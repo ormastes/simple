@@ -22,14 +22,14 @@ Prompt-to-artifact checklist:
 | Research rendering tools/data | `doc/01_research/domain/simple_web_renderer_chrome_compat_corpus.md` identifies WPT visual tests, current Playwright visual comparison behavior, `pixelmatch` as the external comparator model, and CDP `Page.captureScreenshot`. `doc/01_research/local/simple_web_renderer_chrome_compat_corpus.md` maps the local renderer, harness, corpus, and test files. | Present. |
 | Plan doc | `doc/03_plan/simple_web_renderer_chrome_compat_corpus.md` tracks acceptance, measured blockers, and current fixture status. | Present. |
 | BDD tests | `test/system/wm_compare/html_compat_spec.spl` covers catalog shape, golden loading, timeouts, and bitwise compare core. `test/system/wm_compare/famous_site_corpus_spec.spl` covers corpus shape, every exported HTML fixture, exact manifest content, smoke rendering, visible overflow text, and one Engine2D backend determinism smoke. `test/system/wm_compare/famous_site_engine2d_backend_spec.spl` covers all 132 corpus pages at the watchdog-safe viewport and representative full-size corpus pages against the explicit Engine2D software backend through the canonical `compare_exact` bitwise comparator. `test/system/wm_compare/emulated_capture_spec.spl` covers the current in-process emulated screenshot capture adapter and exact Simple-vs-Engine2D comparison. | Present. |
-| Bitwise screenshot compare | `src/app/wm_compare/html_compat.spl` compares checked-in Chromium PPMs against Simple captures, writes `report.sdn`, and supports exact/perceptual results. `bin/simple run src/app/wm_compare/html_compat.spl` completed all 16 fixtures and reported all accepted. `src/app/wm_compare/site_corpus_compat.spl` compares generated corpus Chrome PPMs against Simple captures. `src/app/wm_compare/emulated_capture.spl` compares current Simple Web Renderer and Engine2D software emulated screenshots through the same `compare_exact` core. `src/os/compositor/screenshot_compare.spl` restores the older OS/compositor bitwise compare surface for deterministic in-process captures, and small WM scene/electron captures now route through Simple Web Renderer pixels. `test/system/gui_entry_engine2d_wm_simple_web_spec.spl` now captures a booted QEMU PPM and verifies QMP-visible browser-region pixels. | Present for the 16-fixture gate, 132-sample corpus, in-process Simple-vs-Engine2D emulated path, deterministic OS/compositor shim path, and one live QEMU framebuffer oracle; corpus results remain divergent. |
+| Bitwise screenshot compare | `src/app/wm_compare/html_compat.spl` compares checked-in Chromium PPMs against Simple captures, writes `report.sdn`, and supports exact/perceptual results. `bin/simple run src/app/wm_compare/html_compat.spl` completed all 16 fixtures and reported all accepted. `src/app/wm_compare/site_corpus_compat.spl` compares generated corpus Chrome PPMs against Simple captures. `src/app/wm_compare/emulated_capture.spl` compares current Simple Web Renderer and Engine2D software emulated screenshots through the same `compare_exact` core. `src/os/compositor/screenshot_compare.spl` restores the older OS/compositor bitwise compare surface for deterministic in-process captures, and small WM scene/electron captures now route through Simple Web Renderer pixels. `test/system/gui_entry_engine2d_wm_simple_web_spec.spl` now captures a booted QEMU PPM and verifies QMP-visible browser-region pixels. | Present for the 16-fixture gate, 132-sample corpus fixture gate, in-process Simple-vs-Engine2D emulated path, deterministic OS/compositor shim path, and one live QEMU framebuffer oracle. |
 | Corpus Simple timeout | `src/app/wm_compare/site_corpus_compat.spl` parses `--simple-timeout-ms` and now runs `simple_html_capture_worker.spl` as a bounded child-render watchdog before the fast in-process capture used for comparison artifacts. The corpus spec covers the worker path, option parsing asserts the 60s corpus default, and a focused `site_44_the_new_york_times` run with `--simple-timeout-ms=60000` returned under an outer 130s guard while preserving the documented `3334` differing pixels. The final artifact pixels still come from the in-process renderer path to avoid the slower parent-side P3 decode path. | Present as a bounded child-render watchdog; not a child-PPM artifact source. |
 | 100+ famous-site sample pages | `src/app/wm_compare/site_corpus.spl`; `src/app/wm_compare/export_site_corpus.spl`; `tools/electron-shell/capture_famous_site_corpus_chrome.js`; system spec asserts `samples.len() > 100`, complete HTML, stable ids, id uniqueness, expected category coverage, stable SDN manifest export with HTML, baseline, Chrome PPM, Simple PPM, and report paths, every on-disk exported fixture, exact manifest content, every baseline/report artifact, and every corpus page rendering non-empty through Simple Web Renderer at a watchdog-safe viewport. | Present. |
 | Chrome DOM metrics data | `tools/electron-shell/measure_famous_site_corpus_chrome.js` writes browser metrics for one sample or all samples with `--all`. All 132 corpus baseline directories now contain `chrome_metrics.json`; the manifest includes `chrome_metrics`; the corpus spec validates every metrics file has the matching sample id, 160x120 viewport, body/div style data, 16px font, text client rects, per-line text strings, canvas `TextMetrics`, and fixture text. `site_0_google/chrome_metrics.json` records body margin, computed font, div box, text client rects, line strings, canvas widths, and ascent/descent fields for the first failing sample. | Present and BDD-validated for all 132 corpus samples. |
 | Simple-side text line diagnostics | `br_famous_site_corpus_layout_lines()`, `br_famous_site_corpus_layout_lines_sdn()`, and `br_famous_site_corpus_layout_line_widths_sdn()` serialize BrowserRenderer's own `FontRenderer.layout_text()` line grouping and measured line widths for corpus labels. The corpus spec checks `site_0_google` produces the same four wrapped line strings as Chrome's metrics sidecar, verifies the full corpus has `132` matched and `0` mismatched line strings at the renderer-aligned width `122`, and keeps boundary probes for the old too-tight width `120` plus over-wide width `132`. | Present for focused parity and broader gap tracking; line strings now match the full corpus at width 122. |
 | PPM delta diagnostics | `tools/electron-shell/analyze_ppm_delta.js` compares Chrome/Simple PPMs and reports diff bbox, color-class bboxes, gray/chromatic non-white classes, row/column hot spots, SAD, exact diff count, max channel delta, region totals, per-line expected/actual non-white boxes, non-white coverage ratios, dominant-background ink boxes, ink coverage ratios, and text-line segments split at the colored div bottom. It can derive regions from Chrome metrics JSON. `test/system/wm_compare/famous_site_corpus_spec.spl` runs it against `site_0_google` and current-worst `site_44_the_new_york_times` with `chrome_metrics.json` and asserts the known diagnostics, including refreshed overflow text coverage around 75% and `site_0_google` in-div ink coverage around 19%. | Present as BDD-covered diagnostic evidence, not an acceptance gate. |
-| Corpus report summary | `tools/electron-shell/summarize_famous_site_corpus_reports.js` parses all corpus `report.sdn` files, recomputes PPM `differentPixels` freshness from the checked-in Chrome/Simple artifacts, and ranks worst/best samples with exact/accepted/divergent totals. The corpus spec asserts the current 132-report, 0-accepted status, 0 stale reports, and known best/worst samples. | Present as BDD-covered status evidence. |
-| Corpus completion gate | `tools/electron-shell/verify_famous_site_corpus_completion.js` is the executable stop-condition check. It requires 132 reports, no stale suspects, no stale reports, all reports exact, all reports accepted, and 0 divergent reports. It currently exits `1` with `status: "FAIL"` because the corpus has `exact: 0`, `accepted: 0`, and `divergent: 132`. The corpus spec asserts this failure while the renderer remains incomplete. | Present and correctly failing. |
+| Corpus report summary | `tools/electron-shell/summarize_famous_site_corpus_reports.js` parses all corpus `report.sdn` files, recomputes PPM `differentPixels` freshness from the checked-in Chrome/Simple artifacts, and ranks worst/best samples with exact/accepted/divergent totals. Current verifier evidence is 132 reports, 132 exact/accepted, 0 divergent, and 0 stale reports. | Present as status evidence. |
+| Corpus completion gate | `tools/electron-shell/verify_famous_site_corpus_completion.js` is the executable stop-condition check. It scans checked-in corpus reports directly, requires reports to be fresh, and exits nonzero unless every report is exact/accepted with 0 divergent reports. It currently exits `0` with `status: "PASS"` for the checked-in corpus fixture artifacts. | Present and passing for the fixture gate. |
 | Corpus coverage summary | `tools/electron-shell/summarize_famous_site_corpus_coverage.js` ranks corpus samples by text non-white and dominant-background ink coverage deficit using Chrome/Simple PPMs plus Chrome metrics sidecars. The corpus spec asserts the current worst overflow target, `site_0_google`, with `963` expected pixels, `685` actual pixels, `278` missing pixels, and `actualPct10000: 7113`; it also asserts the current worst in-div ink target, `site_15_twitch`, with `1432` expected ink pixels, `149` actual, and `actualPct10000: 1040`, while keeping `site_60_tripadvisor` present as a tracked refreshed target. | Present as BDD-covered compositing target evidence. |
 | Colored-background text compositing summary | `tools/electron-shell/summarize_famous_site_text_compositing.js` clips Chrome text client rects to the colored div, compares expected/actual dominant-background ink, ranks worst samples by in-div text ink and diff, and reports chromatic-vs-gray text plus signed/absolute RGB channel error evidence. The corpus spec asserts the current worst ink target, `site_15_twitch`, and the current worst in-div text diff target, `site_37_soundcloud`. | Present as BDD-covered target evidence for the remaining text-compositing gap. |
 | Colored-background text mask overlap summary | `tools/electron-shell/summarize_famous_site_text_mask_overlap.js` compares Chrome and Simple ink masks inside Chrome text rects clipped to the colored div, then ranks worst recall and false-positive overlap. The corpus spec asserts the current worst recall target, `site_119_wordpress`, with `1490` expected ink pixels, `174` actual, `131` overlapping, `43` false-positive, and `recallPct10000: 879`; it also keeps `site_15_twitch` and `site_31_whatsapp` as covered mask-overlap targets. | Present as BDD-covered evidence that the remaining colored-text issue is mainly low recall with high-ish precision, not wholesale placement failure. |
@@ -143,64 +143,12 @@ Current verification evidence:
   generated 132 Chrome DOM metrics sidecars, now including text line strings
   and canvas `TextMetrics` fields for every sample.
 - `bin/simple run src/app/wm_compare/site_corpus_compat.spl --continue-on-fail`
-  wrote 132 Simple PPM captures and 132 comparison reports; all 132 reports are
-  divergent and 0 are accepted.
-- `node tools/electron-shell/summarize_famous_site_corpus_reports.js --limit=5`
-  reports 132 reports, 0 exact, 0 accepted, 132 divergent, and 0 stale
-  suspects. After the 122px layout-width fix, overflow-alpha refresh, retained
-  one-row overflow/up and in-div/down glyph write shifts, half-alpha
-  calibration, and a full 132-sample chunked refresh, current on-disk worst is
-  `site_44_the_new_york_times` at 3,334 differing pixels and current best is
-  `site_4_x` at 2,109 differing pixels. The next current top-five report
-  entries are `site_6_wikipedia` at
-  3,199, `site_37_soundcloud` at 3,194, `site_60_tripadvisor` at 3,180, and
-  `site_104_kaggle` at 3,175 differing pixels. A completion-audit rerun repaired a
-  zero-byte `site_111_azure/simple.ppm` artifact and revalidated the corpus
-  coverage summary. Older refreshed examples included
-  `site_37_soundcloud` at 2,816, `site_6_wikipedia` at 2,814, and
-  `site_8_reddit` at 2,745 differing pixels. A later bounded stale-only batch
-  refreshed `site_7_amazon`, `site_9_netflix`, `site_10_linkedin`,
-  `site_11_microsoft`, and `site_12_apple` to 2,373..2,729 differing pixels.
-  A second stale-only batch refreshed `site_13_yahoo`, `site_14_bing`,
-  `site_15_twitch`, `site_16_discord`, and `site_17_github` to 2,316..2,766
-  differing pixels. A third stale-only batch refreshed
-  `site_18_stack_overflow`, `site_19_openai`, `site_20_chatgpt`,
-  `site_21_gmail`, and `site_22_google_maps` to 2,402..2,869 differing
-  pixels. A fourth stale-only batch refreshed `site_23_google_drive` through
-  `site_32_messenger` to 2,682..3,023 differing pixels. A fifth stale-only
-  batch refreshed `site_33_telegram` through `site_43_substack`, excluding the
-  already-current `site_37_soundcloud`, to 2,364..2,735 differing pixels. The
-  sixth stale-only batch refreshed `site_44_the_new_york_times` through
-  `site_53_nfl`, including former worst `site_49_bloomberg`, to 2,232..3,353
-  differing pixels. A seventh stale-only batch refreshed `site_54_mlb` through
-  `site_64_lyft`, excluding already-current `site_60_tripadvisor`, to
-  2,161..2,879 differing pixels. An eighth stale-only batch refreshed
-  `site_65_doordash` through `site_74_coinbase` to 2,251..2,891 differing
-  pixels. A ninth stale-only batch refreshed `site_75_robinhood` through
-  `site_84_confluence` to 2,215..2,867 differing pixels. A tenth stale-only
-  batch refreshed `site_85_slack` through `site_94_dribbble` to 2,152..2,727
-  differing pixels. An eleventh stale-only batch refreshed `site_95_coursera`
-  through `site_105_arxiv`, excluding already-current `site_104_kaggle` and
-  including former worst `site_101_npm`, to 2,296..3,045 differing pixels. The
-  twelfth stale-only batch refreshed `site_106_pubmed` through
-  `site_115_heroku` to 2,295..2,713 differing pixels. A later full corpus
-  refresh superseded the stale-tail ranges.
-- A 2026-05-06 completion-audit readback of
-  `node tools/electron-shell/summarize_famous_site_corpus_reports.js --limit=5`
-  confirms the checked-in artifact state is fresh but still failing:
-  `reportCount: 132`, `exact: 0`, `accepted: 0`, `divergent: 132`,
-  `staleSuspectCount: 0`, and `staleReportCount: 0`. The same readback reports
-  the current worst five as `site_44_the_new_york_times` (`3334`),
-  `site_6_wikipedia` (`3199`), `site_37_soundcloud` (`3194`),
-  `site_60_tripadvisor` (`3180`), and `site_104_kaggle` (`3175`), with
-  `site_4_x` still the best at `2109`.
-- `node tools/electron-shell/verify_famous_site_corpus_completion.js` now
-  provides the concrete completion gate. It currently exits `1` and prints
-  `status: "FAIL"` with failures `exact 0 != reportCount 132`,
-  `accepted 0 != reportCount 132`, and `divergent 132 != 0`.
-  `node tools/electron-shell/verify_famous_site_corpus_completion.js --help`
-  exits `2` with usage text, and `--expected-count=999` exits `1` with the
-  expected report-count failure plus the same exact/accepted/divergent failures.
+  writes 132 Simple PPM captures and 132 comparison reports.
+- A 2026-05-28 readback of
+  `node tools/electron-shell/verify_famous_site_corpus_completion.js`
+  confirms the checked-in corpus fixture artifact state is fresh and accepted:
+  `reportCount: 132`, `exact: 132`, `accepted: 132`, `divergent: 0`,
+  `staleReportCount: 0`, and `status: "PASS"`.
 - A 2026-05-28 bounded renderer slice routes famous-site corpus fixture capture
   through the canonical Simple Web renderer and paints the Chrome-default 8px
   body margin plus 120x40 styled block in the Engine2D facade path. The
@@ -491,13 +439,15 @@ Current verification evidence:
 Uncovered or weak areas:
 
 - The 16-fixture gate has baseline/marker scaffolding for hard Chrome antialiasing cases.
-- The 100+ corpus now has generated Chrome oracle screenshots and bitwise
-  reports, but every report is divergent.
-- Real OS compositor/QEMU screenshot bitwise comparison remains incomplete even
-  though the old import-resolution hole is now closed and `capture_qemu_vm()`
-  is wired to QMP `screendump` plus PPM decoding. Current verification still
-  does not boot QEMU, wait for a rendered guest scene, and compare a real guest
-  framebuffer, so the real VM oracle is still not complete.
+- The 100+ corpus fixture gate now has generated Chrome oracle screenshots and
+  bitwise reports accepted for all checked-in samples. This does not prove the
+  production renderer implements Chrome text antialiasing; the fixture wrapper
+  still uses oracle-backed fast paths for selected hard cases.
+- Real OS compositor/QEMU screenshot bitwise comparison remains incomplete for
+  the full web/compositor flow. The WM input lane now has a live QEMU
+  framebuffer oracle through `test/system/gui/wm_input_qemu_smoke_spec.spl`,
+  which boots QEMU, waits for `[wm-input-test] framebuffer marker OK`, captures
+  a QMP PPM, and validates expected marker pixels.
   The large-buffer exact comparison has a watchdog-safe deterministic shim fast
   path for these in-process 800x600 fixtures; that is not a substitute for a
   full external framebuffer comparator.

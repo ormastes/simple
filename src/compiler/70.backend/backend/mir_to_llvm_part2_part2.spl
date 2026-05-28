@@ -92,10 +92,37 @@ impl MirToLlvm:
         val ret_ty = self.type_mapper.map_type(sig.return_type)
         self.builder.emit_call_indirect(dest_name, ret_ty, ptr_val, arg_vals)
 
+    me phi_block_id_arg(arg: MirOperand) -> i64?:
+        match arg.kind:
+            case Const(value, _):
+                match value:
+                    case Int(v): Some(v)
+                    case _: nil
+            case _: nil
+
+    me emit_ssa_phi_intrinsic(dest: LocalId?, args: [MirOperand]) -> bool:
+        if not dest.?:
+            return false
+        if args.len() < 4:
+            return false
+        val then_block = self.phi_block_id_arg(args[0])
+        val else_block = self.phi_block_id_arg(args[2])
+        if not then_block.? or not else_block.?:
+            return false
+        val dest_name = self.get_local(dest.unwrap().id)
+        val phi_ty = self.get_local_type(dest.unwrap().id)
+        val then_val = self.translate_operand(args[1])
+        val else_val = self.translate_operand(args[3])
+        self.builder.emit("  {dest_name} = phi {phi_ty} [ {then_val}, %bb{then_block.unwrap()} ], [ {else_val}, %bb{else_block.unwrap()} ]")
+        true
+
     me translate_intrinsic(dest: LocalId?, name: text, args: [MirOperand]):
         # Dispatch cipher intrinsics to real LLVM x86 intrinsics.
         # Falls back to __simple_intrinsic_<name> for unknown names.
         match name:
+            case "__simple_ssa_phi":
+                if not self.emit_ssa_phi_intrinsic(dest, args):
+                    eprint("[mir-to-llvm] ERROR: malformed __simple_ssa_phi intrinsic")
             case "crypto_aes_round":
                 self.emit_aes2_intrinsic(dest, "llvm.x86.aesni.aesenc", args)
             case "crypto_aes_round_last":

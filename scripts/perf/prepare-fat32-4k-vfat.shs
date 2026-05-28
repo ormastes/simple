@@ -7,6 +7,8 @@ SIZE_MIB="${VFAT_SIZE_MIB:-64}"
 BYTES=$((64 * 4096))
 UID_ARG="$(id -u)"
 GID_ARG="$(id -g)"
+UDISKS_LOOP=""
+REQUESTED_MNT="$MNT"
 
 mkdir -p "$MNT"
 
@@ -23,13 +25,48 @@ if mountpoint -q "$MNT"; then
 fi
 
 if ! mountpoint -q "$MNT"; then
+    if [ -e "$MNT" ] && [ ! -d "$MNT" ]; then
+        rm -f "$MNT"
+    fi
+    mkdir -p "$MNT"
     rm -f "$IMG"
     dd if=/dev/zero of="$IMG" bs=1M count="$SIZE_MIB" status=none
     mkfs.fat -F 32 "$IMG" >/dev/null
     if sudo -n true 2>/dev/null; then
         sudo -n mount -o "loop,uid=$UID_ARG,gid=$GID_ARG,fmask=0022,dmask=0022" "$IMG" "$MNT"
+    elif command -v udisksctl >/dev/null 2>&1 && command -v losetup >/dev/null 2>&1; then
+        if ! UDISKS_SETUP_ERR="$(udisksctl loop-setup --file "$IMG" --no-user-interaction 2>&1 >/dev/null)"; then
+            rm -f "$IMG"
+            echo "Need sudo or a polkit-authorized udisks session to mount VFAT loop image at $MNT." >&2
+            echo "udisksctl loop-setup failed: $UDISKS_SETUP_ERR" >&2
+            exit 1
+        fi
+        UDISKS_LOOP="$(losetup -j "$IMG" 2>/dev/null | head -1 | cut -d: -f1)"
+        if [ -z "$UDISKS_LOOP" ]; then
+            rm -f "$IMG"
+            echo "udisksctl loop setup succeeded but loop device was not found for $IMG" >&2
+            exit 1
+        fi
+        if ! UDISKS_MOUNT_ERR="$(udisksctl mount -b "$UDISKS_LOOP" --no-user-interaction 2>&1 >/dev/null)"; then
+            udisksctl loop-delete -b "$UDISKS_LOOP" --no-user-interaction >/dev/null 2>&1 || true
+            rm -f "$IMG"
+            echo "Need sudo or a polkit-authorized udisks session to mount VFAT loop image at $MNT." >&2
+            echo "udisksctl mount failed: $UDISKS_MOUNT_ERR" >&2
+            exit 1
+        fi
+        UDISKS_MNT="$(findmnt -n -o TARGET "$UDISKS_LOOP" 2>/dev/null | head -1)"
+        if [ -z "$UDISKS_MNT" ]; then
+            udisksctl loop-delete -b "$UDISKS_LOOP" --no-user-interaction >/dev/null 2>&1 || true
+            rm -f "$IMG"
+            echo "udisksctl mounted $UDISKS_LOOP but no mount target was found" >&2
+            exit 1
+        fi
+        if [ "$UDISKS_MNT" != "$MNT" ]; then
+            rmdir "$MNT" 2>/dev/null || true
+            ln -sfn "$UDISKS_MNT" "$MNT"
+        fi
     else
-        echo "Need sudo to mount VFAT loop image at $MNT." >&2
+        echo "Need sudo or udisksctl to mount VFAT loop image at $MNT." >&2
         exit 1
     fi
 fi
@@ -47,3 +84,6 @@ print(f"seeded {size} bytes x2 under {mnt}")
 PY
 
 findmnt -T "$MNT" -o TARGET,SOURCE,FSTYPE,OPTIONS -n
+if [ "$REQUESTED_MNT" != "/tmp/simple_vfat_bench_mnt" ]; then
+    echo "Use VFAT_MNT=$REQUESTED_MNT when running scripts/perf/run-fat32-4k-cfat-baseline.shs"
+fi

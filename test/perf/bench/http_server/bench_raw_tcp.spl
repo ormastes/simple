@@ -1,62 +1,44 @@
 """
-Raw TCP socket benchmark. Tests native runtime TCP functions directly.
+Raw TCP socket benchmark using std library imports.
+Tests I/O layer ceiling without HTTP parsing overhead.
 """
 
-extern fn rt_io_tcp_socket_create(family: i64) -> i64
-extern fn rt_io_tcp_set_reuseaddr(fd: i64, enabled: bool) -> bool
-extern fn rt_io_tcp_set_reuseport(fd: i64, enabled: bool) -> bool
-extern fn rt_io_tcp_set_nonblocking(fd: i64, enabled: bool) -> bool
-extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
-extern fn rt_io_tcp_bind_fd(fd: i64, addr: text) -> bool
-extern fn rt_io_tcp_listen(fd: i64, backlog: i64) -> bool
+use std.io.tcp.{tcp_backend_socket_create, tcp_backend_bind_fd, tcp_backend_listen,
+    tcp_backend_set_nonblocking, tcp_backend_set_reuseaddr, tcp_backend_set_reuseport,
+    tcp_backend_set_nodelay, tcp_backend_close}
+use std.io.platform_event.{PlatformEvent, EventMode}
+
 extern fn rt_io_tcp_accept(fd: i64) -> i64
 extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
-extern fn rt_io_tcp_close(fd: i64) -> bool
-extern fn rt_event_loop_create() -> i64
-extern fn rt_event_loop_register(epfd: i64, fd: i64, mode: i64) -> i64
-extern fn rt_event_loop_poll(epfd: i64, max_events: i64, timeout_ms: i64) -> i64
-extern fn rt_event_loop_poll_get_fd(index: i64) -> i64
 
 fn main():
-    print "Raw TCP HTTP Server"
-    print "  Creating socket..."
-    val fd = rt_io_tcp_socket_create(4)
+    print "Raw TCP HTTP Server (std imports)"
+    val fd = tcp_backend_socket_create(4)
     print "  Socket fd: {fd}"
 
-    val r1 = rt_io_tcp_set_reuseaddr(fd, true)
-    print "  SO_REUSEADDR: {r1}"
-    val r2 = rt_io_tcp_set_reuseport(fd, true)
-    print "  SO_REUSEPORT: {r2}"
+    tcp_backend_set_reuseaddr(fd, true)
+    tcp_backend_set_reuseport(fd, true)
+    tcp_backend_bind_fd(fd, "0.0.0.0:9090")
+    tcp_backend_set_nonblocking(fd, true)
+    tcp_backend_listen(fd, 1024)
 
-    val r3 = rt_io_tcp_bind_fd(fd, "0.0.0.0:9090")
-    print "  Bind: {r3}"
-
-    rt_io_tcp_set_nonblocking(fd, true)
-
-    val r4 = rt_io_tcp_listen(fd, 1024)
-    print "  Listen: {r4}"
-
-    print "  Creating epoll..."
-    val epfd = rt_event_loop_create()
-    print "  epoll fd: {epfd}"
-
-    val r5 = rt_event_loop_register(epfd, fd, 0)
-    print "  Register: {r5}"
+    var pe = PlatformEvent.new()
+    val epfd = pe.create()
+    print "  epoll fd: {epfd}, backend: {pe.backend_name()}"
+    pe.register(epfd, fd, EventMode.Read)
 
     val resp = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: keep-alive\r\n\r\nHello, World!"
 
-    print ""
     print "  Listening on http://0.0.0.0:9090"
-    print "  Benchmark: wrk -t4 -c100 -d10s http://localhost:9090/hello.txt"
-    print ""
+    print "  Benchmark: wrk -t4 -c100 -d10s http://localhost:9090/"
 
     var count: i64 = 0
     while true:
-        val n = rt_event_loop_poll(epfd, 256, 1000)
+        val ready_fds = pe.poll(epfd, 256, 1000)
         var i: i64 = 0
-        while i < n:
-            val efd = rt_event_loop_poll_get_fd(i)
+        while i < ready_fds.len():
+            val efd = ready_fds[i]
             if efd == fd:
                 var j = 0
                 while j < 64:
@@ -64,9 +46,9 @@ fn main():
                     if cfd < 0:
                         j = 64
                     else:
-                        rt_io_tcp_set_nonblocking(cfd, true)
-                        rt_io_tcp_set_nodelay(cfd, true)
-                        rt_event_loop_register(epfd, cfd, 0)
+                        tcp_backend_set_nonblocking(cfd, true)
+                        tcp_backend_set_nodelay(cfd, true)
+                        pe.register(epfd, cfd, EventMode.Read)
                     j = j + 1
             else:
                 val data = rt_io_tcp_read(efd, 4096)
@@ -74,5 +56,5 @@ fn main():
                     rt_io_tcp_write_text(efd, resp)
                     count = count + 1
                 else:
-                    rt_io_tcp_close(efd)
+                    tcp_backend_close(efd)
             i = i + 1

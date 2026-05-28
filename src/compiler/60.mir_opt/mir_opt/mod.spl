@@ -38,7 +38,11 @@ use compiler.mir_opt.mir_opt.pattern.pattern_rule_pass (pattern_rule_pass_new, p
 use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
     optimization_rule_provider_builtin_with_contract,
-    optimization_rule_provider_is_pipeline_pass
+    optimization_rule_provider_is_pipeline_pass,
+    optimization_rule_provider_with_backend_policy,
+    optimization_rule_provider_applies_to_backend_name,
+    optimization_backend_policy_skip,
+    OptimizerBackendKind
 }
 use compiler.backend.feature_caps.{X86Caps, TargetCapsKind}
 use compiler.mir_opt.optimization_passes.{OptimizationStats, optimize_write_coalesce, optimize_read_ahead_hoist, optimize_syscall_batch}
@@ -169,6 +173,12 @@ fn mir_pipeline_provider(name: text, hot_path: bool) -> OptimizationRuleProvider
         "pure"
     )
 
+fn mir_pipeline_provider_skip_llvm(name: text, hot_path: bool, reason: text) -> OptimizationRuleProvider:
+    optimization_rule_provider_with_backend_policy(
+        mir_pipeline_provider(name, hot_path),
+        optimization_backend_policy_skip([OptimizerBackendKind.Llvm], reason)
+    )
+
 fn mir_pass_descriptor(stable_name: text, aliases: [text], provider: OptimizationRuleProvider, kind: PassKind, scope: PassScope) -> MirPassDescriptor:
     MirPassDescriptor(stable_name: stable_name, aliases: aliases, provider: provider, kind: kind, scope: scope)
 
@@ -177,20 +187,20 @@ fn mir_pass_descriptor_registry() -> [MirPassDescriptor]:
         mir_pass_descriptor("dead_code_elimination", ["dce"], mir_pipeline_provider("dead_code_elimination", false), PassKind.DeadCodeElimination, PassScope.Function),
         mir_pass_descriptor("constant_folding", ["const_fold"], mir_pipeline_provider("constant_folding", false), PassKind.ConstantFolding, PassScope.Function),
         mir_pass_descriptor("copy_propagation", [], mir_pipeline_provider("copy_propagation", false), PassKind.CopyPropagation, PassScope.Function),
-        mir_pass_descriptor("common_subexpr_elim", [], mir_pipeline_provider("common_subexpr_elim", false), PassKind.CommonSubexprElim, PassScope.Function),
+        mir_pass_descriptor("common_subexpr_elim", [], mir_pipeline_provider_skip_llvm("common_subexpr_elim", false, "llvm_runs_gvn_and_scalar_cleanup"), PassKind.CommonSubexprElim, PassScope.Function),
         mir_pass_descriptor("inline_small_functions", [], mir_pipeline_provider("inline_small_functions", false), PassKind.InlineSmallFunctions, PassScope.Module),
         mir_pass_descriptor("inline_functions", [], mir_pipeline_provider("inline_functions", false), PassKind.InlineFunctions, PassScope.Module),
         mir_pass_descriptor("inline_aggressive", [], mir_pipeline_provider("inline_aggressive", false), PassKind.InlineAggressive, PassScope.Module),
         mir_pass_descriptor("loop_invariant_motion", [], mir_pipeline_provider("loop_invariant_motion", false), PassKind.LoopInvariantMotion, PassScope.Function),
-        mir_pass_descriptor("loop_unroll", [], mir_pipeline_provider("loop_unroll", false), PassKind.LoopUnroll, PassScope.Function),
+        mir_pass_descriptor("loop_unroll", [], mir_pipeline_provider_skip_llvm("loop_unroll", false, "llvm_runs_loop_unroll_pipeline"), PassKind.LoopUnroll, PassScope.Function),
         mir_pass_descriptor("bounds_check_elimination", [], mir_pipeline_provider("bounds_check_elimination", false), PassKind.BoundsCheckElimination, PassScope.Function),
-        mir_pass_descriptor("strength_reduction", [], strength_reduction_provider(), PassKind.StrengthReduction, PassScope.Function),
+        mir_pass_descriptor("strength_reduction", [], optimization_rule_provider_with_backend_policy(strength_reduction_provider(), optimization_backend_policy_skip([OptimizerBackendKind.Llvm], "llvm_runs_scalar_strength_reduction")), PassKind.StrengthReduction, PassScope.Function),
         mir_pass_descriptor("collection_opt", ["collection_optimization"], collection_optimization_provider(), PassKind.CollectionOpt, PassScope.Function),
         mir_pass_descriptor("string_builder_opt", [], mir_pipeline_provider("string_builder_opt", false), PassKind.StringBuilderOpt, PassScope.Function),
         mir_pass_descriptor("body_outlining", [], mir_pipeline_provider("body_outlining", false), PassKind.BodyOutlining, PassScope.Module),
         mir_pass_descriptor("generator_state_machine", [], mir_pipeline_provider("generator_state_machine", false), PassKind.GeneratorStateMachine, PassScope.Function),
         mir_pass_descriptor("tail_call_optimization", [], mir_pipeline_provider("tail_call_optimization", false), PassKind.TailCallOptimization, PassScope.Function),
-        mir_pass_descriptor("global_value_numbering", [], mir_pipeline_provider("global_value_numbering", false), PassKind.GlobalValueNumbering, PassScope.Function),
+        mir_pass_descriptor("global_value_numbering", [], mir_pipeline_provider_skip_llvm("global_value_numbering", false, "llvm_runs_gvn_and_scalar_cleanup"), PassKind.GlobalValueNumbering, PassScope.Function),
         mir_pass_descriptor("pattern_idiom", [], mir_pipeline_provider("pattern_idiom", true), PassKind.PatternIdiom, PassScope.Module),
         mir_pass_descriptor("auto_vectorize", ["vectorization"], mir_pipeline_provider("auto_vectorize", false), PassKind.AutoVectorize, PassScope.Module),
         mir_pass_descriptor("predicate_promote", [], mir_pipeline_provider("predicate_promote", false), PassKind.PredicatePromote, PassScope.Module),
@@ -215,7 +225,7 @@ fn mir_pass_descriptor_for_name(pass_name: text) -> MirPassDescriptor?:
     if pass_name == "copy_propagation":
         return Some(mir_pass_descriptor("copy_propagation", [], mir_pipeline_provider("copy_propagation", false), PassKind.CopyPropagation, PassScope.Function))
     if pass_name == "common_subexpr_elim":
-        return Some(mir_pass_descriptor("common_subexpr_elim", [], mir_pipeline_provider("common_subexpr_elim", false), PassKind.CommonSubexprElim, PassScope.Function))
+        return Some(mir_pass_descriptor("common_subexpr_elim", [], mir_pipeline_provider_skip_llvm("common_subexpr_elim", false, "llvm_runs_gvn_and_scalar_cleanup"), PassKind.CommonSubexprElim, PassScope.Function))
     if pass_name == "inline_small_functions":
         return Some(mir_pass_descriptor("inline_small_functions", [], mir_pipeline_provider("inline_small_functions", false), PassKind.InlineSmallFunctions, PassScope.Module))
     if pass_name == "inline_functions":
@@ -225,11 +235,11 @@ fn mir_pass_descriptor_for_name(pass_name: text) -> MirPassDescriptor?:
     if pass_name == "loop_invariant_motion":
         return Some(mir_pass_descriptor("loop_invariant_motion", [], mir_pipeline_provider("loop_invariant_motion", false), PassKind.LoopInvariantMotion, PassScope.Function))
     if pass_name == "loop_unroll":
-        return Some(mir_pass_descriptor("loop_unroll", [], mir_pipeline_provider("loop_unroll", false), PassKind.LoopUnroll, PassScope.Function))
+        return Some(mir_pass_descriptor("loop_unroll", [], mir_pipeline_provider_skip_llvm("loop_unroll", false, "llvm_runs_loop_unroll_pipeline"), PassKind.LoopUnroll, PassScope.Function))
     if pass_name == "bounds_check_elimination":
         return Some(mir_pass_descriptor("bounds_check_elimination", [], mir_pipeline_provider("bounds_check_elimination", false), PassKind.BoundsCheckElimination, PassScope.Function))
     if pass_name == "strength_reduction":
-        return Some(mir_pass_descriptor("strength_reduction", [], strength_reduction_provider(), PassKind.StrengthReduction, PassScope.Function))
+        return Some(mir_pass_descriptor("strength_reduction", [], optimization_rule_provider_with_backend_policy(strength_reduction_provider(), optimization_backend_policy_skip([OptimizerBackendKind.Llvm], "llvm_runs_scalar_strength_reduction")), PassKind.StrengthReduction, PassScope.Function))
     if pass_name == "collection_opt" or pass_name == "collection_optimization":
         return Some(mir_pass_descriptor("collection_opt", ["collection_optimization"], collection_optimization_provider(), PassKind.CollectionOpt, PassScope.Function))
     if pass_name == "string_builder_opt":
@@ -241,7 +251,7 @@ fn mir_pass_descriptor_for_name(pass_name: text) -> MirPassDescriptor?:
     if pass_name == "tail_call_optimization":
         return Some(mir_pass_descriptor("tail_call_optimization", [], mir_pipeline_provider("tail_call_optimization", false), PassKind.TailCallOptimization, PassScope.Function))
     if pass_name == "global_value_numbering":
-        return Some(mir_pass_descriptor("global_value_numbering", [], mir_pipeline_provider("global_value_numbering", false), PassKind.GlobalValueNumbering, PassScope.Function))
+        return Some(mir_pass_descriptor("global_value_numbering", [], mir_pipeline_provider_skip_llvm("global_value_numbering", false, "llvm_runs_gvn_and_scalar_cleanup"), PassKind.GlobalValueNumbering, PassScope.Function))
     if pass_name == "pattern_idiom":
         return Some(mir_pass_descriptor("pattern_idiom", [], mir_pipeline_provider("pattern_idiom", true), PassKind.PatternIdiom, PassScope.Module))
     if pass_name == "auto_vectorize" or pass_name == "vectorization":
@@ -453,6 +463,24 @@ fn optlevel_name(level: OptLevel) -> text:
 fn optimizationpipeline_passes_for_level(level: OptLevel) -> [text]:
     optimizationpipeline_for_level(level).passes
 
+fn mir_pass_applies_to_backend(pass_name: text, backend_name: text) -> bool:
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?:
+        return true
+    optimization_rule_provider_applies_to_backend_name(descriptor.unwrap().provider, backend_name)
+
+fn optimizationpipeline_for_backend(level: OptLevel, backend_name: text) -> OptimizationPipeline:
+    var pipeline = optimizationpipeline_for_level(level)
+    var filtered: [text] = []
+    for pass_name in pipeline.passes:
+        if mir_pass_applies_to_backend(pass_name, backend_name):
+            filtered = filtered.push(pass_name)
+    pipeline.passes = filtered
+    pipeline
+
+fn optimizationpipeline_passes_for_backend(level: OptLevel, backend_name: text) -> [text]:
+    optimizationpipeline_for_backend(level, backend_name).passes
+
 fn optimizationpipeline_inventory_lines() -> [text]:
     var lines: [text] = []
     val levels = [OptLevel.Size, OptLevel.Speed, OptLevel.Aggressive]
@@ -470,6 +498,10 @@ fn optimize_module(module: MirModule, level: OptLevel) -> MirModule:
         val optimized = optimize_module(mir_module, OptLevel.Speed)
     """
     val pipeline = optimizationpipeline_for_level(level)
+    pipeline_optimize(pipeline, module)
+
+fn optimize_module_for_backend(module: MirModule, level: OptLevel, backend_name: text) -> MirModule:
+    val pipeline = optimizationpipeline_for_backend(level, backend_name)
     pipeline_optimize(pipeline, module)
 
 fn optimize_module_with_caps(module: MirModule, level: OptLevel, caps: X86Caps, cipher_remark: bool) -> MirModule:
@@ -737,7 +769,8 @@ export OptLevel, optlevel_name
 export PassManager, passmanager_new, passmanager_run_on_module
 export PassStatistics, passstatistics_new
 export OptimizationPipeline, optimizationpipeline_for_level, optimizationpipeline_passes_for_level, optimizationpipeline_inventory_lines
-export optimize_module, optimize_module_with_caps, optimize_module_with_context
+export optimizationpipeline_for_backend, optimizationpipeline_passes_for_backend, mir_pass_applies_to_backend
+export optimize_module, optimize_module_for_backend, optimize_module_with_caps, optimize_module_with_context
 export optimize_function
 export mir_pipeline_provider, mir_pass_descriptor, mir_pass_descriptor_registry, mir_pass_descriptor_for_name
 export mir_pass_provider_registry, mir_pass_provider_name, mir_pass_uses_pipeline_provider

@@ -30,10 +30,17 @@
   same-device claims.
 - 2026-05-28 follow-up: `ExecCore::run_file_with_args` now forces the
   `src/app/simpleos_nvme_serial_check/main.spl` source path through the
-  interpreter when the default execution mode is JIT. The broader nil/text JIT
-  crash remains tracked separately, but direct checker invocation no longer
-  depends on callers remembering the environment override once the driver is
-  rebuilt.
+  interpreter when the default execution mode is JIT. The workspace `bin/simple`
+  has been refreshed enough for direct checker invocation to reject missing
+  production markers without a native/runtime crash.
+- 2026-05-28 same-device contract follow-up: the OS NVMe performance-contract
+  line builder now emits the same FAT32/NVFS/DBFS extent-source and VFAT
+  same-device baseline markers required by the serial checker, so generated
+  production perf lines no longer lag the validation contract.
+- 2026-05-28 spoof-resistance follow-up: the serial checker rejects duplicate
+  critical `nvme_perf` fields in a single report, so contradictory same-line
+  markers such as `qemu=false ... qemu=true` or duplicate VFAT baseline device
+  claims cannot be accepted by first-value parsing.
 
 ## Known Remaining Work
 
@@ -43,18 +50,30 @@
    - Required evidence includes `hardware_target=real-nvme`, `qemu=false`,
      `physical_runs>=3`, direct 4K shared-DMA paths, FAT32/NVFS/DBFS consumer
      markers, and same-device C/VFAT comparison fields.
+   - Current host preflight is not sufficient for production: all visible
+     `/dev/nvme*n1` namespaces report `namespace_nsid=1` only, so the wrapper
+     cannot produce the required distinct same-controller user namespace report
+     on this host.
 
-2. Fix the serial checker runtime crash before treating app-level evidence as
-   production-grade.
+2. Keep the serial checker crash fix covered while collecting real production
+   evidence.
    - DONE for the production/release lane used by
      `scripts/run_simpleos_physical_nvme_perf.shs`: `test/unit/app/simpleos_nvme_serial_check_spec.spl`
-     passes 22 examples in interpreter-driven SPipe.
+     passes 26 examples in interpreter-driven SPipe.
    - The checker now owns a minimal local serial-evidence gate and the wrapper
      passes serial/preflight/report paths through `SIMPLEOS_NVME_*` environment
      variables under `SIMPLE_EXECUTION_MODE=interpret`.
+   - Standalone preflight now enforces the same exactly-one namespace device
+     rule as production preflight, preventing ambiguous `/dev/nvme*n1` host
+     evidence from reaching identity comparison.
+   - Standalone preflight now also validates the same sysfs identity and
+     distinct same-controller user namespace topology even when no report path
+     is requested; a fake device file without sysfs identity is rejected.
+   - The wrapper rejects validation reports that alias the serial log path, so
+     live capture cannot overwrite the raw serial evidence after validation.
    - Follow-up source fix: the Rust driver now forces this checker source path
-     through the interpreter in JIT mode. This needs a rebuilt `bin/simple`
-     before the currently installed workspace binary shows the new behavior.
+     through the interpreter in JIT mode. Current workspace `bin/simple` direct
+     invocation exits 1 with missing physical NVMe marker instead of signal 139.
    - Still open outside this production lane: the default workspace JIT runtime
      still exits 139 for general nil-coalescing/text paths such as
      `"abc".len()` and `nil ?? ""`. Tracked as
@@ -74,9 +93,15 @@ bin/simple test test/unit/os/drivers/nvme/nvme_driver_probe_contract_spec.spl --
 bin/simple test test/unit/os/drivers/nvme/nvme_performance_contract_spec.spl --mode=interpreter --clean
   PASSED: 14 examples, 0 failures
 bin/simple test test/unit/app/simpleos_nvme_serial_check_spec.spl --mode=interpreter --clean
-  PASSED: 22 examples, 0 failures
+  PASSED: 26 examples, 0 failures
+bin/simple check src/os/drivers/nvme/nvme_performance_contract.spl test/unit/os/drivers/nvme/nvme_performance_contract_spec.spl
+  PASSED: exit code 0
+bin/simple test test/unit/os/drivers/real_device_readiness_spec.spl --mode=interpreter --clean
+  PASSED: 8 examples, 0 failures
 SIMPLE_EXECUTION_MODE=interpret SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log bin/simple run src/app/simpleos_nvme_serial_check/main.spl
   PASSED: no crash, exits 1 with missing-marker rejection
+SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log bin/simple run src/app/simpleos_nvme_serial_check/main.spl
+  PASSED: no crash, exits 1 with missing physical NVMe marker
 bin/simple test test/unit/lib/fs_driver/fs_hardening_spec.spl --mode=interpreter --clean
   PASSED: 15 examples, 0 failures
 bin/simple test test/system/storage_fat32_statfs_truncate_spec.spl --mode=interpreter --clean
@@ -91,9 +116,34 @@ bin/simple check src/lib
   PASSED: exit code 0, warnings only
 scripts/perf/run-fat32-4k-cfat-baseline.shs
   FAILED after clean full-cluster overwrite optimization: Simple FAT32 read
-  p50/p99 13us/14us, write p50/p99 34us/37us; direct C FAT32 read p50/p99
-  27us/64us, write p50/p99 26us/53us; VFAT skipped because
-  scripts/perf/prepare-fat32-4k-vfat.shs is missing
+  p50/p99 13us/21us, write p50/p99 39us/42us; direct C FAT32 read p50/p99
+  32us/76us, write p50/p99 26us/46us; VFAT skipped because the existing
+  /tmp/simple_vfat_bench_mnt mount is unseeded/not writable by this user
+scripts/perf/run-fat32-4k-cfat-baseline.shs
+  PASSED latest isolated direct C comparison: Simple FAT32 read p50/p99 12us/19us,
+  write p50/p99 34us/37us; direct C FAT32 read p50/p99 40us/71us, write
+  p50/p99 45us/84us; VFAT still skipped because the local mount is unseeded
+  or not writable by this user
+REQUIRE_VFAT_BASELINE=1 scripts/perf/run-fat32-4k-cfat-baseline.shs
+  FAILED cleanly: VFAT baseline is required but missing or unseeded; no shell
+  integer-expression error from SKIPPED rows after parser tightening
+scripts/perf/prepare-fat32-4k-vfat.shs
+  FAILED locally: /tmp/simple_vfat_bench_mnt is mounted rw as /dev/loop21 but
+  owned by root:root, and passwordless sudo is unavailable for remount/reseed;
+  the script now has a udisksctl fallback for a free mount point, but this
+  stale root-owned mount must still be removed or remounted before the focused
+  benchmark can consume VFAT files at its fixed path
+sh scripts/run_simpleos_physical_nvme_perf.shs --preflight --report-out /tmp/simpleos_nvme_preflight_probe.sdn
+  FAILED locally: default /dev/nvme*n1 matched 3 real NVMe namespaces, and
+  standalone preflight now fails closed before identity probing when the device
+  glob is ambiguous
+SIMPLEOS_NVME_DEVICE_GLOB=/dev/nvme{0,1,2}n1 sh scripts/run_simpleos_physical_nvme_perf.shs --preflight --report-out /tmp/simpleos_<dev>_preflight.sdn
+  FAILED for each visible namespace: nvme0n1, nvme1n1, and nvme2n1 all report
+  namespace_nsid=1 only, with no distinct user namespace on the same controller
+bin/simple check test/unit/app/simpleos_nvme_serial_check_spec.spl src/app/simpleos_nvme_serial_check/main.spl
+  PASSED: exit code 0
+bin/simple check src/app/simpleos_nvme_serial_check/main.spl test/unit/app/simpleos_nvme_serial_check_spec.spl
+  PASSED: exit code 0
 CARGO_TARGET_DIR=target_codex_text_eq cargo build -p simple-driver --bin simple
   PASSED: dev build from fixed Rust sources
 src/compiler_rust/target_codex_text_eq/debug/simple run src/app/simpleos_nvme_serial_check/main.spl
@@ -143,14 +193,25 @@ SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log src/compiler_rust/ta
    - 2026-05-28 follow-up: full aligned 4K FAT overwrites now use a clean
      cluster write path that avoids dirty-cache bookkeeping, improving Simple
      FAT32 write p99 from 41us to 37us in the host gate, but the focused gate
-     still fails because C write p50 remains faster at 26us versus Simple 34us.
+     remained noisy across local runs.
+   - 2026-05-28 latest rerun: the focused direct C comparison now passes with
+     Simple FAT32 read/write p50 13us/34us versus direct C FAT32 read/write
+     p50 38us/46us.
      Tracked in
      `doc/08_tracking/bug/fat32_4k_overwrite_c_baseline_gap_2026-05-28.md`.
+   - 2026-05-28 VFAT follow-up: the preparation script exists, but the local
+     mount is root-owned and cannot be reseeded without passwordless sudo or a
+     remount with `uid=$(id -u),gid=$(id -g)`. The script now also attempts a
+     `udisksctl` loop mount when the target mount point is free.
 
 5. Audit direct I/O for all three filesystem consumers.
    - FAT32 is wired through shared FAT extents.
    - NVFS/DBFS direct I/O markers exist, but real hardware proof must show the
      same NVMe adapter and lease-backed queue path for all consumers.
+   - DONE for serial-contract alignment: `nvme_production_perf_report_line`
+     now emits `fat32_extent_source`, `nvfs_extent_source`,
+     `dbfs_extent_source`, and same-device VFAT baseline markers, and the
+     parser rejects spoofed VFAT baseline devices.
 
 ## Suggested Restart Commands
 
@@ -170,7 +231,8 @@ bin/simple check src/lib
 ## Do Not Mark Complete Until
 
 - Physical NVMe production run passes on real hardware.
-- App-level serial checker passes without native/runtime crash.
+- App-level serial checker verifies a real production serial log without
+  native/runtime crash.
 - FAT32, NVFS, and DBFS are proven to share the same lease-backed NVMe hardware
   adapter.
 - Simple FAT has accepted 4K random read/write evidence against C/VFAT on the

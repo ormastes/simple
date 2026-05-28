@@ -144,6 +144,18 @@ fn _run_lab_preflight(fake_nvme_path: text) -> (text, text, i32):
         15000
     )
 
+fn _run_lab_preflight_with_sysfs(fake_nvme_path: text, fake_sysfs_root: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "SIMPLEOS_NVME_DEVICE_GLOB=\"" + fake_nvme_path + "\" " +
+                "SIMPLEOS_NVME_SYSFS_ROOT=\"" + fake_sysfs_root + "\" " +
+                "sh scripts/run_simpleos_physical_nvme_perf.shs --preflight"
+        ],
+        15000
+    )
+
 fn _run_lab_preflight_with_two_outputs(fake_nvme_path: text, report_path: text, preflight_out_path: text) -> (text, text, i32):
     rt_process_run_timeout(
         "/bin/sh",
@@ -337,6 +349,39 @@ describe "SimpleOS physical NVMe serial checker app":
         expect(wrapper_stdout).to_contain("multiple-nvme-perf-reports")
         expect(report_text).to_contain("accepted: false")
         expect(report_text).to_contain("acceptance_reason: nvme-real-hardware-perf:multiple-nvme-perf-reports")
+
+    it "rejects duplicate critical NVMe perf fields in a single report":
+        val qemu_path = "/tmp/simpleos_nvme_duplicate_qemu_field.log"
+        val vfat_path = "/tmp/simpleos_nvme_duplicate_vfat_field.log"
+        val qemu_report = "/tmp/simpleos_nvme_duplicate_qemu_field.sdn"
+        val vfat_report = "/tmp/simpleos_nvme_duplicate_vfat_field.sdn"
+        val _ = rt_file_delete(qemu_path)
+        val _ = rt_file_delete(vfat_path)
+        val _ = rt_file_delete(qemu_report)
+        val _ = rt_file_delete(vfat_report)
+        val ready_perf = _physical_nvme_perf_marker("real-nvme", "false", "real-device")
+        val qemu_spoof_log = _physical_nvme_access_marker() +
+            ready_perf.replace("\n", " qemu=true\n") +
+            "TEST PASSED\n"
+        val vfat_spoof_log = _physical_nvme_access_marker() +
+            ready_perf.replace("\n", " vfat_baseline_device=host-cache\n") +
+            "TEST PASSED\n"
+        expect(rt_file_write_text(qemu_path, qemu_spoof_log)).to_equal(true)
+        expect(rt_file_write_text(vfat_path, vfat_spoof_log)).to_equal(true)
+
+        val (qemu_stdout, _qemu_stderr, qemu_code) = _run_checker_with_report(qemu_path, qemu_report)
+        val (vfat_stdout, _vfat_stderr, vfat_code) = _run_checker_with_report(vfat_path, vfat_report)
+        val qemu_report_text = rt_file_read_text(qemu_report) ?? ""
+        val vfat_report_text = rt_file_read_text(vfat_report) ?? ""
+
+        expect(qemu_code).to_equal(1)
+        expect(qemu_stdout).to_contain("duplicate-nvme-perf-field:qemu=")
+        expect(qemu_report_text).to_contain("accepted: false")
+        expect(qemu_report_text).to_contain("acceptance_reason: nvme-real-hardware-perf:duplicate-nvme-perf-field:qemu=")
+        expect(vfat_code).to_equal(1)
+        expect(vfat_stdout).to_contain("duplicate-nvme-perf-field:vfat_baseline_device=")
+        expect(vfat_report_text).to_contain("accepted: false")
+        expect(vfat_report_text).to_contain("acceptance_reason: nvme-real-hardware-perf:duplicate-nvme-perf-field:vfat_baseline_device=")
 
     it "rejects production perf evidence without same-device VFAT baseline markers":
         val missing_path = "/tmp/simpleos_nvme_missing_vfat_baseline.log"
@@ -1007,6 +1052,7 @@ describe "SimpleOS physical NVMe serial checker app":
         val (_both_stdout, both_stderr, both_code) = _run_lab_wrapper_production_with_both_preflight_paths(ready_path, preflight_report, fake_dev, fake_root, preflight_out, report)
         val (_same_report_stdout, same_report_stderr, same_report_code) = _run_lab_wrapper_production_with_preflight_out(ready_path, fake_dev, fake_root, report, report)
         val (_same_serial_stdout, same_serial_stderr, same_serial_code) = _run_lab_wrapper_production_with_preflight_out(ready_path, fake_dev, fake_root, ready_path, report)
+        val (_same_validation_stdout, same_validation_stderr, same_validation_code) = _run_lab_wrapper_production(ready_path, preflight_report, ready_path)
 
         expect(both_code).to_equal(2)
         expect(both_stderr).to_contain("not both")
@@ -1014,6 +1060,8 @@ describe "SimpleOS physical NVMe serial checker app":
         expect(same_report_stderr).to_contain("--preflight-out must differ from --report-out")
         expect(same_serial_code).to_equal(2)
         expect(same_serial_stderr).to_contain("--preflight-out must differ from --serial-log")
+        expect(same_validation_code).to_equal(2)
+        expect(same_validation_stderr).to_contain("--report-out must differ from --serial-log")
 
     it "rejects one-shot production when evidence output paths already exist":
         val fake_root = "/tmp/simpleos_nvme_production_existing_output_sysfs"
@@ -1095,15 +1143,48 @@ describe "SimpleOS physical NVMe serial checker app":
         expect(stderr).to_contain("--production --preflight-out requires live serial capture")
 
     it "preflights the physical NVMe lab environment before serial capture":
-        val fake_nvme = "/tmp/simpleos_nvme_preflight_device"
-        val _ = rt_file_delete(fake_nvme)
+        val fake_root = "/tmp/simpleos_nvme_preflight_status_sysfs"
+        val fake_nvme = "/tmp/simpleos_nvme_preflight_status_device/nvme9n1"
+        val fake_sysfs = fake_root + "/nvme9n1"
+        val fake_user_sysfs = fake_root + "/nvme9n2"
+        val _cleanup = rt_process_run_timeout("/bin/sh", ["-c", "rm -rf \"" + fake_root + "\" \"" + fake_nvme + "\" && mkdir -p \"" + fake_sysfs + "/device\" \"" + fake_user_sysfs + "/device\" \"$(dirname \"" + fake_nvme + "\")\""], 5000)
         expect(rt_file_write_text(fake_nvme, "device")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs + "/device/model", "Samsung PM9A3\n")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs + "/device/serial", "SN123456\n")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs + "/nsid", "1\n")).to_equal(true)
+        expect(rt_file_write_text(fake_user_sysfs + "/device/model", "Samsung PM9A3\n")).to_equal(true)
+        expect(rt_file_write_text(fake_user_sysfs + "/device/serial", "SN123456\n")).to_equal(true)
+        expect(rt_file_write_text(fake_user_sysfs + "/nsid", "2\n")).to_equal(true)
 
-        val (stdout, _stderr, code) = _run_lab_preflight(fake_nvme)
+        val (stdout, _stderr, code) = _run_lab_preflight_with_sysfs(fake_nvme, fake_root)
 
         expect(code).to_equal(0)
         expect(stdout).to_contain("preflight=ready")
         expect(stdout).to_contain("checker=present")
+
+    it "rejects standalone preflight when identity cannot be proven":
+        val fake_nvme = "/tmp/simpleos_nvme_preflight_no_identity_device"
+        val _ = rt_file_delete(fake_nvme)
+        expect(rt_file_write_text(fake_nvme, "device")).to_equal(true)
+
+        val (_stdout, stderr, code) = _run_lab_preflight(fake_nvme)
+
+        expect(code).to_equal(1)
+        expect(stderr).to_contain("incomplete NVMe sysfs identity")
+
+    it "rejects standalone preflight when the device glob is ambiguous":
+        val fake_dir = "/tmp/simpleos_nvme_preflight_multi_device"
+        val fake_a = fake_dir + "/nvme9n1"
+        val fake_b = fake_dir + "/nvme10n1"
+        val fake_glob = fake_dir + "/nvme*n1"
+        val _cleanup = rt_process_run_timeout("/bin/sh", ["-c", "rm -rf \"" + fake_dir + "\" && mkdir -p \"" + fake_dir + "\""], 5000)
+        expect(rt_file_write_text(fake_a, "device-a")).to_equal(true)
+        expect(rt_file_write_text(fake_b, "device-b")).to_equal(true)
+
+        val (_stdout, stderr, code) = _run_lab_preflight(fake_glob)
+
+        expect(code).to_equal(1)
+        expect(stderr).to_contain("production preflight requires exactly one NVMe namespace device; matched 2")
 
     it "rejects standalone preflight when output reports would be overwritten":
         val fake_nvme = "/tmp/simpleos_nvme_preflight_existing_output_device"

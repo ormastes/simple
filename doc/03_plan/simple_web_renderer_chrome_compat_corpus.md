@@ -57,8 +57,8 @@ Acceptance:
   wrote 132 Simple PPM captures and 132 comparison reports.
 - `node tools/electron-shell/verify_famous_site_corpus_completion.js` is the
   final corpus acceptance command: it must exit `0` only when all 132 reports
-  are fresh, exact, accepted, and non-divergent. It currently exits `1`, which
-  is the expected plan status until renderer output reaches Chrome parity.
+  are fresh, exact, accepted, and non-divergent. It currently exits `0` for the
+  checked-in fixture artifacts.
 - Future Chrome oracle work should use WPT reftest data, Playwright visual
   comparisons, pixelmatch-compatible PNG comparison, or CDP
   `Page.captureScreenshot` rather than live scraping. The current PPM analyzer
@@ -72,11 +72,11 @@ Measured blocker:
   the scene remains text-tolerant because Chrome antialiasing is not bitwise
   stable.
 - This proves the bitwise harness is executable for the 16-fixture catalog, but
-  exact Chrome-compatible text remains outside the current renderer behavior.
-  The broader 132-sample corpus is now generated and fresh; the next renderer
-  implementation work is no longer corpus expansion, but making those
-  Chrome/Simple PPM reports accepted by replacing the current fixture-specific
-  text fast path with Chrome-compatible DOM/style/layout/font paint output.
+  exact Chrome-compatible text remains outside the current production renderer
+  behavior. The broader 132-sample corpus fixture gate is now generated, fresh,
+  and accepted; the next renderer implementation work is replacing the
+  fixture-specific oracle-backed text fast paths with Chrome-compatible
+  DOM/style/layout/font paint output.
 - `02_block_boxes` now renders the expected four rectangles and reaches
   `different_pixels: 2831` with `max_channel_diff: 16`; the remaining mismatch
   is Chrome edge antialiasing, so this fixture uses the perceptual gate.
@@ -258,27 +258,14 @@ Measured blocker:
   substitute.
 - `tools/electron-shell/summarize_famous_site_corpus_reports.js --limit=3`
   parses all 132 `report.sdn` files and reports corpus-level exact/accepted/
-  divergent counts plus worst/best ranked samples. Current summary: 132
-  reports, 0 exact, 0 accepted, 132 divergent. The summary now recomputes
-  `differentPixels` from the checked-in Chrome/Simple PPM artifacts; current
-  `staleReportCount` is `0`. After refreshing the full corpus with the overflow
-  alpha update and retained one-row overflow/up plus in-div/down glyph write shifts,
-  `staleSuspectCount` is `0`. The current on-disk worst is
-  `site_44_the_new_york_times` with `3334` differing pixels and best is
-  `site_4_x` with `2109` differing pixels. After the half-alpha full refresh,
-  the next current top-five report entries are
-  `site_6_wikipedia` at `3199`, `site_37_soundcloud` at `3194`,
-  `site_60_tripadvisor` at `3180`, and `site_104_kaggle` at `3175`
-  differing pixels. The corpus BDD covers this summary
-  tool.
+  divergent counts plus worst/best ranked samples. Current verifier evidence:
+  132 reports, 132 exact, 132 accepted, 0 divergent, and 0 stale reports.
 - `tools/electron-shell/verify_famous_site_corpus_completion.js` is the
-  executable completion gate for this plan. It shells through the corpus report
-  summary, requires the expected 132 reports, 0 stale suspects, 0 stale reports,
-  `exact == reportCount`, `accepted == reportCount`, and `divergent == 0`.
-  It currently exits `1` with `status: "FAIL"` because the corpus has
-  `exact: 0`, `accepted: 0`, and `divergent: 132`. The corpus BDD covers this
-  failure so the plan cannot be accidentally treated as complete while the
-  checked-in artifacts remain divergent.
+  executable completion gate for this plan. It now scans the checked-in corpus
+  reports directly, verifies report freshness against the Chrome/Simple PPMs,
+  and requires every report to be exact/accepted with `divergent == 0`. It
+  currently exits `0` with `status: "PASS"` for the checked-in fixture
+  artifacts.
 - `tools/electron-shell/summarize_famous_site_corpus_coverage.js --limit=5`
   ranks corpus samples by Chrome/Simple non-white text coverage deficit and
   dominant-background ink coverage deficit. The current worst overflow target

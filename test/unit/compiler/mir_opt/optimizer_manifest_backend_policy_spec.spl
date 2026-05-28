@@ -1,15 +1,106 @@
 use std.spec
 use compiler.mir_opt.optimizer_manifest.{
-    ManifestPassContract, manifest_pass_entry_new,
-    dynamic_pass_descriptor_from_entry
+    ManifestPassContract, manifest_pass_entry_new, manifest_pass_entry_new_with_backend_policy,
+    dynamic_pass_descriptor_from_entry, dynamic_pass_registry_new,
+    dynamic_pass_registry_register, dynamic_pass_registry_names_for_backend,
+    dynamic_pass_registry_skipped_names_for_backend,
+    load_manifest_v1_from_parsed, load_manifest_v1_from_parsed_with_rules,
+    run_manifest_pattern_rules_for_backend
 }
 use compiler.mir_opt.mir_opt.mod.{PassScope}
+use compiler.mir_opt.mir_opt.pattern.pattern_rule_pass.{
+    PatternRule, MirPattern, MirPatternSlot, MirRewrite
+}
 use compiler.mir_opt.pattern.rule_engine.{
     OptimizerBackendKind,
+    optimization_backend_policy_only,
     optimization_backend_policy_skip,
     optimization_rule_provider_applies_to_backend,
     optimization_rule_provider_with_backend_policy
 }
+use compiler.mir.mir_data.{
+    MirModule, MirFunction, MirBlock, MirInst, MirInstKind,
+    MirTerminator, LocalId, BlockId, SymbolId
+}
+use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
+
+fn manifest_test_local(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn manifest_test_block_id(id: i64) -> BlockId:
+    BlockId.new(id)
+
+fn manifest_test_driver_attr() -> DriverManifestAttr:
+    DriverManifestAttr(
+        kind: DriverManifestAttrKind.Driver,
+        driver_class: 0,
+        vendor: 0,
+        device_ids: [],
+        version: "",
+        abi: ""
+    )
+
+fn manifest_test_function(blocks: [MirBlock]) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 1),
+        name: "manifest_backend_test",
+        signature: MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Unit), is_variadic: false),
+        locals: [],
+        blocks: blocks,
+        entry_block: manifest_test_block_id(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: manifest_test_driver_attr(),
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+fn manifest_test_module() -> MirModule:
+    val block = MirBlock(
+        id: manifest_test_block_id(0),
+        label: "entry",
+        instructions: [
+            MirInst(kind: MirInstKind.Copy(manifest_test_local(1), manifest_test_local(2)), span: nil)
+        ],
+        terminator: MirTerminator.Return(nil)
+    )
+    MirModule(
+        name: "manifest_backend_test_module",
+        functions: {SymbolId(id: 1): manifest_test_function([block])},
+        statics: {},
+        constants: {},
+        types: {}
+    )
+
+fn remove_copy_rule() -> PatternRule:
+    PatternRule(
+        name: "remove-test-copy",
+        pattern: MirPattern(
+            inst_count: 1,
+            slots: [
+                MirPatternSlot(
+                    kind_tag: "Copy",
+                    operand_0: Some("$src"),
+                    operand_1: nil,
+                    dest: Some("$dest")
+                )
+            ]
+        ),
+        rewrite: MirRewrite(kind_tag: "Remove", dest: "$dest", operands: []),
+        cost_delta: -1,
+        safety: "test"
+    )
 
 describe "optimizer manifest backend policy":
     it "gives manifest-created passes an all-backend default":
@@ -41,3 +132,88 @@ describe "optimizer manifest backend policy":
 
         expect(optimization_rule_provider_applies_to_backend(provider, OptimizerBackendKind.Cranelift)).to_equal(true)
         expect(optimization_rule_provider_applies_to_backend(provider, OptimizerBackendKind.Llvm)).to_equal(false)
+
+    it "filters registered dynamic pass descriptors by backend policy":
+        val contract = ManifestPassContract(["typed_mir"], ["canonical_mir"], "pure")
+        val common = manifest_pass_entry_new(
+            "backend_common_test_pass",
+            [],
+            PassScope.Function,
+            [],
+            contract,
+            "backend_common_test_pass_entry"
+        )
+        val cranelift_only = manifest_pass_entry_new_with_backend_policy(
+            "backend_cranelift_test_pass",
+            [],
+            PassScope.Function,
+            [],
+            contract,
+            optimization_backend_policy_only([OptimizerBackendKind.Cranelift], "cranelift_only"),
+            "backend_cranelift_test_pass_entry"
+        )
+        val skip_llvm = manifest_pass_entry_new_with_backend_policy(
+            "backend_skip_llvm_test_pass",
+            [],
+            PassScope.Function,
+            [],
+            contract,
+            optimization_backend_policy_skip([OptimizerBackendKind.Llvm], "llvm_runs_backend_pipeline"),
+            "backend_skip_llvm_test_pass_entry"
+        )
+        val manifest_result = load_manifest_v1_from_parsed(
+            1,
+            "simple.opt.mir.v1",
+            "backend_policy_test_plugin",
+            "1.0.0",
+            "0.9.0",
+            [common, cranelift_only, skip_llvm]
+        )
+        expect(manifest_result.?).to_equal(true)
+        val registry_result = dynamic_pass_registry_register(dynamic_pass_registry_new(), manifest_result.unwrap())
+        expect(registry_result.?).to_equal(true)
+
+        val registry = registry_result.unwrap()
+        val cranelift_names = dynamic_pass_registry_names_for_backend(registry, "cranlift")
+        val llvm_names = dynamic_pass_registry_names_for_backend(registry, "llvm")
+        val llvm_skipped = dynamic_pass_registry_skipped_names_for_backend(registry, "llvm")
+
+        expect(cranelift_names.contains("backend_common_test_pass")).to_equal(true)
+        expect(cranelift_names.contains("backend_cranelift_test_pass")).to_equal(true)
+        expect(cranelift_names.contains("backend_skip_llvm_test_pass")).to_equal(true)
+        expect(llvm_names.contains("backend_common_test_pass")).to_equal(true)
+        expect(llvm_names.contains("backend_cranelift_test_pass")).to_equal(false)
+        expect(llvm_names.contains("backend_skip_llvm_test_pass")).to_equal(false)
+        expect(llvm_skipped.contains("backend_cranelift_test_pass")).to_equal(true)
+        expect(llvm_skipped.contains("backend_skip_llvm_test_pass")).to_equal(true)
+
+    it "runs manifest pattern rules only for backend-applicable dynamic passes":
+        val entry = manifest_pass_entry_new_with_backend_policy(
+            "backend_rule_exec_test_pass",
+            [],
+            PassScope.Function,
+            [],
+            ManifestPassContract(["typed_mir"], ["canonical_mir"], "pure"),
+            optimization_backend_policy_only([OptimizerBackendKind.Cranelift], "cranelift_only"),
+            "backend_rule_exec_test_pass_entry"
+        )
+        val manifest_result = load_manifest_v1_from_parsed_with_rules(
+            1,
+            "simple.opt.mir.v1",
+            "backend_rule_exec_test_plugin",
+            "1.0.0",
+            "0.9.0",
+            [entry],
+            [remove_copy_rule()]
+        )
+        expect(manifest_result.?).to_equal(true)
+        val registry_result = dynamic_pass_registry_register(dynamic_pass_registry_new(), manifest_result.unwrap())
+        expect(registry_result.?).to_equal(true)
+
+        val registry = registry_result.unwrap()
+        val manifest = manifest_result.unwrap()
+        val cranelift_result = run_manifest_pattern_rules_for_backend(manifest_test_module(), registry, manifest, "cranlift")
+        val llvm_result = run_manifest_pattern_rules_for_backend(manifest_test_module(), registry, manifest, "llvm")
+
+        expect(cranelift_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)
+        expect(llvm_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)

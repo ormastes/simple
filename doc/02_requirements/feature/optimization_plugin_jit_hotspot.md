@@ -40,3 +40,13 @@ REQ-OPJH-018: SSA var analysis shall expose a concrete phi insertion plan for si
 REQ-OPJH-019: SSA var analysis shall be able to materialize simple branch-merge phi plans into MIR using a pseudo-phi intrinsic until backend-native phi lowering is implemented.
 
 REQ-OPJH-020: The interpreter shall consume the `__simple_ssa_phi` pseudo-intrinsic with a deterministic fallback so materialized SSA MIR remains executable outside native backends.
+
+REQ-OPJH-021: SSA pseudo-phi materialization shall expose backend lowering policy: Cranelift/`cranlift` lowers to block parameters, LLVM lowers to native phi nodes, the interpreter uses the fallback intrinsic, and unsupported backends reject pseudo-phi MIR explicitly.
+
+REQ-OPJH-022: The general optimization catalog shall expose backend-aware plugin recommendations so LLVM can prefer its backend-managed scalar pipeline while Cranelift keeps Simple-side SSA-var, bounds, scan, and checksum MIR optimizations that preserve high-level facts.
+
+REQ-OPJH-023: Dynamic optimizer plugin registries shall expose backend-filtered descriptor views so backend planners can apply or skip manifest passes without duplicating backend-policy logic.
+
+REQ-OPJH-024: Manifest-backed pattern-rule execution shall honor backend-filtered dynamic pass registration before rewriting MIR, so a pass skipped for LLVM cannot still apply its rules through the generic pattern runner.
+
+REQ-OPJH-025: Canonical MIR pipeline execution shall honor backend policy for built-in pass descriptors, keeping Simple-side scalar cleanup for Cranelift/`cranlift` while skipping LLVM-duplicated scalar cleanup before LLVM codegen.

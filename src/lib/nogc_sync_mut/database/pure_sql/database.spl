@@ -1594,24 +1594,22 @@ class PureDatabase:
         if kci < 0:
             return Err(DbError.QueryFailed(sql: "GET", message: "no such column: {key_col}"))
         val key_txt = key_val.to_text()
-        val all_vis = ti < self._tbl_all_visible.len() as i32 and self._tbl_all_visible[ti]
         self._ensure_pk_map(ti)
+        val typed = self._tbl_typed[ti]
         if kci == self._tbl_pk_col[ti]:
             val pkm = self._tbl_pk_map[ti]
             if pkm.has(key_txt):
                 val tidx = pkm[key_txt]
-                if all_vis and tidx >= 0:
-                    return Ok(Some(DbRow(columns: col_names, values: self._tbl_typed[ti][tidx])))
+                if all_vis_fast and tidx >= 0:
+                    return Ok(Some(DbRow(columns: col_names, values: typed[tidx])))
                 var tbl = self._tbl_data[ti]
-                val typed_len = self._tbl_typed[ti].len()
-                val use_typed = typed_len == tbl.tuples.len()
+                val use_typed = typed.len() == tbl.tuples.len()
                 if use_typed and tidx >= 0 and tidx < tbl.tuples.len() as i32:
                     val snap = self._txn.snapshot()
                     if mvcc_is_visible(tbl.tuples[tidx], snap):
-                        return Ok(Some(DbRow(columns: col_names, values: self._tbl_typed[ti][tidx])))
+                        return Ok(Some(DbRow(columns: col_names, values: typed[tidx])))
             return Ok(nil)
-        if all_vis:
-            val typed = self._tbl_typed[ti]
+        if all_vis_fast:
             val n_typed = typed.len() as i32
             var gi: i32 = 0
             while gi < n_typed:
@@ -1622,7 +1620,6 @@ class PureDatabase:
             return Ok(nil)
         val snap = self._txn.snapshot()
         var tbl = self._tbl_data[ti]
-        val typed = self._tbl_typed[ti]
         val use_typed = typed.len() == tbl.tuples.len()
         val n_tuples = tbl.tuples.len() as i32
         var vis = self._tbl_vis[ti]
@@ -1682,13 +1679,15 @@ class PureDatabase:
         self._ensure_pk_map(ti)
         val pkm = self._tbl_pk_map[ti]
         val results: [DbRow?] = []
+        val n_keys = key_vals.len() as i32
+        val n_tuples = tbl.tuples.len() as i32
         var ki: i32 = 0
-        while ki < key_vals.len() as i32:
+        while ki < n_keys:
             val key_txt = key_vals[ki].to_text()
             if use_pk:
                 if pkm.has(key_txt):
                     val tidx = pkm[key_txt]
-                    if tidx >= 0 and tidx < tbl.tuples.len() as i32:
+                    if tidx >= 0 and tidx < n_tuples:
                         if mvcc_is_visible(tbl.tuples[tidx], snap):
                             results.push(DbRow(columns: col_names, values: typed[tidx]))
                         else:
@@ -1698,18 +1697,16 @@ class PureDatabase:
                 else:
                     results.push(nil)
             elif use_typed:
-                val row_found: [DbRow?] = []
+                var found: DbRow? = nil
                 var gi: i32 = 0
-                while gi < tbl.tuples.len() as i32:
+                while gi < n_tuples:
                     if mvcc_is_visible(tbl.tuples[gi], snap):
                         val rv = typed[gi]
                         if kci < rv.len() as i32 and rv[kci].to_text() == key_txt:
-                            row_found.push(DbRow(columns: col_names, values: rv))
+                            found = DbRow(columns: col_names, values: rv)
+                            gi = n_tuples
                     gi = gi + 1
-                if row_found.len() > 0:
-                    results.push(row_found[0])
-                else:
-                    results.push(nil)
+                results.push(found)
             else:
                 results.push(nil)
             ki = ki + 1
@@ -2736,22 +2733,43 @@ class PureDatabase:
         # Rewrite existing rows to append NULL for the new column
         val snap = self._txn.snapshot()
         var tbl = self._tbl_data[ti]
-        val visible = tbl.scan(snap)
+        val old_typed = self._tbl_typed[ti]
+        val use_typed_alter = old_typed.len() == tbl.tuples.len()
         var new_tbl = MvccTable.new()
         val handle = self._txn.begin()
         val tid = handle.txn_id
-        var ri: i32 = 0
-        while ri < visible.len() as i32:
-            val old_row = visible[ri]
-            var new_row = old_row
-            if old_row != "":
-                new_row = old_row + "\tN:"
-            else:
-                new_row = "N:"
-            new_tbl.insert(tid, new_row)
-            ri = ri + 1
+        var new_typed_rows: [[DbValue]] = []
+        if use_typed_alter:
+            # Table uses typed/placeholder storage — serialize with new null col
+            var ai: i32 = 0
+            while ai < tbl.tuples.len() as i32:
+                if mvcc_is_visible(tbl.tuples[ai], snap):
+                    var new_vals: [DbValue] = []
+                    var ci2: i32 = 0
+                    while ci2 < old_typed[ai].len() as i32:
+                        new_vals.push(old_typed[ai][ci2])
+                        ci2 = ci2 + 1
+                    new_vals.push(DbValue.Null)
+                    new_tbl.insert(tid, _serialize_row(new_vals))
+                    new_typed_rows.push(new_vals)
+                ai = ai + 1
+        else:
+            val visible = tbl.scan(snap)
+            var ri: i32 = 0
+            while ri < visible.len() as i32:
+                val old_row = visible[ri]
+                var new_row = old_row
+                if old_row != "":
+                    new_row = old_row + "\tN:"
+                else:
+                    new_row = "N:"
+                new_tbl.insert(tid, new_row)
+                ri = ri + 1
         self._tbl_data[ti] = new_tbl
         self._txn.commit(tid)
+        # Reset typed cache — new_tbl has serialized rows, typed len won't match
+        var empty_typed_alt: [[DbValue]] = []
+        self._tbl_typed[ti] = empty_typed_alt
         self._invalidate_fts(ti)
         self._last_changes = 0
         self._mark_dirty()?
@@ -3211,6 +3229,10 @@ class PureDatabase:
                 var fts_r = self._fts_rows[ti]
                 fts_r.push(DbRow(columns: col_names, values: row_vals))
                 self._fts_rows[ti] = fts_r
+                # Invalidate stale search result cache so next query re-runs
+                if ti < self._fts_search_key.len() as i32:
+                    self._fts_search_key[ti] = ""
+                    self._fts_search_res[ti] = []
             inserted = inserted + 1
             vi = vi + 1
         self._txn.commit(tid)
@@ -3254,28 +3276,50 @@ class PureDatabase:
             val pk_val = row_vals[pk_col_idx]
             val snap = self._txn.snapshot()
             var tbl = self._tbl_data[ti]
-            val visible = tbl.scan(snap)
-            self._tbl_data[ti] = tbl
-            var found_ri: i32 = -1
-            var ri: i32 = 0
-            while ri < visible.len() as i32:
-                val existing = _deserialize_row(visible[ri])
-                if existing.len() > pk_col_idx:
-                    val existing_pk = existing[pk_col_idx]
-                    if _dbval_eq(pk_val, existing_pk):
-                        found_ri = ri
-                ri = ri + 1
-            val ser = _serialize_row(row_vals)
-            if found_ri >= 0:
-                val old_ser = visible[found_ri]
-                var tbl2 = self._tbl_data[ti]
-                tbl2.delete_matching(tid, old_ser)
-                tbl2.insert(tid, ser)
-                self._tbl_data[ti] = tbl2
+            val cur_typed = self._tbl_typed[ti]
+            val use_typed_upsert = cur_typed.len() == tbl.tuples.len()
+            var found_tidx: i32 = -1
+            if use_typed_upsert:
+                # Search using typed data to correctly handle placeholder tuples
+                var si: i32 = 0
+                while si < tbl.tuples.len() as i32:
+                    if mvcc_is_visible(tbl.tuples[si], snap):
+                        val existing_row = cur_typed[si]
+                        if existing_row.len() > pk_col_idx:
+                            if _dbval_eq(pk_val, existing_row[pk_col_idx]):
+                                found_tidx = si
+                    si = si + 1
             else:
+                val visible = tbl.scan(snap)
+                var ri: i32 = 0
+                while ri < visible.len() as i32:
+                    val existing = _deserialize_row(visible[ri])
+                    if existing.len() > pk_col_idx:
+                        if _dbval_eq(pk_val, existing[pk_col_idx]):
+                            found_tidx = ri
+                    ri = ri + 1
+            self._tbl_data[ti] = tbl
+            if found_tidx >= 0:
+                # Replace: delete old tuple, insert serialized new one
+                var tbl2 = self._tbl_data[ti]
+                val old_data = tbl2.tuples[found_tidx].data
+                tbl2.delete_matching(tid, old_data)
+                val new_tuple_pos = tbl2.tuples.len() as i32
+                tbl2.insert(tid, "{new_tuple_pos}")
+                self._tbl_data[ti] = tbl2
+                # Update typed cache: append new row (old index becomes invisible)
+                var typed3 = self._tbl_typed[ti]
+                typed3.push(row_vals)
+                self._tbl_typed[ti] = typed3
+            else:
+                # Insert new row using typed fast path
                 var tbl3 = self._tbl_data[ti]
-                tbl3.insert(tid, ser)
+                val tuple_pos_new = tbl3.tuples.len() as i32
+                tbl3.insert(tid, "{tuple_pos_new}")
                 self._tbl_data[ti] = tbl3
+                var typed4 = self._tbl_typed[ti]
+                typed4.push(row_vals)
+                self._tbl_typed[ti] = typed4
                 self._tbl_rowids[ti] = self._tbl_rowids[ti] + 1
                 self._last_rowid = self._tbl_rowids[ti]
             affected = affected + 1
@@ -3305,7 +3349,7 @@ class PureDatabase:
         var col_names = self._tbl_cols[ti]
         val snap = self._txn.snapshot()
         var tbl = self._tbl_data[ti]
-        val col_map = self._tbl_col_idx[ti]
+        var col_map = self._tbl_col_idx[ti]
         val typed = self._tbl_typed[ti]
         val use_typed = typed.len() == tbl.tuples.len()
 
@@ -3477,8 +3521,22 @@ class PureDatabase:
                 val jcols = self._tbl_cols[jti]
                 val jsnap = self._txn.snapshot()
                 var jtbl = self._tbl_data[jti]
+                val jtyped = self._tbl_typed[jti]
+                val juse_typed = jtyped.len() == jtbl.tuples.len()
                 val jvisible = jtbl.scan(jsnap)
                 self._tbl_data[jti] = jtbl
+                # Collect visible right-table rows using typed data when available
+                var jright_rows: [[DbValue]] = []
+                var jvk: i32 = 0
+                if juse_typed:
+                    while jvk < jtbl.tuples.len() as i32:
+                        if mvcc_is_visible(jtbl.tuples[jvk], jsnap):
+                            jright_rows.push(jtyped[jvk])
+                        jvk = jvk + 1
+                else:
+                    while jvk < jvisible.len() as i32:
+                        jright_rows.push(_deserialize_row(jvisible[jvk]))
+                        jvk = jvk + 1
                 # Build combined columns
                 var combined_cols: [text] = []
                 var cci: i32 = 0
@@ -3496,8 +3554,8 @@ class PureDatabase:
                     val left_vals = base_rows[li]
                     var any_match = false
                     var rri: i32 = 0
-                    while rri < jvisible.len() as i32:
-                        val right_vals = _deserialize_row(jvisible[rri])
+                    while rri < jright_rows.len() as i32:
+                        val right_vals = jright_rows[rri]
                         # Combine values
                         var combo: [DbValue] = []
                         var lci: i32 = 0
@@ -3529,6 +3587,8 @@ class PureDatabase:
                 base_rows = joined_rows
                 col_names = combined_cols
                 ji = ji + 1
+        if has_join:
+            col_map = _build_col_map(col_names)
 
         # ── Page summary range skip optimization ─────────────────────
         # When a page summary index is available for range predicates,

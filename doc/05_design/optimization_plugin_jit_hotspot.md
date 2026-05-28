@@ -20,11 +20,49 @@ The helper constructs a built-in, hot, pipeline-pass provider so runtime hotspot
   pass provider descriptors.
 - Add `manifest_pass_entry_new` so existing dynamic manifest construction gets
   an explicit all-backend default without positional-field drift.
+- Add `manifest_pass_entry_with_backend_policy` and
+  `manifest_pass_entry_new_with_backend_policy` so manifest construction can
+  declare backend-specific apply/skip policy directly.
+- Add `dynamic_pass_registry_for_backend`,
+  `dynamic_pass_registry_names_for_backend`, and
+  `dynamic_pass_registry_skipped_names_for_backend` so backend planners consume
+  a pre-filtered plugin view instead of duplicating policy checks.
+- Add `run_manifest_pattern_rules_for_backend` so manifest-provided pattern
+  rewrites execute only when at least one registered pass from that manifest is
+  applicable to the requested backend. Rules-only manifests remain
+  backend-neutral because they have no pass-policy anchor.
 
 Backend policy lets Simple keep SSA/escape/borrow-informed pre-optimization for
 Cranelift or interpreter JIT planning while skipping redundant Simple-side
 canonicalization under LLVM when the LLVM pipeline will run equivalent
 mem2reg/SROA scalar promotion.
+
+`src/compiler/60.mir_opt/mir_opt/mod.spl`:
+
+- Add `optimizationpipeline_for_backend`.
+- Add `optimizationpipeline_passes_for_backend`.
+- Add `mir_pass_applies_to_backend`.
+- Mark low-level scalar cleanup passes that LLVM already owns
+  (`common_subexpr_elim`, `global_value_numbering`, `loop_unroll`, and
+  `strength_reduction`) with skip-LLVM provider policy.
+
+The canonical pipeline remains the source of pass ordering, but backend-aware
+callers now consume a filtered view. Cranelift and the accepted `cranlift` alias
+retain Simple-side scalar cleanup because Cranelift benefits from cleaner MIR
+before lowering. LLVM keeps high-level Simple-owned proofs such as bounds,
+target narrowing, pattern idioms, and byte/copy cleanup, but skips duplicated
+scalar/loop cleanup so the LLVM default pipeline can handle it once IR has been
+lowered.
+
+`src/compiler/70.backend/backend/backend_helpers.spl`:
+
+- Convert the backend helper optimization level to MIR `OptLevel`.
+- Resolve the effective backend name before direct codegen.
+- Run `optimize_module_for_backend` before LLVM, LLVM-lib, Cranelift, and
+  generic backend codegen.
+
+This closes the direct-backend gap where driver compilation could bypass the
+canonical MIR optimizer entirely.
 
 `src/compiler/60.mir_opt/mir_opt/var_reassign_analysis.spl`:
 
@@ -32,11 +70,15 @@ mem2reg/SROA scalar promotion.
 - Add `SsaVarTransformResult`.
 - Add `SsaPhiPlan`.
 - Add `SsaPhiMaterializeResult`.
+- Add `SsaPhiLoweringKind`.
+- Add `SsaPhiLoweringPolicy`.
 - Add `analyze_var_reassign_blocks`.
 - Add `var_reassign_analysis_to_jit_facts`.
 - Add `ssa_var_transform_blocks`.
 - Add `ssa_phi_plans_for_blocks`.
 - Add `ssa_materialize_phi_plans_for_blocks`.
+- Add `ssa_phi_lowering_policy_for_backend`.
+- Add `ssa_phi_backend_can_lower`.
 
 The analyzer treats repeated definitions of the same MIR `LocalId` as `var`
 reassignment candidates. It is conservative: a reassigned local is not eligible
@@ -59,6 +101,11 @@ planned phi destination local.
 fresh value locals, inserts `Intrinsic(Some(phi_dest), "__simple_ssa_phi", ...)`
 at the join, and rewrites join-block uses to the phi destination. This avoids a
 new MIR opcode until backend-native phi lowering is implemented.
+`ssa_phi_lowering_policy_for_backend` makes the backend contract explicit:
+Cranelift and the accepted `cranlift` alias lower pseudo-phis to block
+parameters, LLVM lowers them to native phi nodes, the interpreter keeps the
+fallback intrinsic, and unsupported backends must reject pseudo-phi MIR instead
+of compiling it with ambiguous semantics.
 
 `src/compiler/95.interp/mir_interpreter.spl`:
 
@@ -109,6 +156,23 @@ Cranelift/`cranlift` rebuilds are tier-1, medium-cost plans. LLVM rebuilds are
 tier-2, high-cost plans and remain ineligible until the tier-2 hot-count
 threshold is reached and the LLVM backend is available.
 
+`src/compiler/60.mir_opt/general_patterns.spl`:
+
+- Add `BackendOptimizationRecommendation`.
+- Add `all_backend_optimization_recommendations`.
+- Add `backend_optimization_recommendations_for`.
+- Add `backend_optimization_recommendation_names`.
+- Add `backend_optimization_has_recommendation`.
+
+The general pattern catalog now turns researched optimization items into
+backend-aware plugin recommendations. Cranelift/`cranlift` keeps Simple-side
+`ssa-var-canon` because var reassignment facts, escape facts, and borrow safety
+are available in MIR before Cranelift lowering. LLVM skips `ssa-var-canon` and
+selects `llvm-default-pipeline` because LLVM's backend pipeline can run scalar
+promotion and cleanup itself. High-level MIR optimizations whose proofs are
+frontend-owned, including bounds-check elimination, delimiter byte scans, and
+checksum reducers, remain recommended for both backends.
+
 ## Tests
 
 `test/unit/compiler/mir_opt/cipher/pattern_engine_spec.spl` adds a provider-contract test:
@@ -127,6 +191,12 @@ threshold is reached and the LLVM backend is available.
 
 - Manifest-created passes default to all backends.
 - Dynamic provider descriptors can be given backend skip policies after loading.
+- Registered dynamic pass descriptors can be filtered for Cranelift/`cranlift`
+  and LLVM, including skip-list visibility for passes intentionally not run on
+  a backend.
+- Manifest pattern rules are applied to real MIR for Cranelift/`cranlift` when
+  the registered pass applies, and are skipped for LLVM when backend policy
+  excludes that pass.
 
 `test/unit/compiler/mir_opt/var_reassign_analysis_spec.spl` adds MIR analyzer coverage:
 
@@ -143,11 +213,29 @@ threshold is reached and the LLVM backend is available.
 - Simple branch-merge reassignment produces a concrete `SsaPhiPlan`.
 - Simple branch-merge reassignment materializes branch-local values and a
   `__simple_ssa_phi` pseudo-intrinsic in the join block.
+- Backend lowering policy maps Cranelift/`cranlift`, LLVM, interpreter, and
+  unsupported backends to explicit pseudo-phi decisions.
 
 `test/unit/compiler/interpreter/mir_ssa_phi_intrinsic_spec.spl` adds interpreter coverage:
 
 - `__simple_ssa_phi` stores the first incoming value into the destination as a
   deterministic linear fallback.
+
+`test/unit/compiler/mir_opt/general_patterns_backend_recommendation_spec.spl` adds recommendation coverage:
+
+- Cranelift/`cranlift` receives `ssa-var-canon` and general high-level MIR
+  optimizations.
+- LLVM skips `ssa-var-canon` and receives the backend-managed
+  `llvm-default-pipeline`.
+- Bounds-check elimination, byte-scan recognition, and checksum reduction stay
+  recommended for both Cranelift and LLVM.
+
+`test/unit/compiler/mir_opt/pass_descriptor_spec.spl` adds backend pipeline coverage:
+
+- Cranelift/`cranlift` keeps low-level scalar cleanup passes.
+- LLVM skips scalar cleanup passes duplicated by its backend pipeline while
+  keeping high-level MIR passes.
+- `llvm-lib` follows the same backend policy as LLVM.
 
 `test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl` adds plan coverage:
 

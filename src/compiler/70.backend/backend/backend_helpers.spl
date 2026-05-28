@@ -15,7 +15,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction}
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BuildMode, OptimizationLevel, CompileOptions, CompiledModule, CompileError,
     compileerror_backend_error}
-use compiler.mir_opt.mod.{target_opt_context_default}
+use compiler.mir_opt.mod.{target_opt_context_default, optimize_module_for_backend, OptLevel}
 use compiler.backend.llvm_backend.{llc_available}
 use compiler.backend.llvm_codegen_adapter.{llvm_compile_module_direct, llvm_compile_module_direct_compiled}
 use compiler.backend.codegen_factory.{CodegenFactory}
@@ -234,6 +234,16 @@ fn compile_module_with_backend(
         backend_kind: nil
     )
     print "[backend-helper] options ready"
+    val effective_backend = if kind == BackendKind.LlvmLib:
+        "llvm-lib"
+    elif kind == BackendKind.Llvm:
+        "llvm"
+    elif kind == BackendKind.Cranelift:
+        "cranelift"
+    else:
+        get_effective_backend_name(backend_name, is_release)
+    val mir_opt_level = backend_helper_mir_opt_level(opt)
+    val optimized_module = optimize_module_for_backend(module, mir_opt_level, effective_backend)
 
     if kind == BackendKind.Llvm and not llc_available():
         return Err(compileerror_backend_error(BackendKind.Llvm,
@@ -245,8 +255,8 @@ fn compile_module_with_backend(
     if kind == BackendKind.Llvm:
         print "[backend-helper] direct llvm"
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            return llvm_compile_module_direct_compiled(options, module)
-        val result = llvm_compile_module_direct(options, module)
+            return llvm_compile_module_direct_compiled(options, optimized_module)
+        val result = llvm_compile_module_direct(options, optimized_module)
         match result:
             case Ok(output):
                 return Ok(output.to_compiled_module())
@@ -255,7 +265,7 @@ fn compile_module_with_backend(
 
     if kind == BackendKind.LlvmLib:
         print "[backend-helper] direct llvm-lib"
-        val result = llvm_lib_compile_module_direct(options, module)
+        val result = llvm_lib_compile_module_direct(options, optimized_module)
         match result:
             case Ok(output):
                 return Ok(output.to_compiled_module())
@@ -263,7 +273,7 @@ fn compile_module_with_backend(
                 return Err(err)
 
     if kind == BackendKind.Cranelift:
-        val result = cranelift_compile_module_direct(options, module)
+        val result = cranelift_compile_module_direct(options, optimized_module)
         match result:
             case Ok(output):
                 return Ok(output.to_compiled_module())
@@ -271,12 +281,20 @@ fn compile_module_with_backend(
                 return Err(err)
 
     val codegen = CodegenFactory.create(kind, options)
-    val result = codegen.compile_module(module)
+    val result = codegen.compile_module(optimized_module)
     match result:
         case Ok(output):
             Ok(output.to_compiled_module())
         case Err(err):
             Err(err)
+
+fn backend_helper_mir_opt_level(level: OptimizationLevel) -> OptLevel:
+    match level:
+        case None_: OptLevel.NoOpt
+        case Debug: OptLevel.NoOpt
+        case Size: OptLevel.Size
+        case Speed: OptLevel.Speed
+        case Aggressive: OptLevel.Aggressive
 
 fn compile_bootstrap_module_with_backend(
     backend_name: text,

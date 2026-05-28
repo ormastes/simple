@@ -838,28 +838,22 @@ class Worker:
 
         # Process fully decoded H2 requests through the pipeline
         val decoded = conn.take_decoded_requests()
-        print "[W] handle_h2_recv: decoded.len={decoded.len()} keep_going={keep_going}"
         for pair in decoded:
             val stream_id = pair.0
             val request = pair.1
-            print "[W] routing request: {request.method} {request.path} stream={stream_id}"
             var resp = build_not_found()
             val route_result = self.router.route(request)
             match route_result:
                 Ok((location, params)):
-                    print "[W] route matched: {location}"
                     resp = self.inline_static_handler(location, request)
                 Err(e):
-                    print "[W] route failed: {e}"
                     resp = build_not_found()
-            print "[W] response: status={resp.status} body_len={resp.body.len()} body_bytes_len={resp.body_bytes.len()}"
-            resp = compress_response(request, resp)
+            if resp.body_file.len() > 0:
+                resp = worker_static_file_fallback_response(resp)
             conn.queue_h2_response(stream_id, resp)
-            print "[W] queued h2 response for stream={stream_id}"
 
         # Drain any pending outbound frames (SETTINGS ACK, PING echo, responses)
         val out_bytes = conn.take_pending_writes()
-        print "[W] out_bytes.len={out_bytes.len()}"
         self.h2_connections[fd] = conn
 
         if out_bytes.len() > 0:

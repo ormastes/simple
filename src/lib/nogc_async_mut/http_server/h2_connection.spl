@@ -45,6 +45,8 @@ use std.http.h2.h2_hpack.{
 use std.http_server.h2_stream.{H2Stream, H2StreamState}
 use std.http_server.types.{HttpRequestData, HttpResponseData}
 
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
 # ============================================================================
 # Minimal inline HPACK decoder (avoids match-on-Result bugs in interpreter)
 # ============================================================================
@@ -100,12 +102,10 @@ fn _bytes_range_to_str(data: [u8], start: i64, count: i64) -> text:
     return result
 
 fn _mini_hpack_decode(data: [u8]) -> [(text, text)]:
-    print "[HPACK] _mini_hpack_decode called, data.len={data.len()}"
     var headers: [(text, text)] = []
     var pos = 0
     while pos < data.len():
         val b = data[pos]
-        print "[HPACK] pos={pos} byte={b}"
         if (b & 128) != 0:
             val idx = b & 127
             if idx > 0 and idx <= 61:
@@ -263,18 +263,14 @@ class H2Connection:
         while i < data.len():
             self.recv_buf.push(data[i])
             i = i + 1
-        print "[H2] appended {data.len()} bytes, recv_buf={self.recv_buf.len()}"
         if not self.preface_validated:
             if self.recv_buf.len() < H2_CONNECTION_PREFACE_LEN:
                 return true
-            print "[H2] checking preface..."
             if not h2_validate_preface(self.recv_buf):
-                print "[H2] invalid preface, sending goaway"
                 self.queue_goaway(0, H2_ERR_PROTOCOL_ERROR)
                 return false
             self.preface_validated = true
             self.recv_buf = _slice_from(self.recv_buf, H2_CONNECTION_PREFACE_LEN)
-            print "[H2] preface validated, remaining={self.recv_buf.len()}"
         return true
 
     me take_pending_writes() -> [u8]:
@@ -323,27 +319,27 @@ class H2Connection:
         if st == 500: hpack.push(142)
         if st != 200 and st != 204 and st != 304 and st != 404 and st != 500:
             hpack.push(72)
-            val ss = "{st}"
-            hpack.push(ss.len())
+            val ss_bytes = rt_text_to_bytes("{st}")
+            hpack.push(ss_bytes.len())
             var si = 0
-            while si < ss.len():
-                hpack.push(ss.byte_at(si))
+            while si < ss_bytes.len():
+                hpack.push(ss_bytes[si])
                 si = si + 1
         var hi = 0
         while hi < resp.headers.len():
             val pair = resp.headers[hi]
-            val hn = pair.0
-            val hv = pair.1
+            val hn_bytes = rt_text_to_bytes(pair.0)
+            val hv_bytes = rt_text_to_bytes(pair.1)
             hpack.push(0)
-            hpack.push(hn.len())
+            hpack.push(hn_bytes.len())
             var ni = 0
-            while ni < hn.len():
-                hpack.push(hn.byte_at(ni))
+            while ni < hn_bytes.len():
+                hpack.push(hn_bytes[ni])
                 ni = ni + 1
-            hpack.push(hv.len())
+            hpack.push(hv_bytes.len())
             var vi = 0
-            while vi < hv.len():
-                hpack.push(hv.byte_at(vi))
+            while vi < hv_bytes.len():
+                hpack.push(hv_bytes[vi])
                 vi = vi + 1
             hi = hi + 1
 
@@ -352,10 +348,7 @@ class H2Connection:
         if resp.body_bytes.len() > 0:
             body_bytes = resp.body_bytes
         elif resp.body.len() > 0:
-            var bi = 0
-            while bi < resp.body.len():
-                body_bytes.push(resp.body.byte_at(bi))
-                bi = bi + 1
+            body_bytes = rt_text_to_bytes(resp.body)
 
         # Write HEADERS frame: type=1, flags=END_HEADERS(4) [+END_STREAM(1) if no body]
         var hflags = 4
@@ -398,7 +391,6 @@ class H2Connection:
     # ========================================================================
 
     me consume_frames() -> bool:
-        print "[CF] consume_frames: recv_buf.len={self.recv_buf.len()}"
         var offset = 0
         var keep_going = true
         var has_frames = true
@@ -408,24 +400,20 @@ class H2Connection:
             else:
                 val maybe_header = h2_parse_frame_header(self.recv_buf, offset)
                 if maybe_header == nil:
-                    print "[CF] header parse nil at offset={offset}"
                     has_frames = false
                 else:
                     val header = maybe_header ?? H2FrameHeader(length: 0, frame_type: 0, flags: 0, stream_id: 0)
                     val frame_len = H2_FRAME_HEADER_LEN + header.length
-                    print "[CF] frame: type={header.frame_type} flags={header.flags} sid={header.stream_id} len={header.length}"
                     if self.recv_buf.len() < offset + frame_len:
                         has_frames = false
                     else:
                         val maybe_frame = h2_parse_frame(self.recv_buf, offset)
                         offset = offset + frame_len
                         if maybe_frame == nil:
-                            print "[CF] h2_parse_frame returned nil for ft={header.frame_type}"
                             has_frames = false
                         else:
                             val frame = maybe_frame ?? H2Frame.Data(H2DataFrame(stream_id: 0, flags: 0, data: []))
                             val ft = header.frame_type
-                            print "[CF] dispatching ft={ft}"
                             if ft == 4:
                                 val is_ack = (header.flags & 1) != 0
                                 if not is_ack:
@@ -438,24 +426,18 @@ class H2Connection:
                                     self.pending_writes.push(0)
                                     self.pending_writes.push(0)
                                     self.pending_writes.push(0)
-                                    print "[CF] queued SETTINGS ACK"
-                                else:
-                                    print "[CF] received SETTINGS ACK"
                             elif ft == 8:
                                 pass_dn
                             elif ft == 1:
                                 val sid = header.stream_id
                                 val hblock = _slice_bytes(self.recv_buf, offset - header.length, header.length)
-                                print "[CF] HEADERS stream={sid} hblock_len={hblock.len()}"
                                 val decoded_hdrs = _mini_hpack_decode(hblock)
-                                print "[CF] mini_hpack decoded {decoded_hdrs.len()} headers"
                                 var method = "GET"
                                 var path = "/"
                                 var authority = ""
                                 var di = 0
                                 while di < decoded_hdrs.len():
                                     val hpair = decoded_hdrs[di]
-                                    print "[CF]   header: {hpair.0}={hpair.1}"
                                     if hpair.0 == ":method":
                                         method = hpair.1
                                     elif hpair.0 == ":path":
@@ -463,7 +445,6 @@ class H2Connection:
                                     elif hpair.0 == ":authority":
                                         authority = hpair.1
                                     di = di + 1
-                                print "[CF] request: {method} {path}"
                                 var req = HttpRequestData(
                                     method: method,
                                     path: path,
@@ -475,7 +456,6 @@ class H2Connection:
                                     peer_addr: self.peer_addr
                                 )
                                 self.pending_requests.push((sid, req))
-                                print "[CF] pending_requests.len={self.pending_requests.len()}"
                             elif ft == 6:
                                 # PING — need opaque_data from payload
                                 val ping_payload = _slice_bytes(self.recv_buf, offset - header.length, header.length)

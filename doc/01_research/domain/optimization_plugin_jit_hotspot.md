@@ -35,3 +35,25 @@ Cranelift and LLVM should not receive identical Simple-side optimization plans:
 - LLVM SROA exists specifically to scalar-replace aggregates, and upstream source documentation describes converting non-escaping allocas into scalar SSA values. Source: https://llvm.org/doxygen/SROA_8h_source.html and https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-20.1.4/llvm/lib/Transforms/Scalar/SROA.cpp
 
 Implication: Simple-side SSA/escape/borrow-informed canonicalization is most valuable before Cranelift or interpreter JIT planning, while LLVM-backed plans should be able to skip redundant or potentially compile-time-expensive Simple pre-optimization when LLVM will run equivalent scalar-promotion passes downstream.
+
+## 2026-05-28 General Optimization Recommendation Addendum
+
+Primary-source follow-up:
+
+- LLVM's New Pass Manager documentation recommends using `PassBuilder` default
+  optimization pipelines for normal module optimization instead of manually
+  duplicating a backend pipeline. Source: https://llvm.org/docs/NewPassManager.html
+- LLVM frontend performance tips state that SROA and Mem2Reg eliminate allocas
+  only under specific frontend shapes, especially entry-block allocas. Source:
+  https://llvm.org/docs/Frontend/PerformanceTips.html
+- Cranelift frontend SSA construction uses variables and block parameters for
+  values crossing blocks; Simple should preserve high-level facts before that
+  lowering point. Source:
+  https://docs.rs/cranelift-frontend/latest/src/cranelift_frontend/ssa.rs.html
+
+Implication: the plugin catalog needs a decision layer, not only raw passes.
+LLVM should get a backend-managed default-pipeline recommendation and skip
+Simple-side `ssa-var-canon`, while general high-level MIR optimizations such as
+bounds-check elimination, delimiter scan recognition, and checksum reduction
+remain useful for both LLVM and Cranelift because those facts are easiest to
+prove before lowering into backend IR or runtime calls.

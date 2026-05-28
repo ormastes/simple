@@ -15,7 +15,7 @@ use std.sffi.llvm.*
 
 fn translate_instruction(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                          inst: MirInst, value_map: {i64: i64}, local_types: {i64: i64},
-                         func_map: {text: i64}):
+                         block_map: {i64: i64}, func_map: {text: i64}):
     match inst.kind:
         case Const(dest, value, ty):
             translate_const(ctx, mod_, builder, tm, dest, value, ty, value_map, local_types)
@@ -101,7 +101,7 @@ fn translate_instruction(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMappe
             translate_call_indirect(ctx, mod_, builder, tm, dest, ptr, args, sig, value_map, local_types, func_map)
 
         case Intrinsic(dest, name, args):
-            translate_intrinsic(ctx, mod_, builder, tm, dest, name, args, value_map, local_types, func_map)
+            translate_intrinsic(ctx, mod_, builder, tm, dest, name, args, value_map, local_types, block_map, func_map)
 
         case Ref(dest, kind, place):
             val place_val = get_value(value_map, place.local.id)
@@ -481,7 +481,25 @@ fn translate_call_indirect(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMap
 fn translate_intrinsic(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                        dest: LocalId?, name: text, args: [MirOperand],
                        value_map: {i64: i64}, local_types: {i64: i64},
-                       func_map: {text: i64}):
+                       block_map: {i64: i64}, func_map: {text: i64}):
+    if name == "__simple_ssa_phi":
+        if dest.? and args.len() >= 4:
+            val then_block = ssa_phi_const_block_arg(args[0])
+            val else_block = ssa_phi_const_block_arg(args[2])
+            if then_block.? and else_block.? and block_map.has(then_block.unwrap()) and block_map.has(else_block.unwrap()):
+                val dest_id = dest.unwrap().id
+                val phi_ty = get_local_type(local_types, tm, dest_id)
+                val phi = llvm_build_phi(builder, phi_ty, "ssa_phi")
+                val then_val = translate_operand(ctx, mod_, builder, tm, args[1], value_map, local_types, func_map)
+                val else_val = translate_operand(ctx, mod_, builder, tm, args[3], value_map, local_types, func_map)
+                llvm_add_incoming(phi, [then_val, else_val], [block_map[then_block.unwrap()], block_map[else_block.unwrap()]])
+                value_map[dest_id] = phi
+            else:
+                eprint("[llvm-lib] ERROR: malformed __simple_ssa_phi intrinsic")
+        else:
+            eprint("[llvm-lib] ERROR: malformed __simple_ssa_phi intrinsic")
+        return
+
     val intrinsic_name = "__simple_intrinsic_{name}"
     val func_ref = llvm_get_named_function(mod_, intrinsic_name)
     if func_ref == 0:
@@ -498,6 +516,18 @@ fn translate_intrinsic(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
 
     if dest.?:
         value_map[dest.unwrap().id] = call_val
+
+# ============================================================================
+# Pseudo SSA Phi Translation
+# ============================================================================
+
+fn ssa_phi_const_block_arg(arg: MirOperand) -> i64?:
+    match arg.kind:
+        case Const(value, _):
+            match value:
+                case Int(v): Some(v)
+                case _: nil
+        case _: nil
 
 # ============================================================================
 # Terminator Translation

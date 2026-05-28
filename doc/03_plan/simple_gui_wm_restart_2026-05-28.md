@@ -122,16 +122,20 @@ Current result on this Linux host:
   are now local constant-return helpers and the serial marker path no longer
   needs mutable file-scope state.
 - `SIMPLE_LIB=src bin/simple test test/system/gui/wm_input_qemu_smoke_spec.spl --mode=interpreter --clean --format json`
-  now passes `2/2` in 6367 ms and boots the live QEMU input smoke through the
-  init/focus/drag/pass serial-marker path.
+  now passes `3/3` in 14962 ms and boots the live QEMU input smoke through the
+  init/focus/drag/pass serial-marker path plus QMP framebuffer capture.
+- 2026-05-28 follow-up: the entry now initializes PCI before painting the BGA
+  framebuffer, emits `[wm-input-test] framebuffer marker OK`, and the spec
+  decodes the QMP PPM to assert the expected background, title-bar, and dragged
+  window marker pixels.
+- 2026-05-28 harness fix: QEMU stale cleanup now scopes `pkill -f` to
+  `qemu-system.*<identity>` patterns so cleanup no longer kills the shell/test
+  command that mentions the same log path.
 
 ## Remaining Work
 
-1. Extend the live QEMU input proof from serial-marker input state to a
-   framebuffer-backed assertion when the guest can expose a stable screenshot
-   oracle for this entry.
-2. Add macOS validation for Cocoa-backed host WM when a macOS host is available.
-3. Update architecture docs if implementation reveals a different adapter boundary.
+1. Add macOS validation for Cocoa-backed host WM when a macOS host is available.
+2. Update architecture docs if implementation reveals a different adapter boundary.
 
 ## Known Blockers
 

@@ -3,7 +3,10 @@ use compiler.mir_opt.mir_opt.mod.{
     mir_pass_provider_registry,
     mir_pass_descriptor_for_name,
     mir_pass_provider_name,
-    mir_pass_uses_pipeline_provider
+    mir_pass_uses_pipeline_provider,
+    mir_pass_applies_to_backend,
+    optimizationpipeline_passes_for_backend,
+    OptLevel
 }
 
 describe "MIR optimization pass descriptors":
@@ -51,6 +54,26 @@ describe "MIR optimization pass descriptors":
         expect(descriptor.?).to_equal(true)
         expect(descriptor.unwrap().provider.name).to_equal("simple.opt.math.strength_reduce")
         expect(mir_pass_uses_pipeline_provider("strength_reduction")).to_equal(true)
+
+    it "keeps low-level scalar cleanup in the Cranelift pipeline":
+        val passes = optimizationpipeline_passes_for_backend(OptLevel.Aggressive, "cranlift")
+        expect(passes.contains("common_subexpr_elim")).to_equal(true)
+        expect(passes.contains("global_value_numbering")).to_equal(true)
+        expect(passes.contains("loop_unroll")).to_equal(true)
+        expect(passes.contains("strength_reduction")).to_equal(true)
+
+    it "skips LLVM-duplicated scalar cleanup in backend-aware pipelines":
+        val passes = optimizationpipeline_passes_for_backend(OptLevel.Aggressive, "llvm")
+        expect(passes.contains("dead_code_elimination")).to_equal(true)
+        expect(passes.contains("bounds_check_elimination")).to_equal(true)
+        expect(passes.contains("common_subexpr_elim")).to_equal(false)
+        expect(passes.contains("global_value_numbering")).to_equal(false)
+        expect(passes.contains("loop_unroll")).to_equal(false)
+        expect(passes.contains("strength_reduction")).to_equal(false)
+
+    it "treats llvm-lib as LLVM for pass backend policy":
+        expect(mir_pass_applies_to_backend("strength_reduction", "llvm-lib")).to_equal(false)
+        expect(mir_pass_applies_to_backend("strength_reduction", "cranelift")).to_equal(true)
 
     it "returns nil or empty metadata for unknown passes":
         val descriptor = mir_pass_descriptor_for_name("not_a_pass")

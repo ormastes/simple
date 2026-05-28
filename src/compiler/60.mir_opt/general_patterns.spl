@@ -23,6 +23,15 @@ use compiler.mir_opt.optimizer_manifest.{
     manifest_pass_entry_new
 }
 use compiler.mir_opt.mir_opt.mod.{PassScope}
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{
+    OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
+    OptimizerBackendKind,
+    optimization_backend_policy_all, optimization_backend_policy_only,
+    optimization_backend_policy_skip,
+    optimization_rule_provider_builtin_with_contract,
+    optimization_rule_provider_with_backend_policy,
+    optimization_rule_provider_applies_to_backend_name
+}
 use compiler.mir_opt.mir_opt.pattern.pattern_rule_pass.{
     PatternRule, PatternRuleSet, pattern_rule_set_new,
     MirPattern, MirPatternSlot, MirRewrite
@@ -280,6 +289,12 @@ struct OptimizationFact:
     description: text
     general_recognizer: text
 
+struct BackendOptimizationRecommendation:
+    stable_name: text
+    provider: OptimizationRuleProvider
+    rationale: text
+    source_hint: text
+
 fn web_hot_path_facts() -> [OptimizationFact]:
     [
         OptimizationFact(
@@ -336,6 +351,155 @@ fn all_fact_keys() -> [text]:
     keys
 
 # ============================================================================
+# Backend-aware plugin recommendations
+# ============================================================================
+
+fn backend_plugin_provider(
+    name: text,
+    required_facts: [text],
+    produced_facts: [text],
+    safety_class: text
+) -> OptimizationRuleProvider:
+    optimization_rule_provider_builtin_with_contract(
+        "simple.opt.general." + name,
+        OptimizerProviderKind.Mir,
+        OptimizerRuleLookupKind.PipelinePass,
+        true,
+        required_facts,
+        produced_facts,
+        safety_class
+    )
+
+fn backend_recommendation(
+    stable_name: text,
+    provider: OptimizationRuleProvider,
+    rationale: text,
+    source_hint: text
+) -> BackendOptimizationRecommendation:
+    BackendOptimizationRecommendation(stable_name, provider, rationale, source_hint)
+
+fn ssa_var_canon_recommendation() -> BackendOptimizationRecommendation:
+    val provider = backend_plugin_provider(
+        "ssa-var-canon",
+        ["typed_mir", "ssa.var_transform", "escape.no_escape", "borrow.reassign_safe"],
+        ["canonical_mir", "jit.hotspot_var_ready"],
+        "escape-borrow-guarded"
+    )
+    val policy = optimization_backend_policy_skip(
+        [OptimizerBackendKind.Llvm],
+        "llvm_backend_runs_mem2reg_sroa_pipeline"
+    )
+    backend_recommendation(
+        "ssa-var-canon",
+        optimization_rule_provider_with_backend_policy(provider, policy),
+        "Canonicalizes reassigned Simple var storage before Cranelift/interpreter JIT planning; LLVM should receive promotable IR and let SROA/mem2reg run.",
+        "LLVM frontend performance tips: SROA and Mem2Reg promote entry-block allocas; Cranelift frontend uses variables/block params for SSA values."
+    )
+
+fn early_dead_code_recommendation() -> BackendOptimizationRecommendation:
+    val provider = backend_plugin_provider(
+        "early-dead-code-prune",
+        ["typed_mir"],
+        ["canonical_mir", "dead_code_pruned"],
+        "pure"
+    )
+    backend_recommendation(
+        "early-dead-code-prune",
+        optimization_rule_provider_with_backend_policy(provider, optimization_backend_policy_all()),
+        "Prunes obviously dead MIR before backend optimization so later scalar promotion and pattern passes do less work.",
+        "LLVM new pass pipeline guidance favors canonical cleanup around scalar optimization pipelines."
+    )
+
+fn bounds_check_elim_recommendation() -> BackendOptimizationRecommendation:
+    val provider = backend_plugin_provider(
+        "bounds-check-elim",
+        ["typed_mir", "range_facts"],
+        ["canonical_mir", "bounds_checks_elided"],
+        "range-proof-guarded"
+    )
+    backend_recommendation(
+        "bounds-check-elim",
+        optimization_rule_provider_with_backend_policy(provider, optimization_backend_policy_all()),
+        "Keeps Simple range proofs visible before lowering; backend optimizers cannot reliably reconstruct language-level bounds facts after runtime-call lowering.",
+        "General compiler practice: preserve high-level range facts before lowering to low-level IR."
+    )
+
+fn byte_scan_recommendation() -> BackendOptimizationRecommendation:
+    val provider = backend_plugin_provider(
+        "byte-scan-to-delimiter",
+        ["typed_mir", "bounded_scan_terminates"],
+        ["canonical_mir", "byte_scan_intrinsic"],
+        "proof-guarded"
+    )
+    backend_recommendation(
+        "byte-scan-to-delimiter",
+        optimization_rule_provider_with_backend_policy(provider, optimization_backend_policy_all()),
+        "Recognizes delimiter scans while buffer and sentinel facts are still explicit, enabling memchr/SIMD or backend-specific lowering.",
+        "LLVM pass catalog includes loop/vector/scalar cleanup, but high-level delimiter intent is frontend-owned."
+    )
+
+fn checksum_reducer_recommendation() -> BackendOptimizationRecommendation:
+    val provider = backend_plugin_provider(
+        "checksum-reducer",
+        ["typed_mir", "checksum_associative"],
+        ["canonical_mir", "checksum_reduction_intrinsic"],
+        "proof-guarded"
+    )
+    backend_recommendation(
+        "checksum-reducer",
+        optimization_rule_provider_with_backend_policy(provider, optimization_backend_policy_all()),
+        "Keeps checksum associativity and reduction shape explicit for hardware CRC, vector reduction, or table-driven lowering.",
+        "Backend vectorizers help after lowering, but checksum semantics are easier to prove in MIR."
+    )
+
+fn llvm_default_pipeline_recommendation() -> BackendOptimizationRecommendation:
+    val provider = backend_plugin_provider(
+        "llvm-default-pipeline",
+        ["llvm_backend_available"],
+        ["backend_pipeline_selected"],
+        "backend-managed"
+    )
+    val policy = optimization_backend_policy_only(
+        [OptimizerBackendKind.Llvm],
+        "llvm_default_pipeline_only"
+    )
+    backend_recommendation(
+        "llvm-default-pipeline",
+        optimization_rule_provider_with_backend_policy(provider, policy),
+        "Uses LLVM's default optimization pipeline instead of duplicating low-level scalar, loop, and cleanup passes in Simple plugins.",
+        "LLVM New Pass Manager: PassBuilder default pipelines are the intended way to construct normal optimization pipelines."
+    )
+
+fn all_backend_optimization_recommendations() -> [BackendOptimizationRecommendation]:
+    [
+        ssa_var_canon_recommendation(),
+        early_dead_code_recommendation(),
+        bounds_check_elim_recommendation(),
+        byte_scan_recommendation(),
+        checksum_reducer_recommendation(),
+        llvm_default_pipeline_recommendation()
+    ]
+
+fn backend_optimization_recommendations_for(backend_name: text) -> [BackendOptimizationRecommendation]:
+    var selected: [BackendOptimizationRecommendation] = []
+    for rec in all_backend_optimization_recommendations():
+        if optimization_rule_provider_applies_to_backend_name(rec.provider, backend_name):
+            selected = selected.push(rec)
+    selected
+
+fn backend_optimization_recommendation_names(backend_name: text) -> [text]:
+    var names: [text] = []
+    for rec in backend_optimization_recommendations_for(backend_name):
+        names = names.push(rec.stable_name)
+    names
+
+fn backend_optimization_has_recommendation(backend_name: text, stable_name: text) -> bool:
+    for name in backend_optimization_recommendation_names(backend_name):
+        if name == stable_name:
+            return true
+    false
+
+# ============================================================================
 # Exports
 # ============================================================================
 
@@ -354,3 +518,8 @@ export is_capability_guard, is_bit_unpack_loop
 export is_checksum_reducer_loop, is_prefix_scan_lookup, is_wal_batch_flush
 
 export OptimizationFact, web_hot_path_facts, fact_for_recognizer, all_fact_keys
+export BackendOptimizationRecommendation
+export all_backend_optimization_recommendations
+export backend_optimization_recommendations_for
+export backend_optimization_recommendation_names
+export backend_optimization_has_recommendation

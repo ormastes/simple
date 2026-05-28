@@ -10,6 +10,7 @@
 # ABI contract: "simple.opt.mir.v1"
 
 use compiler.common.json.{JsonValue, json_parse}
+use compiler.mir.mir_instructions.{MirModule}
 use compiler.mir_opt.mir_opt.mod.{
     PassScope, mir_pass_descriptor_registry
 }
@@ -17,11 +18,13 @@ use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
     OptimizationBackendPolicy,
     optimization_backend_policy_all,
+    optimization_rule_provider_applies_to_backend_name,
     optimization_rule_provider_builtin_with_contract,
     optimization_rule_provider_with_backend_policy
 }
 use compiler.mir_opt.mir_opt.pattern.pattern_rule_pass.{
-    PatternRule, PatternRuleSet, pattern_rule_set_new
+    PatternRule, PatternRuleSet, pattern_rule_set_new,
+    pattern_rule_pass_new, pattern_rule_pass_add_rule_set, pattern_rule_pass_run
 }
 
 # ============================================================================
@@ -157,6 +160,34 @@ fn manifest_pass_entry_new(
         entry_symbol: entry_symbol
     )
 
+fn manifest_pass_entry_with_backend_policy(
+    entry: ManifestPassEntry,
+    backend_policy: OptimizationBackendPolicy
+) -> ManifestPassEntry:
+    ManifestPassEntry(
+        stable_name: entry.stable_name,
+        aliases: entry.aliases,
+        scope: entry.scope,
+        capability_requires: entry.capability_requires,
+        contract: entry.contract,
+        backend_policy: backend_policy,
+        entry_symbol: entry.entry_symbol
+    )
+
+fn manifest_pass_entry_new_with_backend_policy(
+    stable_name: text,
+    aliases: [text],
+    scope: PassScope,
+    capability_requires: [text],
+    contract: ManifestPassContract,
+    backend_policy: OptimizationBackendPolicy,
+    entry_symbol: text
+) -> ManifestPassEntry:
+    manifest_pass_entry_with_backend_policy(
+        manifest_pass_entry_new(stable_name, aliases, scope, capability_requires, contract, entry_symbol),
+        backend_policy
+    )
+
 fn dynamic_pass_descriptor_from_entry(entry: ManifestPassEntry, plugin_name: text) -> DynamicPassDescriptor:
     DynamicPassDescriptor(
         name: entry.stable_name,
@@ -198,6 +229,31 @@ fn dynamic_pass_registry_lookup(registry: DynamicPassRegistry, name: text) -> Dy
             if alias == name:
                 return Some(desc)
     nil
+
+fn dynamic_pass_descriptor_applies_to_backend(desc: DynamicPassDescriptor, backend_name: text) -> bool:
+    optimization_rule_provider_applies_to_backend_name(desc.provider, backend_name)
+
+fn dynamic_pass_registry_for_backend(registry: DynamicPassRegistry, backend_name: text) -> DynamicPassRegistry:
+    """Return a registry containing only descriptors that apply to backend_name."""
+    var selected: [DynamicPassDescriptor] = []
+    for desc in registry.descriptors:
+        if dynamic_pass_descriptor_applies_to_backend(desc, backend_name):
+            selected = selected.push(desc)
+    DynamicPassRegistry(descriptors: selected)
+
+fn dynamic_pass_registry_names_for_backend(registry: DynamicPassRegistry, backend_name: text) -> [text]:
+    var names: [text] = []
+    val filtered = dynamic_pass_registry_for_backend(registry, backend_name)
+    for desc in filtered.descriptors:
+        names = names.push(desc.name)
+    names
+
+fn dynamic_pass_registry_skipped_names_for_backend(registry: DynamicPassRegistry, backend_name: text) -> [text]:
+    var names: [text] = []
+    for desc in registry.descriptors:
+        if not dynamic_pass_descriptor_applies_to_backend(desc, backend_name):
+            names = names.push(desc.name)
+    names
 
 # ============================================================================
 # Built-in name conflict guard
@@ -341,6 +397,40 @@ fn manifest_to_pattern_rule_set(manifest: OptimizerManifest) -> PatternRuleSet:
     """Extract the PatternRuleSet from a loaded manifest (may be empty)."""
     pattern_rule_set_new(manifest.name, manifest.rules)
 
+fn manifest_registered_pass_applies_to_backend(
+    registry: DynamicPassRegistry,
+    manifest: OptimizerManifest,
+    backend_name: text
+) -> bool:
+    """Return true when at least one registered manifest pass applies to backend_name.
+
+    Rules-only manifests have no pass policy anchor, so they remain
+    backend-neutral and are allowed to run.
+    """
+    if manifest.passes.len() == 0:
+        return true
+    val filtered = dynamic_pass_registry_for_backend(registry, backend_name)
+    for entry in manifest.passes:
+        for desc in filtered.descriptors:
+            if desc.name == entry.stable_name:
+                return true
+    false
+
+fn run_manifest_pattern_rules_for_backend(
+    module: MirModule,
+    registry: DynamicPassRegistry,
+    manifest: OptimizerManifest,
+    backend_name: text
+) -> MirModule:
+    """Run a manifest's pattern rules only when its registered passes apply to the backend."""
+    if manifest.rules.len() == 0:
+        return module
+    if not manifest_registered_pass_applies_to_backend(registry, manifest, backend_name):
+        return module
+    val rule_set = manifest_to_pattern_rule_set(manifest)
+    val rule_pass = pattern_rule_pass_add_rule_set(pattern_rule_pass_new(), rule_set)
+    pattern_rule_pass_run(rule_pass, module)
+
 # ============================================================================
 # Registry registration
 # ============================================================================
@@ -372,11 +462,18 @@ export ManifestSchemaVersion, manifest_schema_version_from_int, manifest_schema_
 export ManifestError, manifest_error_message
 export ManifestPassContract, manifest_pass_contract_default
 export ManifestPassEntry, manifest_pass_entry_new
+export manifest_pass_entry_with_backend_policy, manifest_pass_entry_new_with_backend_policy
 export OptimizerManifest
 export DynamicPassDescriptor, dynamic_pass_descriptor_from_entry
 export DynamicPassRegistry, dynamic_pass_registry_new
 export dynamic_pass_registry_lookup, dynamic_pass_registry_register
+export dynamic_pass_descriptor_applies_to_backend
+export dynamic_pass_registry_for_backend
+export dynamic_pass_registry_names_for_backend
+export dynamic_pass_registry_skipped_names_for_backend
 export load_manifest_v1, load_manifest_v1_from_parsed, load_manifest_v1_from_parsed_with_rules
 export validate_manifest, validate_manifest_pass
 export is_builtin_stable_name, is_builtin_alias
 export manifest_to_pattern_rule_set
+export manifest_registered_pass_applies_to_backend
+export run_manifest_pattern_rules_for_backend

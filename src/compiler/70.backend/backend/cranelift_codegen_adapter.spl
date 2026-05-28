@@ -282,7 +282,7 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
             translate_instruction(ctx, inst, value_map, slot_map, block_map, cl_module, func_handles, func)
 
         # Compile terminator
-        translate_terminator(ctx, block.terminator, value_map, slot_map, block_map, func)
+        translate_terminator(ctx, block.id, block.terminator, value_map, slot_map, block_map, func)
 
     # Seal all blocks and finalize
     cranelift_seal_all_blocks(ctx)
@@ -432,12 +432,19 @@ fn translate_instruction(
                 value_map[dest.unwrap().id] = result
 
         case Intrinsic(dest, name, args):
-            # Intrinsics are lowered to function calls
-            var arg_vals: [i64] = []
-            for arg in args:
-                arg_vals.push(translate_operand(ctx, arg, value_map, slot_map, func))
-            # For now, emit a trap for unknown intrinsics
-            cranelift_trap(ctx, 0)
+            if name == "__simple_ssa_phi" and dest.?:
+                val dest_id = dest.unwrap().id
+                if slot_map.has(dest_id):
+                    val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
+                    val ty = mir_type_to_cl(local_type(dest_id, func))
+                    value_map[dest_id] = cranelift_load(ctx, ty, addr, 0)
+                elif args.len() >= 4:
+                    value_map[dest_id] = translate_operand(ctx, args[1], value_map, slot_map, func)
+                elif args.len() > 0:
+                    value_map[dest_id] = translate_operand(ctx, args[0], value_map, slot_map, func)
+            else:
+                # For now, emit a trap for unknown intrinsics
+                cranelift_trap(ctx, 0)
 
         case Nop:
             ()
@@ -453,8 +460,49 @@ fn translate_instruction(
 # Terminator Translation
 # ============================================================================
 
+fn cranelift_phi_const_block_arg(arg: MirOperand) -> i64?:
+    match arg.kind:
+        case Const(value, _):
+            match value:
+                case Int(v): Some(v)
+                case _: nil
+        case _: nil
+
+fn cranelift_phi_incoming_for_predecessor(pred_id: i64, args: [MirOperand]) -> MirOperand?:
+    if args.len() >= 4:
+        val then_block = cranelift_phi_const_block_arg(args[0])
+        val else_block = cranelift_phi_const_block_arg(args[2])
+        if then_block.? and then_block.unwrap() == pred_id:
+            return Some(args[1])
+        if else_block.? and else_block.unwrap() == pred_id:
+            return Some(args[3])
+    nil
+
+fn store_phi_incomings_for_edge(
+    ctx: i64,
+    pred: BlockId,
+    target: BlockId,
+    value_map: Dict<i64, i64>,
+    slot_map: Dict<i64, i64>,
+    func: MirFunction
+):
+    for block in func.blocks:
+        if block.id.id == target.id:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Intrinsic(dest, name, args):
+                        if name == "__simple_ssa_phi" and dest.?:
+                            val incoming = cranelift_phi_incoming_for_predecessor(pred.id, args)
+                            if incoming.? and slot_map.has(dest.unwrap().id):
+                                val val_ = translate_operand(ctx, incoming.unwrap(), value_map, slot_map, func)
+                                val addr = cranelift_stack_addr(ctx, slot_map[dest.unwrap().id], 0)
+                                cranelift_store(ctx, val_, addr, 0)
+                    case _:
+                        ()
+
 fn translate_terminator(
     ctx: i64,
+    current_block: BlockId,
     term: MirTerminator,
     value_map: Dict<i64, i64>,
     slot_map: Dict<i64, i64>,
@@ -464,6 +512,7 @@ fn translate_terminator(
     match term:
         case Goto(target):
             if block_map.has(target.id):
+                store_phi_incomings_for_edge(ctx, current_block, target, value_map, slot_map, func)
                 cranelift_jump(ctx, block_map[target.id])
 
         case Return(value):
@@ -511,6 +560,7 @@ fn translate_terminator(
             if dest.?:
                 value_map[dest.unwrap().id] = result
             if block_map.has(normal.id):
+                store_phi_incomings_for_edge(ctx, current_block, normal, value_map, slot_map, func)
                 cranelift_jump(ctx, block_map[normal.id])
 
 # ============================================================================
