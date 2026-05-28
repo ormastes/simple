@@ -35,18 +35,11 @@ use std.nogc_sync_mut.io.tcp.{
     tcp_backend_set_nonblocking,
     tcp_backend_set_nodelay
 }
-use std.common.compress.{gzip_compress, brotli_compress}
-
-# ============================================================================
-# Request Struct
-# ============================================================================
-
-struct EmbeddedRequest:
-    """Parsed HTTP request from the inline parser."""
-    method: text
-    path: text
-    headers: [(text, text)]
-    body: text
+use std.http_server.shared.{
+    parse_http_request, serialize_http_response,
+    match_route, RouteMatch, SimpleRoute
+}
+use std.http_server.types.{HttpRequestData}
 
 # ============================================================================
 # Route Entry
@@ -56,89 +49,7 @@ struct EmbeddedRoute:
     """A registered route: HTTP method + path + handler."""
     method: text
     path: text
-    handler: fn(EmbeddedRequest) -> text
-
-# ============================================================================
-# Inline HTTP/1.1 Parser
-# ============================================================================
-
-fn parse_embedded_request(data: text) -> EmbeddedRequest?:
-    """Parse raw HTTP data into an EmbeddedRequest.
-    Splits on \\r\\n\\r\\n, parses request line + headers. Body = remainder.
-    Returns nil if malformed.
-    """
-    val separator = "\r\n\r\n"
-    val sep_pos = data.index_of(separator)
-    if sep_pos < 0:
-        return nil
-
-    val head = data.slice(0, sep_pos)
-    val body = data.slice(sep_pos + 4, data.len())
-
-    val lines = head.split("\r\n")
-    if lines.len() < 1:
-        return nil
-
-    # Parse request line: "GET /path HTTP/1.1"
-    val request_line = lines.at(0)
-    val parts = request_line.split(" ")
-    if parts.len() < 2:
-        return nil
-
-    val method = parts.at(0)
-    val path = parts.at(1)
-
-    # Parse headers
-    var headers: [(text, text)] = []
-    var i = 1
-    while i < lines.len():
-        val line = lines.at(i)
-        val colon = line.index_of(":")
-        if colon > 0:
-            val name = line.slice(0, colon).trim()
-            val value = line.slice(colon + 1, line.len()).trim()
-            headers.push((name, value))
-        i = i + 1
-
-    EmbeddedRequest(
-        method: method,
-        path: path,
-        headers: headers,
-        body: body
-    )
-
-# ============================================================================
-# Response Serializer
-# ============================================================================
-
-fn embedded_response(status: i64, body: text) -> text:
-    """Serialize an HTTP/1.1 response with Content-Length, Server, Connection: close."""
-    val reason = _status_reason(status)
-    val length = body.len()
-    "HTTP/1.1 {status} {reason}\r\nContent-Length: {length}\r\nServer: SimpleEmbedded\r\nConnection: close\r\n\r\n{body}"
-
-fn embedded_negotiate_encoding(headers: [(text, text)]) -> text:
-    """Extract best encoding from Accept-Encoding header."""
-    for pair in headers:
-        val name = pair.0
-        if name.lower() == "accept-encoding":
-            val value = pair.1
-            if value.contains("br"):
-                return "br"
-            if value.contains("gzip"):
-                return "gzip"
-    ""
-
-fn _status_reason(status: i64) -> text:
-    """Map common status codes to reason phrases."""
-    if status == 200: return "OK"
-    if status == 201: return "Created"
-    if status == 204: return "No Content"
-    if status == 400: return "Bad Request"
-    if status == 404: return "Not Found"
-    if status == 405: return "Method Not Allowed"
-    if status == 500: return "Internal Server Error"
-    "Unknown"
+    handler: fn(HttpRequestData) -> text
 
 # ============================================================================
 # Embedded HTTP Server
@@ -162,19 +73,19 @@ class EmbeddedHttpServer:
             running: false
         )
 
-    me get(path: text, handler: fn(EmbeddedRequest) -> text):
+    me get(path: text, handler: fn(HttpRequestData) -> text):
         """Register a GET route."""
         self.routes.push(EmbeddedRoute(method: "GET", path: path, handler: handler))
 
-    me post(path: text, handler: fn(EmbeddedRequest) -> text):
+    me post(path: text, handler: fn(HttpRequestData) -> text):
         """Register a POST route."""
         self.routes.push(EmbeddedRoute(method: "POST", path: path, handler: handler))
 
-    me put(path: text, handler: fn(EmbeddedRequest) -> text):
+    me put(path: text, handler: fn(HttpRequestData) -> text):
         """Register a PUT route."""
         self.routes.push(EmbeddedRoute(method: "PUT", path: path, handler: handler))
 
-    me delete(path: text, handler: fn(EmbeddedRequest) -> text):
+    me delete(path: text, handler: fn(HttpRequestData) -> text):
         """Register a DELETE route."""
         self.routes.push(EmbeddedRoute(method: "DELETE", path: path, handler: handler))
 
@@ -255,24 +166,34 @@ class EmbeddedHttpServer:
 
     fn _handle_request(self, data: text) -> text:
         """Route a raw HTTP request to the matching handler, return serialized response."""
-        val req = parse_embedded_request(data)
+        val req = parse_http_request(data)
         if not req.?:
-            return embedded_response(400, "Bad Request")
+            return self._respond(400, "Bad Request")
 
-        val request = req as EmbeddedRequest
+        val request = req as HttpRequestData
 
-        # Find matching route
+        # Build SimpleRoute list for shared matcher
+        var simple_routes: [SimpleRoute] = []
+        for route in self.routes:
+            simple_routes.push(SimpleRoute(method: route.method, path: route.path))
+
         # NOTE: Compression disabled — submit_send uses text I/O which
         # corrupts binary compressed output via from_utf8_lossy. Enable
         # when IoDriver gains submit_send_bytes for raw [u8] paths.
-        for route in self.routes:
-            if route.method == request.method and route.path == request.path:
+        val result = match_route(request.method, request.path, simple_routes)
+        match result:
+            RouteMatch.Found(idx):
+                val route = self.routes[idx]
                 val body = route.handler(request)
-                return embedded_response(200, body)
+                return self._respond(200, body)
+            RouteMatch.MethodNotAllowed:
+                return self._respond(405, "Method Not Allowed")
+            RouteMatch.NotFound:
+                return self._respond(404, "Not Found")
 
-        # Check if path exists but method doesn't match
-        for route in self.routes:
-            if route.path == request.path:
-                return embedded_response(405, "Method Not Allowed")
-
-        embedded_response(404, "Not Found")
+    fn _respond(self, status: i64, body: text) -> text:
+        """Serialize response with embedded-server headers (Server + Connection: close)."""
+        serialize_http_response(status, body, [
+            ("Server", "SimpleEmbedded"),
+            ("Connection", "close")
+        ])

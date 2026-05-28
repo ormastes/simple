@@ -58,6 +58,9 @@ use std.http_server.compression.{compression_handler}
 use std.http_server.access_log.{access_log_handler}
 use std.http_server.handler.{HandlerRegistry, create_default_registry}
 use std.http_server.error.{HttpServerError}
+use std.nogc_async_mut.io.tls_common.{TlsConfig}
+use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
 
 # Module-level worker storage for thread entry points.
 # Each spawned worker is stored here so the thread callback can retrieve it.
@@ -161,6 +164,15 @@ class HttpServer:
         else:
             self.config.worker_count
 
+        # Validate TLS configuration early (fail fast before spawning workers)
+        if self.config.tls_enabled:
+            val tls_result = load_tls_config(self.config)
+            match tls_result:
+                Ok(tls_cfg):
+                    print "[SimpleServer] TLS enabled (cert={self.config.tls_cert_path}, min={self.config.tls_min_version})"
+                Err(e):
+                    return Err(e)
+
         val router = AsyncRouter.new(self.config.locations)
         val pipeline = build_default_pipeline()
 
@@ -213,7 +225,11 @@ class HttpServer:
         self.running = true
         self.supervisor.start()
 
-        print "[SimpleServer] Listening on {self.config.listen_addr} with {worker_count} workers"
+        val proto = if self.config.tls_enabled: "https" else: "http"
+        if worker_count > 1:
+            print "[SimpleServer] Listening on {proto}://{self.config.listen_addr} with {worker_count} workers (SO_REUSEPORT)"
+        else:
+            print "[SimpleServer] Listening on {proto}://{self.config.listen_addr} with 1 worker"
 
         if last_worker.?:
             var w = last_worker
@@ -303,3 +319,47 @@ fn build_default_pipeline() -> MiddlewarePipeline:
                  access_log_handler)
 
     pipeline
+
+# ============================================================================
+# TLS Configuration
+# ============================================================================
+
+fn load_tls_config(config: ServerConfig) -> Result<TlsConfig, HttpServerError>:
+    """Validate TLS certificate and key files, then build a TlsConfig.
+
+    Called from HttpServer.start() when tls_enabled is true.
+    Fails fast with a TlsError if cert/key files are missing or malformed.
+
+    Args:
+        config: ServerConfig with tls_cert_path and tls_key_path set
+
+    Returns:
+        TlsConfig ready for AsyncTlsListener, or TlsError
+    """
+    if config.tls_cert_path.len() == 0:
+        return Err(HttpServerError.TlsError("tls_cert_path is empty"))
+    if config.tls_key_path.len() == 0:
+        return Err(HttpServerError.TlsError("tls_key_path is empty"))
+
+    if not file_exists(config.tls_cert_path):
+        return Err(HttpServerError.TlsError("certificate file not found: {config.tls_cert_path}"))
+    if not file_exists(config.tls_key_path):
+        return Err(HttpServerError.TlsError("private key file not found: {config.tls_key_path}"))
+
+    val chain_result = TlsCertificateChain.from_pem_file(config.tls_cert_path)
+    var chain: TlsCertificateChain
+    match chain_result:
+        Ok(c):
+            chain = c
+        Err(msg):
+            return Err(HttpServerError.TlsError("failed to load certificate: {msg}"))
+
+    val key_result = TlsPrivateKey.from_pem_file(config.tls_key_path)
+    var key: TlsPrivateKey
+    match key_result:
+        Ok(k):
+            key = k
+        Err(msg):
+            return Err(HttpServerError.TlsError("failed to load private key: {msg}"))
+
+    Ok(TlsConfig.server(chain, key))
