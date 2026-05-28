@@ -11,7 +11,7 @@ use common.ui.state.{update_state}
 use common.ui.event.{process_event}
 use app.ui.web.html.{generate_html_page, generate_wm_html_page}
 use app.ui.web.ws_handler.{handle_ws_upgrade, handle_ws_wm_upgrade, is_ws_upgrade_request, extract_ws_key, compute_ws_accept}
-use app.ui.web.async_ws.{read_ws_frame, parse_ws_event, ws_send_render}
+use app.ui.web.async_ws.{read_ws_frame, parse_ws_event}
 use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.web.origin_guard.{OriginGuard}
 use app.ui.web.session_token.{SessionToken, load_secret, TOKEN_TTL_DEFAULT_MS}
@@ -34,6 +34,41 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_env_get(key: text) -> text
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+fn send_ws_tcp_frame(stream: TcpStream, message: text) -> bool:
+    """Send a text message as one unmasked RFC6455 frame over a raw TcpStream
+    (server->client frames are never masked). Avoids ConnStream (whose
+    write_all_bytes path can't downcast its Any-typed stream in the interpreter)."""
+    val payload = rt_text_to_bytes(message)
+    val len = payload.len()
+    var frame: [u8] = [0x81]
+    if len < 126:
+        frame.push(len & 0xFF)
+    elif len < 65536:
+        frame.push(126)
+        frame.push((len / 256) & 0xFF)
+        frame.push(len & 0xFF)
+    else:
+        frame.push(127)
+        frame.push(0)
+        frame.push(0)
+        frame.push(0)
+        frame.push(0)
+        frame.push((len / 16777216) & 0xFF)
+        frame.push((len / 65536) & 0xFF)
+        frame.push((len / 256) & 0xFF)
+        frame.push(len & 0xFF)
+    frame = frame + payload
+    match stream.write_all(frame):
+        Err(_):
+            return false
+        Ok(()):
+            match stream.flush():
+                Err(_):
+                    return false
+                Ok(()):
+                    return true
 
 fn parse_request_line(request_line: text) -> (text, text):
     var method = ""
@@ -275,6 +310,11 @@ class WebServer:
                 return
             Ok(()):
                 pass_dn
+        match stream.flush():
+            Err(_):
+                return
+            Ok(()):
+                pass_dn
 
         # Initial snapshot, then process client events until disconnect.
         self.push_ws_render(stream)
@@ -292,7 +332,7 @@ class WebServer:
         """Render the current widget tree and push it as a {type:render} frame."""
         val body = render_html_tree(self.state.tree.root_node(), self.state)
         val msg = "{\"type\":\"render\",\"html\":\"" + escape_json(body) + "\"}"
-        ws_send_render(stream, msg)
+        send_ws_tcp_frame(stream, msg)
 
     fn handle_login(stream: TcpStream, headers: text):
         """POST /ui/login — issue a bearer token for a pre-minted capability grant.
