@@ -1,22 +1,22 @@
-# wm_compare Golden-Image Gate — Row 8 of GUI drawing-layer matrix
+# wm_compare Golden-Image Gate — golden gate of GUI drawing-layer matrix
 #
-# Extends the Row 2 V1/V2 parity harness (`v1_v2_parity.spl`) with a
+# Extends the framebuffer/software backend parity harness (`backend_parity.spl`) with a
 # golden-image drift detector:
 #
-#   * Render every parity scene through the V1 path (`render_v1`).
+#   * Render every parity scene through the framebuffer baseline path (`render_framebuffer_baseline`).
 #   * Encode the buffer as PPM P6 (binary).
 #   * On REGEN: write `test/system/wm_compare/goldens/<scene>.ppm`.
 #   * Otherwise: load the golden PPM, decode to ARGB, and compare to the
 #     freshly rendered buffer using `diff_buffers`. Fail if any backend
-#     drifts more than the ≤1 % perceptual budget locked in Row 2.
+#     drifts more than the <=1% perceptual budget locked in the framebuffer/software gate.
 #
-# The gate intentionally re-uses Row 2's `ParityScene`, `render_v1`, and
+# The gate intentionally re-uses the framebuffer/software gate's `ParityScene`, `render_framebuffer_baseline`, and
 # `diff_buffers` — golden-image work is only the serialization layer on
 # top. See doc/06_spec/app/compiler/feature/windows_spec.md (Golden-image
 # gate subsection) for how to regenerate goldens.
 
-use app.wm_compare.v1_v2_parity.{
-    ParityScene, ParityResult, render_v1, render_v2, diff_buffers,
+use app.wm_compare.backend_parity.{
+    ParityScene, ParityResult, render_framebuffer_baseline, render_software_reference, diff_buffers,
     scene_solid_fill, scene_fill_rect_row_edge, scene_text_with_bg, scene_glass_blend,
 }
 
@@ -159,13 +159,13 @@ fn golden_path(scene_name: text) -> text:
 
 fn should_regenerate() -> bool:
     """Honor the REGEN_GOLDENS env var. Setting it to anything non-empty
-    rewrites every golden from the current V1 render output."""
+    rewrites every golden from the current framebuffer baseline render output."""
     val v = rt_env_get("REGEN_GOLDENS") ?? ""
     v != ""
 
 fn write_golden(scene: ParityScene) -> bool:
-    """Render `scene` through V1 and serialize the buffer to disk."""
-    val pixels = render_v1(scene)
+    """Render `scene` through framebuffer baseline and serialize the buffer to disk."""
+    val pixels = render_framebuffer_baseline(scene)
     val bytes = encode_ppm_p6(width: scene.width, height: scene.height, pixels: pixels)
     rt_dir_create(goldens_dir())
     rt_file_write_bytes(golden_path(scene.name), bytes)
@@ -181,7 +181,7 @@ fn check_golden(scene: ParityScene) -> GoldenGateResult:
     val path = golden_path(scene.name)
     if should_regenerate():
         write_golden(scene)
-        val fresh = render_v1(scene)
+        val fresh = render_framebuffer_baseline(scene)
         val self_diff = diff_buffers(scene.name, scene.width, scene.height, fresh, fresh)
         return GoldenGateResult(
             scene: scene.name, path: path,
@@ -199,7 +199,7 @@ fn check_golden(scene: ParityScene) -> GoldenGateResult:
         )
     val raw = rt_file_read_bytes(path) ?? []
     val golden = decode_ppm_p6(raw)
-    val fresh = render_v1(scene)
+    val fresh = render_framebuffer_baseline(scene)
     if golden.len() != fresh.len():
         val placeholder = diff_buffers(scene.name, scene.width, scene.height, fresh, fresh)
         return GoldenGateResult(
@@ -216,7 +216,7 @@ fn check_golden(scene: ParityScene) -> GoldenGateResult:
     )
 
 fn all_gate_scenes() -> [ParityScene]:
-    """Same set Row 2 locks — keeps the gate aligned with the parity
-    runner so a Row 2 regression and a Row 8 regression surface
+    """Same set framebuffer/software gate locks — keeps the gate aligned with the parity
+    runner so a framebuffer/software gate regression and a golden gate regression surface
     together."""
     [scene_solid_fill(), scene_fill_rect_row_edge(), scene_text_with_bg(), scene_glass_blend()]

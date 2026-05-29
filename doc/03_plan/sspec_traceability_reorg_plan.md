@@ -229,7 +229,7 @@ Generated/manual SPipe docs mirror executable test paths:
 - System alias cleanup: `SIMPLE_LIB=src bin/simple test --force-rebuild test/system/wm_compare/html_compat_spec.spl`
 - System alias cleanup: `SIMPLE_LIB=src bin/simple test --force-rebuild test/system/wm_compare/emulated_capture_spec.spl`
 - System alias cleanup: `SIMPLE_LIB=src bin/simple test --force-rebuild test/system/wm_compare/famous_site_engine2d_backend_spec.spl`
-- Known FAIL after matcher/import cleanup: `test/system/wm_compare/v1_v2_parity_spec.spl`, `golden_gate_spec.spl`, `v1_v3_parity_spec.spl`, `v1_v4_parity_spec.spl`.
+- Known FAIL after matcher/import cleanup: `test/system/wm_compare/backend_parity_spec.spl`, `golden_gate_spec.spl`, `browser_shell_parity_spec.spl`, `electron_reference_parity_spec.spl`.
 - Data fixture cleanup: `SIMPLE_LIB=src bin/simple test --force-rebuild test/integration/app/io_intensive_spec.spl`
 - Shared runner unit coverage: `SIMPLE_LIB=src bin/simple test --force-rebuild test/unit/app/test_runner/execution_strategy_reclassify_spec.spl`
 - Shared runner unit coverage: `SIMPLE_LIB=src bin/simple test --force-rebuild test/unit/app/test_runner_new/test_categorization_spec.spl`

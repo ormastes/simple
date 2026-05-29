@@ -1,22 +1,22 @@
-# wm_compare V1/V2 Parity Runner — Row 2 of GUI drawing-layer matrix
+# wm_compare Backend Parity Runner
 #
 # Drives the same logical scene through two pixel paths and compares them
 # byte-for-byte plus perceptually:
 #
-#   V1 — `os.os.drivers.framebuffer.fb_driver.FramebufferDriver.from_buffer`
-#         The same code path V1 (`fb_backend`) uses on real hardware, but
+#   framebuffer baseline — `os.os.drivers.framebuffer.fb_driver.FramebufferDriver.from_buffer`
+#         The same code path framebuffer baseline (`fb_backend`) uses on real hardware, but
 #         wired to an in-process `[u32]` ARGB8888 buffer via the new
 #         `from_buffer` shim — no QEMU, no MMIO.
 #
-#   V2 — pure-Simple software renderer (`_render_v2_to_buffer`)
+#   software reference — pure-Simple software renderer
 #         A minimal ARGB8888 array writer that mirrors the same math the
 #         hosted_backend SFFI (`rt_winit_buffer_*`) performs on the host
 #         side. We render in pure Simple here so the spec stays runnable
 #         in the interpreter — `hosted_backend` would require winit and
 #         a live event loop. The math is intentionally trivial so any
-#         delta surfaces a real V1/V2 contract drift.
+#         delta surfaces a real framebuffer/software contract drift.
 #
-# See doc/03_plan/sys_test/wm_compare_v1_v2_parity.md for the full plan.
+# See the wm_compare system specs for the runnable acceptance surface.
 
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
 use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
@@ -26,12 +26,12 @@ use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
 # ============================================================================
 
 struct ParityResult:
-    """Result of one V1/V2 parity comparison."""
+    """Result of one framebuffer/software parity comparison."""
     scene: text                 # scene name
     width: u32
     height: u32
-    v1_pixels: [u32]            # ARGB8888, row-major, len = width * height
-    v2_pixels: [u32]
+    baseline_pixels: [u32]            # ARGB8888, row-major, len = width * height
+    reference_pixels: [u32]
     max_channel_delta: u32      # max |Δ| across r,g,b channels of any pixel
     differing_pixels: u32       # how many pixels differ at all
     perceptual_pct: u32         # differing_pixels * 10000 / total (basis: 1/100 of a percent)
@@ -44,7 +44,7 @@ struct ParityResult:
 
 struct ParityScene:
     """A scene description that the parity runner can render through both
-    V1 and V2 paths. Intentionally tiny and self-describing — every op is
+    framebuffer baseline and software reference paths. Intentionally tiny and self-describing — every op is
     a single CompositorBackend trait surface call."""
     name: text
     width: u32
@@ -100,7 +100,7 @@ fn make_scene(name: text, width: u32, height: u32, ops: [ParityOp]) -> ParitySce
     ParityScene(name: name, width: width, height: height, ops: ops)
 
 # ============================================================================
-# V1 path — render through FramebufferDriver.from_buffer (the fb_backend
+# framebuffer baseline path — render through FramebufferDriver.from_buffer (the fb_backend
 # code path, just headless)
 # ============================================================================
 
@@ -114,7 +114,7 @@ fn _pack_argb(a: u8, r: u8, g: u8, b: u8) -> u32:
     does not silently truncate the shift result to u8 width."""
     (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
 
-fn render_v1(scene: ParityScene) -> [u32]:
+fn render_framebuffer_baseline(scene: ParityScene) -> [u32]:
     """Render `scene` through `FramebufferDriver.from_buffer` and return
     the host-backed ARGB8888 buffer.
 
@@ -124,30 +124,29 @@ fn render_v1(scene: ParityScene) -> [u32]:
     type is preserved through codegen). To keep the spec runnable in
     interpreter mode we still build the driver via `from_buffer` (so the
     shim is exercised) and then write into the host buffer through the
-    same primitives V2 uses. In compiled mode the equivalent code goes
+    same primitives the software reference uses. In compiled mode the equivalent code goes
     through `fb.fill_rect`, `fb.clear`, `fb.draw_char_8x16` and
-    `fb.blend_rect` — see `render_v1_via_methods` below for that path."""
+    `fb.blend_rect` — see `render_framebuffer_baseline_via_methods` below for that path."""
     var fb = FramebufferDriver.from_buffer(scene.width, scene.height)
-    val buf = fb.host_pixels()
     val w = scene.width
     val h = scene.height
-    _v2_clear(buf, w, h, 0u32)
+    var buf = _software_clear(fb.host_pixels(), w, h, 0u32)
     for op in scene.ops:
         val packed = _pack_argb(op.a, op.r, op.g, op.b)
         val packed_bg = _pack_argb(op.bg_a, op.bg_r, op.bg_g, op.bg_b)
         if op.kind == "clear":
-            _v2_clear(buf, w, h, packed)
+            buf = _software_clear(buf, w, h, packed)
         elif op.kind == "fill_rect":
-            _v2_fill_rect(buf, w, h, op.x, op.y, op.w, op.h, packed)
+            buf = _software_fill_rect(buf, w, h, op.x, op.y, op.w, op.h, packed)
         elif op.kind == "draw_char":
-            _v2_draw_char(buf, w, h, op.x, op.y, op.ch, packed, packed_bg)
+            buf = _software_draw_char(buf, w, h, op.x, op.y, op.ch, packed, packed_bg)
         elif op.kind == "blend_rect":
-            _v2_blend_rect(buf, w, h, op.x, op.y, op.w, op.h,
-                           op.r, op.g, op.b, op.alpha)
+            buf = _software_blend_rect(buf, w, h, op.x, op.y, op.w, op.h,
+                                 op.r, op.g, op.b, op.alpha)
     buf
 
-fn render_v1_via_methods(scene: ParityScene) -> [u32]:
-    """Compiled-mode V1 renderer: drives `FramebufferDriver.from_buffer`
+fn render_framebuffer_baseline_via_methods(scene: ParityScene) -> [u32]:
+    """Compiled-mode framebuffer baseline renderer: drives `FramebufferDriver.from_buffer`
     through the actual `clear`/`fill_rect`/`draw_char_8x16`/`blend_rect`
     methods on the driver — i.e. the same code path `fb_backend` uses on
     real hardware. Not invoked from the spec body because the interpreter
@@ -169,7 +168,7 @@ fn render_v1_via_methods(scene: ParityScene) -> [u32]:
     fb.host_pixels()
 
 # ============================================================================
-# V2 path — pure-Simple software renderer matching the hosted_backend math
+# software reference path — pure-Simple software renderer matching the hosted_backend math
 # ============================================================================
 
 fn _new_buffer(w: u32, h: u32) -> [u32]:
@@ -181,115 +180,138 @@ fn _new_buffer(w: u32, h: u32) -> [u32]:
         i = i + 1
     buf
 
-fn _v2_put(buf: [u32], w: u32, h: u32, x: u32, y: u32, c: u32):
+fn _software_put(buf: [u32], w: u32, h: u32, x: u32, y: u32, c: u32) -> [u32]:
+    """Return buf with pixel (x,y) set to c.
+
+    Arrays are value types in the interpreter — element writes through
+    function parameters do not propagate back to the caller for u32 values
+    that exceed i32 range. Each helper therefore returns the (possibly
+    modified) array so callers can reassign."""
     if x >= w or y >= h:
-        return
+        return buf
     val idx = y * w + x
     buf[idx] = c
+    buf
 
-fn _v2_blend_one(buf: [u32], w: u32, h: u32, x: u32, y: u32,
-                  sr_in: u8, sg_in: u8, sb_in: u8, alpha: u8):
+fn _software_blend_one(buf: [u32], w: u32, h: u32, x: u32, y: u32,
+                  sr_in: u8, sg_in: u8, sb_in: u8, alpha: u8) -> [u32]:
     """Mirrors `FramebufferDriver.blend_pixel`: `(s*a + d*(255-a) + 128) >> 8`
     on each channel, then re-packs with full-opaque alpha. Uses only shift
-    and integer arithmetic so it stays interpreter-safe."""
+    and integer arithmetic so it stays interpreter-safe. Returns buf."""
     if x >= w or y >= h:
-        return
+        return buf
     val idx = y * w + x
     val dst = buf[idx]
-    val inv = 255 - alpha
-    val dr = (dst >> 16) & 0xFF
-    val dg = (dst >> 8) & 0xFF
-    val db = dst & 0xFF
-    val rr = (sr_in * alpha + dr * inv + 128) >> 8
-    val rg = (sg_in * alpha + dg * inv + 128) >> 8
-    val rb = (sb_in * alpha + db * inv + 128) >> 8
-    buf[idx] = 0xFF000000 | (rr << 16) | (rg << 8) | rb
+    val inv = 255u32 - alpha.to_u32()
+    val dr = (dst >> 16u32) & 0xFFu32
+    val dg = (dst >> 8u32) & 0xFFu32
+    val db = dst & 0xFFu32
+    val rr = (sr_in.to_u32() * alpha.to_u32() + dr * inv + 128u32) >> 8u32
+    val rg = (sg_in.to_u32() * alpha.to_u32() + dg * inv + 128u32) >> 8u32
+    val rb = (sb_in.to_u32() * alpha.to_u32() + db * inv + 128u32) >> 8u32
+    buf[idx] = 0xFF000000u32 | (rr << 16u32) | (rg << 8u32) | rb
+    buf
 
-fn _v2_fill_rect(buf: [u32], w: u32, h: u32, x: u32, y: u32, rw: u32, rh: u32, color: u32):
+fn _software_fill_rect(buf: [u32], w: u32, h: u32, x: u32, y: u32, rw: u32, rh: u32, color: u32) -> [u32]:
+    """Return buf with the rectangle [x,x+rw) × [y,y+rh) filled with color."""
+    var out = buf
     var row: u32 = 0
     while row < rh:
         val py = y + row
         if py >= h:
-            return
+            return out
         var col: u32 = 0
         while col < rw:
             val px = x + col
             if px < w:
-                _v2_put(buf, w, h, px, py, color)
+                out = _software_put(out, w, h, px, py, color)
             col = col + 1
         row = row + 1
+    out
 
-fn _v2_clear(buf: [u32], w: u32, h: u32, color: u32):
+fn _software_clear(buf: [u32], w: u32, h: u32, color: u32) -> [u32]:
+    """Return a new buffer of width×height pixels all set to color."""
+    var out = buf
     var i: u32 = 0
     val total = w * h
     while i < total:
-        buf[i] = color
+        out[i] = color
         i = i + 1
+    out
 
-fn _v2_draw_char(buf: [u32], w: u32, h: u32, x: u32, y: u32, ch: u8, fg: u32, bg: u32):
-    # 8x16 — V2 mirrors the V1 font-stub: for the ASCII space (0x20) the
-    # entire 8x16 cell is bg pixels (matches V1's empty glyph). For all
-    # other ch values we write bg only on the cells where V1's glyph bit
-    # is 0; matching the fg-cells would require duplicating the VGA font
-    # table here, which is out of scope for the parity harness. The
-    # parity scenes deliberately use ch=0x20 so this path is fully
-    # covered without coupling the runner to the font table.
+fn _software_draw_char(buf: [u32], w: u32, h: u32, x: u32, y: u32, ch: u8, fg: u32, bg: u32) -> [u32]:
+    """Return buf with an 8×16 character cell drawn at (x,y).
+
+    software reference mirrors the framebuffer baseline font-stub: for the ASCII space (0x20) the entire
+    8×16 cell is bg pixels. For all other ch values we write bg only on
+    the cells where framebuffer baseline glyph bit is 0; matching the fg-cells would
+    require duplicating the VGA font table here, which is out of scope.
+    Parity scenes deliberately use ch=0x20 so this path is fully covered."""
+    var out = buf
     var row: u32 = 0
     while row < 16u32:
         var col: u32 = 0
         while col < 8u32:
-            _v2_put(buf, w, h, x + col, y + row, bg)
+            out = _software_put(out, w, h, x + col, y + row, bg)
             col = col + 1
         row = row + 1
+    out
 
-fn _v2_blend_rect(buf: [u32], w: u32, h: u32, x: u32, y: u32, rw: u32, rh: u32,
-                   sr: u8, sg: u8, sb: u8, alpha: u8):
+fn _software_blend_rect(buf: [u32], w: u32, h: u32, x: u32, y: u32, rw: u32, rh: u32,
+                   sr: u8, sg: u8, sb: u8, alpha: u8) -> [u32]:
+    """Return buf with the blend rectangle applied."""
+    var out = buf
     var row: u32 = 0
     while row < rh:
         var col: u32 = 0
         while col < rw:
-            _v2_blend_one(buf, w, h, x + col, y + row, sr, sg, sb, alpha)
+            out = _software_blend_one(out, w, h, x + col, y + row, sr, sg, sb, alpha)
             col = col + 1
         row = row + 1
+    out
 
-fn render_v2(scene: ParityScene) -> [u32]:
-    """Render `scene` through the pure-Simple V2 path (mirrors the math
-    `hosted_backend` performs on the host side). Returns ARGB8888."""
+fn render_software_reference(scene: ParityScene) -> [u32]:
+    """Render `scene` through the pure-Simple software reference path (mirrors the math
+    `hosted_backend` performs on the host side). Returns ARGB8888.
+
+    Each `_software_*` helper returns the (possibly modified) array; callers
+    must reassign `buf` to pick up writes — arrays are value types in
+    the interpreter."""
     var buf = _new_buffer(scene.width, scene.height)
     for op in scene.ops:
         val packed = _pack_argb(op.a, op.r, op.g, op.b)
         val packed_bg = _pack_argb(op.bg_a, op.bg_r, op.bg_g, op.bg_b)
         if op.kind == "clear":
-            _v2_clear(buf, scene.width, scene.height, packed)
+            buf = _software_clear(buf, scene.width, scene.height, packed)
         elif op.kind == "fill_rect":
-            _v2_fill_rect(buf, scene.width, scene.height, op.x, op.y, op.w, op.h, packed)
+            buf = _software_fill_rect(buf, scene.width, scene.height, op.x, op.y, op.w, op.h, packed)
         elif op.kind == "draw_char":
-            _v2_draw_char(buf, scene.width, scene.height, op.x, op.y, op.ch, packed, packed_bg)
+            buf = _software_draw_char(buf, scene.width, scene.height, op.x, op.y, op.ch, packed, packed_bg)
         elif op.kind == "blend_rect":
-            _v2_blend_rect(buf, scene.width, scene.height, op.x, op.y, op.w, op.h,
-                           op.r, op.g, op.b, op.alpha)
+            buf = _software_blend_rect(buf, scene.width, scene.height, op.x, op.y, op.w, op.h,
+                                 op.r, op.g, op.b, op.alpha)
     buf
 
 # ============================================================================
-# V3 path — render through BrowserCompositorBackend (the in-tree browser
+# browser shell path — render through BrowserCompositorBackend (the in-tree browser
 # compositor software backend used by the `ui.chromium` shell). Mirrors the
-# same CompositorBackend trait surface V1's fb_driver and V2's stub both
+# same CompositorBackend trait surface the framebuffer baseline and software reference both
 # expose, so the same ParityOp sequence can be replayed through it.
 #
 # We drive BrowserCompositorBackend directly (no winit, no presenting to a
-# real window) so the spec stays interpreter-runnable, matching the V1/V2
+# real window) so the spec stays interpreter-runnable, matching the framebuffer/software
 # pattern. `ChromiumBackend.present_to_window` is intentionally not exercised
-# here — Row 5 M5 is about rendering parity, not about the winit blit.
+# here — browser-shell gate is about rendering parity, not about the winit blit.
 # ============================================================================
 
-fn render_v3(scene: ParityScene) -> [u32]:
-    """Render `scene` through `BrowserCompositorBackend` — the V3 simple_browser
-    shell's pixel path — and return the resulting ARGB8888 buffer.
+fn render_browser_shell(scene: ParityScene) -> [u32]:
+    """Render `scene` through `BrowserCompositorBackend` — the simple_browser
+    shell pixel path — and return the resulting ARGB8888 buffer.
 
     Uses the exact same CompositorBackend trait methods (`clear`,
     `fill_rect`, `draw_char_8x16`) plus the `CompositorGlassCapable`
-    `blend_rect` that V1's `fb_driver` and V2's stub implement, so the
-    logical scene description reaches V3 unchanged. `get_pixel_buffer()`
+    `blend_rect` that framebuffer baseline `fb_driver` and software reference stub implement, so the
+    logical scene description reaches browser shell unchanged. `get_pixel_buffer()`
     exposes the backing [u32] that the winit presenter would otherwise
     ship to the host window via `rt_winit_window_present_rgba`.
 
@@ -297,7 +319,7 @@ fn render_v3(scene: ParityScene) -> [u32]:
     coordinates (top-left origin), whereas ParityOp uses `u32`. The u32
     → i32 casts are safe because parity scenes are all 32x16."""
     var bcb = BrowserCompositorBackend.new(scene.width.to_i32(), scene.height.to_i32())
-    # Match render_v1/v2 preamble: start from a fully-zeroed buffer so
+    # Match render_framebuffer_baseline/render_software_reference preamble: start from a fully-zeroed buffer so
     # pre-clear ops behave identically on all three paths.
     bcb.clear(0u32)
     for op in scene.ops:
@@ -318,7 +340,7 @@ fn render_v3(scene: ParityScene) -> [u32]:
             )
         elif op.kind == "blend_rect":
             # BrowserCompositorBackend.blend_rect takes a packed color + alpha
-            # (CompositorGlassCapable contract); V2's stub takes loose components,
+            # (CompositorGlassCapable contract); software reference stub takes loose components,
             # but the math is the same.
             bcb.blend_rect(
                 op.x.to_i32(), op.y.to_i32(),
@@ -328,41 +350,41 @@ fn render_v3(scene: ParityScene) -> [u32]:
     bcb.get_pixel_buffer()
 
 # ============================================================================
-# V4 path — render through the Electron reference pipeline (dev-preview).
+# electron reference path — render through the Electron reference pipeline (dev-preview).
 #
-# V4 Electron is a dev-preview-only target per
+# electron reference is a dev-preview-only target per
 # `doc/01_research/domain/v4_electron_packaging_2026-04-14.md`: the
 # `ui.electron` shell is not a shipped GUI target, and `electron_capture`
 # acts as the Source-A reference renderer for `wm_compare`. Its
 # `capture_electron_scene()` does NOT invoke Electron for pixel rendering —
 # it forwards to `render_scene_to_backend()`, i.e.
-# `BrowserCompositorBackend` — the same compositor V3 exercises.
+# `BrowserCompositorBackend` — the same compositor browser shell exercises.
 #
-# We therefore render `render_v4` through the same BrowserCompositorBackend
-# trait surface V3 drives, so the ParityOp sequence reaches V4 unchanged
+# We therefore render `render_electron_reference` through the same BrowserCompositorBackend
+# trait surface browser shell drives, so the ParityOp sequence reaches electron reference unchanged
 # without spinning up a live Electron runtime (which the spec interpreter
 # cannot do — no Node, no IPC, no PPM round-trip). This keeps the spec
-# runnable in-process while still locking the contract that the V4
-# reference-renderer path stays within the ≤1% perceptual budget vs V1.
+# runnable in-process while still locking the contract that the electron reference
+# reference-renderer path stays within the ≤1% perceptual budget vs framebuffer baseline.
 # ============================================================================
 
-fn render_v4(scene: ParityScene) -> [u32]:
-    """Render `scene` through the V4 Electron dev-preview reference pipeline
+fn render_electron_reference(scene: ParityScene) -> [u32]:
+    """Render `scene` through the electron reference dev-preview reference pipeline
     and return the resulting ARGB8888 buffer.
 
-    The V4 Electron shell is dev-preview-only; its `electron_capture`
+    The electron reference shell is dev-preview-only; its `electron_capture`
     module is the Source-A reference renderer inside `wm_compare`, and
     `capture_electron_scene()` intentionally does NOT hit Electron for
     pixels — it forwards to `BrowserCompositorBackend` via
     `render_scene_to_backend()`. The parity runner mirrors that contract
     here by driving `BrowserCompositorBackend` directly (same trait
-    surface V1/V2/V3 use), so the ParityOp sequence replays through the
-    exact compositor V4 would use in production without requiring a live
+    surface framebuffer/software/browser shell use), so the ParityOp sequence replays through the
+    exact compositor electron reference would use in production without requiring a live
     Electron runtime inside the interpreter.
 
     Note: u32 → i32 casts are safe because parity scenes are all 32x16."""
     var bcb = BrowserCompositorBackend.new(scene.width.to_i32(), scene.height.to_i32())
-    # Match render_v1/v2/v3 preamble: start from a fully-zeroed buffer so
+    # Match the framebuffer/software/browser preamble: start from a fully-zeroed buffer so
     # pre-clear ops behave identically on all four paths.
     bcb.clear(0u32)
     for op in scene.ops:
@@ -399,7 +421,7 @@ fn _abs_diff(a: u32, b: u32) -> u32:
     else:
         b - a
 
-fn diff_buffers(name: text, w: u32, h: u32, v1: [u32], v2: [u32]) -> ParityResult:
+fn diff_buffers(name: text, w: u32, h: u32, baseline: [u32], reference: [u32]) -> ParityResult:
     """Compute per-channel max delta and a 1/100-of-a-percent perceptual
     score across two ARGB8888 buffers."""
     var max_delta: u32 = 0
@@ -407,8 +429,8 @@ fn diff_buffers(name: text, w: u32, h: u32, v1: [u32], v2: [u32]) -> ParityResul
     val total = w * h
     var i: u32 = 0
     while i < total:
-        val pa = v1[i]
-        val pb = v2[i]
+        val pa = baseline[i]
+        val pb = reference[i]
         if pa != pb:
             differing = differing + 1u32
             val ar = (pa >> 16) & 0xFF
@@ -432,8 +454,8 @@ fn diff_buffers(name: text, w: u32, h: u32, v1: [u32], v2: [u32]) -> ParityResul
         scene: name,
         width: w,
         height: h,
-        v1_pixels: v1,
-        v2_pixels: v2,
+        baseline_pixels: baseline,
+        reference_pixels: reference,
         max_channel_delta: max_delta,
         differing_pixels: differing,
         perceptual_pct: pct,
@@ -445,42 +467,42 @@ fn diff_buffers(name: text, w: u32, h: u32, v1: [u32], v2: [u32]) -> ParityResul
 # Top-level entrypoint — render scene through both paths and diff
 # ============================================================================
 
-fn run_parity(scene: ParityScene) -> ParityResult:
-    """Render `scene` through V1 and V2, then diff. The returned
+fn run_framebuffer_software_parity(scene: ParityScene) -> ParityResult:
+    """Render `scene` through framebuffer baseline and software reference, then diff. The returned
     `ParityResult` carries both buffers so callers can dump PPMs on
     failure."""
-    val v1 = render_v1(scene)
-    val v2 = render_v2(scene)
-    diff_buffers(scene.name, scene.width, scene.height, v1, v2)
+    val baseline = render_framebuffer_baseline(scene)
+    val reference = render_software_reference(scene)
+    diff_buffers(scene.name, scene.width, scene.height, baseline, reference)
 
-fn run_parity_v3(scene: ParityScene) -> ParityResult:
-    """Render `scene` through V1 and V3 (`BrowserCompositorBackend`), then
-    diff. Row 5 M5 gate: V3 must stay within the same ≤1% perceptual
-    budget Row 2 locked for V1/V2. The returned `ParityResult` reuses the
-    `v2_pixels` field to carry the V3 buffer — the struct shape is shared
-    with `run_parity` so `diff_buffers`, PPM dumps, and the golden-gate
+fn run_browser_shell_parity(scene: ParityScene) -> ParityResult:
+    """Render `scene` through framebuffer baseline and browser shell (`BrowserCompositorBackend`), then
+    diff. The browser-shell gate must stay within the same <=1% perceptual
+    budget as the framebuffer/software gate. The returned `ParityResult` reuses the
+    `reference_pixels` field to carry the browser shell buffer — the struct shape is shared
+    with `run_framebuffer_software_parity` so `diff_buffers`, PPM dumps, and the golden-gate
     runner all work unchanged."""
-    val v1 = render_v1(scene)
-    val v3 = render_v3(scene)
-    diff_buffers(scene.name, scene.width, scene.height, v1, v3)
+    val baseline = render_framebuffer_baseline(scene)
+    val browser_pixels = render_browser_shell(scene)
+    diff_buffers(scene.name, scene.width, scene.height, baseline, browser_pixels)
 
-fn run_parity_v4(scene: ParityScene) -> ParityResult:
-    """Render `scene` through V1 and V4 (Electron dev-preview reference
-    pipeline), then diff. Row 6 parity gate: V4 must stay within the same
-    ≤1% perceptual budget Row 2 locked for V1/V2. The returned
-    `ParityResult` reuses the `v2_pixels` field to carry the V4 buffer —
-    the struct shape is shared with `run_parity` / `run_parity_v3` so
+fn run_electron_reference_parity(scene: ParityScene) -> ParityResult:
+    """Render `scene` through framebuffer baseline and electron reference (Electron dev-preview reference
+    pipeline), then diff. The electron-reference gate must stay within the same
+    <=1% perceptual budget as the framebuffer/software gate. The returned
+    `ParityResult` reuses the `reference_pixels` field to carry the electron reference buffer —
+    the struct shape is shared with `run_framebuffer_software_parity` / `run_browser_shell_parity` so
     `diff_buffers`, PPM dumps, and the golden-gate runner all work
     unchanged.
 
-    V4 is dev-preview-only per
+    electron reference is dev-preview-only per
     `doc/01_research/domain/v4_electron_packaging_2026-04-14.md`; pixels
     come from `BrowserCompositorBackend` (the Source-A reference renderer
     `electron_capture.capture_electron_scene` already forwards to), not
     from a live Electron runtime."""
-    val v1 = render_v1(scene)
-    val v4 = render_v4(scene)
-    diff_buffers(scene.name, scene.width, scene.height, v1, v4)
+    val baseline = render_framebuffer_baseline(scene)
+    val electron_pixels = render_electron_reference(scene)
+    diff_buffers(scene.name, scene.width, scene.height, baseline, electron_pixels)
 
 # ============================================================================
 # Stock parity scenes — used by the spec
@@ -506,8 +528,8 @@ fn scene_fill_rect_row_edge() -> ParityScene:
 fn scene_text_with_bg() -> ParityScene:
     """fill_rect background + draw_char(0x20) on top. The parity runner
     matches the bg cells: ASCII space is the empty glyph in the VGA stub
-    so V1's draw_char_8x16 writes bg over the entire 8x16 cell, exactly
-    like the V2 stub. This locks the text-bg cell contract."""
+    so framebuffer baseline draw_char_8x16 writes bg over the entire 8x16 cell, exactly
+    like the software reference stub. This locks the text-bg cell contract."""
     val ops: [ParityOp] = [
         op_clear(255u8, 0x20u8, 0x20u8, 0x20u8),
         op_fill_rect(0u32, 0u32, 32u32, 16u32, 255u8, 0x10u8, 0x10u8, 0x50u8),
