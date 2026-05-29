@@ -3,7 +3,7 @@
 **Date:** 2026-05-27
 **Severity:** Critical (blocks bootstrap)
 **Status (string-equality bugs):** RESOLVED — Bug A and Bug B verified fixed 2026-05-29.
-**Status (871-stub bootstrap blocker):** FIXED (2026-05-29) — See "Deeper blocker" section for fix details.
+**Status (871-stub bootstrap blocker):** FIXED (in tree as of commit 8822ad7202) — See "Deeper blocker" section for fix details.
 **Component:** Rust seed codegen (native-build)
 
 ## Summary
@@ -108,28 +108,32 @@ The `compile_stage()` Rust function (`misc_commands.rs:459`) builds stage2 with:
   --entry src/app/cli/main.spl --entry-closure -o <stage2>
 ```
 
-The entry is `main.spl` → `main_part2.spl`. At runtime, `native-build` routes:
-- `main_part2.run_native_build_bootstrap(args)` → `cli_native_build(args)` (weak stub — excluded from closure)
+The entry is `main.spl` → `main_part2.spl`. At runtime, `native-build` routes to
+`main_part2.run_native_build_bootstrap(args)`.
 
-`cli_native_build` lives in `cli_compile_part2.spl` which is outside the entry
-closure. Its weak stub exits 0 silently. The functions `_cli_driver_binary()` and
-`_cli_process_run()` from `cli_ops.spl` ARE in the closure (strong T symbols).
+**Before the fix:** `run_native_build_bootstrap` called `cli_native_build(args)`.
+`cli_native_build` lives in `cli_compile_part2.spl` which is OUTSIDE the entry
+closure → compiled as a W (weak, no-op) stub. Stage2 silently exited 0 without
+producing any output binary.
 
-`cli_native_build`'s `else` branch (when no `--backend=llvm-lib`) already
-delegates via `_cli_driver_binary()` + `_cli_process_run()`. This is the
-accepted bootstrap design (commit `56bad8013e` intentionally chose seed delegation,
-see `.spipe/simpleos-bootstrap-stage2-fix/state.md` AC#3).
+The functions `_cli_driver_binary()` and `_cli_process_run()` from `cli_ops.spl`
+ARE in the closure (strong T symbols). `cli_native_build`'s `else` branch already
+delegates via these helpers — the same pattern that seed-delegation was using.
+The accepted bootstrap design (commit `56bad8013e`, see
+`.spipe/simpleos-bootstrap-stage2-fix/state.md` AC#3) chose seed delegation.
 
-### Fix (2026-05-29)
+### Fix (committed in 8822ad7202)
 
-**Files changed:**
-- `src/app/io/cli_ops.spl`: exported `_cli_driver_binary` and `_cli_process_run` as `pub fn`
-- `src/app/cli/main_part2.spl`: imported both helpers; replaced `cli_native_build(args)` call in
-  `run_native_build_bootstrap` with direct delegation to `_cli_driver_binary()` + `_cli_process_run()`
+**File changed:** `src/app/cli/main_part2.spl`
+- Added imports: `use app.io.cli_ops.{_cli_driver_binary, _cli_process_run, _cli_eprint}`
+- Replaced `cli_native_build(args)` call in `run_native_build_bootstrap` with direct
+  delegation to `_cli_driver_binary()` + `_cli_process_run(args)` (both strong T symbols)
 
-This replicates the exact delegation path from `cli_native_build`'s else-branch using
-functions that ARE inside the entry closure. Stage2 now forwards `native-build` to
-`bin/simple` (or `SIMPLE_BOOTSTRAP_DRIVER`), which is the Rust seed and can compile.
+`cli_ops.spl` was already exporting `_cli_driver_binary` and `_cli_process_run` as
+`pub fn` (no change needed there).
+
+Stage2 now forwards `native-build` to `bin/simple` (or `SIMPLE_BOOTSTRAP_DRIVER`),
+which is the Rust seed and can compile.
 
 ### Architecture options (for reference)
 

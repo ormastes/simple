@@ -639,7 +639,7 @@ describe "AutoVectorize W-cfg — create_peeling_block":
     it "produces a block with label peel_loop":
         val li  = make_test_loop_info()
         val ctx = make_test_vectorize_ctx()
-        val bb  = create_peeling_block(ctx, li)
+        val bb  = create_peeling_block(ctx, li, [])
         expect(bb.label.?).to_equal(true)
         expect(bb.label.unwrap()).to_equal("peel_loop")
 
@@ -822,15 +822,15 @@ describe "AutoVectorize N1-rewrite — elementwise-add divisible trip count (0..
     it "vec_loop block for i32x4 recipe has label vec_loop":
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
         val bb  = create_vector_loop_block(ctx, 1,
-            [make_local(10), make_local(11)], make_local(12), "add_elementwise")
+            [make_local(10), make_local(11)], make_local(12), "add_elementwise", 16, 4)
         expect(bb.label.?).to_equal(true)
         expect(bb.label.unwrap()).to_equal("vec_loop")
 
     it "vec_loop block for i32x4 has >= 4 SIMD instructions":
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
         val bb  = create_vector_loop_block(ctx, 1,
-            [make_local(10), make_local(11)], make_local(12), "add_elementwise")
-        # load_a + load_b + simd_add + simd_store + vi_inc = 5 instructions
+            [make_local(10), make_local(11)], make_local(12), "add_elementwise", 16, 4)
+        # load_a + load_b + simd_add + simd_store + vi_inc + guard = 6 instructions
         expect(bb.instructions.len() >= 4).to_equal(true)
 
     it "peel_loop block for trip_count=16 divisible trip has label peel_loop":
@@ -844,7 +844,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add divisible trip count (0..
             end_value:     16,
             step:          1
         )
-        val peel = create_peeling_block(ctx, li)
+        val peel = create_peeling_block(ctx, li, [])
         expect(peel.label.?).to_equal(true)
         expect(peel.label.unwrap()).to_equal("peel_loop")
 
@@ -872,7 +872,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add dynamic trip count (0..n)
             case _: false
         expect(is_if).to_equal(true)
 
-    it "peel_loop block for dynamic n has Goto terminator (structural placeholder)":
+    it "peel_loop block for dynamic n has Goto terminator (no body clone when body_blocks empty)":
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
         val li  = LoopInfo(
             header_block:  make_block_id(1),
@@ -883,7 +883,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add dynamic trip count (0..n)
             end_value:     0,
             step:          1
         )
-        val peel = create_peeling_block(ctx, li)
+        val peel = create_peeling_block(ctx, li, [])
         val is_goto = match peel.terminator:
             case Goto(target): true
             case _: false
@@ -932,12 +932,12 @@ describe "AutoVectorize N1-rewrite — refuses dynamic trip count (trip_count=-1
         expect(result.blocks.len()).to_equal(func.blocks.len())
 
 # ============================================================================
-# N1 negative: misaligned trip count → rewriter refuses (R4)
-# trip_count=6, chunk_width=4: 6 % 4 != 0 → broken CFG without peel body
+# N1 positive: misaligned trip count → rewriter now accepts (Wave L3b Defect C fix)
+# trip_count=6, chunk_width=4: 6 % 4 = 2 → peel block gets 2-iteration scalar clone
 # ============================================================================
 
-describe "AutoVectorize N1-rewrite — refuses misaligned trip count (6 % 4 != 0)":
-    it "trip-count=6 misaligned with VF=4 returns function unchanged (same block count)":
+describe "AutoVectorize N1-rewrite — accepts misaligned trip count (6 % 4 != 0) with peel body (Wave L3b)":
+    it "trip-count=6 misaligned with VF=4 rewrites function (block count increases)":
         val orig_block = make_elementwise_block_add()
         val func       = make_test_mir_function([orig_block], false)
         val recipe     = VectorRecipe(
@@ -958,7 +958,8 @@ describe "AutoVectorize N1-rewrite — refuses misaligned trip count (6 % 4 != 0
             induction_update: make_local(4)
         )
         val result = rewrite_elementwise_add(recipe, func)
-        expect(result.blocks.len()).to_equal(func.blocks.len())
+        # Was 1 scalar block; now replaced with 3 new blocks (align + vec + peel).
+        expect(result.blocks.len() > func.blocks.len()).to_equal(true)
 
 # ============================================================================
 # N1 negative: unsupported elementwise op → rewriter refuses
@@ -992,11 +993,19 @@ describe "AutoVectorize N1-rewrite — elementwise f32 add does not require fast
 describe "AutoVectorize N1-codegen — create_vector_loop_block":
     it "produces a block with label vec_loop":
         val ctx   = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 100)
-        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise")
+        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise", 16, 103)
         expect(bb.label.?).to_equal(true)
         expect(bb.label.unwrap()).to_equal("vec_loop")
 
-    it "vec_loop block contains >= 4 instructions (load_a, load_b, add, store)":
+    it "vec_loop block contains >= 4 instructions (load_a, load_b, add, store, inc, guard)":
         val ctx   = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 100)
-        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "xor_elementwise")
+        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "xor_elementwise", 16, 103)
         expect(bb.instructions.len() >= 4).to_equal(true)
+
+    it "vec_loop block has If terminator (exit guard — not self-loop Goto)":
+        val ctx   = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 100)
+        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise", 16, 103)
+        val is_if = match bb.terminator:
+            case If(cond, then_, else_): true
+            case _: false
+        expect(is_if).to_equal(true)
