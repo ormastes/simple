@@ -1,13 +1,29 @@
-# Crash-Safe 24-Hour Remaining Work Plan - 2026-05-26
+# Crash-Safe Heavy-Work Preflight Plan
 
-Status: **Superseded** (2026-05-29) — 24h window passed; guardrails below
-remain good operational practice but no active work items remain.
+Status: **Implemented** (2026-05-29) — guardrails automated in
+`scripts/check-heavy-work-preflight.shs`.
 
-## Goal
+Origin: May 25 host hard-lockup during parallel QEMU/build/agent work.
 
-Finish the next 24 hours of recovery work without repeating the May 25 host
-hard-lockup failure mode. Treat QEMU, USB/JTAG board probes, native builds, and
-parallel agents as bounded resources, not background fire-and-forget jobs.
+## Implemented
+
+- `scripts/check-heavy-work-preflight.shs` — 8-check preflight gate:
+  disk space, available memory, swap overcommit, CPU headroom, QEMU guest
+  count, kernel log danger patterns, git working tree cleanliness, stale
+  lock files.
+- `test/system/infra/heavy_work_preflight_spec.spl` — structure verification.
+- Env overrides: `MIN_DISK_GIB`, `MIN_MEM_GIB`, `MAX_CPU_FRACTION`.
+- Outputs `PASS/FAIL/INFO/BLOCKED` lines and `preflight=READY|BLOCKED` summary.
+
+## Usage
+
+Run before any heavy operation (QEMU, board flash, full bootstrap, benchmarks):
+
+```bash
+sh scripts/check-heavy-work-preflight.shs
+```
+
+## Goal (original)
 
 ## Crash Prevention Guardrails
 
