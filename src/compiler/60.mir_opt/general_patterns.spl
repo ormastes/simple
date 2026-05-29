@@ -31,6 +31,7 @@ use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     optimization_rule_provider_builtin_with_contract,
     optimization_rule_provider_with_backend_policy,
     optimization_rule_provider_applies_to_backend_name,
+    optimization_rule_provider_missing_fact,
     optimization_backend_kind_from_text
 }
 use compiler.mir_opt.mir_opt.pattern.pattern_rule_pass.{
@@ -583,15 +584,37 @@ fn backend_optimization_decision(rec: BackendOptimizationRecommendation, backend
         return BackendOptimizationDecision(rec.stable_name, backend_name, max_cost_class, rec.cost_class, false, "cost budget exceeded")
     BackendOptimizationDecision(rec.stable_name, backend_name, max_cost_class, rec.cost_class, true, "ready")
 
+fn backend_optimization_decision_with_facts(rec: BackendOptimizationRecommendation, backend_name: text, max_cost_class: text, available_facts: [text]) -> BackendOptimizationDecision:
+    val base = backend_optimization_decision(rec, backend_name, max_cost_class)
+    if not base.applies:
+        return base
+    val missing = optimization_rule_provider_missing_fact(rec.provider, available_facts)
+    if missing.?:
+        return BackendOptimizationDecision(rec.stable_name, backend_name, max_cost_class, rec.cost_class, false, "missing " + missing.unwrap())
+    base
+
 fn backend_optimization_decisions_for_budget(backend_name: text, max_cost_class: text) -> [BackendOptimizationDecision]:
     var decisions: [BackendOptimizationDecision] = []
     for rec in all_backend_optimization_recommendations():
         decisions = decisions.push(backend_optimization_decision(rec, backend_name, max_cost_class))
     decisions
 
+fn backend_optimization_decisions_for_budget_with_facts(backend_name: text, max_cost_class: text, available_facts: [text]) -> [BackendOptimizationDecision]:
+    var decisions: [BackendOptimizationDecision] = []
+    for rec in all_backend_optimization_recommendations():
+        decisions = decisions.push(backend_optimization_decision_with_facts(rec, backend_name, max_cost_class, available_facts))
+    decisions
+
 fn backend_optimization_skipped_decisions_for_budget(backend_name: text, max_cost_class: text) -> [BackendOptimizationDecision]:
     var skipped: [BackendOptimizationDecision] = []
     for decision in backend_optimization_decisions_for_budget(backend_name, max_cost_class):
+        if not decision.applies:
+            skipped = skipped.push(decision)
+    skipped
+
+fn backend_optimization_skipped_decisions_for_budget_with_facts(backend_name: text, max_cost_class: text, available_facts: [text]) -> [BackendOptimizationDecision]:
+    var skipped: [BackendOptimizationDecision] = []
+    for decision in backend_optimization_decisions_for_budget_with_facts(backend_name, max_cost_class, available_facts):
         if not decision.applies:
             skipped = skipped.push(decision)
     skipped
@@ -634,6 +657,16 @@ fn backend_optimization_plan_for_budget(backend_name: text, max_cost_class: text
     (names, skipped) = backend_optimization_plan_add_entry(names, skipped, "llvm-default-pipeline", backend_name, max_cost_class, "high", is_llvm, "llvm_default_pipeline_only")
     BackendOptimizationPlan(names, skipped)
 
+fn backend_optimization_plan_for_budget_with_facts(backend_name: text, max_cost_class: text, available_facts: [text]) -> BackendOptimizationPlan:
+    var names: [text] = []
+    var skipped: [BackendOptimizationDecision] = []
+    for decision in backend_optimization_decisions_for_budget_with_facts(backend_name, max_cost_class, available_facts):
+        if decision.applies:
+            names = names.push(decision.stable_name)
+        else:
+            skipped = skipped.push(decision)
+    BackendOptimizationPlan(names, skipped)
+
 fn backend_optimization_recommendation_names_for_budget(backend_name: text, max_cost_class: text) -> [text]:
     var names: [text] = []
     for rec in backend_optimization_recommendations_for_budget(backend_name, max_cost_class):
@@ -672,8 +705,12 @@ export backend_optimization_recommendations_for
 export backend_optimization_recommendation_names
 export backend_optimization_recommendations_for_budget
 export backend_optimization_decision
+export backend_optimization_decision_with_facts
 export backend_optimization_decisions_for_budget
+export backend_optimization_decisions_for_budget_with_facts
 export backend_optimization_skipped_decisions_for_budget
+export backend_optimization_skipped_decisions_for_budget_with_facts
 export backend_optimization_plan_for_budget
+export backend_optimization_plan_for_budget_with_facts
 export backend_optimization_recommendation_names_for_budget
 export backend_optimization_has_recommendation

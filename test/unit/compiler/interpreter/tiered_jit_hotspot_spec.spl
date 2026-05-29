@@ -23,7 +23,7 @@ use compiler.interp.execution.tiered_jit.{
     jit_hotspot_compile_decision_allows_compile
 }
 use compiler.mir_opt.mir_opt.mod.{OptLevel, optimizationpipeline_backend_plan_for_budget}
-use compiler.mir_opt.general_patterns.{backend_optimization_plan_for_budget}
+use compiler.mir_opt.general_patterns.{backend_optimization_plan_for_budget_with_facts}
 
 fn hot_profile(call_count: i64) -> FunctionProfile:
     FunctionProfile(
@@ -244,8 +244,9 @@ describe "Tiered JIT hotspot facts":
         expect(plan.passes.contains("loop_unroll")).to_equal(true)
         expect(plan.passes.contains("inline_aggressive")).to_equal(false)
         expect(plan.passes.contains("auto_vectorize")).to_equal(false)
-        expect(plan.plugin_recommendations.contains("ssa-var-canon")).to_equal(true)
-        expect(plan.plugin_recommendations.contains("cranelift-local-licm")).to_equal(true)
+        expect(plan.plugin_recommendations.contains("early-dead-code-prune")).to_equal(true)
+        expect(plan.plugin_recommendations.contains("ssa-var-canon")).to_equal(false)
+        expect(plan.plugin_recommendations.contains("cranelift-local-licm")).to_equal(false)
         expect(plan.plugin_recommendations.contains("llvm-entry-alloca-shaping")).to_equal(false)
         var found_cost_skip = false
         for decision in plan.skipped_passes:
@@ -253,10 +254,14 @@ describe "Tiered JIT hotspot facts":
                 found_cost_skip = true
         expect(found_cost_skip).to_equal(true)
         var found_llvm_plugin_skip = false
+        var found_missing_ssa = false
         for decision in plan.skipped_plugin_recommendations:
             if decision.stable_name == "llvm-entry-alloca-shaping" and decision.reason == "llvm_frontend_alloca_promotion_shape":
                 found_llvm_plugin_skip = true
+            if decision.stable_name == "ssa-var-canon" and decision.reason == "missing ssa.var_transform":
+                found_missing_ssa = true
         expect(found_llvm_plugin_skip).to_equal(true)
+        expect(found_missing_ssa).to_equal(true)
 
     it "builds LLVM hotspot optimization plans without Simple passes LLVM already owns":
         val plan = jit_hotspot_optimization_plan(hot_profile(256), hotspot_config(), true, true, "high")
@@ -269,7 +274,7 @@ describe "Tiered JIT hotspot facts":
         expect(plan.passes.contains("strength_reduction")).to_equal(false)
         expect(plan.passes.contains("loop_unroll")).to_equal(false)
         expect(plan.passes.contains("predicate_promote")).to_equal(false)
-        expect(plan.plugin_recommendations.contains("llvm-entry-alloca-shaping")).to_equal(true)
+        expect(plan.plugin_recommendations.contains("llvm-entry-alloca-shaping")).to_equal(false)
         expect(plan.plugin_recommendations.contains("llvm-default-pipeline")).to_equal(true)
         expect(plan.plugin_recommendations.contains("ssa-var-canon")).to_equal(false)
         expect(plan.plugin_recommendations.contains("cranelift-local-licm")).to_equal(false)
@@ -279,15 +284,28 @@ describe "Tiered JIT hotspot facts":
                 found_llvm_skip = true
         expect(found_llvm_skip).to_equal(true)
         var found_llvm_owned_plugin_skip = false
+        var found_missing_var = false
         for decision in plan.skipped_plugin_recommendations:
             if decision.stable_name == "ssa-var-canon" and decision.reason == "llvm_backend_runs_mem2reg_sroa_pipeline":
                 found_llvm_owned_plugin_skip = true
+            if decision.stable_name == "llvm-entry-alloca-shaping" and decision.reason == "missing var.reassignment":
+                found_missing_var = true
         expect(found_llvm_owned_plugin_skip).to_equal(true)
+        expect(found_missing_var).to_equal(true)
+
+    it "adds var-specific plugin recommendations only when hotspot facts prove them":
+        val facts = jit_var_optimization_facts(true, 2, true, true, true, true)
+        val cranelift = jit_hotspot_optimization_plan(hot_profile_with_var_facts(256, facts), hotspot_config(), true, true, "medium")
+        expect(cranelift.plugin_recommendations.contains("ssa-var-canon")).to_equal(true)
+
+        val llvm = jit_hotspot_optimization_plan(hot_profile_with_var_facts(256, facts), hotspot_config(), true, true, "high")
+        expect(llvm.plugin_recommendations.contains("llvm-entry-alloca-shaping")).to_equal(true)
+        expect(llvm.plugin_recommendations.contains("ssa-var-canon")).to_equal(false)
 
     it "keeps hotspot optimization plans consistent with shared backend budget planners":
         val hotspot = jit_hotspot_optimization_plan(hot_profile(256), hotspot_config(), true, true, "medium")
         val mir_plan = optimizationpipeline_backend_plan_for_budget(OptLevel.Aggressive, "cranelift", "medium")
-        val plugin_plan = backend_optimization_plan_for_budget("cranelift", "medium")
+        val plugin_plan = backend_optimization_plan_for_budget_with_facts("cranelift", "medium", ["profile.hot_count", "typed_mir", "safe_deopt", "cranelift_backend_available"])
         expect(hotspot.passes).to_equal(mir_plan.passes)
         expect(hotspot.skipped_passes.len()).to_equal(mir_plan.skipped_passes.len())
         expect(hotspot.plugin_recommendations).to_equal(plugin_plan.recommendation_names)

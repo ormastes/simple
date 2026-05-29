@@ -2,8 +2,10 @@ use std.spec
 use compiler.mir_opt.general_patterns.{
     backend_optimization_cost_allowed,
     backend_optimization_decisions_for_budget,
+    backend_optimization_decisions_for_budget_with_facts,
     backend_optimization_has_recommendation,
     backend_optimization_plan_for_budget,
+    backend_optimization_plan_for_budget_with_facts,
     backend_optimization_recommendation_names,
     backend_optimization_recommendation_names_for_budget,
     backend_optimization_recommendations_for,
@@ -96,3 +98,26 @@ describe "general optimization backend recommendations":
                 found_cost_skip = true
         expect(found_backend_skip).to_equal(true)
         expect(found_cost_skip).to_equal(true)
+
+    it "gates backend recommendation plans on required optimizer facts":
+        val missing = backend_optimization_plan_for_budget_with_facts("cranelift", "medium", ["typed_mir"])
+        expect(missing.recommendation_names.contains("ssa-var-canon")).to_equal(false)
+        var found_missing_ssa = false
+        for decision in missing.skipped_decisions:
+            if decision.stable_name == "ssa-var-canon" and decision.reason == "missing ssa.var_transform":
+                found_missing_ssa = true
+        expect(found_missing_ssa).to_equal(true)
+
+        val ready = backend_optimization_plan_for_budget_with_facts("cranelift", "medium", ["typed_mir", "ssa.var_transform", "escape.no_escape", "borrow.reassign_safe"])
+        expect(ready.recommendation_names.contains("ssa-var-canon")).to_equal(true)
+
+    it "keeps LLVM alloca shaping behind reassignment and backend facts":
+        var found_missing_var = false
+        for decision in backend_optimization_decisions_for_budget_with_facts("llvm", "high", ["typed_mir", "llvm_backend_available"]):
+            if decision.stable_name == "llvm-entry-alloca-shaping" and decision.reason == "missing var.reassignment":
+                found_missing_var = true
+        expect(found_missing_var).to_equal(true)
+
+        val ready = backend_optimization_plan_for_budget_with_facts("llvm", "high", ["typed_mir", "var.reassignment", "escape.no_escape", "borrow.reassign_safe", "llvm_backend_available"])
+        expect(ready.recommendation_names.contains("llvm-entry-alloca-shaping")).to_equal(true)
+        expect(ready.recommendation_names.contains("llvm-default-pipeline")).to_equal(true)
