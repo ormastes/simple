@@ -123,6 +123,20 @@ fn hot_vector_loop_with_var_facts(call_count: i64, facts) -> FunctionProfile:
         var_facts: facts
     )
 
+fn hot_direct_call_profile(call_count: i64) -> FunctionProfile:
+    FunctionProfile(
+        name: "hot_direct_call",
+        call_count: call_count,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: "fn hot_direct_call(x: i64) -> i64: return helper(x) + 1",
+        typed_mir: true,
+        safe_deopt: true,
+        hotspot_specialized_source: "",
+        hotspot_semantic_proof: false,
+        var_facts: jit_var_optimization_facts_none()
+    )
+
 fn hot_byte_scan_profile(call_count: i64) -> FunctionProfile:
     FunctionProfile(
         name: "hot_scan",
@@ -476,6 +490,28 @@ describe "Tiered JIT hotspot facts":
         var found_llvm_skip = false
         for decision in llvm.skipped_plugin_recommendations:
             if decision.stable_name == "simple-auto-vectorize" and decision.reason == "llvm_runs_vectorizer_pipeline":
+                found_llvm_skip = true
+        expect(found_llvm_skip).to_equal(true)
+
+    it "adds hot-call inline recommendations only for high-budget non-LLVM direct calls":
+        val cranelift = jit_hotspot_optimization_plan(hot_direct_call_profile(256), hotspot_config(), true, true, "high")
+        expect(cranelift.backend).to_equal("cranelift")
+        expect(cranelift.plugin_recommendations.contains("simple-hot-call-inline")).to_equal(true)
+
+        val medium = jit_hotspot_optimization_plan(hot_direct_call_profile(256), hotspot_config(), true, true, "medium")
+        expect(medium.plugin_recommendations.contains("simple-hot-call-inline")).to_equal(false)
+        var found_cost_skip = false
+        for decision in medium.skipped_plugin_recommendations:
+            if decision.stable_name == "simple-hot-call-inline" and decision.reason == "cost budget exceeded":
+                found_cost_skip = true
+        expect(found_cost_skip).to_equal(true)
+
+        val llvm = jit_hotspot_optimization_plan(hot_direct_call_profile(256), hotspot_config(), true, true, "high")
+        expect(llvm.backend).to_equal("llvm")
+        expect(llvm.plugin_recommendations.contains("simple-hot-call-inline")).to_equal(false)
+        var found_llvm_skip = false
+        for decision in llvm.skipped_plugin_recommendations:
+            if decision.stable_name == "simple-hot-call-inline" and decision.reason == "llvm_runs_inliner_pipeline":
                 found_llvm_skip = true
         expect(found_llvm_skip).to_equal(true)
 
