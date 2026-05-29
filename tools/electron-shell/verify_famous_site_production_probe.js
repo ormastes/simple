@@ -68,6 +68,15 @@ let result = {
   maxDifferentPixels,
   computedDifferentPixels: null,
   reportFresh: false,
+  hasSimpleLayoutLines: false,
+  hasSimpleLayoutLineWidths: false,
+  simpleLayoutLineCount: 0,
+  hasTextGeometryDelta: false,
+  chromeTextLineCount: 0,
+  chromeCanvasMetricCount: 0,
+  simpleGeometryLineCount: 0,
+  textLineCountDelta: 0,
+  layoutTextMatch: false,
   failures
 };
 
@@ -86,10 +95,26 @@ if (!fs.existsSync(reportPath)) {
   result.computedDifferentPixels = differentPixelsFromPpm(chromePath, simplePath);
   result.divergent = !result.exact && !result.accepted;
   result.reportFresh = result.computedDifferentPixels === result.differentPixels;
+  result.hasSimpleLayoutLines = text.includes("simple_layout_lines:");
+  result.hasSimpleLayoutLineWidths = text.includes("simple_layout_line_widths:");
+  result.simpleLayoutLineCount = parseIntField(text, /simple_layout_lines:\s*\(text_lines count:\s*([0-9]+)/);
+  result.hasTextGeometryDelta = text.includes("text_geometry_delta:");
+  result.chromeTextLineCount = parseIntField(text, /chrome_text_line_count:\s*([0-9]+)/);
+  result.chromeCanvasMetricCount = parseIntField(text, /chrome_canvas_metric_count:\s*([0-9]+)/);
+  result.simpleGeometryLineCount = parseIntField(text, /simple_line_count:\s*([0-9]+)/);
+  result.textLineCountDelta = Number.parseInt(matchText(text, /text_line_count_delta:\s*(-?[0-9]+)/, "0"), 10);
+  result.layoutTextMatch = parseBool(text, /layout_text_match:\s*(true|false)/);
   if (result.rendererMode !== "production") failures.push("report is not renderer_mode production");
   if (!simpleRel.endsWith("/simple.production.ppm")) failures.push("simple_ppm does not use production artifact path");
   if (!result.divergent) failures.push("production probe is not divergent");
   if (!result.reportFresh) failures.push("production report is stale or PPM parse failed");
+  if (!result.hasSimpleLayoutLines) failures.push("missing Simple layout line diagnostics");
+  if (!result.hasSimpleLayoutLineWidths) failures.push("missing Simple layout line width diagnostics");
+  if (result.simpleLayoutLineCount <= 0) failures.push("Simple layout diagnostics did not report any text lines");
+  if (!result.hasTextGeometryDelta) failures.push("missing Chrome-vs-Simple text geometry delta diagnostics");
+  if (result.chromeTextLineCount <= 0) failures.push("text geometry delta did not report Chrome text lines");
+  if (result.chromeCanvasMetricCount <= 0) failures.push("text geometry delta did not report Chrome canvas metrics");
+  if (result.simpleGeometryLineCount <= 0) failures.push("text geometry delta did not report Simple text lines");
   if (result.differentPixels <= 1000 || result.differentPixels >= 6000) failures.push("production divergence is outside bounded evidence range");
   if (result.differentPixels > maxDifferentPixels) failures.push("production probe regressed above current focused baseline");
 }

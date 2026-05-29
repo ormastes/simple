@@ -387,8 +387,8 @@ fn vfs_boot_nvme_shared_driver_ready_for_user_assignment() -> text:
 fn vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease: NvmeFilesystemLease) -> text:
     val released = g_nvme.release_user_data_queue_owner(
         lease.queue.queue_id,
-        lease.namespace.controller_id,
-        lease.namespace.nsid,
+        lease.namespace_identity.controller_id,
+        lease.namespace_identity.nsid,
         lease.queue.owner_task
     )
     if not released:
@@ -425,8 +425,8 @@ fn vfs_boot_nvme_release_active_lease(lease: NvmeFilesystemLease) -> text:
     if lease.mode == NvmeNamespaceMode.UserAssigned and removed_direct_adapter:
         val released_queue_owner = g_nvme.release_user_data_queue_owner(
             lease.queue.queue_id,
-            lease.namespace.controller_id,
-            lease.namespace.nsid,
+            lease.namespace_identity.controller_id,
+            lease.namespace_identity.nsid,
             lease.queue.owner_task
         )
         if not released_queue_owner:
@@ -565,7 +565,7 @@ fn _vfs_boot_q35_iops(ops: u64, elapsed_us: u64) -> u64:
     iops
 
 fn _vfs_boot_q35_relative_4k_offset(lease: NvmeFilesystemLease, run: u32, op: u32) -> i64:
-    val sectors_per_4k = 4096u64 / lease.namespace.lba_size.to_u64()
+    val sectors_per_4k = 4096u64 / lease.namespace_identity.lba_size.to_u64()
     var slot_count = lease.lba_count / sectors_per_4k
     if slot_count <= 2u64:
         return 0
@@ -841,7 +841,7 @@ fn vfs_boot_nvme_assign_user_namespace_driver_instance(
 fn vfs_boot_nvme_system_namespace_nsid_for_user_assignment() -> u32:
     for lease in g_vfs_nvme_active_leases:
         if lease.mode == NvmeNamespaceMode.System:
-            return lease.namespace.nsid
+            return lease.namespace_identity.nsid
     g_nvme.get_namespace_id()
 
 fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(
@@ -881,25 +881,25 @@ fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(
         return Err(lease_result.unwrap_err())
     val lease = lease_result.unwrap()
     val previous_nsid = g_nvme.get_namespace_id()
-    val identify = g_nvme.identify_namespace_id(lease.namespace.nsid)
+    val identify = g_nvme.identify_namespace_id(lease.namespace_identity.nsid)
     if identify.is_err():
         return Err("nvme-user-assign-namespace-identify-failed:" + identify.unwrap_err())
     val queue_ready = g_nvme.ensure_user_data_queue_for_assignment(
         lease.queue.queue_id,
         lease.queue.max_depth,
-        lease.namespace.controller_id,
-        lease.namespace.nsid,
+        lease.namespace_identity.controller_id,
+        lease.namespace_identity.nsid,
         lease.queue.owner_task
     )
     if queue_ready.is_err():
-        if previous_nsid != lease.namespace.nsid:
+        if previous_nsid != lease.namespace_identity.nsid:
             val restore_after_queue = g_nvme.identify_namespace_id(previous_nsid)
             if restore_after_queue.is_err():
                 return Err("nvme-user-assign-namespace-restore-failed:" + restore_after_queue.unwrap_err())
         return Err("nvme-user-assign-queue-create-failed:" + queue_ready.unwrap_err())
     val adapter_result = NvmeBlockAdapter.for_filesystem_lease(g_nvme, lease, consumer)
     if adapter_result.is_err():
-        if previous_nsid != lease.namespace.nsid:
+        if previous_nsid != lease.namespace_identity.nsid:
             val restore_after_adapter = g_nvme.identify_namespace_id(previous_nsid)
             if restore_after_adapter.is_err():
                 val _release_after_restore_fail = vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease)
@@ -908,7 +908,7 @@ fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(
         if queue_release != "ready":
             return Err(queue_release)
         return Err(adapter_result.unwrap_err())
-    if previous_nsid != lease.namespace.nsid:
+    if previous_nsid != lease.namespace_identity.nsid:
         val restore_identify = g_nvme.identify_namespace_id(previous_nsid)
         if restore_identify.is_err():
             return Err("nvme-user-assign-namespace-restore-failed:" + restore_identify.unwrap_err())

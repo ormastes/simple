@@ -70,15 +70,15 @@ impl NvmeBlockAdapter:
         val reason = nvme_filesystem_lease_reason(lease, consumer)
         if reason != "ready":
             return Err(reason)
-        val identified_sector_count = nvme.namespace_sector_count(lease.namespace.nsid)
+        val identified_sector_count = nvme.namespace_sector_count(lease.namespace_identity.nsid)
         if identified_sector_count.is_err():
             return Err("NvmeBlockAdapter: namespace not identified by driver")
-        val identified_sector_size = nvme.namespace_sector_size(lease.namespace.nsid)
+        val identified_sector_size = nvme.namespace_sector_size(lease.namespace_identity.nsid)
         if identified_sector_size.is_err():
             return Err("NvmeBlockAdapter: namespace not identified by driver")
-        if identified_sector_count.unwrap() != lease.namespace.lba_count:
+        if identified_sector_count.unwrap() != lease.namespace_identity.lba_count:
             return Err("NvmeBlockAdapter: lease namespace sector count mismatch")
-        if identified_sector_size.unwrap() != lease.namespace.lba_size:
+        if identified_sector_size.unwrap() != lease.namespace_identity.lba_size:
             return Err("NvmeBlockAdapter: lease namespace sector size mismatch")
         Ok(NvmeBlockAdapter(
             nvme: nvme,
@@ -86,12 +86,12 @@ impl NvmeBlockAdapter:
             bounce_phys: 0,
             ready: false,
             lease_enabled: true,
-            lease_nsid: lease.namespace.nsid,
+            lease_nsid: lease.namespace_identity.nsid,
             lease_queue_id: lease.queue.queue_id,
             lease_queue_depth: lease.queue.max_depth,
             lease_base_lba: lease.base_lba,
             lease_lba_count: nvme_filesystem_lease_sector_count(lease),
-            lease_sector_size: lease.namespace.lba_size,
+            lease_sector_size: lease.namespace_identity.lba_size,
             consumer_name: nvme_filesystem_consumer_name(consumer)
         ))
 
@@ -397,7 +397,7 @@ impl NvmeBlockAdapter:
             return Err(FsError.Transient(code: DIRECT_IO_TIMEOUT_CODE))
         if req.file_offsets.len() == 0:
             return Err(FsError.InvalidArg)
-        if lease.namespace.lba_size == 0u32:
+        if lease.namespace_identity.lba_size == 0u32:
             return Err(FsError.InvalidArg)
         val ext = DirectIoExt(
             sector_alignment: 4096u32,
@@ -411,15 +411,15 @@ impl NvmeBlockAdapter:
             return Err(expected_bytes.unwrap_err())
         var lbas: [u64] = []
         for offset in req.file_offsets:
-            val relative_lba = (offset as u64) / lease.namespace.lba_size.to_u64()
+            val relative_lba = (offset as u64) / lease.namespace_identity.lba_size.to_u64()
             val absolute_lba = nvme_filesystem_lease_absolute_lba(lease, relative_lba)
             if absolute_lba.is_err():
                 return Err(FsError.InvalidArg)
             lbas.push(absolute_lba.unwrap())
         val io_result = if req.op == DIRECT_IO_READ:
-            nvme.read_4k_shared_dma_batch_in_namespace_on_queue(lease.namespace.nsid, lease.queue.queue_id, lbas, lease.namespace.lba_size, lease.base_lba + lease.lba_count, req.buffer)
+            nvme.read_4k_shared_dma_batch_in_namespace_on_queue(lease.namespace_identity.nsid, lease.queue.queue_id, lbas, lease.namespace_identity.lba_size, lease.base_lba + lease.lba_count, req.buffer)
         else:
-            nvme.write_4k_shared_dma_batch_in_namespace_on_queue(lease.namespace.nsid, lease.queue.queue_id, lbas, lease.namespace.lba_size, lease.base_lba + lease.lba_count, req.buffer)
+            nvme.write_4k_shared_dma_batch_in_namespace_on_queue(lease.namespace_identity.nsid, lease.queue.queue_id, lbas, lease.namespace_identity.lba_size, lease.base_lba + lease.lba_count, req.buffer)
         if io_result.is_err():
             return Err(FsError.IoError(code: 5u32))
         Ok(DirectIoResult(
@@ -451,7 +451,7 @@ impl NvmeBlockAdapter:
             return Err(FsError.Transient(code: DIRECT_IO_TIMEOUT_CODE))
         if req.file_offsets.len() == 0:
             return Err(FsError.InvalidArg)
-        if lease.namespace.lba_size == 0u32:
+        if lease.namespace_identity.lba_size == 0u32:
             return Err(FsError.InvalidArg)
         val ext = DirectIoExt(
             sector_alignment: 4096u32,
@@ -465,15 +465,15 @@ impl NvmeBlockAdapter:
             return Err(expected_bytes.unwrap_err())
         var lbas: [u64] = []
         for offset in req.file_offsets:
-            val relative_lba = (offset as u64) / lease.namespace.lba_size.to_u64()
+            val relative_lba = (offset as u64) / lease.namespace_identity.lba_size.to_u64()
             val absolute_lba = nvme_filesystem_lease_absolute_lba(lease, relative_lba)
             if absolute_lba.is_err():
                 return Err(FsError.InvalidArg)
             lbas.push(absolute_lba.unwrap())
-        val io_result = nvme.write_4k_shared_dma_batch_in_namespace_on_queue(lease.namespace.nsid, lease.queue.queue_id, lbas, lease.namespace.lba_size, lease.base_lba + lease.lba_count, req.buffer)
+        val io_result = nvme.write_4k_shared_dma_batch_in_namespace_on_queue(lease.namespace_identity.nsid, lease.queue.queue_id, lbas, lease.namespace_identity.lba_size, lease.base_lba + lease.lba_count, req.buffer)
         if io_result.is_err():
             return Err(FsError.IoError(code: 5u32))
-        val flush = nvme.flush_in_namespace_on_queue(lease.namespace.nsid, lease.queue.queue_id)
+        val flush = nvme.flush_in_namespace_on_queue(lease.namespace_identity.nsid, lease.queue.queue_id)
         if flush.is_err():
             return Err(FsError.IoError(code: 5u32))
         Ok(DirectIoResult(

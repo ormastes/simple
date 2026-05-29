@@ -285,9 +285,10 @@ Measured blocker:
 - `tools/electron-shell/verify_famous_site_corpus_completion.js` is the
   executable completion gate for this plan. It now scans the checked-in corpus
   reports directly, verifies report freshness against the Chrome/Simple PPMs,
-  and requires every report to be exact/accepted with `divergent == 0`. It
-  currently exits `0` with `status: "PASS"` for the checked-in fixture
-  artifacts.
+  recomputes the Chrome-vs-Simple PPM pixel delta for every report, and
+  requires every report to be exact/accepted with `divergent == 0` and
+  `computedMismatchCount == 0`. It currently exits `0` with `status: "PASS"`
+  for the checked-in fixture artifacts.
 - `src/app/wm_compare/site_corpus_compat.spl --production-renderer` bypasses
   corpus fixture/oracle fallbacks. Treat its current focused failure on
   `site_0_google` as the authoritative evidence that the fixture corpus PASS is
@@ -295,9 +296,12 @@ Measured blocker:
   production-specific artifact paths rather than the fixture `simple.ppm` and
   `report.sdn` files consumed by the completion verifier.
   `tools/electron-shell/verify_famous_site_production_probe.js` verifies that a
-  generated production report is fresh and bounded; the system spec covers its
-  missing-report failure path and the checked-in focused `site_0_google`
-  production-artifact success path.
+  generated production report is fresh and bounded, and now requires
+  Simple-side wrapped-line, line-width, and Chrome-vs-Simple text geometry
+  delta diagnostics in the production report so production misses can be
+  classified against Chrome text metrics without changing the pixel artifact;
+  the system spec covers its missing-report failure path and the checked-in
+  focused `site_0_google` production-artifact success path.
 - `tools/electron-shell/summarize_famous_site_corpus_coverage.js --limit=5`
   ranks corpus samples by Chrome/Simple non-white text coverage deficit and
   dominant-background ink coverage deficit. The current worst overflow target

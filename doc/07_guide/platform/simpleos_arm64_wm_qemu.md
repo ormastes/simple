@@ -85,8 +85,18 @@ bin/simple os test --scenario=arm64-wm-ramfb
 ```
 
 The test command is a live acceptance attempt. It should be considered passing
-only when the serial output contains every acceptance marker listed below.
-Scenario wiring and command construction alone are not boot evidence.
+only when `build/os/arm64_wm_serial.log` contains every acceptance marker
+listed below. The runner uses a persistent serial file for this lane so a guest
+that reaches the WM markers and then keeps running is still usable evidence;
+scenario wiring and command construction alone are not boot evidence.
+
+`test/system/gui/arm64_wm_ramfb_screendump_spec.spl` is the focused framebuffer
+proof target for this lane. It reuses the repo QMP harness, waits for
+`[WM] Glass desktop rendered!`, requests a QMP `screendump`, decodes the PPM,
+and asserts that a real framebuffer image was produced. If the ARM64 native
+build is blocked, this spec writes
+`build/os/arm64_wm_ramfb_screendump.blocker.txt` before any framebuffer claim
+can be made.
 
 ## Acceptance Markers
 

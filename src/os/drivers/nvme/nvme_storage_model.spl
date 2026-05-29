@@ -61,7 +61,7 @@ struct NvmeFilesystemLease:
     driver owns queue submission and namespace assignment; filesystems receive
     only a bounded BlockDevice-compatible LBA window.
     """
-    namespace: NvmeNamespaceIdentity
+    namespace_identity: NvmeNamespaceIdentity
     base_lba: u64
     lba_count: u64
     mode: NvmeNamespaceMode
@@ -138,7 +138,7 @@ fn nvme_filesystem_uses_shared_block_interface(consumer: NvmeFilesystemConsumer)
         case NvmeFilesystemConsumer.Dbfs: true
 
 fn nvme_filesystem_lease(
-    namespace: NvmeNamespaceIdentity,
+    namespace_identity: NvmeNamespaceIdentity,
     base_lba: u64,
     lba_count: u64,
     mode: NvmeNamespaceMode,
@@ -149,7 +149,7 @@ fn nvme_filesystem_lease(
     iommu_or_broker: bool
 ) -> NvmeFilesystemLease:
     NvmeFilesystemLease(
-        namespace: namespace,
+        namespace_identity: namespace_identity,
         base_lba: base_lba,
         lba_count: lba_count,
         mode: mode,
@@ -167,19 +167,19 @@ fn nvme_filesystem_lease_reason(lease: NvmeFilesystemLease, consumer: NvmeFilesy
         return "nvme-fs-consumer-missing-block-interface:" + nvme_filesystem_consumer_name(consumer)
     if not lease.shared_block_interface:
         return "nvme-fs-lease-missing-shared-block-interface"
-    if lease.namespace.lba_size < 512u32:
+    if lease.namespace_identity.lba_size < 512u32:
         return "nvme-fs-namespace-invalid-lba-size"
-    if lease.namespace.lba_count == 0u64:
+    if lease.namespace_identity.lba_count == 0u64:
         return "nvme-fs-namespace-empty"
     if lease.lba_count == 0u64:
         return "nvme-fs-lease-empty"
-    if lease.base_lba + lease.lba_count > lease.namespace.lba_count:
+    if lease.base_lba + lease.lba_count > lease.namespace_identity.lba_count:
         return "nvme-fs-lease-out-of-range"
-    if lease.queue.controller_id != lease.namespace.controller_id:
+    if lease.queue.controller_id != lease.namespace_identity.controller_id:
         return "nvme-fs-queue-controller-mismatch"
-    if lease.queue.nsid != lease.namespace.nsid:
+    if lease.queue.nsid != lease.namespace_identity.nsid:
         return "nvme-fs-queue-namespace-mismatch queue=" + lease.queue.nsid.to_u64().to_text() +
-            " namespace=" + lease.namespace.nsid.to_u64().to_text()
+            " namespace=" + lease.namespace_identity.nsid.to_u64().to_text()
     if lease.queue.max_depth == 0u16:
         return "nvme-fs-queue-depth-zero"
     if (lease.queue.rights & CAP_RIGHT_READ) == 0u32:
@@ -256,7 +256,7 @@ fn nvme_shared_filesystem_interface_acceptance_reason(active_leases: [NvmeFilesy
     nvme_filesystem_lease_set_acceptance_reason(active_leases, requested)
 
 fn nvme_filesystem_lease_sector_size(lease: NvmeFilesystemLease) -> u32:
-    lease.namespace.lba_size
+    lease.namespace_identity.lba_size
 
 fn nvme_filesystem_lease_sector_count(lease: NvmeFilesystemLease) -> u64:
     lease.lba_count
@@ -267,7 +267,7 @@ fn nvme_filesystem_lease_absolute_lba(lease: NvmeFilesystemLease, relative_lba: 
     Ok(lease.base_lba + relative_lba)
 
 fn nvme_filesystem_lease_same_namespace(a: NvmeFilesystemLease, b: NvmeFilesystemLease) -> bool:
-    a.namespace.controller_id == b.namespace.controller_id and a.namespace.nsid == b.namespace.nsid
+    a.namespace_identity.controller_id == b.namespace_identity.controller_id and a.namespace_identity.nsid == b.namespace_identity.nsid
 
 fn nvme_filesystem_lease_same_assignment(a: NvmeFilesystemLease, b: NvmeFilesystemLease) -> bool:
     nvme_filesystem_lease_same_namespace(a, b) and
@@ -280,8 +280,8 @@ fn nvme_filesystem_lease_same_identity(a: NvmeFilesystemLease, b: NvmeFilesystem
     nvme_filesystem_lease_same_assignment(a, b) and
         a.base_lba == b.base_lba and
         a.lba_count == b.lba_count and
-        a.namespace.lba_size == b.namespace.lba_size and
-        a.namespace.lba_count == b.namespace.lba_count and
+        a.namespace_identity.lba_size == b.namespace_identity.lba_size and
+        a.namespace_identity.lba_count == b.namespace_identity.lba_count and
         a.queue.max_depth == b.queue.max_depth
 
 fn nvme_filesystem_lease_conflict_reason(active: NvmeFilesystemLease, requested: NvmeFilesystemLease) -> text:
@@ -318,7 +318,7 @@ fn nvme_namespace_mode_from_transfer_evidence(e: NvmeTransferEvidence) -> Result
 
 fn nvme_filesystem_lease_from_transfer_evidence(
     evidence: NvmeTransferEvidence,
-    namespace: NvmeNamespaceIdentity,
+    namespace_identity: NvmeNamespaceIdentity,
     base_lba: u64,
     lba_count: u64,
     queue: NvmeQueueAssignment,
@@ -332,7 +332,7 @@ fn nvme_filesystem_lease_from_transfer_evidence(
     if mode_result.is_err():
         return Err(mode_result.unwrap_err())
     val lease = nvme_filesystem_lease(
-        namespace,
+        namespace_identity,
         base_lba,
         lba_count,
         mode_result.unwrap(),

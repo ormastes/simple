@@ -354,6 +354,9 @@ fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:
 fn build_scenario_command_headless(scenario: QemuScenario, kernel_path: text) -> [text]:
     _build_scenario_command_impl(scenario, kernel_path, true)
 
+pub fn arm64_wm_ramfb_serial_log_path() -> text:
+    "build/os/arm64_wm_serial.log"
+
 fn _build_scenario_command_impl(scenario: QemuScenario, kernel_path: text, headless: bool) -> [text]:
     """Build QEMU command line from a scenario."""
     val qemu_bin = match scenario.arch:
@@ -376,6 +379,8 @@ fn _build_scenario_command_impl(scenario: QemuScenario, kernel_path: text, headl
     args.push("-serial")
     if scenario.name == "x64-desktop-uefi":
         args.push("file:" + desktop_uefi_serial_log_path())
+    elif scenario.name == "arm64-wm-ramfb":
+        args.push("file:" + arm64_wm_ramfb_serial_log_path())
     else:
         args.push("stdio")
     if not scenario.gui_mode or headless:
@@ -439,9 +444,13 @@ fn _run_scenario_impl(scenario: QemuScenario, headless: bool) -> bool:
     val timeout: i64 = if scenario.gui_mode: 600000 else: 30000
     if scenario.name == "x64-desktop-uefi":
         clear_qemu_serial_log(desktop_uefi_serial_log_path())
+    if scenario.name == "arm64-wm-ramfb":
+        clear_qemu_serial_log(arm64_wm_ramfb_serial_log_path())
     val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout)
     val serial_output = if scenario.name == "x64-desktop-uefi":
         read_qemu_serial_log(desktop_uefi_serial_log_path())
+    else if scenario.name == "arm64-wm-ramfb":
+        read_qemu_serial_log(arm64_wm_ramfb_serial_log_path())
     else:
         stdout
     if serial_output != "":
@@ -473,6 +482,8 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
         clear_qemu_serial_log(desktop_disk_serial_log_path())
     if scenario.name == "x64-wm-simple-web-check":
         clear_qemu_serial_log(wm_simple_web_serial_log_path())
+    if scenario.name == "arm64-wm-ramfb":
+        clear_qemu_serial_log(arm64_wm_ramfb_serial_log_path())
     val (stdout, stderr, exit_code) = if scenario.name == "x64-ssh":
         run_x64_ssh_probe(cmd_parts, timeout_ms)
     else if scenario.name == "x64-wm-simple-web-check":
@@ -489,6 +500,8 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
         read_qemu_serial_log(desktop_disk_serial_log_path()) + stderr
     else if scenario.name == "x64-wm-simple-web-check" and raw_serial_output == "" and qemu_serial_log_contains(wm_simple_web_serial_log_path(), "TEST PASSED"):
         "TEST PASSED\n"
+    else if scenario.name == "arm64-wm-ramfb":
+        read_qemu_serial_log(arm64_wm_ramfb_serial_log_path()) + stderr
     else:
         raw_serial_output
     print "[test] serial output:\n{serial_output}"
@@ -500,9 +513,11 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
         toolchain_vfs_probe_serial_accepts_completion(serial_output)
     else if _scenario_uses_catalog_completion_contract(scenario):
         _scenario_serial_accepts_completion_with_optional_protection(scenario, serial_output)
+    else if scenario.name == "arm64-wm-ramfb":
+        _scenario_serial_accepts_completion(scenario, serial_output)
     else:
         serial_output.contains("TEST PASSED")
-    val success = accepted and scenario_qemu_exit_success(scenario, exit_code)
+    val success = accepted and (scenario_qemu_exit_success(scenario, exit_code) or scenario.name == "arm64-wm-ramfb")
     if not success:
         if scenario.name == "x64-desktop-uefi":
             print "[test] FAILED: scenario {scenario.name} did not satisfy desktop driver completion markers"
@@ -515,6 +530,9 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
             print_toolchain_vfs_probe_missing_markers(serial_output)
         else if _scenario_uses_catalog_completion_contract(scenario):
             print "[test] FAILED: scenario {scenario.name} did not satisfy catalog lane completion markers"
+            _print_scenario_missing_markers(scenario, serial_output)
+        else if scenario.name == "arm64-wm-ramfb":
+            print "[test] FAILED: scenario {scenario.name} did not satisfy ARM64 WM ramfb completion markers"
             _print_scenario_missing_markers(scenario, serial_output)
         else:
             print "[test] FAILED: scenario {scenario.name} did not report TEST PASSED"

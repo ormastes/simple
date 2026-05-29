@@ -6,6 +6,7 @@ use app.wm_compare.site_corpus.{
     SiteSample, build_famous_site_sample_corpus,
     famous_site_sample_baseline_dir,
     famous_site_sample_chrome_ppm_path,
+    famous_site_sample_chrome_metrics_path,
     famous_site_sample_production_simple_ppm_path,
     famous_site_sample_production_report_sdn_path,
     famous_site_sample_simple_ppm_path,
@@ -15,6 +16,10 @@ use app.wm_compare.html_compat.{
     load_ppm_capture, write_ppm_local}
 use std.gc_async_mut.gpu.browser_engine.simple_web_corpus_fixture_renderer.{simple_web_render_html_to_pixels_with_corpus_fixtures}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+use std.gc_async_mut.gpu.browser_engine.text_painter.{
+    br_famous_site_corpus_layout_lines,
+    br_famous_site_corpus_layout_line_widths_sdn,
+    br_famous_site_corpus_layout_lines_sdn}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -239,6 +244,76 @@ fn _repeat_text_site(s: text, count: i32) -> text:
 fn _rgb_text(color: u32) -> text:
     ((color >> 16) & 0xFF).to_string() + " " + ((color >> 8) & 0xFF).to_string() + " " + (color & 0xFF).to_string() + "\n"
 
+fn _count_text_occurrences(haystack: text, needle: text) -> i32:
+    if needle == "":
+        return 0
+    var count = 0
+    var offset = 0
+    while offset < haystack.len():
+        val tail = haystack.substring(offset)
+        val idx = tail.index_of(needle)
+        if idx == -1:
+            return count
+        count = count + 1
+        offset = offset + idx + needle.len()
+    count
+
+fn _section_between(text_value: text, start_marker: text, end_marker: text) -> text:
+    val start = text_value.index_of(start_marker)
+    if start == -1:
+        return ""
+    val tail = text_value.substring(start)
+    val end = tail.index_of(end_marker)
+    if end == -1:
+        return tail
+    tail.substring(0, end)
+
+fn _json_number_after(text_value: text, marker: text) -> text:
+    val idx = text_value.index_of(marker)
+    if idx == -1:
+        return ""
+    val rest = text_value.substring(idx + marker.len())
+    var end = 0
+    while end < rest.len():
+        val c = rest.char_at(end)
+        if c == "," or c == "\n" or c == "}" or c == ")" or c == " ":
+            break
+        end = end + 1
+    rest.substring(0, end)
+
+fn _first_line_width_from_sdn(widths_sdn: text) -> text:
+    _json_number_after(widths_sdn, "width: ")
+
+fn _all_simple_lines_in_chrome_metrics(simple_lines: [text], metrics: text) -> bool:
+    if simple_lines.len() == 0:
+        return false
+    for line in simple_lines:
+        if not metrics.contains("\"text\": \"" + line + "\""):
+            return false
+    true
+
+fn _production_text_geometry_delta_sdn(sample: SiteSample) -> text:
+    val metrics_path = famous_site_sample_chrome_metrics_path(sample.id)
+    if not rt_file_exists(metrics_path):
+        return "(text_geometry_delta chrome_text_metrics_path: \"" + metrics_path + "\" status: \"missing_chrome_metrics\")"
+    val metrics = rt_file_read_text(metrics_path) ?? ""
+    val simple_lines = br_famous_site_corpus_layout_lines(sample.html, 16, 120)
+    val text_lines_section = _section_between(metrics, "\"textLines\"", "\"canvasTextMetrics\"")
+    val canvas_section = _section_between(metrics, "\"canvasTextMetrics\"", "\n  }\n}")
+    val chrome_line_count = _count_text_occurrences(text_lines_section, "\"index\"")
+    val chrome_canvas_count = _count_text_occurrences(canvas_section, "\"index\"")
+    val simple_first_width = _first_line_width_from_sdn(br_famous_site_corpus_layout_line_widths_sdn(sample.html, 16, 120))
+    val chrome_first_canvas_width = _json_number_after(canvas_section, "\"width\": ")
+    val layout_match = _all_simple_lines_in_chrome_metrics(simple_lines, text_lines_section)
+    "(text_geometry_delta chrome_text_metrics_path: \"" + metrics_path + "\" " +
+        "simple_line_count: " + simple_lines.len().to_string() + " " +
+        "chrome_text_line_count: " + chrome_line_count.to_string() + " " +
+        "chrome_canvas_metric_count: " + chrome_canvas_count.to_string() + " " +
+        "text_line_count_delta: " + (simple_lines.len() - chrome_line_count).to_string() + " " +
+        "layout_text_match: " + _bool_text(layout_match) + " " +
+        "simple_first_width: \"" + simple_first_width + "\" " +
+        "chrome_first_canvas_width: \"" + chrome_first_canvas_width + "\")"
+
 fn write_site_sample_simple_ppm(sample: SiteSample, pixels: [u32], opts: SiteCorpusCompatOpts) -> bool:
     var path = famous_site_sample_simple_ppm_path(sample.id)
     if opts.production_renderer:
@@ -316,6 +391,10 @@ fn write_site_corpus_report(sample: SiteSample, chrome: CaptureResult, simple: C
     body = body + "  chrome: (success: {_bool_text(chrome.success)} error: \"{chrome.error}\")\n"
     body = body + "  simple: (success: {_bool_text(simple.success)} error: \"{simple.error}\")\n"
     body = body + "  compare: (exact: {_bool_text(pair.exact)} accepted: {_bool_text(pair.accepted)} different_pixels: {pair.different_pixels} match_pct_10000: {pair.match_pct_10000} perceptual_pct_10000: {pair.perceptual_pct_10000} max_channel_diff: {pair.max_channel_diff})\n"
+    if opts.production_renderer:
+        body = body + "  simple_layout_lines: " + br_famous_site_corpus_layout_lines_sdn(sample.html, 16, 120) + "\n"
+        body = body + "  simple_layout_line_widths: " + br_famous_site_corpus_layout_line_widths_sdn(sample.html, 16, 120) + "\n"
+        body = body + "  text_geometry_delta: " + _production_text_geometry_delta_sdn(sample) + "\n"
     body = body + ")\n"
     dir_create_all(famous_site_sample_baseline_dir(sample.id))
     file_write_text(report_path, body)
