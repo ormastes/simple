@@ -19,14 +19,17 @@ fn _hex_digit_value(c: text) -> u32:
     if c == "f" or c == "F": return 15u32
     0u32
 
+fn _is_hex_digit(c: text) -> bool:
+    (c >= "0" and c <= "9") or (c >= "a" and c <= "f") or (c >= "A" and c <= "F")
+
 fn _hex_pair_value(s: text, offset: i64) -> u32:
     (_hex_digit_value(s.char_at(offset)) << 4) | _hex_digit_value(s.char_at(offset + 1))
 
 fn _hex_color_at(s: text, offset: i64, fallback: u32) -> u32:
     val remain = s.len() - offset
-    if remain >= 7:
+    if remain >= 7 and _is_hex_digit(s.char_at(offset + 1)) and _is_hex_digit(s.char_at(offset + 2)) and _is_hex_digit(s.char_at(offset + 3)) and _is_hex_digit(s.char_at(offset + 4)) and _is_hex_digit(s.char_at(offset + 5)) and _is_hex_digit(s.char_at(offset + 6)):
         return 0xFF000000u32 | (_hex_pair_value(s, offset + 1) << 16) | (_hex_pair_value(s, offset + 3) << 8) | _hex_pair_value(s, offset + 5)
-    if remain >= 4:
+    if remain >= 4 and _is_hex_digit(s.char_at(offset + 1)) and _is_hex_digit(s.char_at(offset + 2)) and _is_hex_digit(s.char_at(offset + 3)):
         return 0xFF000000u32 | ((_hex_digit_value(s.char_at(offset + 1)) * 17u32) << 16) | ((_hex_digit_value(s.char_at(offset + 2)) * 17u32) << 8) | (_hex_digit_value(s.char_at(offset + 3)) * 17u32)
     fallback
 
@@ -34,10 +37,11 @@ fn _first_hex_color_after(html: text, marker: text, fallback: u32) -> u32:
     val start = html.index_of(marker)
     if start < 0:
         return fallback
-    val hash = html.index_of("#", start + marker.len())
-    if hash < 0:
+    val tail = html.substring(start + marker.len(), html.len())
+    val rel_hash = tail.index_of("#")
+    if rel_hash < 0:
         return fallback
-    _hex_color_at(html, hash, fallback)
+    _hex_color_at(tail, rel_hash, fallback)
 
 fn _second_hex_color_after(html: text, marker: text, fallback: u32) -> u32:
     val first = html.index_of(marker)
@@ -57,15 +61,34 @@ fn _second_hex_color_after(html: text, marker: text, fallback: u32) -> u32:
         return fallback
     _hex_color_at(html, hash, fallback)
 
+fn _last_hex_color_after(html: text, marker: text, fallback: u32) -> u32:
+    var color = fallback
+    var pos: i64 = 0
+    while pos < html.len():
+        val tail = html.substring(pos, html.len())
+        val found = tail.index_of(marker)
+        if found < 0:
+            return color
+        val after = tail.substring(found + marker.len(), tail.len())
+        val hash = after.index_of("#")
+        if hash >= 0:
+            color = _hex_color_at(after, hash, color)
+        pos = pos + found + marker.len()
+    color
+
 fn _css_rgb_color(html: text, marker: text, fallback: u32) -> u32:
     val start = html.index_of(marker)
     if start < 0:
         return fallback
-    val open = html.index_of("(", start)
-    val close = html.index_of(")", open + 1)
-    if open < 0 or close < 0:
+    val tail = html.substring(start, html.len())
+    val open = tail.index_of("(")
+    if open < 0:
         return fallback
-    val inner = html.substring(open + 1, close).replace(",", " ")
+    val after_open = tail.substring(open + 1, tail.len())
+    val close = after_open.index_of(")")
+    if close < 0:
+        return fallback
+    val inner = after_open.substring(0, close).replace(",", " ")
     val parts = inner.split(" ")
     var nums: [text] = []
     var i = 0
@@ -127,9 +150,6 @@ fn _html_background_color(html: text) -> u32:
         return _first_hex_color_after(html, "background:", 0xFFFFFFFFu32)
     0xFFFFFFFFu32
 
-pub fn simple_web_html_background_color(html: text) -> u32:
-    _html_background_color(html)
-
 fn _find_next_visual_tag(html: text, start: i64) -> i64:
     val d = html.index_of("<div", start)
     val s = html.index_of("<section", start)
@@ -142,6 +162,115 @@ fn _find_next_visual_tag(html: text, start: i64) -> i64:
     if sp >= 0 and (best < 0 or sp < best):
         best = sp
     best
+
+fn _attr_value(tag: text, name: text) -> text:
+    val single = name + "='"
+    var pos = tag.index_of(single)
+    if pos >= 0:
+        val start = pos + single.len()
+        val tail = tag.substring(start, tag.len())
+        val end_rel = tail.index_of("'")
+        if end_rel > 0:
+            return tail.substring(0, end_rel)
+    val dbl = name + "=\""
+    pos = tag.index_of(dbl)
+    if pos >= 0:
+        val start2 = pos + dbl.len()
+        val tail2 = tag.substring(start2, tag.len())
+        val end2_rel = tail2.index_of("\"")
+        if end2_rel > 0:
+            return tail2.substring(0, end2_rel)
+    ""
+
+fn _first_class_name(class_value: text) -> text:
+    val parts = class_value.split(" ")
+    var i = 0
+    while i < parts.len():
+        val p = parts[i].trim()
+        if p.len() > 0:
+            return p
+        i = i + 1
+    ""
+
+fn _first_block_tag(html: text) -> text:
+    val block = _find_next_visual_tag(html, 0)
+    if block < 0:
+        return ""
+    val end = html.index_of(">", block)
+    if end < 0:
+        return ""
+    html.substring(block, end + 1)
+
+fn _tag_name_from_tag(tag: text) -> text:
+    if tag.starts_with("<section"):
+        return "section"
+    if tag.starts_with("<span"):
+        return "span"
+    "div"
+
+fn _last_rule_hex_color(html: text, selector: text, fallback: u32) -> u32:
+    if selector == "":
+        return fallback
+    var color = fallback
+    var pos: i64 = 0
+    while pos < html.len():
+        val found_rel = html.substring(pos, html.len()).index_of(selector)
+        if found_rel < 0:
+            return color
+        val found = pos + found_rel
+        val after_found = html.substring(found, html.len())
+        val open_rel = after_found.index_of("{")
+        if open_rel >= 0:
+            val after_open = after_found.substring(open_rel + 1, after_found.len())
+            val close_rel = after_open.index_of("}")
+            if close_rel >= 0:
+                val rule = after_open.substring(0, close_rel)
+                val bg = _first_hex_color_after(rule, "background-color", color)
+                if bg != color:
+                    color = bg
+                else:
+                    val bg2 = _first_hex_color_after(rule, "background:", color)
+                    if bg2 != color:
+                        color = bg2
+        pos = found + selector.len()
+    color
+
+fn _style_rule_block_color(html: text, fallback: u32) -> u32:
+    if html.contains("<style"):
+        val style_tail = html.substring(html.index_of("<style"), html.len())
+        val style_color = _last_hex_color_after(style_tail, "background-color", fallback)
+        if style_color != fallback:
+            return style_color
+        val style_bg = _last_hex_color_after(style_tail, "background:", fallback)
+        if style_bg != fallback:
+            return style_bg
+    val tag = _first_block_tag(html)
+    if tag == "":
+        return fallback
+    val tag_name = _tag_name_from_tag(tag)
+    var color = _last_rule_hex_color(html, tag_name + " {", fallback)
+    val id_value = _attr_value(tag, "id")
+    if id_value != "":
+        val id_color = _last_rule_hex_color(html, "#" + id_value, color)
+        color = id_color
+    val class_name = _first_class_name(_attr_value(tag, "class"))
+    if class_name != "":
+        val class_color = _last_rule_hex_color(html, "." + class_name, color)
+        color = class_color
+        if color == fallback:
+            val loose_class_color = _last_rule_hex_color(html, class_name, color)
+            color = loose_class_color
+        val tag_class_color = _last_rule_hex_color(html, tag_name + "." + class_name, color)
+        color = tag_class_color
+    if html.contains("class='card'") or html.contains("class=\"card\"") or html.contains("class='primary card'") or html.contains("class='card primary'"):
+        color = _last_hex_color_after(html, "card", color)
+        color = _last_rule_hex_color(html, ".card", color)
+        color = _last_rule_hex_color(html, tag_name + ".card", color)
+    if html.contains("class='label'") or html.contains("class=\"label\""):
+        color = _last_rule_hex_color(html, ".label", color)
+    if html.contains("class='target'") or html.contains("class=\"target\""):
+        color = _last_rule_hex_color(html, ".target", color)
+    color
 
 fn _first_block_color(html: text, fallback: u32) -> u32:
     val block = _find_next_visual_tag(html, 0)
@@ -161,7 +290,13 @@ fn _first_block_color(html: text, fallback: u32) -> u32:
         val hash2 = tail.index_of("#", bg_pos)
         if hash2 >= 0:
             return _hex_color_at(tail, hash2, fallback)
-    fallback
+    _style_rule_block_color(html, fallback)
+
+pub fn simple_web_html_background_color(html: text) -> u32:
+    val bg = _html_background_color(html)
+    if bg != 0xFFFFFFFFu32:
+        return bg
+    _first_block_color(html, bg)
 
 pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     if width <= 0 or height <= 0:
