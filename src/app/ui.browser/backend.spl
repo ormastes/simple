@@ -123,6 +123,10 @@ class BrowserBackend:
     static_shell_html_stores: i32
     static_frame_hits: i32
     static_frame_stores: i32
+    present_pixels_cache: [i64]
+    present_pixels_cache_valid: bool
+    present_pixels_cache_hits: i32
+    present_pixels_cache_stores: i32
 
     static fn create(w: i32, h: i32, backend: text) -> Result<BrowserBackend, text>:
         """Create a BrowserBackend with the specified GPU backend.
@@ -150,7 +154,11 @@ class BrowserBackend:
             static_shell_html_hits: 0,
             static_shell_html_stores: 0,
             static_frame_hits: 0,
-            static_frame_stores: 0
+            static_frame_stores: 0,
+            present_pixels_cache: [],
+            present_pixels_cache_valid: false,
+            present_pixels_cache_hits: 0,
+            present_pixels_cache_stores: 0
         ))
 
     fn render_html(state: UIState) -> text:
@@ -203,6 +211,7 @@ class BrowserBackend:
             self.gpu_backend_name
         )
         self.framebuffer = framebuffer_from_argb_pixels(self.width, self.height, pixels)
+        self.present_pixels_cache_valid = false
         val artifact = web_render_pixel_artifact(req, self.pixels_argb_u32())
         self.web_render_target = artifact.target
         self.last_artifact_html = artifact.html
@@ -228,6 +237,8 @@ class BrowserBackend:
         self.width = w
         self.height = h
         self.framebuffer = Framebuffer.create(w, h)
+        self.present_pixels_cache = []
+        self.present_pixels_cache_valid = false
 
     me shutdown():
         """Release resources."""
@@ -251,14 +262,21 @@ class BrowserBackend:
         """Hit-test: find the widget id at pixel coordinates."""
         return hit_test_entries(self.layout_cache, x, y)
 
-    fn pixels_rgba_i64() -> [i64]:
+    me pixels_rgba_i64() -> [i64]:
         """Expose the current framebuffer in the host window present format."""
+        if self.present_pixels_cache_valid and self.present_pixels_cache.len() == self.framebuffer.pixels.len():
+            self.present_pixels_cache_hits = self.present_pixels_cache_hits + 1
+            return self.present_pixels_cache
+
         var out: [i64] = [0; self.framebuffer.pixels.len()]
         var i = 0
         while i < self.framebuffer.pixels.len():
             out[i] = self.framebuffer.pixels[i].to_i64()
             i = i + 1
-        return out
+        self.present_pixels_cache = out
+        self.present_pixels_cache_valid = true
+        self.present_pixels_cache_stores = self.present_pixels_cache_stores + 1
+        return self.present_pixels_cache
 
     fn pixels_argb_u32() -> [u32]:
         """Expose the framebuffer for the shared web render pixel artifact."""
