@@ -72,8 +72,9 @@ Acceptance:
   is the readback gate for generated production artifacts: it requires
   `renderer_mode: "production"`, recomputes the Chrome-vs-production PPM delta,
   rejects stale reports, and currently reports `differentPixels: 2717`,
-  `computedDifferentPixels: 2717`, and `status: "PASS"` after the focused
-  production run.
+  `computedDifferentPixels: 2717`, metrics-derived text region deltas
+  (`divBox.differentPixels: 1612`, `overflowText.differentPixels: 1104`),
+  and `status: "PASS"` after the focused production run.
   The CLI summary now prints exact/accepted/divergent/failed-capture counts for
   selected runs; the focused fixture probe reports `exact=1 accepted=1
   divergent=0 failed_capture=0`, and the production probe reports `exact=0
@@ -516,10 +517,12 @@ Measured blocker:
   nudges.
 - `node tools/electron-shell/analyze_ppm_delta.js
   test/baselines/famous_site_corpus/site_0_google/chrome.ppm
-  test/baselines/famous_site_corpus/site_0_google/simple.ppm` confirms the same
-  current `differentPixels: 2495` and shows the remaining error is text-dominated:
-  Chrome dark bbox `x=8..98 y=10..75`, Simple has no `<100` dark-pixel core
-  after the thresholded blend, and diff bbox is `x=7..103 y=9..76`.
+  test/baselines/famous_site_corpus/site_0_google/simple.production.ppm
+  test/baselines/famous_site_corpus/site_0_google/chrome_metrics.json` now
+  reads the real PPM artifacts and reports the current production miss:
+  `differentPixels: 2717`, `sumAbsoluteChannelDiff: 646916`, diff bbox
+  `x=7..111 y=10..75`, div-box text `differentPixels: 1612`, and overflow
+  text `differentPixels: 1104`.
   Single-pixel geometry checks were measured and rejected: moving the layout
   text origin from `y=5` to `y=4` worsened the sample to
   `different_pixels: 2456`, and moving `x=7` to Chrome's text rect `x=8`
