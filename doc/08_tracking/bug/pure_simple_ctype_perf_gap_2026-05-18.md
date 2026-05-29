@@ -3,7 +3,9 @@
 **Date:** 2026-05-18
 **Status:** Open — partially mitigated 2026-05-27; benchmark harness repaired,
 ctype call nesting flattened, and MIR inlining now handles non-tail calls, but
-native remains below the 0.50x C floor.
+native remains below the 0.50x C floor. 2026-05-29: root cause confirmed — no
+pure-Simple lever remains; fix requires Rust-side cross-module LTO or Cranelift
+codegen improvements.
 **Severity:** Medium — ctype is not hot-path, but pattern applies to all pure Simple stdlib
 **Component:** Cranelift AOT codegen / function inlining
 **Related:** `native_cross_module_call_abi_broken_2026-05-18.md`
@@ -124,3 +126,71 @@ to_upper          1454545             209          343163        0.00x        0.
 The enforced benchmark still fails on eight of nine native ratios. The remaining
 work is broader native code quality: branch/code shape, loop optimization, and
 specialization beyond basic MIR call inlining.
+
+## 2026-05-29 Root Cause Confirmation
+
+### Measurement (SAMPLES=1, bench_ctype.spl cross-module + bench_ctype_inline.spl same-file)
+
+Cross-module native (harness, 1000 iters, C also 1000 iters — note: noisy at this count):
+
+```text
+benchmark        c_ops/ms   interp_ops/ms   native_ops/ms     interp/c     native/c
+is_digit          1280000             174          273504        0.00x        0.21x
+is_upper          1185185             162          291571        0.00x        0.25x
+is_lower           941176             148          251968        0.00x        0.27x
+is_alpha           948148             155          217317        0.00x        0.23x
+is_alnum           955223             155          188512        0.00x        0.20x
+is_xdigit          680851             129          251968        0.00x        0.37x
+is_space          1802816             122          243346        0.00x        0.13x
+to_lower          1471264             143          401253        0.00x        0.27x
+to_upper          1542168             161          357541        0.00x        0.23x
+```
+
+Same-file inlined (bench_ctype_inline.spl, 1M iters) vs stable C (100k iters):
+
+```text
+Function     | C stable (ops/ms) | Inline (ops/ms) | Inline/C | Cross(noisy)/C
+is_digit     |          1775065  |          680022 |     0.38 |           0.15
+is_upper     |          1468058  |          836327 |     0.57 |           0.20
+is_lower     |          1244288  |          593912 |     0.48 |           0.20
+is_alpha     |          1485263  |          327443 |     0.22 |           0.15
+is_alnum     |          2218370  |          190951 |     0.09 |           0.08
+is_xdigit    |          1080624  |          212872 |     0.20 |           0.23
+is_space     |          3363994  |          229269 |     0.07 |           0.07
+to_lower     |          2778983  |          571918 |     0.21 |           0.14
+to_upper     |          3106042  |          494804 |     0.16 |           0.12
+```
+
+### Findings
+
+**Inline vs cross-module gap (2x for leaf functions):** The MIR inliner runs
+per source file (each `.spl` compiles to a separate `.o` in the native build
+pipeline via `compile_entries_parallel`). The `inline_small_pure_functions`
+call in `common_backend.rs` only sees one file's `MirModule` at a time.
+Cross-module inlining is therefore architecturally impossible without whole-
+program compilation or LTO. This is the primary source of the 2x gap between
+inline and cross-module leaf function performance.
+
+**Composite functions bad even same-file (is_space 0.07x, is_alnum 0.09x):**
+These functions have 3–6 short-circuit branches. gcc -O2 compiles them to
+tight sequential compares with early-exit optimization; Cranelift emits each
+`or`-chain branch as a separate conditional branch. The codegen ceiling here
+is Cranelift's branch-chain lowering, not the Simple source.
+
+**ctype.spl library is already fully optimized:** All hot aliases and composite
+predicates use direct range checks (no nested ctype calls). There is no further
+pure-Simple library change that would close the gap.
+
+### Remaining Work (Rust-side)
+
+1. **Cross-module LTO / whole-program MIR inlining** — requires merging all
+   MirModules before the inliner pass in `common_backend.rs`. Not a `.spl`
+   change.
+2. **Cranelift branch-chain optimization** — short-circuit `or` on integer
+   comparisons should emit fewer branches. Could be addressed at the MIR level
+   by transforming multi-way `or` into a min/max range check where semantics
+   permit, or by an additional MIR peephole pass.
+3. **Benchmark stability** — the harness at 1000 iters has microsecond noise
+   that corrupts C reference readings for fast functions. Consider raising
+   `ITERS` in both `bench_ctype.spl` and `bench_ctype_ref.c` to 100000 for
+   reliable ratio measurements.

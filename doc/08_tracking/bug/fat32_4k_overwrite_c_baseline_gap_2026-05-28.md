@@ -2,9 +2,19 @@
 
 ## Status
 
-Partially resolved. The latest focused run passes against the direct C FAT32
-baseline, but the stronger C/VFAT same-device claim remains blocked until a
-writable seeded VFAT mount is available.
+Open — two separate remaining blockers confirmed 2026-05-29:
+
+1. **Direct-C write gap (stable):** At N=1000 iters, simple_fat32 write p50 is
+   ~39us vs direct C ~27us (~44% slower). Read passes stably (13us vs 23us).
+   The write gap is structural in the interpreter: `_set_sec` in the mock block
+   device does 512 element-wise assignments to a global 2MB array per sector (×8
+   sectors = 4096 global-indexed array writes per 4K overwrite). Compiled C does
+   `memcpy`. The missing capability is a bulk array-copy intrinsic. N=8 runs are
+   too noisy to determine pass/fail — the gate would sometimes pass and sometimes
+   fail by luck.
+
+2. **VFAT same-device evidence:** Blocked in this sandbox — all mount paths
+   denied without root. See details below.
 
 ## Evidence
 
@@ -88,17 +98,59 @@ repeated-run gate passed direct C with:
 The script also validates `FAT32_4K_RUNS` as a positive integer and preserves
 the VFAT-required clean failure when VFAT rows are missing.
 
-## Likely Cause
+## Stable Measurement (N=1000, 2026-05-29)
 
-The clean overwrite fast path avoids dirty-cache bookkeeping for full-cluster
-overwrites. The remaining release blocker is not the direct C comparison on the
-latest run; it is lack of VFAT same-device evidence in this local environment.
+Run at N=1000 iters to eliminate sampling noise from the N=8 gate:
+
+- Simple FAT32 read4k: p50=13us p99=20us
+- Simple FAT32 write4k: p50=39us p99=65us
+- Direct C FAT32 read4k: p50=23us p99=41us
+- Direct C FAT32 write4k: p50=27us p99=52us
+
+Read consistently beats C. Write consistently loses to C by ~44%.
+
+## Root Cause
+
+**Write gap:** The write critical path is:
+`write_4k_overwrite_cluster_at` → `write_cluster_clean` → `write_cluster_raw`
+→ 8× `_device_write_sector` → `_set_sec` in the mock block device.
+
+`_set_sec` does 512 element-wise assignments into a global 2MB `[u8]` array per
+sector call. The interpreter pays a full global-variable lookup + bounds check +
+mutation on every element. C's equivalent is a single `memcpy`. There is no bulk
+array-copy primitive in Simple today.
+
+**Attempted fix (reverted):** Replacing the inner `while j` push loop in
+`write_cluster_raw` with array slicing (`data[start:end]`) made write ~5× slower
+in the interpreter (222us vs 39us) — the interpreter allocates a new array for
+each slice, adding more allocation overhead than the push loop saves.
+
+**VFAT mount:** All non-root mount paths exhausted in this environment:
+- `/tmp/simple_vfat_bench_mnt`: vfat mount active but root-owned (0755 uid=0) —
+  not writable by current user; no passwordless sudo to remount.
+- `udisksctl loop-setup`: denied by polkit (`NotAuthorizedCanObtain`).
+- `losetup --find --show`: `Permission denied` without root.
+- `unshare --mount --map-root-user`: `uid_map write failed: Operation not
+  permitted` (`unprivileged_userns_clone=1` but uid_map is blocked).
+- `/tmp/simple_vfat_bench_user.img` exists (user-owned valid FAT32, 64MB) but
+  cannot be loop-mounted without root.
 
 ## Required Fix
 
-- Run `scripts/perf/prepare-fat32-4k-vfat.shs` on a writable VFAT mount or
-  remount the local loop device with `uid=$(id -u),gid=$(id -g)`.
-- Re-run `REQUIRE_VFAT_BASELINE=1 scripts/perf/run-fat32-4k-cfat-baseline.shs`
-  and record p50/p99 read and write results.
-- Keep the repeated-run gate for direct-C evidence, then collect the final
-  VFAT-required run on a writable same-device mount.
+### Write gap
+File a feature request for a bulk array-copy intrinsic in the Simple runtime
+(e.g. `array_copy_range(dst, dst_offset, src, src_offset, len)` backed by
+`memmove`). Once available, `_set_sec` and `write_cluster_raw` can use it to
+eliminate the element-wise copy loops. Until then the write gate cannot be
+closed in interpreter mode.
+
+The gate `FAT32_4K_RUNS` should be raised to at least 50 and the benchmark
+`iters` to at least 100 to produce statistically stable p50 values before
+making pass/fail decisions.
+
+### VFAT same-device evidence
+Must be collected on a privileged host with passwordless sudo or in CI with
+root access. Steps:
+1. `scripts/perf/prepare-fat32-4k-vfat.shs` (creates and seeds the mount).
+2. `REQUIRE_VFAT_BASELINE=1 FAT32_4K_RUNS=3 scripts/perf/run-fat32-4k-cfat-baseline.shs`
+3. Record read4k and write4k p50/p99 from the output.
