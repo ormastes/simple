@@ -1,0 +1,256 @@
+# Primitive Lint Classification — AC-7 and AC-8
+#
+# AC-7: PrimitiveClassification — classifies a primitive usage site as one of:
+#   convertible, blocked, intentional, exempt
+# AC-8: DomainWrapper / DomainWrapperCatalog — predefined domain-specific wrappers
+#
+# Used by the primitive_api lint to guide migration reporting.
+
+# ============================================================================
+# PrimitiveClassification (AC-7)
+# ============================================================================
+
+class PrimitiveClassification:
+    name: text              # primitive identifier, e.g. "pid", "fd"
+    raw_type: text          # underlying type, e.g. "u32", "i64"
+    category: text          # "convertible" | "blocked" | "intentional" | "exempt"
+    reason: text            # human-readable explanation
+    suggested_wrapper: text # suggested domain wrapper (empty when not convertible)
+
+impl PrimitiveClassification:
+    static fn convertible(name: text, raw_type: text, wrapper: text) -> PrimitiveClassification:
+        PrimitiveClassification(
+            name: name,
+            raw_type: raw_type,
+            category: "convertible",
+            reason: "bare primitive can be replaced by domain wrapper",
+            suggested_wrapper: wrapper
+        )
+
+    static fn blocked(name: text, raw_type: text, reason: text) -> PrimitiveClassification:
+        PrimitiveClassification(
+            name: name,
+            raw_type: raw_type,
+            category: "blocked",
+            reason: reason,
+            suggested_wrapper: ""
+        )
+
+    static fn intentional(name: text, raw_type: text, reason: text) -> PrimitiveClassification:
+        PrimitiveClassification(
+            name: name,
+            raw_type: raw_type,
+            category: "intentional",
+            reason: reason,
+            suggested_wrapper: ""
+        )
+
+    static fn exempt(name: text, raw_type: text, reason: text) -> PrimitiveClassification:
+        PrimitiveClassification(
+            name: name,
+            raw_type: raw_type,
+            category: "exempt",
+            reason: reason,
+            suggested_wrapper: ""
+        )
+
+    fn should_migrate() -> bool:
+        self.category == "convertible"
+
+    fn summary() -> text:
+        var base = "[" + self.category + "] " + self.name + ": " + self.raw_type + " — " + self.reason
+        if self.suggested_wrapper != "":
+            base = base + " (suggest: " + self.suggested_wrapper + ")"
+        base
+
+# ============================================================================
+# DomainWrapper (AC-8)
+# ============================================================================
+
+class DomainWrapper:
+    wrapper_name: text  # e.g. "FileHandle"
+    underlying: text    # e.g. "u32"
+    domain: text        # e.g. "os", "hal", "net", "fs", "ipc"
+    description: text   # what this wrapper represents
+
+impl DomainWrapper:
+    static fn create(wrapper_name: text, underlying: text, domain: text, description: text) -> DomainWrapper:
+        DomainWrapper(
+            wrapper_name: wrapper_name,
+            underlying: underlying,
+            domain: domain,
+            description: description
+        )
+
+    fn declaration() -> text:
+        "newtype " + self.wrapper_name + " = " + self.underlying
+
+# ============================================================================
+# DomainWrapperCatalog (AC-8) — predefined wrappers
+# ============================================================================
+
+class DomainWrapperCatalog:
+    _placeholder: i32  # catalog is stateless; methods are all static
+
+impl DomainWrapperCatalog:
+    static fn file_handle() -> DomainWrapper:
+        DomainWrapper.create("FileHandle", "u32", "os", "open file descriptor")
+
+    static fn process_id() -> DomainWrapper:
+        DomainWrapper.create("ProcessId", "i32", "os", "process identifier")
+
+    static fn thread_id() -> DomainWrapper:
+        DomainWrapper.create("ThreadId", "i32", "os", "thread identifier")
+
+    static fn irq_vector() -> DomainWrapper:
+        DomainWrapper.create("IrqVector", "u16", "hal", "interrupt request vector")
+
+    static fn phys_addr() -> DomainWrapper:
+        DomainWrapper.create("PhysAddr", "u64", "hal", "physical memory address")
+
+    static fn virt_addr() -> DomainWrapper:
+        DomainWrapper.create("VirtAddr", "u64", "hal", "virtual memory address")
+
+    static fn mem_size() -> DomainWrapper:
+        DomainWrapper.create("MemSize", "u64", "hal", "memory size in bytes")
+
+    static fn mem_offset() -> DomainWrapper:
+        DomainWrapper.create("MemOffset", "u64", "hal", "memory offset in bytes")
+
+    static fn file_mode() -> DomainWrapper:
+        DomainWrapper.create("FileMode", "u32", "fs", "file permission mode bits")
+
+    static fn deadline_ms() -> DomainWrapper:
+        DomainWrapper.create("DeadlineMs", "u64", "os", "deadline in milliseconds")
+
+    static fn errno_code() -> DomainWrapper:
+        DomainWrapper.create("ErrnoCode", "i32", "os", "error number code")
+
+    static fn port_num() -> DomainWrapper:
+        DomainWrapper.create("PortNum", "u16", "net", "network port number")
+
+    static fn all_wrappers() -> text:
+        var out = "Domain Wrapper Catalog (12 entries):\n"
+        out = out + "  " + DomainWrapperCatalog.file_handle().declaration() + " [os]\n"
+        out = out + "  " + DomainWrapperCatalog.process_id().declaration() + " [os]\n"
+        out = out + "  " + DomainWrapperCatalog.thread_id().declaration() + " [os]\n"
+        out = out + "  " + DomainWrapperCatalog.irq_vector().declaration() + " [hal]\n"
+        out = out + "  " + DomainWrapperCatalog.phys_addr().declaration() + " [hal]\n"
+        out = out + "  " + DomainWrapperCatalog.virt_addr().declaration() + " [hal]\n"
+        out = out + "  " + DomainWrapperCatalog.mem_size().declaration() + " [hal]\n"
+        out = out + "  " + DomainWrapperCatalog.mem_offset().declaration() + " [hal]\n"
+        out = out + "  " + DomainWrapperCatalog.file_mode().declaration() + " [fs]\n"
+        out = out + "  " + DomainWrapperCatalog.deadline_ms().declaration() + " [os]\n"
+        out = out + "  " + DomainWrapperCatalog.errno_code().declaration() + " [os]\n"
+        out = out + "  " + DomainWrapperCatalog.port_num().declaration() + " [net]\n"
+        out
+
+# ============================================================================
+# PrimitiveAuditReport — collects and summarises classifications
+# ============================================================================
+
+class PrimitiveAuditReport:
+    total: i32
+    convertible_count: i32
+    blocked_count: i32
+    intentional_count: i32
+    exempt_count: i32
+    # flat 16-slot storage
+    slot_0: text
+    slot_1: text
+    slot_2: text
+    slot_3: text
+    slot_4: text
+    slot_5: text
+    slot_6: text
+    slot_7: text
+    slot_8: text
+    slot_9: text
+    slot_10: text
+    slot_11: text
+    slot_12: text
+    slot_13: text
+    slot_14: text
+    slot_15: text
+
+impl PrimitiveAuditReport:
+    static fn empty() -> PrimitiveAuditReport:
+        PrimitiveAuditReport(
+            total: 0,
+            convertible_count: 0,
+            blocked_count: 0,
+            intentional_count: 0,
+            exempt_count: 0,
+            slot_0: "", slot_1: "", slot_2: "", slot_3: "",
+            slot_4: "", slot_5: "", slot_6: "", slot_7: "",
+            slot_8: "", slot_9: "", slot_10: "", slot_11: "",
+            slot_12: "", slot_13: "", slot_14: "", slot_15: ""
+        )
+
+    fn add(cls: PrimitiveClassification) -> bool:
+        if self.total >= 16:
+            return false
+        val idx = self.total
+        val entry = cls.summary()
+        if idx == 0:
+            self.slot_0 = entry
+        else if idx == 1:
+            self.slot_1 = entry
+        else if idx == 2:
+            self.slot_2 = entry
+        else if idx == 3:
+            self.slot_3 = entry
+        else if idx == 4:
+            self.slot_4 = entry
+        else if idx == 5:
+            self.slot_5 = entry
+        else if idx == 6:
+            self.slot_6 = entry
+        else if idx == 7:
+            self.slot_7 = entry
+        else if idx == 8:
+            self.slot_8 = entry
+        else if idx == 9:
+            self.slot_9 = entry
+        else if idx == 10:
+            self.slot_10 = entry
+        else if idx == 11:
+            self.slot_11 = entry
+        else if idx == 12:
+            self.slot_12 = entry
+        else if idx == 13:
+            self.slot_13 = entry
+        else if idx == 14:
+            self.slot_14 = entry
+        else:
+            self.slot_15 = entry
+        if cls.category == "convertible":
+            self.convertible_count = self.convertible_count + 1
+        else if cls.category == "blocked":
+            self.blocked_count = self.blocked_count + 1
+        else if cls.category == "intentional":
+            self.intentional_count = self.intentional_count + 1
+        else:
+            self.exempt_count = self.exempt_count + 1
+        self.total = self.total + 1
+        true
+
+    fn migration_readiness() -> text:
+        if self.total == 0:
+            return "ready"
+        val pct = (self.convertible_count * 100) / self.total
+        if pct > 50:
+            "ready"
+        else if pct > 0:
+            "partial"
+        else:
+            "blocked"
+
+    fn summary() -> text:
+        var out = "PrimitiveAuditReport: total=" + self.total.to_text()
+        out = out + " convertible=" + self.convertible_count.to_text()
+        out = out + " blocked=" + self.blocked_count.to_text()
+        out = out + " intentional=" + self.intentional_count.to_text()
+        out = out + " exempt=" + self.exempt_count.to_text()
+        out = out + " readiness=" + self.migration_readiness()
+        out

@@ -1,0 +1,176 @@
+# @cover src/lib/hardware/fpga_k26/k26_xdc.spl 0%
+# @cover src/lib/hardware/fpga_linux/soc_vhdl_gen_part2.spl 0%
+# @cover src/lib/hardware/fpga_linux/synthesis_wrapper.spl 0%
+"""
+# KV260 RV64GC FPGA Cross-Validation Specification
+
+**Feature IDs:** rv64-ghdl-fpga-boot
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Draft
+**Requirements:** REQ-1, REQ-6, REQ-7, REQ-9
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Cross-validates that K26 XDC constraint port names match the VHDL
+entity port names from generate_soc_top_vhdl_rv64(). Verifies K26
+default config sanity, XDC format, Vivado TCL K26 targeting, and
+SoC VHDL entity completeness for the rv64-ghdl-fpga-boot pipeline.
+
+Covers:
+- AC-1 (VHDL gen produces soc_top_64 + peripherals)
+- AC-6 (Vivado TCL targets K26 part)
+- AC-7 (XDC validated against GHDL entity port names)
+- AC-9 (boot guide sections — tool-verified)
+
+## Compiled-Mode Notes
+
+All checks are text-pattern based and interpreter-safe.
+AC-2,3,4 (GHDL), AC-5 (backend bugs), AC-6 (synthesis),
+AC-8 (FPGA boot) are tool-verified outside SPipe.
+"""
+
+use std.spipe.*
+use lib.hardware.fpga_k26.k26_xdc.{k26_default_config, k26_generate_xdc}
+use lib.hardware.fpga_linux.soc_vhdl_gen_part2.{generate_soc_top_vhdl_rv64}
+use lib.hardware.fpga_linux.synthesis_wrapper.{generate_vivado_tcl_rv64}
+
+
+# ============================================================================
+# AC-7: XDC-to-VHDL Port Name Cross-Validation
+# ============================================================================
+
+describe "KV260 XDC-VHDL Port Cross-Validation":
+    it "AC-7: both XDC and VHDL reference uart_tx port":
+        val xdc = k26_generate_xdc()
+        val vhdl = generate_soc_top_vhdl_rv64()
+        expect(xdc).to_contain("uart_tx")
+        expect(vhdl).to_contain("uart_tx")
+
+    it "AC-7: both XDC and VHDL reference uart_rx port":
+        val xdc = k26_generate_xdc()
+        val vhdl = generate_soc_top_vhdl_rv64()
+        expect(xdc).to_contain("uart_rx")
+        expect(vhdl).to_contain("uart_rx")
+
+    it "AC-7: both XDC and VHDL reference rst port":
+        val xdc = k26_generate_xdc()
+        val vhdl = generate_soc_top_vhdl_rv64()
+        expect(xdc).to_contain("rst")
+        expect(vhdl).to_contain("rst")
+
+    it "AC-7: both XDC and VHDL reference clk":
+        val xdc = k26_generate_xdc()
+        val vhdl = generate_soc_top_vhdl_rv64()
+        expect(xdc).to_contain("clk")
+        expect(vhdl).to_contain("clk")
+
+    it "AC-7: XDC contains JTAG debug port constraints":
+        val xdc = k26_generate_xdc()
+        expect(xdc).to_contain("jtag_tck")
+        expect(xdc).to_contain("jtag_tms")
+        expect(xdc).to_contain("jtag_tdi")
+        expect(xdc).to_contain("jtag_tdo")
+
+
+# ============================================================================
+# AC-7: K26 Default Config Sanity
+# ============================================================================
+
+describe "K26 Default Config":
+    it "AC-7: default config has 100 MHz clock":
+        val cfg = k26_default_config()
+        expect(cfg.clock_freq).to_equal(100000000)
+
+    it "AC-7: default config uses LVCMOS33 IO standard":
+        val cfg = k26_default_config()
+        expect(cfg.io_standard).to_equal("LVCMOS33")
+
+    it "AC-7: default config has UART TX pin H12":
+        val cfg = k26_default_config()
+        expect(cfg.uart_tx_pin).to_equal("H12")
+
+    it "AC-7: default config has UART RX pin E10":
+        val cfg = k26_default_config()
+        expect(cfg.uart_rx_pin).to_equal("E10")
+
+    it "AC-7: default config has reset pin G11":
+        val cfg = k26_default_config()
+        expect(cfg.reset_pin).to_equal("G11")
+
+    it "AC-7: default config has 4 LED pins":
+        val cfg = k26_default_config()
+        val count = cfg.led_pins.len()
+        expect(count).to_equal(4)
+
+
+# ============================================================================
+# AC-7: XDC Format Validation
+# ============================================================================
+
+describe "K26 XDC Format":
+    it "AC-7: XDC contains PACKAGE_PIN assignments":
+        val xdc = k26_generate_xdc()
+        expect(xdc).to_contain("PACKAGE_PIN")
+
+    it "AC-7: XDC contains IOSTANDARD property":
+        val xdc = k26_generate_xdc()
+        expect(xdc).to_contain("IOSTANDARD")
+
+    it "AC-7: XDC contains set_property commands":
+        val xdc = k26_generate_xdc()
+        expect(xdc).to_contain("set_property")
+
+    it "AC-7: XDC contains K26 SOM header comment":
+        val xdc = k26_generate_xdc()
+        expect(xdc).to_contain("xck26-sfvc784-2LV-c")
+
+
+# ============================================================================
+# AC-1: VHDL Gen Entity Completeness
+# ============================================================================
+
+describe "VHDL Gen SoC Entity Completeness":
+    it "AC-1: soc_top_rv64 entity name present":
+        val vhdl = generate_soc_top_vhdl_rv64()
+        expect(vhdl).to_contain("soc_top_rv64")
+
+    it "AC-1: entity contains rv64gc_core instantiation":
+        val vhdl = generate_soc_top_vhdl_rv64()
+        expect(vhdl).to_contain("rv64gc_core")
+
+    it "AC-1: entity contains CLINT peripheral":
+        val vhdl = generate_soc_top_vhdl_rv64()
+        expect(vhdl).to_contain("u_clint")
+
+    it "AC-1: entity contains PLIC peripheral":
+        val vhdl = generate_soc_top_vhdl_rv64()
+        expect(vhdl).to_contain("u_plic")
+
+    it "AC-1: entity contains UART peripheral":
+        val vhdl = generate_soc_top_vhdl_rv64()
+        expect(vhdl).to_contain("u_uart")
+
+    it "AC-1: entity uses 64-bit Wishbone bus":
+        val vhdl = generate_soc_top_vhdl_rv64()
+        expect(vhdl).to_contain("63 downto 0")
+
+
+# ============================================================================
+# AC-6: Vivado TCL Targets K26
+# ============================================================================
+
+describe "Vivado TCL K26 Targeting":
+    it "AC-6: TCL sets K26 FPGA part":
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain("xck26")
+
+    it "AC-6: TCL creates Vivado project":
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain("create_project")
+
+    it "AC-6: TCL includes bitstream generation":
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain("write_bitstream")

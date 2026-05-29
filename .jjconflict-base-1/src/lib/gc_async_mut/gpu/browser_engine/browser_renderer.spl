@@ -1,0 +1,92 @@
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_engine2d_render_html_pixels, simple_web_html_background_color}
+
+class BrowserSceneCommand:
+    kind: text
+    color: u32
+
+class BrowserRenderScene:
+    width: i32
+    height: i32
+    commands: [BrowserSceneCommand]
+
+class BeRenderResult:
+    pixels: [u8]
+    pixel_data: [u32]
+    width: i32
+    height: i32
+    title: text
+    ok: bool
+    error: text
+    scene: BrowserRenderScene
+
+impl BeRenderResult:
+    static fn success_argb(pixels: [u32], width: i32, height: i32, title: text, scene: BrowserRenderScene) -> BeRenderResult:
+        BeRenderResult(pixels: [], pixel_data: pixels, width: width, height: height, title: title, ok: true, error: "", scene: scene)
+
+    static fn failure(width: i32, height: i32, error: text) -> BeRenderResult:
+        BeRenderResult(pixels: [], pixel_data: [], width: width, height: height, title: "", ok: false, error: error, scene: BrowserRenderScene(width: width, height: height, commands: []))
+
+    fn byte_count() -> i64:
+        self.width.to_i64() * self.height.to_i64() * 4
+
+    fn to_scene() -> BrowserRenderScene:
+        self.scene
+
+class BrowserRenderer:
+    width: i32
+    height: i32
+    backend_value: text
+    engine: bool?
+
+impl BrowserRenderer:
+    static fn create(width: i32, height: i32) -> BrowserRenderer:
+        BrowserRenderer(width: width, height: height, backend_value: "software", engine: nil)
+
+    static fn create_with_backend(width: i32, height: i32, backend_name: text) -> BrowserRenderer:
+        if backend_name == "software" or backend_name == "cpu" or backend_name == "metal":
+            return BrowserRenderer(width: width, height: height, backend_value: "software", engine: true)
+        BrowserRenderer(width: width, height: height, backend_value: "software", engine: nil)
+
+    fn backend_name() -> text:
+        self.backend_value
+
+    fn render_html(html: text) -> BeRenderResult:
+        self.render_html_to_pixels(html)
+
+    fn render_html_to_pixels(html: text) -> BeRenderResult:
+        val pixels = simple_web_engine2d_render_html_pixels(html, self.width, self.height, self.backend_value)
+        val scene = BrowserRenderScene(width: self.width, height: self.height, commands: [BrowserSceneCommand(kind: "fill_rect", color: _browser_scene_color(html, pixels))])
+        BeRenderResult.success_argb(pixels, self.width, self.height, _browser_title(html), scene)
+
+fn _browser_title(html: text) -> text:
+    val lower = html.lower()
+    val start = lower.index_of("<title>")
+    if start < 0:
+        return ""
+    val content_start = start + 7
+    val end = lower.index_of("</title>", content_start)
+    if end < 0:
+        return ""
+    html.substring(content_start, end).trim()
+
+fn _browser_scene_color(html: text, pixels: [u32]) -> u32:
+    val bg = simple_web_html_background_color(html)
+    if bg != 0xFFFFFFFFu32:
+        return bg
+    if pixels.len() > 0:
+        return pixels[0]
+    0xFFFFFFFFu32
+
+fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
+    var root = BeDomNode.document()
+    var body = BeDomNode.element(1, "body")
+    body.children.push(BeDomNode.text_node(2, html))
+    root.children.push(body)
+    root
+
+pub fn render_html_to_pixels_with_viewport(html: text, width: i32, height: i32) -> BeRenderResult:
+    BrowserRenderer.create(width, height).render_html_to_pixels(html)
+
+pub fn render_html_to_pixel_array(html: text, width: i32, height: i32) -> [u32]:
+    render_html_to_pixels_with_viewport(html, width, height).pixel_data

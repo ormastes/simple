@@ -1,0 +1,223 @@
+# RISC-V 64-bit Instruction Decoder — Guest Binary to IR_TC
+#
+# Translates RV64I machine code into IR_TC operations.
+# Each instruction becomes a sequence of IR_TC ops using 64-bit word type.
+#
+# Delegates to shared emit helpers in decoder_common.spl with
+# word_type=IrTcTypeKind.I64 and arch=GuestArch.Riscv64.
+#
+# RV64I includes all RV32I instructions (operating on 64-bit registers)
+# plus W-suffix instructions that operate on lower 32 bits and sign-extend.
+
+use core.types.{IrTcTypeKind, IrTcValue, IrTcCond, GuestArch}
+use core.mem_op.{MemOp, Endian, GuestRegId, ADDR_SPACE_DEFAULT}
+use core.ops.{IrTcOp}
+use core.builder.{IrTcBuilder}
+use core.block.{BlockId, IrTcModuleMode}
+use guest.cpu_def.{GuestCpuDef, GuestState}
+use guest.riscv.common.{RV_REG_PC}
+use guest.riscv.opcodes.{RvOpcode, decode_rv_opcode}
+use guest.riscv.decoder_common.{
+    RvAluOp,
+    emit_rv_alu, emit_rv_alu_imm,
+    emit_rv_alu_word, emit_rv_alu_imm_word,
+    emit_rv_load, emit_rv_store,
+    emit_rv_branch,
+    emit_rv_lui, emit_rv_auipc,
+    emit_rv_jal, emit_rv_jalr,
+    emit_rv_csr,
+    emit_rv_ecall, emit_rv_ebreak, emit_rv_fence
+}
+
+# ============================================================================
+# Decoder Error
+# ============================================================================
+
+enum Rv64DecoderError:
+    """Errors during RV64I instruction decoding."""
+    UnknownOpcode(word: i64, pc: i64)
+
+impl Rv64DecoderError:
+    fn to_text() -> text:
+        match self:
+            UnknownOpcode(w, pc): "unknown RV64 opcode 0x{w} at PC=0x{pc}"
+
+# ============================================================================
+# RV64 Decoder
+# ============================================================================
+
+class Rv64Decoder:
+    """Translates RV64I machine code into IR_TC operations.
+
+    Usage:
+        var builder = IrTcBuilder.new("rv64_tb", IrTcModuleMode.Emulation)
+        val cpu_def = build_rv64_cpu_def()
+        var decoder = Rv64Decoder(builder: builder, cpu_def: cpu_def)
+        val bytes_consumed = decoder.decode_instruction(word, pc)
+    """
+    builder: IrTcBuilder
+    cpu_def: GuestCpuDef
+
+impl Rv64Decoder:
+    me decode_instruction(inst_word: i64, pc: i64) -> Result<i64, Rv64DecoderError>:
+        """Decode and emit IR_TC for a single 32-bit instruction word.
+
+        Args:
+            inst_word: 32-bit instruction word (little-endian)
+            pc: Current program counter value
+
+        Returns the number of bytes consumed (always 4 for base ISA).
+        """
+        val opcode = decode_rv_opcode(inst_word, true)
+        match opcode:
+            Some(op): self._dispatch(op, pc)
+            nil: Err(Rv64DecoderError.UnknownOpcode(word: inst_word, pc: pc))
+
+    me _dispatch(op: RvOpcode, pc: i64) -> Result<i64, Rv64DecoderError>:
+        """Dispatch a decoded opcode to the appropriate emit helper."""
+        match op:
+            # ---- Upper Immediate ----
+            RvOpcode.LUI(rd, imm):
+                emit_rv_lui(self.builder, GuestArch.Riscv64, rd, imm, IrTcTypeKind.I64)
+            RvOpcode.AUIPC(rd, imm):
+                emit_rv_auipc(self.builder, GuestArch.Riscv64, rd, imm, pc, IrTcTypeKind.I64)
+
+            # ---- Jumps ----
+            RvOpcode.JAL(rd, offset):
+                emit_rv_jal(self.builder, GuestArch.Riscv64, rd, offset, pc, IrTcTypeKind.I64)
+            RvOpcode.JALR(rd, rs1, offset):
+                emit_rv_jalr(self.builder, GuestArch.Riscv64, rd, rs1, offset, pc, IrTcTypeKind.I64)
+
+            # ---- Branches ----
+            RvOpcode.BEQ(rs1, rs2, offset):
+                emit_rv_branch(self.builder, GuestArch.Riscv64, rs1, rs2, IrTcCond.Eq, offset, pc, IrTcTypeKind.I64)
+            RvOpcode.BNE(rs1, rs2, offset):
+                emit_rv_branch(self.builder, GuestArch.Riscv64, rs1, rs2, IrTcCond.Ne, offset, pc, IrTcTypeKind.I64)
+            RvOpcode.BLT(rs1, rs2, offset):
+                emit_rv_branch(self.builder, GuestArch.Riscv64, rs1, rs2, IrTcCond.Lt, offset, pc, IrTcTypeKind.I64)
+            RvOpcode.BGE(rs1, rs2, offset):
+                emit_rv_branch(self.builder, GuestArch.Riscv64, rs1, rs2, IrTcCond.Ge, offset, pc, IrTcTypeKind.I64)
+            RvOpcode.BLTU(rs1, rs2, offset):
+                emit_rv_branch(self.builder, GuestArch.Riscv64, rs1, rs2, IrTcCond.Ltu, offset, pc, IrTcTypeKind.I64)
+            RvOpcode.BGEU(rs1, rs2, offset):
+                emit_rv_branch(self.builder, GuestArch.Riscv64, rs1, rs2, IrTcCond.Geu, offset, pc, IrTcTypeKind.I64)
+
+            # ---- Loads (RV32I base) ----
+            RvOpcode.LB(rd, rs1, offset):
+                emit_rv_load(self.builder, GuestArch.Riscv64, rd, rs1, offset, 1, true, IrTcTypeKind.I64)
+            RvOpcode.LH(rd, rs1, offset):
+                emit_rv_load(self.builder, GuestArch.Riscv64, rd, rs1, offset, 2, true, IrTcTypeKind.I64)
+            RvOpcode.LW(rd, rs1, offset):
+                emit_rv_load(self.builder, GuestArch.Riscv64, rd, rs1, offset, 4, true, IrTcTypeKind.I64)
+            RvOpcode.LBU(rd, rs1, offset):
+                emit_rv_load(self.builder, GuestArch.Riscv64, rd, rs1, offset, 1, false, IrTcTypeKind.I64)
+            RvOpcode.LHU(rd, rs1, offset):
+                emit_rv_load(self.builder, GuestArch.Riscv64, rd, rs1, offset, 2, false, IrTcTypeKind.I64)
+
+            # ---- Loads (RV64I only) ----
+            RvOpcode.LWU(rd, rs1, offset):
+                emit_rv_load(self.builder, GuestArch.Riscv64, rd, rs1, offset, 4, false, IrTcTypeKind.I64)
+            RvOpcode.LD(rd, rs1, offset):
+                emit_rv_load(self.builder, GuestArch.Riscv64, rd, rs1, offset, 8, true, IrTcTypeKind.I64)
+
+            # ---- Stores (RV32I base) ----
+            RvOpcode.SB(rs1, rs2, offset):
+                emit_rv_store(self.builder, GuestArch.Riscv64, rs1, rs2, offset, 1, IrTcTypeKind.I64)
+            RvOpcode.SH(rs1, rs2, offset):
+                emit_rv_store(self.builder, GuestArch.Riscv64, rs1, rs2, offset, 2, IrTcTypeKind.I64)
+            RvOpcode.SW(rs1, rs2, offset):
+                emit_rv_store(self.builder, GuestArch.Riscv64, rs1, rs2, offset, 4, IrTcTypeKind.I64)
+
+            # ---- Stores (RV64I only) ----
+            RvOpcode.SD(rs1, rs2, offset):
+                emit_rv_store(self.builder, GuestArch.Riscv64, rs1, rs2, offset, 8, IrTcTypeKind.I64)
+
+            # ---- Immediate ALU ----
+            RvOpcode.ADDI(rd, rs1, imm):
+                emit_rv_alu_imm(self.builder, GuestArch.Riscv64, rd, rs1, imm, RvAluOp.Add, IrTcTypeKind.I64)
+            RvOpcode.SLTI(rd, rs1, imm):
+                emit_rv_alu_imm(self.builder, GuestArch.Riscv64, rd, rs1, imm, RvAluOp.Slt, IrTcTypeKind.I64)
+            RvOpcode.SLTIU(rd, rs1, imm):
+                emit_rv_alu_imm(self.builder, GuestArch.Riscv64, rd, rs1, imm, RvAluOp.Sltu, IrTcTypeKind.I64)
+            RvOpcode.XORI(rd, rs1, imm):
+                emit_rv_alu_imm(self.builder, GuestArch.Riscv64, rd, rs1, imm, RvAluOp.Xor, IrTcTypeKind.I64)
+            RvOpcode.ORI(rd, rs1, imm):
+                emit_rv_alu_imm(self.builder, GuestArch.Riscv64, rd, rs1, imm, RvAluOp.Or, IrTcTypeKind.I64)
+            RvOpcode.ANDI(rd, rs1, imm):
+                emit_rv_alu_imm(self.builder, GuestArch.Riscv64, rd, rs1, imm, RvAluOp.And, IrTcTypeKind.I64)
+            RvOpcode.SLLI(rd, rs1, shamt):
+                emit_rv_alu_imm(self.builder, GuestArch.Riscv64, rd, rs1, shamt, RvAluOp.Sll, IrTcTypeKind.I64)
+            RvOpcode.SRLI(rd, rs1, shamt):
+                emit_rv_alu_imm(self.builder, GuestArch.Riscv64, rd, rs1, shamt, RvAluOp.Srl, IrTcTypeKind.I64)
+            RvOpcode.SRAI(rd, rs1, shamt):
+                emit_rv_alu_imm(self.builder, GuestArch.Riscv64, rd, rs1, shamt, RvAluOp.Sra, IrTcTypeKind.I64)
+
+            # ---- Register ALU ----
+            RvOpcode.ADD(rd, rs1, rs2):
+                emit_rv_alu(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.Add, IrTcTypeKind.I64)
+            RvOpcode.SUB(rd, rs1, rs2):
+                emit_rv_alu(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.Sub, IrTcTypeKind.I64)
+            RvOpcode.SLL(rd, rs1, rs2):
+                emit_rv_alu(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.Sll, IrTcTypeKind.I64)
+            RvOpcode.SLT(rd, rs1, rs2):
+                emit_rv_alu(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.Slt, IrTcTypeKind.I64)
+            RvOpcode.SLTU(rd, rs1, rs2):
+                emit_rv_alu(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.Sltu, IrTcTypeKind.I64)
+            RvOpcode.XOR(rd, rs1, rs2):
+                emit_rv_alu(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.Xor, IrTcTypeKind.I64)
+            RvOpcode.SRL(rd, rs1, rs2):
+                emit_rv_alu(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.Srl, IrTcTypeKind.I64)
+            RvOpcode.SRA(rd, rs1, rs2):
+                emit_rv_alu(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.Sra, IrTcTypeKind.I64)
+            RvOpcode.OR(rd, rs1, rs2):
+                emit_rv_alu(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.Or, IrTcTypeKind.I64)
+            RvOpcode.AND(rd, rs1, rs2):
+                emit_rv_alu(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.And, IrTcTypeKind.I64)
+
+            # ---- RV64I W-suffix Immediate ALU ----
+            RvOpcode.ADDIW(rd, rs1, imm):
+                emit_rv_alu_imm_word(self.builder, GuestArch.Riscv64, rd, rs1, imm, RvAluOp.Add, IrTcTypeKind.I64)
+            RvOpcode.SLLIW(rd, rs1, shamt):
+                emit_rv_alu_imm_word(self.builder, GuestArch.Riscv64, rd, rs1, shamt, RvAluOp.Sll, IrTcTypeKind.I64)
+            RvOpcode.SRLIW(rd, rs1, shamt):
+                emit_rv_alu_imm_word(self.builder, GuestArch.Riscv64, rd, rs1, shamt, RvAluOp.Srl, IrTcTypeKind.I64)
+            RvOpcode.SRAIW(rd, rs1, shamt):
+                emit_rv_alu_imm_word(self.builder, GuestArch.Riscv64, rd, rs1, shamt, RvAluOp.Sra, IrTcTypeKind.I64)
+
+            # ---- RV64I W-suffix Register ALU ----
+            RvOpcode.ADDW(rd, rs1, rs2):
+                emit_rv_alu_word(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.Add, IrTcTypeKind.I64)
+            RvOpcode.SUBW(rd, rs1, rs2):
+                emit_rv_alu_word(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.Sub, IrTcTypeKind.I64)
+            RvOpcode.SLLW(rd, rs1, rs2):
+                emit_rv_alu_word(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.Sll, IrTcTypeKind.I64)
+            RvOpcode.SRLW(rd, rs1, rs2):
+                emit_rv_alu_word(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.Srl, IrTcTypeKind.I64)
+            RvOpcode.SRAW(rd, rs1, rs2):
+                emit_rv_alu_word(self.builder, GuestArch.Riscv64, rd, rs1, rs2, RvAluOp.Sra, IrTcTypeKind.I64)
+
+            # ---- CSR ----
+            RvOpcode.CSRRW(rd, csr, rs1):
+                emit_rv_csr(self.builder, GuestArch.Riscv64, rd, csr, rs1, false, "w", IrTcTypeKind.I64)
+            RvOpcode.CSRRS(rd, csr, rs1):
+                emit_rv_csr(self.builder, GuestArch.Riscv64, rd, csr, rs1, false, "s", IrTcTypeKind.I64)
+            RvOpcode.CSRRC(rd, csr, rs1):
+                emit_rv_csr(self.builder, GuestArch.Riscv64, rd, csr, rs1, false, "c", IrTcTypeKind.I64)
+            RvOpcode.CSRRWI(rd, csr, uimm):
+                emit_rv_csr(self.builder, GuestArch.Riscv64, rd, csr, uimm, true, "w", IrTcTypeKind.I64)
+            RvOpcode.CSRRSI(rd, csr, uimm):
+                emit_rv_csr(self.builder, GuestArch.Riscv64, rd, csr, uimm, true, "s", IrTcTypeKind.I64)
+            RvOpcode.CSRRCI(rd, csr, uimm):
+                emit_rv_csr(self.builder, GuestArch.Riscv64, rd, csr, uimm, true, "c", IrTcTypeKind.I64)
+
+            # ---- System ----
+            RvOpcode.ECALL:
+                emit_rv_ecall(self.builder, GuestArch.Riscv64, pc, IrTcTypeKind.I64)
+            RvOpcode.EBREAK:
+                emit_rv_ebreak(self.builder, GuestArch.Riscv64, pc, IrTcTypeKind.I64)
+
+            # ---- Fence ----
+            RvOpcode.FENCE(_, _):
+                emit_rv_fence(self.builder)
+
+        Ok(4)  # All base ISA instructions are 4 bytes

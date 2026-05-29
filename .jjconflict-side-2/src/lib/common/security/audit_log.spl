@@ -1,0 +1,47 @@
+# Security Audit Log — write security events to a log file or stdout.
+#
+# Provides: log_security_event.
+
+use std.common.security.types.{AuditEntry, AuditConfig, SecuritySeverity, SecurityEvent}
+
+extern fn rt_file_append_text(path: text, content: text)
+extern fn rt_stderr_write(msg: text)
+
+fn _severity_rank(s: SecuritySeverity) -> i64:
+    match s:
+        SecuritySeverity.Debug:    0
+        SecuritySeverity.Info:     1
+        SecuritySeverity.Warn:     2
+        SecuritySeverity.Error:    3
+        SecuritySeverity.Critical: 4
+
+fn _severity_name(s: SecuritySeverity) -> text:
+    match s:
+        SecuritySeverity.Debug:    "DEBUG"
+        SecuritySeverity.Info:     "INFO"
+        SecuritySeverity.Warn:     "WARN"
+        SecuritySeverity.Error:    "ERROR"
+        SecuritySeverity.Critical: "CRITICAL"
+
+fn _event_text(event: SecurityEvent) -> text:
+    match event:
+        SecurityEvent.AccessDenied(resource, capability, peer):
+            "ACCESS_DENIED resource={resource} capability={capability} peer={peer}"
+        SecurityEvent.AuthFailure(user, reason):
+            "AUTH_FAILURE user={user} reason={reason}"
+        SecurityEvent.PrivilegeEscalation(subject, attempted_level):
+            "PRIVILEGE_ESCALATION subject={subject} attempted={attempted_level}"
+        SecurityEvent.AnomalyDetected(description):
+            "ANOMALY description={description}"
+
+# Append an audit entry to the configured log destination.
+fn log_security_event(entry: AuditEntry, config: AuditConfig):
+    if not config.enabled:
+        return
+    if _severity_rank(entry.severity) < _severity_rank(config.min_severity):
+        return
+    val line = "[{_severity_name(entry.severity)}] corr={entry.correlation_id} module={entry.module_path} {_event_text(entry.event)}\n"
+    if config.log_to_stdout:
+        rt_stderr_write(line)
+    if config.log_file.len() > 0:
+        rt_file_append_text(config.log_file, line)

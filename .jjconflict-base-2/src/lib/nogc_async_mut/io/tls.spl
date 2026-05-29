@@ -1,0 +1,277 @@
+"""
+# Async TLS I/O
+
+TLS 1.2 server implementation. Wraps an async TCP stream, performs the TLS
+handshake via the IoDriver completion model, then provides encrypted
+read/write over the negotiated session.
+
+## Wire Encoding
+
+All byte-level wire data uses `text` strings where each character is one
+byte produced through `tls_common.encode_u8(v)`.
+
+## Cipher Suites
+
+Server-side negotiation currently supports TLS_RSA_WITH_AES_128_GCM_SHA256
+(0x009C).  ECDHE suites require an ECDH key-agreement extern that does not
+yet exist; the cipher negotiation code is structured so adding ECDHE is a
+one-line change once rt_ecdh_agree lands.
+
+## Crypto Domain
+
+AES-GCM encrypt/decrypt uses TLS common hex-domain wrappers. Keys, IVs,
+nonces, AAD, and ciphertext are
+converted to hex before crypto operations and back to wire after. This avoids
+NUL-byte truncation inherent in strlen-based C string externs.
+
+## Sub-modules
+
+| File | Description |
+|------|-------------|
+| tls_common.spl | Shared types, wire encoding helpers, TlsConfig/TlsSessionKeys/TlsHandshakeState |
+| tls_io.spl | IoDriver I/O primitives, record-layer wire builders, TCP SFFI |
+| tls_handshake.spl | perform_server_handshake + all helpers |
+| tls.spl | AsyncTlsStream, AsyncTlsListener (this file) |
+"""
+
+use std.io.types.{IoError, IoErrorKind}
+use std.nogc_async_mut.io.driver.{IoDriver}
+use std.tls.types.{
+    CONTENT_TYPE_ALERT,
+    CONTENT_TYPE_APPLICATION_DATA,
+    TLS_VERSION_1_2,
+    TLS_RECORD_HEADER_SIZE,
+    TLS_MAX_FRAGMENT_LENGTH
+}
+use std.tls.record.{is_fatal_alert}
+use std.nogc_async_mut.io.tls_common.{
+    TlsConfig,
+    TlsSessionKeys,
+    TlsHandshakeState,
+    wire_to_bytes,
+    encode_u8,
+    encode_u16_be,
+    tls_aes_gcm_encrypt_hex,
+    tls_aes_gcm_decrypt_hex,
+    tls_wire_to_hex,
+    tls_hex_to_wire
+}
+use std.nogc_async_mut.io.tls_io.{
+    read_tls_record,
+    recv_exact,
+    send_all,
+    tls_tcp_bind,
+    tls_tcp_close,
+    tls_tcp_set_nonblocking
+}
+use std.nogc_async_mut.io.tls_handshake.{perform_server_handshake}
+use std.tls.utilities.{byte_at}
+
+# ============================================================================
+# Hex Helpers
+# ============================================================================
+
+val HEX_CHARS = "0123456789abcdef"
+
+fn hex_byte(v: i64) -> text:
+    """Convert a byte value (0-255) to a 2-character lowercase hex string."""
+    encode_u8(byte_at(HEX_CHARS, (v >> 4) & 15)) + encode_u8(byte_at(HEX_CHARS, v & 15))
+
+fn hex_u16_be(value: i64) -> text:
+    """Encode a 16-bit value as 4-char hex (big-endian)."""
+    hex_byte((value >> 8) & 255) + hex_byte(value & 255)
+
+fn hex_u64_be(value: i64) -> text:
+    """Encode a 64-bit value as 16-char hex (big-endian)."""
+    hex_byte((value >> 56) & 255) + hex_byte((value >> 48) & 255) + hex_byte((value >> 40) & 255) + hex_byte((value >> 32) & 255) + hex_byte((value >> 24) & 255) + hex_byte((value >> 16) & 255) + hex_byte((value >> 8) & 255) + hex_byte(value & 255)
+
+fn build_gcm_nonce_hex(implicit_iv_hex: text, seq_num: i64) -> text:
+    """Build 12-byte GCM nonce as hex: 4-byte implicit IV (8 hex chars) + 8-byte seq (16 hex chars)."""
+    implicit_iv_hex + hex_u64_be(seq_num)
+
+fn build_aead_aad_hex(seq_num: i64, content_type: i64, version: i64, length: i64) -> text:
+    """Build 13-byte AEAD AAD as hex: seq(8) + content_type(1) + version(2) + length(2)."""
+    hex_u64_be(seq_num) + hex_byte(content_type) + hex_u16_be(version) + hex_u16_be(length)
+
+# ============================================================================
+# AsyncTlsStream
+# ============================================================================
+
+class AsyncTlsStream:
+    fd: i64
+    driver: IoDriver
+    peer_addr: text
+    is_closed: bool
+    session_keys: TlsSessionKeys
+    cipher_suite: i64
+    client_seq: i64
+    server_seq: i64
+
+    fn read(buf_size: i64) -> Result<text, IoError>:
+        """Read decrypted application data from the TLS stream.
+
+        Reads a TLS record from the underlying TCP fd, verifies it is
+        application data, decrypts with AES-GCM (hex domain), returns plaintext.
+        """
+        if self.is_closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "TLS stream is closed"))
+
+        val header_wire = recv_exact(self.driver, self.fd, TLS_RECORD_HEADER_SIZE)
+        if header_wire == nil:
+            return Err(IoError(kind: IoErrorKind.ConnectionReset, message: "connection closed during TLS record header read"))
+
+        val header_bytes = wire_to_bytes(header_wire)
+        val content_type = byte_at(header_bytes, 0)
+        val record_len = (byte_at(header_bytes, 3) * 256) + byte_at(header_bytes, 4)
+
+        if record_len > TLS_MAX_FRAGMENT_LENGTH:
+            return Err(IoError(kind: IoErrorKind.InvalidData, message: "TLS record too large"))
+
+        val payload_wire = recv_exact(self.driver, self.fd, record_len)
+        if payload_wire == nil:
+            return Err(IoError(kind: IoErrorKind.ConnectionReset, message: "connection closed during TLS record payload read"))
+
+        if content_type == CONTENT_TYPE_ALERT:
+            val alert_bytes = wire_to_bytes(payload_wire)
+            if len(alert_bytes) >= 2:
+                val level = byte_at(alert_bytes, 0)
+                if is_fatal_alert(level):
+                    self.is_closed = true
+                    return Err(IoError(kind: IoErrorKind.ConnectionAborted, message: "TLS fatal alert received"))
+            return Err(IoError(kind: IoErrorKind.Other, message: "TLS alert received"))
+
+        if content_type != CONTENT_TYPE_APPLICATION_DATA:
+            return Err(IoError(kind: IoErrorKind.InvalidData, message: "expected application data record"))
+
+        # Convert wire data to hex for binary-safe crypto
+        val key_hex = tls_wire_to_hex(self.session_keys.client_write_key, 16)
+        val iv_hex = tls_wire_to_hex(self.session_keys.client_write_iv, 4)
+        val payload_hex = tls_wire_to_hex(payload_wire, record_len)
+        val nonce_hex = build_gcm_nonce_hex(iv_hex, self.client_seq)
+        val aad_hex = build_aead_aad_hex(self.client_seq, content_type, TLS_VERSION_1_2, record_len)
+        val pt_hex = tls_aes_gcm_decrypt_hex(key_hex, nonce_hex, payload_hex, aad_hex)
+        self.client_seq = self.client_seq + 1
+
+        if pt_hex == nil:
+            return Err(IoError(kind: IoErrorKind.InvalidData, message: "AES-GCM decryption failed"))
+
+        Ok(tls_hex_to_wire(pt_hex))
+
+    fn write(data: text) -> Result<i64, IoError>:
+        """Encrypt and send application data over the TLS stream.
+
+        Wraps plaintext in a TLS application data record encrypted with
+        AES-GCM (hex domain), sends over the underlying TCP fd.
+        """
+        if self.is_closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "TLS stream is closed"))
+
+        val data_len = len(wire_to_bytes(data))
+
+        # Convert key/IV/plaintext to hex for binary-safe crypto
+        val key_hex = tls_wire_to_hex(self.session_keys.server_write_key, 16)
+        val iv_hex = tls_wire_to_hex(self.session_keys.server_write_iv, 4)
+        val data_hex = tls_wire_to_hex(data, data_len)
+        val nonce_hex = build_gcm_nonce_hex(iv_hex, self.server_seq)
+        val aad_hex = build_aead_aad_hex(self.server_seq, CONTENT_TYPE_APPLICATION_DATA, TLS_VERSION_1_2, data_len)
+        val ct_hex = tls_aes_gcm_encrypt_hex(key_hex, nonce_hex, data_hex, aad_hex)
+        self.server_seq = self.server_seq + 1
+
+        # ct_hex is ASCII hex — len(ct_hex)/2 gives the wire byte count
+        val ct_len = len(ct_hex) / 2
+        val ct_wire = tls_hex_to_wire(ct_hex)
+        val record_header = encode_u8(CONTENT_TYPE_APPLICATION_DATA) + encode_u16_be(TLS_VERSION_1_2) + encode_u16_be(ct_len)
+        val record_wire = record_header + ct_wire
+
+        val send_result = send_all(self.driver, self.fd, record_wire)
+        if not send_result:
+            return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "failed to send TLS record"))
+        Ok(data_len)
+
+    me close() -> Result<(), IoError>:
+        """Send close_notify alert and close the stream."""
+        if self.is_closed:
+            return Ok(())
+        val alert_body = encode_u8(1) + encode_u8(0)
+        val alert_record = encode_u8(CONTENT_TYPE_ALERT) + encode_u16_be(TLS_VERSION_1_2) + encode_u16_be(2) + alert_body
+        send_all(self.driver, self.fd, alert_record)
+        self.is_closed = true
+        val close_op = self.driver.submit_close(self.fd)
+        self.driver.flush()
+        self.driver.poll(1, 5000)
+        Ok(())
+
+# ============================================================================
+# AsyncTlsListener
+# ============================================================================
+
+class AsyncTlsListener:
+    listener_fd: i64
+    tls_config: TlsConfig
+    driver: IoDriver
+    is_open: bool
+
+    static fn bind(driver: IoDriver, addr: text, config: TlsConfig) -> Result<AsyncTlsListener, IoError>:
+        """Bind a TCP listener and prepare for TLS connections."""
+        val fd = tls_tcp_bind(addr)
+        if fd < 0:
+            return Err(IoError(kind: IoErrorKind.AddrInUse, message: "TLS bind failed: {addr}"))
+        val ok = tls_tcp_set_nonblocking(fd, true)
+        if not ok:
+            tls_tcp_close(fd)
+            return Err(IoError(kind: IoErrorKind.Other, message: "failed to set non-blocking"))
+        Ok(AsyncTlsListener(
+            listener_fd: fd,
+            tls_config: config,
+            driver: driver,
+            is_open: true
+        ))
+
+    fn accept() -> Result<AsyncTlsStream, IoError>:
+        """Accept a TCP connection, perform TLS handshake, return encrypted stream."""
+        if not self.is_open:
+            return Err(IoError(kind: IoErrorKind.Other, message: "TLS listener is closed"))
+
+        val accept_op = self.driver.submit_accept(self.listener_fd)
+        self.driver.flush()
+        val completions = self.driver.poll(1, 30000)
+        if len(completions) == 0:
+            return Err(IoError(kind: IoErrorKind.TimedOut, message: "accept timed out"))
+
+        val c = completions[0]
+        if c.result < 0:
+            return Err(IoError(kind: IoErrorKind.Other, message: "accept failed"))
+        val client_fd = c.result
+
+        val hs_result = perform_server_handshake(
+            self.driver,
+            client_fd,
+            self.tls_config
+        )
+        match hs_result:
+            Ok(state):
+                val keys = state.session_keys
+                if keys == nil:
+                    tls_tcp_close(client_fd)
+                    return Err(IoError(kind: IoErrorKind.Other, message: "handshake produced no session keys"))
+                Ok(AsyncTlsStream(
+                    fd: client_fd,
+                    driver: self.driver,
+                    peer_addr: "",
+                    is_closed: false,
+                    session_keys: keys.unwrap(),
+                    cipher_suite: state.cipher_suite,
+                    client_seq: 0,
+                    server_seq: 0
+                ))
+            Err(e):
+                tls_tcp_close(client_fd)
+                Err(e)
+
+    me close():
+        """Close the TLS listener."""
+        if self.is_open:
+            self.driver.submit_close(self.listener_fd)
+            self.driver.flush()
+            self.driver.poll(1, 1000)
+            self.is_open = false

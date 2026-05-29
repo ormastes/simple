@@ -1,0 +1,548 @@
+# SCV maintenance and export operations.
+
+use app.io.mod (file_exists, file_read, file_delete, file_size, dir_create, dir_walk)
+use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
+use std.nogc_sync_mut.database.core.{SdnRow, SdnTable, new_sdn_database}
+use std.common.compress.gzip.{gzip_decompress}
+use std.scv.core.{scv_objects_dir, scv_object_path, scv_chunk_path, scv_object_index_path, scv_state_private, scv_line_set_contains, scv_worktree_path_safe, scv_parser_index_path}
+use std.scv.store.{scv_repo_exists, scv_read_workspace_commit, scv_workspace_parent_error, scv_commit_tree, scv_object_field, scv_content_id_for_file, scv_create_parent_dir, scv_i64_bytes_to_u8, scv_hash_text, scv_write_text, scv_write_file_object_from_bytes, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_current_op}
+use std.scv.integrity.{scv_current_tree_content}
+
+fn scv_count_files_under(path: text) -> i64:
+    if not file_exists(path):
+        return 0
+    var count = 0
+    for item in dir_walk(path):
+        count = count + 1
+    count
+
+fn scv_bytes_under(path: text) -> i64:
+    if not file_exists(path):
+        return 0
+    var total = 0
+    for item in dir_walk(path):
+        total = total + file_size(item)
+    total
+
+fn scv_stats(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val objects = scv_objects_dir(root)
+    var out = ""
+    out = out + "chunks={scv_count_files_under(\"{objects}/chunks\")}\n"
+    out = out + "files={scv_count_files_under(\"{objects}/files\")}\n"
+    out = out + "trees={scv_count_files_under(\"{objects}/trees\")}\n"
+    out = out + "commits={scv_count_files_under(\"{objects}/commits\")}\n"
+    out = out + "changes={scv_count_files_under(\"{objects}/changes\")}\n"
+    out = out + "operations={scv_count_files_under(\"{objects}/operations\")}\n"
+    out = out + "conflicts={scv_count_files_under(\"{objects}/conflicts\")}\n"
+    out = out + "syntax={scv_count_files_under(\"{objects}/syntax\")}\n"
+    out + "bytes={scv_bytes_under(objects)}\n"
+
+fn scv_export_tree(root: text, out_dir: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val tree_content = scv_current_tree_content(root)
+    if tree_content == "":
+        return "ERROR missing current tree\n"
+    dir_create(out_dir, true)
+    var exported = 0
+    var seen_paths = ""
+    for line in tree_content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() != 5:
+            return "ERROR bad tree entry\n"
+        val rel = parts[0]
+        if not scv_manifest_rel_safe(rel):
+            return "ERROR unsafe tree path: {rel}\n"
+        if scv_line_set_contains(seen_paths, rel):
+            return "ERROR duplicate tree path: {rel}\n"
+        seen_paths = seen_paths + rel + "\n"
+        val chunk = parts[2]
+        val size = parts[3].to_i64() ?? -1
+        if size < 0:
+            return "ERROR bad tree size: {rel}\n"
+        val src = scv_chunk_path(root, chunk)
+        if not file_exists(src):
+            return "ERROR missing chunk: {chunk}\n"
+        if file_size(src) != size:
+            return "ERROR chunk size mismatch: {chunk}\n"
+        if scv_content_id_for_file(src) != chunk:
+            return "ERROR corrupt chunk: {chunk}\n"
+        val dst = "{out_dir}/{rel}"
+        scv_create_parent_dir(dst)
+        file_write_bytes(dst, scv_i64_bytes_to_u8(file_read_bytes(src) ?? []))
+        exported = exported + 1
+    "exported {exported}\n"
+
+fn scv_export_manifest(root: text, manifest_path: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val commit = scv_read_workspace_commit(root)
+    val tree = scv_commit_tree(root, commit)
+    val tree_content = scv_current_tree_content(root)
+    if commit == "" or tree == "" or tree_content == "":
+        return "ERROR missing current tree\n"
+    var manifest = "format: scv-export-manifest-v1\n"
+    manifest = manifest + "commit: {commit}\n"
+    manifest = manifest + "tree: {tree}\n"
+    manifest = manifest + "files:\n"
+    var seen_paths = ""
+    for line in tree_content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() != 5:
+            return "ERROR bad tree entry\n"
+        if not scv_manifest_rel_safe(parts[0]):
+            return "ERROR unsafe tree path: {parts[0]}\n"
+        if scv_line_set_contains(seen_paths, parts[0]):
+            return "ERROR duplicate tree path: {parts[0]}\n"
+        seen_paths = seen_paths + parts[0] + "\n"
+        val chunk = parts[2]
+        val size = parts[3].to_i64() ?? -1
+        if size < 0:
+            return "ERROR bad tree size: {parts[0]}\n"
+        val chunk_path = scv_chunk_path(root, chunk)
+        if not file_exists(chunk_path):
+            return "ERROR missing chunk: {chunk}\n"
+        if file_size(chunk_path) != size:
+            return "ERROR chunk size mismatch: {chunk}\n"
+        if scv_content_id_for_file(chunk_path) != chunk:
+            return "ERROR corrupt chunk: {chunk}\n"
+        manifest = manifest + "file|{parts[0]}|{chunk}|{parts[3]}\n"
+    scv_create_parent_dir(manifest_path)
+    scv_write_text(manifest_path, manifest)
+    "export-manifest {manifest_path}\n"
+
+fn scv_manifest_rel_safe(rel: text) -> bool:
+    scv_worktree_path_safe(rel)
+
+fn scv_import_manifest_file(root: text, source_dir: text, rel: text, chunk: text, size_text: text, lines: [text]) -> (text, [text], i64):
+    if not scv_manifest_rel_safe(rel):
+        return ("ERROR unsafe manifest path: {rel}\n", lines, 0)
+    val src = "{source_dir}/{rel}"
+    if not file_exists(src):
+        return ("ERROR missing source file: {rel}\n", lines, 0)
+    if "{file_size(src)}" != size_text:
+        return ("ERROR size mismatch: {rel}\n", lines, 0)
+    if scv_content_id_for_file(src) != chunk:
+        return ("ERROR content mismatch: {rel}\n", lines, 0)
+    val chunk_path = scv_chunk_path(root, chunk)
+    if not file_exists(chunk_path):
+        file_write_bytes(chunk_path, scv_i64_bytes_to_u8(file_read_bytes(src) ?? []))
+    val payload = "path: {rel}\nchunk: {chunk}\nsize: {size_text}\nmtime: 0\n"
+    val file_id = scv_hash_text("file", payload)
+    scv_write_text(scv_object_path(root, "files", file_id), payload)
+    var next_lines = lines
+    next_lines.push("{rel}|{file_id}|{chunk}|{size_text}|0")
+    ("", next_lines, 1)
+
+fn scv_import_manifest(root: text, manifest_path: text, source_dir: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val parent_error = scv_workspace_parent_error(root)
+    if parent_error != "":
+        return parent_error
+    if not file_exists(manifest_path):
+        return "ERROR missing manifest\n"
+    var tree_lines: [text] = []
+    var imported = 0
+    var saw_format = false
+    var seen_paths = ""
+    for line in file_read(manifest_path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "format: scv-export-manifest-v1":
+            saw_format = true
+        if not trimmed.starts_with("file|"):
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() != 4:
+            return "ERROR bad manifest file line: {trimmed}\n"
+        if scv_line_set_contains(seen_paths, parts[1]):
+            return "ERROR duplicate manifest path: {parts[1]}\n"
+        seen_paths = seen_paths + parts[1] + "\n"
+        val (error, next_lines, count) = scv_import_manifest_file(root, source_dir, parts[1], parts[2], parts[3], tree_lines)
+        if error != "":
+            return error
+        tree_lines = next_lines
+        imported = imported + count
+    if not saw_format:
+        return "ERROR unsupported manifest format\n"
+    if imported == 0:
+        return "ERROR manifest has no files\n"
+    val tree = scv_write_tree_object(root, tree_lines)
+    val commit = scv_write_commit(root, scv_read_workspace_commit(root), tree, scv_state_private())
+    val op = scv_write_operation(root, scv_current_op(root), commit, "import-manifest")
+    if op.starts_with("ERROR"):
+        return op
+    scv_write_text("{root}/.scv/meta/status_index.sdn", file_read(scv_object_path(root, "trees", tree)))
+    "import-manifest files={imported} commit={commit} op={op}\n"
+
+fn scv_object_id_from_path(path: text) -> text:
+    val parts = path.split("/")
+    val name = parts[parts.len() - 1]
+    if name.ends_with(".sdn"):
+        name[0:name.len() - 4]
+    elif name.ends_with(".blob"):
+        name[0:name.len() - 5]
+    else:
+        name
+
+fn scv_index_kind(root: text, table: SdnTable, kind: text) -> SdnTable:
+    var result = table
+    val dir = "{scv_objects_dir(root)}/{kind}"
+    if not file_exists(dir):
+        return result
+    for path in dir_walk(dir):
+        val row = SdnRow(fields: {}, _version: 0)
+        row.set("id", scv_object_id_from_path(path))
+        row.set("kind", kind)
+        row.set("path", path)
+        row.set("size", "{file_size(path)}")
+        row.set("valid", "true")
+        result.add_row(row)
+    result
+
+fn scv_rebuild_object_index(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    var db = new_sdn_database(scv_object_index_path(root))
+    var table = SdnTable.new("objects", ["id", "kind", "path", "size", "valid"])
+    for kind in ["chunks", "files", "trees", "commits", "changes", "operations", "conflicts", "syntax", "packs"]:
+        table = scv_index_kind(root, table, kind)
+    db.set_table("objects", table)
+    if db.save():
+        "db-index objects={table.rows.len()}\n"
+    else:
+        "ERROR db-index save failed\n"
+
+fn scv_add_reachable_from_file_object(root: text, file_id: text, reachable: text) -> text:
+    var out = reachable
+    val path = scv_object_path(root, "files", file_id)
+    if not file_exists(path):
+        return out
+    out = out + file_id + "\n"
+    for line in file_read(path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("chunk:"):
+            val chunk = trimmed[6:].trim()
+            if chunk != "" and not scv_line_set_contains(out, chunk):
+                out = out + chunk + "\n"
+        elif trimmed.contains("|"):
+            val parts = trimmed.split("|")
+            if parts.len() >= 1:
+                val chunk = parts[0]
+                if chunk.starts_with("sha256_") and not scv_line_set_contains(out, chunk):
+                    out = out + chunk + "\n"
+    out
+
+fn scv_add_reachable_from_tree(root: text, tree_id: text, reachable: text) -> text:
+    var out = reachable
+    if tree_id == "" or scv_line_set_contains(out, tree_id):
+        return out
+    out = out + tree_id + "\n"
+    val tree_path = scv_object_path(root, "trees", tree_id)
+    if not file_exists(tree_path):
+        return out
+    for line in file_read(tree_path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() >= 2:
+            out = scv_add_reachable_from_file_object(root, parts[1], out)
+    out
+
+fn scv_add_reachable_from_commit(root: text, commit_id: text, reachable: text) -> text:
+    var out = reachable
+    if commit_id == "" or scv_line_set_contains(out, commit_id):
+        return out
+    out = out + commit_id + "\n"
+    val commit_path = scv_object_path(root, "commits", commit_id)
+    if not file_exists(commit_path):
+        return out
+    val content = file_read(commit_path)
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("tree:"):
+            out = scv_add_reachable_from_tree(root, trimmed[5:].trim(), out)
+        elif trimmed.starts_with("parents:"):
+            for parent in trimmed[8:].trim().split(","):
+                val p = parent.trim()
+                if p != "":
+                    out = scv_add_reachable_from_commit(root, p, out)
+    out
+
+fn scv_add_reachable_syntax_node(root: text, node_id: text, reachable: text) -> text:
+    var out = reachable
+    if node_id == "" or scv_line_set_contains(out, node_id):
+        return out
+    out = out + node_id + "\n"
+    val path = scv_object_path(root, "syntax", node_id)
+    if not file_exists(path):
+        return out
+    for line in file_read(path).split("\n"):
+        val trimmed = line.trim()
+        if not trimmed.starts_with("children:"):
+            continue
+        val children = trimmed[9:].trim()
+        if children == "":
+            continue
+        for child in children.split(","):
+            out = scv_add_reachable_syntax_node(root, child.trim(), out)
+    out
+
+fn scv_add_reachable_from_parser_index(root: text, reachable: text) -> text:
+    var out = reachable
+    val index_path = scv_parser_index_path(root)
+    if not file_exists(index_path):
+        return out
+    for line in file_read(index_path).split("\n"):
+        val trimmed = line.trim()
+        if not trimmed.contains("|node="):
+            continue
+        val parts = trimmed.split("|node=")
+        if parts.len() >= 2:
+            out = scv_add_reachable_syntax_node(root, parts[1].trim(), out)
+    out
+
+fn scv_add_reachable_from_view_content(root: text, view_content: text, reachable: text) -> text:
+    var out = reachable
+    var section = ""
+    for line in view_content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        if trimmed == "heads:" or trimmed == "bookmarks:" or trimmed == "workspaces:":
+            section = trimmed
+            continue
+        if section == "heads:":
+            out = scv_add_reachable_from_commit(root, trimmed, out)
+        elif section == "bookmarks:":
+            val parts = trimmed.split("|")
+            if parts.len() >= 2:
+                out = scv_add_reachable_from_commit(root, parts[1].trim(), out)
+        elif section == "workspaces:" and trimmed.starts_with("default:"):
+            out = scv_add_reachable_from_commit(root, trimmed[8:].trim(), out)
+    out
+
+fn scv_reachable_object_ids(root: text) -> text:
+    var out = ""
+    val current = scv_read_workspace_commit(root)
+    out = scv_add_reachable_from_commit(root, current, out)
+    val ops_dir = "{scv_objects_dir(root)}/operations"
+    if file_exists(ops_dir):
+        for op_path in dir_walk(ops_dir):
+            val content = file_read(op_path)
+            val view = if content.contains("view:"):
+                var found = ""
+                for line in content.split("\n"):
+                    if line.starts_with("view:"):
+                        found = line[5:].trim()
+                found
+            else:
+                ""
+            if view != "":
+                val view_path = scv_object_path(root, "operations", view)
+                if file_exists(view_path):
+                    out = scv_add_reachable_from_view_content(root, file_read(view_path), out)
+    scv_add_reachable_from_parser_index(root, out)
+
+fn scv_count_unreachable_kind(root: text, kind: text, reachable: text) -> i64:
+    val dir = "{scv_objects_dir(root)}/{kind}"
+    if not file_exists(dir):
+        return 0
+    var count = 0
+    for path in dir_walk(dir):
+        val id = scv_object_id_from_path(path)
+        if not scv_line_set_contains(reachable, id):
+            count = count + 1
+    count
+
+fn scv_prune_unreachable_kind(root: text, kind: text, reachable: text) -> i64:
+    val dir = "{scv_objects_dir(root)}/{kind}"
+    if not file_exists(dir):
+        return 0
+    var count = 0
+    for path in dir_walk(dir):
+        val id = scv_object_id_from_path(path)
+        if not scv_line_set_contains(reachable, id) and file_delete(path):
+            count = count + 1
+    count
+
+fn scv_gc_dry_run(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val reachable = scv_reachable_object_ids(root)
+    var out = ""
+    out = out + "unreachable_chunks={scv_count_unreachable_kind(root, \"chunks\", reachable)}\n"
+    out = out + "unreachable_files={scv_count_unreachable_kind(root, \"files\", reachable)}\n"
+    out = out + "unreachable_trees={scv_count_unreachable_kind(root, \"trees\", reachable)}\n"
+    out = out + "unreachable_commits={scv_count_unreachable_kind(root, \"commits\", reachable)}\n"
+    out + "unreachable_syntax={scv_count_unreachable_kind(root, \"syntax\", reachable)}\n"
+
+fn scv_gc_prune(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val reachable = scv_reachable_object_ids(root)
+    var out = ""
+    out = out + "pruned_chunks={scv_prune_unreachable_kind(root, \"chunks\", reachable)}\n"
+    out = out + "pruned_files={scv_prune_unreachable_kind(root, \"files\", reachable)}\n"
+    out = out + "pruned_trees={scv_prune_unreachable_kind(root, \"trees\", reachable)}\n"
+    out = out + "pruned_commits={scv_prune_unreachable_kind(root, \"commits\", reachable)}\n"
+    out + "pruned_syntax={scv_prune_unreachable_kind(root, \"syntax\", reachable)}\n"
+
+# ─── GC pack awareness ───────────────────────────────────────────────────────
+
+# Enumerate base_ids referenced by entry-delta rows across all v2 packs.
+# Returns a newline-separated set of base object ids.
+fn scv_pack_reachable_base_ids(root: text) -> text:
+    val pack_dir = "{scv_objects_dir(root)}/packs"
+    if not file_exists(pack_dir):
+        return ""
+    var base_ids = ""
+    for path in dir_walk(pack_dir):
+        if not path.ends_with(".pack.gz"):
+            continue
+        val compressed = scv_i64_bytes_to_u8(file_read_bytes(path) ?? [])
+        val payload = gzip_decompress(compressed)
+        val v2_header = "format: scv-pack-payload-v2\n".bytes()
+        if payload.len() < v2_header.len() or payload[0:v2_header.len()] != v2_header:
+            continue
+        var pos = v2_header.len()
+        while pos < payload.len():
+            val (line, line_end) = scv_pack_bytes_line_m(payload, pos)
+            val trimmed = line.trim()
+            if trimmed == "":
+                pos = line_end + 1
+                continue
+            if trimmed.starts_with("entry-delta "):
+                val parts = trimmed.split(" ")
+                if parts.len() >= 4:
+                    val base_id = parts[3]
+                    if not scv_line_set_contains(base_ids, base_id):
+                        base_ids = base_ids + base_id + "\n"
+                val size = if parts.len() >= 6: (parts[5].to_i64() ?? -1) else: -1
+                if size < 0:
+                    pos = line_end + 1
+                    continue
+                val data_start = line_end + 1
+                val data_end = data_start + size
+                pos = data_end + "\nendentry\n".bytes().len()
+            elif trimmed.starts_with("entry "):
+                val parts = trimmed.split(" ")
+                val size = if parts.len() >= 4: (parts[3].to_i64() ?? -1) else: -1
+                if size < 0:
+                    pos = line_end + 1
+                    continue
+                val data_start = line_end + 1
+                val data_end = data_start + size
+                pos = data_end + "\nendentry\n".bytes().len()
+            else:
+                pos = line_end + 1
+    base_ids
+
+# scv_pack_bytes_line_m: same as scv_pack_bytes_line in pack.spl
+# but available in maintenance module
+fn scv_pack_bytes_line_m(payload: [u8], start: i64) -> (text, i64):
+    var end = start
+    while end < payload.len() and payload[end] != 10.to_u8():
+        end = end + 1
+    (text.from_bytes(payload[start:end]), end)
+
+# Delete packs where all objects are unreachable.
+# NEVER deletes a pack if any of its base_ids are still reachable.
+# Returns count of deleted packs.
+fn scv_gc_prune_packs(root: text, reachable: text) -> i64:
+    val pack_dir = "{scv_objects_dir(root)}/packs"
+    if not file_exists(pack_dir):
+        return 0
+    var pruned = 0
+    for path in dir_walk(pack_dir):
+        if not path.ends_with(".pack.gz"):
+            continue
+        val pack_id = scv_pack_id_from_path_m(path)
+        val compressed = scv_i64_bytes_to_u8(file_read_bytes(path) ?? [])
+        val payload = gzip_decompress(compressed)
+        val v2_header = "format: scv-pack-payload-v2\n".bytes()
+        if payload.len() < v2_header.len() or payload[0:v2_header.len()] != v2_header:
+            continue
+        # Check if any object (full or delta) in this pack is reachable
+        var any_reachable = false
+        var pos = v2_header.len()
+        while pos < payload.len():
+            val (line, line_end) = scv_pack_bytes_line_m(payload, pos)
+            val trimmed = line.trim()
+            if trimmed == "":
+                pos = line_end + 1
+                continue
+            if trimmed.starts_with("entry "):
+                val parts = trimmed.split(" ")
+                val id = if parts.len() >= 3: parts[2] else: ""
+                if id != "" and scv_line_set_contains(reachable, id):
+                    any_reachable = true
+                val size = if parts.len() >= 4: (parts[3].to_i64() ?? -1) else: -1
+                if size < 0:
+                    pos = line_end + 1
+                    continue
+                val data_start = line_end + 1
+                val data_end = data_start + size
+                pos = data_end + "\nendentry\n".bytes().len()
+            elif trimmed.starts_with("entry-delta "):
+                val parts = trimmed.split(" ")
+                val id = if parts.len() >= 3: parts[2] else: ""
+                val base_id = if parts.len() >= 4: parts[3] else: ""
+                if id != "" and scv_line_set_contains(reachable, id):
+                    any_reachable = true
+                if base_id != "" and scv_line_set_contains(reachable, base_id):
+                    any_reachable = true
+                val size = if parts.len() >= 6: (parts[5].to_i64() ?? -1) else: -1
+                if size < 0:
+                    pos = line_end + 1
+                    continue
+                val data_start = line_end + 1
+                val data_end = data_start + size
+                pos = data_end + "\nendentry\n".bytes().len()
+            else:
+                pos = line_end + 1
+        if not any_reachable:
+            val manifest_path = "{pack_dir}/{pack_id}.manifest"
+            file_delete(path)
+            if file_exists(manifest_path):
+                file_delete(manifest_path)
+            pruned = pruned + 1
+    pruned
+
+fn scv_pack_id_from_path_m(path: text) -> text:
+    val parts = path.split("/")
+    val name = parts[parts.len() - 1]
+    if name.ends_with(".pack.gz"):
+        name[0:name.len() - 8]
+    else:
+        name
+
+# GC with pack awareness: prune loose objects + prune unreachable packs
+fn scv_gc(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    # Build reachable set including pack base ids
+    var reachable = scv_reachable_object_ids(root)
+    # Add base ids from packs to pin them
+    val base_ids = scv_pack_reachable_base_ids(root)
+    for bid in base_ids.split("\n"):
+        val b = bid.trim()
+        if b != "" and not scv_line_set_contains(reachable, b):
+            reachable = reachable + b + "\n"
+    var out = ""
+    out = out + "pruned_chunks={scv_prune_unreachable_kind(root, \"chunks\", reachable)}\n"
+    out = out + "pruned_files={scv_prune_unreachable_kind(root, \"files\", reachable)}\n"
+    out = out + "pruned_trees={scv_prune_unreachable_kind(root, \"trees\", reachable)}\n"
+    out = out + "pruned_commits={scv_prune_unreachable_kind(root, \"commits\", reachable)}\n"
+    out = out + "pruned_syntax={scv_prune_unreachable_kind(root, \"syntax\", reachable)}\n"
+    val pruned_packs = scv_gc_prune_packs(root, reachable)
+    out + "pruned_packs={pruned_packs}\n"

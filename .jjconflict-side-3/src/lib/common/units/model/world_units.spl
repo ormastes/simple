@@ -1,0 +1,119 @@
+# World Units — rational-arithmetic unit types for the compiler's unit system.
+#
+# Provides: ExactRatio, UnitFactor, UnitExpression, UnitClass,
+#           exact_ratio, exact_ratio_mul, exact_ratio_div, exact_ratio_equal,
+#           unit_expression, unit_expression_from_base, unit_expression_scaled,
+#           unit_expression_mul, unit_expression_div,
+#           unit_expression_factor_exponent, unit_expression_equivalent.
+
+# --- ExactRatio: lossless rational number -----------------------------------
+
+struct ExactRatio:
+    numerator: i64
+    denominator: i64
+
+fn _gcd(a: i64, b: i64) -> i64:
+    var x = if a < 0: 0 - a else: a
+    var y = if b < 0: 0 - b else: b
+    while y != 0:
+        val t = y
+        y = x % y
+        x = t
+    x
+
+fn exact_ratio(numerator: i64, denominator: i64) -> ExactRatio:
+    if denominator == 0:
+        return ExactRatio(numerator: numerator, denominator: 1)
+    val g = _gcd(numerator, denominator)
+    ExactRatio(numerator: numerator / g, denominator: denominator / g)
+
+fn exact_ratio_mul(a: ExactRatio, b: ExactRatio) -> ExactRatio:
+    exact_ratio(a.numerator * b.numerator, a.denominator * b.denominator)
+
+fn exact_ratio_div(a: ExactRatio, b: ExactRatio) -> ExactRatio:
+    exact_ratio(a.numerator * b.denominator, a.denominator * b.numerator)
+
+fn exact_ratio_equal(a: ExactRatio, b: ExactRatio) -> bool:
+    a.numerator * b.denominator == b.numerator * a.denominator
+
+# --- UnitFactor: a base dimension raised to an exponent --------------------
+
+struct UnitFactor:
+    dimension: text
+    exponent: i64
+
+# --- UnitClass: kind of unit -----------------------------------------------
+
+enum UnitClass:
+    Linear
+    Affine
+    Logarithmic
+    Count
+    Currency
+    Calendar
+    ProcedureDefined
+
+# --- UnitExpression: product of UnitFactors + scale factor ------------------
+
+struct UnitExpression:
+    factors: [UnitFactor]
+    scale: ExactRatio
+
+fn unit_expression(factors: [UnitFactor], scale: ExactRatio) -> UnitExpression:
+    UnitExpression(factors: factors, scale: scale)
+
+fn unit_expression_from_base(dimension: text) -> UnitExpression:
+    UnitExpression(
+        factors: [UnitFactor(dimension: dimension, exponent: 1)],
+        scale: ExactRatio(numerator: 1, denominator: 1)
+    )
+
+fn unit_expression_scaled(expr: UnitExpression, scale: ExactRatio) -> UnitExpression:
+    UnitExpression(factors: expr.factors, scale: exact_ratio_mul(expr.scale, scale))
+
+fn unit_expression_mul(a: UnitExpression, b: UnitExpression) -> UnitExpression:
+    var combined: [UnitFactor] = []
+    for f in a.factors:
+        combined.push(f)
+    for f in b.factors:
+        combined.push(f)
+    UnitExpression(factors: combined, scale: exact_ratio_mul(a.scale, b.scale))
+
+fn unit_expression_div(a: UnitExpression, b: UnitExpression) -> UnitExpression:
+    var inverted: [UnitFactor] = []
+    for f in b.factors:
+        inverted.push(UnitFactor(dimension: f.dimension, exponent: 0 - f.exponent))
+    var combined: [UnitFactor] = []
+    for f in a.factors:
+        combined.push(f)
+    for f in inverted:
+        combined.push(f)
+    UnitExpression(factors: combined, scale: exact_ratio_div(a.scale, b.scale))
+
+fn unit_expression_factor_exponent(expr: UnitExpression, dimension: text) -> i64:
+    var total: i64 = 0
+    for f in expr.factors:
+        if f.dimension == dimension:
+            total = total + f.exponent
+    total
+
+fn unit_expression_equivalent(a: UnitExpression, b: UnitExpression) -> bool:
+    # Two expressions are equivalent if they have the same dimensions
+    # (simplified check: compare total exponents for each dimension)
+    val dims_a = _collect_dimensions(a)
+    val dims_b = _collect_dimensions(b)
+    for d in dims_a:
+        if unit_expression_factor_exponent(a, d) != unit_expression_factor_exponent(b, d):
+            return false
+    true
+
+fn _collect_dimensions(expr: UnitExpression) -> [text]:
+    var dims: [text] = []
+    for f in expr.factors:
+        var found = false
+        for d in dims:
+            if d == f.dimension:
+                found = true
+        if not found:
+            dims.push(f.dimension)
+    dims

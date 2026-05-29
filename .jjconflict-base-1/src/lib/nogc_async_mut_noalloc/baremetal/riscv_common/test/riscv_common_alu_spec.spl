@@ -1,0 +1,74 @@
+# ============================================================================
+# Spec: RISC-V Common — ALU Operations
+# ============================================================================
+
+use std.io_runtime
+use std.nogc_async_mut_noalloc.baremetal.riscv_common.xlen.XlenConfig
+use std.nogc_async_mut_noalloc.baremetal.riscv_common.alu.{alu_eval, alu_op_name, ALU_ADD, ALU_SUB, ALU_SLL, ALU_SLT, ALU_SLTU, ALU_XOR, ALU_SRL, ALU_SRA, ALU_OR, ALU_AND, ALU_ADDW, ALU_SUBW}
+
+describe "alu_eval RV32":
+    val cfg = XlenConfig.rv32()
+
+    it "ADD computes a + b":
+        expect alu_eval(cfg, ALU_ADD, 10, 20) == 30
+        expect alu_eval(cfg, ALU_ADD, 0xFFFFFFFF, 1) == 0
+
+    it "SUB computes a - b":
+        expect alu_eval(cfg, ALU_SUB, 20, 10) == 10
+        expect alu_eval(cfg, ALU_SUB, 0, 1) == 0xFFFFFFFF
+
+    it "SLL shifts left":
+        expect alu_eval(cfg, ALU_SLL, 1, 4) == 16
+        expect alu_eval(cfg, ALU_SLL, 1, 31) == 0x80000000
+
+    it "SLT does signed compare":
+        # -1 < 1 in signed
+        expect alu_eval(cfg, ALU_SLT, -1, 1) == 1
+        expect alu_eval(cfg, ALU_SLT, 1, -1) == 0
+        expect alu_eval(cfg, ALU_SLT, 5, 5) == 0
+
+    it "SLTU does unsigned compare":
+        expect alu_eval(cfg, ALU_SLTU, 0, 1) == 1
+        expect alu_eval(cfg, ALU_SLTU, 1, 0) == 0
+        # 0xFFFFFFFF > 0 unsigned
+        expect alu_eval(cfg, ALU_SLTU, 0, 0xFFFFFFFF) == 1
+
+    it "XOR computes bitwise xor":
+        expect alu_eval(cfg, ALU_XOR, 0xFF, 0x0F) == 0xF0
+        expect alu_eval(cfg, ALU_XOR, 0xAA, 0xAA) == 0
+
+    it "SRL shifts right logical":
+        expect alu_eval(cfg, ALU_SRL, 0x80, 4) == 0x08
+        expect alu_eval(cfg, ALU_SRL, 0x80000000, 31) == 1
+
+    it "SRA shifts right arithmetic":
+        # 0x80000000 >> 4 arithmetic should fill with 1s
+        val result = alu_eval(cfg, ALU_SRA, 0x80000000, 4)
+        # After sign-extend and shift, result should have high bits set
+        expect result & 0x80000000 != 0
+
+    it "OR computes bitwise or":
+        expect alu_eval(cfg, ALU_OR, 0xF0, 0x0F) == 0xFF
+
+    it "AND computes bitwise and":
+        expect alu_eval(cfg, ALU_AND, 0xFF, 0x0F) == 0x0F
+        expect alu_eval(cfg, ALU_AND, 0xAA, 0x55) == 0
+
+describe "alu_eval RV64 word ops":
+    val cfg = XlenConfig.rv64()
+
+    it "ADDW truncates to 32 bits and sign-extends":
+        val result = alu_eval(cfg, ALU_ADDW, 0x7FFFFFFF, 1)
+        # 0x7FFFFFFF + 1 = 0x80000000 which sign-extends to negative
+        expect result & 0x80000000 != 0
+
+    it "SUBW truncates to 32 bits":
+        val result = alu_eval(cfg, ALU_SUBW, 0, 1)
+        expect result & 0xFFFFFFFF == 0xFFFFFFFF
+
+describe "alu_op_name":
+    it "returns correct names":
+        expect alu_op_name(ALU_ADD) == "ADD"
+        expect alu_op_name(ALU_SUB) == "SUB"
+        expect alu_op_name(ALU_XOR) == "XOR"
+        expect alu_op_name(99) == "???"

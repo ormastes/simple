@@ -1,0 +1,119 @@
+# Full-Text Search via trigram indexing
+# Builds an inverted index of 3-char substrings for approximate string matching.
+
+use nogc_async_mut.database.core (SdnTable, SdnRow)
+
+struct FtsIndex:
+    column: text
+    trigram_map: Dict<text, [i64]>  # trigram -> row indices
+
+struct FtsResult:
+    row_idx: i64
+    score: f64  # trigram overlap ratio
+
+fn trigram_extract(s: text) -> [text]:
+    var result: [text] = []
+    val n = s.len()
+    if n < 3:
+        return result
+    var i = 0
+    while i <= n - 3:
+        val tri = s[i..(i + 3)]
+        result.push(tri)
+        i = i + 1
+    result
+
+fn trigram_overlap_count(a: [text], b: [text]) -> i64:
+    var count: i64 = 0
+    for t in a:
+        for u in b:
+            if t == u:
+                count = count + 1
+                break
+    count
+
+fn fts_build(table: SdnTable, column: text) -> FtsIndex:
+    var tmap: Dict<text, [i64]> = {}
+    var row_idx: i64 = 0
+    for row in table.rows:
+        val val_opt = row.get(column)
+        if val_opt.?:
+            val s = val_opt.unwrap()
+            val tris = trigram_extract(s)
+            for tri in tris:
+                if tmap.contains_key(tri):
+                    var list = tmap[tri]
+                    list.push(row_idx)
+                    tmap[tri] = list
+                else:
+                    tmap[tri] = [row_idx]
+        row_idx = row_idx + 1
+    FtsIndex(column: column, trigram_map: tmap)
+
+fn fts_search(index: FtsIndex, query: text, limit: i64) -> [FtsResult]:
+    val query_tris = trigram_extract(query)
+    if query_tris.len() == 0:
+        return []
+
+    # Count hits per row index
+    var hits: Dict<i64, i64> = {}
+    for tri in query_tris:
+        if index.trigram_map.contains_key(tri):
+            val rows = index.trigram_map[tri]
+            for ridx in rows:
+                if hits.contains_key(ridx):
+                    hits[ridx] = hits[ridx] + 1
+                else:
+                    hits[ridx] = 1
+
+    val query_len = query_tris.len()
+    var results: [FtsResult] = []
+    for (ridx, hit_count) in hits:
+        val score = hit_count.to_float() / query_len.to_float()
+        results.push(FtsResult(row_idx: ridx, score: score))
+
+    # Sort by descending score (simple insertion sort for small result sets)
+    var sorted: [FtsResult] = []
+    for item in results:
+        var inserted = false
+        var out: [FtsResult] = []
+        for existing in sorted:
+            if not inserted and item.score >= existing.score:
+                out.push(item)
+                inserted = true
+            out.push(existing)
+        if not inserted:
+            out.push(item)
+        sorted = out
+
+    # Apply limit
+    var final_results: [FtsResult] = []
+    var taken: i64 = 0
+    for r in sorted:
+        if taken >= limit:
+            break
+        final_results.push(r)
+        taken = taken + 1
+    final_results
+
+fn fts_update(index: FtsIndex, row_idx: i64, old_value: text, new_value: text):
+    # Remove old trigrams
+    val old_tris = trigram_extract(old_value)
+    for tri in old_tris:
+        if index.trigram_map.contains_key(tri):
+            val rows = index.trigram_map[tri]
+            var new_rows: [i64] = []
+            for r in rows:
+                if r != row_idx:
+                    new_rows.push(r)
+            index.trigram_map[tri] = new_rows
+
+    # Add new trigrams
+    val new_tris = trigram_extract(new_value)
+    for tri in new_tris:
+        if index.trigram_map.contains_key(tri):
+            var list = index.trigram_map[tri]
+            list.push(row_idx)
+            index.trigram_map[tri] = list
+        else:
+            index.trigram_map[tri] = [row_idx]

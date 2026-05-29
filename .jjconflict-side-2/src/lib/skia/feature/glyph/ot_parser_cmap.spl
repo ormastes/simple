@@ -1,0 +1,124 @@
+# OpenType cmap table parser (format 4)
+
+use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, find_table, read_u16_be, read_i16_be, read_u32_be}
+
+# ===== cmap =====
+
+class CmapFormat4:
+    seg_count: u32
+    end_codes: [u32]
+    start_codes: [u32]
+    id_deltas: [i32]
+    id_range_offsets: [u32]
+    glyph_ids: [u32]
+
+fn parse_cmap_format4(font: OtFont) -> Option<CmapFormat4>:
+    # Tag 'cmap' = 0x636D6170
+    val cmap_tag: u32 = 1668112752
+    val maybe_tbl = find_table(font, cmap_tag)
+    if maybe_tbl == None:
+        return None
+    val tbl = maybe_tbl.unwrap()
+    val base = tbl.offset as i64
+    val blob = font.blob
+    val version = read_u16_be(blob, base)
+    val num_subtables = read_u16_be(blob, base + 2) as i64
+    # Walk encoding records looking for format 4 (prefer platform 3 encoding 1, or platform 0)
+    var fmt4_offset: i64 = -1
+    var i: i64 = 0
+    while i < num_subtables:
+        val rec = base + 4 + i * 8
+        val platform_id = read_u16_be(blob, rec)
+        val encoding_id = read_u16_be(blob, rec + 2)
+        val sub_offset = read_u32_be(blob, rec + 4) as i64
+        val sub_abs = base + sub_offset
+        val fmt = read_u16_be(blob, sub_abs)
+        if fmt == 4:
+            if fmt4_offset < 0:
+                fmt4_offset = sub_abs
+            # Prefer platform 3 encoding 1
+            if platform_id == 3 and encoding_id == 1:
+                fmt4_offset = sub_abs
+        i = i + 1
+    if fmt4_offset < 0:
+        return None
+    # Parse format 4 subtable
+    val seg_count_x2 = read_u16_be(blob, fmt4_offset + 6) as i64
+    val seg_count = (seg_count_x2 / 2) as u32
+    val end_code_base = fmt4_offset + 14
+    var end_codes: [u32] = []
+    var start_codes: [u32] = []
+    var id_deltas: [i32] = []
+    var id_range_offsets: [u32] = []
+    var j: i64 = 0
+    while j < seg_count as i64:
+        val ec = read_u16_be(blob, end_code_base + j * 2)
+        end_codes.append(ec)
+        j = j + 1
+    # reserved pad at end_code_base + seg_count * 2
+    val start_code_base = end_code_base + seg_count as i64 * 2 + 2
+    j = 0
+    while j < seg_count as i64:
+        val sc = read_u16_be(blob, start_code_base + j * 2)
+        start_codes.append(sc)
+        j = j + 1
+    val delta_base = start_code_base + seg_count as i64 * 2
+    j = 0
+    while j < seg_count as i64:
+        val delta = read_i16_be(blob, delta_base + j * 2)
+        id_deltas.append(delta)
+        j = j + 1
+    val range_base = delta_base + seg_count as i64 * 2
+    j = 0
+    while j < seg_count as i64:
+        val ro = read_u16_be(blob, range_base + j * 2)
+        id_range_offsets.append(ro)
+        j = j + 1
+    # glyph id array follows range offsets
+    val gid_base = range_base + seg_count as i64 * 2
+    val gid_count = (blob.len() as i64 - gid_base) / 2
+    var glyph_ids: [u32] = []
+    j = 0
+    while j < gid_count and j < 65536:
+        val gid = read_u16_be(blob, gid_base + j * 2)
+        glyph_ids.append(gid)
+        j = j + 1
+    Some(CmapFormat4(
+        seg_count: seg_count,
+        end_codes: end_codes,
+        start_codes: start_codes,
+        id_deltas: id_deltas,
+        id_range_offsets: id_range_offsets,
+        glyph_ids: glyph_ids
+    ))
+
+fn cmap_lookup(cmap: CmapFormat4, codepoint: u32) -> u32:
+    val n = cmap.seg_count as i64
+    # Binary search end_codes for first segment where end_code >= codepoint
+    var lo: i64 = 0
+    var hi: i64 = n - 1
+    var seg: i64 = n  # sentinel: not found
+    while lo <= hi:
+        val mid = (lo + hi) / 2
+        if cmap.end_codes[mid] >= codepoint:
+            seg = mid
+            hi = mid - 1
+        else:
+            lo = mid + 1
+    if seg >= n:
+        return 0
+    if cmap.start_codes[seg] > codepoint:
+        return 0
+    val ro = cmap.id_range_offsets[seg]
+    if ro == 0:
+        val raw = (codepoint as i32 + cmap.id_deltas[seg]) & 0xFFFF
+        return raw as u32
+    # Use glyph id array
+    val gid_idx = (ro / 2) as i64 + (codepoint as i64 - cmap.start_codes[seg] as i64) - (n - seg)
+    if gid_idx < 0 or gid_idx >= cmap.glyph_ids.len():
+        return 0
+    val gid = cmap.glyph_ids[gid_idx]
+    if gid == 0:
+        return 0
+    val adjusted = (gid as i32 + cmap.id_deltas[seg]) & 0xFFFF
+    adjusted as u32

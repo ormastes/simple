@@ -1,0 +1,161 @@
+# Electron Render Backend
+#
+# Implements RenderBackend for Electron desktop applications.
+# Wraps the Web backend's HTML generation and adds IPC for native features.
+
+use common.ui.backend.{RenderBackend}
+use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect}
+use common.ui.capability.{Capability, NotSupported}
+use common.ui.web_render_api.{
+    WEB_RENDER_TARGET_ELECTRON,
+    WebRenderHostWindowCommand,
+    WebRenderRequest,
+    web_render_body_html,
+    web_render_capabilities_for_target,
+    web_render_host_window_command_to_json,
+    web_render_input_envelope_from_event,
+    web_render_input_envelope_to_json,
+    web_render_to_artifact
+}
+use app.ui.render.html_widgets.{render_html_tree}
+use app.ui.web.html.{generate_css}
+use app.ui.web.backend.{web_render_patch_transport_json, web_render_snapshot_transport_json}
+use app.ui.electron.ipc.{parse_ipc_message}
+
+extern fn rt_stdin_read_line() -> text?
+
+fn electron_render_ipc_json(state: UIState, viewport_w: i32, viewport_h: i32) -> text:
+    val theme = state.tree.theme_name()
+    val css = generate_css(theme)
+    val body_html = render_html_tree(state.tree.root_node(), state)
+    val req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", body_html, css, "", viewport_w, viewport_h)
+    web_render_to_artifact(req).ipc_json
+
+# =========================================================================
+# Electron Backend
+# =========================================================================
+
+class ElectronBackend:
+    port: i32
+    initialized: bool
+
+    static fn new(port: i32) -> Result<ElectronBackend, text>:
+        return Ok(ElectronBackend(
+            port: port,
+            initialized: false
+        ))
+
+    # --- Lifecycle ---
+
+    me init() -> Result<bool, text>:
+        self.initialized = true
+        return Ok(true)
+
+    me shutdown():
+        self.initialized = false
+
+    # --- Rendering ---
+
+    fn render(state: UIState) -> Result<bool, text>:
+        print electron_render_ipc_json(state, self.viewport_width(), self.viewport_height())
+        return Ok(true)
+
+    fn render_html(state: UIState) -> text:
+        val body = render_html_tree(state.tree.root_node(), state)
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", body, "", "", self.viewport_width(), self.viewport_height())
+        return web_render_body_html(req)
+
+    # --- Events ---
+
+    fn poll_event(timeout_ms: i32) -> UIEvent?:
+        val line = rt_stdin_read_line()
+        if line == nil:
+            return nil
+        if line == "":
+            return nil
+        return parse_ipc_message(line)
+
+    fn input_envelope_json(surface_id: text, event: UIEvent) -> text:
+        val env = web_render_input_envelope_from_event(WEB_RENDER_TARGET_ELECTRON, surface_id, event)
+        web_render_input_envelope_to_json(env)
+
+    fn snapshot_envelope_json(surface_id: text, revision: u64, snapshot_json: text) -> text:
+        web_render_snapshot_transport_json(WEB_RENDER_TARGET_ELECTRON, surface_id, revision, snapshot_json)
+
+    fn patch_envelope_json(surface_id: text, from_sequence: u64, to_sequence: u64, patches_json: text, snapshot_json: text) -> text:
+        web_render_patch_transport_json(WEB_RENDER_TARGET_ELECTRON, surface_id, from_sequence, to_sequence, patches_json, snapshot_json)
+
+    fn host_window_command_json(cmd: WebRenderHostWindowCommand) -> text:
+        web_render_host_window_command_to_json(cmd)
+
+    # --- Capabilities ---
+
+    fn capabilities() -> [Capability]:
+        return web_render_capabilities_for_target(WEB_RENDER_TARGET_ELECTRON)
+
+    fn supports_mouse() -> bool:
+        return true
+
+    fn supports_color() -> bool:
+        return true
+
+    fn supports_images() -> bool:
+        return true
+
+    fn supports_touch() -> bool:
+        return false
+
+    fn render_image(node: WidgetNode, rect: WidgetRect) -> Result<bool, NotSupported>:
+        return Ok(true)
+
+    fn show_notification(title: text, body: text) -> Result<bool, NotSupported>:
+        val ipc_msg = "{\"type\":\"notification\",\"title\":\"{title}\",\"body\":\"{body}\"}"
+        print ipc_msg
+        return Ok(true)
+
+    fn show_dialog(kind: text, title: text, message: text) -> Result<text, NotSupported>:
+        val ipc_msg = "{\"type\":\"dialog\",\"kind\":\"{kind}\",\"title\":\"{title}\",\"message\":\"{message}\"}"
+        print ipc_msg
+        return Ok("")
+
+    # --- Viewport ---
+
+    fn viewport_width() -> i32:
+        return 1280
+
+    fn viewport_height() -> i32:
+        return 720
+
+    # --- Backend Info ---
+
+    fn backend_name() -> text:
+        return "electron"
+
+    # --- Electron-specific ---
+
+    fn generate_full_page(state: UIState) -> text:
+        """Generate a complete HTML page for Electron BrowserWindow."""
+        val body = render_html_tree(state.tree.root_node(), state)
+        val css = generate_css(state.tree.theme_name())
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", body, css, "", self.viewport_width(), self.viewport_height())
+        return web_render_to_artifact(req).html
+
+    # --- Wave 5: unified window spawn over stdin JSON ---------------------
+    #
+    # Simple side emits one JSON line per call; tools/electron-shell/main.js
+    # reads the line from this process's stdout and turns it into a real
+    # Electron BrowserWindow. This keeps the locked gui_layer_contract.md
+    # trait surface untouched — Node owns the actual BrowserWindow, we
+    # just serialize the request.
+
+    fn new_browser_window(window_id: text, url: text, w: i32, h: i32, title: text) -> bool:
+        """Ask the Electron shell to open a top-level BrowserWindow at url."""
+        val json = self.host_window_command_json(WebRenderHostWindowCommand(action: "new_browser_window", window_id: window_id, surface_id: window_id, app_id: "", title: title, url: url, x: 0, y: 0, width: w, height: h))
+        print json
+        return true
+
+    fn close_browser_window(window_id: text) -> bool:
+        """Ask the Electron shell to destroy a previously-spawned window."""
+        val json = "{\"type\":\"close_browser_window\",\"windowId\":\"{window_id}\"}"
+        print json
+        return true

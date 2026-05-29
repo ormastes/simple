@@ -1,0 +1,242 @@
+# DBFS Attribute Index — BeFS-style per-attribute indexes over InodeRow fields.
+#
+# Uses Dict<text, [i64]> per attribute (size, mtime, ctime, uid, gid, mode).
+# Keys are zero-padded i64 strings for lexicographic range queries.
+# Supports Eq / Gt / Lt / Ge / Le / Between and multi-query AND intersection.
+#
+# Maps to: AC-3, AC-10, D3.
+
+use std.db.dbfs_engine.schema.{InodeRow, InodeTable, InodeTableEntry, InodeKey}
+use std.database.index.{add_to_index, remove_from_index, intersect_id_lists, pad_i64}
+
+val ATTR_SIZE:  text = "size"
+val ATTR_MTIME: text = "mtime"
+val ATTR_CTIME: text = "ctime"
+val ATTR_UID:   text = "uid"
+val ATTR_GID:   text = "gid"
+val ATTR_MODE:  text = "mode"
+
+# ============================================================
+# Query types
+# ============================================================
+
+enum AttrOp:
+    Eq(value: text)
+    Gt(value: text)
+    Lt(value: text)
+    Ge(value: text)
+    Le(value: text)
+    Between(low: text, high: text)
+
+struct AttrQuery:
+    attribute: text
+    op: AttrOp
+
+struct AttrQueryResult:
+    ino_ids:  [i64]
+    query_ms: i64
+
+# ============================================================
+# AttrIndexManager
+# ============================================================
+
+struct AttrIndexManager:
+    size_index:    Dict<text, [i64]>
+    mtime_index:   Dict<text, [i64]>
+    ctime_index:   Dict<text, [i64]>
+    uid_index:     Dict<text, [i64]>
+    gid_index:     Dict<text, [i64]>
+    mode_index:    Dict<text, [i64]>
+    indexed_count: i64
+
+impl AttrIndexManager:
+    static fn new() -> AttrIndexManager:
+        AttrIndexManager(
+            size_index:    Dict.new(),
+            mtime_index:   Dict.new(),
+            ctime_index:   Dict.new(),
+            uid_index:     Dict.new(),
+            gid_index:     Dict.new(),
+            mode_index:    Dict.new(),
+            indexed_count: 0
+        )
+
+    me fn build_from_inodes(inodes: InodeTable):
+        self.size_index  = Dict.new()
+        self.mtime_index = Dict.new()
+        self.ctime_index = Dict.new()
+        self.uid_index   = Dict.new()
+        self.gid_index   = Dict.new()
+        self.mode_index  = Dict.new()
+        self.indexed_count = 0
+        var i: i32 = 0
+        while i < inodes.entries.len() as i32:
+            val row = inodes.entries[i].row
+            self.on_inode_insert(row)
+            i = i + 1
+
+    me fn on_inode_insert(row: InodeRow):
+        self._add_to_field_index(ATTR_SIZE, pad_i64(row.size), row.ino_id)
+        self._add_to_field_index(ATTR_MTIME, pad_i64(row.mtime), row.ino_id)
+        self._add_to_field_index(ATTR_CTIME, pad_i64(row.ctime), row.ino_id)
+        self._add_to_field_index(ATTR_UID, pad_i64(row.uid as i64), row.ino_id)
+        self._add_to_field_index(ATTR_GID, pad_i64(row.gid as i64), row.ino_id)
+        self._add_to_field_index(ATTR_MODE, pad_i64(row.mode as i64), row.ino_id)
+        self.indexed_count = self.indexed_count + 1
+
+    me fn on_inode_update(old_row: InodeRow, new_row: InodeRow):
+        self.on_inode_delete(old_row.ino_id, old_row)
+        self.on_inode_insert(new_row)
+
+    me fn on_inode_delete(ino_id: i64, row: InodeRow):
+        self._remove_from_field_index(ATTR_SIZE, pad_i64(row.size), ino_id)
+        self._remove_from_field_index(ATTR_MTIME, pad_i64(row.mtime), ino_id)
+        self._remove_from_field_index(ATTR_CTIME, pad_i64(row.ctime), ino_id)
+        self._remove_from_field_index(ATTR_UID, pad_i64(row.uid as i64), ino_id)
+        self._remove_from_field_index(ATTR_GID, pad_i64(row.gid as i64), ino_id)
+        self._remove_from_field_index(ATTR_MODE, pad_i64(row.mode as i64), ino_id)
+        self.indexed_count = self.indexed_count - 1
+
+    me fn _add_to_field_index(attribute: text, key: text, ino_id: i64):
+        if attribute == ATTR_SIZE:
+            if self.size_index.contains_key(key):
+                var ids = self.size_index[key]
+                ids.push(ino_id)
+                self.size_index[key] = ids
+            else:
+                self.size_index[key] = [ino_id]
+        else if attribute == ATTR_MTIME:
+            if self.mtime_index.contains_key(key):
+                var ids = self.mtime_index[key]
+                ids.push(ino_id)
+                self.mtime_index[key] = ids
+            else:
+                self.mtime_index[key] = [ino_id]
+        else if attribute == ATTR_CTIME:
+            if self.ctime_index.contains_key(key):
+                var ids = self.ctime_index[key]
+                ids.push(ino_id)
+                self.ctime_index[key] = ids
+            else:
+                self.ctime_index[key] = [ino_id]
+        else if attribute == ATTR_UID:
+            if self.uid_index.contains_key(key):
+                var ids = self.uid_index[key]
+                ids.push(ino_id)
+                self.uid_index[key] = ids
+            else:
+                self.uid_index[key] = [ino_id]
+        else if attribute == ATTR_GID:
+            if self.gid_index.contains_key(key):
+                var ids = self.gid_index[key]
+                ids.push(ino_id)
+                self.gid_index[key] = ids
+            else:
+                self.gid_index[key] = [ino_id]
+        else if attribute == ATTR_MODE:
+            if self.mode_index.contains_key(key):
+                var ids = self.mode_index[key]
+                ids.push(ino_id)
+                self.mode_index[key] = ids
+            else:
+                self.mode_index[key] = [ino_id]
+
+    me fn _remove_from_field_index(attribute: text, key: text, ino_id: i64):
+        if attribute == ATTR_SIZE:
+            self.size_index[key] = self._without_id(self.size_index, key, ino_id)
+        else if attribute == ATTR_MTIME:
+            self.mtime_index[key] = self._without_id(self.mtime_index, key, ino_id)
+        else if attribute == ATTR_CTIME:
+            self.ctime_index[key] = self._without_id(self.ctime_index, key, ino_id)
+        else if attribute == ATTR_UID:
+            self.uid_index[key] = self._without_id(self.uid_index, key, ino_id)
+        else if attribute == ATTR_GID:
+            self.gid_index[key] = self._without_id(self.gid_index, key, ino_id)
+        else if attribute == ATTR_MODE:
+            self.mode_index[key] = self._without_id(self.mode_index, key, ino_id)
+
+    fn _without_id(index: Dict<text, [i64]>, key: text, ino_id: i64) -> [i64]:
+        if not index.contains_key(key):
+            return []
+        var next: [i64] = []
+        for existing in index[key]:
+            if existing != ino_id:
+                next.push(existing)
+        next
+
+    fn _select_index(attribute: text) -> Dict<text, [i64]>?:
+        if attribute == ATTR_SIZE:
+            return self.size_index
+        if attribute == ATTR_MTIME:
+            return self.mtime_index
+        if attribute == ATTR_CTIME:
+            return self.ctime_index
+        if attribute == ATTR_UID:
+            return self.uid_index
+        if attribute == ATTR_GID:
+            return self.gid_index
+        if attribute == ATTR_MODE:
+            return self.mode_index
+        nil
+
+    fn _collect_range(index: Dict<text, [i64]>, low: text, high: text, include_low: bool, include_high: bool) -> [i64]:
+        var result: [i64] = []
+        for key in index.keys():
+            val after_low  = if include_low:  key >= low  else: key > low
+            val before_high = if include_high: key <= high else: key < high
+            if (after_low and before_high):
+                for id in index[key]:
+                    result.push(id)
+        result
+
+    fn _query_index(index: Dict<text, [i64]>, op: AttrOp) -> [i64]:
+        var ids: [i64] = []
+        match op:
+            case AttrOp.Eq(value):
+                if index.contains_key(value):
+                    for id in index[value]:
+                        ids.push(id)
+            case AttrOp.Gt(value):
+                ids = self._collect_range(index, value, "", false, false)
+            case AttrOp.Lt(value):
+                ids = self._collect_range(index, "", value, false, false)
+            case AttrOp.Ge(value):
+                ids = self._collect_range(index, value, "", true, false)
+            case AttrOp.Le(value):
+                ids = self._collect_range(index, "", value, false, true)
+            case AttrOp.Between(low, high):
+                ids = self._collect_range(index, low, high, true, true)
+        ids
+
+    fn query(q: AttrQuery) -> AttrQueryResult:
+        var ids: [i64] = []
+        if q.attribute == ATTR_SIZE:
+            ids = self._query_index(self.size_index, q.op)
+        else if q.attribute == ATTR_MTIME:
+            ids = self._query_index(self.mtime_index, q.op)
+        else if q.attribute == ATTR_CTIME:
+            ids = self._query_index(self.ctime_index, q.op)
+        else if q.attribute == ATTR_UID:
+            ids = self._query_index(self.uid_index, q.op)
+        else if q.attribute == ATTR_GID:
+            ids = self._query_index(self.gid_index, q.op)
+        else if q.attribute == ATTR_MODE:
+            ids = self._query_index(self.mode_index, q.op)
+        else:
+            return AttrQueryResult(ino_ids: [], query_ms: 0)
+        AttrQueryResult(ino_ids: ids, query_ms: 0)
+
+    fn query_multi(queries: [AttrQuery]) -> AttrQueryResult:
+        if queries.len() == 0:
+            return AttrQueryResult(ino_ids: [], query_ms: 0)
+        val first = self.query(queries[0])
+        var acc: [i64] = first.ino_ids
+        var i: i32 = 1
+        while i < queries.len() as i32:
+            val r = self.query(queries[i])
+            acc = intersect_id_lists(acc, r.ino_ids)
+            i = i + 1
+        AttrQueryResult(ino_ids: acc, query_ms: 0)
+
+    fn count() -> i64:
+        self.indexed_count

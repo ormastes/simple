@@ -1,0 +1,61 @@
+# SimpleOS — Container Checkpoint Orchestration
+#
+# Freezes all tasks in a container, snapshots each process,
+# captures IPC and filesystem state, serializes to checkpoint.
+
+use os.kernel.replay.checkpoint.checkpoint_types.{ContainerCheckpoint, ProcessSnapshot}
+use os.kernel.replay.checkpoint.process_snapshot.{snapshot_process}
+use os.kernel.replay.checkpoint.ipc_snapshot.{snapshot_ipc}
+use os.kernel.replay.log_buffer.{replay_event_count}
+
+# ============================================================================
+# Checkpoint Creation
+# ============================================================================
+
+fn create_container_checkpoint(container_id: text, task_ids: [i64], parent_ids: [i64]) -> Result<ContainerCheckpoint, text>:
+    var checkpoint = ContainerCheckpoint.create(container_id, 0)
+    checkpoint.replay_event_id = replay_event_count()
+
+    # Phase 1: Freeze scheduler for this container's tasks
+    # (In a real kernel, would call scheduler.freeze_container())
+
+    # Phase 2: Snapshot each process
+    var i = 0
+    while i < task_ids.len():
+        val tid = task_ids[i]
+        val pid = if i < parent_ids.len(): parent_ids[i] else: 0
+        match snapshot_process(tid, pid):
+            case Ok(snap):
+                checkpoint.add_process(snap)
+            case Err(msg):
+                return Err("failed to snapshot task {tid}: {msg}")
+        i = i + 1
+
+    # Phase 3: Snapshot IPC state
+    match snapshot_ipc():
+        case Ok(ipc):
+            checkpoint.ipc_state = ipc
+        case Err(msg):
+            return Err("failed to snapshot IPC: {msg}")
+
+    # Phase 4: Thaw scheduler
+    # (In a real kernel, would call scheduler.thaw_container())
+
+    Ok(checkpoint)
+
+# ============================================================================
+# Checkpoint Summary
+# ============================================================================
+
+fn checkpoint_summary(cp: ContainerCheckpoint) -> text:
+    var lines: [text] = []
+    lines.push("Container Checkpoint: {cp.container_id}")
+    lines.push("  Checkpoint ID: {cp.checkpoint_id}")
+    lines.push("  Processes: {cp.process_count()}")
+    lines.push("  Total pages: {cp.total_pages()}")
+    lines.push("  IPC queues: {cp.ipc_state.message_queues.len()}")
+    lines.push("  IPC notifications: {cp.ipc_state.notifications.len()}")
+    lines.push("  IPC shared regions: {cp.ipc_state.shared_regions.len()}")
+    lines.push("  FS overlay entries: {cp.fs_overlay.len()}")
+    lines.push("  Replay event cursor: {cp.replay_event_id}")
+    lines.join("\n")

@@ -1,0 +1,458 @@
+# Part 2 of src/compiler/10.frontend/core/ast.spl
+use compiler.frontend.core.ast.*
+# Core Simple — Arena-Based AST
+#
+# Shared core library: AST nodes stored in parallel arrays (arena pattern).
+# Each node is referenced by an i64 index. No structs, no enums with
+# payloads, no generics, no me methods.
+#
+# Node types:
+#   - Expr (expressions): integer tags in EXPR_* constants  (see ast_expr.spl)
+#   - Stmt (statements): integer tags in STMT_* constants   (see ast_stmt.spl)
+#   - Decl (declarations): integer tags in DECL_* constants (this file)
+#   - Param (function parameters)
+#   - Field (struct fields)
+#   - MatchArm (match case arms)
+
+# ===== Import from split modules =====
+use compiler.core.ast_expr.*
+use compiler.core.ast_stmt.*
+use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+
+var lexer_state_core_col_slot: [text] = ["1"]
+var lexer_state_core_pending_dedents_slot: [text] = ["0"]
+var lexer_state_core_at_line_start_slot: [text] = ["1"]
+var lexer_state_core_paren_depth_slot: [text] = ["0"]
+var lexer_state_core_cur_kind_slot: [text] = ["0"]
+var lexer_state_core_cur_text_slot: [text] = [""]
+var lexer_state_core_cur_line_slot: [text] = ["0"]
+var lexer_state_core_cur_col_slot: [text] = ["0"]
+var lexer_state_core_indent_stack_slot: [text] = ["0"]
+var lexer_state_cur_kind_slot: [text] = ["0"]
+var lexer_state_cur_text_slot: [text] = [""]
+var lexer_state_cur_line_slot: [text] = ["0"]
+var lexer_state_cur_col_slot: [text] = ["0"]
+var lexer_state_cur_suffix_slot: [text] = [""]
+
+fn module_set_path(path: text):
+    module_path_slot[0] = path
+
+fn module_get_path() -> text:
+    module_path_slot[0]
+
+fn lexer_state_get(key: text) -> text:
+    if key == "core_pos":
+        return lexer_state_core_pos_slot[0]
+    if key == "core_line":
+        return lexer_state_core_line_slot[0]
+    if key == "core_col":
+        return lexer_state_core_col_slot[0]
+    if key == "core_pending_dedents":
+        return lexer_state_core_pending_dedents_slot[0]
+    if key == "core_at_line_start":
+        return lexer_state_core_at_line_start_slot[0]
+    if key == "core_paren_depth":
+        return lexer_state_core_paren_depth_slot[0]
+    if key == "core_cur_kind":
+        return lexer_state_core_cur_kind_slot[0]
+    if key == "core_cur_text":
+        return lexer_state_core_cur_text_slot[0]
+    if key == "core_cur_line":
+        return lexer_state_core_cur_line_slot[0]
+    if key == "core_cur_col":
+        return lexer_state_core_cur_col_slot[0]
+    if key == "core_indent_stack":
+        return lexer_state_core_indent_stack_slot[0]
+    if key == "cur_kind2":
+        return lexer_state_cur_kind_slot[0]
+    if key == "cur_text2":
+        return lexer_state_cur_text_slot[0]
+    if key == "cur_line2":
+        return lexer_state_cur_line_slot[0]
+    if key == "cur_col2":
+        return lexer_state_cur_col_slot[0]
+    if key == "cur_suffix2":
+        return lexer_state_cur_suffix_slot[0]
+    ""
+
+fn lexer_state_set(key: text, value: text):
+    if key == "core_pos":
+        lexer_state_core_pos_slot[0] = value
+        return
+    if key == "core_line":
+        lexer_state_core_line_slot[0] = value
+        return
+    if key == "core_col":
+        lexer_state_core_col_slot[0] = value
+        return
+    if key == "core_pending_dedents":
+        lexer_state_core_pending_dedents_slot[0] = value
+        return
+    if key == "core_at_line_start":
+        lexer_state_core_at_line_start_slot[0] = value
+        return
+    if key == "core_paren_depth":
+        lexer_state_core_paren_depth_slot[0] = value
+        return
+    if key == "core_cur_kind":
+        lexer_state_core_cur_kind_slot[0] = value
+        return
+    if key == "core_cur_text":
+        lexer_state_core_cur_text_slot[0] = value
+        return
+    if key == "core_cur_line":
+        lexer_state_core_cur_line_slot[0] = value
+        return
+    if key == "core_cur_col":
+        lexer_state_core_cur_col_slot[0] = value
+        return
+    if key == "core_indent_stack":
+        lexer_state_core_indent_stack_slot[0] = value
+        return
+    if key == "cur_kind2":
+        lexer_state_cur_kind_slot[0] = value
+        return
+    if key == "cur_text2":
+        lexer_state_cur_text_slot[0] = value
+        return
+    if key == "cur_line2":
+        lexer_state_cur_line_slot[0] = value
+        return
+    if key == "cur_col2":
+        lexer_state_cur_col_slot[0] = value
+        return
+    if key == "cur_suffix2":
+        lexer_state_cur_suffix_slot[0] = value
+        return
+
+fn lexer_core_pos_get() -> text:
+    lexer_state_core_pos_slot[0]
+
+fn lexer_core_pos_set(value: text):
+    lexer_state_core_pos_slot[0] = value
+
+fn lexer_core_line_get() -> text:
+    lexer_state_core_line_slot[0]
+
+fn lexer_core_line_set(value: text):
+    lexer_state_core_line_slot[0] = value
+
+fn lexer_core_col_get() -> text:
+    lexer_state_core_col_slot[0]
+
+fn lexer_core_col_set(value: text):
+    lexer_state_core_col_slot[0] = value
+
+fn lexer_core_pending_dedents_get() -> text:
+    lexer_state_core_pending_dedents_slot[0]
+
+fn lexer_core_pending_dedents_set(value: text):
+    lexer_state_core_pending_dedents_slot[0] = value
+
+fn lexer_core_at_line_start_get() -> text:
+    lexer_state_core_at_line_start_slot[0]
+
+fn lexer_core_at_line_start_set(value: text):
+    lexer_state_core_at_line_start_slot[0] = value
+
+fn lexer_core_paren_depth_get() -> text:
+    lexer_state_core_paren_depth_slot[0]
+
+fn lexer_core_paren_depth_set(value: text):
+    lexer_state_core_paren_depth_slot[0] = value
+
+fn lexer_core_cur_kind_get() -> text:
+    lexer_state_core_cur_kind_slot[0]
+
+fn lexer_core_cur_kind_set(value: text):
+    lexer_state_core_cur_kind_slot[0] = value
+
+fn lexer_core_cur_text_get() -> text:
+    lexer_state_core_cur_text_slot[0]
+
+fn lexer_core_cur_text_set(value: text):
+    lexer_state_core_cur_text_slot[0] = value
+
+fn lexer_core_cur_line_get() -> text:
+    lexer_state_core_cur_line_slot[0]
+
+fn lexer_core_cur_line_set(value: text):
+    lexer_state_core_cur_line_slot[0] = value
+
+fn lexer_core_cur_col_get() -> text:
+    lexer_state_core_cur_col_slot[0]
+
+fn lexer_core_cur_col_set(value: text):
+    lexer_state_core_cur_col_slot[0] = value
+
+fn lexer_core_indent_stack_get() -> text:
+    lexer_state_core_indent_stack_slot[0]
+
+fn lexer_core_indent_stack_set(value: text):
+    lexer_state_core_indent_stack_slot[0] = value
+
+fn lexer_cur_kind2_get() -> text:
+    lexer_state_cur_kind_slot[0]
+
+fn lexer_cur_kind2_set(value: text):
+    lexer_state_cur_kind_slot[0] = value
+
+fn lexer_cur_text2_get() -> text:
+    lexer_state_cur_text_slot[0]
+
+fn lexer_cur_text2_set(value: text):
+    lexer_state_cur_text_slot[0] = value
+
+fn lexer_cur_line2_get() -> text:
+    lexer_state_cur_line_slot[0]
+
+fn lexer_cur_line2_set(value: text):
+    lexer_state_cur_line_slot[0] = value
+
+fn lexer_cur_col2_get() -> text:
+    lexer_state_cur_col_slot[0]
+
+fn lexer_cur_col2_set(value: text):
+    lexer_state_cur_col_slot[0] = value
+
+fn lexer_cur_suffix2_get() -> text:
+    lexer_state_cur_suffix_slot[0]
+
+fn lexer_cur_suffix2_set(value: text):
+    lexer_state_cur_suffix_slot[0] = value
+
+fn module_add_decl(decl_idx: i64):
+    val count = ast_module_decl_count_get()
+    rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(count), int_to_str(decl_idx))
+    if count < 128:
+        module_decl_slots[count] = decl_idx
+    ast_module_decl_count_set(count + 1)
+
+fn module_get_decls() -> [i64]:
+    val count = ast_module_decl_count_get()
+    if count <= 0:
+        return []
+    var result: [i64] = [module_decl_at(0)]
+    var i = 1
+    while i < count:
+        result.push(module_decl_at(i))
+        i = i + 1
+    result
+
+fn module_decl_count_get() -> i64:
+    ast_module_decl_count_get()
+
+fn module_decl_at(index: i64) -> i64:
+    if index < 0 or index >= ast_module_decl_count_get():
+        return -1
+    val env_value = rt_env_get("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(index)) ?? ""
+    if env_value != "":
+        return ast_parse_i64(env_value)
+    module_decl_slots[index]
+
+# ===== AST Reset =====
+
+fn ast_reset():
+    # Bootstrap nil-guard: native binaries zero-initialize module-level vars
+    # instead of running the initializer code. Ensure they're valid containers.
+    if decl_tag == nil:
+        decl_tag = []
+    if decl_span == nil:
+        decl_span = []
+    if decl_name == nil:
+        decl_name = []
+    if decl_params == nil:
+        decl_params = []
+    if decl_param_names == nil:
+        decl_param_names = []
+    if decl_param_types == nil:
+        decl_param_types = []
+    if decl_ret_type == nil:
+        decl_ret_type = []
+    if decl_body_stmts == nil:
+        decl_body_stmts = []
+    if decl_field_names == nil:
+        decl_field_names = []
+    if decl_field_types == nil:
+        decl_field_types = []
+    if decl_field_defaults == nil:
+        decl_field_defaults = []
+    if decl_field_bits == nil:
+        decl_field_bits = []
+    if decl_imports == nil:
+        decl_imports = []
+    if decl_visibility == nil:
+        decl_visibility = []
+    if decl_is_async == nil:
+        decl_is_async = []
+    if decl_is_comptime == nil:
+        decl_is_comptime = []
+    if decl_type_params == nil:
+        decl_type_params = []
+    if decl_type_param_constraints == nil:
+        decl_type_param_constraints = []
+    if decl_type_param_constraint_mode == nil:
+        decl_type_param_constraint_mode = []
+    if decl_is_lazy == nil:
+        decl_is_lazy = []
+    if decl_is_gpu_kernel == nil:
+        decl_is_gpu_kernel = []
+    if decl_is_simd == nil:
+        decl_is_simd = []
+    if decl_is_packed == nil:
+        decl_is_packed = []
+    if decl_derives == nil:
+        decl_derives = []
+    if arm_pattern == nil:
+        arm_pattern = []
+    if arm_guard == nil:
+        arm_guard = []
+    if arm_body == nil:
+        arm_body = []
+    if arm_binding == nil:
+        arm_binding = []
+    if arm_rationale == nil:
+        arm_rationale = []
+    if elif_cond == nil:
+        elif_cond = []
+    if elif_body == nil:
+        elif_body = []
+    if elif_else == nil:
+        elif_else = []
+    if module_decls == nil:
+        module_decls = []
+    if module_path_slot == nil:
+        module_path_slot = [""]
+    if lexer_state_core_pos_slot == nil:
+        lexer_state_core_pos_slot = ["0"]
+    if lexer_state_core_line_slot == nil:
+        lexer_state_core_line_slot = ["1"]
+    if lexer_state_core_col_slot == nil:
+        lexer_state_core_col_slot = ["1"]
+    if lexer_state_core_pending_dedents_slot == nil:
+        lexer_state_core_pending_dedents_slot = ["0"]
+    if lexer_state_core_at_line_start_slot == nil:
+        lexer_state_core_at_line_start_slot = ["1"]
+    if lexer_state_core_paren_depth_slot == nil:
+        lexer_state_core_paren_depth_slot = ["0"]
+    if lexer_state_core_cur_kind_slot == nil:
+        lexer_state_core_cur_kind_slot = ["0"]
+    if lexer_state_core_cur_text_slot == nil:
+        lexer_state_core_cur_text_slot = [""]
+    if lexer_state_core_cur_line_slot == nil:
+        lexer_state_core_cur_line_slot = ["0"]
+    if lexer_state_core_cur_col_slot == nil:
+        lexer_state_core_cur_col_slot = ["0"]
+    if lexer_state_core_indent_stack_slot == nil:
+        lexer_state_core_indent_stack_slot = ["0"]
+    if lexer_state_cur_kind_slot == nil:
+        lexer_state_cur_kind_slot = ["0"]
+    if lexer_state_cur_text_slot == nil:
+        lexer_state_cur_text_slot = [""]
+    if lexer_state_cur_line_slot == nil:
+        lexer_state_cur_line_slot = ["0"]
+    if lexer_state_cur_col_slot == nil:
+        lexer_state_cur_col_slot = ["0"]
+    if lexer_state_cur_suffix_slot == nil:
+        lexer_state_cur_suffix_slot = [""]
+    expr_reset()
+    stmt_reset()
+    ast_decl_count_set(0)
+    ast_module_decl_count_set(0)
+
+# ===== Struct Builders for Interpreter =====
+# These functions construct Core* structs from the arena arrays
+# Needed by the interpreter which expects struct-based access
+
+fn expr_get(idx: i64) -> CoreExpr:
+    CoreExpr(
+        tag: expr_tag[idx],
+        span_id: expr_span[idx],
+        span: -1,
+        i_val: expr_i_val[idx],
+        f_val: expr_f_val[idx],
+        s_val: expr_s_val[idx],
+        left: expr_left[idx],
+        right: expr_right[idx],
+        extra: expr_extra[idx],
+        args: expr_args[idx],
+        stmts: expr_stmts[idx]
+    )
+
+fn stmt_get(idx: i64) -> CoreStmt:
+    CoreStmt(
+        tag: stmt_tag[idx],
+        span_id: stmt_span[idx],
+        span: -1,
+        expr_idx: stmt_expr[idx],
+        name: stmt_name[idx],
+        type_tag: stmt_type_tag[idx],
+        body: stmt_body[idx],
+        target: -1,
+        value: -1,
+        condition: -1,
+        op: -1,
+        iterator: -1,
+        iterable: -1,
+        else_body: [],
+        elif_conds: [],
+        elif_bodies: []
+    )
+
+fn decl_get(idx: i64) -> CoreDecl:
+    CoreDecl(
+        tag: decl_tag[idx],
+        span_id: decl_span[idx],
+        span: -1,
+        name: decl_name[idx],
+        param_names: decl_param_names[idx],
+        param_types: decl_param_types[idx],
+        ret_type: decl_ret_type[idx],
+        body_stmts: decl_body_stmts[idx],
+        field_names: decl_field_names[idx],
+        field_types: decl_field_types[idx],
+        field_defaults: decl_field_defaults[idx],
+        field_bits: decl_field_bits[idx],
+        imports: decl_imports[idx],
+        visibility_text: decl_get_visibility_text(idx),
+        type_params: decl_type_params[idx],
+        is_async: false
+    )
+
+# ===== Yield Detection Utilities =====
+# These access both expr and stmt pools so they stay in the unified module.
+
+fn expr_contains_yield(eid: i64) -> bool:
+    if eid < 0: return false
+    val tag = expr_tag[eid]
+    if tag == EXPR_YIELD: return true
+    if tag == EXPR_LAMBDA: return false
+    if expr_contains_yield(expr_left[eid]): return true
+    if expr_contains_yield(expr_right[eid]): return true
+    if expr_contains_yield(expr_extra[eid]): return true
+    for arg_eid in expr_args[eid]:
+        if expr_contains_yield(arg_eid): return true
+    for child_sid in expr_stmts[eid]:
+        if stmt_contains_yield(child_sid): return true
+    false
+
+fn stmt_contains_yield(sid: i64) -> bool:
+    if sid < 0: return false
+    if expr_contains_yield(stmt_expr[sid]): return true
+    for child_sid in stmt_body[sid]:
+        if stmt_contains_yield(child_sid): return true
+    false
+
+fn stmts_contain_yield(body_stmts: [i64]) -> bool:
+    for sid in body_stmts:
+        if stmt_contains_yield(sid): return true
+    false
+
+# ===== Re-exports from ast_expr =====
+
+# ===== Re-exports from ast_stmt =====
+
+# ===== Exports from this file =====

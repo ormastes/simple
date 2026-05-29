@@ -1,0 +1,305 @@
+# VMM address space management — split from vmm.spl.
+# Contains address space creation/destruction, page-in mapping,
+# COW helpers, phase-2 bulk copy APIs, and the ProcessVmSpace constructor.
+
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, phys_addr_value, virt_addr_value}
+use os.kernel.types.task_types.{AddressSpace}
+use os.kernel.types.vmspace_types.{VmArea, ProcessVmSpace}
+use os.kernel.boot.mmio.{mmio_read8, mmio_write8, mmio_read64, mmio_write64}
+use os.kernel.memory.pmm.{PhysMemManager}
+use os.kernel.log.klog_api.{log_raw_println}
+use os.kernel.memory.vmm.{
+    PAGE_SIZE, ENTRIES_PER_TABLE,
+    PTE_PRESENT, PTE_WRITABLE, PTE_USER, PTE_HUGE_PAGE, PTE_ADDR_MASK,
+    g_vmm, g_next_as_id,
+    _phys_to_virt, _alloc_table_page, _read_pte, _write_pte,
+    _pte_is_present, _pte_phys_addr, _ensure_table_entry,
+    _pml4_index, _pdpt_index, _pd_index, _pt_index,
+    _flags_to_pte_bits, _load_cr3, vmm_map_page, VirtMemManager
+}
+
+extern fn pmm_alloc_page() -> PageFrame?
+extern fn pmm_free_page(frame: PageFrame)
+extern fn pmm_alloc_page_raw() -> u64
+extern fn pmm_free_page_raw(pa: u64)
+extern fn pmm_ref_page(pa: u64)
+extern fn pmm_unref_page(pa: u64) -> u16
+extern fn rt_memcpy(dest: i64, src: i64, len: i64)
+extern fn rt_memset(dest: i64, value: i64, len: i64) -> i64
+extern fn unsafe_addr_of(ref: any) -> u64
+
+# ============================================================================
+# Address Space Management
+# ============================================================================
+
+fn vmm_create_address_space() -> u64:
+    """Create a new address space (PML4) for a process.
+
+    Allocates a fresh PML4 and copies the kernel mappings
+    (upper-half entries 256..511) from the kernel PML4.
+    Returns the physical address of the new PML4, or 0 on failure.
+    """
+    val new_pml4_phys = _alloc_table_page()
+    if new_pml4_phys == 0:
+        return 0
+
+    val new_pml4_virt = _phys_to_virt(new_pml4_phys)
+    val kernel_pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+
+    # Copy kernel-space entries (upper half: indices 256..511)
+    # This ensures kernel is mapped in every address space
+    var i: u64 = 256
+    while i < ENTRIES_PER_TABLE:
+        val entry = _read_pte(kernel_pml4_virt, i)
+        _write_pte(new_pml4_virt, i, entry)
+        i = i + 1
+
+    new_pml4_phys
+
+# ============================================================================
+# Per-Process Address Space API (Phase 1)
+# ============================================================================
+
+fn create_user_address_space() -> AddressSpace:
+    """Allocate a fresh per-process address space.
+
+    Allocates a new PML4 page, copies the kernel-half entries (indices
+    256..511) from the kernel PML4 so the kernel remains mapped in every
+    user address space, and returns an `AddressSpace` handle carrying the
+    physical root and a monotonic id.
+
+    If the PMM is not yet online (e.g. early boot before `vmm_init`
+    completes) the allocation returns 0; in that case we fall back to
+    `phys_root = 1` (the legacy sentinel) and log a single line so the
+    kernel keeps booting instead of panicking.
+    """
+    if g_vmm.pml4_phys == 0:
+        log_raw_println("[VMM] create_user_address_space: VMM not initialized — legacy AS=1")
+        return AddressSpace(phys_root: 1, id: 0)
+
+    val phys = vmm_create_address_space()
+    if phys == 0:
+        log_raw_println("[VMM] create_user_address_space: alloc failed — legacy AS=1")
+        return AddressSpace(phys_root: 1, id: 0)
+
+    val id = g_next_as_id
+    g_next_as_id = g_next_as_id + 1
+    AddressSpace(phys_root: phys, id: id)
+
+fn vmm_cow_clone_pages(pml4_phys: u64) -> u64:
+    """Shallow COW clone of a user address space (wave-4b scaffold).
+
+    Allocates a new PML4, copies kernel-half entries (256..511) unchanged,
+    and copies user-half entries (0..255) with PTE_WRITABLE cleared so the
+    next write from either parent or child traps into the COW fault handler.
+    Only the top PML4 level is walked here; deep PDPT/PD/PT writable
+    clearing is deferred to wave-4c.
+
+    Returns the new PML4 physical address, or 0 on allocation failure.
+    """
+    val new_pml4_phys = _alloc_table_page()
+    if new_pml4_phys == 0:
+        return 0
+
+    val new_pml4_virt = _phys_to_virt(new_pml4_phys)
+    val src_pml4_virt = _phys_to_virt(pml4_phys)
+
+    # User-half (0..255): copy present entries then deep-walk to clear writable
+    var i: u64 = 0
+    while i < 256:
+        val entry = _read_pte(src_pml4_virt, i)
+        if _pte_is_present(entry):
+            _write_pte(new_pml4_virt, i, entry & ~PTE_WRITABLE)
+        i = i + 1
+    # Clear writable on source PML4 user-half leaf PTEs (level 3 = PML4)
+    _cow_clear_writable_recursive(pml4_phys, 3)
+
+    # Kernel-half (256..511): shared unchanged
+    i = 256
+    while i < ENTRIES_PER_TABLE:
+        val entry = _read_pte(src_pml4_virt, i)
+        _write_pte(new_pml4_virt, i, entry)
+        i = i + 1
+
+    new_pml4_phys
+
+fn destroy_user_address_space(space: AddressSpace):
+    """Release page-table pages owned by a user address space.
+
+    Frees intermediate user-half page table pages (PDPT/PD/PT) via
+    `_free_user_half_subtree`, then frees the PML4 page itself.
+    Kernel-half entries (indices 256..511) are shared and are never freed.
+    """
+    if space.phys_root == 0 or space.phys_root == 1:
+        return
+
+    val pml4_virt = _phys_to_virt(space.phys_root)
+    _free_user_half_subtree(pml4_virt)
+    val frame = PageFrame.from_phys_addr(PhysAddr(addr: space.phys_root))
+    pmm_free_page(frame)
+
+fn activate_user_address_space(space: AddressSpace):
+    """Install a user address space on the current CPU."""
+    if space.phys_root == 0 or space.phys_root == 1:
+        return
+    vmm_switch_address_space(space.phys_root)
+
+fn vmm_map_framebuffer(fb_phys: PhysAddr, fb_virt: VirtAddr, size: u64):
+    """Map framebuffer as write-combining, non-executable memory."""
+    val flags = VmFlags.mmio()
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+
+    var i: u64 = 0
+    while i < page_count:
+        val offset = i * PAGE_SIZE
+        val virt = VirtAddr(addr: virt_addr_value(fb_virt) + offset)
+        val phys = PhysAddr(addr: phys_addr_value(fb_phys) + offset)
+        vmm_map_page(virt, phys, flags)
+        i = i + 1
+
+    log_raw_println("[VMM] Mapped framebuffer: {page_count} pages at virt 0x{virt_addr_value(fb_virt)}")
+
+# ============================================================================
+# VMM Query Interface
+# ============================================================================
+
+fn vmm_get_manager() -> VirtMemManager:
+    """Get reference to the global VMM."""
+    g_vmm
+
+# ============================================================================
+# Phase-2 VMM APIs
+# ============================================================================
+
+fn vmm_copy_bytes_to_phys(dst_phys: u64, src: [u8], src_offset: u64, len: u64):
+    """Bulk-copy `len` bytes from `src[src_offset..]` to physical `dst_phys` via HHDM."""
+    if len == 0:
+        return
+    val dst_virt = _phys_to_virt(dst_phys)
+    val src_hdr = unsafe_addr_of(src)
+    val src_data = mmio_read64(src_hdr)
+    rt_memcpy(dst_virt.to_i64(), (src_data + src_offset).to_i64(), len.to_i64())
+
+fn vmm_zero_phys_range(dst_phys: u64, len: u64):
+    """Zero `len` bytes at physical `dst_phys` via HHDM. Used for BSS tails."""
+    if len == 0:
+        return
+    val dst_virt = _phys_to_virt(dst_phys)
+    val _ = rt_memset(dst_virt.to_i64(), 0, len.to_i64())
+
+fn vmm_map_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    """Map a 4KB page in an explicit address space without switching CR3."""
+    if space.phys_root == 0 or space.phys_root == 1:
+        return false
+
+    val vaddr = virt_addr_value(virt)
+    val paddr = phys_addr_value(phys)
+    var safe_flags = flags
+    if flags.writable and not flags.no_execute:
+        safe_flags = VmFlags(
+            present: flags.present,
+            writable: true,
+            user: flags.user,
+            write_through: flags.write_through,
+            cache_disable: flags.cache_disable,
+            no_execute: true
+        )
+
+    val pml4_virt = _phys_to_virt(space.phys_root)
+
+    val pdpt_virt = _ensure_table_entry(pml4_virt, _pml4_index(vaddr))
+    if pdpt_virt == 0:
+        return false
+
+    val pd_virt = _ensure_table_entry(pdpt_virt, _pdpt_index(vaddr))
+    if pd_virt == 0:
+        return false
+
+    val pt_virt = _ensure_table_entry(pd_virt, _pd_index(vaddr))
+    if pt_virt == 0:
+        return false
+
+    val pte_flags = _flags_to_pte_bits(safe_flags)
+    val entry = (paddr & PTE_ADDR_MASK) | pte_flags
+    _write_pte(pt_virt, _pt_index(vaddr), entry)
+
+    true
+
+fn _cow_clear_writable_recursive(table_phys: u64, level: u32):
+    """Recursively clear PTE_WRITABLE on all leaf PTEs in the user half."""
+    val table_virt = _phys_to_virt(table_phys)
+    var limit: u64 = ENTRIES_PER_TABLE
+    if level == 3:
+        limit = 256
+    var i: u64 = 0
+    while i < limit:
+        val entry = _read_pte(table_virt, i)
+        if _pte_is_present(entry):
+            if level == 0:
+                _write_pte(table_virt, i, entry & ~PTE_WRITABLE)
+            else:
+                val child_phys = _pte_phys_addr(entry)
+                _cow_clear_writable_recursive(child_phys, level - 1)
+        i = i + 1
+
+fn _cow_ref_leaf_pages(table_phys: u64, level: u32):
+    val table_virt = _phys_to_virt(table_phys)
+    var limit: u64 = ENTRIES_PER_TABLE
+    if level == 3:
+        limit = 256
+    var i: u64 = 0
+    while i < limit:
+        val entry = _read_pte(table_virt, i)
+        if _pte_is_present(entry):
+            if level == 0:
+                val pa = _pte_phys_addr(entry)
+                pmm_ref_page(pa)
+            else if level == 1 and (entry & PTE_HUGE_PAGE) != 0:
+                val pa = _pte_phys_addr(entry)
+                pmm_ref_page(pa)
+            else:
+                val child_phys = _pte_phys_addr(entry)
+                _cow_ref_leaf_pages(child_phys, level - 1)
+        i = i + 1
+
+fn _free_user_half_subtree(pml4_virt: u64):
+    """Walk the user half of a PML4 and free all intermediate page table pages."""
+    var i: u64 = 0
+    while i < 256:
+        val pdpt_entry = _read_pte(pml4_virt, i)
+        if _pte_is_present(pdpt_entry):
+            val pdpt_phys = _pte_phys_addr(pdpt_entry)
+            val pdpt_virt = _phys_to_virt(pdpt_phys)
+            var j: u64 = 0
+            while j < ENTRIES_PER_TABLE:
+                val pd_entry = _read_pte(pdpt_virt, j)
+                if _pte_is_present(pd_entry):
+                    val pd_phys = _pte_phys_addr(pd_entry)
+                    val pd_virt = _phys_to_virt(pd_phys)
+                    var k: u64 = 0
+                    while k < ENTRIES_PER_TABLE:
+                        val pt_entry = _read_pte(pd_virt, k)
+                        if _pte_is_present(pt_entry):
+                            val pt_phys = _pte_phys_addr(pt_entry)
+                            val pt_frame = PageFrame.from_phys_addr(PhysAddr(addr: pt_phys))
+                            pmm_free_page(pt_frame)
+                        k = k + 1
+                    val pd_frame = PageFrame.from_phys_addr(PhysAddr(addr: pd_phys))
+                    pmm_free_page(pd_frame)
+                j = j + 1
+            val pdpt_frame = PageFrame.from_phys_addr(PhysAddr(addr: pdpt_phys))
+            pmm_free_page(pdpt_frame)
+        i = i + 1
+
+# ============================================================================
+# ProcessVmSpace constructor helper
+# ============================================================================
+
+fn vmm_new_process_space(pml4: u64, id: u64) -> ProcessVmSpace:
+    """Create an empty ProcessVmSpace wrapping an existing PML4."""
+    ProcessVmSpace(
+        pml4: pml4,
+        id: id,
+        vma_count: 0,
+        areas: []
+    )

@@ -1,0 +1,177 @@
+# Agent Pool — Work distribution and health monitoring for agent teams
+#
+# Manages a pool of test-execution agents, distributes work in batches,
+# tracks progress, and reclaims work from stale/dead agents.
+
+
+use app.test_daemon.types.{AgentInfo}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+# ============================================================================
+# Agent Pool
+# ============================================================================
+
+class AgentPool:
+    agents: {text: AgentInfo}
+    pending_tests: [text]
+    in_progress: {text: text}
+    completed: {text: i64}
+    batch_size: i64
+
+impl AgentPool:
+    me register_agent(agent_id: text, capabilities: text) -> bool:
+        val now = rt_time_now_unix_micros()
+        val info = AgentInfo(
+            agent_id: agent_id,
+            registered_at: now,
+            last_heartbeat: now,
+            tests_completed: 0,
+            tests_in_progress: 0,
+            capabilities: capabilities
+        )
+        self.agents[agent_id] = info
+        true
+
+    me heartbeat(agent_id: text) -> bool:
+        val existing = self.agents[agent_id]
+        if not existing.?:
+            return false
+        var info = existing
+        info.last_heartbeat = rt_time_now_unix_micros()
+        self.agents[agent_id] = info
+        true
+
+    me claim_batch(agent_id: text) -> [text]:
+        val existing = self.agents[agent_id]
+        if not existing.?:
+            return []
+
+        var batch: [text] = []
+        var remaining: [text] = []
+        var claimed = 0
+
+        var i = 0
+        while i < self.pending_tests.len():
+            val test_path = self.pending_tests[i]
+            if claimed < self.batch_size:
+                batch.push(test_path)
+                self.in_progress[test_path] = agent_id
+                claimed = claimed + 1
+            else:
+                remaining.push(test_path)
+            i = i + 1
+
+        self.pending_tests = remaining
+
+        # Update agent info
+        var info = existing
+        info.tests_in_progress = info.tests_in_progress + claimed
+        info.last_heartbeat = rt_time_now_unix_micros()
+        self.agents[agent_id] = info
+
+        batch
+
+    me report_result(agent_id: text, test_path: text, status: i64, passed: i64, failed: i64, duration_ms: i64, output: text) -> bool:
+        val existing = self.agents[agent_id]
+        if not existing.?:
+            return false
+
+        # Remove from in_progress, add to completed
+        self.in_progress[test_path] = ""
+        self.completed[test_path] = status
+
+        # Update agent stats
+        var info = existing
+        info.tests_completed = info.tests_completed + 1
+        if info.tests_in_progress > 0:
+            info.tests_in_progress = info.tests_in_progress - 1
+        info.last_heartbeat = rt_time_now_unix_micros()
+        self.agents[agent_id] = info
+
+        true
+
+    me deregister_agent(agent_id: text) -> bool:
+        val existing = self.agents[agent_id]
+        if not existing.?:
+            return false
+
+        # Return in-progress tests to pending
+        var keys = self.in_progress.keys()
+        var i = 0
+        while i < keys.len():
+            val key = keys[i]
+            val owner = self.in_progress[key]
+            if owner == agent_id:
+                self.pending_tests.push(key)
+                self.in_progress[key] = ""
+            i = i + 1
+
+        self.agents[agent_id] = AgentInfo(
+            agent_id: "", registered_at: 0, last_heartbeat: 0,
+            tests_completed: 0, tests_in_progress: 0, capabilities: ""
+        )
+        true
+
+    me cleanup_stale_agents(timeout_ms: i64):
+        val now = rt_time_now_unix_micros()
+        val timeout_us = timeout_ms * 1000
+        var stale_ids: [text] = []
+
+        var keys = self.agents.keys()
+        var i = 0
+        while i < keys.len():
+            val key = keys[i]
+            val info = self.agents[key]
+            if info.agent_id != "" and (now - info.last_heartbeat) > timeout_us:
+                stale_ids.push(key)
+            i = i + 1
+
+        for stale_id in stale_ids:
+            self.deregister_agent(stale_id)
+
+    me load_pending_tests(files: [text]):
+        for file_path in files:
+            # Only add if not already completed or in progress
+            val done = self.completed[file_path]
+            val prog = self.in_progress[file_path]
+            if not done.? and (not prog.? or prog == ""):
+                self.pending_tests.push(file_path)
+
+    fn active_agent_count() -> i64:
+        var count = 0
+        var keys = self.agents.keys()
+        var i = 0
+        while i < keys.len():
+            val info = self.agents[keys[i]]
+            if info.agent_id != "":
+                count = count + 1
+            i = i + 1
+        count
+
+    fn pending_count() -> i64:
+        self.pending_tests.len()
+
+    fn completed_count() -> i64:
+        var count = 0
+        var keys = self.completed.keys()
+        var i = 0
+        while i < keys.len():
+            val v = self.completed[keys[i]]
+            if v.?:
+                count = count + 1
+            i = i + 1
+        count
+
+# ============================================================================
+# Factory
+# ============================================================================
+
+fn agent_pool_new(batch_size: i64) -> AgentPool:
+    AgentPool(
+        agents: {},
+        pending_tests: [],
+        in_progress: {},
+        completed: {},
+        batch_size: batch_size
+    )

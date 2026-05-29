@@ -1,0 +1,32 @@
+# HTTP Baremetal -- Minimal kernel-native HTTP loop for SimpleOS
+#
+# MDSOC: feature dimension, application layer
+# Status: B5 minimal launcher. This path deliberately avoids the hosted
+# std.http_server worker/config/router closure until the freestanding runtime
+# and PCI/VirtIO network surfaces can support that larger ABI.
+
+use os.kernel.log.klog_api.{log_raw_println}
+
+extern fn rt_io_tcp_bind(addr: text) -> i64
+extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_close(fd: i64) -> bool
+
+val SIMPLEOS_HTTP_LISTEN_ADDR: text = "0.0.0.0:8080"
+val SIMPLEOS_HTTP_RESPONSE: text = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nServer: SimpleOS\r\nConnection: close\r\nContent-Length: 44\r\n\r\n{\"status\":\"ok\",\"server\":\"SimpleOS\"}\n"
+
+fn start_http_server_baremetal():
+    """Start a minimal single-core HTTP loop on the boot core."""
+    log_raw_println("[http_baremetal] Starting minimal HTTP loop...")
+
+    val listener = rt_io_tcp_bind(SIMPLEOS_HTTP_LISTEN_ADDR)
+    if listener < 0:
+        log_raw_println("[http_baremetal] ERROR: bind failed")
+        return
+
+    log_raw_println("[http_baremetal] Listening on 0.0.0.0:8080")
+    while true:
+        val client = rt_io_tcp_accept_timeout(listener, 1)
+        if client >= 0:
+            rt_io_tcp_write_text(client, SIMPLEOS_HTTP_RESPONSE)
+            rt_io_tcp_close(client)

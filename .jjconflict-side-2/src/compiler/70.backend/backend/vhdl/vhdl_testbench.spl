@@ -1,0 +1,333 @@
+# VHDL testbench renderer.
+#
+# Callers provide conversion IR: sanitized DUT/port names, literal VHDL stimuli,
+# expect(...).to_equal(...) checks, ordered source-test phases, and optional
+# clock/reset controls.
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+
+struct VhdlTestbenchPort:
+    name: text
+    direction: text
+    type_name: text
+    source_line: i64
+
+struct VhdlTestbenchAssignment:
+    target: text
+    literal: text
+    source_line: i64
+
+struct VhdlTestbenchAssertion:
+    actual: text
+    expected: text
+    test_name: text
+    expectation_index: i64
+    source_line: i64
+
+struct VhdlTestbenchCase:
+    testbench_name: text
+    dut_entity: text
+    test_name: text
+    test_source_line: i64
+    ports: [VhdlTestbenchPort]
+    stimuli: [VhdlTestbenchAssignment]
+    assertions: [VhdlTestbenchAssertion]
+    clock_name: text
+    reset_name: text
+    reset_asserted: text
+
+struct VhdlTestbenchDut:
+    instance_name: text
+    entity: text
+    ports: [VhdlTestbenchPort]
+    source_line: i64
+
+struct VhdlTestbenchPhase:
+    name: text
+    source_line: i64
+    stimuli: [VhdlTestbenchAssignment]
+    assertions: [VhdlTestbenchAssertion]
+    wait_for: text
+
+struct VhdlTestbenchSuite:
+    testbench_name: text
+    test_name: text
+    test_source_line: i64
+    duts: [VhdlTestbenchDut]
+    phases: [VhdlTestbenchPhase]
+    clock_name: text
+    reset_name: text
+    reset_asserted: text
+
+struct VhdlTestbenchDiagnostic:
+    code: text
+    message: text
+    source_line: i64
+
+struct VhdlTestbenchArtifact:
+    testbench_entity: text
+    testbench_vhdl: text
+    source_map_json: text
+
+fn render_vhdl_testbench(tb: VhdlTestbenchCase) -> VhdlTestbenchArtifact:
+    """Render a deterministic VHDL testbench for one DUT."""
+    val suite = VhdlTestbenchSuite(
+        testbench_name: tb.testbench_name,
+        test_name: tb.test_name,
+        test_source_line: tb.test_source_line,
+        duts: [
+            VhdlTestbenchDut(
+                instance_name: "dut",
+                entity: tb.dut_entity,
+                ports: tb.ports,
+                source_line: tb.test_source_line
+            )
+        ],
+        phases: [
+            VhdlTestbenchPhase(
+                name: tb.test_name,
+                source_line: tb.test_source_line,
+                stimuli: tb.stimuli,
+                assertions: tb.assertions,
+                wait_for: ""
+            )
+        ],
+        clock_name: tb.clock_name,
+        reset_name: tb.reset_name,
+        reset_asserted: tb.reset_asserted
+    )
+    _render_vhdl_testbench_suite_unchecked(suite)
+
+fn render_vhdl_testbench_suite(tb: VhdlTestbenchSuite) -> Result<VhdlTestbenchArtifact, VhdlTestbenchDiagnostic>:
+    """Render a deterministic multi-DUT, multi-phase VHDL testbench."""
+    val diagnostic = validate_vhdl_testbench_suite(tb)
+    if diagnostic.?:
+        return Err(diagnostic.unwrap())
+    Ok(_render_vhdl_testbench_suite_unchecked(tb))
+
+fn validate_vhdl_testbench_suite(tb: VhdlTestbenchSuite) -> VhdlTestbenchDiagnostic?:
+    """Reject source-test shapes that would otherwise produce partial VHDL."""
+    if tb.duts.len() == 0:
+        return Some(vhdl_testbench_diagnostic(
+            "VHDL-TB-NO-DUT",
+            "VHDL testbench conversion requires at least one DUT for {tb.testbench_name}",
+            tb.test_source_line
+        ))
+    if tb.phases.len() == 0:
+        return Some(vhdl_testbench_diagnostic(
+            "VHDL-TB-NO-PHASE",
+            "VHDL testbench conversion requires at least one source-test phase for {tb.testbench_name}",
+            tb.test_source_line
+        ))
+
+    var dut_index = 0
+    while dut_index < tb.duts.len():
+        val dut = tb.duts[dut_index]
+        if dut.instance_name == "":
+            return Some(vhdl_testbench_diagnostic("VHDL-TB-DUT-NAME", "DUT instance name must not be empty", dut.source_line))
+        if dut.entity == "":
+            return Some(vhdl_testbench_diagnostic("VHDL-TB-DUT-ENTITY", "DUT entity name must not be empty for instance {dut.instance_name}", dut.source_line))
+        if dut.ports.len() == 0:
+            return Some(vhdl_testbench_diagnostic("VHDL-TB-DUT-PORTS", "DUT instance {dut.instance_name} must expose at least one VHDL port", dut.source_line))
+
+        var other_index = dut_index + 1
+        while other_index < tb.duts.len():
+            if dut.instance_name == tb.duts[other_index].instance_name:
+                return Some(vhdl_testbench_diagnostic("VHDL-TB-DUT-COLLISION", "Duplicate VHDL DUT instance name after sanitization: {dut.instance_name}", tb.duts[other_index].source_line))
+            other_index = other_index + 1
+        dut_index = dut_index + 1
+
+    val ports = _vhdl_testbench_unique_ports(tb.duts)
+    var port_index = 0
+    while port_index < ports.len():
+        val port = ports[port_index]
+        if port.name == "":
+            return Some(vhdl_testbench_diagnostic("VHDL-TB-PORT-NAME", "VHDL testbench signal name must not be empty", port.source_line))
+        var other_port_index = port_index + 1
+        while other_port_index < ports.len():
+            val other = ports[other_port_index]
+            if port.name == other.name and port.type_name != other.type_name:
+                return Some(vhdl_testbench_diagnostic("VHDL-TB-SIGNAL-COLLISION", "VHDL testbench signal {port.name} is driven by incompatible DUT port types {port.type_name} and {other.type_name}", other.source_line))
+            other_port_index = other_port_index + 1
+        port_index = port_index + 1
+
+    nil
+
+fn vhdl_testbench_diagnostic(code: text, message: text, source_line: i64) -> VhdlTestbenchDiagnostic:
+    VhdlTestbenchDiagnostic(code: code, message: message, source_line: source_line)
+
+fn _render_vhdl_testbench_suite_unchecked(tb: VhdlTestbenchSuite) -> VhdlTestbenchArtifact:
+    val builder = VhdlBuilder.create(tb.testbench_name)
+    builder.emit_library_header()
+    builder.emit_line("use std.env.all;")
+    builder.emit_raw("")
+
+    builder.emit_entity_begin(tb.testbench_name)
+    builder.emit_entity_end(tb.testbench_name)
+
+    builder.emit_architecture_begin(tb.testbench_name, "sim")
+    val ports = _vhdl_testbench_unique_ports(tb.duts)
+    for port in ports:
+        builder.emit_signal_decl(port.name, port.type_name, _vhdl_default_literal(port.type_name))
+
+    builder.emit_architecture_body_begin()
+    for dut in tb.duts:
+        builder.emit_instance_begin(dut.instance_name, dut.entity)
+        builder.emit_port_map_begin()
+        var port_index = 0
+        for port in dut.ports:
+            val is_last = port_index == dut.ports.len() - 1
+            builder.emit_port_map_entry(port.name, port.name, is_last)
+            port_index = port_index + 1
+        builder.emit_port_map_end()
+        builder.emit_raw("")
+
+    if tb.clock_name != "":
+        _emit_clock_driver(builder, tb.clock_name)
+        builder.emit_raw("")
+
+    builder.emit_line("stimulus: process")
+    builder.indent_level = builder.indent_level + 1
+    builder.emit_process_body_begin()
+    if tb.reset_name != "":
+        builder.emit_signal_assign(tb.reset_name, tb.reset_asserted)
+        builder.emit_line("wait for 10 ns;")
+        builder.emit_signal_assign(tb.reset_name, _vhdl_reset_deasserted(tb.reset_asserted))
+        if tb.clock_name != "":
+            builder.emit_line("wait until rising_edge({tb.clock_name});")
+    for phase in tb.phases:
+        builder.emit_comment("phase: {phase.name}")
+        for stimulus in phase.stimuli:
+            builder.emit_signal_assign(stimulus.target, stimulus.literal)
+        if phase.wait_for != "":
+            builder.emit_line("wait for {phase.wait_for};")
+        elif tb.clock_name != "":
+            builder.emit_line("wait until rising_edge({tb.clock_name});")
+        else:
+            builder.emit_line("wait for 1 ns;")
+        for check in phase.assertions:
+            val message = "{check.test_name} expectation {check.expectation_index}: expected {check.actual} to equal {check.expected}"
+            builder.emit_assert("{check.actual} = {check.expected}", message, "failure")
+    builder.emit_line("finish;")
+    builder.emit_process_end(Some("stimulus"))
+    builder.emit_architecture_end("sim")
+
+    val vhdl = builder.build()
+    VhdlTestbenchArtifact(
+        testbench_entity: tb.testbench_name,
+        testbench_vhdl: vhdl,
+        source_map_json: _vhdl_testbench_source_map(tb, vhdl)
+    )
+
+fn _vhdl_testbench_unique_ports(duts: [VhdlTestbenchDut]) -> [VhdlTestbenchPort]:
+    var ports: [VhdlTestbenchPort] = []
+    for dut in duts:
+        for port in dut.ports:
+            if not _vhdl_testbench_has_port(ports, port.name):
+                ports = ports.push(port)
+    ports
+
+fn _vhdl_testbench_has_port(ports: [VhdlTestbenchPort], name: text) -> bool:
+    for port in ports:
+        if port.name == name:
+            return true
+    false
+
+fn _emit_clock_driver(builder: VhdlBuilder, clock_name: text):
+    builder.emit_line("clock_driver: process")
+    builder.indent_level = builder.indent_level + 1
+    builder.emit_process_body_begin()
+    builder.emit_line("loop")
+    builder.indent_level = builder.indent_level + 1
+    builder.emit_signal_assign(clock_name, "'0'")
+    builder.emit_line("wait for 5 ns;")
+    builder.emit_signal_assign(clock_name, "'1'")
+    builder.emit_line("wait for 5 ns;")
+    builder.indent_level = builder.indent_level - 1
+    builder.emit_line("end loop;")
+    builder.emit_process_end(Some("clock_driver"))
+
+fn _vhdl_default_literal(type_name: text) -> text?:
+    val trimmed = type_name.trim()
+    if trimmed == "std_logic":
+        return Some("'0'")
+    if trimmed.starts_with("signed(") or trimmed.starts_with("unsigned(") or trimmed.starts_with("std_logic_vector("):
+        return Some("(others => '0')")
+    nil
+
+fn _vhdl_reset_deasserted(asserted: text) -> text:
+    if asserted == "'0'":
+        return "'1'"
+    if asserted == "\"0\"":
+        return "\"1\""
+    "'0'"
+
+fn _vhdl_testbench_source_map(tb: VhdlTestbenchSuite, vhdl: text) -> text:
+    val lines = vhdl.split("\n")
+    val ports = _vhdl_testbench_unique_ports(tb.duts)
+    var json = "{\n"
+    json = json + "  \"version\": 1,\n"
+    json = json + "  \"testbench\": \"" + _tb_json_escape(tb.testbench_name) + "\",\n"
+    json = json + "  \"dutEntity\": \"" + _tb_json_escape(tb.duts[0].entity) + "\",\n"
+    json = json + "  \"duts\": [" + _vhdl_testbench_dut_map(tb.duts, lines) + "],\n"
+    json = json + "  \"testName\": {\"name\":\"" + _tb_json_escape(tb.test_name) + "\",\"line\":" + _line_for_text(lines, "stimulus: process").to_text() + ",\"sourceLine\":" + tb.test_source_line.to_text() + "},\n"
+    json = json + "  \"phases\": [" + _vhdl_testbench_phase_map(tb.phases, lines) + "],\n"
+    json = json + "  \"ports\": [" + _vhdl_testbench_port_map(ports, lines) + "],\n"
+    json = json + "  \"expectations\": [" + _vhdl_testbench_expectation_map(tb.phases, lines) + "]\n"
+    json = json + "}\n"
+    json
+
+fn _vhdl_testbench_dut_map(duts: [VhdlTestbenchDut], lines: [text]) -> text:
+    var entries: [text] = []
+    for dut in duts:
+        val line_no = _line_for_text(lines, "{dut.instance_name}: entity work.{dut.entity}")
+        entries = entries.push("{\"instance\":\"" + _tb_json_escape(dut.instance_name) + "\",\"entity\":\"" + _tb_json_escape(dut.entity) + "\",\"line\":" + line_no.to_text() + ",\"sourceLine\":" + dut.source_line.to_text() + "}")
+    entries.join(", ")
+
+fn _vhdl_testbench_phase_map(phases: [VhdlTestbenchPhase], lines: [text]) -> text:
+    var entries: [text] = []
+    for phase in phases:
+        val line_no = _line_for_text(lines, "-- phase: {phase.name}")
+        entries = entries.push("{\"name\":\"" + _tb_json_escape(phase.name) + "\",\"line\":" + line_no.to_text() + ",\"sourceLine\":" + phase.source_line.to_text() + "}")
+    entries.join(", ")
+
+fn _vhdl_testbench_port_map(ports: [VhdlTestbenchPort], lines: [text]) -> text:
+    var entries: [text] = []
+    for port in ports:
+        val decl_line = _line_for_text(lines, "signal {port.name} :")
+        val map_line = _line_for_text(lines, "{port.name} => {port.name}")
+        entries = entries.push("{\"name\":\"" + _tb_json_escape(port.name) + "\",\"direction\":\"" + _tb_json_escape(port.direction) + "\",\"type\":\"" + _tb_json_escape(port.type_name) + "\",\"line\":" + decl_line.to_text() + ",\"portMapLine\":" + map_line.to_text() + ",\"sourceLine\":" + port.source_line.to_text() + "}")
+    entries.join(", ")
+
+fn _vhdl_testbench_expectation_map(phases: [VhdlTestbenchPhase], lines: [text]) -> text:
+    var entries: [text] = []
+    for phase in phases:
+        for check in phase.assertions:
+            val message = "{check.test_name} expectation {check.expectation_index}: expected {check.actual} to equal {check.expected}"
+            val line_no = _line_for_text(lines, "report \"{message}\"")
+            entries = entries.push("{\"testName\":\"" + _tb_json_escape(check.test_name) + "\",\"phase\":\"" + _tb_json_escape(phase.name) + "\",\"expectationIndex\":" + check.expectation_index.to_text() + ",\"actual\":\"" + _tb_json_escape(check.actual) + "\",\"expected\":\"" + _tb_json_escape(check.expected) + "\",\"line\":" + line_no.to_text() + ",\"sourceLine\":" + check.source_line.to_text() + "}")
+    entries.join(", ")
+
+fn _line_for_text(lines: [text], needle: text) -> i64:
+    var i = 0
+    while i < lines.len():
+        if lines[i].contains(needle):
+            return i + 1
+        i = i + 1
+    0
+
+fn _tb_json_escape(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\"":
+            out = out + "\\\""
+        elif ch == "\n":
+            out = out + "\\n"
+        else:
+            out = out + ch
+        i = i + 1
+    out

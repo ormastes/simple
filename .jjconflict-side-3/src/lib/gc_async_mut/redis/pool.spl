@@ -1,0 +1,123 @@
+"""
+# Redis Connection Pool
+
+Manages a pool of RedisClient connections for reuse.
+Avoids reconnection overhead by recycling idle connections.
+
+## Usage
+
+```simple
+use std.gc_async_mut.redis.pool.{RedisPool}
+
+var pool = RedisPool.new("127.0.0.1", 6379, 5)
+var client = pool.get()?
+client.set("key", "value")?
+pool.release(client)
+```
+"""
+
+use std.io.types.{IoError, IoErrorKind}
+use std.gc_async_mut.redis.client.{RedisClient}
+
+# ============================================================================
+# RedisPool
+# ============================================================================
+
+class RedisPool:
+    """Connection pool for Redis clients.
+
+    Maintains a list of idle connections up to max_size.
+    Creates new connections on demand when pool is empty.
+    """
+    host: text
+    port: i64
+    max_size: i64
+    connections: [RedisClient]
+    password: Option<text>
+
+    static fn new(host: text, port: i64, max_size: i64) -> RedisPool:
+        """Create a new connection pool.
+
+        Args:
+            host: Redis server hostname
+            port: Redis server port
+            max_size: Maximum idle connections to keep
+
+        Returns:
+            Empty RedisPool ready for use
+        """
+        RedisPool(host: host, port: port, max_size: max_size, connections: [], password: nil)
+
+    static fn with_auth(host: text, port: i64, max_size: i64, password: text) -> RedisPool:
+        """Create a pool that authenticates new connections.
+
+        Args:
+            host: Redis server hostname
+            port: Redis server port
+            max_size: Maximum idle connections
+            password: AUTH password for new connections
+
+        Returns:
+            RedisPool that authenticates on connect
+        """
+        RedisPool(host: host, port: port, max_size: max_size, connections: [], password: Some(password))
+
+impl RedisPool:
+    me get() -> Result<RedisClient, IoError>:
+        """Get a connection from the pool.
+
+        Returns an idle connection if available, otherwise creates a new one.
+
+        Returns:
+            Ready-to-use RedisClient
+        """
+        while self.connections.len() > 0:
+            var client = self.connections.pop()
+            if client.is_alive():
+                return Ok(client)
+        self.create_connection()
+
+    me release(client: RedisClient):
+        """Return a connection to the pool.
+
+        If the pool is full, the connection is dropped (closed implicitly).
+
+        Args:
+            client: RedisClient to return
+        """
+        if not client.is_alive():
+            return
+        if self.connections.len() < self.max_size:
+            self.connections.push(client)
+
+    me health_check() -> Result<(), IoError>:
+        """Verify pool connectivity by pinging one connection.
+
+        Creates a temporary connection if pool is empty.
+        """
+        var client = self.get()?
+        val result = client.ping()
+        self.release(client)
+        match result:
+            Ok(_): Ok(())
+            Err(e): Err(e)
+
+    me size() -> i64:
+        """Number of idle connections currently in the pool."""
+        self.connections.len()
+
+    me drain():
+        """Close and remove all idle connections."""
+        while self.connections.len() > 0:
+            var client = self.connections.pop()
+            client.close()
+        self.connections = []
+
+    # --- Internal ---
+
+    fn create_connection() -> Result<RedisClient, IoError>:
+        """Create a new authenticated connection."""
+        var client = RedisClient.connect(self.host, self.port)?
+        if val Some(pw) = self.password:
+            client.auth(pw)?
+        Ok(client)

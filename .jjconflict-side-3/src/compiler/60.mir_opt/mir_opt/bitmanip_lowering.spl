@@ -1,0 +1,274 @@
+# BitManip Lowering — Portable bitmanip intrinsic lowering for x86, AArch64, RISC-V
+#
+# Provides per-arch instruction mapping with native/fallback selection
+# and cost modeling for the MIR optimizer.
+
+# ============================================================================
+# BitmanipOp — portable bitmanip intrinsic descriptor
+# ============================================================================
+
+pub struct BitmanipOp:
+    op_name: text
+    bit_width: i64
+
+pub fn bitmanip_op_popcnt(bits: i64) -> BitmanipOp:
+    BitmanipOp(op_name: "popcnt", bit_width: bits)
+
+pub fn bitmanip_op_ctz(bits: i64) -> BitmanipOp:
+    BitmanipOp(op_name: "ctz", bit_width: bits)
+
+pub fn bitmanip_op_clz(bits: i64) -> BitmanipOp:
+    BitmanipOp(op_name: "clz", bit_width: bits)
+
+pub fn bitmanip_op_bswap(bits: i64) -> BitmanipOp:
+    BitmanipOp(op_name: "bswap", bit_width: bits)
+
+pub fn bitmanip_op_rotl(bits: i64) -> BitmanipOp:
+    BitmanipOp(op_name: "rotl", bit_width: bits)
+
+pub fn bitmanip_op_rotr(bits: i64) -> BitmanipOp:
+    BitmanipOp(op_name: "rotr", bit_width: bits)
+
+pub fn bitmanip_op_summary(op: BitmanipOp) -> text:
+    op.op_name + "_" + op.bit_width.to_text()
+
+# ============================================================================
+# X86BitmanipLowering — x86 instruction mapping
+# ============================================================================
+
+pub struct X86BitmanipLowering:
+    popcnt_available: bool
+    bmi1_available: bool
+    bmi2_available: bool
+
+pub fn x86_bitmanip_create(popcnt: bool, bmi1: bool, bmi2: bool) -> X86BitmanipLowering:
+    X86BitmanipLowering(popcnt_available: popcnt, bmi1_available: bmi1, bmi2_available: bmi2)
+
+pub fn x86_bitmanip_baseline() -> X86BitmanipLowering:
+    X86BitmanipLowering(popcnt_available: false, bmi1_available: false, bmi2_available: false)
+
+pub fn x86_bitmanip_modern() -> X86BitmanipLowering:
+    X86BitmanipLowering(popcnt_available: true, bmi1_available: true, bmi2_available: true)
+
+pub fn x86_bitmanip_lower(lb: X86BitmanipLowering, op: BitmanipOp) -> text:
+    if op.op_name == "popcnt":
+        if lb.popcnt_available:
+            return "POPCNT"
+        return "fallback_popcount_multiply"
+    if op.op_name == "ctz":
+        if lb.bmi1_available:
+            return "TZCNT"
+        return "BSF+CMOV"
+    if op.op_name == "clz":
+        if lb.bmi1_available:
+            return "LZCNT"
+        return "BSR+XOR"
+    if op.op_name == "bswap":
+        return "BSWAP"
+    if op.op_name == "rotl":
+        return "ROL"
+    if op.op_name == "rotr":
+        if lb.bmi2_available:
+            return "RORX"
+        return "ROR"
+    "unknown"
+
+pub fn x86_bitmanip_has_native(lb: X86BitmanipLowering, op_name: text) -> bool:
+    if op_name == "popcnt":
+        return lb.popcnt_available
+    if op_name == "ctz":
+        return lb.bmi1_available
+    if op_name == "clz":
+        return lb.bmi1_available
+    if op_name == "bswap":
+        return true
+    if op_name == "rotl":
+        return true
+    if op_name == "rotr":
+        return true
+    false
+
+pub fn x86_bitmanip_cost(lb: X86BitmanipLowering, op: BitmanipOp) -> i64:
+    if op.op_name == "popcnt":
+        if lb.popcnt_available:
+            return 1
+        return 5
+    if op.op_name == "ctz":
+        if lb.bmi1_available:
+            return 1
+        return 3
+    if op.op_name == "clz":
+        if lb.bmi1_available:
+            return 1
+        return 3
+    if op.op_name == "bswap":
+        return 1
+    if op.op_name == "rotl":
+        return 1
+    if op.op_name == "rotr":
+        return 1
+    4
+
+# ============================================================================
+# Aarch64BitmanipLowering — AArch64 instruction mapping
+# ============================================================================
+
+pub struct Aarch64BitmanipLowering:
+    has_neon: bool
+
+pub fn aarch64_bitmanip_create() -> Aarch64BitmanipLowering:
+    Aarch64BitmanipLowering(has_neon: true)
+
+pub fn aarch64_bitmanip_lower(lb: Aarch64BitmanipLowering, op: BitmanipOp) -> text:
+    if op.op_name == "popcnt":
+        return "CNT+ADDV"
+    if op.op_name == "ctz":
+        return "RBIT+CLZ"
+    if op.op_name == "clz":
+        return "CLZ"
+    if op.op_name == "bswap":
+        if op.bit_width == 32:
+            return "REV32"
+        return "REV"
+    if op.op_name == "rotl":
+        return "ROR_neg"
+    if op.op_name == "rotr":
+        return "ROR"
+    "unknown"
+
+pub fn aarch64_bitmanip_has_native(lb: Aarch64BitmanipLowering, op_name: text) -> bool:
+    if op_name == "clz":
+        return true
+    if op_name == "bswap":
+        return true
+    if op_name == "rotr":
+        return true
+    false
+
+pub fn aarch64_bitmanip_cost(lb: Aarch64BitmanipLowering, op: BitmanipOp) -> i64:
+    if op.op_name == "clz":
+        return 1
+    if op.op_name == "bswap":
+        return 1
+    if op.op_name == "rotr":
+        return 1
+    2
+
+# ============================================================================
+# RiscvBitmanipLowering — RISC-V Zbb extension mapping
+# ============================================================================
+
+pub struct RiscvBitmanipLowering:
+    has_zbb: bool
+    has_zbc: bool
+
+pub fn riscv_bitmanip_create(zbb: bool, zbc: bool) -> RiscvBitmanipLowering:
+    RiscvBitmanipLowering(has_zbb: zbb, has_zbc: zbc)
+
+pub fn riscv_bitmanip_baseline() -> RiscvBitmanipLowering:
+    RiscvBitmanipLowering(has_zbb: false, has_zbc: false)
+
+pub fn riscv_bitmanip_with_zbb() -> RiscvBitmanipLowering:
+    RiscvBitmanipLowering(has_zbb: true, has_zbc: false)
+
+pub fn riscv_bitmanip_lower(lb: RiscvBitmanipLowering, op: BitmanipOp) -> text:
+    if op.op_name == "popcnt":
+        if lb.has_zbb:
+            return "CPOP"
+        return "fallback_loop"
+    if op.op_name == "ctz":
+        if lb.has_zbb:
+            return "CTZ"
+        return "fallback_debruijn"
+    if op.op_name == "clz":
+        if lb.has_zbb:
+            return "CLZ"
+        return "fallback_binary_search"
+    if op.op_name == "bswap":
+        if lb.has_zbb:
+            return "REV8"
+        return "fallback_shift_mask"
+    if op.op_name == "rotl":
+        if lb.has_zbb:
+            return "ROL"
+        return "fallback_shift_or"
+    if op.op_name == "rotr":
+        if lb.has_zbb:
+            return "ROR"
+        return "fallback_shift_or"
+    "unknown"
+
+pub fn riscv_bitmanip_has_native(lb: RiscvBitmanipLowering, op_name: text) -> bool:
+    lb.has_zbb
+
+pub fn riscv_bitmanip_cost(lb: RiscvBitmanipLowering, op: BitmanipOp) -> i64:
+    if lb.has_zbb:
+        return 1
+    if op.op_name == "popcnt":
+        return 8
+    if op.op_name == "ctz":
+        return 6
+    if op.op_name == "clz":
+        return 6
+    if op.op_name == "bswap":
+        return 5
+    if op.op_name == "rotl":
+        return 4
+    if op.op_name == "rotr":
+        return 4
+    8
+
+# ============================================================================
+# BitmanipLoweringDispatch — multi-arch dispatch
+# ============================================================================
+
+pub struct BitmanipLoweringDispatch:
+    target_arch: text
+    x86: X86BitmanipLowering
+    aarch64: Aarch64BitmanipLowering
+    riscv: RiscvBitmanipLowering
+
+pub fn bitmanip_dispatch_for_x86(popcnt: bool, bmi1: bool, bmi2: bool) -> BitmanipLoweringDispatch:
+    BitmanipLoweringDispatch(
+        target_arch: "x86",
+        x86: x86_bitmanip_create(popcnt, bmi1, bmi2),
+        aarch64: aarch64_bitmanip_create(),
+        riscv: riscv_bitmanip_baseline()
+    )
+
+pub fn bitmanip_dispatch_for_aarch64() -> BitmanipLoweringDispatch:
+    BitmanipLoweringDispatch(
+        target_arch: "aarch64",
+        x86: x86_bitmanip_baseline(),
+        aarch64: aarch64_bitmanip_create(),
+        riscv: riscv_bitmanip_baseline()
+    )
+
+pub fn bitmanip_dispatch_for_riscv(zbb: bool, zbc: bool) -> BitmanipLoweringDispatch:
+    BitmanipLoweringDispatch(
+        target_arch: "riscv",
+        x86: x86_bitmanip_baseline(),
+        aarch64: aarch64_bitmanip_create(),
+        riscv: riscv_bitmanip_create(zbb, zbc)
+    )
+
+pub fn bitmanip_dispatch_lower(d: BitmanipLoweringDispatch, op: BitmanipOp) -> text:
+    if d.target_arch == "x86":
+        return x86_bitmanip_lower(d.x86, op)
+    if d.target_arch == "aarch64":
+        return aarch64_bitmanip_lower(d.aarch64, op)
+    if d.target_arch == "riscv":
+        return riscv_bitmanip_lower(d.riscv, op)
+    "unknown_arch"
+
+pub fn bitmanip_dispatch_cost(d: BitmanipLoweringDispatch, op: BitmanipOp) -> i64:
+    if d.target_arch == "x86":
+        return x86_bitmanip_cost(d.x86, op)
+    if d.target_arch == "aarch64":
+        return aarch64_bitmanip_cost(d.aarch64, op)
+    if d.target_arch == "riscv":
+        return riscv_bitmanip_cost(d.riscv, op)
+    99
+
+pub fn bitmanip_dispatch_report(d: BitmanipLoweringDispatch) -> text:
+    "BitmanipLoweringDispatch(arch=" + d.target_arch + ")"

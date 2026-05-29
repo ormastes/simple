@@ -1,0 +1,210 @@
+# Web WM Session
+#
+# RenderSurfaceSession: per-surface frame timing and dirty-rect tracking for
+# web engine render pipelines.
+#
+# WmSessionPolicy + WmBackendSession: WM backend session adoption with
+# managed-shared enforcement. WM sessions NEVER use PerfExclusive; child
+# windows requesting perf_exclusive are rejected.
+
+extern fn rt_time_now_micros() -> i64
+
+# ============================================================================
+# RenderSurfaceSession
+# ============================================================================
+
+class RenderSurfaceSession:
+    """Per-surface render session with pipeline-stage timing and frame stats.
+
+    Tracks microsecond timestamps for each pipeline stage (parse, style,
+    layout, paint, upload, present) and accumulates them across frames.
+    """
+    surface_id: i64
+    session_id: i64
+    mode: text
+    width: i64
+    height: i64
+    parse_us: i64
+    style_us: i64
+    layout_us: i64
+    paint_us: i64
+    upload_us: i64
+    present_us: i64
+    frame_count: i64
+    readback_enabled: bool
+
+    static fn create(surface_id: i64, session_id: i64, mode: text, w: i64, h: i64) -> RenderSurfaceSession:
+        """Create a new RenderSurfaceSession for the given surface and dimensions."""
+        RenderSurfaceSession(
+            surface_id: surface_id,
+            session_id: session_id,
+            mode: mode,
+            width: w,
+            height: h,
+            parse_us: 0,
+            style_us: 0,
+            layout_us: 0,
+            paint_us: 0,
+            upload_us: 0,
+            present_us: 0,
+            frame_count: 0,
+            readback_enabled: false
+        )
+
+    me begin_frame() -> i64:
+        """Return current timestamp in microseconds to use as frame_id."""
+        rt_time_now_micros()
+
+    me record_parse(us: i64):
+        """Accumulate parse stage duration."""
+        self.parse_us = self.parse_us + us
+
+    me record_style(us: i64):
+        """Accumulate style stage duration."""
+        self.style_us = self.style_us + us
+
+    me record_layout(us: i64):
+        """Accumulate layout stage duration."""
+        self.layout_us = self.layout_us + us
+
+    me record_paint(us: i64):
+        """Accumulate paint stage duration."""
+        self.paint_us = self.paint_us + us
+
+    me record_upload(us: i64):
+        """Accumulate upload stage duration."""
+        self.upload_us = self.upload_us + us
+
+    me record_present(us: i64):
+        """Accumulate present stage duration."""
+        self.present_us = self.present_us + us
+
+    me end_frame(frame_id: i64) -> text:
+        """Increment frame counter and return a summary line."""
+        self.frame_count = self.frame_count + 1
+        val total = self.total_pipeline_us()
+        "frame=" + frame_id.to_text() + " total_us=" + total.to_text() + " count=" + self.frame_count.to_text()
+
+    me enable_readback(enabled: bool):
+        """Toggle GPU-to-host readback for this surface."""
+        self.readback_enabled = enabled
+
+    me frame_stats() -> text:
+        """Return a human-readable summary of accumulated pipeline timings."""
+        "surface=" + self.surface_id.to_text() +
+        " parse=" + self.parse_us.to_text() +
+        " style=" + self.style_us.to_text() +
+        " layout=" + self.layout_us.to_text() +
+        " paint=" + self.paint_us.to_text() +
+        " upload=" + self.upload_us.to_text() +
+        " present=" + self.present_us.to_text() +
+        " frames=" + self.frame_count.to_text()
+
+    me total_pipeline_us() -> i64:
+        """Sum of all pipeline stage durations in microseconds."""
+        self.parse_us + self.style_us + self.layout_us + self.paint_us + self.upload_us + self.present_us
+
+    me cleanup() -> text:
+        """Release surface binding and return a cleanup confirmation."""
+        "cleanup surface=" + self.surface_id.to_text() + " session=" + self.session_id.to_text()
+
+# ============================================================================
+# WmSessionPolicy
+# ============================================================================
+
+class WmSessionPolicy:
+    """Policy governing WM backend session behaviour.
+
+    WM sessions are always managed_shared. Children may not be perf_exclusive.
+    """
+    mode: text
+    allow_child_perf: bool
+    dirty_rect_enabled: bool
+    present_batching: bool
+    frame_pacing_target_us: i64
+
+    static fn create() -> WmSessionPolicy:
+        """Default WM policy: managed_shared, no child perf, dirty rects on."""
+        WmSessionPolicy(
+            mode: "managed_shared",
+            allow_child_perf: false,
+            dirty_rect_enabled: true,
+            present_batching: true,
+            frame_pacing_target_us: 16667
+        )
+
+    me validate_child_mode(child_mode: text) -> text:
+        """Return empty string if child_mode is acceptable, or an error message."""
+        if child_mode == "perf_exclusive":
+            return "error: perf_exclusive is forbidden for WM child windows"
+        ""
+
+# ============================================================================
+# WmBackendSession
+# ============================================================================
+
+class WmBackendSession:
+    """WM backend session that adopts surfaces and coordinates presentation.
+
+    Enforces managed_shared policy. Rejects any child requesting perf_exclusive.
+    """
+    session_id: i64
+    mode: text
+    policy: WmSessionPolicy
+    surface_count: i64
+    frame_count: i64
+    dirty_count: i64
+    present_batch_count: i64
+    active: bool
+
+    static fn create(session_id: i64) -> WmBackendSession:
+        """Create a new WM backend session with default managed_shared policy."""
+        WmBackendSession(
+            session_id: session_id,
+            mode: "managed_shared",
+            policy: WmSessionPolicy.create(),
+            surface_count: 0,
+            frame_count: 0,
+            dirty_count: 0,
+            present_batch_count: 0,
+            active: true
+        )
+
+    me add_surface(surface_id: i64, w: i64, h: i64) -> text:
+        """Register a new surface with this WM session."""
+        self.surface_count = self.surface_count + 1
+        "added surface=" + surface_id.to_text() + " " + w.to_text() + "x" + h.to_text()
+
+    me propagate_dirty(surface_id: i64, x: i64, y: i64, w: i64, h: i64) -> text:
+        """Record a dirty rectangle for the given surface."""
+        self.dirty_count = self.dirty_count + 1
+        "dirty surface=" + surface_id.to_text() + " rect=" + x.to_text() + "," + y.to_text() + "+" + w.to_text() + "x" + h.to_text()
+
+    me compose_and_present() -> text:
+        """Compose all dirty surfaces and issue a batched present."""
+        self.frame_count = self.frame_count + 1
+        self.present_batch_count = self.present_batch_count + 1
+        "present batch=" + self.present_batch_count.to_text() + " frame=" + self.frame_count.to_text()
+
+    me retain_for_child(child_mode: text) -> text:
+        """Validate and retain session for a child window.
+
+        Rejects perf_exclusive — WM children must use managed_shared or legacy.
+        """
+        val err = self.policy.validate_child_mode(child_mode)
+        if err == "" == false:
+            return err
+        "retained session=" + self.session_id.to_text() + " child_mode=" + child_mode
+
+    me stats() -> text:
+        """Return a human-readable summary of WM session statistics."""
+        "wm_session=" + self.session_id.to_text() +
+        " surfaces=" + self.surface_count.to_text() +
+        " frames=" + self.frame_count.to_text() +
+        " dirty=" + self.dirty_count.to_text() +
+        " batches=" + self.present_batch_count.to_text()
+
+    me cleanup() -> text:
+        """Deactivate the WM session and return a cleanup confirmation."""
+        self.active = false
+        "cleanup wm_session=" + self.session_id.to_text()

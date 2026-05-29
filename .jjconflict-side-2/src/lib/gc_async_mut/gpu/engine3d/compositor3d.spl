@@ -1,0 +1,131 @@
+"""3D Engine — Render Pass Compositor
+
+@tag:stdlib
+@tag:api
+@tag:gpu
+
+Manages an ordered set of 3D render passes and composites their outputs.
+Each pass has its own color+depth targets. The compositor merges pass
+outputs using configurable blend operations.
+
+Usage:
+    use std.gpu.engine3d.compositor3d.{RenderPass3D, Compositor3D}
+"""
+
+# ============================================================================
+# Render Pass
+# ============================================================================
+
+class RenderPass3D:
+    name: text
+    color_target_id: i32
+    depth_target_id: i32
+    clear_color: u32
+    clear_depth: f32
+    z_order: i32
+    enabled: bool
+    width: i32
+    height: i32
+    pixels: [u32]
+
+    static fn create(name: text, width: i32, height: i32) -> RenderPass3D:
+        val total = width * height
+        RenderPass3D(
+            name: name,
+            color_target_id: -1,
+            depth_target_id: -1,
+            clear_color: 0xFF000000,
+            clear_depth: 1.0,
+            z_order: 0,
+            enabled: true,
+            width: width,
+            height: height,
+            pixels: [0u32; total]
+        )
+
+    me set_clear_color(color: u32):
+        self.clear_color = color
+
+    me set_clear_depth(depth: f32):
+        self.clear_depth = depth
+
+    me set_z_order(order: i32):
+        self.z_order = order
+
+    me set_enabled(on: bool):
+        self.enabled = on
+
+# ============================================================================
+# Compositor
+# ============================================================================
+
+class Compositor3D:
+    _passes: [RenderPass3D]
+    _output_width: i32
+    _output_height: i32
+
+    static fn create(width: i32, height: i32) -> Compositor3D:
+        Compositor3D(
+            _passes: [],
+            _output_width: width,
+            _output_height: height
+        )
+
+    me add_pass(rp: RenderPass3D):
+        self._passes.push(rp)
+
+    me remove_pass(name: text):
+        var new_passes: [RenderPass3D] = []
+        var i = 0
+        while i < self._passes.len():
+            if self._passes[i].name != name:
+                new_passes.push(self._passes[i])
+            i = i + 1
+        self._passes = new_passes
+
+    fn pass_count() -> i32:
+        self._passes.len()
+
+    me sort_passes():
+        var n = self._passes.len()
+        var i = 0
+        while i < n - 1:
+            var j = 0
+            while j < n - i - 1:
+                if self._passes[j].z_order > self._passes[j + 1].z_order:
+                    val tmp = self._passes[j]
+                    self._passes[j] = self._passes[j + 1]
+                    self._passes[j + 1] = tmp
+                j = j + 1
+            i = i + 1
+
+    fn composite() -> [u32]:
+        val total = self._output_width * self._output_height
+        var output: [u32] = [0xFF000000u32; total]
+        var pi = 0
+        while pi < self._passes.len():
+            val rp = self._passes[pi]
+            if rp.enabled and rp.pixels.len() == total:
+                var px = 0
+                while px < total:
+                    val src = rp.pixels[px]
+                    val sa = ((src >> 24) & 0xFF) as i32
+                    if sa > 0:
+                        if sa == 255:
+                            output[px] = src
+                        else:
+                            val dst = output[px]
+                            val inv = 255 - sa
+                            val rr = ((((src >> 16) & 0xFF) as i32) * sa + (((dst >> 16) & 0xFF) as i32) * inv) / 255
+                            val rg = ((((src >> 8) & 0xFF) as i32) * sa + (((dst >> 8) & 0xFF) as i32) * inv) / 255
+                            val rb = (((src & 0xFF) as i32) * sa + ((dst & 0xFF) as i32) * inv) / 255
+                            output[px] = (0xFF000000 as u32) | ((rr as u32) << 16) | ((rg as u32) << 8) | (rb as u32)
+                    px = px + 1
+            pi = pi + 1
+        output
+
+    fn output_width() -> i32:
+        self._output_width
+
+    fn output_height() -> i32:
+        self._output_height

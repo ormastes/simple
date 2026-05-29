@@ -1,0 +1,244 @@
+# Test Manifest — Persistent test file index for fast discovery
+#
+# Stores pre-scanned metadata about all test and sdoctest files.
+# Read from disk in ~5-15ms instead of walking+reading every file (~1.5s).
+#
+# Format: line-based text file at .simple/test-manifest.idx
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct TestManifestEntry:
+    path: text
+    file_size: i64
+    file_mtime: i64
+    test_level: i64           # 0=unknown, 1=unit, 2=integration, 3=system
+    slow_tag: bool
+    skip_tag: bool
+    pending_tag: bool
+    tags: text                # Comma-separated custom tags
+    platform_tags: text       # Comma-separated platform tags
+    is_fuzz: bool
+    is_chaos: bool
+    is_deploy: bool
+    is_security: bool
+    is_baremetal: bool
+    last_duration_ms: i64     # Last known test duration for smart ordering (0 = unknown)
+
+struct SdoctestManifestEntry:
+    path: text
+    file_size: i64
+    file_mtime: i64
+    block_count: i64
+
+struct TestManifest:
+    version: i64
+    scan_timestamp: i64
+    entries: [TestManifestEntry]
+    sdoctest_entries: [SdoctestManifestEntry]
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val MANIFEST_VERSION = 1
+val MANIFEST_PATH = ".simple/test-manifest.idx"
+# Default freshness TTL: 5 minutes in microseconds
+val MANIFEST_TTL_MICROS = 300000000
+
+# ============================================================================
+# Factory
+# ============================================================================
+
+fn manifest_new() -> TestManifest:
+    TestManifest(
+        version: MANIFEST_VERSION,
+        scan_timestamp: 0,
+        entries: [],
+        sdoctest_entries: []
+    )
+
+# ============================================================================
+# Freshness Check
+# ============================================================================
+
+fn manifest_is_fresh(manifest: TestManifest) -> bool:
+    if manifest.scan_timestamp == 0:
+        return false
+    val now = rt_time_now_unix_micros()
+    val age = now - manifest.scan_timestamp
+    age < MANIFEST_TTL_MICROS
+
+fn manifest_is_fresh_with_ttl(manifest: TestManifest, ttl_micros: i64) -> bool:
+    if manifest.scan_timestamp == 0:
+        return false
+    val now = rt_time_now_unix_micros()
+    val age = now - manifest.scan_timestamp
+    age < ttl_micros
+
+# ============================================================================
+# Serialization — Save
+# ============================================================================
+
+fn manifest_save(manifest: TestManifest, path: text) -> bool:
+    # Ensure parent directory exists
+    val last_slash = path.last_index_of("/")
+    if last_slash > 0:
+        val parent = path[0:last_slash]
+        rt_mkdir_p(parent)
+
+    var lines: [text] = []
+    lines.push("# test-manifest v{manifest.version}")
+    lines.push("scan_timestamp={manifest.scan_timestamp}")
+    lines.push("entry_count={manifest.entries.len()}")
+    lines.push("sdoctest_count={manifest.sdoctest_entries.len()}")
+    lines.push("")
+
+    # Entries header
+    lines.push("# entries (path|size|mtime|level|slow|skip|pending|tags|platform|fuzz|chaos|deploy|security|bare|duration_ms)")
+
+    for entry in manifest.entries:
+        val slow = if entry.slow_tag: "1" else: "0"
+        val skip = if entry.skip_tag: "1" else: "0"
+        val pending = if entry.pending_tag: "1" else: "0"
+        val fuzz = if entry.is_fuzz: "1" else: "0"
+        val chaos = if entry.is_chaos: "1" else: "0"
+        val deploy = if entry.is_deploy: "1" else: "0"
+        val security = if entry.is_security: "1" else: "0"
+        val bare = if entry.is_baremetal: "1" else: "0"
+        lines.push("{entry.path}|{entry.file_size}|{entry.file_mtime}|{entry.test_level}|{slow}|{skip}|{pending}|{entry.tags}|{entry.platform_tags}|{fuzz}|{chaos}|{deploy}|{security}|{bare}|{entry.last_duration_ms}")
+
+    lines.push("")
+    lines.push("# sdoctest (path|size|mtime|blocks)")
+
+    for sd in manifest.sdoctest_entries:
+        lines.push("{sd.path}|{sd.file_size}|{sd.file_mtime}|{sd.block_count}")
+
+    val content = lines.join("\n") + "\n"
+    rt_file_write_text(path, content)
+
+# ============================================================================
+# Serialization — Load
+# ============================================================================
+
+fn manifest_load(path: text) -> TestManifest:
+    if not rt_file_exists(path):
+        return manifest_new()
+
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        return manifest_new()
+
+    var manifest = manifest_new()
+    var in_entries = false
+    var in_sdoctest = false
+
+    val all_lines = content.split("\n")
+    var li = 0
+    while li < all_lines.len():
+        val line = all_lines[li].trim()
+        li = li + 1
+
+        # Skip empty lines and comments
+        if line == "" or line.starts_with("#"):
+            # Detect section headers from comments
+            if line.starts_with("# entries"):
+                in_entries = true
+                in_sdoctest = false
+            elif line.starts_with("# sdoctest"):
+                in_entries = false
+                in_sdoctest = true
+            continue
+
+        # Parse header fields
+        if line.starts_with("scan_timestamp="):
+            manifest.scan_timestamp = to_int(line[15:])
+            continue
+        if line.starts_with("entry_count=") or line.starts_with("sdoctest_count="):
+            continue
+
+        # Parse pipe-delimited entries
+        if in_entries:
+            val entry = parse_manifest_entry(line)
+            if entry.path != "":
+                manifest.entries.push(entry)
+        elif in_sdoctest:
+            val sd = parse_sdoctest_entry(line)
+            if sd.path != "":
+                manifest.sdoctest_entries.push(sd)
+
+    manifest
+
+# ============================================================================
+# Parsing Helpers
+# ============================================================================
+
+fn parse_manifest_entry(line: text) -> TestManifestEntry:
+    # Format: path|size|mtime|level|slow|skip|pending|tags|platform|fuzz|chaos|deploy|security|bare[|duration_ms]
+    val parts = line.split("|")
+    if parts.len() < 14:
+        return TestManifestEntry(path: "", file_size: 0, file_mtime: 0, test_level: 0, slow_tag: false, skip_tag: false, pending_tag: false, tags: "", platform_tags: "", is_fuzz: false, is_chaos: false, is_deploy: false, is_security: false, is_baremetal: false, last_duration_ms: 0)
+
+    # Field 15 (index 14) is optional for backward compat with old manifests
+    var duration_ms = 0
+    if parts.len() >= 15:
+        duration_ms = to_int(parts[14])
+
+    TestManifestEntry(
+        path: parts[0],
+        file_size: to_int(parts[1]),
+        file_mtime: to_int(parts[2]),
+        test_level: to_int(parts[3]),
+        slow_tag: parts[4] == "1",
+        skip_tag: parts[5] == "1",
+        pending_tag: parts[6] == "1",
+        tags: parts[7],
+        platform_tags: parts[8],
+        is_fuzz: parts[9] == "1",
+        is_chaos: parts[10] == "1",
+        is_deploy: parts[11] == "1",
+        is_security: parts[12] == "1",
+        is_baremetal: parts[13] == "1",
+        last_duration_ms: duration_ms
+    )
+
+fn parse_sdoctest_entry(line: text) -> SdoctestManifestEntry:
+    # Format: path|size|mtime|blocks
+    val parts = line.split("|")
+    if parts.len() < 4:
+        return SdoctestManifestEntry(path: "", file_size: 0, file_mtime: 0, block_count: 0)
+
+    SdoctestManifestEntry(
+        path: parts[0],
+        file_size: to_int(parts[1]),
+        file_mtime: to_int(parts[2]),
+        block_count: to_int(parts[3])
+    )
+
+# ============================================================================
+# Lookup Helpers
+# ============================================================================
+
+fn manifest_find_entry(manifest: TestManifest, path: text) -> TestManifestEntry:
+    for entry in manifest.entries:
+        if entry.path == path:
+            return entry
+    TestManifestEntry(path: "", file_size: 0, file_mtime: 0, test_level: 0, slow_tag: false, skip_tag: false, pending_tag: false, tags: "", platform_tags: "", is_fuzz: false, is_chaos: false, is_deploy: false, is_security: false, is_baremetal: false, last_duration_ms: 0)
+
+fn manifest_find_sdoctest(manifest: TestManifest, path: text) -> SdoctestManifestEntry:
+    for sd in manifest.sdoctest_entries:
+        if sd.path == path:
+            return sd
+    SdoctestManifestEntry(path: "", file_size: 0, file_mtime: 0, block_count: 0)
+
+# ============================================================================
+# Exports
+# ============================================================================
+

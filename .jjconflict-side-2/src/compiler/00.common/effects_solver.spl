@@ -1,0 +1,248 @@
+"""
+Effect System - Fixed-Point Solver
+
+Iteratively infers effects until convergence. When a function calls an async
+function, it becomes async too. This propagates through the call graph.
+
+Now uses the canonical EffectTag from effects.spl instead of its own enum.
+"""
+
+use compiler.common.effects.{EffectTag, EffectEnv, FunctionEffectInfo}
+
+# ============================================================================
+# Effect Scanner (operates on FunctionEffectInfo)
+# ============================================================================
+
+class EffectScanner:
+    """Scans function info to determine its effect based on the environment."""
+    env: EffectEnv
+
+impl EffectScanner:
+    static fn create(env: EffectEnv) -> EffectScanner:
+        EffectScanner(env: env)
+
+    fn scan_function(func: FunctionEffectInfo) -> EffectTag:
+        """Scan a function to determine its effect.
+
+        Checks:
+        1. is_async annotation -> Async
+        2. contains_suspension operators -> Async
+        3. calls to async functions -> Async
+        4. Otherwise -> Sync
+        """
+        if func.is_async:
+            return EffectTag.Async
+
+        if func.contains_suspension:
+            return EffectTag.Async
+
+        for callee in func.called_functions:
+            val callee_effect = self.env.get_effect(callee)
+            if callee_effect.is_async():
+                return EffectTag.Async
+
+        EffectTag.Sync
+
+# ============================================================================
+# Fixed-Point Solver
+# ============================================================================
+
+class EffectSolver:
+    """
+    Iteratively infers effects until convergence.
+
+    Algorithm:
+    1. Initialize all functions as Sync (unless annotated async)
+    2. Repeat until no changes:
+       - Scan each function
+       - Update effect in environment
+       - Mark as dirty if changed
+    3. Return converged environment
+    """
+    env: EffectEnv
+    scanner: EffectScanner
+    max_iterations: i64
+
+fn effectsolver_solve(solver: EffectSolver, functions: [FunctionEffectInfo]) -> i64:
+    """Free function wrapper — skip for bootstrap (method calls crash)."""
+    return 0
+
+fn effectsolver_create(env: EffectEnv) -> EffectSolver:
+    """Free function wrapper for cross-module bootstrap compatibility."""
+    val scanner = EffectScanner.create(env)
+    EffectSolver(
+        env: env,
+        scanner: scanner,
+        max_iterations: 100
+    )
+
+impl EffectSolver:
+    static fn create(env: EffectEnv) -> EffectSolver:
+        val scanner = EffectScanner.create(env)
+        EffectSolver(
+            env: env,
+            scanner: scanner,
+            max_iterations: 100
+        )
+
+    me solve(functions: [FunctionEffectInfo]) -> i64:
+        """
+        Run fixed-point solver.
+
+        Returns: number of iterations taken.
+        """
+        # Initialize: seed from annotations
+        for func in functions:
+            if func.is_async:
+                self.env.set_effect(func.name, EffectTag.Async)
+            else:
+                self.env.set_effect(func.name, EffectTag.Sync)
+
+        self.env.clear_dirty()
+
+        # Fixed-point iteration
+        var iterations = 0
+
+        while iterations < self.max_iterations:
+            iterations = iterations + 1
+
+            # Scan each function
+            for func in functions:
+                val inferred_effect = self.scanner.scan_function(func)
+                self.env.set_effect(func.name, inferred_effect)
+
+            # Check if converged
+            if not self.env.is_dirty():
+                return iterations
+
+            self.env.clear_dirty()
+
+        # Max iterations reached (should not happen in practice)
+        iterations
+
+    fn get_env() -> EffectEnv:
+        """Get the effect environment after solving."""
+        self.env
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+fn test_single_function():
+    """Test solver on single function"""
+    val env = EffectEnv.new()
+    var solver = EffectSolver.create(env)
+
+    # Sync function
+    val sync_func = FunctionEffectInfo(
+        name: "sync_fn",
+        is_async: false,
+        contains_suspension: false,
+        called_functions: []
+    )
+
+    val iterations = solver.solve([sync_func])
+
+    assert env.get_effect("sync_fn") == EffectTag.Sync
+    assert iterations == 1
+
+fn test_async_function():
+    """Test solver on async function (annotation)"""
+    val env = EffectEnv.new()
+    var solver = EffectSolver.create(env)
+
+    val async_func = FunctionEffectInfo(
+        name: "async_fn",
+        is_async: true,
+        contains_suspension: false,
+        called_functions: []
+    )
+
+    val iterations = solver.solve([async_func])
+
+    assert env.get_effect("async_fn") == EffectTag.Async
+    assert iterations == 1
+
+fn test_call_chain():
+    """Test effect propagation through call chain"""
+    val env = EffectEnv.new()
+    var solver = EffectSolver.create(env)
+
+    # leaf: calls http.get (async builtin)
+    val leaf_func = FunctionEffectInfo(
+        name: "leaf",
+        is_async: false,
+        contains_suspension: false,
+        called_functions: ["http.get"]
+    )
+
+    # middle: calls leaf
+    val middle_func = FunctionEffectInfo(
+        name: "middle",
+        is_async: false,
+        contains_suspension: false,
+        called_functions: ["leaf"]
+    )
+
+    # top: calls middle
+    val top_func = FunctionEffectInfo(
+        name: "top",
+        is_async: false,
+        contains_suspension: false,
+        called_functions: ["middle"]
+    )
+
+    val iterations = solver.solve([leaf_func, middle_func, top_func])
+
+    assert env.get_effect("leaf") == EffectTag.Async
+    assert env.get_effect("middle") == EffectTag.Async
+    assert env.get_effect("top") == EffectTag.Async
+    assert iterations <= 4
+
+fn test_mixed_functions():
+    """Test mix of sync and async functions"""
+    val env = EffectEnv.new()
+    var solver = EffectSolver.create(env)
+
+    val sync_func = FunctionEffectInfo(
+        name: "sync_fn",
+        is_async: false,
+        contains_suspension: false,
+        called_functions: []
+    )
+
+    val async_func = FunctionEffectInfo(
+        name: "async_fn",
+        is_async: false,
+        contains_suspension: false,
+        called_functions: ["http.get"]
+    )
+
+    val sync_caller = FunctionEffectInfo(
+        name: "sync_caller",
+        is_async: false,
+        contains_suspension: false,
+        called_functions: ["sync_fn"]
+    )
+
+    val iterations = solver.solve([sync_func, async_func, sync_caller])
+
+    assert env.get_effect("sync_fn") == EffectTag.Sync
+    assert env.get_effect("async_fn") == EffectTag.Async
+    assert env.get_effect("sync_caller") == EffectTag.Sync
+
+fn main():
+    print "Fixed-Point Solver Tests"
+    print "========================"
+
+    test_single_function()
+    test_async_function()
+    test_call_chain()
+    test_mixed_functions()
+
+    print "All fixed-point solver tests passed!"

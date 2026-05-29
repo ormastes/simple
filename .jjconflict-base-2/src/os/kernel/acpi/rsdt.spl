@@ -1,0 +1,137 @@
+# ACPI RSDT/XSDT Iterator — FR-SIMPLEOS-ACPI-001
+#
+# Iterates all table pointers in an RSDT (32-bit entries) or XSDT (64-bit
+# entries) and invokes a callback for each, passing the 4-byte ASCII signature
+# as u32 and the physical address of the table.
+#
+# Convention: all addresses are PHYSICAL; callers use phys_to_virt() before
+# reading table payloads via mmio helpers.
+
+use os.kernel.boot.mmio.{mmio_read32}
+use os.kernel.boot.limine_boot.{phys_to_virt}
+use os.kernel.acpi.rsdp.{
+    acpi_rsdp_revision,
+    acpi_rsdp_rsdt_phys,
+    acpi_rsdp_xsdt_phys,
+}
+
+# ============================================================================
+# SDT header constants
+# ============================================================================
+
+# Offsets within a standard ACPI System Description Table header (36 bytes)
+val SDT_OFF_SIGNATURE: u64 = 0    # 4 bytes — ASCII signature
+val SDT_OFF_LENGTH:    u64 = 4    # 4 bytes — total table length including header
+val SDT_HEADER_LEN:    u64 = 36   # standard header size
+
+# ============================================================================
+# Internal: read 32-bit physical address from XSDT 64-bit entry slot
+# ============================================================================
+
+fn _read_xsdt_entry(base_virt: u64, index: u64) -> u64:
+    """Read one 64-bit XSDT entry (physical address of a child table)."""
+    val offset = SDT_HEADER_LEN + index * 8
+    val lo = mmio_read32(base_virt + offset) as u64
+    val hi = mmio_read32(base_virt + offset + 4) as u64
+    (hi << 32) | lo
+
+fn _read_rsdt_entry(base_virt: u64, index: u64) -> u64:
+    """Read one 32-bit RSDT entry (physical address of a child table)."""
+    val offset = SDT_HEADER_LEN + index * 4
+    mmio_read32(base_virt + offset) as u64
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn acpi_table_signature(table_phys: u64) -> u32:
+    """Read the 4-byte signature of an ACPI table as a little-endian u32."""
+    val virt = phys_to_virt(table_phys)
+    mmio_read32(virt + SDT_OFF_SIGNATURE)
+
+fn acpi_iterate_tables(rsdp_phys: u64, cb: fn(u32, u64)):
+    """Walk RSDT or XSDT and call cb(signature_u32, table_phys) for each entry.
+
+    Prefers XSDT (ACPI 2.0+) when revision >= 2; falls back to RSDT.
+    cb is called with:
+      - sig: 4-byte ASCII signature packed as u32 little-endian
+      - ptr: physical address of the table (caller must phys_to_virt before read)
+
+    The RSDP itself is not passed to cb.
+    """
+    val rev = acpi_rsdp_revision(rsdp_phys)
+
+    if rev >= 2:
+        val xsdt_phys = acpi_rsdp_xsdt_phys(rsdp_phys)
+        if xsdt_phys != 0:
+            val virt = phys_to_virt(xsdt_phys)
+            val total_len = mmio_read32(virt + SDT_OFF_LENGTH) as u64
+            val entry_bytes = total_len - SDT_HEADER_LEN
+            val count = entry_bytes / 8
+            var i: u64 = 0
+            while i < count:
+                val child_phys = _read_xsdt_entry(virt, i)
+                if child_phys != 0:
+                    val sig = acpi_table_signature(child_phys)
+                    cb(sig, child_phys)
+                i = i + 1
+            return
+
+    # Fallback: RSDT (32-bit entries)
+    val rsdt_phys = acpi_rsdp_rsdt_phys(rsdp_phys)
+    if rsdt_phys == 0:
+        return
+    val virt = phys_to_virt(rsdt_phys)
+    val total_len = mmio_read32(virt + SDT_OFF_LENGTH) as u64
+    val entry_bytes = total_len - SDT_HEADER_LEN
+    val count = entry_bytes / 4
+    var i: u64 = 0
+    while i < count:
+        val child_phys = _read_rsdt_entry(virt, i)
+        if child_phys != 0:
+            val sig = acpi_table_signature(child_phys)
+            cb(sig, child_phys)
+        i = i + 1
+
+fn acpi_find_table(rsdp_phys: u64, target_sig: u32) -> u64?:
+    """Return physical address of first ACPI table matching target_sig, or nil.
+
+    Inlines the XSDT/RSDT scan rather than using acpi_iterate_tables with a
+    closure, because Simple nested closures cannot modify outer variables.
+    """
+    val rev = acpi_rsdp_revision(rsdp_phys)
+
+    if rev >= 2:
+        val xsdt_phys = acpi_rsdp_xsdt_phys(rsdp_phys)
+        if xsdt_phys != 0:
+            val virt = phys_to_virt(xsdt_phys)
+            val total_len = mmio_read32(virt + SDT_OFF_LENGTH) as u64
+            val entry_bytes = total_len - SDT_HEADER_LEN
+            val count = entry_bytes / 8
+            var i: u64 = 0
+            while i < count:
+                val child_phys = _read_xsdt_entry(virt, i)
+                if child_phys != 0:
+                    val sig = acpi_table_signature(child_phys)
+                    if sig == target_sig:
+                        return child_phys
+                i = i + 1
+            return nil
+
+    # Fallback: RSDT (32-bit entries)
+    val rsdt_phys = acpi_rsdp_rsdt_phys(rsdp_phys)
+    if rsdt_phys == 0:
+        return nil
+    val virt = phys_to_virt(rsdt_phys)
+    val total_len = mmio_read32(virt + SDT_OFF_LENGTH) as u64
+    val entry_bytes = total_len - SDT_HEADER_LEN
+    val count = entry_bytes / 4
+    var i: u64 = 0
+    while i < count:
+        val child_phys = _read_rsdt_entry(virt, i)
+        if child_phys != 0:
+            val sig = acpi_table_signature(child_phys)
+            if sig == target_sig:
+                return child_phys
+        i = i + 1
+    nil

@@ -1,0 +1,231 @@
+"""
+# Role-Based Access Control (RBAC)
+
+Provides role and permission management for web framework middleware.
+Roles contain named permissions (resource + action pairs). The RBAC
+policy is checked against user roles extracted from JWT claims.
+
+## Usage
+
+```simple
+var policy = RbacPolicy(roles: {})
+policy.add_role(Role(name: "admin", permissions: []))
+policy.grant("admin", "users", "write")
+policy.grant("admin", "users", "read")
+
+# Check a single role
+val allowed = policy.check("admin", "users", "write")  # true
+
+# Check any of several roles (e.g., from JWT)
+val allowed = policy.check_any(["viewer", "admin"], "users", "write")  # true
+
+# Middleware-style: pass decoded JWT claims
+val result = rbac_middleware(claims, policy, "users", "write")
+match result:
+    Ok(_): print "Access granted"
+    Err(msg): print "Forbidden: {msg}"
+```
+"""
+
+use std.common.jwt.claims.{get_claim}
+
+# ============================================================================
+# Permission & Role Structs
+# ============================================================================
+
+struct Permission:
+    """A single permission: resource + action pair.
+
+    Examples: Permission(resource: "users", action: "write")
+              Permission(resource: "posts", action: "read")
+    """
+    resource: text
+    action: text
+
+struct Role:
+    """A named role containing a list of permissions."""
+    name: text
+    permissions: [Permission]
+
+# ============================================================================
+# RBAC Policy
+# ============================================================================
+
+class RbacPolicy:
+    """Policy engine mapping role names to Role objects.
+
+    Use add_role() to register roles, grant() to add permissions,
+    and check()/check_any() to test access.
+    """
+    roles: Dict<text, Role>
+
+impl RbacPolicy:
+    me add_role(role: Role):
+        """Register a role in the policy. Overwrites if name exists."""
+        self.roles[role.name] = role
+
+    me grant(role_name: text, resource: text, action: text):
+        """Grant a permission to an existing role.
+
+        If the role does not exist, creates it with the single permission.
+
+        Args:
+            role_name: Name of the role to modify
+            resource: Resource identifier (e.g., "users", "posts")
+            action: Action identifier (e.g., "read", "write", "delete")
+        """
+        val perm = Permission(resource: resource, action: action)
+        val existing = self.roles.get(role_name)
+        if existing != nil:
+            var role = existing ?? Role(name: role_name, permissions: [])
+            role.permissions.push(perm)
+            self.roles[role_name] = role
+        else:
+            val new_role = Role(name: role_name, permissions: [perm])
+            self.roles[role_name] = new_role
+
+    me check(role_name: text, resource: text, action: text) -> bool:
+        """Check whether a role has a specific permission.
+
+        Args:
+            role_name: Name of the role to check
+            resource: Required resource
+            action: Required action
+
+        Returns:
+            true if the role exists and has the permission
+        """
+        val role_opt = self.roles.get(role_name)
+        if role_opt == nil:
+            return false
+        val role = role_opt ?? Role(name: "", permissions: [])
+        has_permission(role, resource, action)
+
+    me check_any(role_names: [text], resource: text, action: text) -> bool:
+        """Check whether any of the given roles has a specific permission.
+
+        Args:
+            role_names: List of role names to check (e.g., from JWT)
+            resource: Required resource
+            action: Required action
+
+        Returns:
+            true if at least one role has the permission
+        """
+        var i = 0
+        while i < role_names.len():
+            if self.check(role_names[i], resource, action):
+                return true
+            i = i + 1
+        false
+
+# ============================================================================
+# Permission Helpers
+# ============================================================================
+
+fn has_permission(role: Role, resource: text, action: text) -> bool:
+    """Check whether a Role's permissions list contains the given resource+action."""
+    var i = 0
+    while i < role.permissions.len():
+        val p = role.permissions[i]
+        if p.resource == resource and p.action == action:
+            return true
+        i = i + 1
+    false
+
+# ============================================================================
+# Middleware-Style Functions
+# ============================================================================
+
+fn rbac_middleware(claims: list, policy: RbacPolicy,
+                  resource: text, action: text) -> Result<bool, text>:
+    """Check RBAC access using roles extracted from JWT claims.
+
+    Reads the "roles" claim (comma-separated role names), splits it,
+    and checks policy.check_any().
+
+    Args:
+        claims: Decoded JWT claims list (from JwtAuthResult.claims)
+        policy: The RBAC policy to check against
+        resource: Required resource
+        action: Required action
+
+    Returns:
+        Ok(true) if access is granted, Err(reason) if denied
+    """
+    val roles_str = get_claim(claims, "roles")
+    if roles_str.len() == 0:
+        return Err("Forbidden: no roles claim in token")
+
+    val role_names = parse_comma_roles(roles_str)
+    if role_names.len() == 0:
+        return Err("Forbidden: empty roles claim")
+
+    if policy.check_any(role_names, resource, action):
+        return Ok(true)
+
+    Err("Forbidden: none of the user's roles have " + action + " access to " + resource)
+
+fn requires_role(claims: list, role_name: text) -> Result<bool, text>:
+    """Shorthand check: does the JWT carry the given role?
+
+    Args:
+        claims: Decoded JWT claims list
+        role_name: Required role name
+
+    Returns:
+        Ok(true) if the role is present, Err(reason) otherwise
+    """
+    val roles_str = get_claim(claims, "roles")
+    if roles_str.len() == 0:
+        return Err("Forbidden: no roles claim in token")
+
+    val role_names = parse_comma_roles(roles_str)
+    var i = 0
+    while i < role_names.len():
+        if role_names[i] == role_name:
+            return Ok(true)
+        i = i + 1
+
+    Err("Forbidden: user does not have role " + role_name)
+
+fn requires_permission(claims: list, policy: RbacPolicy,
+                       resource: text, action: text) -> Result<bool, text>:
+    """Shorthand: check a single resource+action against the user's roles.
+
+    Equivalent to rbac_middleware but with a clearer name for
+    route-level guards.
+
+    Args:
+        claims: Decoded JWT claims list
+        policy: The RBAC policy
+        resource: Required resource
+        action: Required action
+
+    Returns:
+        Ok(true) if granted, Err(reason) if denied
+    """
+    rbac_middleware(claims, policy, resource, action)
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn parse_comma_roles(roles_str: text) -> [text]:
+    """Split a comma-separated roles string into trimmed role names.
+
+    Args:
+        roles_str: e.g., "admin,editor, viewer"
+
+    Returns:
+        List of trimmed non-empty role names
+    """
+    val raw_parts = roles_str.split(",")
+    var result: [text] = []
+    var i = 0
+    while i < raw_parts.len():
+        val trimmed = raw_parts[i].trim()
+        if trimmed.len() > 0:
+            result.push(trimmed)
+        i = i + 1
+    result

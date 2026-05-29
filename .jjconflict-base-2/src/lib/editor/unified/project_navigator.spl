@@ -1,0 +1,129 @@
+# Project Navigator
+#
+# File tree walking, search, and navigation for the editor backend.
+# Pure data model — rendering is shell-specific.
+#
+# Provides: FileEntry, ProjectNavigator.
+
+extern fn rt_dir_walk(path: text) -> [text]
+extern fn rt_file_exists(path: text) -> bool
+
+struct FileEntry:
+    path: text
+    name: text
+    is_dir: bool
+    depth: i64
+
+class ProjectNavigator:
+    """Provides project file tree + search for the unified editor backend."""
+    root: text
+    entries: [FileEntry]
+    filtered: [FileEntry]
+    selected_index: i64
+
+    static fn new(root: text) -> ProjectNavigator:
+        ProjectNavigator(
+            root: root,
+            entries: [],
+            filtered: [],
+            selected_index: 0
+        )
+
+    me scan():
+        """Walk the project root and populate entries."""
+        me.entries = []
+        me.filtered = []
+        me.selected_index = 0
+        if me.root == "":
+            return
+        val paths = rt_dir_walk(me.root)
+        var i = 0
+        while i < paths.len():
+            val p = paths[i]
+            val name = _basename(p)
+            # Skip hidden directories and common noise
+            if not _is_ignored(name):
+                val depth = _count_separators(p, me.root)
+                val is_dir = not _has_extension(name)
+                me.entries.push(FileEntry(
+                    path: p,
+                    name: name,
+                    is_dir: is_dir,
+                    depth: depth
+                ))
+            i = i + 1
+        me.filtered = me.entries
+
+    me filter(query: text):
+        """Filter entries by substring match on name."""
+        if query == "":
+            me.filtered = me.entries
+            me.selected_index = 0
+            return
+        var result: [FileEntry] = []
+        var i = 0
+        while i < me.entries.len():
+            if me.entries[i].name.contains(query) or me.entries[i].path.contains(query):
+                result.push(me.entries[i])
+            i = i + 1
+        me.filtered = result
+        me.selected_index = 0
+
+    me move_selection(delta: i64):
+        """Move selection up or down within filtered entries."""
+        if me.filtered.len() == 0:
+            me.selected_index = 0
+            return
+        me.selected_index = me.selected_index + delta
+        if me.selected_index < 0:
+            me.selected_index = 0
+        if me.selected_index >= me.filtered.len():
+            me.selected_index = me.filtered.len() - 1
+
+    fn selected_entry() -> FileEntry?:
+        """Return the currently selected file entry."""
+        if me.filtered.len() == 0 or me.selected_index < 0:
+            return Option.None
+        if me.selected_index >= me.filtered.len():
+            return Option.None
+        Option.Some(me.filtered[me.selected_index])
+
+    fn selected_path() -> text:
+        """Return path of selected entry, or empty string."""
+        if me.filtered.len() == 0 or me.selected_index < 0:
+            return ""
+        if me.selected_index >= me.filtered.len():
+            return ""
+        me.filtered[me.selected_index].path
+
+    fn entry_count() -> i64:
+        me.filtered.len()
+
+    fn total_count() -> i64:
+        me.entries.len()
+
+fn _basename(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() == 0:
+        return path
+    parts[parts.len() - 1]
+
+fn _count_separators(path: text, root: text) -> i64:
+    val relative = if path.starts_with(root):
+        path.slice(root.len(), path.len())
+    else:
+        path
+    val parts = relative.split("/")
+    parts.len() - 1
+
+fn _has_extension(name: text) -> bool:
+    name.contains(".")
+
+fn _is_ignored(name: text) -> bool:
+    if name.starts_with("."):
+        return true
+    if name == "node_modules" or name == "__pycache__" or name == "target":
+        return true
+    if name == "build" or name == "dist" or name == ".git":
+        return true
+    false

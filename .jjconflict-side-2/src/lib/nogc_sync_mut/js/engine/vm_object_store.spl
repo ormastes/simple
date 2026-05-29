@@ -1,0 +1,114 @@
+# JS VM Object Store
+# Manages the heap of JS objects and arrays by integer ID.
+
+use std.js.types.js_types.{JsValue, JsObject, JsProperty}
+
+class ObjectStore:
+    next_id: i64
+    prop_obj_ids: [i64]
+    prop_ref_ids: [i64]
+    prop_ref_tags: [i64]
+    prop_keys: [text]
+    prop_values: [JsValue]
+    prop_enumerables: [bool]
+    prop_configurables: [bool]
+    obj_proto_ids: [i64]
+
+impl ObjectStore:
+    static fn create() -> ObjectStore:
+        ObjectStore(
+            next_id: 1,
+            prop_obj_ids: [],
+            prop_ref_ids: [],
+            prop_ref_tags: [],
+            prop_keys: [],
+            prop_values: [],
+            prop_enumerables: [],
+            prop_configurables: [],
+            obj_proto_ids: []
+        )
+
+    fn alloc_object() -> i64:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.obj_proto_ids.push(-1)
+        id
+
+    fn alloc_array() -> i64:
+        self.alloc_object()
+
+    fn get_object(id: i64) -> JsObject:
+        var props: [JsProperty] = []
+        var i = 0
+        while i < self.prop_obj_ids.len():
+            if self.prop_obj_ids[i] == id:
+                props.push(JsProperty(
+                    key: self.prop_keys[i],
+                    value: self.prop_values[i],
+                    enumerable: self.prop_enumerables[i]
+                ))
+            i = i + 1
+        JsObject(properties: props)
+
+    fn set_property(obj_id: i64, key: text, value: JsValue):
+        var i = 0
+        while i < self.prop_obj_ids.len():
+            if self.prop_obj_ids[i] == obj_id and self.prop_keys[i] == key:
+                self.prop_values[i] = value
+                return
+            i = i + 1
+        self.prop_obj_ids.push(obj_id)
+        self.prop_ref_ids.push(obj_id)
+        self.prop_ref_tags.push(0)
+        self.prop_keys.push(key)
+        self.prop_values.push(value)
+        self.prop_enumerables.push(true)
+        self.prop_configurables.push(true)
+
+    fn get_property(obj_id: i64, key: text) -> JsValue:
+        var i = 0
+        while i < self.prop_obj_ids.len():
+            if self.prop_obj_ids[i] == obj_id and self.prop_keys[i] == key:
+                return self.prop_values[i]
+            i = i + 1
+        JsValue.Undefined
+
+    fn remove_property(obj_id: i64, key: text):
+        var i = 0
+        while i < self.prop_obj_ids.len():
+            if self.prop_obj_ids[i] == obj_id and self.prop_keys[i] == key:
+                self.prop_obj_ids.remove(i)
+                self.prop_ref_ids.remove(i)
+                self.prop_ref_tags.remove(i)
+                self.prop_keys.remove(i)
+                self.prop_values.remove(i)
+                self.prop_enumerables.remove(i)
+                self.prop_configurables.remove(i)
+                return
+            i = i + 1
+
+    fn array_length(arr_id: i64) -> i64:
+        var max_idx = -1
+        var i = 0
+        while i < self.prop_obj_ids.len():
+            if self.prop_obj_ids[i] == arr_id:
+                val k = self.prop_keys[i]
+                val idx = k.parse_int() ?? -1
+                if idx > max_idx:
+                    max_idx = idx
+            i = i + 1
+        max_idx + 1
+
+    fn get_by_index(arr_id: i64, idx: i64) -> JsValue:
+        self.get_property(arr_id, "{idx}")
+
+    fn set_by_index(arr_id: i64, idx: i64, value: JsValue):
+        self.set_property(arr_id, "{idx}", value)
+
+    fn create_array_from(values: [JsValue]) -> i64:
+        val id = self.alloc_array()
+        var i = 0
+        while i < values.len():
+            self.set_by_index(id, i, values[i])
+            i = i + 1
+        id

@@ -1,0 +1,276 @@
+# arch_capabilities — ARM/RISC-V architecture capability records for the graphics session system
+#
+# Capability records include arch_family, bits, simd_kind, vector_bits, cache_line_bytes,
+# atomic_width, icache_flush_required, and unaligned_access_policy. ARM32/ARM64 and
+# RISC-V32/RISC-V64 start with CPU and WebGPU/Vulkan where available. JIT paths keep
+# architecture-specific executable-memory and icache behavior behind the shared mapper/provider layer.
+
+use std.io
+
+class ArchCapability:
+    """Per-architecture capability record for the graphics session and JIT subsystems."""
+
+    arch_family: text           # "x86", "arm", "riscv", "wasm"
+    bits: i64                   # 32 or 64
+    simd_kind: text             # "sse4", "avx2", "avx512", "neon", "sve", "rvv", "none"
+    vector_bits: i64            # 128, 256, 512, etc. (0 = no SIMD)
+    cache_line_bytes: i64       # typically 32 or 64
+    atomic_width: i64           # max atomic op width in bits: 32, 64, 128
+    icache_flush_required: bool # true for ARM/RISC-V JIT
+    unaligned_access: text      # "fast", "slow", "trap"
+    endianness: text            # "little", "big"
+    has_fpu: bool
+    fpu_kind: text              # "vfpv4", "fp-armv8", "d", "f", "none"
+    has_gpu_support: bool       # Vulkan/Metal/WebGPU capable
+    gpu_api: text               # "vulkan", "metal", "webgpu", "none"
+    jit_backend: text           # "cranelift", "llvm", "none"
+    qemu_system_cmd: text       # e.g. "qemu-system-aarch64"
+
+    # -------------------------------------------------------------------------
+    # Static constructors
+    # -------------------------------------------------------------------------
+
+    static fn x86_64() -> ArchCapability:
+        return ArchCapability(
+            arch_family: "x86",
+            bits: 64,
+            simd_kind: "avx2",
+            vector_bits: 256,
+            cache_line_bytes: 64,
+            atomic_width: 64,
+            icache_flush_required: false,
+            unaligned_access: "fast",
+            endianness: "little",
+            has_fpu: true,
+            fpu_kind: "none",
+            has_gpu_support: true,
+            gpu_api: "vulkan",
+            jit_backend: "cranelift",
+            qemu_system_cmd: "qemu-system-x86_64"
+        )
+
+    static fn x86_32() -> ArchCapability:
+        return ArchCapability(
+            arch_family: "x86",
+            bits: 32,
+            simd_kind: "sse4",
+            vector_bits: 128,
+            cache_line_bytes: 64,
+            atomic_width: 32,
+            icache_flush_required: false,
+            unaligned_access: "fast",
+            endianness: "little",
+            has_fpu: true,
+            fpu_kind: "none",
+            has_gpu_support: true,
+            gpu_api: "vulkan",
+            jit_backend: "llvm",
+            qemu_system_cmd: "qemu-system-i386"
+        )
+
+    static fn aarch64() -> ArchCapability:
+        return ArchCapability(
+            arch_family: "arm",
+            bits: 64,
+            simd_kind: "neon",
+            vector_bits: 128,
+            cache_line_bytes: 64,
+            atomic_width: 64,
+            icache_flush_required: true,
+            unaligned_access: "slow",
+            endianness: "little",
+            has_fpu: true,
+            fpu_kind: "fp-armv8",
+            has_gpu_support: true,
+            gpu_api: "vulkan",
+            jit_backend: "cranelift",
+            qemu_system_cmd: "qemu-system-aarch64"
+        )
+
+    static fn arm32() -> ArchCapability:
+        return ArchCapability(
+            arch_family: "arm",
+            bits: 32,
+            simd_kind: "neon",
+            vector_bits: 128,
+            cache_line_bytes: 32,
+            atomic_width: 32,
+            icache_flush_required: true,
+            unaligned_access: "trap",
+            endianness: "little",
+            has_fpu: true,
+            fpu_kind: "vfpv4",
+            has_gpu_support: true,
+            gpu_api: "webgpu",
+            jit_backend: "llvm",
+            qemu_system_cmd: "qemu-system-arm"
+        )
+
+    static fn riscv64() -> ArchCapability:
+        return ArchCapability(
+            arch_family: "riscv",
+            bits: 64,
+            simd_kind: "rvv",
+            vector_bits: 256,
+            cache_line_bytes: 64,
+            atomic_width: 64,
+            icache_flush_required: true,
+            unaligned_access: "slow",
+            endianness: "little",
+            has_fpu: true,
+            fpu_kind: "d",
+            has_gpu_support: true,
+            gpu_api: "vulkan",
+            jit_backend: "cranelift",
+            qemu_system_cmd: "qemu-system-riscv64"
+        )
+
+    static fn riscv32() -> ArchCapability:
+        return ArchCapability(
+            arch_family: "riscv",
+            bits: 32,
+            simd_kind: "none",
+            vector_bits: 0,
+            cache_line_bytes: 32,
+            atomic_width: 32,
+            icache_flush_required: true,
+            unaligned_access: "trap",
+            endianness: "little",
+            has_fpu: true,
+            fpu_kind: "f",
+            has_gpu_support: true,
+            gpu_api: "webgpu",
+            jit_backend: "llvm",
+            qemu_system_cmd: "qemu-system-riscv32"
+        )
+
+    static fn wasm32() -> ArchCapability:
+        return ArchCapability(
+            arch_family: "wasm",
+            bits: 32,
+            simd_kind: "none",
+            vector_bits: 128,
+            cache_line_bytes: 64,
+            atomic_width: 32,
+            icache_flush_required: false,
+            unaligned_access: "fast",
+            endianness: "little",
+            has_fpu: true,
+            fpu_kind: "none",
+            has_gpu_support: true,
+            gpu_api: "webgpu",
+            jit_backend: "none",
+            qemu_system_cmd: ""
+        )
+
+    # -------------------------------------------------------------------------
+    # Queries
+    # -------------------------------------------------------------------------
+
+    me supports_vulkan() -> bool:
+        return self.gpu_api == "vulkan"
+
+    me supports_jit() -> bool:
+        return self.jit_backend != "none"
+
+    me needs_icache_flush() -> bool:
+        return self.icache_flush_required
+
+    me effective_simd_width() -> i64:
+        return self.vector_bits
+
+    me can_run_64bit_atomics() -> bool:
+        return self.atomic_width >= 64
+
+    me summary() -> text:
+        var s = "arch=" + self.arch_family + self.bits.to_text()
+        s = s + " simd=" + self.simd_kind
+        s = s + " vec=" + self.vector_bits.to_text() + "b"
+        s = s + " gpu=" + self.gpu_api
+        s = s + " jit=" + self.jit_backend
+        if self.icache_flush_required:
+            s = s + " icache-flush"
+        return s
+
+# =============================================================================
+
+class ArchCapabilityTable:
+    """Flat registry of known architecture capability records."""
+
+    x86_64_cap: ArchCapability
+    x86_32_cap: ArchCapability
+    aarch64_cap: ArchCapability
+    arm32_cap: ArchCapability
+    riscv64_cap: ArchCapability
+    riscv32_cap: ArchCapability
+    wasm32_cap: ArchCapability
+
+    static fn create() -> ArchCapabilityTable:
+        return ArchCapabilityTable(
+            x86_64_cap: ArchCapability.x86_64(),
+            x86_32_cap: ArchCapability.x86_32(),
+            aarch64_cap: ArchCapability.aarch64(),
+            arm32_cap: ArchCapability.arm32(),
+            riscv64_cap: ArchCapability.riscv64(),
+            riscv32_cap: ArchCapability.riscv32(),
+            wasm32_cap: ArchCapability.wasm32()
+        )
+
+    me get_for_arch(family: text, bits: i64) -> ArchCapability:
+        if family == "x86":
+            if bits == 64:
+                return self.x86_64_cap
+            return self.x86_32_cap
+        if family == "arm":
+            if bits == 64:
+                return self.aarch64_cap
+            return self.arm32_cap
+        if family == "riscv":
+            if bits == 64:
+                return self.riscv64_cap
+            return self.riscv32_cap
+        return self.wasm32_cap
+
+    me all_with_vulkan() -> text:
+        var result = ""
+        if self.x86_64_cap.supports_vulkan():
+            result = result + "x86_64,"
+        if self.x86_32_cap.supports_vulkan():
+            result = result + "x86_32,"
+        if self.aarch64_cap.supports_vulkan():
+            result = result + "aarch64,"
+        if self.arm32_cap.supports_vulkan():
+            result = result + "arm32,"
+        if self.riscv64_cap.supports_vulkan():
+            result = result + "riscv64,"
+        if self.riscv32_cap.supports_vulkan():
+            result = result + "riscv32,"
+        if self.wasm32_cap.supports_vulkan():
+            result = result + "wasm32,"
+        return result
+
+    me all_with_jit() -> text:
+        var result = ""
+        if self.x86_64_cap.supports_jit():
+            result = result + "x86_64,"
+        if self.x86_32_cap.supports_jit():
+            result = result + "x86_32,"
+        if self.aarch64_cap.supports_jit():
+            result = result + "aarch64,"
+        if self.arm32_cap.supports_jit():
+            result = result + "arm32,"
+        if self.riscv64_cap.supports_jit():
+            result = result + "riscv64,"
+        if self.riscv32_cap.supports_jit():
+            result = result + "riscv32,"
+        if self.wasm32_cap.supports_jit():
+            result = result + "wasm32,"
+        return result
+
+    me summary() -> text:
+        var s = "ArchCapabilityTable["
+        s = s + self.x86_64_cap.summary() + "; "
+        s = s + self.aarch64_cap.summary() + "; "
+        s = s + self.riscv64_cap.summary()
+        s = s + "]"
+        return s

@@ -1,0 +1,62 @@
+use std.spipe.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "SimpleOS crypto random production gate":
+    it "keeps public random_bytes on the CSPRNG path":
+        val source = rt_file_read_text("src/os/crypto/random.spl")
+
+        expect(source).to_contain("fn random_bytes(count: u64) -> [u8]")
+        expect(source).to_contain("if not g_csprng.initialized:")
+        expect(source).to_contain("_csprng_init()")
+        expect(source.contains("_soft_random_u64")).to_equal(false)
+        expect(source.contains("return host_bytes")).to_equal(false)
+
+    it "selects platform entropy hooks instead of hardcoding x86":
+        val source = rt_file_read_text("src/os/crypto/random.spl")
+
+        expect(source).to_contain("@cfg(x86_64)")
+        expect(source).to_contain("rt_rdrand()")
+        expect(source).to_contain("@cfg(arm64)")
+        expect(source).to_contain("rt_rndr()")
+        expect(source).to_contain("@cfg(riscv64)")
+        expect(source).to_contain("rt_riscv_seed()")
+
+    it "documents that shimmed entropy is not production entropy":
+        val source = rt_file_read_text("src/os/crypto/random.spl")
+        val shim = rt_file_read_text("src/os/kernel/net/tls_shim.spl")
+
+        expect(source).to_contain("not a production entropy source")
+        expect(shim).to_contain("NOT cryptographically secure")
+
+    it "uses RISC-V CSR jitter instead of the LCG for rt_riscv_seed":
+        val shim = rt_file_read_text("src/os/kernel/net/tls_shim.spl")
+        val entropy = rt_file_read_text("src/os/kernel/arch/riscv64/entropy.spl")
+
+        expect(shim).to_contain("fn rt_riscv_seed() -> u64")
+        expect(shim).to_contain("csrr_cycle()")
+        expect(shim).to_contain("csrr_time()")
+        expect(shim).to_contain("csrr_instret()")
+        expect(entropy).to_contain("cycle+time+instret")
+
+    it "keeps x86_64 baremetal rt_rdrand on the CPUID-gated hardware path":
+        val runtime = rt_file_read_text("examples/simple_os/arch/x86_64/boot/baremetal_stubs.c")
+        val shim = rt_file_read_text("src/os/kernel/net/tls_shim.spl")
+
+        expect(runtime).to_contain("static int _cpu_has_rdrand(void)")
+        expect(runtime).to_contain("cpuid")
+        expect(runtime).to_contain("ecx & (1u << 30)")
+        expect(runtime).to_contain("rdrand %0; setc %1")
+        expect(runtime).to_contain("for (int attempt = 0; attempt < 10; attempt++)")
+        expect(runtime).to_contain("int64_t rt_entropy_hardware_ready(void)")
+        expect(runtime).to_contain("return _cpu_has_rdrand() ? 1 : 0;")
+        expect(shim).to_contain("extern fn rt_entropy_hardware_ready() -> i64")
+        expect(shim).to_contain("rt_entropy_hardware_ready() > 0")
+        expect(runtime.contains("rt_rdrand: pseudo-random")).to_equal(false)
+
+    it "keeps RISC-V TLS entropy explicitly not-ready until hardware RNG exists":
+        val runtime = rt_file_read_text("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
+
+        expect(runtime).to_contain("spl_i64 rt_entropy_hardware_ready(void)")
+        expect(runtime).to_contain("RISC-V TLS remains blocked")
+        expect(runtime).to_contain("return 0;")

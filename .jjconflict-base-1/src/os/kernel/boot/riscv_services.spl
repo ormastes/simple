@@ -1,0 +1,235 @@
+# RISC-V service initialization for QEMU virt bring-up.
+
+use os.kernel.ipc.spm_port.{spm_port_register}
+
+use os.kernel.boot.tcp_baremetal_min.{tcp_baremetal_min_link_anchor}
+
+extern fn log_raw_println(msg: text)
+extern fn rt_pci_device_count() -> i64
+extern fn rt_pci_get_field(index: i64, field: i64) -> i64
+extern fn rt_net_init() -> i64
+extern fn rt_net_tx_test() -> i64
+extern fn rt_net_rx_ready() -> i64
+extern fn rt_net_stats() -> i64
+extern fn rt_io_tcp_bind(addr: text) -> i64
+extern fn rt_io_tcp_close(fd: i64) -> bool
+extern fn rt_display_init() -> i64
+extern fn rt_display_flush_test() -> i64
+extern fn rt_display_width() -> i64
+extern fn rt_display_height() -> i64
+extern fn rt_storage_init() -> i64
+extern fn rt_storage_read_probe() -> i64
+extern fn rt_storage_capacity_sectors() -> i64
+extern fn rt_storage_nvfs_ready() -> i64
+extern fn rt_storage_nvfs_arena_ready() -> i64
+
+val RISCV_SPM_WELL_KNOWN_TASK_ID: u64 = 0xfffffff0 as u64
+val RISCV_DISPLAY_WIDTH: u32 = 320
+val RISCV_DISPLAY_HEIGHT: u32 = 240
+
+var riscv_services_started: bool = false
+var riscv_spm_port_ok: bool = false
+var riscv_network_ok: i64 = 0
+var riscv_display_ok: i64 = 0
+var riscv_storage_ok: i64 = 0
+var riscv_filesystem_ok: i64 = 0
+var riscv_network_device_index: i64 = -1
+var riscv_display_width: u32 = 0
+var riscv_display_height: u32 = 0
+var riscv_storage_capacity: i64 = 0
+
+fn init_riscv_services():
+    """Initialize the architecture-safe service surface for RISC-V boot."""
+    init_riscv_services_impl(0)
+
+fn init_riscv_services_with_network():
+    """Initialize RISC-V services with the opt-in network probe enabled."""
+    init_riscv_services_impl(1)
+
+fn init_riscv_services_impl(enable_network: i64):
+    """Initialize the architecture-safe service surface for RISC-V boot."""
+    log_raw_println("========================================")
+    log_raw_println("[init] Starting SimpleOS RISC-V services...")
+    log_raw_println("========================================")
+
+    spm_port_register(RISCV_SPM_WELL_KNOWN_TASK_ID)
+    riscv_spm_port_ok = true
+    log_raw_println("[init] SPM port: registered placeholder receiver")
+
+    var network_ok: i64 = 0
+    if enable_network == 0:
+        log_raw_println("[net-riscv] Network service disabled")
+    else:
+        log_raw_println("[net-riscv] Starting network service probe...")
+        val count = rt_pci_device_count()
+        riscv_network_device_index = -1
+        var i: i64 = 0
+        while i < count:
+            val cls = rt_pci_get_field(i, 3)
+            val sub = rt_pci_get_field(i, 4)
+            val vendor = rt_pci_get_field(i, 5)
+            val device_id = rt_pci_get_field(i, 6)
+            val is_virtio_net = cls == 2 and sub == 0 and vendor == 0x1af4 and (device_id == 0x1000 or device_id == 0x1041)
+            if is_virtio_net:
+                riscv_network_device_index = i
+                break
+            i = i + 1
+
+        if riscv_network_device_index < 0:
+            log_raw_println("[net-riscv] Network unavailable: no PCI Ethernet/VirtIO device")
+            network_ok = 0
+        else:
+            log_raw_println("[net-riscv] PCI network device index {riscv_network_device_index}")
+            val init_rc = rt_net_init()
+            if init_rc < 0:
+                log_raw_println("[net-riscv] Network init failed rc={init_rc}")
+                network_ok = 0
+            else:
+                log_raw_println("[net-riscv] Network device ready")
+                val tx_rc = rt_net_tx_test()
+                if tx_rc < 0:
+                    log_raw_println("[net-riscv] Network packet TX unavailable rc={tx_rc}")
+                    network_ok = 0
+                else:
+                    log_raw_println("[net-riscv] Network packet TX ready")
+                    val rx_rc = rt_net_rx_ready()
+                    if rx_rc < 0:
+                        log_raw_println("[net-riscv] Network packet RX unavailable rc={rx_rc}")
+                        network_ok = 0
+                    else:
+                        val stats_rc = rt_net_stats()
+                        if stats_rc < 0:
+                            log_raw_println("[net-riscv] Network stats probe failed rc={stats_rc}")
+                            network_ok = 0
+                        else:
+                            log_raw_println("[net-riscv] Network probe passed")
+                            log_raw_println("[net-riscv] Network stats probe rc={stats_rc}")
+                            val shim_linked = tcp_baremetal_min_link_anchor()
+                            if not shim_linked:
+                                log_raw_println("[net-riscv] TCP shim unavailable")
+                                network_ok = 0
+                            else:
+                                val tcp_probe_fd = rt_io_tcp_bind("0.0.0.0:0")
+                                if tcp_probe_fd < 0:
+                                    log_raw_println("[net-riscv] TCP bind probe failed")
+                                    network_ok = 0
+                                else:
+                                    rt_io_tcp_close(tcp_probe_fd)
+                                    network_ok = 1
+                                    log_raw_println("[net-riscv] TCP bind probe passed")
+                                    log_raw_println("[net-riscv] Network service ready")
+
+    riscv_network_ok = network_ok
+    if network_ok == 1:
+        log_raw_println("[init] network: ready")
+    else:
+        log_raw_println("[init] network: unavailable")
+
+    log_raw_println("[display-riscv] Starting display service...")
+    var display_ok: i64 = 0
+    val display_rc = rt_display_init()
+    if display_rc < 0:
+        log_raw_println("[display-riscv] Display unavailable rc={display_rc}")
+        riscv_display_width = 0
+        riscv_display_height = 0
+    else:
+        log_raw_println("[display-riscv] Display GPU ready")
+        val flush_rc = rt_display_flush_test()
+        if flush_rc < 0:
+            log_raw_println("[display-riscv] Display flush failed rc={flush_rc}")
+            riscv_display_width = 0
+            riscv_display_height = 0
+        else:
+            display_ok = 1
+            riscv_display_width = RISCV_DISPLAY_WIDTH
+            riscv_display_height = RISCV_DISPLAY_HEIGHT
+            log_raw_println("[display-riscv] Display flush passed")
+            log_raw_println("[display-riscv] Display service ready: 320x240 framebuffer")
+    riscv_display_ok = display_ok
+
+    if display_ok == 1:
+        log_raw_println("[init] display: ready")
+    else:
+        log_raw_println("[init] display: unavailable")
+
+    log_raw_println("[storage-riscv] Starting storage service probe...")
+    var storage_ok: i64 = 0
+    val storage_rc = rt_storage_init()
+    if storage_rc < 0:
+        log_raw_println("[storage-riscv] Storage unavailable rc={storage_rc}")
+        riscv_storage_capacity = 0
+    else:
+        log_raw_println("[storage-riscv] Storage device ready")
+        val read_rc = rt_storage_read_probe()
+        if read_rc < 0:
+            log_raw_println("[storage-riscv] NVFS superblock probe failed rc={read_rc}")
+            riscv_storage_capacity = 0
+        else:
+            val nvfs_rc = rt_storage_nvfs_ready()
+            if nvfs_rc != 1:
+                log_raw_println("[storage-riscv] NVFS superblock unavailable rc={nvfs_rc}")
+                riscv_storage_capacity = 0
+            else:
+                log_raw_println("[storage-riscv] NVFS superblock probe passed")
+                val arena_rc = rt_storage_nvfs_arena_ready()
+                if arena_rc != 1:
+                    log_raw_println("[storage-riscv] NVFS arena payload unavailable rc={arena_rc}")
+                    riscv_storage_capacity = 0
+                else:
+                    storage_ok = 1
+                    riscv_storage_capacity = rt_storage_capacity_sectors()
+                    log_raw_println("[storage-riscv] NVFS arena payload probe passed")
+                    log_raw_println("[storage-riscv] Storage service ready")
+    riscv_storage_ok = storage_ok
+
+    if storage_ok == 1:
+        log_raw_println("[init] storage: ready")
+    else:
+        log_raw_println("[init] storage: unavailable")
+
+    if storage_ok == 1:
+        riscv_filesystem_ok = 1
+        log_raw_println("[fs-riscv] NVFS root superblock ready")
+        log_raw_println("[fs-riscv] NVFS arena payload ready")
+        log_raw_println("[init] filesystem: nvfs-superblock-ready")
+    else:
+        riscv_filesystem_ok = 0
+        log_raw_println("[fs-riscv] Filesystem unavailable: storage gate not ready")
+        log_raw_println("[init] filesystem: unavailable")
+
+    riscv_services_started = true
+    log_raw_println("[init] Service initialization complete")
+    log_raw_println("========================================")
+
+fn riscv_services_ready() -> bool:
+    """Check whether RISC-V boot services reached the initialized state."""
+    riscv_services_started and riscv_spm_port_ok
+
+fn riscv_network_ready() -> bool:
+    """Check whether the RISC-V network service found and initialized a NIC."""
+    return riscv_network_ok == 1
+
+fn riscv_network_ready_code() -> i64:
+    """Freestanding-safe numeric readiness gate for boot callers."""
+    return riscv_network_ok
+
+fn riscv_display_ready() -> bool:
+    """Check whether the RISC-V display service initialized a framebuffer."""
+    riscv_display_ok == 1
+
+fn riscv_display_mode_width() -> u32:
+    RISCV_DISPLAY_WIDTH
+
+fn riscv_display_mode_height() -> u32:
+    RISCV_DISPLAY_HEIGHT
+
+fn riscv_storage_ready() -> bool:
+    """Check whether the RISC-V storage service completed a real sector read."""
+    riscv_storage_ok == 1
+
+fn riscv_storage_capacity_sectors() -> i64:
+    riscv_storage_capacity
+
+fn riscv_filesystem_ready() -> bool:
+    """Check whether boot storage proved a readable NVFS root superblock."""
+    riscv_filesystem_ok == 1

@@ -1,0 +1,523 @@
+# Part 2 of src/app/io/cli_commands.spl
+use app.io.cli_commands.*
+# CLI Command Handlers - Command dispatch functions
+# Extracted from cli_ops.spl for modularity
+# Functions here reference helpers in cli_ops.spl (same directory, no imports needed)
+
+use compiler.driver.driver_api_core.{interpret_file}
+use compiler.tools.formatter.main.{Formatter, make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
+use compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator}
+use compiler.tools.fix.rules.{check_simd_opportunities}
+use compiler.tools.lint.main.{LintConfig, LintLevel, Linter}
+use std.tooling.easy_fix.{FixConfidence}
+use compiler.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text, core_lexer_token_line, core_lexer_token_col}
+use compiler.core.tokens.{TOK_EOF, TOK_ERROR}
+use app.io.cli_ops.{_cli_shell, _cli_eprint, _cli_process_run, _cli_driver_binary, _cli_result_stdout, _cli_result_exit_code}
+use app.watch.runner.{WatchConfig, watch_config_default, watch_loop}
+use app.test_daemon.types.{TestResult}
+use compiler.driver.watcher.watcher_types.{watcher_config_default, WatcherConfig}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_platform_name() -> text
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+
+fn cli_run_i18n(args: [text]) -> i64:
+    # List available i18n language files and their status
+    var subcmd = ""
+    for arg in args:
+        if arg == "i18n":
+            val _ = 0
+        elif not arg.starts_with("-"):
+            if subcmd == "":
+                subcmd = arg
+    if subcmd == "" or subcmd == "status":
+        # Show i18n status: count .ko.spl files vs .spl files
+        val en_result = _cli_shell("find src/i18n -maxdepth 1 -name 'strings_*.spl' -not -name '*.ko.spl' 2>/dev/null | wc -l")
+        val ko_result = _cli_shell("find src/i18n -maxdepth 1 -name 'strings_*.ko.spl' 2>/dev/null | wc -l")
+        val en_count = _cli_result_stdout(en_result).trim()
+        val ko_count = _cli_result_stdout(ko_result).trim()
+        print "Internationalization (i18n) Status"
+        print "=================================="
+        print ""
+        print "  String modules (English): {en_count}"
+        print "  String modules (Korean):  {ko_count}"
+        print ""
+        print "  Source directory: src/i18n/"
+        print ""
+        print "Categories:"
+        print "  strings_common       Parser errors (E0001-E0016)"
+        print "  strings_semantic     Type checking errors (E1000-E1999)"
+        print "  strings_advanced     Advanced features (generics, traits)"
+        print "  strings_codegen      Code generation (E2000-E2999)"
+        print "  strings_runtime      Runtime errors (E3000+)"
+        print "  strings_verification Static analysis"
+        print "  strings_lint         Code style warnings"
+        print "  strings_explanations Detailed help text"
+        print "  strings_extended     Additional diagnostics"
+        return 0
+    elif subcmd == "list":
+        # List all i18n files
+        val list_result = _cli_shell("find src/i18n -name '*.spl' -maxdepth 1 | sort")
+        print "i18n files:"
+        print _cli_result_stdout(list_result)
+        return 0
+    else:
+        print "Usage: simple i18n [status|list]"
+        print ""
+        print "Subcommands:"
+        print "  status   Show i18n coverage (default)"
+        print "  list     List all i18n files"
+        return 1
+
+fn cli_handle_web(args: [text]) -> i64:
+    cli_not_implemented("Web handler")
+
+fn cli_handle_diagram(args: [text]) -> i64:
+    cli_not_implemented("Diagram generator")
+
+fn cli_handle_run(args: [text], gc_log: bool, gc_off: bool) -> i64:
+    if args.len() > 0:
+        cli_run_file(args[0], args[1:], gc_log, gc_off)
+    else:
+        print "No file specified"
+        1
+
+fn cli_handle_compile(args: [text]) -> i64:
+    cli_compile(args)
+
+fn cli_handle_linkers() -> i64:
+    # Detect available linkers on the system
+    print "Available native linkers:"
+    print ""
+    # Check mold
+    val mold_result = _cli_shell("which mold 2>/dev/null")
+    if _cli_result_exit_code(mold_result) == 0:
+        print "  mold      Modern linker (fastest, recommended)  [installed]"
+    else:
+        print "  mold      Modern linker (fastest, recommended)  [not found]"
+    # Check lld
+    val lld_result = _cli_shell("which lld 2>/dev/null || which ld.lld 2>/dev/null")
+    if _cli_result_exit_code(lld_result) == 0:
+        print "  lld       LLVM linker (fast, widely available)  [installed]"
+    else:
+        print "  lld       LLVM linker (fast, widely available)  [not found]"
+    # Check ld
+    val ld_result = _cli_shell("which ld 2>/dev/null")
+    if _cli_result_exit_code(ld_result) == 0:
+        print "  ld        GNU linker (default, always available)  [installed]"
+    else:
+        print "  ld        GNU linker (default)  [not found]"
+    print ""
+    print "Auto-detection preference: mold > lld > ld"
+    print ""
+    print "Usage:"
+    print "  simple compile app.spl --linker mold"
+    0
+
+fn cli_replay(args: [text]) -> i64:
+    print "[experimental] Replay tool is not yet implemented"
+    1
+
+fn cli_check(args: [text]) -> i64:
+    # Parse flags from args
+    var files: [text] = []
+    for arg in args:
+        if arg == "check":
+            # Skip the command name itself
+            val _ = 0
+        elif not arg.starts_with("-"):
+            files.push(arg)
+
+    if files.len() == 0:
+        print "Usage: simple check <file.spl> [file2.spl ...]"
+        print ""
+        print "Type-checks Simple source files without compiling."
+        return 1
+
+    var exit_code = 0
+    var error_count = 0
+    for file_path in files:
+        if not rt_file_exists(file_path):
+            _cli_eprint("Error: File not found: {file_path}")
+            exit_code = 1
+            continue
+
+        val result = check_file(file_path)
+        match result:
+            case CompileResult.Success(_):
+                print "check: {file_path} OK"
+            case _:
+                _cli_eprint("check: {file_path} FAIL")
+                exit_code = 1
+                error_count = error_count + 1
+
+    if error_count > 0:
+        print ""
+        print "Type check failed: {error_count} file(s) with errors"
+    elif exit_code == 0:
+        print ""
+        print "Type check passed: all files OK"
+    exit_code
+
+fn cli_info(args: [text]) -> i64:
+    # Print project info from simple.sdn manifest
+    var sdn_path = "simple.sdn"
+    if not rt_file_exists(sdn_path):
+        print "No simple.sdn found in current directory."
+        print "Run 'simple init' to create a project."
+        return 1
+    val content = rt_file_read_text(sdn_path) ?? ""
+    if content == "":
+        _cli_eprint("Error: Could not read simple.sdn")
+        return 1
+    # Parse key fields from SDN
+    var name = ""
+    var version = ""
+    var license = ""
+    var main_file = ""
+    var run_config = ""
+    var in_package = false
+    var in_execution = false
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        # Detect top-level sections (no indent, ends with :)
+        if not line.starts_with(" ") and not line.starts_with("\t"):
+            in_package = trimmed == "package:"
+            in_execution = trimmed == "execution:"
+            continue
+        if in_package:
+            if trimmed.starts_with("name:"):
+                name = trimmed[5:].trim()
+            elif trimmed.starts_with("version:"):
+                version = trimmed[8:].trim()
+            elif trimmed.starts_with("license:"):
+                license = trimmed[8:].trim()
+            elif trimmed.starts_with("main:"):
+                main_file = trimmed[5:].trim()
+        elif in_execution:
+            if trimmed.starts_with("run-config:"):
+                run_config = trimmed[11:].trim()
+    print "Project Info"
+    print "============"
+    if name != "":
+        print "  Name:        {name}"
+    if version != "":
+        print "  Version:     {version}"
+    if license != "":
+        print "  License:     {license}"
+    if main_file != "":
+        print "  Entry:       {main_file}"
+    if run_config != "":
+        print "  Run Config:  {run_config}"
+    print ""
+    print "  Manifest:    {sdn_path}"
+    0
+
+# ============================================================================
+# Test Daemon
+# ============================================================================
+
+fn cli_test_daemon(args: [text]) -> i64:
+    if args.len() == 0:
+        print "Usage:"
+        print "  simple test-daemon start       Start test daemon (foreground)"
+        print "  simple test-daemon stop        Stop test daemon"
+        print "  simple test-daemon status      Show daemon status"
+        print "  simple test-daemon run <path>  Run test via daemon (auto-starts)"
+        print "  simple test-daemon clean <path> Force-run bypassing cache"
+        return 1
+
+    val subcmd = args[0]
+    if subcmd == "start":
+        return cli_test_daemon_start()
+    elif subcmd == "stop":
+        return cli_test_daemon_stop()
+    elif subcmd == "status":
+        return cli_test_daemon_status()
+    elif subcmd == "run":
+        if args.len() < 2:
+            print "Usage: simple test-daemon run <path> [--filter F]"
+            return 1
+        return cli_test_daemon_run(args[1:], false)
+    elif subcmd == "clean":
+        if args.len() < 2:
+            print "Usage: simple test-daemon clean <path>"
+            return 1
+        return cli_test_daemon_run(args[1:], true)
+    else:
+        print "Unknown test-daemon subcommand: {subcmd}"
+        return 1
+
+fn cli_test_daemon_start() -> i64:
+    # Start the test daemon in foreground
+    use app.test_daemon.types.{test_daemon_config_default}
+    use app.test_daemon.daemon.{test_daemon_start}
+
+    print "Starting test daemon..."
+    val config = test_daemon_config_default()
+    val daemon = test_daemon_start(config)
+    if not daemon.is_running():
+        print "Failed to start test daemon (lock acquisition failed)"
+        return 1
+
+    print "Test daemon running (pid in .build/test_daemon/test_daemon.lock)"
+    daemon.run()
+    print "Test daemon stopped"
+    0
+
+fn cli_test_daemon_stop() -> i64:
+    use app.test_daemon.client.{test_daemon_stop}
+    use app.test_daemon.types.{test_daemon_config_default}
+
+    val config = test_daemon_config_default()
+    if test_daemon_stop(config):
+        print "Test daemon stopped"
+        return 0
+    print "Failed to stop test daemon (may not be running)"
+    1
+
+fn cli_test_daemon_status() -> i64:
+    val lock_path = ".build/test_daemon/test_daemon.lock"
+    if not rt_file_exists(lock_path):
+        print "Test daemon: not running"
+        return 0
+
+    val content = rt_file_read_text(lock_path) ?? ""
+    if content == "":
+        print "Test daemon: not running (empty lock)"
+        return 0
+
+    val lines = content.split("\n")
+    val pid_str = lines[0].trim()
+
+    extern fn rt_process_exists(pid: i64) -> bool
+    val pid = pid_str.to_i64() ?? 0
+    if pid > 0 and rt_process_exists(pid):
+        print "Test daemon: running (pid: {pid_str})"
+    else:
+        print "Test daemon: not running (stale lock, pid: {pid_str})"
+    0
+
+fn cli_test_daemon_run(args: [text], clean: bool) -> i64:
+    use app.test_daemon.client.{test_daemon_ensure_running, test_submit_and_wait}
+    use app.test_daemon.types.{test_daemon_config_default, TestResult}
+
+    val config = test_daemon_config_default()
+
+    # Ensure daemon is running (auto-start if needed)
+    if not test_daemon_ensure_running(config):
+        print "Failed to start test daemon"
+        return 1
+
+    val path = args[0]
+    val mode = if clean: "clean" else: "run"
+    print "Submitting test ({mode}): {path}"
+
+    # Submit and wait (10 min timeout)
+    val result: TestResult = test_submit_and_wait(path, config, clean, 600000)
+
+    # Print result
+    if result.failed == 0:
+        print "PASS: {path}"
+        if result.output != "":
+            print result.output
+        return 0
+    else:
+        print "FAIL: {path}"
+        if result.output != "":
+            print result.output
+        return 1
+
+# ============================================================================
+# Watch Daemon Commands
+# ============================================================================
+
+fn cli_watch_daemon(args: [text]) -> i64:
+    if args.len() == 0:
+        print "Usage:"
+        print "  simple watch-daemon start [options]"
+        print "                                  Start watch daemon (foreground, SHB+SMF)"
+        print "  simple watch-daemon stop        Stop watch daemon"
+        print "  simple watch-daemon status      Show daemon status"
+        print ""
+        print "Start Options:"
+        print "  --backend=<name>        Default SMF backend: auto, cranelift, llvm"
+        print "  --opt-level=<level>     Default SMF optimization: none, basic, standard, aggressive"
+        print "  --release               Default SMF release mode"
+        print "  --debug-info            Keep debug info enabled (default)"
+        print "  --no-debug-info         Disable debug info for watcher builds"
+        print "  --gc-off                Disable GC for watcher builds"
+        print "  --profile=<name>        Default watcher compile profile: dev, test, prod"
+        print "  --allow-family=<name>   Allow one runtime family; repeat or comma-separate"
+        return 1
+
+    val subcmd = args[0]
+    if subcmd == "start":
+        return cli_watch_daemon_start(args[1:])
+    elif subcmd == "stop":
+        return cli_watch_daemon_stop()
+    elif subcmd == "status":
+        return cli_watch_daemon_status()
+    else:
+        print "Unknown watch-daemon subcommand: {subcmd}"
+        return 1
+
+fn cli_watch_daemon_start(args: [text]) -> i64:
+    use compiler.driver.watcher.watcher_types.{watcher_config_default, WatcherConfig}
+    use compiler.driver.watcher.watcher_daemon.{watcher_daemon_start}
+    use app.io.{thread_sleep_ms}
+
+    var config: WatcherConfig = watcher_config_default()
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--backend="):
+            config.backend = arg.substring(10)
+        elif arg == "--backend":
+            i = i + 1
+            if i >= args.len():
+                print "Error: --backend requires an argument"
+                return 1
+            config.backend = args[i]
+        elif arg.starts_with("--opt-level="):
+            val level = arg.substring(12)
+            if level == "none" or level == "0":
+                config.opt_level = 0
+            elif level == "basic" or level == "1":
+                config.opt_level = 1
+                config.release = true
+            elif level == "standard" or level == "2" or level == "speed":
+                config.opt_level = 2
+                config.release = true
+            elif level == "aggressive" or level == "3" or level == "max":
+                config.opt_level = 3
+                config.release = true
+            else:
+                print "Error: Unknown optimization level: {level}"
+                print "Valid levels: none, basic, standard, aggressive"
+                return 1
+        elif arg == "--release":
+            config.release = true
+            if config.profile == "dev":
+                config.profile = "prod"
+            if config.opt_level < 2:
+                config.opt_level = 2
+        elif arg == "--debug-info":
+            config.debug_info = true
+        elif arg == "--no-debug-info":
+            config.debug_info = false
+        elif arg == "--gc-off":
+            config.gc_off = true
+        elif arg.starts_with("--profile="):
+            config.profile = arg.substring(10)
+            if config.profile == "prod":
+                config.release = true
+                if config.opt_level < 2:
+                    config.opt_level = 2
+        elif arg == "--profile":
+            i = i + 1
+            if i >= args.len():
+                print "Error: --profile requires an argument"
+                return 1
+            config.profile = args[i]
+            if config.profile == "prod":
+                config.release = true
+                if config.opt_level < 2:
+                    config.opt_level = 2
+        elif arg.starts_with("--allow-family="):
+            val family_arg = arg.substring(15)
+            if family_arg != "":
+                for family in family_arg.split(","):
+                    val trimmed = family.trim()
+                    if trimmed != "":
+                        config.allowed_families.push(trimmed)
+        elif arg == "--allow-family":
+            i = i + 1
+            if i >= args.len():
+                print "Error: --allow-family requires an argument"
+                return 1
+            for family in args[i].split(","):
+                val trimmed = family.trim()
+                if trimmed != "":
+                    config.allowed_families.push(trimmed)
+        else:
+            print "Error: Unknown watch-daemon start option: {arg}"
+            return 1
+        i = i + 1
+
+    print "Starting watch daemon (SHB+SMF mode)..."
+    print "  backend: {config.backend}"
+    print "  opt_level: {config.opt_level}"
+    print "  release: {config.release}"
+    print "  debug_info: {config.debug_info}"
+    print "  gc_off: {config.gc_off}"
+    print "  profile: {config.profile}"
+    print "  allowed_families: {config.allowed_families.join(\",\")}"
+    val daemon = watcher_daemon_start(config)
+    if not daemon.is_running():
+        print "Failed to start watch daemon (lock acquisition failed)"
+        return 1
+
+    print "Watch daemon running (pid in {config.lock_path})"
+    print "Watching src/ for .spl changes. Press Ctrl+C to stop."
+    print ""
+
+    # Run poll loop in foreground
+    while daemon.is_running():
+        daemon.run_poll_cycle()
+        thread_sleep_ms(config.poll_interval_ms)
+
+    print "Watch daemon stopped"
+    0
+
+fn cli_watch_daemon_stop() -> i64:
+    val lock_path = ".build/watcher/watcher.lock"
+    if not rt_file_exists(lock_path):
+        print "Watch daemon: not running"
+        return 1
+
+    val content = rt_file_read_text(lock_path) ?? ""
+    if content == "":
+        print "Watch daemon: not running (empty lock)"
+        return 1
+
+    val lines = content.split("\n")
+    val pid_str = lines[0].trim()
+    extern fn rt_process_kill(pid: i64) -> bool
+    val pid = pid_str.to_i64() ?? 0
+    if pid > 0:
+        if rt_process_kill(pid):
+            print "Watch daemon stopped (pid: {pid_str})"
+            return 0
+        else:
+            print "Failed to stop watch daemon (pid: {pid_str})"
+            return 1
+    print "Watch daemon: not running (invalid pid)"
+    1
+
+fn cli_watch_daemon_status() -> i64:
+    val lock_path = ".build/watcher/watcher.lock"
+    if not rt_file_exists(lock_path):
+        print "Watch daemon: not running"
+        return 0
+
+    val content = rt_file_read_text(lock_path) ?? ""
+    if content == "":
+        print "Watch daemon: not running (empty lock)"
+        return 0
+
+    val lines = content.split("\n")
+    val pid_str = lines[0].trim()
+
+    extern fn rt_process_exists(pid: i64) -> bool
+    val pid = pid_str.to_i64() ?? 0
+    if pid > 0 and rt_process_exists(pid):
+        print "Watch daemon: running (pid: {pid_str})"
+    else:
+        print "Watch daemon: not running (stale lock, pid: {pid_str})"
+    0

@@ -1,0 +1,118 @@
+# x86_32 Context Switch HAL — Register Save/Restore
+#
+# Implements context switching for x86 32-bit protected mode.
+# Context switching involves saving/restoring:
+#   - General purpose registers (eax, ebx, ecx, edx, esi, edi, ebp)
+#   - Stack pointer (esp), instruction pointer (eip)
+#   - Flags (eflags)
+#   - Segment registers (cs, ss, ds, es)
+#   - FPU state (fsave/frstor)
+#   - CR3 (page directory base, for address space switch)
+#
+# The actual register save/restore is done in assembly.
+# See os.kernel.arch.arch_context.X86Context for the register state layout.
+
+use os.kernel.arch.arch_context.{X86Context}
+use os.kernel.arch.x86_32.cpu.{GDT_KERNEL_CODE, GDT_KERNEL_DATA, GDT_USER_CODE, GDT_USER_DATA}
+
+val EFLAGS_IF: u32 = 0x200
+val EFLAGS_DEFAULT: u32 = 0x202
+val EFLAGS_USER: u32 = 0x202
+
+extern fn rt_x86_32_context_switch(from_ptr: u32, to_ptr: u32)
+extern fn rt_x86_32_fpu_save(ctx_ptr: u32)
+extern fn rt_x86_32_fpu_restore(ctx_ptr: u32)
+
+# ============================================================================
+# X86_32ContextSwitch
+# ============================================================================
+
+struct X86_32ContextSwitch:
+    """x86_32 context switching implementation.
+
+    Stub -- will implement assembly-based register save/restore
+    for preemptive multitasking in 32-bit protected mode.
+
+    Named X86_32ContextSwitch (not X86_32Context) to avoid collision
+    with the X86Context register state struct in arch_context.spl.
+    """
+    pass_dn
+
+impl X86_32ContextSwitch:
+    fn init():
+        """Initialize context switching (set up initial kernel stack frame)."""
+        pass_dn
+
+    fn create(entry_point: u32, stack_top: u32, user_mode: bool) -> X86Context:
+        """Create a new CPU context for a thread.
+
+        Sets up the register state so that when switched to,
+        execution begins at entry_point with the given stack.
+
+        For user mode, sets segment selectors to ring 3 segments;
+        for kernel mode, uses ring 0 segments.
+        """
+        var cs_val: u32 = GDT_KERNEL_CODE as u32
+        var ss_val: u32 = GDT_KERNEL_DATA as u32
+        var ds_val: u32 = GDT_KERNEL_DATA as u32
+        var flags = EFLAGS_DEFAULT
+
+        if user_mode:
+            cs_val = (GDT_USER_CODE as u32) | 3
+            ss_val = (GDT_USER_DATA as u32) | 3
+            ds_val = (GDT_USER_DATA as u32) | 3
+            flags = EFLAGS_USER
+
+        # Keep the i386 stack 16-byte aligned so code shared with the
+        # x86_64 process-image path can assume a conservative ABI boundary.
+        val aligned_stack = stack_top & 0xFFFFFFF0
+
+        X86Context(
+            eax: 0,
+            ebx: 0,
+            ecx: 0,
+            edx: 0,
+            esi: 0,
+            edi: 0,
+            ebp: aligned_stack,
+            esp: aligned_stack,
+            eip: entry_point,
+            eflags: flags,
+            cs: cs_val,
+            ss: ss_val,
+            ds: ds_val,
+            es: ds_val,
+            fpu_state: 0
+        )
+
+    fn switch(from_ctx: X86Context, to_ctx: X86Context):
+        """Switch from one context to another.
+
+        Saves current register state into from_ctx, loads to_ctx.
+        This is the core context switch -- implemented in assembly.
+
+        The 32-bit context switch saves/restores:
+        eax, ebx, ecx, edx, esi, edi, ebp, esp, eip, eflags,
+        and segment registers cs, ss, ds, es.
+        """
+        rt_x86_32_context_switch((&from_ctx) as u32, (&to_ctx) as u32)
+
+    fn save_fpu(ctx: X86Context):
+        """Save FPU/SSE state for context.
+
+        Uses FSAVE (or FXSAVE if SSE is available) to save the
+        floating-point unit state to the context's fpu_state region.
+        """
+        if ctx.fpu_state == 0:
+            return
+        rt_x86_32_fpu_save((&ctx) as u32)
+
+    fn restore_fpu(ctx: X86Context):
+        """Restore FPU/SSE state for context.
+
+        Uses FRSTOR (or FXRSTOR if SSE is available) to restore the
+        floating-point unit state from the context's fpu_state region.
+        """
+        if ctx.fpu_state == 0:
+            return
+        rt_x86_32_fpu_restore((&ctx) as u32)

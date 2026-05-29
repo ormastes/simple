@@ -1,0 +1,125 @@
+# Multi-column secondary indexes for SdnTable
+# Supports Hash, Sorted, and Trigram index types.
+# Also exports shared index utilities used by dbfs_engine.AttrIndexManager.
+
+use nogc_async_mut.database.core (SdnTable, SdnRow)
+
+fn add_to_index(index: Dict<text, [i64]>, key: text, id: i64):
+    if index.contains_key(key):
+        var list = index[key]
+        list.push(id)
+        index[key] = list
+    else:
+        index[key] = [id]
+
+fn remove_from_index(index: Dict<text, [i64]>, key: text, id: i64):
+    if not index.contains_key(key):
+        return
+    var next: [i64] = []
+    for existing in index[key]:
+        if existing != id:
+            next.push(existing)
+    index[key] = next
+
+fn intersect_id_lists(a: [i64], b: [i64]) -> [i64]:
+    var result: [i64] = []
+    var i: i32 = 0
+    while i < a.len() as i32:
+        var j: i32 = 0
+        while j < b.len() as i32:
+            if a[i] == b[j]:
+                result.push(a[i])
+            j = j + 1
+        i = i + 1
+    result
+
+fn pad_i64(v: i64) -> text:
+    val s = v.to_text()
+    var p: text = ""
+    var remaining: i32 = (20 - s.len() as i32)
+    while remaining > 0:
+        p = p + "0"
+        remaining = remaining - 1
+    p + s
+
+enum IndexType:
+    Hash
+    Sorted
+    Trigram
+
+struct ColumnIndex:
+    column: text
+    index_type: IndexType
+    entries: Dict<text, [i64]>  # value -> list of row indices
+
+class IndexManager:
+    indexes: Dict<text, ColumnIndex>
+
+    static fn new() -> IndexManager:
+        IndexManager(indexes: {})
+
+    me create_index(table: SdnTable, column: text, index_type: IndexType):
+        var entries: Dict<text, [i64]> = {}
+        var row_idx: i64 = 0
+        for row in table.rows:
+            val val_opt = row.get(column)
+            if val_opt.?:
+                add_to_index(entries, val_opt.unwrap(), row_idx)
+            row_idx = row_idx + 1
+        val idx = ColumnIndex(column: column, index_type: index_type, entries: entries)
+        self.indexes[column] = idx
+
+    me drop_index(column: text):
+        if self.indexes.contains_key(column):
+            self.indexes.remove(column)
+
+    fn lookup(column: text, value: text) -> [i64]?:
+        if not self.indexes.contains_key(column):
+            return nil
+        val idx = self.indexes[column]
+        if idx.entries.contains_key(value):
+            Some(idx.entries[value])
+        else:
+            Some([])
+
+    fn range_lookup(column: text, low: text, high: text) -> [i64]:
+        if not self.indexes.contains_key(column):
+            return []
+        val idx = self.indexes[column]
+        var result: [i64] = []
+        for (v, rows) in idx.entries:
+            if v >= low and v <= high:
+                for r in rows:
+                    result.push(r)
+        result
+
+    me on_row_insert(row_idx: i64, row: SdnRow):
+        for (column, idx) in self.indexes:
+            val val_opt = row.get(column)
+            if val_opt.?:
+                add_to_index(idx.entries, val_opt.unwrap(), row_idx)
+                self.indexes[column] = idx
+
+    me on_row_delete(row_idx: i64, row: SdnRow):
+        for (column, idx) in self.indexes:
+            val val_opt = row.get(column)
+            if val_opt.?:
+                remove_from_index(idx.entries, val_opt.unwrap(), row_idx)
+                self.indexes[column] = idx
+
+    me on_row_update(row_idx: i64, old_row: SdnRow, new_row: SdnRow):
+        self.on_row_delete(row_idx, old_row)
+        self.on_row_insert(row_idx, new_row)
+
+    me rebuild(table: SdnTable):
+        var rebuilt: Dict<text, ColumnIndex> = {}
+        for (column, idx) in self.indexes:
+            var entries: Dict<text, [i64]> = {}
+            var row_idx: i64 = 0
+            for row in table.rows:
+                val val_opt = row.get(column)
+                if val_opt.?:
+                    add_to_index(entries, val_opt.unwrap(), row_idx)
+                row_idx = row_idx + 1
+            rebuilt[column] = ColumnIndex(column: column, index_type: idx.index_type, entries: entries)
+        self.indexes = rebuilt

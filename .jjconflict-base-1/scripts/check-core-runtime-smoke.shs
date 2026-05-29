@@ -1,0 +1,77 @@
+#!/bin/sh
+set -eu
+
+RUNTIME_BINARY="${1:-bin/simple}"
+
+if [ ! -x "$RUNTIME_BINARY" ]; then
+    echo "runtime_binary_exists=false"
+    echo "error=missing_runtime_binary:$RUNTIME_BINARY"
+    exit 1
+fi
+
+run_eval_and_expect() {
+    code="$1"
+    expected="$2"
+    output="$("$RUNTIME_BINARY" -c "$code" 2>/dev/null || true)"
+    if [ "$output" = "$expected" ]; then
+        echo "core_eval_smoke=true"
+    else
+        echo "core_eval_smoke=false"
+        echo "expected_eval=$expected"
+        echo "actual_eval=$output"
+        exit 1
+    fi
+}
+
+run_compile_and_expect() {
+    code="$1"
+    expected="$2"
+
+    src_file="$(mktemp /tmp/simple-core-smoke-XXXXXX.spl)"
+    out_file="$(mktemp /tmp/simple-core-smoke-XXXXXX.smf)"
+    printf '%s\n' "$code" > "$src_file"
+
+    output="$("$RUNTIME_BINARY" compile "$src_file" -o "$out_file" 2>/dev/null || true)"
+    rm -f "$src_file" "$out_file"
+
+    case "$output" in
+        *"$expected"*Compiled\ *)
+            echo "core_compile_smoke=true"
+            ;;
+        *)
+            echo "core_compile_smoke=false"
+            echo "expected_compile_contains=$expected"
+            echo "actual_compile=$output"
+            exit 1
+            ;;
+    esac
+}
+
+run_source_and_expect() {
+    code="$1"
+    expected="$2"
+
+    src_file="$(mktemp /tmp/simple-core-source-XXXXXX.spl)"
+    printf '%s\n' "$code" > "$src_file"
+
+    output="$("$RUNTIME_BINARY" "$src_file" 2>/dev/null || true)"
+    rm -f "$src_file"
+
+    if [ "$output" = "$expected" ]; then
+        echo "core_source_smoke=true"
+    else
+        echo "core_source_smoke=false"
+        echo "expected_source=$expected"
+        echo "actual_source=$output"
+        exit 1
+    fi
+}
+
+echo "runtime_binary_exists=true"
+echo "runtime_binary=$RUNTIME_BINARY"
+
+run_eval_and_expect 'print 6 * 7' '42'
+run_source_and_expect 'print 6 * 7' '42'
+run_compile_and_expect 'print 6 * 7' '42'
+
+echo "core_runtime_smoke=true"

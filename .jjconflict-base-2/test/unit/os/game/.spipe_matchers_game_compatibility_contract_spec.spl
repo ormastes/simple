@@ -1,0 +1,58 @@
+# @tag: os, game, steamos, proton, linux
+# @cover src/os/game/platform/compatibility_contract.spl 80%
+
+use std.spec.{describe, it, expect}
+use os.game.platform.compatibility_contract.{
+    game_runtime_prefix,
+    game_runtime_prefix_blocker,
+    game_runtime_prefix_ready,
+    game_target_blocker,
+    game_target_marker,
+    game_target_native_linux,
+    game_target_proton_translated,
+    game_target_proton_x86,
+    game_target_ready,
+    game_target_simple_native,
+    game_target_steam_linux
+}
+
+describe "SimpleOS game compatibility platform contract":
+    it "requires Linux ABI before native Linux games are ready":
+        val missing_linux = game_target_native_linux(false, true, true, true, true, true)
+        val ready_linux = game_target_native_linux(true, true, true, true, true, true)
+        expect game_target_ready(missing_linux) == false
+        expect game_target_blocker(missing_linux) == "missing-linux-abi"
+        expect game_target_ready(ready_linux) == true
+        expect (game_target_marker(ready_linux)).contains("[game-platform] target=native-linux blocker=ready")
+
+    it "requires Steam Runtime before Steam Linux games are ready":
+        val no_runtime = game_target_steam_linux(true, true, true, true, true, true, false)
+        val ready_runtime = game_target_steam_linux(true, true, true, true, true, true, true)
+        expect game_target_blocker(no_runtime) == "missing-steam-runtime"
+        expect game_target_ready(ready_runtime) == true
+
+    it "requires Proton host after Linux, Vulkan, audio, input, prefix, network, and Steam Runtime":
+        val no_vulkan = game_target_proton_x86(true, false, true, true, true, true, true, true)
+        val no_proton = game_target_proton_x86(true, true, true, true, true, true, true, false)
+        val ready_proton = game_target_proton_x86(true, true, true, true, true, true, true, true)
+        expect game_target_blocker(no_vulkan) == "missing-vulkan"
+        expect game_target_blocker(no_proton) == "missing-proton-host"
+        expect game_target_ready(ready_proton) == true
+
+    it "blocks translated Proton on CPU translation":
+        val translated = game_target_proton_translated(true, true, true, true, true, true, true, true, false)
+        expect game_target_ready(translated) == false
+        expect game_target_blocker(translated) == "missing-cpu-translation"
+
+    it "allows Simple-native games without Linux ABI":
+        val simple_native = game_target_simple_native(true, true, true, true, true)
+        expect game_target_ready(simple_native) == true
+        expect game_target_blocker(simple_native) == "ready"
+
+    it "requires full game prefix layout":
+        val partial = game_runtime_prefix("123456", true, true, false, true, true, true)
+        val full = game_runtime_prefix("123456", true, true, true, true, true, true)
+        expect game_runtime_prefix_ready(partial) == false
+        expect game_runtime_prefix_blocker(partial) == "missing-shadercache:/games/app_123456/shadercache"
+        expect game_runtime_prefix_ready(full) == true
+        expect game_runtime_prefix_blocker(full) == "ready"

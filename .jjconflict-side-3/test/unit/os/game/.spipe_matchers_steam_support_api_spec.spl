@@ -1,0 +1,136 @@
+use std.spec
+use os.game.steam.support_api.{
+    steam_api_activate_overlay,
+    steam_api_app_install_dir,
+    steam_api_auth_session_ticket,
+    steam_api_authorize_microtxn,
+    steam_api_backend_required_os_capabilities,
+    steam_api_backend_required_symbols,
+    steam_api_begin_session,
+    steam_api_cloud_write,
+    steam_api_facade,
+    steam_api_friend_identity,
+    steam_api_init,
+    steam_api_input_action,
+    steam_api_interface_count,
+    steam_api_interface_supported,
+    steam_api_interfaces,
+    steam_api_join_lobby,
+    steam_api_launch_options,
+    steam_api_network_message,
+    steam_api_p2p_packet,
+    steam_api_persona_state,
+    steam_api_probe_backend,
+    steam_api_publish_ugc,
+    steam_api_readiness_blocker,
+    steam_api_ready,
+    steam_api_real_backend_blocker,
+    steam_api_real_backend_ready,
+    steam_api_request_drm_ticket,
+    steam_api_runtime_env,
+    steam_api_sffi_bridge_name,
+    steam_api_summary,
+    steam_api_unlock_achievement,
+    steam_api_write_screenshot,
+    steam_api_write_stat,
+    steam_support_api_surface
+}
+
+describe "SimpleOS Steam API facade":
+    it "fails closed until initialized":
+        val surface = steam_support_api_surface(2048, "2048", "/games/app_2048/compatdata")
+        val facade = steam_api_facade(surface)
+        expect steam_api_ready(facade) == false
+        expect steam_api_readiness_blocker(facade) == "SteamAPI_Init not called"
+
+    it "initializes a pure Simple SFFI surface":
+        val surface = steam_support_api_surface(2048, "2048", "/games/app_2048/compatdata")
+        val facade = steam_api_init(steam_api_facade(surface))
+        expect steam_api_ready(facade) == true
+        expect steam_api_sffi_bridge_name(facade) == "simple-steam-sffi-v1"
+        expect (steam_api_summary(facade)).contains("ready=true")
+
+    it "records common Steamworks-style game state":
+        val surface = steam_support_api_surface(2048, "2048", "/games/app_2048/compatdata")
+        var facade = steam_api_init(steam_api_facade(surface))
+        facade = steam_api_begin_session(facade)
+        facade = steam_api_runtime_env(facade, "SteamLinuxRuntime/soldier")
+        facade = steam_api_launch_options(facade, "-simpleos-smoke")
+        facade = steam_api_friend_identity(facade, "friend-1", "Simple Player")
+        facade = steam_api_network_message(facade, "peer", "reliable", "ready")
+        facade = steam_api_unlock_achievement(facade, "FIRST_MERGE")
+        facade = steam_api_write_stat(facade, "score", 4)
+        facade = steam_api_cloud_write(facade, "save.sdn", 64)
+        facade = steam_api_join_lobby(facade, "local-lobby", 1)
+        facade = steam_api_request_drm_ticket(facade, "ticket")
+
+        expect facade.state.session_started == true
+        expect facade.state.runtime_env == "SteamLinuxRuntime/soldier"
+        expect facade.state.launch_options == "-simpleos-smoke"
+        expect facade.state.friend_persona == "Simple Player"
+        expect facade.state.network_message == "ready"
+        expect facade.state.achievement_unlocked == true
+        expect facade.state.stat_value == 4
+        expect facade.state.cloud_bytes_written == 64
+        expect facade.state.lobby_member_count == 1
+        expect facade.state.drm_ticket == "ticket"
+
+    it "advertises the pure Simple Steamworks interface catalog":
+        val interfaces = steam_api_interfaces()
+        expect steam_api_interface_count() == 32
+        expect (interfaces.join(",")).contains("ISteamUser")
+        expect (interfaces.join(",")).contains("ISteamAppTicket")
+        expect (interfaces.join(",")).contains("ISteamGameCoordinator")
+        expect (interfaces.join(",")).contains("ISteamHTTP")
+        expect (interfaces.join(",")).contains("ISteamTimeline")
+        expect (interfaces.join(",")).contains("SteamEncryptedAppTicket")
+        expect (interfaces.join(",")).contains("steam_gameserver")
+        expect steam_api_interface_supported("ISteamApps") == true
+        expect steam_api_interface_supported("ISteamNetworkingSockets") == true
+        expect steam_api_interface_supported("ISteamUnknown") == false
+        expect steam_api_real_backend_ready() == false
+        expect (steam_api_real_backend_blocker()).contains("upstream Steamworks SDK bridge")
+
+    it "records wider Steam domain state without a native Valve dependency":
+        val surface = steam_support_api_surface(2048, "2048", "/games/app_2048/compatdata")
+        var facade = steam_api_init(steam_api_facade(surface))
+        facade = steam_api_auth_session_ticket(facade, "auth-ticket")
+        facade = steam_api_app_install_dir(facade, "/games/app_2048/root")
+        facade = steam_api_activate_overlay(facade, "Friends")
+        facade = steam_api_input_action(facade, "MoveLeft", 1)
+        facade = steam_api_write_screenshot(facade, "/games/app_2048/screenshots/first.png")
+        facade = steam_api_publish_ugc(facade, "ugc-1", "SimpleOS board")
+        facade = steam_api_authorize_microtxn(facade, "order-1", true)
+        facade = steam_api_persona_state(facade, "online")
+        facade = steam_api_p2p_packet(facade, "peer-1", 32)
+
+        expect facade.state.auth_session_ticket == "auth-ticket"
+        expect facade.state.install_dir == "/games/app_2048/root"
+        expect facade.state.overlay_dialog == "Friends"
+        expect facade.state.input_action == "MoveLeft"
+        expect facade.state.screenshot_path == "/games/app_2048/screenshots/first.png"
+        expect facade.state.ugc_title == "SimpleOS board"
+        expect facade.state.microtxn_authorized == true
+        expect facade.state.persona_state == "online"
+        expect facade.state.p2p_packet_bytes == 32
+
+    it "keeps real Steam backend readiness behind an executable SFFI gate":
+        val no_client = steam_api_probe_backend(false, [], [])
+        expect no_client.ready == false
+        expect no_client.blocker == "missing authenticated Steam client"
+        expect no_client.required_symbol_count == 20
+        expect no_client.required_os_capability_count == 11
+
+        val partial_symbols = steam_api_probe_backend(true, ["SteamAPI_Init"], steam_api_backend_required_os_capabilities())
+        expect partial_symbols.ready == false
+        expect partial_symbols.blocker == "missing Steamworks SFFI symbols"
+        expect partial_symbols.matched_symbol_count == 1
+
+        val partial_os = steam_api_probe_backend(true, steam_api_backend_required_symbols(), ["elf64_dynamic_loader"])
+        expect partial_os.ready == false
+        expect partial_os.blocker == "missing SimpleOS Linux/Steam Runtime capabilities"
+        expect partial_os.matched_os_capability_count == 1
+
+        val ready = steam_api_probe_backend(true, steam_api_backend_required_symbols(), steam_api_backend_required_os_capabilities())
+        expect ready.ready == true
+        expect ready.blocker == ""

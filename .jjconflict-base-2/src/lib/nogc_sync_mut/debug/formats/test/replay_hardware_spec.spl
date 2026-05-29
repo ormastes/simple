@@ -1,0 +1,77 @@
+#![allow(primitive_api)]
+# Replay hardware feature registration and types spec.
+
+use std.io_runtime
+use std.nogc_sync_mut.spec.{describe, it, expect}
+use std.nogc_sync_mut.debug.remote.replay.memory_snapshot.{MemorySnapshot, WatchRegion}
+use std.nogc_sync_mut.debug.remote.replay.hardware_replay_controller.{HardwareCheckpoint}
+use std.nogc_sync_mut.debug.remote.feature.features.{FeatureId, FeatureRank}
+
+fn main():
+    describe("MemorySnapshot"):
+        it("captures addr and data"):
+            val snap = MemorySnapshot.capture(4096, [1, 2, 3, 4])
+            expect(snap.addr).to_equal(4096)
+            expect(snap.data.len()).to_equal(4)
+
+        it("captures empty data"):
+            val snap = MemorySnapshot.capture(0, [])
+            expect(snap.addr).to_equal(0)
+            expect(snap.data.len()).to_equal(0)
+
+        it("preserves byte values"):
+            val snap = MemorySnapshot.capture(0x20000000, [0xFF, 0x00, 0xAB])
+            expect(snap.data[0]).to_equal(0xFF)
+            expect(snap.data[1]).to_equal(0x00)
+            expect(snap.data[2]).to_equal(0xAB)
+
+    describe("WatchRegion"):
+        it("creates with addr and size"):
+            val region = WatchRegion.of(0x20000000, 256)
+            expect(region.addr).to_equal(0x20000000)
+            expect(region.size).to_equal(256)
+
+        it("supports zero-length region"):
+            val region = WatchRegion.of(0x1000, 0)
+            expect(region.addr).to_equal(0x1000)
+            expect(region.size).to_equal(0)
+
+    describe("HardwareCheckpoint"):
+        it("stores id and name"):
+            val cp = HardwareCheckpoint(
+                id: 0,
+                name: "initial",
+                registers: [100, 200, 300],
+                memory_regions: []
+            )
+            expect(cp.id).to_equal(0)
+            expect(cp.name).to_equal("initial")
+            expect(cp.registers.len()).to_equal(3)
+
+        it("stores memory regions"):
+            val snap = MemorySnapshot.capture(0x8000, [10, 20])
+            val cp = HardwareCheckpoint(
+                id: 1,
+                name: "with-mem",
+                registers: [],
+                memory_regions: [snap]
+            )
+            expect(cp.memory_regions.len()).to_equal(1)
+            expect(cp.memory_regions[0].addr).to_equal(0x8000)
+
+    describe("Replay FeatureId"):
+        it("ReverseStep exists"):
+            expect(FeatureId.ReverseStep.to_string()).to_equal("ReverseStep")
+
+        it("ReverseContinue exists"):
+            expect(FeatureId.ReverseContinue.to_string()).to_equal("ReverseContinue")
+
+    describe("FeatureRank for hardware replay"):
+        it("EMULATED is rank 4"):
+            expect(FeatureRank.EMULATED()).to_equal(4)
+
+        it("NATIVE is rank 0"):
+            expect(FeatureRank.NATIVE()).to_equal(0)
+
+        it("EMULATED is higher than NATIVE"):
+            expect(FeatureRank.EMULATED()).to_be_greater_than(FeatureRank.NATIVE())

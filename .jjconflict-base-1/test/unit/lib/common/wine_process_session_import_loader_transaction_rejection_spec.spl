@@ -1,0 +1,62 @@
+use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
+use common.wine_process_session.{
+    wine_process_apply_import_loader_transaction_in_vma,
+    wine_process_apply_import_loader_transaction_in_vma_with_peb_teb_vm_writes,
+    wine_process_session_plan,
+    wine_process_session_request_new
+}
+use common.wine_peb_teb.{wine_peb_teb_apply_layout_byte_writes, wine_peb_teb_init_default, wine_peb_teb_layout_byte_writes, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate}
+use common.wine_vm_adapter.{WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
+
+fn _commit_fixed(space: WineVmSpace, base: i64, size: i64, perms: text) -> WineVmSpace:
+    val reserved = wine_vm_reserve_fixed(space, base, size)
+    if not reserved.ok:
+        return reserved.space
+    val committed = wine_vm_commit(reserved.space, reserved.region.base, perms)
+    committed.space
+
+fn _startup_write_space() -> WineVmSpace:
+    var space = wine_vm_process_space_new(10, 30, "pid fs ipc net capability")
+    space = _commit_fixed(space, 0x7ffdc000, 0x1000, "rw")
+    space = _commit_fixed(space, 0x7ffdd000, 0x1000, "rw")
+    space = _commit_fixed(space, 0x7ffde000, 0x1000, "rw")
+    _commit_fixed(space, 0x7ffdf000, 0x1000, "rw")
+
+fn _ready_vm_writes():
+    val init = wine_peb_teb_init_default()
+    val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+    val layout = wine_peb_teb_layout_write_plan(init, writes)
+    val bytes = wine_peb_teb_layout_byte_writes(layout)
+    wine_peb_teb_apply_layout_byte_writes(_startup_write_space(), bytes)
+
+fn _full_gates() -> text:
+    "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
+        "gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified " +
+        "pthread=verified dynload=verified audio=verified fonts=verified input=verified " +
+        "pe_loader=verified async=verified nt_bridge=verified"
+
+fn _expect_transaction_rejection_without_image(result):
+    expect(result.ok).to_equal(false)
+    expect(result.error).to_equal("invalid-import-descriptor-limit")
+    expect(result.patched_image.len()).to_equal(0)
+    expect(result.mapped_base).to_equal(0)
+    expect(result.mapped_size).to_equal(0)
+    expect(result.patched_count).to_equal(0)
+    expect(result.evidence).to_contain("import-loader-vma-transaction-aborted")
+    expect(result.evidence).to_contain("no-vma-thunk-written")
+    expect(result.evidence).to_contain("no-real-dll-loaded")
+    expect(result.evidence).to_contain("no-arbitrary-execution")
+    expect(result.status).to_equal("blocked")
+
+describe "Wine process import-loader transaction rejection":
+    it "blocks import-loader transaction without patched image when loader planning rejects":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_apply_import_loader_transaction_in_vma(plan, wine_known_hello_exe_fixture_bytes(), 0, 8)
+
+        _expect_transaction_rejection_without_image(result)
+
+    it "blocks VM-gated import-loader transaction without patched image when loader planning rejects":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_apply_import_loader_transaction_in_vma_with_peb_teb_vm_writes(plan, wine_known_hello_exe_fixture_bytes(), 0x400000, 0x400000, "native-module-open tls-callback", 0, 8, _ready_vm_writes())
+
+        _expect_transaction_rejection_without_image(result)

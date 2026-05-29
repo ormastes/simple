@@ -1,0 +1,118 @@
+# Language Model Server entrypoint.
+# Startup-light CLI surface for source-mode help and readiness probes.
+
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
+
+val SERVER_NAME = "Simple Language Model Server"
+val SERVER_SHORT_NAME = "Simple LMS"
+val SERVER_VERSION = "0.1.0"
+val DEFAULT_PORT = "8765"
+
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("lms", log_opts.error)
+        return 1
+
+    val args = lms_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h"):
+        print_help_with_progress(log_opts.progress)
+        return 0
+    if args.len() > 0 and (args[0] == "--version" or args[0] == "-v"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"lms\",\"status\":\"ok\",\"version\":\"{SERVER_VERSION}\"}"
+        else:
+            print "{SERVER_SHORT_NAME} v{SERVER_VERSION}"
+        return 0
+
+    val port = lms_port_arg(args)
+    if lms_has_unknown_option(args):
+        val message = "Unknown option: {lms_first_unknown_option(args)}"
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"lms\",\"status\":\"error\",\"message\":\"{message}\"}"
+        else:
+            error("lms", message)
+        return 1
+
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"lms\",\"status\":\"ready\",\"server\":\"{SERVER_SHORT_NAME}\",\"version\":\"{SERVER_VERSION}\",\"port\":{port}}"
+        return 0
+
+    val progress = render_progress(log_opts.progress, 1, 1, "lms")
+    if progress != "":
+        print progress
+    print "{SERVER_SHORT_NAME} v{SERVER_VERSION}"
+    print "Ready for native/package server startup on port {port}."
+    0
+
+fn print_help():
+    print "{SERVER_NAME} (LMS)"
+    print ""
+    print "Usage: simple lms [options]"
+    print ""
+    print "Options:"
+    print "  -h, --help       Show this help message"
+    print "  -v, --version    Show version information"
+    print "  --port <PORT>    Select the server port (default: {DEFAULT_PORT})"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
+
+fn lms_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn lms_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if lms_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+fn lms_port_arg(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--port" and i + 1 < args.len():
+            return args[i + 1]
+        if arg.starts_with("--port="):
+            return arg.substring(7)
+        i = i + 1
+    DEFAULT_PORT
+
+fn lms_has_unknown_option(args: [text]) -> bool:
+    lms_first_unknown_option(args) != ""
+
+fn lms_first_unknown_option(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--port":
+            i = i + 2
+        elif arg.starts_with("--port="):
+            i = i + 1
+        elif arg.starts_with("-"):
+            return arg
+        else:
+            i = i + 1
+    ""

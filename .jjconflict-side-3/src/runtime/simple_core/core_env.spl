@@ -1,0 +1,68 @@
+# Pure-Simple `simple-core` environment ABI wrappers.
+#
+# Provides rt_env_get, rt_env_set, and rt_env_cwd by delegating to libc
+# getenv, setenv, and getcwd. Public rt_* entrypoints follow the compiler
+# runtime SFFI ABI: text inputs arrive as pointer/length pairs and text outputs
+# return runtime tagged string values.
+
+extern fn getenv(name: i64) -> i64
+extern fn setenv(key: i64, value: i64, overwrite: i64) -> i64
+extern fn getcwd(buf: i64, size: i64) -> i64
+extern fn malloc(size: i64) -> i64
+extern fn free(ptr: i64)
+extern fn strlen(s: i64) -> i64
+extern fn rt_string_new(bytes: i64, len: i64) -> i64
+extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+
+fn env_copy_cstr(ptr: i64, len: i64) -> i64:
+    if ptr < 1 or len < 0:
+        return 0
+    val out = malloc(len + 1)
+    if out < 1:
+        return 0
+    var i = 0
+    while i < len:
+        spl_store_u8(out, i, spl_load_u8(ptr, i))
+        i = i + 1
+    spl_store_u8(out, len, 0)
+    return out
+
+pub fn rt_env_get(key_ptr_raw: i64, key_len: i64) -> i64:
+    val key_ptr = env_copy_cstr(key_ptr_raw, key_len)
+    if key_ptr < 1:
+        return rt_string_new(0, 0)
+    val result = getenv(key_ptr)
+    free(key_ptr)
+    if result < 1:
+        return rt_string_new(0, 0)
+    val len = strlen(result)
+    return rt_string_new(result, len)
+
+pub fn rt_env_set(key_ptr_raw: i64, key_len: i64, value_ptr_raw: i64, value_len: i64) -> i8:
+    val key_ptr = env_copy_cstr(key_ptr_raw, key_len)
+    if key_ptr < 1:
+        return 0
+    val value_ptr = env_copy_cstr(value_ptr_raw, value_len)
+    if value_ptr < 1:
+        free(key_ptr)
+        return 0
+    val result = setenv(key_ptr, value_ptr, 1)
+    free(key_ptr)
+    free(value_ptr)
+    if result < 0:
+        return 0
+    return 1
+
+pub fn rt_env_cwd() -> i64:
+    val buf = malloc(4096)
+    if buf < 1:
+        return rt_string_new(0, 0)
+    val result = getcwd(buf, 4096)
+    if result < 1:
+        free(buf)
+        return rt_string_new(0, 0)
+    val len = strlen(buf)
+    val out = rt_string_new(buf, len)
+    free(buf)
+    return out

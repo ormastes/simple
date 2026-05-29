@@ -1,0 +1,40 @@
+# LLM Output Gate — byte-level filter applied to LLM-generated output.
+#
+# Provides: OutputGate, FilteredBody, GateDecision, filter_response_body.
+
+use std.common.privilege.authority_token.{AuthorityToken}
+
+enum GateDecision:
+    Pass
+    Block
+    Redact
+
+struct FilteredBody:
+    decision: GateDecision
+    body: [u8]
+
+class OutputGate:
+    enabled: bool
+    max_bytes: i64
+
+impl OutputGate:
+    static fn default() -> OutputGate:
+        OutputGate(enabled: true, max_bytes: 1048576)
+
+    static fn default_for_test() -> OutputGate:
+        OutputGate(enabled: false, max_bytes: 1048576)
+
+    fn filter_response_body(self, body: [u8], token: AuthorityToken) -> FilteredBody:
+        if not self.enabled:
+            return FilteredBody(decision: GateDecision.Pass, body: body)
+        if body.len() > self.max_bytes:
+            return FilteredBody(decision: GateDecision.Block, body: [])
+        FilteredBody(decision: GateDecision.Pass, body: body)
+
+# Module-level convenience wrapper used by web_dashboard and llm_dashboard.
+fn filter_response_body(gate: OutputGate, body: [u8], token: AuthorityToken) -> [u8]:
+    val result = gate.filter_response_body(body, token)
+    match result.decision:
+        GateDecision.Pass:   result.body
+        GateDecision.Block:  []
+        GateDecision.Redact: []

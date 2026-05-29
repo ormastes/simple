@@ -1,0 +1,85 @@
+# HAL QEMU mock backend — in-memory register map for testing.
+#
+# All operations are pure: they return new state instead of mutating.
+# No real hardware access — suitable for unit tests.
+
+use std.hal.types.{MmioAddress, IrqLine}
+
+# ============================================================================
+# Register entry — one addr/value pair in the mock register map
+# ============================================================================
+
+struct MmioRegEntry:
+    addr: i64
+    value: i64
+
+# ============================================================================
+# IRQ entry — one pending IRQ line
+# ============================================================================
+
+struct MockIrqEntry:
+    line_number: i64
+
+# ============================================================================
+# QemuMockHal — mock HAL state
+# ============================================================================
+
+struct QemuMockHal:
+    registers: [MmioRegEntry]
+    pending_irqs: [MockIrqEntry]
+
+fn qemu_mock_hal_new() -> QemuMockHal:
+    QemuMockHal(registers: [], pending_irqs: [])
+
+# ============================================================================
+# Mock MMIO read/write
+# ============================================================================
+
+fn qemu_mock_effective_addr(addr: MmioAddress) -> i64:
+    addr.base + addr.offset
+
+fn qemu_mock_read(mock: QemuMockHal, addr: MmioAddress) -> i64:
+    val effective = qemu_mock_effective_addr(addr)
+    var i = 0
+    while i < mock.registers.len():
+        val entry = mock.registers[i]
+        if entry.addr == effective:
+            return entry.value
+        i = i + 1
+    0
+
+fn qemu_mock_write(mock: QemuMockHal, addr: MmioAddress, value: i64) -> QemuMockHal:
+    val effective = qemu_mock_effective_addr(addr)
+    # Build new register list: replace existing or append
+    var new_regs: [MmioRegEntry] = []
+    var found = false
+    var i = 0
+    while i < mock.registers.len():
+        val entry = mock.registers[i]
+        if entry.addr == effective:
+            new_regs = new_regs + [MmioRegEntry(addr: effective, value: value)]
+            found = true
+        else:
+            new_regs = new_regs + [entry]
+        i = i + 1
+    if not found:
+        new_regs = new_regs + [MmioRegEntry(addr: effective, value: value)]
+    QemuMockHal(registers: new_regs, pending_irqs: mock.pending_irqs)
+
+# ============================================================================
+# Mock IRQ
+# ============================================================================
+
+fn qemu_mock_irq_pending(mock: QemuMockHal, line: IrqLine) -> bool:
+    var i = 0
+    while i < mock.pending_irqs.len():
+        val entry = mock.pending_irqs[i]
+        if entry.line_number == line.number:
+            return true
+        i = i + 1
+    false
+
+fn qemu_mock_inject_irq(mock: QemuMockHal, line: IrqLine) -> QemuMockHal:
+    val new_entry = MockIrqEntry(line_number: line.number)
+    val new_irqs = mock.pending_irqs + [new_entry]
+    QemuMockHal(registers: mock.registers, pending_irqs: new_irqs)

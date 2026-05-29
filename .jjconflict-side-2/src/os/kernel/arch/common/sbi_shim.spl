@@ -1,0 +1,76 @@
+# SBI Shim — Supervisor Binary Interface call wrappers usable by both
+# rv64 and rv32. SBI is identical at the call-convention level on both
+# (ecall with a7=ext, a6=fid, a0..a5=args; returns a0=err, a1=val).
+#
+# Per-arch riscv*/sbi.spl files contain the asm trampoline; this module
+# centralizes ext/fid constants + the result-decode shape.
+#
+# Wave 2 — added 2026-04-25 for AC-3 helper extraction.
+
+# SBI extension IDs (subset — kernel-relevant only).
+val SBI_EXT_BASE:        i64 = 0x10
+val SBI_EXT_TIMER:       i64 = 0x54494D45        # "TIME"
+val SBI_EXT_IPI:         i64 = 0x735049          # "sPI"
+val SBI_EXT_RFENCE:      i64 = 0x52464E43        # "RFNC"
+val SBI_EXT_HSM:         i64 = 0x48534D          # "HSM"
+val SBI_EXT_SRST:        i64 = 0x53525354        # "SRST"
+val SBI_EXT_PMU:         i64 = 0x504D55          # "PMU"
+val SBI_EXT_DBCN:        i64 = 0x4442434E        # "DBCN" (debug console)
+val SBI_EXT_CPPC:        i64 = 0x43505043        # "CPPC"
+val SBI_EXT_SECMEM:      i64 = 0x4453            # "DS" (Datasalt for entropy on some platforms)
+val SBI_EXT_GET_RANDOM:  i64 = 0x52414E44        # "RAND" — proposed; may be vendor-only
+
+# SBI base function IDs (ext = SBI_EXT_BASE).
+val SBI_BASE_GET_SPEC_VERSION:  i64 = 0
+val SBI_BASE_GET_IMPL_ID:       i64 = 1
+val SBI_BASE_GET_IMPL_VERSION:  i64 = 2
+val SBI_BASE_PROBE_EXTENSION:   i64 = 3
+val SBI_BASE_GET_MVENDORID:     i64 = 4
+val SBI_BASE_GET_MARCHID:       i64 = 5
+val SBI_BASE_GET_MIMPID:        i64 = 6
+
+# SBI System Reset function IDs (ext = SBI_EXT_SRST).
+val SBI_SRST_SYSTEM_RESET: i64 = 0
+val SBI_SRST_TYPE_SHUTDOWN:    i64 = 0
+val SBI_SRST_TYPE_COLD_REBOOT: i64 = 1
+val SBI_SRST_TYPE_WARM_REBOOT: i64 = 2
+val SBI_SRST_REASON_NONE:    i64 = 0
+
+# SBI return-value envelope.
+@repr("C")
+struct SbiResult:
+    """SBI call result — error code + value (a0/a1)."""
+    err: i64
+    val: i64
+
+# Standard error codes per the SBI spec.
+val SBI_OK:                  i64 = 0
+val SBI_ERR_FAILED:          i64 = -1
+val SBI_ERR_NOT_SUPPORTED:   i64 = -2
+val SBI_ERR_INVALID_PARAM:   i64 = -3
+val SBI_ERR_DENIED:          i64 = -4
+val SBI_ERR_INVALID_ADDRESS: i64 = -5
+val SBI_ERR_ALREADY_AVAILABLE: i64 = -6
+
+fn sbi_ok(r: SbiResult) -> bool:
+    r.err == SBI_OK
+
+fn sbi_decode_probe(r: SbiResult) -> bool:
+    """probe_extension returns 0 if the ext is not present; nonzero else."""
+    sbi_ok(r) and r.val != 0
+
+# Compose the canonical fields for a System Reset call.
+fn sbi_srst_args(reset_type: i64, reason: i64) -> [i64; 2]:
+    [reset_type, reason]
+
+# Compose the canonical fields for a Set Timer call (HART-local).
+fn sbi_timer_args(stime_value: u64) -> [u64; 1]:
+    [stime_value]
+
+# Common helper: probe whether an extension is implemented. Returns
+# true iff the SBI implementation answered "available".
+# Per-arch sbi.spl supplies the actual ecall trampoline; this just
+# packages the request shape.
+fn sbi_probe_request_args(ext_id: i64) -> [i64; 2]:
+    """Args for SBI_EXT_BASE / SBI_BASE_PROBE_EXTENSION."""
+    [SBI_EXT_BASE, ext_id]
