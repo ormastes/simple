@@ -8,7 +8,7 @@ use compiler.mir_opt.optimizer_manifest.{
     dynamic_pass_registry_names_for_backend_budget,
     dynamic_pass_registry_skipped_names_for_backend_budget,
     manifest_cost_allowed,
-    load_manifest_v1_from_parsed, load_manifest_v1_from_parsed_with_rules,
+    load_manifest_v1, load_manifest_v1_from_parsed, load_manifest_v1_from_parsed_with_rules,
     run_manifest_pattern_rules_for_backend,
     run_manifest_pattern_rules_for_backend_budget
 }
@@ -293,6 +293,25 @@ describe "optimizer manifest backend policy":
 
         val registry = registry_result.unwrap()
         val manifest = manifest_result.unwrap()
+        val llvm_medium_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "llvm", "medium")
+        val llvm_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "llvm", "high")
+        val cranelift_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "cranelift", "high")
+
+        expect(llvm_medium_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
+        expect(llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)
+        expect(cranelift_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
+
+    it "loads JSON pattern rules and gates execution by backend budget":
+        val json = "{\"schema_version\":1,\"compiler_abi\":\"simple.opt.mir.v1\",\"name\":\"json_rule_budget_plugin\",\"version\":\"1.0.0\",\"min_compiler_version\":\"0.9.0\",\"passes\":[{\"stable_name\":\"json_rule_high_llvm_pass\",\"aliases\":[],\"scope\":\"function\",\"capability_requires\":[],\"contract\":{\"inputs\":[\"typed_mir\"],\"outputs\":[\"canonical_mir\"],\"purity\":\"pure\"},\"backend_policy\":{\"only\":[\"llvm\"],\"reason\":\"json_llvm_only\"},\"cost_class\":\"high\",\"entry_symbol\":\"json_rule_high_llvm_pass_entry\"}],\"rules\":[{\"name\":\"json_remove_copy\",\"pattern\":{\"inst_count\":1,\"slots\":[{\"kind_tag\":\"Copy\",\"operand_0\":\"$src\",\"operand_1\":null,\"dest\":\"$dest\"}]},\"rewrite\":{\"kind_tag\":\"Remove\",\"dest\":\"$dest\",\"operands\":[]},\"cost_delta\":-1,\"safety\":\"test\"}]}"
+        val manifest_result = load_manifest_v1(json)
+        expect(manifest_result.?).to_equal(true)
+        val manifest = manifest_result.unwrap()
+        expect(manifest.rules.len()).to_equal(1)
+
+        val registry_result = dynamic_pass_registry_register(dynamic_pass_registry_new(), manifest)
+        expect(registry_result.?).to_equal(true)
+        val registry = registry_result.unwrap()
+
         val llvm_medium_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "llvm", "medium")
         val llvm_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "llvm", "high")
         val cranelift_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "cranelift", "high")

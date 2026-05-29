@@ -28,7 +28,7 @@ use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     optimization_rule_provider_with_backend_policy
 }
 use compiler.mir_opt.mir_opt.pattern.pattern_rule_pass.{
-    PatternRule, PatternRuleSet, pattern_rule_set_new,
+    PatternRule, PatternRuleSet, MirPattern, MirPatternSlot, MirRewrite, pattern_rule_set_new,
     pattern_rule_pass_new, pattern_rule_pass_add_rule_set, pattern_rule_pass_run
 }
 
@@ -458,6 +458,15 @@ fn manifest_json_optional_text(root: any, field: text, default_value: text) -> t
         return default_value
     text_value
 
+fn manifest_json_optional_text_opt(root: any, field: text) -> text?:
+    val value = json_object_get(root, field)
+    if value == nil:
+        return nil
+    val text_value = json_to_string(value)
+    if text_value == nil:
+        return nil
+    Some(text_value)
+
 fn manifest_json_required_i64(root: any, field: text) -> Result<i64, ManifestError>:
     val value_result = manifest_json_required(root, field)
     match value_result:
@@ -567,6 +576,119 @@ fn manifest_pass_entries_from_json(pass_values: [any]) -> Result<[ManifestPassEn
                 entries = entries.push(entry)
     Ok(entries)
 
+fn manifest_pattern_slot_from_json(slot_json: any) -> Result<MirPatternSlot, ManifestError>:
+    val kind_result = manifest_json_required_text(slot_json, "kind_tag")
+    match kind_result:
+        case Err(err):
+            Err(err)
+        case Ok(kind_tag):
+            Ok(MirPatternSlot(
+                kind_tag: kind_tag,
+                operand_0: manifest_json_optional_text_opt(slot_json, "operand_0"),
+                operand_1: manifest_json_optional_text_opt(slot_json, "operand_1"),
+                dest: manifest_json_optional_text_opt(slot_json, "dest")
+            ))
+
+fn manifest_pattern_slots_from_json(slot_values: [any]) -> Result<[MirPatternSlot], ManifestError>:
+    var slots: [MirPatternSlot] = []
+    for slot_json in slot_values:
+        val slot_result = manifest_pattern_slot_from_json(slot_json)
+        match slot_result:
+            case Err(err):
+                return Err(err)
+            case Ok(slot):
+                slots = slots.push(slot)
+    Ok(slots)
+
+fn manifest_pattern_from_json(rule_json: any) -> Result<MirPattern, ManifestError>:
+    val pattern_result = manifest_json_required(rule_json, "pattern")
+    match pattern_result:
+        case Err(err):
+            return Err(err)
+        case Ok(pattern_json):
+            val inst_count_result = manifest_json_required_i64(pattern_json, "inst_count")
+            match inst_count_result:
+                case Err(err):
+                    return Err(err)
+                case Ok(inst_count):
+                    val slots_result = manifest_json_required_array(pattern_json, "slots")
+                    match slots_result:
+                        case Err(err):
+                            return Err(err)
+                        case Ok(slot_values):
+                            val parsed_slots = manifest_pattern_slots_from_json(slot_values)
+                            match parsed_slots:
+                                case Err(err):
+                                    Err(err)
+                                case Ok(slots):
+                                    Ok(MirPattern(inst_count: inst_count, slots: slots))
+
+fn manifest_rewrite_from_json(rule_json: any) -> Result<MirRewrite, ManifestError>:
+    val rewrite_result = manifest_json_required(rule_json, "rewrite")
+    match rewrite_result:
+        case Err(err):
+            return Err(err)
+        case Ok(rewrite_json):
+            val kind_result = manifest_json_required_text(rewrite_json, "kind_tag")
+            match kind_result:
+                case Err(err):
+                    return Err(err)
+                case Ok(kind_tag):
+                    Ok(MirRewrite(
+                        kind_tag: kind_tag,
+                        dest: manifest_json_optional_text(rewrite_json, "dest", ""),
+                        operands: manifest_json_optional_text_array(rewrite_json, "operands")
+                    ))
+
+fn manifest_pattern_rule_from_json(rule_json: any) -> Result<PatternRule, ManifestError>:
+    val name_result = manifest_json_required_text(rule_json, "name")
+    match name_result:
+        case Err(err):
+            return Err(err)
+        case Ok(name):
+            val pattern_result = manifest_pattern_from_json(rule_json)
+            match pattern_result:
+                case Err(err):
+                    return Err(err)
+                case Ok(pattern):
+                    val rewrite_result = manifest_rewrite_from_json(rule_json)
+                    match rewrite_result:
+                        case Err(err):
+                            return Err(err)
+                        case Ok(rewrite):
+                            val cost_delta_result = manifest_json_required_i64(rule_json, "cost_delta")
+                            match cost_delta_result:
+                                case Err(err):
+                                    return Err(err)
+                                case Ok(cost_delta):
+                                    Ok(PatternRule(
+                                        name: name,
+                                        pattern: pattern,
+                                        rewrite: rewrite,
+                                        cost_delta: cost_delta,
+                                        safety: manifest_json_optional_text(rule_json, "safety", "experimental")
+                                    ))
+
+fn manifest_pattern_rules_from_json(rule_values: [any]) -> Result<[PatternRule], ManifestError>:
+    var rules: [PatternRule] = []
+    for rule_json in rule_values:
+        val rule_result = manifest_pattern_rule_from_json(rule_json)
+        match rule_result:
+            case Err(err):
+                return Err(err)
+            case Ok(rule):
+                rules = rules.push(rule)
+    Ok(rules)
+
+fn manifest_optional_pattern_rules_from_json(root: any) -> Result<[PatternRule], ManifestError>:
+    val rule_value = json_object_get(root, "rules")
+    if rule_value == nil:
+        return Ok([])
+    val rule_values = json_to_array(rule_value)
+    if rule_values == nil:
+        return Err(ManifestError.MissingField("rules"))
+    manifest_pattern_rules_from_json(rule_values)
+
 fn load_manifest_v1_from_parsed(
     schema_version: i64,
     compiler_abi: text,
@@ -653,14 +775,20 @@ fn load_manifest_v1(json_text: text) -> Result<OptimizerManifest, ManifestError>
                                                         case Err(err):
                                                             return Err(err)
                                                         case Ok(entries):
-                                                            load_manifest_v1_from_parsed(
-                                                                schema_version,
-                                                                compiler_abi,
-                                                                name,
-                                                                version,
-                                                                min_compiler_version,
-                                                                entries
-                                                            )
+                                                            val rules_result = manifest_optional_pattern_rules_from_json(root)
+                                                            match rules_result:
+                                                                case Err(err):
+                                                                    return Err(err)
+                                                                case Ok(rules):
+                                                                    load_manifest_v1_from_parsed_with_rules(
+                                                                        schema_version,
+                                                                        compiler_abi,
+                                                                        name,
+                                                                        version,
+                                                                        min_compiler_version,
+                                                                        entries,
+                                                                        rules
+                                                                    )
 
 # ============================================================================
 # Rule set helper
