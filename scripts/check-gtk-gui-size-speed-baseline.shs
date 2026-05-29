@@ -119,6 +119,10 @@ SIMPLE_ENTRY="$BUILD_DIR/simple_gui_render_bench.spl"
 SIMPLE_OUT="$BUILD_DIR/simple_gui_render_bench.out"
 SIMPLE_NATIVE="$BUILD_DIR/simple_gui_render_bench"
 SIMPLE_DEPS="$BUILD_DIR/simple_gui_render_bench.deps"
+SIMPLE_MIN_ENTRY="$BUILD_DIR/simple_gui_render_minimal.spl"
+SIMPLE_MIN_OUT="$BUILD_DIR/simple_gui_render_minimal.out"
+SIMPLE_MIN_NATIVE="$BUILD_DIR/simple_gui_render_minimal"
+SIMPLE_MIN_DEPS="$BUILD_DIR/simple_gui_render_minimal.deps"
 GTK_SRC="$BUILD_DIR/gtk_gui_baseline.c"
 GTK_BIN="$BUILD_DIR/gtk_gui_baseline"
 GTK_OUT="$BUILD_DIR/gtk_gui_baseline.out"
@@ -365,6 +369,35 @@ fn main() -> i64:
     return 0
 EOF
 
+cat >"$SIMPLE_MIN_ENTRY" <<EOF
+extern fn rt_time_now_unix_micros() -> i64
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_renderer.{SimpleWebHtmlPixelCache}
+
+fn main() -> i64:
+    val html = "<html><body><main class='simple-web-accent'><section class='static-shell'><h1>Simple GUI</h1><p>static shell</p></section></main></body></html>"
+    var cache = SimpleWebHtmlPixelCache.create(320, 200)
+    val warm = cache.pixels_for_html(html)
+    if warm.len() != 320 * 200:
+        print "simple_minimal_status=fail"
+        return 2
+    val start = rt_time_now_unix_micros()
+    var i = 0
+    var total = 0
+    while i < $SIMPLE_ITERATIONS:
+        val pixels = cache.pixels_for_html(html)
+        total = total + pixels.len()
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - start
+    print "simple_minimal_status=ok"
+    print "simple_minimal_iterations=$SIMPLE_ITERATIONS"
+    print "simple_minimal_total_us={elapsed}"
+    print "simple_minimal_pixels={total}"
+    print "simple_minimal_cache_hits={cache.hits}"
+    print "simple_minimal_cache_stores={cache.stores}"
+    return 0
+EOF
+
 simple_status="unavailable"
 simple_reason=""
 simple_total_us="n/a"
@@ -384,6 +417,10 @@ simple_static_layout_payload_bytes="n/a"
 simple_static_command_payload_bytes="n/a"
 simple_bytes="n/a"
 simple_closure_bytes="n/a"
+simple_min_status="unavailable"
+simple_min_total_us="n/a"
+simple_min_bytes="n/a"
+simple_min_closure_bytes="n/a"
 simple_run_lib_spl_files="$(spl_file_count_of_path_list "$SIMPLE_RUN_LIB")"
 simple_full_src_spl_files="$(spl_file_count_of_path_list "$ROOT_DIR/src")"
 
@@ -410,6 +447,10 @@ if [ -x "$SIMPLE_BINARY" ]; then
         simple_reason="simple_run_failed"
     fi
     if [ "$SKIP_SIMPLE_NATIVE" != "1" ]; then
+        if SIMPLE_LIB="$SIMPLE_RUN_LIB" with_timeout "$SIMPLE_BINARY" run "$SIMPLE_MIN_ENTRY" >"$SIMPLE_MIN_OUT" 2>&1; then
+            simple_min_status="$(field_of simple_minimal_status "$SIMPLE_MIN_OUT")"
+            simple_min_total_us="$(field_of simple_minimal_total_us "$SIMPLE_MIN_OUT")"
+        fi
         if SIMPLE_LIB="$SIMPLE_NATIVE_LIB" "$SIMPLE_BINARY" native-build \
             --runtime-bundle core-c-bootstrap \
             --source src/lib \
@@ -420,6 +461,17 @@ if [ -x "$SIMPLE_BINARY" ]; then
             -o "$SIMPLE_NATIVE" >"$BUILD_DIR/simple_native_build.log" 2>&1; then
             simple_bytes="$(bytes_of "$SIMPLE_NATIVE")"
             simple_closure_bytes="$(linked_closure_bytes_of "$SIMPLE_NATIVE" "$SIMPLE_DEPS")"
+        fi
+        if SIMPLE_LIB="$SIMPLE_NATIVE_LIB" "$SIMPLE_BINARY" native-build \
+            --runtime-bundle core-c-bootstrap \
+            --source src/lib \
+            --entry-closure \
+            --entry "$SIMPLE_MIN_ENTRY" \
+            --strip \
+            --opt-level=aggressive \
+            -o "$SIMPLE_MIN_NATIVE" >"$BUILD_DIR/simple_min_native_build.log" 2>&1; then
+            simple_min_bytes="$(bytes_of "$SIMPLE_MIN_NATIVE")"
+            simple_min_closure_bytes="$(linked_closure_bytes_of "$SIMPLE_MIN_NATIVE" "$SIMPLE_MIN_DEPS")"
         fi
     fi
 else
@@ -515,11 +567,13 @@ fi
 
 simple_cached_frame_per_iter_us="$(ratio_of "$simple_browser_cached_frame_total_us" "$SIMPLE_ITERATIONS")"
 simple_engine2d_solid_per_iter_us="$(ratio_of "$simple_engine2d_solid_total_us" "$SIMPLE_ITERATIONS")"
+simple_min_per_iter_us="$(ratio_of "$simple_min_total_us" "$SIMPLE_ITERATIONS")"
 gtk_widget_per_iter_us="$(ratio_of "$gtk_total_us" "$GTK_ITERATIONS")"
 gtk_to_simple_cached_frame_speedup="$(cross_ratio_of "$gtk_total_us" "$SIMPLE_ITERATIONS" "$simple_browser_cached_frame_total_us" "$GTK_ITERATIONS")"
 gtk_to_simple_engine2d_solid_speedup="$(cross_ratio_of "$gtk_total_us" "$SIMPLE_ITERATIONS" "$simple_engine2d_solid_total_us" "$GTK_ITERATIONS")"
 gtk_to_simple_closure_size_ratio="$(ratio_of "$gtk_closure_bytes" "$simple_closure_bytes")"
 simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
+simple_min_to_gtk_executable_size_ratio="$(ratio_of "$simple_min_bytes" "$gtk_bytes")"
 
 {
     echo "# GTK GUI Size And Speed Baseline"
@@ -531,6 +585,7 @@ simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
     echo "| Runtime | Status | Binary bytes | Iterations | Total us | Notes |"
     echo "|---|---|---:|---:|---:|---|"
     echo "| Simple web renderer | ${simple_status:-unavailable} | $simple_bytes | $SIMPLE_ITERATIONS | $simple_total_us | ${simple_reason:-retained framebuffer for unchanged Simple web HTML} |"
+    echo "| Simple minimal retained renderer | ${simple_min_status:-unavailable} | $simple_min_bytes | $SIMPLE_ITERATIONS | $simple_min_total_us | minimized dependency entry using only retained Simple web framebuffer |"
     echo "| Simple static cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_cache_total_us | retained HTML artifact hot path after persistent warmup |"
     echo "| Simple persistent SWBC command plan | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_disk_plan_total_us | disk-backed compact static-shell plan to retained commands |"
     echo "| Simple hot SWBC command plan cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_plan_cache_total_us | in-memory encoded SWBC sidecar cache after persistent warmup |"
@@ -549,16 +604,19 @@ simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
     echo "|---|---:|"
     echo "| Simple cached BrowserBackend frame per iteration | ${simple_cached_frame_per_iter_us} us |"
     echo "| Simple Engine2D retained static pixels per iteration | ${simple_engine2d_solid_per_iter_us} us |"
+    echo "| Simple minimal retained renderer per iteration | ${simple_min_per_iter_us} us |"
     echo "| GTK widget loop per iteration | ${gtk_widget_per_iter_us} us |"
     echo "| GTK per-iteration cost / Simple cached-frame cost | ${gtk_to_simple_cached_frame_speedup}x |"
     echo "| GTK per-iteration cost / Simple retained-pixel cost | ${gtk_to_simple_engine2d_solid_speedup}x |"
     echo "| GTK linked closure / Simple linked closure | ${gtk_to_simple_closure_size_ratio}x |"
     echo "| Simple native executable / GTK minimal executable | ${simple_to_gtk_executable_size_ratio}x |"
+    echo "| Simple minimal retained executable / GTK minimal executable | ${simple_min_to_gtk_executable_size_ratio}x |"
     echo
     echo "## Interpretation"
     echo
     echo "- GTK's minimal executable can be smaller than the generated Simple executable, but its linked shared-library closure is the relevant deployed-size comparison for a standalone GUI runtime."
     echo "- The cached Simple BrowserBackend frame path measures unchanged-frame work after the static UI revision key hits; it avoids HTML generation, DOM conversion, layout, raster, and host-present pixel conversion."
+    echo "- The Simple minimal retained renderer row builds a separate dependency-minimized entry that imports only the retained Simple web framebuffer path."
     echo "- The Simple Engine2D retained static pixels row measures a pure Simple flyweight buffer for unchanged static pages; changed dynamic panes should render into separate regions."
     echo "- The Simple benchmark runs with a narrowed SIMPLE_LIB scope of \`$SIMPLE_RUN_LIB\`, so the interpreter does not need the full repository source tree for this GUI path."
     echo "- The GTK speed row measures widget construction on this host under xvfb-run when available, so compare it as a small GUI baseline rather than a full application benchmark."
@@ -572,7 +630,9 @@ simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
     echo "| Simple decoded layout payload estimate | $simple_static_layout_payload_bytes |"
     echo "| Simple retained command payload | $simple_static_command_payload_bytes |"
     echo "| Simple native executable | $simple_bytes |"
+    echo "| Simple minimal retained renderer executable | $simple_min_bytes |"
     echo "| Simple executable plus linked shared-library closure | $simple_closure_bytes |"
+    echo "| Simple minimal retained executable plus linked shared-library closure | $simple_min_closure_bytes |"
     echo "| GTK minimal executable | $gtk_bytes |"
     echo "| GTK executable plus linked shared-library closure | $gtk_closure_bytes |"
     echo
@@ -592,6 +652,14 @@ simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
             /^\[memory-guard\]/ { print "- " $0; next }
             /^\[gc-warning\]/ { print "- " $0; next }
         ' "$SIMPLE_OUT"
+    else
+        echo "- unavailable"
+    fi
+    echo
+    echo "## Simple Minimal Output"
+    echo
+    if [ -f "$SIMPLE_MIN_OUT" ]; then
+        awk '/^[A-Za-z0-9_]+=/ { print "- " $0; next }' "$SIMPLE_MIN_OUT"
     else
         echo "- unavailable"
     fi
@@ -644,6 +712,10 @@ echo "simple_static_layout_payload_bytes=$simple_static_layout_payload_bytes"
 echo "simple_static_command_payload_bytes=$simple_static_command_payload_bytes"
 echo "simple_bytes=$simple_bytes"
 echo "simple_closure_bytes=$simple_closure_bytes"
+echo "simple_min_status=$simple_min_status"
+echo "simple_min_total_us=$simple_min_total_us"
+echo "simple_min_bytes=$simple_min_bytes"
+echo "simple_min_closure_bytes=$simple_min_closure_bytes"
 echo "gtk_status=$gtk_status"
 echo "gtk_bytes=$gtk_bytes"
 echo "gtk_closure_bytes=$gtk_closure_bytes"
