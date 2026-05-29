@@ -1,10 +1,12 @@
 use common.window_protocol.geometry.{Size}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
 use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
 use os.compositor.hosted_backend_win32.{HostedWin32Backend}
 use os.compositor.simple_web_window_renderer.{render_simple_web_app_content}
-use os.compositor.wm_action_applier.{wm_action_from_bridge_request, wm_action_is_shared_lifecycle}
+use os.compositor.wm_action_applier.{WmLifecycleWindowState, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_move_action, wm_resize_action}
+use os.services.wm.wm_service.{WmService}
 use os.services.wm.wm_world.{WmAction}
 
 extern fn rt_sleep_ms(ms: i64)
@@ -47,15 +49,6 @@ class HostedWindow:
     app_id: text
     minimized: bool
     focused: bool
-
-class WmService:
-    running: bool
-
-    static fn new() -> WmService:
-        WmService(running: true)
-
-    me stop():
-        self.running = false
 
 class HeadlessHostCompositorBackend:
     w: i32
@@ -183,48 +176,9 @@ class HostCompositor:
         self.apply_wm_action(action)
 
     me apply_wm_action(action: WmAction):
-        if not wm_action_is_shared_lifecycle(action.kind):
-            return
-        if action.kind == "create_window" or action.kind == "create_web_window":
-            val id = self.next_window_id
-            self.next_window_id = self.next_window_id + 1
-            self.windows.push(HostedWindow(id: id, owner_port: action.owner_port.to_i64(), title: action.title, x: action.x, y: action.y, w: action.width, h: action.height, content: action.content, process_id: action.process_id.to_i64(), app_id: action.app_id, minimized: false, focused: true))
-            self.focus_window(id)
-            return
-        if action.kind == "destroy_window":
-            self.destroy_window(action.window_id.to_i64())
-            return
-        if action.kind == "focus":
-            self.focus_window(action.window_id.to_i64())
-            return
-        var i = self._find_window_index(action.window_id.to_i64())
-        if i < 0:
-            return
-        var win = self.windows[i]
-        if action.kind == "update_tree":
-            win.content = action.content
-        elif action.kind == "resize":
-            win.w = action.width
-            win.h = action.height
-        elif action.kind == "move":
-            win.x = action.x
-            win.y = action.y
-        elif action.kind == "set_title":
-            win.title = action.title
-        elif action.kind == "minimize":
-            win.minimized = true
-            win.focused = false
-        elif action.kind == "maximize":
-            win.minimized = false
-            win.focused = true
-            win.x = 0
-            win.y = 48
-            win.w = self.width
-            win.h = self.height - 96
-        elif action.kind == "restore":
-            win.minimized = false
-            win.focused = true
-        self.windows[i] = win
+        val out = host_compositor_apply_lifecycle_action(self, action)
+        self.windows = out.windows
+        self.next_window_id = out.next_window_id
 
     fn _find_window_index(window_id: i64) -> i32:
         var i = 0
@@ -281,30 +235,24 @@ class HostCompositor:
         if self.resize_window_id != 0:
             val idx = self._find_window_index(self.resize_window_id)
             if idx >= 0:
-                var win = self.windows[idx]
                 var nw = self.resize_start_w + (x - self.resize_start_x)
                 var nh = self.resize_start_h + (y - self.resize_start_y)
                 if nw < 160:
                     nw = 160
                 if nh < 120:
                     nh = 120
-                win.w = nw
-                win.h = nh
-                self.windows[idx] = win
+                self.apply_wm_action(wm_resize_action(self.resize_window_id, nw, nh))
             return
         if self.drag_window_id != 0:
             val idx = self._find_window_index(self.drag_window_id)
             if idx >= 0:
-                var win = self.windows[idx]
                 var nx = x - self.drag_offset_x
                 var ny = y - self.drag_offset_y
                 if nx < 0:
                     nx = 0
                 if ny < 48:
                     ny = 48
-                win.x = nx
-                win.y = ny
-                self.windows[idx] = win
+                self.apply_wm_action(wm_move_action(self.drag_window_id, nx, ny))
             return
         var i = 0
         while i < self.windows.len():
@@ -399,7 +347,7 @@ fn simpleos_gui_adapter_display_path_name(adapter: SimpleOsGuiAdapter) -> text:
 fn simpleos_gui_adapter_content_renderer_name(adapter: SimpleOsGuiAdapter) -> text:
     if simpleos_gui_adapter_display_path_name(adapter) == "invalid":
         return "unsupported"
-    "simple_web"
+    WEB_RENDER_TARGET_SIMPLE_WEB
 
 fn host_wm_surface_failure_reason(cfg: HostWmConfig, event_loop_id: i64, window_id: i64) -> text?:
     if cfg.backend == HostBackendKind.Tui:
@@ -444,9 +392,11 @@ fn init_host_wm(cfg: HostWmConfig) -> HostWmHandle?:
     if backend == nil:
         return nil
     val comp = HostCompositor.new(backend, cfg.initial_size)
+    val wm = WmService.new()
+    wm.running = true
     HostWmHandle(
         compositor: comp,
-        wm: WmService.new(),
+        wm: wm,
         event_loop_id: event_loop_id,
         window_id: window_id,
         backend: cfg.backend
@@ -455,7 +405,7 @@ fn init_host_wm(cfg: HostWmConfig) -> HostWmHandle?:
 fn host_wm_content_renderer_name(handle: HostWmHandle) -> text:
     if handle.backend == HostBackendKind.Tui:
         return "unsupported"
-    "simple_web"
+    WEB_RENDER_TARGET_SIMPLE_WEB
 
 fn host_compositor_find_window_index(comp: HostCompositor, window_id: i64) -> i32:
     var i = 0
@@ -465,35 +415,58 @@ fn host_compositor_find_window_index(comp: HostCompositor, window_id: i64) -> i3
         i = i + 1
     -1
 
+fn host_window_to_lifecycle_state(win: HostedWindow) -> WmLifecycleWindowState:
+    WmLifecycleWindowState(id: win.id, owner_port: win.owner_port, title: win.title, x: win.x, y: win.y, w: win.w, h: win.h, content: win.content, process_id: win.process_id, app_id: win.app_id, minimized: win.minimized, focused: win.focused)
+
+fn host_window_from_lifecycle_state(win: WmLifecycleWindowState) -> HostedWindow:
+    HostedWindow(id: win.id, owner_port: win.owner_port, title: win.title, x: win.x, y: win.y, w: win.w, h: win.h, content: win.content, process_id: win.process_id, app_id: win.app_id, minimized: win.minimized, focused: win.focused)
+
+fn host_windows_to_lifecycle_state(windows: [HostedWindow]) -> [WmLifecycleWindowState]:
+    var out: [WmLifecycleWindowState] = []
+    var i = 0
+    while i < windows.len():
+        out.push(host_window_to_lifecycle_state(windows[i]))
+        i = i + 1
+    out
+
+fn host_windows_from_lifecycle_state(windows: [WmLifecycleWindowState]) -> [HostedWindow]:
+    var out: [HostedWindow] = []
+    var i = 0
+    while i < windows.len():
+        out.push(host_window_from_lifecycle_state(windows[i]))
+        i = i + 1
+    out
+
+fn host_compositor_apply_lifecycle_action(comp: HostCompositor, action: WmAction) -> HostCompositor:
+    var out = comp
+    val result = apply_wm_action_to_lifecycle_windows(host_windows_to_lifecycle_state(out.windows), out.next_window_id, out.width, out.height, action)
+    out.windows = host_windows_from_lifecycle_state(result.windows)
+    out.next_window_id = result.next_window_id
+    out
+
 fn host_compositor_pointer_move(comp: HostCompositor, x: i32, y: i32) -> HostCompositor:
     var out = comp
     if out.resize_window_id != 0:
         val idx = host_compositor_find_window_index(out, out.resize_window_id)
         if idx >= 0:
-            var win = out.windows[idx]
             var nw = out.resize_start_w + (x - out.resize_start_x)
             var nh = out.resize_start_h + (y - out.resize_start_y)
             if nw < 160:
                 nw = 160
             if nh < 120:
                 nh = 120
-            win.w = nw
-            win.h = nh
-            out.windows[idx] = win
+            out = host_compositor_apply_lifecycle_action(out, wm_resize_action(out.resize_window_id, nw, nh))
         return out
     if out.drag_window_id != 0:
         val idx = host_compositor_find_window_index(out, out.drag_window_id)
         if idx >= 0:
-            var win = out.windows[idx]
             var nx = x - out.drag_offset_x
             var ny = y - out.drag_offset_y
             if nx < 0:
                 nx = 0
             if ny < 48:
                 ny = 48
-            win.x = nx
-            win.y = ny
-            out.windows[idx] = win
+            out = host_compositor_apply_lifecycle_action(out, wm_move_action(out.drag_window_id, nx, ny))
         return out
     var i = 0
     while i < out.windows.len():

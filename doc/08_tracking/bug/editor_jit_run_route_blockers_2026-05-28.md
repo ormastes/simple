@@ -46,13 +46,35 @@ aliased name.
 The editor (and code using these paths) cannot run via JIT today; use the
 native-build route. Items 1 and 3 are tractable; item 2 needs design.
 
-## Related work status (2026-05-28)
+## Related work status (2026-05-29)
 
 - `rt_native_eq`/`rt_native_neq` export fix — landed on main.
 - 692 runtime-symbol name-list additions + alias wrappers — implemented locally,
   **held** (conflicts with a concurrent `runtime_symbols.rs` refactor on main;
   needs reconcile before landing).
-- VReg(5) investigation (item 1) — in progress, not landed.
+- VReg(5) investigation (item 1) — **blocked pending MIR dump**. Root cause not
+  confirmed: `compile_copy` hard-errors when `src` vreg absent from `vreg_values`.
+  AOT vs JIT divergence not yet verified empirically (needs
+  `SIMPLE_NO_STUB_FALLBACK=1` repro against the Rust seed binary
+  `src/compiler_rust/target/bootstrap/simple`). Likely fix locus is whichever
+  MirInst defines VReg(5) without calling `vreg_values.insert(dest, …)` in its
+  Cranelift emitter. Do NOT add a silent fallback to `compile_copy` without
+  confirming VReg(5) is cross-block (in `vreg_vars`) first.
+- Item 2 (interpreter-extern bridge) — **architectural, skip** for now. The JIT
+  has no mechanism to call `insert_simple!`-registered interpreter-host externs
+  (ABI mismatch: tuple return / `&[Value]` args). Needs design before any fix.
+- Item 3 (alias-map emits un-aliased name) — **fixed** (2026-05-29).
+  Root cause: `referenced_call_names` only inserted raw call names, so when
+  Simple code calls e.g. `rt_file_delete`, `referenced_names` had
+  `"rt_file_delete"` but not `"rt_file_remove"`. `declare_runtime_functions`
+  therefore skipped `rt_file_remove` in `runtime_funcs`. The
+  `runtime_funcs.get(sffi_name)` lookup at compile_call line 2616 returned None,
+  falling through to the cross-module path which emitted the un-aliased symbol.
+  Fix: extracted the alias table into `sffi_alias_target()` in `calls.rs` and
+  added alias-target insertion to `referenced_call_names` in `common_backend.rs`.
+  The `sffi_name` match in `compile_call` now delegates to `sffi_alias_target()`
+  to keep both in sync. Aliases route through the 2616 branch (with correct
+  text-arg expansion via `text_arg_indices`) instead of the cross-module path.
 
 ## See also
 

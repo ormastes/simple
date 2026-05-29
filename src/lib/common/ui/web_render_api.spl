@@ -1,6 +1,7 @@
 # Shared web render API for GUI backends and pure Simple web rendering.
 
 use common.ui.capability.{Capability}
+use common.ui.widget.{UIEvent}
 use common.text_advanced.{escape_json}
 
 val WEB_RENDER_TARGET_SIMPLE_WEB: text = "simple_web"
@@ -78,6 +79,45 @@ class WebRenderArtifact:
             capability_summary: ""
         )
 
+class WebRenderHostWindowCommand:
+    action: text
+    window_id: text
+    surface_id: text
+    app_id: text
+    title: text
+    url: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+
+class WebRenderSnapshotEnvelope:
+    target: text
+    surface_id: text
+    revision: u64
+    snapshot_json: text
+
+class WebRenderPatchEnvelope:
+    target: text
+    surface_id: text
+    from_sequence: u64
+    to_sequence: u64
+    patches_json: text
+    snapshot_json: text
+
+class WebRenderInputEnvelope:
+    target: text
+    surface_id: text
+    event_type: text
+    target_id: text
+    key: text
+    value: text
+    x: f64
+    y: f64
+    dx: f64
+    dy: f64
+    button: text
+
 fn web_render_capabilities_for_target(target: text) -> [Capability]:
     if target == WEB_RENDER_TARGET_ELECTRON:
         return [Capability.Mouse, Capability.Color, Capability.Images, Capability.NativeDialogs, Capability.Notification]
@@ -103,6 +143,82 @@ fn web_render_body_html(req: WebRenderRequest) -> text:
 
 fn web_render_ipc_json(req: WebRenderRequest) -> text:
     "{\"type\":\"render\",\"target\":\"" + escape_json(req.target) + "\",\"surface_id\":\"" + escape_json(req.surface_id) + "\",\"width\":" + str(req.viewport_w) + ",\"height\":" + str(req.viewport_h) + ",\"html\":\"" + escape_json(web_render_full_html(req)) + "\"}"
+
+fn web_render_host_window_command_to_json(cmd: WebRenderHostWindowCommand) -> text:
+    "{" +
+    "\"action\":\"{escape_json(cmd.action)}\"," +
+    "\"window_id\":\"{escape_json(cmd.window_id)}\"," +
+    "\"surface_id\":\"{escape_json(cmd.surface_id)}\"," +
+    "\"app_id\":\"{escape_json(cmd.app_id)}\"," +
+    "\"title\":\"{escape_json(cmd.title)}\"," +
+    "\"url\":\"{escape_json(cmd.url)}\"," +
+    "\"x\":{cmd.x}," +
+    "\"y\":{cmd.y}," +
+    "\"width\":{cmd.width}," +
+    "\"height\":{cmd.height}" +
+    "}"
+
+fn web_render_snapshot_envelope_to_json(env: WebRenderSnapshotEnvelope) -> text:
+    "{\"type\":\"snapshot\",\"target\":\"" + escape_json(env.target) + "\",\"surface_id\":\"" + escape_json(env.surface_id) + "\",\"revision\":" + str(env.revision) + ",\"snapshot\":" + env.snapshot_json + "}"
+
+fn web_render_patch_envelope_to_json(env: WebRenderPatchEnvelope) -> text:
+    val snapshot_part = if env.snapshot_json != "": ",\"snapshot\":" + env.snapshot_json else: ""
+    "{\"type\":\"patch\",\"target\":\"" + escape_json(env.target) + "\",\"surface_id\":\"" + escape_json(env.surface_id) + "\",\"from_sequence\":" + str(env.from_sequence) + ",\"to_sequence\":" + str(env.to_sequence) + ",\"patches\":" + env.patches_json + snapshot_part + "}"
+
+fn web_render_input_envelope_to_json(env: WebRenderInputEnvelope) -> text:
+    "{" +
+    "\"type\":\"input\"," +
+    "\"target\":\"{escape_json(env.target)}\"," +
+    "\"surface_id\":\"{escape_json(env.surface_id)}\"," +
+    "\"event_type\":\"{escape_json(env.event_type)}\"," +
+    "\"target_id\":\"{escape_json(env.target_id)}\"," +
+    "\"key\":\"{escape_json(env.key)}\"," +
+    "\"value\":\"{escape_json(env.value)}\"," +
+    "\"x\":{env.x}," +
+    "\"y\":{env.y}," +
+    "\"dx\":{env.dx}," +
+    "\"dy\":{env.dy}," +
+    "\"button\":\"{escape_json(env.button)}\"" +
+    "}"
+
+fn web_render_input_envelope_from_event(target: text, surface_id: text, event: UIEvent) -> WebRenderInputEnvelope:
+    match event:
+        UIEvent.KeyPress(key):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "key", target_id: "", key: key, value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.Resize(width, height):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "resize", target_id: "", key: "", value: "", x: width.to_f64(), y: height.to_f64(), dx: 0.0, dy: 0.0, button: "")
+        UIEvent.Action(name):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "action", target_id: "", key: "", value: name, x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.TouchPress(x, y):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "touch_press", target_id: "", key: "", value: "", x: x.to_f64(), y: y.to_f64(), dx: 0.0, dy: 0.0, button: "")
+        UIEvent.TouchMove(x, y):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "touch_move", target_id: "", key: "", value: "", x: x.to_f64(), y: y.to_f64(), dx: 0.0, dy: 0.0, button: "")
+        UIEvent.TouchRelease(x, y):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "touch_release", target_id: "", key: "", value: "", x: x.to_f64(), y: y.to_f64(), dx: 0.0, dy: 0.0, button: "")
+        UIEvent.MouseEvent(x, y, button, kind):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "mouse_" + kind, target_id: "", key: "", value: "", x: x, y: y, dx: 0.0, dy: 0.0, button: button)
+        UIEvent.ScrollEvent(x, y, dx, dy):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "scroll", target_id: "", key: "", value: "", x: x, y: y, dx: dx, dy: dy, button: "")
+        UIEvent.FocusEvent(target_id, kind):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: kind, target_id: target_id, key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.InputChange(target_id, value):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "input", target_id: target_id, key: "", value: value, x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.FetchResult(request_id, url, status, headers, body, error):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "fetch_result", target_id: request_id, key: "", value: url, x: status.to_f64(), y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.FocusNext:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "focus_next", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.FocusPrev:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "focus_prev", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.CommandMode:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "command_mode", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.NormalMode:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "normal_mode", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.InsertMode:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "insert_mode", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.FileChanged:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "file_changed", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.Quit:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "quit", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
 
 fn web_render_to_artifact(req: WebRenderRequest) -> WebRenderArtifact:
     val html = web_render_full_html(req)

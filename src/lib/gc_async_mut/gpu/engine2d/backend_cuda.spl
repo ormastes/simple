@@ -7,7 +7,43 @@
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
-use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count, cuda_device_name, CUDA_SUCCESS}
+use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
+use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count, cuda_device_name, cuda_memcpy_dtoh, cuda_launch_kernel, CUDA_SUCCESS}
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64, rt_ptr_write_i64}
+
+val CUDA_2D_BLOCK_SIZE: i64 = 256
+
+fn cuda_2d_ptx_source() -> text:
+    ".version 7.0\n.target sm_52\n.address_size 64\n\n.visible .entry kernel_clear(\n    .param .u64 param_fb,\n    .param .u32 param_color,\n    .param .u32 param_count\n) {\n    .reg .u64  %rd<3>;\n    .reg .u32  %r<6>;\n    .reg .pred %p0;\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n    ld.param.u32  %r4, [param_count];\n    setp.ge.u32   %p0, %r3, %r4;\n    @%p0 bra done_clear;\n    ld.param.u64  %rd0, [param_fb];\n    mul.wide.u32  %rd1, %r3, 4;\n    add.u64       %rd2, %rd0, %rd1;\n    ld.param.u32  %r5, [param_color];\n    st.global.u32 [%rd2], %r5;\ndone_clear:\n    ret;\n}\n\n.visible .entry kernel_draw_rect_filled(\n    .param .u64 param_fb,\n    .param .u32 param_x,\n    .param .u32 param_y,\n    .param .u32 param_w,\n    .param .u32 param_h,\n    .param .u32 param_color,\n    .param .u32 param_stride,\n    .param .u32 param_surface_h\n) {\n    .reg .u64  %rd<3>;\n    .reg .u32  %r<18>;\n    .reg .pred %p0;\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n    ld.param.u32  %r4, [param_w];\n    ld.param.u32  %r5, [param_h];\n    mul.lo.u32    %r6, %r4, %r5;\n    setp.ge.u32   %p0, %r3, %r6;\n    @%p0 bra done_rect;\n    div.u32  %r7, %r3, %r4;\n    rem.u32  %r8, %r3, %r4;\n    ld.param.u32  %r9,  [param_x];\n    ld.param.u32  %r10, [param_y];\n    add.u32  %r11, %r9,  %r8;\n    add.u32  %r12, %r10, %r7;\n    ld.param.u32  %r13, [param_stride];\n    ld.param.u32  %r14, [param_surface_h];\n    setp.ge.u32   %p0, %r11, %r13;\n    @%p0 bra done_rect;\n    setp.ge.u32   %p0, %r12, %r14;\n    @%p0 bra done_rect;\n    mad.lo.u32    %r15, %r12, %r13, %r11;\n    ld.param.u64  %rd0, [param_fb];\n    mul.wide.u32  %rd1, %r15, 4;\n    add.u64       %rd2, %rd0, %rd1;\n    ld.param.u32  %r16, [param_color];\n    st.global.u32 [%rd2], %r16;\ndone_rect:\n    ret;\n}\n"
+
+fn _cuda_2d_kernel_gap(device_name: text) -> BackendProbeResult:
+    var missing_render = BackendProbeResult.failed("cuda", "CUDA 2D render kernels unavailable: kernel_clear, kernel_draw_rect_filled")
+    missing_render.api_name = "cuda"
+    missing_render.feature_gate = "cuda_2d_render"
+    missing_render.shader_format = "ptx"
+    missing_render.device_name = device_name
+    missing_render.has_compute = true
+    missing_render.has_graphics = false
+    missing_render.has_present = false
+    missing_render
+
+fn _cuda_2d_kernel_ready(device_name: text) -> BackendProbeResult:
+    var ready = BackendProbeResult.success("cuda", "CUDA 2D render kernels loaded")
+    ready.api_name = "cuda"
+    ready.feature_gate = "cuda_2d_render"
+    ready.shader_format = "ptx"
+    ready.device_name = device_name
+    ready.has_compute = true
+    ready.has_graphics = true
+    ready.has_present = true
+    ready
+
+fn _cuda_context_failure(message: text) -> BackendProbeResult:
+    var failed = BackendProbeResult.failed("cuda", message)
+    failed.api_name = "cuda"
+    failed.feature_gate = "cuda_context"
+    failed.shader_format = "ptx"
+    failed
 
 fn probe_cuda_2d() -> BackendProbeResult:
     if not cuda_available():
@@ -29,27 +65,148 @@ fn probe_cuda_2d() -> BackendProbeResult:
         no_device.feature_gate = "cuda_device"
         no_device.shader_format = "ptx"
         return no_device
-    var missing_render = BackendProbeResult.failed("cuda", "CUDA 2D render kernels unavailable")
-    missing_render.api_name = "cuda"
-    missing_render.feature_gate = "cuda_2d_render"
-    missing_render.shader_format = "ptx"
-    missing_render.device_name = cuda_device_name(0)
-    missing_render
+    var session = CudaSession.create()
+    val session_status = session.init()
+    if session_status != CUDA_SUCCESS:
+        return _cuda_context_failure("CUDA context creation failed before 2D render kernel load")
+    val device_name = cuda_device_name(0)
+    val module = session.load_module(cuda_2d_ptx_source())
+    if module == 0:
+        session.release()
+        return _cuda_2d_kernel_gap(device_name)
+    session.module_cache = module
+    session.release()
+    _cuda_2d_kernel_ready(device_name)
 
 fn probe_cuda() -> BackendProbeResult:
     probe_cuda_2d()
 
 class CudaBackend:
     mirror: SoftwareBackend
+    session: CudaSession
+    owns_session: bool
     initialized: bool
+    d_framebuffer: i64
+    framebuffer_bytes: i64
+    clear_val_ptr: i64
+    clear_args_ptr: i64
+    rect_val_ptr: i64
+    rect_args_ptr: i64
+    readback_ptr: i64
     last_probe: BackendProbeResult
 
     static fn create() -> CudaBackend:
         CudaBackend(
             mirror: SoftwareBackend.create(),
+            session: CudaSession.create(),
+            owns_session: false,
             initialized: false,
+            d_framebuffer: 0,
+            framebuffer_bytes: 0,
+            clear_val_ptr: 0,
+            clear_args_ptr: 0,
+            rect_val_ptr: 0,
+            rect_args_ptr: 0,
+            readback_ptr: 0,
             last_probe: BackendProbeResult.unavailable("cuda", "not probed")
         )
+
+    me init_with_session(width: i32, height: i32, session: CudaSession) -> bool:
+        if width <= 0 or height <= 0:
+            self.last_probe = _cuda_context_failure("invalid CUDA framebuffer dimensions")
+            self.initialized = false
+            return false
+        if not session.is_valid():
+            self.last_probe = _cuda_context_failure("CUDA shared session is not initialized")
+            self.initialized = false
+            return false
+        self._cleanup_cuda_surface()
+        self.session = session.retain()
+        self.owns_session = true
+        if self.session.module_cache == 0:
+            val loaded = self.session.load_module(cuda_2d_ptx_source())
+            if loaded == 0:
+                self.last_probe = _cuda_2d_kernel_gap(cuda_device_name(0))
+                self.session.release()
+                self.owns_session = false
+                self.initialized = false
+                return false
+            self.session.module_cache = loaded
+        val bytes = _i64(width) * _i64(height) * 4
+        self.d_framebuffer = self.session.alloc(bytes)
+        if self.d_framebuffer == 0:
+            self.last_probe = _cuda_context_failure("CUDA device framebuffer allocation failed")
+            self.session.release()
+            self.owns_session = false
+            self.initialized = false
+            return false
+        self.framebuffer_bytes = bytes
+        if not self._alloc_launch_buffers(bytes):
+            self.last_probe = _cuda_context_failure("CUDA launch argument buffer allocation failed")
+            self._cleanup_cuda_surface()
+            self.session.release()
+            self.owns_session = false
+            self.initialized = false
+            return false
+        if not self.mirror.init(width, height):
+            self.last_probe = BackendProbeResult.failed("cuda", "CUDA host mirror surface allocation failed")
+            self.last_probe.api_name = "cuda"
+            self.last_probe.feature_gate = "cuda_surface"
+            self.last_probe.shader_format = "ptx"
+            self._cleanup_cuda_surface()
+            self.session.release()
+            self.owns_session = false
+            self.initialized = false
+            return false
+        self.last_probe = _cuda_2d_kernel_ready(cuda_device_name(0))
+        self.initialized = true
+        true
+
+    me _alloc_launch_buffers(bytes: i64) -> bool:
+        self.clear_val_ptr = rt_alloc(24)
+        self.clear_args_ptr = rt_alloc(24)
+        self.rect_val_ptr = rt_alloc(64)
+        self.rect_args_ptr = rt_alloc(64)
+        self.readback_ptr = rt_alloc(bytes)
+        if self.clear_val_ptr == 0 or self.clear_args_ptr == 0 or self.rect_val_ptr == 0 or self.rect_args_ptr == 0 or self.readback_ptr == 0:
+            self._free_launch_buffers()
+            return false
+        rt_ptr_write_i64(self.clear_args_ptr, 0, self.clear_val_ptr)
+        rt_ptr_write_i64(self.clear_args_ptr, 8, self.clear_val_ptr + 8)
+        rt_ptr_write_i64(self.clear_args_ptr, 16, self.clear_val_ptr + 16)
+        rt_ptr_write_i64(self.rect_args_ptr, 0, self.rect_val_ptr)
+        rt_ptr_write_i64(self.rect_args_ptr, 8, self.rect_val_ptr + 8)
+        rt_ptr_write_i64(self.rect_args_ptr, 16, self.rect_val_ptr + 16)
+        rt_ptr_write_i64(self.rect_args_ptr, 24, self.rect_val_ptr + 24)
+        rt_ptr_write_i64(self.rect_args_ptr, 32, self.rect_val_ptr + 32)
+        rt_ptr_write_i64(self.rect_args_ptr, 40, self.rect_val_ptr + 40)
+        rt_ptr_write_i64(self.rect_args_ptr, 48, self.rect_val_ptr + 48)
+        rt_ptr_write_i64(self.rect_args_ptr, 56, self.rect_val_ptr + 56)
+        true
+
+    me _free_launch_buffers():
+        if self.clear_val_ptr != 0:
+            rt_free(self.clear_val_ptr, 24)
+            self.clear_val_ptr = 0
+        if self.clear_args_ptr != 0:
+            rt_free(self.clear_args_ptr, 24)
+            self.clear_args_ptr = 0
+        if self.rect_val_ptr != 0:
+            rt_free(self.rect_val_ptr, 64)
+            self.rect_val_ptr = 0
+        if self.rect_args_ptr != 0:
+            rt_free(self.rect_args_ptr, 64)
+            self.rect_args_ptr = 0
+        if self.readback_ptr != 0:
+            rt_free(self.readback_ptr, self.framebuffer_bytes)
+            self.readback_ptr = 0
+
+    me _cleanup_cuda_surface():
+        self._free_launch_buffers()
+        if self.d_framebuffer != 0:
+            self.session.free(self.d_framebuffer)
+            self.d_framebuffer = 0
+        self.framebuffer_bytes = 0
 
 impl RenderBackend for CudaBackend:
     fn name() -> text:
@@ -60,18 +217,59 @@ impl RenderBackend for CudaBackend:
         if self.last_probe.status != BackendStatus.Initialized:
             self.initialized = false
             return false
-        self.initialized = self.mirror.init(width, height)
-        self.initialized
+        var session = CudaSession.create()
+        val session_status = session.init()
+        if session_status != CUDA_SUCCESS:
+            self.last_probe = _cuda_context_failure("CUDA shared session initialization failed")
+            self.initialized = false
+            return false
+        if not self.init_with_session(width, height, session):
+            session.release()
+            self.owns_session = false
+            return false
+        session.release()
+        true
 
     me shutdown():
+        self._cleanup_cuda_surface()
         self.mirror.shutdown()
+        if self.owns_session:
+            self.session.release()
+            self.owns_session = false
         self.initialized = false
 
     me clear(color: u32):
+        if self.initialized:
+            rt_ptr_write_i64(self.clear_val_ptr, 0, self.d_framebuffer)
+            rt_ptr_write_i64(self.clear_val_ptr, 8, _i64_from_u32(color))
+            rt_ptr_write_i64(self.clear_val_ptr, 16, _i64(self.width()) * _i64(self.height()))
+            val total = _i64(self.width()) * _i64(self.height())
+            val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+            val rc = cuda_launch_kernel(self.session.module_cache, "kernel_clear", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.clear_args_ptr)
+            if rc == CUDA_SUCCESS:
+                self.mirror.clear(color)
+                return
         self.mirror.clear(color)
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         self.mirror.draw_rect(x, y, w, h, color)
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if self.initialized:
+            if w <= 0 or h <= 0:
+                return
+            rt_ptr_write_i64(self.rect_val_ptr, 0, self.d_framebuffer)
+            rt_ptr_write_i64(self.rect_val_ptr, 8, _i64(x))
+            rt_ptr_write_i64(self.rect_val_ptr, 16, _i64(y))
+            rt_ptr_write_i64(self.rect_val_ptr, 24, _i64(w))
+            rt_ptr_write_i64(self.rect_val_ptr, 32, _i64(h))
+            rt_ptr_write_i64(self.rect_val_ptr, 40, _i64_from_u32(color))
+            rt_ptr_write_i64(self.rect_val_ptr, 48, _i64(self.width()))
+            rt_ptr_write_i64(self.rect_val_ptr, 56, _i64(self.height()))
+            val total = _i64(w) * _i64(h)
+            val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+            val rc = cuda_launch_kernel(self.session.module_cache, "kernel_draw_rect_filled", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
+            if rc == CUDA_SUCCESS:
+                self.mirror.draw_rect_filled(x, y, w, h, color)
+                return
         self.mirror.draw_rect_filled(x, y, w, h, color)
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
@@ -98,8 +296,15 @@ impl RenderBackend for CudaBackend:
     me clear_mask():
         self.mirror.clear_mask()
     me present():
+        if self.initialized:
+            self.session.sync()
         self.mirror.present()
     fn read_pixels() -> [u32]:
+        if self.initialized and self.readback_ptr != 0 and self.d_framebuffer != 0:
+            self.session.sync()
+            val rc = cuda_memcpy_dtoh(self.readback_ptr, self.d_framebuffer, self.framebuffer_bytes)
+            if rc == CUDA_SUCCESS:
+                return _read_u32_pixels_from_host(self.readback_ptr, self.width() * self.height())
         self.mirror.read_pixels()
     fn width() -> i32:
         self.mirror.width()

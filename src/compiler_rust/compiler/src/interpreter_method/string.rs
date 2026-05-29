@@ -274,12 +274,14 @@ if let Value::Str(ref s) = recv_val {
             return Ok(Value::Str(s.replacen(&old, &new, 1)));
         }
         "slice" | "substring" => {
-            let start = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            let end = args.get(1)
+            let start_raw = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            let end_raw = args.get(1)
                 .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                 .transpose()?
-                .map(|v| v.as_int().unwrap_or(s.len() as i64) as usize)
-                .unwrap_or(s.len());
+                .map(|v| v.as_int().unwrap_or(s.len() as i64))
+                .unwrap_or(s.len() as i64);
+            let start = start_raw.max(0) as usize;
+            let end = end_raw.max(0) as usize;
             // Identity fast path: full-string slice avoids the chars() walk + Vec<char>.
             // Byte-len upper-bounds char count, so end >= s.len() guarantees end >= chars().count().
             if start == 0 && end >= s.len() {
@@ -331,10 +333,14 @@ if let Value::Str(ref s) = recv_val {
             }
         }
         "char_at" | "at" => {
-            let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            let raw_idx = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            if raw_idx < 0 {
+                return Ok(Value::Str(String::new()));
+            }
+            let idx = raw_idx as usize;
             match s.chars().nth(idx) {
                 Some(c) => return Ok(Value::Str(c.to_string())),
-                None => return Ok(Value::Nil),
+                None => return Ok(Value::Str(String::new())),
             }
         }
         "ord" | "codepoint" | "code_point" => {

@@ -2336,6 +2336,28 @@ pub(crate) fn adapt_args_to_signature_with_signedness(
     adapted
 }
 
+/// Map a Simple-facing call name to its canonical runtime SFFI name.
+///
+/// Returns `Some(canonical)` when the name is an alias that should be
+/// resolved to a different runtime symbol (e.g., `rt_file_delete` →
+/// `rt_file_remove`).  Returns `None` when no alias applies.
+///
+/// This table must stay in sync with the `sffi_name` match in
+/// `compile_call` below and with the alias wrappers in
+/// `simple_common::runtime_symbols::RUNTIME_SYMBOL_NAMES`.
+pub fn sffi_alias_target(name: &str) -> Option<&'static str> {
+    match name {
+        "sys_get_args" => Some("rt_get_args"),
+        "sys_exit" => Some("rt_exit"),
+        "rt_file_read_text" => Some("rt_file_read_text_rv"),
+        "rt_file_delete" => Some("rt_file_remove"),
+        "rt_println" => Some("rt_println_value"),
+        "rt_print" => Some("rt_print_value"),
+        "len" => Some("rt_len"),
+        _ => None,
+    }
+}
+
 /// Compile Call instruction: dispatches to user-defined, built-in I/O, or runtime SFFI functions
 ///
 /// This handles three types of function calls:
@@ -2358,16 +2380,8 @@ pub fn compile_call<M: Module>(
         .unwrap_or(func_name_raw);
     // Map Simple builtin names to runtime SFFI function names (for SFFI lookup only)
     // Note: "str", "int", "input" are handled in compile_builtin_io_call, not here
-    let sffi_name: &str = match func_name_for_sffi {
-        "sys_get_args" => "rt_get_args",
-        "sys_exit" => "rt_exit",
-        "rt_file_read_text" => "rt_file_read_text_rv",
-        "rt_file_delete" => "rt_file_remove",
-        "rt_println" => "rt_println_value",
-        "rt_print" => "rt_print_value",
-        "len" => "rt_len",
-        other => other,
-    };
+    // The alias table is shared with referenced_call_names via sffi_alias_target().
+    let sffi_name: &str = sffi_alias_target(func_name_for_sffi).unwrap_or(func_name_for_sffi);
     // Use raw name for user-function lookups (func_ids, use_map, import_map)
     // but mapped SFFI name for runtime_funcs and builtin I/O checks
     let func_name: &str = func_name_raw;

@@ -11,7 +11,7 @@
 use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect}
 use common.ui.widget.{UIMode}
 use common.layout.box_model.{LayoutBox, BoxKind, BoxModel}
-use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_body_html, web_render_pixel_artifact}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_body_html, web_render_input_envelope_from_event, web_render_input_envelope_to_json, web_render_pixel_artifact}
 use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.web.html.{generate_css}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
@@ -31,23 +31,14 @@ class Framebuffer:
     static fn create(w: i32, h: i32) -> Framebuffer:
         """Create a framebuffer filled with a default background color."""
         val pixel_count = w * h
-        var px: [i32] = []
-        var i = 0
-        while i < pixel_count:
-            # Default background: dark gray (0xFF2D2D2D in ARGB)
-            px = px.push(0x2D2D2D)
-            i = i + 1
+        # Default background: dark gray (0xFF2D2D2D in ARGB).
+        val px = [0x2D2D2D; pixel_count]
         return Framebuffer(width: w, height: h, pixels: px)
 
     me clear(color: i32):
         """Clear the framebuffer to a solid color."""
-        var px: [i32] = []
         val count = self.width * self.height
-        var i = 0
-        while i < count:
-            px = px.push(color)
-            i = i + 1
-        self.pixels = px
+        self.pixels = [color; count]
 
     fn pixel_at(x: i32, y: i32) -> i32:
         """Read a pixel value at (x, y)."""
@@ -124,6 +115,7 @@ class BrowserBackend:
     last_artifact_html: text
     last_artifact_capabilities: text
     last_artifact_pixels: i32
+    last_input_envelope_json: text
 
     static fn create(w: i32, h: i32, backend: text) -> Result<BrowserBackend, text>:
         """Create a BrowserBackend with the specified GPU backend.
@@ -144,7 +136,8 @@ class BrowserBackend:
             web_render_target: WEB_RENDER_TARGET_PURE_SIMPLE,
             last_artifact_html: "",
             last_artifact_capabilities: "",
-            last_artifact_pixels: 0
+            last_artifact_pixels: 0,
+            last_input_envelope_json: ""
         ))
 
     fn render_html(state: UIState) -> text:
@@ -184,6 +177,8 @@ class BrowserBackend:
 
     me push_event(event: UIEvent):
         """Push an external event into the queue."""
+        val input_env = web_render_input_envelope_from_event(WEB_RENDER_TARGET_PURE_SIMPLE, "browser", event)
+        self.last_input_envelope_json = web_render_input_envelope_to_json(input_env)
         self.event_queue = self.event_queue.push(event)
 
     me resize(w: i32, h: i32):
@@ -216,16 +211,20 @@ class BrowserBackend:
 
     fn pixels_rgba_i64() -> [i64]:
         """Expose the current framebuffer in the host window present format."""
-        var out: [i64] = []
-        for pixel in self.framebuffer.pixels:
-            out = out.push(pixel.to_i64())
+        var out: [i64] = [0; self.framebuffer.pixels.len()]
+        var i = 0
+        while i < self.framebuffer.pixels.len():
+            out[i] = self.framebuffer.pixels[i].to_i64()
+            i = i + 1
         return out
 
     fn pixels_argb_u32() -> [u32]:
         """Expose the framebuffer for the shared web render pixel artifact."""
-        var out: [u32] = []
-        for pixel in self.framebuffer.pixels:
-            out = out.push(pixel.to_u32())
+        var out: [u32] = [0u32; self.framebuffer.pixels.len()]
+        var i = 0
+        while i < self.framebuffer.pixels.len():
+            out[i] = self.framebuffer.pixels[i].to_u32()
+            i = i + 1
         return out
 
     fn snapshot_ppm(path: text) -> bool:

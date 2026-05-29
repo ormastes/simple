@@ -38,6 +38,39 @@ loaded_libs() {
     fi
 }
 
+simple_web_min_field() {
+    field="$1"
+    if [ -f "$SIMPLE_WEB_REPORT" ]; then
+        awk -F '|' -v field="$field" '
+            BEGIN { best = ""; best_name = "" }
+            /Simple web/ {
+                name = $2
+                bytes = $5
+                dec = $6
+                gsub(/^[ \t]+|[ \t]+$/, "", name)
+                gsub(/^[ \t]+|[ \t]+$/, "", bytes)
+                gsub(/^[ \t]+|[ \t]+$/, "", dec)
+                if (bytes ~ /^[0-9]+$/ && (best == "" || bytes + 0 < best + 0)) {
+                    best = bytes
+                    best_dec = dec
+                    best_name = name
+                }
+            }
+            END {
+                if (field == "name") print (best_name == "" ? "unavailable" : best_name)
+                else if (field == "dec") print (best_dec == "" ? "n/a" : best_dec)
+                else print (best == "" ? "n/a" : best)
+            }
+        ' "$SIMPLE_WEB_REPORT"
+    else
+        if [ "$field" = "name" ]; then
+            echo "unavailable"
+        else
+            echo "n/a"
+        fi
+    fi
+}
+
 qt_pkg=""
 if have pkg-config && pkg-config --exists Qt6Widgets; then
     qt_pkg="Qt6Widgets"
@@ -85,6 +118,22 @@ simple_summary="unavailable"
 if [ -f "$SIMPLE_WEB_REPORT" ]; then
     simple_summary="$SIMPLE_WEB_REPORT"
 fi
+simple_artifact="$(simple_web_min_field name)"
+simple_bytes="$(simple_web_min_field bytes)"
+simple_dec="$(simple_web_min_field dec)"
+comparison_status="unavailable"
+comparison_reason="qt_baseline_unavailable"
+if [ "$qt_status" = "ok" ] && [ "$simple_bytes" != "n/a" ]; then
+    if [ "$simple_bytes" -le "$qt_bytes" ]; then
+        comparison_status="pass"
+        comparison_reason="simple_web_artifact_not_larger_than_qt"
+    else
+        comparison_status="fail"
+        comparison_reason="simple_web_artifact_larger_than_qt"
+    fi
+elif [ "$simple_bytes" = "n/a" ]; then
+    comparison_reason="simple_web_artifact_unavailable"
+fi
 
 {
     echo "# Qt GUI Size Baseline"
@@ -97,12 +146,22 @@ fi
     echo "- reason=$qt_reason"
     echo "- qt_pkg=${qt_pkg:-unavailable}"
     echo "- simple_web_report=$simple_summary"
+    echo "- simple_artifact=$simple_artifact"
+    echo "- simple_bytes=$simple_bytes"
+    echo "- comparison_status=$comparison_status"
+    echo "- comparison_reason=$comparison_reason"
     echo
     echo "## Qt Artifact"
     echo
     echo "| Artifact | Bytes | ELF dec |"
     echo "|---|---:|---:|"
     echo "| qt_minimal_gui | $qt_bytes | $qt_dec |"
+    echo
+    echo "## Simple Web Artifact"
+    echo
+    echo "| Artifact | Bytes | ELF dec |"
+    echo "|---|---:|---:|"
+    echo "| $simple_artifact | $simple_bytes | $simple_dec |"
     echo
     echo "## Loaded Libraries"
     echo
@@ -116,7 +175,8 @@ fi
     echo
     echo "- This script does not install Qt or network dependencies."
     echo "- Missing Qt records an unavailable baseline instead of failing the Simple verification path."
-    echo "- Use \`scripts/check-web-baremetal-size-audit.shs\` for the Simple web-render artifact side of the comparison."
+    echo "- The comparison passes only when a Qt artifact and a Simple Web artifact are both measured."
+    echo "- Use \`scripts/check-web-baremetal-size-audit.shs\` to refresh the Simple web-render artifact side of the comparison."
 } >"$REPORT_PATH"
 
 echo "qt_baseline_ready=true"
@@ -125,3 +185,6 @@ echo "reason=$qt_reason"
 echo "report_path=$REPORT_PATH"
 echo "qt_bytes=$qt_bytes"
 echo "qt_dec=$qt_dec"
+echo "simple_artifact=$simple_artifact"
+echo "simple_bytes=$simple_bytes"
+echo "comparison_status=$comparison_status"

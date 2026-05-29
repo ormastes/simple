@@ -3,6 +3,7 @@
 
 use std.gpu.engine2d.backend_cuda.{CudaBackend, probe_cuda, probe_cuda_2d}
 use std.gpu.engine2d.backend_probe.{BackendStatus}
+use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gpu.engine2d.engine.{Engine2D}
 
 describe "CudaBackend RenderBackend facade":
@@ -36,6 +37,30 @@ describe "CudaBackend RenderBackend facade":
             backend.shutdown()
         else:
             expect(backend.initialized).to_equal(false)
+            expect(backend.owns_session).to_equal(false)
+
+    it "rejects an invalid shared CUDA session with typed context diagnostics":
+        var backend = CudaBackend.create()
+        var session = CudaSession.create()
+        val ok = backend.init_with_session(4, 4, session)
+        expect(ok).to_equal(false)
+        expect(backend.initialized).to_equal(false)
+        expect(backend.owns_session).to_equal(false)
+        expect(backend.last_probe.requested_name).to_equal("cuda")
+        expect(backend.last_probe.api_name).to_equal("cuda")
+        expect(backend.last_probe.feature_gate).to_equal("cuda_context")
+        expect(backend.last_probe.status).to_equal(BackendStatus.Failed)
+
+    it "reports the real CUDA 2D kernel gap without marking the backend usable":
+        val probe = probe_cuda_2d()
+        if probe.feature_gate == "cuda_2d_render":
+            expect(probe.status).to_equal(BackendStatus.Failed)
+            expect(probe.is_usable()).to_equal(false)
+            expect(probe.has_compute).to_equal(true)
+            expect(probe.has_graphics).to_equal(false)
+            expect(probe.has_present).to_equal(false)
+            expect(probe.fallback_reason).to_contain("kernel_clear")
+            expect(probe.fallback_reason).to_contain("kernel_draw_rect_filled")
 
     it "strict Engine2D cuda creation returns typed cuda failure instead of fallback":
         val probe = probe_cuda_2d()

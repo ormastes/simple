@@ -1,70 +1,279 @@
-# Editor Block Model — parsed Markdown document as a list of render blocks.
+# Editor Block Model — parsed Markdown document as render blocks.
 #
-# Provides: BlockModel, RenderBlock.
+# Provides: BlockModel, RenderBlock, render_block_line_span, bm_* helpers.
 
 # A single rendered block in the document.
 # kind: "heading" | "paragraph" | "code" | "list" | "table" | "callout" |
-#       "embed" | "sdn_graph" | "md_css"
+#       "embed" | "blockquote" | "horizontal_rule" | "sdn_graph" | "md_css"
 struct RenderBlock:
+    id: i64
     kind: text
+    from_line: i64
+    to_line: i64
     content: text
     rendered_lines: [text]
-    level: i64
+    status: text
 
 # A parsed document represented as an ordered sequence of RenderBlocks.
 class BlockModel:
     blocks: [RenderBlock]
-    active_index: i64
+    active_block: i64
+    next_id: i64
 
-impl BlockModel:
-    # Parse Markdown source text into a BlockModel.
-    static fn from_markdown(source: text) -> BlockModel:
-        var blocks: [RenderBlock] = []
-        val lines = source.split("\n")
+    static fn from_markdown(content: text) -> BlockModel:
+        var model = BlockModel(blocks: [], active_block: -1, next_id: 1)
+        model.rebuild(content)
+        model
+
+    fn block_count() -> i64:
+        me.blocks.len()
+
+    fn block_at(index: i64) -> RenderBlock:
+        me.blocks[index]
+
+    fn block_for_line(line: i64) -> i64:
         var i = 0
-        var para_lines: [text] = []
-        while i < lines.len():
-            val line = lines[i]
-            if line.starts_with("# "):
-                if para_lines.len() > 0:
-                    blocks.push(RenderBlock(kind: "paragraph", content: para_lines.join("\n"), rendered_lines: para_lines, level: 0))
-                    para_lines = []
-                blocks.push(RenderBlock(kind: "heading", content: line.slice(2, line.len()), rendered_lines: [line], level: 1))
-            else if line.starts_with("## "):
-                if para_lines.len() > 0:
-                    blocks.push(RenderBlock(kind: "paragraph", content: para_lines.join("\n"), rendered_lines: para_lines, level: 0))
-                    para_lines = []
-                blocks.push(RenderBlock(kind: "heading", content: line.slice(3, line.len()), rendered_lines: [line], level: 2))
-            else if line.starts_with("```"):
-                if para_lines.len() > 0:
-                    blocks.push(RenderBlock(kind: "paragraph", content: para_lines.join("\n"), rendered_lines: para_lines, level: 0))
-                    para_lines = []
-                var code_lines: [text] = []
-                i = i + 1
-                while i < lines.len() and not lines[i].starts_with("```"):
-                    code_lines.push(lines[i])
-                    i = i + 1
-                val code_content = code_lines.join("\n")
-                blocks.push(RenderBlock(kind: "code", content: code_content, rendered_lines: code_lines, level: 0))
-            else if line.len() == 0:
-                if para_lines.len() > 0:
-                    blocks.push(RenderBlock(kind: "paragraph", content: para_lines.join("\n"), rendered_lines: para_lines, level: 0))
-                    para_lines = []
-            else:
-                para_lines.push(line)
+        while i < me.blocks.len():
+            val block = me.blocks[i]
+            if line >= block.from_line and line <= block.to_line:
+                return i
             i = i + 1
-        if para_lines.len() > 0:
-            blocks.push(RenderBlock(kind: "paragraph", content: para_lines.join("\n"), rendered_lines: para_lines, level: 0))
-        BlockModel(blocks: blocks, active_index: -1)
+        -1
 
-    fn block_count(self) -> i64:
-        self.blocks.len()
+    fn is_active(index: i64) -> bool:
+        me.active_block == index
 
-    fn block_at(self, idx: i64) -> RenderBlock:
-        self.blocks[idx]
+    me activate_block(index: i64):
+        if index >= 0 and index < me.blocks.len():
+            me.active_block = index
+        else:
+            me.active_block = -1
 
-    fn is_active(self, idx: i64) -> bool:
-        self.active_index == idx
+    me deactivate_block():
+        me.active_block = -1
 
-    fn set_active(self, idx: i64) -> BlockModel:
-        BlockModel(blocks: self.blocks, active_index: idx)
+    me rebuild(content: text):
+        me.blocks = _bm_parse_blocks(content)
+        me.next_id = me.blocks.len() + 1
+        me.active_block = -1
+
+    fn set_active(index: i64) -> BlockModel:
+        BlockModel(blocks: me.blocks, active_block: index, next_id: me.next_id)
+
+fn render_block_line_span(block: RenderBlock) -> i64:
+    val rendered = block.rendered_lines.len()
+    if rendered > 0:
+        return rendered
+    val span = block.to_line - block.from_line + 1
+    if span > 0:
+        return span
+    1
+
+fn bm_cursor_block_index(model: BlockModel, cursor_row: i64) -> i64:
+    model.block_for_line(cursor_row)
+
+fn bm_cursor_block_changed(model: BlockModel, cursor_row: i64) -> bool:
+    val current = model.block_for_line(cursor_row)
+    current != model.active_block
+
+fn bm_active_block_range(model: BlockModel) -> i64:
+    val idx = model.active_block
+    if idx < 0 or idx >= model.blocks.len():
+        return -1
+    model.blocks[idx].from_line
+
+fn _bm_parse_blocks(content: text) -> [RenderBlock]:
+    val lines = content.split("\n")
+    var blocks: [RenderBlock] = []
+    var i = 0
+    var next_id = 1
+    while i < lines.len():
+        val current_line = lines[i]
+        val current_trimmed = current_line.trim()
+        val current_left = current_line.trim_start()
+        if current_trimmed == "":
+            i = i + 1
+            continue
+        val start = i
+        val line = current_line
+        if _bm_heading_level(line) > 0:
+            blocks.push(_bm_block(next_id, "heading", start, start, lines))
+            next_id = next_id + 1
+            i = i + 1
+        elif current_left.starts_with("```"):
+            i = i + 1
+            var scanning_code = true
+            while i < lines.len() and scanning_code:
+                val probe = lines[i]
+                if _bm_is_code_fence(probe):
+                    scanning_code = false
+                else:
+                    i = i + 1
+            if i < lines.len():
+                i = i + 1
+            blocks.push(_bm_block(next_id, _bm_code_kind(lines, start), start, i - 1, lines))
+            next_id = next_id + 1
+        elif _bm_is_callout_start(line):
+            i = i + 1
+            var scanning_callout = true
+            while i < lines.len() and scanning_callout:
+                val probe = lines[i]
+                if _bm_is_blockquote_line(probe):
+                    i = i + 1
+                else:
+                    scanning_callout = false
+            blocks.push(_bm_block(next_id, "callout", start, i - 1, lines))
+            next_id = next_id + 1
+        elif current_left.starts_with(">"):
+            i = i + 1
+            var scanning_quote = true
+            while i < lines.len() and scanning_quote:
+                val probe = lines[i]
+                if _bm_is_blockquote_line(probe):
+                    i = i + 1
+                else:
+                    scanning_quote = false
+            blocks.push(_bm_block(next_id, "blockquote", start, i - 1, lines))
+            next_id = next_id + 1
+        elif _bm_is_table_row(line):
+            i = i + 1
+            var scanning_table = true
+            while i < lines.len() and scanning_table:
+                val probe = lines[i]
+                if _bm_is_table_row(probe):
+                    i = i + 1
+                else:
+                    scanning_table = false
+            blocks.push(_bm_block(next_id, "table", start, i - 1, lines))
+            next_id = next_id + 1
+        elif _bm_is_list_line(line):
+            i = i + 1
+            var scanning_list = true
+            while i < lines.len() and scanning_list:
+                val probe = lines[i]
+                if _bm_is_list_line(probe):
+                    i = i + 1
+                else:
+                    scanning_list = false
+            blocks.push(_bm_block(next_id, "list", start, i - 1, lines))
+            next_id = next_id + 1
+        elif _bm_is_horizontal_rule(line):
+            blocks.push(_bm_block(next_id, "horizontal_rule", start, start, lines))
+            next_id = next_id + 1
+            i = i + 1
+        elif _bm_is_embed(line):
+            blocks.push(_bm_block(next_id, "embed", start, start, lines))
+            next_id = next_id + 1
+            i = i + 1
+        else:
+            i = i + 1
+            var scanning_paragraph = true
+            while i < lines.len() and scanning_paragraph:
+                val probe = lines[i]
+                if _bm_is_paragraph_continuation(probe):
+                    i = i + 1
+                else:
+                    scanning_paragraph = false
+            blocks.push(_bm_block(next_id, "paragraph", start, i - 1, lines))
+            next_id = next_id + 1
+    blocks
+
+fn _bm_block(id: i64, kind: text, from_line: i64, to_line: i64, lines: [text]) -> RenderBlock:
+    RenderBlock(
+        id: id,
+        kind: kind,
+        from_line: from_line,
+        to_line: to_line,
+        content: _bm_join_lines(lines, from_line, to_line),
+        rendered_lines: _bm_slice_lines(lines, from_line, to_line),
+        status: "ok"
+    )
+
+fn _bm_join_lines(lines: [text], from_line: i64, to_line: i64) -> text:
+    var out = ""
+    var i = from_line
+    while i <= to_line and i < lines.len():
+        if i > from_line:
+            out = out + "\n"
+        out = out + lines[i]
+        i = i + 1
+    out
+
+fn _bm_slice_lines(lines: [text], from_line: i64, to_line: i64) -> [text]:
+    var out: [text] = []
+    var i = from_line
+    while i <= to_line and i < lines.len():
+        out.push(lines[i])
+        i = i + 1
+    out
+
+fn _bm_heading_level(line: text) -> i64:
+    var level = 0
+    while level < line.len() and line.char_at(level) == "#":
+        level = level + 1
+    if level > 0 and level <= 6 and level < line.len() and line.char_at(level) == " ":
+        return level
+    0
+
+fn _bm_code_kind(lines: [text], start: i64) -> text:
+    val raw = lines[start].trim_start()
+    val opener = raw.lower()
+    if opener.starts_with("```sdn-graph") or opener.starts_with("```sdn_graph"):
+        return "sdn_graph"
+    if opener.starts_with("```md-css") or opener.starts_with("```css"):
+        return "md_css"
+    "code"
+
+fn _bm_is_callout_start(line: text) -> bool:
+    val trimmed = line.trim_start()
+    trimmed.starts_with("> [!")
+
+fn _bm_is_code_fence(line: text) -> bool:
+    val trimmed = line.trim_start()
+    trimmed.starts_with("```")
+
+fn _bm_is_blockquote_line(line: text) -> bool:
+    val trimmed = line.trim_start()
+    trimmed.starts_with(">")
+
+fn _bm_is_table_row(line: text) -> bool:
+    val trimmed = line.trim_start()
+    trimmed.starts_with("|") and trimmed.index_of("|") >= 0
+
+fn _bm_is_list_line(line: text) -> bool:
+    val trimmed = line.trim_start()
+    if trimmed.starts_with("- ") or trimmed.starts_with("* ") or trimmed.starts_with("+ "):
+        return true
+    val dot = trimmed.index_of(". ")
+    if dot <= 0:
+        return false
+    _bm_all_digits(trimmed.slice(0, dot))
+
+fn _bm_all_digits(value: text) -> bool:
+    if value.len() == 0:
+        return false
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
+
+fn _bm_is_horizontal_rule(line: text) -> bool:
+    val trimmed = line.trim()
+    trimmed == "---" or trimmed == "***" or trimmed == "___"
+
+fn _bm_is_embed(line: text) -> bool:
+    val trimmed = line.trim()
+    trimmed.starts_with("![[") or trimmed.starts_with("![")
+
+fn _bm_starts_special_block(line: text) -> bool:
+    val trimmed = line.trim_start()
+    _bm_heading_level(line) > 0 or trimmed.starts_with("```") or
+        trimmed.starts_with(">") or _bm_is_table_row(line) or
+        _bm_is_list_line(line) or _bm_is_horizontal_rule(line) or _bm_is_embed(line)
+
+fn _bm_is_paragraph_continuation(line: text) -> bool:
+    val trimmed = line.trim()
+    trimmed != "" and not _bm_starts_special_block(line)

@@ -4,7 +4,7 @@
 - **Severity:** P1 (blocks native string ops) — *needs confirmation of scope*
 - **Date:** 2026-05-29
 - **Area:** compiler / seed native codegen (string method dispatch)
-- **Status:** open — reported mid-investigation, needs isolated repro
+- **Status:** fixed (2026-05-29)
 
 ## Summary
 
@@ -28,20 +28,56 @@ programs that use string methods in `core-c-bootstrap` mode.
 - `.len()` still returns -1 → codegen isn't dispatching to the runtime fn.
 - Earlier a related symptom appeared as `function not found: str.slice`.
 
-## Caveats / needs confirmation
+## Root cause analysis (2026-05-29)
 
-The render agent stalled (watchdog) before isolating this:
-1. Confirm with a MINIMAL repro: native-build a trivial program doing
-   `"abc".len()` with `core-c-bootstrap` and check the return value.
-2. Determine scope: editor-specific call shape vs. all `text` receivers.
-3. Test whether a different runtime bundle (`rust-hosted` / `hosted-runtime`)
-   dispatches correctly — if so, the bundle/codegen pairing is the fault.
+Two separate bugs, both fixed:
 
-## Proposed fix
+### Bug 1: `.len()` returning -1 (fixed earlier today)
 
-Investigate seed native codegen for string method-call lowering on `text`
-receivers; ensure `.len()/.slice()/.substring()` lower to the `rt_string_*`
-runtime calls rather than a dynamic-dispatch path that returns the -1 sentinel.
+The Cranelift inline len implementation in `helpers.rs` loaded `i8` at offset 0
+and compared it to `0x53545231` — but `RtCoreString.kind` is `uint32_t`, so the
+comparison always failed. The -1 sentinel was returned because `tag == heap` but
+`kind != string`, so the type check fell through to `done_block` with `invalid`.
+
+Fix: load `i32` at offset 0 and compare to `0x53545231i64`
+(`src/compiler_rust/compiler/src/codegen/instr/helpers.rs`).
+
+### Bug 2: `.slice()` and `.substring()` printing "function not found: str.slice"
+
+For `val s: text`, `TypeId::STRING` maps via `builtin_type_name` to `"str"`,
+so the MIR emits `MethodCallStatic { func_name: "str.slice", args: [start, end] }`.
+
+`compile_method_call_static` sets `prefer_builtin_first = true` (because
+`lookup_name` contains a dot and `receiver_ty == TypeId::STRING`), and calls
+`try_compile_builtin_method_call`. That function correctly handles `"slice"` /
+`"substring"` by calling `rt_slice` — BUT only if `ctx.runtime_funcs.get("rt_slice")`
+succeeds. If it returns `None`, the function returns `Ok(None)` and execution
+falls through to `rt_function_not_found`.
+
+`runtime_funcs` is populated by `declare_runtime_functions`, which skips any
+symbol not in `referenced_names` AND not a `runtime_symbol_is_codegen_root`.
+`"rt_slice"` was in neither list: `referenced_names` only gets `"rt_slice"` from
+`MirInst::SliceOp`, but `MethodCallStatic` with `"str.slice"` never adds it.
+
+Fix: add `"rt_len"` and `"rt_slice"` to `runtime_symbol_is_codegen_root` in
+`src/compiler_rust/compiler/src/codegen/common_backend.rs`.
+
+## Verification
+
+Minimal repro (`val s: text = "abc"; println(s.len()); println(s.slice(1,3)); println(s.substring(1))`):
+
+- Before fix: `3` / `function not found: str.slice` / `function not found: str.substring`
+  (`.len()` was already fixed by today's `helpers.rs` i32 change; the seed at 05:33
+  post-dated `helpers.rs` at 05:30 so the i32 fix was already active.)
+- After fix: `3` / `bc` / `bc` ✓
+
+Backend: Cranelift (bootstrap binary built without `--features llvm`; default
+`BackendKind::for_target` returns `Cranelift` when LLVM feature is absent).
+
+## Files changed
+
+- `src/compiler_rust/compiler/src/codegen/common_backend.rs` — add `"rt_len"` and `"rt_slice"` to `runtime_symbol_is_codegen_root`
+- `src/compiler_rust/compiler/src/codegen/instr/helpers.rs` — fix `inline_runtime_len_value` to load `i32` for string kind check (landed earlier today)
 
 ## See also
 

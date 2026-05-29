@@ -6,13 +6,23 @@ use common.ui.web_render_api.{
     WEB_RENDER_TARGET_PURE_SIMPLE,
     WEB_RENDER_TARGET_TAURI,
     WebRenderRequest,
+    WebRenderHostWindowCommand,
+    WebRenderInputEnvelope,
+    WebRenderPatchEnvelope,
+    WebRenderSnapshotEnvelope,
     web_render_capabilities_for_target,
     web_render_body_html,
     web_render_full_html,
+    web_render_host_window_command_to_json,
+    web_render_input_envelope_to_json,
+    web_render_input_envelope_from_event,
     web_render_ipc_json,
+    web_render_patch_envelope_to_json,
     web_render_pixel_artifact,
+    web_render_snapshot_envelope_to_json,
     web_render_to_artifact
 }
+use common.ui.widget.{UIEvent}
 
 describe "shared web render API":
 
@@ -51,3 +61,75 @@ describe "shared web render API":
         expect(caps.len() > 0).to_equal(true)
         val artifact = web_render_to_artifact(WebRenderRequest.html(WEB_RENDER_TARGET_TAURI, "", "<p/>", "", "", 1, 1))
         expect(artifact.capability_summary).to_contain("native_dialogs")
+
+    it "serializes host window commands through the common web render API":
+        val cmd = WebRenderHostWindowCommand(
+            action: "spawn_native_window",
+            window_id: "host-window-1",
+            surface_id: "host-surface-1",
+            app_id: "/sys/apps/terminal",
+            title: "Terminal \"One\"",
+            url: "/wm/native_window?title=Line\nBreak",
+            x: 10,
+            y: 20,
+            width: 640,
+            height: 420
+        )
+        val json = web_render_host_window_command_to_json(cmd)
+        expect(json).to_contain("\"action\":\"spawn_native_window\"")
+        expect(json).to_contain("\"title\":\"Terminal \\\"One\\\"\"")
+        expect(json).to_contain("\"url\":\"/wm/native_window?title=Line\\nBreak\"")
+        expect(json).to_contain("\"width\":640")
+
+    it "serializes snapshot patch and input envelopes through the common API":
+        val snap = WebRenderSnapshotEnvelope(
+            target: WEB_RENDER_TARGET_TAURI,
+            surface_id: "main",
+            revision: 7u64,
+            snapshot_json: "{\"mode\":\"NORMAL\",\"active_surface\":\"main\"}"
+        )
+        val patch = WebRenderPatchEnvelope(
+            target: WEB_RENDER_TARGET_ELECTRON,
+            surface_id: "main",
+            from_sequence: 7u64,
+            to_sequence: 9u64,
+            patches_json: "[{\"kind\":\"UpdateProp\",\"target_id\":\"button1\"}]",
+            snapshot_json: ""
+        )
+        val input = WebRenderInputEnvelope(
+            target: WEB_RENDER_TARGET_PURE_SIMPLE,
+            surface_id: "main",
+            event_type: "mouse",
+            target_id: "button1",
+            key: "",
+            value: "",
+            x: 12.5,
+            y: 24.0,
+            dx: 0.0,
+            dy: 0.0,
+            button: "left"
+        )
+        val snap_json = web_render_snapshot_envelope_to_json(snap)
+        val patch_json = web_render_patch_envelope_to_json(patch)
+        val input_json = web_render_input_envelope_to_json(input)
+        expect(snap_json).to_contain("\"type\":\"snapshot\"")
+        expect(snap_json).to_contain("\"revision\":7")
+        expect(snap_json).to_contain("\"snapshot\":{\"mode\":\"NORMAL\"")
+        expect(patch_json).to_contain("\"type\":\"patch\"")
+        expect(patch_json).to_contain("\"from_sequence\":7")
+        expect(patch_json).to_contain("\"patches\":[{\"kind\":\"UpdateProp\"")
+        expect(input_json).to_contain("\"type\":\"input\"")
+        expect(input_json).to_contain("\"event_type\":\"mouse\"")
+        expect(input_json).to_contain("\"button\":\"left\"")
+
+    it "normalizes UI events into common web render input envelopes":
+        val key = web_render_input_envelope_from_event(WEB_RENDER_TARGET_ELECTRON, "main", UIEvent.KeyPress(key: "enter"))
+        expect(key.event_type).to_equal("key")
+        expect(key.key).to_equal("enter")
+        val mouse = web_render_input_envelope_from_event(WEB_RENDER_TARGET_PURE_SIMPLE, "main", UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "left", kind: "down"))
+        expect(mouse.event_type).to_equal("mouse_down")
+        expect(mouse.button).to_equal("left")
+        val input = web_render_input_envelope_from_event(WEB_RENDER_TARGET_TAURI, "main", UIEvent.InputChange(target_id: "name", value: "Ada"))
+        expect(input.event_type).to_equal("input")
+        expect(input.target_id).to_equal("name")
+        expect(input.value).to_equal("Ada")

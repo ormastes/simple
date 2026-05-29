@@ -5,9 +5,9 @@ mod primitives;
 mod special;
 
 use super::{
-    eval_arg, eval_arg_usize, evaluate_expr, exec_function, exec_function_with_captured_env, exec_function_with_values,
-    find_and_exec_method, instantiate_class, try_method_missing, Enums, ImplMethods, BLANKET_IMPL_METHODS,
-    BLOCK_SCOPED_ENUMS, TRAIT_IMPLS,
+    eval_arg, eval_arg_int, eval_arg_usize, evaluate_expr, exec_function, exec_function_with_captured_env,
+    exec_function_with_values, find_and_exec_method, instantiate_class, try_method_missing, Enums, ImplMethods,
+    BLANKET_IMPL_METHODS, BLOCK_SCOPED_ENUMS, TRAIT_IMPLS,
 };
 use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::{Env, Value};

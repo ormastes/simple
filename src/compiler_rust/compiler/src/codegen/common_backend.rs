@@ -53,7 +53,17 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
             for inst in &block.instructions {
                 match inst {
                     MirInst::Call { target, .. } => {
-                        names.insert(target.name().to_string());
+                        let raw = target.name();
+                        names.insert(raw.to_string());
+                        // Also declare the canonical alias target so that the
+                        // runtime_funcs.get(sffi_name) branch in compile_call
+                        // fires (with proper text-arg expansion) instead of
+                        // falling through to the cross-module path.
+                        // e.g., "rt_file_delete" → also insert "rt_file_remove"
+                        let base = raw.rsplit_once("__").map(|(_, t)| t).unwrap_or(raw);
+                        if let Some(alias) = super::instr::calls::sffi_alias_target(base) {
+                            names.insert(alias.to_string());
+                        }
                     }
                     MirInst::InterpCall { func_name, .. } => {
                         names.insert(func_name.clone());
@@ -130,6 +140,8 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_eprint_value"
             | "rt_eprintln_value"
             | "rt_contains"
+            | "rt_len"
+            | "rt_slice"
             | "rt_alloc"
             | "rt_array_new"
             | "rt_array_len"

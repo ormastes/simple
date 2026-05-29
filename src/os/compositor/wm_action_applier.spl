@@ -12,6 +12,26 @@ class WmActionApplyResult:
     window_id: u64
     applied: bool
 
+class WmLifecycleWindowState:
+    id: i64
+    owner_port: i64
+    title: text
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    content: text
+    process_id: i64
+    app_id: text
+    minimized: bool
+    focused: bool
+
+class WmLifecycleApplyResult:
+    windows: [WmLifecycleWindowState]
+    next_window_id: i64
+    window_id: i64
+    applied: bool
+
 fn apply_wm_action_to_compositor(compositor: Compositor, action: WmAction) -> WmActionApplyResult:
     var next = compositor
     match action.kind:
@@ -56,6 +76,86 @@ fn apply_wm_action_to_compositor(compositor: Compositor, action: WmAction) -> Wm
 fn wm_action_is_shared_lifecycle(kind: text) -> bool:
     kind == "create_window" or kind == "create_web_window" or kind == "destroy_window" or kind == "focus" or kind == "resize" or kind == "move" or kind == "set_title" or kind == "minimize" or kind == "maximize" or kind == "restore" or kind == "update_tree"
 
+fn wm_lifecycle_find_window_index(windows: [WmLifecycleWindowState], window_id: i64) -> i32:
+    var i = 0
+    while i < windows.len():
+        if windows[i].id == window_id:
+            return i
+        i = i + 1
+    -1
+
+fn wm_lifecycle_focus_window(windows: [WmLifecycleWindowState], window_id: i64) -> [WmLifecycleWindowState]:
+    val idx = wm_lifecycle_find_window_index(windows, window_id)
+    if idx < 0:
+        return windows
+    var selected = windows[idx]
+    selected.minimized = false
+    selected.focused = true
+    var out: [WmLifecycleWindowState] = []
+    var i = 0
+    while i < windows.len():
+        if i != idx:
+            var other = windows[i]
+            other.focused = false
+            out.push(other)
+        i = i + 1
+    out.push(selected)
+    out
+
+fn wm_lifecycle_destroy_window(windows: [WmLifecycleWindowState], window_id: i64) -> [WmLifecycleWindowState]:
+    var out: [WmLifecycleWindowState] = []
+    var i = 0
+    while i < windows.len():
+        if windows[i].id != window_id:
+            out.push(windows[i])
+        i = i + 1
+    out
+
+fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_window_id: i64, desktop_width: i32, desktop_height: i32, action: WmAction) -> WmLifecycleApplyResult:
+    var out_windows = windows
+    var next_id = next_window_id
+    if not wm_action_is_shared_lifecycle(action.kind):
+        return WmLifecycleApplyResult(windows: out_windows, next_window_id: next_id, window_id: 0, applied: false)
+    if action.kind == "create_window" or action.kind == "create_web_window":
+        val id = next_id
+        next_id = next_id + 1
+        out_windows.push(WmLifecycleWindowState(id: id, owner_port: action.owner_port.to_i64(), title: action.title, x: action.x, y: action.y, w: action.width, h: action.height, content: action.content, process_id: action.process_id.to_i64(), app_id: action.app_id, minimized: false, focused: true))
+        out_windows = wm_lifecycle_focus_window(out_windows, id)
+        return WmLifecycleApplyResult(windows: out_windows, next_window_id: next_id, window_id: id, applied: true)
+    if action.kind == "destroy_window":
+        return WmLifecycleApplyResult(windows: wm_lifecycle_destroy_window(out_windows, action.window_id.to_i64()), next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
+    if action.kind == "focus":
+        return WmLifecycleApplyResult(windows: wm_lifecycle_focus_window(out_windows, action.window_id.to_i64()), next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
+    val i = wm_lifecycle_find_window_index(out_windows, action.window_id.to_i64())
+    if i < 0:
+        return WmLifecycleApplyResult(windows: out_windows, next_window_id: next_id, window_id: action.window_id.to_i64(), applied: false)
+    var win = out_windows[i]
+    if action.kind == "update_tree":
+        win.content = action.content
+    elif action.kind == "resize":
+        win.w = action.width
+        win.h = action.height
+    elif action.kind == "move":
+        win.x = action.x
+        win.y = action.y
+    elif action.kind == "set_title":
+        win.title = action.title
+    elif action.kind == "minimize":
+        win.minimized = true
+        win.focused = false
+    elif action.kind == "maximize":
+        win.minimized = false
+        win.focused = true
+        win.x = 0
+        win.y = 48
+        win.w = desktop_width
+        win.h = desktop_height - 96
+    elif action.kind == "restore":
+        win.minimized = false
+        win.focused = true
+    out_windows[i] = win
+    WmLifecycleApplyResult(windows: out_windows, next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
+
 fn wm_action_from_bridge_request(owner_port: i64, method: i64, window_id: i64, title: text, x: i32, y: i32, w: i32, h: i32, content: text, process_id: i64, app_id: text) -> WmAction:
     var src_port: u64 = 0
     if owner_port > 0:
@@ -87,3 +187,9 @@ fn wm_action_from_bridge_request(owner_port: i64, method: i64, window_id: i64, t
     if method == COMP_RESTORE.to_i64():
         return WmAction(kind: "restore", window_id: wid, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
     wm_action_none()
+
+fn wm_move_action(window_id: i64, x: i32, y: i32) -> WmAction:
+    WmAction(kind: "move", window_id: window_id.to_u64(), title: "", x: x, y: y, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: 0)
+
+fn wm_resize_action(window_id: i64, width: i32, height: i32) -> WmAction:
+    WmAction(kind: "resize", window_id: window_id.to_u64(), title: "", x: 0, y: 0, width: width, height: height, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: 0)

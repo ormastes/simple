@@ -4,7 +4,7 @@
 - **Severity:** P2
 - **Date:** 2026-05-28
 - **Area:** compiler / lexer (string-literal escape decoding)
-- **Status:** fix implemented 2026-05-29 — Rust seed tested+passing; .spl self-hosted fix pending bootstrap rebuild verification
+- **Status:** FIXED — verified 2026-05-29: `"\033[2J"` lexes to `0x1b 5b 32 4a` in the deployed binary; both Rust seed and interpreter paths confirmed correct
 
 ## Summary
 
@@ -24,11 +24,13 @@ with `\033` produced garbage bytes.
 A literal `"\033[2J"` should lex to `ESC [ 2 J` (4 bytes) but produces
 `0x00 '3' '3' '[' '2' 'J'`. The hex form `"\x1b[2J"` decodes correctly.
 
-## Workaround (in tree)
+## Workaround (in tree) — no longer needed
 
-Converting `\033` → `\x1b` works. 15 sites in
-`src/lib/nogc_sync_mut/tui/terminal.spl` were converted; ~4 octal sites remain on
-`main`, and other lib files still use `\033`.
+Converting `\033` → `\x1b` was applied to 15 sites in
+`src/lib/nogc_sync_mut/tui/terminal.spl` (now 17 `\x1b` sites total including
+pre-existing ones). These are left as-is — both forms now decode correctly.
+~14 other `\033` sites across `cli/`, `tui/style.spl`, and `mcp_sdk/` were
+never converted and continue to work with the fix in place.
 
 ## Proposed fix
 

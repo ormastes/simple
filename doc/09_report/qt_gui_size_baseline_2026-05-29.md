@@ -8,9 +8,10 @@ Date: 2026-05-29
 - reason=missing_qt_tooling
 - qt_pkg=unavailable
 - simple_web_report=doc/09_report/web_baremetal_size_audit_2026-05-28.md
-- status=optional_baseline_unavailable
-- verification_effect=non_blocking
-- requirement=REQ-011 / NFR-005
+- simple_artifact=Simple web placeholder URL facade
+- simple_bytes=14336
+- comparison_status=unavailable
+- comparison_reason=qt_baseline_unavailable
 
 ## Qt Artifact
 
@@ -18,7 +19,11 @@ Date: 2026-05-29
 |---|---:|---:|
 | qt_minimal_gui | n/a | n/a |
 
-Interpretation: Qt development files were not available through pkg-config, so no Qt artifact size can be measured on this host.
+## Simple Web Artifact
+
+| Artifact | Bytes | ELF dec |
+|---|---:|---:|
+| Simple web placeholder URL facade | 14336 | 3889 |
 
 ## Loaded Libraries
 
@@ -28,5 +33,5 @@ Interpretation: Qt development files were not available through pkg-config, so n
 
 - This script does not install Qt or network dependencies.
 - Missing Qt records an unavailable baseline instead of failing the Simple verification path.
-- Use `scripts/check-web-baremetal-size-audit.shs` for the Simple web-render artifact side of the comparison.
-- A release or CI gate may require this baseline only when the environment explicitly provisions Qt and sets that expectation outside this script.
+- The comparison passes only when a Qt artifact and a Simple Web artifact are both measured.
+- Use `scripts/check-web-baremetal-size-audit.shs` to refresh the Simple web-render artifact side of the comparison.

@@ -444,6 +444,26 @@ main = evens.len()
     assert_eq!(result.exit_code, 4); // [0, 2, 4, 6]
 }
 
+#[test]
+fn interpreter_string_slice_clamps_negative_start() {
+    let code = r#"
+s = "abc"
+main = if s.slice(-5, 2) == "ab" and s.substring(-5, 2) == "ab": 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_string_char_at_out_of_bounds_is_empty_text() {
+    let code = r#"
+s = "abc"
+main = if s.char_at(-1) == "" and s.char_at(99) == "": 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
 // ============= Negative Indexing =============
 
 #[test]
