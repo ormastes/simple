@@ -1,7 +1,7 @@
 # Short Grammar Placeholder Rejected In Parenthesized Pipe Callback
 
 Date: 2026-05-27
-Status: open — confirmed still failing 2026-05-29; symptom: `5 |> (_1 * 3)` evaluates to `<lambda>` instead of `15`; root cause in Rust pipe-parser, not the desugarer (left unfixed — needs pipe-parser change outside desugarer scope)
+Status: fixed in .spl (2026-05-29) — root cause was parser_expr.spl else-branch not applying transform_placeholder_lambda to pipe RHS; fix: `expr_call(transform_placeholder_lambda(pipe_right), [left], 0)`; test added to pipe_operator_spec.spl; NOTE: bin/simple is the Rust seed binary — the fix takes effect after a self-hosted rebuild/bootstrap; bin/simple test will still show failure until then
 
 ## Summary
 

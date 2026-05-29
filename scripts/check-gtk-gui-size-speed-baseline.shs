@@ -1,0 +1,225 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+BUILD_DIR="${BUILD_DIR:-build/gtk_gui_size_speed_baseline}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/gtk_gui_size_speed_baseline_$(date -u +%F).md}"
+SIMPLE_ITERATIONS="${SIMPLE_ITERATIONS:-200}"
+GTK_ITERATIONS="${GTK_ITERATIONS:-200}"
+SKIP_SIMPLE_NATIVE="${SKIP_SIMPLE_NATIVE:-1}"
+
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+bytes_of() {
+    if [ -f "$1" ]; then
+        wc -c <"$1" | tr -d ' '
+    else
+        echo "n/a"
+    fi
+}
+
+field_of() {
+    key="$1"
+    file="$2"
+    if [ -f "$file" ]; then
+        awk -F '=' -v key="$key" '$1 == key {print $2}' "$file" | tail -n 1
+    fi
+}
+
+SIMPLE_ENTRY="$BUILD_DIR/simple_gui_render_bench.spl"
+SIMPLE_OUT="$BUILD_DIR/simple_gui_render_bench.out"
+SIMPLE_NATIVE="$BUILD_DIR/simple_gui_render_bench"
+GTK_SRC="$BUILD_DIR/gtk_gui_baseline.c"
+GTK_BIN="$BUILD_DIR/gtk_gui_baseline"
+GTK_OUT="$BUILD_DIR/gtk_gui_baseline.out"
+
+cat >"$SIMPLE_ENTRY" <<'EOF'
+extern fn rt_time_now_unix_micros() -> i64
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+use std.common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_optimization_profile}
+
+fn main() -> i64:
+    val html = "<html><body><main class='simple-web-accent'><section class='static-shell'><h1>Simple GUI</h1><p>static shell</p></section><section data-simple-dynamic='pane'>dynamic pane</section></main></body></html>"
+    val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Simple GUI", html, ".static-shell{contain:layout paint style}", "", 320, 200)
+    val profile = web_render_optimization_profile(req)
+    val warm = simple_web_render_html_to_pixels(html, 320, 200)
+    if warm.len() != 320 * 200:
+        print "simple_render_status=fail"
+        return 2
+
+    val start = rt_time_now_unix_micros()
+    var i = 0
+    var total = 0
+    while i < 200:
+        val pixels = simple_web_render_html_to_pixels(html, 320, 200)
+        total = total + pixels.len()
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - start
+    print "simple_render_status=ok"
+    print "simple_render_iterations=200"
+    print "simple_render_total_us={elapsed}"
+    print "simple_render_pixels={total}"
+    print "simple_cache_schema={profile.cache_schema}"
+    print "simple_render_plan={profile.render_plan}"
+    print "simple_dynamic_regions={profile.dynamic_region_count}"
+    return 0
+EOF
+
+simple_status="unavailable"
+simple_reason=""
+simple_total_us="n/a"
+simple_bytes="n/a"
+
+if [ -x "$SIMPLE_BINARY" ]; then
+    if SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BINARY" run "$SIMPLE_ENTRY" >"$SIMPLE_OUT" 2>&1; then
+        simple_status="$(field_of simple_render_status "$SIMPLE_OUT")"
+        simple_total_us="$(field_of simple_render_total_us "$SIMPLE_OUT")"
+    else
+        simple_status="failed"
+        simple_reason="simple_run_failed"
+    fi
+    if [ "$SKIP_SIMPLE_NATIVE" != "1" ]; then
+        if SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BINARY" native-build \
+            --runtime-bundle core-c-bootstrap \
+            --source src/lib \
+            --entry-closure \
+            --entry "$SIMPLE_ENTRY" \
+            --strip \
+            --opt-level=aggressive \
+            -o "$SIMPLE_NATIVE" >"$BUILD_DIR/simple_native_build.log" 2>&1; then
+            simple_bytes="$(bytes_of "$SIMPLE_NATIVE")"
+        fi
+    fi
+else
+    simple_reason="missing_simple_binary:$SIMPLE_BINARY"
+fi
+
+gtk_pkg=""
+gtk_status="unavailable"
+gtk_reason="missing_gtk_tooling"
+gtk_total_us="n/a"
+gtk_bytes="n/a"
+
+if have pkg-config && pkg-config --exists gtk4; then
+    gtk_pkg="gtk4"
+elif have pkg-config && pkg-config --exists gtk+-3.0; then
+    gtk_pkg="gtk+-3.0"
+fi
+
+if [ -n "$gtk_pkg" ] && have cc; then
+    cat >"$GTK_SRC" <<'EOF'
+#include <stdio.h>
+#include <time.h>
+#include <gtk/gtk.h>
+
+static long long now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
+}
+
+int main(void) {
+#if GTK_MAJOR_VERSION >= 4
+    if (!gtk_init_check()) {
+        puts("gtk_render_status=unavailable");
+        puts("gtk_reason=no_display");
+        return 0;
+    }
+#else
+    int argc = 0;
+    char **argv = NULL;
+    if (!gtk_init_check(&argc, &argv)) {
+        puts("gtk_render_status=unavailable");
+        puts("gtk_reason=no_display");
+        return 0;
+    }
+#endif
+    long long start = now_us();
+    for (int i = 0; i < 200; i++) {
+#if GTK_MAJOR_VERSION >= 4
+        GtkWidget *window = gtk_window_new();
+        GtkWidget *label = gtk_label_new("Simple GUI");
+        gtk_window_set_child(GTK_WINDOW(window), label);
+        g_object_unref(window);
+#else
+        GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+        GtkWidget *label = gtk_label_new("Simple GUI");
+        gtk_container_add(GTK_CONTAINER(window), label);
+        gtk_widget_destroy(window);
+#endif
+    }
+    long long elapsed = now_us() - start;
+    puts("gtk_render_status=ok");
+    printf("gtk_render_iterations=200\n");
+    printf("gtk_widget_total_us=%lld\n", elapsed);
+    return 0;
+}
+EOF
+    if cc -Os -s "$GTK_SRC" -o "$GTK_BIN" $(pkg-config --cflags --libs "$gtk_pkg") >"$BUILD_DIR/gtk_build.log" 2>&1; then
+        gtk_bytes="$(bytes_of "$GTK_BIN")"
+        if "$GTK_BIN" >"$GTK_OUT" 2>&1; then
+            gtk_status="$(field_of gtk_render_status "$GTK_OUT")"
+            gtk_total_us="$(field_of gtk_widget_total_us "$GTK_OUT")"
+            gtk_reason="$(field_of gtk_reason "$GTK_OUT")"
+        else
+            gtk_status="failed"
+            gtk_reason="gtk_run_failed"
+        fi
+    else
+        gtk_status="failed"
+        gtk_reason="gtk_compile_failed"
+    fi
+fi
+
+{
+    echo "# GTK GUI Size And Speed Baseline"
+    echo
+    echo "Date: $(date -u +%F)"
+    echo
+    echo "## Summary"
+    echo
+    echo "| Runtime | Status | Binary bytes | Iterations | Total us | Notes |"
+    echo "|---|---|---:|---:|---:|---|"
+    echo "| Simple web renderer | ${simple_status:-unavailable} | $simple_bytes | $SIMPLE_ITERATIONS | $simple_total_us | ${simple_reason:-render loop via Simple software renderer} |"
+    echo "| GTK | $gtk_status | $gtk_bytes | $GTK_ITERATIONS | $gtk_total_us | ${gtk_reason:-widget construction loop; requires display} |"
+    echo
+    echo "## Simple Output"
+    echo
+    if [ -f "$SIMPLE_OUT" ]; then
+        sed 's/^/- /' "$SIMPLE_OUT"
+    else
+        echo "- unavailable"
+    fi
+    echo
+    echo "## GTK Output"
+    echo
+    if [ -f "$GTK_OUT" ]; then
+        sed 's/^/- /' "$GTK_OUT"
+    else
+        echo "- unavailable"
+    fi
+    echo
+    echo "## Notes"
+    echo
+    echo "- Set SKIP_SIMPLE_NATIVE=0 to add Simple native binary bytes; default skips the slow native build."
+    echo "- GTK size is the minimal linked executable size, not the full shared-library closure unless inspected with ldd."
+    echo "- GTK speed is unavailable on headless hosts without a display."
+    echo "- Simple speed measures the pure software HTML-to-pixel path and records the shared render optimization profile."
+} >"$REPORT_PATH"
+
+echo "gtk_gui_baseline_ready=true"
+echo "report_path=$REPORT_PATH"
+echo "simple_status=${simple_status:-unavailable}"
+echo "simple_total_us=$simple_total_us"
+echo "simple_bytes=$simple_bytes"
+echo "gtk_status=$gtk_status"
+echo "gtk_bytes=$gtk_bytes"
+echo "gtk_total_us=$gtk_total_us"

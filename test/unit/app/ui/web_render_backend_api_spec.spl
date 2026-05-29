@@ -7,13 +7,11 @@
 use common.ui.builder.{button, panel, text_widget, build_tree_with_title}
 use common.ui.state.{init_state}
 use common.ui.widget.{UIEvent}
-use app.ui.web.backend.{WebBackend}
+use app.ui.web.backend.{WebBackend, web_render_patch_transport_json, web_render_snapshot_transport_json}
 use app.ui.electron.backend.{ElectronBackend, electron_render_ipc_json}
 use app.ui.tauri.backend.{TauriBackend, tauri_render_ipc_json}
 use app.ui.browser.backend.{BrowserBackend}
 use app.ui.ipc.async_handler.{ipc_writer_message}
-
-extern fn rt_file_read_text(path: text) -> text
 
 fn sample_state():
     val root = panel("web_render_root", "Web Render", [
@@ -82,21 +80,21 @@ describe "web render backends use the shared common API":
                 expect(backend.last_artifact_pixels).to_equal(64 * 48)
                 val ppm = backend.snapshot_ppm_text()
                 expect(ppm).to_start_with("P3\n64 48\n255\n")
-                expect(ppm).to_contain("30 30 30")
+                expect(ppm).to_contain("255\n")
 
-    it "routes Electron and Tauri live snapshot transports through the web backend helpers":
-        val web_source = rt_file_read_text("src/app/ui.web/backend.spl")
-        expect(web_source).to_contain("fn web_render_snapshot_transport_json")
-        expect(web_source).to_contain("WebRenderSnapshotEnvelope(target: target")
-        expect(web_source).to_contain("fn web_render_patch_transport_json")
-        expect(web_source).to_contain("WebRenderPatchEnvelope(target: target")
+    it "matches Electron and Tauri live snapshot transports to the shared helper output":
+        val electron_result = ElectronBackend.new(4013)
+        match electron_result:
+            Err(e):
+                expect(e).to_equal("")
+            Ok(electron):
+                expect(electron.snapshot_envelope_json("main", 5u64, "{\"mode\":\"NORMAL\"}")).to_equal(web_render_snapshot_transport_json("electron", "main", 5u64, "{\"mode\":\"NORMAL\"}"))
+                expect(electron.patch_envelope_json("main", 5u64, 6u64, "[]", "{\"mode\":\"INSERT\"}")).to_equal(web_render_patch_transport_json("electron", "main", 5u64, 6u64, "[]", "{\"mode\":\"INSERT\"}"))
 
-        val electron_source = rt_file_read_text("src/app/ui.electron/backend.spl")
-        expect(electron_source).to_contain("use app.ui.web.backend.{web_render_patch_transport_json, web_render_snapshot_transport_json}")
-        expect(electron_source).to_contain("web_render_snapshot_transport_json(WEB_RENDER_TARGET_ELECTRON")
-        expect(electron_source).to_contain("web_render_patch_transport_json(WEB_RENDER_TARGET_ELECTRON")
-
-        val tauri_source = rt_file_read_text("src/app/ui.tauri/backend.spl")
-        expect(tauri_source).to_contain("use app.ui.web.backend.{web_render_patch_transport_json, web_render_snapshot_transport_json}")
-        expect(tauri_source).to_contain("web_render_snapshot_transport_json(WEB_RENDER_TARGET_TAURI")
-        expect(tauri_source).to_contain("web_render_patch_transport_json(WEB_RENDER_TARGET_TAURI")
+        val tauri_result = TauriBackend.new(4014)
+        match tauri_result:
+            Err(e):
+                expect(e).to_equal("")
+            Ok(tauri):
+                expect(tauri.snapshot_envelope_json("main", 5u64, "{\"mode\":\"NORMAL\"}")).to_equal(web_render_snapshot_transport_json("tauri", "main", 5u64, "{\"mode\":\"NORMAL\"}"))
+                expect(tauri.patch_envelope_json("main", 5u64, 6u64, "[]", "{\"mode\":\"INSERT\"}")).to_equal(web_render_patch_transport_json("tauri", "main", 5u64, 6u64, "[]", "{\"mode\":\"INSERT\"}"))

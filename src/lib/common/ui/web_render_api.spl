@@ -8,6 +8,7 @@ val WEB_RENDER_TARGET_SIMPLE_WEB: text = "simple_web"
 val WEB_RENDER_TARGET_ELECTRON: text = "electron"
 val WEB_RENDER_TARGET_TAURI: text = "tauri"
 val WEB_RENDER_TARGET_PURE_SIMPLE: text = "pure_simple"
+val WEB_RENDER_CACHE_SCHEMA_VERSION: text = "simple-web-cache-v1"
 
 class WebRenderRequest:
     target: text
@@ -79,6 +80,14 @@ class WebRenderArtifact:
             capability_summary: ""
         )
 
+class WebRenderOptimizationProfile:
+    cache_schema: text
+    cache_key: text
+    cacheable_static_shell: bool
+    static_shell_bytes: i32
+    dynamic_region_count: i32
+    render_plan: text
+
 class WebRenderHostWindowCommand:
     action: text
     window_id: text
@@ -142,7 +151,65 @@ fn web_render_body_html(req: WebRenderRequest) -> text:
     req.body_html
 
 fn web_render_ipc_json(req: WebRenderRequest) -> text:
-    "{\"type\":\"render\",\"target\":\"" + escape_json(req.target) + "\",\"surface_id\":\"" + escape_json(req.surface_id) + "\",\"width\":" + str(req.viewport_w) + ",\"height\":" + str(req.viewport_h) + ",\"html\":\"" + escape_json(web_render_full_html(req)) + "\"}"
+    web_render_ipc_json_with_html(req, web_render_full_html(req))
+
+fn web_render_ipc_json_with_html(req: WebRenderRequest, full_html: text) -> text:
+    "{\"type\":\"render\",\"target\":\"" + escape_json(req.target) + "\",\"surface_id\":\"" + escape_json(req.surface_id) + "\",\"width\":" + str(req.viewport_w) + ",\"height\":" + str(req.viewport_h) + ",\"html\":\"" + escape_json(full_html) + "\"}"
+
+fn _web_render_count_marker(haystack: text, marker: text) -> i32:
+    if marker == "":
+        return 0
+    var count = 0
+    var offset = 0
+    while offset < haystack.len():
+        val found = haystack.index_of_from(marker, offset)
+        if found < 0:
+            return count
+        count = count + 1
+        offset = found + marker.len()
+    count
+
+fn _web_render_text_fingerprint(value: text) -> text:
+    val len = value.len()
+    val head_end = if len < 24: len else: 24
+    val tail_start = if len < 24: 0 else: len - 24
+    val head = value.substring(0, head_end)
+    val tail = value.substring(tail_start, len)
+    "len={len};head={escape_json(head)};tail={escape_json(tail)}"
+
+fn web_render_dynamic_region_count(req: WebRenderRequest) -> i32:
+    _web_render_count_marker(req.body_html, "data-simple-dynamic") +
+    _web_render_count_marker(req.body_html, "data-live") +
+    _web_render_count_marker(req.body_html, "data-ui-patch") +
+    _web_render_count_marker(req.js, "WebSocket")
+
+fn web_render_cache_key(req: WebRenderRequest) -> text:
+    WEB_RENDER_CACHE_SCHEMA_VERSION +
+    "|target=" + req.target +
+    "|surface=" + req.surface_id +
+    "|viewport=" + str(req.viewport_w) + "x" + str(req.viewport_h) +
+    "|pixels=" + str(req.wants_pixels) +
+    "|cap=" + web_render_capability_summary(req.target) +
+    "|title=" + _web_render_text_fingerprint(req.title) +
+    "|body=" + _web_render_text_fingerprint(req.body_html) +
+    "|css=" + _web_render_text_fingerprint(req.css) +
+    "|js=" + _web_render_text_fingerprint(req.js)
+
+fn web_render_optimization_profile(req: WebRenderRequest) -> WebRenderOptimizationProfile:
+    val dynamic_regions = web_render_dynamic_region_count(req)
+    val cacheable = dynamic_regions == 0
+    val plan = if cacheable:
+        "binary_static_shell"
+    else:
+        "static_shell_with_dynamic_islands"
+    WebRenderOptimizationProfile(
+        cache_schema: WEB_RENDER_CACHE_SCHEMA_VERSION,
+        cache_key: web_render_cache_key(req),
+        cacheable_static_shell: cacheable,
+        static_shell_bytes: req.body_html.len() + req.css.len(),
+        dynamic_region_count: dynamic_regions,
+        render_plan: plan
+    )
 
 fn web_render_host_window_command_to_json(cmd: WebRenderHostWindowCommand) -> text:
     "{" +
@@ -223,7 +290,7 @@ fn web_render_input_envelope_from_event(target: text, surface_id: text, event: U
 fn web_render_to_artifact(req: WebRenderRequest) -> WebRenderArtifact:
     val html = web_render_full_html(req)
     val ipc = if req.target == WEB_RENDER_TARGET_ELECTRON or req.target == WEB_RENDER_TARGET_TAURI:
-        web_render_ipc_json(req)
+        web_render_ipc_json_with_html(req, html)
     else:
         ""
     WebRenderArtifact(
