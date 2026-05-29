@@ -47,6 +47,11 @@ describe "general optimization backend recommendations":
         expect(backend_optimization_has_recommendation("interpreter", "cranelift-local-licm")).to_equal(true)
         expect(backend_optimization_has_recommendation("llvm", "cranelift-local-licm")).to_equal(false)
 
+    it "keeps Simple auto-vectorization away from LLVM vectorizer pipeline":
+        expect(backend_optimization_has_recommendation("cranelift", "simple-auto-vectorize")).to_equal(true)
+        expect(backend_optimization_has_recommendation("interpreter", "simple-auto-vectorize")).to_equal(true)
+        expect(backend_optimization_has_recommendation("llvm", "simple-auto-vectorize")).to_equal(false)
+
     it "does not apply Cranelift-local LICM to unrelated future backends":
         val wasm = backend_optimization_plan_for_budget("wasm", "medium")
         expect(wasm.recommendation_names.contains("cranelift-local-licm")).to_equal(false)
@@ -58,6 +63,14 @@ describe "general optimization backend recommendations":
 
         val c_plan = backend_optimization_plan_for_budget("c", "medium")
         expect(c_plan.recommendation_names.contains("cranelift-local-licm")).to_equal(false)
+
+        val wasm_high = backend_optimization_plan_for_budget("wasm", "high")
+        expect(wasm_high.recommendation_names.contains("simple-auto-vectorize")).to_equal(false)
+        var found_vectorize_skip = false
+        for decision in wasm_high.skipped_decisions:
+            if decision.stable_name == "simple-auto-vectorize" and decision.reason == "backend_not_simple_low_tier_jit":
+                found_vectorize_skip = true
+        expect(found_vectorize_skip).to_equal(true)
 
     it "filters backend recommendations by compile cost budget":
         expect(backend_optimization_cost_allowed("medium", "medium")).to_equal(true)
@@ -121,3 +134,31 @@ describe "general optimization backend recommendations":
         val ready = backend_optimization_plan_for_budget_with_facts("llvm", "high", ["typed_mir", "var.reassignment", "escape.no_escape", "borrow.reassign_safe", "llvm_backend_available"])
         expect(ready.recommendation_names.contains("llvm-entry-alloca-shaping")).to_equal(true)
         expect(ready.recommendation_names.contains("llvm-default-pipeline")).to_equal(true)
+
+    it "gates Simple auto-vectorization on candidate and alias facts":
+        val missing = backend_optimization_plan_for_budget_with_facts("cranelift", "high", ["typed_mir", "vectorization_candidate"])
+        expect(missing.recommendation_names.contains("simple-auto-vectorize")).to_equal(false)
+        var found_missing_alias = false
+        for decision in missing.skipped_decisions:
+            if decision.stable_name == "simple-auto-vectorize" and decision.reason == "missing alias_stable":
+                found_missing_alias = true
+        expect(found_missing_alias).to_equal(true)
+
+        val medium = backend_optimization_plan_for_budget_with_facts("cranelift", "medium", ["typed_mir", "vectorization_candidate", "alias_stable"])
+        expect(medium.recommendation_names.contains("simple-auto-vectorize")).to_equal(false)
+        var found_cost_skip = false
+        for decision in medium.skipped_decisions:
+            if decision.stable_name == "simple-auto-vectorize" and decision.reason == "cost budget exceeded":
+                found_cost_skip = true
+        expect(found_cost_skip).to_equal(true)
+
+        val ready = backend_optimization_plan_for_budget_with_facts("cranelift", "high", ["typed_mir", "vectorization_candidate", "alias_stable"])
+        expect(ready.recommendation_names.contains("simple-auto-vectorize")).to_equal(true)
+
+        val llvm = backend_optimization_plan_for_budget_with_facts("llvm", "high", ["typed_mir", "vectorization_candidate", "alias_stable", "llvm_backend_available"])
+        expect(llvm.recommendation_names.contains("simple-auto-vectorize")).to_equal(false)
+        var found_llvm_skip = false
+        for decision in llvm.skipped_decisions:
+            if decision.stable_name == "simple-auto-vectorize" and decision.reason == "llvm_runs_vectorizer_pipeline":
+                found_llvm_skip = true
+        expect(found_llvm_skip).to_equal(true)
