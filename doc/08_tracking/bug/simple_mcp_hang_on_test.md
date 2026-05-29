@@ -47,8 +47,8 @@ In `cli_passthrough.spl`, the `simple_test` dispatch now wraps the command to
 redirect its output to a `mktemp` temp file instead of the popen pipe:
 
 ```shell
-tmp=$(mktemp /tmp/simple_mcp_test_XXXXXX.txt)
-{ timeout 120 bin/simple test <args>; } > "$tmp" 2>&1
+tmp=$(mktemp /tmp/simple_mcp_test_XXXXXX)
+{ timeout 120 bin/simple test <args> < /dev/null; } > "$tmp" 2>&1
 EC=$?; cat "$tmp"; rm -f "$tmp"; exit $EC
 ```
 

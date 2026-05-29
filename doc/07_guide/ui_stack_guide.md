@@ -134,6 +134,29 @@ exported HTML only. Live taskbar/window manipulation, input forwarding, native
 window commands, and patch application require the host bridge until a
 non-JavaScript transport lands.
 
+### Common web render API
+
+Web-facing GUI backends share the renderer-neutral contract in
+`src/lib/common/ui/web_render_api.spl`. `WebRenderRequest` describes the HTML,
+CSS, JS, target, surface, viewport, and pixel-output mode; `WebRenderArtifact`
+records the resulting HTML or pixel payload; snapshot, patch, and input
+envelopes define the transport payloads used by Web, Electron, Tauri, and the
+pure Simple browser backend.
+
+Backend adapters may still own their host transport: WebSockets, stdin/stdout
+IPC, WebView messages, or framebuffer queues. They should not invent separate
+render payload shapes. Electron and Tauri snapshot/patch helpers are regression
+tested against the shared web backend helpers in
+`test/unit/app/ui/web_render_backend_api_spec.spl`.
+
+For static-shell and binary-cache planning, use
+`web_render_optimization_profile(req)`. It reports the cache schema, cache key,
+static-shell cacheability, dynamic-island count, and render plan. Dynamic
+markers currently include `data-simple-dynamic`, `data-live`, `data-ui-patch`,
+and WebSocket-backed JS. The first milestone is documented in
+`doc/04_architecture/html_css_binary_caching.md` and
+`doc/05_design/html_css_binary_caching.md`.
+
 ### Practical consequences
 
 - If a feature works in `ui.render`, it works in `ui.tui` and the

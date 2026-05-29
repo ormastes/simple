@@ -88,6 +88,28 @@ through the shared UI runtime.
 | `html` | Standalone HTML document with inline CSS |
 | `both` | Produces both text and HTML; text is printed to stdout, HTML is written to a `.html` file |
 
+## Shared Web Render Contract
+
+HTML-producing GUI paths should route through
+`src/lib/common/ui/web_render_api.spl` instead of building backend-local wire
+formats. The shared API owns:
+
+- `WebRenderRequest` for target, surface, viewport, HTML, CSS, JS, and pixel mode
+- `WebRenderArtifact` for HTML or pixel output
+- snapshot, patch, and input envelopes for Web, Electron, Tauri, and pure Simple
+- `web_render_optimization_profile(req)` for static-shell cache planning
+
+The optimization profile is the first boundary for HTML/CSS binary caching. It
+produces a deterministic cache key, classifies fully static shells versus
+dynamic islands, and lets Electron/Tauri IPC reuse already-built full HTML via
+`web_render_ipc_json_with_html(req, full_html)`.
+
+Related design artifacts:
+
+- `doc/04_architecture/html_css_binary_caching.md`
+- `doc/05_design/html_css_binary_caching.md`
+- `doc/06_spec/app/ui/feature/html_css_binary_caching_spec.spl`
+
 ---
 
 ## Environment Variables
