@@ -4,7 +4,7 @@
 extern fn rt_file_exists(path: text) -> bool
 
 use std.common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest}
-use app.ui.web.render_cache.{WebRenderPreparedStaticShellArtifact, WebRenderStaticArtifactCache, web_render_binary_cache_path, web_render_cache_path, web_render_cached_static_artifact, web_render_static_cache_lookup_html, web_render_static_shell_binary_artifact, web_render_static_shell_binary_decode, web_render_static_shell_binary_matches_request, web_render_static_shell_binary_to_artifact}
+use app.ui.web.render_cache.{WebRenderPreparedStaticShellArtifact, WebRenderStaticArtifactCache, web_render_binary_cache_path, web_render_cache_path, web_render_cached_static_artifact, web_render_static_cache_lookup_html, web_render_static_shell_binary_artifact, web_render_static_shell_binary_decode, web_render_static_shell_binary_matches_request, web_render_static_shell_binary_to_artifact, web_render_static_shell_command_payload_bytes, web_render_static_shell_commands}
 
 describe "persistent web render static cache":
 
@@ -57,6 +57,11 @@ describe "persistent web render static cache":
         expect(binary.encoded).to_start_with("SWBC1|")
         expect(binary.encoded).to_contain("|cmd=")
         expect(binary.command_count).to_be_greater_than(1)
+        expect(binary.viewport_w).to_equal(320)
+        expect(binary.viewport_h).to_equal(200)
+        expect(binary.style_rule_count).to_equal(1)
+        expect(binary.text_run_count).to_equal(2)
+        expect(binary.layout_bytes).to_be_greater_than(binary.command_count)
         expect(binary.encoded_bytes).to_be_less_than(binary.html_bytes)
 
     it "decodes and validates a compact static shell binary plan":
@@ -68,6 +73,9 @@ describe "persistent web render static cache":
         expect(decoded.cache_key_digest).to_equal(binary.cache_key_digest)
         expect(decoded.viewport).to_equal("320x200")
         expect(decoded.command_count).to_equal(binary.command_count)
+        expect(decoded.style_rule_count).to_equal(binary.style_rule_count)
+        expect(decoded.text_run_count).to_equal(binary.text_run_count)
+        expect(decoded.layout_bytes).to_equal(binary.layout_bytes)
         expect(web_render_static_shell_binary_matches_request(binary.encoded, req)).to_equal(true)
 
         val artifact = web_render_static_shell_binary_to_artifact(req, binary.encoded)
@@ -80,14 +88,30 @@ describe "persistent web render static cache":
         expect(miss.cache_hit).to_equal(false)
         expect(miss.cache_path).to_equal("swbc-miss")
 
+    it "decodes retained static shell draw commands":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Commands", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+        val binary = web_render_static_shell_binary_artifact(req)
+        val decoded = web_render_static_shell_binary_decode(binary.encoded)
+        val commands = web_render_static_shell_commands(decoded)
+        expect(commands.len()).to_equal(binary.command_count)
+        expect(commands[0].kind).to_equal("fill_rect")
+        expect(commands[0].w).to_equal(320)
+        expect(commands[0].h).to_equal(200)
+        expect(web_render_static_shell_command_payload_bytes(commands)).to_be_greater_than(0)
+        expect(web_render_static_shell_command_payload_bytes(commands)).to_be_less_than(binary.html_bytes)
+
     it "prepares a decoded static shell binary artifact for hot reuse":
         val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Prepared", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
         val binary = web_render_static_shell_binary_artifact(req)
         var prepared = WebRenderPreparedStaticShellArtifact.prepare(req, binary.encoded)
         expect(prepared.valid).to_equal(true)
+        expect(prepared.commands.len()).to_equal(binary.command_count)
         val first = prepared.cached_result()
         expect(first.cache_hit).to_equal(true)
         expect(first.cache_path).to_equal("swbc:prepared")
         val second = prepared.cached_result()
         expect(second.artifact.html).to_equal(first.artifact.html)
         expect(prepared.hits).to_equal(2)
+        val commands = prepared.command_list()
+        expect(commands.len()).to_equal(binary.command_count)
+        expect(prepared.command_hits).to_equal(1)

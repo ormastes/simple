@@ -16,5 +16,8 @@ Selected scope: first milestone from the prior plan, combining a shared-boundary
 - REQ-HCBC-010: Dynamic island requests shall not be persisted as fully static shell artifacts.
 - REQ-HCBC-011: Static-shell requests shall expose a compact binary-plan artifact that records cache key, viewport, source byte counts, dynamic count, command count, and render plan.
 - REQ-HCBC-012: The GTK comparison report shall include static-shell size evidence for generated full HTML, compact Simple static-shell plan, and GTK minimal executable.
+- REQ-HCBC-013: Decoded static-shell binary plans shall be preparable for repeated hot reuse without re-decoding on every frame.
+- REQ-HCBC-014: Static-shell binary plans shall include layout payload fields for viewport dimensions, style rule count, text run count, command count, and layout payload byte estimate.
+- REQ-HCBC-015: Prepared static-shell binary plans shall expose a retained draw-command list that can be reused without re-walking HTML.
 
 Out of scope for this milestone: full binary encoded DOM/style/layout payloads, GPU backend parity, shader binary generation, and full retained scene graph invalidation.

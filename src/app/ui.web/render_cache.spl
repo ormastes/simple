@@ -36,6 +36,11 @@ class WebRenderStaticShellBinaryArtifact:
     css_bytes: i32
     js_bytes: i32
     command_count: i32
+    viewport_w: i32
+    viewport_h: i32
+    style_rule_count: i32
+    text_run_count: i32
+    layout_bytes: i32
     cacheable: bool
 
 class WebRenderStaticShellBinaryDecoded:
@@ -48,19 +53,38 @@ class WebRenderStaticShellBinaryDecoded:
     js_bytes: i32
     dynamic_region_count: i32
     command_count: i32
+    viewport_w: i32
+    viewport_h: i32
+    style_rule_count: i32
+    text_run_count: i32
+    layout_bytes: i32
     render_plan: text
+
+class WebRenderStaticShellCommand:
+    kind: text
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    color: u32
 
 class WebRenderPreparedStaticShellArtifact:
     artifact: WebRenderArtifact
     profile: WebRenderOptimizationProfile
     decoded: WebRenderStaticShellBinaryDecoded
+    commands: [WebRenderStaticShellCommand]
     valid: bool
     hits: i32
+    command_hits: i32
 
     static fn prepare(req: WebRenderRequest, encoded: text) -> WebRenderPreparedStaticShellArtifact:
         val profile = web_render_optimization_profile(req)
         val decoded = web_render_static_shell_binary_decode(encoded)
         val valid = web_render_static_shell_binary_decoded_matches_request(decoded, req)
+        val commands = if valid:
+            web_render_static_shell_commands(decoded)
+        else:
+            []
         val artifact = if valid:
             _artifact_with_html(req, web_render_full_html(req))
         else:
@@ -69,8 +93,10 @@ class WebRenderPreparedStaticShellArtifact:
             artifact: artifact,
             profile: profile,
             decoded: decoded,
+            commands: commands,
             valid: valid,
-            hits: 0
+            hits: 0,
+            command_hits: 0
         )
 
     me cached_result() -> WebRenderCacheResult:
@@ -90,6 +116,12 @@ class WebRenderPreparedStaticShellArtifact:
             cache_stored: false,
             cache_path: "swbc-invalid"
         )
+
+    me command_list() -> [WebRenderStaticShellCommand]:
+        if not self.valid:
+            return []
+        self.command_hits = self.command_hits + 1
+        self.commands
 
 class WebRenderStaticArtifactCache:
     cache_dir: text
@@ -181,6 +213,33 @@ fn _web_render_static_shell_command_count(req: WebRenderRequest) -> i32:
     _web_render_count_tag(req.body_html, "h2") +
     _web_render_count_tag(req.body_html, "h3")
 
+fn _web_render_count_marker_text(value: text, marker: text) -> i32:
+    if marker == "":
+        return 0
+    var count = 0
+    var offset = 0i64
+    while offset < value.len():
+        val tail = value.substring(offset, value.len())
+        val found = tail.index_of(marker)
+        if found < 0:
+            return count
+        count = count + 1
+        offset = offset + found + marker.len()
+    count
+
+fn _web_render_static_shell_style_rule_count(req: WebRenderRequest) -> i32:
+    _web_render_count_marker_text(req.css, "{")
+
+fn _web_render_static_shell_text_run_count(req: WebRenderRequest) -> i32:
+    _web_render_count_tag(req.body_html, "p") +
+    _web_render_count_tag(req.body_html, "h1") +
+    _web_render_count_tag(req.body_html, "h2") +
+    _web_render_count_tag(req.body_html, "h3") +
+    _web_render_count_tag(req.body_html, "button")
+
+fn _web_render_static_shell_layout_bytes(command_count: i32, style_rule_count: i32, text_run_count: i32) -> i32:
+    16 + (command_count * 8) + (style_rule_count * 4) + (text_run_count * 6)
+
 fn _swbc_field(encoded: text, name: text) -> text:
     val marker = name + "="
     for part in encoded.split("|"):
@@ -197,15 +256,22 @@ fn _swbc_i32(encoded: text, name: text) -> i32:
 fn web_render_static_shell_binary_artifact(req: WebRenderRequest) -> WebRenderStaticShellBinaryArtifact:
     val profile = web_render_optimization_profile(req)
     val command_count = _web_render_static_shell_command_count(req)
+    val style_rule_count = _web_render_static_shell_style_rule_count(req)
+    val text_run_count = _web_render_static_shell_text_run_count(req)
+    val layout_bytes = _web_render_static_shell_layout_bytes(command_count, style_rule_count, text_run_count)
     val digest = sha256_text(profile.cache_key)
     val encoded = "SWBC1|" +
         "key=" + digest +
-        "|viewport=" + str(req.viewport_w) + "x" + str(req.viewport_h) +
+        "|vw=" + str(req.viewport_w) +
+        "|vh=" + str(req.viewport_h) +
         "|html=" + str(web_render_full_html(req).len()) +
         "|css=" + str(req.css.len()) +
         "|js=" + str(req.js.len()) +
         "|dyn=" + str(profile.dynamic_region_count) +
         "|cmd=" + str(command_count) +
+        "|style=" + str(style_rule_count) +
+        "|text=" + str(text_run_count) +
+        "|layout=" + str(layout_bytes) +
         "|plan=" + profile.render_plan
     WebRenderStaticShellBinaryArtifact(
         schema: "SWBC1",
@@ -217,6 +283,11 @@ fn web_render_static_shell_binary_artifact(req: WebRenderRequest) -> WebRenderSt
         css_bytes: req.css.len(),
         js_bytes: req.js.len(),
         command_count: command_count,
+        viewport_w: req.viewport_w,
+        viewport_h: req.viewport_h,
+        style_rule_count: style_rule_count,
+        text_run_count: text_run_count,
+        layout_bytes: layout_bytes,
         cacheable: profile.cacheable_static_shell
     )
 
@@ -226,14 +297,43 @@ fn web_render_static_shell_binary_decode(encoded: text) -> WebRenderStaticShellB
         valid: valid,
         schema: if valid: "SWBC1" else: "",
         cache_key_digest: _swbc_field(encoded, "key"),
-        viewport: _swbc_field(encoded, "viewport"),
+        viewport: _swbc_field(encoded, "vw") + "x" + _swbc_field(encoded, "vh"),
         html_bytes: _swbc_i32(encoded, "html"),
         css_bytes: _swbc_i32(encoded, "css"),
         js_bytes: _swbc_i32(encoded, "js"),
         dynamic_region_count: _swbc_i32(encoded, "dyn"),
         command_count: _swbc_i32(encoded, "cmd"),
+        viewport_w: _swbc_i32(encoded, "vw"),
+        viewport_h: _swbc_i32(encoded, "vh"),
+        style_rule_count: _swbc_i32(encoded, "style"),
+        text_run_count: _swbc_i32(encoded, "text"),
+        layout_bytes: _swbc_i32(encoded, "layout"),
         render_plan: _swbc_field(encoded, "plan")
     )
+
+fn web_render_static_shell_commands(decoded: WebRenderStaticShellBinaryDecoded) -> [WebRenderStaticShellCommand]:
+    if not decoded.valid:
+        return []
+    var commands: [WebRenderStaticShellCommand] = []
+    val width = if decoded.viewport_w > 0: decoded.viewport_w else: 1
+    val height = if decoded.viewport_h > 0: decoded.viewport_h else: 1
+    commands.push(WebRenderStaticShellCommand(kind: "fill_rect", x: 0, y: 0, w: width, h: height, color: 0xFFFFFFFFu32))
+    val slots = if decoded.command_count > 1: decoded.command_count - 1 else: 0
+    val slot_h = if slots > 0 and height / (slots + 1) > 0: height / (slots + 1) else: 1
+    var i = 0
+    while i < slots:
+        val inset = 4 + (i * 2)
+        val y = 4 + (i * slot_h)
+        val w = if width - (inset * 2) > 1: width - (inset * 2) else: 1
+        val h = if slot_h > 2: slot_h - 2 else: 1
+        val color = if i % 2 == 0: 0xFFE5E7EBu32 else: 0xFFD1D5DBu32
+        commands.push(WebRenderStaticShellCommand(kind: "fill_rect", x: inset, y: y, w: w, h: h, color: color))
+        i = i + 1
+    commands
+
+fn web_render_static_shell_command_payload_bytes(commands: [WebRenderStaticShellCommand]) -> i32:
+    # kind enum + x/y/w/h + color, compact fixed-width representation.
+    commands.len() * 18
 
 fn web_render_static_shell_binary_matches_request(encoded: text, req: WebRenderRequest) -> bool:
     val decoded = web_render_static_shell_binary_decode(encoded)
@@ -243,7 +343,8 @@ fn web_render_static_shell_binary_decoded_matches_request(decoded: WebRenderStat
     if not decoded.valid:
         return false
     decoded.cache_key_digest == sha256_text(web_render_cache_key(req)) and
-    decoded.viewport == str(req.viewport_w) + "x" + str(req.viewport_h) and
+    decoded.viewport_w == req.viewport_w and
+    decoded.viewport_h == req.viewport_h and
     decoded.dynamic_region_count == 0
 
 fn web_render_static_shell_binary_to_artifact(req: WebRenderRequest, encoded: text) -> WebRenderCacheResult:

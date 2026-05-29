@@ -55,7 +55,7 @@ extern fn rt_time_now_unix_micros() -> i64
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_renderer.{simple_web_render_html_to_pixels}
 use std.common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_optimization_profile}
-use app.ui.web.render_cache.{WebRenderStaticArtifactCache, web_render_static_shell_binary_artifact, web_render_static_shell_binary_to_artifact}
+use app.ui.web.render_cache.{WebRenderPreparedStaticShellArtifact, WebRenderStaticArtifactCache, web_render_static_shell_binary_artifact, web_render_static_shell_command_payload_bytes}
 
 fn main() -> i64:
     val html = "<html><body><main class='simple-web-accent'><section class='static-shell'><h1>Simple GUI</h1><p>static shell</p></section><section data-simple-dynamic='pane'>dynamic pane</section></main></body></html>"
@@ -63,13 +63,17 @@ fn main() -> i64:
     val profile = web_render_optimization_profile(req)
     val static_req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Simple Static GUI", "<main><section class='static-shell'><h1>Simple GUI</h1><p>cacheable static shell</p></section></main>", ".static-shell{contain:layout paint style}", "", 320, 200)
     val binary = web_render_static_shell_binary_artifact(static_req)
+    var prepared_swbc = WebRenderPreparedStaticShellArtifact.prepare(static_req, binary.encoded)
     val swbc_start = rt_time_now_unix_micros()
     var si = 0
     var swbc_hits = 0
+    var command_total = 0
     while si < $SIMPLE_ITERATIONS:
-        val swbc_artifact = web_render_static_shell_binary_to_artifact(static_req, binary.encoded)
+        val swbc_artifact = prepared_swbc.cached_result()
         if swbc_artifact.cache_hit:
             swbc_hits = swbc_hits + 1
+        val commands = prepared_swbc.command_list()
+        command_total = command_total + commands.len()
         si = si + 1
     val swbc_elapsed = rt_time_now_unix_micros() - swbc_start
     val cache_dir = "build/gtk_gui_size_speed_baseline/simple_render_cache"
@@ -112,7 +116,14 @@ fn main() -> i64:
     print "simple_static_html_bytes={binary.html_bytes}"
     print "simple_static_binary_plan_bytes={binary.encoded_bytes}"
     print "simple_static_binary_commands={binary.command_count}"
+    print "simple_static_layout_payload_bytes={binary.layout_bytes}"
+    print "simple_static_command_payload_bytes={web_render_static_shell_command_payload_bytes(prepared_swbc.commands)}"
+    print "simple_static_style_rules={binary.style_rule_count}"
+    print "simple_static_text_runs={binary.text_run_count}"
     print "simple_static_swbc_hit_iterations={swbc_hits}"
+    print "simple_static_swbc_prepared_hits={prepared_swbc.hits}"
+    print "simple_static_command_reuse_count={command_total}"
+    print "simple_static_command_reuse_hits={prepared_swbc.command_hits}"
     print "simple_static_swbc_total_us={swbc_elapsed}"
     return 0
 EOF
@@ -124,6 +135,8 @@ simple_cache_total_us="n/a"
 simple_swbc_total_us="n/a"
 simple_static_html_bytes="n/a"
 simple_static_binary_plan_bytes="n/a"
+simple_static_layout_payload_bytes="n/a"
+simple_static_command_payload_bytes="n/a"
 simple_bytes="n/a"
 
 if [ -x "$SIMPLE_BINARY" ]; then
@@ -134,6 +147,8 @@ if [ -x "$SIMPLE_BINARY" ]; then
         simple_swbc_total_us="$(field_of simple_static_swbc_total_us "$SIMPLE_OUT")"
         simple_static_html_bytes="$(field_of simple_static_html_bytes "$SIMPLE_OUT")"
         simple_static_binary_plan_bytes="$(field_of simple_static_binary_plan_bytes "$SIMPLE_OUT")"
+        simple_static_layout_payload_bytes="$(field_of simple_static_layout_payload_bytes "$SIMPLE_OUT")"
+        simple_static_command_payload_bytes="$(field_of simple_static_command_payload_bytes "$SIMPLE_OUT")"
     else
         simple_status="failed"
         simple_reason="simple_run_failed"
@@ -245,7 +260,7 @@ fi
     echo "|---|---|---:|---:|---:|---|"
     echo "| Simple web renderer | ${simple_status:-unavailable} | $simple_bytes | $SIMPLE_ITERATIONS | $simple_total_us | ${simple_reason:-render loop via Simple software renderer} |"
     echo "| Simple static cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_cache_total_us | persistent HTML artifact cache hit loop |"
-    echo "| Simple SWBC decode | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_swbc_total_us | compact static-shell plan decode loop |"
+    echo "| Simple SWBC prepared reuse | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_swbc_total_us | decoded compact static-shell plan reuse loop |"
     echo "| GTK | $gtk_status | $gtk_bytes | $GTK_ITERATIONS | $gtk_total_us | ${gtk_reason:-widget construction loop; requires display} |"
     echo
     echo "## Static Shell Size"
@@ -254,6 +269,8 @@ fi
     echo "|---|---:|"
     echo "| Simple generated full HTML | $simple_static_html_bytes |"
     echo "| Simple compact static-shell plan | $simple_static_binary_plan_bytes |"
+    echo "| Simple decoded layout payload estimate | $simple_static_layout_payload_bytes |"
+    echo "| Simple retained command payload | $simple_static_command_payload_bytes |"
     echo "| GTK minimal executable | $gtk_bytes |"
     echo
     echo "## Simple Output"
@@ -288,6 +305,8 @@ echo "simple_cache_total_us=$simple_cache_total_us"
 echo "simple_swbc_total_us=$simple_swbc_total_us"
 echo "simple_static_html_bytes=$simple_static_html_bytes"
 echo "simple_static_binary_plan_bytes=$simple_static_binary_plan_bytes"
+echo "simple_static_layout_payload_bytes=$simple_static_layout_payload_bytes"
+echo "simple_static_command_payload_bytes=$simple_static_command_payload_bytes"
 echo "simple_bytes=$simple_bytes"
 echo "gtk_status=$gtk_status"
 echo "gtk_bytes=$gtk_bytes"

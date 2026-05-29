@@ -10,14 +10,14 @@ Use `common.ui.web_render_api` as the ownership boundary for render cache identi
 
 1. Shared API layer: request/artifact shape, cache schema version, cache key, static-shell profile, dynamic-island count.
 2. Static cache layer: persistent HTML artifact lookup/store for cacheable static shells, keyed by the shared cache key digest.
-3. Static binary-plan layer: compact `SWBC1` render-plan artifact for static shells, used as the future binary DOM/style/layout boundary.
+3. Static binary-plan layer: compact `SWBC1` render-plan artifact for static shells, with decode/validate, layout payload fields, retained draw commands, and prepared reuse support for frame-hot paths.
 4. Renderer layer: HTML/CSS parsing, static shell compilation, future binary artifact decode/encode, retained scene graph.
 5. Host adapter layer: web socket, IPC, compositor, and native host details. This layer can transport artifacts but does not own cache identity.
 6. Benchmark/report layer: host-specific comparison scripts for Simple versus GTK/Qt/etc.
 
 ## First Milestone
 
-The first implementation exposes deterministic cache metadata, removes duplicate full-HTML generation for Electron/Tauri IPC artifact creation, adds `src/app/ui.web/render_cache.spl` as a persistent static-shell HTML cache with a hot in-memory front layer, and emits compact `SWBC1` static-shell binary-plan artifacts. Dynamic-island requests bypass static storage until retained invalidation and full binary artifact storage are designed.
+The first implementation exposes deterministic cache metadata, removes duplicate full-HTML generation for Electron/Tauri IPC artifact creation, adds `src/app/ui.web/render_cache.spl` as a persistent static-shell HTML cache with a hot in-memory front layer, emits compact `SWBC1` static-shell binary-plan artifacts with layout payload fields, and supports retained draw-command reuse after one decode/validation step. Dynamic-island requests bypass static storage until retained invalidation and full binary artifact storage are designed.
 
 ## Future Milestones
 
