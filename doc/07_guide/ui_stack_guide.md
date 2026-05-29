@@ -233,7 +233,46 @@ display), it's a `CompositorBackend` + `InputBackend` pair, not a
   `SurfaceManager` for per-surface state and `WidgetStore` for
   widget-local state.
 
-## 9. Pointers
+## 9. Running an on-screen GUI window on macOS
+
+The pure-Simple / hosted-winit GUI paths present pixels via
+`rt_winit_window_present_rgba`. On macOS a GUI program launched as a bare CLI
+process **will not show a window**: the process is never registered with the
+window server (`lsappinfo` shows it unregistered) and the window is created but
+never composites. Two things are required — both pure Simple / packaging, **no
+Rust-seed change**:
+
+1. **Poll the event loop continuously** in the app's frame loop — call
+   `rt_winit_event_loop_poll_events(el, 1)` in a tight loop, never
+   `rt_thread_sleep`. The interpreter owns the main thread, so a sleep leaves
+   AppKit with no handler between frames and the window never composites.
+   Present once, then re-present occasionally for static content. Examples:
+   `examples/ui/web_engine2d_gui.spl`,
+   `examples/simple_os/hosted/hosted_wm_software.spl`.
+
+2. **Launch via a `.app` bundle** so LaunchServices registers the process in the
+   Aqua session. Use the helper:
+
+   ```bash
+   scripts/macos-gui-run.shs examples/ui/web_engine2d_gui.spl
+   ```
+
+   It builds a throwaway `.app` around the gui driver (binary copied in — it is
+   self-contained), supplies env via `Info.plist` `LSEnvironment`, `open`s it,
+   and nudges the window on-screen (winit may place small windows off-screen).
+   An `exec`-wrapper bundle does **not** work (exec to an out-of-bundle binary
+   de-registers). Needs a gui-feature driver:
+   `cd src/compiler_rust && CARGO_TARGET_DIR=target/gui cargo build -p simple-driver --features gui`.
+
+Notes:
+- Linux/Windows run a continuous `event_loop.run()` on a dedicated thread and do
+  not need the `.app` bundle.
+- The per-pixel software render (e.g. the host WM at 1024×768) is slow in the
+  interpreter; verify at small resolution or use the compiled path.
+- Full root cause + recipe:
+  [`doc/09_bugs/macos_winit_window_not_displayed_2026-05-28.md`](../09_bugs/macos_winit_window_not_displayed_2026-05-28.md).
+
+## 10. Pointers
 
 - Session impl: `src/lib/common/ui/session.spl`
 - Backend trait + factory: `src/lib/common/ui/backend.spl`,
@@ -248,3 +287,4 @@ display), it's a `CompositorBackend` + `InputBackend` pair, not a
 - Work plan: [`doc/03_plan/gui_drawing_layer_variations.md`](../03_plan/gui_drawing_layer_variations.md)
 - Cross-backend parity harness: `src/app/wm_compare/`
 - Semantic UI access surface: [tooling/ui_access.md](tooling/ui_access.md)
+- macOS on-screen GUI launcher: `scripts/macos-gui-run.shs` (see §9)
