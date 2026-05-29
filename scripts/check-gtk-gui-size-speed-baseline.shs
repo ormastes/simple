@@ -55,7 +55,7 @@ extern fn rt_time_now_unix_micros() -> i64
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_renderer.{simple_web_render_html_to_pixels}
 use std.common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_optimization_profile}
-use app.ui.web.render_cache.{WebRenderPreparedStaticShellArtifact, WebRenderStaticArtifactCache, web_render_static_shell_binary_artifact, web_render_static_shell_command_payload_bytes}
+use app.ui.web.render_cache.{WebRenderPreparedStaticShellArtifact, WebRenderPreparedStaticShellPlan, WebRenderStaticArtifactCache, web_render_static_shell_binary_artifact, web_render_static_shell_command_payload_bytes}
 
 fn main() -> i64:
     val html = "<html><body><main class='simple-web-accent'><section class='static-shell'><h1>Simple GUI</h1><p>static shell</p></section><section data-simple-dynamic='pane'>dynamic pane</section></main></body></html>"
@@ -63,6 +63,15 @@ fn main() -> i64:
     val profile = web_render_optimization_profile(req)
     val static_req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Simple Static GUI", "<main><section class='static-shell'><h1>Simple GUI</h1><p>cacheable static shell</p></section></main>", ".static-shell{contain:layout paint style}", "", 320, 200)
     val binary = web_render_static_shell_binary_artifact(static_req)
+    var command_plan = WebRenderPreparedStaticShellPlan.prepare(static_req, binary.encoded)
+    val plan_start = rt_time_now_unix_micros()
+    var pi = 0
+    var plan_command_total = 0
+    while pi < $SIMPLE_ITERATIONS:
+        val plan_commands = command_plan.command_list()
+        plan_command_total = plan_command_total + plan_commands.len()
+        pi = pi + 1
+    val plan_elapsed = rt_time_now_unix_micros() - plan_start
     var prepared_swbc = WebRenderPreparedStaticShellArtifact.prepare(static_req, binary.encoded)
     val swbc_start = rt_time_now_unix_micros()
     var si = 0
@@ -125,6 +134,10 @@ fn main() -> i64:
     print "simple_static_command_reuse_count={command_total}"
     print "simple_static_command_reuse_hits={prepared_swbc.command_hits}"
     print "simple_static_swbc_total_us={swbc_elapsed}"
+    print "simple_static_command_plan_valid={command_plan.valid}"
+    print "simple_static_command_plan_count={plan_command_total}"
+    print "simple_static_command_plan_hits={command_plan.command_hits}"
+    print "simple_static_command_plan_total_us={plan_elapsed}"
     return 0
 EOF
 
@@ -133,6 +146,7 @@ simple_reason=""
 simple_total_us="n/a"
 simple_cache_total_us="n/a"
 simple_swbc_total_us="n/a"
+simple_command_plan_total_us="n/a"
 simple_static_html_bytes="n/a"
 simple_static_binary_plan_bytes="n/a"
 simple_static_layout_payload_bytes="n/a"
@@ -145,6 +159,7 @@ if [ -x "$SIMPLE_BINARY" ]; then
         simple_total_us="$(field_of simple_render_total_us "$SIMPLE_OUT")"
         simple_cache_total_us="$(field_of simple_static_cache_total_us "$SIMPLE_OUT")"
         simple_swbc_total_us="$(field_of simple_static_swbc_total_us "$SIMPLE_OUT")"
+        simple_command_plan_total_us="$(field_of simple_static_command_plan_total_us "$SIMPLE_OUT")"
         simple_static_html_bytes="$(field_of simple_static_html_bytes "$SIMPLE_OUT")"
         simple_static_binary_plan_bytes="$(field_of simple_static_binary_plan_bytes "$SIMPLE_OUT")"
         simple_static_layout_payload_bytes="$(field_of simple_static_layout_payload_bytes "$SIMPLE_OUT")"
@@ -261,6 +276,7 @@ fi
     echo "| Simple web renderer | ${simple_status:-unavailable} | $simple_bytes | $SIMPLE_ITERATIONS | $simple_total_us | ${simple_reason:-render loop via Simple software renderer} |"
     echo "| Simple static cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_cache_total_us | persistent HTML artifact cache hit loop |"
     echo "| Simple SWBC prepared reuse | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_swbc_total_us | decoded compact static-shell plan reuse loop |"
+    echo "| Simple SWBC command plan | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_command_plan_total_us | decoded command-only static-shell plan, no HTML artifact |"
     echo "| GTK | $gtk_status | $gtk_bytes | $GTK_ITERATIONS | $gtk_total_us | ${gtk_reason:-widget construction loop; requires display} |"
     echo
     echo "## Static Shell Size"
@@ -303,6 +319,7 @@ echo "simple_status=${simple_status:-unavailable}"
 echo "simple_total_us=$simple_total_us"
 echo "simple_cache_total_us=$simple_cache_total_us"
 echo "simple_swbc_total_us=$simple_swbc_total_us"
+echo "simple_command_plan_total_us=$simple_command_plan_total_us"
 echo "simple_static_html_bytes=$simple_static_html_bytes"
 echo "simple_static_binary_plan_bytes=$simple_static_binary_plan_bytes"
 echo "simple_static_layout_payload_bytes=$simple_static_layout_payload_bytes"
