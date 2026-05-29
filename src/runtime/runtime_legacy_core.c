@@ -286,7 +286,10 @@ int rt_file_append(const char* path, const char* content) {
     return n == len ? 1 : 0;
 }
 
-int rt_file_exists(const char* path) {
+/* weak: runtime_native.c provides the strong definition; both objects are
+ * linked together in the core-c-bootstrap bundle, so this must not duplicate
+ * the exported symbol. */
+__attribute__((weak)) int rt_file_exists(const char* path) {
     if (!path || !*path) return 0;
 #if defined(_WIN32)
     DWORD attrs = GetFileAttributesA(path);
