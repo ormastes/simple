@@ -207,53 +207,74 @@ branches.
 `val` arrays return nil in the interpreter). Correctness verified: checksums
 match `bench_ctype_inline.spl` for all nine functions.
 
-**Discovery — module-level `val` array nil bug:** `val TABLE = [...]` at module
-scope returns nil for all elements in the interpreter (segfault on arithmetic).
-The table must be built as a function-local `var` returned and captured before
-timing. This is a separate interpreter bug worth tracking.
+**Discovery — same-file module-level `val` array nil bug:** `val TABLE = [...]`
+at module scope in a single-file program returns nil for all elements in the
+interpreter (segfault on arithmetic with nil). Both direct index (`TABLE[i]`)
+and copy-to-local (`var t = TABLE; t[i]`) return nil in the same-file case.
+Cross-module `val` arrays (imported via `use`) work correctly — this is why
+bcrypt's `var s0 = BLOWFISH_S0_INIT` works (types.spl is a separate module).
+The benchmark works around this by building the table with a `build_flag_table()`
+function that returns a fresh local `[i64]` — the return copy is the table.
+This is a separate interpreter bug worth tracking independently.
+
+**Benchmark design limitation — results not directly shippable:** The benchmark
+amortizes the `build_flag_table()` call across 128M lookups. In a real library
+call (`is_space(ch)` called once per char), there is no amortization — each call
+would need its own 256-element value-type copy, which is prohibitively expensive.
+A shippable form would also require the `ch < 0 or ch >= 256` guard, putting a
+branch back before every lookup and eliminating the composite advantage.
+Therefore the LUT/Inline ratios below **measure the lookup kernel only** and
+do not represent achievable library performance.
 
 **Results (1M iters × 128 range, Cranelift native, single sample):**
+C reference ran at 1k iters (different env-var name in C source); C ops/ms
+numbers are noisy for fast functions — treat LUT/C ratios as approximate (±30%).
 
-| Function   | C (ops/ms) | Inline (ops/ms) | LUT (ops/ms) | Inline/C | LUT/C | LUT/Inline |
-|------------|-----------|-----------------|--------------|----------|-------|------------|
-| is_digit   | 1,855,072 |         765,399 |      416,120 |    0.41x | 0.22x |      0.54x |
-| is_upper   | 1,580,246 |         960,405 |      404,456 |    0.61x | 0.26x |      0.42x |
-| is_lower   | 1,280,000 |         670,571 |      381,107 |    0.52x | 0.30x |      0.57x |
-| is_alpha   | 1,488,372 |         391,999 |      405,548 |    0.26x | 0.27x |      1.03x |
-| is_alnum   | 2,206,896 |         260,580 |      338,022 |    0.12x | 0.15x |      1.30x |
-| is_xdigit  | 1,066,666 |         261,199 |      397,856 |    0.24x | 0.37x |      1.52x |
-| is_space   | 3,368,421 |         292,292 |      367,515 |    0.09x | 0.11x |      1.26x |
-| to_lower   | 2,844,444 |         739,444 |      511,488 |    0.26x | 0.18x |      0.69x |
-| to_upper   | 3,121,951 |         767,091 |      449,113 |    0.25x | 0.14x |      0.59x |
+| Function   | C (ops/ms) | Inline (ops/ms) | LUT (ops/ms) | Inline/C | LUT/C  | LUT/Inline |
+|------------|-----------|-----------------|--------------|----------|--------|------------|
+| is_digit   | 1,855,072 |         765,399 |      416,120 |    0.41x | ≈0.22x |      0.54x |
+| is_upper   | 1,580,246 |         960,405 |      404,456 |    0.61x | ≈0.26x |      0.42x |
+| is_lower   | 1,280,000 |         670,571 |      381,107 |    0.52x | ≈0.30x |      0.57x |
+| is_alpha   | 1,488,372 |         391,999 |      405,548 |    0.26x | ≈0.27x |      1.03x |
+| is_alnum   | 2,206,896 |         260,580 |      338,022 |    0.12x | ≈0.15x |      1.30x |
+| is_xdigit  | 1,066,666 |         261,199 |      397,856 |    0.24x | ≈0.37x |      1.52x |
+| is_space   | 3,368,421 |         292,292 |      367,515 |    0.09x | ≈0.11x |      1.26x |
+| to_lower   | 2,844,444 |         739,444 |      511,488 |    0.26x | ≈0.18x |      0.69x |
+| to_upper   | 3,121,951 |         767,091 |      449,113 |    0.25x | ≈0.14x |      0.59x |
 
 **Findings:**
 
-- **Composite functions benefit (is_alpha, is_alnum, is_xdigit, is_space):**
-  LUT is 1.03–1.52x faster than inline branch-chain. Replacing 3–6 short-circuit
-  branches with one array load + bitwise AND is a real win for Cranelift.
-  Improvement over inline: +25% for is_alnum, +52% for is_xdigit, +26% for is_space.
+- **Composite lookup kernel faster (is_alpha, is_alnum, is_xdigit, is_space):**
+  The LUT kernel (array load + bitwise AND, no guard) is 1.03–1.52x faster than
+  the inline branch-chain kernel. +25% for is_alnum, +52% for is_xdigit, +26%
+  for is_space. This confirms Cranelift branch-chain lowering is the bottleneck
+  for composite predicates — but only in the amortized kernel form.
 
-- **Leaf functions regress (is_digit, is_upper, is_lower):** LUT is 0.42–0.57x
-  of inline. The bounds-check + array load + bitmasking costs more than two
-  direct integer compares. The table overhead overwhelms the branch savings for
-  simple range checks.
+- **Leaf functions regress (is_digit, is_upper, is_lower):** LUT 0.42–0.57x of
+  inline. Array load + bitmasking costs more than two direct integer compares.
+  The lookup overhead exceeds the branch savings for simple range checks.
 
 - **to_lower / to_upper regress:** LUT 0.59–0.69x of inline. Array lookup plus
-  setup overhead exceeds the simple conditional add/subtract.
+  one-time setup overhead exceeds simple conditional add/subtract.
 
-- **Does not close the gap to C:** LUT ratios vs C are 0.11–0.37x — worse or
-  comparable to the inline baseline. The bottleneck remains Cranelift's general
-  code quality, not branch count alone. C -O2 benefits from LTO, loop unrolling,
-  and vectorization that LUT cannot replicate at the Simple source level.
+- **Does not close the gap to C:** Even the best LUT result (is_xdigit ≈0.37x)
+  falls far short of 0.5x C. C -O2 benefits from LTO, loop unrolling, and
+  SIMD vectorization that no pure-Simple source change can replicate.
 
-- **Scope of fix:** LUT addresses problem #2 (composite branch-chain codegen)
-  partially, but at the cost of regressions on leaf functions. It does not
-  address problem #1 (cross-module call overhead). Adopting LUT selectively only
-  for composite predicates is possible but the absolute C-ratio improvement is
-  marginal (0.09→0.11x for is_space).
+- **Not deployable as a library fix:** The benchmark's amortized setup and
+  missing non-ASCII guard mean the measured gains do not translate to real
+  `ctype.spl` function bodies. A shippable LUT would add per-call cost that
+  erases the composite advantage.
 
-**Conclusion:** The lookup-table approach is a pure-Simple dead end for this
-bug. The composite function improvements (22–52% over inline) are real but still
-leave all functions below 0.40x C. The root cause remains Cranelift codegen
-quality and the absence of cross-module inlining. No further pure-Simple source
-change is worth pursuing here.
+- **Scope of fix:** The LUT experiment confirms that the pure-Simple source
+  ceiling for problem #2 (composite branch-chain codegen) is ~1.5x over the
+  current ctype.spl — still leaving is_space at 0.11x C. Problem #1
+  (cross-module call overhead) is untouched. There is no pure-Simple path to
+  the 0.5x C floor.
+
+**Conclusion:** The lookup-table approach is a confirmed pure-Simple dead end.
+The composite kernel improvement (22–52% over inline branch-chain in the
+benchmark harness) is real but not shippable and does not close the gap to C.
+`ctype.spl` is unchanged. The root cause remains Cranelift codegen quality and
+absent cross-module inlining. No further pure-Simple source change is worth
+pursuing here.
