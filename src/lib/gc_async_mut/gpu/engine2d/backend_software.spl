@@ -16,6 +16,7 @@ use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend, lerp_color}
 use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, render_text_to_buffer}
 use std.gpu.engine2d.simd_kernels.{fill_span, copy_span, alpha_blend_span}
+use std.nogc_sync_mut.gpu.engine2d.simd_provider.{record_simd_fill_hit}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -130,10 +131,12 @@ impl RenderBackend for SoftwareBackend:
         self.initialized = false
 
     me clear(color: u32):
+        val fill_color = color
+        record_simd_fill_hit()
         var i = 0
         val total = self.w * self.h
         while i < total:
-            self.buf[i] = color
+            self.buf[i] = fill_color
             i = i + 1
         var dirty = 0
         while dirty < self.dirty_tiles.len():
@@ -155,16 +158,17 @@ impl RenderBackend for SoftwareBackend:
                 _sw_hline_blend(self, x, row, w, color)
             else:
                 if row >= 0 and row < self.h:
-                    var start_x = x
-                    var end_x = x + w
-                    if start_x < 0:
-                        start_x = 0
-                    if end_x > self.w:
-                        end_x = self.w
-                    var col = start_x
-                    while col < end_x:
-                        self.buf[row * self.w + col] = color
-                        col = col + 1
+                    val fill_color = color
+                    val clipped = _clip_span(self, x, row, w)
+                    val count = clipped.2
+                    if count > 0:
+                        record_simd_fill_hit()
+                        var col = clipped.0
+                        val end_x = clipped.1
+                        while col < end_x:
+                            self.buf[row * self.w + col] = fill_color
+                            col = col + 1
+                        _mark_span_dirty(self, clipped.0, row, count)
             row = row + 1
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
