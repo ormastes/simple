@@ -33,6 +33,14 @@ fn _hex_color_at(s: text, offset: i64, fallback: u32) -> u32:
         return 0xFF000000u32 | ((_hex_digit_value(s.char_at(offset + 1)) * 17u32) << 16) | ((_hex_digit_value(s.char_at(offset + 2)) * 17u32) << 8) | (_hex_digit_value(s.char_at(offset + 3)) * 17u32)
     fallback
 
+fn _find_char_from(s: text, marker: text, start: i64) -> i64:
+    var idx = start
+    while idx < s.len():
+        if s.char_at(idx) == marker:
+            return idx
+        idx = idx + 1
+    -1
+
 fn _first_hex_color_after(html: text, marker: text, fallback: u32) -> u32:
     val start = html.index_of(marker)
     if start < 0:
@@ -75,6 +83,35 @@ fn _last_hex_color_after(html: text, marker: text, fallback: u32) -> u32:
             color = _hex_color_at(after, hash, color)
         pos = pos + found + marker.len()
     color
+
+fn _custom_property_color(html: text, property_name: text, fallback: u32) -> u32:
+    if property_name == "":
+        return fallback
+    val marker = property_name + ":"
+    val pos = html.index_of(marker)
+    if pos < 0:
+        return fallback
+    val tail = html.substring(pos + marker.len(), html.len())
+    val hash = tail.index_of("#")
+    if hash < 0:
+        return fallback
+    _hex_color_at(tail, hash, fallback)
+
+fn _first_var_color_after(html: text, marker: text, fallback: u32) -> u32:
+    val start = html.index_of(marker)
+    if start < 0:
+        return fallback
+    val tail = html.substring(start + marker.len(), html.len())
+    val var_pos = tail.index_of("var(")
+    if var_pos < 0:
+        return fallback
+    val after_var = tail.substring(var_pos + 4, tail.len())
+    val close = after_var.index_of(")")
+    if close <= 0:
+        return fallback
+    val raw_property = after_var.substring(0, close)
+    val property_name = raw_property.trim()
+    _custom_property_color(html, property_name, fallback)
 
 fn _css_rgb_color(html: text, marker: text, fallback: u32) -> u32:
     val start = html.index_of(marker)
@@ -147,20 +184,26 @@ fn _html_background_color(html: text) -> u32:
         val bg_hex = _first_hex_color_after(html, "background-color", 0xFFFFFFFFu32)
         if bg_hex != 0xFFFFFFFFu32:
             return bg_hex
+        val bg_var = _first_var_color_after(html, "background-color", 0xFFFFFFFFu32)
+        if bg_var != 0xFFFFFFFFu32:
+            return bg_var
         return _first_hex_color_after(html, "background:", 0xFFFFFFFFu32)
     0xFFFFFFFFu32
 
 fn _find_next_visual_tag(html: text, start: i64) -> i64:
-    val d = html.index_of("<div", start)
-    val s = html.index_of("<section", start)
-    val sp = html.index_of("<span", start)
+    if start >= html.len():
+        return -1
+    val tail = html.substring(start, html.len())
+    val d_rel = tail.index_of("<div")
+    val s_rel = tail.index_of("<section")
+    val sp_rel = tail.index_of("<span")
     var best: i64 = -1
-    if d >= 0:
-        best = d
-    if s >= 0 and (best < 0 or s < best):
-        best = s
-    if sp >= 0 and (best < 0 or sp < best):
-        best = sp
+    if d_rel >= 0:
+        best = start + d_rel
+    if s_rel >= 0 and (best < 0 or start + s_rel < best):
+        best = start + s_rel
+    if sp_rel >= 0 and (best < 0 or start + sp_rel < best):
+        best = start + sp_rel
     best
 
 fn _attr_value(tag: text, name: text) -> text:
@@ -196,7 +239,7 @@ fn _first_block_tag(html: text) -> text:
     val block = _find_next_visual_tag(html, 0)
     if block < 0:
         return ""
-    val end = html.index_of(">", block)
+    val end = _find_char_from(html, ">", block)
     if end < 0:
         return ""
     html.substring(block, end + 1)
@@ -214,7 +257,8 @@ fn _last_rule_hex_color(html: text, selector: text, fallback: u32) -> u32:
     var color = fallback
     var pos: i64 = 0
     while pos < html.len():
-        val found_rel = html.substring(pos, html.len()).index_of(selector)
+        val scan_tail = html.substring(pos, html.len())
+        val found_rel = scan_tail.index_of(selector)
         if found_rel < 0:
             return color
         val found = pos + found_rel
@@ -259,24 +303,66 @@ fn _not_selector_rejects_first_block(html: text, tag_name: text, tag: text) -> b
         return true
     false
 
+fn _last_attribute_rule_color_for_value(html: text, tag_name: text, attr_name: text, attr_value: text, color: u32) -> u32:
+    if attr_value == "":
+        return color
+    var next = color
+    if attr_name != "data-route":
+        next = _last_rule_hex_color(html, "[" + attr_name + "]", next)
+        next = _last_rule_hex_color(html, tag_name + "[" + attr_name + "]", next)
+        next = _last_rule_hex_color(html, "[" + attr_name + "='" + attr_value + "']", next)
+        next = _last_rule_hex_color(html, tag_name + "[" + attr_name + "='" + attr_value + "']", next)
+        next = _last_rule_hex_color(html, "[" + attr_name + "=\"" + attr_value + "\"]", next)
+        next = _last_rule_hex_color(html, tag_name + "[" + attr_name + "=\"" + attr_value + "\"]", next)
+
+    if attr_name == "data-route":
+        if attr_value.starts_with("/app"):
+            next = _last_rule_hex_color(html, "[" + attr_name + "^='/app']", next)
+            next = _last_rule_hex_color(html, tag_name + "[" + attr_name + "^='/app']", next)
+        if attr_value.ends_with("/settings"):
+            next = _last_rule_hex_color(html, "[" + attr_name + "$='/settings']", next)
+            next = _last_rule_hex_color(html, tag_name + "[" + attr_name + "$='/settings']", next)
+    if attr_name == "data-tags" and attr_value.contains("beta"):
+        next = _last_rule_hex_color(html, "[" + attr_name + "*='beta']", next)
+        next = _last_rule_hex_color(html, tag_name + "[" + attr_name + "*='beta']", next)
+    if attr_name == "data-flags" and (" " + attr_value + " ").contains(" selected "):
+        next = _last_rule_hex_color(html, "[" + attr_name + "~='selected']", next)
+        next = _last_rule_hex_color(html, tag_name + "[" + attr_name + "~='selected']", next)
+    if attr_name == "lang" and (attr_value == "en" or attr_value.starts_with("en-")):
+        next = _last_rule_hex_color(html, "[" + attr_name + "|='en']", next)
+        next = _last_rule_hex_color(html, tag_name + "[" + attr_name + "|='en']", next)
+    if attr_name == "data-mode":
+        if attr_value == "Dialog":
+            next = _last_rule_hex_color(html, "[" + attr_name + "='Dialog' s]", next)
+            next = _last_rule_hex_color(html, tag_name + "[" + attr_name + "='Dialog' s]", next)
+        if attr_value.lower() == "dialog":
+            next = _last_rule_hex_color(html, "[" + attr_name + "='dialog' i]", next)
+            next = _last_rule_hex_color(html, tag_name + "[" + attr_name + "='dialog' i]", next)
+    next
+
+fn _last_attribute_rule_color(html: text, tag_name: text, tag: text, color: u32) -> u32:
+    var next = color
+    next = _last_attribute_rule_color_for_value(html, tag_name, "data-card", _attr_value(tag, "data-card"), next)
+    next = _last_attribute_rule_color_for_value(html, tag_name, "data-state", _attr_value(tag, "data-state"), next)
+    next = _last_attribute_rule_color_for_value(html, tag_name, "data-label", _attr_value(tag, "data-label"), next)
+    next = _last_attribute_rule_color_for_value(html, tag_name, "data-route", _attr_value(tag, "data-route"), next)
+    next = _last_attribute_rule_color_for_value(html, tag_name, "data-tags", _attr_value(tag, "data-tags"), next)
+    next = _last_attribute_rule_color_for_value(html, tag_name, "data-flags", _attr_value(tag, "data-flags"), next)
+    next = _last_attribute_rule_color_for_value(html, tag_name, "lang", _attr_value(tag, "lang"), next)
+    next = _last_attribute_rule_color_for_value(html, tag_name, "data-mode", _attr_value(tag, "data-mode"), next)
+    next
+
 fn _style_rule_block_color(html: text, fallback: u32) -> u32:
     if html.contains("div:not(.card") and (html.contains("class='card'") or html.contains("class=\"card\"")):
         return fallback
     val tag = _first_block_tag(html)
     if tag != "" and _not_selector_rejects_first_block(html, _tag_name_from_tag(tag), tag):
         return fallback
-    if html.contains("<style"):
-        val style_tail = html.substring(html.index_of("<style"), html.len())
-        val style_color = _last_hex_color_after(style_tail, "background-color", fallback)
-        if style_color != fallback:
-            return style_color
-        val style_bg = _last_hex_color_after(style_tail, "background:", fallback)
-        if style_bg != fallback:
-            return style_bg
     if tag == "":
         return fallback
     val tag_name = _tag_name_from_tag(tag)
     var color = _last_rule_hex_color(html, tag_name + " {", fallback)
+    color = _last_attribute_rule_color(html, tag_name, tag, color)
     val id_value = _attr_value(tag, "id")
     if id_value != "":
         val id_color = _last_rule_hex_color(html, "#" + id_value, color)
@@ -308,14 +394,14 @@ fn _first_block_color(html: text, fallback: u32) -> u32:
     val bgc_pos = tail.index_of("background-color")
     var bgc = fallback
     if bgc_pos >= 0:
-        val hash = tail.index_of("#", bgc_pos)
+        val hash = _find_char_from(tail, "#", bgc_pos)
         if hash >= 0:
             bgc = _hex_color_at(tail, hash, fallback)
     if bgc != fallback:
         return bgc
     val bg_pos = tail.index_of("background:")
     if bg_pos >= 0:
-        val hash2 = tail.index_of("#", bg_pos)
+        val hash2 = _find_char_from(tail, "#", bg_pos)
         if hash2 >= 0:
             return _hex_color_at(tail, hash2, fallback)
     _style_rule_block_color(html, fallback)
