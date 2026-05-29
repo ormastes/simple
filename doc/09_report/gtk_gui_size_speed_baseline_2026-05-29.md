@@ -6,15 +6,15 @@ Date: 2026-05-29
 
 | Runtime | Status | Binary bytes | Iterations | Total us | Notes |
 |---|---|---:|---:|---:|---|
-| Simple web renderer | ok | n/a | 4 | 14202 | render loop via Simple software renderer |
-| Simple static cache | ok | n/a | 4 | 2871 | persistent HTML artifact cache hit loop |
-| Simple persistent SWBC command plan | ok | n/a | 4 | 778441 | disk-backed compact static-shell plan to retained commands |
-| Simple hot SWBC command plan cache | ok | n/a | 4 | 261627 | in-memory encoded SWBC sidecar cache after persistent warmup |
-| Simple retained command hot cache | ok | n/a | 4 | 857 | in-memory retained command list after persistent warmup |
-| Simple BrowserBackend cached frame | ok | n/a | 4 | 6238330 | integrated browser backend render_frame with static shell HTML cache |
-| Simple SWBC prepared reuse | ok | n/a | 4 | 186 | decoded compact static-shell plan reuse loop |
-| Simple SWBC command plan | ok | n/a | 4 | 109 | decoded command-only static-shell plan, no HTML artifact |
-| GTK | ok | 14472 | 200 | 57810 | widget construction loop; uses xvfb-run when available |
+| Simple web renderer | ok | n/a | 4 | 6716 | render loop via Simple software renderer |
+| Simple static cache | ok | n/a | 4 | 3140 | persistent HTML artifact cache hit loop |
+| Simple persistent SWBC command plan | ok | n/a | 4 | 825612 | disk-backed compact static-shell plan to retained commands |
+| Simple hot SWBC command plan cache | ok | n/a | 4 | 279460 | in-memory encoded SWBC sidecar cache after persistent warmup |
+| Simple retained command hot cache | ok | n/a | 4 | 975 | in-memory retained command list after persistent warmup |
+| Simple BrowserBackend cached frame | ok | n/a | 4 | 5301214 | integrated browser backend render_frame with static shell HTML cache |
+| Simple SWBC prepared reuse | ok | n/a | 4 | 213 | decoded compact static-shell plan reuse loop |
+| Simple SWBC command plan | ok | n/a | 4 | 208 | decoded command-only static-shell plan, no HTML artifact |
+| GTK | ok | 14472 | 200 | 39222 | widget construction loop; uses xvfb-run when available |
 
 ## Static Shell Size
 
@@ -29,107 +29,7 @@ Date: 2026-05-29
 
 ## Simple Output
 
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/app/ui.render/table.spl:167:40
--    |
-- 167 |                 val a = if col < sorted[i].len(): sorted[i][col] else: ""
--    |                                        ^
-- 
-- Use angle brackets: sorted<...> instead of sorted[...]
-- 
-- Run `simple migrate --fix-generics` to automatically update your code
-- 
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/app/ui.render/table.spl:168:40
--    |
-- 168 |                 val b = if col < sorted[i + 1].len(): sorted[i + 1][col] else: ""
--    |                                        ^
-- 
-- Use angle brackets: sorted<...> instead of sorted[...]
-- 
-- Run `simple migrate --fix-generics` to automatically update your code
-- 
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/opengl_sffi.spl:3:1
--    |
--   3 | export use std.nogc_async_mut.io.opengl_sffi.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
-- 
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
--    |
-- 138 |         if c < bp.len() and pp[c] == bp[c]:
--    |                               ^
-- 
-- Use angle brackets: pp<...> instead of pp[...]
-- 
-- Run `simple migrate --fix-generics` to automatically update your code
-- 
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/rocm_sffi.spl:3:1
--    |
--   3 | export use std.nogc_async_mut.io.rocm_sffi.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
-- 
 - [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: UITheme
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/app/ui.render/table.spl:167:40
--    |
-- 167 |                 val a = if col < sorted[i].len(): sorted[i][col] else: ""
--    |                                        ^
-- 
-- Use angle brackets: sorted<...> instead of sorted[...]
-- 
-- Run `simple migrate --fix-generics` to automatically update your code
-- 
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/app/ui.render/table.spl:168:40
--    |
-- 168 |                 val b = if col < sorted[i + 1].len(): sorted[i + 1][col] else: ""
--    |                                        ^
-- 
-- Use angle brackets: sorted<...> instead of sorted[...]
-- 
-- Run `simple migrate --fix-generics` to automatically update your code
-- 
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/opengl_sffi.spl:3:1
--    |
--   3 | export use std.nogc_async_mut.io.opengl_sffi.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
-- 
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
--    |
-- 138 |         if c < bp.len() and pp[c] == bp[c]:
--    |                               ^
-- 
-- Use angle brackets: pp<...> instead of pp[...]
-- 
-- Run `simple migrate --fix-generics` to automatically update your code
-- 
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/rocm_sffi.spl:3:1
--    |
--   3 | export use std.nogc_async_mut.io.rocm_sffi.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
-- 
 - [memory-guard] SIMPLE_LIB=/home/ormastes/dev/pub/simple/src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
@@ -138,7 +38,7 @@ Date: 2026-05-29
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - simple_render_status=ok
 - simple_render_iterations=4
-- simple_render_total_us=14202
+- simple_render_total_us=6716
 - simple_render_pixels=256000
 - simple_cache_schema=simple-web-cache-v1
 - simple_render_plan=static_shell_with_dynamic_islands
@@ -147,23 +47,23 @@ Date: 2026-05-29
 - simple_static_cache_hit_iterations=4
 - simple_static_cache_memory_hits=4
 - simple_static_cache_disk_hits=0
-- simple_static_cache_total_us=2871
+- simple_static_cache_total_us=3140
 - simple_static_disk_plan_warm_stored=true
 - simple_static_disk_plan_hit_iterations=4
 - simple_static_disk_plan_command_count=20
-- simple_static_disk_plan_total_us=778441
+- simple_static_disk_plan_total_us=825612
 - simple_static_plan_cache_warm_stored=true
 - simple_static_plan_cache_hit_iterations=4
 - simple_static_plan_cache_memory_hits=4
 - simple_static_plan_cache_command_count=20
-- simple_static_plan_cache_total_us=261627
+- simple_static_plan_cache_total_us=279460
 - simple_static_command_cache_warm_stored=true
 - simple_static_command_cache_hit_iterations=4
 - simple_static_command_cache_memory_hits=4
 - simple_static_command_cache_command_count=20
-- simple_static_command_cache_total_us=857
+- simple_static_command_cache_total_us=975
 - simple_browser_cached_frame_iterations=4
-- simple_browser_cached_frame_total_us=6238330
+- simple_browser_cached_frame_total_us=5301214
 - simple_browser_static_shell_hits=4
 - simple_browser_static_shell_stores=1
 - simple_browser_cached_frame_pixels=3072
@@ -178,17 +78,17 @@ Date: 2026-05-29
 - simple_static_swbc_prepared_hits=4
 - simple_static_command_reuse_count=20
 - simple_static_command_reuse_hits=4
-- simple_static_swbc_total_us=186
+- simple_static_swbc_total_us=213
 - simple_static_command_plan_valid=true
 - simple_static_command_plan_count=20
 - simple_static_command_plan_hits=4
-- simple_static_command_plan_total_us=109
+- simple_static_command_plan_total_us=208
 
 ## GTK Output
 
 - gtk_render_status=ok
 - gtk_render_iterations=200
-- gtk_widget_total_us=57810
+- gtk_widget_total_us=39222
 
 ## GTK Linked Dependencies
 
