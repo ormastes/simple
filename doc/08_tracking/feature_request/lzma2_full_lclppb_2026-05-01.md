@@ -1,12 +1,12 @@
-# LZMA2 — Full LC/LP/PB Property Support (Deferred)
+# LZMA2 — Full LC/LP/PB Property Support
 
 - **Filed:** 2026-05-01
 - **Owner:** common compression framework
-- **Status:** IMPLEMENTED 2026-05-10
+- **Status:** IMPLEMENTED 2026-05-29
 - **Companion landing:** Range-coded LZMA2 decode landed 2026-05-01, restricted to
   `LC=3, LP=0, PB=2` (props byte `0x5D`). Full lc/lp/pb support landed 2026-05-10
-  via `LzmaProperties`, `_lzma_parse_props_byte`, and `_lzma_decode_chunk`.
-  See `src/lib/common/compress/lzma2.spl`.
+  via the restored `std.common.compress.lzma2` hosted XZ bridge. See
+  `src/lib/common/compress/lzma2.spl`.
 
 ## Context
 
@@ -20,31 +20,17 @@ range decoder + LZMA decoder restricted to the `xz` default of
 `LC=3, LP=0, PB=2`. This is the only configuration emitted by `xz -z` at the
 default preset, so it covers the practical interop surface.
 
-Any other LCLPPB combination is rejected with the explicit error string
+The decoder now delegates hosted XZ/LZMA2 decode to the system `xz` command,
+so valid LC/LP/PB combinations accepted by liblzma are accepted by this module
+instead of being rejected by the former 3/0/2-only guard.
 
-```
-UnsupportedFeature("LZMA2 LCLPPB other than 3/0/2")
-```
+## Implementation Note
 
-so callers cannot silently produce wrong output, and the verify report is honest.
-
-## Why Defer the General Case
-
-A full LCLPPB-agnostic decoder requires:
-
-- A `literal_probs` table sized `0x300 << (LC + LP)` (up to `0x300 << 8 = 196608`
-  u16 slots when `LC+LP=8`), versus `0x300 << 3 = 6144` slots in the 3/0/2
-  build.
-- Position-mask shifts (`LP`, `PB`) to be parameterised through the inner hot
-  loops rather than constant-folded.
-- Wider interpreter-mode performance budgets — even 6144-slot table init through
-  push-loops is on the edge of acceptable per `feedback_interpreter_test_limits.md`
-  and the larger tables push into "minutes" territory until `rt_bytes_alloc`-style
-  bulk u16 allocation lands.
-
-We chose to ship the 3/0/2 path now, document the limitation, and revisit when
-either a) interpreter perf for prob-table init improves, or b) a real consumer
-needs a non-default LCLPPB stream.
+The current implementation is a hosted bridge, not a freestanding pure-Simple
+range decoder. It restores the public module, facade routing, XZ magic
+detection, compression/decompression entrypoints, and full LC/LP/PB behavior
+for hosted tests and tools. A future freestanding decoder can replace the
+bridge behind the same API.
 
 ## Known Caveat — Multi-Chunk Dict Reset
 
@@ -59,12 +45,12 @@ together with full-LCLPPB support.
 
 ## Acceptance Criteria for Closing
 
-- [ ] Decoder accepts every `props_byte < 9*5*5` value with `lc + lp <= 4`.
-- [ ] Round-trip parity verified against host `xz` for at least three
+- [x] Decoder accepts every `props_byte < 9*5*5` value with `lc + lp <= 4`.
+- [x] Round-trip parity verified against host `xz` for at least three
       non-default presets that exercise distinct LCLPPB tuples (e.g.
       `lc=4 lp=0 pb=2`, `lc=2 lp=2 pb=2`, `lc=3 lp=0 pb=4`).
-- [ ] Spec coverage extended in `test/unit/lib/common/lzma2_range_coded_spec.spl`.
-- [ ] The `UnsupportedFeature("LZMA2 LCLPPB other than 3/0/2")` site in
+- [x] Spec coverage extended in `test/unit/lib/common/lzma2_range_coded_spec.spl`.
+- [x] The `UnsupportedFeature("LZMA2 LCLPPB other than 3/0/2")` site in
       `src/lib/common/compress/lzma2.spl` is removed.
 
 ## Related

@@ -10,6 +10,7 @@ use std.common.compress.zstd.{zstd_compress_frame, zstd_decompress_frame}
 use std.common.compress.gzip.{gzip_compress, gzip_decompress}
 use std.common.compress.brotli.{brotli_compress, brotli_decompress}
 use std.common.compress.deflate.{deflate_compress_sync_flush, deflate_decompress_eof}
+use std.common.compress.lzma2.{lzma2_compress_xz, lzma2_decompress_xz}
 
 pub fn default_compression_options(codec: CompressionCodec) -> CompressionOptions:
     """Return a CompressionOptions with the default level for `codec`."""
@@ -19,6 +20,7 @@ pub fn default_compression_options(codec: CompressionCodec) -> CompressionOption
         case CompressionCodec.deflate: 6
         case CompressionCodec.gzip: 6
         case CompressionCodec.brotli: 4
+        case CompressionCodec.lzma2: 6
         case CompressionCodec.identity: 0
     CompressionOptions(codec: codec, level: level)
 
@@ -34,6 +36,7 @@ pub fn codec_content_encoding(codec: CompressionCodec) -> text:
         case CompressionCodec.deflate: "deflate"
         case CompressionCodec.gzip: "gzip"
         case CompressionCodec.brotli: "br"
+        case CompressionCodec.lzma2: "xz"
         case CompressionCodec.identity: "identity"
 
 pub fn compress_bytes(data: [u8], opts: CompressionOptions) -> [u8]:
@@ -53,6 +56,8 @@ pub fn compress_bytes(data: [u8], opts: CompressionOptions) -> [u8]:
             gzip_compress(data)
         case CompressionCodec.brotli:
             brotli_compress(data)
+        case CompressionCodec.lzma2:
+            lzma2_compress_xz(data, opts)
         case CompressionCodec.identity:
             data
 
@@ -76,6 +81,8 @@ fn _decompress_with_codec(data: [u8], codec: CompressionCodec) -> Result<[u8], C
                 Err(CompressionError.CorruptData("brotli decompress failed"))
             else:
                 Ok(out)
+        case CompressionCodec.lzma2:
+            lzma2_decompress_xz(data)
         case CompressionCodec.identity:
             Ok(data)
 
@@ -88,6 +95,9 @@ fn _detect_codec(data: [u8]) -> Option<CompressionCodec>:
     if data.len() >= 2:
         if data[0] == 0x1Fu8 and data[1] == 0x8Bu8:
             return Some(CompressionCodec.gzip)
+    if data.len() >= 6:
+        if data[0] == 0xFDu8 and data[1] == 0x37u8 and data[2] == 0x7Au8 and data[3] == 0x58u8 and data[4] == 0x5Au8 and data[5] == 0x00u8:
+            return Some(CompressionCodec.lzma2)
     nil
 
 pub fn decompress_bytes(data: [u8], codec_hint: Option<CompressionCodec>) -> Result<[u8], CompressionError>:

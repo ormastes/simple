@@ -14,8 +14,7 @@
 
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend, lerp_color}
-use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance, render_text_to_buffer}
-use std.gpu.engine2d.simd_kernels.{fill_span, copy_span, alpha_blend_span}
+use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, render_text_to_buffer}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -142,81 +141,69 @@ impl RenderBackend for SoftwareBackend:
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         # Outline: four edges
-        self.draw_rect_filled(x, y, w, 1, color)
-        self.draw_rect_filled(x, y + h - 1, w, 1, color)
-        self.draw_rect_filled(x, y, 1, h, color)
-        self.draw_rect_filled(x + w - 1, y, 1, h, color)
+        self.sw_hline(x, y, w, color)
+        self.sw_hline(x, y + h - 1, w, color)
+        self.sw_vline(x, y, h, color)
+        self.sw_vline(x + w - 1, y, h, color)
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         val has_alpha = color_a(color) < 255
         var row = y
         while row < y + h:
-            if row >= 0 and row < self.h:
-                if (not self.clip_enabled) or (row >= self.clip_y and row < self.clip_y + self.clip_h):
-                    var start_x = x
-                    var end_x = x + w
-                    if start_x < 0:
-                        start_x = 0
-                    if end_x > self.w:
-                        end_x = self.w
-                    if self.clip_enabled:
-                        if start_x < self.clip_x:
-                            start_x = self.clip_x
-                        val clip_end = self.clip_x + self.clip_w
-                        if end_x > clip_end:
-                            end_x = clip_end
-                    var col = start_x
-                    while col < end_x:
-                        val idx = row * self.w + col
-                        if has_alpha:
-                            self.buf[idx] = blend(color, self.buf[idx])
-                        else:
-                            self.buf[idx] = color
-                        col = col + 1
-                    _mark_span_dirty(self, start_x, row, end_x - start_x)
+            if has_alpha:
+                self.sw_hline_blend(x, row, w, color)
+            else:
+                if row >= 0 and row < self.h:
+                    if (not self.clip_enabled) or (row >= self.clip_y and row < self.clip_y + self.clip_h):
+                        var start_x = x
+                        var end_x = x + w
+                        if start_x < 0:
+                            start_x = 0
+                        if end_x > self.w:
+                            end_x = self.w
+                        if self.clip_enabled:
+                            if start_x < self.clip_x:
+                                start_x = self.clip_x
+                            val clip_end = self.clip_x + self.clip_w
+                            if end_x > clip_end:
+                                end_x = clip_end
+                        var col = start_x
+                        while col < end_x:
+                            self.buf[row * self.w + col] = color
+                            col = col + 1
+                        self.mark_span_dirty(start_x, row, end_x - start_x)
             row = row + 1
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
-        var dx = x2 - x1
-        var dy = y2 - y1
-        var sx: i32 = 1
-        var sy: i32 = 1
-        if dx < 0:
-            dx = -dx
-            sx = -1
-        if dy < 0:
-            dy = -dy
-            sy = -1
-        var err = dx - dy
-        var cx = x1
-        var cy = y1
-        val size = if thickness > 1 then thickness else 1
-        val half = size / 2
-        while true:
-            self.draw_rect_filled(cx - half, cy - half, size, size, color)
-            if cx == x2 and cy == y2:
-                return
-            val e2 = 2 * err
-            if e2 > -dy:
-                err = err - dy
-                cx = cx + sx
-            if e2 < dx:
-                err = err + dx
-                cy = cy + sy
+        if thickness <= 1:
+            self.sw_bresenham(x1, y1, x2, y2, color)
+        else:
+            val half = thickness / 2
+            var offset = -half
+            var adx = x2 - x1
+            if adx < 0: adx = -adx
+            var ady = y2 - y1
+            if ady < 0: ady = -ady
+            while offset <= half:
+                if adx >= ady:
+                    self.sw_bresenham(x1, y1 + offset, x2, y2 + offset, color)
+                else:
+                    self.sw_bresenham(x1 + offset, y1, x2 + offset, y2, color)
+                offset = offset + 1
 
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
         var px = r
         var py = 0
         var d = 1 - r
         while px >= py:
-            self.draw_rect_filled(cx + px, cy + py, 1, 1, color)
-            self.draw_rect_filled(cx - px, cy + py, 1, 1, color)
-            self.draw_rect_filled(cx + px, cy - py, 1, 1, color)
-            self.draw_rect_filled(cx - px, cy - py, 1, 1, color)
-            self.draw_rect_filled(cx + py, cy + px, 1, 1, color)
-            self.draw_rect_filled(cx - py, cy + px, 1, 1, color)
-            self.draw_rect_filled(cx + py, cy - px, 1, 1, color)
-            self.draw_rect_filled(cx - py, cy - px, 1, 1, color)
+            self.sw_set_pixel(cx + px, cy + py, color)
+            self.sw_set_pixel(cx - px, cy + py, color)
+            self.sw_set_pixel(cx + px, cy - py, color)
+            self.sw_set_pixel(cx - px, cy - py, color)
+            self.sw_set_pixel(cx + py, cy + px, color)
+            self.sw_set_pixel(cx - py, cy + px, color)
+            self.sw_set_pixel(cx + py, cy - px, color)
+            self.sw_set_pixel(cx - py, cy - px, color)
             py = py + 1
             if d <= 0:
                 d = d + 2 * py + 1
@@ -225,14 +212,21 @@ impl RenderBackend for SoftwareBackend:
                 d = d + 2 * py - 2 * px + 1
 
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        val has_alpha = color_a(color) < 255
         var px = r
         var py = 0
         var d = 1 - r
         while px >= py:
-            self.draw_rect_filled(cx - px, cy + py, 2 * px + 1, 1, color)
-            self.draw_rect_filled(cx - px, cy - py, 2 * px + 1, 1, color)
-            self.draw_rect_filled(cx - py, cy + px, 2 * py + 1, 1, color)
-            self.draw_rect_filled(cx - py, cy - px, 2 * py + 1, 1, color)
+            if has_alpha:
+                self.sw_hline_blend(cx - px, cy + py, 2 * px + 1, color)
+                self.sw_hline_blend(cx - px, cy - py, 2 * px + 1, color)
+                self.sw_hline_blend(cx - py, cy + px, 2 * py + 1, color)
+                self.sw_hline_blend(cx - py, cy - px, 2 * py + 1, color)
+            else:
+                self.sw_hline(cx - px, cy + py, 2 * px + 1, color)
+                self.sw_hline(cx - px, cy - py, 2 * px + 1, color)
+                self.sw_hline(cx - py, cy + px, 2 * py + 1, color)
+                self.sw_hline(cx - py, cy - px, 2 * py + 1, color)
             py = py + 1
             if d <= 0:
                 d = d + 2 * py + 1
@@ -245,29 +239,15 @@ impl RenderBackend for SoftwareBackend:
         if r > w / 2: r = w / 2
         if r > h / 2: r = h / 2
 
-        self.draw_rect_filled(x + r, y, w - 2 * r, 1, color)
-        self.draw_rect_filled(x + r, y + h - 1, w - 2 * r, 1, color)
-        self.draw_rect_filled(x, y + r, 1, h - 2 * r, color)
-        self.draw_rect_filled(x + w - 1, y + r, 1, h - 2 * r, color)
+        self.sw_hline(x + r, y, w - 2 * r, color)
+        self.sw_hline(x + r, y + h - 1, w - 2 * r, color)
+        self.sw_vline(x, y + r, h - 2 * r, color)
+        self.sw_vline(x + w - 1, y + r, h - 2 * r, color)
 
-        var px = r
-        var py = 0
-        var d = 1 - r
-        while px >= py:
-            self.draw_rect_filled(x + r - px, y + r - py, 1, 1, color)
-            self.draw_rect_filled(x + r - py, y + r - px, 1, 1, color)
-            self.draw_rect_filled(x + w - 1 - r + px, y + r - py, 1, 1, color)
-            self.draw_rect_filled(x + w - 1 - r + py, y + r - px, 1, 1, color)
-            self.draw_rect_filled(x + r - px, y + h - 1 - r + py, 1, 1, color)
-            self.draw_rect_filled(x + r - py, y + h - 1 - r + px, 1, 1, color)
-            self.draw_rect_filled(x + w - 1 - r + px, y + h - 1 - r + py, 1, 1, color)
-            self.draw_rect_filled(x + w - 1 - r + py, y + h - 1 - r + px, 1, 1, color)
-            py = py + 1
-            if d <= 0:
-                d = d + 2 * py + 1
-            else:
-                px = px - 1
-                d = d + 2 * py - 2 * px + 1
+        self.sw_corner_arc(x + r, y + r, r, color, -1, -1)
+        self.sw_corner_arc(x + w - 1 - r, y + r, r, color, 1, -1)
+        self.sw_corner_arc(x + r, y + h - 1 - r, r, color, -1, 1)
+        self.sw_corner_arc(x + w - 1 - r, y + h - 1 - r, r, color, 1, 1)
 
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
         # Sort vertices by y
@@ -300,6 +280,8 @@ impl RenderBackend for SoftwareBackend:
             vx2 = tx
             vy2 = ty
 
+        val has_alpha = color_a(color) < 255
+
         # Upper half
         var y = vy1
         while y <= vy2:
@@ -310,7 +292,10 @@ impl RenderBackend for SoftwareBackend:
             if left > right:
                 left = xb
                 right = xa
-            self.draw_rect_filled(left, y, right - left + 1, 1, color)
+            if has_alpha:
+                self.sw_hline_blend(left, y, right - left + 1, color)
+            else:
+                self.sw_hline(left, y, right - left + 1, color)
             y = y + 1
 
         # Lower half
@@ -323,7 +308,10 @@ impl RenderBackend for SoftwareBackend:
             if left > right:
                 left = xb
                 right = xa
-            self.draw_rect_filled(left, y, right - left + 1, 1, color)
+            if has_alpha:
+                self.sw_hline_blend(left, y, right - left + 1, color)
+            else:
+                self.sw_hline(left, y, right - left + 1, color)
             y = y + 1
 
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
@@ -333,54 +321,58 @@ impl RenderBackend for SoftwareBackend:
         while row < h:
             val t = _i32_to_f32(row) / _i32_to_f32(h - 1)
             val c = lerp_color(top_color, bottom_color, t)
-            self.draw_rect_filled(x, y + row, w, 1, c)
+            self.sw_hline(x, y + row, w, c)
             row = row + 1
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
-        # Paint glyph bits through draw_rect_filled so writes stay on self.buf.
+        # Render into a local buffer first (avoids passing self.buf to free fn)
         val gh = glyph_height()
         var scale = font_size / gh
         if scale < 1:
             scale = 1
         val advance = glyph_advance(scale)
-        val tw = text_val.len().to_i32() * advance
-        val th = gh * scale
-        if tw <= 0 or th <= 0:
+        val text_w = text_val.len().to_i32() * advance
+        val text_h = gh * scale
+        if text_w <= 0 or text_h <= 0:
             return
-        var i: i64 = 0
-        var cursor_x = x
-        while i < text_val.len():
-            val code = text_val.char_code_at(i)
-            val ch = "{code as char}"
-            val bitmap = glyph_data(ch)
-            var gy = 0
-            while gy < 7:
-                val row_data = bitmap[gy]
-                var gx = 0
-                while gx < 5:
-                    val bit = (row_data >> (4 - gx)) & 1
-                    if bit != 0:
-                        self.draw_rect_filled(cursor_x + gx * scale, y + gy * scale, scale, scale, color)
-                    gx = gx + 1
-                gy = gy + 1
-            cursor_x = cursor_x + advance
-            i = i + 1
+        var local_buf: [u32] = [0u32; text_w * text_h]
+        render_text_to_buffer(local_buf, text_w, text_h, 0, 0, text_val, color, font_size)
+        # Inline-copy local_buf into self.buf (local arrays persist through free fns)
+        var row = 0
+        while row < text_h:
+            val dst_y = y + row
+            if dst_y >= 0 and dst_y < self.h:
+                var col = 0
+                while col < text_w:
+                    val dst_x = x + col
+                    if dst_x >= 0 and dst_x < self.w:
+                        val src_idx = row * text_w + col
+                        val dst_idx = dst_y * self.w + dst_x
+                        val src_pixel = local_buf[src_idx]
+                        val src_a = color_a(src_pixel)
+                        if src_a > 0u32:
+                            if src_a == 255u32:
+                                self.buf[dst_idx] = src_pixel
+                            else:
+                                self.buf[dst_idx] = blend(src_pixel, self.buf[dst_idx])
+                    col = col + 1
+            row = row + 1
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         var row = 0
         while row < h:
             val py = y + row
             if py >= 0 and py < self.h:
-                val clipped = _clip_span(self, x, py, w)
-                val count = clipped.2
-                if count > 0:
-                    var k = 0
-                    while k < count:
-                        val dst_x = clipped.0 + k
-                        val src_off = row * w + (clipped.0 - x) + k
-                        if src_off >= 0 and src_off < pixels.len():
-                            self.buf[py * self.w + dst_x] = pixels[src_off]
-                        k = k + 1
+                val src_row_base = row * w
+                var col = 0
+                while col < w:
+                    val dst_x = x + col
+                    if dst_x >= 0 and dst_x < self.w:
+                        val src_idx = src_row_base + col
+                        val dst_idx = py * self.w + dst_x
+                        if src_idx >= 0 and src_idx < pixels.len():
+                            self.buf[dst_idx] = pixels[src_idx]
+                    col = col + 1
             row = row + 1
 
     me blit_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
@@ -489,57 +481,6 @@ impl RenderBackend for SoftwareBackend:
     me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
         emu_draw_rect_blend_mode(self, x, y, w, h, color, mode)
 
-    me draw_arc(cx: i32, cy: i32, r: i32, start_deg: i32, end_deg: i32, color: u32, thickness: i32):
-        emu_draw_arc(self, cx, cy, r, start_deg, end_deg, color, thickness)
-
-    me draw_bezier(x1: i32, y1: i32, cx1: i32, cy1: i32, cx2: i32, cy2: i32, x2: i32, y2: i32, color: u32, thickness: i32):
-        emu_draw_bezier(self, x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
-
-    me draw_polygon_filled(xs: [i32], ys: [i32], count: i32, color: u32):
-        emu_draw_polygon_filled(self, xs, ys, count, color)
-
-    me draw_polyline(xs: [i32], ys: [i32], count: i32, color: u32, thickness: i32):
-        emu_draw_polyline(self, xs, ys, count, color, thickness)
-
-    me draw_rect_thick(x: i32, y: i32, w: i32, h: i32, color: u32, thickness: i32):
-        emu_draw_rect_thick(self, x, y, w, h, color, thickness)
-
-    me draw_circle_thick(cx: i32, cy: i32, r: i32, color: u32, thickness: i32):
-        emu_draw_circle_thick(self, cx, cy, r, color, thickness)
-
-    me draw_rounded_rect_outline(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, thickness: i32):
-        emu_draw_rounded_rect_outline(self, x, y, w, h, radius, color, thickness)
-
-    me draw_gradient_rect_h(x: i32, y: i32, w: i32, h: i32, left_color: u32, right_color: u32):
-        emu_draw_gradient_rect_h(self, x, y, w, h, left_color, right_color)
-
-    me draw_radial_gradient(cx: i32, cy: i32, r: i32, center_color: u32, edge_color: u32):
-        emu_draw_radial_gradient(self, cx, cy, r, center_color, edge_color)
-
-    me draw_rect_blend(x: i32, y: i32, w: i32, h: i32, color: u32):
-        emu_draw_rect_blend(self, x, y, w, h, color)
-
-    me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        emu_draw_image_blend(self, x, y, w, h, pixels)
-
-    me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
-        emu_draw_image_scaled(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
-
-    me draw_triangle_outline(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, thickness: i32):
-        emu_draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, color, thickness)
-
-    me draw_blur_rect(x: i32, y: i32, w: i32, h: i32, radius: i32):
-        emu_draw_blur_rect(self, x, y, w, h, radius)
-
-    me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
-        emu_draw_shadow_rect(self, x, y, w, h, offset_x, offset_y, blur_r, color)
-
-    me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
-        emu_draw_image_transform(self, dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
-
-    me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
-        emu_draw_rect_blend_mode(self, x, y, w, h, color, mode)
-
 impl Engine2DExtended for SoftwareBackend:
     # Phase 1 fallback: paint the cell with `bg` first, then overlay the
     # glyph via the shared 5x7 raster. Tile dirty-tracking is preserved
@@ -571,18 +512,43 @@ impl Engine2DExtended for SoftwareBackend:
         emu_draw_ellipse_filled(self, cx, cy, rx, ry, color)
 
 # ============================================================================
-# Pixel-write helpers (me methods)
+# Pixel and Line Helpers — me methods to avoid mutation-loss bug
 #
-# These MUST be `me` methods that write `self.buf` inline. Writes performed by
-# a free function that receives `self` or `self.buf` as a parameter are silently
-# dropped (the receiver is copied) — see
-# doc/08_tracking/bug/self_pass_to_free_fn_mutation_loss_2026-05-29.md. That is
-# why every primitive other than draw_rect_filled rendered nothing before this
-# change. Read-only helpers (_clip_span, _sw_mask_blocks) may stay free fns.
+# The compiler silently drops mutations when `self` or `self.field` is passed
+# to a free function. All helpers that write into `self.buf` or
+# `self.dirty_tiles` are therefore `me` methods so that writes persist.
+# Read-only helpers (_clip_span, _sw_mask_blocks, _sw_edge_x) remain free
+# functions since they never mutate.
+# See: doc/08_tracking/bug/self_pass_to_free_fn_mutation_loss_2026-05-29.md
 # ============================================================================
 
 impl SoftwareBackend:
-    me _set_pixel(x: i32, y: i32, color: u32):
+
+    me mark_dirty(tx: i32, ty: i32):
+        """Mark a tile as dirty."""
+        val idx = ty * self.tiles_x + tx
+        if idx >= 0 and idx < self.dirty_tiles.len():
+            self.dirty_tiles[idx] = true
+
+    me mark_pixel_dirty(x: i32, y: i32):
+        """Mark the tile containing pixel (x, y) as dirty."""
+        val tx = x / TILE_SIZE
+        val ty = y / TILE_SIZE
+        self.mark_dirty(tx, ty)
+
+    me mark_span_dirty(x: i32, y: i32, length: i32):
+        """Mark all tiles touched by a horizontal span."""
+        if length <= 0:
+            return
+        val tx0 = x / TILE_SIZE
+        val tx1 = (x + length - 1) / TILE_SIZE
+        val ty = y / TILE_SIZE
+        var tx = tx0
+        while tx <= tx1:
+            self.mark_dirty(tx, ty)
+            tx = tx + 1
+
+    me sw_set_pixel(x: i32, y: i32, color: u32):
         if x < 0 or y < 0 or x >= self.w or y >= self.h:
             return
         if self.clip_enabled:
@@ -591,9 +557,11 @@ impl SoftwareBackend:
                 return
         if _sw_mask_blocks(self, x, y):
             return
-        self.buf[y * self.w + x] = color
+        val idx = y * self.w + x
+        self.buf[idx] = color
+        self.mark_pixel_dirty(x, y)
 
-    me _set_pixel_blend(x: i32, y: i32, color: u32):
+    me sw_set_pixel_blend(x: i32, y: i32, color: u32):
         if x < 0 or y < 0 or x >= self.w or y >= self.h:
             return
         if self.clip_enabled:
@@ -604,35 +572,39 @@ impl SoftwareBackend:
             return
         val idx = y * self.w + x
         self.buf[idx] = blend(color, self.buf[idx])
+        self.mark_pixel_dirty(x, y)
 
-    me _hline(x: i32, y: i32, length: i32, color: u32):
+    me sw_hline(x: i32, y: i32, length: i32, color: u32):
         val clipped = _clip_span(self, x, y, length)
-        if clipped.2 <= 0:
+        val count = clipped.2
+        if count <= 0:
             return
-        var col = clipped.0
-        val end_col = clipped.1
-        while col < end_col:
-            self.buf[y * self.w + col] = color
-            col = col + 1
+        val off = y * self.w + clipped.0
+        var i = 0
+        while i < count:
+            self.buf[off + i] = color
+            i = i + 1
+        self.mark_span_dirty(clipped.0, y, count)
 
-    me _hline_blend(x: i32, y: i32, length: i32, color: u32):
+    me sw_hline_blend(x: i32, y: i32, length: i32, color: u32):
         val clipped = _clip_span(self, x, y, length)
-        if clipped.2 <= 0:
+        val count = clipped.2
+        if count <= 0:
             return
-        var col = clipped.0
-        val end_col = clipped.1
-        while col < end_col:
-            val idx = y * self.w + col
-            self.buf[idx] = blend(color, self.buf[idx])
-            col = col + 1
+        val off = y * self.w + clipped.0
+        var i = 0
+        while i < count:
+            self.buf[off + i] = blend(color, self.buf[off + i])
+            i = i + 1
+        self.mark_span_dirty(clipped.0, y, count)
 
-    me _vline(x: i32, y: i32, length: i32, color: u32):
+    me sw_vline(x: i32, y: i32, length: i32, color: u32):
         var i = 0
         while i < length:
-            self._set_pixel(x, y + i, color)
+            self.sw_set_pixel(x, y + i, color)
             i = i + 1
 
-    me _bresenham(x1: i32, y1: i32, x2: i32, y2: i32, color: u32):
+    me sw_bresenham(x1: i32, y1: i32, x2: i32, y2: i32, color: u32):
         var dx = x2 - x1
         var dy = y2 - y1
         var sx: i32 = 1
@@ -647,7 +619,7 @@ impl SoftwareBackend:
         var cx = x1
         var cy = y1
         while true:
-            self._set_pixel(cx, cy, color)
+            self.sw_set_pixel(cx, cy, color)
             if cx == x2 and cy == y2:
                 return
             val e2 = 2 * err
@@ -658,13 +630,13 @@ impl SoftwareBackend:
                 err = err + dx
                 cy = cy + sy
 
-    me _corner_arc(cx: i32, cy: i32, r: i32, color: u32, sx: i32, sy: i32):
+    me sw_corner_arc(cx: i32, cy: i32, r: i32, color: u32, sx: i32, sy: i32):
         var px = r
         var py = 0
         var d = 1 - r
         while px >= py:
-            self._set_pixel(cx + px * sx, cy + py * sy, color)
-            self._set_pixel(cx + py * sx, cy + px * sy, color)
+            self.sw_set_pixel(cx + px * sx, cy + py * sy, color)
+            self.sw_set_pixel(cx + py * sx, cy + px * sy, color)
             py = py + 1
             if d <= 0:
                 d = d + 2 * py + 1
@@ -673,47 +645,8 @@ impl SoftwareBackend:
                 d = d + 2 * py - 2 * px + 1
 
 # ============================================================================
-# Tile Operations
+# Read-only span helpers (no mutation — safe as free functions)
 # ============================================================================
-
-fn _clear_tile(backend: SoftwareBackend, tx: i32, ty: i32, color: u32):
-    """Clear a single tile to a solid color (cache-friendly)."""
-    val start_x = tx * TILE_SIZE
-    val start_y = ty * TILE_SIZE
-    var end_x = start_x + TILE_SIZE
-    var end_y = start_y + TILE_SIZE
-    if end_x > backend.w: end_x = backend.w
-    if end_y > backend.h: end_y = backend.h
-
-    var y = start_y
-    while y < end_y:
-        val row_base = y * backend.w
-        fill_span(backend.buf, (row_base + start_x).to_i64(), (end_x - start_x).to_i64(), color)
-        y = y + 1
-
-fn _mark_dirty(backend: SoftwareBackend, tx: i32, ty: i32):
-    """Mark a tile as dirty."""
-    val idx = ty * backend.tiles_x + tx
-    if idx >= 0 and idx < backend.dirty_tiles.len():
-        backend.dirty_tiles[idx] = true
-
-fn _mark_pixel_dirty(backend: SoftwareBackend, x: i32, y: i32):
-    """Mark the tile containing pixel (x, y) as dirty."""
-    val tx = x / TILE_SIZE
-    val ty = y / TILE_SIZE
-    _mark_dirty(backend, tx, ty)
-
-fn _mark_span_dirty(backend: SoftwareBackend, x: i32, y: i32, length: i32):
-    """Mark all tiles touched by a horizontal span."""
-    if length <= 0:
-        return
-    val tx0 = x / TILE_SIZE
-    val tx1 = (x + length - 1) / TILE_SIZE
-    val ty = y / TILE_SIZE
-    var tx = tx0
-    while tx <= tx1:
-        _mark_dirty(backend, tx, ty)
-        tx = tx + 1
 
 fn _clip_span(backend: SoftwareBackend, x: i32, y: i32, length: i32) -> (i32, i32, i32):
     """Clip a horizontal span to framebuffer and active clip rectangle.
@@ -741,10 +674,6 @@ fn _clip_span(backend: SoftwareBackend, x: i32, y: i32, length: i32) -> (i32, i3
         return (0, 0, 0)
     (start, end, end - start)
 
-# ============================================================================
-# Pixel Operations
-# ============================================================================
-
 fn _sw_mask_blocks(backend: SoftwareBackend, x: i32, y: i32) -> bool:
     if backend.mask_buf.len() == 0:
         return false
@@ -752,106 +681,6 @@ fn _sw_mask_blocks(backend: SoftwareBackend, x: i32, y: i32) -> bool:
     if mi < 0 or mi >= backend.mask_buf.len():
         return false
     backend.mask_buf[mi] == 0u8
-
-fn _sw_set_pixel(backend: SoftwareBackend, x: i32, y: i32, color: u32):
-    if x < 0 or y < 0 or x >= backend.w or y >= backend.h:
-        return
-    if backend.clip_enabled:
-        if (x < backend.clip_x or x >= backend.clip_x + backend.clip_w or
-            y < backend.clip_y or y >= backend.clip_y + backend.clip_h):
-            return
-    if _sw_mask_blocks(backend, x, y):
-        return
-    val idx = y * backend.w + x
-    backend.buf[idx] = color
-    _mark_pixel_dirty(backend, x, y)
-
-fn _sw_set_pixel_blend(backend: SoftwareBackend, x: i32, y: i32, color: u32):
-    if x < 0 or y < 0 or x >= backend.w or y >= backend.h:
-        return
-    if backend.clip_enabled:
-        if (x < backend.clip_x or x >= backend.clip_x + backend.clip_w or
-            y < backend.clip_y or y >= backend.clip_y + backend.clip_h):
-            return
-    if _sw_mask_blocks(backend, x, y):
-        return
-    val idx = y * backend.w + x
-    backend.buf[idx] = blend(color, backend.buf[idx])
-    _mark_pixel_dirty(backend, x, y)
-
-# ============================================================================
-# Line Drawing
-# ============================================================================
-
-fn _sw_hline(backend: SoftwareBackend, x: i32, y: i32, length: i32, color: u32):
-    val clipped = _clip_span(backend, x, y, length)
-    val count = clipped.2
-    if count <= 0:
-        return
-    val off = y * backend.w + clipped.0
-    fill_span(backend.buf, off.to_i64(), count.to_i64(), color)
-    _mark_span_dirty(backend, clipped.0, y, count)
-
-fn _sw_hline_blend(backend: SoftwareBackend, x: i32, y: i32, length: i32, color: u32):
-    val clipped = _clip_span(backend, x, y, length)
-    val count = clipped.2
-    if count <= 0:
-        return
-    val off = y * backend.w + clipped.0
-    var src: [u32] = [0u32; off + count]
-    fill_span(src, off.to_i64(), count.to_i64(), color)
-    alpha_blend_span(backend.buf, src, off.to_i64(), count.to_i64())
-    _mark_span_dirty(backend, clipped.0, y, count)
-
-fn _sw_vline(backend: SoftwareBackend, x: i32, y: i32, length: i32, color: u32):
-    var i = 0
-    while i < length:
-        _sw_set_pixel(backend, x, y + i, color)
-        i = i + 1
-
-fn _sw_bresenham(backend: SoftwareBackend, x1: i32, y1: i32, x2: i32, y2: i32, color: u32):
-    var dx = x2 - x1
-    var dy = y2 - y1
-    var sx: i32 = 1
-    var sy: i32 = 1
-    if dx < 0:
-        dx = -dx
-        sx = -1
-    if dy < 0:
-        dy = -dy
-        sy = -1
-    var err = dx - dy
-    var cx = x1
-    var cy = y1
-    while true:
-        _sw_set_pixel(backend, cx, cy, color)
-        if cx == x2 and cy == y2:
-            return
-        val e2 = 2 * err
-        if e2 > -dy:
-            err = err - dy
-            cx = cx + sx
-        if e2 < dx:
-            err = err + dx
-            cy = cy + sy
-
-# ============================================================================
-# Corner Arc
-# ============================================================================
-
-fn _sw_corner_arc(backend: SoftwareBackend, cx: i32, cy: i32, r: i32, color: u32, sx: i32, sy: i32):
-    var px = r
-    var py = 0
-    var d = 1 - r
-    while px >= py:
-        _sw_set_pixel(backend, cx + px * sx, cy + py * sy, color)
-        _sw_set_pixel(backend, cx + py * sx, cy + px * sy, color)
-        py = py + 1
-        if d <= 0:
-            d = d + 2 * py + 1
-        else:
-            px = px - 1
-            d = d + 2 * py - 2 * px + 1
 
 # ============================================================================
 # Triangle Edge Interpolation

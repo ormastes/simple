@@ -1,0 +1,84 @@
+# XZ/LZMA2 facade.
+#
+# This module owns the public `std.common.compress.lzma2` surface. It currently
+# delegates XZ framing and LZMA2 range decoding to the host `xz` command in
+# hosted/interpreter mode. That gives correct LC/LP/PB behavior for all streams
+# accepted by liblzma while preserving the typed Simple API.
+
+use std.common.compress.types.{CompressionError}
+use std.common.compress.lz4.{CompressionOptions}
+use std.io_runtime.{shell}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+val LZMA2_TMP_ROOT: text = "/tmp/simple_lzma2_bridge"
+
+fn _lzma2_hex_encode(data: [u8]) -> text:
+    val hex_chars = "0123456789abcdef"
+    var out = ""
+    var i = 0
+    while i < data.len():
+        val byte = data[i]
+        out = out + hex_chars.char_at(((byte >> 4u8) & 0x0Fu8).to_i64())
+        out = out + hex_chars.char_at((byte & 0x0Fu8).to_i64())
+        i = i + 1
+    out
+
+fn _lzma2_prepare_tmp():
+    shell("mkdir -p '" + LZMA2_TMP_ROOT + "' >/dev/null 2>&1")
+
+fn _lzma2_write_bytes(path: text, data: [u8]) -> bool:
+    if rt_file_write_bytes(path, data):
+        return true
+    val hex = _lzma2_hex_encode(data)
+    val run = shell("sh -c \"printf '%s' '" + hex + "' | xxd -r -p > '" + path + "'\"")
+    run.exit_code == 0
+
+fn _lzma2_shell_error(phase: text, stderr: text) -> CompressionError:
+    if stderr.contains("Unexpected end of input") or stderr.contains("File format not recognized"):
+        return CompressionError.TruncatedInput("xz " + phase + ": " + stderr)
+    if stderr.contains("Compressed data is corrupt") or stderr.contains("Data is corrupt"):
+        return CompressionError.CorruptStream("xz " + phase + ": " + stderr)
+    CompressionError.CorruptData("xz " + phase + " failed: " + stderr)
+
+pub fn lzma2_compress_xz(data: [u8], options: CompressionOptions) -> [u8]:
+    """Compress bytes as an XZ stream carrying LZMA2 data."""
+    _lzma2_prepare_tmp()
+    val input_path = LZMA2_TMP_ROOT + "/input.bin"
+    val output_path = LZMA2_TMP_ROOT + "/output.xz"
+    if not _lzma2_write_bytes(input_path, data):
+        return []
+    var level = options.level
+    if level < 0:
+        level = 6
+    if level > 9:
+        level = 9
+    val run = shell("xz -q -z -f -" + level.to_text() + " -c '" + input_path + "' > '" + output_path + "'")
+    if run.exit_code != 0:
+        return []
+    rt_file_read_bytes(output_path) ?? []
+
+pub fn lzma2_decompress_xz(data: [u8]) -> Result<[u8], CompressionError>:
+    """Decompress an XZ stream containing an LZMA2 filter chain."""
+    if data.len() < 6:
+        return Err(CompressionError.TruncatedInput("xz header"))
+    if not (data[0] == 0xFDu8 and data[1] == 0x37u8 and data[2] == 0x7Au8 and data[3] == 0x58u8 and data[4] == 0x5Au8 and data[5] == 0x00u8):
+        return Err(CompressionError.InvalidHeader("xz bad magic"))
+    _lzma2_prepare_tmp()
+    val input_path = LZMA2_TMP_ROOT + "/decode.xz"
+    val output_path = LZMA2_TMP_ROOT + "/decode.out"
+    if not _lzma2_write_bytes(input_path, data):
+        return Err(CompressionError.Other("xz input write failed"))
+    val run = shell("xz -q -d -f -c '" + input_path + "' > '" + output_path + "'")
+    if run.exit_code != 0:
+        return Err(_lzma2_shell_error("decompress", run.stderr))
+    Ok(rt_file_read_bytes(output_path) ?? [])
+
+pub fn lzma2_compress_xz_for_tier(data: [u8], options: CompressionOptions, tier: any) -> [u8]:
+    """Tier-dispatched XZ/LZMA2 compression. Current tiers share one backend."""
+    lzma2_compress_xz(data, options)
+
+pub fn lzma2_decompress_xz_for_tier(data: [u8], tier: any) -> Result<[u8], CompressionError>:
+    """Tier-dispatched XZ/LZMA2 decompression. Current tiers share one backend."""
+    lzma2_decompress_xz(data)

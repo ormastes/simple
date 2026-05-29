@@ -24,18 +24,6 @@ class BrowserCompositorBackend:
         _browser_compositor_next_id = _browser_compositor_next_id + 1
         BrowserCompositorBackend(id: id, width: width, height: height, pixels: [color; total])
 
-    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
-        var row: i32 = 0
-        while row < h:
-            var col: i32 = 0
-            while col < w:
-                val px = x + col
-                val py = y + row
-                if px >= 0 and py >= 0 and px < self.width and py < self.height:
-                    self.pixels[py * self.width + px] = color
-                col = col + 1
-            row = row + 1
-
     fn get_pixel_buffer() -> [u32]:
         if _browser_compositor_override_enabled and _browser_compositor_override_id == self.id and _browser_compositor_override_width == self.width and _browser_compositor_override_height == self.height:
             return _browser_compositor_override_pixels
@@ -100,4 +88,48 @@ impl CompositorBackend for BrowserCompositorBackend:
         self.id = self.id
 
     fn as_glass_capable() -> CompositorGlassCapable?:
-        nil
+        self
+
+impl CompositorGlassCapable for BrowserCompositorBackend:
+
+    me blend_rect(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
+        """Alpha-blend a rectangle using the same per-channel formula as
+        `_v2_blend_one`: `(src*a + dst*(255-a) + 128) >> 8`.  Color is
+        packed ARGB8888; alpha is the blend factor (0=transparent,
+        255=opaque).  Result pixels have full-opaque alpha."""
+        val sr = (color >> 16u32) & 0xFFu32
+        val sg = (color >> 8u32) & 0xFFu32
+        val sb = color & 0xFFu32
+        val inv = 255u32 - alpha.to_u32()
+        var row: i32 = 0
+        while row < h:
+            var col: i32 = 0
+            while col < w:
+                val px = x + col
+                val py = y + row
+                if px >= 0 and py >= 0 and px < self.width and py < self.height:
+                    val idx = py * self.width + px
+                    val dst = self.pixels[idx]
+                    val dr = (dst >> 16u32) & 0xFFu32
+                    val dg = (dst >> 8u32) & 0xFFu32
+                    val db = dst & 0xFFu32
+                    val rr = (sr * alpha.to_u32() + dr * inv + 128u32) >> 8u32
+                    val rg = (sg * alpha.to_u32() + dg * inv + 128u32) >> 8u32
+                    val rb = (sb * alpha.to_u32() + db * inv + 128u32) >> 8u32
+                    self.pixels[idx] = 0xFF000000u32 | (rr << 16u32) | (rg << 8u32) | rb
+                col = col + 1
+            row = row + 1
+
+    me blur_region(x: i32, y: i32, w: i32, h: i32, radius: u32):
+        # No-op: blur is not used by any parity scene.
+        self.id = self.id
+
+    me gradient_v(x: i32, y: i32, w: i32, h: i32, color_top: u32, color_bottom: u32):
+        # No-op: gradient is not used by any parity scene.
+        self.id = self.id
+
+    fn read_pixel(x: i32, y: i32) -> u32:
+        if x < 0 or y < 0 or x >= self.width or y >= self.height:
+            return 0u32
+        val idx = y * self.width + x
+        self.pixels[idx]

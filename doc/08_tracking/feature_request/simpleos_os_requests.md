@@ -345,9 +345,11 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
         task's `user_context` and return to ring 3. (Commit `4708c2c9`
         `arch_x86_64_enter_user_first` helper + `a3f4f666` syscall 14
         dispatch wired to `arch_x86_64_enter_user_task`.)
-  - [ ] System coverage exercises both the direct process-backed path and the
-        resident-manifest fallback path. (Test scaffolding added; full
-        coverage pending stub-collision fix.)
+  - [x] System coverage exercises both the direct process-backed path and the
+        resident-manifest fallback path. (`bin/simple test
+        test/unit/os/x86_64_fs_loaded_launch_proof_spec.spl --clean` covers
+        filesystem process-backed marker acceptance and resident-manifest
+        fallback rejection.)
   - [ ] The live desktop disk lane shows no `EXCEPTION`, `FAULT @`, `cr2=`,
         `cr3=`, `heap exhausted`, or `PANIC` markers while launching the app.
         (Blocked by freestanding-stub symbol-weakness collision — see

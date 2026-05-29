@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-29 08:24:16*
+*Generated: 2026-05-29 09:25:51*
 
-## test/unit/compiler/mir_opt
+## test/unit/os
 
-❌ **auto_vectorize_spec.spl** (651ms)
-  - Source: `test/unit/compiler/mir_opt/auto_vectorize_spec.spl`
-  - Generated doc: `spec/auto_vectorize_spec.md`
+❌ **x86_64_fs_loaded_launch_proof_spec.spl** (200ms)
+  - Source: `test/unit/os/x86_64_fs_loaded_launch_proof_spec.spl`
+  - Generated doc: `spec/x86_64_fs_loaded_launch_proof_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 59 ✅
-- **Failed:** 1 ❌
-- **Duration:** 659ms
+- **Passed:** 0 ✅
+- **Failed:** 2 ❌
+- **Duration:** 202ms
