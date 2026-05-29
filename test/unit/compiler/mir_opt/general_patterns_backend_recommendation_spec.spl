@@ -52,6 +52,11 @@ describe "general optimization backend recommendations":
         expect(backend_optimization_has_recommendation("interpreter", "simple-auto-vectorize")).to_equal(true)
         expect(backend_optimization_has_recommendation("llvm", "simple-auto-vectorize")).to_equal(false)
 
+    it "keeps Simple hot-call inlining away from LLVM inliner pipeline":
+        expect(backend_optimization_has_recommendation("cranelift", "simple-hot-call-inline")).to_equal(true)
+        expect(backend_optimization_has_recommendation("interpreter", "simple-hot-call-inline")).to_equal(true)
+        expect(backend_optimization_has_recommendation("llvm", "simple-hot-call-inline")).to_equal(false)
+
     it "does not apply Cranelift-local LICM to unrelated future backends":
         val wasm = backend_optimization_plan_for_budget("wasm", "medium")
         expect(wasm.recommendation_names.contains("cranelift-local-licm")).to_equal(false)
@@ -71,6 +76,13 @@ describe "general optimization backend recommendations":
             if decision.stable_name == "simple-auto-vectorize" and decision.reason == "backend_not_simple_low_tier_jit":
                 found_vectorize_skip = true
         expect(found_vectorize_skip).to_equal(true)
+
+        expect(wasm_high.recommendation_names.contains("simple-hot-call-inline")).to_equal(false)
+        var found_inline_skip = false
+        for decision in wasm_high.skipped_decisions:
+            if decision.stable_name == "simple-hot-call-inline" and decision.reason == "backend_not_simple_low_tier_jit":
+                found_inline_skip = true
+        expect(found_inline_skip).to_equal(true)
 
     it "filters backend recommendations by compile cost budget":
         expect(backend_optimization_cost_allowed("medium", "medium")).to_equal(true)
@@ -160,5 +172,33 @@ describe "general optimization backend recommendations":
         var found_llvm_skip = false
         for decision in llvm.skipped_decisions:
             if decision.stable_name == "simple-auto-vectorize" and decision.reason == "llvm_runs_vectorizer_pipeline":
+                found_llvm_skip = true
+        expect(found_llvm_skip).to_equal(true)
+
+    it "gates Simple hot-call inlining on profile and budget facts":
+        val missing = backend_optimization_plan_for_budget_with_facts("cranelift", "high", ["typed_mir", "profile.hot_call"])
+        expect(missing.recommendation_names.contains("simple-hot-call-inline")).to_equal(false)
+        var found_missing_budget = false
+        for decision in missing.skipped_decisions:
+            if decision.stable_name == "simple-hot-call-inline" and decision.reason == "missing inline_budget":
+                found_missing_budget = true
+        expect(found_missing_budget).to_equal(true)
+
+        val medium = backend_optimization_plan_for_budget_with_facts("cranelift", "medium", ["typed_mir", "profile.hot_call", "inline_budget"])
+        expect(medium.recommendation_names.contains("simple-hot-call-inline")).to_equal(false)
+        var found_cost_skip = false
+        for decision in medium.skipped_decisions:
+            if decision.stable_name == "simple-hot-call-inline" and decision.reason == "cost budget exceeded":
+                found_cost_skip = true
+        expect(found_cost_skip).to_equal(true)
+
+        val ready = backend_optimization_plan_for_budget_with_facts("cranelift", "high", ["typed_mir", "profile.hot_call", "inline_budget"])
+        expect(ready.recommendation_names.contains("simple-hot-call-inline")).to_equal(true)
+
+        val llvm = backend_optimization_plan_for_budget_with_facts("llvm", "high", ["typed_mir", "profile.hot_call", "inline_budget", "llvm_backend_available"])
+        expect(llvm.recommendation_names.contains("simple-hot-call-inline")).to_equal(false)
+        var found_llvm_skip = false
+        for decision in llvm.skipped_decisions:
+            if decision.stable_name == "simple-hot-call-inline" and decision.reason == "llvm_runs_inliner_pipeline":
                 found_llvm_skip = true
         expect(found_llvm_skip).to_equal(true)
