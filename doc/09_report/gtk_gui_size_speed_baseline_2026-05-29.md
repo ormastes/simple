@@ -6,13 +6,14 @@ Date: 2026-05-29
 
 | Runtime | Status | Binary bytes | Iterations | Total us | Notes |
 |---|---|---:|---:|---:|---|
-| Simple web renderer | ok | n/a | 4 | 5614 | render loop via Simple software renderer |
-| Simple static cache | ok | n/a | 4 | 1346 | persistent HTML artifact cache hit loop |
-| Simple persistent SWBC command plan | ok | n/a | 4 | 397256 | disk-backed compact static-shell plan to retained commands |
-| Simple hot SWBC command plan cache | ok | n/a | 4 | 133880 | in-memory encoded SWBC sidecar cache after persistent warmup |
-| Simple SWBC prepared reuse | ok | n/a | 4 | 78 | decoded compact static-shell plan reuse loop |
-| Simple SWBC command plan | ok | n/a | 4 | 38 | decoded command-only static-shell plan, no HTML artifact |
-| GTK | ok | 14472 | 200 | 24415 | widget construction loop; uses xvfb-run when available |
+| Simple web renderer | ok | n/a | 4 | 6636 | render loop via Simple software renderer |
+| Simple static cache | ok | n/a | 4 | 1812 | persistent HTML artifact cache hit loop |
+| Simple persistent SWBC command plan | ok | n/a | 4 | 560714 | disk-backed compact static-shell plan to retained commands |
+| Simple hot SWBC command plan cache | ok | n/a | 4 | 183563 | in-memory encoded SWBC sidecar cache after persistent warmup |
+| Simple retained command hot cache | ok | n/a | 4 | 581 | in-memory retained command list after persistent warmup |
+| Simple SWBC prepared reuse | ok | n/a | 4 | 88 | decoded compact static-shell plan reuse loop |
+| Simple SWBC command plan | ok | n/a | 4 | 67 | decoded command-only static-shell plan, no HTML artifact |
+| GTK | ok | 14472 | 200 | 26571 | widget construction loop; uses xvfb-run when available |
 
 ## Static Shell Size
 
@@ -31,7 +32,7 @@ Date: 2026-05-29
 - [memory-guard] SIMPLE_LIB=/home/ormastes/dev/pub/simple/src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
 - simple_render_status=ok
 - simple_render_iterations=4
-- simple_render_total_us=5614
+- simple_render_total_us=6636
 - simple_render_pixels=256000
 - simple_cache_schema=simple-web-cache-v1
 - simple_render_plan=static_shell_with_dynamic_islands
@@ -40,16 +41,21 @@ Date: 2026-05-29
 - simple_static_cache_hit_iterations=4
 - simple_static_cache_memory_hits=4
 - simple_static_cache_disk_hits=0
-- simple_static_cache_total_us=1346
-- simple_static_disk_plan_warm_stored=false
+- simple_static_cache_total_us=1812
+- simple_static_disk_plan_warm_stored=true
 - simple_static_disk_plan_hit_iterations=4
 - simple_static_disk_plan_command_count=20
-- simple_static_disk_plan_total_us=397256
+- simple_static_disk_plan_total_us=560714
 - simple_static_plan_cache_warm_stored=true
 - simple_static_plan_cache_hit_iterations=4
 - simple_static_plan_cache_memory_hits=4
 - simple_static_plan_cache_command_count=20
-- simple_static_plan_cache_total_us=133880
+- simple_static_plan_cache_total_us=183563
+- simple_static_command_cache_warm_stored=true
+- simple_static_command_cache_hit_iterations=4
+- simple_static_command_cache_memory_hits=4
+- simple_static_command_cache_command_count=20
+- simple_static_command_cache_total_us=581
 - simple_static_html_bytes=248
 - simple_static_binary_plan_bytes=171
 - simple_static_binary_commands=5
@@ -61,17 +67,17 @@ Date: 2026-05-29
 - simple_static_swbc_prepared_hits=4
 - simple_static_command_reuse_count=20
 - simple_static_command_reuse_hits=4
-- simple_static_swbc_total_us=78
+- simple_static_swbc_total_us=88
 - simple_static_command_plan_valid=true
 - simple_static_command_plan_count=20
 - simple_static_command_plan_hits=4
-- simple_static_command_plan_total_us=38
+- simple_static_command_plan_total_us=67
 
 ## GTK Output
 
 - gtk_render_status=ok
 - gtk_render_iterations=200
-- gtk_widget_total_us=24415
+- gtk_widget_total_us=26571
 
 ## GTK Linked Dependencies
 
