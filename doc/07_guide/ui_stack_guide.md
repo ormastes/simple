@@ -151,6 +151,12 @@ render payload shapes. Electron and Tauri snapshot/patch helpers are regression
 tested against the shared web backend helpers in
 `test/unit/app/ui/web_render_backend_api_spec.spl`.
 
+For host-bridge parity, `web_render_transport_bundle(req, ...)` builds the
+render, input, snapshot, patch, and host-window command JSON from the common API
+in one place. Electron and Tauri expose their adapter helpers against that
+bundle so webview access through Chromium, Electron, and Tauri stays a transport
+choice, not a separate GUI interface.
+
 For static-shell and binary-cache planning, use
 `web_render_optimization_profile(req)`. It reports the cache schema, cache key,
 static-shell cacheability, dynamic-island count, and render plan. Dynamic
