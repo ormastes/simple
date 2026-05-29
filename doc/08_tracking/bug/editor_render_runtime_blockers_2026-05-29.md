@@ -3,7 +3,7 @@
 - **ID:** editor_render_runtime_blockers
 - **Date:** 2026-05-29
 - **Area:** editor app + seed runtime/JIT
-- **Status:** RENDER ACHIEVED — editor frame drawn via the real EditorBuffer through `bin/simple`'s interpreter with a narrowed SIMPLE_LIB (see "Frame rendered" below). Full native binary still blocked by the 2 seed/runtime bugs.
+- **Status:** RENDER ACHIEVED (interpreter, narrowed SIMPLE_LIB — see "Frame rendered" below). AOT (`core-c-bootstrap`) now **builds + links + runs**: the duplicate-`_rt_file_exists` blocker is fixed (weak attr, main `61b29213`) and the render-loop SIGSEGV is fixed (main `knrqtpow`). The missing UI-state types + the `.id` deref crash fix are on main (`knrqtpow`). Remaining: 3 AOT/JIT-runtime issues below (NOT editor code), plus `PaletteState` is still an undefined type.
 
 ## Frame rendered (2026-05-29)
 
@@ -50,11 +50,17 @@ was written against but that never existed:
   editing/edit_value) in `src/lib/editor/30.view/settings_view.spl`.
 - Wired `use std.editor.view.file_tree.*` / `settings_view.*` into the
   controller, ctrl_core, tui_shell_panels, gui_backend.
-- `_tui_render_split_borders` → single-pane no-op (the flat-array SplitNode model
-  it used doesn't exist; real `SplitNode` is a recursive enum).
-- `_tui_render_palette` → no-op (`PaletteState`/`palette_new`/`palette_show` are an
-  undefined API; popup isn't part of the default frame).
 - `LspResponse` tuple-element annotations in `editor_ctrl_core2.spl`.
+
+**On main as of `knrqtpow`:** `FileTreeState`/`FileTreeVisibleNode`/`_ft_flatten`,
+`SettingsViewState`, the two `use std.editor.view.{file_tree,settings_view}.*`
+imports, and the `.id.value`→`.id` fix in `_layout_find_group_index_local`. The
+proj3 diagnostic workarounds (no-op'ing `_tui_render_palette`, removing the
+per-frame poll calls, skipping `discover_extensions`) were **intentionally NOT
+taken** — they delete real, working code (the four poll methods exist at
+`editor_controller.spl:367/664/682/700` and are used by `gui_shell_core.spl` too;
+`discover_extensions` exists at `host.spl:113`). They are recorded as bugs below
+instead of degrading source.
 
 (The markdown subsystem + string-method/octal seed fixes from the other session
 were prerequisites and are already on main.)
@@ -69,14 +75,34 @@ Running the binary panics immediately (SIGSEGV, 0 bytes output):
 `rt_compile_to_native_with_opt`, an `insert_simple!`-registered interpreter-host
 extern with no C-ABI symbol — the JIT-at-startup path can't resolve it. This is
 the architectural interpreter↔JIT-extern bridge gap (see
-`editor_jit_run_route_blockers_2026-05-28.md` item 2).
+`editor_jit_run_route_blockers_2026-05-28.md` item 2). Use `core-c-bootstrap`
+(AOT) instead, which now builds + links + runs.
 
-### 2. `core-c-bootstrap` (AOT) link error
-`duplicate symbol '_rt_file_exists'` in `libsimple_runtime.a`
-(`runtime_native.o` AND `runtime_legacy_core.o` both define it). A runtime-archive
-bug — likely from in-flight runtime symbol work. With this fixed, the AOT bundle
-should produce a runnable binary (the extern would be a harmless stub, not a JIT
-resolve).
+### 2. AOT runtime: `discover_extensions` reports "function not found"
+`EditorController.new()` calls `host.discover_extensions(editor_extension_roots())`
+(`editor_controller.spl:154`). The method **exists** (`host.spl:113
+me discover_extensions(...)`), yet the `core-c-bootstrap` binary reports
+"function not found" for it at runtime — an AOT method-dispatch/symbol-resolution
+bug, not a missing function. Built-in extensions suffice to draw a frame, so this
+blocks extension loading rather than render.
+
+### 3. AOT runtime: per-frame poll calls crash
+The TUI shell's per-frame `ctrl._refresh_lsp_results()` / `_poll_file_watcher()` /
+`_poll_inlay_hint_refresh_after(100)` / `_poll_debug_dap_client()`
+(`tui_shell.spl`, before `_tui_render_frame`) call AOT-stubbed runtime externs and
+crash. The methods are real (`editor_controller.spl:367/664/682/700`); the fix is
+at the AOT-stub/extern level, not removing the calls.
+
+### 4. `PaletteState` is an undefined type
+Referenced at `editor_controller.spl:98` (`palette_state: PaletteState`), `:166`
+(`palette_state: nil`), and `tui_shell_panels.spl:437` (`_tui_render_palette`
+param), but defined nowhere in the tree. `--entry-closure` builds because the
+palette code is unreached, but a full-tree compile / the GUI palette path will
+fail. Needs a real `PaletteState` struct (+ the `palette_new`/`palette_show` API).
+
+### (fixed) `core-c-bootstrap` (AOT) duplicate-symbol link error
+Was: `duplicate symbol '_rt_file_exists'` (`runtime_native.o` + legacy_core.o).
+Fixed via `__attribute__((weak))` on the legacy_core definition (main `61b29213`).
 
 ## Caveat / likely root
 
