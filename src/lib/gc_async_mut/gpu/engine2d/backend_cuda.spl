@@ -510,6 +510,25 @@ class CudaBackend:
             self.d_framebuffer = 0
         self.framebuffer_bytes = 0
 
+    me _copy_mirror_to_device() -> bool:
+        if not self.initialized or self.d_framebuffer == 0 or self.framebuffer_bytes <= 0:
+            return false
+        val pixels = self.mirror.read_pixels()
+        val expected_pixels = self.width() * self.height()
+        if pixels.len() != expected_pixels:
+            return false
+        val host_pixels = rt_alloc(self.framebuffer_bytes)
+        if host_pixels == 0:
+            return false
+        _write_u32_pixels_to_host(host_pixels, pixels, expected_pixels)
+        val upload_rc = cuda_memcpy_htod(self.d_framebuffer, host_pixels, self.framebuffer_bytes)
+        rt_free(host_pixels, self.framebuffer_bytes)
+        upload_rc == CUDA_SUCCESS
+
+    me _disable_device_readback_after_mirror_sync_failure():
+        self.last_probe = _cuda_context_failure("CUDA mirror-to-device synchronization failed")
+        self.initialized = false
+
 impl RenderBackend for CudaBackend:
     fn name() -> text:
         "cuda"
@@ -592,6 +611,9 @@ impl RenderBackend for CudaBackend:
         self.mirror.draw_rect_filled(x, y, w, h, color)
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
+        if self.initialized:
+            if not self._copy_mirror_to_device():
+                self._disable_device_readback_after_mirror_sync_failure()
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
         self.mirror.draw_circle(cx, cy, r, color)
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):

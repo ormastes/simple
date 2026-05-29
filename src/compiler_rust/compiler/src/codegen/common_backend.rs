@@ -1390,10 +1390,26 @@ impl<M: Module> CodegenBackend<M> {
 
         // Second pass: compile function bodies
         // Track functions that fail compilation so we can create stubs
+        let dump_mir = std::env::var("SIMPLE_DUMP_MIR").is_ok();
         let mut failed_functions: Vec<&MirFunction> = Vec::new();
         for func in &functions {
             if func.blocks.is_empty() {
                 continue;
+            }
+            // SIMPLE_DUMP_MIR: dump post-inline MIR for functions matching
+            // the env var value as a substring filter (or all if value is "1").
+            if dump_mir {
+                let filter = std::env::var("SIMPLE_DUMP_MIR").unwrap_or_default();
+                if filter == "1" || func.name.contains(&filter) {
+                    eprintln!("[MIR-DUMP] function: {}", func.name);
+                    for block in &func.blocks {
+                        eprintln!("  block {:?} (entry={})", block.id, block.id == func.entry_block);
+                        for inst in &block.instructions {
+                            eprintln!("    {:?}", inst);
+                        }
+                        eprintln!("    terminator: {:?}", block.terminator);
+                    }
+                }
             }
             match self.compile_function(func) {
                 Ok(()) => {}
@@ -1404,12 +1420,32 @@ impl<M: Module> CodegenBackend<M> {
                     // previous Agent V workaround inlined launcher_init() into
                     // DesktopShell.new() because `me init()` silently became a
                     // stub via this exact path.
-                    eprintln!(
-                        "[CODEGEN-STUB-FALLBACK] body compilation failed for '{}': {:?} \
-                         — this function will be replaced by an empty stub. \
-                         Set SIMPLE_NO_STUB_FALLBACK=1 to make this a hard error.",
-                        func.name, _e
-                    );
+                    //
+                    // If the error is a "Copy: source vreg" miss, auto-dump the
+                    // failing function's MIR so the root cause is visible
+                    // without needing SIMPLE_DUMP_MIR or SIMPLE_NO_STUB_FALLBACK.
+                    let err_str = format!("{:?}", _e);
+                    if err_str.contains("Copy: source vreg") || err_str.contains("source vreg") {
+                        eprintln!(
+                            "[CODEGEN-STUB-FALLBACK] undefined-vreg in '{}': {} \
+                             — auto-dumping MIR to diagnose cross-block VReg issue:",
+                            func.name, err_str
+                        );
+                        for block in &func.blocks {
+                            eprintln!("  block {:?} (entry={})", block.id, block.id == func.entry_block);
+                            for inst in &block.instructions {
+                                eprintln!("    {:?}", inst);
+                            }
+                            eprintln!("    terminator: {:?}", block.terminator);
+                        }
+                    } else {
+                        eprintln!(
+                            "[CODEGEN-STUB-FALLBACK] body compilation failed for '{}': {:?} \
+                             — this function will be replaced by an empty stub. \
+                             Set SIMPLE_NO_STUB_FALLBACK=1 to make this a hard error.",
+                            func.name, _e
+                        );
+                    }
                     failed_functions.push(func);
                     // IMPORTANT: Clear context to prevent state from leaking to next function
                     self.module.clear_context(&mut self.ctx);
