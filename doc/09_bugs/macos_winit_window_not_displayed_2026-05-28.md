@@ -89,45 +89,39 @@ Open. Discovered 2026-05-28 while verifying the pure-Simple web renderer + Engin
 display. Three single-call objc2 patches are exhausted — do not retry them; the fix is
 architectural.
 
-## RESOLVED 2026-05-29 — continuous pump + proper .app bundle
+## RESOLVED 2026-05-29 — pure-Simple loop + proper .app bundle (NO Rust-seed change)
 
-The macOS on-screen winit window now DISPLAYS the render. Verified: System Events
-reports window "SimpleWeb APP Test", `simple` becomes frontmost, `lsappinfo` shows the
-process registered (bundleID `com.simple.webgui2`), and a screencapture shows the
-blue-titlebar + green-body window on screen. The failure was TWO independent blockers;
-both fixes are required together.
+The macOS on-screen winit window now DISPLAYS the render, verified end-to-end with a
+STOCK gui driver (no Rust-seed changes): System Events reports the window, the app
+becomes frontmost, `lsappinfo` shows it registered, and a screencapture shows the
+rendered window on screen. The failure was TWO independent blockers; both are fixed in
+pure Simple / packaging — the Rust seed (bootstrap-only binary) is NOT touched.
 
-### Part A — code: continuous pump (keeps the AppKit handler installed)
-`pump_events` installs winit's handler only for each 1ms pump, so during the program's
-`rt_thread_sleep` frame gaps AppKit had no handler (`"no handler was set"`). Fix:
-- New `winit_sffi_thread::macos_pump_current()` + `winit_sffi::pump_current_event_loop()`
-  — pump the current thread's event loop with no id gate.
-- `concurrency.rs::rt_thread_sleep` on macOS pumps continuously for the sleep duration
-  instead of plain-sleeping. After this the `"no handler was set"` error count → 0.
+### Part A — pure Simple: poll continuously (keeps the AppKit handler installed)
+`rt_winit_event_loop_poll_events` already pumps the native event loop on macOS (stock).
+The interpreter owns the main thread, so the GUI app's loop must POLL CONTINUOUSLY rather
+than `rt_thread_sleep` — a sleep leaves AppKit with no handler between frames
+(`"no handler was set"`) and the window never composites. Fix is in the Simple app loop
+(no Rust change): present once, then loop calling `rt_winit_event_loop_poll_events(el, 1)`
+with no sleep, re-presenting occasionally for static content. See
+`examples/ui/web_engine2d_gui.spl`.
 
 ### Part B — packaging: proper .app bundle launched via `open` (registers the process)
-The bare CLI process is never registered with the window server (`lsappinfo` empty for
-it), even with winit's `ActivationPolicy::Regular` and even with a runtime
-`TransformProcessType(kProcessTransformToForegroundApplication)` call. Launch from a
-PROPER `.app` bundle so LaunchServices registers it in the Aqua session:
-- The gui driver binary is self-contained (`otool -L` shows only system libs), so COPY it
-  into `MyApp.app/Contents/MacOS/<exe>` and set `CFBundleExecutable=<exe>`.
-- `Info.plist` `LSEnvironment` supplies env: `SIMPLE_EXECUTION_MODE=interpret`,
-  `SIMPLE_LIB=<repo>/src`, `SIMPLE_TIMEOUT_SECONDS=<n>`.
-- Launch with `open MyApp.app --args run <abs-path-to.spl>`.
-- An `exec`-wrapper bundle does NOT work (exec to an out-of-bundle binary de-registers).
+A bare CLI process is never registered with the window server (`lsappinfo` empty for it),
+even with winit's `ActivationPolicy::Regular`. Launch from a PROPER `.app` bundle so
+LaunchServices registers it in the Aqua session. Helper script (no Rust):
+`scripts/macos-gui-run.shs` — locates the gui driver, builds a throwaway `.app` (binary
+COPIED into `Contents/MacOS`, it's self-contained per `otool -L`), sets env via Info.plist
+`LSEnvironment`, launches with `open App --args run <abs.spl>`, and nudges the window
+on-screen via `osascript` (winit may place small windows off-screen, e.g. y=-1095;
+`rt_winit_window_set_position` is a stub no-op so reposition is done in the launcher).
+An `exec`-wrapper bundle does NOT work (exec to an out-of-bundle binary de-registers).
 
-### Gotchas
-- winit may place the window off-screen (observed pos y=-686); add an explicit on-screen
-  `WindowAttributes::with_position(...)` so it is visible.
-- The non-interactive shell here IS in the Aqua session (TextEdit launched via AppleScript
-  shows a window), so `open` launches in the GUI session correctly.
+### Status: RESOLVED (verified on screen, stock driver). Usage
+`scripts/macos-gui-run.shs examples/ui/web_engine2d_gui.spl`
 
-### Status: RESOLVED (verified on screen). Follow-ups not yet landed
-1. Land Part A in source after A/B-isolating the minimal-necessary set — the proven binary
-   also carried objc2 `activate`/`makeKeyAndOrderFront`/`orderFrontRegardless` +
-   `TransformProcessType`, whose individual necessity was not bisected (likely ornamental
-   once the `.app` bundle handles registration); ship only the load-bearing pieces.
-2. Add a reusable macOS `.app` launcher (script or `bin/simple` enhancement) so GUI runs
-   auto-package + `open`.
-3. Add an explicit on-screen window position.
+Notes: needs a gui-feature driver (`CARGO_TARGET_DIR=target/gui cargo build -p
+simple-driver --features gui`). The earlier Rust-seed experiments
+(`macos_pump_current`/`TransformProcessType`/objc2 `orderFront`) were REVERTED — they are
+unnecessary; the pure-Simple loop + `.app` bundle suffice. Optional future polish: a real
+`rt_winit_window_set_position` so the on-screen nudge can move into Simple.
