@@ -9,12 +9,30 @@ use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count, cuda_device_name, cuda_memcpy_dtoh, cuda_launch_kernel, CUDA_SUCCESS}
-use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64, rt_ptr_write_i64}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64, size: i64)
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 
 val CUDA_2D_BLOCK_SIZE: i64 = 256
 
 fn cuda_2d_ptx_source() -> text:
     ".version 7.0\n.target sm_52\n.address_size 64\n\n.visible .entry kernel_clear(\n    .param .u64 param_fb,\n    .param .u32 param_color,\n    .param .u32 param_count\n) {\n    .reg .u64  %rd<3>;\n    .reg .u32  %r<6>;\n    .reg .pred %p0;\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n    ld.param.u32  %r4, [param_count];\n    setp.ge.u32   %p0, %r3, %r4;\n    @%p0 bra done_clear;\n    ld.param.u64  %rd0, [param_fb];\n    mul.wide.u32  %rd1, %r3, 4;\n    add.u64       %rd2, %rd0, %rd1;\n    ld.param.u32  %r5, [param_color];\n    st.global.u32 [%rd2], %r5;\ndone_clear:\n    ret;\n}\n\n.visible .entry kernel_draw_rect_filled(\n    .param .u64 param_fb,\n    .param .u32 param_x,\n    .param .u32 param_y,\n    .param .u32 param_w,\n    .param .u32 param_h,\n    .param .u32 param_color,\n    .param .u32 param_stride,\n    .param .u32 param_surface_h\n) {\n    .reg .u64  %rd<3>;\n    .reg .u32  %r<18>;\n    .reg .pred %p0;\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n    ld.param.u32  %r4, [param_w];\n    ld.param.u32  %r5, [param_h];\n    mul.lo.u32    %r6, %r4, %r5;\n    setp.ge.u32   %p0, %r3, %r6;\n    @%p0 bra done_rect;\n    div.u32  %r7, %r3, %r4;\n    rem.u32  %r8, %r3, %r4;\n    ld.param.u32  %r9,  [param_x];\n    ld.param.u32  %r10, [param_y];\n    add.u32  %r11, %r9,  %r8;\n    add.u32  %r12, %r10, %r7;\n    ld.param.u32  %r13, [param_stride];\n    ld.param.u32  %r14, [param_surface_h];\n    setp.ge.u32   %p0, %r11, %r13;\n    @%p0 bra done_rect;\n    setp.ge.u32   %p0, %r12, %r14;\n    @%p0 bra done_rect;\n    mad.lo.u32    %r15, %r12, %r13, %r11;\n    ld.param.u64  %rd0, [param_fb];\n    mul.wide.u32  %rd1, %r15, 4;\n    add.u64       %rd2, %rd0, %rd1;\n    ld.param.u32  %r16, [param_color];\n    st.global.u32 [%rd2], %r16;\ndone_rect:\n    ret;\n}\n"
+
+fn _i64(v: i32) -> i64:
+    v as i64
+
+fn _i64_from_u32(v: u32) -> i64:
+    v as i64
+
+fn _read_u32_pixels_from_host(ptr: i64, count: i32) -> [u32]:
+    var out: [u32] = []
+    var idx = 0
+    while idx < count:
+        out.push(rt_ptr_read_i32(ptr, _i64(idx) * 4) as u32)
+        idx = idx + 1
+    out
 
 fn _cuda_2d_kernel_gap(device_name: text) -> BackendProbeResult:
     var missing_render = BackendProbeResult.failed("cuda", "CUDA 2D render kernels unavailable: kernel_clear, kernel_draw_rect_filled")
