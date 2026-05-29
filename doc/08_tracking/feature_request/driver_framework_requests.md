@@ -330,7 +330,7 @@ or `Rejected` (one-line reason).
   `src/lib/nogc_sync_mut/fs_driver/driver_adapter.spl` +
   `src/lib/nogc_sync_mut/fs_driver/fat32_stub.spl`
 - **Priority:** P2
-- **Status:** Partial
+- **Status:** Implemented (2026-04-22; file I/O ops intentionally deferred — see Notes)
 - **Requested-semantics:**
   `fat32_stub.spl` used to pull the real FAT32 driver via
   `use os.services.fat32.fat32.{Fat32Driver as Fat32Core, BlockDevice}`.
