@@ -325,15 +325,14 @@ Measured blocker:
   corpus BDD covers this summary tool as the next production renderer target
   selector.
 - `tools/electron-shell/summarize_famous_site_text_mask_overlap.js --limit=5`
-  ranks colored-background text masks by overlap quality inside Chrome text
-  rects clipped to the colored div. The current worst recall target is
-  `site_119_wordpress`, with `1490` expected ink pixels, `174` actual, `131`
-  overlapping, `43` false-positive, and `recallPct10000: 879`.
-  `site_15_twitch` remains a near-worst low-recall target at `886`, while
-  `site_31_whatsapp` currently has the most false-positive ink (`64`). This
-  confirms the remaining colored-text gap is dominated by missing coverage with
-  mostly overlapping drawn ink, not arbitrary glyph placement. The corpus BDD
-  covers this diagnostic.
+  now computes mask overlap from the real PPM artifacts and Chrome metrics,
+  using the same production-artifact preference as the compositing and
+  histogram selectors. It reports `productionArtifactCount: 1`; the current
+  worst recall target is `site_0_google` production mode, with `1612` expected
+  ink pixels, `0` actual, `0` overlap, `1612` missing, and
+  `recallPct10000: 0`. Exact oracle-backed rows correctly report full overlap
+  and zero false positives. The corpus BDD covers this diagnostic as a real
+  artifact-backed mask target selector.
 - `tools/electron-shell/summarize_famous_site_text_color_histogram.js --limit=3
   --top=5` compares Chrome and Simple in-div ink color histograms for the
   focused text targets by reading the real PPM artifacts and Chrome metrics.
