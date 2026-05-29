@@ -15,7 +15,9 @@
 # NOTE: must run under SIMPLE_EXECUTION_MODE=interpret — the renderer uses the
 # array-repeat form [bg; w*h] (rt_array_repeat) which the JIT cannot resolve.
 
-use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{SimpleWebRenderer}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    SimpleWebRenderer,
+    simple_web_resolved_engine2d_backend_name}
 
 extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
@@ -26,6 +28,7 @@ extern fn rt_winit_event_free(ev: i64)
 extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
 extern fn rt_thread_sleep(ms: i64)
+extern fn rt_env_get(key: text) -> text
 val SCREEN_W: i32 = 64
 val SCREEN_H: i32 = 48
 val WINDOW_W: i32 = 640
@@ -54,12 +57,20 @@ fn pack_pixels(src: [u32]) -> [i64]:
 fn render_backend(backend: text) -> [u32]:
     val renderer = SimpleWebRenderer.create_with_backend(SCREEN_W, SCREEN_H, backend)
     val pixels = renderer.render_html_to_pixels(demo_html())
-    print "Rendered {pixels.len()} px via backend '{renderer.backend_name}' sample={pixels[0]}/{pixels[6 + 6 * SCREEN_W]}/{pixels[pixels.len() - 1]}"
+    val resolved = simple_web_resolved_engine2d_backend_name(SCREEN_W, SCREEN_H, renderer.backend_name)
+    print "Rendered {pixels.len()} px via requested backend '{renderer.backend_name}' resolved='{resolved}' sample={pixels[0]}/{pixels[6 + 6 * SCREEN_W]}/{pixels[pixels.len() - 1]}"
     pixels
 
 fn main() -> i64:
     print "Simple Web Renderer + Engine2D GUI {SCREEN_W}x{SCREEN_H} presented at {WINDOW_W}x{WINDOW_H}"
     val cpu_pixels = render_backend("cpu")
+    val metal_pixels = render_backend("metal")
+    if cpu_pixels.len() == metal_pixels.len():
+        print "CPU/Metal render parity sample: {cpu_pixels[0] == metal_pixels[0]} {cpu_pixels[6 + 6 * SCREEN_W] == metal_pixels[6 + 6 * SCREEN_W]}"
+
+    if rt_env_get("SIMPLE_GUI") != "1":
+        print "No GUI requested (set SIMPLE_GUI=1 to open a window); headless render only."
+        return 0
 
     val el = rt_winit_event_loop_new()
     if el == 0:
@@ -70,7 +81,7 @@ fn main() -> i64:
         print "Window creation failed."
         rt_winit_event_loop_free(el)
         return 0
-    val packed = pack_pixels(cpu_pixels)
+    val packed = pack_pixels(metal_pixels)
     var frame = 0
     var running = true
     while running and frame < 200:
