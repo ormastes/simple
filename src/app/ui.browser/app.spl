@@ -34,6 +34,15 @@ val EVT_MOUSE_BUTTON: i64 = 20
 val EVT_MOUSE_MOVED: i64 = 21
 val HOST_WINDOW_TITLE: text = "Simple Browser"
 val BROWSER_WINDOW_SCALE: i32 = 7
+val FILE_CHANGE_POLL_INTERVAL_TICKS: i32 = 15
+
+fn browser_file_change_poll_next(had_event: bool, ticks: i32, interval: i32) -> (bool, i32):
+    if had_event:
+        return (true, 0)
+    val next_ticks = ticks + 1
+    if next_ticks >= interval:
+        return (true, 0)
+    (false, next_ticks)
 
 # =========================================================================
 # BrowserApp
@@ -47,9 +56,14 @@ class BrowserApp:
     last_file_content: text
     last_mouse_x: i32
     last_mouse_y: i32
+    file_change_poll_ticks: i32
+    file_change_poll_interval_ticks: i32
 
     static fn new(file_path: text, port: i32, gpu_backend: text) -> Result<BrowserApp, text>:
         return BrowserApp.new_with_access_store_path(file_path, port, gpu_backend, "")
+
+    static fn file_poll_interval_ticks() -> i32:
+        FILE_CHANGE_POLL_INTERVAL_TICKS
 
     static fn new_with_access_store_path(file_path: text, port: i32, gpu_backend: text, access_db_path: text) -> Result<BrowserApp, text>:
         val tree_result = parse_ui_to_tree(file_path)
@@ -81,7 +95,9 @@ class BrowserApp:
                             running: true,
                             last_file_content: content,
                             last_mouse_x: 0,
-                            last_mouse_y: 0
+                            last_mouse_y: 0,
+                            file_change_poll_ticks: 0,
+                            file_change_poll_interval_ticks: FILE_CHANGE_POLL_INTERVAL_TICKS
                         ))
 
     me run_once(snapshot_path: text) -> i64:
@@ -127,8 +143,10 @@ class BrowserApp:
                 rt_winit_event_free(ev)
                 ev = rt_winit_event_loop_poll_events(event_loop, 100)
 
-            if self.check_file_changes():
-                had_event = true
+            val should_poll_file = self.consume_file_change_poll(had_event)
+            if should_poll_file:
+                if self.check_file_changes():
+                    had_event = true
 
             if had_event:
                 val state = self.session.current_state()
@@ -140,6 +158,12 @@ class BrowserApp:
         rt_winit_window_free(window)
         rt_winit_event_loop_free(event_loop)
         self.backend.shutdown()
+
+    me consume_file_change_poll(had_event: bool) -> bool:
+        """Throttle idle file reload checks while preserving event-time checks."""
+        val (should_poll, next_ticks) = browser_file_change_poll_next(had_event, self.file_change_poll_ticks, self.file_change_poll_interval_ticks)
+        self.file_change_poll_ticks = next_ticks
+        should_poll
 
     me check_file_changes() -> bool:
         """Check if the .ui.sdn file has changed and reload if so."""
