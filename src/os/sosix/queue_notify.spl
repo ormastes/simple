@@ -1,10 +1,35 @@
 """
-SOSIX queue notification stubs — scheduler-aware wakeup placeholders.
+SOSIX queue notification — scheduler-aware blocking and wakeup.
 
-When the scheduler gains blocking-wait support, these stubs will issue the
-corresponding kernel syscalls (IDs 120-131) to wake waiters on send/recv
-readiness rather than busy-polling.
+Each SOSIX queue slot is backed by two notification objects in the kernel
+notification table: one for recv-readiness (a message arrived) and one for
+send-readiness (a slot became free). This module manages the per-queue
+notification IDs and wires them to the kernel notification API so that callers
+can block instead of busy-polling.
+
+Notification IDs are 1-based (0 means "not allocated"). The tables are
+initialised lazily on first use by `_sosix_queue_notify_ensure`.
 """
+
+use os.kernel.ipc.notification.{
+    notification_create,
+    notification_signal,
+    notification_wait,
+    notification_poll
+}
+use os.kernel.ipc.notif_global.{g_notification_table}
+
+# Maximum queues must match share.spl SOSIX_MAX_QUEUES.
+val _SOSIX_NOTIFY_MAX_QUEUES: u64 = 32
+
+# Notification bit used for recv-ready and send-ready signals.
+val SOSIX_NOTIFY_BIT_RECV: u64 = 1
+val SOSIX_NOTIFY_BIT_SEND: u64 = 2
+
+# Per-queue notification IDs (0 = not yet allocated).
+var _sosix_notif_recv_id: [u64; 32]
+var _sosix_notif_send_id: [u64; 32]
+var _sosix_notif_initialized: bool = false
 
 # Syscall IDs 120-131 for dataset/queue kernel managers (Follow-Up Slice).
 val SOSIX_SYS_DATASET_CREATE: u64 = 120
@@ -20,20 +45,98 @@ val SOSIX_SYS_QUEUE_CLOSE: u64 = 129
 val SOSIX_SYS_QUEUE_WAIT_RECV: u64 = 130
 val SOSIX_SYS_QUEUE_WAIT_SEND: u64 = 131
 
-fn sosix_queue_notify_recv(queue_id: u64):
-    """Stub: notify the scheduler that queue_id has a message ready for receive."""
-    val _ignored = queue_id
+fn sosix_queue_notify_init():
+    """Reset all per-queue notification ID tables."""
+    var i: u64 = 0
+    while i < _SOSIX_NOTIFY_MAX_QUEUES:
+        _sosix_notif_recv_id[i] = 0
+        _sosix_notif_send_id[i] = 0
+        i = i + 1
+    _sosix_notif_initialized = true
 
-fn sosix_queue_notify_send(queue_id: u64):
-    """Stub: notify the scheduler that queue_id has a free slot ready for send."""
-    val _ignored = queue_id
+fn _sosix_queue_notify_ensure(slot: u64):
+    """Lazily allocate notification objects for a queue slot."""
+    if not _sosix_notif_initialized:
+        sosix_queue_notify_init()
+    if slot >= _SOSIX_NOTIFY_MAX_QUEUES:
+        return
+    if _sosix_notif_recv_id[slot] == 0:
+        var tbl = g_notification_table
+        _sosix_notif_recv_id[slot] = notification_create(tbl)
+    if _sosix_notif_send_id[slot] == 0:
+        var tbl = g_notification_table
+        _sosix_notif_send_id[slot] = notification_create(tbl)
 
-fn sosix_queue_wait_recv(queue_id: u64) -> i64:
-    """Stub: block caller until queue_id becomes readable (returns 0 on success)."""
-    val _ignored = queue_id
+fn sosix_queue_notify_recv(queue_slot: u64):
+    """Signal waiters that queue_slot now has a message ready for receive."""
+    _sosix_queue_notify_ensure(queue_slot)
+    if queue_slot >= _SOSIX_NOTIFY_MAX_QUEUES:
+        return
+    val notif_id = _sosix_notif_recv_id[queue_slot]
+    if notif_id == 0:
+        return
+    var tbl = g_notification_table
+    val _w = notification_signal(tbl, notif_id, SOSIX_NOTIFY_BIT_RECV)
+
+fn sosix_queue_notify_send(queue_slot: u64):
+    """Signal waiters that queue_slot now has a free slot ready for send."""
+    _sosix_queue_notify_ensure(queue_slot)
+    if queue_slot >= _SOSIX_NOTIFY_MAX_QUEUES:
+        return
+    val notif_id = _sosix_notif_send_id[queue_slot]
+    if notif_id == 0:
+        return
+    var tbl = g_notification_table
+    val _w = notification_signal(tbl, notif_id, SOSIX_NOTIFY_BIT_SEND)
+
+fn sosix_queue_wait_recv(queue_slot: u64) -> i64:
+    """Block caller until queue_slot becomes readable (returns 0 on success)."""
+    _sosix_queue_notify_ensure(queue_slot)
+    if queue_slot >= _SOSIX_NOTIFY_MAX_QUEUES:
+        return -22
+    val notif_id = _sosix_notif_recv_id[queue_slot]
+    if notif_id == 0:
+        return -22
+    var tbl = g_notification_table
+    val bits = notification_wait(tbl, notif_id, 0)
+    if bits > 0:
+        return 0
+    # Bits were zero — thread must be blocked by the scheduler; return 0
+    # to indicate the wait was registered (scheduler unblocks on signal).
     0
 
-fn sosix_queue_wait_send(queue_id: u64) -> i64:
-    """Stub: block caller until queue_id has a free slot (returns 0 on success)."""
-    val _ignored = queue_id
+fn sosix_queue_wait_send(queue_slot: u64) -> i64:
+    """Block caller until queue_slot has a free slot (returns 0 on success)."""
+    _sosix_queue_notify_ensure(queue_slot)
+    if queue_slot >= _SOSIX_NOTIFY_MAX_QUEUES:
+        return -22
+    val notif_id = _sosix_notif_send_id[queue_slot]
+    if notif_id == 0:
+        return -22
+    var tbl = g_notification_table
+    val bits = notification_wait(tbl, notif_id, 0)
+    if bits > 0:
+        return 0
     0
+
+fn sosix_queue_poll_recv_bits(queue_slot: u64) -> u64:
+    """Non-blocking poll: return and clear recv-ready notification bits."""
+    _sosix_queue_notify_ensure(queue_slot)
+    if queue_slot >= _SOSIX_NOTIFY_MAX_QUEUES:
+        return 0
+    val notif_id = _sosix_notif_recv_id[queue_slot]
+    if notif_id == 0:
+        return 0
+    var tbl = g_notification_table
+    notification_poll(tbl, notif_id)
+
+fn sosix_queue_poll_send_bits(queue_slot: u64) -> u64:
+    """Non-blocking poll: return and clear send-ready notification bits."""
+    _sosix_queue_notify_ensure(queue_slot)
+    if queue_slot >= _SOSIX_NOTIFY_MAX_QUEUES:
+        return 0
+    val notif_id = _sosix_notif_send_id[queue_slot]
+    if notif_id == 0:
+        return 0
+    var tbl = g_notification_table
+    notification_poll(tbl, notif_id)

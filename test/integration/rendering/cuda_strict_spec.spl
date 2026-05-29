@@ -363,6 +363,94 @@ describe "CUDA strict smoke tests":
                     expect(pixels[0]).to_equal(bg)
                     engine.shutdown()
 
+    context "draw_text and clip and mask device readback":
+
+        it "draw_text result is visible in device readback":
+            val probe = probe_cuda()
+            if probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    engine.clear(bg)
+                    engine.draw_text(0, 0, "X", color_red_u32(), 8)
+                    engine.present()
+                    val cuda_pixels = engine.read_pixels()
+                    expect(cuda_pixels.len()).to_equal(256)
+                    var non_bg = 0
+                    var idx = 0
+                    while idx < 256:
+                        if cuda_pixels[idx] != bg:
+                            non_bg = non_bg + 1
+                        idx = idx + 1
+                    expect(non_bg).to_be_greater_than(0)
+                    engine.shutdown()
+
+        it "set_clip constrains draw_rect_filled visible via device readback":
+            val probe = probe_cuda()
+            if probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.set_clip(0, 0, 4, 4)
+                    engine.draw_rect_filled(0, 0, 16, 16, fg)
+                    engine.clear_clip()
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    expect(pixels.len()).to_equal(256)
+                    expect(pixels[0]).to_equal(fg)
+                    expect(pixels[3 * 16 + 3]).to_equal(fg)
+                    expect(pixels[4 * 16 + 4]).to_equal(bg)
+                    expect(pixels[15 * 16 + 15]).to_equal(bg)
+                    engine.shutdown()
+
+        it "clear_clip restores full-surface drawing via device readback":
+            val probe = probe_cuda()
+            if probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.set_clip(0, 0, 2, 2)
+                    engine.clear_clip()
+                    engine.draw_rect_filled(0, 0, 16, 16, fg)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    expect(pixels.len()).to_equal(256)
+                    expect(pixels[15 * 16 + 15]).to_equal(fg)
+                    expect(pixels[0]).to_equal(fg)
+                    engine.shutdown()
+
+        it "set_mask constrains draw_rect_filled visible via device readback":
+            val probe = probe_cuda()
+            if probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    # mask_buf[i]==0 means blocked; 1 means allowed
+                    # mask layout [col0_row0, col1_row0, col0_row1, col1_row1]
+                    # pixel (0,0)=1(pass), (1,0)=0(block), (0,1)=1(pass), (1,1)=0(block)
+                    var mask: [u8] = [1u8, 0u8, 1u8, 0u8]
+                    engine.set_mask(mask, 2, 2)
+                    engine.draw_rect_filled(0, 0, 2, 2, fg)
+                    engine.clear_mask()
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    expect(pixels.len()).to_equal(256)
+                    expect(pixels[0]).to_equal(fg)
+                    expect(pixels[1]).to_equal(bg)
+                    expect(pixels[16]).to_equal(fg)
+                    expect(pixels[17]).to_equal(bg)
+                    engine.shutdown()
+
     context "sync and readback correctness":
 
         it "read_pixels after present reflects latest draw":

@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-29 09:25:51*
+*Generated: 2026-05-29 11:13:03*
 
-## test/unit/os
+## test/unit/lib/gc_async_mut/gpu/browser_engine
 
-❌ **x86_64_fs_loaded_launch_proof_spec.spl** (200ms)
-  - Source: `test/unit/os/x86_64_fs_loaded_launch_proof_spec.spl`
-  - Generated doc: `spec/x86_64_fs_loaded_launch_proof_spec.md`
+❌ **simple_web_renderer_spec.spl** (55032ms)
+  - Source: `test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl`
+  - Generated doc: `spec/simple_web_renderer_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 0 ✅
+- **Passed:** 27 ✅
 - **Failed:** 2 ❌
-- **Duration:** 202ms
+- **Duration:** 55036ms

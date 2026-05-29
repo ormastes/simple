@@ -30,6 +30,7 @@ use .resource_lifecycle.{
 }
 use .smf_cache_manager.{SmfCacheManager, smfcachemanager_with_new_cache}
 use .smf_cache.{validated_smf_load}
+use os.smf.smf_generation.{GenerationState, CandidateMapping, SymbolSwap, LifecycleManager}
 
 # ============================================================================
 # Loaded Module
@@ -362,6 +363,11 @@ fn moduleloader_replace_live(self: ModuleLoader, path: text) -> LoadResult:
         val next_version = old_module.version + 1
         val candidate_prefix = "{path}#gen{next_version}:"
 
+        # Phase-2 wiring: track this replacement as a generation candidate.
+        val gen_candidate = GenerationState.candidate(path, next_version)
+        var gen_lm = LifecycleManager.new_manager().register_candidate(path, next_version)
+        var candidate_map = CandidateMapping.create(candidate_prefix)
+
         var reader_result = self.provider.get_reader(path)
         if reader_result_is_err(reader_result):
             reader_result = SmfReaderImpl.open(path)
@@ -416,6 +422,17 @@ fn moduleloader_replace_live(self: ModuleLoader, path: text) -> LoadResult:
             moduleloader_unmap_internal_symbols(self, internal_symbols)
             return loadresult_Error(message: reloc_result.unwrap_err())
 
+        # Phase-2: mark relocation done, validate imports, then check readiness.
+        candidate_map = candidate_map.complete_relocation().validate_imports()
+        if not candidate_map.is_ready():
+            self.modules[path] = old_module
+            moduleloader_unmap_internal_symbols(self, internal_symbols)
+            return loadresult_Error(message: "Candidate not ready after relocation for {path}")
+
+        # Promote candidate generation state.
+        val gen_active = gen_candidate.promote()
+        gen_lm = gen_lm.promote_candidate()
+
         # Publish candidate symbols before retiring old executable records so
         # lookups never observe a missing symbol during successful replacement.
         for sym_name in candidate_symbols.keys():
@@ -428,8 +445,12 @@ fn moduleloader_replace_live(self: ModuleLoader, path: text) -> LoadResult:
                 self.global_symbols = self.global_symbols.remove(old_sym)
             _ = self.jit.exec_mapper.unmap_symbol(old_sym)
 
+        # Phase-2: retire the old generation in the lifecycle manager.
+        gen_lm = gen_lm.retire(path)
+        val _old_gen_retired = GenerationState.loaded(path, old_module.version).retire()
+
         if self.config.verbose:
-            print "[loader] Replaced {path} with generation {next_version}"
+            print "[loader] Replaced {path} with generation {next_version} (gen_active={gen_active.to_text()})"
 
         loadresult_Success(module: candidate)
 

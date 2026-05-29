@@ -115,6 +115,31 @@ fn _last_hex_color_after(html: text, marker: text, fallback: u32) -> u32:
         pos = pos + found + marker.len()
     color
 
+fn _first_color_token_after(s: text, start: i64, fallback: u32) -> u32:
+    val hash = _find_char_from(s, "#", start)
+    if hash >= 0:
+        return _hex_color_at(s, hash, fallback)
+    fallback
+
+fn _declaration_background_color(declarations: text, fallback: u32) -> u32:
+    var color = fallback
+    var pos: i64 = 0
+    while pos < declarations.len():
+        val tail = declarations.substring(pos, declarations.len())
+        val bgc_rel = tail.index_of("background-color")
+        val bg_rel = tail.index_of("background:")
+        if bgc_rel < 0 and bg_rel < 0:
+            return color
+        if bgc_rel >= 0 and (bg_rel < 0 or bgc_rel < bg_rel):
+            val next = _first_color_token_after(tail, bgc_rel, color)
+            color = next
+            pos = pos + bgc_rel + "background-color".len()
+        else:
+            val next2 = _first_color_token_after(tail, bg_rel, color)
+            color = next2
+            pos = pos + bg_rel + "background:".len()
+    color
+
 fn _custom_property_color(html: text, property_name: text, fallback: u32) -> u32:
     if property_name == "":
         return fallback
@@ -300,13 +325,7 @@ fn _last_rule_hex_color(html: text, selector: text, fallback: u32) -> u32:
             val close_rel = after_open.index_of("}")
             if close_rel >= 0:
                 val rule = after_open.substring(0, close_rel)
-                val bg = _first_hex_color_after(rule, "background-color", color)
-                if bg != color:
-                    color = bg
-                else:
-                    val bg2 = _first_hex_color_after(rule, "background:", color)
-                    if bg2 != color:
-                        color = bg2
+                color = _declaration_background_color(rule, color)
         pos = found + selector.len()
     color
 
@@ -422,19 +441,12 @@ fn _first_block_color(html: text, fallback: u32) -> u32:
     if block < 0:
         return fallback
     val tail = html.substring(block, html.len())
-    val bgc_pos = tail.index_of("background-color")
-    var bgc = fallback
-    if bgc_pos >= 0:
-        val hash = _find_char_from(tail, "#", bgc_pos)
-        if hash >= 0:
-            bgc = _hex_color_at(tail, hash, fallback)
-    if bgc != fallback:
-        return bgc
-    val bg_pos = tail.index_of("background:")
-    if bg_pos >= 0:
-        val hash2 = _find_char_from(tail, "#", bg_pos)
-        if hash2 >= 0:
-            return _hex_color_at(tail, hash2, fallback)
+    val tag_end = tail.index_of(">")
+    if tag_end >= 0:
+        val tag_text = tail.substring(0, tag_end)
+        val inline_color = _declaration_background_color(tag_text, fallback)
+        if inline_color != fallback:
+            return inline_color
     _style_rule_block_color(html, fallback)
 
 pub fn simple_web_html_background_color(html: text) -> u32:

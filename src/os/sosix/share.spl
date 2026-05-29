@@ -1,6 +1,7 @@
 # SOSIX immutable dataset and queue sharing.
 
 use os.kernel.errno.{EAGAIN, EBADF, EINVAL, EIO, ENOMEM}
+use os.sosix.queue_notify.{sosix_queue_notify_recv, sosix_queue_notify_send}
 
 val SOSIX_MAX_DATASETS: u64 = 64
 val SOSIX_DATASET_MAX_BYTES: u64 = 4096
@@ -256,6 +257,8 @@ fn sosix_queue_send(queue: u64, bytes: [u8], attached_dataset: u64) -> i64:
     sosix_queue_slot_dataset[slot] = attached_dataset
     sosix_queue_tail[slot_queue] = (tail + 1) % sosix_queue_capacity[slot_queue]
     sosix_queue_count[slot_queue] = sosix_queue_count[slot_queue] + 1
+    # Notify any thread blocked waiting for a message to become available.
+    sosix_queue_notify_recv(slot_queue)
     bytes.len() as i64
 
 fn sosix_queue_recv(queue: u64) -> SosixQueueRecv:
@@ -282,6 +285,8 @@ fn sosix_queue_recv(queue: u64) -> SosixQueueRecv:
     sosix_queue_slot_dataset[slot] = SOSIX_NO_DATASET
     sosix_queue_head[slot_queue] = (head + 1) % sosix_queue_capacity[slot_queue]
     sosix_queue_count[slot_queue] = sosix_queue_count[slot_queue] - 1
+    # Notify any thread blocked waiting for a free send slot.
+    sosix_queue_notify_send(slot_queue)
     SosixQueueRecv(status: msg_len as i64, len: msg_len, attached_dataset: attached, data: out)
 
 fn sosix_queue_poll(queue: u64) -> u32:

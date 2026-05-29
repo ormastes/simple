@@ -5,16 +5,93 @@
 
 use std.common.compress.types.{CompressionError, CompressionCodec}
 
+pub struct CompressionLevel:
+    """Compression level wrapper."""
+    value: i64
+
 pub struct CompressionOptions:
     """Options passed to a compression call."""
     codec: CompressionCodec
-    level: i64
+    level: CompressionLevel
+    checksum: bool
+    block_mode: text
+    dictionary_bytes: [u8]?
+    dictionary_id: i64?
+    content_size: i64?
 
 # ============================================================================
 # LZ4 frame constants
 # ============================================================================
 
 val LZ4_MAGIC: i64 = 0x184D2204
+
+# ============================================================================
+# xxHash32 — pure Simple implementation used for frame checksums
+# ============================================================================
+
+# xxHash32 primes
+val _XXH32_P1: u32 = 2654435761u32
+val _XXH32_P2: u32 = 2246822519u32
+val _XXH32_P3: u32 = 3266489917u32
+val _XXH32_P4: u32 = 668265263u32
+val _XXH32_P5: u32 = 374761393u32
+
+fn _xxh32_rotl(v: u32, r: i64) -> u32:
+    """Rotate left 32-bit."""
+    (v << r.to_u32()) | (v >> (32 - r).to_u32())
+
+fn _xxh32_round(acc: u32, v: u32) -> u32:
+    val a = acc + (v * _XXH32_P2)
+    _xxh32_rotl(a, 13) * _XXH32_P1
+
+fn _xxh32_read_le32_u(data: [u8], off: i64) -> u32:
+    data[off].to_u32() |
+        (data[off + 1].to_u32() << 8u32) |
+        (data[off + 2].to_u32() << 16u32) |
+        (data[off + 3].to_u32() << 24u32)
+
+pub fn xxhash32_bytes(data: [u8], seed: u32) -> u32:
+    """Compute xxHash32 of `data` with given `seed`."""
+    val n = data.len()
+    var h: u32 = 0u32
+    var pos = 0
+
+    if n >= 16:
+        var v1 = seed + _XXH32_P1 + _XXH32_P2
+        var v2 = seed + _XXH32_P2
+        var v3 = seed + 0u32
+        var v4 = seed - _XXH32_P1
+        val limit = n - 16
+        while pos <= limit:
+            v1 = _xxh32_round(v1, _xxh32_read_le32_u(data, pos))
+            pos = pos + 4
+            v2 = _xxh32_round(v2, _xxh32_read_le32_u(data, pos))
+            pos = pos + 4
+            v3 = _xxh32_round(v3, _xxh32_read_le32_u(data, pos))
+            pos = pos + 4
+            v4 = _xxh32_round(v4, _xxh32_read_le32_u(data, pos))
+            pos = pos + 4
+        h = (_xxh32_rotl(v1, 1) + _xxh32_rotl(v2, 7) +
+             _xxh32_rotl(v3, 12) + _xxh32_rotl(v4, 18))
+    else:
+        h = seed + _XXH32_P5
+
+    h = h + n.to_u32()
+
+    while pos + 4 <= n:
+        h = h + (_xxh32_read_le32_u(data, pos) * _XXH32_P3)
+        h = _xxh32_rotl(h, 17) * _XXH32_P4
+        pos = pos + 4
+
+    while pos < n:
+        h = h + (data[pos].to_u32() * _XXH32_P5)
+        h = _xxh32_rotl(h, 11) * _XXH32_P1
+        pos = pos + 1
+
+    h = (h ^ (h >> 15u32)) * _XXH32_P2
+    h = (h ^ (h >> 13u32)) * _XXH32_P3
+    h = h ^ (h >> 16u32)
+    h
 
 # ============================================================================
 # LZ4 block-level helpers
@@ -56,6 +133,28 @@ fn _lz4_write_le32(v: i64) -> [u8]:
         ((v >> 24) & 0xFF) as u8
     ]
 
+fn _lz4_write_le32_u(v: u32) -> [u8]:
+    """Encode a u32 value as 4 little-endian bytes."""
+    [
+        (v & 0xFFu32).to_u8(),
+        ((v >> 8u32) & 0xFFu32).to_u8(),
+        ((v >> 16u32) & 0xFFu32).to_u8(),
+        ((v >> 24u32) & 0xFFu32).to_u8()
+    ]
+
+fn _lz4_write_le64(v: i64) -> [u8]:
+    """Encode a 64-bit value as 8 little-endian bytes."""
+    [
+        (v & 0xFF) as u8,
+        ((v >> 8) & 0xFF) as u8,
+        ((v >> 16) & 0xFF) as u8,
+        ((v >> 24) & 0xFF) as u8,
+        ((v >> 32) & 0xFF) as u8,
+        ((v >> 40) & 0xFF) as u8,
+        ((v >> 48) & 0xFF) as u8,
+        ((v >> 56) & 0xFF) as u8
+    ]
+
 fn _lz4_read_le32(data: [u8], off: i64) -> i64:
     """Read 4 bytes at `off` as a little-endian u32."""
     if off + 4 > data.len():
@@ -64,6 +163,24 @@ fn _lz4_read_le32(data: [u8], off: i64) -> i64:
         ((data[off + 1] as i64) << 8) |
         ((data[off + 2] as i64) << 16) |
         ((data[off + 3] as i64) << 24)
+
+fn _lz4_read_le32_u(data: [u8], off: i64) -> u32:
+    """Read 4 bytes at `off` as a little-endian u32."""
+    data[off].to_u32() |
+        (data[off + 1].to_u32() << 8u32) |
+        (data[off + 2].to_u32() << 16u32) |
+        (data[off + 3].to_u32() << 24u32)
+
+fn _lz4_read_le64(data: [u8], off: i64) -> i64:
+    """Read 8 bytes at `off` as a little-endian i64."""
+    (data[off] as i64) |
+        ((data[off + 1] as i64) << 8) |
+        ((data[off + 2] as i64) << 16) |
+        ((data[off + 3] as i64) << 24) |
+        ((data[off + 4] as i64) << 32) |
+        ((data[off + 5] as i64) << 40) |
+        ((data[off + 6] as i64) << 48) |
+        ((data[off + 7] as i64) << 56)
 
 fn _append_bytes(dst: [u8], src: [u8]) -> [u8]:
     var out = dst
@@ -74,6 +191,44 @@ fn _append_bytes(dst: [u8], src: [u8]) -> [u8]:
     out
 
 # ============================================================================
+# Frame descriptor helpers
+# ============================================================================
+
+fn _lz4_flg_block_independent(flg: u8) -> bool:
+    (flg & 0x20u8) != 0u8
+
+fn _lz4_flg_block_checksum(flg: u8) -> bool:
+    (flg & 0x10u8) != 0u8
+
+fn _lz4_flg_content_size(flg: u8) -> bool:
+    (flg & 0x08u8) != 0u8
+
+fn _lz4_flg_content_checksum(flg: u8) -> bool:
+    (flg & 0x04u8) != 0u8
+
+fn _lz4_header_end_offset(data: [u8]) -> i64:
+    """Return the byte offset immediately after the header checksum byte."""
+    val flg = data[4]
+    var off = 6  # magic(4) + FLG(1) + BD(1)
+    if _lz4_flg_content_size(flg):
+        off = off + 8
+    off + 1  # +1 for HC byte
+
+fn _lz4_build_descriptor(flg: u8, bd: u8, content_size: i64?) -> [u8]:
+    """Build the descriptor bytes (FLG + BD + optional content size)."""
+    var desc: [u8] = []
+    desc = desc.push(flg)
+    desc = desc.push(bd)
+    if content_size != nil:
+        val cs = content_size.unwrap()
+        desc = _append_bytes(desc, _lz4_write_le64(cs))
+    desc
+
+fn _lz4_compute_header_checksum(desc: [u8]) -> u8:
+    """Compute the HC byte: second byte of xxhash32(descriptor, seed=0)."""
+    ((xxhash32_bytes(desc, 0u32) >> 8u32) & 0xFFu32).to_u8()
+
+# ============================================================================
 # Public API
 # ============================================================================
 
@@ -81,59 +236,207 @@ pub fn lz4_compress_frame(data: [u8], opts: CompressionOptions) -> [u8]:
     """Compress `data` as a single LZ4 frame.
 
     Produces a valid LZ4 frame: magic, FLG/BD header, one data block, and
-    end-of-stream marker.  Compression uses the store path (no back-references)
-    which is always valid LZ4.
+    end-of-stream marker.  Uses hash-table compressor by default; falls back
+    to store path for incompressible inputs.  Respects checksum and
+    content_size options.
     """
-    var out: [u8] = []
-    # Magic number (4 bytes LE)
-    out = _append_bytes(out, _lz4_write_le32(LZ4_MAGIC))
-    # FLG byte: version=01, B.Indep=1, no B.checksum, Content.Size=0, no C.checksum
-    # FLG = 0b01100000 = 0x60
-    out = out.push(0x60 as u8)
-    # BD byte: block max size = 64 KB (0x70)
-    out = out.push(0x70 as u8)
-    # HC: header checksum — xxhash32 of FLG+BD bits[7:0]; simplified: use 0x00
-    # (decoder implementations often don't verify this for stored frames)
-    out = out.push(0x00 as u8)
+    val want_checksum = opts.checksum
+    val content_size = opts.content_size
+    val block_mode = opts.block_mode
 
-    val block_data = _lz4_encode_block(data)
-    val block_size = block_data.len()
-    # Block size field (4 bytes LE); high bit 0 means compressed
-    out = _append_bytes(out, _lz4_write_le32(block_size))
+    # Encode block data (compressed or raw)
+    val raw_block_data = _lz4_encode_block(data)
+    val compressed_block_data = _lz4_encode_block_compress(data)
+    var block_is_uncompressed = false
+    var block_data: [u8] = compressed_block_data
+    if compressed_block_data.len() >= data.len():
+        block_data = raw_block_data
+        block_is_uncompressed = true
+
+    if block_mode == "block":
+        # Raw block mode — return compressed block bytes only, no frame
+        return block_data
+
+    # FLG byte: version=01(bits 7:6), B.Indep=1(bit 5), B.checksum(bit 4),
+    #           C.Size(bit 3), C.checksum(bit 2)
+    var flg: u8 = 0x60u8  # version=01, B.Indep=1
+    if want_checksum:
+        flg = flg | 0x10u8  # block checksum
+        flg = flg | 0x04u8  # content checksum
+    if content_size != nil:
+        flg = flg | 0x08u8  # content size present
+
+    # BD byte: block max size = 64 KB (bits 6:4 = 100 = 0x40)
+    val bd: u8 = 0x40u8
+
+    val desc = _lz4_build_descriptor(flg, bd, content_size)
+    val hc = _lz4_compute_header_checksum(desc)
+
+    var out: [u8] = []
+    # Magic number (4 bytes LE) — note: wire order is 04 22 4D 18
+    out = out.push(0x04u8)
+    out = out.push(0x22u8)
+    out = out.push(0x4Du8)
+    out = out.push(0x18u8)
+    # Descriptor bytes (FLG + BD + optional content size)
+    out = _append_bytes(out, desc)
+    # Header checksum
+    out = out.push(hc)
+
+    # Block size field (4 bytes LE):
+    # high bit = 1 means uncompressed (raw), high bit = 0 means compressed
+    var size_word: u32 = block_data.len().to_u32()
+    if block_is_uncompressed:
+        size_word = size_word | 0x80000000u32
+    out = _append_bytes(out, _lz4_write_le32_u(size_word))
     out = _append_bytes(out, block_data)
-    # End mark: block size = 0
+
+    # Optional block checksum
+    if want_checksum:
+        val bc = xxhash32_bytes(block_data, 0u32)
+        out = _append_bytes(out, _lz4_write_le32_u(bc))
+
+    # End mark
     out = _append_bytes(out, _lz4_write_le32(0))
+
+    # Optional content checksum
+    if want_checksum:
+        val cc = xxhash32_bytes(data, 0u32)
+        out = _append_bytes(out, _lz4_write_le32_u(cc))
+
     out
 
-pub fn lz4_decompress_frame(data: [u8]) -> Result<[u8], CompressionError>:
-    """Decompress an LZ4 frame produced by lz4_compress_frame.
+pub fn lz4_compress_frame_for_tier(data: [u8], opts: CompressionOptions, tier: any) -> [u8]:
+    """Compress `data` as a single LZ4 frame for a given SIMD tier.
 
-    Validates the magic number then decodes blocks until the end mark.
+    The current pure-Simple implementation is scalar-only; all tier values
+    produce identical output.
+    """
+    lz4_compress_frame(data, opts)
+
+pub fn lz4_decompress_frame(data: [u8]) -> Result<[u8], CompressionError>:
+    """Decompress an LZ4 frame.
+
+    Validates magic number, frame descriptor (including header checksum),
+    block checksums, content checksum, and content size declaration.
+    Rejects dependent-block frames, trailing bytes, and empty data blocks.
     """
     if data.len() < 7:
         return Err(CompressionError.TruncatedInput("lz4 frame too short"))
-    val magic = _lz4_read_le32(data, 0)
-    if magic != LZ4_MAGIC:
+    # Magic: wire order 04 22 4D 18
+    if (data[0] != 0x04u8 or data[1] != 0x22u8 or
+            data[2] != 0x4Du8 or data[3] != 0x18u8):
         return Err(CompressionError.InvalidHeader("lz4 bad magic"))
-    # Skip magic(4) + FLG(1) + BD(1) + HC(1) = 7 bytes
-    var pos = 7
+
+    val flg = data[4]
+    val bd = data[5]
+
+    # Reject dependent-block frames (B.Indep bit = 0)
+    if not _lz4_flg_block_independent(flg):
+        return Err(CompressionError.UnsupportedFeature("lz4 dependent blocks not supported"))
+
+    val has_block_checksum = _lz4_flg_block_checksum(flg)
+    val has_content_size = _lz4_flg_content_size(flg)
+    val has_content_checksum = _lz4_flg_content_checksum(flg)
+
+    # Parse optional content size
+    var declared_content_size: i64 = -1
+    var pos = 6
+    if has_content_size:
+        if pos + 8 > data.len():
+            return Err(CompressionError.TruncatedInput("lz4 header content size truncated"))
+        declared_content_size = _lz4_read_le64(data, pos)
+        pos = pos + 8
+
+    # Header checksum byte
+    if pos >= data.len():
+        return Err(CompressionError.TruncatedInput("lz4 header checksum missing"))
+    val hc_byte = data[pos]
+    pos = pos + 1
+
+    # Validate header checksum
+    val desc = _lz4_build_descriptor(flg, bd, if has_content_size: Some(declared_content_size) else: nil)
+    val expected_hc = _lz4_compute_header_checksum(desc)
+    if hc_byte != expected_hc:
+        return Err(CompressionError.ChecksumMismatch("lz4 header checksum mismatch"))
+
+    # Decode blocks
     var out: [u8] = []
     while pos + 4 <= data.len():
-        val bsize = _lz4_read_le32(data, pos)
+        val size_word = _lz4_read_le32_u(data, pos)
         pos = pos + 4
-        if bsize == 0:
+
+        # End mark
+        if size_word == 0u32:
+            # Validate content checksum if present
+            if has_content_checksum:
+                if pos + 4 > data.len():
+                    return Err(CompressionError.TruncatedInput("lz4 content checksum truncated"))
+                val stored_cc = _lz4_read_le32_u(data, pos)
+                pos = pos + 4
+                val computed_cc = xxhash32_bytes(out, 0u32)
+                if stored_cc != computed_cc:
+                    return Err(CompressionError.ChecksumMismatch("lz4 content checksum mismatch"))
+            # Reject trailing bytes
+            if pos < data.len():
+                return Err(CompressionError.CorruptStream("lz4 trailing bytes after frame"))
+            # Validate declared content size
+            if has_content_size and declared_content_size != out.len():
+                return Err(CompressionError.CorruptStream("lz4 content size mismatch"))
             return Ok(out)
-        if pos + bsize > data.len():
-            return Err(CompressionError.TruncatedInput("lz4 block beyond input"))
-        # Decompress one block
-        val block_result = _lz4_decode_block(data, pos, bsize)
-        match block_result:
-            Ok(decoded):
-                out = _append_bytes(out, decoded)
-            Err(e):
-                return Err(e)
-        pos = pos + bsize
+
+        val block_is_uncompressed = (size_word & 0x80000000u32) != 0u32
+        val block_len = (size_word & 0x7FFFFFFFu32).to_i64()
+
+        # Reject empty data blocks (zero payload with high bit set or not)
+        if block_len == 0:
+            return Err(CompressionError.CorruptStream("lz4 empty data block"))
+
+        if pos + block_len > data.len():
+            return Err(CompressionError.TruncatedInput("lz4 block payload truncated"))
+
+        val block_bytes_start = pos
+        pos = pos + block_len
+
+        # Validate block checksum if present
+        if has_block_checksum:
+            if pos + 4 > data.len():
+                return Err(CompressionError.TruncatedInput("lz4 block checksum truncated"))
+            val stored_bc = _lz4_read_le32_u(data, pos)
+            pos = pos + 4
+            # Extract block bytes for checksum
+            var block_bytes: [u8] = []
+            var bi = block_bytes_start
+            while bi < block_bytes_start + block_len:
+                block_bytes = block_bytes.push(data[bi])
+                bi = bi + 1
+            val computed_bc = xxhash32_bytes(block_bytes, 0u32)
+            if stored_bc != computed_bc:
+                return Err(CompressionError.ChecksumMismatch("lz4 block checksum mismatch"))
+
+        # Decode block
+        if block_is_uncompressed:
+            var i = block_bytes_start
+            while i < block_bytes_start + block_len:
+                out = out.push(data[i])
+                i = i + 1
+        else:
+            val block_result = _lz4_decode_block(data, block_bytes_start, block_len)
+            match block_result:
+                Ok(decoded):
+                    out = _append_bytes(out, decoded)
+                Err(e):
+                    return Err(e)
+
     Err(CompressionError.TruncatedInput("lz4 missing end mark"))
+
+pub fn lz4_decompress_frame_for_tier(data: [u8], tier: any) -> Result<[u8], CompressionError>:
+    """Decompress an LZ4 frame for a given SIMD tier.
+
+    The current pure-Simple implementation is scalar-only; all tier values
+    produce identical output.
+    """
+    lz4_decompress_frame(data)
 
 # ============================================================================
 # Block-level public API (no frame header)
@@ -349,12 +652,12 @@ fn _lz4_decode_block(data: [u8], start: i64, length: i64) -> Result<[u8], Compre
                 pos = pos + 1
             match_len = match_len + extra
         if offset == 0:
-            return Err(CompressionError.CorruptData("lz4 zero offset"))
+            return Err(CompressionError.CorruptStream("lz4 invalid match offset"))
         var j = 0
         while j < match_len:
             val src_pos = out.len() - offset
             if src_pos < 0:
-                return Err(CompressionError.CorruptData("lz4 match before start"))
+                return Err(CompressionError.CorruptStream("lz4 invalid match offset"))
             out = out.push(out[src_pos])
             j = j + 1
     Ok(out)

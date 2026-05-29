@@ -97,8 +97,15 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   architecture-parameterized test path proving that resolved ELF32/i386 bytes
   can become a process-backed user task with the x86_32 entry and stack top;
   the x86_32 trap bridge also covers a `brk(0)` query through the common
-  syscall handler. Exec live mapping remains blocked behind the i686
-  boot/runtime lane.
+  syscall handler. As of 2026-05-29,
+  `test/unit/os/kernel/arch/x86_32_context_spec.spl`,
+  `test/unit/os/kernel/arch/x86_32_interrupt_spec.spl`,
+  `test/unit/os/kernel/arch/x86_32_paging_timer_spec.spl`,
+  `test/unit/os/kernel/arch/x86_32_trap_model_spec.spl`, and
+  `test/system/os/boot_smoke_spec.spl` pass in interpreter mode; keep the HAL
+  parity checkbox open until the actual i386 IDT gate and assembly save/restore
+  path calls the hosted bridge from a live `int 0x80`. Exec live mapping
+  remains blocked behind the i686 boot/runtime lane.
 
 ### FR-SOS-017 — Discover hardware scheduler topology domains
 
@@ -259,6 +266,9 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Related-design-doc:** `doc/07_guide/platform/sosix_process_scheduler.md`
 - **Related-issue:** none
 - **Notes:** VMM copy-in helpers now back exec argv/envp vector copying.
+  `test/unit/os/kernel/memory/vmm_copyin_spec.spl` passes as of 2026-05-29
+  and covers whole-range validation before explicit address-space byte copies,
+  including cross-page readable success and tail-page-missing failure.
 
 ### FR-SOS-022 — Populate dataset_create_from_file from VFS bytes
 

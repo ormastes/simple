@@ -1,34 +1,55 @@
 """
-SOSIX dataset-from-VFS bridge stub.
+SOSIX dataset-from-VFS bridge.
 
-`dataset_create_from_file` will populate an immutable dataset from a VFS path
-once the VFS byte-reading API stabilises. Currently returns ENOSYS.
+`dataset_create_from_file` populates an immutable sealed dataset from a VFS
+path using `g_vfs_read_file_bytes`. The function fails with ENOENT when the
+file is missing (zero-length result from the VFS layer) and with EFBIG when
+the file exceeds `max_bytes`.
 """
 
-use os.kernel.errno.{ENOSYS, EINVAL}
+use os.kernel.errno.{EFBIG, EINVAL, ENOENT}
 use os.sosix.share.{
     SOSIX_DATASET_MAX_BYTES,
     sosix_dataset_create,
     sosix_dataset_write,
     sosix_dataset_seal
 }
-
-val SOSIX_DATASET_VFS_ENOSYS: i64 = 0 - ENOSYS as i64
+use os.services.vfs.vfs_init.{g_vfs_read_file_bytes}
 
 fn sosix_dataset_create_from_file(path: text, max_bytes: u64) -> i64:
     """
     Create a sealed immutable dataset populated from a VFS file.
 
-    Returns a dataset handle (>= 0) on success, or a negative errno on failure.
-    Currently always returns ENOSYS until VFS byte-read integration lands.
+    Returns a dataset handle (>= 0) on success, or a negative errno on failure:
+      -EINVAL  path is empty, max_bytes is 0, or max_bytes > SOSIX_DATASET_MAX_BYTES
+      -ENOENT  file not found or zero-length
+      -EFBIG   file larger than max_bytes
     """
     if path.len() == 0:
         return 0 - EINVAL as i64
     if max_bytes == 0 or max_bytes > SOSIX_DATASET_MAX_BYTES:
         return 0 - EINVAL as i64
-    # Placeholder: VFS read not yet wired.
-    SOSIX_DATASET_VFS_ENOSYS
+
+    val file_bytes = g_vfs_read_file_bytes(path)
+    if file_bytes.len() == 0:
+        return 0 - ENOENT as i64
+    if file_bytes.len() as u64 > max_bytes:
+        return 0 - EFBIG as i64
+
+    val handle = sosix_dataset_create(file_bytes.len() as u64, 0)
+    if handle < 0:
+        return handle
+
+    val written = sosix_dataset_write(handle as u64, 0u64, file_bytes)
+    if written < 0:
+        return written
+
+    val sealed = sosix_dataset_seal(handle as u64)
+    if sealed < 0:
+        return sealed
+
+    handle
 
 fn sosix_dataset_vfs_available() -> bool:
-    """Return true when the dataset-from-VFS path is implemented."""
-    false
+    """Return true — the dataset-from-VFS path is implemented."""
+    true

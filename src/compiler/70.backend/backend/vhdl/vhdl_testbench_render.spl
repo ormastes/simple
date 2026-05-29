@@ -1,3 +1,6 @@
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
 class CombinationalBench:
     bench_name: text
     dut_entity: text
@@ -117,3 +120,58 @@ class RenderOutput:
             line_count: lines,
             has_source_map: false
         )
+
+
+fn _ghdl_available() -> bool:
+    """Return true if ghdl is on PATH; false otherwise."""
+    val (out, err, code) = rt_process_run("/bin/sh", ["-c", "command -v ghdl 2>/dev/null"])
+    return code == 0
+
+fn _ghdl_run_phase(phase: text, phase_args: [text]) -> GhdlResult:
+    """Run one GHDL phase and return a GhdlResult."""
+    val (stdout, stderr, code_i64) = rt_process_run("ghdl", phase_args)
+    val code = code_i64.to_text().to_int()
+    if code == 0:
+        return GhdlResult.ok(phase)
+    return GhdlResult.fail(phase, stderr, code)
+
+fn run_vhdl_testbench_with_ghdl(vhdl_path: text, entity_name: text) -> GhdlResult:
+    """
+    Run a rendered VHDL testbench through GHDL analyze/elaborate/run phases.
+
+    Phases:
+      analyze   — ghdl -a <vhdl_path>
+      elaborate — ghdl -e <entity_name>
+      run       — ghdl -r <entity_name>
+
+    Returns a GhdlResult for the first failing phase, or the run-phase
+    GhdlResult on full success. If GHDL is not installed, returns a failure
+    result for the analyze phase without crashing.
+    """
+    if not _ghdl_available():
+        return GhdlResult.fail("analyze", "ghdl not found on PATH", 127)
+
+    val analyze_result = _ghdl_run_phase("analyze", ["-a", vhdl_path])
+    if analyze_result.is_failure():
+        return analyze_result
+
+    val elaborate_result = _ghdl_run_phase("elaborate", ["-e", entity_name])
+    if elaborate_result.is_failure():
+        return elaborate_result
+
+    return _ghdl_run_phase("run", ["-r", entity_name])
+
+
+fn run_vhdl_testbench_artifact_with_ghdl(artifact_entity: text, vhdl_text: text, work_dir: text) -> GhdlResult:
+    """
+    Write vhdl_text to <work_dir>/<artifact_entity>.vhd, then run GHDL phases.
+
+    This helper is the primary entry point for the testbench pipeline:
+    it takes a VhdlTestbenchArtifact's fields and handles the file write
+    before delegating to run_vhdl_testbench_with_ghdl.
+    """
+    val vhdl_path = work_dir + "/" + artifact_entity + ".vhd"
+    val wrote = rt_file_write_text(vhdl_path, vhdl_text)
+    if not wrote:
+        return GhdlResult.fail("analyze", "failed to write VHDL to " + vhdl_path, 1)
+    return run_vhdl_testbench_with_ghdl(vhdl_path, artifact_entity)

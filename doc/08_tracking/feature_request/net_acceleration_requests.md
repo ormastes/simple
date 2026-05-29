@@ -46,7 +46,10 @@ Lifecycle: `Open` -> `Accepted` -> `Implemented` or `Rejected`.
 - **Notes:** Implemented through handshake-aware `SocketTable` publication,
   bounded blocking connect completion, `-EINPROGRESS` nonblocking connect, and
   write-readiness gating. System coverage:
-  `test/system/net_connect_completion_spec.spl`.
+  `test/system/net_connect_completion_spec.spl`. The baremetal QEMU network
+  entry point `test/system/os_network_spec.spl` now prints connect phase,
+  socket fd/result, portable backend capability summary, and a bounded
+  refused-or-timeout connect path for FR-NET-0001 live evidence.
 
 ### FR-NET-0002 - Complete TCP data path wakeups and close/error semantics
 

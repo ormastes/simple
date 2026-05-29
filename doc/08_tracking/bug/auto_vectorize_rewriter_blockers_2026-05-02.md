@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-02
 **Wave:** L3 (MIR rewriter)
-**Status:** CLOSED 2026-05-29 — Defects A+B+C fixed; cross-module spread root cause found and repaired — see §7 below
+**Status:** RESOLVED 2026-05-29 — Defects A+B+C fixed; cross-module spread root cause found and repaired — see §7 below. Independently verified 2026-05-29: 64/64 spec tests pass in interpreter mode (see §8).
 **Filed by:** L3 agent (Wave L)
 
 ## Summary
@@ -385,3 +385,22 @@ The test fixture (`make_elementwise_block_add`) uses a `Goto` terminator (not
 `If`), so `is_simple_loop` returns nil and the pass correctly declines
 vectorization (dynamic trip count = R4). Full pipeline rewrite requires either
 a proper loop header fixture with `If`-terminator or SCEV extraction (future).
+
+## §8 — Independent verification 2026-05-29
+
+**Command:**
+```
+bin/simple test test/unit/compiler/mir_opt/auto_vectorize_spec.spl
+```
+
+**Result:** 64 passed, 0 failed (interpreter mode, fresh uncached run 724ms — cache busted via `touch` before running).
+
+**Coverage of repaired defects:**
+- Defect A (self-loop Goto): covered by `"vec_loop block has If terminator (exit guard — not self-loop Goto)"` in `describe "AutoVectorize N1-codegen — create_vector_loop_block"` (line 1068).
+- Defect B (dangling predecessor edges): covered by pipeline wiring tests in `describe "AutoVectorize run_auto_vectorize — pipeline wiring (Wave L3b)"` (lines 394–441) — MirModule fields not dropped after rewrite.
+- Defect C (empty peel body): covered by `describe "AutoVectorize N1-rewrite — accepts misaligned trip count (6 % 4 != 0) with peel body (Wave L3b)"` (line 983) and `describe "AutoVectorize W-cfg — create_peeling_block"` (line 682).
+- Defect D (missing `induction_update` field): all 6 `VectorRecipe(...)` constructors in the spec include `induction_update: make_local(4)` — confirmed by grep.
+
+**Native spec file** (`test/unit/compiler/native/auto_vectorize_spec.spl`): stub only (all tests commented out, single placeholder passing `it "skipped"`). Not a regression target.
+
+**Verification by:** independent agent run, 2026-05-29.

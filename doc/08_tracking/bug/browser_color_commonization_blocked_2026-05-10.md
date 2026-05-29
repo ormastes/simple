@@ -42,16 +42,28 @@ All three blockers resolved without waiting for the Cranelift f64? fix:
    - `Rgba8.to_u32()` / `Rgba8.from_u32()` added to `common/engine/color.spl`
    - Browser code can call `parse_css_color` then pass the i64 directly to renderer
 
-3. **Blocker 3 — named color table**: `_css_named_color` in `css.spl` covers CSS Level 4
-   (148 named colors including `rebeccapurple`).
+3. **Blocker 3 — named color table**: `css_named_color` in `css_named_colors.spl` covers CSS Level 4
+   (148 unique names including `rebeccapurple`; grey/gray synonyms handled via `or` branches;
+   `css.spl` normalizes input with `.trim().to_lower()` before calling the table).
 
 **Files changed:**
 - `src/lib/gc_async_mut/gpu/browser_engine/css.spl` — added `parse_css_color`,
-  `css_color_r/g/b/a`, and `_css_named_color` (148 entries)
+  `css_color_r/g/b/a`; delegates named-color lookup to `css_named_colors.spl`
+- `src/lib/gc_async_mut/web/css_named_colors.spl` — `css_named_color` with 148 CSS L4
+  names (grey/gray synonyms via `or` branches; input normalized via `.trim().to_lower()`)
 - `src/lib/common/engine/color.spl` — added `Rgba8.to_u32()` and `Rgba8.from_u32()`
 
 **Next step:** When color parsing is added to `dom.spl`, delegate to `parse_css_color`
 from `std.gc_async_mut.gpu.browser_engine.css`.
+
+## Re-verification (2026-05-29)
+
+Confirmed all three blockers resolved:
+- `parse_css_color` / `css_color_r/g/b/a` present in `css.spl` (186 lines)
+- `Rgba8.to_u32()` / `Rgba8.from_u32()` present in `common/engine/color.spl`
+- `css_named_colors.spl` covers 148 unique CSS L4 names (grep -oE '"[a-z]+"' | sort -u | wc -l = 148)
+- `dom.spl` reduced to 124 lines; manual parsers (`pcc_parse_int`, `hex_byte`, etc.) absent
+- `css.spl` calls `.trim().to_lower()` before `css_named_color()` — case normalization confirmed
 
 ## Related
 - Timing commonization: completed (commit 6c07c3d)

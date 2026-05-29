@@ -1,57 +1,41 @@
 """
-FR-DRIVER-0003 — `@packed struct { field: Type:N }` bitfield syntax.
+FR-DRIVER-0003 — pure Simple `@packed struct { field: Type:N }` evidence.
 
-Parser support: `@packed` struct modifier + `field: Type:N` bit-width
-annotation on struct fields.
-
-HIR lowering: `@packed` structs with bit-width fields are desugared into
-`HirType::Bitfield` so the existing FR-DRIVER-0008 shift/mask codegen applies.
-
-Negative: post-name `struct Foo @packed` syntax is rejected with a clear
-diagnostic pointing to the prefix form.
+Rust remains seed/bootstrap code. These checks pin the self-hosted parser,
+flat AST bridge, and driver example paths that carry the production contract.
 """
 
 use std.spec
 
 extern fn rt_file_read_text(path: text) -> text
 
+fn read_text(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
 describe "FR-DRIVER-0003 @packed struct parser":
 
-    it "types_def/mod.rs accepts field bit-width after type annotation":
-        val src = rt_file_read_text("src/compiler_rust/parser/src/types_def/mod.rs") ?? ""
-        expect(src.contains("bit_width")).to_equal(true)
-        expect(src.contains("Some(bits)")).to_equal(true)
+    it "self-hosted parser captures field bit widths after type annotations":
+        val src = read_text("src/compiler/10.frontend/core/parser_decls_part1.spl")
+        expect(src.contains("T:N syntax")).to_equal(true)
+        expect(src.contains("fbits = parse_int_text(par_text_get())")).to_equal(true)
+        expect(src.contains("field_bits.push(fbits)")).to_equal(true)
 
-    it "Field AST node carries bit_width field":
-        val src = rt_file_read_text("src/compiler_rust/parser/src/ast/nodes/core.rs") ?? ""
-        expect(src.contains("bit_width: Option<u8>")).to_equal(true)
+    it "self-hosted parser rejects @packed fields without bit widths":
+        val src = read_text("src/compiler/10.frontend/core/parser_decls_part2.spl")
+        expect(src.contains("decl_get_field_bits")).to_equal(true)
+        expect(src.contains("@packed struct fields must use explicit bit widths")).to_equal(true)
+        expect(src.contains("use an explicit nested struct instead")).to_equal(true)
 
-    it "parse_field no longer returns the 'not implemented yet' error":
-        val src = rt_file_read_text("src/compiler_rust/parser/src/types_def/mod.rs") ?? ""
-        expect(src.contains("not implemented yet")).to_equal(false)
+describe "FR-DRIVER-0003 @packed struct lowering":
 
-    it "packed_struct_bitfield Rust tests cover the positive parse path":
-        val src = rt_file_read_text("src/compiler_rust/parser/tests/packed_struct_bitfield.rs") ?? ""
-        expect(src.contains("packed_struct_with_bit_width_fields_parses_successfully")).to_equal(true)
-        expect(src.contains("bit_width, Some(4)")).to_equal(true)
+    it "flat AST bridge routes packed structs into module bitfields":
+        val src = read_text("src/compiler/10.frontend/flat_ast_bridge_part2.spl")
+        expect(src.contains("decl_is_packed")).to_equal(true)
+        expect(src.contains("bitfields[s_name] = Bitfield")).to_equal(true)
+        expect(src.contains("has_bits: fb > 0")).to_equal(true)
 
-describe "FR-DRIVER-0003 @packed struct HIR lowering":
-
-    it "type_registration.rs desugars @packed struct to HirType::Bitfield":
-        val src = rt_file_read_text("src/compiler_rust/compiler/src/hir/lower/type_registration.rs") ?? ""
-        expect(src.contains("register_packed_struct_as_bitfield")).to_equal(true)
-        expect(src.contains("is_packed && has_bitwidth_fields")).to_equal(true)
-
-    it "register_packed_struct_as_bitfield produces HirBitfieldField entries":
-        val src = rt_file_read_text("src/compiler_rust/compiler/src/hir/lower/type_registration.rs") ?? ""
-        expect(src.contains("HirBitfieldField")).to_equal(true)
-        expect(src.contains("bit_offset: offset")).to_equal(true)
-        expect(src.contains("bit_width: width")).to_equal(true)
-
-    it "register_packed_struct_as_bitfield validates backing type is integer":
-        val src = rt_file_read_text("src/compiler_rust/compiler/src/hir/lower/type_registration.rs") ?? ""
-        expect(src.contains("integer base type for bitfield packing")).to_equal(true)
-
-    it "register_packed_struct_as_bitfield enforces total bit budget":
-        val src = rt_file_read_text("src/compiler_rust/compiler/src/hir/lower/type_registration.rs") ?? ""
-        expect(src.contains("backing type only has")).to_equal(true)
+    it "null_block example carries a packed status register":
+        val src = read_text("examples/simple_os/src/drivers/null_block.spl")
+        expect(src.contains("@packed")).to_equal(true)
+        expect(src.contains("struct NullBlockStatusRegister")).to_equal(true)
+        expect(src.contains("ready: u32:1")).to_equal(true)

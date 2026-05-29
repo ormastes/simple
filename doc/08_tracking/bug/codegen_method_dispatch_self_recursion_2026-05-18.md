@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-18
 **Severity:** High (silent stack overflow at runtime)
-**Status:** Fixed (2026-05-19); workaround remains in place for safety
+**Status:** RESOLVED (2026-05-19; verified 2026-05-29)
 
 ## Summary
 
@@ -101,3 +101,44 @@ Relevant files:
 - `src/compiler/35.semantics/resolve_strategies.spl` — fix site
 - `src/compiler/35.semantics/resolve.spl` — `MethodResolver` struct definition
 - `src/compiler_rust/compiler/src/codegen/instr/calls.rs` — downstream (no fix needed)
+
+## Verification (2026-05-29)
+
+Fix code confirmed present in source:
+- `current_fn_sym: SymbolId?` field in `MethodResolver` at `resolve.spl:118`
+- All three construction paths initialise to `nil` (lines 127, 138, 162)
+- `resolve_function` sets `Some(func.symbol)` at line 240
+- Self-recursion guard in `try_ufcs` at `resolve_strategies.spl:258-260`
+
+Fix committed in: `4c9e74d8dc` "feat: Wave 15 — UFCS self-recursion fix" (2026-05-19)
+
+Reproduction test run (interpreter mode, live `.spl` resolver execution):
+
+```spl
+fn ends_with(s: text, suffix: text) -> bool:
+    s.ends_with(suffix)
+
+fn starts_with(s: text, prefix: text) -> bool:
+    s.starts_with(prefix)
+
+fn main():
+    val r1 = ends_with("hello world", "world")   # must be true
+    val r2 = ends_with("hello world", "xyz")      # must be false
+    val r3 = starts_with("hello world", "hello")  # must be true
+    val r4 = starts_with("hello world", "xyz")    # must be false
+```
+
+Command: `bin/simple run /tmp/ufcs_repro3.spl`
+
+Output:
+```
+ends_with true-case: PASS
+ends_with false-case: PASS
+starts_with true-case: PASS
+starts_with false-case: PASS
+```
+
+No stack overflow. Both true and false cases resolve correctly — confirms the guard
+causes self-named calls to fall through to the `rt_string_*` builtin rather than
+looping. Workaround in `types.spl` and `text.spl` remains in place (safe, no need
+to remove).

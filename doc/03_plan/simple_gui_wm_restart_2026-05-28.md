@@ -27,6 +27,7 @@ Related docs:
 - `doc/04_architecture/shared_wm_stack.md`
 - `doc/04_architecture/cross_platform_wm.md`
 - `doc/03_plan/wm_ui_export_plan.md`
+- `doc/03_plan/gui_renderer_restart_plan_2026-05-29.md`
 
 ## Completed In This Session
 
@@ -176,6 +177,36 @@ Current result on this Linux host:
 
 ## Remaining Work
 
+2026-05-29 parallel restart expansion:
+
+1. Use `doc/03_plan/gui_renderer_restart_plan_2026-05-29.md` as the active
+   lane checklist for the resumed renderer restart objective.
+2. Keep Engine2D CPU/Vulkan, pure Simple web/Tauri, 2D UI layer, TUI/Simple
+   IDE, Android GUI, iOS GUI, browser, and macOS ARM64 graphics evidence
+   separate until each lane has focused commands and direct proof.
+3. Do not mark the overall restart complete while any lane only has inferred
+   evidence, missing platform proof, or a platform-unavailable note without a
+   tracking entry.
+
+2026-05-29 interrupted continuation from
+`rollout-2026-05-29T06-34-21-019e7270-e325-71c3-8c7d-ec533ba14866.jsonl`:
+
+1. Resume the GUI size/performance lane only after a fresh dirty-worktree audit.
+2. Inspect the minimized renderer native-build inputs and record the exact
+   source roots used by the current benchmark artifact.
+3. Test narrower native-build source roots only if the runtime entry closure
+   still includes the required renderer, WM, and platform adapter paths.
+4. Regenerate the GTK size/speed report with complete raw rows before updating
+   any ratio or summary text.
+5. Keep the GTK comparison separate from shared web-render API refactoring; do
+   not mix benchmark/report changes with renderer boundary changes in one
+   commit.
+6. Before commit, rerun the focused GUI/native-build checks and record the
+   exact command, artifact path, binary size, startup/runtime timing, and any
+   unavailable GTK speed reason.
+
+Existing GUI/WM continuation:
+
 1. Add macOS validation for Cocoa-backed host WM when a macOS host is available.
 2. Promote the ARM64 target-contract/readiness lane into a live QEMU boot/capture
    lane when the ARM64 kernel compile, ramfb configuration, and capture path are
@@ -185,6 +216,9 @@ Current result on this Linux host:
 ## Known Blockers
 
 - GitHub SSH fetch/push failed with `Permission denied (publickey)`.
+- The 2026-05-29 GUI size/perf session was interrupted while report
+  regeneration was running. Treat any partial report output as invalid until the
+  benchmark is rerun and the raw rows are present.
 - The current live SimpleOS GUI proof is a bounded x86_64 WM input/framebuffer
   smoke. It proves the focused QEMU lane, shared compositor adapter path, and
   marker pixels, but not a full desktop session or multi-architecture GUI run.

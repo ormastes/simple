@@ -1,7 +1,24 @@
 # Native `[u8]` array literal is not a packed byte buffer
 
 Date: 2026-05-13
-Status: Fixed (2026-05-19)
+Status: RESOLVED (2026-05-19)
+
+## Verification
+
+Commit `083eae0c38` ("fix(codegen): pack u8 array literals in native mode") landed 2026-05-19.
+
+Two-pronged fix confirmed in source:
+
+1. `lowering_expr_collection.rs` — `lower_array_expr` now accepts an `outer_ty` parameter.
+   The guard at line 76 fires the `rt_byte_array_new` + `rt_typed_bytes_u8_push` packed path
+   when either all element HIR types are `U8` OR the outer declared type resolves to
+   `HirType::Array { element: U8 }`.  This catches the case where bare integer literals stay
+   `I64` in the HIR even though the declaration says `[u8]`.
+
+2. `lowering_stmt.rs` — `HirStmt::Let` with `declared_ty = [u8]` and an `Array` RHS now
+   bypasses `lower_array_expr` entirely for the empty-array case (line 72) and emits the
+   packed byte path directly for non-empty literals (lines 108–120), using `declared_ty` as
+   the authoritative type regardless of element HIR typing.
 
 ## Summary
 

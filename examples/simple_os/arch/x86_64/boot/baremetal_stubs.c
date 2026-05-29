@@ -363,9 +363,18 @@ RuntimeValue rt_x86_prepare_ap_startup(RuntimeValue cpu_id_rv, RuntimeValue vect
     uint8_t *dst = (uint8_t *)(uintptr_t)SIMPLEOS_AP_TRAMPOLINE_PHYS;
     uint64_t size = (uint64_t)(simpleos_ap_trampoline_template_end - simpleos_ap_trampoline_template_start);
 
-    if (cpu_id == 0 || cpu_id >= SIMPLEOS_AP_MAX_CPUS) return ENCODE_INT(0);
-    if (vector != SIMPLEOS_AP_TRAMPOLINE_VECTOR) return ENCODE_INT(0);
-    if (size == 0 || size > SIMPLEOS_AP_TRAMPOLINE_MAX) return ENCODE_INT(0);
+    if (cpu_id == 0 || cpu_id >= SIMPLEOS_AP_MAX_CPUS) {
+        serial_puts("[smp] AP trampoline reject cpu\r\n");
+        return (RuntimeValue)0;
+    }
+    if (vector != SIMPLEOS_AP_TRAMPOLINE_VECTOR) {
+        serial_puts("[smp] AP trampoline reject vector\r\n");
+        return (RuntimeValue)0;
+    }
+    if (size == 0 || size > SIMPLEOS_AP_TRAMPOLINE_MAX) {
+        serial_puts("[smp] AP trampoline reject size\r\n");
+        return (RuntimeValue)0;
+    }
 
     __builtin_memcpy(dst, simpleos_ap_trampoline_template_start, (size_t)size);
 
@@ -380,7 +389,7 @@ RuntimeValue rt_x86_prepare_ap_startup(RuntimeValue cpu_id_rv, RuntimeValue vect
     serial_puts("[smp] AP trampoline prepared cpu=");
     serial_put_dec((int64_t)cpu_id);
     serial_puts(" vector=0x08\r\n");
-    return ENCODE_INT(1);
+    return (RuntimeValue)1;
 }
 
 RuntimeValue rt_x86_ap_entry_count(void)

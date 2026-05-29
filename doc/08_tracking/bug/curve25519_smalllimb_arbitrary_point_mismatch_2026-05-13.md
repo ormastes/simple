@@ -1,7 +1,7 @@
 # Curve25519 small-limb arbitrary-point mismatch
 
 Date: 2026-05-13
-Status: Fixed
+Status: RESOLVED
 Severity: Was a production blocker for X25519-based TLS/SSH key exchange
 
 ## Evidence
@@ -51,3 +51,9 @@ bin/simple test test/unit/lib/crypto/curve25519_smalllimb_probe_spec.spl --mode=
 bin/simple test test/unit/lib/crypto/curve25519_rfc7748_spec.spl --mode=interpreter
 bin/simple test test/unit/os/tls13/server_accept_spec.spl --mode=interpreter
 ```
+
+Re-verified 2026-05-29: all 7 RFC 7748 test vectors pass (including the 4
+arbitrary-point vectors that were previously failing), and the smalllimb probe
+spec passes. Implementation at `src/os/crypto/curve25519_smalllimb.spl` uses
+correct nonnegative bit-slicing (`_load4` + mask with `MASK26`/`MASK25` via
+unsigned division shift) — no signed carry-schedule underflow.
