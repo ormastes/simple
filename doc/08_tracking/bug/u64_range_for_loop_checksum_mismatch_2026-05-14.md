@@ -2,8 +2,11 @@
 
 ## Status
 
-Resolved for checksum correctness in both the Rust seed and the self-hosted
-SPL compiler. Performance parity remains open.
+**Status: RESOLVED** (checksum correctness). Performance parity remains open.
+
+Rust seed: verified end-to-end (unit test + benchmark parity).
+Self-hosted SPL compiler: source-verified by code inspection; end-to-end run
+pending a full bootstrap rebuild.
 
 **Re-verified 2026-05-29:** Rust seed fix confirmed passing at HEAD. Test is
 at `src/compiler_rust/compiler/src/mir/lower/tests/branch_coverage/control.rs`
@@ -23,6 +26,17 @@ bound expression's actual type. Fixed by:
 
 This ensures all loop temporaries are type-consistent (no i64/u64 width
 mismatch), matching the Rust seed's `range_counter_type` logic.
+
+**Code-inspection verified 2026-05-29:** `lower_for_range` in
+`src/compiler/50.mir/mir_lowering_stmts.spl` (lines 411–540) was read and
+confirmed to match the fix description exactly:
+- `loop_ty` derived from `end.unwrap().type_` (falling back to `start`'s type,
+  then `MirType.i64()`) via `self.lower_type` — lines 433–438
+- `b_init.new_local(nil, loop_ty, LocalKind.Var)` for the counter — line 472
+- `MirConstValue.Int(0/1)` with `loop_ty` for nil start/step defaults — lines
+  445–466
+- `b_inc.emit_binop(MirBinOp.Add, ..., loop_ty)` for the increment — line 516
+No hardcoded `MirType.i64()` remains in the range-counter path.
 
 **Note:** A full bootstrap rebuild is needed to verify the SPL fix end-to-end.
 

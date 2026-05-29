@@ -57,6 +57,25 @@ HTTPS is now measured in two explicit lanes:
 TCP, UDP, and plain HTTP must stay TLS-free and continue to load only `libc` and
 the ELF loader.
 
+## Status: RESOLVED
+
+Verified 2026-05-29 by running `sh scripts/check-startup-size-performance-audit.shs` on Linux x86_64.
+All regression gates passed with real `ok` results (not `skip`):
+
+```
+mmap-preload-gate:        ok  simple_mmap_preload (14400 bytes) <= mmap_preload_argparse_c (14472 bytes)
+network-size-gate(tcp):   ok  simple (14328 bytes) <= C (14472 bytes)
+network-size-gate(udp):   ok  simple (14328 bytes) <= C (14472 bytes)
+network-size-gate(http-plain): ok  simple (14336 bytes) <= C (14472 bytes)
+network-libs-gate(tcp):        ok  (only libc + ELF loader)
+network-libs-gate(udp):        ok  (only libc + ELF loader)
+network-libs-gate(http-plain): ok  (only libc + ELF loader)
+```
+
+The Simple network probes are smaller than the C socket counters, load only `libc.so.6` and
+`/lib64/ld-linux-x86-64.so.2`, and the regression gate is wired into the audit script for
+all three lanes (tcp, udp, http-plain). No further fix work is required.
+
 ## Likely Fix Direction
 
 - Keep the minimal socket primitives in the core-C startup lane and avoid

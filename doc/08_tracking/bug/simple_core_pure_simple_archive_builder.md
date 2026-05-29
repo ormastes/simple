@@ -90,6 +90,18 @@ Add a Simple-source runtime archive lane:
 
 ## Status
 
+**Status: RESOLVED** (live-verified 2026-05-29)
+
+Live run of `sh scripts/check-simple-core-runtime-smoke.shs` (exit 0):
+
+```
+simple_core_archive=build/simple-core/libsimple_runtime.a
+simple_core_hello=true
+simple_core_standalone_tui=true
+simple_core_tui_app=true
+simple_core_closure_clean=true
+```
+
 Resolved for the tracked bootstrap gate: `scripts/check-simple-core-runtime-smoke.shs`
 passes with `simple_core_hello=true`, `simple_core_standalone_tui=true`,
 `simple_core_tui_app=true`, and `simple_core_closure_clean=true`. The

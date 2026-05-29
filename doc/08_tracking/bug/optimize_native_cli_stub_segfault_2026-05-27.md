@@ -2,7 +2,7 @@
 
 ## Status
 
-Fixed.
+RESOLVED (2026-05-27)
 
 ## Summary
 

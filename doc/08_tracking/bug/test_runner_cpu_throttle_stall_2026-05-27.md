@@ -36,6 +36,21 @@ The CPU throttle logic in the test runner:
 
 **RESOLVED** — fixed in `src/compiler_rust/driver/src/cli/test_runner/parallel.rs`.
 
+**Verified:** commit `498e5dd96e` ("fix: avoid test runner throttle stall", 2026-05-27).
+All five described mechanics confirmed present in code:
+
+| Claim | Code evidence |
+|-------|---------------|
+| 3 consecutive high samples before throttle | `parallel.rs:238-239` — `high_resource_samples.fetch_add(1) + 1; if high_samples < 3 { return }` |
+| Halving instead of cliff to 1 | `parallel.rs:249` — `current.div_ceil(2).max(floor)` |
+| Floor of 4 threads (not 1) | `parallel.rs:41` — `throttled_threads: 4` default; `parallel.rs:372` — test asserts `== 4` |
+| 2 consecutive low samples before ramp-up | `parallel.rs:285-286` — `low_resource_samples.fetch_add(1) + 1; if low_samples < 2 { return }` |
+| Ramp-up by doubling | `parallel.rs:298` — "Unthrottled: ... threads {} -> {}" (doubles to max) |
+
+The .spl runner (`src/lib/nogc_sync_mut/test_runner/resource_governor.spl`) was
+already immune: `governor_can_spawn` is gate-based (checks free % threshold,
+never mutates a thread count), so no .spl changes were needed.
+
 The runner now:
 - waits for 3 consecutive high-resource samples before throttling
 - reduces gradually by halving current thread count instead of jumping directly
