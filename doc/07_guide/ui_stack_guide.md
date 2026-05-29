@@ -15,8 +15,7 @@ host operating systems, and anyone picking between `ui.cli`, `ui.tui`,
 
 For the architecture diagram and the four drawing-layer variations
 (SimpleOS / host OS / Chromium / Electron), see
-[`doc/04_architecture/cross_platform_wm.md`](../04_architecture/cross_platform_wm.md)
-and [`doc/03_plan/gui_drawing_layer_variations.md`](../03_plan/gui_drawing_layer_variations.md).
+[`doc/04_architecture/cross_platform_wm.md`](../04_architecture/cross_platform_wm.md).
 
 ## 1. The model: UISession
 
@@ -106,16 +105,19 @@ Concrete backends ship richer hooks (async event loops, capability
 negotiation, DPI changes) — but any backend that honors `apply` +
 `poll_events` participates in the diff loop.
 
-`backend_factory.spl` chooses a backend at runtime based on
-`SIMPLE_UI_BACKEND` / CLI flags. Apps should not name a backend
-directly; they should accept whatever the factory returns.
+`src/app/ui/main.spl` dispatches to the chosen `ui.<name>` backend.
+In auto mode it calls `detect_gui_backend()`
+(`src/app/ui/detect.spl`), which honors a `SIMPLE_GUI_BACKEND`
+override and otherwise probes the platform and display. Apps should
+not name a backend directly; they target the shared session and let
+the entry point select the backend.
 
 ## 4. CLI / TUI / GUI — what actually differs
 
 | Aspect | CLI (`ui.cli`) | TUI (`ui.tui`) | GUI (compositor or browser) |
 |--------|----------------|----------------|-----------------------------|
 | Output unit | lines | cells | pixels |
-| Layout engine | `common.ui.layout` (text flow) | `common.ui.layout_engine` (grid cells) | `common.ui.layout_engine` (flex/px) |
+| Layout engine | `common.ui.layout` (text flow) | `common.ui.layout` (grid cells) | `common.ui.layout` (flex/px) |
 | Patch renderer | `ui.render` text snapshot / stdio | `screen.spl` cell buffer | `os.compositor` or `browser_backend` |
 | Input source | line reader / socket | termios raw | PS/2, winit, DOM, IPC |
 | Event pump | blocking read loop | `async_input.spl` | compositor loop or event-loop callback |
@@ -199,7 +201,7 @@ in app code:
   `compute_profile`; the backend picks the current size-class on every
   viewport change. Apps usually don't interact with this — the builder
   DSL bakes profiles into style tokens (`common.ui.design_tokens`,
-  `common.ui.glass_tokens`, `ios_theme`, …).
+  `common.ui.glass.tokens`, `common.ui.ios.theme`, …).
 
 ## 6. Testing across backends
 
@@ -292,16 +294,17 @@ Notes:
 ## 10. Pointers
 
 - Session impl: `src/lib/common/ui/session.spl`
-- Backend trait + factory: `src/lib/common/ui/backend.spl`,
-  `backend_factory.spl`
+- Backend trait: `src/lib/common/ui/backend.spl`
+- Backend selection + dispatch: `src/app/ui/detect.spl`
+  (`detect_gui_backend`), `src/app/ui/main.spl`
 - Event enum: `src/lib/common/ui/event.spl`
 - Diff + patch: `src/lib/common/ui/diff.spl`, `patch.spl`
-- Layout: `src/lib/common/ui/layout.spl`, `layout_engine.spl`
+- Layout: `src/lib/common/ui/layout.spl`
 - Capabilities: `src/lib/common/ui/capability.spl`,
   `capability_policy.spl`
 - Profiles + viewport: `src/lib/common/ui/profile.spl`, `viewport.spl`
 - Architecture: [`doc/04_architecture/cross_platform_wm.md`](../04_architecture/cross_platform_wm.md)
-- Work plan: [`doc/03_plan/gui_drawing_layer_variations.md`](../03_plan/gui_drawing_layer_variations.md)
+- GUI/WM restart plan: [`doc/03_plan/simple_gui_wm_restart_2026-05-28.md`](../03_plan/simple_gui_wm_restart_2026-05-28.md)
 - Cross-backend parity harness: `src/app/wm_compare/`
 - Semantic UI access surface: [tooling/ui_access.md](tooling/ui_access.md)
 - macOS on-screen GUI launcher: `scripts/macos-gui-run.shs` (see §9)
