@@ -391,6 +391,50 @@ describe "AutoVectorize run_auto_vectorize — skeleton no-op guarantee":
         val after = result.functions.keys().len()
         expect(after).to_equal(before)
 
+describe "AutoVectorize run_auto_vectorize — pipeline wiring (Wave L3b)":
+    it "module with elementwise function is processed (name preserved, functions accessible)":
+        # Build a non-empty module and run the pass.
+        # The block fixture has dynamic trip count so R4 refuses vectorization,
+        # but the pass still processes the module and preserves all fields correctly
+        # (verifies MirModule explicit-field construction in run_auto_vectorize).
+        val ew_block = make_elementwise_block_add()
+        val func     = make_test_mir_function([ew_block], false)
+        var fns: Dict<SymbolId, MirFunction> = {}
+        fns[func.symbol] = func
+        val m = MirModule(
+            name:      "test_module",
+            functions: fns,
+            statics:   {},
+            constants: {},
+            types:     {}
+        )
+        val result = run_auto_vectorize(m)
+        # Module name is preserved and the function is still present.
+        expect(result.name).to_equal("test_module")
+        expect(result.functions.keys().len()).to_equal(1)
+
+    it "module.functions dict is correctly updated after rewrite (MirModule fields not dropped)":
+        # Verify explicit MirModule construction wires the functions field.
+        # Use make_elementwise_add_recipe_for_rewrite (trip_count=16) directly
+        # via rewrite_elementwise_add to confirm the rewriter works, then verify
+        # the function can be stored and retrieved from a module dict.
+        val orig_block = make_elementwise_block_add()
+        val func       = make_test_mir_function([orig_block], false)
+        val recipe     = make_elementwise_add_recipe_for_rewrite()
+        val rewritten  = rewrite_elementwise_add(recipe, func)
+        var fns: Dict<SymbolId, MirFunction> = {}
+        fns[rewritten.symbol] = rewritten
+        val m2 = MirModule(
+            name:      "test_rewritten",
+            functions: fns,
+            statics:   {},
+            constants: {},
+            types:     {}
+        )
+        val retrieved = m2.functions[rewritten.symbol]
+        # The rewritten function's block count should be greater than the original.
+        expect(retrieved.blocks.len() > func.blocks.len()).to_equal(true)
+
 # ============================================================================
 # W-recipe: VectorRecipe operand fields (L3 gap §1)
 # ============================================================================

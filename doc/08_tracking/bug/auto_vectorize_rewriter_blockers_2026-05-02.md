@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-02
 **Wave:** L3 (MIR rewriter)
-**Status:** PREREQS CLOSED 2026-05-10, REWRITER CFG DEFECTS FOUND 2026-05-19 — see §6 below
+**Status:** CLOSED 2026-05-29 — Defects A+B+C fixed; cross-module spread root cause found and repaired — see §7 below
 **Filed by:** L3 agent (Wave L)
 
 ## Summary
