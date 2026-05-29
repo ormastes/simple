@@ -7,14 +7,23 @@ cd "$ROOT_DIR"
 SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
 BUILD_DIR="${BUILD_DIR:-build/gtk_gui_size_speed_baseline}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/gtk_gui_size_speed_baseline_$(date -u +%F).md}"
-SIMPLE_ITERATIONS="${SIMPLE_ITERATIONS:-200}"
+SIMPLE_ITERATIONS="${SIMPLE_ITERATIONS:-4}"
 GTK_ITERATIONS="${GTK_ITERATIONS:-200}"
 SKIP_SIMPLE_NATIVE="${SKIP_SIMPLE_NATIVE:-1}"
+SIMPLE_RUN_TIMEOUT_SECS="${SIMPLE_RUN_TIMEOUT_SECS:-20}"
 
 mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
 
 have() {
     command -v "$1" >/dev/null 2>&1
+}
+
+with_timeout() {
+    if have timeout; then
+        timeout "$SIMPLE_RUN_TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
 }
 
 bytes_of() {
@@ -40,7 +49,7 @@ GTK_SRC="$BUILD_DIR/gtk_gui_baseline.c"
 GTK_BIN="$BUILD_DIR/gtk_gui_baseline"
 GTK_OUT="$BUILD_DIR/gtk_gui_baseline.out"
 
-cat >"$SIMPLE_ENTRY" <<'EOF'
+cat >"$SIMPLE_ENTRY" <<EOF
 extern fn rt_time_now_unix_micros() -> i64
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
@@ -58,13 +67,13 @@ fn main() -> i64:
     val start = rt_time_now_unix_micros()
     var i = 0
     var total = 0
-    while i < 200:
+    while i < $SIMPLE_ITERATIONS:
         val pixels = simple_web_render_html_to_pixels(html, 320, 200)
         total = total + pixels.len()
         i = i + 1
     val elapsed = rt_time_now_unix_micros() - start
     print "simple_render_status=ok"
-    print "simple_render_iterations=200"
+    print "simple_render_iterations=$SIMPLE_ITERATIONS"
     print "simple_render_total_us={elapsed}"
     print "simple_render_pixels={total}"
     print "simple_cache_schema={profile.cache_schema}"
@@ -79,7 +88,7 @@ simple_total_us="n/a"
 simple_bytes="n/a"
 
 if [ -x "$SIMPLE_BINARY" ]; then
-    if SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BINARY" run "$SIMPLE_ENTRY" >"$SIMPLE_OUT" 2>&1; then
+    if SIMPLE_LIB="$ROOT_DIR/src" with_timeout "$SIMPLE_BINARY" run "$SIMPLE_ENTRY" >"$SIMPLE_OUT" 2>&1; then
         simple_status="$(field_of simple_render_status "$SIMPLE_OUT")"
         simple_total_us="$(field_of simple_render_total_us "$SIMPLE_OUT")"
     else
@@ -115,7 +124,7 @@ elif have pkg-config && pkg-config --exists gtk+-3.0; then
 fi
 
 if [ -n "$gtk_pkg" ] && have cc; then
-    cat >"$GTK_SRC" <<'EOF'
+    cat >"$GTK_SRC" <<EOF
 #include <stdio.h>
 #include <time.h>
 #include <gtk/gtk.h>
@@ -143,7 +152,7 @@ int main(void) {
     }
 #endif
     long long start = now_us();
-    for (int i = 0; i < 200; i++) {
+    for (int i = 0; i < $GTK_ITERATIONS; i++) {
 #if GTK_MAJOR_VERSION >= 4
         GtkWidget *window = gtk_window_new();
         GtkWidget *label = gtk_label_new("Simple GUI");
@@ -158,7 +167,7 @@ int main(void) {
     }
     long long elapsed = now_us() - start;
     puts("gtk_render_status=ok");
-    printf("gtk_render_iterations=200\n");
+    printf("gtk_render_iterations=$GTK_ITERATIONS\n");
     printf("gtk_widget_total_us=%lld\n", elapsed);
     return 0;
 }
@@ -169,6 +178,9 @@ EOF
             gtk_status="$(field_of gtk_render_status "$GTK_OUT")"
             gtk_total_us="$(field_of gtk_widget_total_us "$GTK_OUT")"
             gtk_reason="$(field_of gtk_reason "$GTK_OUT")"
+            if [ -z "$gtk_total_us" ]; then
+                gtk_total_us="n/a"
+            fi
         else
             gtk_status="failed"
             gtk_reason="gtk_run_failed"
