@@ -57,6 +57,11 @@ describe "general optimization backend recommendations":
         expect(backend_optimization_has_recommendation("interpreter", "simple-predicate-promote")).to_equal(true)
         expect(backend_optimization_has_recommendation("llvm", "simple-predicate-promote")).to_equal(false)
 
+    it "keeps Simple strength reduction away from LLVM scalar pipeline":
+        expect(backend_optimization_has_recommendation("cranelift", "simple-strength-reduce")).to_equal(true)
+        expect(backend_optimization_has_recommendation("interpreter", "simple-strength-reduce")).to_equal(true)
+        expect(backend_optimization_has_recommendation("llvm", "simple-strength-reduce")).to_equal(false)
+
     it "keeps Simple scalar cleanup away from LLVM scalar pipeline":
         expect(backend_optimization_has_recommendation("cranelift", "simple-scalar-cleanup")).to_equal(true)
         expect(backend_optimization_has_recommendation("interpreter", "simple-scalar-cleanup")).to_equal(true)
@@ -85,9 +90,17 @@ describe "general optimization backend recommendations":
         expect(c_plan.recommendation_names.contains("cranelift-local-licm")).to_equal(false)
         expect(c_plan.recommendation_names.contains("simple-loop-unroll")).to_equal(false)
         expect(c_plan.recommendation_names.contains("simple-predicate-promote")).to_equal(false)
+        expect(c_plan.recommendation_names.contains("simple-strength-reduce")).to_equal(false)
         expect(c_plan.recommendation_names.contains("simple-scalar-cleanup")).to_equal(false)
 
         val wasm_high = backend_optimization_plan_for_budget("wasm", "high")
+        expect(wasm_high.recommendation_names.contains("simple-strength-reduce")).to_equal(false)
+        var found_strength_skip = false
+        for decision in wasm_high.skipped_decisions:
+            if decision.stable_name == "simple-strength-reduce" and decision.reason == "backend_not_simple_low_tier_jit":
+                found_strength_skip = true
+        expect(found_strength_skip).to_equal(true)
+
         expect(wasm_high.recommendation_names.contains("simple-predicate-promote")).to_equal(false)
         var found_predicate_skip = false
         for decision in wasm_high.skipped_decisions:
@@ -228,6 +241,34 @@ describe "general optimization backend recommendations":
         var found_llvm_skip = false
         for decision in llvm.skipped_decisions:
             if decision.stable_name == "simple-predicate-promote" and decision.reason == "llvm_runs_if_conversion_and_select_promotion":
+                found_llvm_skip = true
+        expect(found_llvm_skip).to_equal(true)
+
+    it "gates Simple strength reduction on candidate and induction facts":
+        val missing = backend_optimization_plan_for_budget_with_facts("cranelift", "medium", ["typed_mir", "strength_reduce_candidate"])
+        expect(missing.recommendation_names.contains("simple-strength-reduce")).to_equal(false)
+        var found_missing_induction = false
+        for decision in missing.skipped_decisions:
+            if decision.stable_name == "simple-strength-reduce" and decision.reason == "missing induction_safe":
+                found_missing_induction = true
+        expect(found_missing_induction).to_equal(true)
+
+        val low = backend_optimization_plan_for_budget_with_facts("cranelift", "low", ["typed_mir", "strength_reduce_candidate", "induction_safe"])
+        expect(low.recommendation_names.contains("simple-strength-reduce")).to_equal(false)
+        var found_cost_skip = false
+        for decision in low.skipped_decisions:
+            if decision.stable_name == "simple-strength-reduce" and decision.reason == "cost budget exceeded":
+                found_cost_skip = true
+        expect(found_cost_skip).to_equal(true)
+
+        val ready = backend_optimization_plan_for_budget_with_facts("cranelift", "medium", ["typed_mir", "strength_reduce_candidate", "induction_safe"])
+        expect(ready.recommendation_names.contains("simple-strength-reduce")).to_equal(true)
+
+        val llvm = backend_optimization_plan_for_budget_with_facts("llvm", "medium", ["typed_mir", "strength_reduce_candidate", "induction_safe", "llvm_backend_available"])
+        expect(llvm.recommendation_names.contains("simple-strength-reduce")).to_equal(false)
+        var found_llvm_skip = false
+        for decision in llvm.skipped_decisions:
+            if decision.stable_name == "simple-strength-reduce" and decision.reason == "llvm_runs_scalar_strength_reduction":
                 found_llvm_skip = true
         expect(found_llvm_skip).to_equal(true)
 
