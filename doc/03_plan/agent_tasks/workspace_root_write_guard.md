@@ -2,6 +2,8 @@
 
 # Workspace Root Write Guard - Detailed Implementation Plan
 
+Status: **Not started — all 6 phases remaining** (updated 2026-05-29)
+
 ## Phase 1 - Policy and Audit
 
 1. Add a workspace root guard module/script that reads `FILE.md`.

@@ -1,7 +1,9 @@
 <!-- codex-design -->
 # Security Convention-First Architecture Agent Tasks
 
-## Completed This Slice
+Status: **Phase 1 complete, Phase 2 remaining** (updated 2026-05-29)
+
+## Completed (Phase 1)
 
 - Explorer agent: plan/docs gap analysis.
 - Explorer agent: compiler implementation gap analysis.
@@ -21,7 +23,7 @@
 - Main agent: install generated sandbox lowering metadata into the hosted runtime security registry for backend/capability observability.
 - Main agent: add focused compiler tests.
 
-## Next Candidate Tasks
+## Phase 2 — Remaining
 
 - Add remote `SecurityContext` key rotation, persistent session lookup, refresh, and revocation.
 - Enforce lowered sandbox plans in runtime/kernel/VM backends.

@@ -1,25 +1,11 @@
 # Web and Baremetal Size Reduction Restart Plan — 2026-05-28
 
+Status: **All restart candidates complete, stabilization remaining** (updated 2026-05-29)
+
 ## Current State
 
-Workspace for the latest unpushed slice:
-
-```bash
-/tmp/simple-size-next4.EEbaCI
-```
-
-Local commit in that worktree after adding this plan doc:
-
-```bash
-git log -1 --oneline
-```
-
-This commit is not pushed yet. The user interrupted the push/rebase flow and
-asked for a restart plan document.
-
-The shared checkout at `/home/ormastes/dev/pub/simple` is dirty and diverged.
-Continue size work in clean temporary worktrees from `origin/main`; do not edit
-or reset the shared checkout unless the user explicitly asks.
+All worktrees merged to main and pushed to origin on 2026-05-29.
+10 size-next5 commits cherry-picked and conflict-resolved onto main.
 
 ## Latest Completed Remote Commits
 
@@ -57,34 +43,12 @@ Measured result before this plan doc was added:
 - ARM32 stdout object stayed `2000` bytes.
 - Full `scripts/check-web-baremetal-size-audit.shs` passed.
 
-## Restart Commands
+## Stabilization Remaining
 
-Resume the unpushed slice:
-
-```bash
-cd /tmp/simple-size-next4.EEbaCI
-git status --short --branch
-git log -1 --oneline
-```
-
-Then fetch/rebase/push with the file-count guard:
-
-```bash
-before=$(git ls-files | wc -l | tr -d ' ')
-token=$(GITHUB_TOKEN= gh auth token)
-basic=$(printf 'x-access-token:%s' "$token" | base64 -w0)
-git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $basic" \
-  fetch https://github.com/ormastes/simple.git main:refs/remotes/origin/main
-if ! git merge-base --is-ancestor origin/main HEAD; then
-  git rebase origin/main
-fi
-after=$(git ls-files | wc -l | tr -d ' ')
-echo "file_count_before=$before"
-echo "file_count_after=$after"
-test "$after" -ge "$before"
-git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $basic" \
-  push https://github.com/ormastes/simple.git HEAD:main
-```
+1. Re-run full size audit gate after the 29-commit merge to confirm no
+   regression.
+2. Verify web rendering, SimpleOS/baremetal examples, semihost stdout, startup,
+   and interrupt handling are still minimized and covered by stable gates.
 
 ## Required Verification Before Pushing Further Size Work
 

@@ -1,5 +1,8 @@
 # Crash-Safe 24-Hour Remaining Work Plan - 2026-05-26
 
+Status: **Superseded** (2026-05-29) — 24h window passed; guardrails below
+remain good operational practice but no active work items remain.
+
 ## Goal
 
 Finish the next 24 hours of recovery work without repeating the May 25 host
