@@ -16,10 +16,11 @@ use os.kernel.memory.vmm.{
     vmm_copyin_bytes,
     vmm_copyin_u64,
     vmm_copyin_cstr,
-    vmm_copyin_string_vector
+    vmm_copyin_string_vector,
+    vmm_copy_clear_test_words,
+    vmm_copy_set_test_word
 }
 use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_WRITE, VMA_EXEC, VMA_ANON}
-use os.kernel.boot.mmio.{mmio_write64}
 use os.posix.errno.{E2BIG, EFAULT, ESUCCESS}
 
 val _TEST_PTE_PRESENT: u64 = 1
@@ -30,7 +31,7 @@ val _TEST_PTE_ADDR_MASK: u64 = 0x000FFFFFFFFFF000
 fn _zero_test_page(page: u64):
     var i: u64 = 0
     while i < 512:
-        mmio_write64(page + i * 8, 0)
+        vmm_copy_set_test_word(page + i * 8, 0)
         i = i + 1
 
 fn _wire_test_user_pages(pml4: u64, pdpt: u64, pd: u64, pt: u64, first_user_page: u64, first_data_page: u64, second_data_page: u64):
@@ -39,13 +40,13 @@ fn _wire_test_user_pages(pml4: u64, pdpt: u64, pd: u64, pt: u64, first_user_page
     _zero_test_page(pd)
     _zero_test_page(pt)
     val flags = _TEST_PTE_PRESENT | _TEST_PTE_WRITABLE | _TEST_PTE_USER
-    mmio_write64(pml4 + (((first_user_page >> 39) & 0x1FF) * 8), (pdpt & _TEST_PTE_ADDR_MASK) | flags)
-    mmio_write64(pdpt + (((first_user_page >> 30) & 0x1FF) * 8), (pd & _TEST_PTE_ADDR_MASK) | flags)
-    mmio_write64(pd + (((first_user_page >> 21) & 0x1FF) * 8), (pt & _TEST_PTE_ADDR_MASK) | flags)
-    mmio_write64(pt + (((first_user_page >> 12) & 0x1FF) * 8), (first_data_page & _TEST_PTE_ADDR_MASK) | flags)
+    vmm_copy_set_test_word(pml4 + (((first_user_page >> 39) & 0x1FF) * 8), (pdpt & _TEST_PTE_ADDR_MASK) | flags)
+    vmm_copy_set_test_word(pdpt + (((first_user_page >> 30) & 0x1FF) * 8), (pd & _TEST_PTE_ADDR_MASK) | flags)
+    vmm_copy_set_test_word(pd + (((first_user_page >> 21) & 0x1FF) * 8), (pt & _TEST_PTE_ADDR_MASK) | flags)
+    vmm_copy_set_test_word(pt + (((first_user_page >> 12) & 0x1FF) * 8), (first_data_page & _TEST_PTE_ADDR_MASK) | flags)
     if second_data_page != 0:
         val second_user_page = first_user_page + 4096
-        mmio_write64(pt + (((second_user_page >> 12) & 0x1FF) * 8), (second_data_page & _TEST_PTE_ADDR_MASK) | flags)
+        vmm_copy_set_test_word(pt + (((second_user_page >> 12) & 0x1FF) * 8), (second_data_page & _TEST_PTE_ADDR_MASK) | flags)
 
 describe "vmm copy-in status":
     """
@@ -137,6 +138,7 @@ describe "explicit ProcessVmSpace page-table copy-in":
         expect(result.status.errno).to_equal(EFAULT)
 
     it "copies a byte range that crosses two mapped readable pages":
+        vmm_copy_clear_test_words()
         val pml4: u64 = 0x100000
         val pdpt: u64 = 0x101000
         val pd: u64 = 0x102000
@@ -144,10 +146,10 @@ describe "explicit ProcessVmSpace page-table copy-in":
         val data0: u64 = 0x104000
         val data1: u64 = 0x105000
         _wire_test_user_pages(pml4, pdpt, pd, pt, 0x7000, data0, data1)
-        mmio_write64(data0 + 0xFF0, 0x4746454443424140)
-        mmio_write64(data0 + 0xFF8, 0x4F4E4D4C4B4A4948)
-        mmio_write64(data1, 0x6766656463626160)
-        mmio_write64(data1 + 8, 0x6F6E6D6C6B6A6968)
+        vmm_copy_set_test_word(data0 + 0xFF0, 0x4746454443424140)
+        vmm_copy_set_test_word(data0 + 0xFF8, 0x4F4E4D4C4B4A4948)
+        vmm_copy_set_test_word(data1, 0x6766656463626160)
+        vmm_copy_set_test_word(data1 + 8, 0x6F6E6D6C6B6A6968)
         val area = VmArea(start: 0x7000, len: 8192, kind: VMA_ANON, flags: VMA_READ, backing: 0, backing_offset: 0)
         var space = ProcessVmSpace(pml4: pml4, id: 6, vma_count: 0, areas: [])
         space.vma_count = 1
@@ -161,6 +163,7 @@ describe "explicit ProcessVmSpace page-table copy-in":
         expect(result.bytes[31]).to_equal(0x6Fu8)
 
     it "rejects cross-page copy when the tail page is unmapped":
+        vmm_copy_clear_test_words()
         val pml4: u64 = 0x110000
         val pdpt: u64 = 0x111000
         val pd: u64 = 0x112000

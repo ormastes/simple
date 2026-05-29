@@ -46,6 +46,37 @@ struct VmmPtWalkResult:
     kernel_ptr: u64
     bytes_until_page_end: u64
 
+struct VmmCopyTestWord:
+    addr: u64
+    value: u64
+
+var g_vmm_copy_test_words: [VmmCopyTestWord] = []
+
+fn vmm_copy_clear_test_words():
+    """Test hook: clear synthetic RAM words used by hosted copy-in specs."""
+    g_vmm_copy_test_words = []
+
+fn vmm_copy_set_test_word(addr: u64, value: u64):
+    """Test hook: install one synthetic RAM/page-table word for hosted specs."""
+    var i = 0
+    while i < g_vmm_copy_test_words.len():
+        if g_vmm_copy_test_words[i].addr == addr:
+            g_vmm_copy_test_words[i] = VmmCopyTestWord(addr: addr, value: value)
+            return
+        i = i + 1
+    g_vmm_copy_test_words.push(VmmCopyTestWord(addr: addr, value: value))
+
+fn _vmm_copy_test_word(addr: u64) -> u64?:
+    var i = 0
+    while i < g_vmm_copy_test_words.len():
+        if g_vmm_copy_test_words[i].addr == addr:
+            return Some(g_vmm_copy_test_words[i].value)
+        i = i + 1
+    nil
+
+fn _vmm_copy_test_words_active() -> bool:
+    g_vmm_copy_test_words.len() > 0
+
 fn vmm_copy_bytes_result_ok(result: VmmCopyBytesResult) -> bool:
     result.status.ok
 
@@ -93,7 +124,22 @@ fn _vmm_read_physmap_byte(addr: u64) -> u8:
     """Read a byte from RAM-backed physmap memory using available word MMIO."""
     val aligned = addr - (addr % 8)
     val shift = (addr % 8) * 8
-    ((mmio_read64(aligned) >> shift) & 0xFF).to_u8()
+    val synthetic = _vmm_copy_test_word(aligned)
+    if val Some(word) = synthetic:
+        return ((word >> shift) & 0xFF).to_u8()
+    if _vmm_copy_test_words_active():
+        return 0u8
+    val word = mmio_read64(aligned)
+    ((word >> shift) & 0xFF).to_u8()
+
+fn _vmm_read_pte_word(table_virt: u64, index: u64) -> u64:
+    val addr = table_virt + (index * 8)
+    val synthetic = _vmm_copy_test_word(addr)
+    if val Some(word) = synthetic:
+        return word
+    if _vmm_copy_test_words_active():
+        return 0
+    _read_pte(table_virt, index)
 
 fn _vmm_verify_user_access(addr: u64, size: u64, required_bits: u64) -> bool:
     if not _vmm_is_userspace_range(addr, size):
@@ -121,17 +167,17 @@ fn _vmm_pt_walk(space: ProcessVmSpace, vaddr: u64, required_bits: u64) -> VmmPtW
         return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
 
     val pml4_virt = _phys_to_virt(space.pml4)
-    val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
+    val pml4_entry = _vmm_read_pte_word(pml4_virt, _pml4_index(vaddr))
     if (pml4_entry & required_bits) != required_bits:
         return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
 
     val pdpt_virt = _phys_to_virt(_pte_phys_addr(pml4_entry))
-    val pdpt_entry = _read_pte(pdpt_virt, _pdpt_index(vaddr))
+    val pdpt_entry = _vmm_read_pte_word(pdpt_virt, _pdpt_index(vaddr))
     if (pdpt_entry & required_bits) != required_bits:
         return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
 
     val pd_virt = _phys_to_virt(_pte_phys_addr(pdpt_entry))
-    val pd_entry = _read_pte(pd_virt, _pd_index(vaddr))
+    val pd_entry = _vmm_read_pte_word(pd_virt, _pd_index(vaddr))
     if (pd_entry & required_bits) != required_bits:
         return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
 
@@ -144,7 +190,7 @@ fn _vmm_pt_walk(space: ProcessVmSpace, vaddr: u64, required_bits: u64) -> VmmPtW
         )
 
     val pt_virt = _phys_to_virt(_pte_phys_addr(pd_entry))
-    val pt_entry = _read_pte(pt_virt, _pt_index(vaddr))
+    val pt_entry = _vmm_read_pte_word(pt_virt, _pt_index(vaddr))
     if (pt_entry & required_bits) != required_bits:
         return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
 
@@ -213,6 +259,8 @@ fn vmm_copyin_bytes_from_space(space: ProcessVmSpace, ptr: u64, len: u64) -> Vmm
     if len == 0:
         return VmmCopyBytesResult(status: _vmm_copy_ok(0), bytes: [])
     if ptr + len < ptr:
+        return _vmm_copy_bytes_err(14)
+    if not vmm_pt_range_user_readable(space, ptr, len):
         return _vmm_copy_bytes_err(14)
 
     var bytes: [u8] = []

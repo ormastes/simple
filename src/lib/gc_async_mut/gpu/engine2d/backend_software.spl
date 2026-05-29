@@ -14,7 +14,7 @@
 
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend, lerp_color}
-use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance, render_text_to_buffer}
+use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -325,38 +325,38 @@ impl RenderBackend for SoftwareBackend:
             row = row + 1
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
-        # Render into a local buffer first (avoids passing self.buf to free fn)
+        # Use glyph_data directly via sw_set_pixel — avoids passing self.buf
+        # to any free function (which would silently drop writes due to the
+        # self-pass-to-free-fn mutation-loss bug).
         val gh = glyph_height()
         var scale = font_size / gh
         if scale < 1:
             scale = 1
         val advance = glyph_advance(scale)
-        val text_w = text_val.len().to_i32() * advance
-        val text_h = gh * scale
-        if text_w <= 0 or text_h <= 0:
-            return
-        var local_buf: [u32] = [0u32; text_w * text_h]
-        render_text_to_buffer(local_buf, text_w, text_h, 0, 0, text_val, color, font_size)
-        # Inline-copy local_buf into self.buf (local arrays persist through free fns)
-        var row = 0
-        while row < text_h:
-            val dst_y = y + row
-            if dst_y >= 0 and dst_y < self.h:
-                var col = 0
-                while col < text_w:
-                    val dst_x = x + col
-                    if dst_x >= 0 and dst_x < self.w:
-                        val src_idx = row * text_w + col
-                        val dst_idx = dst_y * self.w + dst_x
-                        val src_pixel = local_buf[src_idx]
-                        val src_a = color_a(src_pixel)
-                        if src_a > 0u32:
-                            if src_a == 255u32:
-                                self.buf[dst_idx] = src_pixel
-                            else:
-                                self.buf[dst_idx] = blend(src_pixel, self.buf[dst_idx])
-                    col = col + 1
-            row = row + 1
+        var i: i64 = 0
+        var cursor_x = x
+        while i < text_val.len():
+            val code = text_val.char_code_at(i)
+            val ch = "{code as char}"
+            val bitmap = glyph_data(ch)
+            var gy = 0
+            while gy < gh:
+                val row_data = bitmap[gy]
+                var gx = 0
+                while gx < 5:
+                    val bit = (row_data >> (4 - gx)) & 1
+                    if bit != 0:
+                        var sy = 0
+                        while sy < scale:
+                            var sx = 0
+                            while sx < scale:
+                                self.sw_set_pixel(cursor_x + gx * scale + sx, y + gy * scale + sy, color)
+                                sx = sx + 1
+                            sy = sy + 1
+                    gx = gx + 1
+                gy = gy + 1
+            cursor_x = cursor_x + advance
+            i = i + 1
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         var row = 0
@@ -487,6 +487,7 @@ impl Engine2DExtended for SoftwareBackend:
     # because both calls route through the `self.*` helpers that already
     # mark tiles dirty.
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
+        # Fill background rect first, then draw glyphs on top via sw_set_pixel.
         val gh = glyph_height()
         var scale = font_size / gh
         if scale < 1:
@@ -496,14 +497,8 @@ impl Engine2DExtended for SoftwareBackend:
         val text_h = gh * scale
         if text_w <= 0 or text_h <= 0:
             return
-        var buf: [u32] = []
-        var _i = 0
-        val buf_size = text_w * text_h
-        while _i < buf_size:
-            buf.push(bg)
-            _i = _i + 1
-        render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, fg, font_size)
-        self.draw_image(x, y, text_w, text_h, buf)
+        self.draw_rect_filled(x, y, text_w, text_h, bg)
+        self.draw_text(x, y, text_val, fg, font_size)
 
     me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
         emu_draw_ellipse(self, cx, cy, rx, ry, color)
