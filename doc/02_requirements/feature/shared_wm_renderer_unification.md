@@ -12,7 +12,7 @@ Make the GUI layer access web rendering through a common API, refactor pure Simp
 
 REQ-001: Shared web render API
 
-The repo must expose one Simple-owned web render API used by `ui.web`, `ui.electron`, `ui.tauri`, and the pure Simple browser/web renderer path. The API must cover at minimum:
+The repo must expose one Simple-owned web render API used by `ui.web`, `ui.electron`, `ui.tauri`, and the pure Simple browser/web renderer path. The current canonical file is `src/lib/common/ui/web_render_api.spl`, consumed by `src/app/ui.web/backend.spl`, `src/app/ui.electron/backend.spl`, `src/app/ui.tauri/backend.spl`, and the pure Simple browser path covered by `test/unit/app/ui/web_render_backend_api_spec.spl`. The API must cover at minimum:
 
 - render request metadata
 - HTML/body rendering
@@ -32,7 +32,7 @@ The pure Simple web renderer must expose or consume the same API shape as the ho
 
 REQ-004: Engine2D backend API convergence
 
-`std.gpu.engine2d.backend.RenderBackend` is the canonical 2D renderer API. CPU, Metal, and CUDA 2D backends must implement that same interface or explicitly report unavailable capability through a typed backend result without pretending success.
+`std.gpu.engine2d.backend.RenderBackend` in `src/lib/gc_async_mut/gpu/engine2d/backend.spl` is the canonical 2D renderer API. CPU, Metal, and CUDA 2D backends in `backend_cpu.spl`, `backend_metal.spl`, and `backend_cuda.spl` must implement that same interface or explicitly report unavailable capability through a typed backend result without pretending success.
 
 REQ-005: CUDA 2D backend
 
@@ -60,7 +60,7 @@ The refactor must avoid avoidable frame buffer copies, repeated full-frame alloc
 
 REQ-011: Qt baseline comparison
 
-Add a reproducible baseline plan or harness for an equivalent Qt-based GUI app and compare binary/package size against the Simple GUI/web-render path. If Qt is unavailable locally, the harness must record that as an unavailable baseline rather than blocking normal verification.
+Add a reproducible baseline plan or harness for an equivalent Qt-based GUI app and compare binary/package size against the Simple GUI/web-render path. `scripts/check-qt-gui-size-baseline.shs` is the harness. If Qt is unavailable locally, it must record `qt_status=unavailable` as an optional, non-blocking baseline rather than failing normal verification.
 
 REQ-012: Tests and evidence
 

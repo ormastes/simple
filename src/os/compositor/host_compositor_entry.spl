@@ -4,7 +4,8 @@ use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
 use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
 use os.compositor.hosted_backend_win32.{HostedWin32Backend}
 use os.compositor.simple_web_window_renderer.{render_simple_web_app_content}
-use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_MINIMIZE, COMP_RESTORE}
+use os.compositor.wm_action_applier.{wm_action_from_bridge_request, wm_action_is_shared_lifecycle}
+use os.services.wm.wm_world.{WmAction}
 
 extern fn rt_sleep_ms(ms: i64)
 
@@ -178,25 +179,49 @@ class HostCompositor:
         self.backend.present()
 
     me apply_bridge_request(seq: i64, owner_port: i64, method: i64, window_id: i64, title: text, x: i32, y: i32, w: i32, h: i32, content: text, process_id: i64, app_id: text):
-        if method == COMP_CREATE_WINDOW.to_i64() or (window_id == 0 and title.len() > 0 and w > 0 and h > 0):
+        val action = wm_action_from_bridge_request(owner_port, method, window_id, title, x, y, w, h, content, process_id, app_id)
+        self.apply_wm_action(action)
+
+    me apply_wm_action(action: WmAction):
+        if not wm_action_is_shared_lifecycle(action.kind):
+            return
+        if action.kind == "create_window" or action.kind == "create_web_window":
             val id = self.next_window_id
             self.next_window_id = self.next_window_id + 1
-            self.windows.push(HostedWindow(id: id, owner_port: owner_port, title: title, x: x, y: y, w: w, h: h, content: content, process_id: process_id, app_id: app_id, minimized: false, focused: true))
+            self.windows.push(HostedWindow(id: id, owner_port: action.owner_port.to_i64(), title: action.title, x: action.x, y: action.y, w: action.width, h: action.height, content: action.content, process_id: action.process_id.to_i64(), app_id: action.app_id, minimized: false, focused: true))
             self.focus_window(id)
             return
-        if method == COMP_DESTROY_WINDOW.to_i64():
-            self.destroy_window(window_id)
+        if action.kind == "destroy_window":
+            self.destroy_window(action.window_id.to_i64())
             return
-        var i = self._find_window_index(window_id)
+        if action.kind == "focus":
+            self.focus_window(action.window_id.to_i64())
+            return
+        var i = self._find_window_index(action.window_id.to_i64())
         if i < 0:
             return
         var win = self.windows[i]
-        if method == COMP_UPDATE_TREE.to_i64():
-            win.content = content
-        elif method == COMP_MINIMIZE.to_i64():
+        if action.kind == "update_tree":
+            win.content = action.content
+        elif action.kind == "resize":
+            win.w = action.width
+            win.h = action.height
+        elif action.kind == "move":
+            win.x = action.x
+            win.y = action.y
+        elif action.kind == "set_title":
+            win.title = action.title
+        elif action.kind == "minimize":
             win.minimized = true
             win.focused = false
-        elif method == COMP_RESTORE.to_i64():
+        elif action.kind == "maximize":
+            win.minimized = false
+            win.focused = true
+            win.x = 0
+            win.y = 48
+            win.w = self.width
+            win.h = self.height - 96
+        elif action.kind == "restore":
             win.minimized = false
             win.focused = true
         self.windows[i] = win

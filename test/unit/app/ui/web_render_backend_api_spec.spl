@@ -1,0 +1,63 @@
+# @cover src/app/ui.web/backend.spl
+# @cover src/app/ui.electron/backend.spl
+# @cover src/app/ui.tauri/backend.spl
+# @cover src/app/ui.browser/backend.spl
+# @tag: unit, ui, web_render_api
+
+use common.ui.builder.{button, panel, text_widget, build_tree_with_title}
+use common.ui.state.{init_state}
+use app.ui.web.backend.{WebBackend}
+use app.ui.electron.backend.{ElectronBackend}
+use app.ui.tauri.backend.{TauriBackend}
+use app.ui.browser.backend.{BrowserBackend}
+
+fn sample_state():
+    val root = panel("web_render_root", "Web Render", [
+        text_widget("web_render_copy", "Shared API"),
+        button("web_render_action", "Run", "run")
+    ])
+    val tree = build_tree_with_title(root, "Web Render", "dark")
+    init_state(tree)
+
+describe "web render backends use the shared common API":
+
+    it "keeps render_html as body-only HTML for web electron and tauri":
+        val state = sample_state()
+        val web = WebBackend.new(4010)
+        val web_html = web.render_html(state)
+        expect(web_html).to_contain("widget-panel")
+        expect(web_html).to_contain("widget-button")
+
+        val electron_result = ElectronBackend.new(4011)
+        match electron_result:
+            Err(e):
+                expect(e).to_equal("")
+            Ok(electron):
+                val electron_html = electron.render_html(state)
+                expect(electron_html).to_equal(web_html)
+
+        val tauri_result = TauriBackend.new(4012)
+        match tauri_result:
+            Err(e):
+                expect(e).to_equal("")
+            Ok(tauri):
+                val tauri_html = tauri.render_html(state)
+                expect(tauri_html).to_equal(web_html)
+
+    it "records pure simple browser output as a shared web render artifact":
+        val state = sample_state()
+        val backend_result = BrowserBackend.create(64, 48, "software")
+        match backend_result:
+            Err(e):
+                expect(e).to_equal("")
+            Ok(backend):
+                val body_html = backend.render_html(state)
+                expect(body_html).to_contain("widget-panel")
+                expect(body_html).to_contain("widget-button")
+
+                backend.render_frame(state.tree, state)
+                expect(backend.web_render_target).to_equal("pure_simple")
+                expect(backend.last_artifact_capabilities).to_contain("touch")
+                expect(backend.last_artifact_html).to_contain("<div id=\"app\">")
+                expect(backend.last_artifact_html).to_contain("widget-button")
+                expect(backend.last_artifact_pixels).to_equal(64 * 48)

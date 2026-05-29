@@ -24,7 +24,7 @@ The GUI/web render refactor must reduce or avoid duplicated render buffers and h
 
 NFR-005: Size comparison
 
-The Qt baseline and Simple GUI/web-render artifact sizes must be reported in a reproducible format. The comparison must include command, artifact path, byte size, and availability status.
+The Qt baseline and Simple GUI/web-render artifact sizes must be reported in a reproducible format. The comparison must include command, artifact path, byte size, and availability status. A missing local Qt installation is an `unavailable` optional baseline state, not a verification failure; requiring Qt is only valid for an explicitly provisioned size-baseline environment.
 
 NFR-006: Performance evidence
 

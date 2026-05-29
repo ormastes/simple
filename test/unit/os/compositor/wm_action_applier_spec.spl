@@ -3,8 +3,9 @@
 
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.compositor.{Compositor}
-use os.compositor.wm_action_applier.{apply_wm_action_to_compositor, wm_action_is_shared_lifecycle}
+use os.compositor.wm_action_applier.{apply_wm_action_to_compositor, wm_action_from_bridge_request, wm_action_is_shared_lifecycle}
 use os.services.wm.wm_world.{WmAction}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_UPDATE_TREE, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_RESTORE}
 
 class ApplierBackend:
     w: i32
@@ -63,3 +64,31 @@ describe "shared WM action applier":
     it "classifies shared lifecycle actions":
         expect(wm_action_is_shared_lifecycle("resize")).to_equal(true)
         expect(wm_action_is_shared_lifecycle("none")).to_equal(false)
+
+    it "builds shared lifecycle actions from host bridge requests":
+        val create = wm_action_from_bridge_request(42, COMP_CREATE_WINDOW.to_i64(), 0, "Host App", 12, 18, 240, 160, "initial", 700, "/host/app")
+        expect(create.kind).to_equal("create_window")
+        expect(create.owner_port).to_equal(42)
+        expect(create.process_id).to_equal(700)
+        expect(create.app_id).to_equal("/host/app")
+        val create_web = wm_action_from_bridge_request(42, COMP_CREATE_WEB_WINDOW.to_i64(), 0, "https://example.test", 12, 18, 240, 160, "https://example.test", 700, "/host/browser")
+        expect(create_web.kind).to_equal("create_web_window")
+        expect(create_web.content).to_equal("https://example.test")
+
+        val move_action = wm_action_from_bridge_request(42, COMP_MOVE.to_i64(), 9, "", 30, 40, 0, 0, "", 0, "")
+        val resize = wm_action_from_bridge_request(42, COMP_RESIZE.to_i64(), 9, "", 0, 0, 320, 220, "", 0, "")
+        val title = wm_action_from_bridge_request(42, COMP_SET_TITLE.to_i64(), 9, "Renamed", 0, 0, 0, 0, "", 0, "")
+        val update = wm_action_from_bridge_request(42, COMP_UPDATE_TREE.to_i64(), 9, "", 0, 0, 0, 0, "tree", 0, "")
+        val minimized = wm_action_from_bridge_request(42, COMP_MINIMIZE.to_i64(), 9, "", 0, 0, 0, 0, "", 0, "")
+        val restored = wm_action_from_bridge_request(42, COMP_RESTORE.to_i64(), 9, "", 0, 0, 0, 0, "", 0, "")
+
+        expect(move_action.kind).to_equal("move")
+        expect(move_action.x).to_equal(30)
+        expect(resize.kind).to_equal("resize")
+        expect(resize.width).to_equal(320)
+        expect(title.kind).to_equal("set_title")
+        expect(title.title).to_equal("Renamed")
+        expect(update.kind).to_equal("update_tree")
+        expect(update.content).to_equal("tree")
+        expect(minimized.kind).to_equal("minimize")
+        expect(restored.kind).to_equal("restore")

@@ -4,7 +4,7 @@ Date: 2026-05-29
 
 ## Current Status
 
-Local agent research found the requested end state is incomplete. Existing contracts cover parts of the goal, but there is no single web render API for Web/Electron/Tauri/pure Simple renderer, CUDA lacks a concrete Engine2D backend file, and host WM still has local service logic that conflicts with the shared WM architecture.
+Local agent research found the requested end state is now partially implemented. Existing contracts cover the shared web render API in `src/lib/common/ui/web_render_api.spl`, concrete Web/Electron/Tauri consumers, and concrete CPU/Metal/CUDA Engine2D backend files. Remaining work is to keep the docs/specs aligned with those API files, prove pure Simple browser parity, and close any host WM versus SimpleOS WM service/core gaps.
 
 ## Recommended Path
 
@@ -13,14 +13,14 @@ Recommended selection: Feature Option C with NFR Option 3 if the goal is to make
 ## Implementation Phases
 
 1. Finalize requirements after user selection.
-2. Design `WebRenderApi`:
-   - Shared request/response types for HTML render, snapshot/patch render, input forwarding, host window commands, capabilities, and optional pixel output.
-   - Add `UI_SURFACE_KIND_TAURI` or replace surface-kind constants with a host-renderer capability model.
-   - Move Electron/Tauri duplicate `build_ipc_render` usage behind the shared API.
-3. Design Engine2D API convergence:
+2. Maintain shared web render API docs/specs:
+   - Treat `src/lib/common/ui/web_render_api.spl` as the canonical request/artifact/capability API.
+   - Keep Web/Electron/Tauri and pure Simple browser participation covered by one conformance spec.
+   - Track host window command serialization separately in `src/app/ui.web/host_adapter_contract.spl`.
+3. Maintain Engine2D API convergence:
    - Treat `src/lib/gc_async_mut/gpu/engine2d/backend.spl::RenderBackend` as the mandatory primitive API.
    - Make session APIs wrap that trait instead of competing with it.
-   - Add or restore `backend_cuda.spl`; verify CPU, Metal, and CUDA compile against the same trait.
+   - Keep `backend_cpu.spl`, `backend_metal.spl`, and `backend_cuda.spl` aligned, with CUDA allowed to report typed unavailable capability.
 4. Design WM logic sharing:
    - Remove or replace the local `WmService` in `host_compositor_entry.spl`.
    - Extract any host-only window list mechanics into adapter code below the real WM service/core.
@@ -40,6 +40,6 @@ Recommended selection: Feature Option C with NFR Option 3 if the goal is to make
 
 ## Open Decisions
 
-- Whether to use `src/lib/common/ui/web_render_api.spl` as the canonical web API location or keep it in `src/app/ui.web/render_api.spl`.
-- Whether CUDA must be a real accelerated renderer in the first implementation or a capability-gated backend that returns unavailable without pretending to render.
+- Whether `UI_SURFACE_KIND_TAURI` should be added or whether Tauri remains represented through capability policy without a distinct surface kind.
+- Whether CUDA must become a real accelerated renderer in this feature or remain a capability-gated backend that returns unavailable without pretending to render.
 - Whether host TUI is in scope for this goal or should remain an explicit unsupported backend while Web/Electron/Tauri/pure Simple are unified.

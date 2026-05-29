@@ -30,7 +30,7 @@ use os.compositor.host_compositor_entry.{
     simpleos_gui_adapter_content_renderer_name,
     init_host_wm,
 }
-use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_MINIMIZE, COMP_RESTORE}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 
 var _fake_present_count: i64 = 0
 var _capture_present_count: i64 = 0
@@ -384,6 +384,30 @@ describe "HostCompositor hosted window state":
 
         comp.apply_bridge_request(5, 77, COMP_DESTROY_WINDOW.to_i64(), wid, "", 0, 0, 0, 0, "", 0, "/sys/apps/test")
         expect(comp.windows.len()).to_equal(0)
+
+    it "applies host bridge lifecycle requests through shared WM actions":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "One", 40, 50, 240, 160, "", 1, "/sys/apps/one")
+        comp.apply_bridge_request(2, 88, COMP_CREATE_WINDOW.to_i64(), 0, "Two", 80, 90, 240, 160, "", 2, "/sys/apps/two")
+
+        val first_id = comp.windows[0].id
+        comp.apply_bridge_request(3, 77, COMP_MOVE.to_i64(), first_id, "", 120, 130, 0, 0, "", 0, "")
+        comp.apply_bridge_request(4, 77, COMP_RESIZE.to_i64(), first_id, "", 0, 0, 320, 220, "", 0, "")
+        comp.apply_bridge_request(5, 77, COMP_SET_TITLE.to_i64(), first_id, "One Renamed", 0, 0, 0, 0, "", 0, "")
+        expect(comp.windows[0].x).to_equal(120)
+        expect(comp.windows[0].y).to_equal(130)
+        expect(comp.windows[0].w).to_equal(320)
+        expect(comp.windows[0].h).to_equal(220)
+        expect(comp.windows[0].title).to_equal("One Renamed")
+
+        comp.apply_bridge_request(6, 77, COMP_FOCUS.to_i64(), first_id, "", 0, 0, 0, 0, "", 0, "")
+        expect(comp.windows[comp.windows.len() - 1].id).to_equal(first_id)
+        comp.apply_bridge_request(7, 77, COMP_MAXIMIZE.to_i64(), first_id, "", 0, 0, 0, 0, "", 0, "")
+        expect(comp.windows[comp.windows.len() - 1].x).to_equal(0)
+        expect(comp.windows[comp.windows.len() - 1].y).to_equal(48)
+        expect(comp.windows[comp.windows.len() - 1].w).to_equal(640)
+        expect(comp.windows[comp.windows.len() - 1].h).to_equal(384)
 
     it "maps taskbar hit to the expected window and restores focus":
         val backend = FakeCompositorBackend(w: 640, h: 480)
