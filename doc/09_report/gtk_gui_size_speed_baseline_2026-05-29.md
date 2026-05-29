@@ -6,28 +6,28 @@ Date: 2026-05-29
 
 | Runtime | Status | Binary bytes | Iterations | Total us | Notes |
 |---|---|---:|---:|---:|---|
-| Simple web renderer | ok | 39056 | 4 | 8274 | render loop via Simple software renderer |
-| Simple static cache | ok | n/a | 4 | 71 | retained HTML artifact hot path after persistent warmup |
-| Simple persistent SWBC command plan | ok | n/a | 4 | 302582 | disk-backed compact static-shell plan to retained commands |
-| Simple hot SWBC command plan cache | ok | n/a | 4 | 85 | in-memory encoded SWBC sidecar cache after persistent warmup |
-| Simple retained command hot cache | ok | n/a | 4 | 83 | in-memory retained command list after persistent warmup |
-| Simple BrowserBackend cached frame | ok | n/a | 4 | 258 | integrated browser backend unchanged-static-frame cache |
-| Simple BrowserBackend no-op frame | ok | n/a | 4 | 59 | explicit event-loop no-change static frame reuse |
-| Simple BrowserBackend present cache | ok | n/a | 4 | 82 | cached host-present pixel buffer when framebuffer is unchanged |
-| Simple Engine2D retained static pixels | ok | n/a | 4 | 100 | flyweight pixel buffer for unchanged static Engine2D page |
-| Simple SWBC prepared reuse | ok | n/a | 4 | 92 | decoded compact static-shell plan reuse loop |
-| Simple SWBC command plan | ok | n/a | 4 | 56 | decoded command-only static-shell plan, no HTML artifact |
-| GTK | ok | 14472 | 200 | 27532 | widget construction loop; uses xvfb-run when available |
+| Simple web renderer | ok | 39056 | 4 | 108 | retained framebuffer for unchanged Simple web HTML |
+| Simple static cache | ok | n/a | 4 | 81 | retained HTML artifact hot path after persistent warmup |
+| Simple persistent SWBC command plan | ok | n/a | 4 | 364156 | disk-backed compact static-shell plan to retained commands |
+| Simple hot SWBC command plan cache | ok | n/a | 4 | 88 | in-memory encoded SWBC sidecar cache after persistent warmup |
+| Simple retained command hot cache | ok | n/a | 4 | 89 | in-memory retained command list after persistent warmup |
+| Simple BrowserBackend cached frame | ok | n/a | 4 | 268 | integrated browser backend unchanged-static-frame cache |
+| Simple BrowserBackend no-op frame | ok | n/a | 4 | 79 | explicit event-loop no-change static frame reuse |
+| Simple BrowserBackend present cache | ok | n/a | 4 | 99 | cached host-present pixel buffer when framebuffer is unchanged |
+| Simple Engine2D retained static pixels | ok | n/a | 4 | 111 | flyweight pixel buffer for unchanged static Engine2D page |
+| Simple SWBC prepared reuse | ok | n/a | 4 | 135 | decoded compact static-shell plan reuse loop |
+| Simple SWBC command plan | ok | n/a | 4 | 58 | decoded command-only static-shell plan, no HTML artifact |
+| GTK | ok | 14472 | 200 | 36244 | widget construction loop; uses xvfb-run when available |
 
 ## Comparison Ratios
 
 | Metric | Value |
 |---|---:|
-| Simple cached BrowserBackend frame per iteration | 64.50 us |
-| Simple Engine2D retained static pixels per iteration | 25.00 us |
-| GTK widget loop per iteration | 137.66 us |
-| GTK per-iteration cost / Simple cached-frame cost | 2.13x |
-| GTK per-iteration cost / Simple retained-pixel cost | 5.51x |
+| Simple cached BrowserBackend frame per iteration | 67.00 us |
+| Simple Engine2D retained static pixels per iteration | 27.75 us |
+| GTK widget loop per iteration | 181.22 us |
+| GTK per-iteration cost / Simple cached-frame cost | 2.70x |
+| GTK per-iteration cost / Simple retained-pixel cost | 6.53x |
 | GTK linked closure / Simple linked closure | 13.55x |
 | Simple native executable / GTK minimal executable | 2.70x |
 
@@ -68,8 +68,11 @@ Date: 2026-05-29
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - simple_render_status=ok
 - simple_render_iterations=4
-- simple_render_total_us=8274
+- simple_render_total_us=108
 - simple_render_pixels=256000
+- simple_render_cache_hits=4
+- simple_render_cache_stores=1
+- simple_render_cache_warm_pixels=64000
 - simple_cache_schema=simple-web-cache-v1
 - simple_render_plan=static_shell_with_dynamic_islands
 - simple_dynamic_regions=1
@@ -77,24 +80,24 @@ Date: 2026-05-29
 - simple_static_cache_hit_iterations=4
 - simple_static_cache_memory_hits=4
 - simple_static_cache_disk_hits=0
-- simple_static_cache_total_us=71
+- simple_static_cache_total_us=81
 - simple_static_cache_html_bytes=992
 - simple_static_disk_plan_warm_stored=true
 - simple_static_disk_plan_hit_iterations=4
 - simple_static_disk_plan_command_count=20
-- simple_static_disk_plan_total_us=302582
+- simple_static_disk_plan_total_us=364156
 - simple_static_plan_cache_warm_stored=true
 - simple_static_plan_cache_hit_iterations=4
 - simple_static_plan_cache_memory_hits=4
 - simple_static_plan_cache_command_count=20
-- simple_static_plan_cache_total_us=85
+- simple_static_plan_cache_total_us=88
 - simple_static_command_cache_warm_stored=true
 - simple_static_command_cache_hit_iterations=4
 - simple_static_command_cache_memory_hits=4
 - simple_static_command_cache_command_count=20
-- simple_static_command_cache_total_us=83
+- simple_static_command_cache_total_us=89
 - simple_browser_cached_frame_iterations=4
-- simple_browser_cached_frame_total_us=258
+- simple_browser_cached_frame_total_us=268
 - simple_browser_static_shell_hits=0
 - simple_browser_static_shell_stores=1
 - simple_browser_static_frame_hits=8
@@ -104,15 +107,15 @@ Date: 2026-05-29
 - simple_browser_cached_frame_pixels=3072
 - simple_browser_noop_cached_frame_iterations=4
 - simple_browser_noop_cached_frame_hits=4
-- simple_browser_noop_cached_frame_total_us=59
+- simple_browser_noop_cached_frame_total_us=79
 - simple_browser_present_cache_iterations=4
-- simple_browser_present_cache_total_us=82
+- simple_browser_present_cache_total_us=99
 - simple_browser_present_cache_pixels=12288
 - simple_browser_present_cache_hits=4
 - simple_browser_present_cache_stores=1
 - simple_browser_present_cache_warm_pixels=3072
 - simple_engine2d_solid_status=ok
-- simple_engine2d_solid_total_us=100
+- simple_engine2d_solid_total_us=111
 - simple_engine2d_solid_pixels=256000
 - simple_engine2d_solid_cache_hits=4
 - simple_engine2d_solid_cache_stores=1
@@ -128,17 +131,17 @@ Date: 2026-05-29
 - simple_static_swbc_prepared_hits=4
 - simple_static_command_reuse_count=20
 - simple_static_command_reuse_hits=4
-- simple_static_swbc_total_us=92
+- simple_static_swbc_total_us=135
 - simple_static_command_plan_valid=true
 - simple_static_command_plan_count=20
 - simple_static_command_plan_hits=4
-- simple_static_command_plan_total_us=56
+- simple_static_command_plan_total_us=58
 
 ## GTK Output
 
 - gtk_render_status=ok
 - gtk_render_iterations=200
-- gtk_widget_total_us=27532
+- gtk_widget_total_us=36244
 
 ## Simple Linked Dependencies
 
