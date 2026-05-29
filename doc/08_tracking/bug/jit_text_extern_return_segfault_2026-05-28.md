@@ -2,7 +2,27 @@
 
 ## Status
 
-Mitigated in source; release binary refresh still required.
+**Blocked — binary rebuild required.**
+
+The Rust source fix is committed (commit `33a854f608`, 2026-05-29 08:21 UTC).
+The checked-in `bin/simple` binary was built at 2026-05-29 05:33 UTC — **2h 48min
+before that commit** — so it does not contain the fix.
+
+This is not fixable in pure Simple (`.spl`). The vreg type-map that loses `text`
+for string constants and known text-return SFFI calls lives entirely in the Rust
+JIT layer (`src/compiler_rust/compiler/src/codegen/instr/body.rs`); the
+Simple-side codegen (`src/compiler/70.backend/codegen.spl`) delegates to that
+layer and has no parallel implementation to patch.
+
+**Required action:** rebuild `bin/simple` from the fixed Rust sources:
+
+```bash
+scripts/bootstrap/bootstrap-from-scratch.sh --deploy
+```
+
+Until then the probe exits 139 (segfault) in default JIT mode and exits 0 in
+`SIMPLE_EXECUTION_MODE=interpret` mode. The interpret-mode guard on the serial
+checker NVMe wrapper remains appropriate.
 
 ## Reproduction
 

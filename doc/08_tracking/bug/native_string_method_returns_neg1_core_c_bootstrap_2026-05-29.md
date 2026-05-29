@@ -4,7 +4,7 @@
 - **Severity:** P1 (blocks native string ops) — *needs confirmation of scope*
 - **Date:** 2026-05-29
 - **Area:** compiler / seed native codegen (string method dispatch)
-- **Status:** fixed (2026-05-29)
+- **Status:** fix in source, NOT deployed — seed rebuild required (verified 2026-05-29)
 
 ## Summary
 
@@ -73,6 +73,27 @@ Minimal repro (`val s: text = "abc"; println(s.len()); println(s.slice(1,3)); pr
 
 Backend: Cranelift (bootstrap binary built without `--features llvm`; default
 `BackendKind::for_target` returns `Cranelift` when LLVM feature is absent).
+
+## Re-verification (2026-05-29, post-commit check)
+
+Repro run against the currently deployed seed (`bin/simple`, mtime 05:33 UTC May 29):
+
+```
+$ bin/simple compile /tmp/string_method_repro.spl -o /tmp/out --native --runtime-bundle=core-c-bootstrap
+$ /tmp/out
+-1
+Runtime error: Function 'str.slice' not found
+Runtime error: Function 'str.substring' not found
+```
+
+**Still broken.** Root cause: fix commit `27b41b8340` (05:57 UTC May 29) landed **24 minutes after**
+the seed binary was last written (05:33 UTC). The source files (`common_backend.rs`,
+`helpers.rs`) contain the correct changes, but the deployed `bin/simple` seed binary
+does not include them.
+
+**Resolution needed:** Run `scripts/bootstrap/bootstrap-from-scratch.sh --deploy` to rebuild
+and redeploy the seed binary incorporating commit `27b41b8340`. This is a Rust-seed
+codegen change — not fixable in pure Simple.
 
 ## Files changed
 

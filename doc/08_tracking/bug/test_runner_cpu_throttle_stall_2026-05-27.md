@@ -2,7 +2,8 @@
 
 **Date:** 2026-05-27
 **Severity:** Medium
-**Component:** src/app/test_runner_new/
+**Component:** src/compiler_rust/driver/src/cli/test_runner/parallel.rs
+**Note:** The pure-Simple runner (`src/lib/nogc_sync_mut/test_runner/resource_governor.spl`) uses a gate-based design (`governor_can_spawn`) and does not mutate a thread count; it is structurally immune to this stall.
 
 ## Symptom
 

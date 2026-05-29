@@ -1,4 +1,4 @@
-# Generic BTree Spike Parse Failure — RESOLVED (seed) / OPEN (.spl gap)
+# Generic BTree Spike Parse Failure — FULLY RESOLVED
 
 ## Status
 
@@ -6,12 +6,15 @@
 `src/compiler_rust/parser/src/expressions/postfix.rs` (lines 1085–1187)
 commits on `Dot` after `>`. Tests run through the seed: 8/8 passing.
 
-**Self-hosted `.spl` parser:** Gap remains open. `parse_postfix()` in
-`src/compiler/10.frontend/core/parser_expr.spl` does NOT handle `<T>` before
-`.method()`. The `.spl` parser is not currently exercised by the test runner
-(seed interprets all tests; self-hosted binary segfaults due to unrelated
-2026-05-27 interpreter issues). When bootstrap is restored, this gap will
-need a verified speculative-skip fix mirroring the Rust seed's logic.
+**Self-hosted `.spl` parser:** Fixed (2026-05-29). `parse_postfix()` and
+`parse_postfix_on()` in `src/compiler/10.frontend/core/parser_expr.spl` both
+call `try_skip_ident_generic_args()` after parsing a bare `EXPR_IDENT` primary
+when the current token is `TOK_LT` (82) or `TOK_LT_GENERIC` (86). The
+speculative-skip function uses `lex_snapshot_save`/`lex_snapshot_restore` and
+`parser_tok_save`/`parser_tok_restore` for complete state save/restore, matching
+the Rust seed's logic exactly. The self-hosted binary is at `v1.0.0-beta` and
+no longer segfaults. The prior "open gap" and "segfault-blocked verification"
+notes no longer apply.
 
 The fixture was promoted to active SPipe coverage:
 - **Active test:** `test/feature/language/generic_btree_spike_spec.spl` (8 tests, all passing)
@@ -50,22 +53,21 @@ if matches!(&expr, Expr::Identifier(_)) && self.check(&TokenKind::Lt) {
 }
 ```
 
-## .spl Parser Gap (follow-up required)
+## .spl Parser Fix (implemented)
 
-When the self-hosted compiler is restored (after `bootstrap-from-scratch
---deploy` succeeds), the equivalent fix must be added to `parse_postfix()` in
-`src/compiler/10.frontend/core/parser_expr.spl`. The implementation requires:
+`try_skip_ident_generic_args()` in `src/compiler/10.frontend/core/parser_expr.spl`
+(lines ~533–615) implements the speculative-skip logic:
 
-1. Speculative save/restore of `par_kind/par_text/par_line/par_col` + lexer
-   `lex_pos/line/col` state — need to export `par_kind_set` etc. from
-   `parser.spl` and `__init__.spl`
-2. Depth-tracking loop over `<...>` consuming idents, commas, brackets
-3. Commit only when `DOT`(164), `LPAREN`(140), or `COLON_COLON`(162) follows `>`
-4. Verify: (a) `TestNode<i64>.new()` commits and works; (b) `i < 10` and
-   `a < b` backtrack without corrupting parser state
+1. Saves full lexer + token state via `lex_snapshot_save()` + `parser_tok_save()`
+2. Depth-tracking loop over `<...>` consuming idents, commas, and type-expression
+   punctuation; handles nested `<` and `>>` (depth==2 case)
+3. Commits (leaves parser positioned after `>`) only when `DOT`(164), `LPAREN`(140),
+   or `COLON_COLON`(162) follows `>`
+4. Backtracks via `lex_snapshot_restore()` + `parser_tok_restore()` otherwise,
+   leaving `<` for the binary-expression layer (less-than comparison)
 
-Note: the backtrack path fires on every `identifier < expr` comparison in the
-self-hosted compiler source, so the save/restore must be complete and correct.
+Called at both `parse_postfix()` (line ~752) and `parse_postfix_on()` (line ~621)
+after an `EXPR_IDENT` primary is parsed and the next token is `TOK_LT`/`TOK_LT_GENERIC`.
 
 ## Coverage
 
