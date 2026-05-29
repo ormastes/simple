@@ -3,6 +3,7 @@ use app.cli.main.*
 use app.cli.main_part1.{get_cli_args}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
+use app.io.env_ops.{env_get}
 # Simple Language - Unified CLI (Written in Simple)
 #
 # This is the main entry point for the Simple CLI, written in Simple itself.
@@ -149,6 +150,17 @@ fn main() -> i64:
         val watch_args = filtered_args[1:]
         return cli_run_file("src/app/watch/main.spl", watch_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "test"):
+        # Recursion guard: refuse nested `bin/simple test` invocations.
+        # test_entry.spl applies the same guard for the lightweight path;
+        # this site covers the standard `bin/simple test` dispatch path.
+        val _depth_str = env_get("SIMPLE_TEST_DEPTH")
+        val _depth = if _depth_str == "" or _depth_str == nil: 0 else: _depth_str.to_int()
+        if _depth >= 1:
+            print "ERROR: simple test recursion guard triggered (SIMPLE_TEST_DEPTH={_depth_str})"
+            print "  Nested `bin/simple test` invocations are not allowed."
+            print "  A spec or script is calling `bin/simple test` from inside a test run."
+            return 1
+        env_set("SIMPLE_TEST_DEPTH", "{_depth + 1}")
         val test_args = filtered_args[1:]
         return cli_run_tests(test_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "test-daemon"):

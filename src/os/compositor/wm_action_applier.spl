@@ -34,6 +34,23 @@ class WmLifecycleApplyResult:
     window_id: i64
     applied: bool
 
+class WmPointerInteractionState:
+    dragging: bool
+    drag_window_id: i64
+    drag_offset_x: i32
+    drag_offset_y: i32
+    resizing: bool
+    resize_window_id: i64
+    resize_start_x: i32
+    resize_start_y: i32
+    resize_start_w: i32
+    resize_start_h: i32
+
+class WmLifecyclePointerResult:
+    windows: [WmLifecycleWindowState]
+    next_window_id: i64
+    interaction: WmPointerInteractionState
+
 fn wm_action_remote_tree(window_id: u64, content: text) -> UITree:
     val wid_str = "{window_id}"
     val root = column("remote_{wid_str}", [
@@ -124,6 +141,88 @@ fn wm_lifecycle_destroy_window(windows: [WmLifecycleWindowState], window_id: i64
         if windows[i].id != window_id:
             out.push(windows[i])
         i = i + 1
+    out
+
+fn wm_taskbar_item_width(screen_width: i32, count: i32) -> i32:
+    if count <= 0:
+        return 0
+    val available = screen_width - 80
+    val fit = available / count
+    if fit < 104: fit else: 104
+
+fn wm_taskbar_dock_width(screen_width: i32, count: i32) -> i32:
+    if count <= 0:
+        return 0
+    wm_taskbar_item_width(screen_width, count) * count + 20
+
+fn wm_taskbar_item_x(screen_width: i32, count: i32, index: i32) -> i32:
+    val dock_w = wm_taskbar_dock_width(screen_width, count)
+    val start = (screen_width - dock_w) / 2 + 10
+    start + index * wm_taskbar_item_width(screen_width, count)
+
+fn wm_lifecycle_hit_taskbar(windows: [WmLifecycleWindowState], screen_width: i32, screen_height: i32, x: i32, y: i32) -> i64:
+    val count = windows.len()
+    if count == 0:
+        return 0
+    val dock_y = screen_height - 62
+    if y < dock_y or y >= dock_y + 44:
+        return 0
+    var i = 0
+    val item_w = wm_taskbar_item_width(screen_width, count)
+    while i < count:
+        val ix = wm_taskbar_item_x(screen_width, count, i)
+        if x >= ix and x < ix + item_w:
+            return windows[i].id
+        i = i + 1
+    0
+
+fn wm_lifecycle_pointer_move(windows: [WmLifecycleWindowState], next_window_id: i64, desktop_width: i32, desktop_height: i32, interaction: WmPointerInteractionState, x: i32, y: i32) -> WmLifecyclePointerResult:
+    var out_windows = windows
+    var out_interaction = interaction
+    if out_interaction.resize_window_id != 0:
+        val idx = wm_lifecycle_find_window_index(out_windows, out_interaction.resize_window_id)
+        if idx >= 0:
+            var nw = out_interaction.resize_start_w + (x - out_interaction.resize_start_x)
+            var nh = out_interaction.resize_start_h + (y - out_interaction.resize_start_y)
+            if nw < 160:
+                nw = 160
+            if nh < 120:
+                nh = 120
+            val resized = apply_wm_action_to_lifecycle_windows(out_windows, next_window_id, desktop_width, desktop_height, wm_resize_action(out_interaction.resize_window_id, nw, nh))
+            out_windows = resized.windows
+        return WmLifecyclePointerResult(windows: out_windows, next_window_id: next_window_id, interaction: out_interaction)
+    if out_interaction.drag_window_id != 0:
+        val idx = wm_lifecycle_find_window_index(out_windows, out_interaction.drag_window_id)
+        if idx >= 0:
+            var nx = x - out_interaction.drag_offset_x
+            var ny = y - out_interaction.drag_offset_y
+            if nx < 0:
+                nx = 0
+            if ny < 48:
+                ny = 48
+            val moved = apply_wm_action_to_lifecycle_windows(out_windows, next_window_id, desktop_width, desktop_height, wm_move_action(out_interaction.drag_window_id, nx, ny))
+            out_windows = moved.windows
+        return WmLifecyclePointerResult(windows: out_windows, next_window_id: next_window_id, interaction: out_interaction)
+    var i = 0
+    while i < out_windows.len():
+        val win = out_windows[i]
+        if x >= win.x + win.w - 8 and x <= win.x + win.w and y >= win.y + win.h - 8 and y <= win.y + win.h:
+            out_interaction.resize_window_id = win.id
+            out_interaction.resize_start_x = x
+            out_interaction.resize_start_y = y
+            out_interaction.resize_start_w = win.w
+            out_interaction.resize_start_h = win.h
+        i = i + 1
+    WmLifecyclePointerResult(windows: out_windows, next_window_id: next_window_id, interaction: out_interaction)
+
+fn wm_lifecycle_left_button(interaction: WmPointerInteractionState, down: bool) -> WmPointerInteractionState:
+    var out = interaction
+    if down:
+        if out.resize_window_id != 0:
+            out.resizing = true
+    else:
+        out.resizing = false
+        out.resize_window_id = 0
     out
 
 fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_window_id: i64, desktop_width: i32, desktop_height: i32, action: WmAction) -> WmLifecycleApplyResult:

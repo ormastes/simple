@@ -48,8 +48,21 @@ core runtime archive no longer forces `libm` into hello/TUI/network binaries.
 The focused hello verbose probe linked without `-lm`, and `ldd` showed only
 `libc.so.6` and the dynamic loader.
 
-## Remaining Size Gap
+## Size Gap Resolution
 
-Loaded-library parity is resolved, but file-size parity is not. Simple hello and
-standalone TUI remain 26864 bytes versus the 14472-byte C counters, and the
-Simple mmap preload row remains 34968 bytes versus the 14472-byte C baseline.
+File-size parity is also resolved. Current audit results from
+`doc/09_report/startup_size_performance_audit_2026-05-27.md`:
+
+- Simple hello core-c-bootstrap: **14336** bytes (C baseline: 14472 bytes)
+- Simple mmap preload argparse: **14400** bytes (C baseline: 14472 bytes)
+- Simple TCP connect: **14328** bytes (C baseline: 14472 bytes)
+- Simple UDP send: **14328** bytes (C baseline: 14472 bytes)
+- Simple HTTP plain connect: **14336** bytes (C baseline: 14472 bytes)
+
+All Simple core-lane binaries are now at or below the corresponding C counter
+sizes. The previous 26864-byte hello and 34968-byte mmap preload figures were
+from before the core-C startup lane and `--gc-sections` / `--as-needed` fixes
+landed. Separate tracking bugs for each lane are resolved:
+`simple_mmap_preload_size_gap_2026-05-27.md`,
+`simple_network_size_gap_2026-05-27.md`,
+`simple_https_size_lane_missing_2026-05-27.md`.

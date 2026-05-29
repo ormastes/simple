@@ -5,7 +5,7 @@ use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
 use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
 use os.compositor.hosted_backend_win32.{HostedWin32Backend}
 use os.compositor.simple_web_window_renderer.{render_simple_web_app_content}
-use os.compositor.wm_action_applier.{WmLifecycleWindowState, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_move_action, wm_resize_action}
+use os.compositor.wm_action_applier.{WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 use os.services.wm.wm_service.{WmService}
 use os.services.wm.wm_world.{WmAction}
 
@@ -195,20 +195,7 @@ class HostCompositor:
         self.apply_wm_action(wm_focus_action(window_id))
 
     fn hit_taskbar(x: i32, y: i32) -> i64:
-        val count = self.windows.len()
-        if count == 0:
-            return 0
-        val dock_y = self.height - 62
-        if y < dock_y or y >= dock_y + 44:
-            return 0
-        var i = 0
-        val item_w = host_taskbar_item_width(self.width, count)
-        while i < count:
-            val ix = host_taskbar_item_x(self.width, count, i)
-            if x >= ix and x < ix + item_w:
-                return self.windows[i].id
-            i = i + 1
-        0
+        wm_lifecycle_hit_taskbar(host_windows_to_lifecycle_state(self.windows), self.width, self.height, x, y)
 
     me pointer_move(x: i32, y: i32):
         val out = host_compositor_pointer_move(self, x, y)
@@ -403,63 +390,42 @@ fn host_compositor_apply_lifecycle_action(comp: HostCompositor, action: WmAction
 
 fn host_compositor_pointer_move(comp: HostCompositor, x: i32, y: i32) -> HostCompositor:
     var out = comp
-    if out.resize_window_id != 0:
-        val idx = host_compositor_find_window_index(out, out.resize_window_id)
-        if idx >= 0:
-            var nw = out.resize_start_w + (x - out.resize_start_x)
-            var nh = out.resize_start_h + (y - out.resize_start_y)
-            if nw < 160:
-                nw = 160
-            if nh < 120:
-                nh = 120
-            out = host_compositor_apply_lifecycle_action(out, wm_resize_action(out.resize_window_id, nw, nh))
-        return out
-    if out.drag_window_id != 0:
-        val idx = host_compositor_find_window_index(out, out.drag_window_id)
-        if idx >= 0:
-            var nx = x - out.drag_offset_x
-            var ny = y - out.drag_offset_y
-            if nx < 0:
-                nx = 0
-            if ny < 48:
-                ny = 48
-            out = host_compositor_apply_lifecycle_action(out, wm_move_action(out.drag_window_id, nx, ny))
-        return out
-    var i = 0
-    while i < out.windows.len():
-        val win = out.windows[i]
-        if x >= win.x + win.w - 8 and x <= win.x + win.w and y >= win.y + win.h - 8 and y <= win.y + win.h:
-            out.resize_window_id = win.id
-            out.resize_start_x = x
-            out.resize_start_y = y
-            out.resize_start_w = win.w
-            out.resize_start_h = win.h
-        i = i + 1
+    val interaction = WmPointerInteractionState(dragging: out.dragging, drag_window_id: out.drag_window_id, drag_offset_x: out.drag_offset_x, drag_offset_y: out.drag_offset_y, resizing: out.resizing, resize_window_id: out.resize_window_id, resize_start_x: out.resize_start_x, resize_start_y: out.resize_start_y, resize_start_w: out.resize_start_w, resize_start_h: out.resize_start_h)
+    val result = wm_lifecycle_pointer_move(host_windows_to_lifecycle_state(out.windows), out.next_window_id, out.width, out.height, interaction, x, y)
+    out.windows = host_windows_from_lifecycle_state(result.windows)
+    out.next_window_id = result.next_window_id
+    out.dragging = result.interaction.dragging
+    out.drag_window_id = result.interaction.drag_window_id
+    out.drag_offset_x = result.interaction.drag_offset_x
+    out.drag_offset_y = result.interaction.drag_offset_y
+    out.resizing = result.interaction.resizing
+    out.resize_window_id = result.interaction.resize_window_id
+    out.resize_start_x = result.interaction.resize_start_x
+    out.resize_start_y = result.interaction.resize_start_y
+    out.resize_start_w = result.interaction.resize_start_w
+    out.resize_start_h = result.interaction.resize_start_h
     out
 
 fn host_compositor_left_button(comp: HostCompositor, down: bool) -> HostCompositor:
     var out = comp
-    if down:
-        if out.resize_window_id != 0:
-            out.resizing = true
-    else:
-        out.resizing = false
-        out.resize_window_id = 0
+    val interaction = wm_lifecycle_left_button(WmPointerInteractionState(dragging: out.dragging, drag_window_id: out.drag_window_id, drag_offset_x: out.drag_offset_x, drag_offset_y: out.drag_offset_y, resizing: out.resizing, resize_window_id: out.resize_window_id, resize_start_x: out.resize_start_x, resize_start_y: out.resize_start_y, resize_start_w: out.resize_start_w, resize_start_h: out.resize_start_h), down)
+    out.dragging = interaction.dragging
+    out.drag_window_id = interaction.drag_window_id
+    out.drag_offset_x = interaction.drag_offset_x
+    out.drag_offset_y = interaction.drag_offset_y
+    out.resizing = interaction.resizing
+    out.resize_window_id = interaction.resize_window_id
+    out.resize_start_x = interaction.resize_start_x
+    out.resize_start_y = interaction.resize_start_y
+    out.resize_start_w = interaction.resize_start_w
+    out.resize_start_h = interaction.resize_start_h
     out
 
 fn host_taskbar_item_width(screen_width: i32, count: i32) -> i32:
-    if count <= 0:
-        return 0
-    val available = screen_width - 80
-    val fit = available / count
-    if fit < 104: fit else: 104
+    wm_taskbar_item_width(screen_width, count)
 
 fn host_taskbar_dock_width(screen_width: i32, count: i32) -> i32:
-    if count <= 0:
-        return 0
-    host_taskbar_item_width(screen_width, count) * count + 20
+    wm_taskbar_dock_width(screen_width, count)
 
 fn host_taskbar_item_x(screen_width: i32, count: i32, index: i32) -> i32:
-    val dock_w = host_taskbar_dock_width(screen_width, count)
-    val start = (screen_width - dock_w) / 2 + 10
-    start + index * host_taskbar_item_width(screen_width, count)
+    wm_taskbar_item_x(screen_width, count, index)

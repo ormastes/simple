@@ -7,7 +7,7 @@
 use common.ui.builder.{button, panel, text_widget, build_tree_with_title}
 use common.ui.state.{init_state}
 use common.ui.widget.{UIEvent}
-use common.ui.web_render_api.{WEB_RENDER_TARGET_ELECTRON, WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_cache_key, web_render_dynamic_region_count, web_render_ipc_json, web_render_ipc_json_with_html, web_render_optimization_profile}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_ELECTRON, WEB_RENDER_TARGET_PURE_SIMPLE, WEB_RENDER_TARGET_TAURI, WebRenderHostWindowCommand, WebRenderRequest, web_render_cache_key, web_render_dynamic_region_count, web_render_ipc_json, web_render_ipc_json_with_html, web_render_optimization_profile, web_render_transport_bundle}
 use app.ui.web.backend.{WebBackend, web_render_patch_transport_json, web_render_snapshot_transport_json}
 use app.ui.electron.backend.{ElectronBackend, electron_render_ipc_json}
 use app.ui.tauri.backend.{TauriBackend, tauri_render_ipc_json}
@@ -99,6 +99,29 @@ describe "web render backends use the shared common API":
             Ok(tauri):
                 expect(tauri.snapshot_envelope_json("main", 5u64, "{\"mode\":\"NORMAL\"}")).to_equal(web_render_snapshot_transport_json("tauri", "main", 5u64, "{\"mode\":\"NORMAL\"}"))
                 expect(tauri.patch_envelope_json("main", 5u64, 6u64, "[]", "{\"mode\":\"INSERT\"}")).to_equal(web_render_patch_transport_json("tauri", "main", 5u64, 6u64, "[]", "{\"mode\":\"INSERT\"}"))
+
+    it "matches Electron and Tauri transport bundles to the common API":
+        val state = sample_state()
+        val cmd = WebRenderHostWindowCommand(action: "new_browser_window", window_id: "win-transport", surface_id: "main", app_id: "/sys/apps/browser", title: "Browser", url: "https://example.test", x: 0, y: 0, width: 640, height: 480)
+        val body = WebBackend.new(4015).render_html(state)
+        val electron_req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", body, "", "", 1280, 720)
+        val tauri_req = WebRenderRequest.html(WEB_RENDER_TARGET_TAURI, "", body, "", "", 1280, 720)
+        val electron_bundle = web_render_transport_bundle(electron_req, "main", UIEvent.KeyPress(key: "enter"), 8u64, 8u64, 9u64, "[]", "{\"mode\":\"NORMAL\"}", cmd)
+        val tauri_bundle = web_render_transport_bundle(tauri_req, "main", UIEvent.InputChange(target_id: "name", value: "Ada"), 8u64, 8u64, 9u64, "[]", "{\"mode\":\"NORMAL\"}", cmd)
+
+        val electron = ElectronBackend.new(4016).unwrap()
+        expect(electron_render_ipc_json(state, 1280, 720)).to_contain("\"target\":\"electron\"")
+        expect(electron.input_envelope_json("main", UIEvent.KeyPress(key: "enter"))).to_equal(electron_bundle.input_json)
+        expect(electron.snapshot_envelope_json("main", 8u64, "{\"mode\":\"NORMAL\"}")).to_equal(electron_bundle.snapshot_json)
+        expect(electron.patch_envelope_json("main", 8u64, 9u64, "[]", "{\"mode\":\"NORMAL\"}")).to_equal(electron_bundle.patch_json)
+        expect(electron.host_window_command_json(cmd)).to_equal(electron_bundle.host_window_json)
+
+        val tauri = TauriBackend.new(4017).unwrap()
+        expect(tauri_render_ipc_json(state, 1280, 720)).to_contain("\"target\":\"tauri\"")
+        expect(tauri.input_envelope_json("main", UIEvent.InputChange(target_id: "name", value: "Ada"))).to_equal(tauri_bundle.input_json)
+        expect(tauri.snapshot_envelope_json("main", 8u64, "{\"mode\":\"NORMAL\"}")).to_equal(tauri_bundle.snapshot_json)
+        expect(tauri.patch_envelope_json("main", 8u64, 9u64, "[]", "{\"mode\":\"NORMAL\"}")).to_equal(tauri_bundle.patch_json)
+        expect(tauri.host_window_command_json(cmd)).to_equal(tauri_bundle.host_window_json)
 
     it "classifies static shells and dynamic islands for binary cache planning":
         val static_req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Static", "<main><section>stable</section></main>", ".stable{contain:layout paint style}", "", 320, 200)

@@ -47,3 +47,12 @@ Verification:
 ```sh
 cargo build -q --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --bin simple
 ```
+
+## Status
+
+Verified resolved 2026-05-29. The `cargo build -q -p simple-driver --bin simple` build
+completes with warnings only (no linker errors). `rust_file_exports_symbol` and the
+`runtime_regex` feature-gate are present in `build.rs` and the symbol-table entries
+generated are limited to `#[no_mangle]` / `#[export_name]` C ABI symbols. No pure
+Simple (.spl) equivalent exists for this Cargo build script; the fix is correctly
+confined to `src/compiler_rust/runtime/build.rs`.

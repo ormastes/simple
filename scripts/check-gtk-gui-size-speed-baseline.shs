@@ -80,8 +80,11 @@ cat >"$SIMPLE_ENTRY" <<EOF
 extern fn rt_time_now_unix_micros() -> i64
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_renderer.{simple_web_render_html_to_pixels}
+use common.ui.builder.{button, panel, text_widget, build_tree_with_title}
+use common.ui.state.{init_state}
 use std.common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_cache_key, web_render_optimization_profile}
 use app.ui.web.render_cache.{WebRenderPreparedStaticShellArtifact, WebRenderPreparedStaticShellPlan, WebRenderStaticArtifactCache, WebRenderStaticCommandCache, WebRenderStaticPlanCache, web_render_cached_static_plan, web_render_static_shell_binary_artifact, web_render_static_shell_command_payload_bytes}
+use app.ui.browser.backend.{BrowserBackend}
 
 fn main() -> i64:
     val html = "<html><body><main class='simple-web-accent'><section class='static-shell'><h1>Simple GUI</h1><p>static shell</p></section><section data-simple-dynamic='pane'>dynamic pane</section></main></body></html>"
@@ -163,6 +166,19 @@ fn main() -> i64:
         command_cache_total = command_cache_total + cached_commands.commands.len()
         cci = cci + 1
     val command_cache_elapsed = rt_time_now_unix_micros() - command_cache_start
+    val browser_root = panel("bench_browser_root", "Browser Static", [
+        text_widget("bench_browser_copy", "Cached shell"),
+        button("bench_browser_action", "Run", "run")
+    ])
+    val browser_state = init_state(build_tree_with_title(browser_root, "Browser Static", "dark"))
+    var browser_backend = BrowserBackend.create(64, 48, "software").unwrap()
+    browser_backend.render_frame(browser_state.tree, browser_state)
+    val browser_start = rt_time_now_unix_micros()
+    var bi = 0
+    while bi < $SIMPLE_ITERATIONS:
+        browser_backend.render_frame(browser_state.tree, browser_state)
+        bi = bi + 1
+    val browser_elapsed = rt_time_now_unix_micros() - browser_start
     val warm = simple_web_render_html_to_pixels(html, 320, 200)
     if warm.len() != 320 * 200:
         print "simple_render_status=fail"
@@ -202,6 +218,11 @@ fn main() -> i64:
     print "simple_static_command_cache_memory_hits={command_cache.memory_hits}"
     print "simple_static_command_cache_command_count={command_cache_total}"
     print "simple_static_command_cache_total_us={command_cache_elapsed}"
+    print "simple_browser_cached_frame_iterations=$SIMPLE_ITERATIONS"
+    print "simple_browser_cached_frame_total_us={browser_elapsed}"
+    print "simple_browser_static_shell_hits={browser_backend.static_shell_html_hits}"
+    print "simple_browser_static_shell_stores={browser_backend.static_shell_html_stores}"
+    print "simple_browser_cached_frame_pixels={browser_backend.last_artifact_pixels}"
     print "simple_static_html_bytes={binary.html_bytes}"
     print "simple_static_binary_plan_bytes={binary.encoded_bytes}"
     print "simple_static_binary_commands={binary.command_count}"
@@ -230,6 +251,7 @@ simple_command_plan_total_us="n/a"
 simple_disk_plan_total_us="n/a"
 simple_plan_cache_total_us="n/a"
 simple_command_cache_total_us="n/a"
+simple_browser_cached_frame_total_us="n/a"
 simple_static_html_bytes="n/a"
 simple_static_binary_plan_bytes="n/a"
 simple_static_layout_payload_bytes="n/a"
@@ -246,6 +268,7 @@ if [ -x "$SIMPLE_BINARY" ]; then
         simple_disk_plan_total_us="$(field_of simple_static_disk_plan_total_us "$SIMPLE_OUT")"
         simple_plan_cache_total_us="$(field_of simple_static_plan_cache_total_us "$SIMPLE_OUT")"
         simple_command_cache_total_us="$(field_of simple_static_command_cache_total_us "$SIMPLE_OUT")"
+        simple_browser_cached_frame_total_us="$(field_of simple_browser_cached_frame_total_us "$SIMPLE_OUT")"
         simple_static_html_bytes="$(field_of simple_static_html_bytes "$SIMPLE_OUT")"
         simple_static_binary_plan_bytes="$(field_of simple_static_binary_plan_bytes "$SIMPLE_OUT")"
         simple_static_layout_payload_bytes="$(field_of simple_static_layout_payload_bytes "$SIMPLE_OUT")"
@@ -371,6 +394,7 @@ fi
     echo "| Simple persistent SWBC command plan | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_disk_plan_total_us | disk-backed compact static-shell plan to retained commands |"
     echo "| Simple hot SWBC command plan cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_plan_cache_total_us | in-memory encoded SWBC sidecar cache after persistent warmup |"
     echo "| Simple retained command hot cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_command_cache_total_us | in-memory retained command list after persistent warmup |"
+    echo "| Simple BrowserBackend cached frame | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_browser_cached_frame_total_us | integrated browser backend render_frame with static shell HTML cache |"
     echo "| Simple SWBC prepared reuse | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_swbc_total_us | decoded compact static-shell plan reuse loop |"
     echo "| Simple SWBC command plan | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_command_plan_total_us | decoded command-only static-shell plan, no HTML artifact |"
     echo "| GTK | $gtk_status | $gtk_bytes | $GTK_ITERATIONS | $gtk_total_us | ${gtk_reason:-widget construction loop; uses xvfb-run when available} |"
@@ -426,6 +450,7 @@ echo "simple_command_plan_total_us=$simple_command_plan_total_us"
 echo "simple_disk_plan_total_us=$simple_disk_plan_total_us"
 echo "simple_plan_cache_total_us=$simple_plan_cache_total_us"
 echo "simple_command_cache_total_us=$simple_command_cache_total_us"
+echo "simple_browser_cached_frame_total_us=$simple_browser_cached_frame_total_us"
 echo "simple_static_html_bytes=$simple_static_html_bytes"
 echo "simple_static_binary_plan_bytes=$simple_static_binary_plan_bytes"
 echo "simple_static_layout_payload_bytes=$simple_static_layout_payload_bytes"

@@ -1,7 +1,7 @@
 # Short Grammar Placeholder Rejected In Parenthesized Pipe Callback
 
 Date: 2026-05-27
-Status: fixed in .spl (2026-05-29) — root cause was parser_expr.spl else-branch not applying transform_placeholder_lambda to pipe RHS; fix: `expr_call(transform_placeholder_lambda(pipe_right), [left], 0)`; test added to pipe_operator_spec.spl; NOTE: bin/simple is the Rust seed binary — the fix takes effect after a self-hosted rebuild/bootstrap; bin/simple test will still show failure until then
+Status: fixed in .spl (2026-05-29) — root cause was the `parse_pipe()` function (line ~127) else-branch not applying `transform_placeholder_lambda` to the pipe RHS; a second identical pipe loop in the binary-expression context (line ~470) already had the fix applied. Fix: changed `expr_call(right, [left], 0)` to `expr_call(transform_placeholder_lambda(right), [left], 0)` in `parse_pipe()`. Test `"pipe to placeholder lambda in parens"` in pipe_operator_spec.spl covers this. NOTE: bin/simple is the Rust seed binary — fix takes effect after self-hosted rebuild/bootstrap.
 
 ## Summary
 

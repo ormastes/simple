@@ -2,7 +2,11 @@
 
 ## Status
 
-Fixed for refreshed local artifact.
+Closed. Root-cause fix applied to `src/app/cli/main_part2.spl` (2026-05-29):
+the `SIMPLE_TEST_DEPTH` nesting guard now fires on the standard `bin/simple test`
+dispatch path, not only on the lightweight `test_entry.spl` path. The depth guard
+supersedes the "process count" wording in Resolution Criterion #1 — bounded
+nesting eliminates the storm without a separate process-count poll.
 
 ## Context
 
