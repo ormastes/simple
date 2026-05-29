@@ -88,3 +88,46 @@ Open. Discovered 2026-05-28 while verifying the pure-Simple web renderer + Engin
 (`examples/ui/web_engine2d_gui.spl`); this bug is purely the macOS on-screen host
 display. Three single-call objc2 patches are exhausted — do not retry them; the fix is
 architectural.
+
+## RESOLVED 2026-05-29 — continuous pump + proper .app bundle
+
+The macOS on-screen winit window now DISPLAYS the render. Verified: System Events
+reports window "SimpleWeb APP Test", `simple` becomes frontmost, `lsappinfo` shows the
+process registered (bundleID `com.simple.webgui2`), and a screencapture shows the
+blue-titlebar + green-body window on screen. The failure was TWO independent blockers;
+both fixes are required together.
+
+### Part A — code: continuous pump (keeps the AppKit handler installed)
+`pump_events` installs winit's handler only for each 1ms pump, so during the program's
+`rt_thread_sleep` frame gaps AppKit had no handler (`"no handler was set"`). Fix:
+- New `winit_sffi_thread::macos_pump_current()` + `winit_sffi::pump_current_event_loop()`
+  — pump the current thread's event loop with no id gate.
+- `concurrency.rs::rt_thread_sleep` on macOS pumps continuously for the sleep duration
+  instead of plain-sleeping. After this the `"no handler was set"` error count → 0.
+
+### Part B — packaging: proper .app bundle launched via `open` (registers the process)
+The bare CLI process is never registered with the window server (`lsappinfo` empty for
+it), even with winit's `ActivationPolicy::Regular` and even with a runtime
+`TransformProcessType(kProcessTransformToForegroundApplication)` call. Launch from a
+PROPER `.app` bundle so LaunchServices registers it in the Aqua session:
+- The gui driver binary is self-contained (`otool -L` shows only system libs), so COPY it
+  into `MyApp.app/Contents/MacOS/<exe>` and set `CFBundleExecutable=<exe>`.
+- `Info.plist` `LSEnvironment` supplies env: `SIMPLE_EXECUTION_MODE=interpret`,
+  `SIMPLE_LIB=<repo>/src`, `SIMPLE_TIMEOUT_SECONDS=<n>`.
+- Launch with `open MyApp.app --args run <abs-path-to.spl>`.
+- An `exec`-wrapper bundle does NOT work (exec to an out-of-bundle binary de-registers).
+
+### Gotchas
+- winit may place the window off-screen (observed pos y=-686); add an explicit on-screen
+  `WindowAttributes::with_position(...)` so it is visible.
+- The non-interactive shell here IS in the Aqua session (TextEdit launched via AppleScript
+  shows a window), so `open` launches in the GUI session correctly.
+
+### Status: RESOLVED (verified on screen). Follow-ups not yet landed
+1. Land Part A in source after A/B-isolating the minimal-necessary set — the proven binary
+   also carried objc2 `activate`/`makeKeyAndOrderFront`/`orderFrontRegardless` +
+   `TransformProcessType`, whose individual necessity was not bisected (likely ornamental
+   once the `.app` bundle handles registration); ship only the load-bearing pieces.
+2. Add a reusable macOS `.app` launcher (script or `bin/simple` enhancement) so GUI runs
+   auto-package + `open`.
+3. Add an explicit on-screen window position.
