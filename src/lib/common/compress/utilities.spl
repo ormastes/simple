@@ -4,17 +4,26 @@
 # returns a CompressionOptions ready to pass to compress_frame functions.
 
 use std.common.compress.types.{CompressionCodec, CompressionError}
-use std.common.compress.lz4.{CompressionOptions}
-use std.common.compress.lz4.{lz4_compress_frame, lz4_decompress_frame}
+use std.common.compress.lz4.{CompressionOptions, CompressionLevel, xxhash32_bytes}
+use std.common.compress.lz4.{lz4_compress_frame, lz4_decompress_frame, lz4_compress_block}
 use std.common.compress.zstd.{zstd_compress_frame, zstd_decompress_frame}
 use std.common.compress.gzip.{gzip_compress, gzip_decompress}
 use std.common.compress.brotli.{brotli_compress, brotli_decompress}
 use std.common.compress.deflate.{deflate_compress_sync_flush, deflate_decompress_eof}
 use std.common.compress.lzma2.{lzma2_compress_xz, lzma2_decompress_xz}
 
+pub enum CompressionSimdTier:
+    """SIMD tier selector for compression operations."""
+    scalar
+    sse2
+    avx2
+    neon
+
+pub use std.common.compress.lz4.{xxhash32_bytes}
+
 pub fn default_compression_options(codec: CompressionCodec) -> CompressionOptions:
     """Return a CompressionOptions with the default level for `codec`."""
-    val level = match codec:
+    val level_val = match codec:
         case CompressionCodec.zstd: 3
         case CompressionCodec.lz4: 1
         case CompressionCodec.deflate: 6
@@ -22,11 +31,27 @@ pub fn default_compression_options(codec: CompressionCodec) -> CompressionOption
         case CompressionCodec.brotli: 4
         case CompressionCodec.lzma2: 6
         case CompressionCodec.identity: 0
-    CompressionOptions(codec: codec, level: level)
+    CompressionOptions(
+        codec: codec,
+        level: CompressionLevel(value: level_val),
+        checksum: false,
+        block_mode: "frame",
+        dictionary_bytes: nil,
+        dictionary_id: nil,
+        content_size: nil
+    )
 
 pub fn compression_options(codec: CompressionCodec, level: i64) -> CompressionOptions:
     """Return a CompressionOptions with an explicit level."""
-    CompressionOptions(codec: codec, level: level)
+    CompressionOptions(
+        codec: codec,
+        level: CompressionLevel(value: level),
+        checksum: false,
+        block_mode: "frame",
+        dictionary_bytes: nil,
+        dictionary_id: nil,
+        content_size: nil
+    )
 
 pub fn codec_content_encoding(codec: CompressionCodec) -> text:
     """Return the HTTP Content-Encoding header value for `codec`."""
@@ -45,7 +70,10 @@ pub fn compress_bytes(data: [u8], opts: CompressionOptions) -> [u8]:
         case CompressionCodec.zstd:
             zstd_compress_frame(data, opts)
         case CompressionCodec.lz4:
-            lz4_compress_frame(data, opts)
+            if opts.block_mode == "block":
+                lz4_compress_block(data)
+            else:
+                lz4_compress_frame(data, opts)
         case CompressionCodec.deflate:
             val result = deflate_compress_sync_flush(data)
             if result.is_err():
@@ -96,7 +124,8 @@ fn _detect_codec(data: [u8]) -> Option<CompressionCodec>:
         if data[0] == 0x1Fu8 and data[1] == 0x8Bu8:
             return Some(CompressionCodec.gzip)
     if data.len() >= 6:
-        if data[0] == 0xFDu8 and data[1] == 0x37u8 and data[2] == 0x7Au8 and data[3] == 0x58u8 and data[4] == 0x5Au8 and data[5] == 0x00u8:
+        if (data[0] == 0xFDu8 and data[1] == 0x37u8 and data[2] == 0x7Au8 and
+                data[3] == 0x58u8 and data[4] == 0x5Au8 and data[5] == 0x00u8):
             return Some(CompressionCodec.lzma2)
     nil
 

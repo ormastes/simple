@@ -1,7 +1,7 @@
 # Phase 1: Shared Header Contract — Spec
 #
 # Covers SmfHeader, TrailerDetection, HeaderFallback, and SmfTestVector
-# using the pure-data factories; no file I/O required.
+# using direct struct construction; no file I/O required.
 
 use std.spec.*
 
@@ -9,89 +9,86 @@ use std.spec.*
 # SmfHeader specs
 # ============================================================================
 
-describe "SmfHeader - factory and validation":
-    it "create produces valid magic and version":
-        val h = SmfHeader.create(1, 3, 128)
+describe "SmfHeader - fields and validation":
+    it "header stores magic":
+        val h = SmfHeader(magic: "SMF1", version: 1, section_count: 3, trailer_offset: 128, is_valid: false)
         expect(h.magic).to_equal("SMF1")
-        expect(h.version).to_equal(1)
-        expect(h.section_count).to_equal(3)
-        expect(h.trailer_offset).to_equal(128)
 
-    it "create leaves is_valid false":
-        val h = SmfHeader.create(1, 3, 128)
-        expect(h.is_valid).to_equal(false)
+    it "header stores version":
+        val h = SmfHeader(magic: "SMF1", version: 2, section_count: 1, trailer_offset: 0, is_valid: false)
+        expect(h.version).to_equal(2)
 
-    it "validate sets is_valid true for good magic and positive version":
-        val h = SmfHeader.create(1, 3, 128).validate()
-        expect(h.is_valid).to_equal(true)
+    it "header stores section_count":
+        val h = SmfHeader(magic: "SMF1", version: 1, section_count: 5, trailer_offset: 0, is_valid: false)
+        expect(h.section_count).to_equal(5)
 
-    it "validate leaves is_valid false when version is zero":
-        val h = SmfHeader.create(0, 3, 128).validate()
-        expect(h.is_valid).to_equal(false)
-
-    it "empty returns version zero":
-        val h = SmfHeader.empty()
-        expect(h.version).to_equal(0)
-
-    it "empty has no trailer":
-        val h = SmfHeader.empty()
-        expect(h.has_trailer()).to_equal(false)
-
-    it "has_trailer true when trailer_offset is positive":
-        val h = SmfHeader.create(1, 2, 64)
+    it "has_trailer true when trailer_offset positive":
+        val h = SmfHeader(magic: "SMF1", version: 1, section_count: 2, trailer_offset: 64, is_valid: false)
         expect(h.has_trailer()).to_equal(true)
 
+    it "has_trailer false when trailer_offset zero":
+        val h = SmfHeader(magic: "SMF1", version: 1, section_count: 2, trailer_offset: 0, is_valid: false)
+        expect(h.has_trailer()).to_equal(false)
+
+    it "validate sets is_valid true for SMF1 magic and positive version":
+        val h = SmfHeader(magic: "SMF1", version: 1, section_count: 3, trailer_offset: 0, is_valid: false).validate()
+        expect(h.is_valid).to_equal(true)
+
+    it "validate leaves is_valid false for version zero":
+        val h = SmfHeader(magic: "SMF1", version: 0, section_count: 0, trailer_offset: 0, is_valid: false).validate()
+        expect(h.is_valid).to_equal(false)
+
+    it "validate leaves is_valid false for wrong magic":
+        val h = SmfHeader(magic: "BAD!", version: 1, section_count: 1, trailer_offset: 0, is_valid: false).validate()
+        expect(h.is_valid).to_equal(false)
+
     it "to_text contains version number":
-        val h = SmfHeader.create(2, 4, 0)
-        expect(h.to_text()).to_contain("2")
+        val h = SmfHeader(magic: "SMF1", version: 3, section_count: 1, trailer_offset: 0, is_valid: false)
+        expect(h.to_text()).to_contain("3")
 
 # ============================================================================
 # TrailerDetection specs
 # ============================================================================
 
-describe "TrailerDetection - factory predicates":
-    it "trailer factory yields is_trailer true":
-        val td = TrailerDetection.trailer(256)
+describe "TrailerDetection - detection mode predicates":
+    it "trailer mode is_trailer true":
+        val td = TrailerDetection(detection_mode: "trailer", confidence: 100, fallback_used: false, raw_offset: 256)
         expect(td.is_trailer()).to_equal(true)
 
-    it "trailer factory has confidence 100":
-        val td = TrailerDetection.trailer(256)
-        expect(td.confidence).to_equal(100)
+    it "trailer mode is_offset0 false":
+        val td = TrailerDetection(detection_mode: "trailer", confidence: 100, fallback_used: false, raw_offset: 256)
+        expect(td.is_offset0()).to_equal(false)
 
-    it "trailer factory records raw_offset":
-        val td = TrailerDetection.trailer(256)
-        expect(td.raw_offset).to_equal(256)
-
-    it "trailer factory has fallback_used false":
-        val td = TrailerDetection.trailer(256)
-        expect(td.fallback_used).to_equal(false)
-
-    it "offset0 factory yields is_offset0 true":
-        val td = TrailerDetection.offset0()
-        expect(td.is_offset0()).to_equal(true)
-
-    it "offset0 factory has confidence 80":
-        val td = TrailerDetection.offset0()
-        expect(td.confidence).to_equal(80)
-
-    it "offset0 factory has fallback_used true":
-        val td = TrailerDetection.offset0()
-        expect(td.fallback_used).to_equal(true)
-
-    it "not_found factory yields is_found false":
-        val td = TrailerDetection.not_found()
-        expect(td.is_found()).to_equal(false)
-
-    it "not_found factory has confidence 0":
-        val td = TrailerDetection.not_found()
-        expect(td.confidence).to_equal(0)
-
-    it "trailer factory is_found true":
-        val td = TrailerDetection.trailer(1)
+    it "trailer mode is_found true":
+        val td = TrailerDetection(detection_mode: "trailer", confidence: 100, fallback_used: false, raw_offset: 1)
         expect(td.is_found()).to_equal(true)
 
+    it "offset0 mode is_offset0 true":
+        val td = TrailerDetection(detection_mode: "offset0", confidence: 80, fallback_used: true, raw_offset: 0)
+        expect(td.is_offset0()).to_equal(true)
+
+    it "offset0 mode is_trailer false":
+        val td = TrailerDetection(detection_mode: "offset0", confidence: 80, fallback_used: true, raw_offset: 0)
+        expect(td.is_trailer()).to_equal(false)
+
+    it "offset0 mode is_found true":
+        val td = TrailerDetection(detection_mode: "offset0", confidence: 80, fallback_used: true, raw_offset: 0)
+        expect(td.is_found()).to_equal(true)
+
+    it "none mode is_found false":
+        val td = TrailerDetection(detection_mode: "none", confidence: 0, fallback_used: false, raw_offset: 0)
+        expect(td.is_found()).to_equal(false)
+
+    it "none mode confidence is zero":
+        val td = TrailerDetection(detection_mode: "none", confidence: 0, fallback_used: false, raw_offset: 0)
+        expect(td.confidence).to_equal(0)
+
+    it "trailer confidence 100":
+        val td = TrailerDetection(detection_mode: "trailer", confidence: 100, fallback_used: false, raw_offset: 8)
+        expect(td.confidence).to_equal(100)
+
     it "to_text contains detection_mode":
-        val td = TrailerDetection.trailer(8)
+        val td = TrailerDetection(detection_mode: "trailer", confidence: 100, fallback_used: false, raw_offset: 0)
         expect(td.to_text()).to_contain("trailer")
 
 # ============================================================================
@@ -99,67 +96,63 @@ describe "TrailerDetection - factory predicates":
 # ============================================================================
 
 describe "HeaderFallback - strategy resolution":
-    it "standard factory has primary trailer mode":
-        val fb = HeaderFallback.standard()
+    it "standard fallback primary is trailer":
+        val fb = HeaderFallback(primary_mode: "trailer", fallback_mode: "offset0", resolved: false, attempt_count: 0)
         expect(fb.primary_mode).to_equal("trailer")
 
-    it "standard factory has offset0 fallback mode":
-        val fb = HeaderFallback.standard()
+    it "standard fallback mode is offset0":
+        val fb = HeaderFallback(primary_mode: "trailer", fallback_mode: "offset0", resolved: false, attempt_count: 0)
         expect(fb.fallback_mode).to_equal("offset0")
 
-    it "standard factory starts unresolved":
-        val fb = HeaderFallback.standard()
-        expect(fb.resolved).to_equal(false)
-
-    it "needs_fallback true when unresolved":
-        val fb = HeaderFallback.standard()
+    it "unresolved needs_fallback true":
+        val fb = HeaderFallback(primary_mode: "trailer", fallback_mode: "offset0", resolved: false, attempt_count: 0)
         expect(fb.needs_fallback()).to_equal(true)
 
     it "resolve sets resolved true":
-        val fb = HeaderFallback.standard().resolve()
+        val fb = HeaderFallback(primary_mode: "trailer", fallback_mode: "offset0", resolved: false, attempt_count: 0).resolve()
         expect(fb.resolved).to_equal(true)
 
-    it "needs_fallback false after resolve":
-        val fb = HeaderFallback.standard().resolve()
+    it "after resolve needs_fallback false":
+        val fb = HeaderFallback(primary_mode: "trailer", fallback_mode: "offset0", resolved: false, attempt_count: 0).resolve()
         expect(fb.needs_fallback()).to_equal(false)
 
-    it "trailer_only has no fallback mode":
-        val fb = HeaderFallback.trailer_only()
+    it "trailer_only has none fallback_mode":
+        val fb = HeaderFallback(primary_mode: "trailer", fallback_mode: "none", resolved: false, attempt_count: 0)
         expect(fb.fallback_mode).to_equal("none")
 
-    it "to_text contains primary mode":
-        val fb = HeaderFallback.standard()
+    it "to_text contains primary_mode":
+        val fb = HeaderFallback(primary_mode: "trailer", fallback_mode: "offset0", resolved: false, attempt_count: 0)
         expect(fb.to_text()).to_contain("trailer")
 
 # ============================================================================
 # SmfTestVector specs
 # ============================================================================
 
-describe "SmfTestVector - parameterised detection vectors":
+describe "SmfTestVector - parameterised vectors":
     it "pure_smf vector expects trailer mode":
-        val v = SmfTestVector.pure_smf(1024)
+        val v = SmfTestVector(vector_name: "pure_smf", expected_mode: "trailer", expected_valid: true, file_size: 1024)
         expect(v.expected_mode).to_equal("trailer")
 
     it "pure_smf vector is positive":
-        val v = SmfTestVector.pure_smf(1024)
+        val v = SmfTestVector(vector_name: "pure_smf", expected_mode: "trailer", expected_valid: true, file_size: 1024)
         expect(v.is_positive()).to_equal(true)
 
     it "pure_smf vector records file_size":
-        val v = SmfTestVector.pure_smf(1024)
+        val v = SmfTestVector(vector_name: "pure_smf", expected_mode: "trailer", expected_valid: true, file_size: 1024)
         expect(v.file_size).to_equal(1024)
 
     it "malformed vector expects none mode":
-        val v = SmfTestVector.malformed(512)
+        val v = SmfTestVector(vector_name: "malformed", expected_mode: "none", expected_valid: false, file_size: 512)
         expect(v.expected_mode).to_equal("none")
 
     it "malformed vector is not positive":
-        val v = SmfTestVector.malformed(512)
+        val v = SmfTestVector(vector_name: "malformed", expected_mode: "none", expected_valid: false, file_size: 512)
         expect(v.is_positive()).to_equal(false)
 
-    it "to_text contains vector name":
-        val v = SmfTestVector.pure_smf(256)
+    it "to_text contains vector_name":
+        val v = SmfTestVector(vector_name: "pure_smf", expected_mode: "trailer", expected_valid: true, file_size: 256)
         expect(v.to_text()).to_contain("pure_smf")
 
-    it "to_text contains expected mode":
-        val v = SmfTestVector.malformed(256)
+    it "to_text contains expected_mode":
+        val v = SmfTestVector(vector_name: "malformed", expected_mode: "none", expected_valid: false, file_size: 256)
         expect(v.to_text()).to_contain("none")

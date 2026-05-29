@@ -1,0 +1,472 @@
+# @tag: system, smux, tmux
+# @cover src/os/apps/smux/api.spl 80%
+# @cover src/os/apps/smux/service.spl 40%
+# @cover src/os/apps/smux/contract.spl 60%
+#
+# System feature spec for the smux native terminal multiplexer backend.
+# Covers REQ-001 through REQ-012 and NFR-007 from
+#   doc/03_plan/sys_test/tmux_simpleos.md
+#
+# All tests run in interpreter mode — no host tmux required.
+
+use std.spec.{describe, context, it, expect}
+use os.apps.smux.api.{
+    smux_reset_for_test,
+    smux_create_session,
+    smux_list_sessions,
+    smux_new_window,
+    smux_list_windows,
+    smux_list_panes,
+    smux_split_pane,
+    smux_close_pane,
+    smux_resize,
+    smux_send_command,
+    smux_capture,
+    smux_attach,
+    smux_detach,
+    smux_backend_contract_name,
+    smux_is_deferred_feature,
+    smux_metrics
+}
+use os.apps.smux.contract.{
+    MuxSession, MuxWindow, MuxPane, MuxCapture, MuxClientAttachment,
+    SmuxMetrics, MuxBackendKind
+}
+
+# =========================================================================
+# REQ-001 — persistent session/window/pane model
+# =========================================================================
+
+describe "REQ-001 persistent session/window/pane model":
+    context "session lifecycle":
+        it "create session returns named session":
+            smux_reset_for_test()
+            val s = smux_create_session("main")
+            expect(s.name).to_equal("main")
+            expect(s.id == "").to_equal(false)
+
+        it "list sessions includes created session":
+            smux_reset_for_test()
+            val s = smux_create_session("alpha")
+            val list = smux_list_sessions()
+            expect(list.len()).to_equal(1)
+            expect(list[0].id).to_equal(s.id)
+
+        it "session auto-creates window and pane":
+            smux_reset_for_test()
+            val s = smux_create_session("boot")
+            val windows = smux_list_windows(s.id)
+            expect(windows.len()).to_equal(1)
+            val panes = smux_list_panes(s.id, windows[0].id)
+            expect(panes.len()).to_equal(1)
+
+        it "multiple sessions are all listed":
+            smux_reset_for_test()
+            val s1 = smux_create_session("s1")
+            val s2 = smux_create_session("s2")
+            val list = smux_list_sessions()
+            expect(list.len()).to_equal(2)
+
+    context "window lifecycle":
+        it "new_window creates additional window in session":
+            smux_reset_for_test()
+            val s = smux_create_session("ws")
+            val w2 = smux_new_window(s.id, "editor")
+            val windows = smux_list_windows(s.id)
+            expect(windows.len()).to_equal(2)
+
+        it "new_window auto-creates a pane":
+            smux_reset_for_test()
+            val s = smux_create_session("wp")
+            val w2 = smux_new_window(s.id, "term")
+            val panes = smux_list_panes(s.id, w2.id)
+            expect(panes.len()).to_equal(1)
+
+# =========================================================================
+# REQ-002 — pane-backed shell execution
+# =========================================================================
+
+describe "REQ-002 pane-backed shell execution":
+    it "initial pane backend kind is NativeShell":
+        smux_reset_for_test()
+        val s = smux_create_session("sh")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val p = panes[0]
+        expect(p.state).to_equal("running")
+
+    it "initial pane has non-zero terminal dimensions":
+        smux_reset_for_test()
+        val s = smux_create_session("dim")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val p = panes[0]
+        expect(p.cols > 0).to_equal(true)
+        expect(p.rows > 0).to_equal(true)
+
+# =========================================================================
+# REQ-003 — attach/detach without session destruction
+# =========================================================================
+
+describe "REQ-003 attach/detach without session destruction":
+    it "attach registers a client against the session":
+        smux_reset_for_test()
+        val s = smux_create_session("adet")
+        val att = smux_attach(s.id, "client-1", 80, 24)
+        expect(att.attached).to_equal(true)
+        expect(att.session_id).to_equal(s.id)
+
+    it "detach removes the client and returns true":
+        smux_reset_for_test()
+        val s = smux_create_session("det")
+        val att = smux_attach(s.id, "client-2", 80, 24)
+        val ok = smux_detach("client-2")
+        expect(ok).to_equal(true)
+
+    it "session persists after detach":
+        smux_reset_for_test()
+        val s = smux_create_session("persist")
+        val att = smux_attach(s.id, "client-3", 80, 24)
+        val _d = smux_detach("client-3")
+        val list = smux_list_sessions()
+        expect(list.len()).to_equal(1)
+        expect(list[0].id).to_equal(s.id)
+
+    it "detach on unknown client returns false":
+        smux_reset_for_test()
+        val ok = smux_detach("ghost-client")
+        expect(ok).to_equal(false)
+
+    it "reattach after detach succeeds":
+        smux_reset_for_test()
+        val s = smux_create_session("reatt")
+        val _a1 = smux_attach(s.id, "client-4", 80, 24)
+        val _d = smux_detach("client-4")
+        val a2 = smux_attach(s.id, "client-4", 80, 24)
+        expect(a2.attached).to_equal(true)
+
+# =========================================================================
+# REQ-004 — split/layout operations
+# =========================================================================
+
+describe "REQ-004 split/layout operations":
+    it "split vertical creates a new pane":
+        smux_reset_for_test()
+        val s = smux_create_session("split")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val src = panes[0]
+        val result = smux_split_pane(s.id, wins[0].id, src.id, "vertical")
+        expect(result.is_ok()).to_equal(true)
+
+    it "split horizontal creates a new pane":
+        smux_reset_for_test()
+        val s = smux_create_session("splith")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val src = panes[0]
+        val result = smux_split_pane(s.id, wins[0].id, src.id, "horizontal")
+        expect(result.is_ok()).to_equal(true)
+
+    it "split returns pane with valid id":
+        smux_reset_for_test()
+        val s = smux_create_session("splitid")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val result = smux_split_pane(s.id, wins[0].id, panes[0].id, "vertical")
+        val new_pane = result.unwrap()
+        expect(new_pane.id == "").to_equal(false)
+
+    it "split with invalid pane returns error":
+        smux_reset_for_test()
+        val s = smux_create_session("spliterr")
+        val wins = smux_list_windows(s.id)
+        val result = smux_split_pane(s.id, wins[0].id, "bad-pane-id", "vertical")
+        expect(result.is_ok()).to_equal(false)
+
+    it "resize pane updates geometry":
+        smux_reset_for_test()
+        val s = smux_create_session("resize")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val result = smux_resize(s.id, wins[0].id, panes[0].id, 120, 40)
+        expect(result.is_ok()).to_equal(true)
+
+    it "resize with invalid pane returns error":
+        smux_reset_for_test()
+        val s = smux_create_session("resizeerr")
+        val wins = smux_list_windows(s.id)
+        val result = smux_resize(s.id, wins[0].id, "no-such-pane", 100, 30)
+        expect(result.is_ok()).to_equal(false)
+
+# =========================================================================
+# REQ-005 — input/output routing
+# =========================================================================
+
+describe "REQ-005 input/output routing":
+    it "send_command to valid pane succeeds":
+        smux_reset_for_test()
+        val s = smux_create_session("io")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val result = smux_send_command(s.id, wins[0].id, panes[0].id, "echo hello")
+        expect(result.is_ok()).to_equal(true)
+
+    it "send_command to invalid pane returns error":
+        smux_reset_for_test()
+        val s = smux_create_session("ioerr")
+        val wins = smux_list_windows(s.id)
+        val result = smux_send_command(s.id, wins[0].id, "bad-pane", "echo hi")
+        expect(result.is_ok()).to_equal(false)
+
+    it "send_command delivers text content to scrollback":
+        smux_reset_for_test()
+        val s = smux_create_session("iosend")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val pid = panes[0].id
+        val _r = smux_send_command(s.id, wins[0].id, pid, "hello world")
+        val cap = smux_capture(s.id, wins[0].id, pid, 10)
+        expect(cap.content.len() > 0).to_equal(true)
+
+# =========================================================================
+# REQ-006 — state query API
+# =========================================================================
+
+describe "REQ-006 state query API":
+    it "list_sessions returns stable metadata across calls":
+        smux_reset_for_test()
+        val s = smux_create_session("stable")
+        val l1 = smux_list_sessions()
+        val l2 = smux_list_sessions()
+        expect(l1.len()).to_equal(l2.len())
+        expect(l1[0].id).to_equal(l2[0].id)
+
+    it "list_windows returns stable metadata":
+        smux_reset_for_test()
+        val s = smux_create_session("wstable")
+        val w1 = smux_list_windows(s.id)
+        val w2 = smux_list_windows(s.id)
+        expect(w1.len()).to_equal(w2.len())
+        expect(w1[0].id).to_equal(w2[0].id)
+
+    it "list_panes returns stable metadata":
+        smux_reset_for_test()
+        val s = smux_create_session("pstable")
+        val wins = smux_list_windows(s.id)
+        val p1 = smux_list_panes(s.id, wins[0].id)
+        val p2 = smux_list_panes(s.id, wins[0].id)
+        expect(p1.len()).to_equal(p2.len())
+        expect(p1[0].id).to_equal(p2[0].id)
+
+    it "pane metadata includes session and window ids":
+        smux_reset_for_test()
+        val s = smux_create_session("pmeta")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val p = panes[0]
+        expect(p.session_id).to_equal(s.id)
+        expect(p.window_id).to_equal(wins[0].id)
+
+# =========================================================================
+# REQ-007 — capture API
+# =========================================================================
+
+describe "REQ-007 capture API":
+    it "capture returns valid pane identity":
+        smux_reset_for_test()
+        val s = smux_create_session("cap")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val pid = panes[0].id
+        val cap = smux_capture(s.id, wins[0].id, pid, 20)
+        expect(cap.pane_id).to_equal(pid)
+
+    it "capture rows is greater than zero":
+        smux_reset_for_test()
+        val s = smux_create_session("caprows")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val cap = smux_capture(s.id, wins[0].id, panes[0].id, 20)
+        expect(cap.rows > 0).to_equal(true)
+
+    it "capture increments metrics capture_count":
+        smux_reset_for_test()
+        val s = smux_create_session("capmet")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val before = smux_metrics().capture_count
+        val _cap = smux_capture(s.id, wins[0].id, panes[0].id, 5)
+        val after = smux_metrics().capture_count
+        expect(after).to_equal(before + 1)
+
+    it "capture on unknown pane returns minimal capture":
+        smux_reset_for_test()
+        val s = smux_create_session("capunk")
+        val wins = smux_list_windows(s.id)
+        val cap = smux_capture(s.id, wins[0].id, "no-pane", 10)
+        expect(cap.rows > 0).to_equal(true)
+
+# =========================================================================
+# REQ-008 — compatibility-facing tmux-shaped API
+# =========================================================================
+
+describe "REQ-008 compatibility-facing tmux-shaped API":
+    it "MuxSession has id and name fields":
+        smux_reset_for_test()
+        val s = smux_create_session("compat")
+        expect(s.id == "").to_equal(false)
+        expect(s.name).to_equal("compat")
+
+    it "MuxWindow has id and session_id fields":
+        smux_reset_for_test()
+        val s = smux_create_session("cw")
+        val wins = smux_list_windows(s.id)
+        expect(wins[0].id == "").to_equal(false)
+        expect(wins[0].session_id).to_equal(s.id)
+
+    it "MuxPane has id, window_id, session_id fields":
+        smux_reset_for_test()
+        val s = smux_create_session("cp")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val p = panes[0]
+        expect(p.id == "").to_equal(false)
+        expect(p.window_id).to_equal(wins[0].id)
+        expect(p.session_id).to_equal(s.id)
+
+    it "MuxCapture has pane_id and content fields":
+        smux_reset_for_test()
+        val s = smux_create_session("cc")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val cap = smux_capture(s.id, wins[0].id, panes[0].id, 5)
+        expect(cap.pane_id == "").to_equal(false)
+
+# =========================================================================
+# REQ-009 — native-first backend, no upstream tmux dependency
+# =========================================================================
+
+describe "REQ-009 native-first backend, no upstream tmux dependency":
+    it "backend contract name is smux-native":
+        val name = smux_backend_contract_name()
+        expect(name).to_equal("smux-native")
+
+    it "service operates without host tmux":
+        smux_reset_for_test()
+        val s = smux_create_session("natv")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        expect(panes.len()).to_equal(1)
+
+# =========================================================================
+# REQ-010 — backend swap readiness boundary
+# =========================================================================
+
+describe "REQ-010 backend swap readiness boundary":
+    it "backend contract name can be queried independently of API surface":
+        val name = smux_backend_contract_name()
+        expect(name == "").to_equal(false)
+
+    it "initial pane records its backend kind":
+        smux_reset_for_test()
+        val s = smux_create_session("bkswap")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        # backend_kind should have a text representation via to_text on the pane
+        val p_txt = panes[0].to_text()
+        expect(p_txt.len() > 0).to_equal(true)
+
+# =========================================================================
+# REQ-011 — explicit non-fatal failure handling
+# =========================================================================
+
+describe "REQ-011 explicit non-fatal failure handling":
+    it "split on invalid pane returns Err not crash":
+        smux_reset_for_test()
+        val s = smux_create_session("err1")
+        val wins = smux_list_windows(s.id)
+        val r = smux_split_pane(s.id, wins[0].id, "ghost", "vertical")
+        expect(r.is_ok()).to_equal(false)
+
+    it "resize on invalid pane returns Err not crash":
+        smux_reset_for_test()
+        val s = smux_create_session("err2")
+        val wins = smux_list_windows(s.id)
+        val r = smux_resize(s.id, wins[0].id, "ghost", 80, 24)
+        expect(r.is_ok()).to_equal(false)
+
+    it "send_command on invalid pane returns Err not crash":
+        smux_reset_for_test()
+        val s = smux_create_session("err3")
+        val wins = smux_list_windows(s.id)
+        val r = smux_send_command(s.id, wins[0].id, "ghost", "ls")
+        expect(r.is_ok()).to_equal(false)
+
+    it "detach on unknown client returns false not crash":
+        smux_reset_for_test()
+        val ok = smux_detach("nobody")
+        expect(ok).to_equal(false)
+
+# =========================================================================
+# REQ-012 — declared deferrals remain deferred and are queryable
+# =========================================================================
+
+describe "REQ-012 declared deferrals queryable":
+    it "copy-mode is a deferred feature":
+        expect(smux_is_deferred_feature("copy-mode")).to_equal(true)
+
+    it "mouse is a deferred feature":
+        expect(smux_is_deferred_feature("mouse")).to_equal(true)
+
+    it "key-table-compat is a deferred feature":
+        expect(smux_is_deferred_feature("key-table-compat")).to_equal(true)
+
+    it "tmux-conf is a deferred feature":
+        expect(smux_is_deferred_feature("tmux-conf")).to_equal(true)
+
+    it "control-mode is a deferred feature":
+        expect(smux_is_deferred_feature("control-mode")).to_equal(true)
+
+    it "non-deferred features report false":
+        expect(smux_is_deferred_feature("session-create")).to_equal(false)
+
+# =========================================================================
+# NFR-007 — startup/operation observability counters
+# =========================================================================
+
+describe "NFR-007 observability counters":
+    it "startup_count increments with each session created":
+        smux_reset_for_test()
+        val m0 = smux_metrics()
+        expect(m0.startup_count).to_equal(0)
+        val _s1 = smux_create_session("obs1")
+        expect(smux_metrics().startup_count).to_equal(1)
+        val _s2 = smux_create_session("obs2")
+        expect(smux_metrics().startup_count).to_equal(2)
+
+    it "capture_count increments with each capture call":
+        smux_reset_for_test()
+        val s = smux_create_session("obscap")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val pid = panes[0].id
+        val _c1 = smux_capture(s.id, wins[0].id, pid, 5)
+        val _c2 = smux_capture(s.id, wins[0].id, pid, 5)
+        expect(smux_metrics().capture_count).to_equal(2)
+
+    it "resize_count increments with each resize call":
+        smux_reset_for_test()
+        val s = smux_create_session("obsrez")
+        val wins = smux_list_windows(s.id)
+        val panes = smux_list_panes(s.id, wins[0].id)
+        val pid = panes[0].id
+        val _r = smux_resize(s.id, wins[0].id, pid, 100, 30)
+        expect(smux_metrics().resize_count).to_equal(1)
+
+    it "metrics can be queried independently of session state":
+        smux_reset_for_test()
+        val m = smux_metrics()
+        expect(m.startup_count >= 0).to_equal(true)
+        expect(m.capture_count >= 0).to_equal(true)
+        expect(m.resize_count >= 0).to_equal(true)

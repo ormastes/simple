@@ -349,10 +349,17 @@ fn exec_function_inner(
                 positional_idx += 1;
                 continue;
             }
-            let (caller_name, param_name) = if let Some(name) = &arg.name {
+            // Determine the caller binding name and the callee parameter name.
+            // For FieldAccess args (e.g., `self.values`), we track separately
+            // so we can write back into the object field after the call.
+            enum ArgSource {
+                Ident { caller_name: String, param_name: String },
+                Field { obj_name: String, field_name: String, param_name: String },
+            }
+            let source = if let Some(name) = &arg.name {
                 // Named argument: match param by name
                 if let simple_parser::ast::Expr::Identifier(caller) = &arg.value {
-                    (caller.clone(), name.clone())
+                    ArgSource::Ident { caller_name: caller.clone(), param_name: name.clone() }
                 } else {
                     continue;
                 }
@@ -366,22 +373,50 @@ fn exec_function_inner(
                 };
                 positional_idx += 1;
                 if let simple_parser::ast::Expr::Identifier(caller) = &arg.value {
-                    (caller.clone(), param.name.clone())
+                    ArgSource::Ident { caller_name: caller.clone(), param_name: param.name.clone() }
+                } else if let simple_parser::ast::Expr::FieldAccess { receiver, field } = &arg.value {
+                    if let simple_parser::ast::Expr::Identifier(obj) = receiver.as_ref() {
+                        ArgSource::Field { obj_name: obj.clone(), field_name: field.clone(), param_name: param.name.clone() }
+                    } else {
+                        continue;
+                    }
                 } else {
                     continue;
                 }
             };
-            if caller_name == METHOD_SELF {
-                continue;
-            }
-            if let Some(callee_val) = local_env.get(&param_name) {
-                if matches!(
-                    callee_val,
-                    Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
-                ) && outer_env.contains_key(&caller_name)
-                {
-                    let new_val = callee_val.clone();
-                    outer_env.insert(caller_name, new_val);
+            match source {
+                ArgSource::Ident { caller_name, param_name } => {
+                    if caller_name == METHOD_SELF && self_ctx.is_some() {
+                        continue;
+                    }
+                    if let Some(callee_val) = local_env.get(&param_name) {
+                        if matches!(
+                            callee_val,
+                            Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                        ) && outer_env.contains_key(&caller_name)
+                        {
+                            let new_val = callee_val.clone();
+                            outer_env.insert(caller_name, new_val);
+                        }
+                    }
+                }
+                ArgSource::Field { obj_name, field_name, param_name } => {
+                    // Write back mutated field value into the caller's object.
+                    // e.g., `write_first(self.values, next)` — after the call,
+                    // write the callee's `values` param back into `self.values`.
+                    if let Some(callee_val) = local_env.get(&param_name).cloned() {
+                        if matches!(
+                            callee_val,
+                            Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                        ) {
+                            if let Some(obj_val) = outer_env.get(&obj_name).cloned() {
+                                if let Value::Object { class, mut fields } = obj_val {
+                                    Arc::make_mut(&mut fields).insert(field_name, callee_val);
+                                    outer_env.insert(obj_name, Value::Object { class, fields });
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
