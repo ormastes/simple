@@ -315,16 +315,15 @@ Measured blocker:
   The corpus BDD covers this summary tool as the production-aware compositing
   target selector.
 - `tools/electron-shell/summarize_famous_site_text_compositing.js --limit=5`
-  ranks colored-background text compositing directly by clipping Chrome text
-  client rects to the colored div and comparing expected/actual
-  dominant-background ink. The current worst ink target is `site_15_twitch`,
-  with `1432` expected ink pixels, `149` actual, and `actualPct10000: 1040`.
-  Its signed RGB error is currently `r: -73269`, `g: -34468`, `b: -139546`,
-  confirming Simple is too bright in the dominant purple/blue channels inside
-  the colored text region.
-  The current worst in-div text diff target is `site_37_soundcloud`, with
-  `1577` differing pixels and SAD `190021`. The corpus BDD covers this summary
-  tool as the next renderer target selector.
+  now computes colored-background text compositing directly from checked-in
+  PPMs and Chrome metrics, preferring `simple.production.ppm` when a focused
+  production artifact exists. It reports `productionArtifactCount: 1`; the
+  current worst ink and in-div diff target is `site_0_google` production mode,
+  with `1612` expected ink pixels, `0` actual ink pixels, `1612` in-div
+  differing pixels, SAD `269117`, and blue-channel absolute error `169893`.
+  The exact oracle-backed rows correctly report zero in-div text diffs. The
+  corpus BDD covers this summary tool as the next production renderer target
+  selector.
 - `tools/electron-shell/summarize_famous_site_text_mask_overlap.js --limit=5`
   ranks colored-background text masks by overlap quality inside Chrome text
   rects clipped to the colored div. The current worst recall target is
