@@ -1,0 +1,47 @@
+# @cover src/lib/common/ui/web_render_api.spl 80%
+# @tag: unit, ui, web_render_api
+
+use common.ui.web_render_api.{
+    WEB_RENDER_TARGET_ELECTRON,
+    WEB_RENDER_TARGET_PURE_SIMPLE,
+    WEB_RENDER_TARGET_TAURI,
+    WebRenderRequest,
+    web_render_capabilities_for_target,
+    web_render_full_html,
+    web_render_ipc_json,
+    web_render_pixel_artifact,
+    web_render_to_artifact
+}
+
+describe "shared web render API":
+
+    it "builds one full HTML shell for host web renderers":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "Demo", "<button>Run</button>", ".x{color:red}", "console.log('x')", 320, 240)
+        val html = web_render_full_html(req)
+        expect(html).to_contain("<div id=\"app\"><button>Run</button></div>")
+        expect(html).to_contain("<style>.x{color:red}</style>")
+        expect(html).to_contain("<script>console.log('x')</script>")
+
+    it "builds the same render envelope for electron and tauri":
+        val e = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", "<p>Hello</p>", "", "", 1280, 720)
+        val t = WebRenderRequest.html(WEB_RENDER_TARGET_TAURI, "", "<p>Hello</p>", "", "", 1280, 720)
+        val electron_json = web_render_ipc_json(e)
+        val tauri_json = web_render_ipc_json(t)
+        expect(electron_json).to_contain("\"type\":\"render\"")
+        expect(tauri_json).to_contain("\"type\":\"render\"")
+        expect(electron_json).to_contain("\"html\"")
+        expect(tauri_json).to_contain("\"html\"")
+
+    it "represents pure simple pixels as an optional artifact":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "", "<canvas></canvas>", "", "", 2, 2)
+        val artifact = web_render_pixel_artifact(req, [0xFF000000u32, 0xFFFFFFFFu32, 0xFF112233u32, 0xFF445566u32])
+        expect(artifact.target).to_equal(WEB_RENDER_TARGET_PURE_SIMPLE)
+        expect(artifact.pixels.len()).to_equal(4)
+        expect(artifact.viewport_w).to_equal(2)
+        expect(artifact.viewport_h).to_equal(2)
+
+    it "reports native host capabilities through the common API":
+        val caps = web_render_capabilities_for_target(WEB_RENDER_TARGET_ELECTRON)
+        expect(caps.len() > 0).to_equal(true)
+        val artifact = web_render_to_artifact(WebRenderRequest.html(WEB_RENDER_TARGET_TAURI, "", "<p/>", "", "", 1, 1))
+        expect(artifact.capability_summary).to_contain("native_dialogs")
