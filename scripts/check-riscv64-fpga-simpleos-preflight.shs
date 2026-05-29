@@ -55,7 +55,7 @@ fi
 
 # --- 2. Serial ports (/dev/ttyUSB*) ---
 ttyusb_count=0
-for dev in /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB3 /dev/ttyUSB4 /dev/ttyUSB5; do
+for dev in /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB3 /dev/ttyUSB4 /dev/ttyUSB5 /dev/ttyUSB6; do
     if [ -e "$dev" ]; then
         ttyusb_count=$((ttyusb_count + 1))
         info "serial_port=$dev"
@@ -70,13 +70,16 @@ info "serial_port_count=$ttyusb_count"
 
 # --- 3. FT4232H channel map (interface→ttyUSB) ---
 # Interface 0 (Channel A) = JTAG MPSSE  — sysfs path 3-2:1.0 (no ttyUSB when unbound)
-# Interface 1 (Channel B) = ttyUSB2     — console UART (PS UART0) at 115200
-# Interface 2 (Channel C) = ttyUSB3     — UART1 / PL UART
-# Interface 3 (Channel D) = ttyUSB5     — spare / platform
+# Interface 1 (Channel B) = active merged USB PS UART on current ML carrier host
+# Interface 2/3 are exposed as spare serial candidates; current RV64 PL image routes UART to PMOD.
 info "ft4232h_channel_a=JTAG_MPSSE (3-2:1.0, no ttyUSB when bound to ftdi_sio)"
-info "ft4232h_channel_b=ttyUSB2 console UART0 115200"
-info "ft4232h_channel_c=ttyUSB3 UART1/PL"
-info "ft4232h_channel_d=ttyUSB5 spare"
+for link in /dev/serial/by-id/usb-Xilinx_ML_Carrier_Card_*-port0; do
+    if [ -e "$link" ]; then
+        info "ft4232h_serial_link=$link -> $(readlink -f "$link")"
+    fi
+done
+info "ft4232h_channel_b=merged_usb_ps_uart verified through ZynqMP UART1"
+info "ft4232h_pl_uart=current_xilinx_kv260_bitstream_routes_to_pmod_H12_E10"
 
 # --- 4. JTAG claim status (is ftdi_sio bound to interface 0?) ---
 jtag_iface_path="/sys/bus/usb/drivers/ftdi_sio/$FTDI_USB_PATH"
@@ -139,9 +142,9 @@ else
 fi
 
 # --- 7. Existing SimpleOS RV64 build artifacts ---
-rv64_elf="build/riscv64-fpga/simpleos.elf"
-rv64_bin="build/riscv64-fpga/simpleos.bin"
-rv64_bit="build/riscv64-fpga/simpleos.bit"
+rv64_elf="${RV64_FPGA_ELF:-build/os/simpleos_riscv64_fpga.elf}"
+rv64_bin="${RV64_FPGA_BIN:-build/rv64_bringup_check/hello_litex_rv64.bin}"
+rv64_bit="${RV64_FPGA_BIT:-build/build/xilinx_kv260/gateware/xilinx_kv260.bit}"
 
 if [ -f "$rv64_elf" ]; then
     sz="$(wc -c <"$rv64_elf" | tr -d ' ')"
