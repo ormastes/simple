@@ -151,3 +151,42 @@ hardware supports Metal). `rt_metal_init()` was not reached.
   be rewritten in proper Simple indentation syntax before it can be parsed, and
   its CUDA `extern fn` calls replaced with Metal equivalents before it is useful
   on macOS.
+
+---
+
+## 6. Remaining Plan — 2026-05-29
+
+Current state:
+
+- The current working line is based on the remote refactor around
+  `docs(editor): feature request for TUI render completion + ctrl *2 module
+  consolidation`.
+- `simd_kernels_spec.spl` passes again after keeping the existing
+  `simd_kernels.spl` row/span API stable.
+- `backend_software_primitives_spec.spl` passes with the current software
+  backend changes.
+- `backend_software_simd_spec.spl` still times out. A direct probe confirmed
+  `SoftwareBackend.clear()` completes quickly and increments `fill_hits`; a
+  combined probe timed out, so the next pass should isolate blit, alpha blend,
+  and tile/present cases separately before changing more code.
+- A stale backend SIMD test process was observed and killed during this stop
+  point. Check for stale `backend_software_simd_spec` or `bin/simple test`
+  processes before restarting verification.
+
+Remaining work:
+
+- Keep the first implementation pass in pure Simple. Do not move the remaining
+  2D engine work into Rust until the Simple engine paths are complete enough to
+  verify correctness and renderer parity.
+- Finish CPU software backend acceleration accounting on the current refactored
+  line: direct buffer mutation remains inside `SoftwareBackend` methods, while
+  SIMD provider hit counters record fill, copy, and alpha hot-path usage.
+- Keep the existing `simd_kernels.spl` row/span API stable for current tests and
+  consumers. Use it as the scalar/SIMD parity surface, not as the mutation path
+  for `SoftwareBackend` fields when that causes interpreter fallback or stalls.
+- Continue the Metal path after the pure Simple CPU path is verified: ensure
+  Metal availability, init, readback, and browser bridge routing all remain
+  consistent with current remote refactors.
+- Re-run focused verification before each push: SIMD kernels, software SIMD
+  integration, software primitives, Metal sync where present, browser bridge,
+  and the GUI parity smoke.
