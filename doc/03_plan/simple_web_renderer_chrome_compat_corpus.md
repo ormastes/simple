@@ -337,13 +337,14 @@ Measured blocker:
   covers this diagnostic.
 - `tools/electron-shell/summarize_famous_site_text_color_histogram.js --limit=3
   --top=5` compares Chrome and Simple in-div ink color histograms for the
-  focused text targets. It shows Chrome uses hundreds of channel-specific
-  antialias/LCD colors (`site_0_google`: `527`, `site_15_twitch`: `591`,
-  `site_44_the_new_york_times`: `371` unique ink colors), while Simple still
-  emits a single flat blended ink color per background (`27,74,176`,
-  `92,43,177`, and `3,112,78`). The corpus BDD covers this diagnostic so
-  future work does not retry scalar alpha as though the remaining gap were a
-  one-color coverage problem.
+  focused text targets by reading the real PPM artifacts and Chrome metrics.
+  With the current production-only artifact set, `site_0_google` reports
+  `simple.production.ppm`, `1612` expected in-div ink pixels, `0` actual ink
+  pixels, and `562` unique Chrome ink colors. The oracle-backed `site_15_twitch`
+  and `site_44_the_new_york_times` rows both report matching expected/actual
+  color histograms, proving the tool is no longer using canned divergence
+  numbers for exact fixture artifacts. The corpus BDD covers this diagnostic so
+  future text-compositing work is selected from real artifacts.
 - `tools/electron-shell/calibrate_famous_site_corpus_ink.js --limit=3` ranks
   threshold/alpha candidates for the current worst ink/exact samples using
   checked-in Chrome PPMs, Simple PPMs, and Chrome metrics sidecars. It is an
