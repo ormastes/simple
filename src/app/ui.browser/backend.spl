@@ -100,9 +100,6 @@ class DomNode:
             style_width: self.style_width, style_height: self.style_height
         )
 
-fn browser_frame_state_key(tree: UITree, state: UIState, width: i32, height: i32, revision: i64) -> text:
-    "{tree.root_id}|{state.mode_name()}|{state.focused_id}|{state.command_buffer}|{width}x{height}|rev={revision}"
-
 # =========================================================================
 # BrowserBackend
 # =========================================================================
@@ -124,7 +121,14 @@ class BrowserBackend:
     static_shell_full_html: text
     static_shell_html_hits: i32
     static_shell_html_stores: i32
-    static_frame_state_key: text
+    static_frame_state_valid: bool
+    static_frame_root_id: text
+    static_frame_mode: UIMode
+    static_frame_focused_id: text
+    static_frame_command_buffer: text
+    static_frame_width: i32
+    static_frame_height: i32
+    static_frame_revision: i64
     static_frame_fast_hits: i32
     static_frame_fast_stores: i32
     static_frame_hits: i32
@@ -159,7 +163,14 @@ class BrowserBackend:
             static_shell_full_html: "",
             static_shell_html_hits: 0,
             static_shell_html_stores: 0,
-            static_frame_state_key: "",
+            static_frame_state_valid: false,
+            static_frame_root_id: "",
+            static_frame_mode: UIMode.Normal,
+            static_frame_focused_id: "",
+            static_frame_command_buffer: "",
+            static_frame_width: 0,
+            static_frame_height: 0,
+            static_frame_revision: -1,
             static_frame_fast_hits: 0,
             static_frame_fast_stores: 0,
             static_frame_hits: 0,
@@ -182,10 +193,30 @@ class BrowserBackend:
             return true
         false
 
+    fn static_frame_matches(tree: UITree, state: UIState, revision: i64) -> bool:
+        self.static_frame_state_valid
+            and self.static_frame_root_id == tree.root_id
+            and self.static_frame_mode == state.mode
+            and self.static_frame_focused_id == state.focused_id
+            and self.static_frame_command_buffer == state.command_buffer
+            and self.static_frame_width == self.width
+            and self.static_frame_height == self.height
+            and self.static_frame_revision == revision
+
+    me store_static_frame_state(tree: UITree, state: UIState, revision: i64):
+        self.static_frame_state_valid = true
+        self.static_frame_root_id = tree.root_id
+        self.static_frame_mode = state.mode
+        self.static_frame_focused_id = state.focused_id
+        self.static_frame_command_buffer = state.command_buffer
+        self.static_frame_width = self.width
+        self.static_frame_height = self.height
+        self.static_frame_revision = revision
+
     me render_frame(tree: UITree, state: UIState):
         """Convert widget tree to DOM, layout, and paint to framebuffer."""
-        val frame_state_key = browser_frame_state_key(tree, state, self.width, self.height, widget_store_revision())
-        if self.static_frame_state_key == frame_state_key and self.render_cached_static_frame():
+        val revision = widget_store_revision()
+        if self.static_frame_matches(tree, state, revision) and self.render_cached_static_frame():
             self.static_frame_fast_hits = self.static_frame_fast_hits + 1
             return
 
@@ -232,7 +263,7 @@ class BrowserBackend:
         self.last_artifact_capabilities = artifact.capability_summary
         self.last_artifact_pixels = artifact.pixels.len()
         if profile.cacheable_static_shell:
-            self.static_frame_state_key = frame_state_key
+            self.store_static_frame_state(tree, state, revision)
             self.static_frame_fast_stores = self.static_frame_fast_stores + 1
             self.static_frame_stores = self.static_frame_stores + 1
 
@@ -253,7 +284,7 @@ class BrowserBackend:
         self.width = w
         self.height = h
         self.framebuffer = Framebuffer.create(w, h)
-        self.static_frame_state_key = ""
+        self.static_frame_state_valid = false
         self.present_pixels_cache = []
         self.present_pixels_cache_valid = false
 

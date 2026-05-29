@@ -6,25 +6,25 @@ Date: 2026-05-29
 
 | Runtime | Status | Binary bytes | Iterations | Total us | Notes |
 |---|---|---:|---:|---:|---|
-| Simple web renderer | ok | 34840 | 4 | 6954 | render loop via Simple software renderer |
-| Simple static cache | ok | n/a | 4 | 1514 | persistent HTML artifact cache hit loop |
-| Simple persistent SWBC command plan | ok | n/a | 4 | 450367 | disk-backed compact static-shell plan to retained commands |
-| Simple hot SWBC command plan cache | ok | n/a | 4 | 152267 | in-memory encoded SWBC sidecar cache after persistent warmup |
-| Simple retained command hot cache | ok | n/a | 4 | 506 | in-memory retained command list after persistent warmup |
-| Simple BrowserBackend cached frame | ok | n/a | 4 | 233 | integrated browser backend unchanged-static-frame cache |
+| Simple web renderer | ok | 34840 | 4 | 6491 | render loop via Simple software renderer |
+| Simple static cache | ok | n/a | 4 | 1447 | persistent HTML artifact cache hit loop |
+| Simple persistent SWBC command plan | ok | n/a | 4 | 445430 | disk-backed compact static-shell plan to retained commands |
+| Simple hot SWBC command plan cache | ok | n/a | 4 | 150311 | in-memory encoded SWBC sidecar cache after persistent warmup |
+| Simple retained command hot cache | ok | n/a | 4 | 485 | in-memory retained command list after persistent warmup |
+| Simple BrowserBackend cached frame | ok | n/a | 4 | 173 | integrated browser backend unchanged-static-frame cache |
 | Simple BrowserBackend no-op frame | ok | n/a | 4 | 53 | explicit event-loop no-change static frame reuse |
-| Simple BrowserBackend present cache | ok | n/a | 4 | 68 | cached host-present pixel buffer when framebuffer is unchanged |
-| Simple SWBC prepared reuse | ok | n/a | 4 | 100 | decoded compact static-shell plan reuse loop |
-| Simple SWBC command plan | ok | n/a | 4 | 63 | decoded command-only static-shell plan, no HTML artifact |
-| GTK | ok | 14472 | 200 | 27289 | widget construction loop; uses xvfb-run when available |
+| Simple BrowserBackend present cache | ok | n/a | 4 | 51 | cached host-present pixel buffer when framebuffer is unchanged |
+| Simple SWBC prepared reuse | ok | n/a | 4 | 88 | decoded compact static-shell plan reuse loop |
+| Simple SWBC command plan | ok | n/a | 4 | 53 | decoded command-only static-shell plan, no HTML artifact |
+| GTK | ok | 14472 | 200 | 26792 | widget construction loop; uses xvfb-run when available |
 
 ## Comparison Ratios
 
 | Metric | Value |
 |---|---:|
-| Simple cached BrowserBackend frame per iteration | 58.25 us |
-| GTK widget loop per iteration | 136.44 us |
-| GTK per-iteration cost / Simple cached-frame cost | 2.34x |
+| Simple cached BrowserBackend frame per iteration | 43.25 us |
+| GTK widget loop per iteration | 133.96 us |
+| GTK per-iteration cost / Simple cached-frame cost | 3.10x |
 | GTK linked closure / Simple linked closure | 13.57x |
 | Simple native executable / GTK minimal executable | 2.41x |
 
@@ -65,7 +65,7 @@ Date: 2026-05-29
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - simple_render_status=ok
 - simple_render_iterations=4
-- simple_render_total_us=6954
+- simple_render_total_us=6491
 - simple_render_pixels=256000
 - simple_cache_schema=simple-web-cache-v1
 - simple_render_plan=static_shell_with_dynamic_islands
@@ -74,23 +74,23 @@ Date: 2026-05-29
 - simple_static_cache_hit_iterations=4
 - simple_static_cache_memory_hits=4
 - simple_static_cache_disk_hits=0
-- simple_static_cache_total_us=1514
+- simple_static_cache_total_us=1447
 - simple_static_disk_plan_warm_stored=true
 - simple_static_disk_plan_hit_iterations=4
 - simple_static_disk_plan_command_count=20
-- simple_static_disk_plan_total_us=450367
+- simple_static_disk_plan_total_us=445430
 - simple_static_plan_cache_warm_stored=true
 - simple_static_plan_cache_hit_iterations=4
 - simple_static_plan_cache_memory_hits=4
 - simple_static_plan_cache_command_count=20
-- simple_static_plan_cache_total_us=152267
+- simple_static_plan_cache_total_us=150311
 - simple_static_command_cache_warm_stored=true
 - simple_static_command_cache_hit_iterations=4
 - simple_static_command_cache_memory_hits=4
 - simple_static_command_cache_command_count=20
-- simple_static_command_cache_total_us=506
+- simple_static_command_cache_total_us=485
 - simple_browser_cached_frame_iterations=4
-- simple_browser_cached_frame_total_us=233
+- simple_browser_cached_frame_total_us=173
 - simple_browser_static_shell_hits=0
 - simple_browser_static_shell_stores=1
 - simple_browser_static_frame_hits=8
@@ -102,7 +102,7 @@ Date: 2026-05-29
 - simple_browser_noop_cached_frame_hits=4
 - simple_browser_noop_cached_frame_total_us=53
 - simple_browser_present_cache_iterations=4
-- simple_browser_present_cache_total_us=68
+- simple_browser_present_cache_total_us=51
 - simple_browser_present_cache_pixels=12288
 - simple_browser_present_cache_hits=4
 - simple_browser_present_cache_stores=1
@@ -118,17 +118,17 @@ Date: 2026-05-29
 - simple_static_swbc_prepared_hits=4
 - simple_static_command_reuse_count=20
 - simple_static_command_reuse_hits=4
-- simple_static_swbc_total_us=100
+- simple_static_swbc_total_us=88
 - simple_static_command_plan_valid=true
 - simple_static_command_plan_count=20
 - simple_static_command_plan_hits=4
-- simple_static_command_plan_total_us=63
+- simple_static_command_plan_total_us=53
 
 ## GTK Output
 
 - gtk_render_status=ok
 - gtk_render_iterations=200
-- gtk_widget_total_us=27289
+- gtk_widget_total_us=26792
 
 ## Simple Linked Dependencies
 
