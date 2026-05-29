@@ -305,14 +305,15 @@ Measured blocker:
   the system spec covers its missing-report failure path and the checked-in
   focused `site_0_google` production-artifact success path.
 - `tools/electron-shell/summarize_famous_site_corpus_coverage.js --limit=5`
-  ranks corpus samples by Chrome/Simple non-white text coverage deficit and
-  dominant-background ink coverage deficit. The current worst overflow target
-  is `site_0_google`, with `963` expected non-white pixels, `685`
-  actual pixels, `278` missing pixels, and `actualPct10000: 7113`. The current
-  worst in-div ink target is `site_15_twitch`, with `1432` expected ink pixels,
-  `149` actual, and `actualPct10000: 1040`; `site_60_tripadvisor` remains a
-  tracked refreshed target. The corpus BDD covers this summary tool as the
-  compositing target selector.
+  now reads the checked-in PPMs and Chrome metrics instead of returning canned
+  target rows. It reports `reportCount: 132`, `analyzedCount: 132`, and
+  `productionArtifactCount: 1`; because only `site_0_google` currently has a
+  production-renderer artifact, that focused production miss is the real worst
+  overflow and in-div target (`overflow missingPixels: 1104`,
+  `divInk missingPixels: 1612`). The exact oracle-backed corpus rows correctly
+  report zero coverage deficit until broader production artifacts are generated.
+  The corpus BDD covers this summary tool as the production-aware compositing
+  target selector.
 - `tools/electron-shell/summarize_famous_site_text_compositing.js --limit=5`
   ranks colored-background text compositing directly by clipping Chrome text
   client rects to the colored div and comparing expected/actual
