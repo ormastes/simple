@@ -53,6 +53,20 @@ fn hot_profile_with_var_facts(call_count: i64, facts) -> FunctionProfile:
         var_facts: facts
     )
 
+fn hot_structured_loop_with_var_facts(call_count: i64, facts) -> FunctionProfile:
+    FunctionProfile(
+        name: "hot_structured_loop",
+        call_count: call_count,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: "fn hot_structured_loop(n: i64) -> i64: var i = 0; var sum = 0; while i < n: sum = sum + 1; i += 1; return sum",
+        typed_mir: true,
+        safe_deopt: true,
+        hotspot_specialized_source: "",
+        hotspot_semantic_proof: false,
+        var_facts: facts
+    )
+
 fn hot_strength_profile(call_count: i64) -> FunctionProfile:
     FunctionProfile(
         name: "hot_strength",
@@ -340,11 +354,27 @@ describe "Tiered JIT hotspot facts":
         val cranelift = jit_hotspot_optimization_plan(hot_profile_with_var_facts(256, facts), hotspot_config(), true, true, "medium")
         expect(cranelift.plugin_recommendations.contains("ssa-var-canon")).to_equal(true)
         expect(cranelift.plugin_recommendations.contains("simple-scalar-cleanup")).to_equal(true)
+        expect(cranelift.plugin_recommendations.contains("cranelift-local-licm")).to_equal(false)
 
         val llvm = jit_hotspot_optimization_plan(hot_profile_with_var_facts(256, facts), hotspot_config(), true, true, "high")
         expect(llvm.plugin_recommendations.contains("llvm-entry-alloca-shaping")).to_equal(true)
         expect(llvm.plugin_recommendations.contains("ssa-var-canon")).to_equal(false)
         expect(llvm.plugin_recommendations.contains("simple-scalar-cleanup")).to_equal(false)
+
+    it "adds LICM recommendations only when structured loops also have alias-stable facts":
+        val facts = jit_var_optimization_facts(true, 2, true, true, true, true)
+        val cranelift = jit_hotspot_optimization_plan(hot_structured_loop_with_var_facts(256, facts), hotspot_config(), true, true, "medium")
+        expect(cranelift.backend).to_equal("cranelift")
+        expect(cranelift.plugin_recommendations.contains("cranelift-local-licm")).to_equal(true)
+
+        val llvm = jit_hotspot_optimization_plan(hot_structured_loop_with_var_facts(256, facts), hotspot_config(), true, true, "high")
+        expect(llvm.backend).to_equal("llvm")
+        expect(llvm.plugin_recommendations.contains("cranelift-local-licm")).to_equal(false)
+        var found_llvm_skip = false
+        for decision in llvm.skipped_plugin_recommendations:
+            if decision.stable_name == "cranelift-local-licm" and decision.reason == "llvm_default_pipeline_runs_loop_optimizations":
+                found_llvm_skip = true
+        expect(found_llvm_skip).to_equal(true)
 
     it "adds strength-reduction plugin recommendations only for low-tier eligible source facts":
         val cranelift = jit_hotspot_optimization_plan(hot_strength_profile(256), hotspot_config(), true, true, "medium")
