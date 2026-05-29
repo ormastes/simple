@@ -82,10 +82,18 @@ fn _vmm_is_userspace_ptr(ptr: u64) -> bool:
 fn _vmm_is_userspace_range(ptr: u64, size: u64) -> bool:
     if ptr == 0 or size == 0:
         return false
+    if size > VMM_U64_MAX - ptr:
+        return false
     val end = ptr + size - 1
     if end < ptr:
         return false
     _vmm_is_userspace_ptr(ptr) and _vmm_is_userspace_ptr(end)
+
+fn _vmm_read_physmap_byte(addr: u64) -> u8:
+    """Read a byte from RAM-backed physmap memory using available word MMIO."""
+    val aligned = addr - (addr % 8)
+    val shift = (addr % 8) * 8
+    ((mmio_read64(aligned) >> shift) & 0xFF).to_u8()
 
 fn _vmm_verify_user_access(addr: u64, size: u64, required_bits: u64) -> bool:
     if not _vmm_is_userspace_range(addr, size):
@@ -226,7 +234,7 @@ fn vmm_copyin_bytes_from_space(space: ProcessVmSpace, ptr: u64, len: u64) -> Vmm
             chunk = remaining
         var i: u64 = 0
         while i < chunk:
-            bytes.push(mmio_read8(walked.kernel_ptr + i))
+            bytes.push(_vmm_read_physmap_byte(walked.kernel_ptr + i))
             i = i + 1
         copied = copied + chunk
 
@@ -242,7 +250,7 @@ fn _vmm_copyin_current_byte(ptr: u64) -> u8?:
     """Read one byte from the current userspace mapping through page tables."""
     val translated = vmm_translate(VirtAddr(addr: ptr))
     if val Some(phys) = translated:
-        return mmio_read8(_phys_to_virt(phys_addr_value(phys)))
+        return _vmm_read_physmap_byte(_phys_to_virt(phys_addr_value(phys)))
     nil
 
 fn vmm_copyin_bytes(ptr: u64, len: u64) -> VmmCopyBytesResult:

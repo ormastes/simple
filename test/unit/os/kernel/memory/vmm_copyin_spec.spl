@@ -19,8 +19,7 @@ use os.kernel.memory.vmm.{
     vmm_copyin_string_vector
 }
 use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_WRITE, VMA_EXEC, VMA_ANON}
-use os.kernel.memory.pmm.{pmm_alloc_page_raw}
-use os.kernel.boot.mmio.{mmio_write8, mmio_write64}
+use os.kernel.boot.mmio.{mmio_write64}
 use os.posix.errno.{E2BIG, EFAULT, ESUCCESS}
 
 val _TEST_PTE_PRESENT: u64 = 1
@@ -34,10 +33,7 @@ fn _zero_test_page(page: u64):
         mmio_write64(page + i * 8, 0)
         i = i + 1
 
-fn _wire_test_user_pages(pml4: u64, first_user_page: u64, first_data_page: u64, second_data_page: u64):
-    val pdpt = pmm_alloc_page_raw()
-    val pd = pmm_alloc_page_raw()
-    val pt = pmm_alloc_page_raw()
+fn _wire_test_user_pages(pml4: u64, pdpt: u64, pd: u64, pt: u64, first_user_page: u64, first_data_page: u64, second_data_page: u64):
     _zero_test_page(pml4)
     _zero_test_page(pdpt)
     _zero_test_page(pd)
@@ -141,15 +137,17 @@ describe "explicit ProcessVmSpace page-table copy-in":
         expect(result.status.errno).to_equal(EFAULT)
 
     it "copies a byte range that crosses two mapped readable pages":
-        val pml4 = pmm_alloc_page_raw()
-        val data0 = pmm_alloc_page_raw()
-        val data1 = pmm_alloc_page_raw()
-        _wire_test_user_pages(pml4, 0x7000, data0, data1)
-        var i: u64 = 0
-        while i < 16:
-            mmio_write8(data0 + 0xFF0 + i, (0x40 + i).to_u8())
-            mmio_write8(data1 + i, (0x60 + i).to_u8())
-            i = i + 1
+        val pml4: u64 = 0x100000
+        val pdpt: u64 = 0x101000
+        val pd: u64 = 0x102000
+        val pt: u64 = 0x103000
+        val data0: u64 = 0x104000
+        val data1: u64 = 0x105000
+        _wire_test_user_pages(pml4, pdpt, pd, pt, 0x7000, data0, data1)
+        mmio_write64(data0 + 0xFF0, 0x4746454443424140)
+        mmio_write64(data0 + 0xFF8, 0x4F4E4D4C4B4A4948)
+        mmio_write64(data1, 0x6766656463626160)
+        mmio_write64(data1 + 8, 0x6F6E6D6C6B6A6968)
         val area = VmArea(start: 0x7000, len: 8192, kind: VMA_ANON, flags: VMA_READ, backing: 0, backing_offset: 0)
         var space = ProcessVmSpace(pml4: pml4, id: 6, vma_count: 0, areas: [])
         space.vma_count = 1
@@ -163,9 +161,12 @@ describe "explicit ProcessVmSpace page-table copy-in":
         expect(result.bytes[31]).to_equal(0x6Fu8)
 
     it "rejects cross-page copy when the tail page is unmapped":
-        val pml4 = pmm_alloc_page_raw()
-        val data0 = pmm_alloc_page_raw()
-        _wire_test_user_pages(pml4, 0x9000, data0, 0)
+        val pml4: u64 = 0x110000
+        val pdpt: u64 = 0x111000
+        val pd: u64 = 0x112000
+        val pt: u64 = 0x113000
+        val data0: u64 = 0x114000
+        _wire_test_user_pages(pml4, pdpt, pd, pt, 0x9000, data0, 0)
         val area = VmArea(start: 0x9000, len: 8192, kind: VMA_ANON, flags: VMA_READ, backing: 0, backing_offset: 0)
         var space = ProcessVmSpace(pml4: pml4, id: 7, vma_count: 0, areas: [])
         space.vma_count = 1

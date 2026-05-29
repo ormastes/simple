@@ -166,13 +166,21 @@ fn main() -> i64:
     val cache_dir = "build/gtk_gui_size_speed_baseline/simple_render_cache"
     var cache = WebRenderStaticArtifactCache.create(cache_dir)
     val cache_miss = cache.artifact(static_req)
+    val static_cache_key = web_render_cache_key(static_req)
     val cache_start = rt_time_now_unix_micros()
     var ci = 0
     var cache_hits = 0
+    var cache_html_bytes = 0
     while ci < $SIMPLE_ITERATIONS:
-        val cached = cache.artifact(static_req)
-        if cached.cache_hit:
+        val hot_html_bytes = cache.hot_html_bytes_for_key(static_cache_key)
+        if hot_html_bytes >= 0:
             cache_hits = cache_hits + 1
+            cache_html_bytes = cache_html_bytes + hot_html_bytes
+        else:
+            val cached = cache.artifact(static_req)
+            if cached.cache_hit:
+                cache_hits = cache_hits + 1
+            cache_html_bytes = cache_html_bytes + cached.artifact.html.len()
         ci = ci + 1
     val cache_elapsed = rt_time_now_unix_micros() - cache_start
     val disk_plan_dir = "build/gtk_gui_size_speed_baseline/simple_plan_cache"
@@ -188,7 +196,6 @@ fn main() -> i64:
         disk_plan_commands = disk_plan_commands + disk_plan.plan.commands.len()
         dpi = dpi + 1
     val disk_plan_elapsed = rt_time_now_unix_micros() - disk_plan_start
-    val static_cache_key = web_render_cache_key(static_req)
     var plan_cache = WebRenderStaticPlanCache.create("build/gtk_gui_size_speed_baseline/simple_plan_memory_cache")
     val plan_cache_warm = plan_cache.plan(static_req)
     val plan_cache_start = rt_time_now_unix_micros()
@@ -295,6 +302,7 @@ fn main() -> i64:
     print "simple_static_cache_memory_hits={cache.memory_hits}"
     print "simple_static_cache_disk_hits={cache.disk_hits}"
     print "simple_static_cache_total_us={cache_elapsed}"
+    print "simple_static_cache_html_bytes={cache_html_bytes}"
     print "simple_static_disk_plan_warm_stored={disk_plan_warm.cache_stored}"
     print "simple_static_disk_plan_hit_iterations={disk_plan_hits}"
     print "simple_static_disk_plan_command_count={disk_plan_commands}"
@@ -518,7 +526,7 @@ simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
     echo "| Runtime | Status | Binary bytes | Iterations | Total us | Notes |"
     echo "|---|---|---:|---:|---:|---|"
     echo "| Simple web renderer | ${simple_status:-unavailable} | $simple_bytes | $SIMPLE_ITERATIONS | $simple_total_us | ${simple_reason:-render loop via Simple software renderer} |"
-    echo "| Simple static cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_cache_total_us | persistent HTML artifact cache hit loop |"
+    echo "| Simple static cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_cache_total_us | retained HTML artifact hot path after persistent warmup |"
     echo "| Simple persistent SWBC command plan | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_disk_plan_total_us | disk-backed compact static-shell plan to retained commands |"
     echo "| Simple hot SWBC command plan cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_plan_cache_total_us | in-memory encoded SWBC sidecar cache after persistent warmup |"
     echo "| Simple retained command hot cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_command_cache_total_us | in-memory retained command list after persistent warmup |"
