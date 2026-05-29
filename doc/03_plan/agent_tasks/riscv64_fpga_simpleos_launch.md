@@ -18,27 +18,33 @@ far enough to prove:
 
 ## Local Hardware Facts
 
-Observed on this host:
+Observed on this host as of 2026-05-29:
 
 - USB FTDI/Xilinx device: `0403:6011`, model `ML_Carrier_Card`, serial
   `XFL1OSWWFM2B`.
 - Serial ports:
-  - `/dev/ttyUSB2`, interface `01`
-  - `/dev/ttyUSB3`, interface `02`
-  - `/dev/ttyUSB5`, interface `03`
-- `openFPGALoader -c ft4232 --detect` currently fails because `ftdi_sio` has
-  claimed the FT4232H interfaces.
+  - `/dev/serial/by-id/usb-Xilinx_ML_Carrier_Card_XFL1OSWWFM2B-if01-port0`
+    -> `/dev/ttyUSB4`
+  - `/dev/serial/by-id/usb-Xilinx_ML_Carrier_Card_XFL1OSWWFM2B-if02-port0`
+    -> `/dev/ttyUSB5`
+  - `/dev/serial/by-id/usb-Xilinx_ML_Carrier_Card_XFL1OSWWFM2B-if03-port0`
+    -> `/dev/ttyUSB6`
+- Merged USB `/dev/ttyUSB4` is verified as ZynqMP PS UART1 by the
+  `KV260-PS-UART-JTAG` marker.
+- The current RV64 PL image routes its own UART to PMOD pins H12/E10; merged
+  USB capture during programming sees zero PL bytes.
+- `openFPGALoader`/OpenOCD are not the working K26 programming path for this
+  carrier; use Vivado `hw_server`.
 - Installed tools:
+  - `Vivado 2025.2`
   - `openocd`
   - `openFPGALoader`
   - `riscv64-unknown-elf-gcc`
   - `riscv64-linux-gnu-gcc/as/ld`
   - `ghdl`
 - Missing tools:
-  - `vivado`
   - `yosys`
   - `nextpnr-*`
-  - `litex_*`
   - `quartus`
 
 ## Existing Repo State
@@ -53,6 +59,9 @@ Observed on this host:
 - `scripts/rtl_riscv64_linux_generated.shs` and
   `scripts/check-riscv-rtl-linux-smoke.shs` are existing generated RV64 Linux
   proof lanes.
+- `scripts/fpga/check_kv260_simple_rv64_linux.shs` loads the current KV260
+  bitstream, validates the Simple RV64 ELF header, checks merged USB PS UART,
+  and runs the generated RV64 Linux handoff smoke.
 - `scripts/make_os_disk.shs` has RISC-V image lanes, including `riscv64`.
 
 ## Board Strategy
@@ -218,6 +227,30 @@ SIMPLE-RV64-FPGA-HELLO board=<id> hart=0 pc=<addr>
   - physical memory from manifest;
   - timer interrupt from CLINT-like block or polling fallback.
 - Add FPGA-specific platform capsule:
+
+## Phase 5: Network-Dependent Physical Verification
+
+### Status
+
+Open. Physical KV260 Simple RV64 web server and sshd verification are not
+complete. QEMU RV64 evidence proves the software path can boot and bind HTTP
+with virtio networking, but it does not prove physical FPGA network readiness.
+
+### Tracking
+
+Feature request:
+`doc/08_tracking/feature_request/kv260_simple_rv64_network_verification_2026-05-29.md`
+
+### Required Proof
+
+- Capture SimpleOS RV64 PL UART boot output from PMOD H12/E10.
+- Establish a physical network path for the RV64 softcore: native MAC,
+  PS/PL bridge, TAP bridge, UART/SLIP bridge, or another documented transport.
+- Record target-side network readiness.
+- From the host, prove HTTP `/health` and `/` responses.
+- From the host, prove sshd banner exchange and login.
+- Keep QEMU-only, RTL-sim-only, and physical-KV260 evidence separated in docs
+  and scripts.
   - `src/os/kernel/arch/riscv64/platform/fpga.spl`
   - `src/os/kernel/arch/riscv64/platform/manifest.spl`
   - `src/os/kernel/arch/riscv64/platform/uart_mmio.spl`

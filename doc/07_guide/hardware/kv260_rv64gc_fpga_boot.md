@@ -24,6 +24,10 @@ Verified in test workspace:
 - RV64GC / SoC / FPGA Linux specification tests pass through `bin/simple test`.
 - VHDL/RV64 generation and string-level synthesis script checks pass.
 - Bounded interpreter and native test-runner probes complete without leaving `simple` child processes.
+- Generated RV64 Linux handoff smoke passes in GHDL:
+  `[GHDL-GEN-RV64-LINUX-HANDOFF] PASS`.
+- QEMU RV64 SimpleOS logs show boot markers and HTTP bind/listen behavior when
+  virtio networking is present, but this is not physical KV260 network proof.
 
 Not yet verified:
 
@@ -31,6 +35,9 @@ Not yet verified:
 - Loading OpenSBI / Linux payloads on the generated SoC.
 - Observing UART boot messages from physical FPGA hardware.
 - Proving whether any FT4232H channel on this carrier can be routed to the PL UART for a future generated image. Current evidence says this image routes UART to PMOD pins H12/E10, while merged USB `/dev/ttyUSB4` is ZynqMP PS UART1.
+- Physical KV260 SimpleOS network service readiness.
+- Physical KV260 HTTP request/response proof from the Simple RV64 softcore.
+- Physical KV260 sshd banner/login proof from the Simple RV64 softcore.
 
 Next step: wire a 3.3V USB-UART adapter (FT232/CH340/CP2102) to PMOD J2 pins 1 (TX), 2 (RX), 5 (GND), then run `litex_term /dev/ttyUSB_adapter --speed 115200`. The merged USB serial interfaces are still worth sampling, but the current programmed image did not emit boot text there.
 
@@ -178,6 +185,37 @@ Artifacts from the verified run are in `build/kv260_simple_rv64_linux_check_2026
 - `program_and_uart.log` — confirms the KV260 bitstream reached `End of startup status: HIGH`.
 - `ps_uart_probe.log` — confirms merged USB `/dev/ttyUSB4` receives the `KV260-PS-UART-JTAG` sanity marker from ZynqMP UART1.
 - `generated_rv64_linux_handoff.log` — confirms `[GHDL-GEN-RV64-LINUX-HANDOFF] PASS`.
+
+### 5.2 Network Verification Status
+
+Network-dependent SimpleOS services are not fully verified on the physical
+KV260 Simple RV64 FPGA target yet. The current evidence is split this way:
+
+| Lane | Current evidence | Status |
+|------|------------------|--------|
+| Physical KV260 bitstream load | `End of startup status: HIGH` in Vivado log | Verified |
+| Physical merged USB UART sanity | `/dev/ttyUSB4` captures `KV260-PS-UART-JTAG` from ZynqMP PS UART1 | Verified |
+| Physical PL UART boot log | Current PL image routes UART to PMOD `H12/E10`; no PMOD capture artifact yet | Not verified |
+| Physical Simple RV64 network | No proven network device/bridge for the softcore yet | Not verified |
+| Physical HTTP server | No host HTTP response from KV260 Simple RV64 target yet | Not verified |
+| Physical sshd | No banner or login from KV260 Simple RV64 target yet | Not verified |
+| QEMU RV64 HTTP | Logs show `Network service ready` and HTTP bind/listen with virtio network | QEMU-only proof |
+| Generated RV64 Linux handoff | GHDL handoff smoke passes | RTL-sim proof |
+
+Existing QEMU evidence is useful as a software baseline, but it must not be
+used to claim physical FPGA web or SSH readiness. Full physical verification is
+tracked as
+`doc/08_tracking/feature_request/kv260_simple_rv64_network_verification_2026-05-29.md`.
+
+The required physical verification should produce all of these artifacts:
+
+- PL UART boot log from the PMOD UART path.
+- Target network readiness log from the Simple RV64 softcore.
+- Host HTTP transcript proving `GET /health` and `GET /` return `200`.
+- Host SSH transcript proving banner exchange and a successful login or a
+  documented key-auth flow.
+- A single nonzero-exit script for failures such as missing network bridge,
+  deferred HTTP, sshd timeout, or QEMU-only evidence.
 
 ## 6. UART Console
 
