@@ -11,15 +11,6 @@
 # Usage:
 #   use std.gpu.engine2d.metal_session.{MetalSession}
 
-use std.gpu.engine2d.backend_metal_msl.{_engine2d_msl}
-use std.nogc_sync_mut.io.metal_sffi.{
-    metal_sffi_init, metal_sffi_is_available, metal_sffi_device_count,
-    metal_sffi_create_device, metal_sffi_destroy_device,
-    metal_sffi_compile_shader, metal_sffi_destroy_shader,
-    metal_sffi_create_compute_pipeline, metal_sffi_destroy_pipeline,
-    metal_sffi_create_command_queue, metal_sffi_destroy_command_queue
-}
-
 # ============================================================================
 # MetalSession
 # ============================================================================
@@ -37,9 +28,8 @@ class MetalSession:
           ...
           s.release()   # each backend calls release() in shutdown()
 
-    init_status() follows the same 0-success/non-zero-error convention used by
-    CUDA/Vulkan sessions. init() remains as a bool compatibility wrapper for
-    older MetalBackend callers.
+    init() returns false until the native runtime path is re-enabled after the
+    pure Simple renderer is complete. error_code() exposes the failure code.
     """
 
     device: i64               # MTLDevice handle
@@ -58,9 +48,9 @@ class MetalSession:
     ref_count: i64            # Live reference count (i64 matches CUDA/Vulkan/CPU)
     is_initialized: bool      # True after a successful init() (matches CUDA/Vulkan/CPU naming)
     generation: i64           # Stale-resource detection; incremented on init and cleanup
-    last_error: i64            # Last init_status() code; 0 means success
+    last_error: i64            # Last init failure code; 0 means success
 
-    static fn create() -> MetalSession:
+    static fn create(mode: text) -> MetalSession:
         """Return a zero-initialised, uninitialised session. Call init() before use."""
         MetalSession(
             device: 0,
@@ -83,84 +73,16 @@ class MetalSession:
         )
 
     me init() -> bool:
-        """Compatibility bool wrapper for legacy Metal callers."""
-        self.init_status() == 0
+        """Pure-Simple Metal probe facade.
 
-    me init_status() -> i64:
-        """Create device, command queue, compile shaders, and compute pipelines.
-
-        Returns 0 on success, non-zero error code on failure.
-        Error codes:
-          1 — Metal SFFI not available
-          2 — metal_sffi_init() failed
-          3 — no Metal devices found
-          4 — device creation failed
-          5 — command queue creation failed
-          6 — shader library compilation failed
-          7 — one or more pipeline creations failed
+        Native Metal is intentionally not initialized from Simple yet. The
+        Engine2D Metal backend can still be probed and can fail cleanly, while
+        callers fall back to software/CPU until the Rust/native runtime path is
+        enabled after the pure Simple renderer is complete.
         """
-        if not metal_sffi_is_available():
-            self.last_error = 1
-            return 1
-
-        if not metal_sffi_init():
-            self.last_error = 2
-            return 2
-
-        if metal_sffi_device_count() < 1:
-            self.last_error = 3
-            return 3
-
-        # Metal device (index 0 = system default GPU)
-        self.device = metal_sffi_create_device(0)
-        if self.device == 0:
-            self.last_error = 4
-            return 4
-
-        # Persistent command queue
-        self.command_queue = metal_sffi_create_command_queue(self.device)
-        if self.command_queue == 0:
-            metal_sffi_destroy_device(self.device)
-            self.device = 0
-            self.last_error = 5
-            return 5
-
-        # Compile MSL shader library
-        self.shader_lib = metal_sffi_compile_shader(self.device, _engine2d_msl())
-        if self.shader_lib == 0:
-            metal_sffi_destroy_command_queue(self.command_queue)
-            metal_sffi_destroy_device(self.device)
-            self.command_queue = 0
-            self.device = 0
-            self.last_error = 6
-            return 6
-
-        # Create all compute pipelines
-        self.pipe_clear        = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_clear")
-        self.pipe_rect_filled  = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_filled")
-        self.pipe_rect_outline = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_outline")
-        self.pipe_line         = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_line")
-        self.pipe_circle       = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle")
-        self.pipe_circle_filled = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle_filled")
-        self.pipe_rounded_rect = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rounded_rect")
-        self.pipe_triangle     = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_triangle_filled")
-        self.pipe_gradient     = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_gradient_rect")
-        self.pipe_blit         = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_blit_image")
-
-        if (self.pipe_clear == 0 or self.pipe_rect_filled == 0 or
-            self.pipe_rect_outline == 0 or self.pipe_line == 0 or
-            self.pipe_circle == 0 or self.pipe_circle_filled == 0 or
-            self.pipe_rounded_rect == 0 or self.pipe_triangle == 0 or
-            self.pipe_gradient == 0 or self.pipe_blit == 0):
-            self.last_error = 7
-            self._cleanup()
-            return 7
-
-        self.ref_count = 1
-        self.is_initialized = true
-        self.generation = self.generation + 1
-        self.last_error = 0
-        0
+        self._cleanup()
+        self.last_error = 1
+        false
 
     me retain() -> MetalSession:
         """Increment the reference count and return self for convenient assignment."""
@@ -182,45 +104,20 @@ class MetalSession:
         self.last_error
 
     me _cleanup():
-        """Destroy all GPU objects. Called automatically by release() on zero refcount."""
-        if self.pipe_clear != 0:
-            metal_sffi_destroy_pipeline(self.pipe_clear)
-            self.pipe_clear = 0
-        if self.pipe_rect_filled != 0:
-            metal_sffi_destroy_pipeline(self.pipe_rect_filled)
-            self.pipe_rect_filled = 0
-        if self.pipe_rect_outline != 0:
-            metal_sffi_destroy_pipeline(self.pipe_rect_outline)
-            self.pipe_rect_outline = 0
-        if self.pipe_line != 0:
-            metal_sffi_destroy_pipeline(self.pipe_line)
-            self.pipe_line = 0
-        if self.pipe_circle != 0:
-            metal_sffi_destroy_pipeline(self.pipe_circle)
-            self.pipe_circle = 0
-        if self.pipe_circle_filled != 0:
-            metal_sffi_destroy_pipeline(self.pipe_circle_filled)
-            self.pipe_circle_filled = 0
-        if self.pipe_rounded_rect != 0:
-            metal_sffi_destroy_pipeline(self.pipe_rounded_rect)
-            self.pipe_rounded_rect = 0
-        if self.pipe_triangle != 0:
-            metal_sffi_destroy_pipeline(self.pipe_triangle)
-            self.pipe_triangle = 0
-        if self.pipe_gradient != 0:
-            metal_sffi_destroy_pipeline(self.pipe_gradient)
-            self.pipe_gradient = 0
-        if self.pipe_blit != 0:
-            metal_sffi_destroy_pipeline(self.pipe_blit)
-            self.pipe_blit = 0
-        if self.shader_lib != 0:
-            metal_sffi_destroy_shader(self.shader_lib)
-            self.shader_lib = 0
-        if self.command_queue != 0:
-            metal_sffi_destroy_command_queue(self.command_queue)
-            self.command_queue = 0
-        if self.device != 0:
-            metal_sffi_destroy_device(self.device)
-            self.device = 0
+        """Reset all tracked GPU handles."""
+        self.pipe_clear = 0
+        self.pipe_rect_filled = 0
+        self.pipe_rect_outline = 0
+        self.pipe_line = 0
+        self.pipe_circle = 0
+        self.pipe_circle_filled = 0
+        self.pipe_rounded_rect = 0
+        self.pipe_triangle = 0
+        self.pipe_gradient = 0
+        self.pipe_blit = 0
+        self.shader_lib = 0
+        self.command_queue = 0
+        self.device = 0
+        self.ref_count = 0
         self.is_initialized = false
         self.generation = self.generation + 1

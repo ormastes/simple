@@ -8,7 +8,7 @@
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult}
-use std.gpu.engine2d.metal_session.{MetalSession}
+use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
 use std.nogc_sync_mut.env.platform.{is_macos}
 
 fn _metal_status_message(code: i64) -> text:
@@ -35,15 +35,15 @@ fn probe_metal() -> BackendProbeResult:
         r.feature_gate = "macos"
         r.shader_format = "msl"
         return r
-    var session = MetalSession.create()
-    val status = session.init_status()
-    if status == 0:
+    var session = MetalSession.create("legacy_no_session")
+    if session.init():
         session.release()
         var ok = BackendProbeResult.success("metal", "Metal initialized")
         ok.api_name = "metal"
         ok.feature_gate = "metal_runtime"
         ok.shader_format = "msl"
         return ok
+    val status = session.error_code()
     var fail = BackendProbeResult.failed("metal", _metal_status_message(status))
     fail.api_name = "metal"
     fail.feature_gate = "metal_runtime"
@@ -62,7 +62,7 @@ class MetalBackend:
 fn make_metal_backend():
     MetalBackend(
         mirror: SoftwareBackend.create(),
-        session: MetalSession.create(),
+        session: MetalSession.create("legacy_no_session"),
         initialized: false,
         last_probe: BackendProbeResult.unavailable("metal", "not probed")
     )
@@ -76,8 +76,8 @@ impl RenderBackend for MetalBackend:
             self.last_probe = probe_metal()
             self.initialized = false
             return false
-        val status = self.session.init_status()
-        if status != 0:
+        if not self.session.init():
+            val status = self.session.error_code()
             self.last_probe = BackendProbeResult.failed("metal", _metal_status_message(status))
             self.last_probe.api_name = "metal"
             self.last_probe.feature_gate = "metal_runtime"
