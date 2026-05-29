@@ -37,6 +37,9 @@ release before the surface is declared stable.
   REQ-PLUG-003b
 - **Related-design-doc:** `doc/04_architecture/sffi_bidirectional_interop.md §9`
 - **Related-issue:** none
+- **Verification (2026-05-29):** WFFI dispatch confirmed in Rust seed:
+  `src/compiler_rust/compiler/src/interpreter_extern/wffi.rs` and
+  `codegen/runtime_ffi.rs`. No pure-Simple extension path exists. Status unchanged.
 - **Notes:** **Rust seed rebuild required — no manifest-routed path exists.**
   Investigation confirmed: the WFFI extern dispatch lives in
   `src/compiler_rust/compiler/src/interpreter_extern/wffi.rs` (whitelisted in
@@ -158,6 +161,13 @@ release before the surface is declared stable.
 - **Related-design-doc:** `doc/04_architecture/sffi_bidirectional_interop.md §9`
   ("Static specialization (next release)")
 - **Related-issue:** none
+- **Verification (2026-05-29):** `[STATIC-NEXT]` marker confirmed present at
+  `src/compiler/70.backend/backend/c_backend_translate_ops.spl:147` (file is under
+  `backend/` subdir, not `cranelift/` — path in earlier notes was incorrect).
+  Also present at `collection_desugar.spl:66` and `collection_desugar.spl:222`,
+  and `sugar_registry.spl:24`. No Cranelift directory exists in the backend tree;
+  the backend C codegen path is the target. Status unchanged — interpreter-mode
+  verification impossible by design.
 - **Notes:** Verification of this in interpreter mode is impossible by
   design — needs a Cranelift-mode test harness (see
   `feedback_compile_mode_false_greens.md` for current limitations).
