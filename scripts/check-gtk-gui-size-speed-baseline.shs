@@ -128,6 +128,7 @@ cat >"$SIMPLE_ENTRY" <<EOF
 extern fn rt_time_now_unix_micros() -> i64
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_renderer.{simple_web_render_html_to_pixels}
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{SimpleWebEngine2DStaticPixelCache, simple_web_engine2d_render_html_pixels}
 use common.ui.builder.{button, panel, text_widget, build_tree_with_title}
 use common.ui.state.{init_state}
 use std.common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_cache_key, web_render_optimization_profile}
@@ -249,6 +250,21 @@ fn main() -> i64:
         browser_present_pixels = browser_present_pixels + present_pixels.len()
         bpi = bpi + 1
     val browser_present_elapsed = rt_time_now_unix_micros() - browser_present_start
+    val solid_html = "<html><body style='background-color: #123456'></body></html>"
+    val solid_warm = simple_web_engine2d_render_html_pixels(solid_html, 320, 200, "software")
+    if solid_warm.len() != 320 * 200:
+        print "simple_engine2d_solid_status=fail"
+        return 2
+    var solid_cache = SimpleWebEngine2DStaticPixelCache.create(320, 200, "software")
+    val solid_cache_warm = solid_cache.pixels_for_html(solid_html)
+    val solid_start = rt_time_now_unix_micros()
+    var solid_i = 0
+    var solid_pixels = 0
+    while solid_i < $SIMPLE_ITERATIONS:
+        val solid_frame = solid_cache.pixels_for_html(solid_html)
+        solid_pixels = solid_pixels + solid_frame.len()
+        solid_i = solid_i + 1
+    val solid_elapsed = rt_time_now_unix_micros() - solid_start
     val warm = simple_web_render_html_to_pixels(html, 320, 200)
     if warm.len() != 320 * 200:
         print "simple_render_status=fail"
@@ -306,6 +322,12 @@ fn main() -> i64:
     print "simple_browser_present_cache_hits={browser_backend.present_pixels_cache_hits}"
     print "simple_browser_present_cache_stores={browser_backend.present_pixels_cache_stores}"
     print "simple_browser_present_cache_warm_pixels={present_warm.len()}"
+    print "simple_engine2d_solid_status=ok"
+    print "simple_engine2d_solid_total_us={solid_elapsed}"
+    print "simple_engine2d_solid_pixels={solid_pixels}"
+    print "simple_engine2d_solid_cache_hits={solid_cache.hits}"
+    print "simple_engine2d_solid_cache_stores={solid_cache.stores}"
+    print "simple_engine2d_solid_cache_warm_pixels={solid_cache_warm.len()}"
     print "simple_static_html_bytes={binary.html_bytes}"
     print "simple_static_binary_plan_bytes={binary.encoded_bytes}"
     print "simple_static_binary_commands={binary.command_count}"
@@ -337,6 +359,7 @@ simple_command_cache_total_us="n/a"
 simple_browser_cached_frame_total_us="n/a"
 simple_browser_noop_cached_frame_total_us="n/a"
 simple_browser_present_cache_total_us="n/a"
+simple_engine2d_solid_total_us="n/a"
 simple_static_html_bytes="n/a"
 simple_static_binary_plan_bytes="n/a"
 simple_static_layout_payload_bytes="n/a"
@@ -359,6 +382,7 @@ if [ -x "$SIMPLE_BINARY" ]; then
         simple_browser_cached_frame_total_us="$(field_of simple_browser_cached_frame_total_us "$SIMPLE_OUT")"
         simple_browser_noop_cached_frame_total_us="$(field_of simple_browser_noop_cached_frame_total_us "$SIMPLE_OUT")"
         simple_browser_present_cache_total_us="$(field_of simple_browser_present_cache_total_us "$SIMPLE_OUT")"
+        simple_engine2d_solid_total_us="$(field_of simple_engine2d_solid_total_us "$SIMPLE_OUT")"
         simple_static_html_bytes="$(field_of simple_static_html_bytes "$SIMPLE_OUT")"
         simple_static_binary_plan_bytes="$(field_of simple_static_binary_plan_bytes "$SIMPLE_OUT")"
         simple_static_layout_payload_bytes="$(field_of simple_static_layout_payload_bytes "$SIMPLE_OUT")"
@@ -472,8 +496,10 @@ EOF
 fi
 
 simple_cached_frame_per_iter_us="$(ratio_of "$simple_browser_cached_frame_total_us" "$SIMPLE_ITERATIONS")"
+simple_engine2d_solid_per_iter_us="$(ratio_of "$simple_engine2d_solid_total_us" "$SIMPLE_ITERATIONS")"
 gtk_widget_per_iter_us="$(ratio_of "$gtk_total_us" "$GTK_ITERATIONS")"
 gtk_to_simple_cached_frame_speedup="$(cross_ratio_of "$gtk_total_us" "$SIMPLE_ITERATIONS" "$simple_browser_cached_frame_total_us" "$GTK_ITERATIONS")"
+gtk_to_simple_engine2d_solid_speedup="$(cross_ratio_of "$gtk_total_us" "$SIMPLE_ITERATIONS" "$simple_engine2d_solid_total_us" "$GTK_ITERATIONS")"
 gtk_to_simple_closure_size_ratio="$(ratio_of "$gtk_closure_bytes" "$simple_closure_bytes")"
 simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
 
@@ -494,6 +520,7 @@ simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
     echo "| Simple BrowserBackend cached frame | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_browser_cached_frame_total_us | integrated browser backend unchanged-static-frame cache |"
     echo "| Simple BrowserBackend no-op frame | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_browser_noop_cached_frame_total_us | explicit event-loop no-change static frame reuse |"
     echo "| Simple BrowserBackend present cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_browser_present_cache_total_us | cached host-present pixel buffer when framebuffer is unchanged |"
+    echo "| Simple Engine2D retained static pixels | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_engine2d_solid_total_us | flyweight pixel buffer for unchanged static Engine2D page |"
     echo "| Simple SWBC prepared reuse | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_swbc_total_us | decoded compact static-shell plan reuse loop |"
     echo "| Simple SWBC command plan | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_command_plan_total_us | decoded command-only static-shell plan, no HTML artifact |"
     echo "| GTK | $gtk_status | $gtk_bytes | $GTK_ITERATIONS | $gtk_total_us | ${gtk_reason:-widget construction loop; uses xvfb-run when available} |"
@@ -503,8 +530,10 @@ simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
     echo "| Metric | Value |"
     echo "|---|---:|"
     echo "| Simple cached BrowserBackend frame per iteration | ${simple_cached_frame_per_iter_us} us |"
+    echo "| Simple Engine2D retained static pixels per iteration | ${simple_engine2d_solid_per_iter_us} us |"
     echo "| GTK widget loop per iteration | ${gtk_widget_per_iter_us} us |"
     echo "| GTK per-iteration cost / Simple cached-frame cost | ${gtk_to_simple_cached_frame_speedup}x |"
+    echo "| GTK per-iteration cost / Simple retained-pixel cost | ${gtk_to_simple_engine2d_solid_speedup}x |"
     echo "| GTK linked closure / Simple linked closure | ${gtk_to_simple_closure_size_ratio}x |"
     echo "| Simple native executable / GTK minimal executable | ${simple_to_gtk_executable_size_ratio}x |"
     echo
@@ -512,6 +541,7 @@ simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
     echo
     echo "- GTK's minimal executable can be smaller than the generated Simple executable, but its linked shared-library closure is the relevant deployed-size comparison for a standalone GUI runtime."
     echo "- The cached Simple BrowserBackend frame path measures unchanged-frame work after the static UI revision key hits; it avoids HTML generation, DOM conversion, layout, raster, and host-present pixel conversion."
+    echo "- The Simple Engine2D retained static pixels row measures a pure Simple flyweight buffer for unchanged static pages; changed dynamic panes should render into separate regions."
     echo "- The Simple benchmark runs with a narrowed SIMPLE_LIB scope of \`$SIMPLE_RUN_LIB\`, so the interpreter does not need the full repository source tree for this GUI path."
     echo "- The GTK speed row measures widget construction on this host under xvfb-run when available, so compare it as a small GUI baseline rather than a full application benchmark."
     echo
