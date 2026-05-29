@@ -9,15 +9,20 @@
 #
 # ABI contract: "simple.opt.mir.v1"
 
-use compiler.common.json.{JsonValue, json_parse}
+use lib.json.parser.{json_parse}
+use lib.json.types.{json_to_string, json_to_number, json_to_array}
+use lib.json.object_ops.{json_object_get}
 use compiler.mir.mir_instructions.{MirModule}
 use compiler.mir_opt.mir_opt.mod.{
     PassScope, mir_pass_descriptor_registry
 }
 use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
-    OptimizationBackendPolicy,
+    OptimizationBackendPolicy, OptimizerBackendKind,
     optimization_backend_policy_all,
+    optimization_backend_policy_only,
+    optimization_backend_policy_skip,
+    optimization_backend_kind_from_text,
     optimization_rule_provider_applies_to_backend_name,
     optimization_rule_provider_builtin_with_contract,
     optimization_rule_provider_with_backend_policy
@@ -427,6 +432,141 @@ fn parse_scope(scope_text: text) -> PassScope:
     else:
         PassScope.Function
 
+fn manifest_json_required(root: any, field: text) -> Result<any, ManifestError>:
+    val value = json_object_get(root, field)
+    if value == nil:
+        return Err(ManifestError.MissingField(field))
+    Ok(value)
+
+fn manifest_json_required_text(root: any, field: text) -> Result<text, ManifestError>:
+    val value_result = manifest_json_required(root, field)
+    match value_result:
+        case Err(err):
+            Err(err)
+        case Ok(value):
+            val text_value = json_to_string(value)
+            if text_value == nil:
+                return Err(ManifestError.MissingField(field))
+            Ok(text_value)
+
+fn manifest_json_optional_text(root: any, field: text, default_value: text) -> text:
+    val value = json_object_get(root, field)
+    if value == nil:
+        return default_value
+    val text_value = json_to_string(value)
+    if text_value == nil:
+        return default_value
+    text_value
+
+fn manifest_json_required_i64(root: any, field: text) -> Result<i64, ManifestError>:
+    val value_result = manifest_json_required(root, field)
+    match value_result:
+        case Err(err):
+            Err(err)
+        case Ok(value):
+            val number_value = json_to_number(value)
+            if number_value == nil:
+                return Err(ManifestError.MissingField(field))
+            Ok(number_value as i64)
+
+fn manifest_json_required_array(root: any, field: text) -> Result<[any], ManifestError>:
+    val value_result = manifest_json_required(root, field)
+    match value_result:
+        case Err(err):
+            Err(err)
+        case Ok(value):
+            val array_value = json_to_array(value)
+            if array_value == nil:
+                return Err(ManifestError.MissingField(field))
+            Ok(array_value)
+
+fn manifest_json_optional_text_array(root: any, field: text) -> [text]:
+    val value = json_object_get(root, field)
+    if value == nil:
+        return []
+    val array_value = json_to_array(value)
+    if array_value == nil:
+        return []
+    var items: [text] = []
+    for item in array_value:
+        val text_value = json_to_string(item)
+        if text_value != nil:
+            items = items.push(text_value)
+    items
+
+fn manifest_backend_kinds_from_json_array(value: any) -> [OptimizerBackendKind]:
+    val array_value = json_to_array(value)
+    if array_value == nil:
+        return []
+    var kinds: [OptimizerBackendKind] = []
+    for item in array_value:
+        val name = json_to_string(item)
+        if name != nil:
+            kinds = kinds.push(optimization_backend_kind_from_text(name))
+    kinds
+
+fn manifest_backend_policy_from_json(pass_json: any) -> OptimizationBackendPolicy:
+    val policy = json_object_get(pass_json, "backend_policy")
+    if policy == nil:
+        return optimization_backend_policy_all()
+    val reason = manifest_json_optional_text(policy, "reason", "manifest_backend_policy")
+    val only_value = json_object_get(policy, "only")
+    if only_value != nil:
+        return optimization_backend_policy_only(manifest_backend_kinds_from_json_array(only_value), reason)
+    val allowed_value = json_object_get(policy, "allowed_backends")
+    if allowed_value != nil:
+        return optimization_backend_policy_only(manifest_backend_kinds_from_json_array(allowed_value), reason)
+    val skip_value = json_object_get(policy, "skip")
+    if skip_value != nil:
+        return optimization_backend_policy_skip(manifest_backend_kinds_from_json_array(skip_value), reason)
+    val skipped_value = json_object_get(policy, "skipped_backends")
+    if skipped_value != nil:
+        return optimization_backend_policy_skip(manifest_backend_kinds_from_json_array(skipped_value), reason)
+    optimization_backend_policy_all()
+
+fn manifest_contract_from_json(pass_json: any) -> ManifestPassContract:
+    val contract = json_object_get(pass_json, "contract")
+    if contract == nil:
+        return manifest_pass_contract_default()
+    ManifestPassContract(
+        inputs: manifest_json_optional_text_array(contract, "inputs"),
+        outputs: manifest_json_optional_text_array(contract, "outputs"),
+        purity: manifest_json_optional_text(contract, "purity", "pure")
+    )
+
+fn manifest_pass_entry_from_json(pass_json: any) -> Result<ManifestPassEntry, ManifestError>:
+    val stable_name_result = manifest_json_required_text(pass_json, "stable_name")
+    match stable_name_result:
+        case Err(err):
+            return Err(err)
+        case Ok(stable_name):
+            val entry_symbol_result = manifest_json_required_text(pass_json, "entry_symbol")
+            match entry_symbol_result:
+                case Err(err):
+                    return Err(err)
+                case Ok(entry_symbol):
+                    Ok(ManifestPassEntry(
+                        stable_name: stable_name,
+                        aliases: manifest_json_optional_text_array(pass_json, "aliases"),
+                        scope: parse_scope(manifest_json_optional_text(pass_json, "scope", "function")),
+                        capability_requires: manifest_json_optional_text_array(pass_json, "capability_requires"),
+                        contract: manifest_contract_from_json(pass_json),
+                        backend_policy: manifest_backend_policy_from_json(pass_json),
+                        cost_class: manifest_json_optional_text(pass_json, "cost_class", "medium"),
+                        entry_symbol: entry_symbol
+                    ))
+
+fn manifest_pass_entries_from_json(pass_values: [any]) -> Result<[ManifestPassEntry], ManifestError>:
+    var entries: [ManifestPassEntry] = []
+    for pass_json in pass_values:
+        val entry_result = manifest_pass_entry_from_json(pass_json)
+        match entry_result:
+            case Err(err):
+                return Err(err)
+            case Ok(entry):
+                entries = entries.push(entry)
+    Ok(entries)
+
 fn load_manifest_v1_from_parsed(
     schema_version: i64,
     compiler_abi: text,
@@ -472,25 +612,55 @@ fn load_manifest_v1(json_text: text) -> Result<OptimizerManifest, ManifestError>
 
     Validates schema_version, compiler_abi, and all pass entries against
     the built-in pass registry before returning a usable OptimizerManifest.
-
-    TODO(manifest-v1): Replace stub field extraction with full JSON parsing
-    once the compiler's JSON library supports typed field access on arbitrary
-    objects.  Current json_parse returns a JsonValue tree; full extraction
-    requires walking the tree per field.
     """
     val parse_result = json_parse(json_text)
-    if not parse_result.?:
+    if parse_result == nil:
         return Err(ManifestError.ParseError("invalid JSON"))
-    # Stub: return a minimal valid manifest for schema conformance testing.
-    # Full field extraction is deferred — see TODO above.
-    load_manifest_v1_from_parsed(
-        1,
-        "simple.opt.mir.v1",
-        "stub_manifest",
-        "0.0.0",
-        "0.0.0",
-        []
-    )
+    val root = parse_result
+
+    val schema_result = manifest_json_required_i64(root, "schema_version")
+    match schema_result:
+        case Err(err):
+            return Err(err)
+        case Ok(schema_version):
+            val abi_result = manifest_json_required_text(root, "compiler_abi")
+            match abi_result:
+                case Err(err):
+                    return Err(err)
+                case Ok(compiler_abi):
+                    val name_result = manifest_json_required_text(root, "name")
+                    match name_result:
+                        case Err(err):
+                            return Err(err)
+                        case Ok(name):
+                            val version_result = manifest_json_required_text(root, "version")
+                            match version_result:
+                                case Err(err):
+                                    return Err(err)
+                                case Ok(version):
+                                    val min_version_result = manifest_json_required_text(root, "min_compiler_version")
+                                    match min_version_result:
+                                        case Err(err):
+                                            return Err(err)
+                                        case Ok(min_compiler_version):
+                                            val passes_result = manifest_json_required_array(root, "passes")
+                                            match passes_result:
+                                                case Err(err):
+                                                    return Err(err)
+                                                case Ok(pass_values):
+                                                    val entries_result = manifest_pass_entries_from_json(pass_values)
+                                                    match entries_result:
+                                                        case Err(err):
+                                                            return Err(err)
+                                                        case Ok(entries):
+                                                            load_manifest_v1_from_parsed(
+                                                                schema_version,
+                                                                compiler_abi,
+                                                                name,
+                                                                version,
+                                                                min_compiler_version,
+                                                                entries
+                                                            )
 
 # ============================================================================
 # Rule set helper

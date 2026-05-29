@@ -11,6 +11,7 @@ use compiler.mir_opt.optimizer_manifest.{
     dynamic_pass_registry_skipped_decisions_for_backend_budget,
     manifest_registered_pass_applies_to_backend_budget,
     manifest_cost_allowed,
+    load_manifest_v1,
     load_manifest_v1_from_parsed
 }
 use compiler.mir_opt.mir_opt.mod.{PassScope}
@@ -44,6 +45,22 @@ describe "optimizer manifest backend and cost budget policy":
         val registry = registry_result.unwrap()
         expect(dynamic_pass_registry_names_for_backend(registry, "cranlift").contains("budget_default_pass")).to_equal(true)
         expect(dynamic_pass_registry_names_for_backend_budget(registry, "llvm-lib", "medium").contains("budget_default_pass")).to_equal(true)
+
+    it "loads backend policy and cost class from JSON manifests":
+        val json = "{\"schema_version\":1,\"compiler_abi\":\"simple.opt.mir.v1\",\"name\":\"json_budget_plugin\",\"version\":\"1.0.0\",\"min_compiler_version\":\"0.9.0\",\"passes\":[{\"stable_name\":\"json_high_llvm_pass\",\"aliases\":[\"json_llvm_alias\"],\"scope\":\"function\",\"capability_requires\":[\"typed_mir\"],\"contract\":{\"inputs\":[\"typed_mir\"],\"outputs\":[\"canonical_mir\"],\"purity\":\"pure\"},\"backend_policy\":{\"only\":[\"llvm\"],\"reason\":\"json_llvm_only\"},\"cost_class\":\"high\",\"entry_symbol\":\"json_high_llvm_pass_entry\"}]}"
+        val manifest_result = load_manifest_v1(json)
+        expect(manifest_result.?).to_equal(true)
+        val manifest = manifest_result.unwrap()
+        expect(manifest.name).to_equal("json_budget_plugin")
+        expect(manifest.passes.len()).to_equal(1)
+        expect(manifest.passes[0].cost_class).to_equal("high")
+
+        val registry_result = dynamic_pass_registry_register(dynamic_pass_registry_new(), manifest)
+        expect(registry_result.?).to_equal(true)
+        val registry = registry_result.unwrap()
+        expect(dynamic_pass_registry_names_for_backend_budget(registry, "llvm-lib", "medium").contains("json_high_llvm_pass")).to_equal(false)
+        expect(dynamic_pass_registry_names_for_backend_budget(registry, "llvm", "high").contains("json_high_llvm_pass")).to_equal(true)
+        expect(dynamic_pass_registry_names_for_backend_budget(registry, "cranelift", "high").contains("json_high_llvm_pass")).to_equal(false)
 
     it "skips high-cost LLVM-only dynamic plugins under a medium budget":
         val low = manifest_pass_entry_new_with_backend_policy_and_cost(
