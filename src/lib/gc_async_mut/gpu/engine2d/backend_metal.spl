@@ -7,8 +7,26 @@
 
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
-use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult}
+use std.gpu.engine2d.metal_session.{MetalSession}
 use std.nogc_sync_mut.env.platform.{is_macos}
+
+fn _metal_status_message(code: i64) -> text:
+    if code == 1:
+        return "Metal SFFI not available"
+    if code == 2:
+        return "Metal runtime init failed"
+    if code == 3:
+        return "No Metal devices found"
+    if code == 4:
+        return "Metal device creation failed"
+    if code == 5:
+        return "Metal command queue creation failed"
+    if code == 6:
+        return "Metal shader compilation failed"
+    if code == 7:
+        return "Metal compute pipeline creation failed"
+    "Metal initialization failed"
 
 fn probe_metal() -> BackendProbeResult:
     if not is_macos():
@@ -17,7 +35,16 @@ fn probe_metal() -> BackendProbeResult:
         r.feature_gate = "macos"
         r.shader_format = "msl"
         return r
-    var fail = BackendProbeResult.failed("metal", "Metal runtime probe unavailable")
+    var session = MetalSession.create()
+    val status = session.init_status()
+    if status == 0:
+        session.release()
+        var ok = BackendProbeResult.success("metal", "Metal initialized")
+        ok.api_name = "metal"
+        ok.feature_gate = "metal_runtime"
+        ok.shader_format = "msl"
+        return ok
+    var fail = BackendProbeResult.failed("metal", _metal_status_message(status))
     fail.api_name = "metal"
     fail.feature_gate = "metal_runtime"
     fail.shader_format = "msl"
@@ -25,30 +52,56 @@ fn probe_metal() -> BackendProbeResult:
 
 class MetalBackend:
     mirror: SoftwareBackend
+    session: MetalSession
     initialized: bool
     last_probe: BackendProbeResult
 
     static fn create() -> MetalBackend:
-        MetalBackend(
-            mirror: SoftwareBackend.create(),
-            initialized: false,
-            last_probe: BackendProbeResult.unavailable("metal", "not probed")
-        )
+        make_metal_backend()
+
+fn make_metal_backend():
+    MetalBackend(
+        mirror: SoftwareBackend.create(),
+        session: MetalSession.create(),
+        initialized: false,
+        last_probe: BackendProbeResult.unavailable("metal", "not probed")
+    )
 
 impl RenderBackend for MetalBackend:
     fn name() -> text:
         "metal"
 
     me init(width: i32, height: i32) -> bool:
-        self.last_probe = probe_metal()
-        if self.last_probe.status != BackendStatus.Initialized:
+        if not is_macos():
+            self.last_probe = probe_metal()
             self.initialized = false
             return false
-        self.initialized = self.mirror.init(width, height)
+        val status = self.session.init_status()
+        if status != 0:
+            self.last_probe = BackendProbeResult.failed("metal", _metal_status_message(status))
+            self.last_probe.api_name = "metal"
+            self.last_probe.feature_gate = "metal_runtime"
+            self.last_probe.shader_format = "msl"
+            self.initialized = false
+            return false
+        if not self.mirror.init(width, height):
+            self.session.release()
+            self.last_probe = BackendProbeResult.failed("metal", "Metal mirror surface allocation failed")
+            self.last_probe.api_name = "metal"
+            self.last_probe.feature_gate = "metal_runtime"
+            self.last_probe.shader_format = "msl"
+            self.initialized = false
+            return false
+        self.initialized = true
+        self.last_probe = BackendProbeResult.success("metal", "Metal initialized")
+        self.last_probe.api_name = "metal"
+        self.last_probe.feature_gate = "metal_runtime"
+        self.last_probe.shader_format = "msl"
         self.initialized
 
     me shutdown():
         self.mirror.shutdown()
+        self.session.release()
         self.initialized = false
 
     me clear(color: u32):
@@ -93,3 +146,60 @@ impl RenderBackend for MetalBackend:
 impl Engine2DExtended for MetalBackend:
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
         self.mirror.draw_text_bg(x, y, text_val, fg, bg, font_size)
+
+    me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
+        self.mirror.draw_ellipse(cx, cy, rx, ry, color)
+
+    me draw_ellipse_filled(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
+        self.mirror.draw_ellipse_filled(cx, cy, rx, ry, color)
+
+    me draw_arc(cx: i32, cy: i32, r: i32, start_deg: i32, end_deg: i32, color: u32, thickness: i32):
+        self.mirror.draw_arc(cx, cy, r, start_deg, end_deg, color, thickness)
+
+    me draw_bezier(x1: i32, y1: i32, cx1: i32, cy1: i32, cx2: i32, cy2: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        self.mirror.draw_bezier(x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
+
+    me draw_polygon_filled(xs: [i32], ys: [i32], count: i32, color: u32):
+        self.mirror.draw_polygon_filled(xs, ys, count, color)
+
+    me draw_polyline(xs: [i32], ys: [i32], count: i32, color: u32, thickness: i32):
+        self.mirror.draw_polyline(xs, ys, count, color, thickness)
+
+    me draw_rect_thick(x: i32, y: i32, w: i32, h: i32, color: u32, thickness: i32):
+        self.mirror.draw_rect_thick(x, y, w, h, color, thickness)
+
+    me draw_circle_thick(cx: i32, cy: i32, r: i32, color: u32, thickness: i32):
+        self.mirror.draw_circle_thick(cx, cy, r, color, thickness)
+
+    me draw_rounded_rect_outline(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, thickness: i32):
+        self.mirror.draw_rounded_rect_outline(x, y, w, h, radius, color, thickness)
+
+    me draw_gradient_rect_h(x: i32, y: i32, w: i32, h: i32, left_color: u32, right_color: u32):
+        self.mirror.draw_gradient_rect_h(x, y, w, h, left_color, right_color)
+
+    me draw_radial_gradient(cx: i32, cy: i32, r: i32, center_color: u32, edge_color: u32):
+        self.mirror.draw_radial_gradient(cx, cy, r, center_color, edge_color)
+
+    me draw_rect_blend(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.mirror.draw_rect_blend(x, y, w, h, color)
+
+    me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        self.mirror.draw_image_blend(x, y, w, h, pixels)
+
+    me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
+        self.mirror.draw_image_scaled(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+
+    me draw_triangle_outline(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, thickness: i32):
+        self.mirror.draw_triangle_outline(x1, y1, x2, y2, x3, y3, color, thickness)
+
+    me draw_blur_rect(x: i32, y: i32, w: i32, h: i32, radius: i32):
+        self.mirror.draw_blur_rect(x, y, w, h, radius)
+
+    me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
+        self.mirror.draw_shadow_rect(x, y, w, h, offset_x, offset_y, blur_r, color)
+
+    me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
+        self.mirror.draw_image_transform(dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
+
+    me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
+        self.mirror.draw_rect_blend(x, y, w, h, color)

@@ -115,6 +115,14 @@ pub extern "C" fn rt_exit(code: i32) -> ! {
     std::process::exit(code)
 }
 
+/// Codegen alias for `rt_exit`: the compiler emits the Simple-facing `sys_exit` builtin
+/// name. The AOT loader rewrites it, but the Cranelift JIT registers symbols by exact
+/// name, so expose `sys_exit` as a real exported symbol forwarding here.
+#[export_name = "sys_exit"]
+pub extern "C" fn sys_exit_alias(code: i32) -> ! {
+    rt_exit(code)
+}
+
 // ============================================================================
 // Environment Variables
 // ============================================================================

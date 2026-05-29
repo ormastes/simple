@@ -1,0 +1,171 @@
+# Editor Markdown Editing — minimal stubs.
+#
+# Minimal type/function surface needed by the editor controllers and TUI
+# render path to compile and draw a frame. These are intentionally minimal:
+# table/callout/motion operations return "no change" / "not found" defaults so
+# the editor renders and navigates without a full markdown editing engine.
+#
+# Provides: MdMotionResult, MdTableEdit, MdCommandResult, MdEditorState,
+# md_table_*/md_callout_*/md_assist_* helpers, md_commands_dispatch glue.
+
+use std.editor.buffer.buffer.{EditorBuffer}
+
+# Result of a vim-style markdown motion or table cell navigation.
+struct MdMotionResult:
+    found: bool
+    line: i64
+    col: i64
+    message: text
+
+fn md_motion_none(line: i64, col: i64) -> MdMotionResult:
+    MdMotionResult(found: false, line: line, col: col, message: "")
+
+# Result of a markdown table / callout structural edit.
+struct MdTableEdit:
+    changed: bool
+    content: text
+    line: i64
+    col: i64
+    message: text
+
+fn md_table_edit_none(message: text) -> MdTableEdit:
+    MdTableEdit(changed: false, content: "", line: 0, col: 0, message: message)
+
+# Per-document markdown command state (visibility flags).
+struct MdEditorState:
+    preview_visible: bool
+    outline_visible: bool
+
+fn md_editor_state_new() -> MdEditorState:
+    MdEditorState(preview_visible: false, outline_visible: false)
+
+fn md_editor_state_preview_visible(state: MdEditorState) -> bool:
+    state.preview_visible
+
+fn md_editor_state_outline_visible(state: MdEditorState) -> bool:
+    state.outline_visible
+
+# Result of dispatching a markdown editor command.
+struct MdCommandResult:
+    status_message: text
+    replace_line: text
+    insert_text: text
+    cursor_delta_line: i64
+    cursor_delta_col: i64
+    preview_visible: bool
+    outline_visible: bool
+
+# --- Markdown table query helpers (used by the render path) ---
+
+fn md_table_is_row(line: text) -> bool:
+    line.starts_with("|") or line.index_of("|") >= 0 and line.trim_start().starts_with("|")
+
+fn md_table_is_separator_row(line: text) -> bool:
+    val t = line.trim()
+    if t.len() == 0:
+        return false
+    var i = 0
+    while i < t.len():
+        val ch = t.char_at(i)
+        if ch != "|" and ch != "-" and ch != ":" and ch != " ":
+            return false
+        i = i + 1
+    t.index_of("-") >= 0
+
+fn md_table_cell_start_columns(line: text) -> [i64]:
+    var starts: [i64] = []
+    var i = 0
+    var at_cell_start = true
+    while i < line.len():
+        if line.char_at(i) == "|":
+            at_cell_start = true
+        else:
+            if at_cell_start and line.char_at(i) != " ":
+                starts.push(i)
+                at_cell_start = false
+        i = i + 1
+    starts
+
+fn md_table_column_at(line: text, col: i64) -> i64:
+    val starts = md_table_cell_start_columns(line)
+    var idx = -1
+    var i = 0
+    while i < starts.len():
+        if col >= starts[i]:
+            idx = i
+        i = i + 1
+    idx
+
+# --- Markdown table edits (minimal no-op: report unchanged) ---
+
+fn md_table_insert_row_after(content: text, cursor_line: i64) -> MdTableEdit:
+    md_table_edit_none("no markdown table")
+
+fn md_table_insert_column_after(content: text, cursor_line: i64, cursor_col: i64) -> MdTableEdit:
+    md_table_edit_none("no markdown table")
+
+fn md_table_set_cell(content: text, line: i64, col: i64, value: text) -> MdTableEdit:
+    md_table_edit_none("no markdown table")
+
+fn md_table_next_cell(content: text, cursor_line: i64, cursor_col: i64) -> MdMotionResult:
+    MdMotionResult(found: false, line: cursor_line, col: cursor_col, message: "no table cell")
+
+fn md_table_prev_cell(content: text, cursor_line: i64, cursor_col: i64) -> MdMotionResult:
+    MdMotionResult(found: false, line: cursor_line, col: cursor_col, message: "no table cell")
+
+# --- Markdown callout edits (minimal no-op) ---
+
+fn md_callout_toggle_fold(content: text, cursor_line: i64) -> MdTableEdit:
+    md_table_edit_none("no callout")
+
+# --- Markdown insert assists (minimal: no continuation / no nav) ---
+
+fn md_assist_on_enter(current_line: text, cursor_col: i64) -> text:
+    ""
+
+fn md_assist_on_tab(current_line: text, cursor_col: i64) -> i64:
+    -1
+
+# --- Buffer content + motion dispatch (used by core controller) ---
+
+fn md_editing_buffer_content(buffer: EditorBuffer) -> text:
+    var content = ""
+    var i = 0
+    while i < buffer.line_count():
+        if i > 0:
+            content = content + "\n"
+        content = content + buffer.line_at(i)
+        i = i + 1
+    content
+
+fn md_dispatch_motion(prefix: text, key: text, content: text, cursor_line: i64, cursor_col: i64) -> MdMotionResult:
+    md_motion_none(cursor_line, cursor_col)
+
+# --- Command dispatch glue (minimal: status only, no mutation) ---
+
+fn md_commands_dispatch(command_name: text, state: MdEditorState, content: text, cursor_line: i64, cursor_col: i64) -> MdCommandResult:
+    var preview = state.preview_visible
+    var outline = state.outline_visible
+    if command_name == "markdown.togglePreview":
+        preview = not preview
+    if command_name == "markdown.toggleOutline":
+        outline = not outline
+    MdCommandResult(status_message: command_name, replace_line: "", insert_text: "", cursor_delta_line: 0, cursor_delta_col: 0, preview_visible: preview, outline_visible: outline)
+
+fn md_command_result_state(result: MdCommandResult) -> MdEditorState:
+    MdEditorState(preview_visible: result.preview_visible, outline_visible: result.outline_visible)
+
+fn md_apply_result(buffer: EditorBuffer, result: MdCommandResult):
+    if result.replace_line != "":
+        val row = buffer.cursor_row
+        val old_line = buffer.line_at(row)
+        buffer.move_to_line_start()
+        var i = 0
+        while i < old_line.len():
+            buffer.delete_at_cursor()
+            i = i + 1
+        buffer.insert_at_cursor(result.replace_line)
+    if result.insert_text != "":
+        buffer.insert_at_cursor(result.insert_text)
+    if result.cursor_delta_line != 0 or result.cursor_delta_col != 0:
+        buffer.move_relative(result.cursor_delta_line, result.cursor_delta_col)

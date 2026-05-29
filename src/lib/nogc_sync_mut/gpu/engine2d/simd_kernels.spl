@@ -7,13 +7,14 @@ Provides vectorized fill, blend, blit, copy, and scroll operations with
 runtime CPU feature detection. Falls back to scalar loops when no SIMD
 is available.
 
-The actual SIMD intrinsics live in the C/Rust runtime (rt_simd_*).
-This module detects the CPU's capability level and dispatches to the
-appropriate runtime function.
+This pure Simple layer detects the CPU's capability level and exposes the
+same kernel API regardless of host. The first pass keeps row operations in
+Simple so backend behavior is correct before native Rust/NEON kernels are
+introduced behind the same functions.
 
-Each span/rect kernel increments the matching SimdHitCounts counter in
-g_simd_hits (from simd_provider.spl) so that the optimization plugin
-metadata hook can report accurate per-frame hit counts.
+Each span/rect kernel records the matching SimdHitCounts value through
+simd_provider.spl so the optimization plugin metadata hook can report
+accurate per-frame hit counts without importing provider globals directly.
 
 Usage:
     val level = detect_simd_level()
@@ -23,7 +24,7 @@ Usage:
     scroll_region(buf, 1920, 0, 0, 1920, 1080, -2)
 """
 
-use std.nogc_sync_mut.gpu.engine2d.simd_provider.{SimdHitCounts, SimdProvider, g_simd_hits}
+use std.nogc_sync_mut.gpu.engine2d.simd_provider.{SimdHitCounts, SimdProvider, record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit, record_simd_blit_hit, record_simd_scroll_hit, simd_hit_counts}
 
 # ============================================================================
 # SIMD Level Enum
@@ -72,32 +73,7 @@ impl SimdLevel:
 extern fn rt_simd_has_sse() -> bool
 extern fn rt_simd_has_avx2() -> bool
 extern fn rt_simd_has_neon() -> bool
-
-# ============================================================================
-# Runtime externs for SIMD kernels
-# ============================================================================
-
-extern fn rt_simd_fill_row_avx2(buf: [u32], offset: i64, count: i64, color: u32)
-extern fn rt_simd_fill_row_sse42(buf: [u32], offset: i64, count: i64, color: u32)
-extern fn rt_simd_fill_row_neon(buf: [u32], offset: i64, count: i64, color: u32)
-
-extern fn rt_simd_blend_row_avx2(dst: [u32], src: [u32], offset: i64, count: i64)
-extern fn rt_simd_blend_row_sse42(dst: [u32], src: [u32], offset: i64, count: i64)
-extern fn rt_simd_blend_row_neon(dst: [u32], src: [u32], offset: i64, count: i64)
-
-extern fn rt_simd_blit_row_avx2(dst: [u32], dst_offset: i64, src: [u32], src_offset: i64, count: i64)
-extern fn rt_simd_blit_row_sse42(dst: [u32], dst_offset: i64, src: [u32], src_offset: i64, count: i64)
-extern fn rt_simd_blit_row_neon(dst: [u32], dst_offset: i64, src: [u32], src_offset: i64, count: i64)
-
-# ============================================================================
-# Runtime externs — RISC-V V (RVV) SIMD
-# ============================================================================
-
-extern fn rt_cpu_has_rvv() -> bool
-
-extern fn rt_simd_fill_row_rvv(buf: [u32], offset: i64, count: i64, color: u32)
-extern fn rt_simd_blend_row_rvv(dst: [u32], src: [u32], offset: i64, count: i64)
-extern fn rt_simd_blit_row_rvv(dst: [u32], dst_offset: i64, src: [u32], src_offset: i64, count: i64)
+extern fn rt_simd_has_rvv() -> bool
 
 # ============================================================================
 # Detection
@@ -116,7 +92,7 @@ fn detect_simd_level() -> SimdLevel:
         _cached_simd_level = SimdLevel.Sse42
     elif rt_simd_has_neon():
         _cached_simd_level = SimdLevel.Neon
-    elif rt_cpu_has_rvv():
+    elif rt_simd_has_rvv():
         _cached_simd_level = SimdLevel.Rvv
     else:
         _cached_simd_level = SimdLevel.None_
@@ -204,6 +180,7 @@ fn fill_span(buf: [u32], offset: i64, count: i64, color: u32):
     """Fill buf[offset..offset+count] with color. Increments fill_hits."""
     if count <= 0:
         return
+    record_simd_fill_hit()
     simd_fill_row(buf, offset, count, color)
 
 fn _scalar_fill_span(buf: [u32], offset: i64, count: i64, color: u32):
@@ -218,6 +195,7 @@ fn copy_span(dst: [u32], dst_off: i64, src: [u32], src_off: i64, count: i64):
     """Copy src[src_off..] into dst[dst_off..]. Increments copy_hits."""
     if count <= 0:
         return
+    record_simd_copy_hit()
     simd_blit_row(dst, dst_off, src, src_off, count)
 
 fn _scalar_copy_span(dst: [u32], dst_off: i64, src: [u32], src_off: i64, count: i64):
@@ -232,6 +210,7 @@ fn alpha_blend_span(dst: [u32], src: [u32], offset: i64, count: i64):
     """Blend src into dst using src-over. Increments alpha_hits."""
     if count <= 0:
         return
+    record_simd_alpha_hit()
     simd_blend_row(dst, src, offset, count)
 
 fn _scalar_alpha_blend_span(dst: [u32], src: [u32], offset: i64, count: i64):
@@ -248,6 +227,7 @@ fn blit_rect(dst: [u32], dst_stride: i64, dst_x: i64, dst_y: i64,
     """Blit src rect into dst rect. Increments blit_hits once per call."""
     if w <= 0 or h <= 0:
         return
+    record_simd_blit_hit()
     var row: i64 = 0
     while row < h:
         val d_off = (dst_y + row) * dst_stride + dst_x
@@ -279,6 +259,7 @@ fn scroll_region(buf: [u32], stride: i64, x: i64, y: i64, w: i64, h: i64, delta_
     """Scroll a rect within buf by delta_y rows. Increments scroll_hits."""
     if w <= 0 or h <= 0 or delta_y == 0:
         return
+    record_simd_scroll_hit()
 
     val abs_dy = if delta_y < 0: -delta_y else: delta_y
     val rows_to_copy = h - abs_dy
@@ -345,7 +326,7 @@ fn make_cpu_simd_provider() -> CpuSimdProvider:
 impl SimdProvider for CpuSimdProvider:
 
     fn hit_counts() -> SimdHitCounts:
-        g_simd_hits
+        simd_hit_counts()
 
     fn target_features() -> [text]:
         active_target_features()

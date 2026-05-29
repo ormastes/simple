@@ -431,6 +431,15 @@ pub unsafe extern "C" fn rt_file_remove(path_ptr: *const u8, path_len: u64) -> b
     std::fs::remove_file(path_str).is_ok()
 }
 
+/// Codegen alias for `rt_file_remove`: the compiler emits `rt_file_delete` for the
+/// Simple-facing `delete` builtin. The AOT loader rewrites this name, but the Cranelift
+/// JIT registers symbols by exact name, so expose `rt_file_delete` as a real exported
+/// symbol that forwards to `rt_file_remove`.
+#[export_name = "rt_file_delete"]
+pub unsafe extern "C" fn rt_file_delete_alias(path_ptr: *const u8, path_len: u64) -> bool {
+    rt_file_remove(path_ptr, path_len)
+}
+
 /// Return file size in bytes, or -1 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_size(path_ptr: *const u8, path_len: u64) -> i64 {

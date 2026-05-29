@@ -400,6 +400,17 @@ pub(super) fn start_event_loop_thread(event_loop_id: i64) -> Result<EventLoopHan
             });
         });
 
+        // macOS: pump the freshly-built event loop several times BEFORE any window
+        // is created so that applicationDidFinishLaunching fires (dispatching
+        // NewEvents(Init) + Resumed). winit only delivers these once the loop is
+        // pumped; creating a window before the app finishes launching makes macOS
+        // create it but never display it. The MACOS_PUMP borrow_mut taken inside
+        // the `.with` closure above has already dropped, so macos_pump can borrow.
+        for _ in 0..20 {
+            macos_pump(event_loop_id);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
         return Ok(EventLoopHandle { command_tx, event_rx });
     }
 
