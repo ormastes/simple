@@ -35,6 +35,27 @@ bytes_of() {
     fi
 }
 
+linked_closure_bytes_of() {
+    bin="$1"
+    deps="$2"
+    if [ ! -f "$bin" ] || ! have ldd; then
+        echo "n/a"
+        return
+    fi
+    ldd "$bin" 2>/dev/null | awk '
+        $2 == "=>" && $3 ~ /^\// { print $3 }
+        $1 ~ /^\// { print $1 }
+    ' | sort -u >"$deps"
+    total="$(bytes_of "$bin")"
+    while IFS= read -r dep; do
+        if [ -f "$dep" ]; then
+            dep_bytes="$(bytes_of "$dep")"
+            total=$((total + dep_bytes))
+        fi
+    done <"$deps"
+    echo "$total"
+}
+
 field_of() {
     key="$1"
     file="$2"
@@ -49,6 +70,7 @@ SIMPLE_NATIVE="$BUILD_DIR/simple_gui_render_bench"
 GTK_SRC="$BUILD_DIR/gtk_gui_baseline.c"
 GTK_BIN="$BUILD_DIR/gtk_gui_baseline"
 GTK_OUT="$BUILD_DIR/gtk_gui_baseline.out"
+GTK_DEPS="$BUILD_DIR/gtk_gui_baseline.deps"
 
 cat >"$SIMPLE_ENTRY" <<EOF
 extern fn rt_time_now_unix_micros() -> i64
@@ -189,6 +211,7 @@ gtk_status="unavailable"
 gtk_reason="missing_gtk_tooling"
 gtk_total_us="n/a"
 gtk_bytes="n/a"
+gtk_closure_bytes="n/a"
 
 if have pkg-config && pkg-config --exists gtk4; then
     gtk_pkg="gtk4"
@@ -247,7 +270,13 @@ int main(void) {
 EOF
     if cc -Os -s "$GTK_SRC" -o "$GTK_BIN" $(pkg-config --cflags --libs "$gtk_pkg") >"$BUILD_DIR/gtk_build.log" 2>&1; then
         gtk_bytes="$(bytes_of "$GTK_BIN")"
-        if "$GTK_BIN" >"$GTK_OUT" 2>&1; then
+        gtk_closure_bytes="$(linked_closure_bytes_of "$GTK_BIN" "$GTK_DEPS")"
+        if have xvfb-run; then
+            gtk_runner="xvfb-run -a"
+        else
+            gtk_runner=""
+        fi
+        if ${gtk_runner} "$GTK_BIN" >"$GTK_OUT" 2>&1; then
             gtk_status="$(field_of gtk_render_status "$GTK_OUT")"
             gtk_total_us="$(field_of gtk_widget_total_us "$GTK_OUT")"
             gtk_reason="$(field_of gtk_reason "$GTK_OUT")"
@@ -277,7 +306,7 @@ fi
     echo "| Simple static cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_cache_total_us | persistent HTML artifact cache hit loop |"
     echo "| Simple SWBC prepared reuse | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_swbc_total_us | decoded compact static-shell plan reuse loop |"
     echo "| Simple SWBC command plan | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_command_plan_total_us | decoded command-only static-shell plan, no HTML artifact |"
-    echo "| GTK | $gtk_status | $gtk_bytes | $GTK_ITERATIONS | $gtk_total_us | ${gtk_reason:-widget construction loop; requires display} |"
+    echo "| GTK | $gtk_status | $gtk_bytes | $GTK_ITERATIONS | $gtk_total_us | ${gtk_reason:-widget construction loop; uses xvfb-run when available} |"
     echo
     echo "## Static Shell Size"
     echo
@@ -288,6 +317,7 @@ fi
     echo "| Simple decoded layout payload estimate | $simple_static_layout_payload_bytes |"
     echo "| Simple retained command payload | $simple_static_command_payload_bytes |"
     echo "| GTK minimal executable | $gtk_bytes |"
+    echo "| GTK executable plus linked shared-library closure | $gtk_closure_bytes |"
     echo
     echo "## Simple Output"
     echo
@@ -304,12 +334,18 @@ fi
     else
         echo "- unavailable"
     fi
+    if [ -f "$GTK_DEPS" ]; then
+        echo
+        echo "## GTK Linked Dependencies"
+        echo
+        sed 's/^/- /' "$GTK_DEPS"
+    fi
     echo
     echo "## Notes"
     echo
     echo "- Set SKIP_SIMPLE_NATIVE=0 to add Simple native binary bytes; default skips the slow native build."
-    echo "- GTK size is the minimal linked executable size, not the full shared-library closure unless inspected with ldd."
-    echo "- GTK speed is unavailable on headless hosts without a display."
+    echo "- GTK executable size is reported separately from the linked shared-library closure."
+    echo "- GTK speed uses xvfb-run when available; otherwise it is unavailable on headless hosts without a display."
     echo "- Simple speed measures the pure software HTML-to-pixel path and records the shared render optimization profile."
 } >"$REPORT_PATH"
 
@@ -327,4 +363,5 @@ echo "simple_static_command_payload_bytes=$simple_static_command_payload_bytes"
 echo "simple_bytes=$simple_bytes"
 echo "gtk_status=$gtk_status"
 echo "gtk_bytes=$gtk_bytes"
+echo "gtk_closure_bytes=$gtk_closure_bytes"
 echo "gtk_total_us=$gtk_total_us"
