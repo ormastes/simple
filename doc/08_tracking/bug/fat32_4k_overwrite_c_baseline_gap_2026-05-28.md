@@ -2,16 +2,20 @@
 
 ## Status
 
-Open — two separate remaining blockers confirmed 2026-05-29:
+Open — two separate remaining blockers confirmed 2026-05-29.
+Exhaustive search of existing bulk-copy externs completed 2026-05-29: no
+suitable in-place `[u8]` bulk-copy extern exists. Required fix is a new
+`rt_byte_array_blit` extern (see Required Fix below).
 
 1. **Direct-C write gap (stable):** At N=1000 iters, simple_fat32 write p50 is
    ~39us vs direct C ~27us (~44% slower). Read passes stably (13us vs 23us).
-   The write gap is structural in the interpreter: `_set_sec` in the mock block
-   device does 512 element-wise assignments to a global 2MB array per sector (×8
-   sectors = 4096 global-indexed array writes per 4K overwrite). Compiled C does
-   `memcpy`. The missing capability is a bulk array-copy intrinsic. N=8 runs are
-   too noisy to determine pass/fail — the gate would sometimes pass and sometimes
-   fail by luck.
+   The write gap is structural in the interpreter: `_set_sec` in the bench
+   mock device (`test/perf/bench/fat32_4k_compare.spl`, lines 26-31) does
+   512 element-wise assignments to a global `[u8]` per sector (×8 sectors =
+   4096 element-wise writes per 4K overwrite). Compiled C does `memcpy`. No
+   existing extern provides in-place bulk byte copy at offset. N=8 runs are
+   too noisy to determine pass/fail — the gate would sometimes pass and
+   sometimes fail by luck.
 
 2. **VFAT same-device evidence:** Blocked in this sandbox — all mount paths
    denied without root. See details below.
@@ -113,12 +117,20 @@ Read consistently beats C. Write consistently loses to C by ~44%.
 
 **Write gap:** The write critical path is:
 `write_4k_overwrite_cluster_at` → `write_cluster_clean` → `write_cluster_raw`
-→ 8× `_device_write_sector` → `_set_sec` in the mock block device.
+→ 8× `_device_write_sector` → `BenchBlockDevice.write_sector` →
+`_set_sec` in `test/perf/bench/fat32_4k_compare.spl` (lines 26-31).
 
-`_set_sec` does 512 element-wise assignments into a global 2MB `[u8]` array per
-sector call. The interpreter pays a full global-variable lookup + bounds check +
-mutation on every element. C's equivalent is a single `memcpy`. There is no bulk
-array-copy primitive in Simple today.
+`_set_sec` does 512 element-wise assignments (`__bench_data[base + i] = data[i]`)
+into a module-level `[u8]` global per sector call (×8 sectors = 4096 writes per
+4K overwrite). The interpreter pays a full global-variable lookup + bounds check
++ mutation on every element. C's equivalent is a single `memcpy`.
+
+The `fat32_4k_compare.spl` bench uses `std.fs_driver.fat32_core` (the
+`nogc_sync_mut` variant) with a `BenchBlockDevice` mock defined in the bench
+file itself. This is the real hot path — not a separate lib mock.
+
+No bulk in-place `[u8]` write extern exists in Simple today (exhaustive search
+2026-05-29 — see table below).
 
 **Attempted fix (reverted):** Replacing the inner `while j` push loop in
 `write_cluster_raw` with array slicing (`data[start:end]`) made write ~5× slower
@@ -135,14 +147,53 @@ each slice, adding more allocation overhead than the push loop saves.
 - `/tmp/simple_vfat_bench_user.img` exists (user-owned valid FAT32, 64MB) but
   cannot be loop-mounted without root.
 
+## Bulk-Copy Extern Exhaustive Search (2026-05-29)
+
+All existing runtime externs that could replace the element-wise loop in
+`write_sector` were audited:
+
+| Candidate | Signature | Verdict |
+|-----------|-----------|---------|
+| `rt_array_extend_i64` | `(dst:[i64], src:[i64], count:i64) -> bool` | **[i64] only, appends to end** — changes array length, cannot write at an offset into an existing buffer. Not applicable to `[u8]`. |
+| `rt_bytes_u8_set` | `(arr:[u8], idx:i64, val:i64) -> bool` | Per-element, single byte. Still one interpreter dispatch per byte — same cost as the current loop. |
+| `rt_memcpy` | `(dst:i64, src:i64, n:i64)` raw-pointer copy | Exposed as a Simple extern and wired in interpreter dispatch. Operates on raw pointers (i64), not typed `[u8]`. Requires pairing with `rt_array_data_ptr_u8` to get pointers. |
+| `rt_array_data_ptr_u8` + `rt_memcpy` | pointer extraction + raw copy | `rt_array_data_ptr_u8` returns the base pointer; `rt_memcpy(dst_ptr + off, src_ptr, n)` would copy at native speed. **Viable but unsafe from Simple** — pointer arithmetic (`dst_ptr + off`) is untyped i64 arithmetic into a live array's backing memory. No bounds guarantee at the Simple level. Usable only if `_set_sec` is annotated unsafe; not safe to add without a design decision. |
+| Slice syntax `data[start:end]` | Language built-in | Already attempted — **5× slower** (222us vs 39us) because the interpreter allocates a new array per slice call. |
+
+**Conclusion:** No existing extern provides an in-place bulk byte copy that writes
+into an offset of an existing `[u8]` global backing store. Replacing the loop
+with any currently-available extern still dispatches through the interpreter
+per-element.
+
+The hot path is in the bench file itself (`test/perf/bench/fat32_4k_compare.spl`
+`_set_sec`, lines 26-31), not in a shared lib. `mem_block_device.spl` has an
+identical element-wise `write_sector` pattern but is not exercised by this
+benchmark — it is a separate concern.
+
 ## Required Fix
 
 ### Write gap
-File a feature request for a bulk array-copy intrinsic in the Simple runtime
-(e.g. `array_copy_range(dst, dst_offset, src, src_offset, len)` backed by
-`memmove`). Once available, `_set_sec` and `write_cluster_raw` can use it to
-eliminate the element-wise copy loops. Until then the write gate cannot be
-closed in interpreter mode.
+Add a new extern `rt_byte_array_blit` to the Simple runtime:
+
+```
+extern fn rt_byte_array_blit(dst: [u8], dst_off: i64, src: [u8], src_off: i64, count: i64) -> bool
+```
+
+Backed by a single `memcpy` call in `runtime_native.c` (and the corresponding
+Rust interpreter dispatch in `sffi_array.rs` + `mod.rs`). Once wired, replace
+the element-wise loop in `_set_sec` (`test/perf/bench/fat32_4k_compare.spl`
+lines 26-31) and `_get_sec` (lines 33-40) with a single `rt_byte_array_blit`
+call, eliminating 512 interpreter dispatches per sector write.
+
+**Warning:** Adding a new `rt_*` extern requires a full bootstrap rebuild:
+```
+scripts/bootstrap/bootstrap-from-scratch.sh --deploy
+```
+`bin/simple build` silently no-ops for extern additions (wrapper whitelist).
+
+Estimated impact: the 4096-dispatch loop (8 sectors × 512 bytes) collapses to 8
+`rt_byte_array_blit` calls, each a single Rust→C dispatch. Expected to bring
+Simple write p50 from 39us to below 27us (the current C baseline).
 
 The gate `FAT32_4K_RUNS` should be raised to at least 50 and the benchmark
 `iters` to at least 100 to produce statistically stable p50 values before

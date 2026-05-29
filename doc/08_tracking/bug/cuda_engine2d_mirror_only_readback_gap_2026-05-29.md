@@ -2,9 +2,9 @@
 
 ## Status
 
-Partially resolved. `draw_line`, `draw_circle`, `draw_circle_filled`, and
-`draw_rounded_rect` now have CUDA PTX kernels and strict readback coverage.
-Other mirror-only primitives remain open.
+Partially resolved. `draw_line`, `draw_circle`, `draw_circle_filled`,
+`draw_rounded_rect`, and `draw_triangle_filled` now have CUDA PTX kernels and
+strict readback coverage. Other mirror-only primitives remain open.
 
 ## Problem
 
@@ -16,7 +16,6 @@ pixels instead of the mirror result.
 
 Confirmed remaining mirror-only core primitives:
 
-- `draw_triangle_filled`
 - `draw_text`
 - clip and mask state
 
@@ -34,14 +33,15 @@ removed.
 ## Completed Fix
 
 Added real CUDA primitive coverage for `kernel_draw_line`, `kernel_draw_circle`,
-`kernel_draw_circle_filled`, and `kernel_draw_rounded_rect` instead of silently
-relying on mirror-only state while device readback remains preferred.
+`kernel_draw_circle_filled`, `kernel_draw_rounded_rect`, and
+`kernel_draw_triangle_filled` instead of silently relying on mirror-only state
+while device readback remains preferred.
 
 Verification:
 
 - `bin/simple check src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl test/integration/rendering/cuda_strict_spec.spl test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl`
 - `SIMPLE_LIB=src bin/simple test test/integration/rendering/cuda_strict_spec.spl --mode=interpreter --clean`
-  - Result: 20 passed, 0 failed.
+  - Result: 21 passed, 0 failed.
 - `SIMPLE_LIB=src bin/simple test test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl --mode=interpreter --clean`
   - Result: 8 passed, 0 failed.
 
@@ -53,5 +53,5 @@ Target files:
 - `test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl`
 - `test/integration/rendering/cuda_strict_spec.spl`
 
-The next strict hardware tests should compare CUDA triangle, text, clip, and
-mask behavior against the CPU reference after `clear()`.
+The next strict hardware tests should compare CUDA text, clip, and mask behavior
+against the CPU reference after `clear()`.
