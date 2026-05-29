@@ -1,0 +1,285 @@
+# DMA Descriptor — canonical shared descriptor, cache policy, sync helpers, SR-IOV isolation
+# AC-1: canonical DMA descriptor with cache policy
+# AC-2: CPU-device sync helpers
+# AC-3: SR-IOV/IOMMU isolation gating
+
+class CachePolicy:
+    """Cache coherency policy for a DMA mapping."""
+    kind: text
+
+    static fn coherent() -> CachePolicy:
+        """CPU and device share a coherent view — no explicit flush needed."""
+        CachePolicy(kind: "coherent")
+
+    static fn uncached() -> CachePolicy:
+        """Fully uncached — bypasses CPU cache entirely."""
+        CachePolicy(kind: "uncached")
+
+    static fn write_combining() -> CachePolicy:
+        """Write-combining — coalesces CPU writes before device sees them."""
+        CachePolicy(kind: "write_combining")
+
+    static fn flush_required() -> CachePolicy:
+        """Non-coherent — caller must flush/invalidate explicitly."""
+        CachePolicy(kind: "flush_required")
+
+    me needs_explicit_flush() -> bool:
+        """True only when the policy requires manual cache maintenance."""
+        self.kind == "flush_required"
+
+    me is_valid() -> bool:
+        """True if the kind string is one of the four recognised policies."""
+        self.kind == "coherent" or
+        self.kind == "uncached" or
+        self.kind == "write_combining" or
+        self.kind == "flush_required"
+
+
+class DmaDescriptor:
+    """Canonical shared DMA descriptor — tracks one contiguous mapping."""
+    vaddr:         i64   # CPU virtual address
+    paddr:         i64   # CPU physical address
+    device_addr:   i64   # Bus / IOVA address seen by the device
+    byte_length:   i64   # Size of the mapping in bytes
+    cache_kind:    text  # One of the CachePolicy kind strings
+    owner_task:    i32   # Task that owns this mapping
+    owner_device:  i32   # Device ID that was assigned the mapping
+    alloc_id:      i64   # Unique allocation identity
+    is_active:     bool  # True while the mapping is live
+
+    static fn create(
+        vaddr:        i64,
+        paddr:        i64,
+        device_addr:  i64,
+        byte_length:  i64,
+        cache_kind:   text,
+        owner_task:   i32,
+        owner_device: i32,
+        alloc_id:     i64,
+    ) -> DmaDescriptor:
+        """Allocate and activate a new DMA descriptor."""
+        DmaDescriptor(
+            vaddr:        vaddr,
+            paddr:        paddr,
+            device_addr:  device_addr,
+            byte_length:  byte_length,
+            cache_kind:   cache_kind,
+            owner_task:   owner_task,
+            owner_device: owner_device,
+            alloc_id:     alloc_id,
+            is_active:    true,
+        )
+
+    me validate_release(task_id: i32) -> text:
+        """Return "" if the descriptor can be released by task_id, error otherwise."""
+        if self.is_active == false:
+            return "error:already_released alloc_id=" + self.alloc_id.to_text()
+        if self.owner_task == task_id:
+            return ""
+        "error:owner_mismatch expected=" + self.owner_task.to_text() +
+            " got=" + task_id.to_text()
+
+    me release(task_id: i32) -> text:
+        """Validate and mark this descriptor inactive. Returns "" on success."""
+        val check = self.validate_release(task_id)
+        if check == "" == false:
+            return check
+        self.is_active = false
+        ""
+
+    me summary() -> text:
+        """Human-readable one-line summary of this descriptor."""
+        "DmaDescriptor{alloc_id=" + self.alloc_id.to_text() +
+            " vaddr=" + self.vaddr.to_text() +
+            " paddr=" + self.paddr.to_text() +
+            " device_addr=" + self.device_addr.to_text() +
+            " len=" + self.byte_length.to_text() +
+            " cache=" + self.cache_kind +
+            " task=" + self.owner_task.to_text() +
+            " dev=" + self.owner_device.to_text() +
+            " active=" + self.is_active.to_text() + "}"
+
+
+class DmaSyncHelper:
+    """CPU-device cache synchronisation helper driven by a cache policy."""
+    cache_kind: text
+
+    static fn for_policy(cache_kind: text) -> DmaSyncHelper:
+        """Create a sync helper for the given cache_kind string."""
+        DmaSyncHelper(cache_kind: cache_kind)
+
+    me cpu_to_device(desc: DmaDescriptor) -> text:
+        """Return the sync action required before the device reads CPU-written data."""
+        if desc.cache_kind == "flush_required":
+            return "sync:flush"
+        "sync:noop"
+
+    me device_to_cpu(desc: DmaDescriptor) -> text:
+        """Return the sync action required before the CPU reads device-written data."""
+        if desc.cache_kind == "flush_required":
+            return "sync:invalidate"
+        "sync:noop"
+
+
+class IsolationDomain:
+    """SR-IOV / IOMMU isolation context for a device assignment."""
+    domain_id:  i32
+    has_iommu:  bool
+    mode:       text  # "isolated" | "trusted" | "none"
+
+    static fn isolated(domain_id: i32) -> IsolationDomain:
+        """Full IOMMU-backed isolation — required for VF assignment."""
+        IsolationDomain(domain_id: domain_id, has_iommu: true, mode: "isolated")
+
+    static fn trusted() -> IsolationDomain:
+        """Trusted domain — no IOMMU, but the device is considered safe."""
+        IsolationDomain(domain_id: 0, has_iommu: false, mode: "trusted")
+
+    static fn none() -> IsolationDomain:
+        """No isolation — passthrough or legacy mode."""
+        IsolationDomain(domain_id: 0, has_iommu: false, mode: "none")
+
+    me can_assign_vf() -> bool:
+        """True only when IOMMU is present (isolated mode)."""
+        self.has_iommu
+
+    me advertises_isolation() -> bool:
+        """True only in isolated mode."""
+        self.mode == "isolated"
+
+    me validate_sriov() -> text:
+        """Return "" if VF assignment is permitted, error otherwise."""
+        if self.can_assign_vf():
+            return ""
+        "error:sriov_requires_iommu mode=" + self.mode +
+            " domain_id=" + self.domain_id.to_text()
+
+
+class DmaRegistry:
+    """Flat 16-slot registry of active DMA descriptors."""
+    count: i32
+    d0:  DmaDescriptor
+    d1:  DmaDescriptor
+    d2:  DmaDescriptor
+    d3:  DmaDescriptor
+    d4:  DmaDescriptor
+    d5:  DmaDescriptor
+    d6:  DmaDescriptor
+    d7:  DmaDescriptor
+    d8:  DmaDescriptor
+    d9:  DmaDescriptor
+    d10: DmaDescriptor
+    d11: DmaDescriptor
+    d12: DmaDescriptor
+    d13: DmaDescriptor
+    d14: DmaDescriptor
+    d15: DmaDescriptor
+
+    me slot_active(idx: i32) -> bool:
+        """Return whether the descriptor at idx is active."""
+        if idx == 0:  return self.d0.is_active
+        if idx == 1:  return self.d1.is_active
+        if idx == 2:  return self.d2.is_active
+        if idx == 3:  return self.d3.is_active
+        if idx == 4:  return self.d4.is_active
+        if idx == 5:  return self.d5.is_active
+        if idx == 6:  return self.d6.is_active
+        if idx == 7:  return self.d7.is_active
+        if idx == 8:  return self.d8.is_active
+        if idx == 9:  return self.d9.is_active
+        if idx == 10: return self.d10.is_active
+        if idx == 11: return self.d11.is_active
+        if idx == 12: return self.d12.is_active
+        if idx == 13: return self.d13.is_active
+        if idx == 14: return self.d14.is_active
+        false
+
+    me slot_owner(idx: i32) -> i32:
+        """Return the owner_task for the descriptor at idx."""
+        if idx == 0:  return self.d0.owner_task
+        if idx == 1:  return self.d1.owner_task
+        if idx == 2:  return self.d2.owner_task
+        if idx == 3:  return self.d3.owner_task
+        if idx == 4:  return self.d4.owner_task
+        if idx == 5:  return self.d5.owner_task
+        if idx == 6:  return self.d6.owner_task
+        if idx == 7:  return self.d7.owner_task
+        if idx == 8:  return self.d8.owner_task
+        if idx == 9:  return self.d9.owner_task
+        if idx == 10: return self.d10.owner_task
+        if idx == 11: return self.d11.owner_task
+        if idx == 12: return self.d12.owner_task
+        if idx == 13: return self.d13.owner_task
+        if idx == 14: return self.d14.owner_task
+        self.d15.owner_task
+
+    me release_slot(idx: i32, task_id: i32):
+        """Mark the slot at idx inactive (only if owner matches)."""
+        if idx == 0  and self.d0.owner_task  == task_id: self.d0.is_active  = false
+        if idx == 1  and self.d1.owner_task  == task_id: self.d1.is_active  = false
+        if idx == 2  and self.d2.owner_task  == task_id: self.d2.is_active  = false
+        if idx == 3  and self.d3.owner_task  == task_id: self.d3.is_active  = false
+        if idx == 4  and self.d4.owner_task  == task_id: self.d4.is_active  = false
+        if idx == 5  and self.d5.owner_task  == task_id: self.d5.is_active  = false
+        if idx == 6  and self.d6.owner_task  == task_id: self.d6.is_active  = false
+        if idx == 7  and self.d7.owner_task  == task_id: self.d7.is_active  = false
+        if idx == 8  and self.d8.owner_task  == task_id: self.d8.is_active  = false
+        if idx == 9  and self.d9.owner_task  == task_id: self.d9.is_active  = false
+        if idx == 10 and self.d10.owner_task == task_id: self.d10.is_active = false
+        if idx == 11 and self.d11.owner_task == task_id: self.d11.is_active = false
+        if idx == 12 and self.d12.owner_task == task_id: self.d12.is_active = false
+        if idx == 13 and self.d13.owner_task == task_id: self.d13.is_active = false
+        if idx == 14 and self.d14.owner_task == task_id: self.d14.is_active = false
+        if idx == 15 and self.d15.owner_task == task_id: self.d15.is_active = false
+
+    me set_slot(idx: i32, desc: DmaDescriptor):
+        """Write descriptor into the given slot."""
+        if idx == 0:  self.d0  = desc
+        if idx == 1:  self.d1  = desc
+        if idx == 2:  self.d2  = desc
+        if idx == 3:  self.d3  = desc
+        if idx == 4:  self.d4  = desc
+        if idx == 5:  self.d5  = desc
+        if idx == 6:  self.d6  = desc
+        if idx == 7:  self.d7  = desc
+        if idx == 8:  self.d8  = desc
+        if idx == 9:  self.d9  = desc
+        if idx == 10: self.d10 = desc
+        if idx == 11: self.d11 = desc
+        if idx == 12: self.d12 = desc
+        if idx == 13: self.d13 = desc
+        if idx == 14: self.d14 = desc
+        if idx == 15: self.d15 = desc
+
+    me register(desc: DmaDescriptor) -> bool:
+        """Add a descriptor to the first free slot. Returns false if registry is full."""
+        var idx = 0
+        while idx < 16:
+            if self.slot_active(idx) == false:
+                self.set_slot(idx, desc)
+                self.count = self.count + 1
+                return true
+            idx = idx + 1
+        false
+
+    me release_all_for_task(task_id: i32) -> i32:
+        """Release every active descriptor owned by task_id. Returns the count released."""
+        var released = 0
+        var idx = 0
+        while idx < 16:
+            if self.slot_active(idx) and self.slot_owner(idx) == task_id:
+                self.release_slot(idx, task_id)
+                released = released + 1
+            idx = idx + 1
+        released
+
+    me summary() -> text:
+        """Return a one-line count of active slots in the registry."""
+        var active = 0
+        var idx = 0
+        while idx < 16:
+            if self.slot_active(idx):
+                active = active + 1
+            idx = idx + 1
+        "DmaRegistry{count=" + self.count.to_text() +
+            " active_slots=" + active.to_text() + "/16}"

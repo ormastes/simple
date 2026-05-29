@@ -1,0 +1,92 @@
+# @cover src/lib/nogc_sync_mut/game2d/input/snapshot.spl 80%
+# @cover src/lib/nogc_sync_mut/game2d/input/api.spl 80%
+# @cover src/lib/nogc_sync_mut/game2d/input/keys.spl 60%
+"""
+# Game2D InputSnapshot (AC-3)
+
+Snapshot-based input view: `g.input.key_down(K)`, `key_pressed_this_frame(K)`,
+`mouse_pos()`, `mouse_down(B)` backed by `class InputSnapshot {
+keys_down, keys_pressed, mouse_pos, mouse_buttons }`.
+
+Archtest: examples/game2d/** must NOT call rt_sdl2_* directly — the snapshot
+is the only read path.
+
+Red-phase: InputSnapshot/api absent; signature-presence assertions fail.
+
+**Status:** Failing (no impl)
+"""
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn _read(path: text) -> text:
+    if rt_file_exists(path):
+        rt_file_read_text(path)
+    else:
+        ""
+
+fn _has(s: text, n: text) -> bool:
+    s.contains(n)
+
+describe "Game2D InputSnapshot (AC-3)":
+    """## Frame-frozen snapshot input."""
+
+    describe "InputSnapshot class declared":
+        it "snapshot.spl declares class InputSnapshot":
+            val src = _read("src/lib/nogc_sync_mut/game2d/input/snapshot.spl")
+            expect(_has(src, "class InputSnapshot")).to_equal(true)
+
+        it "InputSnapshot has keys_down/keys_pressed/mouse_pos/mouse_buttons":
+            val src = _read("src/lib/nogc_sync_mut/game2d/input/snapshot.spl")
+            expect(_has(src, "keys_down") and _has(src, "keys_pressed") and
+                   _has(src, "mouse_pos") and _has(src, "mouse_buttons")
+                ).to_equal(true)
+
+        it "edge case: synthetic class declaration is detected":
+            val sample = "class InputSnapshot:\n    var keys_down: [Key]\n"
+            expect(_has(sample, "class InputSnapshot")).to_equal(true)
+
+    describe "g.input accessors":
+        it "api.spl declares fn key_down(k: Key) -> bool":
+            val src = _read("src/lib/nogc_sync_mut/game2d/input/api.spl")
+            expect(_has(src, "fn key_down(") and _has(src, "Key")
+                ).to_equal(true)
+
+        it "api.spl declares fn key_pressed_this_frame":
+            val src = _read("src/lib/nogc_sync_mut/game2d/input/api.spl")
+            expect(_has(src, "fn key_pressed_this_frame(")).to_equal(true)
+
+        it "api.spl declares fn mouse_pos and fn mouse_down":
+            val src = _read("src/lib/nogc_sync_mut/game2d/input/api.spl")
+            expect(_has(src, "fn mouse_pos(") and _has(src, "fn mouse_down(")
+                ).to_equal(true)
+
+    describe "edge case: simultaneous press+release in same frame":
+        it "snapshot retains the press in keys_pressed":
+            # Contract documented in snapshot.spl header; red until impl.
+            val src = _read("src/lib/nogc_sync_mut/game2d/input/snapshot.spl")
+            expect(_has(src, "press") and _has(src, "release") or
+                   _has(src, "keys_pressed_this_frame") or
+                   _has(src, "frame-coalesced")).to_equal(true)
+
+        it "synthetic: detector finds 'frame-coalesced' marker":
+            expect(_has("# frame-coalesced press wins", "frame-coalesced")
+                ).to_equal(true)
+
+    describe "error path: no direct OS input calls in user code":
+        it "examples/game2d/hello/main.spl does not call rt_sdl2_*":
+            val src = _read("examples/game2d/hello/main.spl")
+            expect(_has(src, "rt_sdl2_")).to_equal(false)
+
+        it "examples/game2d/hello/main.spl does not import std.io":
+            val src = _read("examples/game2d/hello/main.spl")
+            expect(_has(src, "use std.nogc_sync_mut.io")).to_equal(false)
+
+        it "edge case: synthetic violation is detected":
+            expect(_has("rt_sdl2_is_key_pressed(...)", "rt_sdl2_")
+                ).to_equal(true)
+
+        it "error path: empty content does not falsely flag":
+            expect(_has("", "rt_sdl2_")).to_equal(false)

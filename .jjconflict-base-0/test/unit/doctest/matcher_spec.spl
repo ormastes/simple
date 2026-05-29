@@ -1,0 +1,149 @@
+/// Unit tests for doctest matcher
+
+import test.unit.*
+import std.doctest.matcher.*
+import std.doctest.parser::{Expected}
+
+describe "DoctestMatcher":
+    context "match_output":
+        it "matches exact output":
+            actual = "42"
+            expected = Expected.Output("42")
+            result = match_output(actual, expected)
+            
+            match result:
+                case MatchResult.Pass:
+                    pass
+                case MatchResult.Fail(msg):
+                    fail "Expected pass, got: ${msg}"
+        
+        it "matches with trailing whitespace normalization":
+            actual = "42  \n"
+            expected = Expected.Output("42")
+            result = match_output(actual, expected)
+            
+            expect result to be MatchResult.Pass
+        
+        it "fails on mismatch":
+            actual = "42"
+            expected = Expected.Output("43")
+            result = match_output(actual, expected)
+            
+            match result:
+                case MatchResult.Fail(msg):
+                    expect msg to include "mismatch"
+                case _:
+                    fail "Expected Fail"
+        
+        it "matches multi-line output":
+            actual = "line1\nline2\nline3"
+            expected = Expected.Output("line1\nline2\nline3")
+            result = match_output(actual, expected)
+            
+            expect result to be MatchResult.Pass
+        
+        it "matches empty output":
+            actual = ""
+            expected = Expected.Empty
+            result = match_output(actual, expected)
+            
+            expect result to be MatchResult.Pass
+        
+        it "fails when expecting empty but got output":
+            actual = "unexpected"
+            expected = Expected.Empty
+            result = match_output(actual, expected)
+            
+            match result:
+                case MatchResult.Fail(msg):
+                    expect msg to include "Expected no output"
+    
+    context "match_exception":
+        it "matches exception type":
+            result = match_exception("ValueError", "some message", 
+                                    Expected.Exception("ValueError", Option.None))
+            
+            expect result to be MatchResult.Pass
+        
+        it "matches exception type and message":
+            result = match_exception("ValueError", "invalid input", 
+                                    Expected.Exception("ValueError", Option.Some("invalid")))
+            
+            expect result to be MatchResult.Pass
+        
+        it "fails on wrong exception type":
+            result = match_exception("TypeError", "msg", 
+                                    Expected.Exception("ValueError", Option.None))
+            
+            match result:
+                case MatchResult.Fail(msg):
+                    expect msg to include "Expected ValueError"
+                    expect msg to include "got TypeError"
+        
+        it "fails on wrong message":
+            result = match_exception("ValueError", "wrong message", 
+                                    Expected.Exception("ValueError", Option.Some("expected message")))
+            
+            match result:
+                case MatchResult.Fail(msg):
+                    expect msg to include "message mismatch"
+        
+        it "fails when expected output but got exception":
+            result = match_exception("ValueError", "msg", Expected.Output("42"))
+            
+            match result:
+                case MatchResult.Fail(msg):
+                    expect msg to include "Expected output"
+                    expect msg to include "got exception"
+    
+    context "wildcard_match":
+        it "matches with dot wildcard":
+            expect wildcard_match("abc", "a.c") to be True
+            expect wildcard_match("a1c", "a.c") to be True
+            expect wildcard_match("axc", "a.c") to be True
+        
+        it "matches with star wildcard":
+            expect wildcard_match("hello world", "hello*") to be True
+            expect wildcard_match("hello world", "*world") to be True
+            expect wildcard_match("hello world", "hello*world") to be True
+        
+        it "matches UUID pattern":
+            uuid = "550e8400-e29b-41d4-a716-446655440000"
+            pattern = "........-....-....-....-............"
+            expect wildcard_match(uuid, pattern) to be True
+        
+        it "matches timestamp pattern":
+            timestamp = "1702345678"
+            pattern = "1702*"
+            expect wildcard_match(timestamp, pattern) to be True
+        
+        it "fails on non-matching pattern":
+            expect wildcard_match("abc", "a.d") to be False
+            expect wildcard_match("hello", "world") to be False
+        
+        it "handles multiple wildcards":
+            expect wildcard_match("ab12cd34ef", "ab..cd..ef") to be True
+            expect wildcard_match("prefix123suffix456", "prefix*suffix*") to be True
+    
+    context "exact_match":
+        it "matches identical strings":
+            expect exact_match("hello", "hello") to be True
+        
+        it "normalizes whitespace":
+            expect exact_match("hello  ", "hello") to be True
+            expect exact_match("hello\n", "hello") to be True
+            expect exact_match(" hello ", " hello") to be True
+        
+        it "fails on different strings":
+            expect exact_match("hello", "world") to be False
+    
+    context "normalize":
+        it "strips trailing whitespace":
+            expect normalize("hello  ") to eq "hello"
+            expect normalize("hello\t\n") to eq "hello"
+        
+        it "strips trailing whitespace from each line":
+            expect normalize("line1  \nline2  ") to eq "line1\nline2"
+        
+        it "preserves leading whitespace":
+            expect normalize("  hello") to eq "  hello"

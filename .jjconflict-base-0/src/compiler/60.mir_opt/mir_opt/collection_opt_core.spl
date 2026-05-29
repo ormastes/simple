@@ -1,0 +1,721 @@
+# Collection Optimization — Core
+#
+# Class definition, shared utilities, and pattern implementations for:
+#   - Pattern 5: Typed array index dispatch specialization
+#   - Pattern 6: Dead write-only capacity array elimination
+#   - Pure query canonicalization
+#   - Len query canonicalization
+#
+# Patterns 1, 2, 4 are in collection_opt_patterns.spl.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir_opt.mir_opt.loop_detect.{LoopInfo, LoopDetector}
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{
+    OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
+    optimization_rule_provider_builtin_with_contract
+}
+
+# Known pure methods safe to hoist out of loops
+val PURE_METHODS = ["len", "size", "is_empty", "first", "last", "get", "has", "contains", "contains_key", "is_subset", "is_superset", "is_disjoint"]
+
+# ============================================================================
+# Collection Optimization Pass
+# ============================================================================
+
+class CollectionOptimization:
+    detector: LoopDetector
+    concat_replaced: i64
+    str_append_replaced: i64
+    calls_hoisted: i64
+    scalar_ops_hoisted: i64
+    len_queries_reused: i64
+    pure_queries_reused: i64
+    array_index_gets_specialized: i64
+    dead_append_arrays_elided: i64
+
+impl CollectionOptimization:
+    static fn new() -> CollectionOptimization:
+        CollectionOptimization(
+            detector: LoopDetector.new(),
+            concat_replaced: 0,
+            str_append_replaced: 0,
+            calls_hoisted: 0,
+            scalar_ops_hoisted: 0,
+            len_queries_reused: 0,
+            pure_queries_reused: 0,
+            array_index_gets_specialized: 0,
+            dead_append_arrays_elided: 0
+        )
+
+    # ========================================================================
+    # Pattern 6: Dead write-only capacity array elimination
+    # ========================================================================
+
+    me elide_dead_append_only_capacity_arrays(blocks: [MirBlock]) -> [MirBlock]:
+        var new_blocks: [MirBlock] = []
+        for block in blocks:
+            var new_insts: [MirInst] = []
+            var changed = false
+            for inst in block.instructions:
+                val dest_id = self.capacity_array_alloc_dest_id(inst)
+                if dest_id >= 0 and self.array_local_has_only_ignored_writes(blocks, dest_id):
+                    self.dead_append_arrays_elided = self.dead_append_arrays_elided + 1
+                    changed = true
+                    continue
+                val write_array_id = self.ignored_array_write_local_id(inst)
+                if write_array_id >= 0 and self.array_local_has_only_ignored_writes(blocks, write_array_id):
+                    changed = true
+                    continue
+                new_insts.push(inst)
+            if changed:
+                new_blocks.push(MirBlock(
+                    id: block.id,
+                    label: block.label,
+                    instructions: new_insts,
+                    terminator: block.terminator
+                ))
+            else:
+                new_blocks.push(block)
+        new_blocks
+
+    fn array_local_has_only_ignored_writes(blocks: [MirBlock], array_id: i64) -> bool:
+        var write_count = 0
+        for block in blocks:
+            for inst in block.instructions:
+                if self.capacity_array_alloc_dest_id(inst) == array_id:
+                    continue
+
+                if self.ignored_array_write_local_id(inst) == array_id:
+                    write_count = write_count + 1
+                    if self.inst_uses_local_outside_ignored_write(inst, array_id):
+                        return false
+                    continue
+
+                if self.inst_uses_local_id(inst, array_id):
+                    return false
+
+            if self.terminator_uses_local_id(block.terminator, array_id):
+                return false
+        write_count > 0
+
+    fn capacity_array_alloc_dest_id(inst: MirInst) -> i64:
+        match inst.kind:
+            case Call(dest, func, args):
+                if not dest.? or args.len() != 1:
+                    return -1
+                if self.is_capacity_array_alloc(self.get_func_name(func)):
+                    return dest.id
+                -1
+            case _: -1
+
+    fn is_capacity_array_alloc(name: text) -> bool:
+        name == "rt_array_new_with_cap" or
+        name == "rt_array_new_with_cap_u64" or
+        name == "rt_array_new_with_cap_i64" or
+        name == "rt_array_new_with_cap_text" or
+        name == "rt_array_new_with_cap_js_value" or
+        name == "rt_array_new_with_cap_bool"
+
+    fn ignored_array_write_local_id(inst: MirInst) -> i64:
+        match inst.kind:
+            case Call(dest, func, args):
+                if dest.? or args.len() < 2:
+                    return -1
+                if not self.is_dead_array_write_call_name(self.get_func_name(func)):
+                    return -1
+                match args[0].kind:
+                    case Copy(local): local.id
+                    case Move(local): local.id
+                    case _: -1
+            case _: -1
+
+    fn is_dead_array_write_call_name(name: text) -> bool:
+        name == "push" or
+        name == "rt_array_set" or
+        name == "rt_typed_words_u32_push" or
+        name == "rt_typed_words_u64_push" or
+        name == "rt_typed_words_u32_push_known_at" or
+        name == "rt_typed_words_u64_push_known_at" or
+        name == "rt_typed_words_u32_push_known_data_at" or
+        name == "rt_typed_words_u64_push_known_data_at" or
+        name == "rt_typed_words_u32_set" or
+        name == "rt_typed_words_u64_set" or
+        name == "rt_typed_words_u32_store_known_data_at" or
+        name == "rt_typed_words_u64_store_known_data_at"
+
+    # ========================================================================
+    # Pure query canonicalization
+    # ========================================================================
+
+    me canonicalize_collection_pure_queries(blocks: [MirBlock]) -> [MirBlock]:
+        var new_blocks: [MirBlock] = []
+        for block in blocks:
+            new_blocks.push(self.canonicalize_collection_pure_queries_block(block))
+        new_blocks
+
+    me canonicalize_collection_pure_queries_block(block: MirBlock) -> MirBlock:
+        val insts = block.instructions
+        if insts.len() < 2:
+            return block
+
+        var seen: Dict<text, i64> = {}
+        var new_insts: [MirInst] = []
+        var changed = false
+
+        for inst in insts:
+            val query = self.collection_pure_call_key(inst)
+            if query != "":
+                val dest = self.inst_dest(inst)
+                if dest.?:
+                    if seen.has(query):
+                        new_insts.push(MirInst(kind: MirInstKind.Copy(dest, LocalId(id: seen[query])), span: inst.span))
+                        self.pure_queries_reused = self.pure_queries_reused + 1
+                        changed = true
+                    else:
+                        seen[query] = dest.id
+                        new_insts.push(inst)
+                else:
+                    new_insts.push(inst)
+            else:
+                if self.inst_may_mutate_collection_state(inst):
+                    seen = {}
+                new_insts.push(inst)
+
+        if changed:
+            MirBlock(
+                id: block.id,
+                label: block.label,
+                instructions: new_insts,
+                terminator: block.terminator
+            )
+        else:
+            block
+
+    fn collection_pure_call_key(inst: MirInst) -> text:
+        match inst.kind:
+            case Call(dest, func, args):
+                if not dest.?:
+                    return ""
+                val fname = self.get_func_name(func)
+                if not self.is_pure_method(fname) and not self.is_collection_runtime_read(fname):
+                    return ""
+                var key = fname
+                for arg in args:
+                    key = key + ":" + self.collection_operand_key(arg)
+                key
+            case _:
+                ""
+
+    fn inst_may_mutate_collection_state(inst: MirInst) -> bool:
+        match inst.kind:
+            case Call(_, func, _):
+                val fname = self.get_func_name(func)
+                not self.is_pure_method(fname) and not self.is_collection_runtime_read(fname)
+            case CallIndirect(_, _, _, _): true
+            case Store(_, _): true
+            case SetField(_, _, _): true
+            case _: false
+
+    # ========================================================================
+    # Len query canonicalization
+    # ========================================================================
+
+    me canonicalize_collection_len_queries(blocks: [MirBlock]) -> [MirBlock]:
+        var new_blocks: [MirBlock] = []
+        for block in blocks:
+            new_blocks.push(self.canonicalize_collection_len_queries_block(block))
+        new_blocks
+
+    me canonicalize_collection_len_queries_block(block: MirBlock) -> MirBlock:
+        val insts = block.instructions
+        if insts.len() < 2:
+            return block
+
+        val uses = self.local_use_counts(block)
+        var seen_lens: Dict<text, i64> = {}
+        var new_insts: [MirInst] = []
+        var changed = false
+        var i = 0
+
+        while i < insts.len():
+            val len_dest_id = self.collection_len_call_dest_id(insts[i])
+            if len_dest_id >= 0:
+                val dest = LocalId(id: len_dest_id)
+                val key = self.collection_len_call_key(insts[i])
+                if not seen_lens.has(key):
+                    seen_lens[key] = dest.id
+                    new_insts.push(insts[i])
+                    i = i + 1
+                    continue
+                else:
+                    val canonical = LocalId(id: seen_lens[key])
+                    if i + 1 < insts.len():
+                        val use_count = uses[dest.id] ?? 0
+                        if use_count == 1:
+                            val rewritten = self.rewrite_single_use_len_consumer(insts[i + 1], dest, canonical)
+                            if rewritten.?:
+                                new_insts.push(rewritten.unwrap())
+                            else:
+                                new_insts.push(MirInst(kind: MirInstKind.Copy(dest, canonical), span: insts[i].span))
+                                new_insts.push(insts[i + 1])
+                            self.len_queries_reused = self.len_queries_reused + 1
+                            changed = true
+                            i = i + 2
+                            continue
+
+                    new_insts.push(MirInst(kind: MirInstKind.Copy(dest, canonical), span: insts[i].span))
+                    self.len_queries_reused = self.len_queries_reused + 1
+                    changed = true
+                    i = i + 1
+                    continue
+
+            if self.inst_may_mutate_collection_state(insts[i]):
+                seen_lens = {}
+
+            new_insts.push(insts[i])
+            i = i + 1
+
+        if changed:
+            MirBlock(
+                id: block.id,
+                label: block.label,
+                instructions: new_insts,
+                terminator: block.terminator
+            )
+        else:
+            block
+
+    fn collection_len_call_dest_id(inst: MirInst) -> i64:
+        match inst.kind:
+            case Call(dest, func, args):
+                if not dest.? or args.len() != 1:
+                    return -1
+                val fname = self.get_func_name(func)
+                if not self.is_collection_len_runtime(fname):
+                    return -1
+                return dest.id
+            case _: -1
+
+    fn collection_len_call_key(inst: MirInst) -> text:
+        match inst.kind:
+            case Call(_, func, args):
+                "{self.get_func_name(func)}:{self.collection_operand_key(args[0])}"
+            case _:
+                ""
+
+    fn is_collection_len_runtime(name: text) -> bool:
+        name == "rt_array_len" or name == "rt_string_len" or name == "rt_dict_len"
+
+    # ========================================================================
+    # Pattern 5: Typed array index dispatch specialization
+    # ========================================================================
+
+    me specialize_typed_array_index_gets(blocks: [MirBlock], func: MirFunction) -> [MirBlock]:
+        var new_blocks: [MirBlock] = []
+        for block in blocks:
+            new_blocks.push(self.specialize_typed_array_index_gets_block(block, func))
+        new_blocks
+
+    me specialize_typed_array_index_gets_block(block: MirBlock, func: MirFunction) -> MirBlock:
+        var new_insts: [MirInst] = []
+        var changed = false
+
+        for inst in block.instructions:
+            val rewritten = self.specialize_typed_array_index_get(inst, func)
+            if rewritten.?:
+                new_insts.push(rewritten)
+                self.array_index_gets_specialized = self.array_index_gets_specialized + 1
+                changed = true
+            else:
+                new_insts.push(inst)
+
+        if changed:
+            MirBlock(
+                id: block.id,
+                label: block.label,
+                instructions: new_insts,
+                terminator: block.terminator
+            )
+        else:
+            block
+
+    fn specialize_typed_array_index_get(inst: MirInst, func: MirFunction) -> MirInst?:
+        match inst.kind:
+            case Call(dest, callee, args):
+                if self.get_func_name(callee) != "rt_index_get" or args.len() != 2:
+                    return nil
+                val array_local = self.operand_local_id(args[0])
+                if not array_local.?:
+                    return nil
+                if not self.local_is_array(array_local, func):
+                    return nil
+                val array_get_func = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_array_get"),
+                    MirType.unit()
+                ))
+                MirInst(kind: MirInstKind.Call(dest, array_get_func, args), span: inst.span)
+            case _:
+                nil
+
+    # ========================================================================
+    # Len consumer rewriting helpers
+    # ========================================================================
+
+    fn rewrite_single_use_len_consumer(inst: MirInst, duplicate_len: LocalId, canonical_len: LocalId) -> MirInst?:
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                val rewritten_left = self.replace_operand_local_value(left, duplicate_len, canonical_len)
+                val rewritten_right = self.replace_operand_local_value(right, duplicate_len, canonical_len)
+                if rewritten_left.1 or rewritten_right.1:
+                    Some(MirInst(kind: MirInstKind.BinOp(dest, op, rewritten_left.0, rewritten_right.0), span: inst.span))
+                else:
+                    nil
+            case CheckedBinOp(dest, op, left, right):
+                val rewritten_left = self.replace_operand_local_value(left, duplicate_len, canonical_len)
+                val rewritten_right = self.replace_operand_local_value(right, duplicate_len, canonical_len)
+                if rewritten_left.1 or rewritten_right.1:
+                    Some(MirInst(kind: MirInstKind.CheckedBinOp(dest, op, rewritten_left.0, rewritten_right.0), span: inst.span))
+                else:
+                    nil
+            case Intrinsic(dest, name, args):
+                if name != "bounds_check" or args.len() < 2:
+                    return nil
+                val rewritten_args = self.replace_operand_local(args, duplicate_len, canonical_len)
+                if rewritten_args.1:
+                    Some(MirInst(kind: MirInstKind.Intrinsic(dest, name, rewritten_args.0), span: inst.span))
+                else:
+                    nil
+            case Call(dest, func, args):
+                val fname = self.get_func_name(func)
+                if fname != "bounds_check" and fname != "array_bounds_check" and fname != "rt_bounds_check" and fname != "__simple_bounds_check":
+                    return nil
+                val rewritten_args = self.replace_operand_local(args, duplicate_len, canonical_len)
+                if rewritten_args.1:
+                    Some(MirInst(kind: MirInstKind.Call(dest, func, rewritten_args.0), span: inst.span))
+                else:
+                    nil
+            case _: nil
+
+    fn replace_operand_local_value(arg: MirOperand, from: LocalId, to: LocalId) -> (MirOperand, bool):
+        match arg.kind:
+            case Copy(local):
+                if local.id == from.id:
+                    (mir_operand_copy(to), true)
+                else:
+                    (arg, false)
+            case Move(local):
+                if local.id == from.id:
+                    (mir_operand_move(to), true)
+                else:
+                    (arg, false)
+            case _:
+                (arg, false)
+
+    fn replace_operand_local(args: [MirOperand], from: LocalId, to: LocalId) -> ([MirOperand], bool):
+        var out: [MirOperand] = []
+        var changed = false
+        for arg in args:
+            val rewritten = self.replace_operand_local_value(arg, from, to)
+            out.push(rewritten.0)
+            if rewritten.1:
+                changed = true
+        (out, changed)
+
+    # ========================================================================
+    # Shared utilities (used by this file and collection_opt_patterns.spl)
+    # ========================================================================
+
+    fn local_use_counts(block: MirBlock) -> Dict<i64, i64>:
+        var counts: Dict<i64, i64> = {}
+        for inst in block.instructions:
+            self.count_inst_uses(inst, counts)
+        self.count_terminator_uses(block.terminator, counts)
+        counts
+
+    fn count_inst_uses(inst: MirInst, counts: Dict<i64, i64>):
+        match inst.kind:
+            case Copy(_, src):
+                self.count_local_use(src, counts)
+            case Move(_, src):
+                self.count_local_use(src, counts)
+            case BinOp(_, _, left, right):
+                self.count_operand_use(left, counts)
+                self.count_operand_use(right, counts)
+            case UnaryOp(_, _, operand):
+                self.count_operand_use(operand, counts)
+            case CheckedBinOp(_, _, left, right):
+                self.count_operand_use(left, counts)
+                self.count_operand_use(right, counts)
+            case Load(_, ptr):
+                self.count_operand_use(ptr, counts)
+            case Store(ptr, value):
+                self.count_operand_use(ptr, counts)
+                self.count_operand_use(value, counts)
+            case GetElementPtr(_, base, indices):
+                self.count_operand_use(base, counts)
+                for idx in indices:
+                    self.count_operand_use(idx, counts)
+            case Aggregate(_, _, operands):
+                for operand in operands:
+                    self.count_operand_use(operand, counts)
+            case GetField(_, base, _):
+                self.count_operand_use(base, counts)
+            case SetField(base, _, value):
+                self.count_operand_use(base, counts)
+                self.count_operand_use(value, counts)
+            case Cast(_, operand, _):
+                self.count_operand_use(operand, counts)
+            case Bitcast(_, operand, _):
+                self.count_operand_use(operand, counts)
+            case Call(_, func, args):
+                self.count_operand_use(func, counts)
+                for arg in args:
+                    self.count_operand_use(arg, counts)
+            case CallIndirect(_, ptr, args, _):
+                self.count_operand_use(ptr, counts)
+                for arg in args:
+                    self.count_operand_use(arg, counts)
+            case Intrinsic(_, _, args):
+                for arg in args:
+                    self.count_operand_use(arg, counts)
+            case _:
+                ()
+
+    fn count_terminator_uses(term: MirTerminator, counts: Dict<i64, i64>):
+        match term:
+            case Return(value):
+                if value.?:
+                    self.count_operand_use(value.unwrap(), counts)
+            case If(cond, _, _):
+                self.count_operand_use(cond, counts)
+            case Switch(value, _, _):
+                self.count_operand_use(value, counts)
+            case CallTerminator(_, func, args, _, _):
+                self.count_operand_use(func, counts)
+                for arg in args:
+                    self.count_operand_use(arg, counts)
+            case _:
+                ()
+
+    fn count_operand_use(op: MirOperand, counts: Dict<i64, i64>):
+        match op.kind:
+            case Copy(local):
+                self.count_local_use(local, counts)
+            case Move(local):
+                self.count_local_use(local, counts)
+            case _:
+                ()
+
+    fn count_local_use(local: LocalId, counts: Dict<i64, i64>):
+        counts[local.id] = (counts[local.id] ?? 0) + 1
+
+    fn inst_uses_local_id(inst: MirInst, local_id: i64) -> bool:
+        match inst.kind:
+            case Copy(dest, src):
+                dest.id == local_id or src.id == local_id
+            case Move(dest, src):
+                dest.id == local_id or src.id == local_id
+            case BinOp(dest, _, left, right):
+                dest.id == local_id or self.operand_uses_local_id(left, local_id) or self.operand_uses_local_id(right, local_id)
+            case UnaryOp(dest, _, operand):
+                dest.id == local_id or self.operand_uses_local_id(operand, local_id)
+            case CheckedBinOp(dest, _, left, right):
+                dest.id == local_id or self.operand_uses_local_id(left, local_id) or self.operand_uses_local_id(right, local_id)
+            case Load(dest, ptr):
+                dest.id == local_id or self.operand_uses_local_id(ptr, local_id)
+            case Store(ptr, value):
+                self.operand_uses_local_id(ptr, local_id) or self.operand_uses_local_id(value, local_id)
+            case GetElementPtr(dest, base, indices):
+                if dest.id == local_id or self.operand_uses_local_id(base, local_id):
+                    return true
+                for idx in indices:
+                    if self.operand_uses_local_id(idx, local_id):
+                        return true
+                false
+            case Aggregate(dest, _, operands):
+                if dest.id == local_id:
+                    return true
+                for operand in operands:
+                    if self.operand_uses_local_id(operand, local_id):
+                        return true
+                false
+            case GetField(dest, base, _):
+                dest.id == local_id or self.operand_uses_local_id(base, local_id)
+            case SetField(base, _, value):
+                self.operand_uses_local_id(base, local_id) or self.operand_uses_local_id(value, local_id)
+            case Cast(dest, operand, _):
+                dest.id == local_id or self.operand_uses_local_id(operand, local_id)
+            case Bitcast(dest, operand, _):
+                dest.id == local_id or self.operand_uses_local_id(operand, local_id)
+            case Call(dest, func, args):
+                if dest.? and dest.id == local_id:
+                    return true
+                if self.operand_uses_local_id(func, local_id):
+                    return true
+                for arg in args:
+                    if self.operand_uses_local_id(arg, local_id):
+                        return true
+                false
+            case CallIndirect(dest, ptr, args, _):
+                if dest.? and dest.id == local_id:
+                    return true
+                if self.operand_uses_local_id(ptr, local_id):
+                    return true
+                for arg in args:
+                    if self.operand_uses_local_id(arg, local_id):
+                        return true
+                false
+            case Intrinsic(dest, _, args):
+                if dest.? and dest.id == local_id:
+                    return true
+                for arg in args:
+                    if self.operand_uses_local_id(arg, local_id):
+                        return true
+                false
+            case Const(dest, _, _):
+                dest.id == local_id
+            case DebugValue(local, _):
+                local.id == local_id
+            case _: false
+
+    fn inst_uses_local_outside_ignored_write(inst: MirInst, local_id: i64) -> bool:
+        match inst.kind:
+            case Call(_, _, args):
+                if args.len() == 0:
+                    return false
+                for i in 1..args.len():
+                    if self.operand_uses_local_id(args[i], local_id):
+                        return true
+                false
+            case _: self.inst_uses_local_id(inst, local_id)
+
+    fn terminator_uses_local_id(term: MirTerminator, local_id: i64) -> bool:
+        match term:
+            case Return(value):
+                value.? and self.operand_uses_local_id(value.unwrap(), local_id)
+            case If(cond, _, _):
+                self.operand_uses_local_id(cond, local_id)
+            case Switch(value, _, _):
+                self.operand_uses_local_id(value, local_id)
+            case CallTerminator(dest, func, args, _, _):
+                if dest.? and dest.id == local_id:
+                    return true
+                if self.operand_uses_local_id(func, local_id):
+                    return true
+                for arg in args:
+                    if self.operand_uses_local_id(arg, local_id):
+                        return true
+                false
+            case _: false
+
+    fn operand_uses_local_id(op: MirOperand, local_id: i64) -> bool:
+        match op.kind:
+            case Copy(local):
+                local.id == local_id
+            case Move(local):
+                local.id == local_id
+            case _: false
+
+    fn collection_operand_key(op: MirOperand) -> text:
+        match op.kind:
+            case Copy(local):
+                "copy:{local.id}"
+            case Move(local):
+                "move:{local.id}"
+            case Const(value, _):
+                "const:{self.collection_const_key(value)}"
+
+    fn collection_const_key(value: MirConstValue) -> text:
+        match value:
+            case Int(v): "int:{v}"
+            case Float(v): "float:{v}"
+            case Bool(v): "bool:{v}"
+            case Str(v): "str:{v}"
+            case Zero: "zero"
+            case Array(_): "array"
+            case Tuple(_): "tuple"
+            case Struct(_): "struct"
+
+    fn get_func_name(op: MirOperand) -> text:
+        match op.kind:
+            case Const(value, _):
+                match value:
+                    case Str(s): s
+                    case _: ""
+            case _: ""
+
+    fn operand_local_id(op: MirOperand) -> LocalId?:
+        match op.kind:
+            case Copy(local): local
+            case Move(local): local
+            case _: nil
+
+    fn local_is_array(local_id: LocalId, func: MirFunction) -> bool:
+        for loc in func.locals:
+            if loc.id.id == local_id.id:
+                match loc.type_.kind:
+                    case Array(_, _): return true
+                    case _: return false
+        false
+
+    fn is_pure_method(name: text) -> bool:
+        for m in PURE_METHODS:
+            if m == name:
+                return true
+        false
+
+    fn is_collection_runtime_read(name: text) -> bool:
+        name == "rt_array_get" or
+        name == "rt_array_len" or
+        name == "rt_string_len" or
+        name == "rt_dict_len" or
+        name == "rt_typed_bytes_u8_at" or
+        name == "rt_typed_bytes_u8_unchecked" or
+        name == "rt_typed_bytes_u8_data_at" or
+        name == "rt_typed_bytes_u32_le_at" or
+        name == "rt_typed_bytes_u32_le_unchecked" or
+        name == "rt_typed_bytes_u64_le_at" or
+        name == "rt_typed_bytes_u64_le_unchecked" or
+        name == "rt_typed_words_u32_at" or
+        name == "rt_typed_words_u64_at" or
+        name == "rt_typed_words_u32_unchecked" or
+        name == "rt_typed_words_u64_unchecked" or
+        name == "rt_typed_words_u32_data_at" or
+        name == "rt_typed_words_u64_data_at" or
+        name == "rt_typed_words_u64_data_at_checked" or
+        name == "rt_typed_words_u64_raw_data_at" or
+        name == "rt_array_data_ptr" or
+        name == "rt_array_header_ptr" or
+        name == "rt_array_first" or
+        name == "rt_array_last" or
+        name == "rt_array_contains" or
+        name == "rt_dict_get" or
+        name == "rt_dict_contains" or
+        name == "rt_dict_contains_key"
+
+    fn inst_dest(inst: MirInst) -> LocalId?:
+        match inst.kind:
+            case Const(dest, _, _): dest
+            case BinOp(dest, _, _, _): dest
+            case UnaryOp(dest, _, _): dest
+            case Copy(dest, _): dest
+            case Bitcast(dest, _, _): dest
+            case Call(dest, _, _): dest
+            case Aggregate(dest, _, _): dest
+            case _: nil
+
+    fn inst_in_list(inst: MirInst, list: [MirInst]) -> bool:
+        val d1 = self.inst_dest(inst)
+        if not d1.?:
+            return false
+        val d1_id = d1.id
+        for other in list:
+            val d2 = self.inst_dest(other)
+            if d2.? and d2.id == d1_id:
+                return true
+        false
+
+    fn stats_summary() -> text:
+        "CollectionOpt: {self.concat_replaced} concat->push, {self.str_append_replaced} str->append, {self.calls_hoisted} calls hoisted, {self.scalar_ops_hoisted} scalar ops hoisted, {self.len_queries_reused} len queries reused, {self.pure_queries_reused} pure queries reused, {self.dead_append_arrays_elided} dead append arrays elided"

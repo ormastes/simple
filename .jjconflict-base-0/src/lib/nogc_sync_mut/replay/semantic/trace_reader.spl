@@ -1,0 +1,116 @@
+# SReplay — Semantic Trace Reader
+#
+# Reads .sst (Simple Semantic Trace) files produced by TraceWriter.
+# Binary deserialization of fixed 68-byte SemanticEvent records.
+
+use std.io.{shell}
+use std.nogc_sync_mut.replay.codec.{decode_i64, decode_i32}
+use std.nogc_sync_mut.replay.semantic.trace_events.{SemanticEvent, SEMANTIC_EVENT_SIZE}
+
+# ============================================================================
+# Reader
+# ============================================================================
+
+fn read_semantic_trace(path: text) -> Result<[SemanticEvent], text>:
+    """Read all SemanticEvent records from a .sst file."""
+    val hex_result = shell("xxd -p '{path}' 2>/dev/null | tr -d '\\n'")
+    if hex_result.exit_code != 0:
+        return Err("failed to read trace file: {path}")
+
+    val hex_str = hex_result.stdout.trim()
+    if hex_str.len() == 0:
+        return Ok([])
+
+    # Decode hex to bytes
+    var bytes: [i32] = []
+    var i = 0
+    while i + 1 < hex_str.len():
+        val hi = hex_value(hex_str[i])
+        val lo = hex_value(hex_str[i + 1])
+        bytes.push(hi * 16 + lo)
+        i = i + 2
+
+    # Decode fixed-size records
+    var events: [SemanticEvent] = []
+    var offset: i64 = 0
+    while offset + SEMANTIC_EVENT_SIZE as i64 <= bytes.len():
+        val event = decode_semantic_event(bytes, offset)?
+        events.push(event)
+        offset = offset + SEMANTIC_EVENT_SIZE as i64
+    Ok(events)
+
+# ============================================================================
+# Record Decoder
+# ============================================================================
+
+fn decode_semantic_event(bytes: [i32], offset: i64) -> Result<SemanticEvent, text>:
+    """Decode a single 68-byte SemanticEvent from bytes at the given offset."""
+    if bytes.len() - offset < SEMANTIC_EVENT_SIZE as i64:
+        return Err("insufficient bytes for SemanticEvent at offset {offset}")
+
+    var pos = offset
+    val seq = decode_i64(bytes, pos)
+    pos = pos + 8
+    val thread_id = decode_i64(bytes, pos)
+    pos = pos + 8
+    val kind = decode_i32(bytes, pos)
+    pos = pos + 4
+    val timestamp_ns = decode_i64(bytes, pos)
+    pos = pos + 8
+    val source_file_id = decode_i32(bytes, pos)
+    pos = pos + 4
+    val source_line = decode_i32(bytes, pos)
+    pos = pos + 4
+    val source_column = decode_i32(bytes, pos)
+    pos = pos + 4
+    val name_id = decode_i32(bytes, pos)
+    pos = pos + 4
+    val object_id = decode_i64(bytes, pos)
+    pos = pos + 8
+    val payload_a = decode_i64(bytes, pos)
+    pos = pos + 8
+    val payload_b = decode_i64(bytes, pos)
+
+    Ok(SemanticEvent(
+        seq: seq,
+        thread_id: thread_id,
+        kind: kind,
+        timestamp_ns: timestamp_ns,
+        source_file_id: source_file_id,
+        source_line: source_line,
+        source_column: source_column,
+        name_id: name_id,
+        object_id: object_id,
+        payload_a: payload_a,
+        payload_b: payload_b
+    ))
+
+# ============================================================================
+# Hex helpers
+# ============================================================================
+
+fn hex_value(ch: text) -> i32:
+    match ch:
+        case "0": 0
+        case "1": 1
+        case "2": 2
+        case "3": 3
+        case "4": 4
+        case "5": 5
+        case "6": 6
+        case "7": 7
+        case "8": 8
+        case "9": 9
+        case "a": 10
+        case "A": 10
+        case "b": 11
+        case "B": 11
+        case "c": 12
+        case "C": 12
+        case "d": 13
+        case "D": 13
+        case "e": 14
+        case "E": 14
+        case "f": 15
+        case "F": 15
+        case _: 0

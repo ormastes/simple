@@ -1,0 +1,207 @@
+"""
+# MCP UI Access Tools Specification
+
+**Feature IDs:** #3031-3035
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Validates the ui_access MCP tool family:
+ui_access_snapshot, ui_access_surface, ui_access_find, ui_access_act,
+ui_access_history, ui_access_observe, ui_access_state, ui_access_query,
+ui_access_ensure, ui_access_value, ui_access_adapter_snapshot,
+ui_access_visual_probe.
+
+The spec checks the tool vocabulary, tool-list exposure, and tools/call routing
+behaviour using a local JSON-RPC mock.
+"""
+
+use std.common.mcp_helpers.{LB, RB, jp, js, jo1, jo2, jo3, extract_json_string, extract_json_value, extract_nested_string, make_error_response, make_tool_result}
+
+fn make_req(id: text, method: text) -> text:
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("method", js(method)))
+
+fn make_req_params(id: text, method: text, params: text) -> text:
+    var r = LB()
+    r = r + jp("jsonrpc", js("2.0"))
+    r = r + "," + jp("id", id)
+    r = r + "," + jp("method", js(method))
+    r = r + "," + jp("params", params)
+    r = r + RB()
+    r
+
+fn make_tool_call_req(id: text, tool: text, args: text) -> text:
+    val params = jo2(jp("name", js(tool)), jp("arguments", args))
+    make_req_params(id, "tools/call", params)
+
+fn make_ui_access_tools_list(id: text) -> text:
+    val t1 = jo2(jp("name", js("ui_access_snapshot")), jp("description", js("Read the canonical UI access snapshot")))
+    val t2 = jo2(jp("name", js("ui_access_surface")), jp("description", js("Read one canonical UI surface")))
+    val t3 = jo2(jp("name", js("ui_access_find")), jp("description", js("Find canonical UI nodes")))
+    val t4 = jo2(jp("name", js("ui_access_act")), jp("description", js("Dispatch an action against a canonical UI node")))
+    val t5 = jo2(jp("name", js("ui_access_history")), jp("description", js("Read recent canonical UI access events")))
+    val t6 = jo2(jp("name", js("ui_access_observe")), jp("description", js("Observe declarative UI access state")))
+    val t7 = jo2(jp("name", js("ui_access_state")), jp("description", js("Read or set declarative UI state")))
+    val t8 = jo2(jp("name", js("ui_access_query")), jp("description", js("Query canonical UI nodes with structured JSON results")))
+    val t9 = jo2(jp("name", js("ui_access_ensure")), jp("description", js("Ensure canonical UI state satisfies a bounded declarative expectation")))
+    val t10 = jo2(jp("name", js("ui_access_value")), jp("description", js("Read or set typed values on canonical UI nodes")))
+    val t11 = jo2(jp("name", js("ui_access_adapter_snapshot")), jp("description", js("Read an additive adapter-backed snapshot envelope for a UI surface")))
+    val t12 = jo2(jp("name", js("ui_access_visual_probe")), jp("description", js("Read a vision-sidecar probe for a UI surface")))
+    val tools = "[" + t1 + "," + t2 + "," + t3 + "," + t4 + "," + t5 + "," + t6 + "," + t7 + "," + t8 + "," + t9 + "," + t10 + "," + t11 + "," + t12 + "]"
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", jo1(jp("tools", tools))))
+
+fn handle_jsonrpc(body: text) -> text:
+    val method = extract_json_string(body, "method")
+    val id = extract_json_value(body, "id")
+
+    if method == "tools/list":
+        return make_ui_access_tools_list(id)
+    elif method == "tools/call":
+        val tool_name = extract_nested_string(body, "params", "name")
+        if tool_name == "ui_access_snapshot":
+            return make_tool_result(id, "snapshot: ui_access_snapshot")
+        elif tool_name == "ui_access_surface":
+            val surface_id = extract_nested_string(body, "arguments", "surface_id")
+            return make_tool_result(id, "surface: " + surface_id)
+        elif tool_name == "ui_access_find":
+            val kind = extract_nested_string(body, "arguments", "kind")
+            return make_tool_result(id, "find: " + kind)
+        elif tool_name == "ui_access_act":
+            val action = extract_nested_string(body, "arguments", "action")
+            return make_tool_result(id, "act: " + action)
+        elif tool_name == "ui_access_history":
+            val count = extract_nested_string(body, "arguments", "count")
+            return make_tool_result(id, "history: " + count)
+        elif tool_name == "ui_access_observe":
+            val canonical_id = extract_nested_string(body, "arguments", "canonical_id")
+            return make_tool_result(id, "observe: " + canonical_id)
+        elif tool_name == "ui_access_state":
+            val state_key = extract_nested_string(body, "arguments", "state_key")
+            return make_tool_result(id, "state: " + state_key)
+        elif tool_name == "ui_access_query":
+            val kind = extract_nested_string(body, "arguments", "kind")
+            return make_tool_result(id, "query: " + kind)
+        elif tool_name == "ui_access_ensure":
+            val expectation = extract_nested_string(body, "arguments", "expectation")
+            return make_tool_result(id, "ensure: " + expectation)
+        elif tool_name == "ui_access_value":
+            val canonical_id = extract_nested_string(body, "arguments", "canonical_id")
+            return make_tool_result(id, "value: " + canonical_id)
+        elif tool_name == "ui_access_adapter_snapshot":
+            val surface_id = extract_nested_string(body, "arguments", "surface_id")
+            return make_tool_result(id, "adapter_snapshot: " + surface_id)
+        elif tool_name == "ui_access_visual_probe":
+            val surface_id = extract_nested_string(body, "arguments", "surface_id")
+            return make_tool_result(id, "visual_probe: " + surface_id)
+        else:
+            return make_error_response(id, -32602, "Unknown tool: " + tool_name)
+    else:
+        return make_error_response(id, -32601, "Method not found: " + method)
+
+describe "ui_access tool family":
+    context "tool vocabulary":
+        it "contains twelve ui_access tools":
+            val tools = [
+                "ui_access_snapshot",
+                "ui_access_surface",
+                "ui_access_find",
+                "ui_access_act",
+                "ui_access_history",
+                "ui_access_observe",
+                "ui_access_state",
+                "ui_access_query",
+                "ui_access_ensure",
+                "ui_access_value",
+                "ui_access_adapter_snapshot",
+                "ui_access_visual_probe"
+            ]
+            expect(tools.len()).to_equal(12)
+
+        it "all ui_access tools use the canonical prefix":
+            val tools = [
+                "ui_access_snapshot",
+                "ui_access_surface",
+                "ui_access_find",
+                "ui_access_act",
+                "ui_access_history",
+                "ui_access_observe",
+                "ui_access_state",
+                "ui_access_query",
+                "ui_access_ensure",
+                "ui_access_value",
+                "ui_access_adapter_snapshot",
+                "ui_access_visual_probe"
+            ]
+            for tool in tools:
+                expect(tool.starts_with("ui_access_")).to_equal(true)
+
+    context "tools/list":
+        it "advertises all ui_access tool names":
+            val resp = handle_jsonrpc(make_req("1", "tools/list"))
+            expect(resp.contains("\"ui_access_snapshot\"")).to_equal(true)
+            expect(resp.contains("\"ui_access_surface\"")).to_equal(true)
+            expect(resp.contains("\"ui_access_find\"")).to_equal(true)
+            expect(resp.contains("\"ui_access_act\"")).to_equal(true)
+            expect(resp.contains("\"ui_access_history\"")).to_equal(true)
+            expect(resp.contains("\"ui_access_observe\"")).to_equal(true)
+            expect(resp.contains("\"ui_access_state\"")).to_equal(true)
+            expect(resp.contains("\"ui_access_query\"")).to_equal(true)
+            expect(resp.contains("\"ui_access_ensure\"")).to_equal(true)
+            expect(resp.contains("\"ui_access_value\"")).to_equal(true)
+            expect(resp.contains("\"ui_access_adapter_snapshot\"")).to_equal(true)
+            expect(resp.contains("\"ui_access_visual_probe\"")).to_equal(true)
+
+    context "tools/call":
+        it "routes ui_access_snapshot":
+            val resp = handle_jsonrpc(make_tool_call_req("2", "ui_access_snapshot", jo1("")))
+            expect(resp.contains("snapshot: ui_access_snapshot")).to_equal(true)
+
+        it "routes ui_access_surface":
+            val resp = handle_jsonrpc(make_tool_call_req("3", "ui_access_surface", jo1(jp("surface_id", js("main")))))
+            expect(resp.contains("surface: main")).to_equal(true)
+
+        it "routes ui_access_find":
+            val resp = handle_jsonrpc(make_tool_call_req("4", "ui_access_find", jo1(jp("kind", js("button")))))
+            expect(resp.contains("find: button")).to_equal(true)
+
+        it "routes ui_access_act":
+            val resp = handle_jsonrpc(make_tool_call_req("5", "ui_access_act", jo1(jp("action", js("click")))))
+            expect(resp.contains("act: click")).to_equal(true)
+
+        it "routes ui_access_history":
+            val resp = handle_jsonrpc(make_tool_call_req("6", "ui_access_history", jo1(jp("count", js("5")))))
+            expect(resp.contains("history: 5")).to_equal(true)
+
+        it "routes ui_access_observe":
+            val resp = handle_jsonrpc(make_tool_call_req("7", "ui_access_observe", jo1(jp("canonical_id", js("main#submit_btn")))))
+            expect(resp.contains("observe: main#submit_btn")).to_equal(true)
+
+        it "routes ui_access_state":
+            val resp = handle_jsonrpc(make_tool_call_req("8", "ui_access_state", jo1(jp("state_key", js("focused")))))
+            expect(resp.contains("state: focused")).to_equal(true)
+
+        it "routes ui_access_query":
+            val resp = handle_jsonrpc(make_tool_call_req("9", "ui_access_query", jo1(jp("kind", js("button")))))
+            expect(resp.contains("query: button")).to_equal(true)
+
+        it "routes ui_access_ensure":
+            val resp = handle_jsonrpc(make_tool_call_req("10", "ui_access_ensure", jo1(jp("expectation", js("exists")))))
+            expect(resp.contains("ensure: exists")).to_equal(true)
+
+        it "routes ui_access_value":
+            val resp = handle_jsonrpc(make_tool_call_req("11", "ui_access_value", jo1(jp("canonical_id", js("main#name_input")))))
+            expect(resp.contains("value: main#name_input")).to_equal(true)
+
+        it "routes ui_access_adapter_snapshot":
+            val resp = handle_jsonrpc(make_tool_call_req("12", "ui_access_adapter_snapshot", jo1(jp("surface_id", js("main")))))
+            expect(resp.contains("adapter_snapshot: main")).to_equal(true)
+
+        it "routes ui_access_visual_probe":
+            val resp = handle_jsonrpc(make_tool_call_req("13", "ui_access_visual_probe", jo1(jp("surface_id", js("main")))))
+            expect(resp.contains("visual_probe: main")).to_equal(true)

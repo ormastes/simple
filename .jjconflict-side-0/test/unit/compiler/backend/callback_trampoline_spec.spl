@@ -1,0 +1,156 @@
+"""
+# Callback Trampoline Specification
+
+**Feature IDs:** #SFFI-BIDIR #SFFI-CALLBACK #WS5
+**Category:** Compiler / Backend / Callback Trampoline
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests the callback trampoline generation module that converts C function
+pointer types to Simple-callable patterns. Covers type classification,
+naming, parsing, and C code emission.
+
+v1 scope: stateless function pointers only (no closures with captures).
+"""
+
+use std.spec
+use compiler.backend.callback_trampoline.*
+
+# @cover src/compiler/70.backend/backend/callback_trampoline.spl 80%
+
+describe "callback trampoline":
+    describe "is_callback_type":
+        it "accepts plain function pointer types":
+            expect(is_callback_type("Fn<(i64) -> i64>")).to_equal(true)
+
+        it "accepts multi-param function pointers":
+            expect(is_callback_type("Fn<(i64, f64) -> bool>")).to_equal(true)
+
+        it "accepts no-arg function pointers":
+            expect(is_callback_type("Fn<() -> void>")).to_equal(true)
+
+        it "rejects closures with captures":
+            expect(is_callback_type("Fn<(i64) -> i64>[x, y]")).to_equal(false)
+
+        it "rejects non-function types":
+            expect(is_callback_type("i64")).to_equal(false)
+            expect(is_callback_type("text")).to_equal(false)
+            expect(is_callback_type("List<i64>")).to_equal(false)
+
+    describe "is_closure_with_captures":
+        it "detects closures with capture lists":
+            expect(is_closure_with_captures("Fn<(i64) -> i64>[x, y]")).to_equal(true)
+
+        it "rejects plain function pointers":
+            expect(is_closure_with_captures("Fn<(i64) -> i64>")).to_equal(false)
+
+        it "rejects non-function types":
+            expect(is_closure_with_captures("i64")).to_equal(false)
+
+    describe "callback_typedef_name":
+        it "generates name for single-param callback":
+            val name = callback_typedef_name(["i64"], "i64")
+            expect(name).to_equal("spl_callback_i64_to_i64")
+
+        it "generates name for multi-param callback":
+            val name = callback_typedef_name(["i64", "f64"], "bool")
+            expect(name).to_equal("spl_callback_i64_f64_to_bool")
+
+        it "generates name for void-param callback":
+            val name = callback_typedef_name([], "void")
+            expect(name).to_equal("spl_callback_void_to_void")
+
+    describe "extract_callback_params":
+        it "extracts single parameter":
+            val params = extract_callback_params("Fn<(i64) -> i64>")
+            expect(params.len()).to_equal(1)
+            expect(params[0]).to_equal("i64")
+
+        it "extracts multiple parameters":
+            val params = extract_callback_params("Fn<(i64, f64) -> bool>")
+            expect(params.len()).to_equal(2)
+            expect(params[0]).to_equal("i64")
+            expect(params[1]).to_equal("f64")
+
+        it "returns empty list for no-arg function":
+            val params = extract_callback_params("Fn<() -> void>")
+            expect(params.len()).to_equal(0)
+
+    describe "extract_callback_return":
+        it "extracts return type":
+            val ret = extract_callback_return("Fn<(i64) -> bool>")
+            expect(ret).to_equal("bool")
+
+        it "extracts void return":
+            val ret = extract_callback_return("Fn<() -> void>")
+            expect(ret).to_equal("void")
+
+        it "extracts i64 return":
+            val ret = extract_callback_return("Fn<(i64, f64) -> i64>")
+            expect(ret).to_equal("i64")
+
+    describe "emit_callback_typedef":
+        it "generates correct C typedef for single-param callback":
+            val cb = CallbackTypedef(
+                name: "spl_callback_i64_to_i64",
+                return_type: "int64_t",
+                param_types: ["int64_t"]
+            )
+            val result = emit_callback_typedef(cb)
+            expect(result).to_equal("typedef int64_t (*spl_callback_i64_to_i64)(int64_t);")
+
+        it "generates correct C typedef for multi-param callback":
+            val cb = CallbackTypedef(
+                name: "spl_callback_i64_f64_to_bool",
+                return_type: "int64_t",
+                param_types: ["int64_t", "double"]
+            )
+            val result = emit_callback_typedef(cb)
+            expect(result).to_equal("typedef int64_t (*spl_callback_i64_f64_to_bool)(int64_t, double);")
+
+        it "generates void param list for no-arg callback":
+            val cb = CallbackTypedef(
+                name: "spl_callback_void_to_void",
+                return_type: "void",
+                param_types: []
+            )
+            val result = emit_callback_typedef(cb)
+            expect(result).to_equal("typedef void (*spl_callback_void_to_void)(void);")
+
+    describe "emit_callback_trampoline":
+        it "generates null-check and invocation":
+            val cb = CallbackTypedef(
+                name: "spl_callback_i64_to_i64",
+                return_type: "int64_t",
+                param_types: ["int64_t"]
+            )
+            val result = emit_callback_trampoline("_spl_trampoline_test", cb)
+            expect(result).to_contain("if (!_cb)")
+            expect(result).to_contain("return _cb(_a0)")
+
+        it "generates void return for void callback":
+            val cb = CallbackTypedef(
+                name: "spl_callback_void_to_void",
+                return_type: "void",
+                param_types: []
+            )
+            val result = emit_callback_trampoline("_spl_trampoline_void", cb)
+            expect(result).to_contain("if (!_cb)")
+            expect(result).to_contain("_cb()")
+
+    describe "build_callback_typedef":
+        it "builds typedef from Fn type string":
+            val cb = build_callback_typedef("Fn<(i64) -> i64>")
+            expect(cb.name).to_contain("spl_callback")
+            expect(cb.return_type).to_equal("int64_t")
+            expect(cb.param_types.len()).to_equal(1)
+            expect(cb.param_types[0]).to_equal("int64_t")
+
+        it "builds typedef from multi-param Fn type":
+            val cb = build_callback_typedef("Fn<(i64, f64) -> bool>")
+            expect(cb.return_type).to_equal("int64_t")
+            expect(cb.param_types.len()).to_equal(2)
+            expect(cb.param_types[0]).to_equal("int64_t")
+            expect(cb.param_types[1]).to_equal("double")

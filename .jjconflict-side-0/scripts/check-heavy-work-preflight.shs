@@ -1,0 +1,129 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+MIN_DISK_GIB="${MIN_DISK_GIB:-250}"
+MIN_MEM_GIB="${MIN_MEM_GIB:-32}"
+MAX_CPU_FRACTION="${MAX_CPU_FRACTION:-2}"
+
+pass() {
+    printf 'PASS %s\n' "$1"
+}
+
+fail() {
+    printf 'FAIL %s\n' "$1"
+}
+
+info() {
+    printf 'INFO %s\n' "$1"
+}
+
+blocked() {
+    printf 'BLOCKED %s\n' "$1"
+}
+
+exit_code=0
+
+# --- 1. Disk space ---
+disk_avail_kb=$(df --output=avail / 2>/dev/null | tail -1 | tr -d ' ' || echo 0)
+disk_avail_gib=$((disk_avail_kb / 1048576))
+info "disk_available_gib=$disk_avail_gib"
+if [ "$disk_avail_gib" -ge "$MIN_DISK_GIB" ]; then
+    pass "disk_space_min_${MIN_DISK_GIB}gib"
+else
+    fail "disk_space_min_${MIN_DISK_GIB}gib"
+    exit_code=1
+fi
+
+# --- 2. Available memory ---
+mem_avail_kb=$(grep MemAvailable /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
+mem_avail_gib=$((mem_avail_kb / 1048576))
+info "memory_available_gib=$mem_avail_gib"
+if [ "$mem_avail_gib" -ge "$MIN_MEM_GIB" ]; then
+    pass "memory_min_${MIN_MEM_GIB}gib"
+else
+    fail "memory_min_${MIN_MEM_GIB}gib"
+    exit_code=1
+fi
+
+# --- 3. Swap not over-committed ---
+swap_total_kb=$(grep SwapTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
+swap_used_kb=$(grep SwapFree /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
+swap_used_kb=$((swap_total_kb - swap_used_kb))
+swap_used_gib=$((swap_used_kb / 1048576))
+info "swap_used_gib=$swap_used_gib"
+if [ "$swap_used_gib" -le 2 ]; then
+    pass "swap_not_overcommitted"
+else
+    fail "swap_not_overcommitted"
+    exit_code=1
+fi
+
+# --- 4. CPU headroom ---
+cpu_count=$(nproc 2>/dev/null || echo 1)
+cpu_half=$((cpu_count / MAX_CPU_FRACTION))
+load_1m=$(cat /proc/loadavg 2>/dev/null | awk '{printf "%d", $1}' || echo 0)
+info "cpu_count=$cpu_count load_1m=$load_1m cpu_half=$cpu_half"
+if [ "$load_1m" -le "$cpu_half" ]; then
+    pass "cpu_load_below_half"
+else
+    fail "cpu_load_below_half"
+    exit_code=1
+fi
+
+# --- 5. No active QEMU guests ---
+qemu_count="$(pgrep -c qemu-system 2>/dev/null || true)"
+qemu_count="${qemu_count:-0}"
+info "qemu_running=$qemu_count"
+if [ "$qemu_count" -le 1 ]; then
+    pass "qemu_at_most_one"
+else
+    fail "qemu_at_most_one"
+    exit_code=1
+fi
+
+# --- 6. Kernel log: no recent hard lockup / OOM / NVMe errors ---
+kernel_danger=0
+if dmesg_out=$(dmesg --time-format iso 2>/dev/null | tail -200); then
+    for pattern in "hard LOCKUP" "blocked for more than" "Out of memory" "nvme.*I/O error" "usb.*disconnect"; do
+        if echo "$dmesg_out" | grep -qi "$pattern" 2>/dev/null; then
+            blocked "kernel_log_contains: $pattern"
+            kernel_danger=1
+        fi
+    done
+    if [ "$kernel_danger" -eq 0 ]; then
+        pass "kernel_log_clean"
+    else
+        exit_code=1
+    fi
+else
+    info "kernel_log_unavailable (dmesg requires privileges)"
+fi
+
+# --- 7. Git working tree clean ---
+if git -C "$ROOT_DIR" diff --quiet HEAD 2>/dev/null; then
+    pass "git_working_tree_clean"
+else
+    dirty_count=$(git -C "$ROOT_DIR" diff --name-only HEAD 2>/dev/null | wc -l)
+    info "git_dirty_files=$dirty_count"
+    blocked "git_working_tree_clean"
+fi
+
+# --- 8. No stale lock files ---
+if [ -f "$ROOT_DIR/.git/index.lock" ]; then
+    fail "no_stale_git_index_lock"
+    exit_code=1
+else
+    pass "no_stale_git_index_lock"
+fi
+
+# --- Summary ---
+if [ "$exit_code" -eq 0 ]; then
+    info "preflight=READY"
+else
+    info "preflight=BLOCKED"
+fi
+
+exit "$exit_code"

@@ -1,0 +1,656 @@
+# Editor Controller Core Methods
+#
+# Key dispatch, palette, settings, file tree, and command execution.
+
+use app.editor.editor_controller_types.*
+use app.editor.editor_controller.*
+use std.editor.buffer.buffer.*
+use std.editor.common.types.*
+use std.editor.core.session.*
+use std.editor.services.file_watcher.*
+use std.editor.view.lsp_result_panel.*
+use std.editor.view.md_editing.*
+use std.editor.extensions.builtin.md_commands.{md_buffer_content}
+use app.editor.commands.*
+use app.editor.editor_path_text_helpers.*
+
+fn ctrl_handle_key(ctrl: EditorController, key: text, rects: [SplitRect]) -> EditorAction:
+    if key == "":
+        return EditorAction(redraw: false, quit: false, status_msg: ctrl.status_msg)
+
+    if ctrl.palette_state != nil and ctrl.palette_state.visible:
+        return ctrl_dispatch_palette_key(ctrl, key)
+
+    if ctrl.settings_view != nil:
+        return ctrl_dispatch_settings_key(ctrl, key)
+
+    if ctrl.session.mode == editor_mode_command():
+        return ctrl_dispatch_command_key(ctrl, key)
+
+    if ctrl.session.mode == editor_mode_normal():
+        return ctrl_dispatch_normal_key(ctrl, key, rects)
+
+    if ctrl.session.mode == editor_mode_insert():
+        return ctrl_dispatch_insert_key(ctrl, key)
+
+    EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+
+fn ctrl_toggle_file_tree(ctrl: EditorController):
+    ctrl.file_tree_visible = if ctrl.file_tree_visible then false else: true
+    if ctrl.file_tree_visible:
+        ctrl.focus_panel = "file_tree"
+    else:
+        ctrl.focus_panel = "editor"
+
+fn ctrl_toggle_focus(ctrl: EditorController):
+    if ctrl.file_tree_visible:
+        ctrl.focus_panel = if ctrl.focus_panel == "editor" then "file_tree" else: "editor"
+
+fn ctrl_active_buffer(ctrl: EditorController) -> EditorBuffer:
+    ctrl.session.active_buffer()
+
+fn ctrl_mode(ctrl: EditorController) -> EditorMode:
+    ctrl.session.mode
+
+fn ctrl_is_running(ctrl: EditorController) -> bool:
+    ctrl.running
+
+fn ctrl_settings_open(ctrl: EditorController):
+    ctrl.settings_view = SettingsViewState.new(full_settings_schema())
+
+fn ctrl_settings_close(ctrl: EditorController):
+    ctrl.settings_view = nil
+
+fn ctrl_dispatch_settings_key(ctrl: EditorController, key: text) -> EditorAction:
+    val sv: SettingsViewState = ctrl.settings_view
+    if key == "j":
+        sv.select_next()
+    elif key == "k":
+        sv.select_prev()
+    elif key == "\t":
+        sv.next_category()
+    elif key == "h":
+        sv.prev_category()
+    elif key == "l":
+        sv.next_category()
+    elif key == "\r" or key == "\n":
+        if not sv.is_editing():
+            val setting_key = sv.current_setting_key()
+            if sv.current_setting_type() == "bool":
+                val cur = editor_config_get_by_key(ctrl.config, setting_key)
+                val toggled = if cur == "true" then "false" else: "true"
+                ctrl.config = editor_config_set_by_key(ctrl.config, setting_key, toggled)
+                ctrl.status_msg = setting_key + " = " + toggled
+            else:
+                val cur2 = editor_config_get_by_key(ctrl.config, setting_key)
+                sv.start_edit(cur2)
+    elif key == "\x1b":
+        if sv.is_editing():
+            sv.cancel_edit()
+        else:
+            ctrl_settings_close(ctrl)
+    elif key == "q":
+        ctrl_settings_close(ctrl)
+    elif key == "/":
+        sv.clear_search()
+    EditorAction(redraw: true, quit: not ctrl.running, status_msg: ctrl.status_msg)
+
+fn ctrl_dispatch_command_key(ctrl: EditorController, key: text) -> EditorAction:
+    val result = ctrl_handle_command_key(key, ctrl.commandline)
+    ctrl.commandline = result.commandline
+    if result.done:
+        val parsed = editor_parse_commandline(ctrl.commandline)
+        if parsed.name == "settings":
+            ctrl_settings_open(ctrl)
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            ctrl.status_msg = "settings"
+            return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+        if parsed.name == "palette":
+            ctrl_open_palette(ctrl)
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return EditorAction(redraw: true, quit: false, status_msg: "command palette")
+        if parsed.name == "preview":
+            ctrl_toggle_md_preview(ctrl)
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+        if parsed.name == "outline":
+            ctrl_toggle_md_outline(ctrl)
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+        if parsed.name == "quickfix":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_quickfix(ctrl)
+        if parsed.name == "quickfix-apply":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_apply_first_quickfix(ctrl)
+        if parsed.name == "problems":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_show_diagnostics_panel(ctrl)
+        if parsed.name == "diagnostics-filter":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_show_diagnostics_filter(ctrl, parsed.payload)
+        if parsed.name == "diagnostics-group":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_show_diagnostics_group(ctrl, parsed.payload)
+        if parsed.name == "diagnostics-sort":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_show_diagnostics_sort(ctrl, parsed.payload)
+        if parsed.name == "completion":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "completion")
+        if parsed.name == "hover":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "hover")
+        if parsed.name == "hover-dismiss":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_dismiss_lsp_hover_popup(ctrl)
+        if parsed.name == "definition":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "definition")
+        if parsed.name == "code-action":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "code-action")
+        if parsed.name == "references":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "references")
+        if parsed.name == "selection-ranges":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "selection-ranges")
+        if parsed.name == "selection-expand":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_expand_lsp_selection_range(ctrl)
+        if parsed.name == "selection-shrink":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_shrink_lsp_selection_range(ctrl)
+        if parsed.name == "selection-apply-all":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_apply_all_lsp_selection_ranges(ctrl)
+        if parsed.name == "document-symbols":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "document-symbols")
+        if parsed.name == "prepare-rename":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "prepare-rename")
+        if parsed.name == "rename":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_rename_active_symbol(ctrl, parsed.payload)
+        if parsed.name == "rename-preview":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_rename_active_symbol_preview(ctrl, parsed.payload)
+        if parsed.name == "rename-confirm":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_confirm_pending_workspace_edit(ctrl)
+        if parsed.name == "workspace-edit-cancel":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_cancel_pending_workspace_edit(ctrl)
+        if parsed.name == "formatting":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "formatting")
+        if parsed.name == "formatting-preview":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_formatting_preview(ctrl, "formatting")
+        if parsed.name == "formatting-save":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_formatting_save(ctrl, "formatting")
+        if parsed.name == "range-formatting":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "range-formatting")
+        if parsed.name == "range-formatting-preview":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_formatting_preview(ctrl, "range-formatting")
+        if parsed.name == "range-formatting-save":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_formatting_save(ctrl, "range-formatting")
+        if parsed.name == "signature-help":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "signature-help")
+        if parsed.name == "signature-next":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_select_signature_overload(ctrl, 1)
+        if parsed.name == "signature-prev":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_select_signature_overload(ctrl, 0 - 1)
+        if parsed.name == "signature-dismiss":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_dismiss_lsp_signature_popup(ctrl)
+        if parsed.name == "document-links":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "document-links")
+        if parsed.name == "open-link":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_open_markdown_link_under_cursor(ctrl)
+        if parsed.name == "folding-ranges":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "folding-ranges")
+        if parsed.name == "fold-all":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_fold_all_active_document(ctrl)
+        if parsed.name == "unfold-all":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_unfold_all_active_document(ctrl)
+        if parsed.name == "fold-toggle":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_toggle_active_markdown_fold(ctrl)
+        if parsed.name == "workspace-symbols":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "workspace-symbols")
+        if parsed.name == "semantic-tokens":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "semantic-tokens")
+        if parsed.name == "inlay-hints":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            ctrl_cancel_pending_inlay_hint_refresh(ctrl)
+            return ctrl_request_active_lsp_action(ctrl, "inlay-hints")
+        if parsed.name == "code-lens":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "code-lens")
+        if parsed.name == "code-lens-run":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_run_selected_code_lens(ctrl)
+        if parsed.name == "call-hierarchy":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_request_active_lsp_action(ctrl, "call-hierarchy")
+        if parsed.name == "lsp-jump":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_lsp_jump_selected(ctrl)
+        if parsed.name == "debug-start":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_start_debug_adapter(ctrl, parsed.payload)
+        if parsed.name == "debug-configs":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_debug_show_launch_configs(ctrl, parsed.payload)
+        if parsed.name == "keyboard-shortcuts":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_show_keyboard_shortcuts(ctrl)
+        if parsed.name == "debug-console":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_debug_show_session(ctrl)
+        if parsed.name == "debug-sessions":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_debug_show_sessions(ctrl)
+        if parsed.name == "debug-switch":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_debug_switch_session(ctrl, _editor_parse_i64(parsed.payload, 0))
+        if parsed.name == "daily-note-create":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_daily_note_create(ctrl, parsed.payload)
+        if parsed.name == "daily-note-picker":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_daily_note_picker(ctrl, parsed.payload)
+        if parsed.name == "template-insert":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_template_insert(ctrl, parsed.payload)
+        if parsed.name == "template-picker":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_template_picker(ctrl, parsed.payload)
+        if parsed.name == "wiki-embed-insert":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_embed_insert(ctrl, parsed.payload)
+        if parsed.name == "attachment-insert":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_attachment_insert(ctrl, parsed.payload)
+        if parsed.name == "attachment-picker":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_attachment_picker(ctrl, parsed.payload)
+        if parsed.name == "wiki-backlinks":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_show_backlinks(ctrl)
+        if parsed.name == "wiki-tasks":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_show_tasks(ctrl, parsed.payload)
+        if parsed.name == "wiki-task-batch":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_task_batch(ctrl, parsed.payload)
+        if parsed.name == "wiki-vault-task-batch":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_vault_task_batch(ctrl, parsed.payload)
+        if parsed.name == "wiki-properties":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_show_properties(ctrl)
+        if parsed.name == "wiki-property-set":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_set_property(ctrl, parsed.payload)
+        if parsed.name == "wiki-vault-property-set":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_vault_set_property(ctrl, parsed.payload)
+        if parsed.name == "wiki-vault-property-review":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_vault_property_review(ctrl, parsed.payload)
+        if parsed.name == "wiki-property-diagnostics":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_property_diagnostics(ctrl, parsed.payload)
+        if parsed.name == "wiki-tags":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_show_tags(ctrl, parsed.payload)
+        if parsed.name == "wiki-graph":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_show_graph(ctrl)
+        if parsed.name == "wiki-vault-search":
+            ctrl.session.mode = editor_mode_normal()
+            ctrl.commandline = ""
+            return ctrl_wiki_vault_search(ctrl, parsed.payload)
+        val dispatch_result = editor_dispatch_session(ctrl.session, parsed)
+        ctrl.status_msg = dispatch_result.message
+        if dispatch_result.quit:
+            ctrl.running = false
+        ctrl.session.mode = editor_mode_normal()
+        ctrl.commandline = ""
+    elif result.cancelled:
+        ctrl.session.mode = editor_mode_normal()
+        ctrl.commandline = ""
+        ctrl.status_msg = ""
+    EditorAction(redraw: true, quit: not ctrl.running, status_msg: ctrl.status_msg)
+
+fn ctrl_dispatch_normal_key(ctrl: EditorController, key: text, rects: [SplitRect]) -> EditorAction:
+    if key == "\x02":
+        ctrl_toggle_file_tree(ctrl)
+        return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+    if key == "\t":
+        ctrl_toggle_focus(ctrl)
+        return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+    if key == "\x10":
+        ctrl_open_palette(ctrl)
+        return EditorAction(redraw: true, quit: false, status_msg: "command palette")
+    if key == "\x16":
+        ctrl_toggle_md_preview(ctrl)
+        return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+    if key == "Ctrl+Space":
+        return ctrl_request_active_lsp_action(ctrl, "completion")
+    if key == "K":
+        return ctrl_request_active_lsp_action(ctrl, "hover")
+    if key == "F12":
+        return ctrl_request_active_lsp_action(ctrl, "definition")
+    if key == "Ctrl+.":
+        return ctrl_request_quickfix(ctrl)
+    if key == "Shift+Alt+Right":
+        return ctrl_expand_lsp_selection_range(ctrl)
+    if key == "Shift+Alt+Left":
+        return ctrl_shrink_lsp_selection_range(ctrl)
+    if key == "F5":
+        return ctrl_start_debug_process_adapter(ctrl, "simple")
+    if key == "\x1b" and ctrl.lsp_hover_popup.visible:
+        return ctrl_dismiss_lsp_hover_popup(ctrl)
+    if key == "\x1b" and ctrl.lsp_signature_popup.visible:
+        return ctrl_dismiss_lsp_signature_popup(ctrl)
+    if ctrl.session.dock_layout.active_right_panel() == "lsp-panel":
+        val lsp_panel_action = ctrl_dispatch_lsp_result_key(ctrl, key)
+        if lsp_panel_action.redraw:
+            return lsp_panel_action
+    if ctrl.session.dock_layout.active_right_panel() == "wiki-panel":
+        val wiki_panel_action = ctrl_dispatch_wiki_panel_key(ctrl, key)
+        if wiki_panel_action.redraw:
+            return wiki_panel_action
+    if ctrl.session.dock_layout.active_right_panel() == "problems":
+        val problems_action = ctrl_dispatch_diagnostics_panel_key(ctrl, key)
+        if problems_action.redraw:
+            return problems_action
+    if ctrl.session.dock_layout.active_right_panel() == "md-outline":
+        val outline_action = ctrl_dispatch_md_outline_key(ctrl, key)
+        if outline_action.redraw:
+            return outline_action
+
+    if ctrl.pending_prefix == "ctrl_w":
+        ctrl.pending_prefix = ""
+        val wresult: WincmdResult = wincmd_dispatch(ctrl.session, key, rects)
+        if wincmd_result_handled(wresult):
+            ctrl.status_msg = wincmd_result_message(wresult)
+            if wincmd_result_quit(wresult):
+                ctrl.running = false
+        return EditorAction(redraw: true, quit: not ctrl.running, status_msg: ctrl.status_msg)
+
+    if ctrl.pending_prefix == "]" or ctrl.pending_prefix == "[":
+        val saved_prefix = ctrl.pending_prefix
+        ctrl.pending_prefix = ""
+        val doc = ctrl.session.active_document()
+        if doc != nil and doc.language_id == "markdown":
+            val buffer_m = ctrl.session.active_buffer()
+            if buffer_m != nil:
+                val content = md_buffer_content(buffer_m)
+                val motion_result = md_dispatch_motion(saved_prefix, key, content, buffer_m.cursor_row_value(), buffer_m.cursor_col_value())
+                if motion_result.found:
+                    buffer_m.move_cursor(motion_result.line, motion_result.col)
+                    ctrl.status_msg = "motion"
+                return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+        return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+
+    if ctrl.pending_prefix == "g":
+        ctrl.pending_prefix = ""
+        val doc_g = ctrl.session.active_document()
+        if doc_g != nil and doc_g.language_id == "markdown" and key == "x":
+            val buffer_gx = ctrl.session.active_buffer()
+            if buffer_gx != nil:
+                return ctrl_open_markdown_link_under_cursor(ctrl)
+            return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+        val buffer_gg = ctrl.session.active_buffer()
+        if buffer_gg != nil:
+            buffer_gg.move_cursor(0, 0)
+            ctrl.status_msg = "top"
+        return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+
+    if ctrl.pending_prefix == "z":
+        ctrl.pending_prefix = ""
+        if key == "a":
+            return ctrl_toggle_active_markdown_fold(ctrl)
+        ctrl.status_msg = ""
+        return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+
+    if key == "\x17":
+        ctrl.pending_prefix = "ctrl_w"
+        return EditorAction(redraw: true, quit: false, status_msg: "Ctrl+W ...")
+
+    if key == "]" or key == "[":
+        ctrl.pending_prefix = key
+        return EditorAction(redraw: true, quit: false, status_msg: key + " ...")
+
+    if ctrl.focus_panel == "file_tree":
+        return ctrl_dispatch_file_tree_key(ctrl, key)
+
+    val buffer = ctrl.session.active_buffer()
+    if buffer == nil:
+        if key == ":":
+            ctrl.session.mode = editor_mode_command()
+            ctrl.commandline = ""
+        elif key == "q":
+            ctrl.running = false
+        return EditorAction(redraw: true, quit: not ctrl.running, status_msg: ctrl.status_msg)
+
+    if key == "g":
+        val doc_g2 = ctrl.session.active_document()
+        if doc_g2 != nil and doc_g2.language_id == "markdown":
+            ctrl.pending_prefix = "g"
+            return EditorAction(redraw: true, quit: false, status_msg: "g ...")
+    if key == "z":
+        val doc_z = ctrl.session.active_document()
+        if doc_z != nil and doc_z.language_id == "markdown":
+            ctrl.pending_prefix = "z"
+            return EditorAction(redraw: true, quit: false, status_msg: "z ...")
+
+    val result = ctrl_handle_normal_key(buffer, key)
+    ctrl.status_msg = result.message
+    if result.quit:
+        ctrl.running = false
+    if result.enter_insert:
+        ctrl.session.mode = editor_mode_insert()
+        ctrl.status_msg = "-- INSERT --"
+    if result.enter_command:
+        ctrl.session.mode = editor_mode_command()
+        ctrl.commandline = ""
+    EditorAction(redraw: true, quit: not ctrl.running, status_msg: ctrl.status_msg)
+
+fn ctrl_dispatch_insert_key(ctrl: EditorController, key: text) -> EditorAction:
+    val buffer = ctrl.session.active_buffer()
+    if buffer == nil:
+        ctrl.session.mode = editor_mode_normal()
+        return EditorAction(redraw: true, quit: false, status_msg: "")
+    val doc = ctrl.session.active_document()
+    if doc != nil and doc.language_id == "markdown":
+        if key == "\r" or key == "\n":
+            val current_line = buffer.line_at(buffer.cursor_row_value())
+            val continuation = md_assist_on_enter(current_line, buffer.cursor_col_value())
+            if continuation != "":
+                buffer.insert_at_cursor("\n" + continuation)
+                ctrl_update_markdown_preview(ctrl, doc, buffer)
+                ctrl.session.update_active_buffer(buffer)
+                ctrl_notify_active_lsp_changed(ctrl)
+                return EditorAction(redraw: true, quit: false, status_msg: "-- INSERT --")
+        if key == "\t":
+            val tab_line = buffer.line_at(buffer.cursor_row_value())
+            val same_row_col = md_assist_on_tab(tab_line, buffer.cursor_col_value())
+            val nav = md_table_next_cell(buffer.to_text(), buffer.cursor_row_value(), buffer.cursor_col_value())
+            if nav.found:
+                buffer.move_cursor(nav.line, nav.col)
+                ctrl.session.update_active_buffer(buffer)
+                return EditorAction(redraw: true, quit: false, status_msg: "-- INSERT --")
+            if same_row_col >= 0:
+                buffer.move_cursor(buffer.cursor_row_value(), same_row_col)
+                ctrl.session.update_active_buffer(buffer)
+                return EditorAction(redraw: true, quit: false, status_msg: "-- INSERT --")
+    var result = InsertKeyResult(message: "-- INSERT --", exit_insert: false)
+    if key == "\x1b":
+        result = InsertKeyResult(message: "", exit_insert: true)
+    elif key == "\x7f" or key == "\b":
+        buffer.delete_before_cursor()
+    elif key == "\r" or key == "\n":
+        buffer.insert_at_cursor("\n")
+    elif key.len() == 1:
+        val code = key.char_code_at(0)
+        if code >= 32:
+            buffer.insert_at_cursor(key)
+    ctrl.status_msg = result.message
+    if result.exit_insert:
+        ctrl.session.mode = editor_mode_normal()
+        ctrl.status_msg = ""
+    else:
+        ctrl.session.update_active_buffer(buffer)
+        if doc != nil and doc.language_id == "markdown":
+            ctrl_update_markdown_preview(ctrl, doc, buffer)
+        ctrl_notify_active_lsp_changed(ctrl)
+        if ctrl_should_trigger_signature_help(ctrl, key):
+            return ctrl_request_active_lsp_action(ctrl, "signature-help")
+    EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+
+fn ctrl_dispatch_file_tree_key(ctrl: EditorController, key: text) -> EditorAction:
+    if key == "j":
+        ctrl.file_tree.select_next()
+    elif key == "k":
+        ctrl.file_tree.select_prev()
+    elif key == "\r" or key == "\n":
+        if ctrl.file_tree.selected_is_dir():
+            ctrl.file_tree.toggle_expand()
+        else:
+            val fpath = ctrl.file_tree.selected_path()
+            ctrl.session.open_file(fpath)
+            ctrl_activate_active_language(ctrl)
+            ctrl.focus_panel = "editor"
+            ctrl.status_msg = "opened " + fpath
+    elif key == "\x1b":
+        ctrl.focus_panel = "editor"
+    elif key == ":":
+        ctrl.session.mode = editor_mode_command()
+        ctrl.commandline = ""
+    elif key == "q":
+        ctrl.running = false
+    EditorAction(redraw: true, quit: not ctrl.running, status_msg: ctrl.status_msg)
+
+fn ctrl_should_trigger_signature_help(ctrl: EditorController, key: text) -> bool:
+    key == "(" or key == ","
+
+fn ctrl_dispatch_palette_key(ctrl: EditorController, key: text) -> EditorAction:
+    if key == "\x1b":
+        ctrl.palette_state = palette_hide(ctrl.palette_state)
+        return EditorAction(redraw: true, quit: false, status_msg: "")
+    if key == "\r" or key == "\n":
+        val selected = palette_selected(ctrl.palette_state)
+        ctrl.palette_state = palette_hide(ctrl.palette_state)
+        if selected.command_name != "":
+            return ctrl_execute_palette_command(ctrl, selected.command_name, selected.command_payload)
+        return EditorAction(redraw: true, quit: false, status_msg: "")
+    if key == "\x1b[A":
+        ctrl.palette_state = palette_select_prev(ctrl.palette_state)
+        return EditorAction(redraw: true, quit: false, status_msg: "")
+    if key == "\x1b[B":
+        ctrl.palette_state = palette_select_next(ctrl.palette_state)
+        return EditorAction(redraw: true, quit: false, status_msg: "")
+    if key == "\x7f" or key == "\b":
+        val q = palette_query(ctrl.palette_state)
+        if q.len() > 0:
+            ctrl.palette_state = palette_update_query(ctrl.palette_state, q.slice(0, q.len() - 1))
+        return EditorAction(redraw: true, quit: false, status_msg: "")
+    if key.len() == 1:
+        val code = key.char_code_at(0)
+        if code >= 32:
+            ctrl.palette_state = palette_update_query(ctrl.palette_state, palette_query(ctrl.palette_state) + key)
+    EditorAction(redraw: true, quit: false, status_msg: "")

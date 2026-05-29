@@ -1,0 +1,199 @@
+# ============================================================================
+# RV32I RTL Decoder — Combinational Instruction Decoder
+# ============================================================================
+#
+# Translates decoder.vhd into Simple.  Pure functions only (combinational).
+# Extracts all fields from a 32-bit instruction, selects ALU op, generates
+# control signals, and sign-extends immediates.
+#
+# Supports all RV32I instruction formats: R, I, S, B, U, J.
+# ============================================================================
+
+use std.hardware.rv32i_rtl.pkg.{OP_LUI, OP_AUIPC, OP_JAL, OP_JALR}
+use std.hardware.rv32i_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_IMMED, OP_REG, OP_SYSTEM}
+use std.hardware.rv32i_rtl.pkg.{ALU_ADD, ALU_SUB, ALU_SLL, ALU_SLT, ALU_SLTU}
+use std.hardware.rv32i_rtl.pkg.{ALU_XOR, ALU_SRL, ALU_SRA, ALU_OR, ALU_AND}
+use std.hardware.rv32i_rtl.pkg.ALU_PASS_B
+
+# ============================================================================
+# Decode result — all decoder output signals
+# ============================================================================
+
+struct DecodeResult:
+    """All outputs from the combinational decoder."""
+    opcode: u32       # bits [6:0]
+    rd: u32           # bits [11:7]   — destination register
+    rs1: u32          # bits [19:15]  — source register 1
+    rs2: u32          # bits [24:20]  — source register 2
+    funct3: u32       # bits [14:12]
+    funct7: u32       # bits [31:25]
+    imm: u32          # Sign-extended immediate
+    alu_op: i64       # ALU operation code
+    reg_write: bool   # Write-back to register file
+    mem_read: bool    # Read from data memory
+    mem_write: bool   # Write to data memory
+    mem_to_reg: bool  # Load result goes to rd
+    alu_src: bool     # true = ALU op_b from immediate; false = from rs2
+    branch: bool      # Conditional branch instruction
+    jump: bool        # JAL or JALR
+
+# ============================================================================
+# Sign-extension helper (32-bit)
+# ============================================================================
+
+fn sign_extend_u32(value: u32, width: u32) -> u32:
+    """Sign-extend a value of the given bit width to 32 bits."""
+    val sign_bit = 1 << (width - 1)
+    if (value & sign_bit) != 0:
+        val fill = 0xFFFFFFFF << width
+        value | fill
+    else:
+        value
+
+# ============================================================================
+# Immediate extraction
+# ============================================================================
+
+fn extract_i_imm_u32(insn: u32) -> u32:
+    """I-type immediate: bits [31:20], sign-extended to 32 bits."""
+    val raw = (insn >> 20) & 0xFFF
+    sign_extend_u32(raw, 12)
+
+fn extract_s_imm_u32(insn: u32) -> u32:
+    """S-type immediate: [31:25] | [11:7], sign-extended to 32 bits."""
+    val hi = (insn >> 25) & 0x7F
+    val lo = (insn >> 7) & 0x1F
+    val raw = (hi << 5) | lo
+    sign_extend_u32(raw, 12)
+
+fn extract_b_imm_u32(insn: u32) -> u32:
+    """B-type immediate: 13-bit, sign-extended, bit[0]=0."""
+    val bit12 = (insn >> 31) & 0x1
+    val bit10_5 = (insn >> 25) & 0x3F
+    val bit4_1 = (insn >> 8) & 0xF
+    val bit11 = (insn >> 7) & 0x1
+    val raw = (bit12 << 12) | (bit11 << 11) | (bit10_5 << 5) | (bit4_1 << 1)
+    sign_extend_u32(raw, 13)
+
+fn extract_u_imm_u32(insn: u32) -> u32:
+    """U-type immediate: bits [31:12] shifted left by 12."""
+    insn & 0xFFFFF000
+
+fn extract_j_imm_u32(insn: u32) -> u32:
+    """J-type immediate: 21-bit, sign-extended, bit[0]=0."""
+    val bit20 = (insn >> 31) & 0x1
+    val bit10_1 = (insn >> 21) & 0x3FF
+    val bit11 = (insn >> 20) & 0x1
+    val bit19_12 = (insn >> 12) & 0xFF
+    val raw = (bit20 << 20) | (bit19_12 << 12) | (bit11 << 11) | (bit10_1 << 1)
+    sign_extend_u32(raw, 21)
+
+# ============================================================================
+# ALU operation selection
+# ============================================================================
+
+fn select_alu_op(opcode: u32, funct3: u32, funct7: u32) -> i64:
+    """Select ALU operation based on opcode, funct3, and funct7.
+    Mirrors the VHDL decoder ALU-op process."""
+
+    if opcode == OP_REG:
+        if funct3 == 0x0:
+            # ADD / SUB — funct7 bit 5 disambiguates
+            if (funct7 & 0x20) != 0:
+                return ALU_SUB
+            else:
+                return ALU_ADD
+        if funct3 == 0x1: return ALU_SLL
+        if funct3 == 0x2: return ALU_SLT
+        if funct3 == 0x3: return ALU_SLTU
+        if funct3 == 0x4: return ALU_XOR
+        if funct3 == 0x5:
+            if (funct7 & 0x20) != 0:
+                return ALU_SRA
+            else:
+                return ALU_SRL
+        if funct3 == 0x6: return ALU_OR
+        if funct3 == 0x7: return ALU_AND
+        return ALU_ADD
+
+    else if opcode == OP_IMMED:
+        if funct3 == 0x0: return ALU_ADD
+        if funct3 == 0x1: return ALU_SLL
+        if funct3 == 0x2: return ALU_SLT
+        if funct3 == 0x3: return ALU_SLTU
+        if funct3 == 0x4: return ALU_XOR
+        if funct3 == 0x5:
+            if (funct7 & 0x20) != 0:
+                return ALU_SRA
+            else:
+                return ALU_SRL
+        if funct3 == 0x6: return ALU_OR
+        if funct3 == 0x7: return ALU_AND
+        return ALU_ADD
+
+    else if opcode == OP_LUI:
+        return ALU_PASS_B
+
+    # Default: ADD (used for load/store address calculation, AUIPC, JAL, JALR)
+    ALU_ADD
+
+# ============================================================================
+# Main decode function
+# ============================================================================
+
+fn decode_instruction(instruction: u32) -> DecodeResult:
+    """Decode a 32-bit RV32I instruction into all control and data signals.
+    Mirrors the VHDL decoder entity."""
+
+    # Field extraction
+    val op = instruction & 0x7F
+    val rd = (instruction >> 7) & 0x1F
+    val f3 = (instruction >> 12) & 0x7
+    val rs1 = (instruction >> 15) & 0x1F
+    val rs2 = (instruction >> 20) & 0x1F
+    val f7 = (instruction >> 25) & 0x7F
+
+    # Immediate extraction based on opcode format
+    var imm: u32 = 0
+    if op == OP_IMMED or op == OP_LOAD or op == OP_JALR:
+        imm = extract_i_imm_u32(instruction)
+    else if op == OP_STORE:
+        imm = extract_s_imm_u32(instruction)
+    else if op == OP_BRANCH:
+        imm = extract_b_imm_u32(instruction)
+    else if op == OP_LUI or op == OP_AUIPC:
+        imm = extract_u_imm_u32(instruction)
+    else if op == OP_JAL:
+        imm = extract_j_imm_u32(instruction)
+
+    # ALU operation
+    val alu_op = select_alu_op(op, f3, f7)
+
+    # Control signals (matching VHDL concurrent assignments)
+    val reg_w = (op == OP_REG or op == OP_IMMED or op == OP_LOAD or
+                 op == OP_LUI or op == OP_AUIPC or op == OP_JAL or op == OP_JALR)
+    val m_read = op == OP_LOAD
+    val m_write = op == OP_STORE
+    val m_to_reg = op == OP_LOAD
+    val a_src = (op == OP_IMMED or op == OP_LOAD or op == OP_STORE or
+                 op == OP_LUI or op == OP_AUIPC or op == OP_JAL or op == OP_JALR)
+    val br = op == OP_BRANCH
+    val jmp = op == OP_JAL or op == OP_JALR
+
+    DecodeResult(
+        opcode: op,
+        rd: rd,
+        rs1: rs1,
+        rs2: rs2,
+        funct3: f3,
+        funct7: f7,
+        imm: imm,
+        alu_op: alu_op,
+        reg_write: reg_w,
+        mem_read: m_read,
+        mem_write: m_write,
+        mem_to_reg: m_to_reg,
+        alu_src: a_src,
+        branch: br,
+        jump: jmp
+    )

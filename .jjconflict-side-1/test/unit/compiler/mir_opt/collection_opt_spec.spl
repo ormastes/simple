@@ -1,0 +1,598 @@
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirBlock}
+use compiler.mir_opt.mir_opt.collection_opt.{create_collection_opt_pass}
+use compiler.mir_opt.mir_opt.loop_detect.{LoopInfo}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
+
+fn _co_lid(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn _co_copy(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(_co_lid(id)))
+
+fn _co_int(value: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), MirType.i64()))
+
+fn _co_local(id: i64, type_: MirType) -> MirLocal:
+    MirLocal(
+        id: _co_lid(id),
+        name: nil,
+        type_: type_,
+        kind: LocalKind.Temp,
+        is_ghost: false
+    )
+
+fn _co_func(name: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+    ))
+
+fn _co_block(instructions: [MirInst]) -> MirBlock:
+    MirBlock(
+        id: BlockId(id: 0),
+        label: Some("entry"),
+        instructions: instructions,
+        terminator: MirTerminator.Return(nil)
+    )
+
+fn _co_block_with(id: i64, instructions: [MirInst], terminator: MirTerminator) -> MirBlock:
+    MirBlock(
+        id: BlockId(id: id),
+        label: Some("b{id}"),
+        instructions: instructions,
+        terminator: terminator
+    )
+
+fn _co_loop(header: i64, body: [i64]) -> LoopInfo:
+    var body_blocks: [BlockId] = []
+    for id in body:
+        body_blocks.push(BlockId(id: id))
+    LoopInfo(
+        header: BlockId(id: header),
+        body: body_blocks,
+        backedges: body_blocks,
+        exit_edges: [],
+        trip_count: nil
+    )
+
+fn _co_driver_manifest_attr_default() -> DriverManifestAttr:
+    DriverManifestAttr(
+        kind: DriverManifestAttrKind.Driver,
+        driver_class: 0,
+        vendor: 0,
+        device_ids: [],
+        version: "",
+        abi: ""
+    )
+
+fn _co_function(blocks: [MirBlock]) -> MirFunction:
+    _co_function_with_locals(blocks, [])
+
+fn _co_function_with_locals(blocks: [MirBlock], locals: [MirLocal]) -> MirFunction:
+    val sig = MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)
+    MirFunction(
+        SymbolId(id: 1), "test_fn", sig, locals, blocks,
+        BlockId(id: 0),
+        Span(0, 0, 1, 1),
+        [], false, nil, {}, nil, false, false, "",
+        false, _co_driver_manifest_attr_default(),
+        false, vhdl_hardware_metadata_default(),
+        false
+    )
+
+fn _co_count_rt_array_len(block: MirBlock) -> i64:
+    _co_count_named_call(block, "rt_array_len")
+
+fn _co_count_named_call(block: MirBlock, expected: text) -> i64:
+    var count = 0
+    for inst in block.instructions:
+        match inst.kind:
+            case Call(_, func, _):
+                match func.kind:
+                    case Const(value, _):
+                        match value:
+                            case Str(name):
+                                if name == expected:
+                                    count = count + 1
+                            case _:
+                                ()
+                    case _:
+                        ()
+            case _:
+                ()
+    count
+
+fn _co_count_bounds_checks(block: MirBlock) -> i64:
+    var count = 0
+    for inst in block.instructions:
+        match inst.kind:
+            case Intrinsic(_, name, _):
+                if name == "bounds_check":
+                    count = count + 1
+            case _:
+                ()
+    count
+
+fn _co_count_copy_from(block: MirBlock, src_id: i64) -> i64:
+    var count = 0
+    for inst in block.instructions:
+        match inst.kind:
+            case Copy(_, src):
+                if src.id == src_id:
+                    count = count + 1
+            case _:
+                ()
+    count
+
+fn _co_count_binop(block: MirBlock, expected: MirBinOp) -> i64:
+    var count = 0
+    for inst in block.instructions:
+        match inst.kind:
+            case BinOp(_, op, _, _):
+                if op == expected:
+                    count = count + 1
+            case _:
+                ()
+    count
+
+fn _co_count_bitcast(block: MirBlock) -> i64:
+    var count = 0
+    for inst in block.instructions:
+        match inst.kind:
+            case Bitcast(_, _, _):
+                count = count + 1
+            case _:
+                ()
+    count
+
+describe "MIR Collection Optimization":
+    it "treats set membership tests as pure hoistable collection queries":
+        var opt = create_collection_opt_pass()
+
+        expect(opt.is_pure_method("contains")).to_equal(true)
+        expect(opt.is_pure_method("has")).to_equal(true)
+        expect(opt.is_pure_method("size")).to_equal(true)
+        expect(opt.is_pure_method("contains_key")).to_equal(true)
+        expect(opt.is_pure_method("is_subset")).to_equal(true)
+        expect(opt.is_pure_method("is_superset")).to_equal(true)
+        expect(opt.is_pure_method("is_disjoint")).to_equal(true)
+        expect(opt.is_pure_method("insert")).to_equal(false)
+
+    it "reuses repeated pure set relationship query results in a block":
+        val subset1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("is_subset"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val subset2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("is_subset"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val disjoint1 = MirInst(kind: MirInstKind.Call(_co_lid(12), _co_func("is_disjoint"), [_co_copy(1), _co_copy(4)]), span: nil)
+        val disjoint2 = MirInst(kind: MirInstKind.Call(_co_lid(13), _co_func("is_disjoint"), [_co_copy(1), _co_copy(4)]), span: nil)
+        val func = _co_function([_co_block([subset1, cmp, subset2, disjoint1, disjoint2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "is_subset")).to_equal(1)
+        expect(_co_count_named_call(block, "is_disjoint")).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(2)
+
+    it "reuses repeated pure has membership query results in a block":
+        val has1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("has"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val has2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("has"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([has1, cmp, has2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "has")).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "reuses repeated pure set membership query results in a block":
+        val contains1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val contains2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([contains1, cmp, contains2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "contains")).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "does not reuse pure set membership across mutating collection calls":
+        val contains1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val insert = MirInst(kind: MirInstKind.Call(nil, _co_func("insert"), [_co_copy(1), _co_copy(3)]), span: nil)
+        val contains2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([contains1, insert, contains2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "contains")).to_equal(2)
+        expect(opt.pure_queries_reused).to_equal(0)
+
+    it "reuses repeated runtime collection reads in a block":
+        val get1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_get"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val get2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_get"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([get1, cmp, get2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_array_get")).to_equal(1)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "keeps runtime length reads from fencing repeated runtime collection reads":
+        val get1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_get"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val len = MirInst(kind: MirInstKind.Call(_co_lid(20), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val get2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_get"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([get1, len, get2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_array_get")).to_equal(1)
+        expect(_co_count_rt_array_len(block)).to_equal(1)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "reuses repeated typed byte reads in a block":
+        val get1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_typed_bytes_u8_data_at"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val get2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_typed_bytes_u8_data_at"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([get1, cmp, get2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_typed_bytes_u8_data_at")).to_equal(1)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "does not reuse runtime collection reads across append calls":
+        val get1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_typed_words_u64_at"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val push = MirInst(kind: MirInstKind.Call(nil, _co_func("rt_typed_words_u64_push"), [_co_copy(1), _co_copy(3)]), span: nil)
+        val get2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_typed_words_u64_at"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([get1, push, get2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_typed_words_u64_at")).to_equal(2)
+        expect(opt.pure_queries_reused).to_equal(0)
+
+    it "reuses repeated runtime array data pointer reads in a block":
+        val ptr1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_data_ptr"), [_co_copy(1)]), span: nil)
+        val use_ptr = MirInst(kind: MirInstKind.GetElementPtr(_co_lid(20), _co_copy(10), [_co_copy(2)]), span: nil)
+        val ptr2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_data_ptr"), [_co_copy(1)]), span: nil)
+        val func = _co_function([_co_block([ptr1, use_ptr, ptr2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_array_data_ptr")).to_equal(1)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "reuses repeated runtime dict lookups in a block":
+        val get1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_dict_get"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val get2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_dict_get"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([get1, cmp, get2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_dict_get")).to_equal(1)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "reuses repeated runtime contains queries in a block":
+        val contains1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val contains2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val dict_contains1 = MirInst(kind: MirInstKind.Call(_co_lid(12), _co_func("rt_dict_contains_key"), [_co_copy(4), _co_copy(5)]), span: nil)
+        val dict_contains2 = MirInst(kind: MirInstKind.Call(_co_lid(13), _co_func("rt_dict_contains_key"), [_co_copy(4), _co_copy(5)]), span: nil)
+        val func = _co_function([_co_block([contains1, cmp, contains2, dict_contains1, dict_contains2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_array_contains")).to_equal(1)
+        expect(_co_count_named_call(block, "rt_dict_contains_key")).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(2)
+
+    it "reuses repeated runtime array first reads in a block":
+        val first1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_first"), [_co_copy(1)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val first2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_first"), [_co_copy(1)]), span: nil)
+        val func = _co_function([_co_block([first1, cmp, first2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_array_first")).to_equal(1)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "reuses repeated typed array length queries for adjacent bounds checks":
+        val len1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val check1 = MirInst(kind: MirInstKind.Intrinsic(nil, "bounds_check", [_co_copy(2), _co_copy(10)]), span: nil)
+        val len2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val check2 = MirInst(kind: MirInstKind.Intrinsic(nil, "bounds_check", [_co_copy(3), _co_copy(11)]), span: nil)
+        val func = _co_function([_co_block([len1, check1, len2, check2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_rt_array_len(block)).to_equal(1)
+        expect(_co_count_bounds_checks(block)).to_equal(2)
+        expect(opt.len_queries_reused).to_equal(1)
+
+    it "reuses repeated typed array length queries for traversal compares":
+        val len1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val cmp1 = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Lt, _co_copy(2), _co_copy(10)), span: nil)
+        val len2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val cmp2 = MirInst(kind: MirInstKind.BinOp(_co_lid(21), MirBinOp.Lt, _co_copy(3), _co_copy(11)), span: nil)
+        val func = _co_function([_co_block([len1, cmp1, len2, cmp2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_rt_array_len(block)).to_equal(1)
+        expect(opt.len_queries_reused).to_equal(1)
+
+    it "replaces duplicate typed array length calls even when the duplicate has multiple consumers":
+        val len1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val len2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Lt, _co_copy(2), _co_copy(11)), span: nil)
+        val check = MirInst(kind: MirInstKind.Intrinsic(nil, "bounds_check", [_co_copy(2), _co_copy(11)]), span: nil)
+        val func = _co_function([_co_block([len1, len2, cmp, check])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_rt_array_len(block)).to_equal(1)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)
+        expect(opt.len_queries_reused).to_equal(1)
+
+    it "does not reuse typed array length queries across mutating collection calls":
+        val len1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val push = MirInst(kind: MirInstKind.Call(nil, _co_func("push"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val len2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val func = _co_function([_co_block([len1, push, len2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_rt_array_len(block)).to_equal(2)
+        expect(opt.len_queries_reused).to_equal(0)
+
+    it "hoists invariant runtime collection metadata reads out of read-only loops":
+        val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
+        val len = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val body = _co_block_with(1, [len], MirTerminator.Goto(BlockId(id: 0)))
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
+
+        expect(_co_count_rt_array_len(optimized[0])).to_equal(1)
+        expect(_co_count_rt_array_len(optimized[1])).to_equal(0)
+        expect(opt.calls_hoisted).to_equal(1)
+
+    it "keeps runtime collection metadata reads inside mutating loops":
+        val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
+        val len = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val push = MirInst(kind: MirInstKind.Call(nil, _co_func("rt_typed_words_u64_push"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val body = _co_block_with(1, [len, push], MirTerminator.Goto(BlockId(id: 0)))
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
+
+        expect(_co_count_rt_array_len(optimized[0])).to_equal(0)
+        expect(_co_count_rt_array_len(optimized[1])).to_equal(1)
+        expect(opt.calls_hoisted).to_equal(0)
+
+    it "hoists invariant scalar tag operations used by collection loops":
+        val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
+        val tag = MirInst(kind: MirInstKind.BinOp(_co_lid(10), MirBinOp.Shl, _co_copy(2), _co_int(3)), span: nil)
+        val mask = MirInst(kind: MirInstKind.BinOp(_co_lid(11), MirBinOp.BitOr, _co_copy(10), _co_int(1)), span: nil)
+        val body = _co_block_with(1, [tag, mask], MirTerminator.Goto(BlockId(id: 0)))
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
+
+        expect(_co_count_binop(optimized[0], MirBinOp.Shl)).to_equal(1)
+        expect(_co_count_binop(optimized[0], MirBinOp.BitOr)).to_equal(1)
+        expect(_co_count_binop(optimized[1], MirBinOp.Shl)).to_equal(0)
+        expect(_co_count_binop(optimized[1], MirBinOp.BitOr)).to_equal(0)
+        expect(opt.scalar_ops_hoisted).to_equal(2)
+
+    it "hoists invariant scalar chains through bitcasts":
+        val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
+        val casted = MirInst(kind: MirInstKind.Bitcast(_co_lid(10), _co_copy(2), MirType.i64()), span: nil)
+        val mask = MirInst(kind: MirInstKind.BinOp(_co_lid(11), MirBinOp.BitAnd, _co_copy(10), _co_int(255)), span: nil)
+        val body = _co_block_with(1, [casted, mask], MirTerminator.Goto(BlockId(id: 0)))
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
+
+        expect(_co_count_bitcast(optimized[0])).to_equal(1)
+        expect(_co_count_binop(optimized[0], MirBinOp.BitAnd)).to_equal(1)
+        expect(_co_count_bitcast(optimized[1])).to_equal(0)
+        expect(_co_count_binop(optimized[1], MirBinOp.BitAnd)).to_equal(0)
+        expect(opt.scalar_ops_hoisted).to_equal(2)
+
+    it "keeps scalar operations inside loops when they use loop-defined values":
+        val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
+        val next_slot = MirInst(kind: MirInstKind.BinOp(_co_lid(2), MirBinOp.BitXor, _co_copy(2), _co_int(1)), span: nil)
+        val tag = MirInst(kind: MirInstKind.BinOp(_co_lid(10), MirBinOp.Shl, _co_copy(2), _co_int(3)), span: nil)
+        val body = _co_block_with(1, [next_slot, tag], MirTerminator.Goto(BlockId(id: 0)))
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
+
+        expect(_co_count_binop(optimized[0], MirBinOp.Shl)).to_equal(0)
+        expect(_co_count_binop(optimized[1], MirBinOp.Shl)).to_equal(1)
+        expect(opt.scalar_ops_hoisted).to_equal(0)
+
+    it "specializes proven array index dispatch to direct array get":
+        val index_get = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_index_get"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
+        val func = _co_function_with_locals([_co_block([index_get])], [_co_local(1, array_type)])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_index_get")).to_equal(0)
+        expect(_co_count_named_call(block, "rt_array_get")).to_equal(1)
+        expect(opt.array_index_gets_specialized).to_equal(1)
+
+    it "keeps generic index dispatch when receiver type is not array":
+        val index_get = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_index_get"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function_with_locals([_co_block([index_get])], [_co_local(1, MirType.i64())])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_index_get")).to_equal(1)
+        expect(_co_count_named_call(block, "rt_array_get")).to_equal(0)
+        expect(opt.array_index_gets_specialized).to_equal(0)
+
+    it "elides dead append-only capacity arrays":
+        val alloc = MirInst(kind: MirInstKind.Call(_co_lid(1), _co_func("rt_array_new_with_cap"), [_co_copy(2)]), span: nil)
+        val push = MirInst(kind: MirInstKind.Call(nil, _co_func("rt_typed_words_u64_push"), [_co_copy(1), _co_copy(3)]), span: nil)
+        val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
+        val func = _co_function_with_locals(
+            [_co_block([alloc, push])],
+            [_co_local(1, array_type), _co_local(2, MirType(kind: MirTypeKind.U64)), _co_local(3, MirType(kind: MirTypeKind.U64))]
+        )
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(0)
+        expect(_co_count_named_call(block, "rt_typed_words_u64_push")).to_equal(0)
+
+    it "elides dead append-only u64 capacity arrays":
+        val alloc = MirInst(kind: MirInstKind.Call(_co_lid(1), _co_func("rt_array_new_with_cap_u64"), [_co_copy(2)]), span: nil)
+        val push = MirInst(kind: MirInstKind.Call(nil, _co_func("rt_typed_words_u64_push"), [_co_copy(1), _co_copy(3)]), span: nil)
+        val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
+        val func = _co_function_with_locals(
+            [_co_block([alloc, push])],
+            [_co_local(1, array_type), _co_local(2, MirType(kind: MirTypeKind.U64)), _co_local(3, MirType(kind: MirTypeKind.U64))]
+        )
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_array_new_with_cap_u64")).to_equal(0)
+        expect(_co_count_named_call(block, "rt_typed_words_u64_push")).to_equal(0)
+        expect(opt.dead_append_arrays_elided).to_equal(1)
+
+    it "keeps capacity arrays when append result is observed":
+        val alloc = MirInst(kind: MirInstKind.Call(_co_lid(1), _co_func("rt_array_new_with_cap"), [_co_copy(2)]), span: nil)
+        val push = MirInst(kind: MirInstKind.Call(_co_lid(4), _co_func("rt_typed_words_u64_push"), [_co_copy(1), _co_copy(3)]), span: nil)
+        val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
+        val func = _co_function_with_locals(
+            [_co_block([alloc, push])],
+            [_co_local(1, array_type), _co_local(2, MirType(kind: MirTypeKind.U64)), _co_local(3, MirType(kind: MirTypeKind.U64)), _co_local(4, MirType.bool())]
+        )
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(1)
+        expect(_co_count_named_call(block, "rt_typed_words_u64_push")).to_equal(1)
+        expect(opt.dead_append_arrays_elided).to_equal(0)
+
+    it "elides dead write-only capacity arrays":
+        val alloc = MirInst(kind: MirInstKind.Call(_co_lid(1), _co_func("rt_array_new_with_cap"), [_co_copy(2)]), span: nil)
+        val set = MirInst(kind: MirInstKind.Call(nil, _co_func("rt_typed_words_u64_set"), [_co_copy(1), _co_copy(4), _co_copy(3)]), span: nil)
+        val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
+        val func = _co_function_with_locals(
+            [_co_block([alloc, set])],
+            [
+                _co_local(1, array_type),
+                _co_local(2, MirType(kind: MirTypeKind.U64)),
+                _co_local(3, MirType(kind: MirTypeKind.U64)),
+                _co_local(4, MirType(kind: MirTypeKind.U64))
+            ]
+        )
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(0)
+        expect(_co_count_named_call(block, "rt_typed_words_u64_set")).to_equal(0)
+        expect(opt.dead_append_arrays_elided).to_equal(1)
+
+    it "keeps write-only capacity arrays when write result is observed":
+        val alloc = MirInst(kind: MirInstKind.Call(_co_lid(1), _co_func("rt_array_new_with_cap"), [_co_copy(2)]), span: nil)
+        val set = MirInst(kind: MirInstKind.Call(_co_lid(5), _co_func("rt_typed_words_u64_set"), [_co_copy(1), _co_copy(4), _co_copy(3)]), span: nil)
+        val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
+        val func = _co_function_with_locals(
+            [_co_block([alloc, set])],
+            [
+                _co_local(1, array_type),
+                _co_local(2, MirType(kind: MirTypeKind.U64)),
+                _co_local(3, MirType(kind: MirTypeKind.U64)),
+                _co_local(4, MirType(kind: MirTypeKind.U64)),
+                _co_local(5, MirType.bool())
+            ]
+        )
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(1)
+        expect(_co_count_named_call(block, "rt_typed_words_u64_set")).to_equal(1)
+        expect(opt.dead_append_arrays_elided).to_equal(0)
+
+    it "elides dead append-only arrays after known data pointer lowering":
+        val alloc = MirInst(kind: MirInstKind.Call(_co_lid(1), _co_func("rt_array_new_with_cap"), [_co_copy(2)]), span: nil)
+        val data_ptr_store = MirInst(kind: MirInstKind.Call(nil, _co_func("rt_typed_words_u64_store_known_data_at"), [_co_copy(1), _co_copy(5), _co_copy(6), _co_copy(3)]), span: nil)
+        val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
+        val func = _co_function_with_locals(
+            [_co_block([alloc, data_ptr_store])],
+            [
+                _co_local(1, array_type),
+                _co_local(2, MirType(kind: MirTypeKind.U64)),
+                _co_local(3, MirType(kind: MirTypeKind.U64)),
+                _co_local(5, MirType.i64()),
+                _co_local(6, MirType(kind: MirTypeKind.U64))
+            ]
+        )
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(0)
+        expect(_co_count_named_call(block, "rt_typed_words_u64_store_known_data_at")).to_equal(0)
+        expect(opt.dead_append_arrays_elided).to_equal(1)

@@ -1,0 +1,136 @@
+use std.spec.*
+use examples.browser.feature.browser.app.{BrowserApp, BrowserCommand}
+use examples.browser.shared.error.{BrowserResult}
+use examples.browser.shared.config.{BrowserConfig}
+use examples.browser.shared.logging.{Logger, LogLevel}
+use examples.browser.entity.browser.tab_types.{TabState}
+use examples.browser.entity.browser.navigation_types.{NavigationState}
+use examples.browser.feature.browser.tab_manager.{TabManager}
+use examples.browser.feature.browser.navigation.{NavigationController}
+use examples.browser.feature.net.h1_client.{MockResponseRegistry, set_mock_registry}
+
+fn _app() -> BrowserApp:
+    val logger = Logger(name: "app-command-test")
+    val config = BrowserConfig(
+            name: "simple-browser-platform",
+            version: "0.1.0",
+            homepage: "about:blank",
+            user_agent: "SimpleBrowser/0.1",
+            tab_limit: 8,
+            process_model: "site-per-process",
+            default_encoding: "utf-8",
+            max_history_entries: 1000,
+            max_connections_per_host: 6,
+            max_total_connections: 64,
+            dns_cache_ttl: 300,
+            http_cache_size_mb: 256,
+            cookie_policy: "same-site-lax",
+            connect_timeout_ms: 30000,
+            read_timeout_ms: 60000,
+            gpu_compositing: true,
+            hardware_acceleration: true,
+            max_texture_size: 4096,
+            tile_size: 256,
+            target_fps: 60,
+            csp_default: "default-src 'self'",
+            mixed_content: "block"
+        )
+    BrowserApp(
+        windows: [],
+        active_window: 0,
+        config: config,
+        is_running: false,
+        next_window_id: 1,
+        logger: logger,
+        tab_manager: TabManager(
+            tabs: [],
+            active_tab_id: 0,
+            tab_groups: [],
+            next_tab_id: 1,
+            next_group_id: 1,
+            max_tabs: config.tab_limit,
+            logger: logger
+        ),
+        navigation: NavigationController(
+            entries: [],
+            current_index: -1,
+            is_loading: false,
+            state: NavigationState.Idle,
+            logger: logger
+        ),
+        last_find_query: "",
+        zoom_percent: 100,
+        devtools_open: false,
+        page_title: "New Tab",
+        page_text_content: "",
+        page_html: ""
+    )
+
+fn _ok(result: BrowserResult<()>) -> bool:
+    match result:
+        Ok(_): true
+        Err(_): false
+
+fn _register_pages():
+    var registry = MockResponseRegistry.create()
+    registry.register("example.com", 200, "<html><body><h1>Example Page</h1><p>loaded</p><div>ok</div></body></html>")
+    registry.register("a.example", 200, "<html><body><h1>A Page</h1><p>a loaded</p><div>ok</div></body></html>")
+    registry.register("b.example", 200, "<html><body><h1>B Page</h1><p>b loaded</p><div>ok</div></body></html>")
+    set_mock_registry(registry)
+
+describe "BrowserApp command execution":
+    it "creates tabs and navigates the active tab":
+        _register_pages()
+        var app = _app()
+        expect(_ok(app.handle_command(BrowserCommand.NewTab))).to_equal(true)
+        expect(app.tab_manager.get_tab_count()).to_equal(1)
+        expect(app.tab_manager.get_active_tab().?).to_equal(true)
+        expect(_ok(app.handle_command(BrowserCommand.Navigate("example.com")))).to_equal(true)
+        expect(app.navigation.current_url()).to_equal("https://example.com")
+        val tab = app.tab_manager.get_active_tab().unwrap()
+        expect(tab.url).to_equal("https://example.com")
+        expect(tab.state).to_equal(TabState.Complete)
+        expect(tab.title).to_equal("Example Page")
+        expect(app.page_text_content).to_contain("loaded")
+
+    it "executes back forward and reload against navigation state":
+        _register_pages()
+        var app = _app()
+        expect(_ok(app.handle_command(BrowserCommand.NewTab))).to_equal(true)
+        expect(_ok(app.handle_command(BrowserCommand.Navigate("https://a.example")))).to_equal(true)
+        expect(_ok(app.handle_command(BrowserCommand.Navigate("https://b.example")))).to_equal(true)
+        expect(_ok(app.handle_command(BrowserCommand.Back))).to_equal(true)
+        expect(app.navigation.current_url()).to_equal("https://a.example")
+        expect(app.tab_manager.get_active_tab().unwrap().url).to_equal("https://a.example")
+        expect(app.page_title).to_equal("A Page")
+        expect(_ok(app.handle_command(BrowserCommand.Forward))).to_equal(true)
+        expect(app.navigation.current_url()).to_equal("https://b.example")
+        expect(app.page_title).to_equal("B Page")
+        expect(_ok(app.handle_command(BrowserCommand.Reload))).to_equal(true)
+        expect(app.tab_manager.get_active_tab().unwrap().state).to_equal(TabState.Complete)
+
+    it "closes the active tab and keeps a usable tab open":
+        var app = _app()
+        expect(_ok(app.handle_command(BrowserCommand.NewTab))).to_equal(true)
+        expect(_ok(app.handle_command(BrowserCommand.NewTab))).to_equal(true)
+        expect(app.tab_manager.get_tab_count()).to_equal(2)
+        expect(_ok(app.handle_command(BrowserCommand.CloseTab))).to_equal(true)
+        expect(app.tab_manager.get_tab_count()).to_equal(1)
+        expect(_ok(app.handle_command(BrowserCommand.CloseTab))).to_equal(true)
+        expect(app.tab_manager.get_tab_count()).to_equal(1)
+        expect(app.tab_manager.get_active_tab().unwrap().url).to_equal(app.config.homepage)
+
+    it "updates browser chrome state commands":
+        var app = _app()
+        val window_id = app.create_window().unwrap()
+        app.active_window = window_id
+        expect(_ok(app.handle_command(BrowserCommand.Find("needle")))).to_equal(true)
+        expect(app.last_find_query).to_equal("needle")
+        expect(_ok(app.handle_command(BrowserCommand.ZoomIn))).to_equal(true)
+        expect(app.zoom_percent).to_equal(110)
+        expect(_ok(app.handle_command(BrowserCommand.ZoomReset))).to_equal(true)
+        expect(app.zoom_percent).to_equal(100)
+        expect(_ok(app.handle_command(BrowserCommand.ToggleDevtools))).to_equal(true)
+        expect(app.devtools_open).to_equal(true)
+        expect(_ok(app.handle_command(BrowserCommand.ToggleFullscreen))).to_equal(true)
+        expect(app.windows[0].is_fullscreen).to_equal(true)

@@ -1,0 +1,101 @@
+# Assistant Session Views and Queries
+#
+# Reads the file-backed assistant store and exposes small reusable views for
+# session detail, compact briefs, and timeline/notification collection.
+
+use ..main_lazy_json.{extract_field}
+use .types.{
+    AssistantSessionRecord, AssistantTimelineRecord, assistant_first_non_empty,
+    assistant_timeline_severity, assistant_timeline_title, assistant_timeline_detail
+}
+use .session_store.{assistant_store_load_session, assistant_store_timeline_record_from_json_text}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+val ASSISTANT_STORE_ROOT = ".build/llm_dashboard/assistant"
+
+# =========================================================================
+# Public Views
+# =========================================================================
+
+fn assistant_store_session_detail(root: text, session_id: text) -> AssistantSessionRecord?:
+    assistant_store_load_session(root, session_id)
+
+fn assistant_store_session_brief(root: text, session_id: text) -> text:
+    if val session = assistant_store_load_session(root, session_id):
+        val timeline_count = assistant_store_count_jsonl_entries(assistant_store_timeline_path(root, session_id))
+        val notification_count = assistant_store_count_jsonl_entries(assistant_store_notifications_path(root, session_id))
+        var lines: [text] = []
+        lines.push("session: " + session.session_id)
+        lines.push("name: " + session.name)
+        lines.push("state: " + session.state)
+        lines.push("mode: " + session.mode)
+        if session.summary.trim() != "":
+            lines.push("summary: " + session.summary)
+        lines.push("timeline events: " + "{timeline_count}")
+        lines.push("notifications: " + "{notification_count}")
+        if session.last_event_kind.trim() != "":
+            var tail = "last event: " + session.last_event_kind
+            if session.last_event_detail.trim() != "":
+                tail = tail + " - " + session.last_event_detail
+            lines.push(tail)
+        lines.join("\n")
+    ""
+
+fn assistant_store_collect_timeline(root: text, session_id: text, limit: i64, since_ts: i64) -> [AssistantTimelineRecord]:
+    assistant_store_collect_stream(assistant_store_timeline_path(root, session_id), limit, since_ts)
+
+fn assistant_store_collect_notifications(root: text, session_id: text, limit: i64, since_ts: i64) -> [AssistantTimelineRecord]:
+    assistant_store_collect_stream(assistant_store_notifications_path(root, session_id), limit, since_ts)
+
+# =========================================================================
+# Path Helpers
+# =========================================================================
+
+fn assistant_store_resolve_root(root: text) -> text:
+    if root.trim() == "":
+        ASSISTANT_STORE_ROOT
+    else:
+        root
+
+fn assistant_store_timeline_path(root: text, session_id: text) -> text:
+    "{assistant_store_resolve_root(root)}/timelines/{session_id}.jsonl"
+
+fn assistant_store_notifications_path(root: text, session_id: text) -> text:
+    "{assistant_store_resolve_root(root)}/notifications/{session_id}.jsonl"
+
+# =========================================================================
+# Collection Helpers
+# =========================================================================
+
+fn assistant_store_collect_stream(path: text, limit: i64, since_ts: i64) -> [AssistantTimelineRecord]:
+    if path.trim() == "" or not rt_file_exists(path):
+        return []
+    var events: [AssistantTimelineRecord] = []
+    val content = rt_file_read_text(path)
+    if content.trim() == "":
+        return events
+    for raw in content.split("\n"):
+        val line = raw.trim()
+        if line == "":
+            continue
+        val event = assistant_store_timeline_record_from_json_text(line)
+        if since_ts > 0 and event.timestamp_ms <= since_ts:
+            continue
+        events.push(event)
+    if limit <= 0 or events.len() <= limit:
+        return events
+    events.slice(events.len() - limit)
+
+fn assistant_store_count_jsonl_entries(path: text) -> i64:
+    if path.trim() == "" or not rt_file_exists(path):
+        return 0
+    val content = rt_file_read_text(path)
+    if content.trim() == "":
+        return 0
+    var count: i64 = 0
+    for raw in content.split("\n"):
+        if raw.trim() != "":
+            count = count + 1
+    count

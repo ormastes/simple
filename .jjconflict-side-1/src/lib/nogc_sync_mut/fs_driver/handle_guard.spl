@@ -1,0 +1,64 @@
+# Handle guard — generation-stamped handle encoding.
+#
+# FileHandle.id packs a u32 generation (bits 63..32) and u32 slot index
+# (bits 31..0) into a single u64.  When a slot is closed, its generation
+# field is incremented so old handles referencing that slot compare unequal
+# and are rejected as StaleHandle.
+#
+# Architecture decision D-2.
+
+use std.fs_driver.error.{FsError}
+
+# Multiplier for the high-32 half: 2^32 = 4294967296.
+val HANDLE_GEN_SHIFT: u64 = 4294967296u64
+val HANDLE_LOW_MASK: u64  = 4294967295u64
+
+pub struct HandleSlot:
+    """A single slot in a handle table.
+
+    generation — incremented on each close; packed into high-32 of handle id.
+    ino_id     — inode the slot refers to (driver-specific meaning).
+    active     — true while the handle is open.
+    """
+    generation: u32
+    ino_id:     u64
+    active:     bool
+
+pub fn handle_pack(slot_idx: u32, slot_generation: u32) -> u64:
+    """Pack slot index and generation into a u64 handle id.
+
+    High 32 bits = generation.
+    Low  32 bits = slot index.
+    """
+    val hi = slot_generation as u64
+    val lo = slot_idx as u64
+    val packed = hi * HANDLE_GEN_SHIFT + lo
+    packed
+
+pub fn handle_unpack_slot(handle_id: u64) -> u32:
+    """Extract the slot index from a packed handle id."""
+    (handle_id & HANDLE_LOW_MASK) as u32
+
+pub fn handle_unpack_gen(handle_id: u64) -> u32:
+    """Extract the generation from a packed handle id."""
+    val hi = handle_id / HANDLE_GEN_SHIFT
+    hi as u32
+
+pub fn handle_validate(slots: [HandleSlot], handle_id: u64) -> Result<u64, FsError>:
+    """Validate handle_id against the slot table.
+
+    Returns Ok(ino_id) if handle_id matches an active slot with matching
+    generation. Returns Err(FsError.StaleHandle) otherwise.
+    """
+    val idx = handle_unpack_slot(handle_id) as i32
+    val expected_gen = handle_unpack_gen(handle_id)
+    if idx < 0:
+        return Err(FsError.StaleHandle)
+    if idx >= slots.len() as i32:
+        return Err(FsError.StaleHandle)
+    val slot = slots[idx]
+    if slot.generation != expected_gen:
+        return Err(FsError.StaleHandle)
+    if not slot.active:
+        return Err(FsError.StaleHandle)
+    Ok(slot.ino_id)

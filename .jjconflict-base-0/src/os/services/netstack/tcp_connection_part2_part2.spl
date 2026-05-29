@@ -1,0 +1,476 @@
+# Part 2 of src/os/services/netstack/tcp_connection_part2.spl
+use os.services.netstack.tcp_connection_part2.*
+# Part 2 of src/os/services/netstack/tcp_connection.spl
+use os.services.netstack.tcp_connection.*
+# TCP Connection -- Per-Connection State Management
+#
+# MDSOC: feature dimension, network layer
+# Implements the full RFC 793 TCP state machine for a single connection.
+# Each TcpConnection tracks sequence numbers, buffers, retransmission,
+# and drives all state transitions.
+#
+# State transitions (RFC 793):
+#   CLOSED -> LISTEN             (passive open)
+#   CLOSED -> SYN_SENT           (active open, send SYN)
+#   LISTEN -> SYN_RECEIVED       (recv SYN, send SYN+ACK)
+#   SYN_SENT -> ESTABLISHED      (recv SYN+ACK, send ACK)
+#   SYN_RECEIVED -> ESTABLISHED  (recv ACK)
+#   ESTABLISHED -> FIN_WAIT_1    (close, send FIN)
+#   ESTABLISHED -> CLOSE_WAIT    (recv FIN, send ACK)
+#   FIN_WAIT_1 -> FIN_WAIT_2    (recv ACK of FIN)
+#   FIN_WAIT_1 -> CLOSING       (recv FIN, send ACK)
+#   FIN_WAIT_2 -> TIME_WAIT     (recv FIN, send ACK)
+#   CLOSE_WAIT -> LAST_ACK      (close, send FIN)
+#   CLOSING -> TIME_WAIT        (recv ACK)
+#   LAST_ACK -> CLOSED          (recv ACK)
+#   TIME_WAIT -> CLOSED         (2MSL timeout)
+
+use os.services.netstack.ipv4.{Ipv4Address}
+use os.services.netstack.tcp.{
+    TcpState, TcpHeader, TcpSegment,
+    TCP_FLAG_FIN, TCP_FLAG_SYN, TCP_FLAG_RST, TCP_FLAG_PSH, TCP_FLAG_ACK,
+    TCP_DEFAULT_WINDOW, TCP_MSS, TCP_MAX_RETRIES, TCP_INITIAL_RTO, TCP_TIME_WAIT_MS,
+    tcp_build, tcp_has_flag, tcp_state_name,
+    seq_lt, seq_lte, seq_gt, seq_gte, seq_between
+}
+use os.services.netstack.tcp_state_machine.{TcpStateMachine}
+
+impl TcpConnection:
+    me _process_ack(ack_num: u32, window: u16):
+        """Process an incoming ACK: advance snd_una, update window, purge retransmits."""
+        if seq_gt(ack_num, self.snd_una) and seq_lte(ack_num, self.snd_nxt):
+            self.snd_una = ack_num
+            self.snd_wnd = window
+
+            # Remove acknowledged entries from retransmit queue
+            var new_queue: [TcpRetransmitEntry] = []
+            var i: u64 = 0
+            while i < self.retransmit_queue.len():
+                val entry = self.retransmit_queue[i]
+                val entry_end = entry.seq_num + entry.data.len().to_u32()
+                if seq_gt(entry_end, ack_num):
+                    # Not yet fully acknowledged
+                    new_queue.push(entry)
+                i = i + 1
+            self.retransmit_queue = new_queue
+            if self.retransmit_queue.len() == 0:
+                self.retransmit_attempts = 0u32
+
+    # ========================================================================
+    # Application Interface
+    # ========================================================================
+
+    me send_data(data: [u8]) -> Result<u64, text>:
+        """Queue application data for sending.
+
+        Only valid in ESTABLISHED or CLOSE_WAIT states.
+        Returns the number of bytes queued. Admission is bounded by both the
+        send-buffer cap and the currently advertised peer window.
+        """
+        if self.last_error.len() > 0:
+            return Err(self.last_error)
+
+        if not (_is_state(self.state, TcpState.Established) or
+                _is_state(self.state, TcpState.CloseWait)):
+            return Err("cannot send in state {tcp_state_name(self.state)}")
+
+        if data.len() == 0:
+            return Ok(0u64)
+
+        val cap_remaining = if self.send_buf.len() < TCP_SEND_BUFFER_CAP:
+            TCP_SEND_BUFFER_CAP - self.send_buf.len()
+        else:
+            0u64
+        val in_flight = (self.snd_nxt - self.snd_una).to_u64()
+        val reserved = in_flight + self.send_buf.len()
+        val window_remaining = if self.snd_wnd.to_u64() > reserved:
+            self.snd_wnd.to_u64() - reserved
+        else:
+            0u64
+        val max_queue = if cap_remaining < window_remaining: cap_remaining else: window_remaining
+        if max_queue == 0:
+            return Err("would-block: send buffer full or window closed")
+
+        val count = if data.len() < max_queue: data.len() else: max_queue
+        var i: u64 = 0
+        while i < count:
+            self.send_buf.push(data[i])
+            i = i + 1
+
+        Ok(count)
+
+    me recv_data(max: u64) -> [u8]:
+        """Read received data from buffer.
+
+        Returns up to max bytes and removes them from the receive buffer.
+        """
+        var result: [u8] = []
+        val count = if max < self.recv_buf.len(): max else: self.recv_buf.len()
+
+        var i: u64 = 0
+        while i < count:
+            result.push(self.recv_buf[i])
+            i = i + 1
+
+        # Remove consumed bytes
+        if count > 0:
+            var new_buf: [u8] = []
+            var j: u64 = count
+            while j < self.recv_buf.len():
+                new_buf.push(self.recv_buf[j])
+                j = j + 1
+            self.recv_buf = new_buf
+
+        result
+
+    me recv_data_result(max: u64) -> Result<[u8], text>:
+        """Read data, EOF, or a documented would-block/error status."""
+        if self.recv_buf.len() > 0:
+            return Ok(self.recv_data(max))
+
+        val status = self.recv_status()
+        if status == "peer-closed":
+            return Ok([])
+
+        Err(status)
+
+    fn recv_status() -> text:
+        """Return application-visible receive readiness or terminal status."""
+        if self.recv_buf.len() > 0:
+            return "ready"
+        if self.retransmit_attempts >= TCP_MAX_RETRIES:
+            return "timeout"
+        if self.last_error.len() > 0:
+            return self.last_error
+        if self.retransmit_attempts >= TCP_MAX_RETRIES:
+            return "timeout"
+        if self.retransmit_queue.len() > 0 and self.retransmit_queue[0].retries >= TCP_MAX_RETRIES:
+            return "timeout"
+        if self.peer_closed:
+            return "peer-closed"
+        if _is_state(self.state, TcpState.TimeWait):
+            return "time-wait"
+        "would-block"
+
+    fn retransmit_status_at(current_time: u64) -> text:
+        """Project whether pending retransmissions have exceeded retry budget."""
+        if self.last_error.len() > 0:
+            return self.last_error
+        if self.retransmit_queue.len() == 0:
+            return "idle"
+        val budget = self.rto * TCP_MAX_RETRIES.to_u64()
+        if current_time >= budget:
+            return "timeout"
+        "pending"
+
+    fn has_recv_data() -> bool:
+        """Check if there is data available to read."""
+        self.recv_buf.len() > 0
+
+    fn has_send_data() -> bool:
+        """Check if there is data queued for sending."""
+        self.send_buf.len() > 0
+
+    me close() -> [TcpSegment]:
+        """Initiate connection close from our side.
+
+        Transitions:
+          ESTABLISHED -> FIN_WAIT_1 (send FIN)
+          CLOSE_WAIT -> LAST_ACK (send FIN)
+        """
+        var out: [TcpSegment] = []
+
+        if _is_state(self.state, TcpState.Established):
+            val fin = self._build_fin()
+            out.push(fin)
+            self.retransmit_queue.push(TcpRetransmitEntry(
+                seq_num: self.snd_nxt, data: [],
+                flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
+                send_time: 0, retries: 0
+            ))
+            self.snd_nxt = self.snd_nxt + 1  # FIN consumes one sequence
+            self.state = TcpState.FinWait1
+            tcp_trace("[tcp] ESTABLISHED -> FIN_WAIT_1 (close)")
+
+        else if _is_state(self.state, TcpState.CloseWait):
+            val fin = self._build_fin()
+            out.push(fin)
+            self.retransmit_queue.push(TcpRetransmitEntry(
+                seq_num: self.snd_nxt, data: [],
+                flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
+                send_time: 0, retries: 0
+            ))
+            self.snd_nxt = self.snd_nxt + 1
+            self.state = TcpState.LastAck
+            tcp_trace("[tcp] CLOSE_WAIT -> LAST_ACK (close)")
+
+        else if _is_state(self.state, TcpState.Listen):
+            self.state = TcpState.Closed
+
+        else if _is_state(self.state, TcpState.SynSent):
+            self.state = TcpState.Closed
+            self.retransmit_queue = []
+
+        out
+
+    me abort() -> [TcpSegment]:
+        """Abort the connection immediately (send RST)."""
+        var out: [TcpSegment] = []
+
+        if not (_is_state(self.state, TcpState.Closed) or
+                _is_state(self.state, TcpState.Listen)):
+            out.push(self._build_rst(self.snd_nxt))
+            self.state = TcpState.Closed
+            self.send_buf = []
+            self.recv_buf = []
+            self.retransmit_queue = []
+
+        out
+
+    # ========================================================================
+    # Transmit Pending Data
+    # ========================================================================
+
+    me flush_send_buf() -> [TcpSegment]:
+        """Segment and transmit any pending data in the send buffer.
+
+        Breaks data into MSS-sized segments. Each segment is queued
+        for retransmission.
+        """
+        var out: [TcpSegment] = []
+
+        if not (_is_state(self.state, TcpState.Established) or
+                _is_state(self.state, TcpState.CloseWait)):
+            return out
+
+        while self.send_buf.len() > 0:
+            val max_send = TCP_MSS.to_u64()
+            val send_len = if self.send_buf.len() < max_send: self.send_buf.len() else: max_send
+
+            # Check send window
+            val in_flight = self.snd_nxt - self.snd_una
+            if in_flight.to_u64() + send_len > self.snd_wnd.to_u64():
+                break  # Window full
+
+            # Extract data to send
+            var seg_data: [u8] = []
+            var i: u64 = 0
+            while i < send_len:
+                seg_data.push(self.send_buf[i])
+                i = i + 1
+
+            # Remove from send buffer
+            var new_buf: [u8] = []
+            var j: u64 = send_len
+            while j < self.send_buf.len():
+                new_buf.push(self.send_buf[j])
+                j = j + 1
+            self.send_buf = new_buf
+
+            # Build segment with PSH+ACK
+            val flags: u8 = TCP_FLAG_PSH | TCP_FLAG_ACK
+            val seg = self._build_data_segment(seg_data, flags)
+            out.push(seg)
+
+            # Queue for retransmission
+            self.retransmit_queue.push(TcpRetransmitEntry(
+                seq_num: self.snd_nxt, data: seg_data,
+                flags: flags, send_time: 0, retries: 0
+            ))
+
+            self.snd_nxt = self.snd_nxt + send_len.to_u32()
+
+        out
+
+    # ========================================================================
+    # Retransmission
+    # ========================================================================
+
+    me check_retransmit(current_time: u64) -> [TcpSegment]:
+        """Check for segments that need retransmission.
+
+        Returns segments whose RTO has expired. Uses exponential backoff.
+        """
+        var out: [TcpSegment] = []
+
+        if self.retransmit_queue.len() == 0 and _is_state(self.state, TcpState.SynSent):
+            self.retransmit_attempts = self.retransmit_attempts + 1
+            if self.retransmit_attempts >= TCP_MAX_RETRIES:
+                self.last_error = "timeout"
+                self.retransmit_queue = [TcpRetransmitEntry(
+                    seq_num: self.iss, data: [], flags: TCP_FLAG_SYN,
+                    send_time: current_time, retries: TCP_MAX_RETRIES
+                )]
+                self.time_wait_start = current_time
+                self.state = TcpState.Closed
+                return []
+            out.push(self._build_syn())
+            self.retransmit_queue = [TcpRetransmitEntry(
+                seq_num: self.iss, data: [], flags: TCP_FLAG_SYN,
+                send_time: current_time, retries: self.retransmit_attempts
+            )]
+            return out
+
+        var new_queue: [TcpRetransmitEntry] = []
+        var i: u64 = 0
+        while i < self.retransmit_queue.len():
+            val entry = self.retransmit_queue[i]
+            val elapsed = current_time - entry.send_time
+            val timeout = self.rto * (1 << entry.retries)
+
+            if elapsed >= timeout:
+                self.retransmit_attempts = self.retransmit_attempts + 1
+                if self.retransmit_attempts >= TCP_MAX_RETRIES:
+                    tcp_trace("[tcp] max retries exceeded, aborting connection")
+                    self.last_error = "timeout"
+                    self.peer_closed = true
+                    self.state = TcpState.Closed
+                    self.send_buf = []
+                    self.recv_buf = []
+                    self.retransmit_queue = [TcpRetransmitEntry(
+                        seq_num: entry.seq_num, data: entry.data,
+                        flags: entry.flags, send_time: current_time,
+                        retries: TCP_MAX_RETRIES
+                    )]
+                    self.time_wait_start = current_time
+                    return out
+
+                # Retransmit
+                val seg_flags = entry.flags
+                if tcp_has_flag(seg_flags, TCP_FLAG_SYN) and not tcp_has_flag(seg_flags, TCP_FLAG_ACK):
+                    out.push(self._build_syn())
+                else if tcp_has_flag(seg_flags, TCP_FLAG_SYN) and tcp_has_flag(seg_flags, TCP_FLAG_ACK):
+                    out.push(self._build_syn_ack(self.irs))
+                else if tcp_has_flag(seg_flags, TCP_FLAG_FIN):
+                    out.push(self._build_fin())
+                else:
+                    out.push(self._build_data_segment(entry.data, seg_flags))
+
+                # Preserve updated retry state explicitly; in-place array
+                # mutation is not reliable across all interpreter paths.
+                new_queue.push(TcpRetransmitEntry(
+                    seq_num: entry.seq_num, data: entry.data,
+                    flags: entry.flags, send_time: current_time,
+                    retries: entry.retries + 1
+                ))
+            else:
+                new_queue.push(entry)
+
+            i = i + 1
+
+        self.retransmit_queue = new_queue
+        out
+
+    me check_time_wait(current_time: u64) -> bool:
+        """Check if TIME_WAIT has expired (2MSL timeout).
+
+        Returns true if the connection should transition to CLOSED.
+        """
+        if _is_state(self.state, TcpState.TimeWait):
+            if self.time_wait_start > 0 and (current_time - self.time_wait_start) >= TCP_TIME_WAIT_MS:
+                self.state = TcpState.Closed
+                tcp_trace("[tcp] TIME_WAIT -> CLOSED (2MSL expired)")
+                return true
+        false
+
+    fn is_closed() -> bool:
+        _is_state(self.state, TcpState.Closed)
+
+    fn is_established() -> bool:
+        _is_state(self.state, TcpState.Established)
+
+    fn is_listening() -> bool:
+        _is_state(self.state, TcpState.Listen)
+
+    # ========================================================================
+    # Segment Builders
+    # ========================================================================
+
+    fn _build_syn() -> TcpSegment:
+        """Build a SYN segment for connection initiation."""
+        val raw = tcp_build(
+            self.local_port, self.remote_port,
+            self.iss, 0,
+            TCP_FLAG_SYN, self.rcv_wnd, []
+        )
+        TcpSegment(
+            header: TcpHeader(
+                src_port: self.local_port, dst_port: self.remote_port,
+                seq_num: self.iss, ack_num: 0,
+                data_offset: 5, flags: TCP_FLAG_SYN,
+                window: self.rcv_wnd, checksum: 0, urgent_ptr: 0
+            ),
+            data: []
+        )
+
+    fn _build_syn_ack(remote_seq: u32) -> TcpSegment:
+        """Build a SYN+ACK segment."""
+        val flags: u8 = TCP_FLAG_SYN | TCP_FLAG_ACK
+        TcpSegment(
+            header: TcpHeader(
+                src_port: self.local_port, dst_port: self.remote_port,
+                seq_num: self.iss, ack_num: remote_seq + 1,
+                data_offset: 5, flags: flags,
+                window: self.rcv_wnd, checksum: 0, urgent_ptr: 0
+            ),
+            data: []
+        )
+
+    fn _build_ack() -> TcpSegment:
+        """Build a pure ACK segment."""
+        TcpSegment(
+            header: TcpHeader(
+                src_port: self.local_port, dst_port: self.remote_port,
+                seq_num: self.snd_nxt, ack_num: self.rcv_nxt,
+                data_offset: 5, flags: TCP_FLAG_ACK,
+                window: self.rcv_wnd, checksum: 0, urgent_ptr: 0
+            ),
+            data: []
+        )
+
+    fn _build_fin() -> TcpSegment:
+        """Build a FIN+ACK segment."""
+        val flags: u8 = TCP_FLAG_FIN | TCP_FLAG_ACK
+        TcpSegment(
+            header: TcpHeader(
+                src_port: self.local_port, dst_port: self.remote_port,
+                seq_num: self.snd_nxt, ack_num: self.rcv_nxt,
+                data_offset: 5, flags: flags,
+                window: self.rcv_wnd, checksum: 0, urgent_ptr: 0
+            ),
+            data: []
+        )
+
+    fn _build_rst(seq: u32) -> TcpSegment:
+        """Build a RST segment."""
+        TcpSegment(
+            header: TcpHeader(
+                src_port: self.local_port, dst_port: self.remote_port,
+                seq_num: seq, ack_num: 0,
+                data_offset: 5, flags: TCP_FLAG_RST,
+                window: 0, checksum: 0, urgent_ptr: 0
+            ),
+            data: []
+        )
+
+    fn _build_data_segment(data: [u8], flags: u8) -> TcpSegment:
+        """Build a data-carrying segment."""
+        TcpSegment(
+            header: TcpHeader(
+                src_port: self.local_port, dst_port: self.remote_port,
+                seq_num: self.snd_nxt, ack_num: self.rcv_nxt,
+                data_offset: 5, flags: flags,
+                window: self.rcv_wnd, checksum: 0, urgent_ptr: 0
+            ),
+            data: data
+        )
+
+    fn matches_tuple(src_ip: Ipv4Address, src_port: u16, dst_port: u16) -> bool:
+        """Check if this connection matches a (remote_ip, remote_port, local_port) tuple."""
+        (self.remote_addr.equals(src_ip) and
+         self.remote_port == src_port and
+         self.local_port == dst_port)
+
+# ============================================================================
+# Helpers
+# ============================================================================

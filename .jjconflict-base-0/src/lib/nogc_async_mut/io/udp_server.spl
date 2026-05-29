@@ -1,0 +1,282 @@
+# Async UDP Server — IoDriver-based
+#
+# Standalone async UDP server using IoDriver for non-blocking recv/send.
+# Provides a simple request/response pattern suitable for DNS-like or
+# game-like workloads.
+#
+# Complements the sync UdpSocket at std.nogc_sync_mut.io.udp by adding
+# IoDriver integration with EventLoop readiness notification.
+#
+# Design:
+#   - Bind via rt_io_udp_bind (one-shot, not async)
+#   - Recv via IoDriver.submit_udp_recv + completion polling
+#   - Send via rt_io_udp_send_to directly (binary-safe, no text cliff)
+#   - Handler callback processes datagrams and returns optional response
+#
+# Reference: IoDriver at std.io.driver
+
+use std.io.driver.{IoDriver, Completion}
+use std.io.event_loop.{EventLoop}
+
+extern fn rt_io_udp_bind(addr: text) -> i64
+extern fn rt_io_udp_send_to(fd: i64, data: [u8], addr: text) -> i64
+extern fn rt_io_udp_close(fd: i64) -> bool
+extern fn rt_io_udp_set_nonblocking(fd: i64, enabled: bool) -> bool
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+# ============================================================================
+# UdpDatagram — a received datagram with sender address
+# ============================================================================
+
+struct UdpDatagram:
+    """A received UDP datagram."""
+    data: [u8]
+    peer_addr: text
+
+# ============================================================================
+# UdpServerConfig — configuration
+# ============================================================================
+
+struct UdpServerConfig:
+    """Configuration for the async UDP server."""
+    bind_addr: text
+    recv_buf_size: i64
+    max_completions: i64
+    poll_timeout_ms: i64
+    recv_pool_size: i64
+
+fn default_udp_server_config() -> UdpServerConfig:
+    """Default config: bind all interfaces port 9000, 64KB recv buffer."""
+    return UdpServerConfig(
+        bind_addr: "0.0.0.0:9000",
+        recv_buf_size: 65536,
+        max_completions: 64,
+        poll_timeout_ms: 10,
+        recv_pool_size: 8
+    )
+
+# ============================================================================
+# UdpHandler — callback trait for processing datagrams
+# ============================================================================
+
+trait UdpHandler:
+    """Handler for incoming UDP datagrams.
+
+    Implement on_datagram to process each received datagram.
+    Return a response payload to send back to the sender, or nil to
+    send nothing.
+    """
+    me on_datagram(datagram: UdpDatagram) -> [u8]?
+
+# ============================================================================
+# AsyncUdpServer — async UDP server with IoDriver
+# ============================================================================
+
+class AsyncUdpServer:
+    """Async UDP server backed by IoDriver completions.
+
+    Binds a UDP socket, arms recv ops via IoDriver, polls completions,
+    extracts datagrams, and sends responses via rt_io_udp_send_to
+    (binary-safe, bypasses IoDriver's text-based send path).
+
+    Usage:
+        val config = default_udp_server_config()
+        var server = AsyncUdpServer.create(config)
+        server.start(9000)
+        loop:
+            val datagrams = server.poll()
+            # process datagrams, call server.send_to(response, peer_addr)
+    """
+    udp_fd: i64
+    driver: IoDriver
+    config: UdpServerConfig
+    running: bool
+    pending_recv_ops: [i64]
+    local_addr: text
+    stats_recv: i64
+    stats_sent: i64
+    stats_bytes_recv: i64
+    stats_bytes_sent: i64
+
+    static fn create(config: UdpServerConfig) -> AsyncUdpServer:
+        """Create an async UDP server (not yet started)."""
+        return AsyncUdpServer(
+            udp_fd: -1,
+            driver: IoDriver.new(),
+            config: config,
+            running: false,
+            pending_recv_ops: [],
+            local_addr: "",
+            stats_recv: 0,
+            stats_sent: 0,
+            stats_bytes_recv: 0,
+            stats_bytes_sent: 0
+        )
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    me start(port: i64) -> bool:
+        """Bind UDP socket on the given port and begin polling.
+
+        Returns true on success, false on bind failure.
+        """
+        val addr = "0.0.0.0:{port}"
+        val fd = rt_io_udp_bind(addr)
+        if fd < 0:
+            return false
+
+        self.udp_fd = fd
+        self.local_addr = addr
+        self.running = true
+
+        # Arm initial recv operations
+        self._arm_recv_ops()
+        return true
+
+    me start_addr(addr: text) -> bool:
+        """Bind UDP socket to a specific address. Returns true on success."""
+        val fd = rt_io_udp_bind(addr)
+        if fd < 0:
+            return false
+
+        self.udp_fd = fd
+        self.local_addr = addr
+        self.running = true
+        self._arm_recv_ops()
+        return true
+
+    me stop():
+        """Stop the server and close the UDP socket."""
+        self.running = false
+        if self.udp_fd >= 0:
+            rt_io_udp_close(self.udp_fd)
+            self.udp_fd = -1
+
+    # ------------------------------------------------------------------
+    # Polling
+    # ------------------------------------------------------------------
+
+    me poll() -> [UdpDatagram]:
+        """Poll for received UDP datagrams.
+
+        Drives the IoDriver flush/poll cycle, extracts received datagrams,
+        re-arms recv ops, and returns the list of datagrams.
+        """
+        var datagrams: [UdpDatagram] = []
+
+        if not self.running:
+            return datagrams
+
+        # Flush and poll
+        self.driver.flush()
+        val completions = self.driver.poll(
+            self.config.max_completions, self.config.poll_timeout_ms
+        )
+
+        # Extract datagrams from completions
+        var i = 0
+        loop:
+            if i >= completions.len():
+                break
+            val c = completions[i]
+            if c.result > 0:
+                # Binary-safe: raw bytes via poll_recv_bytes, addr via poll_data
+                val data = self.driver.poll_recv_bytes(i)
+                val peer_addr = self.driver.poll_data(i)
+                if data.len() > 0 and peer_addr != "":
+                    val dgram = UdpDatagram(data: data, peer_addr: peer_addr)
+                    self.stats_recv = self.stats_recv + 1
+                    self.stats_bytes_recv = self.stats_bytes_recv + data.len()
+                    datagrams.push(dgram)
+            self._remove_pending_op(c.id)
+            i = i + 1
+
+        # Re-arm recv operations
+        self._arm_recv_ops()
+        return datagrams
+
+    # ------------------------------------------------------------------
+    # Sending
+    # ------------------------------------------------------------------
+
+    me send_to(data: [u8], peer_addr: text) -> i64:
+        """Send a UDP datagram to a peer. Binary-safe.
+
+        Returns bytes sent, or -1 on error.
+        """
+        if self.udp_fd < 0:
+            return -1
+        val sent = rt_io_udp_send_to(self.udp_fd, data, peer_addr)
+        if sent > 0:
+            self.stats_sent = self.stats_sent + 1
+            self.stats_bytes_sent = self.stats_bytes_sent + sent
+        return sent
+
+    me send_response(datagram: UdpDatagram, response: [u8]) -> i64:
+        """Send a response back to the sender of a datagram."""
+        return self.send_to(response, datagram.peer_addr)
+
+    # ------------------------------------------------------------------
+    # Request/response pattern — convenience for DNS/game workloads
+    # ------------------------------------------------------------------
+
+    me poll_and_respond(handler: UdpHandler):
+        """Poll for datagrams and invoke handler for each.
+
+        If the handler returns a response, sends it back to the sender.
+        Convenience method for simple request/response protocols.
+        """
+        val datagrams = self.poll()
+        var i = 0
+        loop:
+            if i >= datagrams.len():
+                break
+            val dgram = datagrams[i]
+            val resp = handler.on_datagram(dgram)
+            if resp != nil:
+                self.send_to(resp, dgram.peer_addr)
+            i = i + 1
+
+    # ------------------------------------------------------------------
+    # Queries
+    # ------------------------------------------------------------------
+
+    fn is_running() -> bool:
+        return self.running
+
+    fn stats_summary() -> text:
+        """Return a text summary of server statistics."""
+        return "recv={self.stats_recv} sent={self.stats_sent} bytes_recv={self.stats_bytes_recv} bytes_sent={self.stats_bytes_sent}"
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    me _arm_recv_ops():
+        """Ensure there are pending recv operations on the UDP socket."""
+        var current = self.pending_recv_ops.len()
+        loop:
+            if current >= self.config.recv_pool_size:
+                break
+            val op_id = self.driver.submit_udp_recv(
+                self.udp_fd, self.config.recv_buf_size
+            )
+            self.pending_recv_ops.push(op_id)
+            current = current + 1
+
+    me _remove_pending_op(op_id: i64):
+        """Remove a completed op from the pending list."""
+        var new_pending: [i64] = []
+        var i = 0
+        loop:
+            if i >= self.pending_recv_ops.len():
+                break
+            if self.pending_recv_ops[i] != op_id:
+                new_pending.push(self.pending_recv_ops[i])
+            i = i + 1
+        self.pending_recv_ops = new_pending
+
+    # UDP recv data is now accessed binary-safe via driver.poll_recv_bytes()
+    # and the peer address via driver.poll_data() (see poll() method above).

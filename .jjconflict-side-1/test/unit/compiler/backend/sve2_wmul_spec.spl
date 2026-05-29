@@ -1,0 +1,431 @@
+# test/unit/compiler/backend/sve2_wmul_spec.spl
+#
+# Golden byte tests for SVE2 widening integer multiply emit functions.
+# Covers: SMULLB/T .S, UMULLB/T .S, SMULLB/T .D
+#
+# Sources emit 16-bit (.H) or 32-bit (.S) elements; results are 32-bit (.S)
+# or 64-bit (.D). "B" (bottom) variants use even-indexed source lanes;
+# "T" (top) variants use odd-indexed source lanes.
+#
+# ALL byte goldens VERIFIED via:
+#   llvm-mc -triple=aarch64-none-linux-gnu -mattr=+sve2 --show-encoding
+#   (run 2026-05-03)
+#
+# Architecture reference: ARMv9 ARM §C7.2 SVE2 widening integer multiply
+# Register indices: Z0=0..Z31=31 (raw 5-bit field values).
+# Instructions are 4-byte fixed-width, little-endian per ARMv9 ABI.
+
+use compiler.backend.native.arm_sve2.{emit_smullb_z_s}
+use compiler.backend.native.arm_sve2.{emit_smullt_z_s}
+use compiler.backend.native.arm_sve2.{emit_umullb_z_s}
+use compiler.backend.native.arm_sve2.{emit_umullt_z_s}
+use compiler.backend.native.arm_sve2.{emit_smullb_z_d}
+use compiler.backend.native.arm_sve2.{emit_smullt_z_d}
+
+# ============================================================================
+# SMULLB Zd.S, Zn.H, Zm.H — signed widening multiply, bottom halves
+# Base opcode (all regs=0): 0x45807000 → LE [0x00, 0x70, 0x80, 0x45]
+# bits[31:24]=0x45  bits[23:22]=10(S)  bits[15:10]=011100(SMULLB)
+# Zm in bits[20:16]: Zm*65536  Zn in bits[9:5]: Zn*32  Zd in bits[4:0]: Zd
+# ============================================================================
+
+describe "SVE2 emit_smullb_z_s golden Z0 Z0 Z0":
+    it "SMULLB Z0.S Z0.H Z0.H emits 4 bytes":
+        val result = emit_smullb_z_s(0, 0, 0)
+        expect(result.len()).to_equal(4)
+
+    it "SMULLB Z0.S Z0.H Z0.H byte0 is 0x00":
+        val result = emit_smullb_z_s(0, 0, 0)
+        expect(result[0]).to_equal(0)
+
+    it "SMULLB Z0.S Z0.H Z0.H byte1 is 0x70":
+        # bits[15:8]=0x70: widening multiply opcode sub-field
+        val result = emit_smullb_z_s(0, 0, 0)
+        expect(result[1]).to_equal(112)
+
+    it "SMULLB Z0.S Z0.H Z0.H byte2 is 0x80":
+        # bits[23:16]=0x80: size=10 (S result) with Zm=0
+        val result = emit_smullb_z_s(0, 0, 0)
+        expect(result[2]).to_equal(128)
+
+    it "SMULLB Z0.S Z0.H Z0.H byte3 is 0x45":
+        # bits[31:24]=0x45: SVE2 integer multiply group
+        val result = emit_smullb_z_s(0, 0, 0)
+        expect(result[3]).to_equal(69)
+
+describe "SVE2 emit_smullb_z_s register field Z0 Z1 Z2":
+    it "SMULLB Z0.S Z1.H Z2.H byte0 encodes Zn":
+        # Zd=0, Zn=1 in bits[9:5]=32 → byte0 = 0 + 32 = 32 = 0x20
+        val result = emit_smullb_z_s(0, 1, 2)
+        expect(result[0]).to_equal(32)
+
+    it "SMULLB Z0.S Z1.H Z2.H byte1 is 0x70":
+        val result = emit_smullb_z_s(0, 1, 2)
+        expect(result[1]).to_equal(112)
+
+    it "SMULLB Z0.S Z1.H Z2.H byte2 encodes Zm":
+        # Zm=2 in bits[20:16]=2 → byte2 = 0x80 + 2 = 0x82 = 130
+        val result = emit_smullb_z_s(0, 1, 2)
+        expect(result[2]).to_equal(130)
+
+    it "SMULLB Z0.S Z1.H Z2.H byte3 is 0x45":
+        val result = emit_smullb_z_s(0, 1, 2)
+        expect(result[3]).to_equal(69)
+
+describe "SVE2 emit_smullb_z_s Z3 Z5 Z7":
+    it "SMULLB Z3.S Z5.H Z7.H byte0 encodes Zd and Zn":
+        # Zd=3, Zn=5 → byte0 = 3 + 5*32 = 3 + 160 = 163 = 0xA3
+        val result = emit_smullb_z_s(3, 5, 7)
+        expect(result[0]).to_equal(163)
+
+    it "SMULLB Z3.S Z5.H Z7.H byte2 encodes Zm":
+        # Zm=7 → byte2 = 0x80 + 7 = 135 = 0x87
+        val result = emit_smullb_z_s(3, 5, 7)
+        expect(result[2]).to_equal(135)
+
+describe "SVE2 emit_smullb_z_s boundary Z31 Z31 Z31":
+    it "SMULLB Z31.S Z31.H Z31.H byte0 is 0xFF":
+        # Zd=31, Zn=31 → byte0 = (31 + 31*32) % 256 = 1023 % 256 = 255 = 0xFF
+        val result = emit_smullb_z_s(31, 31, 31)
+        expect(result[0]).to_equal(255)
+
+    it "SMULLB Z31.S Z31.H Z31.H byte1 is 0x73":
+        # bits[15:8]: opcode 0x70 + Zn overflow (1023/256=3 carry + 0x70) = 0x73 = 115
+        val result = emit_smullb_z_s(31, 31, 31)
+        expect(result[1]).to_equal(115)
+
+    it "SMULLB Z31.S Z31.H Z31.H byte2 is 0x9F":
+        # Zm=31 in bits[20:16] → byte2 = 0x80 + 31 = 0x9F = 159
+        val result = emit_smullb_z_s(31, 31, 31)
+        expect(result[2]).to_equal(159)
+
+    it "SMULLB Z31.S Z31.H Z31.H byte3 is 0x45":
+        val result = emit_smullb_z_s(31, 31, 31)
+        expect(result[3]).to_equal(69)
+
+# ============================================================================
+# SMULLT Zd.S, Zn.H, Zm.H — signed widening multiply, top halves
+# Base opcode: 0x45807400 → LE [0x00, 0x74, 0x80, 0x45]
+# Differs from SMULLB only in bits[11:10]: T variant adds 0x400 to base
+# ============================================================================
+
+describe "SVE2 emit_smullt_z_s golden Z0 Z0 Z0":
+    it "SMULLT Z0.S Z0.H Z0.H emits 4 bytes":
+        val result = emit_smullt_z_s(0, 0, 0)
+        expect(result.len()).to_equal(4)
+
+    it "SMULLT Z0.S Z0.H Z0.H byte0 is 0x00":
+        val result = emit_smullt_z_s(0, 0, 0)
+        expect(result[0]).to_equal(0)
+
+    it "SMULLT Z0.S Z0.H Z0.H byte1 is 0x74":
+        # bits[15:8]=0x74: top-half variant (T bit set vs SMULLB's 0x70)
+        val result = emit_smullt_z_s(0, 0, 0)
+        expect(result[1]).to_equal(116)
+
+    it "SMULLT Z0.S Z0.H Z0.H byte2 is 0x80":
+        val result = emit_smullt_z_s(0, 0, 0)
+        expect(result[2]).to_equal(128)
+
+    it "SMULLT Z0.S Z0.H Z0.H byte3 is 0x45":
+        val result = emit_smullt_z_s(0, 0, 0)
+        expect(result[3]).to_equal(69)
+
+describe "SVE2 emit_smullt_z_s Z3 Z5 Z7":
+    it "SMULLT Z3.S Z5.H Z7.H byte0 is 0xA3":
+        val result = emit_smullt_z_s(3, 5, 7)
+        expect(result[0]).to_equal(163)
+
+    it "SMULLT Z3.S Z5.H Z7.H byte1 is 0x74":
+        val result = emit_smullt_z_s(3, 5, 7)
+        expect(result[1]).to_equal(116)
+
+    it "SMULLT Z3.S Z5.H Z7.H byte2 is 0x87":
+        val result = emit_smullt_z_s(3, 5, 7)
+        expect(result[2]).to_equal(135)
+
+describe "SVE2 emit_smullt_z_s boundary Z31 Z31 Z31":
+    it "SMULLT Z31.S Z31.H Z31.H byte0 is 0xFF":
+        val result = emit_smullt_z_s(31, 31, 31)
+        expect(result[0]).to_equal(255)
+
+    it "SMULLT Z31.S Z31.H Z31.H byte1 is 0x77":
+        # 0x74 + carry 3 from Zn=31 overflow = 0x77 = 119
+        val result = emit_smullt_z_s(31, 31, 31)
+        expect(result[1]).to_equal(119)
+
+    it "SMULLT Z31.S Z31.H Z31.H byte2 is 0x9F":
+        val result = emit_smullt_z_s(31, 31, 31)
+        expect(result[2]).to_equal(159)
+
+    it "SMULLT Z31.S Z31.H Z31.H byte3 is 0x45":
+        val result = emit_smullt_z_s(31, 31, 31)
+        expect(result[3]).to_equal(69)
+
+# ============================================================================
+# UMULLB Zd.S, Zn.H, Zm.H — unsigned widening multiply, bottom halves
+# Base opcode: 0x45807800 → LE [0x00, 0x78, 0x80, 0x45]
+# ============================================================================
+
+describe "SVE2 emit_umullb_z_s golden Z0 Z0 Z0":
+    it "UMULLB Z0.S Z0.H Z0.H emits 4 bytes":
+        val result = emit_umullb_z_s(0, 0, 0)
+        expect(result.len()).to_equal(4)
+
+    it "UMULLB Z0.S Z0.H Z0.H byte0 is 0x00":
+        val result = emit_umullb_z_s(0, 0, 0)
+        expect(result[0]).to_equal(0)
+
+    it "UMULLB Z0.S Z0.H Z0.H byte1 is 0x78":
+        # bits[15:8]=0x78: unsigned bottom-half variant
+        val result = emit_umullb_z_s(0, 0, 0)
+        expect(result[1]).to_equal(120)
+
+    it "UMULLB Z0.S Z0.H Z0.H byte2 is 0x80":
+        val result = emit_umullb_z_s(0, 0, 0)
+        expect(result[2]).to_equal(128)
+
+    it "UMULLB Z0.S Z0.H Z0.H byte3 is 0x45":
+        val result = emit_umullb_z_s(0, 0, 0)
+        expect(result[3]).to_equal(69)
+
+describe "SVE2 emit_umullb_z_s Z0 Z1 Z2":
+    it "UMULLB Z0.S Z1.H Z2.H byte0 is 0x20":
+        val result = emit_umullb_z_s(0, 1, 2)
+        expect(result[0]).to_equal(32)
+
+    it "UMULLB Z0.S Z1.H Z2.H byte1 is 0x78":
+        val result = emit_umullb_z_s(0, 1, 2)
+        expect(result[1]).to_equal(120)
+
+    it "UMULLB Z0.S Z1.H Z2.H byte2 is 0x82":
+        val result = emit_umullb_z_s(0, 1, 2)
+        expect(result[2]).to_equal(130)
+
+describe "SVE2 emit_umullb_z_s Z3 Z5 Z7":
+    it "UMULLB Z3.S Z5.H Z7.H byte0 is 0xA3":
+        val result = emit_umullb_z_s(3, 5, 7)
+        expect(result[0]).to_equal(163)
+
+    it "UMULLB Z3.S Z5.H Z7.H byte1 is 0x78":
+        val result = emit_umullb_z_s(3, 5, 7)
+        expect(result[1]).to_equal(120)
+
+    it "UMULLB Z3.S Z5.H Z7.H byte2 is 0x87":
+        val result = emit_umullb_z_s(3, 5, 7)
+        expect(result[2]).to_equal(135)
+
+describe "SVE2 emit_umullb_z_s boundary Z31 Z31 Z31":
+    it "UMULLB Z31.S Z31.H Z31.H byte0 is 0xFF":
+        val result = emit_umullb_z_s(31, 31, 31)
+        expect(result[0]).to_equal(255)
+
+    it "UMULLB Z31.S Z31.H Z31.H byte1 is 0x7B":
+        # 0x78 + carry 3 = 0x7B = 123
+        val result = emit_umullb_z_s(31, 31, 31)
+        expect(result[1]).to_equal(123)
+
+    it "UMULLB Z31.S Z31.H Z31.H byte2 is 0x9F":
+        val result = emit_umullb_z_s(31, 31, 31)
+        expect(result[2]).to_equal(159)
+
+    it "UMULLB Z31.S Z31.H Z31.H byte3 is 0x45":
+        val result = emit_umullb_z_s(31, 31, 31)
+        expect(result[3]).to_equal(69)
+
+# ============================================================================
+# UMULLT Zd.S, Zn.H, Zm.H — unsigned widening multiply, top halves
+# Base opcode: 0x45807C00 → LE [0x00, 0x7C, 0x80, 0x45]
+# ============================================================================
+
+describe "SVE2 emit_umullt_z_s golden Z0 Z0 Z0":
+    it "UMULLT Z0.S Z0.H Z0.H emits 4 bytes":
+        val result = emit_umullt_z_s(0, 0, 0)
+        expect(result.len()).to_equal(4)
+
+    it "UMULLT Z0.S Z0.H Z0.H byte0 is 0x00":
+        val result = emit_umullt_z_s(0, 0, 0)
+        expect(result[0]).to_equal(0)
+
+    it "UMULLT Z0.S Z0.H Z0.H byte1 is 0x7C":
+        # bits[15:8]=0x7C: unsigned top-half variant
+        val result = emit_umullt_z_s(0, 0, 0)
+        expect(result[1]).to_equal(124)
+
+    it "UMULLT Z0.S Z0.H Z0.H byte2 is 0x80":
+        val result = emit_umullt_z_s(0, 0, 0)
+        expect(result[2]).to_equal(128)
+
+    it "UMULLT Z0.S Z0.H Z0.H byte3 is 0x45":
+        val result = emit_umullt_z_s(0, 0, 0)
+        expect(result[3]).to_equal(69)
+
+describe "SVE2 emit_umullt_z_s Z3 Z5 Z7":
+    it "UMULLT Z3.S Z5.H Z7.H byte0 is 0xA3":
+        val result = emit_umullt_z_s(3, 5, 7)
+        expect(result[0]).to_equal(163)
+
+    it "UMULLT Z3.S Z5.H Z7.H byte1 is 0x7C":
+        val result = emit_umullt_z_s(3, 5, 7)
+        expect(result[1]).to_equal(124)
+
+    it "UMULLT Z3.S Z5.H Z7.H byte2 is 0x87":
+        val result = emit_umullt_z_s(3, 5, 7)
+        expect(result[2]).to_equal(135)
+
+describe "SVE2 emit_umullt_z_s boundary Z31 Z31 Z31":
+    it "UMULLT Z31.S Z31.H Z31.H byte0 is 0xFF":
+        val result = emit_umullt_z_s(31, 31, 31)
+        expect(result[0]).to_equal(255)
+
+    it "UMULLT Z31.S Z31.H Z31.H byte1 is 0x7F":
+        # 0x7C + carry 3 = 0x7F = 127
+        val result = emit_umullt_z_s(31, 31, 31)
+        expect(result[1]).to_equal(127)
+
+    it "UMULLT Z31.S Z31.H Z31.H byte2 is 0x9F":
+        val result = emit_umullt_z_s(31, 31, 31)
+        expect(result[2]).to_equal(159)
+
+    it "UMULLT Z31.S Z31.H Z31.H byte3 is 0x45":
+        val result = emit_umullt_z_s(31, 31, 31)
+        expect(result[3]).to_equal(69)
+
+# ============================================================================
+# SMULLB Zd.D, Zn.S, Zm.S — signed widening multiply, bottom halves, 64-bit
+# Base opcode: 0x45C07000 → LE [0x00, 0x70, 0xC0, 0x45]
+# bits[23:22]=11 (D result from S sources); same opcode sub-field as .S form
+# ============================================================================
+
+describe "SVE2 emit_smullb_z_d golden Z0 Z0 Z0":
+    it "SMULLB Z0.D Z0.S Z0.S emits 4 bytes":
+        val result = emit_smullb_z_d(0, 0, 0)
+        expect(result.len()).to_equal(4)
+
+    it "SMULLB Z0.D Z0.S Z0.S byte0 is 0x00":
+        val result = emit_smullb_z_d(0, 0, 0)
+        expect(result[0]).to_equal(0)
+
+    it "SMULLB Z0.D Z0.S Z0.S byte1 is 0x70":
+        # bits[15:8]=0x70: same widening multiply sub-field as S form
+        val result = emit_smullb_z_d(0, 0, 0)
+        expect(result[1]).to_equal(112)
+
+    it "SMULLB Z0.D Z0.S Z0.S byte2 is 0xC0":
+        # bits[23:16]=0xC0: size=11 (D result) with Zm=0 → 0xC0 vs 0x80 for S
+        val result = emit_smullb_z_d(0, 0, 0)
+        expect(result[2]).to_equal(192)
+
+    it "SMULLB Z0.D Z0.S Z0.S byte3 is 0x45":
+        val result = emit_smullb_z_d(0, 0, 0)
+        expect(result[3]).to_equal(69)
+
+describe "SVE2 emit_smullb_z_d Z0 Z1 Z2":
+    it "SMULLB Z0.D Z1.S Z2.S byte0 is 0x20":
+        # Zd=0, Zn=1 → byte0 = 1*32 = 32
+        val result = emit_smullb_z_d(0, 1, 2)
+        expect(result[0]).to_equal(32)
+
+    it "SMULLB Z0.D Z1.S Z2.S byte2 is 0xC2":
+        # Zm=2, size=D base=0xC0 → byte2 = 0xC0 + 2 = 194 = 0xC2
+        val result = emit_smullb_z_d(0, 1, 2)
+        expect(result[2]).to_equal(194)
+
+describe "SVE2 emit_smullb_z_d Z3 Z5 Z7":
+    it "SMULLB Z3.D Z5.S Z7.S byte0 is 0xA3":
+        val result = emit_smullb_z_d(3, 5, 7)
+        expect(result[0]).to_equal(163)
+
+    it "SMULLB Z3.D Z5.S Z7.S byte2 is 0xC7":
+        # Zm=7, base 0xC0 → 0xC7 = 199
+        val result = emit_smullb_z_d(3, 5, 7)
+        expect(result[2]).to_equal(199)
+
+describe "SVE2 emit_smullb_z_d boundary Z31 Z31 Z31":
+    it "SMULLB Z31.D Z31.S Z31.S byte0 is 0xFF":
+        val result = emit_smullb_z_d(31, 31, 31)
+        expect(result[0]).to_equal(255)
+
+    it "SMULLB Z31.D Z31.S Z31.S byte1 is 0x73":
+        val result = emit_smullb_z_d(31, 31, 31)
+        expect(result[1]).to_equal(115)
+
+    it "SMULLB Z31.D Z31.S Z31.S byte2 is 0xDF":
+        # Zm=31, base 0xC0 → 0xC0 + 31 = 0xDF = 223
+        val result = emit_smullb_z_d(31, 31, 31)
+        expect(result[2]).to_equal(223)
+
+    it "SMULLB Z31.D Z31.S Z31.S byte3 is 0x45":
+        val result = emit_smullb_z_d(31, 31, 31)
+        expect(result[3]).to_equal(69)
+
+# ============================================================================
+# SMULLT Zd.D, Zn.S, Zm.S — signed widening multiply, top halves, 64-bit
+# Base opcode: 0x45C07400 → LE [0x00, 0x74, 0xC0, 0x45]
+# ============================================================================
+
+describe "SVE2 emit_smullt_z_d golden Z0 Z0 Z0":
+    it "SMULLT Z0.D Z0.S Z0.S emits 4 bytes":
+        val result = emit_smullt_z_d(0, 0, 0)
+        expect(result.len()).to_equal(4)
+
+    it "SMULLT Z0.D Z0.S Z0.S byte0 is 0x00":
+        val result = emit_smullt_z_d(0, 0, 0)
+        expect(result[0]).to_equal(0)
+
+    it "SMULLT Z0.D Z0.S Z0.S byte1 is 0x74":
+        # bits[15:8]=0x74: top-half D-result variant
+        val result = emit_smullt_z_d(0, 0, 0)
+        expect(result[1]).to_equal(116)
+
+    it "SMULLT Z0.D Z0.S Z0.S byte2 is 0xC0":
+        val result = emit_smullt_z_d(0, 0, 0)
+        expect(result[2]).to_equal(192)
+
+    it "SMULLT Z0.D Z0.S Z0.S byte3 is 0x45":
+        val result = emit_smullt_z_d(0, 0, 0)
+        expect(result[3]).to_equal(69)
+
+describe "SVE2 emit_smullt_z_d Z0 Z1 Z2":
+    it "SMULLT Z0.D Z1.S Z2.S byte0 is 0x20":
+        val result = emit_smullt_z_d(0, 1, 2)
+        expect(result[0]).to_equal(32)
+
+    it "SMULLT Z0.D Z1.S Z2.S byte1 is 0x74":
+        val result = emit_smullt_z_d(0, 1, 2)
+        expect(result[1]).to_equal(116)
+
+    it "SMULLT Z0.D Z1.S Z2.S byte2 is 0xC2":
+        val result = emit_smullt_z_d(0, 1, 2)
+        expect(result[2]).to_equal(194)
+
+describe "SVE2 emit_smullt_z_d Z3 Z5 Z7":
+    it "SMULLT Z3.D Z5.S Z7.S byte0 is 0xA3":
+        val result = emit_smullt_z_d(3, 5, 7)
+        expect(result[0]).to_equal(163)
+
+    it "SMULLT Z3.D Z5.S Z7.S byte1 is 0x74":
+        val result = emit_smullt_z_d(3, 5, 7)
+        expect(result[1]).to_equal(116)
+
+    it "SMULLT Z3.D Z5.S Z7.S byte2 is 0xC7":
+        val result = emit_smullt_z_d(3, 5, 7)
+        expect(result[2]).to_equal(199)
+
+describe "SVE2 emit_smullt_z_d boundary Z31 Z31 Z31":
+    it "SMULLT Z31.D Z31.S Z31.S byte0 is 0xFF":
+        val result = emit_smullt_z_d(31, 31, 31)
+        expect(result[0]).to_equal(255)
+
+    it "SMULLT Z31.D Z31.S Z31.S byte1 is 0x77":
+        # 0x74 + carry 3 from Zn=31 = 0x77 = 119
+        val result = emit_smullt_z_d(31, 31, 31)
+        expect(result[1]).to_equal(119)
+
+    it "SMULLT Z31.D Z31.S Z31.S byte2 is 0xDF":
+        val result = emit_smullt_z_d(31, 31, 31)
+        expect(result[2]).to_equal(223)
+
+    it "SMULLT Z31.D Z31.S Z31.S byte3 is 0x45":
+        val result = emit_smullt_z_d(31, 31, 31)
+        expect(result[3]).to_equal(69)

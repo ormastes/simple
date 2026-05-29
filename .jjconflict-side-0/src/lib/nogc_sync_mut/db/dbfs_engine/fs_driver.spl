@@ -1,0 +1,425 @@
+# DbfsFsDriver — DBFS engine-backed FsDriver.
+#
+# Wires DBFS engine components (NsBTree namespace + arena data store) into
+# the FsDriver interface consumed by the VFS mount table.
+#
+# Architecture:
+#   NsBTree   → namespace: path hash → inode_id (DentryKey lookup)
+#   arenas    → raw byte storage: one arena per file inode
+#   Module-level stores keyed by inst_id (interpreter value-semantics workaround;
+#   same pattern as pager.spl / checkpoint_ring.spl / dbfs_driver.spl)
+#
+# Maps to: AC-1, AC-2, AC-6, AC-9, D1, D2, D3.
+
+use std.io_runtime
+use common.string_core.{str_char_at}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.types.{FileHandle, DirHandle, Path, OpenFlags, DirEntry, StatInfo}
+use std.fs_driver.capability.{Capability, CapabilitySet}
+use std.fs_driver.extension.{Extension, PosixCompatExt}
+use std.db.dbfs_engine.ns_btree.{NsBTree}
+use std.db.dbfs_engine.arena.{
+    arena_create_impl, arena_append_impl, arena_readv_impl,
+    arena_total_bytes_impl, arena_discard_impl
+}
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+# ============================================================================
+# Internal types
+# ============================================================================
+
+enum DbfsEngineKind:
+    File
+    Dir
+
+struct DbfsEngineInode:
+    inst_id:  i64
+    id:       i64
+    kind:     DbfsEngineKind
+    path:     text
+    parent:   i64
+    arena_id: i64      # arena handle for file data; -1 for directories
+    unlinked: bool
+
+struct DbfsEngineFd:
+    inst_id:   i64
+    handle_id: i64
+    inode_id:  i64
+    is_dir:    bool
+    closed:    bool
+
+# ============================================================================
+# Module-level NsBTree store (one per instance)
+# ============================================================================
+
+struct DbfsEngineBTreeEntry:
+    inst_id: i64
+    tree:    NsBTree
+
+var _de_trees:     [DbfsEngineBTreeEntry] = []
+var _de_inodes:    [DbfsEngineInode]      = []
+var _de_fds:       [DbfsEngineFd]         = []
+var _de_next_inst: i64 = 1
+
+# ============================================================================
+# Path hashing — djb2 over UTF-8 bytes
+# ============================================================================
+
+fn _path_hash(path: text) -> i64:
+    val bytes = rt_text_to_bytes(path)
+    var h: i64 = 5381
+    var i: i32 = 0
+    while i < bytes.len() as i32:
+        val b: i64 = bytes[i] as i64
+        h = h * 33 + b
+        i = i + 1
+    h
+
+# ============================================================================
+# NsBTree module helpers
+# ============================================================================
+
+fn _tree_idx(inst_id: i64) -> i32:
+    var i: i32 = 0
+    while i < _de_trees.len() as i32:
+        if _de_trees[i].inst_id == inst_id:
+            return i
+        i = i + 1
+    -1
+
+fn _tree_insert(inst_id: i64, path: text, ino_id: i64):
+    # The inode table is authoritative; the B-tree is retained for future acceleration.
+    val _ = inst_id
+    val _p = path
+    val _i = ino_id
+
+fn _tree_lookup(inst_id: i64, path: text) -> i64:
+    val _ = inst_id
+    val _p = path
+    -1
+
+fn _tree_delete(inst_id: i64, path: text):
+    val _ = inst_id
+    val _p = path
+
+# ============================================================================
+# Inode / fd lookup helpers
+# ============================================================================
+
+fn _find_inode_idx(inst_id: i64, path: text) -> i32:
+    var i: i32 = 0
+    while i < _de_inodes.len() as i32:
+        val n = _de_inodes[i]
+        if n.inst_id == inst_id and n.path == path and not n.unlinked:
+            return i
+        i = i + 1
+    -1
+
+fn _find_inode_by_id(inst_id: i64, inode_id: i64) -> i32:
+    var i: i32 = 0
+    while i < _de_inodes.len() as i32:
+        val n = _de_inodes[i]
+        if n.inst_id == inst_id and n.id == inode_id:
+            return i
+        i = i + 1
+    -1
+
+fn _find_fd_idx(inst_id: i64, handle_id: i64) -> i32:
+    var i: i32 = 0
+    while i < _de_fds.len() as i32:
+        val f = _de_fds[i]
+        if f.inst_id == inst_id and f.handle_id == handle_id:
+            return i
+        i = i + 1
+    -1
+
+fn _alloc_inst_id() -> i64:
+    val id = _de_next_inst
+    _de_next_inst = _de_next_inst + 1
+    id
+
+fn _alloc_inode_id(inst_id: i64) -> i64:
+    var max_id: i64 = 1
+    for n in _de_inodes:
+        if n.inst_id == inst_id and n.id >= max_id:
+            max_id = n.id + 1
+    max_id
+
+fn _alloc_fd_id(inst_id: i64) -> i64:
+    var max_id: i64 = 1
+    for f in _de_fds:
+        if f.inst_id == inst_id and f.handle_id >= max_id:
+            max_id = f.handle_id + 1
+    max_id
+
+# ============================================================================
+# DbfsFsDriver
+# ============================================================================
+
+struct DbfsFsDriver:
+    """DBFS engine-backed filesystem driver.
+
+    Uses NsBTree for namespace lookups and NVFS arenas for byte-level file
+    data storage. Module-level stores persist across struct copies.
+
+    inst_id — unique key into module-level stores.
+    name    — human-readable driver identifier.
+    """
+    name:    text
+    inst_id: i64
+
+impl DbfsFsDriver:
+    static fn new() -> DbfsFsDriver:
+        """Create a new in-memory DBFS engine driver with an empty root dir."""
+        val iid = _alloc_inst_id()
+        _de_trees.push(DbfsEngineBTreeEntry(
+            inst_id: iid,
+            tree:    NsBTree.new(),
+        ))
+        _de_inodes.push(DbfsEngineInode(
+            inst_id:  iid,
+            id:       1,
+            kind:     DbfsEngineKind.Dir,
+            path:     "/",
+            parent:   0,
+            arena_id: -1,
+            unlinked: false,
+        ))
+        DbfsFsDriver(name: "DbfsFsDriver", inst_id: iid)
+
+    # --- stat ---
+
+    fn stat_path(path: Path) -> Result<StatInfo, FsError>:
+        val raw = path.raw
+        if raw == "/" or raw == "":
+            return Ok(StatInfo(is_dir: true, is_file: false, size: 0))
+        # Use linear scan as authoritative lookup (NsBTree mutations don't
+        # persist through module-list copies under interpreter value-semantics).
+        val inode_idx = _find_inode_idx(self.inst_id, raw)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        val inode = _de_inodes[inode_idx]
+        if inode.unlinked:
+            return Err(FsError.NotFound)
+        val is_dir: bool = match inode.kind:
+            case Dir:  true
+            case File: false
+        val size: i64 = if is_dir:
+            0
+        else if inode.arena_id >= 0:
+            arena_total_bytes_impl(inode.arena_id)
+        else:
+            0
+        Ok(StatInfo(is_dir: is_dir, is_file: not is_dir, size: size))
+
+    # --- open ---
+
+    fn open_path(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
+        val raw = path.raw
+        # Use linear scan as authoritative lookup (same value-semantics workaround).
+        val existing_idx = _find_inode_idx(self.inst_id, raw)
+        var inode_id: i64 = if existing_idx >= 0: _de_inodes[existing_idx].id else: -1
+        if inode_id < 0:
+            val new_id = _alloc_inode_id(self.inst_id)
+            val aid = arena_create_impl(0, 65536)
+            _de_inodes.push(DbfsEngineInode(
+                inst_id:  self.inst_id,
+                id:       new_id,
+                kind:     DbfsEngineKind.File,
+                path:     raw,
+                parent:   1,
+                arena_id: aid,
+                unlinked: false,
+            ))
+            _tree_insert(self.inst_id, raw, new_id)
+            inode_id = new_id
+        val hid = _alloc_fd_id(self.inst_id)
+        _de_fds.push(DbfsEngineFd(
+            inst_id:   self.inst_id,
+            handle_id: hid,
+            inode_id:  inode_id,
+            is_dir:    false,
+            closed:    false,
+        ))
+        Ok(FileHandle(id: hid as u64))
+
+    # --- opendir ---
+
+    fn opendir_path(path: Path) -> Result<DirHandle, FsError>:
+        val hid = _alloc_fd_id(self.inst_id)
+        _de_fds.push(DbfsEngineFd(
+            inst_id:   self.inst_id,
+            handle_id: hid,
+            inode_id:  1,
+            is_dir:    true,
+            closed:    false,
+        ))
+        Ok(DirHandle(id: hid as u64))
+
+    # --- readdir ---
+
+    fn readdir_handle(handle: DirHandle) -> Result<[DirEntry], FsError>:
+        var entries: [DirEntry] = []
+        for inode in _de_inodes:
+            if inode.inst_id == self.inst_id and not inode.unlinked and inode.id != 1:
+                val is_dir_entry: bool = match inode.kind:
+                    case Dir:  true
+                    case File: false
+                entries.push(DirEntry(name: inode.path, is_dir: is_dir_entry))
+        Ok(entries)
+
+    # --- read_handle (text facade used by MountTable) ---
+
+    fn read_handle(handle: FileHandle, length: i64) -> Result<text, FsError>:
+        val fd_idx = _find_fd_idx(self.inst_id, handle.id as i64)
+        if fd_idx < 0:
+            return Err(FsError.NotFound)
+        val fd = _de_fds[fd_idx]
+        if fd.closed:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _find_inode_by_id(self.inst_id, fd.inode_id)
+        if inode_idx < 0:
+            return Ok("")
+        val inode = _de_inodes[inode_idx]
+        if inode.arena_id < 0:
+            return Ok("")
+        val total = arena_total_bytes_impl(inode.arena_id)
+        val cap: i64 = if length < total: length else: total
+        if cap <= 0:
+            return Ok("")
+        val raw_bytes = arena_readv_impl(inode.arena_id, 0, cap)
+        Ok(rt_bytes_to_text(raw_bytes))
+
+    # --- write_handle (text facade used by MountTable) ---
+
+    fn write_handle(handle: FileHandle, content: text) -> Result<(), FsError>:
+        val fd_idx = _find_fd_idx(self.inst_id, handle.id as i64)
+        if fd_idx < 0:
+            return Err(FsError.NotFound)
+        val fd = _de_fds[fd_idx]
+        if fd.closed:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _find_inode_by_id(self.inst_id, fd.inode_id)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        val inode = _de_inodes[inode_idx]
+        if inode.arena_id < 0:
+            return Err(FsError.InvalidArg)
+        # Discard old arena; create a fresh one with the new content
+        val _ = arena_discard_impl(inode.arena_id)
+        val new_aid = arena_create_impl(0, 65536)
+        val buf = rt_text_to_bytes(content)
+        val _ = arena_append_impl(new_aid, buf, 0)
+        # Replace inode with updated arena_id
+        val old = _de_inodes[inode_idx]
+        _de_inodes.remove(inode_idx)
+        _de_inodes.push(DbfsEngineInode(
+            inst_id:  old.inst_id,
+            id:       old.id,
+            kind:     old.kind,
+            path:     old.path,
+            parent:   old.parent,
+            arena_id: new_aid,
+            unlinked: old.unlinked,
+        ))
+        Ok(())
+
+    # --- close_handle ---
+
+    fn close_handle(handle: FileHandle) -> Result<(), FsError>:
+        val fd_idx = _find_fd_idx(self.inst_id, handle.id as i64)
+        if fd_idx < 0:
+            return Err(FsError.NotFound)
+        val old_fd = _de_fds[fd_idx]
+        _de_fds.remove(fd_idx)
+        _de_fds.push(DbfsEngineFd(
+            inst_id:   old_fd.inst_id,
+            handle_id: old_fd.handle_id,
+            inode_id:  old_fd.inode_id,
+            is_dir:    old_fd.is_dir,
+            closed:    true,
+        ))
+        Ok(())
+
+    # --- mkdir_path ---
+
+    fn mkdir_path(path: text, mode: u32) -> Result<(), FsError>:
+        val existing = _find_inode_idx(self.inst_id, path)
+        if existing >= 0:
+            return Err(FsError.AlreadyExists)
+        val new_id = _alloc_inode_id(self.inst_id)
+        _de_inodes.push(DbfsEngineInode(
+            inst_id:  self.inst_id,
+            id:       new_id,
+            kind:     DbfsEngineKind.Dir,
+            path:     path,
+            parent:   1,
+            arena_id: -1,
+            unlinked: false,
+        ))
+        _tree_insert(self.inst_id, path, new_id)
+        Ok(())
+
+    fn mkdir(path: text, mode: u32) -> Result<(), FsError>:
+        self.mkdir_path(path, mode)
+
+    # --- unlink_path ---
+
+    fn unlink_path(path: text) -> Result<(), FsError>:
+        val idx = _find_inode_idx(self.inst_id, path)
+        if idx < 0:
+            return Err(FsError.NotFound)
+        val old = _de_inodes[idx]
+        _de_inodes.remove(idx)
+        _de_inodes.push(DbfsEngineInode(
+            inst_id:  old.inst_id,
+            id:       old.id,
+            kind:     old.kind,
+            path:     old.path,
+            parent:   old.parent,
+            arena_id: old.arena_id,
+            unlinked: true,
+        ))
+        _tree_delete(self.inst_id, path)
+        Ok(())
+
+    # --- rename_path ---
+
+    fn rename_path(old_path: text, new_path: text) -> Result<(), FsError>:
+        val target_idx = _find_inode_idx(self.inst_id, new_path)
+        if target_idx >= 0:
+            _de_inodes.remove(target_idx)
+            _tree_delete(self.inst_id, new_path)
+        val src_idx = _find_inode_idx(self.inst_id, old_path)
+        if src_idx < 0:
+            return Err(FsError.NotFound)
+        val old = _de_inodes[src_idx]
+        _de_inodes.remove(src_idx)
+        _de_inodes.push(DbfsEngineInode(
+            inst_id:  old.inst_id,
+            id:       old.id,
+            kind:     old.kind,
+            path:     new_path,
+            parent:   old.parent,
+            arena_id: old.arena_id,
+            unlinked: false,
+        ))
+        _tree_delete(self.inst_id, old_path)
+        _tree_insert(self.inst_id, new_path, old.id)
+        Ok(())
+
+    # --- capabilities / probe ---
+
+    fn capabilities() -> CapabilitySet:
+        CapabilitySet.empty()
+            .with(Capability.PosixCompat)
+            .with(Capability.LargeFiles)
+
+    fn probe(cap: Capability) -> Option<Extension>:
+        match cap:
+            case PosixCompat:
+                Some(Extension.PosixCompat(ext: PosixCompatExt(flags: 0, mode: 0)))
+            case _:
+                None

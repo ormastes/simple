@@ -1,0 +1,251 @@
+@no_gc
+# Mimalloc-style Allocator (Pure Simple)
+#
+# Free-list based allocator with 10 size classes for SimpleOS.
+# No C dependencies — all state is stored in the heap region itself
+# via raw pointer read/write externs.
+#
+# Size classes: 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096
+# Large allocations (>4096) use a bump allocator from a separate pool.
+#
+# Usage:
+#   init(0x100000, 1048576)   # 1 MB heap at address 0x100000
+#   val ptr = alloc(64)       # allocate 64 bytes
+#   free(ptr, 64)             # return to free list
+
+extern fn rt_ptr_write_i64(ptr: i64, offset: i64, value: i64) -> i64
+extern fn rt_ptr_read_i64(ptr: i64, offset: i64) -> i64
+
+# ============================================================================
+# Module state
+# ============================================================================
+
+var heap_base_addr: i64 = 0
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val NUM_CLASSES = 10
+
+# Metadata region: NUM_CLASSES * 3 slots (free_head, page_cur, page_end)
+#   + 2 slots for large pool (large_cur, large_end)
+# = 32 slots * 8 bytes = 256 bytes
+val METADATA_SIZE = 256
+
+# Number of regions = NUM_CLASSES + 1 (large pool)
+val NUM_REGIONS = 11
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn size_class_index(size: i64) -> i64:
+    """Find the size class index for a given allocation size.
+    Returns -1 if size > 4096 (large allocation)."""
+    if size <= 8:
+        return 0
+    if size <= 16:
+        return 1
+    if size <= 32:
+        return 2
+    if size <= 64:
+        return 3
+    if size <= 128:
+        return 4
+    if size <= 256:
+        return 5
+    if size <= 512:
+        return 6
+    if size <= 1024:
+        return 7
+    if size <= 2048:
+        return 8
+    if size <= 4096:
+        return 9
+    -1
+
+fn class_block_size(idx: i64) -> i64:
+    """Get the block size for a size class index."""
+    if idx == 0:
+        return 8
+    if idx == 1:
+        return 16
+    if idx == 2:
+        return 32
+    if idx == 3:
+        return 64
+    if idx == 4:
+        return 128
+    if idx == 5:
+        return 256
+    if idx == 6:
+        return 512
+    if idx == 7:
+        return 1024
+    if idx == 8:
+        return 2048
+    4096
+
+# Metadata layout per class (3 i64 slots = 24 bytes each):
+#   slot 0: free_head pointer (0 = empty list)
+#   slot 1: page_cur (next bump position within page)
+#   slot 2: page_end (end of page region)
+# Large pool at offset NUM_CLASSES * 24:
+#   slot 0: large_cur
+#   slot 1: large_end
+
+fn meta_offset_free_head(idx: i64) -> i64:
+    """Byte offset in metadata for free_head of class idx."""
+    idx * 24
+
+fn meta_offset_page_cur(idx: i64) -> i64:
+    """Byte offset in metadata for page_cur of class idx."""
+    idx * 24 + 8
+
+fn meta_offset_page_end(idx: i64) -> i64:
+    """Byte offset in metadata for page_end of class idx."""
+    idx * 24 + 16
+
+fn meta_offset_large_cur() -> i64:
+    """Byte offset in metadata for large_cur."""
+    NUM_CLASSES * 24
+
+fn meta_offset_large_end() -> i64:
+    """Byte offset in metadata for large_end."""
+    NUM_CLASSES * 24 + 8
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn init(heap_base: i64, heap_size: i64):
+    """Initialize the mimalloc-style allocator.
+
+    Divides the heap into:
+    - 256 bytes of metadata (stored at heap_base)
+    - 10 equal-sized pages for size classes
+    - 1 large allocation pool (same size as one page)
+
+    Args:
+        heap_base: Starting address of the heap region
+        heap_size: Total size of the heap in bytes
+    """
+    heap_base_addr = heap_base
+
+    # Usable region after metadata
+    val usable_base = heap_base + METADATA_SIZE
+    val usable_size = heap_size - METADATA_SIZE
+
+    # Divide usable space into NUM_REGIONS equal parts
+    val region_size = usable_size / NUM_REGIONS
+
+    # Initialize each size class page
+    var idx = 0
+    while idx < NUM_CLASSES:
+        val page_start = usable_base + idx * region_size
+        val page_end_addr = page_start + region_size
+
+        # free_head = 0 (empty)
+        rt_ptr_write_i64(heap_base, meta_offset_free_head(idx), 0)
+        # page_cur = start of page
+        rt_ptr_write_i64(heap_base, meta_offset_page_cur(idx), page_start)
+        # page_end
+        rt_ptr_write_i64(heap_base, meta_offset_page_end(idx), page_end_addr)
+
+        idx = idx + 1
+
+    # Initialize large pool (last region)
+    val large_start = usable_base + NUM_CLASSES * region_size
+    val large_end_addr = large_start + region_size
+
+    rt_ptr_write_i64(heap_base, meta_offset_large_cur(), large_start)
+    rt_ptr_write_i64(heap_base, meta_offset_large_end(), large_end_addr)
+
+fn alloc(size: i64) -> i64:
+    """Allocate memory of the given size.
+
+    Returns a pointer (i64) to the allocated block, or 0 if out of memory.
+    For sizes <= 4096: uses size-class free lists with bump fallback.
+    For sizes > 4096: uses bump allocation from the large pool.
+
+    Requires init() to have been called first.
+    """
+    if size <= 0:
+        return 0
+
+    val base = heap_base_addr
+    if base == 0:
+        return 0  # Not initialized
+
+    val idx = size_class_index(size)
+
+    if idx < 0:
+        # Large allocation — bump from large pool
+        return alloc_large_internal(base, size)
+
+    # Try free list first
+    val head = rt_ptr_read_i64(base, meta_offset_free_head(idx))
+    if head != 0:
+        # Pop from free list: next = read(head, 0)
+        val next = rt_ptr_read_i64(head, 0)
+        rt_ptr_write_i64(base, meta_offset_free_head(idx), next)
+        return head
+
+    # Free list empty — bump allocate from page
+    val block_sz = class_block_size(idx)
+    val cur = rt_ptr_read_i64(base, meta_offset_page_cur(idx))
+    val end = rt_ptr_read_i64(base, meta_offset_page_end(idx))
+
+    if cur + block_sz > end:
+        return 0  # Page exhausted
+
+    # Advance page_cur
+    rt_ptr_write_i64(base, meta_offset_page_cur(idx), cur + block_sz)
+    cur
+
+fn free(ptr: i64, size: i64):
+    """Return a previously allocated block to the free list.
+
+    Args:
+        ptr: Pointer to the block being freed
+        size: Size that was originally allocated
+    """
+    if ptr == 0:
+        return
+    if size <= 0:
+        return
+
+    val base = heap_base_addr
+    if base == 0:
+        return  # Not initialized
+
+    val idx = size_class_index(size)
+
+    if idx < 0:
+        # Large allocations cannot be freed in this simple implementation
+        # (bump-only for large; reclaimed only on full reset)
+        return
+
+    # Push onto free list: write current head into block, then set block as new head
+    val current_head = rt_ptr_read_i64(base, meta_offset_free_head(idx))
+    rt_ptr_write_i64(ptr, 0, current_head)
+    rt_ptr_write_i64(base, meta_offset_free_head(idx), ptr)
+
+fn alloc_large_internal(base: i64, size: i64) -> i64:
+    """Bump-allocate from the large pool. 8-byte aligned."""
+    # Align size up to 8 bytes
+    val aligned = ((size + 7) / 8) * 8
+
+    val cur = rt_ptr_read_i64(base, meta_offset_large_cur())
+    val end = rt_ptr_read_i64(base, meta_offset_large_end())
+
+    if cur + aligned > end:
+        return 0  # Out of large pool space
+
+    rt_ptr_write_i64(base, meta_offset_large_cur(), cur + aligned)
+    cur
+
+fn mimalloc_version() -> text:
+    """Return allocator version string."""
+    "0.1.0"

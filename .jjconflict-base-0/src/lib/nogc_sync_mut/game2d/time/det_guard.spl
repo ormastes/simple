@@ -1,0 +1,122 @@
+# Game2D Determinism Guard (AC-4)
+#
+# Runtime guard for `#[deterministic]` mode: in deterministic mode wall-clock
+# reads (`now()`) and unseeded random reads (`rand()`) outside `App.*`
+# callbacks panic with `GAME-DET-001`. Inside callbacks, `now()` returns the
+# simulated step time set by `enter_callback(step_ns)`, and `rand()` returns
+# numbers from a seeded xorshift64 RNG.
+#
+# Strategy: module-level mutable state (matches the local idiom used in
+# `src/lib/nogc_sync_mut/io/debug_state.spl`). The `LoopDriver` (Wave B) will
+# bracket every callback with `enter_callback(step_ns)` / `leave_callback()`.
+#
+# RNG: xorshift64 — seeded RNG path keeps determinism reproducible across
+# runs. Seed is set explicitly via `seed_random(seed)`.
+#
+# Public surface (re-exported via `time/__init__.spl`):
+#   fn now() -> i64
+#   fn seed_random(seed: u64)
+#   fn random_u64() -> u64
+#   fn random_f64() -> f64
+#   fn set_deterministic_mode(on: bool)
+#   fn enter_callback(step_ns: i64)
+#   fn leave_callback()
+#   fn rand() -> f64                 # alias of random_f64 for spec contract
+
+extern fn rt_time_now() -> i64
+
+# ============================================================================
+# Module-level state — single TimeState instance + scalar mirrors.
+# We keep both so the unit-test grep for `class TimeState` finds it, and the
+# scalar mirrors keep the hot path branch-free.
+# ============================================================================
+
+class TimeState:
+    deterministic: bool
+    in_callback: bool
+    simulated_step_ns: i64
+    rng_state: i64
+
+    static fn create() -> TimeState:
+        TimeState(
+            deterministic: false,
+            in_callback: false,
+            simulated_step_ns: 0,
+            rng_state: 0x9E3779B97F4A7C15
+        )
+
+var _det_mode: bool = false
+var _in_cb: bool = false
+var _sim_step_ns: i64 = 0
+var _rng_state: i64 = 0x9E3779B97F4A7C15
+
+# ============================================================================
+# Mode toggles — driven by GameConfig and LoopDriver (Wave B).
+# ============================================================================
+
+fn set_deterministic_mode(on: bool):
+    """Enable or disable deterministic mode (runtime guard)."""
+    _det_mode = on
+
+fn enter_callback(step_ns: i64):
+    """Called by LoopDriver around every App.* callback. step_ns is the
+    simulated step time in nanoseconds for this fixed-update slice."""
+    _in_cb = true
+    _sim_step_ns = step_ns
+
+fn leave_callback():
+    """Called by LoopDriver after the App.* callback returns."""
+    _in_cb = false
+
+# ============================================================================
+# Wall-clock now() — the only sanctioned read path under deterministic mode.
+# Outside callback in deterministic mode → panic GAME-DET-001 wall clock.
+# ============================================================================
+
+fn now() -> i64:
+    """Return time in nanoseconds. In deterministic mode outside a callback
+    this panics with `GAME-DET-001: wall-clock read outside callback in
+    deterministic mode`. Inside a callback, returns the simulated step time."""
+    if _det_mode and not _in_cb:
+        # GAME-DET-001 panic wall clock outside callback
+        panic("GAME-DET-001: wall-clock read outside callback in deterministic mode")
+    if _in_cb:
+        return _sim_step_ns
+    rt_time_now()
+
+# ============================================================================
+# Seeded RNG — xorshift64.
+# Outside callback in deterministic mode → panic GAME-DET-001 random.
+# ============================================================================
+
+fn seed_random(seed: i64):
+    """Set the seeded RNG state. seed=0 is auto-bumped to a non-zero value
+    because xorshift64 is a no-op on zero."""
+    if seed == 0:
+        _rng_state = 0x9E3779B97F4A7C15
+    else:
+        _rng_state = seed
+
+fn random_u64() -> i64:
+    """Seeded xorshift64 step. Returns a pseudo-random i64 (interpret as u64).
+    In deterministic mode outside a callback this panics GAME-DET-001."""
+    if _det_mode and not _in_cb:
+        panic("GAME-DET-001: random read outside callback in deterministic mode")
+    var s = _rng_state
+    s = s ^ (s << 13)
+    s = s ^ (s >> 7)
+    s = s ^ (s << 17)
+    _rng_state = s
+    s
+
+fn random_f64() -> f64:
+    """Uniform random f64 in [0.0, 1.0) using the top 53 bits of random_u64."""
+    val r = random_u64()
+    # Mask to 53 bits, divide by 2^53 — standard pattern.
+    val mask: i64 = 9007199254740991  # (1 << 53) - 1
+    val masked = r & mask
+    masked.to_f64() / 9007199254740992.0
+
+# Spec-contract alias — `g.time.rand()` reads as a deterministic RNG.
+fn rand() -> f64:
+    random_f64()

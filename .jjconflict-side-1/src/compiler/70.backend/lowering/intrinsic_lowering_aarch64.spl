@@ -1,0 +1,317 @@
+# AArch64 Cipher Intrinsic Lowering — Pure Simple
+#
+# Maps canonical MirInstKind.Intrinsic `name` strings to AArch64 byte sequences
+# via the emit_* helpers in encode_aarch64_crypto.spl, gated by Aarch64Caps.supports.
+#
+# Arity contract (positional args list):
+#   crypto_aes_round          args=[rd, rn]              -> 2  (AESE + AESMC, 8 bytes)
+#   crypto_aes_round_last     args=[rd, rn]              -> 2  (AESE only, 4 bytes)
+#   crypto_aes_inv_round      args=[rd, rn]              -> 2  (AESD + AESIMC, 8 bytes)
+#   crypto_aes_inv_round_last args=[rd, rn]              -> 2  (AESD only, 4 bytes)
+#   crypto_sha256_rnds2       args=[rd, rn, rm]          -> 3  (SHA256H + SHA256H2, 8 bytes)
+#   crc32_u8                  args=[rd, rn, rm]          -> 3  (CRC32B, 4 bytes)
+#   crc32_u32                 args=[rd, rn, rm]          -> 3  (CRC32W, 4 bytes)
+#   crc32_u64                 args=[rd, rn, rm]          -> 3  (CRC32X, 4 bytes)
+#   clmul_lo                  args=[rd, rn, rm]          -> 3  (PMULL, 4 bytes)
+#   clmul_hi                  args=[rd, rn, rm]          -> 3  (PMULL2, 4 bytes)
+#   crypto_sha512_rnds2       args=[rd, rn, rm]          -> 3  (SHA512H + SHA512H2, 8 bytes)
+#   crypto_sha512_msg1        args=[rd, rn]              -> 2  (SHA512SU0, 4 bytes)
+#   crypto_sha512_msg2        args=[rd, rn, rm]          -> 3  (SHA512SU1, 4 bytes)
+#   bit_bswap                 args=[rd, rn]              -> 2  (REV, 4 bytes)
+#   bit_clz                   args=[rd, rn]              -> 2  (CLZ, 4 bytes)
+#   bit_ctz                   args=[rd, rn]              -> 2  (RBIT + CLZ, 8 bytes)
+#   bit_bitreverse            args=[rd, rn]              -> 2  (RBIT, 4 bytes)
+#   bit_rotate_right          args=[rd, rn, imm]         -> 3  (EXTR/ROR, 4 bytes)
+#   bit_rotate_left           args=[rd, rn, imm]         -> 3  (EXTR/ROR neg, 4 bytes)
+
+use compiler.backend.lowering.intrinsic_lowering_x86.{LoweringResult}
+use compiler.backend.backend.native.encode_aarch64_crypto.{
+    emit_aese, emit_aesd, emit_aesmc_aarch64, emit_aesimc_aarch64,
+    emit_sha256h, emit_sha256h2,
+    emit_sha512h, emit_sha512h2, emit_sha512su0, emit_sha512su1,
+    emit_crc32b, emit_crc32w, emit_crc32x,
+    emit_pmull, emit_pmull2,
+    emit_extr_x
+}
+
+# Aarch64Caps and TargetIdiom come from the parallel-agent feature_caps.spl.
+# Import via the lowering sibling that already pulls them in, or directly.
+# NOTE: feature_caps.spl is owned by the x86-dispatch agent; when it lands
+# the import below will resolve.  Until then the spec tests gate on load.
+use compiler.backend.feature_caps.{TargetIdiom, Aarch64Caps}
+
+# ============================================================================
+# intrinsic_to_target_idiom — name -> TargetIdiom?
+# ============================================================================
+
+"""Map a canonical AArch64-relevant intrinsic name to its TargetIdiom tag.
+
+Returns nil for unrecognised names.  Reuses the same TargetIdiom enum as x86
+so capability checks share one enum definition across both backends.
+"""
+fn intrinsic_to_target_idiom_aarch64(name: text) -> TargetIdiom?:
+    match name:
+        case "crypto_aes_round":            Some(TargetIdiom.AesEnc)
+        case "crypto_aes_round_last":       Some(TargetIdiom.AesEncLast)
+        case "crypto_aes_inv_round":        Some(TargetIdiom.AesDec)
+        case "crypto_aes_inv_round_last":   Some(TargetIdiom.AesDecLast)
+        case "crypto_sha256_rnds2":         Some(TargetIdiom.Sha256Rounds2)
+        case "crc32_u8":                    Some(TargetIdiom.Crc32U8)
+        case "crc32_u32":                   Some(TargetIdiom.Crc32U32)
+        case "crc32_u64":                   Some(TargetIdiom.Crc32U64)
+        case "clmul_lo":                    Some(TargetIdiom.ClmulLo)
+        case "clmul_hi":                    Some(TargetIdiom.ClmulHi)
+        case "bit_rotate_left":             Some(TargetIdiom.RotateLeft)
+        case "bit_rotate_right":            Some(TargetIdiom.RotateRight)
+        case "bit_popcount":                Some(TargetIdiom.Popcount)
+        case "bit_clz":                     Some(TargetIdiom.CountLeadingZeros)
+        case "bit_ctz":                     Some(TargetIdiom.CountTrailingZeros)
+        case "bit_bswap":                   Some(TargetIdiom.ByteSwap)
+        case "bit_bitreverse":              Some(TargetIdiom.BitReverse)
+        case "crypto_clmul":                Some(TargetIdiom.ClmulLo)
+        case "matrix_dot":                  Some(TargetIdiom.MatrixDot)
+        case "matrix_outer_product":        Some(TargetIdiom.MatrixOuterProduct)
+        case "matrix_fma_kernel":           Some(TargetIdiom.MatrixFmaKernel)
+        case "bit_parity":                  Some(TargetIdiom.Parity)
+        case "crypto_sha512_rnds2":         Some(TargetIdiom.Sha512Rounds2)
+        case "crypto_sha512_msg1":          Some(TargetIdiom.Sha512Msg1)
+        case "crypto_sha512_msg2":          Some(TargetIdiom.Sha512Msg2)
+        case _:                             nil
+
+fn intrinsic_requires_placeholder_lowering(idiom: TargetIdiom) -> bool:
+    match idiom:
+        case RotateLeft:            false
+        case RotateRight:           false
+        case Popcount:              true
+        case CountLeadingZeros:     false
+        case CountTrailingZeros:    false
+        case ByteSwap:              false
+        case BitReverse:            false
+        case MatrixDot:             true
+        case MatrixOuterProduct:    true
+        case MatrixFmaKernel:       true
+        case _:                     false
+
+# ============================================================================
+# _concat8 — join two 4-byte arrays into one 8-byte array
+# ============================================================================
+
+"""Concatenate two 4-element [i64] byte arrays into an 8-element array."""
+fn _concat8(a: [i64], b: [i64]) -> [i64]:
+    [a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]]
+
+fn emit_u32_le_aarch64(value: i64) -> [i64]:
+    var masked = value
+    if masked < 0:
+        masked = masked + 4294967296
+    [
+        masked % 256,
+        (masked / 256) % 256,
+        (masked / 65536) % 256,
+        (masked / 16777216) % 256
+    ]
+
+fn emit_rev_x(rd: i64, rn: i64) -> [i64]:
+    val encoding = 0xDAC00C00 or (bit_shl(rn, 5)) or rd
+    emit_u32_le_aarch64(encoding)
+
+fn emit_clz_x(rd: i64, rn: i64) -> [i64]:
+    val encoding = 0xDAC01000 or (bit_shl(rn, 5)) or rd
+    emit_u32_le_aarch64(encoding)
+
+fn emit_rbit_x(rd: i64, rn: i64) -> [i64]:
+    val encoding = 0xDAC00000 or (bit_shl(rn, 5)) or rd
+    emit_u32_le_aarch64(encoding)
+
+# ============================================================================
+# lower_cipher_intrinsic_aarch64 — main lowering entry point
+# ============================================================================
+
+"""Lower a canonical cipher intrinsic to an AArch64 byte sequence.
+
+Steps:
+  1. Resolve name -> TargetIdiom; unknown names return reason="unknown".
+  2. Check caps.supports(idiom); unsupported targets return reason="no-cap".
+  3. Return reason="unimplemented" for recognised portable intrinsics whose
+     backend encoder has not landed yet.
+  4. Validate args arity; mismatches return reason="bad-arity".
+  5. Dispatch to the matching emit_* helper(s) and return the bytes.
+
+See top-of-file comment for the full arity table per intrinsic name.
+
+AES full rounds emit two instructions:
+  crypto_aes_round     -> AESE Vd,Vn  +  AESMC Vd,Vd  (8 bytes, in-place mix)
+  crypto_aes_inv_round -> AESD Vd,Vn  +  AESIMC Vd,Vd (8 bytes)
+SHA-256 rnds2 emits two instructions:
+  crypto_sha256_rnds2  -> SHA256H Qd,Qn,Vm + SHA256H2 Qd,Qn,Vm (8 bytes)
+"""
+fn lower_cipher_intrinsic_aarch64(name: text, args: [i64], caps: Aarch64Caps) -> LoweringResult:
+    var empty: [i64] = []
+
+    # Step 1: name -> idiom
+    var maybe_idiom = intrinsic_to_target_idiom_aarch64(name)
+    match maybe_idiom:
+        case Some(idiom):
+            # Step 2: capability gate
+            if not caps.supports(idiom):
+                return LoweringResult(empty, false, "no-cap")
+
+            # Direct scalar bitmanip lowers should report arity before
+            # falling through the generic placeholder path.
+            match name:
+                case "bit_bswap":
+                    if args.len() != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_rev_x(args[0], args[1])
+                    return LoweringResult(bytes, true, "")
+
+                case "bit_clz":
+                    if args.len() != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_clz_x(args[0], args[1])
+                    return LoweringResult(bytes, true, "")
+
+                case "bit_ctz":
+                    if args.len() != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var rbit_bytes = emit_rbit_x(args[0], args[1])
+                    var clz_bytes = emit_clz_x(args[0], args[0])
+                    var bytes = _concat8(rbit_bytes, clz_bytes)
+                    return LoweringResult(bytes, true, "")
+
+                case "bit_bitreverse":
+                    if args.len() != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_rbit_x(args[0], args[1])
+                    return LoweringResult(bytes, true, "")
+
+                case "bit_rotate_right":
+                    # ROR Xd, Xn, #imm is EXTR Xd, Xn, Xn, #imm
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_extr_x(args[0], args[1], args[2])
+                    return LoweringResult(bytes, true, "")
+
+                case "bit_rotate_left":
+                    # ROL Xd, Xn, #imm = ROR Xd, Xn, #(64-imm)
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var neg_shift = 64 - args[2]
+                    var bytes = emit_extr_x(args[0], args[1], neg_shift)
+                    return LoweringResult(bytes, true, "")
+
+                case _:
+                    pass
+
+            if intrinsic_requires_placeholder_lowering(idiom):
+                return LoweringResult(empty, false, "unimplemented")
+
+            # Step 4 + 5: arity check then emit
+            match name:
+                case "crypto_aes_round":
+                    if args.len() != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    # Full AES encrypt round: AESE Vd,Vn then AESMC Vd,Vd
+                    var aese_bytes = emit_aese(args[0], args[1])
+                    var aesmc_bytes = emit_aesmc_aarch64(args[0], args[0])
+                    var bytes = _concat8(aese_bytes, aesmc_bytes)
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_aes_round_last":
+                    if args.len() != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    # Final AES encrypt round: AESE only (no mix columns)
+                    var bytes = emit_aese(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_aes_inv_round":
+                    if args.len() != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    # Full AES decrypt round: AESD Vd,Vn then AESIMC Vd,Vd
+                    var aesd_bytes = emit_aesd(args[0], args[1])
+                    var aesimc_bytes = emit_aesimc_aarch64(args[0], args[0])
+                    var bytes = _concat8(aesd_bytes, aesimc_bytes)
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_aes_inv_round_last":
+                    if args.len() != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    # Final AES decrypt round: AESD only
+                    var bytes = emit_aesd(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_sha256_rnds2":
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    # SHA-256 rounds: SHA256H Qd,Qn,Vm + SHA256H2 Qd,Qn,Vm
+                    var h_bytes = emit_sha256h(args[0], args[1], args[2])
+                    var h2_bytes = emit_sha256h2(args[0], args[1], args[2])
+                    var bytes = _concat8(h_bytes, h2_bytes)
+                    LoweringResult(bytes, true, "")
+
+                case "crc32_u8":
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_crc32b(args[0], args[1], args[2])
+                    LoweringResult(bytes, true, "")
+
+                case "crc32_u32":
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_crc32w(args[0], args[1], args[2])
+                    LoweringResult(bytes, true, "")
+
+                case "crc32_u64":
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_crc32x(args[0], args[1], args[2])
+                    LoweringResult(bytes, true, "")
+
+                case "clmul_lo":
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_pmull(args[0], args[1], args[2])
+                    LoweringResult(bytes, true, "")
+
+                case "clmul_hi":
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_pmull2(args[0], args[1], args[2])
+                    LoweringResult(bytes, true, "")
+
+                case "bit_parity":
+                    # Parity requires NEON CNT + ADDV + AND (>=12 bytes),
+                    # which exceeds the current _concat8 (8-byte) helper.
+                    # Approach: FMOV Dd,Xn → CNT Vd.8B → ADDV Bd → UMOV Wd →
+                    #           AND Wd,Wd,#1.  Needs a multi-instruction concat
+                    #           helper or direct byte-array builder.
+                    LoweringResult(empty, false, "unimplemented")
+
+                case "crypto_sha512_rnds2":
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    # SHA-512 rounds: SHA512H Qd,Qn,Vm.2D + SHA512H2 Qd,Qn,Vm.2D
+                    var sh_bytes = emit_sha512h(args[0], args[1], args[2])
+                    var sh2_bytes = emit_sha512h2(args[0], args[1], args[2])
+                    var bytes = _concat8(sh_bytes, sh2_bytes)
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_sha512_msg1":
+                    if args.len() != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    # SHA-512 schedule update 0: SHA512SU0 Vd.2D, Vn.2D
+                    var bytes = emit_sha512su0(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_sha512_msg2":
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    # SHA-512 schedule update 1: SHA512SU1 Vd.2D, Vn.2D, Vm.2D
+                    var bytes = emit_sha512su1(args[0], args[1], args[2])
+                    LoweringResult(bytes, true, "")
+
+                case _:
+                    LoweringResult(empty, false, "unknown")
+
+        case _:
+            LoweringResult(empty, false, "unknown")

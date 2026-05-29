@@ -1,0 +1,211 @@
+# SMF Dependency Validation Specification
+#
+# Tests serialization/deserialization of dependency hashes
+# and staleness validation with dependency interface checking.
+#
+# **Feature IDs:** #CACHE-DEP-001 to #CACHE-DEP-010
+# **Category:** Cache
+
+# ============================================================================
+# Mock types (self-contained for interpreter mode)
+# ============================================================================
+
+struct MockDep:
+    module_path: text
+    interface_hash: i64
+
+# ============================================================================
+# Mock serialization (mirrors production serialize_smf_dependencies)
+# ============================================================================
+
+fn mock_u32_to_bytes(value: i64) -> [u8]:
+    [
+        (value & 0xFF) as u8,
+        ((value >> 8) & 0xFF) as u8,
+        ((value >> 16) & 0xFF) as u8,
+        ((value >> 24) & 0xFF) as u8
+    ]
+
+fn mock_u64_to_bytes(value: i64) -> [u8]:
+    [
+        (value & 0xFF) as u8,
+        ((value >> 8) & 0xFF) as u8,
+        ((value >> 16) & 0xFF) as u8,
+        ((value >> 24) & 0xFF) as u8,
+        ((value >> 32) & 0xFF) as u8,
+        ((value >> 40) & 0xFF) as u8,
+        ((value >> 48) & 0xFF) as u8,
+        ((value >> 56) & 0xFF) as u8
+    ]
+
+fn mock_read_u32_le(data: [u8], offset: i64) -> i64:
+    val b0 = data[offset] as i64
+    val b1 = data[offset + 1] as i64
+    val b2 = data[offset + 2] as i64
+    val b3 = data[offset + 3] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+fn mock_read_u64_le(data: [u8], offset: i64) -> i64:
+    val b0 = data[offset] as i64
+    val b1 = data[offset + 1] as i64
+    val b2 = data[offset + 2] as i64
+    val b3 = data[offset + 3] as i64
+    val b4 = data[offset + 4] as i64
+    val b5 = data[offset + 5] as i64
+    val b6 = data[offset + 6] as i64
+    val b7 = data[offset + 7] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+
+fn mock_serialize(deps: [MockDep]) -> [u8]:
+    var buf: [u8] = []
+    buf = buf + mock_u32_to_bytes(deps.len())
+    for dep in deps:
+        val path_bytes = dep.module_path.to_bytes()
+        buf = buf + mock_u32_to_bytes(path_bytes.len())
+        buf = buf + path_bytes
+        buf = buf + mock_u64_to_bytes(dep.interface_hash)
+    buf
+
+fn mock_deserialize(data: [u8]) -> [MockDep]:
+    if data.len() < 4:
+        return []
+    val count = mock_read_u32_le(data, 0)
+    var deps: [MockDep] = []
+    var offset = 4
+    var i = 0
+    while i < count:
+        if offset + 4 > data.len():
+            break
+        val path_len = mock_read_u32_le(data, offset)
+        offset = offset + 4
+        if offset + path_len > data.len():
+            break
+        var chars: [text] = []
+        var j = 0
+        while j < path_len:
+            val b = data[offset + j]
+            val ascii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+            val idx = (b as i64) - 32
+            if idx >= 0 and idx < ascii.len():
+                chars = chars + [ascii[idx:idx + 1]]
+            j = j + 1
+        val module_path = chars.join("")
+        offset = offset + path_len
+        if offset + 8 > data.len():
+            break
+        val hash = mock_read_u64_le(data, offset)
+        offset = offset + 8
+        deps = deps + [MockDep(module_path: module_path, interface_hash: hash)]
+        i = i + 1
+    deps
+
+# ============================================================================
+# Mock dependency validation (mirrors validate_dependencies)
+# ============================================================================
+
+val MOCK_CACHE_FRESH: i64 = 0
+val MOCK_CACHE_STALE: i64 = 2
+
+fn mock_validate_deps(deps: [MockDep], get_hash: any) -> i64:
+    """Returns FRESH (0) or STALE (2)."""
+    var i = 0
+    while i < deps.len():
+        val dep = deps[i]
+        val actual_hash = get_hash(dep.module_path)
+        if actual_hash == 0:
+            return MOCK_CACHE_STALE
+        if actual_hash != dep.interface_hash:
+            return MOCK_CACHE_STALE
+        i = i + 1
+    MOCK_CACHE_FRESH
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "SMF dependency serialization":
+    it "serializes empty list":
+        val data = mock_serialize([])
+        expect(data.len()).to_equal(4)
+        expect(mock_read_u32_le(data, 0)).to_equal(0)
+
+    it "round-trips single dependency":
+        val deps = [MockDep(module_path: "src/lib.spl", interface_hash: 42)]
+        val data = mock_serialize(deps)
+        val parsed = mock_deserialize(data)
+        expect(parsed.len()).to_equal(1)
+        expect(parsed[0].module_path).to_equal("src/lib.spl")
+        expect(parsed[0].interface_hash).to_equal(42)
+
+    it "round-trips multiple dependencies":
+        val deps = [
+            MockDep(module_path: "src/a.spl", interface_hash: 100),
+            MockDep(module_path: "src/b.spl", interface_hash: 200),
+            MockDep(module_path: "src/c.spl", interface_hash: 300)
+        ]
+        val data = mock_serialize(deps)
+        val parsed = mock_deserialize(data)
+        expect(parsed.len()).to_equal(3)
+        expect(parsed[0].module_path).to_equal("src/a.spl")
+        expect(parsed[0].interface_hash).to_equal(100)
+        expect(parsed[2].module_path).to_equal("src/c.spl")
+        expect(parsed[2].interface_hash).to_equal(300)
+
+    it "handles long module paths":
+        val long_path = "src/compiler/70.backend/backend/common/expression_evaluator_bootstrap.spl"
+        val deps = [MockDep(module_path: long_path, interface_hash: 999)]
+        val data = mock_serialize(deps)
+        val parsed = mock_deserialize(data)
+        expect(parsed.len()).to_equal(1)
+        expect(parsed[0].module_path).to_equal(long_path)
+
+    it "deserializes truncated data gracefully":
+        val data: [u8] = [1, 0, 0]  # Less than 4 bytes
+        val parsed = mock_deserialize(data)
+        expect(parsed.len()).to_equal(0)
+
+describe "SMF dependency validation":
+    it "returns FRESH when all hashes match":
+        val deps = [
+            MockDep(module_path: "src/a.spl", interface_hash: 100),
+            MockDep(module_path: "src/b.spl", interface_hash: 200)
+        ]
+        val result = mock_validate_deps(deps, fn(path: text) -> i64:
+            if path == "src/a.spl": return 100
+            if path == "src/b.spl": return 200
+            0
+        )
+        expect(result).to_equal(MOCK_CACHE_FRESH)
+
+    it "returns STALE when dependency interface changed":
+        val deps = [MockDep(module_path: "src/a.spl", interface_hash: 100)]
+        val result = mock_validate_deps(deps, fn(path: text) -> i64:
+            999  # Different hash
+        )
+        expect(result).to_equal(MOCK_CACHE_STALE)
+
+    it "returns STALE when dependency is missing":
+        val deps = [MockDep(module_path: "src/missing.spl", interface_hash: 100)]
+        val result = mock_validate_deps(deps, fn(path: text) -> i64:
+            0  # Hash = 0 means missing
+        )
+        expect(result).to_equal(MOCK_CACHE_STALE)
+
+    it "returns FRESH for empty dependency list":
+        val deps: [MockDep] = []
+        val result = mock_validate_deps(deps, fn(path: text) -> i64: 0)
+        expect(result).to_equal(MOCK_CACHE_FRESH)
+
+    it "detects single stale dep among many fresh":
+        val deps = [
+            MockDep(module_path: "src/a.spl", interface_hash: 100),
+            MockDep(module_path: "src/b.spl", interface_hash: 200),
+            MockDep(module_path: "src/c.spl", interface_hash: 300)
+        ]
+        val result = mock_validate_deps(deps, fn(path: text) -> i64:
+            if path == "src/a.spl": return 100
+            if path == "src/b.spl": return 999  # Changed!
+            if path == "src/c.spl": return 300
+            0
+        )
+        expect(result).to_equal(MOCK_CACHE_STALE)

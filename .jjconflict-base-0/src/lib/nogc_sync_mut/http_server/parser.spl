@@ -1,0 +1,108 @@
+# HTTP Request Parser — Lightweight Embedded Web Server
+#
+# Part of std.nogc_sync_mut.http_server
+# Full standalone example: examples/simple_web_server/
+# Design: doc/05_design/simple_web_server_lib_api.md
+
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.http_server.types.{
+    HttpRequest, HttpMethod, http_method_from_text
+}
+
+fn parse_request(stream: TcpStream) -> Result<HttpRequest, text>:
+    match stream.read_line():
+        Err(e):
+            return Err("Failed to read request line: {e}")
+        Ok(request_line):
+            val trimmed = request_line.trim()
+            if trimmed == "":
+                return Err("Empty request line")
+
+            val parsed = parse_request_line(trimmed)
+            val method_str = parsed.0
+            val raw_path = parsed.1
+            val version = parsed.2
+
+            if method_str == "" or raw_path == "":
+                return Err("Malformed request line: {trimmed}")
+
+            val method = http_method_from_text(method_str)
+
+            var path = raw_path
+            var query = ""
+            val qmark = raw_path.index_of("?")
+            if qmark >= 0:
+                path = raw_path.slice(0, qmark)
+                query = raw_path.slice(qmark + 1, raw_path.len())
+
+            var headers: [(text, text)] = []
+            var content_length = 0
+            loop:
+                match stream.read_line():
+                    Ok(header_line):
+                        val hl = header_line.trim()
+                        if hl == "":
+                            break
+                        val colon = hl.index_of(":")
+                        if colon > 0:
+                            val name = hl.slice(0, colon).trim()
+                            val value = hl.slice(colon + 1, hl.len()).trim()
+                            headers.push((name, value))
+                            if name.to_lower() == "content-length":
+                                content_length = to_i32_safe(value)
+                    Err(_):
+                        break
+
+            var body = ""
+            if content_length > 0:
+                match stream.read_bytes(content_length):
+                    Ok(data):
+                        body = data
+                    Err(_):
+                        pass
+
+            return Ok(HttpRequest(
+                method: method,
+                path: path,
+                query: query,
+                version: version,
+                headers: headers,
+                body: body,
+                remote_addr: ""
+            ))
+
+fn parse_request_line(line: text) -> (text, text, text):
+    var method = ""
+    var path = ""
+    var version = ""
+    var idx = 0
+    for part in line.split(" "):
+        if idx == 0:
+            method = part
+        elif idx == 1:
+            path = part
+        elif idx == 2:
+            version = part
+            break
+        idx = idx + 1
+    return (method, path, version)
+
+fn to_i32_safe(s: text) -> i32:
+    val trimmed = s.trim()
+    val n = trimmed.len()
+    if n == 0:
+        return 0
+    val zero = "0".to_i64()
+    var result: i64 = 0
+    var i = 0
+    if trimmed.char_at(0) == "-":
+        i = 1
+    while i < n:
+        val digit = trimmed.char_at(i).to_i64() - zero
+        if digit < 0 or digit > 9:
+            return 0
+        result = result * 10 + digit
+        i = i + 1
+    if trimmed.char_at(0) == "-":
+        result = 0 - result
+    return result.to_i32()

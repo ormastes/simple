@@ -1,0 +1,276 @@
+# ============================================================================
+# RV32I RTL CSR File — M-Mode Control/Status Registers
+# ============================================================================
+#
+# Implements the machine-mode CSR register file for RV32I.  All operations
+# are pure functions returning new state — suitable for synthesizable RTL.
+#
+# Supported CSRs:
+#   Trap Setup:    mstatus, misa, mie, mtvec
+#   Trap Handling: mscratch, mepc, mcause, mtval, mip
+#   Counters:      mcycle/h, minstret/h
+#   Info:          mhartid (read-only)
+#
+# VHDL synthesizable subset: u32, bool, structs only.
+# ============================================================================
+
+# ============================================================================
+# CSR Address Constants (u32 for RTL address matching)
+# ============================================================================
+
+val CSR_ADDR_MSTATUS: u32   = 0x300
+val CSR_ADDR_MISA: u32      = 0x301
+val CSR_ADDR_MIE: u32       = 0x304
+val CSR_ADDR_MTVEC: u32     = 0x305
+val CSR_ADDR_MSCRATCH: u32  = 0x340
+val CSR_ADDR_MEPC: u32      = 0x341
+val CSR_ADDR_MCAUSE: u32    = 0x342
+val CSR_ADDR_MTVAL: u32     = 0x343
+val CSR_ADDR_MIP: u32       = 0x344
+val CSR_ADDR_MCYCLE: u32    = 0xB00
+val CSR_ADDR_MCYCLEH: u32   = 0xB80
+val CSR_ADDR_MINSTRET: u32  = 0xB02
+val CSR_ADDR_MINSTRETH: u32 = 0xB82
+val CSR_ADDR_MHARTID: u32   = 0xF14
+
+# ============================================================================
+# MSTATUS Bit Masks (u32 for bitwise ops)
+# ============================================================================
+
+val MSTATUS_MIE_MASK: u32   = 0x00000008   # bit 3
+val MSTATUS_MPIE_MASK: u32  = 0x00000080   # bit 7
+val MSTATUS_MPP_MASK: u32   = 0x00001800   # bits [12:11]
+
+val MSTATUS_MIE_BIT: u32    = 3
+val MSTATUS_MPIE_BIT: u32   = 7
+val MSTATUS_MPP_LO_BIT: u32 = 11
+
+# MPP = M-mode (0b11) — we only support M-mode
+val MPP_M_MODE: u32         = 0x00001800   # 3 << 11
+
+# ============================================================================
+# MIE / MIP Bit Masks
+# ============================================================================
+
+val MIP_MSIP_MASK: u32 = 0x00000008   # bit 3 — Machine Software Interrupt
+val MIP_MTIP_MASK: u32 = 0x00000080   # bit 7 — Machine Timer Interrupt
+val MIP_MEIP_MASK: u32 = 0x00000800   # bit 11 — Machine External Interrupt
+
+# ============================================================================
+# MISA for RV32I: MXL=01 (bits [31:30]) + bit 8 (I extension)
+# ============================================================================
+
+val MISA_RV32I: u32 = 0x40000100
+
+# ============================================================================
+# CSR funct3 encodings (from SYSTEM instruction)
+# ============================================================================
+
+val FUNCT3_CSRRW: u32  = 0x1
+val FUNCT3_CSRRS: u32  = 0x2
+val FUNCT3_CSRRC: u32  = 0x3
+val FUNCT3_CSRRWI: u32 = 0x5
+val FUNCT3_CSRRSI: u32 = 0x6
+val FUNCT3_CSRRCI: u32 = 0x7
+
+# ============================================================================
+# CSR File Struct
+# ============================================================================
+
+struct CsrFile:
+    """M-mode CSR register file.  All fields are u32."""
+    mstatus: u32
+    misa: u32
+    mie: u32
+    mtvec: u32
+    mscratch: u32
+    mepc: u32
+    mcause: u32
+    mtval: u32
+    mip: u32
+    mcycle: u32
+    mcycleh: u32
+    minstret: u32
+    minstreth: u32
+    mhartid: u32
+
+# ============================================================================
+# CSR Read/Write Result
+# ============================================================================
+
+struct CsrRwResult:
+    """Result of a CSR read-modify-write operation."""
+    csr: CsrFile      # Updated CSR file
+    old_value: u32     # Previous value (written to rd)
+
+# ============================================================================
+# Create — initial CSR state after reset
+# ============================================================================
+
+fn csr_create(hartid: u32) -> CsrFile:
+    """Create initial CSR state for a given hart.
+    misa indicates RV32I, mstatus starts with interrupts disabled."""
+    CsrFile(
+        mstatus: 0,
+        misa: MISA_RV32I,
+        mie: 0,
+        mtvec: 0,
+        mscratch: 0,
+        mepc: 0,
+        mcause: 0,
+        mtval: 0,
+        mip: 0,
+        mcycle: 0,
+        mcycleh: 0,
+        minstret: 0,
+        minstreth: 0,
+        mhartid: hartid
+    )
+
+# ============================================================================
+# CSR Read — read by 12-bit address
+# ============================================================================
+
+fn csr_read(csr: CsrFile, addr: u32) -> u32:
+    """Read a CSR by its 12-bit address.  Unknown addresses return 0."""
+    if addr == CSR_ADDR_MSTATUS:
+        return csr.mstatus
+    if addr == CSR_ADDR_MISA:
+        return csr.misa
+    if addr == CSR_ADDR_MIE:
+        return csr.mie
+    if addr == CSR_ADDR_MTVEC:
+        return csr.mtvec
+    if addr == CSR_ADDR_MSCRATCH:
+        return csr.mscratch
+    if addr == CSR_ADDR_MEPC:
+        return csr.mepc
+    if addr == CSR_ADDR_MCAUSE:
+        return csr.mcause
+    if addr == CSR_ADDR_MTVAL:
+        return csr.mtval
+    if addr == CSR_ADDR_MIP:
+        return csr.mip
+    if addr == CSR_ADDR_MCYCLE:
+        return csr.mcycle
+    if addr == CSR_ADDR_MCYCLEH:
+        return csr.mcycleh
+    if addr == CSR_ADDR_MINSTRET:
+        return csr.minstret
+    if addr == CSR_ADDR_MINSTRETH:
+        return csr.minstreth
+    if addr == CSR_ADDR_MHARTID:
+        return csr.mhartid
+    # Unknown CSR — return 0
+    0
+
+# ============================================================================
+# CSR Write — write by 12-bit address
+# ============================================================================
+
+fn csr_write(csr: CsrFile, addr: u32, value: u32) -> CsrFile:
+    """Write a value to a CSR by address.  Read-only CSRs (misa, mhartid)
+    and unknown addresses are silently ignored."""
+    var out = csr
+    if addr == CSR_ADDR_MSTATUS:
+        # Only allow writable bits: MIE, MPIE, MPP
+        val writable_mask: u32 = MSTATUS_MIE_MASK | MSTATUS_MPIE_MASK | MSTATUS_MPP_MASK
+        out.mstatus = value & writable_mask
+    else if addr == CSR_ADDR_MIE:
+        out.mie = value
+    else if addr == CSR_ADDR_MTVEC:
+        out.mtvec = value
+    else if addr == CSR_ADDR_MSCRATCH:
+        out.mscratch = value
+    else if addr == CSR_ADDR_MEPC:
+        # mepc must be aligned to 4 bytes (IALIGN=32)
+        out.mepc = value & 0xFFFFFFFC
+    else if addr == CSR_ADDR_MCAUSE:
+        out.mcause = value
+    else if addr == CSR_ADDR_MTVAL:
+        out.mtval = value
+    else if addr == CSR_ADDR_MIP:
+        # Only MSIP is software-writable in mip; MTIP and MEIP are external
+        out.mip = (csr.mip & (MIP_MTIP_MASK | MIP_MEIP_MASK)) | (value & MIP_MSIP_MASK)
+    # misa, mhartid, mcycle*, minstret* — read-only or counter (updated by tick)
+    out
+
+# ============================================================================
+# CSR Read-Modify-Write — CSRRW, CSRRS, CSRRC
+# ============================================================================
+
+fn csr_rw(csr: CsrFile, addr: u32, rs1_val: u32, funct3: u32) -> CsrRwResult:
+    """Perform a CSR read-modify-write operation.
+    Returns the old value (for rd writeback) and the updated CsrFile.
+
+    funct3 encoding:
+      CSRRW  (0x1): swap — write rs1_val, return old
+      CSRRS  (0x2): set bits — old | rs1_val
+      CSRRC  (0x3): clear bits — old & ~rs1_val
+      CSRRWI (0x5): swap with immediate (rs1_val is zero-extended imm)
+      CSRRSI (0x6): set bits with immediate
+      CSRRCI (0x7): clear bits with immediate
+    """
+    val old_value = csr_read(csr, addr)
+    var new_value = old_value
+
+    # Determine the operation based on funct3[1:0]
+    val op = funct3 & 0x3
+    if op == 1:
+        # CSRRW / CSRRWI — replace entirely
+        new_value = rs1_val
+    else if op == 2:
+        # CSRRS / CSRRSI — set bits
+        if rs1_val != 0:
+            new_value = old_value | rs1_val
+    else if op == 3:
+        # CSRRC / CSRRCI — clear bits
+        if rs1_val != 0:
+            new_value = old_value & (rs1_val ^ 0xFFFFFFFF)
+
+    val new_csr = csr_write(csr, addr, new_value)
+    CsrRwResult(csr: new_csr, old_value: old_value)
+
+# ============================================================================
+# CSR Tick — increment cycle and instruction counters
+# ============================================================================
+
+fn csr_tick(csr: CsrFile) -> CsrFile:
+    """Increment mcycle and minstret counters (called once per clock cycle).
+    Handles 32-bit overflow into the high halves."""
+    var out = csr
+
+    # Increment mcycle (64-bit split across mcycle/mcycleh)
+    val new_mcycle = csr.mcycle + 1
+    out.mcycle = new_mcycle
+    if new_mcycle == 0:
+        # Overflow — increment high half
+        out.mcycleh = csr.mcycleh + 1
+
+    # Increment minstret (64-bit split across minstret/minstreth)
+    val new_minstret = csr.minstret + 1
+    out.minstret = new_minstret
+    if new_minstret == 0:
+        # Overflow — increment high half
+        out.minstreth = csr.minstreth + 1
+
+    out
+
+# ============================================================================
+# Update MIP — set interrupt pending bits from external sources
+# ============================================================================
+
+fn csr_update_mip(csr: CsrFile, mtip: bool, msip: bool, meip: bool) -> CsrFile:
+    """Update the interrupt-pending register from external interrupt sources.
+    mtip = timer interrupt (from CLINT), msip = software interrupt (from CLINT),
+    meip = external interrupt (from PLIC)."""
+    var new_mip: u32 = 0
+    if msip:
+        new_mip = new_mip | MIP_MSIP_MASK
+    if mtip:
+        new_mip = new_mip | MIP_MTIP_MASK
+    if meip:
+        new_mip = new_mip | MIP_MEIP_MASK
+    var out = csr
+    out.mip = new_mip
+    out

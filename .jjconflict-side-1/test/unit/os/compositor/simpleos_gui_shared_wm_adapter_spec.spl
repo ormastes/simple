@@ -1,0 +1,81 @@
+# @cover src/os/compositor/host_compositor_entry.spl 80%
+"""
+# SimpleOS GUI Shared WM Adapter Spec
+
+Focused proof that the SimpleOS GUI adapter uses the shared WM bridge,
+input, and framebuffer render path instead of only reporting capability names.
+"""
+
+use std.spec.{describe, it, expect}
+use common.window_protocol.geometry.{Size}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.host_compositor_entry.{
+    SimpleOsGuiAdapter,
+    simpleos_gui_adapter_display_path_name,
+    simpleos_gui_adapter_content_renderer_name,
+}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+
+var _adapter_present_count: i64 = 0
+var _adapter_chrome_fill_count: i64 = 0
+var _adapter_clear_color: u32 = 0u32
+
+class AdapterCaptureBackend:
+    w: i32
+    h: i32
+
+impl CompositorBackend for AdapterCaptureBackend:
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        _adapter_clear_color = color
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if color == 0xFF2563EBu32:
+            _adapter_chrome_fill_count = _adapter_chrome_fill_count + 1
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        if text_str.len() > 0:
+            self.fill_rect(x, y, text_str.len().to_i32() * 8, 16, bg)
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        self.fill_rect(x, y, 8, 16, bg)
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        _adapter_clear_color = _adapter_clear_color
+
+    me present():
+        _adapter_present_count = _adapter_present_count + 1
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        _adapter_present_count = _adapter_present_count + 1
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+describe "SimpleOS GUI adapter shared WM proof":
+
+    it "routes bridge, input, and framebuffer presentation through HostCompositor":
+        _adapter_present_count = 0
+        _adapter_chrome_fill_count = 0
+        _adapter_clear_color = 0u32
+        val backend = AdapterCaptureBackend(w: 240, h: 180)
+        val adapter = SimpleOsGuiAdapter.new(backend, Size.wh(240, 180))
+
+        adapter.deliver_bridge_request(1, 44, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 24, 36, 128, 92, "adapter-ready", 800, "/sys/apps/terminal")
+        adapter.render_framebuffer_frame()
+
+        expect(simpleos_gui_adapter_display_path_name(adapter)).to_equal("simpleos-framebuffer")
+        expect(simpleos_gui_adapter_content_renderer_name(adapter)).to_equal("simple_web")
+        expect(adapter.delivered_bridge_events).to_equal(1)
+        expect(adapter.presented_frames).to_equal(1)
+        expect(adapter.compositor.windows.len()).to_equal(1)
+        expect(adapter.compositor.windows[0].content).to_equal("adapter-ready")
+        expect(_adapter_present_count).to_equal(1)
+        expect(_adapter_chrome_fill_count).to_be_greater_than(0)
+        expect(_adapter_clear_color).to_equal(0xFF0F172Au32)

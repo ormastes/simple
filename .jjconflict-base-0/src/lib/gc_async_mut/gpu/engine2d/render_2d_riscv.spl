@@ -1,0 +1,262 @@
+# RISC-V 2D Rendering — CUDA with CPU scalar fallback
+#
+# Attempts CUDA-accelerated 2D rendering on RISC-V hosts. Falls back to
+# scalar CPU rendering when CUDA is unavailable or initialisation fails.
+# riscv32 never attempts CUDA (no NVIDIA GPU silicon exists for rv32).
+#
+# Usage:
+#   use std.gpu.engine2d.render_2d_riscv.{Render2dRiscv}
+#
+# Lifecycle:
+#   val r = Render2dRiscv.for_target("riscv64")
+#   if r.init(width, height):
+#       r.clear(0xFF000000u32)
+#       r.fill_rect(0, 0, 64, 64, 0xFFFF0000u32)
+#       val pixels = r.sync_readback()
+#       r.shutdown()
+
+use std.gpu.engine2d.cpu_session.{CpuSession, CpuFeatureSet}
+use std.gpu.engine2d.backend_cuda.{CudaBackend}
+use std.gpu.engine2d.cuda_session.{CudaSession}
+use std.gpu.engine2d.backend_session.{BackendSessionMode, BackendSessionKind,
+    BackendSessionPolicy, BackendSessionHandle,
+    backend_session_create, backend_session_retain, backend_session_release}
+use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count, CUDA_SUCCESS}
+
+extern fn rt_cpu_arch_name() -> text
+extern fn rt_time_now_monotonic_ms() -> i64
+
+# ============================================================================
+# Render2dRiscv
+# ============================================================================
+
+class Render2dRiscv:
+    """2D renderer targeting RISC-V hosts (rv32 and rv64).
+
+    Architecture:
+    - riscv32: reports "unavailable" — no NVIDIA CUDA silicon for rv32
+    - riscv64 + CUDA present: initialises CudaBackend; backend() == "cuda"
+    - riscv64 + no CUDA: falls through to CpuSession scalar; backend() == "cpu_scalar"
+
+    fill_rect / clear / sync_readback work on whichever path is active.
+    The pixel buffer is always a [u32] slice in ARGB order.
+    """
+
+    # Target and state
+    arch: text               # "riscv64" or "riscv32" (injected at construction)
+    width: i32
+    height: i32
+    initialized: bool
+
+    # Active backend discriminator
+    # "cuda" | "cpu_scalar" | "unavailable"
+    active_backend: text
+    diagnostic: text         # Non-empty when backend == "unavailable"
+
+    # CUDA path
+    cuda_backend: CudaBackend
+    cuda_session: CudaSession
+    cuda_initialized: bool
+
+    # CPU scalar path
+    cpu_session: CpuSession
+    cpu_buf: [u32]           # Host pixel buffer for scalar path
+
+    # Shared handle (ManagedShared support)
+    session_handle: BackendSessionHandle
+
+    static fn create() -> Render2dRiscv:
+        """Create for the actual host architecture (rt_cpu_arch_name)."""
+        val arch = rt_cpu_arch_name()
+        Render2dRiscv.for_target(arch)
+
+    static fn for_target(arch: text) -> Render2dRiscv:
+        """Create for a specific target string — enables hermetic testing."""
+        Render2dRiscv(
+            arch: arch,
+            width: 0,
+            height: 0,
+            initialized: false,
+            active_backend: "unavailable",
+            diagnostic: "",
+            cuda_backend: CudaBackend.create(),
+            cuda_session: CudaSession.create(),
+            cuda_initialized: false,
+            cpu_session: CpuSession.create(),
+            cpu_buf: [],
+            session_handle: BackendSessionHandle.null()
+        )
+
+    me target() -> text:
+        """Return "riscv64" or "riscv32" (the injected arch string)."""
+        self.arch
+
+    me backend() -> text:
+        """Return "cuda", "cpu_scalar", or "unavailable"."""
+        self.active_backend
+
+    me get_diagnostic() -> text:
+        """Human-readable reason when backend() == "unavailable"."""
+        self.diagnostic
+
+    me init(width: i32, height: i32) -> bool:
+        """Initialise the best available rendering path.
+
+        Returns true when at least one rendering path is available.
+        Returns false only for riscv32 (sets diagnostic).
+        """
+        self.width = width
+        self.height = height
+
+        if self.arch == "riscv32":
+            self.active_backend = "unavailable"
+            self.diagnostic = "GPU unavailable on riscv32"
+            self.initialized = false
+            return false
+
+        # riscv64: attempt CUDA first
+        val cuda_ok = self._try_init_cuda(width, height)
+        if cuda_ok:
+            self.active_backend = "cuda"
+            self.initialized = true
+            return true
+
+        # Fallback: CPU scalar via CpuSession
+        val cpu_ok = self._init_cpu_scalar(width, height)
+        if cpu_ok:
+            self.active_backend = "cpu_scalar"
+            self.initialized = true
+            return true
+
+        # Both failed — should not happen on a functional rv64 host
+        self.active_backend = "unavailable"
+        self.diagnostic = "GPU unavailable on riscv64"
+        self.initialized = false
+        false
+
+    me init_with_shared_cpu(width: i32, height: i32, session: CpuSession) -> bool:
+        """Initialise with an externally-provided ManagedShared CpuSession.
+
+        The session's ref_count is incremented; caller retains its own
+        reference and must call session.release() independently.
+        Only operates on the cpu_scalar path (not CUDA).
+        Returns true on success.
+        """
+        if not session.is_valid():
+            return false
+        self.width = width
+        self.height = height
+        self.cpu_session = session.retain()
+        val total = width * height
+        self.cpu_buf = [0u32; total]
+        val policy = BackendSessionPolicy.default_for(BackendSessionKind.Cpu)
+        self.session_handle = backend_session_create(BackendSessionKind.Cpu, policy)
+        self.active_backend = "cpu_scalar"
+        self.initialized = true
+        true
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        """Fill a rectangle with the given ARGB colour.
+
+        Dispatches to CUDA kernel or scalar CPU loop depending on
+        which path was initialised.
+        """
+        if not self.initialized:
+            return
+        if self.active_backend == "cuda":
+            self.cuda_backend.draw_rect_filled(x, y, w, h, color)
+            return
+        if self.active_backend == "cpu_scalar":
+            self._scalar_fill_rect(x, y, w, h, color)
+
+    me clear(color: u32):
+        """Fill the entire framebuffer with the given ARGB colour."""
+        if not self.initialized:
+            return
+        if self.active_backend == "cuda":
+            self.cuda_backend.clear(color)
+            return
+        if self.active_backend == "cpu_scalar":
+            self._scalar_clear(color)
+
+    me sync_readback() -> [u32]:
+        """Return current framebuffer pixels as a host [u32] slice.
+
+        CUDA path: triggers device-to-host copy then returns the buffer.
+        CPU scalar path: returns the in-memory pixel buffer directly.
+        Unavailable path: returns empty slice.
+        """
+        if not self.initialized:
+            return []
+        if self.active_backend == "cuda":
+            self.cuda_backend.present()
+            return self.cuda_backend.read_pixels()
+        if self.active_backend == "cpu_scalar":
+            return self.cpu_buf
+        []
+
+    me shutdown():
+        """Release all resources for the active backend."""
+        if not self.initialized:
+            return
+        if self.cuda_initialized:
+            self.cuda_backend.shutdown()
+            self.cuda_initialized = false
+        if self.active_backend == "cpu_scalar":
+            self.cpu_session.release()
+        self.initialized = false
+        self.active_backend = "unavailable"
+
+    # -------------------------------------------------------------------------
+    # Private helpers
+    # -------------------------------------------------------------------------
+
+    me _try_init_cuda(width: i32, height: i32) -> bool:
+        """Attempt CUDA initialisation. Returns true on success."""
+        if not cuda_available():
+            return false
+        val result = cuda_init()
+        if result != CUDA_SUCCESS:
+            return false
+        if cuda_device_count() < 1:
+            return false
+        val ok = self.cuda_backend.init(width, height)
+        if ok:
+            self.cuda_initialized = true
+        ok
+
+    me _init_cpu_scalar(width: i32, height: i32) -> bool:
+        """Initialise CPU scalar session and allocate pixel buffer."""
+        val rc = self.cpu_session.init()
+        if rc != 0:
+            return false
+        val total = width * height
+        self.cpu_buf = [0u32; total]
+        val policy = BackendSessionPolicy.default_for(BackendSessionKind.Cpu)
+        self.session_handle = backend_session_create(BackendSessionKind.Cpu, policy)
+        true
+
+    me _scalar_clear(color: u32):
+        """Fill cpu_buf with color (scalar loop)."""
+        val total = self.width * self.height
+        var i = 0
+        while i < total:
+            self.cpu_buf[i] = color
+            i = i + 1
+
+    me _scalar_fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        """Scalar rect fill into cpu_buf with bounds clamping."""
+        val x0 = x
+        val y0 = y
+        val x1 = x + w
+        val y1 = y + h
+        var row = y0
+        while row < y1:
+            if row >= 0 and row < self.height:
+                var col = x0
+                while col < x1:
+                    if col >= 0 and col < self.width:
+                        val idx = row * self.width + col
+                        self.cpu_buf[idx] = color
+                    col = col + 1
+            row = row + 1

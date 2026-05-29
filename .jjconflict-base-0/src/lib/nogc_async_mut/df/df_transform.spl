@@ -1,0 +1,497 @@
+use std.ndarray.*
+use std.nogc_async_mut.df.mod.{Symbol, DfError, DfValue, Series, SeriesErased, DataFrame, JoinHow, JoinPairs, ConcatAxis, no_missing_values, column_index, series_value_at}
+
+struct PivotCell:
+    value: Float64
+    missing: Bool
+
+fn series_value_as_f64(series: Series, index: i64) -> Float64:
+    if series.dtype == DType.I64:
+        return Float64.new(series.values.flat_i64(index).value as f64)
+    series.values.flat_f64(index)
+
+fn series_value_equal(left: Series, left_index: i64, right: Series, right_index: i64) -> bool:
+    if left.missing[left_index].value or right.missing[right_index].value:
+        return false
+    if left.dtype == DType.F64:
+        return left.values.flat_f64(left_index) == right.values.flat_f64(right_index)
+    if left.dtype == DType.I64:
+        return left.values.flat_i64(left_index) == right.values.flat_i64(right_index)
+    false
+
+fn melt_numeric(frame: DataFrame, id: Symbol, value_vars: [Symbol], variable_name: Symbol, value_name: Symbol) -> Result<DataFrame, DfError>:
+    if value_vars.len() == 0:
+        return Err(DfError.ShapeMismatch)
+    if variable_name == value_name or variable_name == id or value_name == id:
+        return Err(DfError.DuplicateColumn)
+    val id_series = frame.col(id)?
+    if id_series.dtype == DType.Bool:
+        return Err(DfError.ShapeMismatch)
+    var value_series: [Series] = []
+    var value_index = 0
+    while value_index < value_vars.len():
+        val current = frame.col(value_vars[value_index])?
+        if current.dtype == DType.Bool:
+            return Err(DfError.ShapeMismatch)
+        value_series.push(current)
+        value_index = value_index + 1
+    val rows = frame.num_rows().value
+    var variable_values: [Int64] = []
+    var value_values: [Float64] = []
+    var value_missing: [Bool] = []
+    if id_series.dtype == DType.I64:
+        var id_values: [Int64] = []
+        var id_missing: [Bool] = []
+        var row = 0
+        while row < rows:
+            value_index = 0
+            while value_index < value_series.len():
+                id_values.push(id_series.values.flat_i64(row))
+                id_missing.push(id_series.missing[row])
+                variable_values.push(Int64.new(value_index))
+                value_values.push(series_value_as_f64(value_series[value_index], row))
+                value_missing.push(value_series[value_index].missing[row])
+                value_index = value_index + 1
+            row = row + 1
+        return DataFrame.from_columns([
+            SeriesErased.I64Series(Series(name: id, values: array_i64(id_values), dtype: DType.I64, missing: id_missing)),
+            SeriesErased.I64Series(Series(name: variable_name, values: array_i64(variable_values), dtype: DType.I64, missing: no_missing_values(variable_values.len()))),
+            SeriesErased.F64Series(Series(name: value_name, values: array(value_values), dtype: DType.F64, missing: value_missing)),
+        ])
+    var id_values: [Float64] = []
+    var id_missing: [Bool] = []
+    var row = 0
+    while row < rows:
+        value_index = 0
+        while value_index < value_series.len():
+            id_values.push(id_series.values.flat_f64(row))
+            id_missing.push(id_series.missing[row])
+            variable_values.push(Int64.new(value_index))
+            value_values.push(series_value_as_f64(value_series[value_index], row))
+            value_missing.push(value_series[value_index].missing[row])
+            value_index = value_index + 1
+        row = row + 1
+    DataFrame.from_columns([
+        SeriesErased.F64Series(Series(name: id, values: array(id_values), dtype: DType.F64, missing: id_missing)),
+        SeriesErased.I64Series(Series(name: variable_name, values: array_i64(variable_values), dtype: DType.I64, missing: no_missing_values(variable_values.len()))),
+        SeriesErased.F64Series(Series(name: value_name, values: array(value_values), dtype: DType.F64, missing: value_missing)),
+    ])
+
+fn pivot_sum(frame: DataFrame, index: Symbol, columns: Symbol, values: Symbol, value_prefix: Symbol) -> Result<DataFrame, DfError>:
+    if index == columns or index == values or columns == values:
+        return Err(DfError.DuplicateColumn)
+    val index_series = frame.col(index)?
+    val column_series = frame.col(columns)?
+    val value_series = frame.col(values)?
+    if column_series.dtype != DType.I64 or value_series.dtype != DType.F64 or index_series.dtype == DType.Bool:
+        return Err(DfError.ShapeMismatch)
+    if index_series.dtype == DType.I64:
+        pivot_sum_i64_index(index_series, column_series, value_series, index, value_prefix)
+    else:
+        pivot_sum_f64_index(index_series, column_series, value_series, index, value_prefix)
+
+fn pivot_sum_i64_index(index_series: Series, column_series: Series, value_series: Series, index_name: Symbol, value_prefix: Symbol) -> Result<DataFrame, DfError>:
+    var row_keys: [Int64] = []
+    var col_keys: [Int64] = []
+    var row = 0
+    while row < value_series.len().value:
+        if not index_series.missing[row].value and not column_series.missing[row].value and not value_series.missing[row].value:
+            val row_key = index_series.values.flat_i64(row)
+            val col_key = column_series.values.flat_i64(row)
+            if i64_group_index(row_keys, row_key) < 0:
+                row_keys.push(row_key)
+            if i64_group_index(col_keys, col_key) < 0:
+                col_keys.push(col_key)
+        row = row + 1
+    var out: [SeriesErased] = [
+        SeriesErased.I64Series(Series(name: index_name, values: array_i64(row_keys), dtype: DType.I64, missing: no_missing_values(row_keys.len())))
+    ]
+    var col_pos = 0
+    while col_pos < col_keys.len():
+        var cell_values: [Float64] = []
+        var cell_missing: [Bool] = []
+        var row_pos = 0
+        while row_pos < row_keys.len():
+            val result = pivot_cell_sum_i64_index(index_series, column_series, value_series, row_keys[row_pos], col_keys[col_pos])
+            cell_values.push(result.value)
+            cell_missing.push(result.missing)
+            row_pos = row_pos + 1
+        out.push(SeriesErased.F64Series(Series(name: pivot_value_name(value_prefix, col_pos), values: array(cell_values), dtype: DType.F64, missing: cell_missing)))
+        col_pos = col_pos + 1
+    DataFrame.from_columns(out)
+
+fn pivot_sum_f64_index(index_series: Series, column_series: Series, value_series: Series, index_name: Symbol, value_prefix: Symbol) -> Result<DataFrame, DfError>:
+    var row_keys: [Float64] = []
+    var col_keys: [Int64] = []
+    var row = 0
+    while row < value_series.len().value:
+        if not index_series.missing[row].value and not column_series.missing[row].value and not value_series.missing[row].value:
+            val row_key = index_series.values.flat_f64(row)
+            val col_key = column_series.values.flat_i64(row)
+            if f64_group_index(row_keys, row_key) < 0:
+                row_keys.push(row_key)
+            if i64_group_index(col_keys, col_key) < 0:
+                col_keys.push(col_key)
+        row = row + 1
+    var out: [SeriesErased] = [
+        SeriesErased.F64Series(Series(name: index_name, values: array(row_keys), dtype: DType.F64, missing: no_missing_values(row_keys.len())))
+    ]
+    var col_pos = 0
+    while col_pos < col_keys.len():
+        var cell_values: [Float64] = []
+        var cell_missing: [Bool] = []
+        var row_pos = 0
+        while row_pos < row_keys.len():
+            val result = pivot_cell_sum_f64_index(index_series, column_series, value_series, row_keys[row_pos], col_keys[col_pos])
+            cell_values.push(result.value)
+            cell_missing.push(result.missing)
+            row_pos = row_pos + 1
+        out.push(SeriesErased.F64Series(Series(name: pivot_value_name(value_prefix, col_pos), values: array(cell_values), dtype: DType.F64, missing: cell_missing)))
+        col_pos = col_pos + 1
+    DataFrame.from_columns(out)
+
+fn pivot_cell_sum_i64_index(index_series: Series, column_series: Series, value_series: Series, row_key: Int64, col_key: Int64) -> PivotCell:
+    var total = 0.0
+    var found = false
+    var row = 0
+    while row < value_series.len().value:
+        if not index_series.missing[row].value and not column_series.missing[row].value and not value_series.missing[row].value:
+            if index_series.values.flat_i64(row) == row_key and column_series.values.flat_i64(row) == col_key:
+                total = total + value_series.values.flat_f64(row).value
+                found = true
+        row = row + 1
+    PivotCell(value: Float64.new(total), missing: Bool.new(not found))
+
+fn pivot_cell_sum_f64_index(index_series: Series, column_series: Series, value_series: Series, row_key: Float64, col_key: Int64) -> PivotCell:
+    var total = 0.0
+    var found = false
+    var row = 0
+    while row < value_series.len().value:
+        if not index_series.missing[row].value and not column_series.missing[row].value and not value_series.missing[row].value:
+            if index_series.values.flat_f64(row) == row_key and column_series.values.flat_i64(row) == col_key:
+                total = total + value_series.values.flat_f64(row).value
+                found = true
+        row = row + 1
+    PivotCell(value: Float64.new(total), missing: Bool.new(not found))
+
+fn pivot_value_name(prefix: Symbol, ordinal: i64) -> Symbol:
+    Symbol.from("{prefix.text}_{ordinal}")
+
+fn concat(frames: [DataFrame], axis: ConcatAxis) -> Result<DataFrame, DfError>:
+    if frames.len() == 0:
+        return Err(DfError.ShapeMismatch)
+    match axis:
+        case ConcatAxis.Rows:
+            concat_rows(frames)
+        case ConcatAxis.Cols:
+            concat_cols(frames)
+
+fn concat_rows(frames: [DataFrame]) -> Result<DataFrame, DfError>:
+    val first = frames[0]
+    var i = 1
+    while i < frames.len():
+        if not same_schema(first, frames[i]):
+            return Err(DfError.ShapeMismatch)
+        i = i + 1
+    var out: [Series] = []
+    var col = 0
+    while col < first.columns_internal.len():
+        var arrays: [NDArray] = []
+        i = 0
+        while i < frames.len():
+            arrays.push(frames[i].columns_internal[col].values)
+            i = i + 1
+        val values = concatenate(arrays)
+        out.push(Series(name: first.columns_internal[col].name, values: values, dtype: first.columns_internal[col].dtype, missing: concat_column_missing(frames, col)))
+        col = col + 1
+    Ok(DataFrame(columns_internal: out))
+
+fn concat_cols(frames: [DataFrame]) -> Result<DataFrame, DfError>:
+    val row_count = frames[0].num_rows()
+    var out: [Series] = []
+    var i = 0
+    while i < frames.len():
+        val frame = frames[i]
+        if frame.num_rows() != row_count:
+            return Err(DfError.ShapeMismatch)
+        var col = 0
+        while col < frame.columns_internal.len():
+            val series = frame.columns_internal[col]
+            if column_index(out, series.name) >= 0:
+                return Err(DfError.DuplicateColumn)
+            out.push(series)
+            col = col + 1
+        i = i + 1
+    Ok(DataFrame(columns_internal: out))
+
+fn concat_column_missing(frames: [DataFrame], col: i64) -> [Bool]:
+    var out: [Bool] = []
+    var i = 0
+    while i < frames.len():
+        val frame = frames[i]
+        val series = frame.columns_internal[col]
+        var row = 0
+        while row < series.missing.len():
+            out.push(series.missing[row])
+            row = row + 1
+        i = i + 1
+    out
+
+fn same_schema(left: DataFrame, right: DataFrame) -> bool:
+    if left.num_cols() != right.num_cols():
+        return false
+    var i = 0
+    while i < left.columns_internal.len():
+        if left.columns_internal[i].name != right.columns_internal[i].name:
+            return false
+        if left.columns_internal[i].dtype != right.columns_internal[i].dtype:
+            return false
+        i = i + 1
+    true
+
+fn merge(left: DataFrame, right: DataFrame, on: Symbol, how: JoinHow) -> Result<DataFrame, DfError>:
+    merge_by_pairs(left, right, on, how)
+
+fn merge_inner(left: DataFrame, right: DataFrame, on: Symbol) -> Result<DataFrame, DfError>:
+    merge_by_pairs(left, right, on, JoinHow.Inner)
+
+fn merge_by_pairs(left: DataFrame, right: DataFrame, on: Symbol, how: JoinHow) -> Result<DataFrame, DfError>:
+    val left_key = left.col(on)?
+    val right_key = right.col(on)?
+    if left_key.dtype != right_key.dtype:
+        return Err(DfError.ShapeMismatch)
+    if left_key.dtype == DType.Bool:
+        return Err(DfError.ShapeMismatch)
+    val pairs = join_pairs(left_key, right_key, how)
+    var out: [Series] = []
+    var col = 0
+    while col < left.columns_internal.len():
+        val current = left.columns_internal[col]
+        out.push(build_left_join_series(current, right_key, pairs, on)?)
+        col = col + 1
+    col = 0
+    while col < right.columns_internal.len():
+        val current = right.columns_internal[col]
+        if current.name != on:
+            if column_index(out, current.name) >= 0:
+                return Err(DfError.DuplicateColumn)
+            out.push(build_right_join_series(current, pairs)?)
+        col = col + 1
+    Ok(DataFrame(columns_internal: out))
+
+fn join_pairs(left_key: Series, right_key: Series, how: JoinHow) -> JoinPairs:
+    match how:
+        case JoinHow.Right:
+            right_order_join_pairs(left_key, right_key)
+        case _:
+            left_order_join_pairs(left_key, right_key, how)
+
+fn left_order_join_pairs(left_key: Series, right_key: Series, how: JoinHow) -> JoinPairs:
+    var left_idx: [Int64] = []
+    var right_idx: [Int64] = []
+    var right_matched = no_missing_values(right_key.len().value)
+    var li = 0
+    while li < left_key.len().value:
+        var matched = false
+        var ri = 0
+        while ri < right_key.len().value:
+            if series_value_equal(left_key, li, right_key, ri):
+                left_idx.push(Int64.new(li))
+                right_idx.push(Int64.new(ri))
+                right_matched[ri] = Bool.new(true)
+                matched = true
+            ri = ri + 1
+        if not matched and (how == JoinHow.Left or how == JoinHow.Outer):
+            left_idx.push(Int64.new(li))
+            right_idx.push(Int64.new(-1))
+        li = li + 1
+    if how == JoinHow.Outer:
+        var ri = 0
+        while ri < right_key.len().value:
+            if not right_matched[ri].value:
+                left_idx.push(Int64.new(-1))
+                right_idx.push(Int64.new(ri))
+            ri = ri + 1
+    JoinPairs(left: left_idx, right: right_idx)
+
+fn right_order_join_pairs(left_key: Series, right_key: Series) -> JoinPairs:
+    var left_idx: [Int64] = []
+    var right_idx: [Int64] = []
+    var ri = 0
+    while ri < right_key.len().value:
+        var matched = false
+        var li = 0
+        while li < left_key.len().value:
+            if series_value_equal(left_key, li, right_key, ri):
+                left_idx.push(Int64.new(li))
+                right_idx.push(Int64.new(ri))
+                matched = true
+            li = li + 1
+        if not matched:
+            left_idx.push(Int64.new(-1))
+            right_idx.push(Int64.new(ri))
+        ri = ri + 1
+    JoinPairs(left: left_idx, right: right_idx)
+
+fn build_left_join_series(series: Series, right_key: Series, pairs: JoinPairs, on: Symbol) -> Result<Series, DfError>:
+    match series.dtype:
+        case DType.F64:
+            var values: [Float64] = []
+            var missing: [Bool] = []
+            var i = 0
+            while i < pairs.left.len():
+                val row = pairs.left[i].value
+                if row >= 0:
+                    values.push(series.values.flat_f64(row))
+                    missing.push(series.missing[row])
+                else:
+                    val right_row = pairs.right[i].value
+                    if series.name == on and right_row >= 0:
+                        values.push(right_key.values.flat_f64(right_row))
+                        missing.push(right_key.missing[right_row])
+                    else:
+                        values.push(Float64.new(0.0))
+                        missing.push(Bool.new(true))
+                i = i + 1
+            Series.from_f64_masked(series.name, values, missing)
+        case DType.I64:
+            var values: [Int64] = []
+            var missing: [Bool] = []
+            var i = 0
+            while i < pairs.left.len():
+                val row = pairs.left[i].value
+                if row >= 0:
+                    values.push(series.values.flat_i64(row))
+                    missing.push(series.missing[row])
+                else:
+                    val right_row = pairs.right[i].value
+                    if series.name == on and right_row >= 0:
+                        values.push(right_key.values.flat_i64(right_row))
+                        missing.push(right_key.missing[right_row])
+                    else:
+                        values.push(Int64.new(0))
+                        missing.push(Bool.new(true))
+                i = i + 1
+            Series.from_i64_masked(series.name, values, missing)
+        case DType.Bool:
+            Err(DfError.ShapeMismatch)
+
+fn build_right_join_series(series: Series, pairs: JoinPairs) -> Result<Series, DfError>:
+    match series.dtype:
+        case DType.F64:
+            var values: [Float64] = []
+            var missing: [Bool] = []
+            var i = 0
+            while i < pairs.right.len():
+                val row = pairs.right[i].value
+                if row >= 0:
+                    values.push(series.values.flat_f64(row))
+                    missing.push(series.missing[row])
+                else:
+                    values.push(Float64.new(0.0))
+                    missing.push(Bool.new(true))
+                i = i + 1
+            Series.from_f64_masked(series.name, values, missing)
+        case DType.I64:
+            var values: [Int64] = []
+            var missing: [Bool] = []
+            var i = 0
+            while i < pairs.right.len():
+                val row = pairs.right[i].value
+                if row >= 0:
+                    values.push(series.values.flat_i64(row))
+                    missing.push(series.missing[row])
+                else:
+                    values.push(Int64.new(0))
+                    missing.push(Bool.new(true))
+                i = i + 1
+            Series.from_i64_masked(series.name, values, missing)
+        case DType.Bool:
+            Err(DfError.ShapeMismatch)
+
+fn groupby_numeric(frame: DataFrame, by: Symbol, value: Symbol, mean: bool) -> Result<DataFrame, DfError>:
+    val key = frame.col(by)?
+    val values = frame.col(value)?
+    if values.dtype != DType.F64:
+        return Err(DfError.ShapeMismatch)
+    match key.dtype:
+        case DType.F64:
+            groupby_f64_key(key, values, by, value, mean)
+        case DType.I64:
+            groupby_i64_key(key, values, by, value, mean)
+        case DType.Bool:
+            Err(DfError.ShapeMismatch)
+
+fn groupby_f64_key(key: Series, values: Series, by: Symbol, value: Symbol, mean: bool) -> Result<DataFrame, DfError>:
+    var keys: [Float64] = []
+    var sums: [Float64] = []
+    var counts: [Int64] = []
+    var row = 0
+    while row < values.len().value:
+        if not key.missing[row].value and not values.missing[row].value:
+            val key_value = key.values.flat_f64(row)
+            val value_value = values.values.flat_f64(row)
+            val index = f64_group_index(keys, key_value)
+            if index < 0:
+                keys.push(key_value)
+                sums.push(value_value)
+                counts.push(Int64.new(1))
+            else:
+                sums[index] = Float64.new(sums[index].value + value_value.value)
+                counts[index] = Int64.new(counts[index].value + 1)
+        row = row + 1
+    if mean:
+        sums = divide_group_sums(sums, counts)
+    Ok(DataFrame(columns_internal: [
+        Series(name: by, values: array(keys), dtype: DType.F64, missing: no_missing_values(keys.len())),
+        Series(name: value, values: array(sums), dtype: DType.F64, missing: no_missing_values(sums.len()))
+    ]))
+
+fn groupby_i64_key(key: Series, values: Series, by: Symbol, value: Symbol, mean: bool) -> Result<DataFrame, DfError>:
+    var keys: [Int64] = []
+    var sums: [Float64] = []
+    var counts: [Int64] = []
+    var row = 0
+    while row < values.len().value:
+        if not key.missing[row].value and not values.missing[row].value:
+            val key_value = key.values.flat_i64(row)
+            val value_value = values.values.flat_f64(row)
+            val index = i64_group_index(keys, key_value)
+            if index < 0:
+                keys.push(key_value)
+                sums.push(value_value)
+                counts.push(Int64.new(1))
+            else:
+                sums[index] = Float64.new(sums[index].value + value_value.value)
+                counts[index] = Int64.new(counts[index].value + 1)
+        row = row + 1
+    if mean:
+        sums = divide_group_sums(sums, counts)
+    Ok(DataFrame(columns_internal: [
+        Series(name: by, values: array_i64(keys), dtype: DType.I64, missing: no_missing_values(keys.len())),
+        Series(name: value, values: array(sums), dtype: DType.F64, missing: no_missing_values(sums.len()))
+    ]))
+
+fn f64_group_index(keys: [Float64], value: Float64) -> i64:
+    var i = 0
+    while i < keys.len():
+        if keys[i] == value:
+            return i
+        i = i + 1
+    -1
+
+fn i64_group_index(keys: [Int64], value: Int64) -> i64:
+    var i = 0
+    while i < keys.len():
+        if keys[i] == value:
+            return i
+        i = i + 1
+    -1
+
+fn divide_group_sums(sums: [Float64], counts: [Int64]) -> [Float64]:
+    var out: [Float64] = []
+    var i = 0
+    while i < sums.len():
+        out.push(Float64.new(sums[i].value / counts[i].value))
+        i = i + 1
+    out

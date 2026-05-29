@@ -1,0 +1,395 @@
+"""
+# Event Loop
+
+Portable event loop using platform-native I/O notification mechanisms for
+efficient file descriptor readiness notification. Falls back to cooperative
+polling on unsupported platforms.
+
+Uses extern stubs (`rt_event_loop_*`) that delegate to the native backend.
+Until the Rust runtime implements those externs, the polling fallback is used.
+
+## Platform Backends
+
+| Backend | Platform | Characteristics |
+|---------|----------|----------------|
+| epoll | Linux | Level/edge-triggered, O(1) readiness notification |
+| kqueue | BSD/macOS | Edge-triggered by default, filters for fine-grained events |
+| IOCP | Windows | Completion-based (proactor pattern), not readiness-based |
+| event_port | Solaris/illumos | port_create/port_associate/port_get, one-shot by default |
+| poll | Other | Cooperative fallback, O(n) per poll call |
+
+## Components
+
+| Type | Description |
+|------|-------------|
+| EventLoop | Core event loop (epoll/kqueue/iocp/event_port/poll) |
+| Event | Readiness event with fd, interest, and token |
+| Waker | Callback to wake a pending future |
+
+## Creating an Event Loop
+
+```simple
+val ev_loop = EventLoop.new()?
+expect ev_loop.loop_fd >= 0
+```
+
+## Registering and Polling
+
+```simple
+val ev_loop = EventLoop.new()?
+ev_loop.register(socket_fd, Interest.Read, 1)?
+
+val events = ev_loop.poll(100)?
+for event in events:
+    if event.ready == Interest.Read:
+        handle_read(event.fd)
+
+ev_loop.close()?
+```
+
+## Edge-Triggered Mode
+
+```simple
+val ev_loop = EventLoop.new()?
+ev_loop.register_edge(socket_fd, Interest.ReadWrite, 1)?
+```
+
+## Waker Callback
+
+```simple
+var woken_id = -1
+val waker = Waker.new(42, \\id: woken_id = id)
+waker.wake()
+expect woken_id == 42
+```
+"""
+
+use std.io.types.{IoError, IoErrorKind, Interest}
+use std.io.platform_event.{PlatformEvent, EventMode}
+
+# ============================================================================
+# Platform Detection
+# ============================================================================
+
+fn event_loop_platform() -> text:
+    """Detect the event notification backend for the current OS.
+
+    Delegates to PlatformEvent's detect_backend() and returns a string name.
+
+    Returns:
+        "epoll" on Linux (level/edge-triggered, O(1) readiness)
+        "kqueue" on macOS/FreeBSD (edge-triggered, filter-based)
+        "iocp" on Windows (completion-based proactor pattern)
+        "event_ports" on Solaris/illumos (one-shot port_create/port_get)
+        "poll" otherwise (cooperative fallback)
+
+    Example:
+        val backend = event_loop_platform()
+        # Returns "epoll" on Linux
+    """
+    val pe = PlatformEvent.new()
+    pe.backend_name()
+
+# ============================================================================
+# Interest <-> EventMode Mapping
+# ============================================================================
+
+fn _interest_to_mode(interest: Interest) -> EventMode:
+    """Convert Interest enum to EventMode for PlatformEvent dispatch."""
+    match interest:
+        case Interest.Read: EventMode.Read
+        case Interest.Write: EventMode.Write
+        case Interest.ReadWrite: EventMode.ReadWrite
+
+fn _interest_to_i64(interest: Interest) -> i64:
+    """Convert Interest enum to extern ABI integer."""
+    match interest:
+        case Interest.Read: 0
+        case Interest.Write: 1
+        case Interest.ReadWrite: 2
+
+fn _i64_to_interest(value: i64) -> Interest:
+    """Convert extern ABI integer back to Interest enum."""
+    if value == 1:
+        Interest.Write
+    else if value == 2:
+        Interest.ReadWrite
+    else:
+        Interest.Read
+
+# ============================================================================
+# Event - Readiness Event with Token
+# ============================================================================
+
+struct Event:
+    """An I/O readiness event from the event loop.
+
+    Returned by EventLoop.poll(). Includes a user-supplied token
+    so callers can map events back to their resources without
+    scanning by fd.
+
+    Example:
+        val event = Event(fd: 42, ready: Interest.Read, token: 1)
+        expect event.fd == 42
+        expect event.token == 1
+    """
+    fd: i64
+    ready: Interest
+    token: i64
+
+# ============================================================================
+# Waker - Future Wake Callback
+# ============================================================================
+
+class Waker:
+    """Wakes a pending future when I/O is ready.
+
+    A higher-level abstraction that maps tokens to callbacks.
+    Can be used alongside EventLoop by maintaining a token -> Waker map.
+
+    Example:
+        val waker = Waker.new(task_id, scheduler.wake(_))
+    """
+    id: i64
+    wake_fn: fn(i64)
+
+    static fn new(id: i64, wake_fn: fn(i64)) -> Waker:
+        """Create waker.
+
+        Args:
+            id: Associated task/future ID
+            wake_fn: Callback to invoke on wake
+
+        Returns:
+            Waker
+        """
+        Waker(id: id, wake_fn: wake_fn)
+
+    fn wake():
+        """Invoke the wake callback."""
+        self.wake_fn(self.id)
+
+# ============================================================================
+# EventLoop - epoll/kqueue Abstraction
+# ============================================================================
+
+class EventLoop:
+    """Portable event loop backed by PlatformEvent abstraction.
+
+    Creates a native event notification fd on construction and delegates
+    registration, modification, and polling to PlatformEvent which dispatches
+    to the appropriate platform backend (epoll/kqueue/iocp/event_ports).
+
+    NOTE: Arrays are value types in Simple — passing an array to a function
+    copies it, so poll() returns a new [Event] rather than filling a caller
+    buffer.
+
+    Example:
+        val ev_loop = EventLoop.new()?
+        ev_loop.register(socket_fd, Interest.ReadWrite, 1)?
+
+        while running:
+            val events = ev_loop.poll(100)?
+            for event in events:
+                dispatch(event)
+
+        ev_loop.close()?
+    """
+    loop_fd: i64
+    _platform: text
+    _closed: bool
+    _pe: PlatformEvent
+
+    static fn new() -> Result<EventLoop, IoError>:
+        """Create event loop via the native backend.
+
+        Delegates to PlatformEvent.create() which dispatches to the
+        platform-appropriate backend (epoll/kqueue/iocp/event_ports).
+        Returns error if creation fails (fd < 0).
+
+        Returns:
+            Result with EventLoop or IoError
+        """
+        val pe = PlatformEvent.new()
+        val fd = pe.create()
+        if fd < 0:
+            Err(IoError(kind: IoErrorKind.Other, message: "failed to create event loop", source: nil))
+        else:
+            Ok(EventLoop(loop_fd: fd, _platform: pe.backend_name(), _closed: false, _pe: pe))
+
+    fn platform() -> text:
+        """Return the backend name: "epoll", "kqueue", "iocp", "event_port", or "poll".
+
+        Returns:
+            Backend name string
+        """
+        self._platform
+
+    me register(fd: i64, interest: Interest, token: i64) -> Result<(), IoError>:
+        """Register fd for level-triggered event monitoring.
+
+        Args:
+            fd: File descriptor to monitor
+            interest: Read, Write, or ReadWrite
+            token: User-supplied token returned in Event on readiness
+
+        Returns:
+            Result or IoError
+        """
+        if self._closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
+        val mode = _interest_to_mode(interest)
+        val ok = self._pe.register_with_token(self.loop_fd, fd, mode, token, false)
+        if ok:
+            Ok(())
+        else:
+            Err(IoError(kind: IoErrorKind.Other, message: "failed to register fd {fd}", source: nil))
+
+    me register_edge(fd: i64, interest: Interest, token: i64) -> Result<(), IoError>:
+        """Register fd for edge-triggered event monitoring.
+
+        Edge-triggered mode only notifies on state transitions, not while
+        the fd remains ready. Caller must drain the fd fully on each event.
+
+        Args:
+            fd: File descriptor to monitor
+            interest: Read, Write, or ReadWrite
+            token: User-supplied token returned in Event on readiness
+
+        Returns:
+            Result or IoError
+        """
+        if self._closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
+        val mode = _interest_to_mode(interest)
+        val ok = self._pe.register_with_token(self.loop_fd, fd, mode, token, true)
+        if ok:
+            Ok(())
+        else:
+            Err(IoError(kind: IoErrorKind.Other, message: "failed to register fd {fd} (edge)", source: nil))
+
+    me reregister(fd: i64, interest: Interest, token: i64) -> Result<(), IoError>:
+        """Modify registration for an already-registered fd.
+
+        Args:
+            fd: File descriptor already registered
+            interest: New interest flags
+            token: New or same token
+
+        Returns:
+            Result or IoError
+        """
+        if self._closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
+        # Deregister + re-register via PlatformEvent (EPOLL_CTL_MOD / kevent EV_ADD)
+        val mode = _interest_to_mode(interest)
+        val ok = self._pe.register_with_token(self.loop_fd, fd, mode, token, false)
+        if ok:
+            Ok(())
+        else:
+            Err(IoError(kind: IoErrorKind.Other, message: "failed to reregister fd {fd}", source: nil))
+
+    me reregister_edge(fd: i64, interest: Interest, token: i64) -> Result<(), IoError>:
+        """Modify registration for an already-registered fd, keeping edge-triggered mode.
+
+        Use this instead of reregister() when the fd was originally registered
+        with register_edge(). Calling reregister() on an edge-registered fd
+        would silently downgrade it to level-triggered.
+
+        Args:
+            fd: File descriptor already registered
+            interest: New interest flags
+            token: New or same token
+
+        Returns:
+            Result or IoError
+        """
+        if self._closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
+        val mode = _interest_to_mode(interest)
+        val ok = self._pe.register_with_token(self.loop_fd, fd, mode, token, true)
+        if ok:
+            Ok(())
+        else:
+            Err(IoError(kind: IoErrorKind.Other, message: "failed to reregister fd {fd} (edge)", source: nil))
+
+    me deregister(fd: i64) -> Result<(), IoError>:
+        """Remove fd from event monitoring.
+
+        Args:
+            fd: File descriptor to remove
+
+        Returns:
+            Result or IoError
+        """
+        if self._closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
+        val ok = self._pe.deregister(self.loop_fd, fd)
+        if ok:
+            Ok(())
+        else:
+            Err(IoError(kind: IoErrorKind.Other, message: "failed to deregister fd {fd}", source: nil))
+
+    fn poll(timeout_ms: i64) -> Result<[Event], IoError>:
+        """Wait for I/O events and return ready descriptors.
+
+        Calls the native poll extern which blocks up to timeout_ms.
+        Returns a flat [i64] array (fd, ready, token triples) that is
+        unpacked into Event structs here.
+
+        Args:
+            timeout_ms: Max wait time in ms (-1 for infinite, 0 for non-blocking)
+
+        Returns:
+            Result with array of ready Events
+        """
+        if self._closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
+        val max_events: i64 = 64
+        val raw = self._pe.poll(self.loop_fd, max_events, timeout_ms)
+        # raw is a flat array: [fd1, ready1, token1, fd2, ready2, token2, ...]
+        var events: [Event] = []
+        var i = 0
+        while i + 2 < raw.len():
+            val ev_fd = raw[i]
+            val ev_ready = _i64_to_interest(raw[i + 1])
+            val ev_token = raw[i + 2]
+            events.push(Event(fd: ev_fd, ready: ev_ready, token: ev_token))
+            i = i + 3
+        Ok(events)
+
+    fn poll_one(timeout_ms: i64) -> Result<Event?, IoError>:
+        """Poll for a single event.
+
+        Args:
+            timeout_ms: Max wait time in ms
+
+        Returns:
+            Result with Some(event) or nil if timeout
+        """
+        val events = self.poll(timeout_ms)?
+        if events.len() > 0:
+            Ok(Some(events[0]))
+        else:
+            Ok(nil)
+
+    me close() -> Result<(), IoError>:
+        """Close the event loop and release the native fd.
+
+        Returns:
+            Result or IoError
+        """
+        if self._closed:
+            return Ok(())
+        val ok = self._pe.close(self.loop_fd)
+        self._closed = true
+        if ok:
+            Ok(())
+        else:
+            Err(IoError(kind: IoErrorKind.Other, message: "failed to close event loop", source: nil))
+
+# ============================================================================
+# Extern Stubs — Native Backend
+# ============================================================================
+# Event loop externs are now declared in platform_event.spl and dispatched
+# via PlatformEvent. The EventLoop class delegates through self._pe.

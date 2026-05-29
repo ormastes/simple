@@ -1,0 +1,650 @@
+# Part 1 of src/compiler/10.frontend/flat_ast_bridge.spl
+use compiler.frontend.flat_ast_bridge.*
+# Flat AST Bridge
+#
+# Converts the core parser's flat, index-based AST into the richer frontend
+# Module shape expected by HIR lowering. This is used as the bootstrap-safe
+# frontend path when the newer parser surface is unavailable.
+
+use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.core.ast.*
+use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
+use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
+use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
+use compiler.core.ast.{decl_is_packed}
+use compiler.core.ast_expr.*
+use compiler.core.ast_stmt.*
+use compiler.core.ast_stmt.{STMT_GPU_LAUNCH, stmt_get_gpu_grid, stmt_get_gpu_block}
+use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY, TYPE_ANY, TYPE_NIL}
+use compiler.core.types.{TYPE_DICT, TYPE_FN, TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
+use compiler.core.types.{TYPE_RESULT, TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GENERIC_ERASED}
+use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE, TYPE_UNION_BASE, type_tag_name, int_to_str}
+use compiler.frontend.parser_types.{Module as FrontendModule, Function as ParserFunction}
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.*
+use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
+use compiler.frontend.lexer_types.Span
+use compiler.common.dependency.visibility.{Visibility}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+extern fn rt_env_get(key: text) -> text
+
+fn flat_is_bootstrap_entry_path(path: text) -> bool:
+    path.ends_with("/src/app/cli/bootstrap_main.spl") or path == "./src/app/cli/bootstrap_main.spl"
+
+fn flat_bootstrap_function_count() -> i64:
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        eprint("[flat-bridge] fn-count:start")
+    var count = 0
+    var i = 0
+    while i < 64:
+        val tag = rt_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(i)) ?? ""
+        if tag == "1":
+            count = count + 1
+        i = i + 1
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        eprint("[flat-bridge] fn-count:done {count}")
+    count
+
+fn flat_bootstrap_function_at(index: i64) -> ParserFunction:
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        eprint("[flat-bridge] fn-at:start {index}")
+    var seen = 0
+    var i = 0
+    while i < 64:
+        val tag = rt_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(i)) ?? ""
+        if tag == "1":
+            if seen == index:
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    eprint("[flat-bridge] fn-at:decl {i}")
+                val fn_ = convert_decl_fn(i)
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    eprint("[flat-bridge] fn-at:done")
+                return fn_
+            seen = seen + 1
+        i = i + 1
+    parser_function_new(
+        "",
+        [],
+        [],
+        false,
+        Type(kind: TypeKind.Infer, span: make_span()),
+        Block(stmts: [], span: make_span()),
+        Visibility.Private,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        [],
+        false,
+        "",
+        make_span()
+    )
+
+fn flat_bootstrap_function_decl_at(index: i64) -> i64:
+    var seen = 0
+    var i = 0
+    while i < 64:
+        val tag = rt_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(i)) ?? ""
+        if tag == "1":
+            if seen == index:
+                return i
+            seen = seen + 1
+        i = i + 1
+    -1
+
+fn flat_bootstrap_body_at(index: i64) -> Block:
+    Block(stmts: [], span: make_span())
+
+fn make_span() -> Span:
+    Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
+
+fn flat_empty_module(path: text) -> FrontendModule:
+    parser_module_new(
+        name: path,
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        functions: {},
+        classes: {},
+        actors: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        type_aliases: {},
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: []
+    )
+
+fn convert_decl_visibility(idx: i64) -> Visibility:
+    val vis_text = decl_get_visibility_text(idx)
+    if vis_text == "public":
+        return Visibility.Public
+    if vis_text == "peer":
+        return Visibility.Peer
+    if vis_text == "up":
+        return Visibility.Up
+    if vis_text == "internal":
+        return Visibility.Internal
+    if vis_text == "package":
+        return Visibility.Package
+    Visibility.Private
+
+fn convert_flat_type(type_expr_idx: i64) -> Type:
+    if type_expr_idx <= 0:
+        return Type(kind: TypeKind.Infer, span: make_span())
+    if type_expr_idx == TYPE_VOID:
+        return Type(kind: TypeKind.Named("void", []), span: make_span())
+    if type_expr_idx == TYPE_BOOL:
+        return Type(kind: TypeKind.Named("bool", []), span: make_span())
+    if type_expr_idx == TYPE_I64:
+        return Type(kind: TypeKind.Named("i64", []), span: make_span())
+    if type_expr_idx == TYPE_F64:
+        return Type(kind: TypeKind.Named("f64", []), span: make_span())
+    if type_expr_idx == TYPE_TEXT:
+        return Type(kind: TypeKind.Named("text", []), span: make_span())
+    if type_expr_idx == TYPE_ARRAY_I64:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("i64", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx == TYPE_ARRAY_TEXT:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("text", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx == TYPE_ARRAY_BOOL:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("bool", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx == TYPE_ARRAY_ANY:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("Any", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx == TYPE_ANY:
+        return Type(kind: TypeKind.Named("Any", []), span: make_span())
+    if type_expr_idx == TYPE_NIL:
+        return Type(kind: TypeKind.Named("nil", []), span: make_span())
+    if type_expr_idx == TYPE_DICT:
+        return Type(kind: TypeKind.Named("Dict", []), span: make_span())
+    if type_expr_idx == TYPE_FN:
+        return Type(kind: TypeKind.Named("fn", []), span: make_span())
+    if type_expr_idx == TYPE_OPTION:
+        return Type(kind: TypeKind.Named("Option", []), span: make_span())
+    if type_expr_idx == TYPE_OPTION_I64:
+        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("i64", []), span: make_span())]), span: make_span())
+    if type_expr_idx == TYPE_OPTION_F64:
+        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("f64", []), span: make_span())]), span: make_span())
+    if type_expr_idx == TYPE_OPTION_TEXT:
+        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("text", []), span: make_span())]), span: make_span())
+    if type_expr_idx == TYPE_OPTION_BOOL:
+        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("bool", []), span: make_span())]), span: make_span())
+    if type_expr_idx == TYPE_RESULT:
+        return Type(kind: TypeKind.Named("Result", []), span: make_span())
+    if type_expr_idx == TYPE_FUTURE:
+        return Type(kind: TypeKind.Named("Future", []), span: make_span())
+    if type_expr_idx == TYPE_POLL:
+        return Type(kind: TypeKind.Named("Poll", []), span: make_span())
+    if type_expr_idx == TYPE_TASK:
+        return Type(kind: TypeKind.Named("Task", []), span: make_span())
+    if type_expr_idx == TYPE_GENERIC_ERASED:
+        return Type(kind: TypeKind.Named("Generic", []), span: make_span())
+    if type_expr_idx >= TYPE_UNION_BASE:
+        return Type(kind: TypeKind.Named(type_tag_name(type_expr_idx), []), span: make_span())
+    val tag = expr_get_tag(type_expr_idx)
+    if tag == EXPR_IDENT:
+        Type(kind: TypeKind.Named(expr_get_str(type_expr_idx), []), span: make_span())
+    elif tag == EXPR_INDEX:
+        val base_name = expr_get_str(expr_get_left(type_expr_idx))
+        var type_args: [Type] = []
+        val arg_idx = expr_get_right(type_expr_idx)
+        if arg_idx >= 0:
+            type_args.push(convert_flat_type(arg_idx))
+        Type(kind: TypeKind.Named(base_name, type_args), span: make_span())
+    else:
+        Type(kind: TypeKind.Infer, span: make_span())
+
+fn convert_flat_expr(idx: i64) -> Expr:
+    if idx < 0:
+        return Expr(kind: ExprKind.NilLit, span: make_span())
+    val tag = expr_get_tag(idx)
+    val span = make_span()
+    if tag <= 0:
+        print "[flat-bridge] missing expr tag idx={idx} tag={tag}"
+        return Expr(kind: ExprKind.NilLit, span: span)
+    if tag == EXPR_INT_LIT:
+        return Expr(kind: ExprKind.IntLit(expr_get_int(idx)), span: span)
+    elif tag == EXPR_FLOAT_LIT:
+        return Expr(kind: ExprKind.FloatLit(0.0), span: span)
+    elif tag == EXPR_STRING_LIT:
+        return Expr(kind: ExprKind.StringLit(expr_get_str(idx), nil), span: span)
+    elif tag == EXPR_BOOL_LIT:
+        return Expr(kind: ExprKind.BoolLit(expr_get_int(idx) != 0), span: span)
+    elif tag == EXPR_NIL_LIT:
+        return Expr(kind: ExprKind.NilLit, span: span)
+    elif tag == EXPR_IDENT:
+        return Expr(kind: ExprKind.Ident(expr_get_str(idx)), span: span)
+    elif tag == EXPR_CALL:
+        val callee = convert_flat_expr(expr_get_left(idx))
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            return Expr(kind: ExprKind.Call(callee, []), span: span)
+        val arg_indices = expr_get_args(idx)
+        var args: [CallArg] = []
+        var ai = 0
+        while ai < arg_indices.len():
+            args = args.push(CallArg(
+                has_name: false,
+                name: "",
+                value: convert_flat_expr(arg_indices[ai]),
+                span: span
+            ))
+            ai = ai + 1
+        return Expr(kind: ExprKind.Call(callee, args), span: span)
+    elif tag == EXPR_BINARY:
+        val left = convert_flat_expr(expr_get_left(idx))
+        val right = convert_flat_expr(expr_get_right(idx))
+        return Expr(kind: ExprKind.Binary(BinOp.Add, left, right), span: span)
+    elif tag == EXPR_UNARY:
+        val operand = convert_flat_expr(expr_get_left(idx))
+        return Expr(kind: ExprKind.Unary(UnaryOp.Neg, operand), span: span)
+    elif tag == EXPR_FIELD_ACCESS:
+        val obj = convert_flat_expr(expr_get_left(idx))
+        val field_name = expr_get_str(idx)
+        return Expr(kind: ExprKind.Field(obj, field_name), span: span)
+    elif tag == EXPR_METHOD_CALL:
+        val obj = convert_flat_expr(expr_get_left(idx))
+        val method_name = expr_get_str(idx)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            return Expr(kind: ExprKind.MethodCall(obj, method_name, []), span: span)
+        val m_arg_indices = expr_get_args(idx)
+        var m_args: [CallArg] = []
+        var mai = 0
+        while mai < m_arg_indices.len():
+            m_args = m_args.push(CallArg(
+                has_name: false,
+                name: "",
+                value: convert_flat_expr(m_arg_indices[mai]),
+                span: span
+            ))
+            mai = mai + 1
+        return Expr(kind: ExprKind.MethodCall(obj, method_name, m_args), span: span)
+    elif tag == EXPR_INDEX:
+        val obj = convert_flat_expr(expr_get_left(idx))
+        val index = convert_flat_expr(expr_get_right(idx))
+        return Expr(kind: ExprKind.Index(obj, index), span: span)
+    elif tag == EXPR_ARRAY_LIT:
+        val elem_indices = expr_get_args(idx)
+        var elems: [Expr] = []
+        var ei = 0
+        while ei < elem_indices.len():
+            elems.push(convert_flat_expr(elem_indices[ei]))
+            ei = ei + 1
+        return Expr(kind: ExprKind.ArrayLit(elems), span: span)
+    elif tag == EXPR_INTERPOLATED_STRING:
+        val parts = expr_get_args(idx)
+        var interpolations: [Interpolation] = []
+        var ii = 0
+        while ii < parts.len():
+            interpolations.push(Interpolation(
+                expr: convert_flat_expr(parts[ii]),
+                has_format: false,
+                format: "",
+                span: span
+            ))
+            ii = ii + 1
+        return Expr(kind: ExprKind.StringLit(expr_get_str(idx), interpolations), span: span)
+    elif tag == EXPR_IF:
+        val cond = convert_flat_expr(expr_get_left(idx))
+        val then_stmts = expr_get_stmts(idx)
+        var then_body: [Stmt] = []
+        var ti = 0
+        while ti < then_stmts.len():
+            then_body.push(convert_flat_stmt(then_stmts[ti]))
+            ti = ti + 1
+        val then_block = Block(stmts: then_body, span: span)
+        return Expr(kind: ExprKind.If(cond, then_block, nil), span: span)
+    elif tag == EXPR_RETURN:
+        val ret_expr = convert_flat_expr(expr_get_left(idx))
+        return Expr(kind: ExprKind.Return(ret_expr), span: span)
+    elif tag == EXPR_LAMBDA:
+        val body_expr = convert_flat_expr(expr_get_left(idx))
+        var lambda_params: [LambdaParam] = []
+        val lp_names = expr_get_args(idx)
+        var lpi = 0
+        while lpi < lp_names.len():
+            val lp_idx = lp_names[lpi]
+            lambda_params.push(LambdaParam(
+                name: expr_get_str(lp_idx),
+                has_type_: false,
+                type_: Type(kind: TypeKind.Infer, span: span),
+                span: span
+            ))
+            lpi = lpi + 1
+        return Expr(kind: ExprKind.Lambda(lambda_params, body_expr), span: span)
+    elif tag == EXPR_NULL_COALESCE:
+        val lhs = convert_flat_expr(expr_get_left(idx))
+        val rhs = convert_flat_expr(expr_get_right(idx))
+        return Expr(kind: ExprKind.NullCoalesce(lhs, rhs), span: span)
+    elif tag == EXPR_OPTIONAL_CHAIN:
+        val obj = convert_flat_expr(expr_get_left(idx))
+        return Expr(kind: ExprKind.OptionalChain(obj, expr_get_str(idx)), span: span)
+    elif tag == EXPR_STRUCT_LIT:
+        val struct_name = expr_get_str(idx)
+        val field_exprs = expr_get_args(idx)
+        var fields: [(text, Expr)] = []
+        var fi = 0
+        while fi < field_exprs.len():
+            val field_idx = field_exprs[fi]
+            fields.push((expr_get_str(field_idx), convert_flat_expr(expr_get_left(field_idx))))
+            fi = fi + 1
+        return Expr(kind: ExprKind.StructLit(struct_name, fields), span: span)
+    elif tag == EXPR_TUPLE:
+        val tuple_args = expr_get_args(idx)
+        var tuple_elems: [Expr] = []
+        var tui = 0
+        while tui < tuple_args.len():
+            tuple_elems.push(convert_flat_expr(tuple_args[tui]))
+            tui = tui + 1
+        return Expr(kind: ExprKind.TupleLit(tuple_elems), span: span)
+    elif tag == EXPR_DICT_LIT:
+        return Expr(kind: ExprKind.DictLit([]), span: span)
+    elif tag == EXPR_UNIT:
+        return Expr(kind: ExprKind.NilLit, span: span)
+    elif tag == EXPR_PASS or tag == EXPR_PASS_DO_NOTHING or tag == EXPR_PASS_DN or tag == EXPR_PASS_TODO:
+        return Expr(kind: ExprKind.NilLit, span: span)
+    elif tag == EXPR_EXISTS_CHECK:
+        val inner = convert_flat_expr(expr_get_left(idx))
+        return Expr(kind: ExprKind.ExistsCheck(inner), span: span)
+    elif tag == EXPR_LIST_COMP:
+        val comp_body = convert_flat_expr(expr_get_right(idx))
+        val comp_iterable = convert_flat_expr(expr_get_left(idx))
+        val comp_iter_name = expr_get_str(idx)
+        var comp_clauses: [ComprehensionClause] = []
+        comp_clauses.push(ComprehensionClause(
+            kind: ComprehensionKind.For(comp_iter_name, comp_iterable),
+            span: span
+        ))
+        val comp_cond_idx = expr_get_extra(idx)
+        if comp_cond_idx >= 0:
+            val comp_cond_expr = convert_flat_expr(comp_cond_idx)
+            comp_clauses.push(ComprehensionClause(
+                kind: ComprehensionKind.If(comp_cond_expr),
+                span: span
+            ))
+        return Expr(kind: ExprKind.ListComprehension(comp_body, comp_clauses), span: span)
+    elif tag == EXPR_DICT_COMP:
+        val dc_args = expr_get_args(idx)
+        val dc_key = convert_flat_expr(dc_args[0])
+        val dc_val = convert_flat_expr(dc_args[1])
+        val dc_iterable = convert_flat_expr(expr_get_left(idx))
+        val dc_iter_name = expr_get_str(idx)
+        var dc_clauses: [ComprehensionClause] = []
+        dc_clauses.push(ComprehensionClause(
+            kind: ComprehensionKind.For(dc_iter_name, dc_iterable),
+            span: span
+        ))
+        val dc_cond_idx = expr_get_extra(idx)
+        if dc_cond_idx >= 0:
+            val dc_cond_expr = convert_flat_expr(dc_cond_idx)
+            dc_clauses.push(ComprehensionClause(
+                kind: ComprehensionKind.If(dc_cond_expr),
+                span: span
+            ))
+        return Expr(kind: ExprKind.DictComprehension(dc_key, dc_val, dc_clauses), span: span)
+    else:
+        return Expr(kind: ExprKind.NilLit, span: span)
+
+fn convert_flat_stmt(idx: i64) -> Stmt:
+    if idx < 0:
+        val nil_span = make_span()
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: nil_span)), span: nil_span)
+    val tag = stmt_get_tag(idx)
+    val span = make_span()
+    if tag <= 0:
+        print "[flat-bridge] missing stmt tag idx={idx} tag={tag}"
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
+    if tag == STMT_EXPR:
+        val e = convert_flat_expr(stmt_get_expr(idx))
+        return Stmt(kind: StmtKind.Expr(e), span: span)
+    elif tag == STMT_RETURN:
+        val ret_idx = stmt_get_expr(idx)
+        if ret_idx >= 0:
+            val e = convert_flat_expr(ret_idx)
+            return Stmt(kind: StmtKind.Return(e), span: span)
+        else:
+            return Stmt(kind: StmtKind.Return(nil), span: span)
+    elif tag == STMT_VAL_DECL:
+        val name = stmt_get_name(idx)
+        val type_idx = stmt_get_type(idx)
+        val init_idx = stmt_get_expr(idx)
+        val type_ = convert_flat_type(type_idx)
+        val init_expr = convert_flat_expr(init_idx)
+        return Stmt(kind: StmtKind.Val(name, type_, init_expr), span: span)
+    elif tag == STMT_VAR_DECL:
+        val name = stmt_get_name(idx)
+        val type_idx = stmt_get_type(idx)
+        val init_idx = stmt_get_expr(idx)
+        val type_ = convert_flat_type(type_idx)
+        if init_idx >= 0:
+            val init_expr = convert_flat_expr(init_idx)
+            return Stmt(kind: StmtKind.Var(name, type_, init_expr), span: span)
+        else:
+            return Stmt(kind: StmtKind.Var(name, type_, nil), span: span)
+    elif tag == STMT_ASSIGN:
+        val target = convert_flat_expr(stmt_get_expr(idx))
+        val body = stmt_get_body(idx)
+        val value = convert_flat_expr(body[0])
+        return Stmt(kind: StmtKind.Assign(target, nil, value), span: span)
+    elif tag == STMT_IF:
+        val cond = convert_flat_expr(stmt_get_expr(idx))
+        val then_stmts = stmt_get_body(idx)
+        var then_body: [Stmt] = []
+        var si = 0
+        while si < then_stmts.len():
+            then_body.push(convert_flat_stmt(then_stmts[si]))
+            si = si + 1
+        val then_block = Block(stmts: then_body, span: span)
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.If(cond, then_block, nil), span: span)), span: span)
+    elif tag == STMT_WHILE:
+        val cond = convert_flat_expr(stmt_get_expr(idx))
+        val body_stmts = stmt_get_body(idx)
+        var body: [Stmt] = []
+        var wi = 0
+        while wi < body_stmts.len():
+            body.push(convert_flat_stmt(body_stmts[wi]))
+            wi = wi + 1
+        val block = Block(stmts: body, span: span)
+        return Stmt(kind: StmtKind.While(cond, block), span: span)
+    elif tag == STMT_FOR:
+        val iter_name = stmt_get_name(idx)
+        val iterable = convert_flat_expr(stmt_get_expr(idx))
+        val body_stmts = stmt_get_body(idx)
+        var body: [Stmt] = []
+        var fi = 0
+        while fi < body_stmts.len():
+            body.push(convert_flat_stmt(body_stmts[fi]))
+            fi = fi + 1
+        val block = Block(stmts: body, span: span)
+        return Stmt(kind: StmtKind.For(iter_name, iterable, block), span: span)
+    elif tag == STMT_BREAK:
+        return Stmt(kind: StmtKind.Break(nil), span: span)
+    elif tag == STMT_CONTINUE:
+        return Stmt(kind: StmtKind.Continue(nil), span: span)
+    elif tag == STMT_BLOCK:
+        val body_stmts = stmt_get_body(idx)
+        var body: [Stmt] = []
+        var bi = 0
+        while bi < body_stmts.len():
+            body.push(convert_flat_stmt(body_stmts[bi]))
+            bi = bi + 1
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.Block(Block(stmts: body, span: span)), span: span)), span: span)
+    elif tag == STMT_GPU_LAUNCH:
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
+    else:
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
+
+fn convert_decl_fn(idx: i64) -> ParserFunction:
+    val name = decl_get_name(idx)
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        eprint("[flat-bridge] fn:start {name}")
+    val p_names_raw = flat_decl_field_text(idx, "PARAM_NAMES")
+    val p_types_raw = flat_decl_field_text(idx, "PARAM_TYPES")
+    val span = make_span()
+    var params: [Param] = []
+    var pi = 0
+    val p_count = flat_text_list_count(p_names_raw)
+    while pi < p_count:
+        val p_type = flat_i64_list_at(p_types_raw, pi)
+        val has_t = p_type > 0
+        params.push(Param(
+            name: flat_text_list_at(p_names_raw, pi),
+            has_type_: has_t,
+            type_: if has_t: convert_flat_type(p_type) else: Type(kind: TypeKind.Infer, span: span),
+            has_default: false,
+            default: Expr(kind: ExprKind.NilLit, span: span),
+            span: span
+        ))
+        pi = pi + 1
+
+    val ret = decl_get_ret_type(idx)
+    val body_raw = flat_decl_field_text(idx, "BODY")
+    var stmts: [Stmt] = []
+    var si = 0
+    val body_count = flat_i64_list_count(body_raw)
+    while si < body_count:
+        stmts.push(convert_flat_stmt(flat_i64_list_at(body_raw, si)))
+        si = si + 1
+
+    val visibility = convert_decl_visibility(idx)
+    val fn_params: [Param] = params
+    val inferred_ret = Type(kind: TypeKind.Infer, span: span)
+    val body_block = Block(stmts: stmts, span: span)
+    val converted = parser_function_new(
+        name,
+        [],
+        fn_params,
+        false,
+        inferred_ret,
+        body_block,
+        visibility,
+        decl_get_is_async(idx) != 0,
+        false,
+        visibility.is_public(),
+        false,
+        false,
+        decl_get_is_comptime(idx),
+        false,
+        false,
+        [],
+        false,
+        "",
+        span
+    )
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        eprint("[flat-bridge] fn:done {name}")
+    converted
+
+fn convert_decl_method_fn(idx: i64, target_name: text) -> ParserFunction:
+    val base: ParserFunction = convert_decl_fn(idx)
+    val method_mode = decl_is_async[idx]
+    match base:
+        case Function(base_name, base_type_params, base_params, base_has_return_type, base_return_type, base_body, base_visibility, _, _, base_is_public, _, _, base_is_const, base_is_kernel, base_is_extern, base_attributes, base_has_doc_comment, base_doc_comment, base_span):
+            val prefix = target_name + "__"
+            val method_name = if base_name.starts_with(prefix):
+                base_name.substring(prefix.len(), base_name.len())
+            else:
+                base_name
+            parser_function_new(
+                method_name,
+                base_type_params,
+                base_params,
+                base_has_return_type,
+                base_return_type,
+                base_body,
+                base_visibility,
+                false,
+                method_mode == 1,
+                base_is_public,
+                method_mode != 1,
+                method_mode == 2,
+                base_is_const,
+                base_is_kernel,
+                base_is_extern,
+                base_attributes,
+                base_has_doc_comment,
+                base_doc_comment,
+                base_span
+            )
+
+fn convert_decl_extern_fn(idx: i64) -> ParserFunction:
+    val name = decl_get_name(idx)
+    val p_names_raw = flat_decl_field_text(idx, "PARAM_NAMES")
+    val p_types_raw = flat_decl_field_text(idx, "PARAM_TYPES")
+    val span = make_span()
+    var params: [Param] = []
+    var pi = 0
+    val p_count = flat_text_list_count(p_names_raw)
+    while pi < p_count:
+        val p_type = flat_i64_list_at(p_types_raw, pi)
+        val has_t = p_type > 0
+        params.push(Param(
+            name: flat_text_list_at(p_names_raw, pi),
+            has_type_: has_t,
+            type_: if has_t: convert_flat_type(p_type) else: Type(kind: TypeKind.Infer, span: span),
+            has_default: false,
+            default: Expr(kind: ExprKind.NilLit, span: span),
+            span: span
+        ))
+        pi = pi + 1
+
+    val ret = decl_get_ret_type(idx)
+    val extern_params: [Param] = params
+    val extern_inferred_ret = Type(kind: TypeKind.Infer, span: span)
+    parser_function_new(
+        name,
+        [],
+        extern_params,
+        false,
+        extern_inferred_ret,
+        Block(stmts: [], span: span),
+        Visibility.Private,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        [],
+        false,
+        "",
+        span
+    )
+
+fn text_parse_int_simple(s: text) -> i64:
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        result = result * 10
+        val ch = s[i]
+        if ch == "1":
+            result = result + 1
+        elif ch == "2":
+            result = result + 2
+        elif ch == "3":
+            result = result + 3
+        elif ch == "4":
+            result = result + 4
+        elif ch == "5":
+            result = result + 5
+        elif ch == "6":
+            result = result + 6
+        elif ch == "7":
+            result = result + 7
+        elif ch == "8":
+            result = result + 8
+        elif ch == "9":
+            result = result + 9
+        i = i + 1
+    result

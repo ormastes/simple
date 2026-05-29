@@ -1,0 +1,152 @@
+# HOTP / TOTP — RFC 4226 + RFC 6238
+#
+# HOTP (HMAC-based One-Time Password) — RFC 4226 §5
+#   hotp_sha1_bytes / hotp_sha256_bytes / hotp_sha512_bytes
+#   hotp_bytes  (algorithm-selecting convenience)
+#
+# TOTP (Time-Based One-Time Password) — RFC 6238 §4
+#   totp_sha1_bytes / totp_sha256_bytes / totp_sha512_bytes
+#   totp_bytes  (algorithm-selecting convenience)
+#   Default: T0=0, X=30 seconds, digits=6
+#
+# Key-agreement test vectors:
+#   test/unit/lib/crypto/hotp_totp_kat_spec.spl
+#   (RFC 4226 Appendix D: 8 HOTP counters with key "12345678901234567890")
+#   (RFC 6238 Appendix B: 5 time points × SHA-1/SHA-256/SHA-512)
+
+use std.crypto.hmac.{hmac_sha1_bytes, hmac_sha256_bytes, hmac_sha512_bytes}
+
+# =============================================================================
+# Internal helpers
+# =============================================================================
+
+# Encode counter as 8-byte big-endian (RFC 4226 §5.2 Step 1)
+fn _encode_counter_be8(counter: i64) -> list:
+    var out = []
+    out.push((counter >> 56) & 0xff)
+    out.push((counter >> 48) & 0xff)
+    out.push((counter >> 40) & 0xff)
+    out.push((counter >> 32) & 0xff)
+    out.push((counter >> 24) & 0xff)
+    out.push((counter >> 16) & 0xff)
+    out.push((counter >> 8) & 0xff)
+    out.push(counter & 0xff)
+    out
+
+# Dynamic truncation — RFC 4226 §5.3 Step 2 + Step 3
+# Works on HMAC output of any length (20 bytes SHA-1, 32 SHA-256, 64 SHA-512).
+fn _dynamic_truncate(hmac_bytes: list) -> i64:
+    val last = hmac_bytes.get(hmac_bytes.len() - 1)
+    val offset = last & 0x0f
+    val b0 = (hmac_bytes.get(offset) & 0x7f)
+    val b1 = (hmac_bytes.get(offset + 1) & 0xff)
+    val b2 = (hmac_bytes.get(offset + 2) & 0xff)
+    val b3 = (hmac_bytes.get(offset + 3) & 0xff)
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+# Small power-of-10 table for digits 1..10
+fn _pow10(digits: i64) -> i64:
+    if digits == 1:
+        10
+    else:
+        if digits == 2:
+            100
+        else:
+            if digits == 3:
+                1000
+            else:
+                if digits == 4:
+                    10000
+                else:
+                    if digits == 5:
+                        100000
+                    else:
+                        if digits == 6:
+                            1000000
+                        else:
+                            if digits == 7:
+                                10000000
+                            else:
+                                if digits == 8:
+                                    100000000
+                                else:
+                                    if digits == 9:
+                                        1000000000
+                                    else:
+                                        10000000000
+
+# =============================================================================
+# HOTP
+# =============================================================================
+
+# HOTP-SHA-1 (RFC 4226 §5 — HMAC-SHA-1, N-digit output)
+# reason: positional crypto hotp API
+fn hotp_sha1_bytes(key_bytes: list, counter: i64, digits: i64) -> i64:
+    val msg = _encode_counter_be8(counter)
+    val h = hmac_sha1_bytes(key_bytes, msg)
+    val bin_code = _dynamic_truncate(h)
+    bin_code % _pow10(digits)
+
+# HOTP-SHA-256 (HMAC-SHA-256 variant, N-digit output)
+# reason: positional crypto hotp API
+fn hotp_sha256_bytes(key_bytes: list, counter: i64, digits: i64) -> i64:
+    val msg = _encode_counter_be8(counter)
+    val h = hmac_sha256_bytes(key_bytes, msg)
+    val bin_code = _dynamic_truncate(h)
+    bin_code % _pow10(digits)
+
+# HOTP-SHA-512 (HMAC-SHA-512 variant, N-digit output)
+# reason: positional crypto hotp API
+fn hotp_sha512_bytes(key_bytes: list, counter: i64, digits: i64) -> i64:
+    val msg = _encode_counter_be8(counter)
+    val h = hmac_sha512_bytes(key_bytes, msg)
+    val bin_code = _dynamic_truncate(h)
+    bin_code % _pow10(digits)
+
+# Generic HOTP — algorithm selected by text tag: "sha1", "sha256", "sha512"
+# reason: positional crypto hotp API
+fn hotp_bytes(key_bytes: list, counter: i64, digits: i64, algorithm: text) -> i64:
+    if algorithm == "sha256":
+        hotp_sha256_bytes(key_bytes, counter, digits)
+    else:
+        if algorithm == "sha512":
+            hotp_sha512_bytes(key_bytes, counter, digits)
+        else:
+            hotp_sha1_bytes(key_bytes, counter, digits)
+
+# =============================================================================
+# TOTP
+# =============================================================================
+
+# TOTP-SHA-1 — RFC 6238 §4
+# time_unix_seconds: current Unix epoch time
+# period: time step in seconds (RFC 6238 default: 30)
+# digits: output digit count (RFC 6238 typical: 6 or 8)
+# T0 is always 0 per RFC 6238 §4 default
+# reason: positional crypto totp API
+fn totp_sha1_bytes(key_bytes: list, time_unix_seconds: i64, period: i64, digits: i64) -> i64:
+    val t = time_unix_seconds / period
+    hotp_sha1_bytes(key_bytes, t, digits)
+
+# TOTP-SHA-256 — RFC 6238 §4
+# reason: positional crypto totp API
+fn totp_sha256_bytes(key_bytes: list, time_unix_seconds: i64, period: i64, digits: i64) -> i64:
+    val t = time_unix_seconds / period
+    hotp_sha256_bytes(key_bytes, t, digits)
+
+# TOTP-SHA-512 — RFC 6238 §4
+# reason: positional crypto totp API
+fn totp_sha512_bytes(key_bytes: list, time_unix_seconds: i64, period: i64, digits: i64) -> i64:
+    val t = time_unix_seconds / period
+    hotp_sha512_bytes(key_bytes, t, digits)
+
+# Generic TOTP — algorithm selected by text tag: "sha1", "sha256", "sha512"
+# reason: positional crypto totp API
+fn totp_bytes(key_bytes: list, time_unix_seconds: i64, period: i64, digits: i64, algorithm: text) -> i64:
+    if algorithm == "sha256":
+        totp_sha256_bytes(key_bytes, time_unix_seconds, period, digits)
+    else:
+        if algorithm == "sha512":
+            totp_sha512_bytes(key_bytes, time_unix_seconds, period, digits)
+        else:
+            totp_sha1_bytes(key_bytes, time_unix_seconds, period, digits)

@@ -1,0 +1,76 @@
+# @cover src/lib/nogc_async_mut/df/mod.spl 80%
+"""
+# DataFrame Async/NoGC Facade Specification
+
+**Feature IDs:** science-math-lib-set-async-df-facade
+**Plan:** doc/03_plan/agent_tasks/science_math_lib_set.md
+**Design:** doc/05_design/science_math_lib_set.md
+
+Validates the first namespace-consistency slice from the science math lib set:
+`std.nogc_async_mut.df` exposes the same DataFrame seed API as the existing
+`std.df` / `std.nogc_sync_mut.df` surface.
+"""
+
+use std.spipe.*
+use std.ndarray.*
+use std.nogc_async_mut.df.*
+
+
+describe "nogc_async_mut DataFrame facade":
+    it "constructs a DataFrame through the async/nogc namespace":
+        val price_col = SeriesErased.F64Series(Series.from_values(
+            name: Symbol.from("price"),
+            values: [Float64.new(1.0), Float64.new(2.0)]
+        ))
+        val qty_col = SeriesErased.I64Series(Series.from_values(
+            name: Symbol.from("qty"),
+            values: [Int64.new(5), Int64.new(8)]
+        ))
+        val df = DataFrame.from_columns([price_col, qty_col]).unwrap()
+        expect(df.num_rows()).to_equal(Index.new(2))
+        expect(df.num_cols()).to_equal(Index.new(2))
+        expect(df.columns()[0]).to_equal(Symbol.from("price"))
+        expect(df.dtypes().dtype_at(Index.new(1))).to_equal(DType.I64)
+
+    it "uses the same column operation behavior as the sync facade":
+        val df = DataFrame.from_columns([
+            SeriesErased.F64Series(Series.from_values(
+                name: Symbol.from("a"),
+                values: [Float64.new(1.0), Float64.new(2.0)]
+            )),
+        ]).unwrap()
+        val df2 = df.assign(
+            Symbol.from("b"),
+            SeriesErased.F64Series(Series.from_values(
+                name: Symbol.from("b"),
+                values: [Float64.new(10.0), Float64.new(20.0)]
+            ))
+        )
+        val b = df2.col(Symbol.from("b")).unwrap()
+        expect(df2.column_count()).to_equal(Index.new(2))
+        expect(b.get(Index.new(1))).to_equal(Float64.new(20.0))
+
+    it "exposes reshape helpers through the async/nogc namespace":
+        val wide = DataFrame.from_columns([
+            SeriesErased.I64Series(Series.from_values(Symbol.from("id"), [Int64.new(1)])),
+            SeriesErased.F64Series(Series.from_values(Symbol.from("jan"), [Float64.new(10.0)])),
+        ]).unwrap()
+        val long = melt_numeric(
+            wide,
+            Symbol.from("id"),
+            [Symbol.from("jan")],
+            Symbol.from("variable"),
+            Symbol.from("value")
+        ).unwrap()
+        expect(long.num_rows()).to_equal(Index.new(1))
+        expect(long.col(Symbol.from("value")).unwrap().get(Index.new(0))).to_equal(Float64.new(10.0))
+
+        val pivoted = pivot_sum(
+            long,
+            Symbol.from("id"),
+            Symbol.from("variable"),
+            Symbol.from("value"),
+            Symbol.from("value")
+        ).unwrap()
+        expect(pivoted.num_cols()).to_equal(Index.new(2))
+        expect(pivoted.col(Symbol.from("value_0")).unwrap().get(Index.new(0))).to_equal(Float64.new(10.0))

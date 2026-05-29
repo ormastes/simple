@@ -1,0 +1,430 @@
+# QPACK Decoder — RFC 9204 section 4.5
+#
+# Implements the QPACK header field decoding instructions for HTTP/3.
+# Decodes prefixed integers and dispatches header field representations
+# from the encoded header block back to (name, value) pairs.
+#
+# This module provides:
+#   - Prefixed integer decode (RFC 7541 section 5.1 / RFC 9204 section 4.1.1)
+#   - String literal decode (RFC 9204 section 4.1.2)
+#   - Header block prefix decode (section 4.5.1)
+#   - Indexed header field decode (static, section 4.5.2)
+#   - Literal with name reference decode (static, section 4.5.4)
+#   - Literal without name reference decode (section 4.5.6)
+#   - Full header block decode dispatching on instruction patterns
+#
+# Scope: static-table-only decoding (no dynamic table).
+#
+# Reference: RFC 9204 section 4.5, RFC 7541 section 5.1
+
+# ============================================================================
+# Result types
+# ============================================================================
+
+class QpackIntOk:
+    """Successful prefixed integer decode."""
+    value: i64
+    consumed: i64   # bytes consumed
+
+enum QpackIntResult:
+    """Result of decoding a prefixed integer."""
+    Ok(QpackIntOk)
+    Err(msg: text)
+
+class QpackStringOk:
+    """Successful string literal decode."""
+    value: text
+    consumed: i64
+
+enum QpackStringResult:
+    """Result of decoding a string literal."""
+    Ok(QpackStringOk)
+    Err(msg: text)
+
+class QpackDecodedHeader:
+    """A decoded header field pair."""
+    name: text
+    value: text
+
+class QpackDecodeBlockOk:
+    """Successfully decoded header block."""
+    headers: [QpackDecodedHeader]
+    required_insert_count: i64
+    delta_base: i64
+
+enum QpackDecodeBlockResult:
+    """Result of decoding a complete header block."""
+    Ok(QpackDecodeBlockOk)
+    Err(msg: text)
+
+# ============================================================================
+# Prefixed integer decoding — RFC 7541 section 5.1
+# ============================================================================
+
+pub fn qpack_decode_prefixed_int(bytes: [u8], offset: i64, prefix_bits: i64) -> QpackIntResult:
+    """Decode an HPACK/QPACK prefixed integer from bytes at offset.
+
+    prefix_bits: number of bits in the first byte used for the value (1..8).
+    Returns Ok(value, consumed) or Err.
+    """
+    if offset >= bytes.len():
+        return QpackIntResult.Err("offset past end of buffer")
+    val max_prefix = (1 << prefix_bits) - 1
+    val first = bytes[offset] & max_prefix
+    if first < max_prefix:
+        return QpackIntResult.Ok(QpackIntOk(value: first, consumed: 1))
+    # Multi-byte form
+    var value = max_prefix
+    var shift = 0
+    var pos = offset + 1
+    loop:
+        if pos >= bytes.len():
+            return QpackIntResult.Err("prefixed integer truncated")
+        val b = bytes[pos] & 0xff
+        value = value + ((b & 0x7f) << shift)
+        pos = pos + 1
+        if (b & 0x80) == 0:
+            break
+        shift = shift + 7
+        if shift > 56:
+            return QpackIntResult.Err("prefixed integer overflow")
+    return QpackIntResult.Ok(QpackIntOk(value: value, consumed: pos - offset))
+
+# ============================================================================
+# String literal decoding — RFC 9204 section 4.1.2
+#
+# H(1 bit) + Length(7-bit prefixed int) + Data.
+# H=0: raw octets. H=1: Huffman-encoded (not supported in this implementation).
+# ============================================================================
+
+pub fn qpack_decode_string_literal(bytes: [u8], offset: i64) -> QpackStringResult:
+    """Decode a QPACK string literal at offset.
+
+    Supports raw (H=0) strings only. Returns Err for Huffman (H=1).
+    """
+    if offset >= bytes.len():
+        return QpackStringResult.Err("offset past end of buffer")
+    val huffman = (bytes[offset] & 0x80) != 0
+    if huffman:
+        return QpackStringResult.Err("Huffman decoding not implemented")
+    # Decode length with 7-bit prefix
+    val len_r = qpack_decode_prefixed_int(bytes, offset, 7)
+    match len_r:
+        case Err(msg):
+            return QpackStringResult.Err(msg)
+        case Ok(lr):
+            val str_start = offset + lr.consumed
+            val str_end = str_start + lr.value
+            if str_end > bytes.len():
+                return QpackStringResult.Err("string literal truncated")
+            # Build text from raw bytes
+            var s = ""
+            var i = str_start
+            while i < str_end:
+                val c = bytes[i] & 0xff
+                # Simple ASCII char construction
+                s = s + _qd_byte_to_char(c)
+                i = i + 1
+            val total = lr.consumed + lr.value
+            return QpackStringResult.Ok(QpackStringOk(value: s, consumed: total))
+    return QpackStringResult.Err("unreachable")
+
+# ============================================================================
+# Header block prefix decode — RFC 9204 section 4.5.1
+# ============================================================================
+
+class QpackPrefixOk:
+    """Decoded header block prefix."""
+    required_insert_count: i64
+    sign: i64
+    delta_base: i64
+    consumed: i64
+
+enum QpackPrefixResult:
+    Ok(QpackPrefixOk)
+    Err(msg: text)
+
+pub fn qpack_decode_header_block_prefix(bytes: [u8], offset: i64) -> QpackPrefixResult:
+    """Decode the 2-field header block prefix.
+
+    Field 1: Required Insert Count (8-bit prefixed integer).
+    Field 2: S(1 bit) + Delta Base (7-bit prefixed integer).
+    """
+    # Required Insert Count
+    val ric_r = qpack_decode_prefixed_int(bytes, offset, 8)
+    match ric_r:
+        case Err(msg):
+            return QpackPrefixResult.Err("RIC: " + msg)
+        case Ok(ric_ok):
+            val after_ric = offset + ric_ok.consumed
+            if after_ric >= bytes.len():
+                return QpackPrefixResult.Err("prefix truncated after RIC")
+            # S bit and Delta Base
+            val sign = (bytes[after_ric] >> 7) & 0x01
+            val db_r = qpack_decode_prefixed_int(bytes, after_ric, 7)
+            match db_r:
+                case Err(msg):
+                    return QpackPrefixResult.Err("DeltaBase: " + msg)
+                case Ok(db_ok):
+                    val total = ric_ok.consumed + db_ok.consumed
+                    return QpackPrefixResult.Ok(QpackPrefixOk(
+                        required_insert_count: ric_ok.value,
+                        sign: sign,
+                        delta_base: db_ok.value,
+                        consumed: total
+                    ))
+    return QpackPrefixResult.Err("unreachable")
+
+# ============================================================================
+# Full header block decode — RFC 9204 section 4.5
+#
+# After the prefix, each instruction is dispatched by the first byte pattern:
+#   0b11xxxxxx  — Indexed header field (T=1 for static, 6-bit index)
+#   0b0001xxxx  — Indexed header field with post-base index (not supported)
+#   0b01x1xxxx  — Literal with name reference (T=1 for static, 4-bit index)
+#   0b0000xxxx  — Literal with post-base name ref (not supported)
+#   0b001xxxxx  — Literal without name reference
+# ============================================================================
+
+pub fn qpack_decode_header_block(bytes: [u8]) -> QpackDecodeBlockResult:
+    """Decode a complete QPACK header block into (name, value) pairs.
+
+    Supports static-table-only instructions. Returns Err for dynamic table
+    or post-base references.
+    """
+    var headers: [QpackDecodedHeader] = []
+    # Decode prefix
+    val prefix_r = qpack_decode_header_block_prefix(bytes, 0)
+    match prefix_r:
+        case Err(msg):
+            return QpackDecodeBlockResult.Err("prefix: " + msg)
+        case Ok(pfx):
+            var pos = pfx.consumed
+            loop:
+                if pos >= bytes.len():
+                    break
+                val first = bytes[pos] & 0xff
+                if (first & 0xc0) == 0xc0:
+                    # Indexed header field (static) — 0b11xxxxxx
+                    val idx_r = qpack_decode_prefixed_int(bytes, pos, 6)
+                    match idx_r:
+                        case Err(msg):
+                            return QpackDecodeBlockResult.Err("indexed: " + msg)
+                        case Ok(idx_ok):
+                            val entry = _qd_static_lookup(idx_ok.value)
+                            headers.push(entry)
+                            pos = pos + idx_ok.consumed
+                elif (first & 0xf0) == 0x50:
+                    # Literal with static name ref — 0b0101xxxx (N=0, T=1)
+                    val nidx_r = qpack_decode_prefixed_int(bytes, pos, 4)
+                    match nidx_r:
+                        case Err(msg):
+                            return QpackDecodeBlockResult.Err("lit name ref idx: " + msg)
+                        case Ok(nidx_ok):
+                            val after_idx = pos + nidx_ok.consumed
+                            val val_r = qpack_decode_string_literal(bytes, after_idx)
+                            match val_r:
+                                case Err(msg):
+                                    return QpackDecodeBlockResult.Err("lit name ref val: " + msg)
+                                case Ok(val_ok):
+                                    val name_entry = _qd_static_lookup(nidx_ok.value)
+                                    headers.push(QpackDecodedHeader(
+                                        name: name_entry.name,
+                                        value: val_ok.value
+                                    ))
+                                    pos = after_idx + val_ok.consumed
+                elif (first & 0xe0) == 0x20:
+                    # Literal without name reference — 0b001xxxxx
+                    # Name: H(bit 3) + length(3-bit prefix) + data
+                    val name_huffman = (first & 0x08) != 0
+                    if name_huffman:
+                        return QpackDecodeBlockResult.Err("Huffman name not supported")
+                    val nlen_r = qpack_decode_prefixed_int(bytes, pos, 3)
+                    match nlen_r:
+                        case Err(msg):
+                            return QpackDecodeBlockResult.Err("lit name len: " + msg)
+                        case Ok(nlen_ok):
+                            val name_start = pos + nlen_ok.consumed
+                            val name_end = name_start + nlen_ok.value
+                            if name_end > bytes.len():
+                                return QpackDecodeBlockResult.Err("lit name truncated")
+                            var hname = ""
+                            var ni = name_start
+                            while ni < name_end:
+                                hname = hname + _qd_byte_to_char(bytes[ni] & 0xff)
+                                ni = ni + 1
+                            # Value
+                            val val_r = qpack_decode_string_literal(bytes, name_end)
+                            match val_r:
+                                case Err(msg):
+                                    return QpackDecodeBlockResult.Err("lit val: " + msg)
+                                case Ok(val_ok):
+                                    headers.push(QpackDecodedHeader(
+                                        name: hname,
+                                        value: val_ok.value
+                                    ))
+                                    pos = name_end + val_ok.consumed
+                else:
+                    # Post-base or unknown instruction
+                    return QpackDecodeBlockResult.Err("unsupported instruction byte: " + first.to_text())
+            return QpackDecodeBlockResult.Ok(QpackDecodeBlockOk(
+                headers: headers,
+                required_insert_count: pfx.required_insert_count,
+                delta_base: pfx.delta_base
+            ))
+    return QpackDecodeBlockResult.Err("unreachable")
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _qd_byte_to_char(b: i64) -> text:
+    """Convert a byte value (0-127 ASCII) to a single-character text.
+    Non-ASCII bytes are replaced with '?'."""
+    # Use a lookup for printable ASCII
+    if b == 32: return " "
+    if b == 33: return "!"
+    if b == 34: return "\""
+    if b == 35: return "#"
+    if b == 36: return "$"
+    if b == 37: return "%"
+    if b == 38: return "&"
+    if b == 39: return "'"
+    if b == 40: return "("
+    if b == 41: return ")"
+    if b == 42: return "*"
+    if b == 43: return "+"
+    if b == 44: return ","
+    if b == 45: return "-"
+    if b == 46: return "."
+    if b == 47: return "/"
+    if b >= 48 and b <= 57:
+        # Digits 0-9
+        val d = b - 48
+        if d == 0: return "0"
+        if d == 1: return "1"
+        if d == 2: return "2"
+        if d == 3: return "3"
+        if d == 4: return "4"
+        if d == 5: return "5"
+        if d == 6: return "6"
+        if d == 7: return "7"
+        if d == 8: return "8"
+        return "9"
+    if b == 58: return ":"
+    if b == 59: return ";"
+    if b == 60: return "<"
+    if b == 61: return "="
+    if b == 62: return ">"
+    if b == 63: return "?"
+    if b == 64: return "@"
+    if b >= 65 and b <= 90:
+        # Uppercase A-Z
+        val c = b - 65
+        if c == 0: return "A"
+        if c == 1: return "B"
+        if c == 2: return "C"
+        if c == 3: return "D"
+        if c == 4: return "E"
+        if c == 5: return "F"
+        if c == 6: return "G"
+        if c == 7: return "H"
+        if c == 8: return "I"
+        if c == 9: return "J"
+        if c == 10: return "K"
+        if c == 11: return "L"
+        if c == 12: return "M"
+        if c == 13: return "N"
+        if c == 14: return "O"
+        if c == 15: return "P"
+        if c == 16: return "Q"
+        if c == 17: return "R"
+        if c == 18: return "S"
+        if c == 19: return "T"
+        if c == 20: return "U"
+        if c == 21: return "V"
+        if c == 22: return "W"
+        if c == 23: return "X"
+        if c == 24: return "Y"
+        return "Z"
+    if b == 91: return "["
+    if b == 92: return "\\"
+    if b == 93: return "]"
+    if b == 94: return "^"
+    if b == 95: return "_"
+    if b == 96: return "`"
+    if b >= 97 and b <= 122:
+        # Lowercase a-z
+        val c = b - 97
+        if c == 0: return "a"
+        if c == 1: return "b"
+        if c == 2: return "c"
+        if c == 3: return "d"
+        if c == 4: return "e"
+        if c == 5: return "f"
+        if c == 6: return "g"
+        if c == 7: return "h"
+        if c == 8: return "i"
+        if c == 9: return "j"
+        if c == 10: return "k"
+        if c == 11: return "l"
+        if c == 12: return "m"
+        if c == 13: return "n"
+        if c == 14: return "o"
+        if c == 15: return "p"
+        if c == 16: return "q"
+        if c == 17: return "r"
+        if c == 18: return "s"
+        if c == 19: return "t"
+        if c == 20: return "u"
+        if c == 21: return "v"
+        if c == 22: return "w"
+        if c == 23: return "x"
+        if c == 24: return "y"
+        return "z"
+    if b == 123: return "{"
+    if b == 124: return "|"
+    if b == 125: return "}"
+    if b == 126: return "~"
+    return "?"
+
+fn _qd_static_lookup(index: i64) -> QpackDecodedHeader:
+    """Inline static table lookup for the most common entries.
+    Returns a QpackDecodedHeader. For out-of-range indices returns empty."""
+    if index == 0: return QpackDecodedHeader(name: ":authority", value: "")
+    if index == 1: return QpackDecodedHeader(name: ":path", value: "/")
+    if index == 2: return QpackDecodedHeader(name: "age", value: "0")
+    if index == 3: return QpackDecodedHeader(name: "content-disposition", value: "")
+    if index == 4: return QpackDecodedHeader(name: "content-length", value: "0")
+    if index == 5: return QpackDecodedHeader(name: "cookie", value: "")
+    if index == 6: return QpackDecodedHeader(name: "date", value: "")
+    if index == 7: return QpackDecodedHeader(name: "etag", value: "")
+    if index == 8: return QpackDecodedHeader(name: "if-modified-since", value: "")
+    if index == 9: return QpackDecodedHeader(name: "if-none-match", value: "")
+    if index == 10: return QpackDecodedHeader(name: "last-modified", value: "")
+    if index == 11: return QpackDecodedHeader(name: "link", value: "")
+    if index == 12: return QpackDecodedHeader(name: "location", value: "")
+    if index == 13: return QpackDecodedHeader(name: "referer", value: "")
+    if index == 14: return QpackDecodedHeader(name: "set-cookie", value: "")
+    if index == 15: return QpackDecodedHeader(name: ":method", value: "CONNECT")
+    if index == 16: return QpackDecodedHeader(name: ":method", value: "DELETE")
+    if index == 17: return QpackDecodedHeader(name: ":method", value: "GET")
+    if index == 18: return QpackDecodedHeader(name: ":method", value: "HEAD")
+    if index == 19: return QpackDecodedHeader(name: ":method", value: "OPTIONS")
+    if index == 20: return QpackDecodedHeader(name: ":method", value: "POST")
+    if index == 21: return QpackDecodedHeader(name: ":method", value: "PUT")
+    if index == 22: return QpackDecodedHeader(name: ":scheme", value: "http")
+    if index == 23: return QpackDecodedHeader(name: ":scheme", value: "https")
+    if index == 24: return QpackDecodedHeader(name: ":status", value: "103")
+    if index == 25: return QpackDecodedHeader(name: ":status", value: "200")
+    if index == 26: return QpackDecodedHeader(name: ":status", value: "304")
+    if index == 27: return QpackDecodedHeader(name: ":status", value: "404")
+    if index == 28: return QpackDecodedHeader(name: ":status", value: "503")
+    if index == 29: return QpackDecodedHeader(name: "accept", value: "*/*")
+    if index == 30: return QpackDecodedHeader(name: "accept", value: "application/dns-message")
+    if index == 31: return QpackDecodedHeader(name: "accept-encoding", value: "gzip, deflate, br")
+    if index == 46: return QpackDecodedHeader(name: "content-type", value: "application/json")
+    if index == 52: return QpackDecodedHeader(name: "content-type", value: "text/html; charset=utf-8")
+    if index == 53: return QpackDecodedHeader(name: "content-type", value: "text/plain")
+    # Default for unmatched indices
+    return QpackDecodedHeader(name: "", value: "")

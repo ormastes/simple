@@ -1,0 +1,56 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+use std.spec
+use examples.browser.feature.gpu.shader.{ShaderManager, ShaderStage}
+use examples.browser.shared.logging.{Logger}
+
+fn make_shader_manager() -> ShaderManager:
+    ShaderManager.new(Logger(name: "shader-spec"))
+
+val VALID_VERTEX = """#version 450
+void main() {
+    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+}"""
+
+val VALID_FRAGMENT = """#version 450
+layout(location = 0) out vec4 o_color;
+void main() {
+    o_color = vec4(1.0, 0.0, 0.0, 1.0);
+}"""
+
+describe "ShaderManager":
+    describe "compile_shader":
+        it "rejects empty and structurally invalid shader sources":
+            var manager = make_shader_manager()
+            val empty_id = manager.create_shader(ShaderStage.Vertex, "", "empty")
+            val no_main_id = manager.create_shader(ShaderStage.Fragment, "out vec4 o_color;", "no-main")
+            val bad_vertex_id = manager.create_shader(ShaderStage.Vertex, "void main() { }", "bad-vertex")
+            val unbalanced_id = manager.create_shader(ShaderStage.Fragment, "out vec4 o_color; void main() {", "unbalanced")
+
+            expect(manager.compile_shader(empty_id).?).to_equal(false)
+            expect(manager.compile_shader(no_main_id).?).to_equal(false)
+            expect(manager.compile_shader(bad_vertex_id).?).to_equal(false)
+            expect(manager.compile_shader(unbalanced_id).?).to_equal(false)
+
+        it "marks a program compiled only after both linked stages validate":
+            var manager = make_shader_manager()
+            val vertex_id = manager.create_shader(ShaderStage.Vertex, VALID_VERTEX, "valid-vertex")
+            val fragment_id = manager.create_shader(ShaderStage.Fragment, VALID_FRAGMENT, "valid-fragment")
+            val program_result = manager.create_program(vertex_id, fragment_id)
+            expect(program_result.?).to_equal(true)
+            expect(manager.programs[0].is_compiled).to_equal(false)
+
+            expect(manager.compile_shader(vertex_id).?).to_equal(true)
+            expect(manager.programs[0].is_compiled).to_equal(false)
+
+            expect(manager.compile_shader(fragment_id).?).to_equal(true)
+            expect(manager.programs[0].is_compiled).to_equal(true)
+
+        it "rejects linking stages in the wrong slots":
+            var manager = make_shader_manager()
+            val fragment_id = manager.create_shader(ShaderStage.Fragment, VALID_FRAGMENT, "fragment")
+            val vertex_id = manager.create_shader(ShaderStage.Vertex, VALID_VERTEX, "vertex")
+
+            expect(manager.create_program(fragment_id, vertex_id).?).to_equal(false)

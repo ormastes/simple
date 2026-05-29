@@ -1,0 +1,656 @@
+# Part 1 of src/compiler/00.common/attributes.spl
+use compiler.common.attributes.*
+# Attribute Parsing - Parse and Validate Attributes
+#
+# Handles parsing of layout-related attributes:
+# - @repr("C")         - C ABI compatible layout
+# - @repr("packed")    - No padding between fields
+# - @repr("transparent") - Single-field wrapper layout
+# - @packed            - Shorthand for @repr("packed")
+# - @align(N)          - Minimum alignment (must be power of 2)
+#
+# Handles parsing of volatile attributes:
+# - @volatile          - Full volatile (reads and writes)
+# - @volatile_read     - Read-only volatile
+# - @volatile_write    - Write-only volatile
+# - @nonvolatile       - Explicitly non-volatile (override)
+#
+# Returns a LayoutAttr for use in type layout computation.
+
+# bypass: parsing functions need L1 (Attribute/Expr) and L3 (LayoutAttr/LayoutKind) types.
+# Split deferred — spawn_analysis.spl (L1) consumes parse_function_attrs/parse_task_attr,
+# so moving parsing fns to L2 would create a new L1→L2 violation.
+use compiler.frontend.parser_types.{Attribute}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, expr_kind}
+use compiler.types.type_layout.{
+    LayoutAttr, LayoutKind,
+    PlatformAbi, PlatformBit, PlatformPredicate, PlatformVariant, PlatformParseResult,
+    PlatformLayoutDiagnostic, platform_abi_from_text, platform_bit_from_text,
+    platform_cpu_from_text, platform_os_from_text,
+    platform_predicate_default, platform_validate_variants
+}
+use compiler.common.diagnostics.span.{Span}
+
+
+# ============================================================================
+# Volatile Attribute Types
+# ============================================================================
+
+"""Volatile access mode for memory-mapped I/O."""
+enum VolatileMode:
+    None_            # Normal (not volatile)
+    Full            # Full volatile (reads and writes)
+    ReadOnly        # Volatile reads, normal writes
+    WriteOnly       # Volatile writes, normal reads
+    Explicit        # Explicitly non-volatile (override)
+
+struct VolatileAttr:
+    """Volatile attribute configuration."""
+    mode: VolatileMode
+    address: i64?          # Fixed address for memory-mapped variable (@ addr)
+    barriers: bool         # Insert memory barriers around access
+
+# ============================================================================
+# Volatile Attribute Parsing
+# ============================================================================
+
+fn parse_volatile_attrs(attrs: [Attribute]) -> VolatileAttr:
+    """Extract volatile attributes from a list of attributes."""
+    var mode = VolatileMode.None_
+    var address: i64? = nil
+    var barriers = false
+
+    for attr in attrs:
+        if attr.name == "volatile":
+            mode = VolatileMode.Full
+            # Check for @volatile(barriers: true)
+            if attr.args.len() > 0:
+                barriers = extract_barriers_arg(attr.args)
+        elif attr.name == "volatile_read":
+            mode = VolatileMode.ReadOnly
+        elif attr.name == "volatile_write":
+            mode = VolatileMode.WriteOnly
+        elif attr.name == "nonvolatile":
+            mode = VolatileMode.Explicit
+        elif attr.name == "address" or attr.name == "addr":
+            # @address(0x40020000) - fixed memory address
+            if attr.args.len() > 0:
+                address = extract_int_arg(attr.args[0])
+
+    VolatileAttr(
+        mode: mode,
+        address: address,
+        barriers: barriers
+    )
+
+fn is_volatile(attr: VolatileAttr) -> bool:
+    """Check if volatile access is required."""
+    (attr.mode == VolatileMode.Full or
+    attr.mode == VolatileMode.ReadOnly or
+    attr.mode == VolatileMode.WriteOnly)
+
+fn is_read_volatile(attr: VolatileAttr) -> bool:
+    """Check if volatile reads are required."""
+    attr.mode == VolatileMode.Full or attr.mode == VolatileMode.ReadOnly
+
+fn is_write_volatile(attr: VolatileAttr) -> bool:
+    """Check if volatile writes are required."""
+    attr.mode == VolatileMode.Full or attr.mode == VolatileMode.WriteOnly
+
+# ============================================================================
+# Export Attribute Types
+# ============================================================================
+
+struct ExportAttr:
+    """Export attribute for C ABI interop.
+
+    Marks a class or function for export with C-compatible ABI.
+    Used by @export("C") annotation to generate C ABI wrappers,
+    C headers, and C++ wrapper headers.
+
+    Fields:
+        is_export_c: Whether to export with C ABI
+        export_name: Custom C symbol name (empty = use default mangled name)
+    """
+    is_export_c: bool
+    export_name: text
+
+enum DriverManifestAttrKind:
+    Driver
+    NativeLib
+
+struct DriverManifestAttr:
+    """Parsed @driver(...) / @native_lib(...) manifest attribute.
+
+    `driver_class` stores the DriverClass ordinal to keep this compiler-common
+    type independent from std.driver. `device_ids` stores the device id list
+    exactly as it will be encoded into the DRVS record.
+    """
+    kind: DriverManifestAttrKind
+    driver_class: i64
+    vendor: i64
+    device_ids: [i64]
+    version: text
+    abi: text
+
+enum VhdlResetPolarity:
+    ActiveLow
+    ActiveHigh
+
+enum VhdlResetSynchrony:
+    Async
+    Sync
+    None_
+
+struct VhdlClockedMetadata:
+    """Structured @clocked(...) metadata for hardware VHDL lowering."""
+    clock_signal: text
+    reset_signal: text
+    has_reset: bool
+    reset_polarity: VhdlResetPolarity
+    reset_synchrony: VhdlResetSynchrony
+    domain: text
+    is_valid: bool
+    validation_errors: [text]
+
+struct VhdlGenericMetadata:
+    """Structured @generic(...) item preserved for VHDL entity generation."""
+    name: text
+    type_text: text
+    default_text: text
+
+struct VhdlReturnFieldMetadata:
+    """Structured labeled return field metadata for VHDL output ports."""
+    label: text
+    type_text: text
+
+struct VhdlHardwareMetadata:
+    """Function-level structured metadata for pure-Simple VHDL lowering."""
+    is_hardware: bool
+    generics: [VhdlGenericMetadata]
+    has_clocked: bool
+    clocked: VhdlClockedMetadata
+    return_fields: [VhdlReturnFieldMetadata]
+
+# ============================================================================
+# Export Attribute Parsing
+# ============================================================================
+
+fn parse_export_attrs(attrs: [Attribute]) -> ExportAttr?:
+    """Extract @export attributes from a list of attributes.
+
+    Scans for @export("C") with optional name: kwarg.
+    Returns nil if no @export found.
+
+    Examples:
+        @export("C")                    # Export with C ABI, default name
+        @export("C", name: "my_func")   # Export with custom C symbol name
+    """
+    var found = false
+    var is_export_c = false
+    var export_name = ""
+
+    for attr in attrs:
+        if attr.name == "export":
+            if attr.args.len() > 0:
+                # First arg should be the ABI string, e.g. "C"
+                val abi = extract_string_arg(attr.args[0])
+                if abi == "C":
+                    found = true
+                    is_export_c = true
+
+                    # Check remaining args for name: kwarg
+                    var ai = 1
+                    while ai < attr.args.len():
+                        val arg = attr.args[ai]
+                        match arg.kind:
+                            case Assign(left, op, right):
+                                match left.kind:
+                                    case Ident(name):
+                                        if name == "name":
+                                            val n = extract_string_arg(right)
+                                            if n.len() > 0:
+                                                export_name = n
+                                    case _: ()
+                            case _: ()
+                        ai = ai + 1
+
+    if not found:
+        return nil
+
+    ExportAttr(
+        is_export_c: is_export_c,
+        export_name: export_name
+    )
+
+fn parse_driver_manifest_attrs(attrs: [Attribute]) -> DriverManifestAttr?:
+    """Extract @driver(...) or @native_lib(...) from declaration attributes.
+
+    Supports both the design's named form and the current positional form:
+      @driver(class = 0, vendor = 0x8086, device = [0x2922], version = "1.0")
+      @driver(0, 0x8086, [0x2922], "1.0")
+      @native_lib(abi = "simple", version = "1.0")
+      @native_lib("simple", "1.0")
+    """
+    for attr in attrs:
+        if attr.name == "driver":
+            var driver_class: i64 = 0
+            var vendor: i64 = 0
+            var device_ids: [i64] = []
+            var version = ""
+
+            if attr.args.len() >= 4:
+                driver_class = extract_int_arg(attr.args[0]) ?? 0
+                vendor = extract_int_arg(attr.args[1]) ?? 0
+                device_ids = extract_int_array_arg(attr.args[2])
+                version = extract_string_arg(attr.args[3])
+
+            for arg in attr.args:
+                match arg.kind:
+                    case Assign(left, op, right):
+                        match left.kind:
+                            case Ident(name):
+                                if name == "class" or name == "dclass":
+                                    driver_class = extract_int_arg(right) ?? driver_class
+                                elif name == "vendor":
+                                    vendor = extract_int_arg(right) ?? vendor
+                                elif name == "device" or name == "devices":
+                                    device_ids = extract_int_array_arg(right)
+                                elif name == "version":
+                                    val v = extract_string_arg(right)
+                                    if v.len() > 0:
+                                        version = v
+                            case _: ()
+                    case _: ()
+
+            return DriverManifestAttr(
+                kind: DriverManifestAttrKind.Driver,
+                driver_class: driver_class,
+                vendor: vendor,
+                device_ids: device_ids,
+                version: version,
+                abi: ""
+            )
+
+        elif attr.name == "native_lib":
+            var abi = "simple"
+            var version = ""
+            if attr.args.len() >= 1:
+                val a = extract_string_arg(attr.args[0])
+                if a.len() > 0:
+                    abi = a
+            if attr.args.len() >= 2:
+                version = extract_string_arg(attr.args[1])
+
+            for arg in attr.args:
+                match arg.kind:
+                    case Assign(left, op, right):
+                        match left.kind:
+                            case Ident(name):
+                                if name == "abi":
+                                    val a = extract_string_arg(right)
+                                    if a.len() > 0:
+                                        abi = a
+                                elif name == "version":
+                                    val v = extract_string_arg(right)
+                                    if v.len() > 0:
+                                        version = v
+                            case _: ()
+                    case _: ()
+
+            return DriverManifestAttr(
+                kind: DriverManifestAttrKind.NativeLib,
+                driver_class: 15,
+                vendor: 0,
+                device_ids: [],
+                version: version,
+                abi: abi
+            )
+
+    nil
+
+fn vhdl_clocked_metadata_default() -> VhdlClockedMetadata:
+    VhdlClockedMetadata(
+        clock_signal: "",
+        reset_signal: "",
+        has_reset: false,
+        reset_polarity: VhdlResetPolarity.ActiveLow,
+        reset_synchrony: VhdlResetSynchrony.None_,
+        domain: "",
+        is_valid: true,
+        validation_errors: []
+    )
+
+fn vhdl_hardware_metadata_default() -> VhdlHardwareMetadata:
+    VhdlHardwareMetadata(
+        is_hardware: false,
+        generics: [],
+        has_clocked: false,
+        clocked: vhdl_clocked_metadata_default(),
+        return_fields: []
+    )
+
+fn parse_vhdl_hardware_attrs(attrs: [Attribute]) -> VhdlHardwareMetadata:
+    """Extract structured VHDL hardware metadata from function attributes.
+
+    This intentionally preserves the existing syntax as metadata instead of
+    making the VHDL backend rescan source text for @hardware/@generic/@clocked.
+    """
+    var meta = vhdl_hardware_metadata_default()
+
+    for attr in attrs:
+        if attr.name == "hardware":
+            meta.is_hardware = true
+        elif attr.name == "generic":
+            meta.generics = _parse_vhdl_generic_args(attr.args)
+        elif attr.name == "clocked":
+            meta.has_clocked = true
+            meta.clocked = _parse_vhdl_clocked_args(attr.args)
+
+    meta
+
+fn vhdl_hardware_metadata_with_return_fields(meta: VhdlHardwareMetadata, fields: [VhdlReturnFieldMetadata]) -> VhdlHardwareMetadata:
+    VhdlHardwareMetadata(
+        is_hardware: meta.is_hardware,
+        generics: meta.generics,
+        has_clocked: meta.has_clocked,
+        clocked: meta.clocked,
+        return_fields: fields
+    )
+
+fn _parse_vhdl_generic_args(args: [Expr]) -> [VhdlGenericMetadata]:
+    var generics: [VhdlGenericMetadata] = []
+    for arg in args:
+        match arg.kind:
+            case Assign(left, op, right):
+                val name = extract_text_arg(left)
+                val default_text = extract_text_arg(right)
+                if name != "":
+                    generics.push(VhdlGenericMetadata(
+                        name: name,
+                        type_text: "",
+                        default_text: default_text
+                    ))
+            case Ident(name):
+                generics.push(VhdlGenericMetadata(
+                    name: name,
+                    type_text: "",
+                    default_text: ""
+                ))
+            case _:
+                val text_value = extract_text_arg(arg)
+                if text_value != "":
+                    generics.push(VhdlGenericMetadata(
+                        name: text_value,
+                        type_text: "",
+                        default_text: ""
+                    ))
+    generics
+
+fn _parse_vhdl_clocked_args(args: [Expr]) -> VhdlClockedMetadata:
+    var clock_signal = ""
+    var reset_signal = ""
+    var has_reset = false
+    var polarity = VhdlResetPolarity.ActiveLow
+    var synchrony = VhdlResetSynchrony.Async
+    var domain = ""
+    var errors: [text] = []
+    var positional = 0
+    var has_explicit_synchrony = false
+
+    for arg in args:
+        match arg.kind:
+            case Assign(left, op, right):
+                val key = extract_text_arg(left).lower()
+                val value = extract_text_arg(right)
+                val lower_value = value.lower()
+                if key == "clock" or key == "clk":
+                    clock_signal = value
+                elif key == "reset" or key == "rst":
+                    if _vhdl_clocked_value_is_no_reset(lower_value):
+                        reset_signal = ""
+                        has_reset = false
+                    else:
+                        reset_signal = value
+                        has_reset = value != ""
+                elif key == "domain":
+                    domain = value
+                elif key == "polarity" or key == "reset_polarity":
+                    if lower_value == "active_high" or lower_value == "high":
+                        polarity = VhdlResetPolarity.ActiveHigh
+                    elif lower_value == "active_low" or lower_value == "low":
+                        polarity = VhdlResetPolarity.ActiveLow
+                    else:
+                        errors.push("unknown @clocked reset_polarity '{value}'")
+                elif key == "sync" or key == "synchrony" or key == "reset_sync":
+                    has_explicit_synchrony = true
+                    if lower_value == "sync" or lower_value == "synchronous" or lower_value == "true":
+                        synchrony = VhdlResetSynchrony.Sync
+                    elif lower_value == "async" or lower_value == "asynchronous" or lower_value == "false":
+                        synchrony = VhdlResetSynchrony.Async
+                    elif _vhdl_clocked_value_is_no_reset(lower_value):
+                        synchrony = VhdlResetSynchrony.None_
+                    else:
+                        errors.push("unknown @clocked reset_sync '{value}'")
+            case _:
+                val token = extract_text_arg(arg)
+                val lower_token = token.lower()
+                if positional == 0:
+                    clock_signal = token
+                elif positional == 1:
+                    reset_signal = token
+                    has_reset = token != ""
+                else:
+                    if lower_token == "active_high" or lower_token == "high" or lower_token == "reset_high":
+                        polarity = VhdlResetPolarity.ActiveHigh
+                    elif lower_token == "active_low" or lower_token == "low" or lower_token == "reset_low":
+                        polarity = VhdlResetPolarity.ActiveLow
+                    elif lower_token == "sync" or lower_token == "synchronous":
+                        synchrony = VhdlResetSynchrony.Sync
+                        has_explicit_synchrony = true
+                    elif lower_token == "async" or lower_token == "asynchronous":
+                        synchrony = VhdlResetSynchrony.Async
+                        has_explicit_synchrony = true
+                    elif _vhdl_clocked_value_is_no_reset(lower_token):
+                        synchrony = VhdlResetSynchrony.None_
+                        has_explicit_synchrony = true
+                    elif lower_token.starts_with("domain="):
+                        domain = token.substring(7, token.len())
+                positional = positional + 1
+
+    if not has_reset and not has_explicit_synchrony:
+        synchrony = VhdlResetSynchrony.None_
+
+    if clock_signal.trim() == "":
+        errors.push("@clocked requires a clock signal")
+
+    if domain.trim() == "" and clock_signal.trim() != "":
+        domain = clock_signal
+
+    if domain.trim() != "" and not _vhdl_clocked_domain_name_is_valid(domain):
+        errors.push("@clocked domain '{domain}' contains unsupported characters")
+
+    if synchrony == VhdlResetSynchrony.None_ and has_reset:
+        errors.push("@clocked reset_sync 'none' cannot be used with a reset signal")
+    elif synchrony != VhdlResetSynchrony.None_ and not has_reset and has_explicit_synchrony:
+        errors.push("@clocked reset_sync '{_vhdl_reset_synchrony_name(synchrony)}' requires a reset signal")
+
+    VhdlClockedMetadata(
+        clock_signal: clock_signal,
+        reset_signal: reset_signal,
+        has_reset: has_reset,
+        reset_polarity: polarity,
+        reset_synchrony: synchrony,
+        domain: domain,
+        is_valid: errors.len() == 0,
+        validation_errors: errors
+    )
+
+fn _vhdl_clocked_value_is_no_reset(value: text) -> bool:
+    value == "" or value == "none" or value == "no_reset" or value == "no-reset"
+
+fn _vhdl_clocked_domain_name_is_valid(value: text) -> bool:
+    val trimmed = value.trim()
+    if trimmed.len() == 0:
+        return false
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.substring(i, i + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "-" or ch == "."
+        if not ok:
+            return false
+        i = i + 1
+    true
+
+fn _vhdl_reset_synchrony_name(synchrony: VhdlResetSynchrony) -> text:
+    match synchrony:
+        case Async: "async"
+        case Sync: "sync"
+        case None_: "none"
+
+# ============================================================================
+# Function Attribute Types
+# ============================================================================
+
+struct FunctionAttr:
+    """Function-level attributes for code generation."""
+    is_entry: bool          # @entry - bare-metal entry point
+    is_naked: bool          # @naked - no prologue/epilogue
+    is_noreturn: bool       # @noreturn - function never returns
+    section: text?          # @section("X") - ELF section placement
+    is_interrupt: bool      # @interrupt - interrupt handler
+    is_boot: bool           # @boot - init-phase function (runs before scheduler)
+    is_alloc: bool          # @alloc - function performs allocation
+    is_no_alloc: bool       # @no_alloc - function must not allocate
+    is_gpu_kernel: bool     # @gpu_kernel - GPU kernel function (emitted as .entry in PTX)
+    is_simd: bool           # @simd - auto-vectorized loop with GPU grid/bounds
+    has_fast_math: bool     # @fast_math - permits reassociation-sensitive FP transforms
+    simd_enable: bool       # @simd(enable) or bare @simd
+    simd_disable: bool      # @simd(disable)
+    simd_prefer_scalable: bool  # @simd(prefer_scalable)
+
+impl FunctionAttr:
+    static fn default() -> FunctionAttr:
+        """Default function attributes (no special attributes)."""
+        FunctionAttr(
+            is_entry: false,
+            is_naked: false,
+            is_noreturn: false,
+            section: nil,
+            is_interrupt: false,
+            is_boot: false,
+            is_alloc: false,
+            is_no_alloc: false,
+            is_gpu_kernel: false,
+            is_simd: false,
+            has_fast_math: false,
+            simd_enable: false,
+            simd_disable: false,
+            simd_prefer_scalable: false
+        )
+
+fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
+    """Extract function attributes from a list of attributes."""
+    var is_entry = false
+    var is_naked = false
+    var is_noreturn = false
+    var section: text? = nil
+    var is_interrupt = false
+    var is_boot = false
+    var is_alloc = false
+    var is_no_alloc = false
+    var is_gpu_kernel = false
+    var is_simd = false
+    var has_fast_math = false
+    var simd_enable = false
+    var simd_disable = false
+    var simd_prefer_scalable = false
+
+    for attr in attrs:
+        if attr.name == "entry":
+            is_entry = true
+        elif attr.name == "naked":
+            is_naked = true
+        elif attr.name == "noreturn":
+            is_noreturn = true
+        elif attr.name == "section":
+            if attr.args.len() > 0:
+                val section_name = extract_string_arg(attr.args[0])
+                if section_name.len() > 0:
+                    section = section_name
+        elif attr.name == "interrupt":
+            is_interrupt = true
+        elif attr.name == "boot":
+            is_boot = true
+        elif attr.name == "alloc":
+            is_alloc = true
+        elif attr.name == "no_alloc":
+            is_no_alloc = true
+        elif attr.name == "gpu_kernel":
+            is_gpu_kernel = true
+        elif attr.name == "fast_math":
+            has_fast_math = true
+        elif attr.name == "simd":
+            is_simd = true
+            if attr.args.len() == 0:
+                simd_enable = true
+            else:
+                for arg in attr.args:
+                    val simd_arg = extract_text_arg(arg)
+                    if simd_arg == "enable":
+                        simd_enable = true
+                    elif simd_arg == "disable":
+                        simd_disable = true
+                    elif simd_arg == "prefer_scalable":
+                        simd_prefer_scalable = true
+
+    FunctionAttr(
+        is_entry: is_entry,
+        is_naked: is_naked,
+        is_noreturn: is_noreturn,
+        section: section,
+        is_interrupt: is_interrupt,
+        is_boot: is_boot,
+        is_alloc: is_alloc,
+        is_no_alloc: is_no_alloc,
+        is_gpu_kernel: is_gpu_kernel,
+        is_simd: is_simd,
+        has_fast_math: has_fast_math,
+        simd_enable: simd_enable,
+        simd_disable: simd_disable,
+        simd_prefer_scalable: simd_prefer_scalable
+    )
+
+# ============================================================================
+# Task Attribute Types
+# ============================================================================
+
+struct TaskAttr:
+    """Task-level attributes from @task annotation.
+
+    Used by spawn boundedness analysis (Pass B) to verify that task pools
+    are correctly sized for baremetal strict mode.
+
+    Fields:
+        instances: Maximum number of concurrent instances (from @task(instances=N))
+        group: Optional task group name (from @task(group="name"))
+        frame: Optional declared frame size in bytes (from @task(frame=N))
+        wait_nodes: Number of wait-queue nodes (from @task(wait_nodes=N), default 0)
+        policy: Scheduler policy name (fair/background/rt_fifo/rt_rr/deadline)
+    """
+    instances: i64
+    group: text?
+    frame: i64?
+    wait_nodes: i64
+    policy: text
+    weight: i64?
+    priority: i64?
+    latency_hint: text?
+    runtime_ns: i64?
+    period_ns: i64?
+    deadline_ns: i64?
+
+struct TaskPolicyDiagnostic:
+    """A diagnostic from @task scheduler policy validation."""
+    level: text
+    message: text

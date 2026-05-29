@@ -1,0 +1,353 @@
+# Part 2 of src/app/svim/core_part2.spl
+use app.svim.core_part2.*
+# Part 2 of src/app/svim/core.spl
+use app.svim.core.*
+# svim shared editor core
+#
+# Editor-native public vocabulary backed by a shared session model.
+# This v1 foundation keeps editing logic in the core so host TUI and
+# future shells can reuse the same state and command surface.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+
+# ============================================================================
+# Public IDs and editor vocabulary
+# ============================================================================
+
+impl SvimSession:
+    me _put_after(register_name: text):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return
+        val cursor = self.current_cursor()
+        val entry = self._register_entry(if register_name == "" then "\"" else: register_name)
+        if entry.name == "":
+            return
+        if entry.linewise:
+            val text = self.buffers[buffer_idx].piece_table.to_text()
+            val line_start = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, cursor.row, 0)
+            val line_len = _svim_line_length(text, self.buffers[buffer_idx].line_starts, cursor.row)
+            val has_next = cursor.row < _svim_max_row(self.buffers[buffer_idx].line_starts)
+            val offset = if has_next then line_start + line_len + 1 else: line_start + line_len
+            self._push_undo_snapshot(cursor)
+            var buffer = self.buffers[buffer_idx]
+            buffer.piece_table.insert(offset, entry.content)
+            val line_cursor = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, offset)
+            buffer.anchors.apply_insert(line_cursor.row, line_cursor.col, entry.content)
+            buffer.line_starts = _svim_compute_line_starts(buffer.piece_table.to_text())
+            self.buffers[buffer_idx] = buffer
+            self.set_current_cursor(cursor.row + 1, 0)
+        else:
+            self._insert_text(entry.content)
+
+    me _put_selection(register_name: text):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0 or self.selection == nil:
+            return
+        val entry = self._register_entry(if register_name == "" then "\"" else: register_name)
+        if entry.name == "":
+            return
+        val bounds = _svim_selection_bounds(self.buffers[buffer_idx].line_starts, self.selection)
+        if bounds.1 <= bounds.0:
+            self._set_mode(SvimMode.Normal)
+            return
+        val cursor = self.current_cursor()
+        val start_cursor = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, bounds.0)
+        val end_cursor = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, bounds.1)
+        self._push_undo_snapshot(cursor)
+        var buffer = self.buffers[buffer_idx]
+        buffer.piece_table.delete(bounds.0, bounds.1)
+        buffer.anchors.apply_delete(start_cursor.row, start_cursor.col, end_cursor.row, end_cursor.col)
+        buffer.piece_table.insert(bounds.0, entry.content)
+        buffer.anchors.apply_insert(start_cursor.row, start_cursor.col, entry.content)
+        buffer.line_starts = _svim_compute_line_starts(buffer.piece_table.to_text())
+        buffer.version = buffer.version + 1
+        self.buffers[buffer_idx] = buffer
+        self._set_mode(SvimMode.Normal)
+        val stats = _svim_text_insert_stats(entry.content)
+        val after = _svim_position_after_insert(start_cursor.row, start_cursor.col, true, start_cursor.row, start_cursor.col, stats.0, stats.1)
+        self.set_current_cursor(after.row, after.col)
+
+    me _yank_motion(motion: text, count: i64, register_name: text):
+        val bounds = self._motion_bounds(motion, count)
+        self._yank_range(register_name, bounds.0, bounds.1)
+
+    me _delete_motion(motion: text, count: i64, register_name: text):
+        val bounds = self._motion_bounds(motion, count)
+        self._delete_range(register_name, bounds.0, bounds.1, false)
+
+    me _yank_text_object(name: text, register_name: text):
+        val bounds = self._text_object_bounds(name)
+        self._yank_range(register_name, bounds.0, bounds.1)
+
+    me _delete_text_object(name: text, register_name: text):
+        val bounds = self._text_object_bounds(name)
+        self._delete_range(register_name, bounds.0, bounds.1, false)
+
+    me _motion_bounds(motion: text, count: i64) -> (i64, i64):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return (0, 0)
+        val cursor = self.current_cursor()
+        val target = _svim_apply_motion(self.buffers[buffer_idx].piece_table.to_text(), self.buffers[buffer_idx].line_starts, cursor, motion, count)
+        val start_offset = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, cursor.row, cursor.col)
+        val end_offset = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, target.row, target.col)
+        if end_offset >= start_offset:
+            return (start_offset, end_offset)
+        (end_offset, start_offset)
+
+    me _text_object_bounds(name: text) -> (i64, i64):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return (0, 0)
+        _svim_text_object_bounds(self.buffers[buffer_idx].piece_table.to_text(), self.buffers[buffer_idx].line_starts, self.current_cursor(), name)
+
+    me _yank_range(register_name: text, start: i64, end: i64):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0 or end <= start:
+            return
+        val text = self.buffers[buffer_idx].piece_table.to_text()
+        val name = if register_name == "" then "\"" else: register_name
+        self._store_register(name, text.slice(start, end), false)
+
+    me _delete_range(register_name: text, start: i64, end: i64, linewise: bool):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0 or end <= start:
+            return
+        val cursor = self.current_cursor()
+        val text = self.buffers[buffer_idx].piece_table.to_text()
+        val start_cursor = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, start)
+        val end_cursor = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, end)
+        val name = if register_name == "" then "\"" else: register_name
+        self._push_undo_snapshot(cursor)
+        self._store_register(name, text.slice(start, end), linewise)
+        var buffer = self.buffers[buffer_idx]
+        buffer.piece_table.delete(start, end)
+        buffer.anchors.apply_delete(start_cursor.row, start_cursor.col, end_cursor.row, end_cursor.col)
+        val new_text = buffer.piece_table.to_text()
+        buffer.line_starts = _svim_compute_line_starts(new_text)
+        if new_text.len() == 0:
+            buffer.piece_table = PieceTable.from_text("")
+            buffer.line_starts = [0]
+        buffer.version = buffer.version + 1
+        self.buffers[buffer_idx] = buffer
+        self.set_current_cursor(start_cursor.row, start_cursor.col)
+
+    me _move_horizontal(delta: i64):
+        val cursor = self.current_cursor()
+        self.set_current_cursor(cursor.row, cursor.col + delta)
+
+    me _move_vertical(delta: i64):
+        val cursor = self.current_cursor()
+        self.set_current_cursor(cursor.row + delta, cursor.col)
+
+    me _search_forward(term: text) -> CommandResult:
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return CommandResult(ok: false, message: "no active buffer", events: [])
+        self.last_search = term
+        self.last_search_direction = 1
+        val text = self.buffers[buffer_idx].piece_table.to_text()
+        val cursor = self.current_cursor()
+        val start_offset = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, cursor.row, cursor.col)
+        var found = text.find(term, start_offset + 1) ?? -1
+        if found < 0:
+            found = text.find(term, 0) ?? -1
+        if found < 0:
+            return CommandResult(ok: false, message: "pattern not found", events: [])
+        val target = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, found)
+        self._record_jump(self.buffers[buffer_idx].id, cursor)
+        self.set_current_cursor(target.row, target.col)
+        CommandResult(ok: true, message: "found {term}", events: [EditorEvent(kind: "search-hit", message: term)])
+
+    me _search_word(direction: i64) -> CommandResult:
+        """* / # — search for the word under the cursor in the given direction."""
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return CommandResult(ok: false, message: "no active buffer", events: [])
+        val text = self.buffers[buffer_idx].piece_table.to_text()
+        val cursor = self.current_cursor()
+        val offset = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, cursor.row, cursor.col)
+        val word = _svim_word_at_offset(text, offset)
+        if word == "":
+            return CommandResult(ok: false, message: "no word under cursor", events: [])
+        self.last_search = word
+        self.last_search_direction = direction
+        self._search_repeat(1)
+
+    me _search_repeat(direction: i64) -> CommandResult:
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return CommandResult(ok: false, message: "no active buffer", events: [])
+        if self.last_search == "":
+            return CommandResult(ok: false, message: "no prior search", events: [])
+        val text = self.buffers[buffer_idx].piece_table.to_text()
+        val cursor = self.current_cursor()
+        val start_offset = _svim_row_col_to_offset(self.buffers[buffer_idx].line_starts, cursor.row, cursor.col)
+        val actual_direction = self.last_search_direction * direction
+        var found = -1
+        if actual_direction >= 0:
+            found = text.find(self.last_search, start_offset + 1) ?? -1
+            if found < 0:
+                found = text.find(self.last_search, 0) ?? -1
+        else:
+            found = _svim_find_last_before(text, self.last_search, start_offset)
+            if found < 0:
+                found = _svim_find_last_before(text, self.last_search, text.len())
+        if found < 0:
+            return CommandResult(ok: false, message: "pattern not found", events: [])
+        val target = _svim_offset_to_cursor(self.buffers[buffer_idx].line_starts, found)
+        self._record_jump(self.buffers[buffer_idx].id, cursor)
+        self.set_current_cursor(target.row, target.col)
+        CommandResult(ok: true, message: "found {self.last_search}", events: [EditorEvent(kind: "search-hit", message: self.last_search)])
+
+    me _jump_back() -> CommandResult:
+        if self.jumps.locations.len() == 0 or self.jumps.index < 0:
+            return CommandResult(ok: false, message: "jump list empty", events: [])
+        val target = self.jumps.locations[self.jumps.index]
+        self.jumps.index = self.jumps.index - 1
+        self.focus_buffer(target.buffer_id)
+        self.set_current_cursor(target.row, target.col)
+        CommandResult(ok: true, message: "jump back", events: [])
+
+    me _jump_forward() -> CommandResult:
+        if self.jumps.locations.len() == 0:
+            return CommandResult(ok: false, message: "jump list empty", events: [])
+        val next_index = self.jumps.index + 1
+        if next_index < 0 or next_index >= self.jumps.locations.len():
+            return CommandResult(ok: false, message: "at newest jump", events: [])
+        self.jumps.index = next_index
+        val target = self.jumps.locations[self.jumps.index]
+        self.focus_buffer(target.buffer_id)
+        self.set_current_cursor(target.row, target.col)
+        CommandResult(ok: true, message: "jump forward", events: [])
+
+    me _record_jump(buffer_id: BufferId, cursor: Cursor):
+        if self.jumps.index + 1 < self.jumps.locations.len():
+            self.jumps.locations = _svim_trim_jumps(self.jumps.locations, self.jumps.index + 1)
+        self.jumps.locations.push(JumpLocation(buffer_id: buffer_id, row: cursor.row, col: cursor.col))
+        self.jumps.index = self.jumps.locations.len() - 1
+
+    me _cycle_buffer(direction: i64):
+        if self.buffers.len() == 0:
+            return
+        val current = self.active_buffer_index()
+        if current < 0:
+            return
+        var next = current + direction
+        if next < 0:
+            next = self.buffers.len() - 1
+        elif next >= self.buffers.len():
+            next = 0
+        self.focus_buffer(self.buffers[next].id)
+
+    me _cycle_quickfix(direction: i64, count: i64) -> CommandResult:
+        if self.quickfix.items.len() == 0:
+            return CommandResult(ok: false, message: "quickfix empty", events: [])
+        var target = self.quickfix.selected_index + (direction * count)
+        while target < 0:
+            target = target + self.quickfix.items.len()
+        while target >= self.quickfix.items.len():
+            target = target - self.quickfix.items.len()
+        self.jump_to_quickfix(target)
+
+    me _push_undo_snapshot(cursor: Cursor):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return
+        var buffer = self.buffers[buffer_idx]
+        buffer.undo_stack.push(BufferSnapshot(text: buffer.piece_table.to_text(), cursor: cursor))
+        buffer.redo_stack = []
+        if buffer.undo_stack.len() > 32:
+            buffer.undo_stack = _svim_trim_snapshots(buffer.undo_stack)
+        self.buffers[buffer_idx] = buffer
+
+    me _undo():
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0 or self.buffers[buffer_idx].undo_stack.len() == 0:
+            return
+        val current = BufferSnapshot(text: self.buffers[buffer_idx].piece_table.to_text(), cursor: self.current_cursor())
+        var buffer = self.buffers[buffer_idx]
+        buffer.redo_stack.push(current)
+        val last = buffer.undo_stack[buffer.undo_stack.len() - 1]
+        buffer.undo_stack = _svim_drop_last_snapshot(buffer.undo_stack)
+        self.buffers[buffer_idx] = buffer
+        self._restore_snapshot(last)
+
+    me _redo():
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0 or self.buffers[buffer_idx].redo_stack.len() == 0:
+            return
+        val current = BufferSnapshot(text: self.buffers[buffer_idx].piece_table.to_text(), cursor: self.current_cursor())
+        var buffer = self.buffers[buffer_idx]
+        buffer.undo_stack.push(current)
+        val last = buffer.redo_stack[buffer.redo_stack.len() - 1]
+        buffer.redo_stack = _svim_drop_last_snapshot(buffer.redo_stack)
+        self.buffers[buffer_idx] = buffer
+        self._restore_snapshot(last)
+
+    me _restore_snapshot(snapshot: BufferSnapshot):
+        val buffer_idx = self.active_buffer_index()
+        if buffer_idx < 0:
+            return
+        var buffer = self.buffers[buffer_idx]
+        buffer.piece_table = PieceTable.from_text(snapshot.text)
+        buffer.line_starts = _svim_compute_line_starts(snapshot.text)
+        buffer.anchors = AnchorTracker.new()
+        val window_idx = self.active_window_index()
+        val anchor = buffer.anchors.create(snapshot.cursor.row, snapshot.cursor.col, true)
+        buffer.version = buffer.version + 1
+        self.buffers[buffer_idx] = buffer
+        var window = self.windows[window_idx]
+        window.cursor_anchor = anchor
+        window.cursor_row = snapshot.cursor.row
+        window.cursor_col = snapshot.cursor.col
+        self.windows[window_idx] = window
+        self.set_current_cursor(snapshot.cursor.row, snapshot.cursor.col)
+
+    me _set_mode(mode: SvimMode):
+        self.mode_state.mode = mode
+        if mode == SvimMode.Visual:
+            val cursor = self.current_cursor()
+            self.selection = Selection(start: cursor, end: cursor)
+        elif mode != SvimMode.Visual:
+            self.selection = nil
+
+    me _store_register(name: text, content: text, linewise: bool):
+        var i = 0
+        while i < self.registers.entries.len():
+            if self.registers.entries[i].name == name:
+                var entry = self.registers.entries[i]
+                entry.content = content
+                entry.linewise = linewise
+                self.registers.entries[i] = entry
+                self.registers.active_register = name
+                return
+            i = i + 1
+        self.registers.entries.push(RegisterEntry(name: name, content: content, linewise: linewise))
+        self.registers.active_register = name
+
+    fn _register_entry(name: text) -> RegisterEntry:
+        for entry in self.registers.entries:
+            if entry.name == name:
+                return entry
+        RegisterEntry(name: "", content: "", linewise: false)
+
+    me _ensure_cursor_visible():
+        val window_idx = self.active_window_index()
+        val cursor = self.current_cursor()
+        if window_idx < 0:
+            return
+        var window = self.windows[window_idx]
+        if cursor.row < window.viewport.top_row:
+            window.viewport.top_row = cursor.row
+        elif cursor.row >= window.viewport.top_row + window.viewport.height:
+            window.viewport.top_row = cursor.row - window.viewport.height + 1
+        self.windows[window_idx] = window
+
+
+# ============================================================================
+# Rendering helpers used by shells and tests
+# ============================================================================

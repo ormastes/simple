@@ -1,0 +1,53 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val FIXTURE_DIR = "/tmp/simple_info_log_mode_fixture"
+
+fn _setup_fixture():
+    val (_out, _err, _code) = rt_process_run("/bin/sh", [
+        "-c",
+        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR + " && cat > " + FIXTURE_DIR + "/simple.sdn <<'EOF'\npackage:\n  name: sample-info\n  version: 1.2.3\n  license: MIT\n  main: src/main.spl\nEOF"
+    ])
+
+fn _run_info(args: [text]) -> (text, text, i64):
+    val joined = args.join(" ")
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); cd " + FIXTURE_DIR + " && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/info/main.spl\" " + joined
+    ])
+
+describe "info log mode CLI options":
+    it "shows shared log options in help":
+        _setup_fixture()
+        val (out, err, code) = _run_info(["--help"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("--log-mode")
+        expect(out).to_contain("--progress")
+
+    it "supports project log-mode json":
+        _setup_fixture()
+        val (out, err, code) = _run_info(["--log-mode=json"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("\"command\":\"info\"")
+        expect(out).to_contain("\"kind\":\"project\"")
+        expect(out).to_contain("\"name\":\"sample-info\"")
+
+    it "supports package log-mode json":
+        _setup_fixture()
+        val (out, err, code) = _run_info(["sample-pkg", "--log-mode=json"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("\"kind\":\"package\"")
+        expect(out).to_contain("\"name\":\"sample-pkg\"")
+
+    it "supports dot progress":
+        _setup_fixture()
+        val (out, err, code) = _run_info(["--progress=dot"])
+        expect(code).to_equal(0)
+        expect(out).to_start_with(".")
+        expect(out).to_contain("Project Info")
+
+    it "rejects invalid log mode":
+        _setup_fixture()
+        val (out, err, code) = _run_info(["--log-mode=noisy"])
+        expect(code).to_equal(1)

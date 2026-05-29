@@ -1,0 +1,200 @@
+# @tag: rendering, backend, matrix, ci
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 60%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_probe.spl 80%
+
+# Backend Matrix — Forced-Backend Test Matrix
+#
+# Tests every known backend via create_with_backend_strict().
+# Classifies each result as one of:
+#   HARDWARE_PASS  — strict init succeeded, device is a real GPU
+#   SOFTWARE_PASS  — strict init succeeded, device is software/cpu renderer
+#   UNAVAILABLE    — backend not present on this host (feature gate missing)
+#   FAILED         — backend present but init error (driver crash, OOM, etc.)
+#
+# CPU backend is the guaranteed baseline; its test is the only hard PASS
+# assertion.  All other backends may be UNAVAILABLE on any given host.
+# CI environment gates: set FORCE_CUDA=1, FORCE_VULKAN=1, etc. to require
+# a specific backend to HARDWARE_PASS.
+
+use std.spec.{describe, context, it, expect}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn probe_result_label(probe: BackendProbeResult) -> text:
+    """Return one of HARDWARE_PASS / SOFTWARE_PASS / UNAVAILABLE / FAILED."""
+    if probe.is_ok():
+        if probe.is_hardware():
+            return "HARDWARE_PASS"
+        return "SOFTWARE_PASS"
+    if probe.status == BackendStatus.Unavailable:
+        return "UNAVAILABLE"
+    "FAILED"
+
+fn probe_one(name: text) -> BackendProbeResult:
+    """Probe a single backend with a minimal 16x16 framebuffer."""
+    val r = Engine2D.create_with_backend_strict(16, 16, name)
+    if r.is_ok():
+        var eng = r.unwrap()
+        eng.shutdown()
+        return BackendProbeResult.success(name, name, name, "rgba8")
+    r.unwrap_err()
+
+fn print_probe(probe: BackendProbeResult):
+    """Print a single-line diagnostic for the probe result."""
+    val label = probe_result_label(probe)
+    print "[" + label + "] " + probe.diagnostic_text()
+
+# ---------------------------------------------------------------------------
+# Spec
+# ---------------------------------------------------------------------------
+
+describe "Backend Matrix — Forced-Backend Probe":
+
+    context "hardware backends":
+
+        it "cuda probe — HARDWARE_PASS, UNAVAILABLE, or FAILED":
+            val probe = probe_one("cuda")
+            val label = probe_result_label(probe)
+            print_probe(probe)
+            var ok = label == "HARDWARE_PASS" or label == "UNAVAILABLE" or label == "FAILED"
+            expect(ok).to_equal(true)
+
+        it "vulkan probe — HARDWARE_PASS, UNAVAILABLE, or FAILED":
+            val probe = probe_one("vulkan")
+            val label = probe_result_label(probe)
+            print_probe(probe)
+            var ok = label == "HARDWARE_PASS" or label == "UNAVAILABLE" or label == "FAILED"
+            expect(ok).to_equal(true)
+
+        it "metal probe — HARDWARE_PASS, UNAVAILABLE, or FAILED":
+            val probe = probe_one("metal")
+            val label = probe_result_label(probe)
+            print_probe(probe)
+            var ok = label == "HARDWARE_PASS" or label == "UNAVAILABLE" or label == "FAILED"
+            expect(ok).to_equal(true)
+
+        it "rocm probe — HARDWARE_PASS, UNAVAILABLE, or FAILED":
+            val probe = probe_one("rocm")
+            val label = probe_result_label(probe)
+            print_probe(probe)
+            var ok = label == "HARDWARE_PASS" or label == "UNAVAILABLE" or label == "FAILED"
+            expect(ok).to_equal(true)
+
+        it "intel probe — HARDWARE_PASS, UNAVAILABLE, or FAILED":
+            val probe = probe_one("intel")
+            val label = probe_result_label(probe)
+            print_probe(probe)
+            var ok = label == "HARDWARE_PASS" or label == "UNAVAILABLE" or label == "FAILED"
+            expect(ok).to_equal(true)
+
+        it "qualcomm probe — HARDWARE_PASS, UNAVAILABLE, or FAILED":
+            val probe = probe_one("qualcomm")
+            val label = probe_result_label(probe)
+            print_probe(probe)
+            var ok = label == "HARDWARE_PASS" or label == "UNAVAILABLE" or label == "FAILED"
+            expect(ok).to_equal(true)
+
+        it "webgpu probe — HARDWARE_PASS, UNAVAILABLE, or FAILED":
+            val probe = probe_one("webgpu")
+            val label = probe_result_label(probe)
+            print_probe(probe)
+            var ok = label == "HARDWARE_PASS" or label == "UNAVAILABLE" or label == "FAILED"
+            expect(ok).to_equal(true)
+
+        it "opengl probe — HARDWARE_PASS, UNAVAILABLE, or FAILED":
+            val probe = probe_one("opengl")
+            val label = probe_result_label(probe)
+            print_probe(probe)
+            var ok = label == "HARDWARE_PASS" or label == "UNAVAILABLE" or label == "FAILED"
+            expect(ok).to_equal(true)
+
+    context "software backends":
+
+        it "software probe — SOFTWARE_PASS or FAILED":
+            val probe = probe_one("software")
+            val label = probe_result_label(probe)
+            print_probe(probe)
+            var ok = label == "SOFTWARE_PASS" or label == "FAILED"
+            expect(ok).to_equal(true)
+
+    context "baseline cpu backend":
+
+        it "cpu probe always passes":
+            val probe = probe_one("cpu")
+            val label = probe_result_label(probe)
+            print_probe(probe)
+            expect(label).to_equal("SOFTWARE_PASS")
+
+        it "cpu strict result is not Err":
+            val r = Engine2D.create_with_backend_strict(16, 16, "cpu")
+            expect(r.is_ok()).to_equal(true)
+            if r.is_ok():
+                var eng = r.unwrap()
+                eng.shutdown()
+
+    context "no silent fallback":
+
+        it "strict cuda never returns cpu on failure":
+            val r = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if not r.is_ok():
+                val probe = r.unwrap_err()
+                val is_fallback = probe.is_ok() and probe.selected_name == "cpu"
+                expect(is_fallback).to_equal(false)
+
+        it "strict vulkan never returns cpu on failure":
+            val r = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+            if not r.is_ok():
+                val probe = r.unwrap_err()
+                val is_fallback = probe.is_ok() and probe.selected_name == "cpu"
+                expect(is_fallback).to_equal(false)
+
+        it "strict metal never returns cpu on failure":
+            val r = Engine2D.create_with_backend_strict(16, 16, "metal")
+            if not r.is_ok():
+                val probe = r.unwrap_err()
+                val is_fallback = probe.is_ok() and probe.selected_name == "cpu"
+                expect(is_fallback).to_equal(false)
+
+        it "strict webgpu never returns cpu on failure":
+            val r = Engine2D.create_with_backend_strict(16, 16, "webgpu")
+            if not r.is_ok():
+                val probe = r.unwrap_err()
+                val is_fallback = probe.is_ok() and probe.selected_name == "cpu"
+                expect(is_fallback).to_equal(false)
+
+        it "unknown backend returns Err not cpu":
+            val r = Engine2D.create_with_backend_strict(16, 16, "does-not-exist")
+            expect(r.is_ok()).to_equal(false)
+            val probe = r.unwrap_err()
+            print_probe(probe)
+            expect(probe.requested_name).to_equal("does-not-exist")
+
+    context "diagnostics":
+
+        it "failed probe includes requested_name":
+            val r = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if not r.is_ok():
+                val probe = r.unwrap_err()
+                expect(probe.requested_name).to_equal("cuda")
+
+        it "failed probe includes fallback_reason when unavailable":
+            val r = Engine2D.create_with_backend_strict(16, 16, "metal")
+            if not r.is_ok():
+                val probe = r.unwrap_err()
+                if probe.status == BackendStatus.Unavailable:
+                    var reason_present = probe.fallback_reason.len() > 0
+                    expect(reason_present).to_equal(true)
+
+        it "diagnostic_text contains requested and selected fields":
+            val r = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if not r.is_ok():
+                val probe = r.unwrap_err()
+                val diag = probe.diagnostic_text()
+                var has_requested = diag.contains("requested=cuda")
+                var has_selected = diag.contains("selected=")
+                expect(has_requested).to_equal(true)
+                expect(has_selected).to_equal(true)

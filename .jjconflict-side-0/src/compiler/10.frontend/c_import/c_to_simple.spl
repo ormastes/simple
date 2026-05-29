@@ -1,0 +1,110 @@
+# C to Simple Conversion
+#
+# Converts parsed CStruct definitions from the c_parser library into
+# Simple struct AST-compatible representations with @repr(C) @preserve_order.
+
+fn convert_c_structs(c_structs: [CStruct], matches: [CImportMatch], strict_default: bool) -> CImportResult:
+    var imported_structs: [CImportedStruct] = []
+    var errors: [text] = []
+
+    if matches.length == 0:
+        for cs in c_structs:
+            val converted = convert_single_struct(cs)
+            imported_structs.push(converted)
+    else:
+        for m in matches:
+            val found = find_c_struct_by_match(c_structs, m, strict_default)
+            if found != nil:
+                var converted = convert_single_struct(found)
+                if m.simple_name != "":
+                    converted = CImportedStruct(
+                        name: m.simple_name,
+                        fields: converted.fields,
+                        is_union: converted.is_union,
+                        layout_kind: converted.layout_kind
+                    )
+                imported_structs.push(converted)
+            else:
+                val target = if m.c_name != "": m.c_name else: m.simple_name
+                errors.push("no matching C struct found for: " + target)
+
+    CImportResult(structs: imported_structs, extern_fns: [], errors: errors)
+
+fn convert_single_struct(cs: CStruct) -> CImportedStruct:
+    var fields: [CImportedField] = []
+    for cf in cs.fields:
+        val simple_type = c_type_to_simple(cf.c_type, cf.is_pointer)
+        fields.push(CImportedField(
+            name: cf.name,
+            simple_type: simple_type,
+            aka_name: "",
+            bit_width: cf.bit_width
+        ))
+    val kind = if cs.is_union: "union" else: "C"
+    CImportedStruct(name: cs.name, fields: fields, is_union: cs.is_union, layout_kind: kind)
+
+fn c_type_to_simple(c_type: text, is_pointer: bool) -> text:
+    if is_pointer:
+        return "ptr"
+    if c_type == "int" or c_type == "signed int":
+        return "i32"
+    if c_type == "unsigned int":
+        return "u32"
+    if c_type == "char" or c_type == "signed char":
+        return "i8"
+    if c_type == "unsigned char":
+        return "u8"
+    if c_type == "short" or c_type == "short int" or c_type == "signed short":
+        return "i16"
+    if c_type == "unsigned short":
+        return "u16"
+    if c_type == "long" or c_type == "long int" or c_type == "signed long":
+        return "i64"
+    if c_type == "unsigned long":
+        return "u64"
+    if c_type == "long long" or c_type == "long long int":
+        return "i64"
+    if c_type == "unsigned long long":
+        return "u64"
+    if c_type == "float":
+        return "f32"
+    if c_type == "double" or c_type == "long double":
+        return "f64"
+    if c_type == "void":
+        return "void"
+    if c_type == "bool" or c_type == "_Bool":
+        return "bool"
+    if c_type == "uint8_t":
+        return "u8"
+    if c_type == "uint16_t":
+        return "u16"
+    if c_type == "uint32_t":
+        return "u32"
+    if c_type == "uint64_t":
+        return "u64"
+    if c_type == "int8_t":
+        return "i8"
+    if c_type == "int16_t":
+        return "i16"
+    if c_type == "int32_t":
+        return "i32"
+    if c_type == "int64_t":
+        return "i64"
+    if c_type == "size_t" or c_type == "uintptr_t":
+        return "u64"
+    if c_type == "ssize_t" or c_type == "intptr_t" or c_type == "ptrdiff_t":
+        return "i64"
+    c_type
+
+fn find_c_struct_by_match(c_structs: [CStruct], m: CImportMatch, strict_default: bool) -> CStruct:
+    val strict = m.strict or strict_default
+    val target = if m.c_name != "": m.c_name else: m.simple_name
+    var names: [text] = []
+    for cs in c_structs:
+        names.push(cs.name)
+    val matched_name = c_find_matching_struct(target, names, strict)
+    if matched_name != "":
+        for cs in c_structs:
+            if cs.name == matched_name:
+                return cs
+    nil

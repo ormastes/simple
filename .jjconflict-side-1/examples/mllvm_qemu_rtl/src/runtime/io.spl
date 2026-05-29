@@ -1,0 +1,931 @@
+# I/O Port Emulation
+#
+# Trait-based I/O device model for guest CPU port-mapped and
+# memory-mapped I/O. Includes basic devices for AVR and 8086.
+#
+# AVR devices: GPIO ports, Timer0, UART
+# 8086 devices: COM1 serial, PIC 8259
+
+use core.types.{GuestArch}
+
+# ============================================================================
+# IoDevice trait
+# ============================================================================
+
+trait IoDevice:
+    """A device that responds to I/O port reads and writes."""
+    fn read(port: i64, width: i64) -> i64
+    me write(port: i64, width: i64, value: i64)
+    fn name() -> text
+
+# ============================================================================
+# Port Mapping Entry
+# ============================================================================
+
+struct PortMapping:
+    """Maps a port range to a device."""
+    port_start: i64
+    port_end: i64           # Exclusive
+    device_index: i64       # Index into IoController.device_* arrays
+
+impl PortMapping:
+    static fn new(start: i64, end: i64, device_index: i64) -> PortMapping:
+        PortMapping(port_start: start, port_end: end, device_index: device_index)
+
+    fn contains(port: i64) -> bool:
+        (port >= self.port_start) & (port < self.port_end)
+
+# ============================================================================
+# IoController
+# ============================================================================
+
+val MAX_IO_DEVICES: i64 = 32
+
+struct IoController:
+    """Central I/O controller — routes port reads/writes to registered devices.
+
+    Devices are stored by concrete type in separate arrays (no dynamic dispatch).
+    The device_kind array tracks which type each index corresponds to.
+    """
+    mappings: [PortMapping]
+    mapping_count: i64
+
+    # Device storage by kind (tagged union approach since no dynamic dispatch)
+    device_kind: [i64]          # 0=avr_port, 1=avr_timer, 2=avr_uart, 3=x86_serial, 4=x86_pic, 5=riscv_uart
+    avr_ports: [AvrPortIO]
+    avr_timers: [AvrTimerIO]
+    avr_uarts: [AvrUartIO]
+    x86_serials: [X86SerialIO]
+    x86_pics: [X86PicIO]
+    riscv_uarts: [RiscvUartIO]
+
+    # Logging
+    log_enabled: bool
+    log_entries: [IoLogEntry]
+
+impl IoController:
+    static fn new() -> IoController:
+        IoController(
+            mappings: [],
+            mapping_count: 0,
+            device_kind: [],
+            avr_ports: [],
+            avr_timers: [],
+            avr_uarts: [],
+            x86_serials: [],
+            x86_pics: [],
+            riscv_uarts: [],
+            log_enabled: false,
+            log_entries: []
+        )
+
+    # ========================================================================
+    # Device registration
+    # ========================================================================
+
+    me register_avr_port(port_start: i64, port_end: i64, device: AvrPortIO):
+        """Register an AVR GPIO port device."""
+        val idx = self.avr_ports.len()
+        self.avr_ports.push(device)
+        self.device_kind.push(0)
+        self.mappings.push(PortMapping.new(port_start, port_end, self.mapping_count))
+        self.mapping_count = self.mapping_count + 1
+
+    me register_avr_timer(port_start: i64, port_end: i64, device: AvrTimerIO):
+        """Register an AVR timer device."""
+        val idx = self.avr_timers.len()
+        self.avr_timers.push(device)
+        self.device_kind.push(1)
+        self.mappings.push(PortMapping.new(port_start, port_end, self.mapping_count))
+        self.mapping_count = self.mapping_count + 1
+
+    me register_avr_uart(port_start: i64, port_end: i64, device: AvrUartIO):
+        """Register an AVR UART device."""
+        val idx = self.avr_uarts.len()
+        self.avr_uarts.push(device)
+        self.device_kind.push(2)
+        self.mappings.push(PortMapping.new(port_start, port_end, self.mapping_count))
+        self.mapping_count = self.mapping_count + 1
+
+    me register_x86_serial(port_start: i64, port_end: i64, device: X86SerialIO):
+        """Register an x86 serial port device."""
+        val idx = self.x86_serials.len()
+        self.x86_serials.push(device)
+        self.device_kind.push(3)
+        self.mappings.push(PortMapping.new(port_start, port_end, self.mapping_count))
+        self.mapping_count = self.mapping_count + 1
+
+    me register_x86_pic(port_start: i64, port_end: i64, device: X86PicIO):
+        """Register an x86 PIC device."""
+        val idx = self.x86_pics.len()
+        self.x86_pics.push(device)
+        self.device_kind.push(4)
+        self.mappings.push(PortMapping.new(port_start, port_end, self.mapping_count))
+        self.mapping_count = self.mapping_count + 1
+
+    me register_riscv_uart(base_addr: i64, uart: RiscvUartIO):
+        """Register a RISC-V UART device at the given MMIO base address."""
+        val idx = self.riscv_uarts.len()
+        self.riscv_uarts.push(uart)
+        self.device_kind.push(5)
+        self.mappings.push(PortMapping.new(base_addr, base_addr + 8, self.mapping_count))
+        self.mapping_count = self.mapping_count + 1
+
+    # ========================================================================
+    # Port read/write dispatch
+    # ========================================================================
+
+    fn _find_mapping(port: i64) -> PortMapping?:
+        for mapping in self.mappings:
+            if mapping.contains(port):
+                return Some(mapping)
+        nil
+
+    me port_read(port: i64, width: i64) -> i64:
+        """Read from an I/O port. Returns 0xFF if no device is mapped."""
+        if val Some(mapping) = self._find_mapping(port):
+            val dev_idx = mapping.device_index
+            if dev_idx < self.device_kind.len():
+                val kind = self.device_kind[dev_idx]
+                val result = self._dispatch_read(kind, port, width)
+                if self.log_enabled:
+                    self.log_entries.push(IoLogEntry.new_read(port, width, result))
+                return result
+        # Unmapped port
+        if self.log_enabled:
+            self.log_entries.push(IoLogEntry.new_read(port, width, 0xFF))
+        0xFF
+
+    me port_write(port: i64, width: i64, value: i64):
+        """Write to an I/O port. Silently ignored if no device is mapped."""
+        if self.log_enabled:
+            self.log_entries.push(IoLogEntry.new_write(port, width, value))
+        if val Some(mapping) = self._find_mapping(port):
+            val dev_idx = mapping.device_index
+            if dev_idx < self.device_kind.len():
+                val kind = self.device_kind[dev_idx]
+                self._dispatch_write(kind, port, width, value)
+
+    fn _dispatch_read(kind: i64, port: i64, width: i64) -> i64:
+        """Route read to correct device type."""
+        if kind == 0:
+            if self.avr_ports.len() > 0:
+                return self.avr_ports[0].read(port, width)
+        else if kind == 1:
+            if self.avr_timers.len() > 0:
+                return self.avr_timers[0].read(port, width)
+        else if kind == 2:
+            if self.avr_uarts.len() > 0:
+                return self.avr_uarts[0].read(port, width)
+        else if kind == 3:
+            if self.x86_serials.len() > 0:
+                return self.x86_serials[0].read(port, width)
+        else if kind == 4:
+            if self.x86_pics.len() > 0:
+                return self.x86_pics[0].read(port, width)
+        else if kind == 5:
+            if self.riscv_uarts.len() > 0:
+                return self.riscv_uarts[0].read_byte(port, width)
+        0xFF
+
+    me _dispatch_write(kind: i64, port: i64, width: i64, value: i64):
+        """Route write to correct device type."""
+        if kind == 0:
+            if self.avr_ports.len() > 0:
+                self.avr_ports[0].write(port, width, value)
+        else if kind == 1:
+            if self.avr_timers.len() > 0:
+                self.avr_timers[0].write(port, width, value)
+        else if kind == 2:
+            if self.avr_uarts.len() > 0:
+                self.avr_uarts[0].write(port, width, value)
+        else if kind == 3:
+            if self.x86_serials.len() > 0:
+                self.x86_serials[0].write(port, width, value)
+        else if kind == 4:
+            if self.x86_pics.len() > 0:
+                self.x86_pics[0].write(port, width, value)
+        else if kind == 5:
+            if self.riscv_uarts.len() > 0:
+                self.riscv_uarts[0].write_byte(port, width, value)
+
+    # ========================================================================
+    # Logging
+    # ========================================================================
+
+    me enable_logging():
+        self.log_enabled = true
+
+    me disable_logging():
+        self.log_enabled = false
+
+    me clear_log():
+        self.log_entries = []
+
+# ============================================================================
+# I/O Log Entry
+# ============================================================================
+
+struct IoLogEntry:
+    """Records a single I/O operation for debugging."""
+    is_write: bool
+    port: i64
+    width: i64
+    value: i64
+
+impl IoLogEntry:
+    static fn new_read(port: i64, width: i64, value: i64) -> IoLogEntry:
+        IoLogEntry(is_write: false, port: port, width: width, value: value)
+
+    static fn new_write(port: i64, width: i64, value: i64) -> IoLogEntry:
+        IoLogEntry(is_write: true, port: port, width: width, value: value)
+
+    fn to_text() -> text:
+        val op = if self.is_write: "W" else: "R"
+        "{op} port=0x{self.port} w={self.width} val=0x{self.value}"
+
+# ============================================================================
+# AVR GPIO Port I/O
+# ============================================================================
+
+# AVR I/O register addresses (memory-mapped in I/O space 0x00-0x3F)
+val AVR_PINB: i64 = 0x03
+val AVR_DDRB: i64 = 0x04
+val AVR_PORTB: i64 = 0x05
+val AVR_PINC: i64 = 0x06
+val AVR_DDRC: i64 = 0x07
+val AVR_PORTC: i64 = 0x08
+val AVR_PIND: i64 = 0x09
+val AVR_DDRD: i64 = 0x0A
+val AVR_PORTD: i64 = 0x0B
+
+struct AvrPortIO:
+    """AVR GPIO port emulation (PORTB/DDRB/PINB, PORTC/DDRC/PINC, PORTD/DDRD/PIND).
+
+    Each port has three registers:
+    - PINx: Input pins (read-only, reflects external state)
+    - DDRx: Data direction (1=output, 0=input)
+    - PORTx: Output data / pull-up enable
+    """
+    portb: i64      # PORTB output register
+    ddrb: i64       # DDRB direction register
+    pinb: i64       # PINB input register (external state)
+
+    portc: i64
+    ddrc: i64
+    pinc: i64
+
+    portd: i64
+    ddrd: i64
+    pind: i64
+
+impl AvrPortIO:
+    static fn new() -> AvrPortIO:
+        AvrPortIO(
+            portb: 0, ddrb: 0, pinb: 0,
+            portc: 0, ddrc: 0, pinc: 0,
+            portd: 0, ddrd: 0, pind: 0
+        )
+
+    fn read(port: i64, width: i64) -> i64:
+        if port == AVR_PINB: self.pinb & 0xFF
+        else if port == AVR_DDRB: self.ddrb & 0xFF
+        else if port == AVR_PORTB: self.portb & 0xFF
+        else if port == AVR_PINC: self.pinc & 0xFF
+        else if port == AVR_DDRC: self.ddrc & 0xFF
+        else if port == AVR_PORTC: self.portc & 0xFF
+        else if port == AVR_PIND: self.pind & 0xFF
+        else if port == AVR_DDRD: self.ddrd & 0xFF
+        else if port == AVR_PORTD: self.portd & 0xFF
+        else: 0
+
+    me write(port: i64, width: i64, value: i64):
+        val v = value & 0xFF
+        if port == AVR_DDRB: self.ddrb = v
+        else if port == AVR_PORTB: self.portb = v
+        else if port == AVR_DDRC: self.ddrc = v
+        else if port == AVR_PORTC: self.portc = v
+        else if port == AVR_DDRD: self.ddrd = v
+        else if port == AVR_PORTD: self.portd = v
+        # Writing to PINx toggles the corresponding PORTx bits (ATmega feature)
+        else if port == AVR_PINB: self.portb = self.portb ^ v
+        else if port == AVR_PINC: self.portc = self.portc ^ v
+        else if port == AVR_PIND: self.portd = self.portd ^ v
+
+    fn name() -> text:
+        "avr_gpio"
+
+    me set_pin_input(port_addr: i64, value: i64):
+        """Set external pin state (simulates external signals)."""
+        val v = value & 0xFF
+        if port_addr == AVR_PINB: self.pinb = v
+        else if port_addr == AVR_PINC: self.pinc = v
+        else if port_addr == AVR_PIND: self.pind = v
+
+# ============================================================================
+# AVR Timer0 I/O
+# ============================================================================
+
+val AVR_TCCR0A: i64 = 0x24
+val AVR_TCCR0B: i64 = 0x25
+val AVR_TCNT0: i64 = 0x26
+val AVR_OCR0A: i64 = 0x27
+val AVR_OCR0B: i64 = 0x28
+val AVR_TIFR0: i64 = 0x15
+val AVR_TIMSK0: i64 = 0x6E
+
+struct AvrTimerIO:
+    """AVR Timer/Counter0 basic emulation.
+
+    Supports normal mode counting. Prescaler values from TCCR0B[2:0].
+    Interrupt flags in TIFR0, masks in TIMSK0.
+    """
+    tccr0a: i64     # Timer control register A (WGM, COM bits)
+    tccr0b: i64     # Timer control register B (WGM, CS bits)
+    tcnt0: i64      # Timer counter value
+    ocr0a: i64      # Output compare A
+    ocr0b: i64      # Output compare B
+    tifr0: i64      # Timer interrupt flags
+    timsk0: i64     # Timer interrupt mask
+
+    # Internal state
+    prescaler_counter: i64
+    cycle_count: i64
+
+impl AvrTimerIO:
+    static fn new() -> AvrTimerIO:
+        AvrTimerIO(
+            tccr0a: 0, tccr0b: 0, tcnt0: 0,
+            ocr0a: 0, ocr0b: 0,
+            tifr0: 0, timsk0: 0,
+            prescaler_counter: 0, cycle_count: 0
+        )
+
+    fn read(port: i64, width: i64) -> i64:
+        if port == AVR_TCCR0A: self.tccr0a & 0xFF
+        else if port == AVR_TCCR0B: self.tccr0b & 0xFF
+        else if port == AVR_TCNT0: self.tcnt0 & 0xFF
+        else if port == AVR_OCR0A: self.ocr0a & 0xFF
+        else if port == AVR_OCR0B: self.ocr0b & 0xFF
+        else if port == AVR_TIFR0: self.tifr0 & 0xFF
+        else if port == AVR_TIMSK0: self.timsk0 & 0xFF
+        else: 0
+
+    me write(port: i64, width: i64, value: i64):
+        val v = value & 0xFF
+        if port == AVR_TCCR0A: self.tccr0a = v
+        else if port == AVR_TCCR0B: self.tccr0b = v
+        else if port == AVR_TCNT0: self.tcnt0 = v
+        else if port == AVR_OCR0A: self.ocr0a = v
+        else if port == AVR_OCR0B: self.ocr0b = v
+        else if port == AVR_TIFR0:
+            # Writing 1 to a flag bit clears it
+            self.tifr0 = self.tifr0 & (v ^ 0xFF)
+        else if port == AVR_TIMSK0: self.timsk0 = v
+
+    fn name() -> text:
+        "avr_timer0"
+
+    fn _prescaler_value() -> i64:
+        """Get prescaler divisor from CS0[2:0] bits in TCCR0B."""
+        val cs = self.tccr0b & 0x07
+        if cs == 0: 0           # Timer stopped
+        else if cs == 1: 1      # clk/1
+        else if cs == 2: 8      # clk/8
+        else if cs == 3: 64     # clk/64
+        else if cs == 4: 256    # clk/256
+        else if cs == 5: 1024   # clk/1024
+        else: 0                 # External clock (not emulated)
+
+    me tick(cycles: i64):
+        """Advance the timer by the given number of CPU cycles."""
+        val prescaler = self._prescaler_value()
+        if prescaler == 0:
+            return      # Timer stopped
+
+        self.cycle_count = self.cycle_count + cycles
+        self.prescaler_counter = self.prescaler_counter + cycles
+
+        # Count ticks based on prescaler
+        val ticks = self.prescaler_counter / prescaler
+        self.prescaler_counter = self.prescaler_counter % prescaler
+
+        for _ in 0..ticks:
+            self.tcnt0 = (self.tcnt0 + 1) & 0xFF
+
+            # Check overflow (TCNT0 wraps from 0xFF to 0x00)
+            if self.tcnt0 == 0:
+                # Set TOV0 flag (bit 0 of TIFR0)
+                self.tifr0 = self.tifr0 | 0x01
+
+            # Check compare match A
+            if self.tcnt0 == self.ocr0a:
+                # Set OCF0A flag (bit 1 of TIFR0)
+                self.tifr0 = self.tifr0 | 0x02
+
+            # Check compare match B
+            if self.tcnt0 == self.ocr0b:
+                # Set OCF0B flag (bit 2 of TIFR0)
+                self.tifr0 = self.tifr0 | 0x04
+
+    fn has_pending_interrupt() -> bool:
+        """Check if any enabled timer interrupt is pending."""
+        (self.tifr0 & self.timsk0) != 0
+
+# ============================================================================
+# AVR UART I/O
+# ============================================================================
+
+val AVR_UDR0: i64 = 0xC6
+val AVR_UCSR0A: i64 = 0xC0
+val AVR_UCSR0B: i64 = 0xC1
+val AVR_UBRR0L: i64 = 0xC4
+val AVR_UBRR0H: i64 = 0xC5
+
+# UCSR0A bits
+val UCSR0A_RXC: i64 = 0x80     # Receive complete
+val UCSR0A_TXC: i64 = 0x40     # Transmit complete
+val UCSR0A_UDRE: i64 = 0x20    # Data register empty
+
+struct AvrUartIO:
+    """AVR USART0 emulation for console output.
+
+    Supports basic transmit (TX) and receive (RX) buffering.
+    """
+    udr0_tx: i64               # Transmit data register
+    udr0_rx: i64               # Receive data register
+    ucsr0a: i64                # Status register A
+    ucsr0b: i64                # Control register B
+    ubrr0: i64                 # Baud rate register (16-bit)
+
+    # Output buffer (captures transmitted bytes)
+    tx_buffer: [i64]
+    # Input buffer (bytes available to receive)
+    rx_buffer: [i64]
+    rx_read_pos: i64
+
+impl AvrUartIO:
+    static fn new() -> AvrUartIO:
+        AvrUartIO(
+            udr0_tx: 0,
+            udr0_rx: 0,
+            ucsr0a: UCSR0A_UDRE | UCSR0A_TXC,  # Initially: data reg empty, TX complete
+            ucsr0b: 0,
+            ubrr0: 0,
+            tx_buffer: [],
+            rx_buffer: [],
+            rx_read_pos: 0
+        )
+
+    fn read(port: i64, width: i64) -> i64:
+        if port == AVR_UDR0:
+            # Reading UDR0 returns receive buffer
+            self.udr0_rx & 0xFF
+        else if port == AVR_UCSR0A:
+            self.ucsr0a & 0xFF
+        else if port == AVR_UCSR0B:
+            self.ucsr0b & 0xFF
+        else if port == AVR_UBRR0L:
+            self.ubrr0 & 0xFF
+        else if port == AVR_UBRR0H:
+            (self.ubrr0 >> 8) & 0x0F
+        else:
+            0
+
+    me write(port: i64, width: i64, value: i64):
+        val v = value & 0xFF
+        if port == AVR_UDR0:
+            # Writing UDR0 transmits a byte
+            self.udr0_tx = v
+            self.tx_buffer.push(v)
+            # Set TXC (transmit complete) and UDRE (data register empty)
+            self.ucsr0a = self.ucsr0a | UCSR0A_TXC | UCSR0A_UDRE
+        else if port == AVR_UCSR0A:
+            # Writing 1 to TXC clears it
+            if (v & UCSR0A_TXC) != 0:
+                self.ucsr0a = self.ucsr0a & (UCSR0A_TXC ^ 0xFF)
+        else if port == AVR_UCSR0B:
+            self.ucsr0b = v
+        else if port == AVR_UBRR0L:
+            self.ubrr0 = (self.ubrr0 & 0x0F00) | v
+        else if port == AVR_UBRR0H:
+            self.ubrr0 = (self.ubrr0 & 0x00FF) | ((v & 0x0F) << 8)
+
+    fn name() -> text:
+        "avr_uart0"
+
+    me push_rx_byte(byte: i64):
+        """Push a byte into the receive buffer (simulates incoming data)."""
+        self.rx_buffer.push(byte & 0xFF)
+        self.udr0_rx = byte & 0xFF
+        # Set RXC (receive complete)
+        self.ucsr0a = self.ucsr0a | UCSR0A_RXC
+
+    me consume_rx():
+        """Advance receive buffer (called after guest reads UDR0)."""
+        self.rx_read_pos = self.rx_read_pos + 1
+        if self.rx_read_pos < self.rx_buffer.len():
+            self.udr0_rx = self.rx_buffer[self.rx_read_pos] & 0xFF
+        else:
+            # No more data — clear RXC
+            self.ucsr0a = self.ucsr0a & (UCSR0A_RXC ^ 0xFF)
+            self.udr0_rx = 0
+
+    fn get_tx_output() -> [i64]:
+        """Get all transmitted bytes (for test verification)."""
+        self.tx_buffer
+
+    fn get_tx_text() -> text:
+        """Get transmitted bytes as text string."""
+        var s = ""
+        for byte in self.tx_buffer:
+            # Simple ASCII conversion for printable characters
+            if (byte >= 32) & (byte < 127):
+                # Append character — use runtime text building
+                s = s + _char_from_byte(byte)
+            else if byte == 10:
+                s = s + "\n"
+            else if byte == 13:
+                s = s + "\r"
+        s
+
+# ============================================================================
+# 8086 Serial Port (COM1)
+# ============================================================================
+
+val X86_COM1_THR: i64 = 0x3F8      # Transmit Holding Register (write)
+val X86_COM1_RBR: i64 = 0x3F8      # Receive Buffer Register (read)
+val X86_COM1_IER: i64 = 0x3F9      # Interrupt Enable Register
+val X86_COM1_IIR: i64 = 0x3FA      # Interrupt Identification Register (read)
+val X86_COM1_FCR: i64 = 0x3FA      # FIFO Control Register (write)
+val X86_COM1_LCR: i64 = 0x3FB      # Line Control Register
+val X86_COM1_MCR: i64 = 0x3FC      # Modem Control Register
+val X86_COM1_LSR: i64 = 0x3FD      # Line Status Register
+val X86_COM1_MSR: i64 = 0x3FE      # Modem Status Register
+
+# LSR bits
+val LSR_DR: i64 = 0x01             # Data Ready
+val LSR_THRE: i64 = 0x20           # Transmitter Holding Register Empty
+val LSR_TEMT: i64 = 0x40           # Transmitter Empty
+
+struct X86SerialIO:
+    """8086 COM1 serial port emulation (8250/16550 UART at 0x3F8).
+
+    Supports basic THR/RBR/LSR for serial console I/O.
+    """
+    thr: i64            # Transmit Holding Register
+    rbr: i64            # Receive Buffer Register
+    ier: i64            # Interrupt Enable Register
+    iir: i64            # Interrupt Identification Register
+    lcr: i64            # Line Control Register
+    mcr: i64            # Modem Control Register
+    lsr: i64            # Line Status Register
+    msr: i64            # Modem Status Register
+    dll: i64            # Divisor Latch Low
+    dlh: i64            # Divisor Latch High
+    dlab: bool          # Divisor Latch Access Bit (LCR bit 7)
+
+    tx_buffer: [i64]
+    rx_buffer: [i64]
+    rx_read_pos: i64
+
+impl X86SerialIO:
+    static fn new() -> X86SerialIO:
+        X86SerialIO(
+            thr: 0, rbr: 0,
+            ier: 0, iir: 0x01,     # No interrupt pending
+            lcr: 0, mcr: 0,
+            lsr: LSR_THRE | LSR_TEMT,  # Initially: TX empty
+            msr: 0, dll: 0, dlh: 0,
+            dlab: false,
+            tx_buffer: [],
+            rx_buffer: [],
+            rx_read_pos: 0
+        )
+
+    fn read(port: i64, width: i64) -> i64:
+        if port == X86_COM1_RBR:
+            if self.dlab:
+                self.dll & 0xFF     # DLAB=1: read divisor low
+            else:
+                self.rbr & 0xFF     # DLAB=0: read receive buffer
+        else if port == X86_COM1_IER:
+            if self.dlab:
+                self.dlh & 0xFF     # DLAB=1: read divisor high
+            else:
+                self.ier & 0xFF
+        else if port == X86_COM1_IIR:
+            self.iir & 0xFF
+        else if port == X86_COM1_LCR:
+            self.lcr & 0xFF
+        else if port == X86_COM1_MCR:
+            self.mcr & 0xFF
+        else if port == X86_COM1_LSR:
+            self.lsr & 0xFF
+        else if port == X86_COM1_MSR:
+            self.msr & 0xFF
+        else:
+            0
+
+    me write(port: i64, width: i64, value: i64):
+        val v = value & 0xFF
+        if port == X86_COM1_THR:
+            if self.dlab:
+                self.dll = v                # DLAB=1: write divisor low
+            else:
+                # DLAB=0: transmit byte
+                self.thr = v
+                self.tx_buffer.push(v)
+                # Keep THR empty and transmitter empty flags set
+                self.lsr = self.lsr | LSR_THRE | LSR_TEMT
+        else if port == X86_COM1_IER:
+            if self.dlab:
+                self.dlh = v                # DLAB=1: write divisor high
+            else:
+                self.ier = v
+        else if port == X86_COM1_FCR:
+            pass_do_nothing                 # FIFO control — not fully emulated
+        else if port == X86_COM1_LCR:
+            self.lcr = v
+            self.dlab = (v & 0x80) != 0
+        else if port == X86_COM1_MCR:
+            self.mcr = v
+
+    fn name() -> text:
+        "x86_serial_com1"
+
+    me push_rx_byte(byte: i64):
+        """Push a byte into the receive buffer."""
+        self.rx_buffer.push(byte & 0xFF)
+        self.rbr = byte & 0xFF
+        self.lsr = self.lsr | LSR_DR        # Data ready
+        # Set IIR to indicate received data
+        self.iir = 0x04
+
+    me consume_rx():
+        """Advance receive buffer after guest reads RBR."""
+        self.rx_read_pos = self.rx_read_pos + 1
+        if self.rx_read_pos < self.rx_buffer.len():
+            self.rbr = self.rx_buffer[self.rx_read_pos] & 0xFF
+        else:
+            self.lsr = self.lsr & (LSR_DR ^ 0xFF)   # Clear data ready
+            self.rbr = 0
+
+    fn get_tx_output() -> [i64]:
+        self.tx_buffer
+
+# ============================================================================
+# 8086 PIC (Programmable Interrupt Controller)
+# ============================================================================
+
+val X86_PIC1_CMD: i64 = 0x20       # Master PIC command port
+val X86_PIC1_DATA: i64 = 0x21      # Master PIC data port
+val X86_PIC2_CMD: i64 = 0xA0       # Slave PIC command port
+val X86_PIC2_DATA: i64 = 0xA1      # Slave PIC data port
+
+struct X86PicIO:
+    """8259 PIC emulation (master + slave).
+
+    Handles ICW1-ICW4 initialization, IMR, and EOI.
+    """
+    # Master PIC
+    master_irr: i64         # Interrupt Request Register
+    master_isr: i64         # In-Service Register
+    master_imr: i64         # Interrupt Mask Register
+    master_icw_step: i64    # ICW initialization step (0=idle, 1-4=init)
+    master_vector_base: i64 # Base interrupt vector
+
+    # Slave PIC
+    slave_irr: i64
+    slave_isr: i64
+    slave_imr: i64
+    slave_icw_step: i64
+    slave_vector_base: i64
+
+impl X86PicIO:
+    static fn new() -> X86PicIO:
+        X86PicIO(
+            master_irr: 0, master_isr: 0, master_imr: 0xFF,
+            master_icw_step: 0, master_vector_base: 0x08,
+            slave_irr: 0, slave_isr: 0, slave_imr: 0xFF,
+            slave_icw_step: 0, slave_vector_base: 0x70
+        )
+
+    fn read(port: i64, width: i64) -> i64:
+        if port == X86_PIC1_CMD:
+            self.master_isr & 0xFF
+        else if port == X86_PIC1_DATA:
+            self.master_imr & 0xFF
+        else if port == X86_PIC2_CMD:
+            self.slave_isr & 0xFF
+        else if port == X86_PIC2_DATA:
+            self.slave_imr & 0xFF
+        else:
+            0
+
+    me write(port: i64, width: i64, value: i64):
+        val v = value & 0xFF
+        if port == X86_PIC1_CMD:
+            self._write_master_cmd(v)
+        else if port == X86_PIC1_DATA:
+            self._write_master_data(v)
+        else if port == X86_PIC2_CMD:
+            self._write_slave_cmd(v)
+        else if port == X86_PIC2_DATA:
+            self._write_slave_data(v)
+
+    me _write_master_cmd(v: i64):
+        if (v & 0x10) != 0:
+            # ICW1 — start initialization sequence
+            self.master_icw_step = 1
+            self.master_isr = 0
+            self.master_imr = 0
+        else if (v & 0x20) != 0:
+            # EOI (End Of Interrupt) — clear highest priority ISR bit
+            self._eoi_master()
+
+    me _write_master_data(v: i64):
+        if self.master_icw_step == 1:
+            # ICW2 — vector base
+            self.master_vector_base = v & 0xF8
+            self.master_icw_step = 2
+        else if self.master_icw_step == 2:
+            # ICW3 — cascade info (which IRQ connects to slave)
+            self.master_icw_step = 3
+        else if self.master_icw_step == 3:
+            # ICW4 — mode (8086 mode, auto EOI, etc.)
+            self.master_icw_step = 0
+        else:
+            # OCW1 — interrupt mask register
+            self.master_imr = v
+
+    me _write_slave_cmd(v: i64):
+        if (v & 0x10) != 0:
+            self.slave_icw_step = 1
+            self.slave_isr = 0
+            self.slave_imr = 0
+        else if (v & 0x20) != 0:
+            self._eoi_slave()
+
+    me _write_slave_data(v: i64):
+        if self.slave_icw_step == 1:
+            self.slave_vector_base = v & 0xF8
+            self.slave_icw_step = 2
+        else if self.slave_icw_step == 2:
+            self.slave_icw_step = 3
+        else if self.slave_icw_step == 3:
+            self.slave_icw_step = 0
+        else:
+            self.slave_imr = v
+
+    me _eoi_master():
+        """Non-specific EOI — clear highest priority in-service bit."""
+        for i in 0..8:
+            if (self.master_isr & (1 << i)) != 0:
+                self.master_isr = self.master_isr & ((1 << i) ^ 0xFF)
+                return
+
+    me _eoi_slave():
+        for i in 0..8:
+            if (self.slave_isr & (1 << i)) != 0:
+                self.slave_isr = self.slave_isr & ((1 << i) ^ 0xFF)
+                return
+
+    fn name() -> text:
+        "x86_pic_8259"
+
+    me request_irq(irq: i64):
+        """Request an interrupt on the given IRQ line."""
+        if irq < 8:
+            self.master_irr = self.master_irr | (1 << irq)
+        else:
+            val slave_irq = irq - 8
+            self.slave_irr = self.slave_irr | (1 << slave_irq)
+            # Also trigger IRQ2 on master (cascade)
+            self.master_irr = self.master_irr | (1 << 2)
+
+    fn get_pending_irq() -> i64:
+        """Get highest priority pending IRQ (-1 if none).
+
+        Checks master first, then slave if IRQ2 is pending.
+        """
+        val master_pending = self.master_irr & (self.master_imr ^ 0xFF)
+        for i in 0..8:
+            if (master_pending & (1 << i)) != 0:
+                if i == 2:
+                    # Check slave
+                    val slave_pending = self.slave_irr & (self.slave_imr ^ 0xFF)
+                    for j in 0..8:
+                        if (slave_pending & (1 << j)) != 0:
+                            return 8 + j
+                return i
+        -1
+
+    me acknowledge_irq(irq: i64):
+        """Acknowledge an IRQ — move from IRR to ISR."""
+        if irq < 8:
+            self.master_irr = self.master_irr & ((1 << irq) ^ 0xFF)
+            self.master_isr = self.master_isr | (1 << irq)
+        else:
+            val slave_irq = irq - 8
+            self.slave_irr = self.slave_irr & ((1 << slave_irq) ^ 0xFF)
+            self.slave_isr = self.slave_isr | (1 << slave_irq)
+
+    fn get_vector_for_irq(irq: i64) -> i64:
+        """Get the interrupt vector number for a given IRQ."""
+        if irq < 8:
+            self.master_vector_base + irq
+        else:
+            self.slave_vector_base + (irq - 8)
+
+# ============================================================================
+# RISC-V UART I/O (QEMU virt machine)
+# ============================================================================
+
+# QEMU virt machine UART base address
+val RISCV_UART_BASE: i64 = 0x10000000
+
+# UART register offsets (16550-compatible)
+val RISCV_UART_RBR: i64 = 0    # Receive Buffer Register (read)
+val RISCV_UART_THR: i64 = 0    # Transmit Holding Register (write)
+val RISCV_UART_LSR: i64 = 5    # Line Status Register
+
+# LSR bits
+val RISCV_UART_LSR_DR: i64 = 0x01      # Data Ready
+val RISCV_UART_LSR_THRE: i64 = 0x20    # TX Holding Register Empty
+val RISCV_UART_LSR_TEMT: i64 = 0x40    # Transmitter Empty
+
+struct RiscvUartIO:
+    """RISC-V UART I/O device (QEMU virt machine UART at 0x10000000)."""
+    tx_buffer: [i64]
+    rx_buffer: [i64]
+    rx_read_pos: i64
+
+impl RiscvUartIO:
+    static fn new() -> RiscvUartIO:
+        RiscvUartIO(tx_buffer: [], rx_buffer: [], rx_read_pos: 0)
+
+    fn read_byte(offset: i64, width: i64) -> i64:
+        """Read from UART register at given offset.
+        offset 0 = RBR (receive buffer), offset 5 = LSR (line status).
+        """
+        if offset == RISCV_UART_RBR:
+            # RBR — return current receive byte
+            if self.rx_read_pos < self.rx_buffer.len():
+                self.rx_buffer[self.rx_read_pos]
+            else:
+                0
+        else if offset == RISCV_UART_LSR:
+            # LSR — always report TX ready, RX available if buffer non-empty
+            val rx_ready = if self.rx_read_pos < self.rx_buffer.len(): RISCV_UART_LSR_DR else: 0
+            RISCV_UART_LSR_THRE | RISCV_UART_LSR_TEMT | rx_ready
+        else:
+            0
+
+    me write_byte(offset: i64, width: i64, value: i64):
+        """Write to UART register at given offset.
+        offset 0 = THR (transmit holding register).
+        """
+        if offset == RISCV_UART_THR:
+            self.tx_buffer.push(value & 0xFF)
+
+    fn name() -> text:
+        "riscv-uart"
+
+    me push_rx_byte(byte: i64):
+        """Push a byte into the receive buffer (simulates incoming data)."""
+        self.rx_buffer.push(byte & 0xFF)
+
+    me consume_rx():
+        """Advance receive buffer (called after guest reads RBR)."""
+        self.rx_read_pos = self.rx_read_pos + 1
+
+    fn get_tx_output() -> [i64]:
+        """Get all transmitted bytes (for test verification)."""
+        self.tx_buffer
+
+    fn get_tx_text() -> text:
+        """Get transmitted bytes as text string."""
+        var s = ""
+        for byte in self.tx_buffer:
+            if (byte >= 32) & (byte < 127):
+                s = s + _char_from_byte(byte)
+            else if byte == 10:
+                s = s + "\n"
+            else if byte == 13:
+                s = s + "\r"
+        s
+
+# ============================================================================
+# Helper: byte to single-character text
+# ============================================================================
+
+fn _char_from_byte(byte: i64) -> text:
+    """Convert an ASCII byte value to a single-character text string."""
+    # Simple lookup for printable ASCII range
+    val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val idx = byte - 32
+    if (idx >= 0) & (idx < chars.len()):
+        chars[idx:idx + 1]
+    else:
+        "?"

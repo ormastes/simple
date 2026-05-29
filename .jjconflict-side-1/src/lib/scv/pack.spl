@@ -1,0 +1,464 @@
+# SCV pack files and private backup sync.
+
+use app.io.mod (file_exists, file_read, file_copy, file_size, dir_create, dir_walk)
+use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.common.compress.gzip.{gzip_compress, gzip_decompress}
+use std.scv.core.{scv_objects_dir, scv_state_test_ok, scv_state_public_ready, scv_metadata_path_safe, scv_object_path, scv_chunk_path, scv_line_set_contains}
+use std.scv.maintenance.{scv_count_files_under, scv_bytes_under, scv_object_id_from_path, scv_export_manifest}
+use std.scv.integrity.{scv_fsck}
+use std.scv.store.{scv_repo_exists, scv_read_workspace_commit, scv_commit_tree, scv_commit_state, scv_i64_bytes_to_u8, scv_hash_text, scv_write_text, scv_content_id_for_u8, scv_current_op, scv_write_operation, scv_restore_op}
+fn scv_pack_status(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val objects = scv_objects_dir(root)
+    val loose = scv_count_files_under("{objects}/chunks") + scv_count_files_under("{objects}/files") + scv_count_files_under("{objects}/trees") + scv_count_files_under("{objects}/commits") + scv_count_files_under("{objects}/changes") + scv_count_files_under("{objects}/operations") + scv_count_files_under("{objects}/conflicts") + scv_count_files_under("{objects}/syntax")
+    val packs = scv_count_files_under("{objects}/packs")
+    "loose_objects={loose}\npack_files={packs}\nloose_bytes={scv_bytes_under(objects)}\n"
+
+fn scv_pack_manifest_for_kind(root: text, kind: text) -> text:
+    val dir = "{scv_objects_dir(root)}/{kind}"
+    if not file_exists(dir):
+        return ""
+    var out = ""
+    for path in dir_walk(dir):
+        val id = scv_object_id_from_path(path)
+        out = out + "{kind}|{id}|{file_size(path)}|{scv_pack_manifest_path_for_entry(kind, id)}\n"
+    out
+
+fn scv_append_bytes(target: [u8], source: [u8]) -> [u8]:
+    var out = target
+    var i = 0
+    while i < source.len():
+        out.push(source[i])
+        i = i + 1
+    out
+
+fn scv_append_text_bytes(target: [u8], value: text) -> [u8]:
+    scv_append_bytes(target, value.bytes())
+
+fn scv_pack_payload_for_kind(root: text, kind: text, payload: [u8]) -> [u8]:
+    val dir = "{scv_objects_dir(root)}/{kind}"
+    if not file_exists(dir):
+        return payload
+    var out = payload
+    for path in dir_walk(dir):
+        val id = scv_object_id_from_path(path)
+        val raw = scv_i64_bytes_to_u8(file_read_bytes(path) ?? [])
+        out = scv_append_text_bytes(out, "entry {kind} {id} {raw.len()}\n")
+        out = scv_append_bytes(out, raw)
+        out = scv_append_text_bytes(out, "\nendentry\n")
+    out
+
+fn scv_pack_payload(root: text) -> [u8]:
+    var payload: [u8] = []
+    payload = scv_append_text_bytes(payload, "format: scv-pack-payload-v1\n")
+    for kind in ["chunks", "files", "trees", "commits", "changes", "operations", "conflicts", "syntax"]:
+        payload = scv_pack_payload_for_kind(root, kind, payload)
+    payload
+
+fn scv_pack_write(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val pack_dir = "{scv_objects_dir(root)}/packs"
+    dir_create(pack_dir, true)
+    var manifest = "format: scv-pack-v1\n"
+    for kind in ["chunks", "files", "trees", "commits", "changes", "operations", "conflicts", "syntax"]:
+        manifest = manifest + scv_pack_manifest_for_kind(root, kind)
+    val pack_id = scv_hash_text("pack", manifest)
+    val manifest_path = "{pack_dir}/{pack_id}.manifest"
+    val gzip_path = "{pack_dir}/{pack_id}.pack.gz"
+    val payload = scv_pack_payload(root)
+    val compressed = gzip_compress(payload)
+    scv_write_text(manifest_path, manifest)
+    file_write_bytes(gzip_path, compressed)
+    "pack {pack_id} manifest={manifest_path} gzip={gzip_path} compression=gzip payload_bytes={payload.len()} compressed_bytes={compressed.len()}\n"
+
+fn scv_pack_id_from_gzip_path(path: text) -> text:
+    val parts = path.split("/")
+    val name = parts[parts.len() - 1]
+    if name.ends_with(".pack.gz"):
+        name[0:name.len() - 8]
+    else:
+        name
+
+fn scv_pack_manifest_entry_count(manifest_text: text) -> i64:
+    var count = 0
+    for line in manifest_text.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("format:"):
+            continue
+        count = count + 1
+    count
+
+fn scv_pack_manifest_has_entry(manifest_text: text, kind: text, id: text, size_text: text) -> bool:
+    for line in manifest_text.split("\n"):
+        val trimmed = line.trim()
+        val parts = trimmed.split("|")
+        if parts.len() == 4 and parts[0] == kind and parts[1] == id and parts[2] == size_text and parts[3] == scv_pack_manifest_path_for_entry(kind, id):
+            return true
+    false
+
+fn scv_pack_manifest_path_for_entry(kind: text, id: text) -> text:
+    if kind == "chunks":
+        "{kind}/{id}.blob"
+    else:
+        "{kind}/{id}.sdn"
+
+fn scv_pack_payload_object_hash_ok(kind: text, id: text, raw: [u8]) -> bool:
+    if kind == "chunks":
+        return scv_content_id_for_u8(raw) == id
+    val raw_text = text.from_bytes(raw)
+    if kind == "files":
+        return scv_hash_text("file", raw_text) == id
+    if kind == "trees":
+        return scv_hash_text("tree", raw_text) == id
+    if kind == "commits":
+        return scv_hash_text("commit", raw_text) == id
+    if kind == "conflicts":
+        return scv_hash_text("conflict", raw_text) == id
+    if kind == "syntax":
+        return scv_hash_text("syntax_node", raw_text) == id
+    if kind == "operations" and id.starts_with("view_"):
+        return scv_hash_text("view", raw_text) == id
+    if kind == "changes":
+        return true
+    if kind == "operations" and id.starts_with("op_"):
+        return true
+    false
+
+fn scv_pack_payload_matches_manifest_bytes(payload: [u8], manifest_text: text) -> (bool, i64):
+    val header = "format: scv-pack-payload-v1\n".bytes()
+    if payload.len() < header.len() or payload[0:header.len()] != header:
+        return (false, 0)
+    var pos = header.len()
+    var entries = 0
+    var seen = ""
+    while pos < payload.len():
+        val (line, line_end) = scv_pack_bytes_line(payload, pos)
+        val trimmed = line.trim()
+        if trimmed == "":
+            pos = line_end + 1
+            continue
+        if not trimmed.starts_with("entry "):
+            return (false, entries)
+        val parts = trimmed.split(" ")
+        if parts.len() < 4:
+            return (false, entries)
+        if not scv_pack_kind_valid(parts[1]):
+            return (false, entries)
+        if not scv_pack_id_prefix_valid(parts[1], parts[2]):
+            return (false, entries)
+        val size = parts[3].to_i64() ?? -1
+        if size < 0:
+            return (false, entries)
+        val data_start = line_end + 1
+        val data_end = data_start + size
+        if data_end > payload.len():
+            return (false, entries)
+        if not scv_pack_marker_at(payload, data_end):
+            return (false, entries)
+        val object_key = "{parts[1]}|{parts[2]}"
+        if scv_line_set_contains(seen, object_key):
+            return (false, entries)
+        seen = seen + object_key + "\n"
+        if not scv_pack_manifest_has_entry(manifest_text, parts[1], parts[2], parts[3]):
+            return (false, entries)
+        if not scv_pack_payload_object_hash_ok(parts[1], parts[2], payload[data_start:data_end]):
+            return (false, entries)
+        entries = entries + 1
+        pos = data_end + "\nendentry\n".bytes().len()
+    (true, entries)
+
+fn scv_pack_label_prefix(label: text) -> text:
+    if label == "":
+        ""
+    else:
+        "{label} "
+
+fn scv_pack_verify_dir(pack_dir: text, requested_pack: text, label: text) -> (text, i64, i64, i64, i64):
+    val prefix = scv_pack_label_prefix(label)
+    if not file_exists(pack_dir):
+        return ("ERROR missing {prefix}packs\n", 0, 0, 0, 0)
+    var checked = 0
+    var entries = 0
+    var payload_bytes = 0
+    var compressed_bytes = 0
+    for path in dir_walk(pack_dir):
+        if not path.ends_with(".pack.gz"):
+            continue
+        val pack_id = scv_pack_id_from_gzip_path(path)
+        if requested_pack != "" and requested_pack != pack_id:
+            continue
+        val manifest_path = "{pack_dir}/{pack_id}.manifest"
+        if not file_exists(manifest_path):
+            return ("ERROR missing {prefix}pack manifest: {pack_id}\n", 0, 0, 0, 0)
+        val manifest_text = file_read(manifest_path)
+        if not manifest_text.starts_with("format: scv-pack-v1\n"):
+            return ("ERROR unsupported {prefix}pack manifest: {pack_id}\n", 0, 0, 0, 0)
+        if scv_hash_text("pack", manifest_text) != pack_id:
+            return ("ERROR {prefix}pack manifest id mismatch: {pack_id}\n", 0, 0, 0, 0)
+        val compressed = scv_i64_bytes_to_u8(file_read_bytes(path) ?? [])
+        val payload = gzip_decompress(compressed)
+        if payload.len() == 0:
+            return ("ERROR corrupt {prefix}pack payload: {pack_id}\n", 0, 0, 0, 0)
+        val header = "format: scv-pack-payload-v1\n".bytes()
+        if payload.len() < header.len() or payload[0:header.len()] != header:
+            return ("ERROR unsupported {prefix}pack payload: {pack_id}\n", 0, 0, 0, 0)
+        val (payload_ok, payload_entries) = scv_pack_payload_matches_manifest_bytes(payload, manifest_text)
+        if scv_pack_manifest_entry_count(manifest_text) != payload_entries:
+            return ("ERROR pack manifest payload mismatch: {pack_id}\n", 0, 0, 0, 0)
+        if not payload_ok:
+            return ("ERROR pack manifest payload mismatch: {pack_id}\n", 0, 0, 0, 0)
+        checked = checked + 1
+        entries = entries + payload_entries
+        payload_bytes = payload_bytes + payload.len()
+        compressed_bytes = compressed_bytes + compressed.len()
+    if checked == 0:
+        return ("ERROR {prefix}pack not found\n", 0, 0, 0, 0)
+    ("", checked, entries, payload_bytes, compressed_bytes)
+
+fn scv_pack_verify(root: text, requested_pack: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val (error, checked, entries, payload_bytes, compressed_bytes) = scv_pack_verify_dir("{scv_objects_dir(root)}/packs", requested_pack, "")
+    if error != "":
+        return error
+    "pack-verify packs={checked} entries={entries} payload_bytes={payload_bytes} compressed_bytes={compressed_bytes}\n"
+
+fn scv_pack_kind_valid(kind: text) -> bool:
+    kind == "chunks" or kind == "files" or kind == "trees" or kind == "commits" or kind == "changes" or kind == "operations" or kind == "conflicts" or kind == "syntax"
+
+fn scv_pack_id_prefix_valid(kind: text, id: text) -> bool:
+    if not scv_metadata_path_safe(id):
+        return false
+    match kind:
+        case "chunks":
+            id.starts_with("sha256_")
+        case "files":
+            id.starts_with("file_")
+        case "trees":
+            id.starts_with("tree_")
+        case "commits":
+            id.starts_with("commit_")
+        case "changes":
+            id.starts_with("change_")
+        case "operations":
+            id.starts_with("op_") or id.starts_with("view_")
+        case "conflicts":
+            id.starts_with("conflict_")
+        case "syntax":
+            id.starts_with("syntax_node_")
+        case _:
+            false
+
+fn scv_pack_entry_path(root: text, kind: text, id: text) -> text:
+    if kind == "chunks":
+        scv_chunk_path(root, id)
+    else:
+        scv_object_path(root, kind, id)
+
+fn scv_pack_bytes_line(payload: [u8], start: i64) -> (text, i64):
+    var end = start
+    while end < payload.len() and payload[end] != 10.to_u8():
+        end = end + 1
+    (text.from_bytes(payload[start:end]), end)
+
+fn scv_pack_marker_at(payload: [u8], start: i64) -> bool:
+    val marker = "\nendentry\n".bytes()
+    if start + marker.len() > payload.len():
+        return false
+    payload[start:start + marker.len()] == marker
+
+fn scv_pack_import_entry(root: text, kind: text, id: text, raw: [u8]) -> text:
+    if not scv_pack_kind_valid(kind):
+        return "ERROR unsupported pack object kind: {kind}\n"
+    if not scv_pack_id_prefix_valid(kind, id):
+        return "ERROR unsafe pack object id: {id}\n"
+    if kind == "chunks" and scv_content_id_for_u8(raw) != id:
+        return "ERROR chunk content mismatch: {id}\n"
+    val raw_text = if kind == "chunks": "" else: text.from_bytes(raw)
+    if kind == "files" and scv_hash_text("file", raw_text) != id:
+        return "ERROR pack object hash mismatch: {id}\n"
+    if kind == "trees" and scv_hash_text("tree", raw_text) != id:
+        return "ERROR pack object hash mismatch: {id}\n"
+    if kind == "commits" and scv_hash_text("commit", raw_text) != id:
+        return "ERROR pack object hash mismatch: {id}\n"
+    if kind == "conflicts" and scv_hash_text("conflict", raw_text) != id:
+        return "ERROR pack object hash mismatch: {id}\n"
+    if kind == "syntax" and scv_hash_text("syntax_node", raw_text) != id:
+        return "ERROR pack object hash mismatch: {id}\n"
+    if kind == "operations" and id.starts_with("view_") and scv_hash_text("view", raw_text) != id:
+        return "ERROR pack object hash mismatch: {id}\n"
+    file_write_bytes(scv_pack_entry_path(root, kind, id), raw)
+    ""
+
+fn scv_pack_import_payload(root: text, payload: [u8]) -> (text, i64):
+    val header = "format: scv-pack-payload-v1\n".bytes()
+    if payload.len() < header.len() or payload[0:header.len()] != header:
+        return ("ERROR unsupported pack payload\n", 0)
+    var pos = header.len()
+    var imported = 0
+    while pos < payload.len():
+        val (line, line_end) = scv_pack_bytes_line(payload, pos)
+        val trimmed = line.trim()
+        if trimmed == "":
+            pos = line_end + 1
+            continue
+        if not trimmed.starts_with("entry "):
+            return ("ERROR bad pack payload entry\n", imported)
+        val parts = trimmed.split(" ")
+        if parts.len() < 4:
+            return ("ERROR bad pack payload entry\n", imported)
+        val kind = parts[1]
+        val id = parts[2]
+        val size = parts[3].to_i64() ?? -1
+        if size < 0:
+            return ("ERROR bad pack payload size\n", imported)
+        val data_start = line_end + 1
+        val data_end = data_start + size
+        if data_end > payload.len():
+            return ("ERROR truncated pack payload entry\n", imported)
+        if not scv_pack_marker_at(payload, data_end):
+            return ("ERROR corrupt pack payload entry\n", imported)
+        val error = scv_pack_import_entry(root, kind, id, payload[data_start:data_end])
+        if error != "":
+            return (error, imported)
+        imported = imported + 1
+        pos = data_end + "\nendentry\n".bytes().len()
+    ("", imported)
+
+fn scv_pack_import_from_dir(root: text, pack_dir: text, requested_pack: text, label: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val (verify_error, checked, entries, payload_bytes, compressed_bytes) = scv_pack_verify_dir(pack_dir, requested_pack, label)
+    if verify_error != "":
+        return verify_error
+    var imported = 0
+    for path in dir_walk(pack_dir):
+        if not path.ends_with(".pack.gz"):
+            continue
+        val pack_id = scv_pack_id_from_gzip_path(path)
+        if requested_pack != "" and requested_pack != pack_id:
+            continue
+        val compressed = scv_i64_bytes_to_u8(file_read_bytes(path) ?? [])
+        val payload = gzip_decompress(compressed)
+        val (error, count) = scv_pack_import_payload(root, payload)
+        if error != "":
+            return error
+        imported = imported + count
+    "pack-import packs={checked} entries={entries} imported={imported} payload_bytes={payload_bytes} compressed_bytes={compressed_bytes}\n"
+
+fn scv_pack_import(root: text, pack_dir: text, requested_pack: text) -> text:
+    scv_pack_import_from_dir(root, pack_dir, requested_pack, "")
+
+fn scv_private_sync(root: text, out_dir: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val commit = scv_read_workspace_commit(root)
+    if commit == "":
+        return "ERROR no current commit\n"
+    val state = scv_commit_state(root, commit)
+    if state != scv_state_test_ok() and state != scv_state_public_ready():
+        return "ERROR private-sync requires test_ok or public_ready\n"
+    val tree = scv_commit_tree(root, commit)
+    if tree == "":
+        return "ERROR missing current tree\n"
+    val fsck = scv_fsck(root)
+    if not fsck.starts_with("OK"):
+        return fsck
+    dir_create(out_dir, true)
+    dir_create("{out_dir}/packs", true)
+    val pack_result = scv_pack_write(root)
+    if pack_result.starts_with("ERROR"):
+        return pack_result
+    val pack_id = pack_result.split(" ")[1]
+    val pack_dir = "{scv_objects_dir(root)}/packs"
+    if not file_copy("{pack_dir}/{pack_id}.manifest", "{out_dir}/packs/{pack_id}.manifest"):
+        return "ERROR private-sync failed copying manifest\n"
+    if not file_copy("{pack_dir}/{pack_id}.pack.gz", "{out_dir}/packs/{pack_id}.pack.gz"):
+        return "ERROR private-sync failed copying pack\n"
+    val export_result = scv_export_manifest(root, "{out_dir}/manifest.sdn")
+    if export_result.starts_with("ERROR"):
+        return export_result
+    val marker = "format: scv-private-sync-v1\ncommit: {commit}\ntree: {tree}\nstate: {state}\npack: {pack_id}\ntime_ms: {current_time_ms()}\n"
+    scv_write_text("{out_dir}/sync.sdn", marker)
+    "private-sync {out_dir} commit={commit} state={state} pack={pack_id}\n"
+
+fn scv_private_sync_field(content: text, name: text) -> text:
+    for line in content.split("\n"):
+        if line.starts_with("{name}:"):
+            return line[name.len() + 1:].trim()
+    ""
+
+fn scv_marker_id_safe(value: text, prefix: text) -> bool:
+    value.starts_with(prefix) and scv_metadata_path_safe(value)
+
+fn scv_private_sync_verify(out_dir: text) -> text:
+    val sync_path = "{out_dir}/sync.sdn"
+    val manifest_path = "{out_dir}/manifest.sdn"
+    if not file_exists(sync_path):
+        return "ERROR missing private-sync marker\n"
+    if not file_exists(manifest_path):
+        return "ERROR missing private-sync manifest\n"
+    val sync = file_read(sync_path)
+    if not sync.starts_with("format: scv-private-sync-v1\n"):
+        return "ERROR unsupported private-sync marker\n"
+    val manifest = file_read(manifest_path)
+    if not manifest.starts_with("format: scv-export-manifest-v1\n"):
+        return "ERROR unsupported private-sync manifest\n"
+    val pack_id = scv_private_sync_field(sync, "pack")
+    if pack_id == "":
+        return "ERROR private-sync marker missing pack\n"
+    if not scv_marker_id_safe(pack_id, "pack_"):
+        return "ERROR unsafe private-sync pack id\n"
+    val commit = scv_private_sync_field(sync, "commit")
+    if not scv_marker_id_safe(commit, "commit_"):
+        return "ERROR unsafe private-sync commit id\n"
+    val tree = scv_private_sync_field(sync, "tree")
+    if not scv_marker_id_safe(tree, "tree_"):
+        return "ERROR unsafe private-sync tree id\n"
+    val manifest_commit = scv_private_sync_field(manifest, "commit")
+    if manifest_commit != commit:
+        return "ERROR private-sync manifest commit mismatch\n"
+    val manifest_tree = scv_private_sync_field(manifest, "tree")
+    if manifest_tree != tree:
+        return "ERROR private-sync manifest tree mismatch\n"
+    val state = scv_private_sync_field(sync, "state")
+    if state != scv_state_test_ok() and state != scv_state_public_ready():
+        return "ERROR private-sync marker state is not syncable\n"
+    val (error, checked, entries, payload_bytes, compressed_bytes) = scv_pack_verify_dir("{out_dir}/packs", pack_id, "private-sync")
+    if error != "":
+        return error
+    "private-sync-verify {out_dir} commit={commit} state={state} packs={checked} entries={entries} payload_bytes={payload_bytes} compressed_bytes={compressed_bytes}\n"
+
+fn scv_private_sync_import(root: text, out_dir: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val verify = scv_private_sync_verify(out_dir)
+    if verify.starts_with("ERROR"):
+        return verify
+    val sync = file_read("{out_dir}/sync.sdn")
+    val commit = scv_private_sync_field(sync, "commit")
+    val pack_id = scv_private_sync_field(sync, "pack")
+    val marker_tree = scv_private_sync_field(sync, "tree")
+    if commit == "" or pack_id == "":
+        return "ERROR corrupt private-sync marker\n"
+    val import_result = scv_pack_import_from_dir(root, "{out_dir}/packs", pack_id, "private-sync")
+    if import_result.starts_with("ERROR"):
+        return import_result
+    val imported_tree = scv_commit_tree(root, commit)
+    if imported_tree == "":
+        return "ERROR private-sync missing imported commit\n"
+    if marker_tree != imported_tree:
+        return "ERROR private-sync tree does not match imported commit\n"
+    val op = scv_write_operation(root, scv_current_op(root), commit, "private-sync-import")
+    if op.starts_with("ERROR"):
+        return op
+    val restore = scv_restore_op(root, op)
+    if restore.starts_with("ERROR"):
+        return restore
+    val fsck = scv_fsck(root)
+    if not fsck.starts_with("OK"):
+        return fsck
+    "private-sync-import {out_dir} commit={commit} op={op}\n"

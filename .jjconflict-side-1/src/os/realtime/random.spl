@@ -1,0 +1,62 @@
+# @platform: baremetal
+#
+# xoshiro256** PRNG — deterministic, no external dependency.
+# Seed address lives in .rtos_state section so JTAG can inject entropy.
+
+var s0: u64 = 0x853c49e6748fea9bu64
+var s1: u64 = 0xda3e39cb94b95bdbu64
+var s2: u64 = 0x7b6ae3583e1b47e2u64
+var s3: u64 = 0x3203384738291049u64
+
+fn rng_seed(seed: u64):
+    """Seed the PRNG. Splits seed into 4 state words via splitmix64."""
+    s0 = splitmix64(seed)
+    s1 = splitmix64(s0)
+    s2 = splitmix64(s1)
+    s3 = splitmix64(s2)
+
+fn rng_next() -> u64:
+    """Return next pseudo-random u64."""
+    val result = rotl(s1 * 5u64, 7) * 9u64
+
+    val t = s1 << 17
+    s2 = s2 ^ s0
+    s3 = s3 ^ s1
+    s1 = s1 ^ s2
+    s0 = s0 ^ s3
+    s2 = s2 ^ t
+    s3 = rotl(s3, 45)
+
+    result
+
+fn rng_next_bounded(max: u64) -> u64:
+    """Return pseudo-random value in [0, max)."""
+    if max == 0u64:
+        return 0u64
+    rng_next() % max
+
+fn rotl(x: u64, k: i32) -> u64:
+    (x << k) | (x >> (64 - k))
+
+fn splitmix64(x: u64) -> u64:
+    var z = x + 0x9e3779b97f4a7c15u64
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9u64
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebu64
+    z ^ (z >> 31)
+
+fn rng_get_state() -> [u64]:
+    """Return current PRNG state (4 words) for snapshot."""
+    var state: [u64] = []
+    state.push(s0)
+    state.push(s1)
+    state.push(s2)
+    state.push(s3)
+    state
+
+fn rng_set_state(state: [u64]):
+    """Restore PRNG state from snapshot."""
+    if state.length() >= 4:
+        s0 = state[0]
+        s1 = state[1]
+        s2 = state[2]
+        s3 = state[3]

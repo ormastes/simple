@@ -1,0 +1,85 @@
+# @platform: baremetal
+# @cfg: x86_64
+#
+# x86_64 context switch via ISR.
+# Saves rax-r15, rip, rflags, rsp to TCB.
+# Simplified: no ring transitions, no CR3 swap (flat kernel mode).
+
+use std.baremetal.interrupt (mem_read_u32, mem_write_u32, apic_eoi)
+
+# Register save frame layout (all 64-bit):
+#   [SP+0]   rax
+#   [SP+8]   rbx
+#   [SP+16]  rcx
+#   [SP+24]  rdx
+#   [SP+32]  rsi
+#   [SP+40]  rdi
+#   [SP+48]  rbp
+#   [SP+56]  r8
+#   [SP+64]  r9
+#   [SP+72]  r10
+#   [SP+80]  r11
+#   [SP+88]  r12
+#   [SP+96]  r13
+#   [SP+104] r14
+#   [SP+112] r15
+#   [SP+120] rip
+#   [SP+128] rflags
+#   [SP+136] rsp (original)
+val CONTEXT_FRAME_WORDS: i32 = 18
+val CONTEXT_FRAME_SIZE: u64 = 144u64
+
+# extern for actual asm context save/restore
+extern fn rt_x86_context_save(stack_ptr: u64) -> u64
+extern fn rt_x86_context_restore(stack_ptr: u64)
+extern fn rt_x86_get_rsp() -> u64
+
+fn x86_context_switch():
+    """Called from timer ISR. Saves current, picks next, restores."""
+    val curr_id = sched_get_current()
+
+    if curr_id >= 0:
+        val rsp = rt_x86_get_rsp()
+        val new_sp = rt_x86_context_save(rsp)
+        task_set_stack_ptr(curr_id, new_sp)
+
+    sched_switch()
+
+    val next_id = sched_get_current()
+    if next_id >= 0:
+        val next_task = task_get(next_id)
+        rt_x86_context_restore(next_task.stack_ptr)
+
+fn x86_init_task_stack(stack_top: u64, entry: u64) -> u64:
+    """Initialize a task stack frame for first context restore.
+    Returns adjusted SP pointing to the saved register frame."""
+    var sp = stack_top - CONTEXT_FRAME_SIZE
+
+    # Zero all register slots
+    var i = 0
+    while i < CONTEXT_FRAME_WORDS:
+        val addr = sp + (i * 8).to_u64()
+        mem_write_u32(addr.to_u32(), 0u32)
+        mem_write_u32((addr + 4u64).to_u32(), 0u32)
+        i = i + 1
+
+    # rip = entry function
+    mem_write_u32((sp + 120u64).to_u32(), entry.to_u32())
+    mem_write_u32((sp + 124u64).to_u32(), (entry >> 32).to_u32())
+
+    # rflags = interrupts enabled (IF = bit 9)
+    mem_write_u32((sp + 128u64).to_u32(), 0x200u32)
+
+    # rsp = original stack top
+    mem_write_u32((sp + 136u64).to_u32(), stack_top.to_u32())
+    mem_write_u32((sp + 140u64).to_u32(), (stack_top >> 32).to_u32())
+
+    sp
+
+fn x86_timer_isr():
+    """x86_64 timer ISR entry. Acknowledges APIC, runs scheduler."""
+    apic_eoi()
+    timer_isr()
+
+    if sched_needs_switch():
+        x86_context_switch()

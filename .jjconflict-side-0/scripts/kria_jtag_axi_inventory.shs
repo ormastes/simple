@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+OUT_DIR="${OUT_DIR:-build/kria_jtag_axi}"
+TCL="$OUT_DIR/jtag_axi_inventory.tcl"
+LOG="$OUT_DIR/jtag_axi_inventory.txt"
+
+mkdir -p "$OUT_DIR"
+
+cat > "$TCL" <<'TCL'
+set status 0
+puts "Kria JTAG-AXI inventory"
+puts "timestamp_clock_seconds=[clock seconds]"
+
+if {[catch {
+    open_hw_manager
+    connect_hw_server
+    set targets [get_hw_targets *]
+    puts "targets_count=[llength $targets]"
+    foreach target $targets {
+        puts "target=$target"
+        if {[catch {open_hw_target $target} err]} {
+            puts "open_target_error=$err"
+            continue
+        }
+
+        set devices [get_hw_devices *]
+        puts "devices_count=[llength $devices]"
+        foreach dev $devices {
+            set part ""
+            set program_file ""
+            catch {set part [get_property PART $dev]}
+            catch {set program_file [get_property PROGRAM.FILE $dev]}
+            puts "device=$dev part=$part program_file=$program_file"
+        }
+
+        if {[catch {set axis [get_hw_axis *]} err]} {
+            puts "hw_axis_error=$err"
+        } else {
+            puts "hw_axis_count=[llength $axis]"
+            foreach axi $axis {
+                puts "hw_axis=$axi"
+            }
+        }
+
+        catch {close_hw_target}
+    }
+    disconnect_hw_server
+    close_hw_manager
+} err]} {
+    puts "inventory_error=$err"
+    set status 1
+}
+exit $status
+TCL
+
+vivado -mode batch -source "$TCL" 2>&1 | tee "$LOG"
+
+if grep -q "hw_axis_count=0" "$LOG"; then
+    echo "JTAG_AXI_STATUS=blocked_no_hw_axi"
+elif grep -q "hw_axis=" "$LOG"; then
+    echo "JTAG_AXI_STATUS=available"
+else
+    echo "JTAG_AXI_STATUS=unknown"
+fi

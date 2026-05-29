@@ -1,0 +1,242 @@
+# Ed25519 Scalar Arithmetic modulo L (RFC 8032)
+#
+# L = 2^252 + 27742317777372353535851937790883648493
+# In hex: L = 0x1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed
+#
+# Provides sc_reduce (64-byte -> 32-byte mod L) and sc_muladd (a*b+c mod L).
+# Scalars are represented as arrays of 8 u32 limbs in little-endian order.
+# For 64-byte (512-bit) intermediates, 16 u32 limbs are used.
+#
+# No imports from ed25519_ops.spl — this file is standalone except for
+# the std.crypto types needed by callers.
+
+# L as 8 u32 limbs (little-endian)
+fn _sc_L() -> [u32]:
+    """Return the group order L as 8 u32 limbs (little-endian)."""
+    var l: [u32] = []
+    l.push(0x5cf5d3ed)  # limb 0 (lowest)
+    l.push(0x5812631a)  # limb 1
+    l.push(0xa2f79cd6)  # limb 2
+    l.push(0x14def9de)  # limb 3
+    l.push(0x00000000)  # limb 4
+    l.push(0x00000000)  # limb 5
+    l.push(0x00000000)  # limb 6
+    l.push(0x10000000)  # limb 7 (bit 252)
+    l
+
+fn _bytes_to_limbs32(b: [u8], count: u64) -> [u32]:
+    """Convert byte array to u32 limbs (little-endian), reading 'count' bytes."""
+    var limbs: [u32] = []
+    var i: u64 = 0
+    while i < count:
+        val idx = i * 4
+        var val_u32: u32 = 0
+        if idx < b.len():
+            val_u32 = val_u32 | b[idx].to_u32()
+        if (idx + 1) < b.len():
+            val_u32 = val_u32 | (b[idx + 1].to_u32() << 8)
+        if (idx + 2) < b.len():
+            val_u32 = val_u32 | (b[idx + 2].to_u32() << 16)
+        if (idx + 3) < b.len():
+            val_u32 = val_u32 | (b[idx + 3].to_u32() << 24)
+        limbs.push(val_u32)
+        i = i + 1
+    limbs
+
+fn _limbs32_to_bytes(limbs: [u32], byte_count: u64) -> [u8]:
+    """Convert u32 limbs (little-endian) to byte array."""
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < byte_count:
+        val limb_idx = i / 4
+        val byte_idx = i % 4
+        var byte_val: u8 = 0
+        if limb_idx < limbs.len():
+            byte_val = ((limbs[limb_idx].to_u64() >> (byte_idx * 8)) & 0xFF).to_u8()
+        result.push(byte_val)
+        i = i + 1
+    result
+
+fn _sc_sub_L(a: [u32]) -> [u32]:
+    """Subtract L from a (8 limbs). Returns result and sets borrow.
+    If borrow is set, a < L so the subtraction underflowed.
+    Returns a pair: (result_limbs, borrow).
+    We encode this as 9 limbs where limb[8] is the borrow flag.
+    """
+    val l = _sc_L()
+    var result: [u32] = []
+    var borrow: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        val ai: u64 = a[i].to_u64()
+        val li: u64 = l[i].to_u64()
+        val diff: u64 = ai - li - borrow
+        result.push((diff & 0xFFFFFFFF).to_u32())
+        # Borrow if diff underflowed (bit 32 set in two's complement)
+        if ai < (li + borrow):
+            borrow = 1
+        else:
+            borrow = 0
+        i = i + 1
+    # Append borrow flag as 9th limb
+    result.push(borrow.to_u32())
+    result
+
+fn sc_reduce(s: [u8]) -> [u8]:
+    """Reduce a 64-byte scalar modulo L to 32 bytes.
+
+    Input: 64 bytes (512 bits), output: 32 bytes (< L).
+    Uses schoolbook reduction by repeatedly subtracting L * 2^k.
+    """
+    # Load 64 bytes into 16 u32 limbs
+    var limbs = _bytes_to_limbs32(s, 16)
+
+    # Barrett-like reduction: we reduce from the top down.
+    # L ~ 2^252, so we need to reduce the upper portion.
+    #
+    # Simple approach: interpret as a big number, then do schoolbook
+    # modular reduction. We'll use the fact that for any value v < 2^512,
+    # we can reduce mod L by repeated subtraction.
+    #
+    # More efficient: split into low 252 bits and high bits, multiply high
+    # part by appropriate constant, and reduce.
+    #
+    # For simplicity, we use the classic Barrett reduction approach:
+    # q = floor(x / L), r = x - q * L
+    #
+    # We implement a simpler iterative approach since this is not
+    # performance-critical (called once per sign/verify).
+
+    # Convert to a wide representation and reduce step by step.
+    # Process from the top: for each bit from 511 down to 252,
+    # if the bit is set, subtract L shifted to that position.
+
+    # We'll work with 16 u32 limbs (512 bits)
+    var bit: u64 = 511
+    val l = _sc_L()
+
+    while bit >= 252:
+        # Check if bit is set
+        val limb_idx = bit / 32
+        val bit_idx = bit % 32
+        val is_set = (limbs[limb_idx].to_u64() >> bit_idx) & 1
+
+        if is_set == 1:
+            # Subtract L << (bit - 252) from limbs
+            val shift = bit - 252
+            val word_shift = shift / 32
+            val bit_shift = shift % 32
+
+            var borrow: u64 = 0
+            var j: u64 = 0
+            while j < 9:
+                val target = j + word_shift
+                if target < 16:
+                    # Get the shifted L limb value
+                    var l_val: u64 = 0
+                    if j < 8:
+                        l_val = l[j].to_u64() << bit_shift
+                    # Add carry from previous limb shift
+                    if bit_shift > 0:
+                        if j > 0:
+                            if (j - 1) < 8:
+                                l_val = l_val | (l[j - 1].to_u64() >> (32 - bit_shift))
+                    val cur: u64 = limbs[target].to_u64()
+                    val sub_val = (l_val & 0xFFFFFFFF) + borrow
+                    if cur >= sub_val:
+                        limbs[target] = (cur - sub_val).to_u32()
+                        borrow = 0
+                    else:
+                        limbs[target] = ((cur + 0x100000000) - sub_val).to_u32()
+                        borrow = 1
+                j = j + 1
+
+        if bit == 252:
+            # Prevent underflow when decrementing at 252
+            break
+        bit = bit - 1
+
+    # Now limbs[0..7] holds a value < 2*L (approximately).
+    # Do a final conditional subtraction.
+    var low8: [u32] = []
+    var k: u64 = 0
+    while k < 8:
+        low8.push(limbs[k])
+        k = k + 1
+
+    val sub_result = _sc_sub_L(low8)
+    # If borrow (limb[8]) is 0, the subtraction was valid (a >= L), use the result
+    # If borrow is 1, a < L, keep the original
+    if sub_result[8] == 0:
+        # a >= L, use subtracted result
+        var final_limbs: [u32] = []
+        k = 0
+        while k < 8:
+            final_limbs.push(sub_result[k])
+            k = k + 1
+        return _limbs32_to_bytes(final_limbs, 32)
+
+    _limbs32_to_bytes(low8, 32)
+
+fn sc_muladd(a_bytes: [u8], b_bytes: [u8], c_bytes: [u8]) -> [u8]:
+    """Compute (a * b + c) mod L, where a, b, c are 32-byte scalars.
+
+    Returns 32-byte result.
+    Uses schoolbook multiplication to produce a 64-byte product, adds c,
+    then reduces modulo L.
+    """
+    # Load a, b, c as 8 u32 limbs each
+    val a = _bytes_to_limbs32(a_bytes, 8)
+    val b = _bytes_to_limbs32(b_bytes, 8)
+    val c = _bytes_to_limbs32(c_bytes, 8)
+
+    # Schoolbook multiply a * b into 16 u64 accumulators
+    var product: [u64] = []
+    var i: u64 = 0
+    while i < 16:
+        product.push(0)
+        i = i + 1
+
+    i = 0
+    while i < 8:
+        var carry: u64 = 0
+        var j: u64 = 0
+        while j < 8:
+            val idx = i + j
+            val mul_val: u64 = a[i].to_u64() * b[j].to_u64()
+            val sum: u64 = product[idx] + mul_val + carry
+            product[idx] = sum & 0xFFFFFFFF
+            carry = sum >> 32
+            j = j + 1
+        product[i + 8] = product[i + 8] + carry
+        i = i + 1
+
+    # Add c to the product
+    var add_carry: u64 = 0
+    i = 0
+    while i < 8:
+        val sum: u64 = product[i] + c[i].to_u64() + add_carry
+        product[i] = sum & 0xFFFFFFFF
+        add_carry = sum >> 32
+        i = i + 1
+    # Propagate carry through upper limbs
+    while add_carry > 0:
+        if i >= 16:
+            break
+        val sum: u64 = product[i] + add_carry
+        product[i] = sum & 0xFFFFFFFF
+        add_carry = sum >> 32
+        i = i + 1
+
+    # Convert product to 64 bytes and reduce mod L
+    var prod_bytes: [u8] = []
+    i = 0
+    while i < 16:
+        val limb = product[i]
+        prod_bytes.push((limb & 0xFF).to_u8())
+        prod_bytes.push(((limb >> 8) & 0xFF).to_u8())
+        prod_bytes.push(((limb >> 16) & 0xFF).to_u8())
+        prod_bytes.push(((limb >> 24) & 0xFF).to_u8())
+        i = i + 1
+
+    sc_reduce(prod_bytes)

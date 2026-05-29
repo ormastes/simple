@@ -1,0 +1,65 @@
+# @cover src/lib/nogc_async_mut/container/pressure_vessel.spl
+
+use std.spec
+use std.nogc_async_mut.container.pressure_vessel.{
+    pressure_vessel_create,
+    pressure_vessel_exec,
+    pressure_vessel_destroy,
+    pressure_vessel_has_nvfs,
+    pressure_vessel_namespace_profile
+}
+
+describe "Pressure-vessel container":
+    it "create with valid rootfs returns is_ok=true":
+        val result = pressure_vessel_create("/var/lib/pressure-vessel/runtime", true)
+        expect result.is_ok == true
+        expect result.container_id > 0
+        expect result.status == "created"
+
+    it "create with empty rootfs returns error":
+        val result = pressure_vessel_create("", true)
+        expect result.is_ok == false
+        expect result.error == "missing-rootfs-path"
+
+    it "has_nvfs returns true when NVFS backend requested":
+        val result = pressure_vessel_create("/rootfs", true)
+        expect pressure_vessel_has_nvfs(result.container_id) == true
+
+    it "has_nvfs returns false when NVFS backend not requested":
+        val result = pressure_vessel_create("/rootfs", false)
+        expect pressure_vessel_has_nvfs(result.container_id) == false
+
+    it "has_nvfs returns false for invalid container":
+        expect pressure_vessel_has_nvfs(0) == false
+
+    it "namespace_profile contains all five facets":
+        val result = pressure_vessel_create("/rootfs", true)
+        val profile = pressure_vessel_namespace_profile(result.container_id)
+        expect (profile).contains("ns-pid")
+        expect (profile).contains("ns-fs")
+        expect (profile).contains("ns-ipc")
+        expect (profile).contains("ns-net")
+        expect (profile).contains("ns-capability")
+
+    it "exec with valid command returns exec-ready status":
+        val result = pressure_vessel_create("/rootfs", true)
+        val exec = pressure_vessel_exec(result.container_id, "wine64 hl2.exe")
+        expect exec.is_ok == true
+        expect exec.status == "exec-ready"
+
+    it "exec with empty command returns error":
+        val result = pressure_vessel_create("/rootfs", true)
+        val exec = pressure_vessel_exec(result.container_id, "")
+        expect exec.is_ok == false
+        expect exec.error == "missing-command"
+
+    it "exec on invalid container returns error":
+        val exec = pressure_vessel_exec(0, "wine64 app.exe")
+        expect exec.is_ok == false
+
+    it "destroy makes container unreachable":
+        val result = pressure_vessel_create("/rootfs", true)
+        pressure_vessel_destroy(result.container_id)
+        expect pressure_vessel_has_nvfs(result.container_id) == false
+        val profile = pressure_vessel_namespace_profile(result.container_id)
+        expect profile == ""

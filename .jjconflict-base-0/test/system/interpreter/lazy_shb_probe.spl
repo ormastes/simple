@@ -1,0 +1,77 @@
+use std.cli.cli_util.{get_cli_args}
+
+extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+
+fn find_simple_binary() -> text:
+    if rt_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    "bin/simple"
+
+fn pass_ok() -> i64:
+    print "ok"
+    0
+
+fn fail(message: text, stdout: text, stderr: text) -> i64:
+    print "fail: {message}"
+    if stdout != "":
+        print stdout
+    if stderr != "":
+        print stderr
+    1
+
+fn run_simple(args: [text]) -> (text, text, i64):
+    rt_process_run(find_simple_binary(), args)
+
+fn probe_parse_only() -> i64:
+    val (stdout, stderr, code) = run_simple(["check", "test/system/interpreter/lazy_shb_probe_alpha.spl"])
+    if code != 0:
+        return fail("parse_only check failed", stdout, stderr)
+    pass_ok()
+
+fn probe_register_only() -> i64:
+    val (stdout, stderr, code) = run_simple(["run", "test/system/interpreter/lazy_shb_probe_alpha_main.spl"])
+    if code != 0:
+        return fail("register_only import failed", stdout, stderr)
+    if not stdout.contains("alpha=1"):
+        return fail("register_only output missing alpha", stdout, stderr)
+    pass_ok()
+
+fn probe_direct_load() -> i64:
+    val (stdout, stderr, code) = run_simple(["run", "test/system/interpreter/lazy_shb_probe_alpha_main.spl"])
+    if code != 0:
+        return fail("direct_load import failed", stdout, stderr)
+    if not stdout.contains("alpha=1"):
+        return fail("direct_load output missing alpha", stdout, stderr)
+    pass_ok()
+
+fn probe_wildcard_filter() -> i64:
+    val (stdout, stderr, code) = run_simple(["run", "test/system/interpreter/lazy_shb_probe_beta_main.spl"])
+    if code != 0:
+        return fail("wildcard filter import failed", stdout, stderr)
+    if not stdout.contains("beta=2"):
+        return fail("wildcard filter output missing beta", stdout, stderr)
+    if stdout.contains("alpha=1"):
+        return fail("wildcard filter loaded unrelated alpha", stdout, stderr)
+    pass_ok()
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() == 0:
+        return fail("missing command", "", "")
+
+    val command = args[0]
+    if command == "parse_only":
+        return probe_parse_only()
+    if command == "register_only":
+        return probe_register_only()
+    if command == "direct_load":
+        return probe_direct_load()
+    if command == "wildcard_filter":
+        return probe_wildcard_filter()
+    if command == "circular_wildcard":
+        return fail("circular lazy wildcard imports are not supported", "", "")
+
+    fail("unknown command {command}", "", "")

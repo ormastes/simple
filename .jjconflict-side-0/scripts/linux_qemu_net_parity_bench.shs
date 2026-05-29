@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+LINUX_QEMU_IMAGE="${LINUX_QEMU_IMAGE:-}"
+LINUX_QEMU_KERNEL="${LINUX_QEMU_KERNEL:-}"
+LINUX_QEMU_SSH_USER="${LINUX_QEMU_SSH_USER:-ubuntu}"
+LINUX_QEMU_SSH_PORT="${LINUX_QEMU_SSH_PORT:-22922}"
+LINUX_QEMU_MEM="${LINUX_QEMU_MEM:-1024M}"
+LINUX_QEMU_CPUS="${LINUX_QEMU_CPUS:-2}"
+LINUX_QEMU_TIMEOUT="${LINUX_QEMU_TIMEOUT:-120}"
+LINUX_QEMU_DISK="${LINUX_QEMU_DISK:-virtio}"
+LINUX_QEMU_ACCEL="${LINUX_QEMU_ACCEL:-kvm:tcg}"
+LINUX_QEMU_WORKDIR="${LINUX_QEMU_WORKDIR:-/tmp/simple-net-parity}"
+NET_PARITY_ITERS="${NET_PARITY_ITERS:-5000}"
+NET_PARITY_PAYLOAD="${NET_PARITY_PAYLOAD:-1024}"
+NET_PARITY_PORT="${NET_PARITY_PORT:-39091}"
+OUT_DIR="$ROOT/build/perf/linux_qemu_net_parity"
+SERIAL_LOG="$OUT_DIR/serial.log"
+
+usage() {
+    cat <<'USAGE'
+Usage:
+  LINUX_QEMU_IMAGE=/path/to/linux.qcow2 scripts/linux_qemu_net_parity_bench.shs
+
+Optional environment:
+  LINUX_QEMU_KERNEL=/path/to/bzImage   Boot with explicit kernel instead of disk bootloader
+  LINUX_QEMU_SSH_USER=ubuntu          SSH user inside the guest
+  LINUX_QEMU_SSH_PORT=22922           Host forwarded SSH port
+  LINUX_QEMU_MEM=1024M
+  LINUX_QEMU_CPUS=2
+  LINUX_QEMU_DISK=virtio|nvme         Disk attachment mode
+  LINUX_QEMU_ACCEL=kvm:tcg            QEMU accelerator list
+  NET_PARITY_ITERS=5000
+  NET_PARITY_PAYLOAD=1024
+
+The guest must already have SSH enabled plus gcc, rustc, bash, and a working
+Simple binary path copied by this script from the current workspace. No guest
+image is downloaded by this harness.
+USAGE
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    usage
+    exit 0
+fi
+
+if [[ -z "$LINUX_QEMU_IMAGE" ]]; then
+    echo "error: set LINUX_QEMU_IMAGE to an existing Linux qcow2/raw disk image" >&2
+    usage >&2
+    exit 2
+fi
+if [[ ! -f "$LINUX_QEMU_IMAGE" ]]; then
+    echo "error: LINUX_QEMU_IMAGE not found: $LINUX_QEMU_IMAGE" >&2
+    exit 2
+fi
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    echo "error: qemu-system-x86_64 not found in PATH" >&2
+    exit 2
+fi
+if ! command -v ssh >/dev/null 2>&1; then
+    echo "error: ssh not found in PATH" >&2
+    exit 2
+fi
+if ! command -v scp >/dev/null 2>&1; then
+    echo "error: scp not found in PATH" >&2
+    exit 2
+fi
+case "$LINUX_QEMU_DISK" in
+    virtio|nvme) ;;
+    *)
+        echo "error: LINUX_QEMU_DISK must be 'virtio' or 'nvme'" >&2
+        exit 2
+        ;;
+esac
+
+mkdir -p "$OUT_DIR"
+rm -f "$SERIAL_LOG" "$OUT_DIR"/guest.out
+
+QEMU_PID=""
+cleanup() {
+    if [[ -n "$QEMU_PID" ]]; then
+        kill "$QEMU_PID" 2>/dev/null || true
+        wait "$QEMU_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+qemu_args=(
+    -machine "q35,accel=${LINUX_QEMU_ACCEL}"
+    -m "$LINUX_QEMU_MEM"
+    -smp "$LINUX_QEMU_CPUS"
+    -nographic
+    -netdev "user,id=net0,hostfwd=tcp::${LINUX_QEMU_SSH_PORT}-:22,hostfwd=tcp::${NET_PARITY_PORT}-:${NET_PARITY_PORT}"
+    -device virtio-net-pci,netdev=net0
+    -serial "file:$SERIAL_LOG"
+)
+if [[ "$LINUX_QEMU_DISK" == "nvme" ]]; then
+    qemu_args+=(
+        -drive "file=$LINUX_QEMU_IMAGE,if=none,id=linuxdisk,format=qcow2"
+        -device "nvme,serial=simple-linux-netbench,drive=linuxdisk"
+    )
+else
+    qemu_args+=(-drive "file=$LINUX_QEMU_IMAGE,if=virtio,format=qcow2")
+fi
+if [[ -n "$LINUX_QEMU_KERNEL" ]]; then
+    if [[ ! -f "$LINUX_QEMU_KERNEL" ]]; then
+        echo "error: LINUX_QEMU_KERNEL not found: $LINUX_QEMU_KERNEL" >&2
+        exit 2
+    fi
+    qemu_args+=(-kernel "$LINUX_QEMU_KERNEL" -append "root=/dev/vda console=ttyS0")
+fi
+
+echo "[1/5] Launching Linux QEMU guest with virtio-net-pci..."
+qemu-system-x86_64 "${qemu_args[@]}" </dev/null &
+QEMU_PID=$!
+echo "  QEMU PID: $QEMU_PID"
+
+ssh_base=(
+    ssh
+    -p "$LINUX_QEMU_SSH_PORT"
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o ConnectTimeout=3
+    "${LINUX_QEMU_SSH_USER}@127.0.0.1"
+)
+
+echo "[2/5] Waiting for SSH..."
+deadline=$((SECONDS + LINUX_QEMU_TIMEOUT))
+last_ssh_error="$OUT_DIR/ssh-last.err"
+rm -f "$last_ssh_error"
+until nc -z 127.0.0.1 "$LINUX_QEMU_SSH_PORT" >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+        echo "error: SSH TCP port did not open within ${LINUX_QEMU_TIMEOUT}s" >&2
+        echo "serial log: $SERIAL_LOG" >&2
+        exit 1
+    fi
+    sleep 2
+done
+until "${ssh_base[@]}" 'printf ready' >/dev/null 2>"$last_ssh_error"; do
+    if (( SECONDS >= deadline )); then
+        echo "error: SSH authentication/command failed within ${LINUX_QEMU_TIMEOUT}s" >&2
+        if [[ -s "$last_ssh_error" ]]; then
+            tail -n 20 "$last_ssh_error" >&2
+        fi
+        echo "serial log: $SERIAL_LOG" >&2
+        exit 1
+    fi
+    sleep 2
+done
+
+echo "[3/5] Copying benchmark inputs..."
+"${ssh_base[@]}" "rm -rf '$LINUX_QEMU_WORKDIR' && mkdir -p '$LINUX_QEMU_WORKDIR/test/perf' '$LINUX_QEMU_WORKDIR/bin' '$LINUX_QEMU_WORKDIR/src'"
+scp -P "$LINUX_QEMU_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r \
+    "$ROOT/test/perf/net_parity" "${LINUX_QEMU_SSH_USER}@127.0.0.1:$LINUX_QEMU_WORKDIR/test/perf/" >/dev/null
+scp -P "$LINUX_QEMU_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    "$ROOT/bin/simple" "${LINUX_QEMU_SSH_USER}@127.0.0.1:$LINUX_QEMU_WORKDIR/bin/simple" >/dev/null
+scp -P "$LINUX_QEMU_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r \
+    "$ROOT/src/lib" "$LINUX_QEMU_SSH_USER@127.0.0.1:$LINUX_QEMU_WORKDIR/src/" >/dev/null
+
+echo "[4/5] Running guest net parity benchmark..."
+"${ssh_base[@]}" \
+    "cd '$LINUX_QEMU_WORKDIR' && chmod +x bin/simple test/perf/net_parity/run_net_parity_benchmarks.shs && NET_PARITY_ITERS='$NET_PARITY_ITERS' NET_PARITY_PAYLOAD='$NET_PARITY_PAYLOAD' NET_PARITY_PORT='$NET_PARITY_PORT' SIMPLE_BIN='\$PWD/bin/simple' bash test/perf/net_parity/run_net_parity_benchmarks.shs" \
+    | tee "$OUT_DIR/guest.out"
+
+echo "[5/5] Linux QEMU net parity complete"

@@ -1,0 +1,126 @@
+"""
+log-lib-drivers Phase 4 spec — facade level filtering & per-subsys filter.
+
+Covers AC-3 (unified facade with swappable backend; level can be changed
+at runtime per-subsystem) and AC-6a (facade level filter).
+
+Status: RED PHASE. Phase 5 has not implemented `std.log.facade` yet.
+These tests will fail to import / fail to resolve names until Phase 5
+lands the noalloc facade described in `.sstack/log-lib-drivers/state.md`
+section 3-arch §B-D-H.
+
+Phase 3 contract (locked):
+  - Levels: TRACE=0, DEBUG=1, INFO=2, WARN=3, ERROR=4, FATAL=5, OFF=6
+  - Per-subsys filter: subsys IDs are integer constants (SUBSYS_*),
+    g_subsys_level[id] = 0xFF means "fall through to global"
+  - EnvFilter syntax: "net=debug,vfs=warn,*=info" — `*` sets global
+  - effective_level(subsys) returns per-subsys override OR global
+"""
+
+use std.spec
+use std.log.{
+    LOG_TRACE, LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR, LOG_FATAL, LOG_OFF,
+    log_set_level, log_set_subsys_level, log_init_from_config,
+    log_register_backend, log_remove_backend,
+    SUBSYS_NET, SUBSYS_VFS, SUBSYS_KERN
+}
+
+# ----------------------------------------------------------------------------
+# Helper: a tiny in-RAM RingBufferBackend for tests.
+# Phase 5 must provide std.log.test_backends.RingBufferBackend (or this
+# spec lives next to it). For the red phase, we declare the expected
+# surface as comments — the import above will fail until Phase 5 lands it.
+# ----------------------------------------------------------------------------
+
+describe "log facade — level enum sanity (AC-6a)":
+
+    it "AC-6a: level enum numeric values are TRACE..OFF = 0..6":
+        expect(LOG_TRACE).to_equal(0)
+        expect(LOG_DEBUG).to_equal(1)
+        expect(LOG_INFO).to_equal(2)
+        expect(LOG_WARN).to_equal(3)
+        expect(LOG_ERROR).to_equal(4)
+        expect(LOG_FATAL).to_equal(5)
+        expect(LOG_OFF).to_equal(6)
+
+    it "AC-6a: lower numeric value = more verbose (TRACE most, OFF silent)":
+        expect(LOG_TRACE).to_be_less_than(LOG_DEBUG)
+        expect(LOG_DEBUG).to_be_less_than(LOG_INFO)
+        expect(LOG_INFO).to_be_less_than(LOG_WARN)
+        expect(LOG_WARN).to_be_less_than(LOG_ERROR)
+        expect(LOG_ERROR).to_be_less_than(LOG_FATAL)
+        expect(LOG_FATAL).to_be_less_than(LOG_OFF)
+
+
+describe "log facade — global level filter (AC-3, AC-6a)":
+
+    it "AC-3: log_set_level(WARN) drops INFO emissions":
+        # Arrange: register a sink we can inspect.
+        val sink = ring_backend_new(64)
+        val id = log_register_backend(sink.ops)
+        log_set_level(LOG_WARN)
+        ring_backend_clear(sink)
+        # Act
+        log_info(SUBSYS_KERN, "should be filtered")
+        # Assert
+        expect(ring_backend_count(sink)).to_equal(0)
+        log_remove_backend(id)
+
+    it "AC-3: log_set_level(WARN) admits WARN+ emissions":
+        val sink = ring_backend_new(64)
+        val id = log_register_backend(sink.ops)
+        log_set_level(LOG_WARN)
+        ring_backend_clear(sink)
+        log_warn(SUBSYS_KERN, "warn should pass")
+        log_error(SUBSYS_KERN, "error should pass")
+        log_fatal(SUBSYS_KERN, "fatal should pass")
+        expect(ring_backend_count(sink)).to_equal(3)
+        log_remove_backend(id)
+
+
+describe "log facade — per-subsystem level filter (AC-3, AC-6a)":
+
+    it "AC-3: log_set_subsys_level(NET, DEBUG) admits NET DEBUG when global=WARN":
+        val sink = ring_backend_new(64)
+        val id = log_register_backend(sink.ops)
+        log_set_level(LOG_WARN)
+        log_set_subsys_level(SUBSYS_NET, LOG_DEBUG)
+        ring_backend_clear(sink)
+        # Act
+        log_debug(SUBSYS_NET, "net debug — should emit (override admits)")
+        log_debug(SUBSYS_VFS, "vfs debug — should be filtered (falls through to WARN)")
+        # Assert
+        expect(ring_backend_count(sink)).to_equal(1)
+        expect(ring_backend_subsys_at(sink, 0)).to_equal(SUBSYS_NET)
+        log_remove_backend(id)
+
+    it "AC-3: per-subsys override only affects that subsys; others fall through":
+        val sink = ring_backend_new(64)
+        val id = log_register_backend(sink.ops)
+        log_set_level(LOG_INFO)
+        log_set_subsys_level(SUBSYS_VFS, LOG_WARN)
+        ring_backend_clear(sink)
+        log_info(SUBSYS_VFS, "vfs info — filtered by override")
+        log_info(SUBSYS_NET, "net info — admitted by global INFO")
+        expect(ring_backend_count(sink)).to_equal(1)
+        expect(ring_backend_subsys_at(sink, 0)).to_equal(SUBSYS_NET)
+        log_remove_backend(id)
+
+
+describe "log facade — EnvFilter parser (AC-3)":
+
+    it "AC-3: log_init_from_config('net=debug,vfs=warn,*=info') sets per-subsys + global":
+        # The parser is locked in Phase 3 §D.
+        log_init_from_config("net=debug,vfs=warn,*=info")
+        expect(effective_level(SUBSYS_NET)).to_equal(LOG_DEBUG)
+        expect(effective_level(SUBSYS_VFS)).to_equal(LOG_WARN)
+        expect(effective_level(SUBSYS_KERN)).to_equal(LOG_INFO)   # falls through to global
+
+    it "AC-3: log_init_from_config('') leaves defaults (global=INFO)":
+        log_init_from_config("")
+        expect(effective_level(SUBSYS_KERN)).to_equal(LOG_INFO)
+
+    it "AC-3: unknown subsys names are skipped (do not crash)":
+        # Phase 3 §D: unknown name → 1 warn line, parser keeps going.
+        log_init_from_config("doesnotexist=debug,*=warn")
+        expect(effective_level(SUBSYS_KERN)).to_equal(LOG_WARN)

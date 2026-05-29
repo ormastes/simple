@@ -1,0 +1,140 @@
+# Session-scoped widget registry.
+
+use common.ui.widget.{WidgetRecord, WidgetProp, WidgetNode, encode_child_ids, decode_child_ids, default_widget_record}
+
+class WidgetStore:
+    registry: [WidgetRecord]
+    props: [WidgetProp]
+
+    static fn new() -> WidgetStore:
+        return WidgetStore(registry: [], props: [])
+
+fn new_widget_store() -> WidgetStore:
+    return WidgetStore.new()
+
+impl WidgetStore:
+    me upsert_record(record: WidgetRecord):
+        var updated: [WidgetRecord] = []
+        var replaced = false
+        for existing in self.registry:
+            if existing.id == record.id:
+                updated = updated + [record]
+                replaced = true
+            else:
+                updated = updated + [existing]
+        if not replaced:
+            updated = updated + [record]
+        self.registry = updated
+
+    fn get_record(id: text) -> WidgetRecord?:
+        for record in self.registry:
+            if record.id == id:
+                return record
+        return nil
+
+    fn require_record(id: text) -> WidgetRecord:
+        val found = self.get_record(id)
+        if found != nil:
+            return found
+        val fallback = default_widget_record(id, "panel")
+        self.upsert_record(fallback)
+        return fallback
+
+    fn record_count() -> i32:
+        return self.registry.len()
+
+    fn get_prop(node_id: text, key: text) -> text:
+        for prop in self.props:
+            if prop.node_id == node_id and prop.key == key:
+                return prop.value
+        return ""
+
+    me set_prop(node_id: text, key: text, value: text):
+        var updated: [WidgetProp] = []
+        var replaced = false
+        for prop in self.props:
+            if prop.node_id == node_id and prop.key == key:
+                updated = updated + [WidgetProp(node_id: node_id, key: key, value: value)]
+                replaced = true
+            else:
+                updated = updated + [prop]
+        if not replaced:
+            updated = updated + [WidgetProp(node_id: node_id, key: key, value: value)]
+        self.props = updated
+
+    fn all_props() -> [WidgetProp]:
+        return self.props
+
+    fn prop_count() -> i32:
+        return self.props.len()
+
+    fn get_child_ids(node_id: text) -> [text]:
+        return decode_child_ids(self.get_prop(node_id, "ui_children"))
+
+    me register_child(parent_id: text, child_id: text):
+        val existing = decode_child_ids(self.get_prop(parent_id, "ui_children"))
+        for current_id in existing:
+            if current_id == child_id:
+                return
+        self.set_prop(parent_id, "ui_children", encode_child_ids(existing + [child_id]))
+
+    fn get_node(id: text) -> WidgetNode?:
+        val record = self.get_record(id)
+        if record == nil:
+            return nil
+        return WidgetNode(id: id)
+
+impl WidgetNode:
+    fn get_prop_from(store: WidgetStore, key: text) -> text:
+        return store.get_prop(self.id, key)
+
+    fn set_prop_in(store: WidgetStore, key: text, value: text) -> WidgetNode:
+        store.set_prop(self.id, key, value)
+        return self
+
+    fn has_prop_in(store: WidgetStore, key: text) -> bool:
+        return store.get_prop(self.id, key) != ""
+
+    fn prop_keys_from(store: WidgetStore) -> [text]:
+        var keys: [text] = []
+        for prop in store.all_props():
+            if prop.node_id == self.id:
+                keys = keys + [prop.key]
+        return keys
+
+    fn children_from(store: WidgetStore) -> [WidgetNode]:
+        var result: [WidgetNode] = []
+        for id in store.get_child_ids(self.id):
+            val node = store.get_node(id)
+            if node != nil:
+                result = result + [node]
+        return result
+
+    fn add_child_in(store: WidgetStore, child: WidgetNode) -> WidgetNode:
+        store.register_child(self.id, child.id)
+        return self
+
+    fn kind_name_from(store: WidgetStore) -> text:
+        return store.require_record(self.id).kind
+
+    fn layout_name_from(store: WidgetStore) -> text:
+        return store.require_record(self.id).layout
+
+    fn is_visible_from(store: WidgetStore) -> bool:
+        return store.require_record(self.id).visible
+
+    fn find_by_id_in(store: WidgetStore, target_id: text) -> WidgetNode?:
+        if self.id == target_id:
+            return self
+        for child in self.children_from(store):
+            val found = child.find_by_id_in(store, target_id)
+            if found != nil:
+                return found
+        return nil
+
+    fn collect_ids_from(store: WidgetStore) -> [text]:
+        var ids: [text] = [self.id]
+        for child in self.children_from(store):
+            for cid in child.collect_ids_from(store):
+                ids = ids + [cid]
+        return ids

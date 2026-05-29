@@ -1,0 +1,487 @@
+# Path effects — corner rounding + discrete jitter.
+#
+# CornerPathEffect (mirrors SkCornerPathEffect): rounds each sharp corner of
+# an input path into an arc. Corner radius controls how aggressive the rounding is.
+#
+# DiscretePathEffect (mirrors SkDiscretePathEffect): breaks the path into
+# short segments of `length`, displaces each segment endpoint by a
+# pseudo-random offset up to `deviation`. Used for hand-drawn/sketchy effects.
+
+use std.skia.entity.path.{SkPath, SkPathSegment, SkPathVerb, sk_path_new}
+use std.skia.entity.geometry.{SkPoint}
+
+# ============================================================================
+# Parameter classes
+# ============================================================================
+
+class CornerPathEffectParams:
+    radius: f64
+
+class DiscretePathEffectParams:
+    length: f64
+    deviation: f64
+    seed: i64
+
+fn corner_path_effect_params_new(radius: f64) -> CornerPathEffectParams:
+    CornerPathEffectParams(radius: radius)
+
+fn discrete_path_effect_params_new(length: f64, deviation: f64, seed: i64) -> DiscretePathEffectParams:
+    DiscretePathEffectParams(length: length, deviation: deviation, seed: seed)
+
+# ============================================================================
+# Private helpers
+# ============================================================================
+
+# Newton 8-iteration sqrt for f64.
+fn _sqrt_newton(x: f64) -> f64:
+    if x <= 0.0:
+        return 0.0
+    var g = x
+    if g > 1.0:
+        g = x * 0.5
+    var i = 0
+    while i < 8:
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    g
+
+fn _normalize(x: f64, y: f64) -> (f64, f64):
+    val len = _sqrt_newton(x * x + y * y)
+    if len <= 0.0:
+        return (0.0, 0.0)
+    (x / len, y / len)
+
+fn _perpendicular(x: f64, y: f64) -> (f64, f64):
+    # Rotate 90 degrees CCW.
+    (0.0 - y, x)
+
+# Linear congruential generator — Glibc-style constants.
+# state' = (state * 1103515245 + 12345) mod (1 << 31)
+fn _lcg_next(state: i64) -> i64:
+    val m: i64 = 2147483648   # 1 << 31
+    val a: i64 = 1103515245
+    val c: i64 = 12345
+    var s = state * a + c
+    s = s % m
+    if s < 0:
+        s = s + m
+    s
+
+# Map LCG state to a float in [-1.0, 1.0].
+fn _lcg_to_unit(state: i64) -> f64:
+    val m: i64 = 2147483648
+    val f = (state as f64) / (m as f64)
+    # f is in [0, 1); map to [-1, 1].
+    f * 2.0 - 1.0
+
+# ============================================================================
+# Path flattening
+# ============================================================================
+#
+# Walks an SkPath, subdividing curves depth-4 (16 samples) to produce a flat
+# array of (x0, y0, x1, y1) line segments. Contour breaks (Move verbs that
+# do not match the prior endpoint) appear as gaps — callers use the absence
+# of shared endpoints to detect contour boundaries.
+
+fn _flatten_path(input: SkPath) -> [(f64, f64, f64, f64)]:
+    var out: [(f64, f64, f64, f64)] = []
+    var cur_x = 0.0
+    var cur_y = 0.0
+    var start_x = 0.0
+    var start_y = 0.0
+    var has_cur = false
+    var i = 0
+    while i < input.segments.length():
+        val opt = input.segments.at(i)
+        match opt:
+            Some(seg):
+                match seg.verb:
+                    SkPathVerb.Move:
+                        val p_opt = seg.pts.at(0)
+                        match p_opt:
+                            Some(p):
+                                cur_x = p.x
+                                cur_y = p.y
+                                start_x = p.x
+                                start_y = p.y
+                                has_cur = true
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Line:
+                        val p_opt = seg.pts.at(0)
+                        match p_opt:
+                            Some(p):
+                                if has_cur:
+                                    out.append((cur_x, cur_y, p.x, p.y))
+                                cur_x = p.x
+                                cur_y = p.y
+                                has_cur = true
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Quad:
+                        val p1_opt = seg.pts.at(0)
+                        val p2_opt = seg.pts.at(1)
+                        match p1_opt:
+                            Some(p1):
+                                match p2_opt:
+                                    Some(p2):
+                                        if has_cur:
+                                            var k = 1
+                                            var px = cur_x
+                                            var py = cur_y
+                                            while k <= 16:
+                                                val t = (k as f64) / 16.0
+                                                val omt = 1.0 - t
+                                                val bx = omt * omt * cur_x + 2.0 * omt * t * p1.x + t * t * p2.x
+                                                val by = omt * omt * cur_y + 2.0 * omt * t * p1.y + t * t * p2.y
+                                                out.append((px, py, bx, by))
+                                                px = bx
+                                                py = by
+                                                k = k + 1
+                                        cur_x = p2.x
+                                        cur_y = p2.y
+                                        has_cur = true
+                                    None:
+                                        pass_do_nothing
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Conic:
+                        val p1_opt = seg.pts.at(0)
+                        val p2_opt = seg.pts.at(1)
+                        match p1_opt:
+                            Some(p1):
+                                match p2_opt:
+                                    Some(p2):
+                                        if has_cur:
+                                            var k = 1
+                                            var px = cur_x
+                                            var py = cur_y
+                                            while k <= 16:
+                                                val t = (k as f64) / 16.0
+                                                val omt = 1.0 - t
+                                                val bx = omt * omt * cur_x + 2.0 * omt * t * p1.x + t * t * p2.x
+                                                val by = omt * omt * cur_y + 2.0 * omt * t * p1.y + t * t * p2.y
+                                                out.append((px, py, bx, by))
+                                                px = bx
+                                                py = by
+                                                k = k + 1
+                                        cur_x = p2.x
+                                        cur_y = p2.y
+                                        has_cur = true
+                                    None:
+                                        pass_do_nothing
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Cubic:
+                        val p1_opt = seg.pts.at(0)
+                        val p2_opt = seg.pts.at(1)
+                        val p3_opt = seg.pts.at(2)
+                        match p1_opt:
+                            Some(p1):
+                                match p2_opt:
+                                    Some(p2):
+                                        match p3_opt:
+                                            Some(p3):
+                                                if has_cur:
+                                                    var k = 1
+                                                    var px = cur_x
+                                                    var py = cur_y
+                                                    while k <= 16:
+                                                        val t = (k as f64) / 16.0
+                                                        val omt = 1.0 - t
+                                                        val b0 = omt * omt * omt
+                                                        val b1 = 3.0 * omt * omt * t
+                                                        val b2 = 3.0 * omt * t * t
+                                                        val b3 = t * t * t
+                                                        val bx = b0 * cur_x + b1 * p1.x + b2 * p2.x + b3 * p3.x
+                                                        val by = b0 * cur_y + b1 * p1.y + b2 * p2.y + b3 * p3.y
+                                                        out.append((px, py, bx, by))
+                                                        px = bx
+                                                        py = by
+                                                        k = k + 1
+                                                cur_x = p3.x
+                                                cur_y = p3.y
+                                                has_cur = true
+                                            None:
+                                                pass_do_nothing
+                                    None:
+                                        pass_do_nothing
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Close:
+                        if has_cur:
+                            out.append((cur_x, cur_y, start_x, start_y))
+                            cur_x = start_x
+                            cur_y = start_y
+            None:
+                pass_do_nothing
+        i = i + 1
+    out
+
+# ============================================================================
+# apply_corner_path_effect
+# ============================================================================
+#
+# For each interior vertex (v_prev -> v -> v_next) we:
+#   1. Compute unit tangents in and out of v.
+#   2. If tangents are collinear (cross ~ 0), leave the corner untouched.
+#   3. Otherwise, pull each tangent back by `radius` to get arc endpoints,
+#      then approximate the turning arc with 5 line segments using a
+#      bisector-based circular interpolation.
+#
+# `radius == 0` short-circuits to the flattened path unchanged.
+
+fn apply_corner_path_effect(input: SkPath, params: CornerPathEffectParams) -> SkPath:
+    val out_empty = sk_path_new()
+    if input.is_empty():
+        return out_empty
+    val segs = _flatten_path(input)
+    val n = segs.length()
+    if n == 0:
+        return out_empty
+    val radius = params.radius
+
+    var out = out_empty
+
+    # Collect the polyline vertex list. A contour is a run of segments whose
+    # endpoints chain — we walk `segs` and emit move_to on the first vertex.
+    if radius <= 0.0:
+        # Just re-emit the flattened polyline.
+        var i = 0
+        var started = false
+        var prev_ex = 0.0
+        var prev_ey = 0.0
+        while i < n:
+            val tup_opt = segs.at(i)
+            match tup_opt:
+                Some(tup):
+                    val x0 = tup.0
+                    val y0 = tup.1
+                    val x1 = tup.2
+                    val y1 = tup.3
+                    if started == false:
+                        out = out.move_to(x0, y0)
+                        out = out.line_to(x1, y1)
+                        started = true
+                    else:
+                        if x0 != prev_ex or y0 != prev_ey:
+                            out = out.move_to(x0, y0)
+                        out = out.line_to(x1, y1)
+                    prev_ex = x1
+                    prev_ey = y1
+                None:
+                    pass_do_nothing
+            i = i + 1
+        return out
+
+    # radius > 0 path. Walk segment pairs.
+    var i = 0
+    var started = false
+    var prev_ex = 0.0
+    var prev_ey = 0.0
+    while i < n:
+        val tup_opt = segs.at(i)
+        match tup_opt:
+            Some(tup):
+                val ax = tup.0
+                val ay = tup.1
+                val bx = tup.2
+                val by = tup.3
+                # Decide whether this segment chains from the previous one.
+                val chained = started and (ax == prev_ex) and (ay == prev_ey)
+                if started == false:
+                    out = out.move_to(ax, ay)
+                    started = true
+                else:
+                    if chained == false:
+                        out = out.move_to(ax, ay)
+
+                # Look at the next segment to see if we have a true interior
+                # corner at b = (bx, by).
+                var has_next = false
+                var cx = 0.0
+                var cy = 0.0
+                if i + 1 < n:
+                    val nxt_opt = segs.at(i + 1)
+                    match nxt_opt:
+                        Some(nxt):
+                            val nx0 = nxt.0
+                            val ny0 = nxt.1
+                            val nx1 = nxt.2
+                            val ny1 = nxt.3
+                            if nx0 == bx and ny0 == by:
+                                has_next = true
+                                cx = nx1
+                                cy = ny1
+                        None:
+                            pass_do_nothing
+
+                if has_next:
+                    # Tangents in (a->b) and out (b->c).
+                    val in_dx = bx - ax
+                    val in_dy = by - ay
+                    val out_dx = cx - bx
+                    val out_dy = cy - by
+                    val in_n = _normalize(in_dx, in_dy)
+                    val out_n = _normalize(out_dx, out_dy)
+                    val in_len = _sqrt_newton(in_dx * in_dx + in_dy * in_dy)
+                    val out_len = _sqrt_newton(out_dx * out_dx + out_dy * out_dy)
+                    # Cross product magnitude — collinearity test.
+                    val cross = in_n.0 * out_n.1 - in_n.1 * out_n.0
+                    val abs_cross = if cross < 0.0: 0.0 - cross else: cross
+                    if abs_cross < 1e-9:
+                        # Collinear — no corner; emit line to b directly.
+                        out = out.line_to(bx, by)
+                    else:
+                        # Effective radius is clipped to half of each adjacent segment
+                        # so we never over-run.
+                        var r = radius
+                        val half_in = in_len * 0.5
+                        val half_out = out_len * 0.5
+                        if r > half_in:
+                            r = half_in
+                        if r > half_out:
+                            r = half_out
+                        # Arc start = b - in_n * r; arc end = b + out_n * r.
+                        val s_x = bx - in_n.0 * r
+                        val s_y = by - in_n.1 * r
+                        val e_x = bx + out_n.0 * r
+                        val e_y = by + out_n.1 * r
+                        # Emit line_to arc start, then 5 arc chords to arc end.
+                        out = out.line_to(s_x, s_y)
+                        # Parametric arc approximation: linearly interpolate
+                        # tangent direction then renormalize, stepping 5 chords
+                        # from s to e through an intermediate control at b.
+                        # Use a simple quadratic Bezier with control = b.
+                        var k = 1
+                        while k <= 5:
+                            val t = (k as f64) / 5.0
+                            val omt = 1.0 - t
+                            val qx = omt * omt * s_x + 2.0 * omt * t * bx + t * t * e_x
+                            val qy = omt * omt * s_y + 2.0 * omt * t * by + t * t * e_y
+                            out = out.line_to(qx, qy)
+                            k = k + 1
+                        # We ended at (e_x, e_y). Advance pen to e.
+                        prev_ex = e_x
+                        prev_ey = e_y
+                        # Mark that the next iteration begins from e, not from
+                        # nxt.0 — we rewrite nxt's effective start to e by
+                        # letting chained==true fall through below.
+                        i = i + 1
+                        # Emit the outgoing segment starting from e to c.
+                        out = out.line_to(cx, cy)
+                        prev_ex = cx
+                        prev_ey = cy
+                else:
+                    out = out.line_to(bx, by)
+                    prev_ex = bx
+                    prev_ey = by
+            None:
+                pass_do_nothing
+        i = i + 1
+    out
+
+# ============================================================================
+# apply_discrete_path_effect
+# ============================================================================
+#
+# Walks the flattened polyline's arc length. Every `length` units we sample
+# the current position, jitter it in the local perpendicular direction by an
+# LCG-driven offset in [-deviation, +deviation], and emit line_to.
+
+fn apply_discrete_path_effect(input: SkPath, params: DiscretePathEffectParams) -> SkPath:
+    val out_empty = sk_path_new()
+    if input.is_empty():
+        return out_empty
+    val segs = _flatten_path(input)
+    val n = segs.length()
+    if n == 0:
+        return out_empty
+    val step = params.length
+    if step <= 0.0:
+        return out_empty
+
+    val deviation = params.deviation
+    var state: i64 = params.seed
+    if state < 0:
+        state = 0 - state
+    if state == 0:
+        state = 1
+
+    var out = out_empty
+    var started = false
+    var acc = 0.0   # distance since last sample
+    var prev_ex = 0.0
+    var prev_ey = 0.0
+
+    var si = 0
+    while si < n:
+        val tup_opt = segs.at(si)
+        match tup_opt:
+            Some(tup):
+                val x0 = tup.0
+                val y0 = tup.1
+                val x1 = tup.2
+                val y1 = tup.3
+                val dx = x1 - x0
+                val dy = y1 - y0
+                val seg_len = _sqrt_newton(dx * dx + dy * dy)
+                # Contour-break detection: if segment's start does not
+                # match previous endpoint (or not started), begin new
+                # subpath at a jittered version of (x0, y0).
+                val new_contour = (started == false) or (x0 != prev_ex) or (y0 != prev_ey)
+                if new_contour:
+                    val dir_n = _normalize(dx, dy)
+                    val perp = _perpendicular(dir_n.0, dir_n.1)
+                    state = _lcg_next(state)
+                    val rnd = _lcg_to_unit(state) * deviation
+                    val jx = x0 + perp.0 * rnd
+                    val jy = y0 + perp.1 * rnd
+                    out = out.move_to(jx, jy)
+                    started = true
+                    acc = 0.0
+                if seg_len > 0.0:
+                    val dir_n = _normalize(dx, dy)
+                    val perp = _perpendicular(dir_n.0, dir_n.1)
+                    var consumed = 0.0
+                    while consumed < seg_len:
+                        val remaining_on_seg = seg_len - consumed
+                        val remaining_step = step - acc
+                        if remaining_step <= remaining_on_seg:
+                            val t = (consumed + remaining_step) / seg_len
+                            val px = x0 + dx * t
+                            val py = y0 + dy * t
+                            state = _lcg_next(state)
+                            val rnd = _lcg_to_unit(state) * deviation
+                            val jx = px + perp.0 * rnd
+                            val jy = py + perp.1 * rnd
+                            out = out.line_to(jx, jy)
+                            consumed = consumed + remaining_step
+                            acc = 0.0
+                        else:
+                            consumed = seg_len
+                            acc = acc + remaining_on_seg
+                    prev_ex = x1
+                    prev_ey = y1
+            None:
+                pass_do_nothing
+        si = si + 1
+
+    # Flush — emit a jittered terminal point if we have residual distance.
+    if started and acc > 0.0:
+        # Re-derive last direction from the final segment.
+        val last_opt = segs.at(n - 1)
+        match last_opt:
+            Some(last):
+                val dx = last.2 - last.0
+                val dy = last.3 - last.1
+                val dir_n = _normalize(dx, dy)
+                val perp = _perpendicular(dir_n.0, dir_n.1)
+                state = _lcg_next(state)
+                val rnd = _lcg_to_unit(state) * deviation
+                val jx = last.2 + perp.0 * rnd
+                val jy = last.3 + perp.1 * rnd
+                out = out.line_to(jx, jy)
+            None:
+                pass_do_nothing
+    out

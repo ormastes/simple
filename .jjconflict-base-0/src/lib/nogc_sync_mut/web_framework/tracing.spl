@@ -1,0 +1,371 @@
+"""
+# W3C Trace Context (Simplified)
+
+Distributed tracing support implementing a simplified W3C Trace Context
+specification. Provides trace/span ID generation, context propagation
+via the `traceparent` header, and OTLP-compatible span export.
+
+## Usage
+
+```simple
+# Create a fresh trace
+val ctx = TraceContext.new()
+
+# Parse from incoming header
+val ctx = TraceContext.from_traceparent("00-abc...def-1234...5678-01")
+
+# Create child span
+val child = ctx.child_span()
+
+# Record a span
+var span = Span.new(child, "handle_request")
+span.set_attribute("http.method", "GET")
+span.set_status("ok")
+span.end()
+
+# Export spans
+var exporter = TraceExporter.new(1000)
+exporter.add_span(span)
+val json = exporter.export_json()
+```
+"""
+
+use std.http_server.types.{HttpRequestData}
+
+extern fn rt_random_i64() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn _trace_time_now_ms() -> i64:
+    rt_time_now_unix_micros() / 1000
+
+# ============================================================================
+# Hex Conversion Helpers
+# ============================================================================
+
+fn i64_to_hex_padded(n: i64, width: i64) -> text:
+    """Convert an i64 to a zero-padded hex string of the given width."""
+    val hex_chars = "0123456789abcdef"
+    var result = ""
+    var remaining = n
+    var i = 0
+    while i < width:
+        val nibble = remaining & 0xF
+        result = hex_chars[nibble:nibble + 1] + result
+        remaining = remaining >> 4
+        i = i + 1
+    result
+
+fn hex_char_to_i64(c: text) -> i64:
+    """Convert a single hex character to its integer value, or -1."""
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    if c == "a": return 10
+    if c == "b": return 11
+    if c == "c": return 12
+    if c == "d": return 13
+    if c == "e": return 14
+    if c == "f": return 15
+    if c == "A": return 10
+    if c == "B": return 11
+    if c == "C": return 12
+    if c == "D": return 13
+    if c == "E": return 14
+    if c == "F": return 15
+    -1
+
+fn hex_to_i64(s: text) -> i64:
+    """Parse a hex string into an i64. Returns 0 on invalid input."""
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        val digit = hex_char_to_i64(s[i:i + 1])
+        if digit < 0:
+            return 0
+        result = (result << 4) + digit
+        i = i + 1
+    result
+
+# ============================================================================
+# TraceId — 128-bit trace identifier as two i64s
+# ============================================================================
+
+struct TraceId:
+    """128-bit trace identifier stored as two 64-bit halves."""
+    high: i64
+    low: i64
+
+fn trace_id_generate() -> TraceId:
+    """Generate a random TraceId."""
+    TraceId(high: rt_random_i64(), low: rt_random_i64())
+
+fn trace_id_to_hex(tid: TraceId) -> text:
+    """Serialize to a 32-character lowercase hex string."""
+    i64_to_hex_padded(tid.high, 16) + i64_to_hex_padded(tid.low, 16)
+
+fn trace_id_from_hex(s: text) -> TraceId?:
+    """Parse a 32-character hex string into a TraceId."""
+    if s.len() != 32:
+        return nil
+    var i = 0
+    while i < 32:
+        if hex_char_to_i64(s[i:i + 1]) < 0:
+            return nil
+        i = i + 1
+    val high = hex_to_i64(s[0:16])
+    val low = hex_to_i64(s[16:32])
+    Some(TraceId(high: high, low: low))
+
+# ============================================================================
+# SpanId — 64-bit span identifier
+# ============================================================================
+
+struct SpanId:
+    """64-bit span identifier."""
+    value: i64
+
+fn span_id_generate() -> SpanId:
+    """Generate a random SpanId."""
+    SpanId(value: rt_random_i64())
+
+fn span_id_to_hex(sid: SpanId) -> text:
+    """Serialize to a 16-character lowercase hex string."""
+    i64_to_hex_padded(sid.value, 16)
+
+# ============================================================================
+# TraceContext — W3C traceparent propagation
+# ============================================================================
+
+class TraceContext:
+    """W3C Trace Context carrying trace_id, span_id, parent, and sampled flag."""
+    trace_id: TraceId
+    span_id: SpanId
+    parent_span_id: SpanId?
+    sampled: bool
+
+    static fn new() -> TraceContext:
+        """Create a fresh trace context with no parent."""
+        TraceContext(
+            trace_id: trace_id_generate(),
+            span_id: span_id_generate(),
+            parent_span_id: nil,
+            sampled: true
+        )
+
+    static fn from_traceparent(header: text) -> TraceContext?:
+        """Parse a W3C traceparent header value.
+
+        Format: `00-{32hex_trace_id}-{16hex_span_id}-{2hex_flags}`
+
+        Args:
+            header: The raw traceparent header value
+
+        Returns:
+            Parsed TraceContext or nil if invalid
+        """
+        val parts = header.split("-")
+        if parts.len() != 4:
+            return nil
+
+        val version = parts[0]
+        val trace_hex = parts[1]
+        val parent_hex = parts[2]
+        val flags_hex = parts[3]
+
+        if version != "00":
+            return nil
+        if trace_hex.len() != 32:
+            return nil
+        if parent_hex.len() != 16:
+            return nil
+        if flags_hex.len() != 2:
+            return nil
+
+        val tid_opt = trace_id_from_hex(trace_hex)
+        if tid_opt == nil:
+            return nil
+        val tid = tid_opt ?? TraceId(high: 0, low: 0)
+
+        val parent_sid = SpanId(value: hex_to_i64(parent_hex))
+        val flags_val = hex_to_i64(flags_hex)
+        val is_sampled = (flags_val & 1) == 1
+
+        Some(TraceContext(
+            trace_id: tid,
+            span_id: span_id_generate(),
+            parent_span_id: Some(parent_sid),
+            sampled: is_sampled
+        ))
+
+    fn to_traceparent() -> text:
+        """Serialize to a W3C traceparent header value.
+
+        Returns:
+            String in format `00-{trace_id}-{span_id}-{flags}`
+        """
+        val tid_hex = trace_id_to_hex(self.trace_id)
+        val sid_hex = span_id_to_hex(self.span_id)
+        val flags = if self.sampled: "01" else: "00"
+        "00-{tid_hex}-{sid_hex}-{flags}"
+
+    fn child_span() -> TraceContext:
+        """Create a child context: same trace_id, new span_id, current becomes parent."""
+        TraceContext(
+            trace_id: self.trace_id,
+            span_id: span_id_generate(),
+            parent_span_id: Some(self.span_id),
+            sampled: self.sampled
+        )
+
+# ============================================================================
+# Span — timed operation within a trace
+# ============================================================================
+
+class Span:
+    """A single timed operation within a trace, OTLP-compatible."""
+    context: TraceContext
+    name: text
+    start_time: i64
+    end_time: i64
+    attributes: [(text, text)]
+    status: text
+
+    static fn new(ctx: TraceContext, name: text) -> Span:
+        """Create a new span starting now."""
+        Span(
+            context: ctx,
+            name: name,
+            start_time: _trace_time_now_ms(),
+            end_time: 0,
+            attributes: [],
+            status: "unset"
+        )
+
+    me set_attribute(key: text, value: text):
+        """Add or overwrite a key-value attribute."""
+        self.attributes = self.attributes + [(key, value)]
+
+    me set_status(status: text):
+        """Set span status (unset, ok, error)."""
+        self.status = status
+
+    me end():
+        """Mark the span as finished with the current timestamp."""
+        self.end_time = _trace_time_now_ms()
+
+    fn duration_ms() -> i64:
+        """Duration in milliseconds, or 0 if not ended."""
+        if self.end_time == 0:
+            return 0
+        self.end_time - self.start_time
+
+    fn to_json() -> text:
+        """Serialize to OTLP-compatible JSON."""
+        val tid = trace_id_to_hex(self.context.trace_id)
+        val sid = span_id_to_hex(self.context.span_id)
+
+        var parent_str = ""
+        val psid = self.context.parent_span_id
+        if psid != nil:
+            val p = psid ?? SpanId(value: 0)
+            parent_str = span_id_to_hex(p)
+
+        var attrs_parts: [text] = []
+        for attr in self.attributes:
+            val k = attr.0
+            val v = attr.1
+            attrs_parts = attrs_parts + ["{\"key\":\"{k}\",\"value\":{\"stringValue\":\"{v}\"}}"]
+
+        val attrs_json = "[" + join_texts(attrs_parts, ",") + "]"
+        val dur = self.duration_ms()
+
+        var json = "{"
+        json = json + "\"traceId\":\"{tid}\""
+        json = json + ",\"spanId\":\"{sid}\""
+        if parent_str.len() > 0:
+            json = json + ",\"parentSpanId\":\"{parent_str}\""
+        json = json + ",\"name\":\"{self.name}\""
+        json = json + ",\"startTimeUnixMs\":{self.start_time}"
+        json = json + ",\"endTimeUnixMs\":{self.end_time}"
+        json = json + ",\"durationMs\":{dur}"
+        json = json + ",\"status\":\"{self.status}\""
+        json = json + ",\"attributes\":{attrs_json}"
+        json = json + "}"
+        json
+
+# ============================================================================
+# TraceExporter — buffers and exports spans
+# ============================================================================
+
+class TraceExporter:
+    """Collects spans and exports them as a JSON array."""
+    spans: [Span]
+    max_buffer: i64
+
+    static fn new(max_buffer: i64) -> TraceExporter:
+        TraceExporter(spans: [], max_buffer: max_buffer)
+
+    me add_span(span: Span):
+        """Buffer a completed span. Drops oldest if over max_buffer."""
+        if self.spans.len() >= self.max_buffer:
+            self.spans = self.spans[1:]
+        self.spans = self.spans + [span]
+
+    fn export_json() -> text:
+        """Export all buffered spans as a JSON array."""
+        var parts: [text] = []
+        for span in self.spans:
+            parts = parts + [span.to_json()]
+        "[" + join_texts(parts, ",") + "]"
+
+    me flush():
+        """Clear all buffered spans."""
+        self.spans = []
+
+# ============================================================================
+# Tracing Middleware
+# ============================================================================
+
+fn tracing_middleware(ctx: TraceContext, request: HttpRequestData) -> (TraceContext, HttpRequestData):
+    """Extract or propagate trace context from an HTTP request.
+
+    If the request carries a `traceparent` header, parses it to create
+    a child span context. Otherwise creates a child from the provided ctx.
+
+    Args:
+        ctx: Fallback trace context (used when no traceparent header present)
+        request: Incoming HTTP request
+
+    Returns:
+        Tuple of (active TraceContext, original request)
+    """
+    for header in request.headers:
+        if header.0.lower() == "traceparent":
+            val parsed = TraceContext.from_traceparent(header.1)
+            if parsed != nil:
+                val trace_ctx = parsed ?? ctx.child_span()
+                return (trace_ctx, request)
+
+    (ctx.child_span(), request)
+
+# ============================================================================
+# Text Helpers
+# ============================================================================
+
+fn join_texts(parts: [text], sep: text) -> text:
+    """Join a list of text values with a separator."""
+    var result = ""
+    var i = 0
+    for part in parts:
+        if i > 0:
+            result = result + sep
+        result = result + part
+        i = i + 1
+    result

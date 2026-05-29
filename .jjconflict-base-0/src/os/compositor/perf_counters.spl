@@ -1,0 +1,179 @@
+# perf_counters.spl — WM timing instrumentation
+#
+# WmPerfCounters tracks per-phase wall-clock durations for each frame
+# and accumulates rolling samples for p50/p95 reporting.
+#
+# Phases tracked: event_wait, input, layout, paint, present, idle
+#
+# Usage:
+#   counters.start_phase("paint")
+#   ... do paint work ...
+#   counters.end_phase("paint")
+#   counters.report()
+
+extern fn rt_time_now_monotonic_ms() -> i64
+
+val PHASE_EVENT_WAIT: i32 = 0
+val PHASE_INPUT: i32      = 1
+val PHASE_LAYOUT: i32     = 2
+val PHASE_PAINT: i32      = 3
+val PHASE_PRESENT: i32    = 4
+val PHASE_IDLE: i32       = 5
+val PHASE_COUNT: i32      = 6
+
+val MAX_SAMPLES: i32 = 128
+
+# Per-phase rolling sample buffer.
+class PhaseSamples:
+    name: text
+    samples: [i64]
+    phase_start_ms: i64
+    total_calls: i64
+
+    static fn new(name: text) -> PhaseSamples:
+        PhaseSamples(
+            name: name,
+            samples: [],
+            phase_start_ms: 0,
+            total_calls: 0
+        )
+
+    me start():
+        self.phase_start_ms = rt_time_now_monotonic_ms()
+
+    me end():
+        val dur = rt_time_now_monotonic_ms() - self.phase_start_ms
+        self.total_calls = self.total_calls + 1
+        # Ring-buffer: drop oldest when full
+        if self.samples.len() >= MAX_SAMPLES.to_u64():
+            var trimmed: [i64] = []
+            var i = 1
+            while i < self.samples.len():
+                trimmed.push(self.samples[i])
+                i = i + 1
+            self.samples = trimmed
+        self.samples.push(dur)
+
+    me count() -> i64:
+        self.samples.len().to_i64()
+
+    me sum_ms() -> i64:
+        var s: i64 = 0
+        var i = 0
+        while i < self.samples.len():
+            s = s + self.samples[i]
+            i = i + 1
+        s
+
+    me mean_ms() -> i64:
+        val n = self.count()
+        if n == 0: 0 else: self.sum_ms() / n
+
+    # Approximate p50 (median) via sorted copy.
+    me p50_ms() -> i64:
+        val n = self.samples.len()
+        if n == 0:
+            return 0
+        # Build sorted copy via insertion sort (small N ≤ 128).
+        var sorted: [i64] = []
+        var i = 0
+        while i < n:
+            sorted.push(self.samples[i])
+            i = i + 1
+        var j = 1
+        while j < sorted.len():
+            val key = sorted[j]
+            var k = j
+            while k > 0 and sorted[k - 1] > key:
+                sorted[k] = sorted[k - 1]
+                k = k - 1
+            sorted[k] = key
+            j = j + 1
+        sorted[n / 2]
+
+    # Approximate p95.
+    me p95_ms() -> i64:
+        val n = self.samples.len()
+        if n == 0:
+            return 0
+        var sorted: [i64] = []
+        var i = 0
+        while i < n:
+            sorted.push(self.samples[i])
+            i = i + 1
+        var j = 1
+        while j < sorted.len():
+            val key = sorted[j]
+            var k = j
+            while k > 0 and sorted[k - 1] > key:
+                sorted[k] = sorted[k - 1]
+                k = k - 1
+            sorted[k] = key
+            j = j + 1
+        val idx = (n * 95) / 100
+        sorted[idx]
+
+class WmPerfCounters:
+    phases: [PhaseSamples]
+    frame_count: i64
+
+    static fn new() -> WmPerfCounters:
+        val phases: [PhaseSamples] = [
+            PhaseSamples.new("event_wait"),
+            PhaseSamples.new("input"),
+            PhaseSamples.new("layout"),
+            PhaseSamples.new("paint"),
+            PhaseSamples.new("present"),
+            PhaseSamples.new("idle")
+        ]
+        WmPerfCounters(phases: phases, frame_count: 0)
+
+    # Resolve a phase name to index.  Returns -1 for unknown names.
+    fn _phase_index(name: text) -> i32:
+        if name == "event_wait": return PHASE_EVENT_WAIT
+        if name == "input":      return PHASE_INPUT
+        if name == "layout":     return PHASE_LAYOUT
+        if name == "paint":      return PHASE_PAINT
+        if name == "present":    return PHASE_PRESENT
+        if name == "idle":       return PHASE_IDLE
+        -1
+
+    me start_phase(name: text):
+        val idx = WmPerfCounters._phase_index(name)
+        if idx >= 0:
+            self.phases[idx.to_u64()].start()
+
+    me end_phase(name: text):
+        val idx = WmPerfCounters._phase_index(name)
+        if idx >= 0:
+            self.phases[idx.to_u64()].end()
+
+    me mark_frame():
+        self.frame_count = self.frame_count + 1
+
+    me mean_ms(name: text) -> i64:
+        val idx = WmPerfCounters._phase_index(name)
+        if idx < 0: return 0
+        self.phases[idx.to_u64()].mean_ms()
+
+    me p50_ms(name: text) -> i64:
+        val idx = WmPerfCounters._phase_index(name)
+        if idx < 0: return 0
+        self.phases[idx.to_u64()].p50_ms()
+
+    me p95_ms(name: text) -> i64:
+        val idx = WmPerfCounters._phase_index(name)
+        if idx < 0: return 0
+        self.phases[idx.to_u64()].p95_ms()
+
+    me total_frames() -> i64:
+        self.frame_count
+
+    # Print a human-readable report to stdout.
+    me report():
+        print("=== WM Perf Report (frames: {self.frame_count}) ===")
+        var i = 0
+        while i < self.phases.len():
+            val ph = self.phases[i]
+            print("  {ph.name}: mean={ph.mean_ms()}ms  p50={ph.p50_ms()}ms  p95={ph.p95_ms()}ms  calls={ph.total_calls}")
+            i = i + 1

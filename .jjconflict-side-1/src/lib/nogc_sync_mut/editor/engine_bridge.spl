@@ -1,0 +1,176 @@
+# EngineBridge — drives Engine2D/3D in tick mode from the editor
+#
+# Wraps engine state to run in tick mode instead of owning the loop.
+# Provides fixed-timestep accumulator, pause/resume, frame counting,
+# and an EditorEngineController that ties mode changes to engine state.
+
+use std.nogc_sync_mut.editor.mode.{EditorMode}
+
+# ============================================================================
+# EngineType
+# ============================================================================
+
+enum EngineType:
+    Engine2DType
+    Engine3DType
+
+# ============================================================================
+# EngineConfig
+# ============================================================================
+
+struct EngineConfig:
+    engine_type: EngineType
+    viewport_width: i32
+    viewport_height: i32
+    headless: bool
+
+fn default_engine_config_2d(width: i32, height: i32) -> EngineConfig:
+    EngineConfig(
+        engine_type: EngineType.Engine2DType,
+        viewport_width: width,
+        viewport_height: height,
+        headless: false
+    )
+
+fn default_engine_config_3d(width: i32, height: i32) -> EngineConfig:
+    EngineConfig(
+        engine_type: EngineType.Engine3DType,
+        viewport_width: width,
+        viewport_height: height,
+        headless: false
+    )
+
+# ============================================================================
+# EngineBridge — fixed-timestep accumulator
+# ============================================================================
+
+class EngineBridge:
+    config: EngineConfig
+    running: bool
+    paused: bool
+    frame_count: i64
+    accumulated_time_ns: i64
+    fixed_step_ns: i64
+
+impl EngineBridge:
+    static fn new(config: EngineConfig) -> EngineBridge:
+        EngineBridge(
+            config: config,
+            running: true,
+            paused: false,
+            frame_count: 0,
+            accumulated_time_ns: 0,
+            fixed_step_ns: 16666666
+        )
+
+    me tick(wall_dt_ns: i64) -> i32:
+        """Accumulate time and return number of fixed steps to execute.
+
+        Same accumulator pattern as game2d/loop/driver.spl:
+        add wall delta, count how many fixed steps fit, subtract consumed.
+        """
+        if self.paused:
+            return 0
+
+        self.accumulated_time_ns = self.accumulated_time_ns + wall_dt_ns
+
+        var steps = 0
+        while self.accumulated_time_ns >= self.fixed_step_ns:
+            self.accumulated_time_ns = self.accumulated_time_ns - self.fixed_step_ns
+            steps = steps + 1
+            self.frame_count = self.frame_count + 1
+
+        steps
+
+    me pause():
+        self.paused = true
+
+    me resume():
+        self.paused = false
+
+    me reset():
+        """Reset frame count and accumulated time."""
+        self.frame_count = 0
+        self.accumulated_time_ns = 0
+
+    me resize(width: i32, height: i32):
+        self.config = EngineConfig(
+            engine_type: self.config.engine_type,
+            viewport_width: width,
+            viewport_height: height,
+            headless: self.config.headless
+        )
+
+    fn is_running(self) -> bool:
+        self.running
+
+    fn is_paused(self) -> bool:
+        self.paused
+
+    fn current_frame(self) -> i64:
+        self.frame_count
+
+    fn fixed_step_seconds(self) -> f64:
+        """Convert fixed_step_ns to seconds."""
+        var ns_f = self.fixed_step_ns.to_f64()
+        var result = ns_f / 1000000000.0
+        result
+
+# ============================================================================
+# EditorEngineController — ties editor mode to engine state
+# ============================================================================
+
+class EditorEngineController:
+    bridge: EngineBridge
+    mode: EditorMode
+    physics_debug: bool
+    audio_debug: bool
+
+impl EditorEngineController:
+    static fn new_2d(width: i32, height: i32) -> EditorEngineController:
+        val config = default_engine_config_2d(width, height)
+        EditorEngineController(
+            bridge: EngineBridge.new(config),
+            mode: EditorMode.Edit2D,
+            physics_debug: false,
+            audio_debug: false
+        )
+
+    static fn new_3d(width: i32, height: i32) -> EditorEngineController:
+        val config = default_engine_config_3d(width, height)
+        EditorEngineController(
+            bridge: EngineBridge.new(config),
+            mode: EditorMode.Edit3D,
+            physics_debug: false,
+            audio_debug: false
+        )
+
+    me set_mode(mode: EditorMode):
+        """Pause engine in Edit mode, resume in Play mode."""
+        self.mode = mode
+        if mode.is_editing():
+            self.bridge.pause()
+        if mode.is_playing():
+            self.bridge.resume()
+
+    me step_frame():
+        """Advance exactly one fixed step (for frame-by-frame debugging)."""
+        self.bridge.accumulated_time_ns = self.bridge.accumulated_time_ns + self.bridge.fixed_step_ns
+        var discard = self.bridge.tick(0)
+
+    me toggle_physics_debug():
+        self.physics_debug = not self.physics_debug
+
+    me toggle_audio_debug():
+        self.audio_debug = not self.audio_debug
+
+    fn should_tick_physics(self) -> bool:
+        """Only tick physics when playing and not paused."""
+        if not self.mode.is_playing():
+            return false
+        if self.bridge.is_paused():
+            return false
+        true
+
+    fn should_render_debug(self) -> bool:
+        self.physics_debug or self.audio_debug

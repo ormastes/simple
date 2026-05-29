@@ -1,0 +1,69 @@
+# hexdump — Display file in hex
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error}
+
+fn tool_hexdump(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Display file contents in hexadecimal.
+
+    Usage: hexdump FILE
+    """
+    if args.len() == 0:
+        write_error(terminal, "hexdump: missing file operand")
+        return 1
+    if vfs == nil:
+        write_error(terminal, "hexdump: no filesystem mounted")
+        return 1
+
+    val path = resolve_path(cwd, args[0])
+    val result = vfs.read_text(path)
+    if result.is_err():
+        write_error(terminal, "hexdump: {path}: {result.unwrap_err()}")
+        return 1
+
+    val content = result.unwrap()
+    var offset: u64 = 0
+    var hex_part = ""
+    var ascii_part = ""
+    var col = 0
+
+    for ch in content:
+        val byte_val = ch.to_i32() & 0xFF
+        val hi = (byte_val >> 4) & 0xF
+        val lo = byte_val & 0xF
+        hex_part = "{hex_part}{_hex_digit(hi)}{_hex_digit(lo)} "
+        ascii_part = "{ascii_part}{if byte_val >= 32 and byte_val < 127: ch else: "."}"
+        col = col + 1
+        if col == 16:
+            write_line(terminal, "{_hex_offset(offset)}  {hex_part} |{ascii_part}|")
+            offset = offset + 16
+            hex_part = ""
+            ascii_part = ""
+            col = 0
+
+    # Print remaining bytes
+    if col > 0:
+        # Pad hex part
+        while col < 16:
+            hex_part = "{hex_part}   "
+            col = col + 1
+        write_line(terminal, "{_hex_offset(offset)}  {hex_part} |{ascii_part}|")
+
+    return 0
+
+fn _hex_digit(n: i32) -> text:
+    val digits = "0123456789abcdef"
+    return digits.char_at(n & 0xF)
+
+fn _hex_offset(n: u64) -> text:
+    """Format offset as 8-digit hex."""
+    var result = ""
+    var remaining = n
+    var i = 0
+    while i < 8:
+        val nibble = (remaining >> (28 - i * 4)) & 0xF
+        result = "{result}{_hex_digit(nibble as i32)}"
+        i = i + 1
+    return result

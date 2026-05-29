@@ -1,0 +1,149 @@
+# Typed Action API Specification (Phase 5 UI Typed Core RFC)
+#
+# Verifies that typed actions (CommonAction / Action / app-defined IntoAction)
+# round-trip correctly to the wire name used by UIEvent.Action(name: text).
+# The UIEvent.Action variant shape is intentionally left unchanged.
+
+use common.ui.action.{Action, CommonAction, IntoAction}
+use common.ui.event.{ui_event_action}
+use common.ui.widget.{UIEvent, WidgetNode}
+use common.ui.builder.{button, with_on_action, with_on_typed_action}
+
+# =========================================================================
+# App-defined action enum (defined here to test IntoAction extensibility)
+# =========================================================================
+
+enum AppAction:
+    OpenFile
+    CloseTab
+
+impl IntoAction for AppAction:
+    fn into_action(self) -> Action:
+        match self:
+            case AppAction.OpenFile: return Action.Custom(name: "open_file")
+            case AppAction.CloseTab: return Action.Custom(name: "close_tab")
+
+# =========================================================================
+# CommonAction.to_wire tests
+# =========================================================================
+
+describe "CommonAction.to_wire":
+    it "Save returns save":
+        var a = CommonAction.Save
+        expect a.to_wire() to_equal "save"
+
+    it "Cancel returns cancel":
+        var a = CommonAction.Cancel
+        expect a.to_wire() to_equal "cancel"
+
+    it "Confirm returns confirm":
+        var a = CommonAction.Confirm
+        expect a.to_wire() to_equal "confirm"
+
+    it "Dismiss returns dismiss":
+        var a = CommonAction.Dismiss
+        expect a.to_wire() to_equal "dismiss"
+
+    it "Back returns back":
+        var a = CommonAction.Back
+        expect a.to_wire() to_equal "back"
+
+    it "Search returns search":
+        var a = CommonAction.Search
+        expect a.to_wire() to_equal "search"
+
+    it "ToggleSidebar returns toggle_sidebar":
+        var a = CommonAction.ToggleSidebar
+        expect a.to_wire() to_equal "toggle_sidebar"
+
+# =========================================================================
+# Action.into_wire_name tests
+# =========================================================================
+
+describe "Action.into_wire_name":
+    it "Builtin Save returns save":
+        var a = Action.Builtin(action: CommonAction.Save)
+        expect a.into_wire_name() to_equal "save"
+
+    it "Builtin Cancel returns cancel":
+        var a = Action.Builtin(action: CommonAction.Cancel)
+        expect a.into_wire_name() to_equal "cancel"
+
+    it "Custom open_file returns open_file":
+        var a = Action.Custom(name: "open_file")
+        expect a.into_wire_name() to_equal "open_file"
+
+    it "Custom empty string returns empty string":
+        var a = Action.Custom(name: "")
+        expect a.into_wire_name() to_equal ""
+
+# =========================================================================
+# ui_event_action bridge tests
+# =========================================================================
+
+describe "ui_event_action":
+    it "Builtin Cancel produces UIEvent.Action with name cancel":
+        var a = Action.Builtin(action: CommonAction.Cancel)
+        var ev = ui_event_action(a)
+        match ev:
+            UIEvent.Action(name):
+                expect name to_equal "cancel"
+            _:
+                expect "wrong variant" to_equal "UIEvent.Action"
+
+    it "Custom save produces UIEvent.Action with name save":
+        var a = Action.Custom(name: "save")
+        var ev = ui_event_action(a)
+        match ev:
+            UIEvent.Action(name):
+                expect name to_equal "save"
+            _:
+                expect "wrong variant" to_equal "UIEvent.Action"
+
+# =========================================================================
+# App-defined IntoAction routing tests
+# =========================================================================
+
+describe "app-defined IntoAction":
+    it "AppAction.OpenFile routes to open_file via into_action":
+        var app = AppAction.OpenFile
+        var a = app.into_action()
+        expect a.into_wire_name() to_equal "open_file"
+
+    it "AppAction.CloseTab routes to close_tab via into_action":
+        var app = AppAction.CloseTab
+        var a = app.into_action()
+        expect a.into_wire_name() to_equal "close_tab"
+
+# =========================================================================
+# CommonAction IntoAction impl
+# =========================================================================
+
+describe "CommonAction impl IntoAction":
+    it "CommonAction.Save into_action returns Action.Builtin with save wire name":
+        var c = CommonAction.Save
+        var a = c.into_action()
+        expect a.into_wire_name() to_equal "save"
+
+# =========================================================================
+# with_on_typed_action wire-equivalence tests
+# =========================================================================
+
+describe "with_on_typed_action":
+    it "Custom action sets same handler_id as with_on_action":
+        var base_node = button("ta_btn_1", "Click", "x")
+        var typed_node = with_on_typed_action(base_node, Action.Custom(name: "x"))
+        var direct_node = with_on_action(base_node, "x")
+        expect typed_node.get_prop("on_action") to_equal direct_node.get_prop("on_action")
+
+    it "Builtin Save sets handler_id save":
+        var base_node = button("ta_btn_2", "Save", "save")
+        var typed_node = with_on_typed_action(base_node, Action.Builtin(action: CommonAction.Save))
+        expect typed_node.get_prop("on_action") to_equal "save"
+
+    it "with_on_typed_action is wire-identical to with_on_action for same name":
+        var base_node = button("ta_btn_3", "Cancel", "cancel")
+        var a = Action.Custom(name: "my_action")
+        var typed_node = with_on_typed_action(base_node, a)
+        var direct_node = with_on_action(base_node, "my_action")
+        expect typed_node.get_prop("on_action") to_equal direct_node.get_prop("on_action")

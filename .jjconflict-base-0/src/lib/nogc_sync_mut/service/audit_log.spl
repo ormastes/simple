@@ -1,0 +1,59 @@
+"""
+# Service Audit Log — Append-only structured log
+#
+# Records lease grants, releases, reclaims, and command executions
+# to a per-repo audit log file.
+"""
+
+use std.io_runtime
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+
+struct AuditLog:
+    path: text
+
+fn audit_log_new(path: text) -> AuditLog:
+    AuditLog(path: path)
+
+fn _parent_dir(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() <= 1i64:
+        return "."
+    var out: [text] = []
+    var i = 0i64
+    while i < parts.len() - 1i64:
+        out.push(parts[i])
+        i = i + 1i64
+    out.join("/")
+
+fn audit_append(log: AuditLog, event: text, detail: text):
+    val parent = _parent_dir(log.path)
+    rt_mkdir_p(parent)
+    val ts = rt_time_now_unix_micros()
+    val line = "{ts}\t{event}\t{detail}\n"
+    val existing = rt_file_read_text(log.path)
+    if existing.len() > 0i64:
+        rt_file_write_text(log.path, existing + line)
+    else:
+        rt_file_write_text(log.path, line)
+
+fn audit_lease_granted(log: AuditLog, lease_id: text, pid: i64, kind: text):
+    audit_append(log, "LEASE_GRANTED", "id={lease_id} pid={pid} kind={kind}")
+
+fn audit_lease_released(log: AuditLog, lease_id: text):
+    audit_append(log, "LEASE_RELEASED", "id={lease_id}")
+
+fn audit_lease_reclaimed(log: AuditLog, lease_id: text, reason: text):
+    audit_append(log, "LEASE_RECLAIMED", "id={lease_id} reason={reason}")
+
+fn audit_command(log: AuditLog, lease_id: text, command: text, exit_code: i64):
+    audit_append(log, "COMMAND", "lease={lease_id} cmd={command} exit={exit_code}")
+
+fn audit_daemon_start(log: AuditLog, pid: i64):
+    audit_append(log, "DAEMON_START", "pid={pid}")
+
+fn audit_daemon_stop(log: AuditLog, pid: i64):
+    audit_append(log, "DAEMON_STOP", "pid={pid}")

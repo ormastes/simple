@@ -1,0 +1,437 @@
+# ---------------------------------------------------------------------------
+# GPU Framebuffer Rendering Benchmark — Simple + Vulkan Compute
+#
+# Allocates a 1920x1080 RGBA framebuffer on device, runs two GLSL compute
+# shaders per frame:
+#   glsl_clear      — fill entire FB with a solid color (1D dispatch)
+#   glsl_rect_fill  — fill a rectangle (2D dispatch, 16x16 workgroups)
+#
+# Scene: clear + 100 deterministic rects (mirrors vulkan_bench.c fill_1080p
+# and bench_3d_render.spl CUDA benchmark).
+#
+# Timing: 5 warmup frames + 100 timed frames; reports avg us/frame.
+# Timing uses rt_time_now_nanos() (nanosecond monotonic clock).
+#
+# Reference: test/perf/local_gpu_check/c_cuda/vulkan_bench.c
+#            test/perf/graphics_2d/bench_3d_render.spl (CUDA pattern)
+#
+# Usage:
+#   bin/simple test/perf/graphics_2d/bench_2d_vulkan.spl
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Raw Vulkan FFI — re-declared here to keep the benchmark self-contained
+# (same externs defined in src/lib/nogc_sync_mut/io/vulkan_ffi.spl)
+# ---------------------------------------------------------------------------
+
+extern fn rt_vulkan_init() -> bool
+extern fn rt_vulkan_shutdown() -> bool
+extern fn rt_vulkan_is_available() -> bool
+extern fn rt_vulkan_device_count() -> i64
+extern fn rt_vulkan_select_device(id: i64) -> bool
+extern fn rt_vulkan_get_device() -> i64
+extern fn rt_vulkan_device_name(id: i64) -> text
+extern fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64
+extern fn rt_vulkan_free_buffer(handle: i64) -> bool
+extern fn rt_vulkan_compile_glsl(glsl_source: text) -> i64
+extern fn rt_vulkan_destroy_shader(module: i64) -> bool
+extern fn rt_vulkan_create_compute_pipeline(shader_module: i64, entry_point: text, push_constant_size: i64) -> i64
+extern fn rt_vulkan_destroy_pipeline(pipe: i64) -> bool
+extern fn rt_vulkan_create_descriptor_set(pipe: i64) -> i64
+extern fn rt_vulkan_bind_buffer(descriptor_set: i64, binding: i64, buf: i64) -> bool
+extern fn rt_vulkan_destroy_descriptor_set(descriptor_set: i64) -> bool
+extern fn rt_vulkan_begin_compute() -> i64
+extern fn rt_vulkan_bind_pipeline(cmd: i64, pipe: i64) -> bool
+extern fn rt_vulkan_bind_descriptors(cmd: i64, descriptor_set: i64) -> bool
+extern fn rt_vulkan_push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool
+extern fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool
+extern fn rt_vulkan_end_compute(cmd: i64) -> bool
+extern fn rt_vulkan_submit_and_wait(cmd: i64) -> bool
+extern fn rt_vulkan_wait_idle() -> bool
+extern fn rt_vulkan_get_last_error() -> text
+extern fn rt_time_now_nanos() -> i64
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+val FB_W:     i64 = 1920
+val FB_H:     i64 = 1080
+val FB_BYTES: i64 = 1920 * 1080 * 4    # 8,294,400 bytes  (u32 RGBA per pixel)
+val FB_PIX:   i64 = 1920 * 1080        # 2,073,600 pixels
+
+# Vulkan storage buffer usage flag (VK_BUFFER_USAGE_STORAGE_BUFFER_BIT = 0x80)
+val VK_STORAGE: i64 = 0x80
+
+# Push constant block size (must be ≥ largest kernel's push constant footprint)
+# clear needs 12 bytes (u32 color + 2x i32), rect needs 48 bytes (12x i32).
+# Round up to 64 to match backend_vulkan.spl VK_PUSH_CONSTANT_SIZE.
+val VK_PC_SIZE: i64 = 64
+
+val WARMUP_FRAMES: i64 = 5
+val TIMED_FRAMES:  i64 = 100
+val NUM_RECTS:     i64 = 100
+
+# NOTE: There is no rt_vulkan_create_queue / rt_vulkan_get_queue function.
+# Queue creation is implicit in rt_vulkan_init(); command buffers are
+# obtained per-dispatch via rt_vulkan_begin_compute().
+
+# ---------------------------------------------------------------------------
+# GLSL Compute Shader Sources
+#
+# These mirror the shaders in backend_vulkan_glsl.spl but are inlined here
+# so the benchmark has no dependency on the high-level engine library.
+# ---------------------------------------------------------------------------
+
+fn glsl_clear_src() -> text:
+    r"""#version 450
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer Framebuffer {
+    uint data[];
+} fb;
+
+layout(push_constant) uniform PushConstants {
+    uint color;
+    int fb_w;
+    int fb_h;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = uint(pc.fb_w) * uint(pc.fb_h);
+    if (idx >= total) return;
+    fb.data[idx] = pc.color;
+}
+"""
+
+fn glsl_rect_fill_src() -> text:
+    r"""#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer Framebuffer {
+    uint data[];
+} fb;
+
+layout(push_constant) uniform PushConstants {
+    int x;
+    int y;
+    int w;
+    int h;
+    uint color;
+    int fb_w;
+    int fb_h;
+    int clip_x;
+    int clip_y;
+    int clip_w;
+    int clip_h;
+    int clip_enabled;
+} pc;
+
+void main() {
+    int lx = int(gl_GlobalInvocationID.x);
+    int ly = int(gl_GlobalInvocationID.y);
+    if (lx >= pc.w || ly >= pc.h) return;
+    int px = pc.x + lx;
+    int py = pc.y + ly;
+    if (pc.clip_enabled != 0) {
+        if (px < pc.clip_x || px >= pc.clip_x + pc.clip_w) return;
+        if (py < pc.clip_y || py >= pc.clip_y + pc.clip_h) return;
+    }
+    if (px < 0 || px >= pc.fb_w || py < 0 || py >= pc.fb_h) return;
+    fb.data[uint(py * pc.fb_w + px)] = pc.color;
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Push-constant packing helpers (little-endian, inline — no library deps)
+# ---------------------------------------------------------------------------
+
+fn pack_i32_le(buf: [u8], off: i64, val_: i64):
+    val v = val_ & 0xFFFFFFFF
+    buf[off]     = ((v) & 0xFF).to_u8()
+    buf[off + 1] = ((v >> 8) & 0xFF).to_u8()
+    buf[off + 2] = ((v >> 16) & 0xFF).to_u8()
+    buf[off + 3] = ((v >> 24) & 0xFF).to_u8()
+
+fn pack_u32_le(buf: [u8], off: i64, val_: i64):
+    pack_i32_le(buf, off, val_)
+
+fn make_clear_pc(color: i64) -> [u8]:
+    # Layout: color(u32 @ 0), fb_w(i32 @ 4), fb_h(i32 @ 8)
+    var buf: [u8] = [0u8; VK_PC_SIZE]
+    pack_u32_le(buf, 0, color)
+    pack_i32_le(buf, 4, FB_W)
+    pack_i32_le(buf, 8, FB_H)
+    buf
+
+fn make_rect_pc(x: i64, y: i64, w: i64, h: i64, color: i64) -> [u8]:
+    # Layout (matches glsl_rect_fill_src push constants):
+    #   x(0) y(4) w(8) h(12) color(16) fb_w(20) fb_h(24)
+    #   clip_x(28) clip_y(32) clip_w(36) clip_h(40) clip_enabled(44)
+    # clip_enabled=0 (no clipping in the benchmark)
+    var buf: [u8] = [0u8; VK_PC_SIZE]
+    pack_i32_le(buf, 0,  x)
+    pack_i32_le(buf, 4,  y)
+    pack_i32_le(buf, 8,  w)
+    pack_i32_le(buf, 12, h)
+    pack_u32_le(buf, 16, color)
+    pack_i32_le(buf, 20, FB_W)
+    pack_i32_le(buf, 24, FB_H)
+    pack_i32_le(buf, 28, 0)    # clip_x
+    pack_i32_le(buf, 32, 0)    # clip_y
+    pack_i32_le(buf, 36, FB_W) # clip_w
+    pack_i32_le(buf, 40, FB_H) # clip_h
+    pack_i32_le(buf, 44, 0)    # clip_enabled = false
+    buf
+
+# ---------------------------------------------------------------------------
+# Dispatch helper
+#
+# NOTE: The FFI's begin_compute/end_compute/submit_and_wait wraps a single
+# command buffer recording.  Each call to this helper records and submits
+# one dispatch.  With 1 clear + 100 rects per frame that is 101 submits/frame.
+# This is a known FFI-level limitation versus the C reference which batches
+# all dispatches into a single command buffer per frame (vkCmdFillBuffer +
+# 100 vkCmdDispatch).  The measured timing therefore includes 101x
+# submit_and_wait overhead per frame, which will be higher than the C
+# reference's 2.61 ms/frame.  A future rt_vulkan_begin_batch / end_batch API
+# would resolve this.
+# ---------------------------------------------------------------------------
+
+fn dispatch_compute(pipe: i64, ds: i64, pc_bytes: [u8], gx: i64, gy: i64):
+    val cmd = rt_vulkan_begin_compute()
+    if cmd == 0:
+        print("WARN: begin_compute returned 0: " + rt_vulkan_get_last_error())
+        return
+    rt_vulkan_bind_pipeline(cmd, pipe)
+    rt_vulkan_bind_descriptors(cmd, ds)
+    rt_vulkan_push_constants(cmd, pipe, pc_bytes)
+    rt_vulkan_dispatch(cmd, gx, gy, 1)
+    rt_vulkan_end_compute(cmd)
+    rt_vulkan_submit_and_wait(cmd)
+
+# ---------------------------------------------------------------------------
+# Deterministic color table (same as bench_3d_render.spl)
+# ---------------------------------------------------------------------------
+
+fn fill_color(idx: i64) -> i64:
+    if idx == 0: return 0xFF0000FF
+    if idx == 1: return 0xFF00FF00
+    if idx == 2: return 0xFFFF0000
+    if idx == 3: return 0xFF808080
+    if idx == 4: return 0xFF00FFFF
+    if idx == 5: return 0xFFFF00FF
+    if idx == 6: return 0xFFFFFF00
+    0xFFFFFFFF
+
+# ---------------------------------------------------------------------------
+# Scene: clear + 100 deterministic rects (mirrors bench_2d_cuda.c fill_1080p
+# and bench_3d_render.spl scene_fill_1080p)
+# ---------------------------------------------------------------------------
+
+fn scene_fill_1080p(pipe_clear: i64, pipe_rect: i64, ds_clear: i64, ds_rect: i64):
+    # --- clear ---
+    # Dispatch 1D: ceil(1920*1080 / 256) = 8100 workgroups
+    val clear_gx = (FB_PIX + 255) / 256
+    val clear_pc = make_clear_pc(0xFF111111)
+    dispatch_compute(pipe_clear, ds_clear, clear_pc, clear_gx, 1)
+
+    # --- 100 deterministic rects ---
+    var i = 0
+    while i < NUM_RECTS:
+        val col = (i * 37) % 8
+        var rx  = (i * 19) % (FB_W - 1)
+        var ry  = (i * 11) % (FB_H - 1)
+        var rw  = 1 + (i * 7)  % 320
+        var rh  = 1 + (i * 13) % 180
+        if rx < 0: rx = 0
+        if ry < 0: ry = 0
+        if rx + rw > FB_W: rw = FB_W - rx
+        if ry + rh > FB_H: rh = FB_H - ry
+        if rw > 0 and rh > 0:
+            # Dispatch 2D: ceil(rw/16) × ceil(rh/16) workgroups
+            val gx = (rw + 15) / 16
+            val gy = (rh + 15) / 16
+            val rect_pc = make_rect_pc(rx, ry, rw, rh, fill_color(col))
+            dispatch_compute(pipe_rect, ds_rect, rect_pc, gx, gy)
+        i = i + 1
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+fn main():
+    print("========================================")
+    print("GPU Framebuffer Benchmark — Simple + Vulkan Compute")
+    print("Scene: clear + 100 rects, 1920x1080 RGBA")
+    print("Reference: vulkan_bench.c (2.61 ms/frame on TITAN RTX)")
+    print("========================================")
+    print("")
+
+    # --- Availability check ---
+    if not rt_vulkan_is_available():
+        print("SKIP: Vulkan runtime not available on this host.")
+        return
+
+    # --- Init ---
+    if not rt_vulkan_init():
+        print("FAIL: rt_vulkan_init: " + rt_vulkan_get_last_error())
+        return
+
+    val dev_count = rt_vulkan_device_count()
+    print("Vulkan device count: " + dev_count.to_string())
+    if dev_count < 1:
+        print("FAIL: no Vulkan devices found.")
+        rt_vulkan_shutdown()
+        return
+
+    if not rt_vulkan_select_device(0):
+        print("FAIL: rt_vulkan_select_device(0): " + rt_vulkan_get_last_error())
+        rt_vulkan_shutdown()
+        return
+
+    val dev_id = rt_vulkan_get_device()
+    print("Device: " + rt_vulkan_device_name(dev_id))
+    print("")
+
+    # NOTE: No explicit queue creation step — queue is managed internally by
+    # rt_vulkan_init().  Command buffers are obtained via rt_vulkan_begin_compute().
+
+    # --- Allocate device framebuffer (storage buffer, 1920×1080 RGBA = 8 MB) ---
+    val d_fb = rt_vulkan_alloc_buffer(FB_BYTES, VK_STORAGE)
+    if d_fb == 0:
+        print("FAIL: rt_vulkan_alloc_buffer: " + rt_vulkan_get_last_error())
+        rt_vulkan_shutdown()
+        return
+    print("Device FB: " + FB_BYTES.to_string() + " bytes, handle=" + d_fb.to_string())
+    print("")
+
+    # --- Compile GLSL compute shaders ---
+    print("Compiling shaders...")
+    val shader_clear = rt_vulkan_compile_glsl(glsl_clear_src())
+    if shader_clear == 0:
+        print("FAIL: compile clear shader: " + rt_vulkan_get_last_error())
+        rt_vulkan_free_buffer(d_fb)
+        rt_vulkan_shutdown()
+        return
+
+    val shader_rect = rt_vulkan_compile_glsl(glsl_rect_fill_src())
+    if shader_rect == 0:
+        print("FAIL: compile rect shader: " + rt_vulkan_get_last_error())
+        rt_vulkan_destroy_shader(shader_clear)
+        rt_vulkan_free_buffer(d_fb)
+        rt_vulkan_shutdown()
+        return
+    print("Shaders compiled OK.")
+    print("")
+
+    # --- Create compute pipelines ---
+    val pipe_clear = rt_vulkan_create_compute_pipeline(shader_clear, "main", VK_PC_SIZE)
+    if pipe_clear == 0:
+        print("FAIL: create_compute_pipeline (clear): " + rt_vulkan_get_last_error())
+        rt_vulkan_destroy_shader(shader_rect)
+        rt_vulkan_destroy_shader(shader_clear)
+        rt_vulkan_free_buffer(d_fb)
+        rt_vulkan_shutdown()
+        return
+
+    val pipe_rect = rt_vulkan_create_compute_pipeline(shader_rect, "main", VK_PC_SIZE)
+    if pipe_rect == 0:
+        print("FAIL: create_compute_pipeline (rect): " + rt_vulkan_get_last_error())
+        rt_vulkan_destroy_pipeline(pipe_clear)
+        rt_vulkan_destroy_shader(shader_rect)
+        rt_vulkan_destroy_shader(shader_clear)
+        rt_vulkan_free_buffer(d_fb)
+        rt_vulkan_shutdown()
+        return
+    print("Pipelines created OK.")
+    print("")
+
+    # --- Create descriptor set (once, reused across all frames) ---
+    # Both pipelines share the same storage buffer layout (set=0, binding=0).
+    # We create one descriptor set per pipeline so each can be bound correctly.
+    val ds_clear = rt_vulkan_create_descriptor_set(pipe_clear)
+    if ds_clear == 0:
+        print("FAIL: create_descriptor_set (clear): " + rt_vulkan_get_last_error())
+        rt_vulkan_destroy_pipeline(pipe_rect)
+        rt_vulkan_destroy_pipeline(pipe_clear)
+        rt_vulkan_destroy_shader(shader_rect)
+        rt_vulkan_destroy_shader(shader_clear)
+        rt_vulkan_free_buffer(d_fb)
+        rt_vulkan_shutdown()
+        return
+
+    val ds_rect = rt_vulkan_create_descriptor_set(pipe_rect)
+    if ds_rect == 0:
+        print("FAIL: create_descriptor_set (rect): " + rt_vulkan_get_last_error())
+        rt_vulkan_destroy_descriptor_set(ds_clear)
+        rt_vulkan_destroy_pipeline(pipe_rect)
+        rt_vulkan_destroy_pipeline(pipe_clear)
+        rt_vulkan_destroy_shader(shader_rect)
+        rt_vulkan_destroy_shader(shader_clear)
+        rt_vulkan_free_buffer(d_fb)
+        rt_vulkan_shutdown()
+        return
+
+    # Bind the framebuffer buffer to both descriptor sets (binding=0)
+    rt_vulkan_bind_buffer(ds_clear, 0, d_fb)
+    rt_vulkan_bind_buffer(ds_rect,  0, d_fb)
+    print("Descriptor sets bound OK.")
+    print("")
+
+    # --- Warmup ---
+    print("Warmup: " + WARMUP_FRAMES.to_string() + " frames...")
+    var wi = 0
+    while wi < WARMUP_FRAMES:
+        scene_fill_1080p(pipe_clear, pipe_rect, ds_clear, ds_rect)
+        wi = wi + 1
+    rt_vulkan_wait_idle()
+    print("Warmup done.")
+    print("")
+
+    # --- Timed frames ---
+    print("Timed: " + TIMED_FRAMES.to_string() + " frames...")
+    val t0_ns = rt_time_now_nanos()
+    var fi = 0
+    while fi < TIMED_FRAMES:
+        scene_fill_1080p(pipe_clear, pipe_rect, ds_clear, ds_rect)
+        fi = fi + 1
+    rt_vulkan_wait_idle()
+    val t1_ns = rt_time_now_nanos()
+    print("Timed done.")
+    print("")
+
+    # --- Results ---
+    val total_ns  = t1_ns - t0_ns
+    val total_us  = total_ns / 1000
+    val avg_us    = total_us / TIMED_FRAMES
+    val avg_ms_i  = avg_us / 1000
+    val avg_ms_f  = avg_us % 1000
+
+    print("=== Results ===")
+    print("  Frames:    " + TIMED_FRAMES.to_string())
+    print("  Total:     " + total_us.to_string() + " us")
+    print("  avg:       " + avg_us.to_string() + " us/frame")
+    print("  avg:       " + avg_ms_i.to_string() + "." + avg_ms_f.to_string() + " ms/frame")
+    print("  Reference: ~2610 us/frame (vulkan_bench.c, TITAN RTX, vkCmdFillBuffer)")
+    print("")
+    print("BENCH_RESULT scene=fill_1080p backend=vulkan_compute"
+        + " frames=" + TIMED_FRAMES.to_string()
+        + " avg_us=" + avg_us.to_string()
+        + " rects_per_frame=" + NUM_RECTS.to_string()
+        + " fb=" + FB_W.to_string() + "x" + FB_H.to_string())
+
+    # --- Cleanup ---
+    rt_vulkan_destroy_descriptor_set(ds_rect)
+    rt_vulkan_destroy_descriptor_set(ds_clear)
+    rt_vulkan_destroy_pipeline(pipe_rect)
+    rt_vulkan_destroy_pipeline(pipe_clear)
+    rt_vulkan_destroy_shader(shader_rect)
+    rt_vulkan_destroy_shader(shader_clear)
+    rt_vulkan_free_buffer(d_fb)
+    rt_vulkan_shutdown()
+    print("")
+    print("Done.")
+
+main()

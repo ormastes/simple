@@ -1,0 +1,158 @@
+use std.io_runtime
+
+# ============================================================================
+# TcpState — AC-1: TCP socket state machine
+# ============================================================================
+
+class TcpState:
+    state: text
+    is_active_open: bool
+
+    static fn closed() -> TcpState:
+        return TcpState(state: "closed", is_active_open: false)
+
+    static fn active_open() -> TcpState:
+        return TcpState(state: "syn_sent", is_active_open: true)
+
+    me to_connecting() -> TcpState:
+        return TcpState(state: "connecting", is_active_open: self.is_active_open)
+
+    me to_established() -> TcpState:
+        return TcpState(state: "established", is_active_open: self.is_active_open)
+
+    me to_close_wait() -> TcpState:
+        return TcpState(state: "close_wait", is_active_open: self.is_active_open)
+
+    me is_established() -> bool:
+        return self.state == "established"
+
+    me is_connectable() -> bool:
+        return self.state == "connecting" or self.state == "syn_sent"
+
+    me can_send() -> bool:
+        return self.state == "established"
+
+# ============================================================================
+# SocketEntry — AC-2: socket publication
+# ============================================================================
+
+class SocketEntry:
+    fd: i32
+    local_port: i32
+    remote_port: i32
+    tcp_state: text
+    is_published: bool
+
+    static fn create(fd: i32, local: i32, remote: i32) -> SocketEntry:
+        return SocketEntry(
+            fd: fd,
+            local_port: local,
+            remote_port: remote,
+            tcp_state: "closed",
+            is_published: false
+        )
+
+    me update_state(new_state: text) -> SocketEntry:
+        return SocketEntry(
+            fd: self.fd,
+            local_port: self.local_port,
+            remote_port: self.remote_port,
+            tcp_state: new_state,
+            is_published: new_state == "established"
+        )
+
+    me is_ready() -> bool:
+        return self.is_published and self.tcp_state == "established"
+
+# ============================================================================
+# AcceptQueue — pending connection tracking
+# ============================================================================
+
+class AcceptQueue:
+    pending_count: i32
+    established_count: i32
+    rejected_count: i32
+
+    static fn empty() -> AcceptQueue:
+        return AcceptQueue(
+            pending_count: 0,
+            established_count: 0,
+            rejected_count: 0
+        )
+
+    me enqueue_if_established(is_established: bool) -> AcceptQueue:
+        if is_established:
+            return AcceptQueue(
+                pending_count: self.pending_count,
+                established_count: self.established_count + 1,
+                rejected_count: self.rejected_count
+            )
+        return AcceptQueue(
+            pending_count: self.pending_count,
+            established_count: self.established_count,
+            rejected_count: self.rejected_count + 1
+        )
+
+    me has_ready() -> bool:
+        return self.established_count > 0
+
+    me total_seen() -> i32:
+        return self.pending_count + self.established_count + self.rejected_count
+
+# ============================================================================
+# SocketTable — fixed 3-slot socket registry
+# ============================================================================
+
+class SocketTable:
+    s0_fd: i32
+    s0_state: text
+    s0_published: bool
+    s1_fd: i32
+    s1_state: text
+    s1_published: bool
+    s2_fd: i32
+    s2_state: text
+    s2_published: bool
+    total: i32
+
+    static fn empty() -> SocketTable:
+        return SocketTable(
+            s0_fd: -1, s0_state: "unused", s0_published: false,
+            s1_fd: -1, s1_state: "unused", s1_published: false,
+            s2_fd: -1, s2_state: "unused", s2_published: false,
+            total: 0
+        )
+
+    me add_socket(fd: i32, state: text) -> SocketTable:
+        if self.s0_fd == -1:
+            return SocketTable(
+                s0_fd: fd, s0_state: state, s0_published: state == "established",
+                s1_fd: self.s1_fd, s1_state: self.s1_state, s1_published: self.s1_published,
+                s2_fd: self.s2_fd, s2_state: self.s2_state, s2_published: self.s2_published,
+                total: self.total + 1
+            )
+        if self.s1_fd == -1:
+            return SocketTable(
+                s0_fd: self.s0_fd, s0_state: self.s0_state, s0_published: self.s0_published,
+                s1_fd: fd, s1_state: state, s1_published: state == "established",
+                s2_fd: self.s2_fd, s2_state: self.s2_state, s2_published: self.s2_published,
+                total: self.total + 1
+            )
+        if self.s2_fd == -1:
+            return SocketTable(
+                s0_fd: self.s0_fd, s0_state: self.s0_state, s0_published: self.s0_published,
+                s1_fd: self.s1_fd, s1_state: self.s1_state, s1_published: self.s1_published,
+                s2_fd: fd, s2_state: state, s2_published: state == "established",
+                total: self.total + 1
+            )
+        return self
+
+    me published_count() -> i32:
+        var count: i32 = 0
+        if self.s0_published:
+            count = count + 1
+        if self.s1_published:
+            count = count + 1
+        if self.s2_published:
+            count = count + 1
+        return count

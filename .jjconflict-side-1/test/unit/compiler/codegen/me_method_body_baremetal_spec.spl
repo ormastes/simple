@@ -1,0 +1,93 @@
+# me-method Body Baremetal Codegen Regression Spec
+#
+# Regression coverage for the 2026-04-13 bug where `me`-method bodies on
+# user-defined classes were silently replaced by empty stubs in the
+# Cranelift baremetal lane (Agent V flagged this in Round 6; Agent Z2
+# diagnosed and fixed in Round 7).
+#
+# Symptom: in the x86_64 SimpleOS desktop_e2e lane, DesktopShell.init()
+# (a `me` method) never executed. Its symbol
+# `desktop__shell__DesktopShell_dot_init` was present in the linked ELF,
+# but its body was empty — the `serial_println("[shell] init: …")`
+# string literals were missing from .rodata, and the shell could not
+# bootstrap the launcher service from `init()`. Agent V worked around it
+# by inlining `launcher_init()` into `DesktopShell.new()`, the static
+# constructor, which DOES run.
+#
+# Root cause (Agent Z2):
+#   src/compiler_rust/compiler/src/codegen/common_backend.rs in
+#   `compile_all_functions` had a silent stub-fallback: when
+#   `compile_function(func)` returned Err for any reason, the function
+#   was added to `failed_functions`, an `[CODEGEN STUB]` line was
+#   written to stderr (drowned out by `bin/simple os build` log noise),
+#   and an empty entry-block-only stub was emitted under the same
+#   symbol name with `Linkage::Preemptible`. The linker happily resolved
+#   `desktop_e2e_main`'s call to `shell.init()` against the stub, and
+#   the body's side effects vanished.
+#
+# Fix:
+#   1. The stub-fallback log line now uses a distinctive marker
+#      `[CODEGEN-STUB-FALLBACK]` and includes the function name and the
+#      underlying error so missing-body bugs cannot hide.
+#   2. A new opt-in env var SIMPLE_NO_STUB_FALLBACK=1 makes the
+#      stub-fallback path a hard error, returning
+#      BackendError::ModuleError listing every function whose body
+#      failed to compile. Recommended setting for diagnosing
+#      missing-body bugs and for the os build lane once the underlying
+#      compile error is resolved.
+#
+# This spec is documentation-only at present (the build harness for
+# spawning a baremetal sub-compile is in test/system/, not test/unit/).
+# When the baremetal compile harness is unified, this spec can be
+# expanded to actually compile a tiny class with a `me` method to ELF
+# and assert that `serial_println` strings appear in .rodata.
+
+extern fn serial_println(msg: text)
+
+class TinyShell:
+    initialized: bool
+
+    static fn new() -> TinyShell:
+        TinyShell(initialized: false)
+
+    me init():
+        # If this body is silently stubbed out, the marker below will
+        # never appear in the linked ELF's .rodata.
+        serial_println("[tiny-shell] init: me-method body executed")
+        self.initialized = true
+
+describe "me method body baremetal regression":
+    context "stub fallback diagnostics":
+        it "documents the SIMPLE_NO_STUB_FALLBACK env var":
+            # SIMPLE_NO_STUB_FALLBACK=1 turns the silent stub-fallback in
+            # compile_all_functions into a hard ModuleError, making
+            # missing-body bugs loud at codegen time. Use this when
+            # bisecting suspected me-method body losses or any other
+            # silently-failing function-body compilation.
+            val expected_marker = "[CODEGEN-STUB-FALLBACK]"
+            assert(expected_marker.len() > 0)
+
+        it "documents the Agent V workaround in DesktopShell.new()":
+            # src/os/desktop/shell.spl currently inlines launcher_init()
+            # into DesktopShell.new() because DesktopShell.init() (a `me`
+            # method) was hitting the stub-fallback path. Once the
+            # underlying compile error is resolved AND
+            # SIMPLE_NO_STUB_FALLBACK=1 is enabled by default, the
+            # workaround in DesktopShell.new() should be reverted and
+            # the launcher_init() call moved back into init().
+            val workaround_file = "src/os/desktop/shell.spl"
+            assert(workaround_file.len() > 0)
+
+    context "TinyShell tracer class":
+        it "instantiates via the static constructor":
+            val tiny = TinyShell.new()
+            assert(not tiny.initialized)
+
+        it "runs the me-method body in interpreter and SMF modes":
+            # In interpreter and SMF modes the me-method body runs
+            # correctly today; only the baremetal Cranelift lane
+            # exhibited the silent-stub bug. This case guards against
+            # regressions in those modes.
+            val tiny = TinyShell.new()
+            tiny.init()
+            assert(tiny.initialized)

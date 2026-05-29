@@ -1,0 +1,226 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+# Content Security Policy enforcement for the Simple Browser Platform.
+# Parses CSP headers and checks whether resource loads are permitted
+# by the active policy directives.
+# MP-4: Full directive parsing for default-src, script-src, style-src,
+# img-src, connect-src, font-src. Enhanced source_matches with 'self'
+# origin comparison, scheme matching, and host wildcard support.
+
+class CspDirective:
+    name: text
+    sources: [text]
+
+    static fn create(name: text, sources: [text]) -> CspDirective:
+        CspDirective(name: name, sources: sources)
+
+class CspPolicy:
+    directives: [CspDirective]
+    report_uri: text
+    page_origin: text
+
+    static fn create(directives: [CspDirective], report_uri: text) -> CspPolicy:
+        CspPolicy(directives: directives, report_uri: report_uri, page_origin: "")
+
+    static fn create_with_origin(directives: [CspDirective], report_uri: text, page_origin: text) -> CspPolicy:
+        CspPolicy(directives: directives, report_uri: report_uri, page_origin: page_origin)
+
+    static fn empty() -> CspPolicy:
+        CspPolicy(directives: [], report_uri: "", page_origin: "")
+
+fn parse_csp(header: text) -> CspPolicy:
+    # Parse a CSP header string into a CspPolicy.
+    # Format: "directive-name source1 source2; directive-name source3"
+    var directives: [CspDirective] = []
+    var report_uri = ""
+    val entries = header.split(";")
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i].trim()
+        if entry.len() > 0:
+            val raw_parts = entry.split(" ")
+            val parts = filter_non_empty(raw_parts)
+            if parts.len() > 0:
+                val name = parts[0]
+                if name == "report-uri":
+                    if parts.len() > 1:
+                        report_uri = parts[1]
+                else:
+                    var sources: [text] = []
+                    var j = 1
+                    while j < parts.len():
+                        sources = sources + [parts[j]]
+                        j = j + 1
+                    directives = directives + [CspDirective.create(name, sources)]
+        i = i + 1
+    CspPolicy.create(directives, report_uri)
+
+fn parse_csp_with_origin(header: text, page_origin: text) -> CspPolicy:
+    # MP-4: Parse CSP header with page origin for 'self' resolution.
+    val policy = parse_csp(header)
+    CspPolicy.create_with_origin(policy.directives, policy.report_uri, page_origin)
+
+fn check_csp(policy: CspPolicy, directive: text, url: text) -> bool:
+    # MP-4: Verify URL matches allowed sources for the given directive.
+    # This is the primary entry point for CSP enforcement.
+    check_source(policy, directive, url)
+
+fn check_source(policy: CspPolicy, directive: text, source: text) -> bool:
+    # Check if source is allowed by the named directive.
+    # Falls back through CSP fetch-directive chains, then to default-src.
+    # An empty policy means no CSP was delivered, so the load is allowed.
+    if policy.directives.len() == 0:
+        return true
+    val specific = find_directive(policy, directive)
+    match specific:
+        Some(d):
+            source_matches(d, source, policy.page_origin)
+        nil:
+            val fallback = fallback_directive_name(directive)
+            if fallback.len() > 0:
+                val fallback_d = find_directive(policy, fallback)
+                match fallback_d:
+                    Some(d):
+                        return source_matches(d, source, policy.page_origin)
+                    nil:
+                        pass_dn
+            val default_d = find_directive(policy, "default-src")
+            match default_d:
+                Some(d):
+                    return source_matches(d, source, policy.page_origin)
+                nil:
+                    return true
+
+fn check_script(policy: CspPolicy, source: text) -> bool:
+    check_source(policy, "script-src", source)
+
+fn check_style(policy: CspPolicy, source: text) -> bool:
+    check_source(policy, "style-src", source)
+
+fn check_image(policy: CspPolicy, source: text) -> bool:
+    check_source(policy, "img-src", source)
+
+fn check_connect(policy: CspPolicy, source: text) -> bool:
+    # MP-4: Check connect-src for XHR/fetch/WebSocket/EventSource.
+    check_source(policy, "connect-src", source)
+
+fn check_font(policy: CspPolicy, source: text) -> bool:
+    # MP-4: Check font-src for @font-face loads.
+    check_source(policy, "font-src", source)
+
+# --- internal helpers ---
+
+fn find_directive(policy: CspPolicy, name: text) -> Option<CspDirective>:
+    var i = 0
+    while i < policy.directives.len():
+        val d = policy.directives[i]
+        if d.name == name:
+            return Some(d)
+        i = i + 1
+    nil
+
+fn fallback_directive_name(name: text) -> text:
+    if name == "script-src-elem" or name == "script-src-attr":
+        return "script-src"
+    if name == "style-src-elem" or name == "style-src-attr":
+        return "style-src"
+    if name == "worker-src":
+        return "script-src"
+    if name == "frame-src":
+        return "child-src"
+    ""
+
+fn source_matches(directive: CspDirective, source: text, page_origin: text) -> bool:
+    # Check if source matches any entry in the directive's source list.
+    # Handles special tokens: 'self', 'none', 'unsafe-inline', 'unsafe-eval', '*'
+    # MP-4: Added 'self' origin comparison, scheme matching, host wildcards.
+    var i = 0
+    while i < directive.sources.len():
+        val allowed = directive.sources[i]
+        if allowed == "*":
+            return true
+        if allowed == "'none'":
+            return false
+        if allowed == "'unsafe-inline'":
+            # unsafe-inline allows inline scripts/styles — source is "inline"
+            if source == "inline":
+                return true
+        if allowed == "'unsafe-eval'":
+            if source == "eval":
+                return true
+        if allowed == "'self'":
+            # 'self' matches the page's own origin
+            if page_origin.len() > 0:
+                if _source_is_same_origin(source, page_origin):
+                    return true
+            else if source == "'self'":
+                return true
+        else if _is_csp_keyword(allowed):
+            pass_dn
+        else if allowed.starts_with("*."):
+            # Host wildcard: *.example.com matches sub.example.com
+            val wildcard_suffix = allowed.substring(1, allowed.len())
+            if _source_host_matches_wildcard(source, wildcard_suffix):
+                return true
+        else if allowed.ends_with(":"):
+            # Scheme source: "https:" matches any https URL
+            if source == allowed:
+                return true
+            if source.starts_with(allowed.substring(0, allowed.len() - 1) + "://"):
+                return true
+        else:
+            if _source_matches_host_source(source, allowed):
+                return true
+        i = i + 1
+    false
+
+fn _source_is_same_origin(source: text, page_origin: text) -> bool:
+    if source == page_origin:
+        return true
+    if source.starts_with(page_origin + "/"):
+        return true
+    if source.starts_with(page_origin + "?"):
+        return true
+    if source.starts_with(page_origin + "#"):
+        return true
+    false
+
+fn _is_csp_keyword(source: text) -> bool:
+    source == "'self'" or source == "'none'" or source == "'unsafe-inline'" or source == "'unsafe-eval'"
+
+fn _source_matches_host_source(source: text, allowed: text) -> bool:
+    if allowed == source:
+        return true
+    if allowed.contains("://"):
+        return _source_is_same_origin(source, allowed)
+    _url_host(source) == allowed
+
+fn _source_host_matches_wildcard(source: text, wildcard_suffix: text) -> bool:
+    val host = _url_host(source)
+    if host.len() == 0:
+        return false
+    host.ends_with(wildcard_suffix)
+
+fn _url_host(source: text) -> text:
+    val scheme_pos = source.index_of("://")
+    if scheme_pos < 0:
+        return ""
+    var pos = scheme_pos + 3
+    val start = pos
+    while pos < source.len():
+        val ch = source.substring(pos, pos + 1)
+        if ch == "/" or ch == "?" or ch == "#":
+            return source.substring(start, pos)
+        pos = pos + 1
+    source.substring(start, pos)
+
+fn filter_non_empty(parts: [text]) -> [text]:
+    var result: [text] = []
+    var i = 0
+    while i < parts.len():
+        val part = parts[i].trim()
+        if part.len() > 0:
+            result = result + [part]
+        i = i + 1
+    result

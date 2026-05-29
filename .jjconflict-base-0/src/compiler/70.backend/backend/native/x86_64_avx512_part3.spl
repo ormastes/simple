@@ -1,0 +1,53 @@
+# Part 3 of src/compiler/70.backend/backend/native/x86_64_avx512.spl
+use compiler.backend.backend.native.x86_64_avx512.*
+# src/compiler/70.backend/backend/native/x86_64_avx512.spl
+#
+# AVX-512 strict-emit backend (scaffold; M1 fills the implementations)
+#
+# Pattern: src/compiler/70.backend/backend/native/arm_neon.spl
+# Reference: doc/04_architecture/simd_backend_strict_emit_detail_part1.md §3 (EVEX encoding)
+#            doc/04_architecture/simd_backend_strict_emit_detail_part2.md §8.2 (k-reg alloc)
+#
+# ERRATA NOTE: simd_backend_strict_emit_detail_part1.md §3 contains ERR-001 (P0/P1 swap bug).
+# See simd_strict_emit_errata.md for the corrected byte layout before implementing EVEX in M1.
+#
+# AVX-512 uses EVEX prefix encoding (4-byte prefix replacing VEX):
+#   Byte 0: 0x62  (mandatory EVEX escape)
+#   Byte 1 / P0:  ~R | ~X | ~B | ~R' | 0 | mm[2:0]
+#   Byte 2 / P1:  W | ~vvvv[3:0] | 1 | pp[1:0]
+#   Byte 3 / P2:  z | L'L | b | ~V' | aaa
+#
+# ZMM registers (512-bit): ZMM0-ZMM31
+# k-mask registers: k0-k7  (k0 reserved as all-ones; k1-k7 allocatable — see §8.2)
+#
+# MachOpcode families added by D3 (SimdZmm*):
+#   SimdZmmAddF32x16, SimdZmmMulF32x16, SimdZmmFmaF32x16,
+#   SimdZmmMaskAdd, SimdZmmLoad, SimdZmmStore,
+#   SimdZmmGather, SimdZmmScatter,
+#   SimdZmmKand, SimdZmmKor, SimdZmmKxor, SimdZmmKnot,
+#   SimdZmmPerm, SimdZmmShuffle
+
+use compiler.backend.native.mach_inst.{MachReg, MachRegKind, physical_reg, reg_id, Operand, OperandKind, MachInst, MachBlock, MachFunction, MachModule}
+use compiler.backend.native.mach_inst.{X86_XMM0, X86_XMM1, X86_XMM2, X86_XMM3, X86_XMM4, X86_XMM5, X86_XMM6, X86_XMM7}
+use compiler.backend.native.mach_inst.{X86_XMM8, X86_XMM9, X86_XMM10, X86_XMM11, X86_XMM12, X86_XMM13, X86_XMM14, X86_XMM15}
+use compiler.backend.native.mach_inst.{X86_YMM0, X86_YMM1, X86_YMM2, X86_YMM3, X86_YMM4, X86_YMM5, X86_YMM6, X86_YMM7}
+use compiler.backend.native.mach_inst.{X86_YMM8, X86_YMM9, X86_YMM10, X86_YMM11, X86_YMM12, X86_YMM13, X86_YMM14, X86_YMM15}
+
+# ============================================================================
+# AVX-512 ZMM Register IDs
+# ZMM registers extend YMM; IDs are assigned by M1 in mach_inst when ZMM
+# constants are added. Scaffold uses placeholder i64 values matching the
+# expected offset (YMM base 32..47 → ZMM expected at 48..79 or similar).
+# M1 will replace these with the real mach_inst exports.
+# ============================================================================
+
+# ZMM0-ZMM15 (lower bank; extend the YMM 16-31 base used by x86_64_simd.spl)
+# Placeholder IDs: 48..63 — M1 must reconcile with mach_inst.spl constants
+fn avx512_zmm_reg_name(id: i64) -> text:
+    """Convert ZMM register ID to name string for diagnostics and ICE messages."""
+    val idx = zmm_to_index(id)
+    "zmm{idx}"
+
+# ============================================================================
+# Exports
+# ============================================================================

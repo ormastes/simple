@@ -1,0 +1,53 @@
+# GC CUDA Ownership Pattern Spec
+# Documents the owns_handle conditional drop pattern in gc_async_mut/cuda/
+
+class MockResource:
+    handle: i64
+    owns_handle: bool
+    kind: text
+
+    fn should_free() -> bool:
+        self.owns_handle
+
+fn owned_stream(h: i64) -> MockResource:
+    MockResource(handle: h, owns_handle: true, kind: "stream")
+
+fn borrowed_stream(h: i64) -> MockResource:
+    MockResource(handle: h, owns_handle: false, kind: "stream")
+
+fn owned_event(h: i64) -> MockResource:
+    MockResource(handle: h, owns_handle: true, kind: "event")
+
+fn owned_mem(h: i64) -> MockResource:
+    MockResource(handle: h, owns_handle: true, kind: "mem")
+
+describe "GC CUDA Ownership":
+    describe "CudaStreamWrapper":
+        it "owned stream frees on drop":
+            val s = owned_stream(42)
+            expect(s.should_free()).to_equal(true)
+
+        it "borrowed stream does not free":
+            val s = borrowed_stream(42)
+            expect(s.should_free()).to_equal(false)
+
+    describe "CudaEventWrapper":
+        it "owned event frees on drop":
+            val e = owned_event(99)
+            expect(e.should_free()).to_equal(true)
+
+    describe "CudaDeviceMemWrapper":
+        it "owned memory frees on drop":
+            val m = owned_mem(100)
+            expect(m.should_free()).to_equal(true)
+
+    describe "Ownership transfer":
+        it "only owner frees shared handle":
+            val owner = owned_stream(77)
+            val borrower = borrowed_stream(77)
+            # Borrower should not free
+            expect(borrower.should_free()).to_equal(false)
+            # Owner should free
+            expect(owner.should_free()).to_equal(true)
+            # Same handle
+            expect(owner.handle).to_equal(borrower.handle)

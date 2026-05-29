@@ -1,0 +1,160 @@
+# OpenType layout table parsers: GSUB, GPOS, GDEF
+
+use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, find_table, read_u16_be, read_u32_be}
+
+# ===== GSUB / GPOS =====
+
+class GsubLookup:
+    lookup_type: u32
+    flag: u32
+    subtable_offsets: [u32]
+
+class GposLookup:
+    lookup_type: u32
+    flag: u32
+    subtable_offsets: [u32]
+
+fn read_lookup_list(blob: [u8], lookup_list_abs: i64) -> [u32]:
+    if lookup_list_abs + 1 >= blob.len() as i64:
+        return []
+    val count = read_u16_be(blob, lookup_list_abs) as i64
+    var offsets: [u32] = []
+    var i: i64 = 0
+    while i < count:
+        val off = read_u16_be(blob, lookup_list_abs + 2 + i * 2)
+        offsets.append(off)
+        i = i + 1
+    offsets
+
+fn parse_gsub_skeleton(font: OtFont) -> [GsubLookup]:
+    # Tag 'GSUB' = 0x47535542
+    val gsub_tag: u32 = 1196643650
+    val maybe_tbl = find_table(font, gsub_tag)
+    if maybe_tbl == None:
+        return []
+    val tbl = maybe_tbl.unwrap()
+    val base = tbl.offset as i64
+    val blob = font.blob
+    if base + 10 >= blob.len() as i64:
+        return []
+    val lookup_list_off = read_u16_be(blob, base + 8) as i64
+    val lookup_list_abs = base + lookup_list_off
+    if lookup_list_abs + 1 >= blob.len() as i64:
+        return []
+    val count = read_u16_be(blob, lookup_list_abs) as i64
+    var results: [GsubLookup] = []
+    var i: i64 = 0
+    while i < count:
+        val off = read_u16_be(blob, lookup_list_abs + 2 + i * 2) as i64
+        val lkp_abs = lookup_list_abs + off
+        if lkp_abs + 5 >= blob.len() as i64:
+            i = i + 1
+            continue
+        val ltype = read_u16_be(blob, lkp_abs)
+        val flag = read_u16_be(blob, lkp_abs + 2)
+        val sub_count = read_u16_be(blob, lkp_abs + 4) as i64
+        var subs: [u32] = []
+        var j: i64 = 0
+        while j < sub_count:
+            val soff = read_u16_be(blob, lkp_abs + 6 + j * 2)
+            subs.append(soff)
+            j = j + 1
+        val lkp = GsubLookup(lookup_type: ltype, flag: flag, subtable_offsets: subs)
+        results.append(lkp)
+        i = i + 1
+    results
+
+fn parse_gpos_skeleton(font: OtFont) -> [GposLookup]:
+    # Tag 'GPOS' = 0x47504F53
+    val gpos_tag: u32 = 1196643155
+    val maybe_tbl = find_table(font, gpos_tag)
+    if maybe_tbl == None:
+        return []
+    val tbl = maybe_tbl.unwrap()
+    val base = tbl.offset as i64
+    val blob = font.blob
+    if base + 10 >= blob.len() as i64:
+        return []
+    val lookup_list_off = read_u16_be(blob, base + 8) as i64
+    val lookup_list_abs = base + lookup_list_off
+    if lookup_list_abs + 1 >= blob.len() as i64:
+        return []
+    val count = read_u16_be(blob, lookup_list_abs) as i64
+    var results: [GposLookup] = []
+    var i: i64 = 0
+    while i < count:
+        val off = read_u16_be(blob, lookup_list_abs + 2 + i * 2) as i64
+        val lkp_abs = lookup_list_abs + off
+        if lkp_abs + 5 >= blob.len() as i64:
+            i = i + 1
+            continue
+        val ltype = read_u16_be(blob, lkp_abs)
+        val flag = read_u16_be(blob, lkp_abs + 2)
+        val sub_count = read_u16_be(blob, lkp_abs + 4) as i64
+        var subs: [u32] = []
+        var j: i64 = 0
+        while j < sub_count:
+            val soff = read_u16_be(blob, lkp_abs + 6 + j * 2)
+            subs.append(soff)
+            j = j + 1
+        val lkp = GposLookup(lookup_type: ltype, flag: flag, subtable_offsets: subs)
+        results.append(lkp)
+        i = i + 1
+    results
+
+# ===== GDEF =====
+
+enum GlyphClass:
+    Base
+    Ligature
+    Mark
+    Component
+    Unknown
+
+fn parse_gdef_glyph_class(font: OtFont, glyph_id: u32) -> GlyphClass:
+    # Tag 'GDEF' = 0x47444546
+    val gdef_tag: u32 = 1195656006
+    val maybe_tbl = find_table(font, gdef_tag)
+    if maybe_tbl == None:
+        return GlyphClass.Unknown
+    val tbl = maybe_tbl.unwrap()
+    val base = tbl.offset as i64
+    val blob = font.blob
+    if base + 13 >= blob.len() as i64:
+        return GlyphClass.Unknown
+    # GlyphClassDef offset at bytes 4-5
+    val glyph_class_def_off = read_u16_be(blob, base + 4) as i64
+    if glyph_class_def_off == 0:
+        return GlyphClass.Unknown
+    val class_def_abs = base + glyph_class_def_off
+    if class_def_abs + 1 >= blob.len() as i64:
+        return GlyphClass.Unknown
+    val format = read_u16_be(blob, class_def_abs)
+    var class_val: u32 = 0
+    if format == 1:
+        val start_glyph = read_u16_be(blob, class_def_abs + 2) as i64
+        val glyph_count = read_u16_be(blob, class_def_abs + 4) as i64
+        val idx = glyph_id as i64 - start_glyph
+        if idx >= 0 and idx < glyph_count:
+            class_val = read_u16_be(blob, class_def_abs + 6 + idx * 2)
+    else if format == 2:
+        val range_count = read_u16_be(blob, class_def_abs + 2) as i64
+        var ri: i64 = 0
+        while ri < range_count:
+            val rbase = class_def_abs + 4 + ri * 6
+            val start_g = read_u16_be(blob, rbase) as i64
+            val end_g = read_u16_be(blob, rbase + 2) as i64
+            val cls = read_u16_be(blob, rbase + 4)
+            if (glyph_id as i64) >= start_g and (glyph_id as i64) <= end_g:
+                class_val = cls
+            ri = ri + 1
+    if class_val == 1:
+        GlyphClass.Base
+    else if class_val == 2:
+        GlyphClass.Ligature
+    else if class_val == 3:
+        GlyphClass.Mark
+    else if class_val == 4:
+        GlyphClass.Component
+    else:
+        GlyphClass.Unknown

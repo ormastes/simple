@@ -1,0 +1,223 @@
+# Package Builder — Create .spk Archives
+# MDSOC: feature dimension, apps layer
+#
+# Builds .spk packages from a source directory containing manifest.sdn.
+# Workflow: validate manifest → collect files → compute checksum → create tar → output .spk
+#
+# Usage:
+#   pkg build <source-dir> [-o <output-dir>]
+#   pkg build examples/simple_os/apps/hello_world/ -o /tmp/packages/
+
+use os.tools.pkg.pkg_format.{
+    ExtendedManifest, PackageType, PkgArch,
+    parse_extended_manifest, serialize_extended_manifest,
+    spk_filename, SPK_MANIFEST_NAME, SPK_DATA_PREFIX,
+    package_type_to_text, pkg_arch_to_text
+}
+use os.tools.pkg.pkg_manifest.{PackageVersion}
+use os.tools.archive.tar_tool.{tar_create, TarHeader, TarEntry, BLOCK_SIZE, TYPE_FILE, TYPE_DIR}
+use os.userlib.fs.{read_text, write_text, stat, readdir, mkdir}
+
+# === Build Context ===
+
+struct BuildContext:
+    source_dir: text           # Directory containing manifest.sdn + source files
+    output_dir: text           # Where to write the .spk file
+    manifest: ExtendedManifest # Parsed manifest
+    collected_files: [text]    # Relative paths of files to include
+
+# === Public API ===
+
+fn build_package(source_dir: text, output_dir: text) -> Result<text, text>:
+    """Build a .spk package from source directory.
+
+    Returns the path to the created .spk file.
+    """
+    # Step 1: Read and validate manifest
+    val manifest_path = "{source_dir}/manifest.sdn"
+    val manifest_content = read_text(manifest_path)
+    if manifest_content == "":
+        return Result.Err("No manifest.sdn found in {source_dir}")
+
+    val manifest_result = parse_extended_manifest(manifest_content)
+    if val Err(e) = manifest_result:
+        return Result.Err("Invalid manifest: {e}")
+    var manifest = manifest_result.unwrap()
+
+    # Step 2: Collect files listed in manifest
+    val collect_result = _collect_files(source_dir, manifest)
+    if val Err(e) = collect_result:
+        return Result.Err("File collection failed: {e}")
+    val file_list = collect_result.unwrap()
+
+    # Step 3: Compute total size
+    var total_size: u64 = 0
+    for file_path in file_list:
+        val full_path = "{source_dir}/{file_path}"
+        val content = read_text(full_path)
+        total_size = total_size + content.len().to_u64()
+    manifest.installed_size = total_size
+
+    # Step 4: Compute checksum (simple hash of all file contents)
+    val checksum = _compute_checksum(source_dir, file_list)
+    manifest.base.checksum = checksum
+
+    # Step 5: Create the .spk tar archive
+    val spk_name = spk_filename(manifest.base.name, manifest.base.version, manifest.arch)
+    mkdir(output_dir)
+    val spk_path = "{output_dir}/{spk_name}"
+
+    val archive_result = _create_spk_archive(source_dir, manifest, file_list)
+    if val Err(e) = archive_result:
+        return Result.Err("Archive creation failed: {e}")
+    val archive_data = archive_result.unwrap()
+
+    write_text(spk_path, archive_data)
+    return Result.Ok(spk_path)
+
+fn build_meta_package(manifest: ExtendedManifest, output_dir: text) -> Result<text, text>:
+    """Build a meta-package (.spk) that only contains a manifest — no payload files.
+
+    Meta-packages declare dependencies on other packages to create package groups.
+    """
+    if manifest.pkg_type != PackageType.Meta:
+        return Result.Err("build_meta_package requires PackageType.Meta")
+
+    val spk_name = spk_filename(manifest.base.name, manifest.base.version, manifest.arch)
+    mkdir(output_dir)
+    val spk_path = "{output_dir}/{spk_name}"
+
+    # Create minimal archive with just the manifest
+    val manifest_content = serialize_extended_manifest(manifest)
+    var archive = ""
+    archive = archive + _make_header(SPK_MANIFEST_NAME, manifest_content.len())
+    archive = archive + _pad_block(manifest_content)
+    # Two empty blocks = end of archive
+    archive = archive + (" " * BLOCK_SIZE) + (" " * BLOCK_SIZE)
+
+    write_text(spk_path, archive)
+    return Result.Ok(spk_path)
+
+# === CLI Entry Point ===
+
+fn _print_build_usage():
+    print "Usage: pkg build <source-dir> [-o <output-dir>]"
+    print ""
+    print "Build a .spk package from a directory containing manifest.sdn."
+    print ""
+    print "Options:"
+    print "  -o DIR    Output directory (default: ./packages/)"
+    print "  -h        Show this help"
+    print ""
+    print "The source directory must contain:"
+    print "  manifest.sdn   Package manifest with name, version, files, etc."
+    print "  <files>         Files listed in the manifest's 'files' field"
+
+fn run_pkg_build(args: [text]) -> i32:
+    for arg in args:
+        if arg == "-h":
+            _print_build_usage()
+            return 0
+
+    if args.len() < 1:
+        _print_build_usage()
+        return 1
+
+    val source_dir = args[0]
+    var output_dir = "./packages"
+
+    var i = 1
+    while i < args.len():
+        if args[i] == "-o" and i + 1 < args.len():
+            output_dir = args[i + 1]
+            i = i + 2
+        else:
+            i = i + 1
+
+    print "Building package from: {source_dir}"
+    val result = build_package(source_dir, output_dir)
+    if val Ok(path) = result:
+        print "Package created: {path}"
+        return 0
+    else if val Err(e) = result:
+        print "Error: {e}"
+        return 1
+
+    return 0
+
+# === Internal Helpers ===
+
+fn _collect_files(source_dir: text, manifest: ExtendedManifest) -> Result<[text], text>:
+    """Collect files to include in package based on manifest.files list."""
+    var collected: [text] = []
+
+    if manifest.base.files.len() == 0:
+        # Auto-discover: include all files in source directory (excluding manifest.sdn)
+        val entries = readdir(source_dir)
+        for entry in entries:
+            if entry != "manifest.sdn" and entry != "." and entry != "..":
+                collected.push(entry)
+    else:
+        # Use explicitly listed files
+        for file_path in manifest.base.files:
+            # Strip leading / for relative lookup
+            var rel_path = file_path
+            if rel_path.starts_with("/"):
+                rel_path = rel_path.slice(1, rel_path.len())
+            collected.push(rel_path)
+
+    return Result.Ok(collected)
+
+fn _compute_checksum(source_dir: text, files: [text]) -> text:
+    """Compute a simple checksum over all file contents.
+
+    Uses a basic additive hash. For production, use SHA-256.
+    """
+    var hash: u64 = 0x811C9DC5  # FNV offset basis
+    for file_path in files:
+        val full_path = "{source_dir}/{file_path}"
+        val content = read_text(full_path)
+        var j = 0
+        while j < content.len():
+            hash = hash ^ content[j].to_u64()
+            hash = (hash * 0x01000193) & 0xFFFFFFFF  # FNV prime
+            j = j + 1
+
+    return "fnv1a:{hash}"
+
+fn _create_spk_archive(source_dir: text, manifest: ExtendedManifest, files: [text]) -> Result<text, text>:
+    """Create a .spk tar archive with manifest + data/ payload."""
+    var archive = ""
+
+    # Entry 1: manifest.sdn
+    val manifest_content = serialize_extended_manifest(manifest)
+    archive = archive + _make_header(SPK_MANIFEST_NAME, manifest_content.len())
+    archive = archive + _pad_block(manifest_content)
+
+    # Entry 2+: data/<file> for each payload file
+    for file_path in files:
+        val full_path = "{source_dir}/{file_path}"
+        val content = read_text(full_path)
+        val archive_path = "{SPK_DATA_PREFIX}{file_path}"
+        archive = archive + _make_header(archive_path, content.len())
+        archive = archive + _pad_block(content)
+
+    # Two empty blocks = end of archive
+    archive = archive + (" " * BLOCK_SIZE) + (" " * BLOCK_SIZE)
+    return Result.Ok(archive)
+
+fn _make_header(name: text, size: i32) -> text:
+    """Create a simplified tar header block."""
+    val line = "{name}\t{size}\t0644\t0\t0"
+    val padding_len = BLOCK_SIZE - line.len()
+    if padding_len > 0:
+        return line + (" " * padding_len)
+    return line.slice(0, BLOCK_SIZE)
+
+fn _pad_block(data: text) -> text:
+    """Pad data to 512-byte block boundary."""
+    val remainder = data.len() % BLOCK_SIZE
+    if remainder == 0:
+        return data
+    val padding_len = BLOCK_SIZE - remainder
+    return data + (" " * padding_len)

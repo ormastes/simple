@@ -1,0 +1,495 @@
+"""
+# Authentication Middleware
+
+Session-based and JWT-based authentication middleware.
+Extracts credentials from cookies or Authorization headers
+and verifies them against the session store or JWT secret.
+
+## Usage
+
+```simple
+# Session-based auth
+val user_id = session_auth_middleware(request, session_store)
+match user_id:
+    Ok(uid): print "Authenticated user: {uid}"
+    Err(msg): print "Auth failed: {msg}"
+
+# JWT-based auth (simple)
+val user_id = jwt_auth_middleware(request, "my-jwt-secret")
+match user_id:
+    Ok(uid): print "Authenticated user: {uid}"
+    Err(msg): print "Auth failed: {msg}"
+
+# JWT-based auth (configurable, v2)
+val config = JwtAuthConfig(
+    secret: "my-jwt-secret",
+    algorithm: "HS256",
+    required_claims: ["sub", "exp"],
+    issuer: Some("my-app"),
+    audience: Some("my-api")
+)
+val auth_result = jwt_auth_middleware_v2(request, config)
+match auth_result:
+    Ok(result):
+        print "User: {result.user_id}"
+        val roles_text = result.get_claim("roles")
+    Err(msg): print "Auth failed: {msg}"
+```
+"""
+
+use std.http_server.types.{HttpRequestData}
+use std.web_framework.session.{SessionStore}
+use std.crypto.hmac.{hmac_sha256}
+use std.common.jwt.decode.{split_token, json_decode}
+use std.common.jwt.claims.{get_claim, has_claim, current_timestamp}
+
+# ============================================================================
+# JWT Auth Configuration
+# ============================================================================
+
+class JwtAuthConfig:
+    """Configuration for JWT-based authentication.
+
+    Args:
+        secret: The signing secret (for HMAC algorithms)
+        algorithm: Signing algorithm ("HS256" supported)
+        required_claims: List of claim keys that must be present (e.g., ["sub", "exp"])
+        issuer: Expected issuer claim value (nil to skip validation)
+        audience: Expected audience claim value (nil to skip validation)
+    """
+    secret: text
+    algorithm: text
+    required_claims: [text]
+    issuer: text?
+    audience: text?
+
+# ============================================================================
+# JWT Auth Result
+# ============================================================================
+
+class JwtAuthResult:
+    """Result of a successful JWT authentication.
+
+    Carries the extracted user_id (from "sub" claim) and the full
+    decoded claims list so callers can inspect roles, scopes, etc.
+    """
+    user_id: text
+    claims: list
+
+impl JwtAuthResult:
+    me get_claim(key: text) -> text:
+        """Retrieve a specific claim value by key."""
+        get_claim(self.claims, key)
+
+    me has_claim(key: text) -> bool:
+        """Check whether a claim exists."""
+        has_claim(self.claims, key)
+
+# ============================================================================
+# Session-Based Authentication
+# ============================================================================
+
+fn session_auth_middleware(request: HttpRequestData,
+                          session_store: SessionStore,
+                          cookie_name: text) -> Result<text, text>:
+    """Authenticate a request using session cookies.
+
+    Extracts the session cookie, looks up the session in the store,
+    and returns the user_id if the session is valid.
+
+    Args:
+        request: HTTP request
+        session_store: Database session store
+        cookie_name: Name of the session cookie (e.g., "sid")
+
+    Returns:
+        Ok(user_id) if authenticated, Err(reason) otherwise
+    """
+    val session_id = extract_session_cookie(request, cookie_name)
+    if session_id == nil:
+        return Err("No session cookie found")
+
+    val sid = session_id ?? ""
+    val session_result = session_store.get(sid)
+    match session_result:
+        Ok(data):
+            val user_id = data.get("_user_id")
+            if user_id == nil:
+                return Err("Session has no user")
+            val uid = user_id ?? ""
+            if uid.len() == 0:
+                return Err("Session has no user")
+            Ok(uid)
+        Err(e):
+            Err("Session lookup failed")
+
+# ============================================================================
+# JWT-Based Authentication (Simple)
+# ============================================================================
+
+fn jwt_auth_middleware(request: HttpRequestData, secret: text) -> Result<text, text>:
+    """Authenticate a request using JWT Bearer token.
+
+    Extracts the token from the Authorization header, verifies
+    the HMAC-SHA256 signature, and returns the subject claim.
+
+    Args:
+        request: HTTP request
+        secret: JWT signing secret
+
+    Returns:
+        Ok(user_id) from the JWT subject claim, Err(reason) otherwise
+    """
+    val token = extract_bearer_token(request)
+    if token == nil:
+        return Err("No Bearer token found")
+
+    val jwt = token ?? ""
+    val parts = jwt.split(".")
+    if parts.len() != 3:
+        return Err("Invalid JWT format")
+
+    val header = parts[0]
+    val payload = parts[1]
+    val signature = parts[2]
+
+    # Verify signature
+    val signing_input = "{header}.{payload}"
+    val expected_sig = compute_jwt_signature(signing_input, secret)
+    if signature != expected_sig:
+        return Err("Invalid JWT signature")
+
+    # Decode payload (base64url -> JSON-like text)
+    val decoded_payload = base64url_decode(payload)
+
+    # Extract "sub" field (simple JSON parsing)
+    val user_id = extract_json_field(decoded_payload, "sub")
+    if user_id.len() == 0:
+        return Err("JWT has no subject claim")
+
+    Ok(user_id)
+
+# ============================================================================
+# JWT-Based Authentication (Configurable, v2)
+# ============================================================================
+
+fn jwt_auth_middleware_v2(request: HttpRequestData,
+                         config: JwtAuthConfig) -> Result<JwtAuthResult, text>:
+    """Authenticate a request using JWT with full configuration.
+
+    Extracts the Bearer token, verifies the HMAC signature, validates
+    required claims (exp, iss, aud), and returns a JwtAuthResult
+    containing the user_id and all decoded claims.
+
+    Args:
+        request: HTTP request
+        config: JWT authentication configuration
+
+    Returns:
+        Ok(JwtAuthResult) on success, Err(reason) on failure
+    """
+    # Extract token from Authorization header
+    val token_opt = extract_bearer_token(request)
+    if token_opt == nil:
+        return Err("No Bearer token in Authorization header")
+
+    val raw_token = token_opt ?? ""
+    verify_and_decode_jwt(raw_token, config)
+
+fn verify_and_decode_jwt(raw_token: text,
+                         config: JwtAuthConfig) -> Result<JwtAuthResult, text>:
+    """Verify JWT signature and decode claims from a raw token string.
+
+    Args:
+        raw_token: The raw JWT token (without "Bearer " prefix)
+        config: JWT authentication configuration
+
+    Returns:
+        Ok(JwtAuthResult) on success, Err(reason) on failure
+    """
+    val parts = raw_token.split(".")
+    if parts.len() != 3:
+        return Err("Invalid JWT format: expected 3 dot-separated parts")
+
+    val header_b64 = parts[0]
+    val payload_b64 = parts[1]
+    val signature_b64 = parts[2]
+
+    # --- 1. Verify signature ---
+    val signing_input = "{header_b64}.{payload_b64}"
+    if config.algorithm == "HS256":
+        val expected_sig = compute_jwt_signature(signing_input, config.secret)
+        if signature_b64 != expected_sig:
+            return Err("JWT signature verification failed")
+    else:
+        return Err("Unsupported algorithm: " + config.algorithm + " (only HS256 supported)")
+
+    # --- 2. Decode payload ---
+    val payload_json = base64url_decode(payload_b64)
+    val claims = json_decode(payload_json)
+
+    # --- 3. Validate required claims ---
+    var i = 0
+    while i < config.required_claims.len():
+        val claim_key = config.required_claims[i]
+        val claim_val = get_claim(claims, claim_key)
+        if claim_val.len() == 0:
+            return Err("Missing required claim: " + claim_key)
+        i = i + 1
+
+    # --- 4. Validate exp (expiration) ---
+    if has_claim(claims, "exp"):
+        val exp_str = get_claim(claims, "exp")
+        val exp_val = parse_i64_simple(exp_str)
+        val now = current_timestamp()
+        if now > exp_val:
+            return Err("JWT has expired")
+
+    # --- 5. Validate iss (issuer) ---
+    val expected_issuer = config.issuer ?? ""
+    if expected_issuer.len() > 0:
+        val actual_issuer = get_claim(claims, "iss")
+        if actual_issuer != expected_issuer:
+            return Err("JWT issuer mismatch: expected " + expected_issuer + ", got " + actual_issuer)
+
+    # --- 6. Validate aud (audience) ---
+    val expected_audience = config.audience ?? ""
+    if expected_audience.len() > 0:
+        val actual_audience = get_claim(claims, "aud")
+        if actual_audience != expected_audience:
+            return Err("JWT audience mismatch: expected " + expected_audience + ", got " + actual_audience)
+
+    # --- 7. Extract user_id from sub claim ---
+    val user_id = get_claim(claims, "sub")
+    if user_id.len() == 0:
+        return Err("JWT has no subject (sub) claim")
+
+    Ok(JwtAuthResult(user_id: user_id, claims: claims))
+
+# ============================================================================
+# Token Extraction
+# ============================================================================
+
+fn extract_bearer_token(request: HttpRequestData) -> text?:
+    """Extract Bearer token from Authorization header.
+
+    Args:
+        request: HTTP request
+
+    Returns:
+        Token string or nil if not found
+    """
+    for header in request.headers:
+        if header.0.lower() == "authorization":
+            val value = header.1.trim()
+            if value.starts_with("Bearer "):
+                val token = value[7:]
+                if token.len() > 0:
+                    return Some(token)
+            elif value.starts_with("bearer "):
+                val token = value[7:]
+                if token.len() > 0:
+                    return Some(token)
+    nil
+
+fn extract_bearer_token_from_header(auth_header: text) -> Result<text, text>:
+    """Extract Bearer token from a raw Authorization header value.
+
+    Args:
+        auth_header: Raw Authorization header string
+
+    Returns:
+        Ok(token) if valid Bearer token found, Err(reason) otherwise
+    """
+    val trimmed = auth_header.trim()
+    if trimmed.len() == 0:
+        return Err("Empty Authorization header")
+
+    if trimmed.starts_with("Bearer ") or trimmed.starts_with("bearer "):
+        val token = trimmed[7:]
+        if token.len() == 0:
+            return Err("Empty Bearer token")
+        return Ok(token)
+
+    Err("Authorization header is not Bearer type")
+
+fn extract_session_cookie(request: HttpRequestData, cookie_name: text) -> text?:
+    """Extract a specific cookie value from the request.
+
+    Args:
+        request: HTTP request
+        cookie_name: Name of the cookie to find
+
+    Returns:
+        Cookie value or nil if not found
+    """
+    for header in request.headers:
+        if header.0.lower() == "cookie":
+            val cookies = parse_cookies(header.1)
+            val value = cookies.get(cookie_name)
+            if value != nil:
+                return Some(value ?? "")
+    nil
+
+fn parse_cookies(cookie_header: text) -> Dict<text, text>:
+    """Parse a Cookie header into name-value dict.
+
+    Args:
+        cookie_header: Raw Cookie header value
+
+    Returns:
+        Dict of cookie name to value
+    """
+    var result: Dict<text, text> = {}
+    val pairs = cookie_header.split("; ")
+    for pair in pairs:
+        val eq_pos = pair.index_of("=")
+        if eq_pos > 0:
+            val name = pair[0:eq_pos].trim()
+            val value = pair[eq_pos + 1:].trim()
+            result[name] = value
+    result
+
+# ============================================================================
+# JWT Helpers
+# ============================================================================
+
+fn compute_jwt_signature(signing_input: text, secret: text) -> text:
+    """Compute HMAC-SHA256 JWT signature and return base64url-encoded."""
+    val hash_bytes = hmac_sha256(secret, signing_input)
+    base64url_encode_bytes(hash_bytes)
+
+fn base64url_encode_bytes(bytes: [i64]) -> text:
+    """Base64url encode a byte array (no padding)."""
+    val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    var result: [text] = []
+    var i = 0
+    while i < bytes.len():
+        val b0 = bytes[i]
+        val b1 = if i + 1 < bytes.len(): bytes[i + 1] else: 0
+        val b2 = if i + 2 < bytes.len(): bytes[i + 2] else: 0
+
+        result.push(chars[(b0 >> 2) % 64:(b0 >> 2) % 64 + 1])
+        result.push(chars[((b0 & 3) * 16 + (b1 >> 4)) % 64:((b0 & 3) * 16 + (b1 >> 4)) % 64 + 1])
+
+        if i + 1 < bytes.len():
+            result.push(chars[((b1 & 15) * 4 + (b2 >> 6)) % 64:((b1 & 15) * 4 + (b2 >> 6)) % 64 + 1])
+
+        if i + 2 < bytes.len():
+            result.push(chars[(b2 & 63) % 64:(b2 & 63) % 64 + 1])
+
+        i = i + 3
+
+    result.join("")
+
+fn base64url_decode(s: text) -> text:
+    """Simple base64url decode to text.
+
+    Handles the URL-safe variant (- instead of +, _ instead of /).
+    """
+    val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    var bytes: [i64] = []
+    var buffer = 0
+    var bits = 0
+    var i = 0
+
+    while i < s.len():
+        val c = s[i:i + 1]
+        val idx = chars.index_of(c)
+        if idx >= 0:
+            buffer = (buffer * 64) + idx
+            bits = bits + 6
+            if bits >= 8:
+                bits = bits - 8
+                val byte_val = (buffer >> bits) & 0xFF
+                bytes.push(byte_val)
+                buffer = buffer & ((1 << bits) - 1)
+        i = i + 1
+
+    # Convert bytes to text
+    var result: [text] = []
+    for b in bytes:
+        result.push(char_from_code(b))
+    result.join("")
+
+fn extract_json_field(json: text, field: text) -> text:
+    """Extract a simple string value from JSON by field name.
+
+    Very basic JSON parsing for extracting known fields.
+    Looks for `"field":"value"` or `"field": "value"`.
+
+    Args:
+        json: JSON string
+        field: Field name to extract
+
+    Returns:
+        Field value or empty string
+    """
+    val search = "\"" + field + "\""
+    val pos = json.index_of(search)
+    if pos < 0:
+        return ""
+
+    # Find the colon after the key
+    var i = pos + search.len()
+    while i < json.len():
+        val c = json[i:i + 1]
+        if c == ":":
+            i = i + 1
+            # Skip whitespace
+            while i < json.len() and json[i:i + 1] == " ":
+                i = i + 1
+            # Check for quoted value
+            if i < json.len() and json[i:i + 1] == "\"":
+                i = i + 1
+                val start = i
+                while i < json.len() and json[i:i + 1] != "\"":
+                    i = i + 1
+                return json[start:i]
+            # Unquoted value (number, bool, etc.)
+            val start = i
+            while i < json.len() and json[i:i + 1] != "," and json[i:i + 1] != "}":
+                i = i + 1
+            return json[start:i].trim()
+        i = i + 1
+
+    ""
+
+# ============================================================================
+# Utility Helpers
+# ============================================================================
+
+fn parse_i64_simple(s: text) -> i64:
+    """Parse a decimal integer string to i64. Returns 0 on invalid input."""
+    var result: i64 = 0
+    var i = 0
+    var negative = false
+    if s.len() > 0 and s[0:1] == "-":
+        negative = true
+        i = 1
+    while i < s.len():
+        val c = s[i:i + 1]
+        val digit = char_digit(c)
+        if digit < 0:
+            return 0
+        result = result * 10 + digit
+        i = i + 1
+    if negative:
+        return 0 - result
+    result
+
+fn char_digit(c: text) -> i64:
+    """Convert a single-character string to its digit value, or -1."""
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    -1
+
+extern fn char_from_code(code: i64) -> text

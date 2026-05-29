@@ -1,0 +1,399 @@
+# JsInterpreter — native function dispatch (setTimeout, fetch, Promise, Response, Blob, Storage).
+
+use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError, js_nan, js_infinity, js_neg_infinity, is_nan}
+use std.js.types.js_types.JsValue
+use std.js.types.ast_types.JsExpression
+use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
+use std.js.engine.vm_object_store.{ObjectStore}
+use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
+use std.js.engine.parser.{JsParser}
+use std.js.builtins.json.{json_parse}
+use std.gc_async_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask}
+use std.gc_async_mut.js.engine.interpreter.{filter_response_headers_for_script, parse_non_negative_i64_text, text_equals_exact, _simple_fetch_state, _simple_fetch_value, _simple_fetch_marker, _simple_fetch_base_url, _simple_fetch_cookie_header, _resolve_fetch_url}
+use std.gc_async_mut.js.engine.interpreter_object.{JsInterpreter}
+
+impl JsInterpreter:
+    me _dispatch_native_with_receiver(native_id: i64, this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
+        if native_id == NATIVE_SET_TIMEOUT:
+            return self._native_set_timer(arg_vals, false)
+        if native_id == NATIVE_SET_INTERVAL:
+            return self._native_set_timer(arg_vals, true)
+        if native_id == NATIVE_CLEAR_TIMEOUT or native_id == NATIVE_CLEAR_INTERVAL:
+            return self._native_clear_timer(arg_vals)
+        if native_id == NATIVE_FETCH:
+            return self._native_fetch(this_val, arg_vals, env)
+        if native_id == NATIVE_PROMISE_THEN:
+            return self._native_promise_then(this_val, arg_vals)
+        if native_id == NATIVE_PROMISE_CATCH:
+            return self._native_promise_catch(this_val, arg_vals)
+        if native_id == NATIVE_PROMISE_FINALLY:
+            return self._native_promise_finally(this_val, arg_vals)
+        if native_id == NATIVE_PROMISE_RESOLVE:
+            return self._native_promise_resolve(arg_vals)
+        if native_id == NATIVE_PROMISE_REJECT:
+            return self._native_promise_reject(arg_vals)
+        if native_id == NATIVE_RESPONSE_TEXT:
+            return self._native_response_text(this_val)
+        if native_id == NATIVE_RESPONSE_JSON:
+            return self._native_response_json(this_val)
+        if native_id == NATIVE_RESPONSE_BLOB:
+            return self._native_response_blob(this_val)
+        if native_id == NATIVE_BLOB_TEXT:
+            return self._native_blob_text(this_val)
+        if native_id == NATIVE_STORAGE_GET_ITEM:
+            return self._native_storage_get_item(this_val, arg_vals)
+        if native_id == NATIVE_STORAGE_SET_ITEM:
+            return self._native_storage_set_item(this_val, arg_vals)
+        if native_id == NATIVE_STORAGE_REMOVE_ITEM:
+            return self._native_storage_remove_item(this_val, arg_vals)
+        if native_id == NATIVE_STORAGE_CLEAR:
+            return self._native_storage_clear(this_val)
+        if native_id == NATIVE_STORAGE_KEY:
+            return self._native_storage_key(this_val, arg_vals)
+        if native_id == NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER:
+            return self._native_navigator_gpu_request_adapter(this_val, arg_vals)
+        dispatch_native(native_id, arg_vals, self.logger)
+
+    me _native_set_timer(arg_vals: [JsValue], is_interval: bool) -> JsValue:
+        val timer_id = self.next_timer_id
+        self.next_timer_id = self.next_timer_id + 1
+        var callback_id = -1
+        if arg_vals.len() > 0:
+            match arg_vals[0]:
+                JsValue.Function(id): callback_id = id
+                _: pass_dn
+        var delay_ms = 0
+        if arg_vals.len() > 1:
+            delay_ms = f64_to_i64(to_number(arg_vals[1]))
+            if delay_ms < 0:
+                delay_ms = 0
+        if is_interval and delay_ms < 1:
+            delay_ms = 1
+        self.pending_timer_tasks = self.pending_timer_tasks + [PendingTimerTask.create(timer_id, callback_id, delay_ms, 0, is_interval)]
+        JsValue.Number(v: (timer_id as f64))
+
+    me _native_clear_timer(arg_vals: [JsValue]) -> JsValue:
+        if arg_vals.len() == 0:
+            return JsValue.Undefined
+        val timer_id = f64_to_i64(to_number(arg_vals[0]))
+        var rest: [PendingTimerTask] = []
+        var i = 0
+        while i < self.pending_timer_tasks.len():
+            val task = self.pending_timer_tasks[i]
+            if task.id != timer_id:
+                rest = rest + [task]
+            i = i + 1
+        self.pending_timer_tasks = rest
+        JsValue.Undefined
+
+    me _native_fetch(this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
+        var host_obj_id = _get_obj_id(this_val)
+        if host_obj_id < 0:
+            match self.lookup_global_value("window"):
+                Some(window_val):
+                    host_obj_id = _get_obj_id(window_val)
+                _:
+                    pass_dn
+        if host_obj_id < 0:
+            return JsValue.Undefined
+        if not _simple_fetch_marker(host_obj_id, self.object_store):
+            return JsValue.Undefined
+
+        var request_url = _simple_fetch_base_url(host_obj_id, self.object_store)
+        if arg_vals.len() > 0:
+            request_url = _resolve_fetch_url(request_url, js_to_string(arg_vals.get(0)))
+
+        var method = "GET"
+        var headers_text = ""
+        var body = ""
+        var content_type = ""
+        if arg_vals.len() > 1:
+            match arg_vals.get(1):
+                JsValue.Object(opts_id):
+                    match self.get_object_property(opts_id, "method"):
+                        JsValue.String(v):
+                            if v.trim() != "":
+                                method = v.trim().upper()
+                        JsValue.Number(v):
+                            method = "{v}".upper()
+                        _: pass_dn
+                    match self.get_object_property(opts_id, "headers"):
+                        JsValue.Undefined: pass_dn
+                        header_value: headers_text = self._serialize_fetch_headers(header_value)
+                    match self.get_object_property(opts_id, "body"):
+                        JsValue.String(v): body = v
+                        JsValue.Number(v): body = "{v}"
+                        JsValue.Boolean(v): body = if v: "true" else: "false"
+                        _: pass_dn
+                    match self.get_object_property(opts_id, "contentType"):
+                        JsValue.String(v): content_type = v
+                        _: pass_dn
+                JsValue.String(v):
+                    headers_text = v
+                _:
+                    pass_dn
+
+        val cookie_header = _simple_fetch_cookie_header(host_obj_id, self.object_store)
+        if cookie_header != "":
+            if headers_text != "":
+                headers_text = headers_text + "\n"
+            headers_text = headers_text + "Cookie: " + cookie_header
+        if content_type != "":
+            if headers_text != "":
+                headers_text = headers_text + "\n"
+            headers_text = headers_text + "Content-Type: " + content_type
+
+        val promise_id = self._create_pending_promise_object()
+        val request_obj_id = self.create_object()
+        val request_id = "fetch-{self.next_async_request_seq}"
+        self.next_async_request_seq = self.next_async_request_seq + 1
+        self.set_object_property(promise_id, "__simple_request_id", JsValue.String(v: request_id))
+        self.set_object_property(request_obj_id, "request_id", JsValue.String(v: request_id))
+        self.set_object_property(request_obj_id, "kind", JsValue.String(v: "fetch"))
+        self.set_object_property(request_obj_id, "url", JsValue.String(v: request_url))
+        self.set_object_property(request_obj_id, "method", JsValue.String(v: if method.trim() != "": method else: "GET"))
+        self.set_object_property(request_obj_id, "headers", JsValue.String(v: headers_text))
+        self.set_object_property(request_obj_id, "body", JsValue.String(v: body))
+        self.set_object_property(request_obj_id, "content_type", JsValue.String(v: content_type))
+        self.set_object_property(request_obj_id, "promise_id", JsValue.String(v: "{promise_id}"))
+        val request_record = PendingAsyncRequest.create(request_obj_id)
+        self.pending_async_requests = self.pending_async_requests + [request_record]
+        self.pending_async_request_registry = self.pending_async_request_registry + [request_record]
+        JsValue.Object(id: promise_id)
+
+    me _native_promise_then(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val promise_id = _get_obj_id(this_val)
+        if promise_id < 0:
+            return JsValue.Undefined
+        var on_fulfilled = -1
+        var on_rejected = -1
+        if arg_vals.len() > 0:
+            on_fulfilled = _get_fn_id(arg_vals.get(0))
+        if arg_vals.len() > 1:
+            on_rejected = _get_fn_id(arg_vals.get(1))
+        val next_promise_id = self._create_pending_promise_object()
+        val handler_id = self._create_promise_handler(on_fulfilled, on_rejected, next_promise_id, "then")
+        self._append_handler(promise_id, handler_id)
+        match _simple_fetch_state(promise_id, self.object_store):
+            "pending": JsValue.Object(id: next_promise_id)
+            _:
+                self._enqueue_promise_task(promise_id, handler_id)
+                JsValue.Object(id: next_promise_id)
+
+    me _native_promise_catch(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val promise_id = _get_obj_id(this_val)
+        if promise_id < 0:
+            return JsValue.Undefined
+        var on_rejected = -1
+        if arg_vals.len() > 0:
+            on_rejected = _get_fn_id(arg_vals.get(0))
+        val next_promise_id = self._create_pending_promise_object()
+        val handler_id = self._create_promise_handler(-1, on_rejected, next_promise_id, "then")
+        self._append_handler(promise_id, handler_id)
+        match _simple_fetch_state(promise_id, self.object_store):
+            "pending": JsValue.Object(id: next_promise_id)
+            _:
+                self._enqueue_promise_task(promise_id, handler_id)
+                JsValue.Object(id: next_promise_id)
+
+    me _native_promise_finally(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val promise_id = _get_obj_id(this_val)
+        if promise_id < 0:
+            return JsValue.Undefined
+        var on_finally = -1
+        if arg_vals.len() > 0:
+            on_finally = _get_fn_id(arg_vals.get(0))
+        val next_promise_id = self._create_pending_promise_object()
+        val handler_id = self._create_promise_handler(on_finally, on_finally, next_promise_id, "finally")
+        self._append_handler(promise_id, handler_id)
+        match _simple_fetch_state(promise_id, self.object_store):
+            "pending": JsValue.Object(id: next_promise_id)
+            _:
+                self._enqueue_promise_task(promise_id, handler_id)
+                JsValue.Object(id: next_promise_id)
+
+    me _native_promise_resolve(arg_vals: [JsValue]) -> JsValue:
+        val value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined
+        JsValue.Object(id: self._create_settled_promise_object(value, false))
+
+    me _native_promise_reject(arg_vals: [JsValue]) -> JsValue:
+        val value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined
+        JsValue.Object(id: self._create_settled_promise_object(value, true))
+
+    me _native_response_text(this_val: JsValue) -> JsValue:
+        val response_id = _get_obj_id(this_val)
+        if response_id < 0:
+            return JsValue.Undefined
+        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
+        match self.get_object_property(response_id, "body"):
+            JsValue.String(v): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: v), false))
+            _: JsValue.Undefined
+
+    me _native_response_json(this_val: JsValue) -> JsValue:
+        val response_id = _get_obj_id(this_val)
+        if response_id < 0:
+            return JsValue.Undefined
+        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
+        match self.get_object_property(response_id, "body"):
+            JsValue.String(v):
+                match self._json_parse_allocated(v, self.global_env):
+                    Ok(value): JsValue.Object(id: self._create_settled_promise_object(value, false))
+                    Err(e): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: e.message), true))
+            _: JsValue.Undefined
+
+    me _native_response_blob(this_val: JsValue) -> JsValue:
+        val response_id = _get_obj_id(this_val)
+        if response_id < 0:
+            return JsValue.Undefined
+        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
+        var body = ""
+        match self.get_object_property(response_id, "body"):
+            JsValue.String(v): body = v
+            _: pass_dn
+        var blob_type = self._response_content_type(response_id)
+        if blob_type == "":
+            blob_type = "application/octet-stream"
+        val blob_id = self.create_object()
+        self.set_object_property(blob_id, "__simple_blob_host", JsValue.Boolean(v: true))
+        self.set_object_property(blob_id, "size", JsValue.Number(v: body.len().to_f64()))
+        self.set_object_property(blob_id, "type", JsValue.String(v: blob_type))
+        self.set_object_property(blob_id, "__body__", JsValue.String(v: body))
+        self._define_method_on(blob_id, "text", NATIVE_BLOB_TEXT)
+        JsValue.Object(id: self._create_settled_promise_object(JsValue.Object(id: blob_id), false))
+
+    me _native_blob_text(this_val: JsValue) -> JsValue:
+        val blob_id = _get_obj_id(this_val)
+        if blob_id < 0:
+            return JsValue.Undefined
+        match self.get_object_property(blob_id, "__body__"):
+            JsValue.String(v): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: v), false))
+            _: JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: ""), false))
+
+    me _native_navigator_gpu_request_adapter(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val gpu_id = _get_obj_id(this_val)
+        if gpu_id < 0:
+            return JsValue.Object(id: self._create_settled_promise_object(JsValue.Null, false))
+        match self.get_object_property(gpu_id, "__simple_webgpu_host"):
+            JsValue.Boolean(is_host):
+                if not is_host:
+                    return JsValue.Object(id: self._create_settled_promise_object(JsValue.Null, false))
+            _:
+                return JsValue.Object(id: self._create_settled_promise_object(JsValue.Null, false))
+
+        val adapter_id = self.create_object()
+        self.set_object_property(adapter_id, "__simple_webgpu_adapter_host", JsValue.Boolean(v: true))
+        self.set_object_property(adapter_id, "name", JsValue.String(v: "Simple WebGPU Software Adapter"))
+        self.set_object_property(adapter_id, "requestAdapterStatus", JsValue.String(v: "available"))
+        self.set_object_property(adapter_id, "isFallbackAdapter", JsValue.Boolean(v: true))
+        self.set_object_property(adapter_id, "features", JsValue.String(v: "texture-compression-bc,timestamp-query"))
+        self.set_object_property(adapter_id, "limitsProfile", JsValue.String(v: "mvp"))
+        JsValue.Object(id: self._create_settled_promise_object(JsValue.Object(id: adapter_id), false))
+
+    fn _response_content_type(response_id: i64) -> text:
+        match self.get_object_property(response_id, "headersText"):
+            JsValue.String(headers):
+                for line in headers.split("\n"):
+                    val trimmed = line.trim()
+                    if trimmed.lower().starts_with("content-type:"):
+                        return trimmed.slice(13, trimmed.len()).trim()
+            _: pass_dn
+        ""
+
+    fn _json_parse_allocated(source: text, env: i64) -> BrowserResult<JsValue>:
+        val valid = json_parse(source)
+        match valid:
+            Err(e): return Err(e)
+            Ok(_): pass_dn
+        var parser = JsParser.create(source, self.logger)
+        val expr = parser.parse_assignment()?
+        self.eval_expression(expr, env)
+
+    fn _storage_api_property(key: text) -> bool:
+        key == "__proto__" or
+        key == "getItem" or
+        key == "setItem" or
+        key == "removeItem" or
+        key == "clear" or
+        key == "key" or
+        key == "length"
+
+    fn _storage_internal_prefix() -> text:
+        "__simple_storage_data:"
+
+    fn _storage_internal_key(key: text) -> text:
+        self._storage_internal_prefix() + key
+
+    fn _storage_public_key_from_internal(key: text) -> text:
+        val prefix = self._storage_internal_prefix()
+        if key.starts_with(prefix):
+            return key.slice(prefix.len(), key.len())
+        key
+
+    fn _storage_property_key(key: text) -> text:
+        if self._storage_api_property(key):
+            return self._storage_internal_key(key)
+        key
+
+    fn _storage_keys(storage_id: i64) -> [text]:
+        val obj = self.object_store.get_object(storage_id)
+        var keys: [text] = []
+        for prop in obj.properties:
+            if prop.key.starts_with(self._storage_internal_prefix()):
+                keys.push(self._storage_public_key_from_internal(prop.key))
+            else if not self._storage_api_property(prop.key):
+                keys.push(prop.key)
+        keys
+
+    fn _sync_storage_length(storage_id: i64):
+        val keys = self._storage_keys(storage_id)
+        self.set_object_property(storage_id, "length", JsValue.Number(v: keys.len().to_f64()))
+
+    fn _native_storage_get_item(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        val key = if arg_vals.len() > 0: js_to_string(arg_vals.get(0)) else: ""
+        val stored = self.get_object_property(storage_id, self._storage_property_key(key))
+        if val JsValue.Undefined = stored:
+            return JsValue.Null
+        if val JsValue.String(v) = stored:
+            return JsValue.String(v: v)
+        JsValue.String(v: js_to_string(stored))
+
+    fn _native_storage_set_item(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        val key = if arg_vals.len() > 0: js_to_string(arg_vals.get(0)) else: ""
+        val value = if arg_vals.len() > 1: js_to_string(arg_vals.get(1)) else: ""
+        self.set_object_property(storage_id, self._storage_property_key(key), JsValue.String(v: value))
+        self._sync_storage_length(storage_id)
+        JsValue.Undefined
+
+    fn _native_storage_remove_item(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        val key = if arg_vals.len() > 0: js_to_string(arg_vals.get(0)) else: ""
+        self.object_store.remove_property(storage_id, self._storage_property_key(key))
+        self._sync_storage_length(storage_id)
+        JsValue.Undefined
+
+    fn _native_storage_clear(this_val: JsValue) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        for key in self._storage_keys(storage_id):
+            self.object_store.remove_property(storage_id, self._storage_property_key(key))
+        self._sync_storage_length(storage_id)
+        JsValue.Undefined
+
+    fn _native_storage_key(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        val idx = if arg_vals.len() > 0: f64_to_i64(to_number(arg_vals.get(0))) else: -1
+        val keys = self._storage_keys(storage_id)
+        if idx < 0 or idx >= keys.len():
+            return JsValue.Null
+        JsValue.String(v: keys.get(idx))

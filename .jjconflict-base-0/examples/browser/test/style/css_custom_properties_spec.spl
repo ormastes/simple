@@ -1,0 +1,203 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+"""
+# CSS Custom Properties Specification
+
+Tests for var() resolution, inheritance, fallback values, and edge cases.
+Pure logic — no rendering required.
+
+Run with: bin/simple test examples/browser/test/style/css_custom_properties_spec.spl
+"""
+
+use std.spec
+use examples.browser.feature.style.custom_properties.{
+    CustomPropertyStore, is_custom_property, has_var_reference, parse_var_function
+}
+use examples.browser.shared.logging.{Logger, LogLevel}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn make_store() -> CustomPropertyStore:
+    val logger = Logger.new("test-custom-props", LogLevel.Error)
+    CustomPropertyStore.new(logger)
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+describe "CSS Custom Property Predicates":
+    """
+    Validates is_custom_property() and has_var_reference() helpers.
+    """
+
+    context "is_custom_property":
+        it "-- prefixed name is a custom property":
+            expect(is_custom_property("--main-color")).to_equal(true)
+
+        it "regular property name is not custom":
+            expect(is_custom_property("color")).to_equal(false)
+
+        it "single dash is not custom":
+            expect(is_custom_property("-vendor")).to_equal(false)
+
+        it "empty string is not custom":
+            expect(is_custom_property("")).to_equal(false)
+
+        it "-- alone (len=2) is not custom (length guard)":
+            expect(is_custom_property("--")).to_equal(false)
+
+        it "--x is custom (len=3, minimum)":
+            expect(is_custom_property("--x")).to_equal(true)
+
+    context "has_var_reference":
+        it "value containing var( is true":
+            expect(has_var_reference("var(--color)")).to_equal(true)
+
+        it "plain keyword has no var reference":
+            expect(has_var_reference("red")).to_equal(false)
+
+        it "empty string has no var reference":
+            expect(has_var_reference("")).to_equal(false)
+
+        it "hex color has no var reference":
+            expect(has_var_reference("#ff0000")).to_equal(false)
+
+        it "var( embedded in larger string is true":
+            expect(has_var_reference("1px solid var(--border-color)")).to_equal(true)
+
+
+describe "CSS Custom Property Store":
+    """
+    Validates CustomPropertyStore set_property, get_property, and resolve_var.
+    """
+
+    context "set and retrieve":
+        it "set and retrieve a property by node and name":
+            val store = make_store()
+            store.set_property(1, "--color", "red")
+            val resolved = store.get_property(1, "--color")
+            expect(resolved.?).to_equal(true)
+
+        it "retrieved value matches what was set":
+            val store = make_store()
+            store.set_property(1, "--color", "blue")
+            val resolved = store.get_property(1, "--color")
+            if val v = resolved:
+                expect(v).to_equal("blue")
+            else:
+                expect("should have value").to_equal("")
+
+        it "property missing for different node returns nil":
+            val store = make_store()
+            store.set_property(1, "--color", "red")
+            val result = store.get_property(2, "--color")
+            expect(result.?).to_equal(false)
+
+        it "property missing for same node different name returns nil":
+            val store = make_store()
+            store.set_property(1, "--color", "red")
+            val result = store.get_property(1, "--bg")
+            expect(result.?).to_equal(false)
+
+        it "overwriting property replaces the value":
+            val store = make_store()
+            store.set_property(1, "--color", "red")
+            store.set_property(1, "--color", "green")
+            val resolved = store.get_property(1, "--color")
+            if val v = resolved:
+                expect(v).to_equal("green")
+            else:
+                expect("should have value").to_equal("")
+
+        it "two nodes can hold different values for same property":
+            val store = make_store()
+            store.set_property(1, "--size", "10px")
+            store.set_property(2, "--size", "20px")
+            val r1 = store.get_property(1, "--size")
+            val r2 = store.get_property(2, "--size")
+            if val v1 = r1:
+                expect(v1).to_equal("10px")
+            else:
+                expect("node 1 should have value").to_equal("")
+            if val v2 = r2:
+                expect(v2).to_equal("20px")
+            else:
+                expect("node 2 should have value").to_equal("")
+
+    context "non-custom property rejection":
+        it "setting a non-custom property is silently ignored":
+            val store = make_store()
+            store.set_property(1, "color", "red")
+            val result = store.get_property(1, "color")
+            expect(result.?).to_equal(false)
+
+    context "resolve_var — simple":
+        it "plain value without var() resolves to Keyword":
+            val store = make_store()
+            val result = store.resolve_var("red", 1)
+            val is_kw = match result:
+                CSSValue.Keyword(v): v == "red"
+                _: false
+            expect(is_kw).to_equal(true)
+
+        it "var(--color) resolves to the stored value":
+            val store = make_store()
+            store.set_property(1, "--color", "blue")
+            val result = store.resolve_var("var(--color)", 1)
+            val is_blue = match result:
+                CSSValue.Keyword(v): v == "blue"
+                _: false
+            expect(is_blue).to_equal(true)
+
+        it "var(--missing) with no fallback returns Initial":
+            val store = make_store()
+            val result = store.resolve_var("var(--missing)", 1)
+            val is_initial = match result:
+                CSSValue.Initial: true
+                _: false
+            expect(is_initial).to_equal(true)
+
+    context "resolve_var — fallback":
+        it "var(--missing, fallback-val) uses fallback when property absent":
+            val store = make_store()
+            val result = store.resolve_var("var(--missing, fallback-val)", 1)
+            val ok = match result:
+                CSSValue.Keyword(v): v == "fallback-val"
+                _: false
+            expect(ok).to_equal(true)
+
+        it "var(--present, fallback) uses the stored value not fallback":
+            val store = make_store()
+            store.set_property(1, "--color", "red")
+            val result = store.resolve_var("var(--color, blue)", 1)
+            val ok = match result:
+                CSSValue.Keyword(v): v == "red"
+                _: false
+            expect(ok).to_equal(true)
+
+    context "resolve_var — recursive":
+        it "var referring to another var resolves both":
+            val store = make_store()
+            store.set_property(1, "--base", "10px")
+            store.set_property(1, "--size", "var(--base)")
+            val result = store.resolve_var("var(--size)", 1)
+            val ok = match result:
+                CSSValue.Keyword(v): v == "10px"
+                _: false
+            expect(ok).to_equal(true)
+
+    context "parse_var_function helpers":
+        it "parse_var_function extracts variable name":
+            val pair = parse_var_function("var(--color)")
+            expect(pair.first).to_equal("--color")
+
+        it "parse_var_function with fallback extracts both parts":
+            val pair = parse_var_function("var(--color, red)")
+            expect(pair.first).to_equal("--color")
+            expect(pair.second).to_equal("red")
+
+        it "parse_var_function with no fallback returns empty second":
+            val pair = parse_var_function("var(--size)")
+            expect(pair.second).to_equal("")

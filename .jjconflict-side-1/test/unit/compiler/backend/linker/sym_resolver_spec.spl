@@ -1,0 +1,241 @@
+# @cover src/compiler/70.backend/linker/sym_resolver.spl
+# ============================================================================
+# Symbol Resolver Unit Tests
+#
+# Tests for sym_resolver.spl: elf_binding_to_sym, sym_entry_from_elf,
+# is_strong/is_weak, sym_resolution_new, sym_add_object, sym_resolve_objects,
+# sym_collect_undefined, sym_get, sym_is_resolved, sym_has_symbol,
+# sym_local_count, sym_defined_count, sym_undefined_count, sym_error_count.
+# ============================================================================
+
+use compiler.backend.linker.elf_inspect.{
+    ElfHeader, ElfSectionHeader
+}
+use compiler.backend.linker.elf_parser.{
+    ElfSymbol, ElfRelocation, ElfStringTable, ElfObject,
+    elf_make_empty_strtab,
+    SHN_UNDEF,
+    STB_LOCAL, STB_GLOBAL, STB_WEAK
+}
+use compiler.backend.linker.sym_resolver.{
+    SymBinding, SymEntry, SymResolution,
+    sym_resolution_new, sym_add_object, sym_collect_undefined,
+    sym_resolve_objects, sym_get, sym_is_resolved,
+    sym_defined_count, sym_undefined_count, sym_error_count,
+    sym_has_symbol, sym_local_count,
+    elf_binding_to_sym, sym_entry_from_elf, is_strong, is_weak
+}
+
+# ============================================================================
+# Helper: Build a minimal ElfObject from a symbol list
+# ============================================================================
+
+fn make_obj(syms: [ElfSymbol]) -> ElfObject:
+    val hdr = ElfHeader(e_type: 1, e_machine: 62, e_entry: 0, e_phoff: 0, e_shoff: 0, e_shnum: 0, e_shstrndx: 0)
+    val empty_strtab = elf_make_empty_strtab()
+    val empty_sections: [ElfSectionHeader] = []
+    val empty_relocs: [ElfRelocation] = []
+    val raw: [i64] = []
+    ElfObject(
+        header: hdr,
+        sections: empty_sections,
+        symbols: syms,
+        relocations: empty_relocs,
+        strtab: empty_strtab,
+        shstrtab: empty_strtab,
+        raw: raw
+    )
+
+# ============================================================================
+# Group 1: elf_binding_to_sym helper
+# ============================================================================
+
+describe "SymResolver - elf_binding_to_sym":
+    it "STB_LOCAL maps to SymBinding.Local":
+        val b = elf_binding_to_sym(STB_LOCAL)
+        expect(b == SymBinding.Local).to_equal(true)
+
+    it "STB_GLOBAL maps to SymBinding.Global":
+        val b = elf_binding_to_sym(STB_GLOBAL)
+        expect(b == SymBinding.Global).to_equal(true)
+
+    it "STB_WEAK maps to SymBinding.Weak":
+        val b = elf_binding_to_sym(STB_WEAK)
+        expect(b == SymBinding.Weak).to_equal(true)
+
+# ============================================================================
+# Group 2: sym_entry_from_elf
+# ============================================================================
+
+describe "SymResolver - sym_entry_from_elf":
+    it "defined symbol has is_defined=true":
+        # st_info=16 = STB_GLOBAL<<4, st_shndx=1 (nonzero = defined)
+        val sym = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 1, st_value: 0x1000, st_size: 8, name: "main")
+        val entry = sym_entry_from_elf(sym, 0)
+        expect(entry.is_defined).to_equal(true)
+        expect(entry.name).to_equal("main")
+        expect(entry.offset).to_equal(0x1000)
+
+    it "undefined symbol has is_defined=false":
+        # st_shndx=0 = SHN_UNDEF
+        val sym = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 0, st_value: 0, st_size: 0, name: "printf")
+        val entry = sym_entry_from_elf(sym, 0)
+        expect(entry.is_defined).to_equal(false)
+        expect(entry.name).to_equal("printf")
+
+# ============================================================================
+# Group 3: is_strong / is_weak
+# ============================================================================
+
+describe "SymResolver - is_strong and is_weak":
+    it "global binding entry is_strong=true, is_weak=false":
+        val sym = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 1, st_value: 0x1000, st_size: 8, name: "foo")
+        val entry = sym_entry_from_elf(sym, 0)
+        expect(is_strong(entry)).to_equal(true)
+        expect(is_weak(entry)).to_equal(false)
+
+    it "weak binding entry is_weak=true, is_strong=false":
+        # st_info=32 = STB_WEAK<<4
+        val sym = ElfSymbol(st_name: 0, st_info: 32, st_other: 0, st_shndx: 1, st_value: 0x2000, st_size: 4, name: "weak_fn")
+        val entry = sym_entry_from_elf(sym, 0)
+        expect(is_weak(entry)).to_equal(true)
+        expect(is_strong(entry)).to_equal(false)
+
+# ============================================================================
+# Group 4: Empty resolution
+# ============================================================================
+
+describe "SymResolver - empty resolution":
+    it "sym_resolution_new has 0 defined, 0 undefined, 0 errors":
+        val res = sym_resolution_new()
+        expect(sym_defined_count(res)).to_equal(0)
+        expect(sym_undefined_count(res)).to_equal(0)
+        expect(sym_error_count(res)).to_equal(0)
+
+    it "sym_is_resolved on empty resolution returns true":
+        val res = sym_resolution_new()
+        expect(sym_is_resolved(res)).to_equal(true)
+
+# ============================================================================
+# Group 5: Single object resolution
+# ============================================================================
+
+describe "SymResolver - single object resolution":
+    it "object with two globals results in both in defined table":
+        val sym_main = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 1, st_value: 0x1000, st_size: 8, name: "main")
+        val sym_init = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 2, st_value: 0x2000, st_size: 4, name: "_init")
+        val obj = make_obj([sym_main, sym_init])
+        val res = sym_resolve_objects([obj])
+        expect(sym_defined_count(res)).to_equal(2)
+        expect(sym_has_symbol(res, "main")).to_equal(true)
+        expect(sym_has_symbol(res, "_init")).to_equal(true)
+
+    it "sym_get returns correct SymEntry for defined symbol":
+        val sym_main = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 1, st_value: 0x1000, st_size: 8, name: "main")
+        val obj = make_obj([sym_main])
+        val res = sym_resolve_objects([obj])
+        expect(sym_has_symbol(res, "main")).to_equal(true)
+        val e = res.defined["main"]
+        expect(e.name).to_equal("main")
+        expect(e.offset).to_equal(0x1000)
+        expect(e.size).to_equal(8)
+
+    it "sym_has_symbol returns false for absent symbol":
+        val sym_main = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 1, st_value: 0x1000, st_size: 8, name: "main")
+        val obj = make_obj([sym_main])
+        val res = sym_resolve_objects([obj])
+        expect(sym_has_symbol(res, "nonexistent")).to_equal(false)
+
+# ============================================================================
+# Group 6: Multi-object resolution
+# ============================================================================
+
+describe "SymResolver - multi-object resolution":
+    it "object A defines main, object B defines helper — both resolved":
+        val sym_main = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 1, st_value: 0x1000, st_size: 8, name: "main")
+        val sym_helper = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 1, st_value: 0x3000, st_size: 16, name: "helper")
+        val obj_a = make_obj([sym_main])
+        val obj_b = make_obj([sym_helper])
+        val res = sym_resolve_objects([obj_a, obj_b])
+        expect(sym_defined_count(res)).to_equal(2)
+        expect(sym_has_symbol(res, "main")).to_equal(true)
+        expect(sym_has_symbol(res, "helper")).to_equal(true)
+        expect(sym_is_resolved(res)).to_equal(true)
+
+    it "object A defines foo, object B references foo — undefined list is empty":
+        val sym_foo_def = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 1, st_value: 0x100, st_size: 4, name: "foo")
+        val sym_foo_ref = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 0, st_value: 0, st_size: 0, name: "foo")
+        val obj_a = make_obj([sym_foo_def])
+        val obj_b = make_obj([sym_foo_ref])
+        val res = sym_resolve_objects([obj_a, obj_b])
+        expect(sym_undefined_count(res)).to_equal(0)
+        expect(sym_is_resolved(res)).to_equal(true)
+
+    it "unresolved reference produces non-empty undefined list":
+        val sym_ref = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 0, st_value: 0, st_size: 0, name: "missing_fn")
+        val obj = make_obj([sym_ref])
+        val res = sym_resolve_objects([obj])
+        expect(sym_undefined_count(res)).to_equal(1)
+        expect(sym_is_resolved(res)).to_equal(false)
+
+# ============================================================================
+# Group 7: Strong vs weak
+# ============================================================================
+
+describe "SymResolver - strong vs weak":
+    it "weak def + strong def of same name — strong wins":
+        # Object A: weak definition of "data"
+        val sym_weak = ElfSymbol(st_name: 0, st_info: 32, st_other: 0, st_shndx: 1, st_value: 0x100, st_size: 4, name: "data")
+        # Object B: strong (global) definition of "data"
+        val sym_strong = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 1, st_value: 0x200, st_size: 8, name: "data")
+        val obj_a = make_obj([sym_weak])
+        val obj_b = make_obj([sym_strong])
+        val res = sym_resolve_objects([obj_a, obj_b])
+        expect(sym_error_count(res)).to_equal(0)
+        expect(sym_has_symbol(res, "data")).to_equal(true)
+        val e = res.defined["data"]
+        # Strong definition at 0x200 should win over weak at 0x100
+        expect(e.offset).to_equal(0x200)
+        expect(is_strong(e)).to_equal(true)
+
+    it "two strong defs of same name — error recorded":
+        val sym_a = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 1, st_value: 0x100, st_size: 4, name: "conflict")
+        val sym_b = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 1, st_value: 0x200, st_size: 4, name: "conflict")
+        val obj_a = make_obj([sym_a])
+        val obj_b = make_obj([sym_b])
+        val res = sym_resolve_objects([obj_a, obj_b])
+        expect(sym_error_count(res)).to_equal(1)
+
+# ============================================================================
+# Group 8: Local symbols
+# ============================================================================
+
+describe "SymResolver - local symbols":
+    it "local symbols do not enter the global defined table":
+        # st_info=0 = STB_LOCAL<<4 | 0
+        val sym_local = ElfSymbol(st_name: 0, st_info: 0, st_other: 0, st_shndx: 1, st_value: 0x100, st_size: 16, name: "local_helper")
+        val obj = make_obj([sym_local])
+        val res = sym_resolve_objects([obj])
+        expect(sym_has_symbol(res, "local_helper")).to_equal(false)
+        expect(sym_defined_count(res)).to_equal(0)
+
+    it "sym_local_count returns correct count per object":
+        val sym_local1 = ElfSymbol(st_name: 0, st_info: 0, st_other: 0, st_shndx: 1, st_value: 0x100, st_size: 4, name: "lf1")
+        val sym_local2 = ElfSymbol(st_name: 0, st_info: 0, st_other: 0, st_shndx: 2, st_value: 0x200, st_size: 4, name: "lf2")
+        val sym_global = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 1, st_value: 0x300, st_size: 8, name: "gfn")
+        val obj = make_obj([sym_local1, sym_local2, sym_global])
+        val res = sym_resolve_objects([obj])
+        expect(sym_local_count(res, 0)).to_equal(2)
+
+# ============================================================================
+# Group 9: Empty-name symbols
+# ============================================================================
+
+describe "SymResolver - empty-name symbols":
+    it "symbols with empty name are skipped in the global table":
+        val sym_empty = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 1, st_value: 0x500, st_size: 4, name: "")
+        val sym_named = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 1, st_value: 0x600, st_size: 8, name: "real_fn")
+        val obj = make_obj([sym_empty, sym_named])
+        val res = sym_resolve_objects([obj])
+        expect(sym_defined_count(res)).to_equal(1)
+        expect(sym_has_symbol(res, "real_fn")).to_equal(true)

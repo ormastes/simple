@@ -1,0 +1,365 @@
+"""
+# Master HTTP Server
+
+Manages worker lifecycle, configuration, and graceful shutdown.
+Mimics nginx's master process role.
+
+## Architecture
+
+```
+HttpServer (master thread)
+  ├── Supervisor (one_for_one, auto-restart workers)
+  ├── N × Worker threads (each with own EventLoop + IoDriver)
+  └── Control Channel (shutdown/reload signals)
+```
+
+## Usage
+
+```simple
+# From SDN config file
+val server = HttpServer.from_config_file("server.sdn")?
+server.start()?
+
+# Programmatic
+val config = default_server_config()
+val server = HttpServer.new(config)
+server.start()?
+
+# Later...
+server.stop()
+```
+"""
+
+use std.concurrent.channel.{Channel, channel_new}
+use std.thread_sffi.{
+    spl_thread_create, spl_thread_join, spl_thread_cpu_count,
+    spl_thread_sleep
+}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+fn _http_time_now_ms() -> i64:
+    current_time_ms()
+use std.supervisor.{
+    Supervisor, SupervisorConfig, ChildSpec,
+    STRATEGY_ONE_FOR_ONE, RESTART_PERMANENT,
+    SHUTDOWN_TIMEOUT
+}
+
+use std.http_server.types.{
+    ServerConfig, WorkerHandle, Phase, default_server_config
+}
+use std.http_server.config.{load_config}
+use std.http_server.worker.{Worker}
+use std.http_server.router.{AsyncRouter}
+use std.http_server.middleware.{
+    MiddlewarePipeline, connection_limit_handler, body_limit_handler
+}
+use std.http_server.compression.{compression_handler}
+use std.http_server.access_log.{access_log_handler}
+use std.http_server.handler.{HandlerRegistry, create_default_registry}
+use std.http_server.error.{HttpServerError}
+use std.nogc_async_mut.io.tls_common.{TlsConfig}
+use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+
+# Module-level worker storage for thread entry points.
+# Each spawned worker is stored here so the thread callback can retrieve it.
+var _workers: Dict<i64, Worker> = {}
+var _next_worker_slot: i64 = 0
+
+fn worker_thread_entry(slot_id: i64):
+    """Thread entry point. Runs the worker stored at slot_id."""
+    val worker = _workers.get(slot_id)
+    if worker.?:
+        var w = worker
+        w.run()
+
+fn spawn_worker(worker: Worker) -> i64:
+    """Spawn a worker in a new OS thread.
+
+    Stores the worker in a module-level dict so the thread entry
+    function can retrieve and run it.
+
+    Args:
+        worker: Initialized worker ready to run
+
+    Returns:
+        Thread handle from spl_thread_create
+    """
+    val slot = _next_worker_slot
+    _next_worker_slot = _next_worker_slot + 1
+    _workers[slot] = worker
+
+    val closure = \: worker_thread_entry(slot)
+    spl_thread_create(closure, 0)
+
+# ============================================================================
+# HttpServer
+# ============================================================================
+
+class HttpServer:
+    """Master server managing worker threads.
+
+    Creates N worker threads (default = CPU count), each with its
+    own EventLoop and IoDriver. Workers bind their own listeners
+    using SO_REUSEPORT so the kernel distributes connections.
+
+    The master manages lifecycle via a Supervisor (one_for_one
+    strategy) and communicates shutdown via Channel.
+    """
+    config: ServerConfig
+    workers: [WorkerHandle]
+    control_channels: [Channel]
+    supervisor: Supervisor
+    running: bool
+    handler_registry: HandlerRegistry
+
+    static fn new(config: ServerConfig) -> HttpServer:
+        """Create server from a ServerConfig."""
+        val sup_config = SupervisorConfig(
+            strategy: STRATEGY_ONE_FOR_ONE,
+            max_restarts: 10,
+            max_seconds: 60
+        )
+        val sup = Supervisor(
+            config: sup_config,
+            children: [],
+            restart_counts: [],
+            running: false
+        )
+
+        val registry = create_default_registry(".")
+
+        HttpServer(
+            config: config,
+            workers: [],
+            control_channels: [],
+            supervisor: sup,
+            running: false,
+            handler_registry: registry
+        )
+
+    static fn from_config_file(path: text) -> Result<HttpServer, HttpServerError>:
+        """Load config from SDN file and create server."""
+        val config = load_config(path)?
+        Ok(HttpServer.new(config))
+
+    me set_handler_registry(registry: HandlerRegistry):
+        """Set a custom handler registry."""
+        self.handler_registry = registry
+
+    me start() -> Result<(), HttpServerError>:
+        """Start the server and all worker threads.
+
+        Determines worker count (0 = CPU count), creates
+        control channels, builds router and middleware pipeline,
+        then spawns worker threads.
+        """
+        if self.running:
+            return Err(HttpServerError.Internal("Server already running"))
+
+        val worker_count = if self.config.worker_count <= 0:
+            val cpus = spl_thread_cpu_count()
+            if cpus > 0: cpus else: 4
+        else:
+            self.config.worker_count
+
+        # Validate TLS configuration early (fail fast before spawning workers)
+        if self.config.tls_enabled:
+            val tls_result = load_tls_config(self.config)
+            match tls_result:
+                Ok(tls_cfg):
+                    print "[SimpleServer] TLS enabled (cert={self.config.tls_cert_path}, min={self.config.tls_min_version})"
+                Err(e):
+                    return Err(e)
+
+        val router = AsyncRouter.new(self.config.locations)
+        val pipeline = build_default_pipeline()
+
+        var workers: [WorkerHandle] = []
+        var channels: [Channel] = []
+
+        var last_worker: Worker? = nil
+        var i = 0
+        while i < worker_count:
+            val control = channel_new()
+            channels.push(control)
+
+            val worker_result = Worker.create(
+                i, self.config, router, pipeline,
+                self.handler_registry, control
+            )
+            match worker_result:
+                Ok(worker):
+                    if i < worker_count - 1:
+                        val handle = spawn_worker(worker)
+                        workers.push(WorkerHandle(
+                            worker_id: i,
+                            thread_handle: handle,
+                            is_alive: true
+                        ))
+                    else:
+                        last_worker = worker
+                        workers.push(WorkerHandle(
+                            worker_id: i,
+                            thread_handle: 0,
+                            is_alive: true
+                        ))
+
+                    val child = ChildSpec(
+                        id: "worker_{i}",
+                        restart: RESTART_PERMANENT,
+                        shutdown: SHUTDOWN_TIMEOUT,
+                        shutdown_ms: 5000
+                    )
+                    self.supervisor.add_child(child)
+
+                Err(e):
+                    self.stop_workers(channels)
+                    return Err(e)
+
+            i = i + 1
+
+        self.workers = workers
+        self.control_channels = channels
+        self.running = true
+        self.supervisor.start()
+
+        val proto = if self.config.tls_enabled: "https" else: "http"
+        if worker_count > 1:
+            print "[SimpleServer] Listening on {proto}://{self.config.listen_addr} with {worker_count} workers (SO_REUSEPORT)"
+        else:
+            print "[SimpleServer] Listening on {proto}://{self.config.listen_addr} with 1 worker"
+
+        if last_worker.?:
+            var w = last_worker
+            w.run()
+
+        Ok(())
+
+    me stop():
+        """Gracefully stop the server with connection draining.
+
+        Sends drain signal to workers, waits up to drain_timeout_ms
+        for in-flight requests to complete, then forces shutdown.
+        """
+        if not self.running:
+            return
+
+        print "[SimpleServer] Draining connections (timeout={self.config.drain_timeout_ms}ms)..."
+
+        for ch in self.control_channels:
+            ch.send("drain")
+
+        val drain_start = _http_time_now_ms()
+        val drain_deadline = drain_start + self.config.drain_timeout_ms
+        var all_drained = false
+
+        while _http_time_now_ms() < drain_deadline and not all_drained:
+            spl_thread_sleep(100)
+            all_drained = true
+            for ch in self.control_channels:
+                val status = ch.try_recv()
+                if status.?:
+                    val s = status as text
+                    if s != "drained":
+                        all_drained = false
+
+        if not all_drained:
+            print "[SimpleServer] Drain timeout reached, forcing shutdown..."
+
+        self.stop_workers(self.control_channels)
+        self.supervisor.stop()
+        self.running = false
+
+        print "[SimpleServer] Stopped"
+
+    me wait():
+        """Block until all workers exit."""
+        for wh in self.workers:
+            if wh.is_alive:
+                spl_thread_join(wh.thread_handle)
+
+    fn is_running() -> bool:
+        """Check if the server is running."""
+        self.running
+
+    fn worker_count() -> i64:
+        """Get the number of running workers."""
+        self.workers.len()
+
+    # ========================================================================
+    # Internal
+    # ========================================================================
+
+    me stop_workers(channels: [Channel]):
+        """Send shutdown to all workers and join threads."""
+        for ch in channels:
+            ch.send("shutdown")
+
+        for wh in self.workers:
+            if wh.is_alive:
+                spl_thread_join(wh.thread_handle)
+
+# ============================================================================
+# Default Pipeline
+# ============================================================================
+
+fn build_default_pipeline() -> MiddlewarePipeline:
+    """Create the default middleware pipeline with built-in handlers."""
+    var pipeline = MiddlewarePipeline.new()
+
+    pipeline.add(Phase.PostAccept, 100, "connection_limit",
+                 connection_limit_handler)
+    pipeline.add(Phase.Read, 100, "body_limit",
+                 body_limit_handler)
+    pipeline.add(Phase.Content, 50, "compression",
+                 compression_handler)
+    pipeline.add(Phase.Log, 50, "access_log",
+                 access_log_handler)
+
+    pipeline
+
+# ============================================================================
+# TLS Configuration
+# ============================================================================
+
+fn load_tls_config(config: ServerConfig) -> Result<TlsConfig, HttpServerError>:
+    """Validate TLS certificate and key files, then build a TlsConfig.
+
+    Called from HttpServer.start() when tls_enabled is true.
+    Fails fast with a TlsError if cert/key files are missing or malformed.
+
+    Args:
+        config: ServerConfig with tls_cert_path and tls_key_path set
+
+    Returns:
+        TlsConfig ready for AsyncTlsListener, or TlsError
+    """
+    if config.tls_cert_path.len() == 0:
+        return Err(HttpServerError.TlsError("tls_cert_path is empty"))
+    if config.tls_key_path.len() == 0:
+        return Err(HttpServerError.TlsError("tls_key_path is empty"))
+
+    if not file_exists(config.tls_cert_path):
+        return Err(HttpServerError.TlsError("certificate file not found: {config.tls_cert_path}"))
+    if not file_exists(config.tls_key_path):
+        return Err(HttpServerError.TlsError("private key file not found: {config.tls_key_path}"))
+
+    val chain_result = TlsCertificateChain.from_pem_file(config.tls_cert_path)
+    var chain: TlsCertificateChain
+    match chain_result:
+        Ok(c):
+            chain = c
+        Err(msg):
+            return Err(HttpServerError.TlsError("failed to load certificate: {msg}"))
+
+    val key_result = TlsPrivateKey.from_pem_file(config.tls_key_path)
+    var key: TlsPrivateKey
+    match key_result:
+        Ok(k):
+            key = k
+        Err(msg):
+            return Err(HttpServerError.TlsError("failed to load private key: {msg}"))
+
+    Ok(TlsConfig.server(chain, key))

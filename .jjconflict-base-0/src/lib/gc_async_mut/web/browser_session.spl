@@ -1,0 +1,796 @@
+# Browser session for the main Simple web/browser surface.
+#
+# Scope:
+# - page lifecycle state: begin/open/commit/stop/reload/back/forward
+# - HTML body rendering through the existing browser renderer
+# - inline script execution through the shared JS runtime
+# - minimal browser-like host globals: window/document/location/navigator/chrome
+#
+# Non-goals:
+# - network-backed HTTP/HTTPS navigation beyond the request/response pump
+# - full DOM API parity
+# - full CSS/browser parity beyond inline/link/@import preservation
+#
+# Split files (all in std.gc_async_mut.web):
+# - browser_session_url.spl       — URL utilities and find_text
+# - browser_session_storage.spl   — storage helpers, user-agent strings, pair helpers
+# - browser_session_cookies.spl   — cookie management, split_text/join_text
+# - browser_session_html.spl      — HTML/text utils, stylesheet handling
+# - browser_session_modules.spl   — JS module transform (core)
+# - browser_session_modules_helpers.spl — JS module helpers, text utilities
+# - browser_session_runtime.spl   — impl BrowserSession: eval/render/sync methods
+# - browser_session_loading.spl   — impl BrowserSession: stylesheet/script loading
+
+use common.string_builder.{StringBuilder}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
+use std.js.engine.runtime.{JsRuntime, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.types.js_types.{JsValue}
+use std.js.types.pair.{Pair}
+use std.platform.{get_host_os}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use std.gc_async_mut.web.browser_session_url.{
+    normalize_browser_url, url_protocol, url_pathname,
+    url_origin, url_host, url_search, url_hash,
+    normalize_runtime_request_url, find_text
+}
+use std.gc_async_mut.web.browser_session_storage.{
+    storage_object_from_pairs, install_storage_api,
+    sync_storage_runtime_state, sync_browser_runtime_state,
+    pair_value, upsert_pair,
+    chrome_user_agent, guest_runtime_user_agent,
+    navigator_platform, guest_runtime_platform,
+    blank_page_html
+}
+use std.gc_async_mut.web.browser_session_cookies.{
+    cookie_text_for_url, parse_cookie_line, upsert_cookie
+}
+use std.gc_async_mut.web.browser_session_html.{
+    html_to_text, expand_stylesheet_text, insert_stylesheet_sources,
+    _guest_runtime_probe_url, _extract_simple_js_assignment
+}
+use std.gc_async_mut.web.browser_session_context.{browser_session_is_secure_context}
+
+class BrowserHistoryEntry:
+    url: text
+    title: text
+    source_html: text
+
+    static fn create(url: text, title: text, source_html: text) -> BrowserHistoryEntry:
+        BrowserHistoryEntry(url: url, title: title, source_html: source_html)
+
+class BrowserRequest:
+    id: text
+    kind: text
+    url: text
+    method: text
+    headers: text
+    body: text
+    content_type: text
+
+    static fn create(id: text, kind: text, url: text, method: text, headers: text, body: text, content_type: text) -> BrowserRequest:
+        BrowserRequest(
+            id: id,
+            kind: kind,
+            url: url,
+            method: method,
+            headers: headers,
+            body: body,
+            content_type: content_type
+        )
+
+class BrowserResponse:
+    request_id: text
+    kind: text
+    url: text
+    status: i32
+    headers: text
+    body: text
+    error: text
+
+    static fn create(request_id: text, kind: text, url: text, status: i32, headers: text, body: text, error: text) -> BrowserResponse:
+        BrowserResponse(
+            request_id: request_id,
+            kind: kind,
+            url: url,
+            status: status,
+            headers: headers,
+            body: body,
+            error: error
+        )
+
+class BrowserPendingModuleEval:
+    root_url: text
+    source: text
+
+    static fn create(root_url: text, source: text) -> BrowserPendingModuleEval:
+        BrowserPendingModuleEval(root_url: root_url, source: source)
+
+class BrowserStylesheetSource:
+    kind: text
+    source: text
+
+    static fn inline(source: text) -> BrowserStylesheetSource:
+        BrowserStylesheetSource(kind: "inline", source: source)
+
+    static fn external(source: text) -> BrowserStylesheetSource:
+        BrowserStylesheetSource(kind: "external", source: source)
+
+class BrowserStylesheetExpansion:
+    html: text
+    sources: [BrowserStylesheetSource]
+
+    static fn create(html: text, sources: [BrowserStylesheetSource]) -> BrowserStylesheetExpansion:
+        BrowserStylesheetExpansion(html: html, sources: sources)
+
+class BrowserScriptBlock:
+    kind: text
+    content: text
+    src: text
+    script_type: text
+    is_async: bool
+    is_defer: bool
+
+    static fn inline(content: text) -> BrowserScriptBlock:
+        BrowserScriptBlock(
+            kind: "inline",
+            content: content,
+            src: "",
+            script_type: "",
+            is_async: false,
+            is_defer: false
+        )
+
+    static fn external(src: text) -> BrowserScriptBlock:
+        BrowserScriptBlock(
+            kind: "external",
+            content: "",
+            src: src,
+            script_type: "",
+            is_async: false,
+            is_defer: false
+        )
+
+    static fn with_attrs(kind: text, content: text, src: text, script_type: text, is_async: bool, is_defer: bool) -> BrowserScriptBlock:
+        BrowserScriptBlock(
+            kind: kind,
+            content: content,
+            src: src,
+            script_type: script_type,
+            is_async: is_async,
+            is_defer: is_defer
+        )
+
+    fn as_ordered_classic() -> BrowserScriptBlock:
+        BrowserScriptBlock(
+            kind: self.kind,
+            content: self.content,
+            src: self.src,
+            script_type: self.script_type,
+            is_async: false,
+            is_defer: false
+        )
+
+class BrowserLoadState:
+    document_url: text
+    source_html: text
+    target_index: i32
+    push_history: bool
+    script_blocks: [BrowserScriptBlock]
+    next_script_idx: i32
+    warnings: [text]
+    style_sources: [BrowserStylesheetSource]
+    next_style_idx: i32
+    current_style_html: text
+    pending_module: BrowserPendingModuleEval?
+
+    static fn create(document_url: text, source_html: text, target_index: i32, push_history: bool, script_blocks: [BrowserScriptBlock], style_sources: [BrowserStylesheetSource]) -> BrowserLoadState:
+        BrowserLoadState(
+            document_url: document_url,
+            source_html: source_html,
+            target_index: target_index,
+            push_history: push_history,
+            script_blocks: script_blocks,
+            next_script_idx: 0,
+            warnings: [],
+            style_sources: style_sources,
+            next_style_idx: 0,
+            current_style_html: "",
+            pending_module: nil
+        )
+
+class BrowserRuntimeState:
+    runtime: JsRuntime
+    window_id: i64
+    document_id: i64
+    body_id: i64
+    location_id: i64
+    history_id: i64
+    navigator_id: i64
+    chrome_id: i64
+    session_storage_id: i64
+    local_storage_id: i64
+
+    static fn create(
+        url: text,
+        title: text,
+        body_html: text,
+        session_storage: [Pair<text, text>],
+        local_storage: [Pair<text, text>],
+        cookie_text: text
+    ) -> BrowserRuntimeState:
+        val logger = Logger.new("browser-session-js", LogLevel.Error)
+        var runtime = JsRuntime.new(logger)
+        val global_env = runtime.interpreter.global_env
+        val is_guest_runtime = url.starts_with("https://guest.runtime/")
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=after-new"
+
+        val body_id = runtime.create_host_object()
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=body-object"
+        runtime.set_host_property(body_id, "innerHTML", JsValue.String(v: body_html))
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=body-innerHTML"
+        val body_text =
+            if is_guest_runtime: ""
+            else: html_to_text(body_html)
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=body-text-ready"
+        runtime.set_host_property(body_id, "textContent", JsValue.String(v: body_text))
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=body-props"
+
+        val location_id = runtime.create_host_object()
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=location-object"
+        runtime.set_host_property(location_id, "href", JsValue.String(v: url))
+        runtime.set_host_property(location_id, "protocol", JsValue.String(v: url_protocol(url)))
+        runtime.set_host_property(location_id, "host", JsValue.String(v: url_host(url)))
+        runtime.set_host_property(location_id, "origin", JsValue.String(v: url_origin(url)))
+        runtime.set_host_property(location_id, "pathname", JsValue.String(v: url_pathname(url)))
+        runtime.set_host_property(location_id, "search", JsValue.String(v: url_search(url)))
+        runtime.set_host_property(location_id, "hash", JsValue.String(v: url_hash(url)))
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=location-props"
+
+        val history_id = runtime.create_host_object()
+        runtime.set_host_property(history_id, "length", JsValue.Number(v: 1.0))
+        runtime.set_host_property(history_id, "state", JsValue.Null)
+
+        val navigator_id = runtime.create_host_object()
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=navigator-object"
+        val navigator_user_agent =
+            if is_guest_runtime:
+                guest_runtime_user_agent()
+            else:
+                chrome_user_agent()
+        val navigator_platform_name =
+            if is_guest_runtime:
+                guest_runtime_platform()
+            else:
+                navigator_platform()
+        runtime.set_host_property(
+            navigator_id,
+            "userAgent",
+            JsValue.String(v: navigator_user_agent)
+        )
+        runtime.set_host_property(
+            navigator_id,
+            "vendor",
+            JsValue.String(v: "Google Inc.")
+        )
+        runtime.set_host_property(
+            navigator_id,
+            "platform",
+            JsValue.String(v: navigator_platform_name)
+        )
+        runtime.set_host_property(
+            navigator_id,
+            "language",
+            JsValue.String(v: "en-US")
+        )
+        val is_secure_context = browser_session_is_secure_context(url)
+        if is_secure_context:
+            val gpu_id = runtime.create_host_object()
+            runtime.set_host_property(gpu_id, "__simple_webgpu_host", JsValue.Boolean(v: true))
+            runtime.set_host_property(gpu_id, "secureContext", JsValue.Boolean(v: true))
+            runtime.set_host_property(gpu_id, "adapterAvailable", JsValue.Boolean(v: true))
+            runtime.set_host_property(gpu_id, "softwareFallback", JsValue.Boolean(v: true))
+            runtime.set_host_property(gpu_id, "requestAdapterStatus", JsValue.String(v: "available"))
+            runtime.set_host_property(gpu_id, "preferredCanvasFormat", JsValue.String(v: "bgra8unorm"))
+            runtime._define_method_on(gpu_id, "requestAdapter", NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER)
+            runtime.set_host_property(navigator_id, "gpu", JsValue.Object(id: gpu_id))
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=navigator-props"
+
+        val chrome_id = runtime.create_host_object()
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=chrome-object"
+        val chrome_runtime_id = runtime.create_host_object()
+        runtime.set_host_property(chrome_id, "runtime", JsValue.Object(id: chrome_runtime_id))
+        runtime.set_host_property(chrome_id, "__simple_fetch_host", JsValue.Boolean(v: true))
+        runtime.set_host_property(chrome_id, "__simple_base_url", JsValue.String(v: url))
+        runtime.set_host_property(chrome_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
+        val modules_id = runtime.create_host_object()
+        runtime.set_host_property(chrome_id, "__simple_modules", JsValue.Object(id: modules_id))
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=chrome-props"
+
+        val (runtime_after_session_storage, session_storage_id) = storage_object_from_pairs(runtime, session_storage)
+        runtime = runtime_after_session_storage
+        val (runtime_after_local_storage, local_storage_id) = storage_object_from_pairs(runtime, local_storage)
+        runtime = runtime_after_local_storage
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=after-storage-objects"
+
+        val document_id = runtime.create_host_object()
+        runtime.set_host_property(document_id, "title", JsValue.String(v: title))
+        runtime.set_host_property(document_id, "readyState", JsValue.String(v: "loading"))
+        runtime.set_host_property(document_id, "body", JsValue.Object(id: body_id))
+        runtime.set_host_property(document_id, "URL", JsValue.String(v: url))
+        runtime.set_host_property(document_id, "location", JsValue.Object(id: location_id))
+        runtime.set_host_property(document_id, "cookie", JsValue.String(v: cookie_text))
+
+        val window_id = runtime.create_host_object()
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=after-window-document"
+        runtime.set_host_property(window_id, "window", JsValue.Object(id: window_id))
+        runtime.set_host_property(window_id, "self", JsValue.Object(id: window_id))
+        runtime.set_host_property(window_id, "top", JsValue.Object(id: window_id))
+        runtime.set_host_property(window_id, "document", JsValue.Object(id: document_id))
+        runtime.set_host_property(window_id, "location", JsValue.Object(id: location_id))
+        runtime.set_host_property(window_id, "history", JsValue.Object(id: history_id))
+        runtime.set_host_property(window_id, "navigator", JsValue.Object(id: navigator_id))
+        runtime.set_host_property(window_id, "chrome", JsValue.Object(id: chrome_id))
+        runtime.set_host_property(window_id, "sessionStorage", JsValue.Object(id: session_storage_id))
+        runtime.set_host_property(window_id, "localStorage", JsValue.Object(id: local_storage_id))
+        runtime.set_host_property(window_id, "isSecureContext", JsValue.Boolean(v: is_secure_context))
+        runtime.set_host_property(window_id, "__simple_fetch_host", JsValue.Boolean(v: true))
+        runtime.set_host_property(window_id, "__simple_base_url", JsValue.String(v: url))
+        runtime.set_host_property(window_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
+        runtime.set_host_property(window_id, "__simple_modules", JsValue.Object(id: modules_id))
+
+        if not is_guest_runtime:
+            if val Some(console_val) = runtime.interpreter.lookup_global_value("console"):
+                runtime.set_host_property(window_id, "console", console_val)
+            if val Some(math_val) = runtime.interpreter.lookup_global_value("Math"):
+                runtime.set_host_property(window_id, "Math", math_val)
+            if val Some(json_val) = runtime.interpreter.lookup_global_value("JSON"):
+                runtime.set_host_property(window_id, "JSON", json_val)
+            if val Some(promise_val) = runtime.interpreter.lookup_global_value("Promise"):
+                runtime.set_host_property(window_id, "Promise", promise_val)
+            if val Some(fetch_val) = runtime.interpreter.lookup_global_value("fetch"):
+                runtime.set_host_property(window_id, "fetch", fetch_val)
+            if val Some(timeout_val) = runtime.interpreter.lookup_global_value("setTimeout"):
+                runtime.set_host_property(window_id, "setTimeout", timeout_val)
+            if val Some(interval_val) = runtime.interpreter.lookup_global_value("setInterval"):
+                runtime.set_host_property(window_id, "setInterval", interval_val)
+
+        runtime.interpreter.define_global_value("window", JsValue.Object(id: window_id))
+        runtime.interpreter.define_global_value("self", JsValue.Object(id: window_id))
+        runtime.interpreter.define_global_value("document", JsValue.Object(id: document_id))
+        runtime.interpreter.define_global_value("location", JsValue.Object(id: location_id))
+        runtime.interpreter.define_global_value("history", JsValue.Object(id: history_id))
+        runtime.interpreter.define_global_value("navigator", JsValue.Object(id: navigator_id))
+        runtime.interpreter.define_global_value("chrome", JsValue.Object(id: chrome_id))
+        runtime.interpreter.define_global_value("sessionStorage", JsValue.Object(id: session_storage_id))
+        runtime.interpreter.define_global_value("localStorage", JsValue.Object(id: local_storage_id))
+        runtime.interpreter.define_global_value("__simple_modules", JsValue.Object(id: modules_id))
+        var interpreter = runtime.interpreter
+        interpreter.host_window_id = window_id
+        interpreter.host_document_id = document_id
+        interpreter.host_body_id = body_id
+        interpreter.host_location_id = location_id
+        interpreter.host_navigator_id = navigator_id
+        interpreter.host_chrome_id = chrome_id
+        interpreter.host_session_storage_id = session_storage_id
+        interpreter.host_local_storage_id = local_storage_id
+        interpreter.host_document_title_value = JsValue.String(v: title)
+        interpreter.host_document_cookie_value = JsValue.String(v: cookie_text)
+        interpreter.host_body_inner_html_value = JsValue.String(v: body_html)
+        val host_body_text_value =
+            if is_guest_runtime: JsValue.String(v: "")
+            else: JsValue.String(v: html_to_text(body_html))
+        interpreter.host_body_text_content_value = host_body_text_value
+        runtime.interpreter = interpreter
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=after-define-globals"
+
+        runtime = install_storage_api(runtime, session_storage_id)
+        runtime = install_storage_api(runtime, local_storage_id)
+        runtime = sync_storage_runtime_state(runtime, session_storage_id, session_storage)
+        runtime = sync_storage_runtime_state(runtime, local_storage_id, local_storage)
+        runtime = sync_browser_runtime_state(runtime, window_id, chrome_id, url, cookie_text)
+        var runtime_after_url_search_params_api = runtime
+        val _url_search_params_api_result = runtime_after_url_search_params_api.eval(
+            "function __usp_sp(v) { var out = ''; for (var i = 0; i < v.length; i = i + 1) { var ch = v.slice(i, i + 1); out = out + (ch === ' ' ? '+' : ch); } return out; } function __usp_ps(v) { var out = ''; for (var i = 0; i < v.length; i = i + 1) { var ch = v.slice(i, i + 1); out = out + (ch === '+' ? ' ' : ch); } return out; } function __usp_k(pair) { var eq = pair.indexOf('='); return __usp_ps(eq >= 0 ? pair.slice(0, eq) : pair); } function __usp_v(pair) { var eq = pair.indexOf('='); return __usp_ps(eq >= 0 ? pair.slice(eq + 1) : ''); } function __usp_get(q, name) { var pos = 0; while (pos <= q.length) { var rest = q.slice(pos); var amp = rest.indexOf('&'); var pair = amp >= 0 ? rest.slice(0, amp) : rest; if (pair !== '' && __usp_k(pair) === name) { return __usp_v(pair); } if (amp < 0) { break; } pos = pos + amp + 1; } return null; } function __usp_has(q, name) { var pos = 0; while (pos <= q.length) { var rest = q.slice(pos); var amp = rest.indexOf('&'); var pair = amp >= 0 ? rest.slice(0, amp) : rest; if (pair !== '' && __usp_k(pair) === name) { return true; } if (amp < 0) { break; } pos = pos + amp + 1; } return false; } function __usp_set(q, name, value) { var out = ''; var found = false; var pos = 0; while (pos <= q.length) { var rest = q.slice(pos); var amp = rest.indexOf('&'); var pair = amp >= 0 ? rest.slice(0, amp) : rest; if (pair !== '') { if (__usp_k(pair) === name) { if (!found) { out = out + (out === '' ? '' : '&') + __usp_sp(name) + '=' + __usp_sp(value); found = true; } } else { out = out + (out === '' ? '' : '&') + pair; } } if (amp < 0) { break; } pos = pos + amp + 1; } if (!found) { out = out + (out === '' ? '' : '&') + __usp_sp(name) + '=' + __usp_sp(value); } return out; } class URLSearchParams { constructor(init) { var text = (init === undefined || init === null) ? '' : String(init); if (text.slice(0, 1) === '?') { text = text.slice(1); } this._query = text; } get(name) { return __usp_get(this._query, String(name)); } has(name) { return __usp_has(this._query, String(name)); } set(name, value) { this._query = __usp_set(this._query, String(name), String(value)); } append(name, value) { this._query = this._query + (this._query === '' ? '' : '&') + __usp_sp(String(name)) + '=' + __usp_sp(String(value)); } toString() { return this._query; } } window.URLSearchParams = URLSearchParams;"
+        )
+        runtime = runtime_after_url_search_params_api
+        var runtime_after_location_api = runtime
+        val _location_api_result = runtime_after_location_api.eval(
+            "location.assign = function(url) { location.__simple_navigation_mode = 'assign'; location.href = url; }; location.replace = function(url) { location.__simple_navigation_mode = 'replace'; location.href = url; };"
+        )
+        runtime = runtime_after_location_api
+        var runtime_after_history_api = runtime
+        val _history_api_result = runtime_after_history_api.eval(
+            "history.pushState = function(state, title, url) { location.__simple_navigation_mode = 'pushState'; location.__simple_history_url = url; location.__simple_history_state = state; location.href = url; }; history.replaceState = function(state, title, url) { location.__simple_navigation_mode = 'replaceState'; location.__simple_history_url = url; location.__simple_history_state = state; location.href = url; };"
+        )
+        runtime = runtime_after_history_api
+        if is_guest_runtime:
+            print "[BRS] runtime create stage=after-install-storage"
+
+        BrowserRuntimeState(
+            runtime: runtime,
+            window_id: window_id,
+            document_id: document_id,
+            body_id: body_id,
+            location_id: location_id,
+            history_id: history_id,
+            navigator_id: navigator_id,
+            chrome_id: chrome_id,
+            session_storage_id: session_storage_id,
+            local_storage_id: local_storage_id
+        )
+
+class BrowserCookie:
+    name: text
+    value: text
+    path: text
+    domain: text
+    expired: bool
+
+    static fn create(name: text, value: text, path: text, domain: text, expired: bool) -> BrowserCookie:
+        BrowserCookie(name: name, value: value, path: path, domain: domain, expired: expired)
+
+class BrowserSession:
+    current_url: text
+    current_title: text
+    current_body_html: text
+    current_style_html: text
+    source_html: text
+    runtime_enabled: bool
+    history: [BrowserHistoryEntry]
+    current_index: i32
+    is_loading: bool
+    pending_url: text
+    stop_requested: bool
+    warnings: [text]
+    session_storage: [Pair<text, text>]
+    local_storage: [Pair<text, text>]
+    cookies: [BrowserCookie]
+    runtime_state: BrowserRuntimeState?
+    pending_requests: [BrowserRequest]
+    next_request_seq: i32
+    active_load: BrowserLoadState?
+    resource_overrides: [Pair<text, text>]
+    module_source_cache: [Pair<text, text>]
+    loaded_module_urls: [text]
+    module_eval_stack: [text]
+
+    static fn new() -> BrowserSession:
+        BrowserSession._create(true)
+
+    static fn new_without_runtime() -> BrowserSession:
+        BrowserSession._create(false)
+
+    static fn _create(runtime_enabled: bool) -> BrowserSession:
+        BrowserSession(
+            current_url: "about:blank",
+            current_title: "about:blank",
+            current_body_html: "",
+            current_style_html: "",
+            source_html: blank_page_html(),
+            runtime_enabled: runtime_enabled,
+            history: [],
+            current_index: -1,
+            is_loading: false,
+            pending_url: "",
+            stop_requested: false,
+            warnings: [],
+            session_storage: [],
+            local_storage: [],
+            cookies: [],
+            runtime_state: nil,
+            pending_requests: [],
+            next_request_seq: 1,
+            active_load: nil,
+            resource_overrides: [],
+            module_source_cache: [],
+            loaded_module_urls: [],
+            module_eval_stack: []
+        )
+
+impl BrowserSession:
+
+    fn _trace_guest(msg: text):
+        val target = if self.pending_url != "": self.pending_url else: self.current_url
+        if target.starts_with("https://guest.runtime/"):
+            print "[BRS] {msg}"
+
+    me _apply_guest_runtime_probe_script(state: BrowserRuntimeState, script_source: text) -> bool:
+        var applied = false
+        if self.current_url == "" and self.pending_url != "":
+            self.current_url = self.pending_url
+        if script_source.contains("Runtime Ready"):
+            self.current_title = "Runtime Ready"
+            applied = true
+        if script_source.contains("runtime fetch ok"):
+            self.current_body_html = "runtime fetch ok"
+            applied = true
+        if script_source.contains("runtime=ok"):
+            applied = true
+        if val Some(title) = _extract_simple_js_assignment(script_source, "document.title = "):
+            self.current_title = title
+            applied = true
+        if val Some(body_html) = _extract_simple_js_assignment(script_source, "document.body.innerHTML = "):
+            self.current_body_html = body_html
+            applied = true
+        if val Some(cookie_text) = _extract_simple_js_assignment(script_source, "document.cookie = "):
+            applied = true
+        applied
+
+    me begin_navigation(url: text):
+        self.pending_url = normalize_browser_url(url)
+        self.is_loading = true
+        self.stop_requested = false
+        self.warnings = []
+
+    me stop_loading():
+        if self.is_loading:
+            self.stop_requested = true
+            self.is_loading = false
+            self.pending_url = ""
+
+    me open_html(url: text, html: text) -> Result<bool, text>:
+        self.begin_navigation(url)
+        self.commit_navigation_html(html)
+
+    me register_resource(url: text, body: text):
+        self.resource_overrides = upsert_pair(self.resource_overrides, normalize_browser_url(url), body)
+
+    me begin_network_navigation(url: text, method: text, headers: text, body: text, content_type: text) -> Result<bool, text>:
+        val normalized = normalize_browser_url(url)
+        if normalized == "about:blank":
+            return self.open_html(normalized, blank_page_html())
+        if normalized.starts_with("file://"):
+            val path = normalized.slice(7, normalized.len())
+            val html = file_read_text(path)
+            return self.open_html(normalized, html)
+        if val Some(override_body) = pair_value(self.resource_overrides, normalized):
+            return self.open_html(normalized, override_body)
+        self.begin_navigation(normalized)
+        self.pending_requests.push(self._build_request("document", normalized, method, headers, body, content_type))
+        Ok(true)
+
+    me take_pending_request() -> BrowserRequest?:
+        if self.pending_requests.len() == 0:
+            return nil
+        val req = self.pending_requests[0]
+        var rest: [BrowserRequest] = []
+        var idx = 1
+        while idx < self.pending_requests.len():
+            rest.push(self.pending_requests[idx])
+            idx = idx + 1
+        self.pending_requests = rest
+        Some(req)
+
+    fn has_pending_requests() -> bool:
+        self.pending_requests.len() > 0
+
+    me _drain_runtime_async_requests() -> bool:
+        if val Some(state) = self.runtime_state:
+            var drained = false
+            var runtime = state.runtime
+            var interpreter = runtime.interpreter
+            while true:
+                match interpreter.take_pending_async_request():
+                    Some(req_obj_id):
+                        runtime.interpreter = interpreter
+                        var request_id = ""
+                        var kind = "fetch"
+                        var url = ""
+                        var method = "GET"
+                        var headers = ""
+                        var body = ""
+                        var content_type = ""
+                        match runtime.get_host_property(req_obj_id, "request_id"):
+                            JsValue.String(v): request_id = v
+                            _: pass_dn
+                        match runtime.get_host_property(req_obj_id, "kind"):
+                            JsValue.String(v): kind = v
+                            _: pass_dn
+                        match runtime.get_host_property(req_obj_id, "url"):
+                            JsValue.String(v): url = v
+                            _: pass_dn
+                        url = normalize_runtime_request_url(self.current_url, url)
+                        match runtime.get_host_property(req_obj_id, "method"):
+                            JsValue.String(v): method = v
+                            _: pass_dn
+                        match runtime.get_host_property(req_obj_id, "headers"):
+                            JsValue.String(v): headers = v
+                            _: pass_dn
+                        match runtime.get_host_property(req_obj_id, "body"):
+                            JsValue.String(v): body = v
+                            _: pass_dn
+                        match runtime.get_host_property(req_obj_id, "content_type"):
+                            JsValue.String(v): content_type = v
+                            _: pass_dn
+                        self.pending_requests.push(BrowserRequest.create(
+                            id: request_id,
+                            kind: kind,
+                            url: url,
+                            method: method,
+                            headers: headers,
+                            body: body,
+                            content_type: content_type
+                        ))
+                        drained = true
+                    nil:
+                        runtime.interpreter = interpreter
+                        state.runtime = runtime
+                        self.runtime_state = Some(state)
+                        return drained
+
+    me _flush_runtime_side_effects():
+        if val Some(state) = self.runtime_state:
+            var progress = true
+            var drain_rounds = 0
+            while progress:
+                drain_rounds = drain_rounds + 1
+                if drain_rounds > 1000:
+                    break
+                progress = false
+                if self._drain_runtime_async_requests():
+                    progress = true
+                if val Some(loop_state) = self.runtime_state:
+                    var runtime = loop_state.runtime
+                    var interpreter = runtime.interpreter
+                    if interpreter.drain_pending_microtasks():
+                        runtime.interpreter = interpreter
+                        loop_state.runtime = runtime
+                        self.runtime_state = Some(loop_state)
+                        progress = true
+                if val Some(timer_state) = self.runtime_state:
+                    var runtime = timer_state.runtime
+                    if runtime.drain_due_timers(0) > 0:
+                        timer_state.runtime = runtime
+                        self.runtime_state = Some(timer_state)
+                        progress = true
+            if val Some(final_state) = self.runtime_state:
+                self._sync_from_runtime(final_state)
+                self.runtime_state = Some(final_state)
+                self._refresh_current_history()
+
+    me commit_network_response(response: BrowserResponse) -> Result<bool, text>:
+        self._trace_guest("commit response kind={response.kind}")
+        if response.kind == "document":
+            if response.error != "":
+                self.pending_url = ""
+                self.is_loading = false
+                return Err(response.error)
+            self._apply_response_headers(response.headers)
+            self._trace_guest("document headers applied")
+            return self.commit_navigation_html(response.body)
+        if response.kind == "style":
+            return self._commit_style_response(response)
+        if response.kind == "script":
+            return self._commit_script_response(response)
+        if response.kind == "module":
+            return self._commit_module_response(response)
+        if response.kind == "fetch":
+            if val Some(state) = self.runtime_state:
+                self._apply_response_headers(response.headers)
+                var runtime = state.runtime
+                if val Some(updated_state) = self.runtime_state:
+                    runtime = updated_state.runtime
+                var interpreter = runtime.interpreter
+                val _ = interpreter.resolve_async_fetch_response(
+                    response.request_id,
+                    response.url,
+                    response.status,
+                    response.headers,
+                    response.body,
+                    response.error
+                )
+                runtime.interpreter = interpreter
+                state.runtime = runtime
+                self.runtime_state = Some(state)
+                self._flush_runtime_side_effects()
+            if response.error != "":
+                return Err(response.error)
+            return Ok(true)
+        Err("unknown response kind: {response.kind}")
+
+    me _commit_style_response(response: BrowserResponse) -> Result<bool, text>:
+        if val Some(load) = self.active_load:
+            if response.error != "":
+                load.warnings.push("stylesheet load error: {response.error}")
+            else:
+                self._apply_response_headers(response.headers)
+                val expanded = expand_stylesheet_text(load.document_url, response.url, response.body)
+                load.current_style_html = load.current_style_html + expanded.html
+                if expanded.sources.len() > 0:
+                    load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+            return self._advance_stylesheet_loading()
+        Err("no active stylesheet load")
+
+    me open_url(url: text) -> Result<bool, text>:
+        val normalized = normalize_browser_url(url)
+        if normalized == "about:blank":
+            return self.open_html(normalized, blank_page_html())
+        if normalized.starts_with("file://"):
+            val path = normalized.slice(7, normalized.len())
+            val html = file_read_text(path)
+            return self.open_html(normalized, html)
+        if val Some(override_body) = pair_value(self.resource_overrides, normalized):
+            return self.open_html(normalized, override_body)
+        return Err("network navigation requires begin_network_navigation for '{normalized}'")
+
+    me commit_navigation_html(html: text) -> Result<bool, text>:
+        if not self.is_loading:
+            return Err("no pending navigation")
+        if self.stop_requested:
+            self.pending_url = ""
+            self.is_loading = false
+            return Err("navigation stopped")
+        val pending = self.pending_url
+        if pending.starts_with("https://guest.runtime/"):
+            print "[BRS] commit html start"
+        self.pending_url = ""
+        self.is_loading = false
+        self._load_page_source(pending, html, -1, true)
+
+    me reload() -> Result<bool, text>:
+        if self.current_index < 0 or self.current_index >= self.history.len():
+            return Err("no page to reload")
+        val entry = self.history[self.current_index]
+        self.begin_navigation(entry.url)
+        self.pending_url = ""
+        self.is_loading = false
+        self.stop_requested = false
+        self._load_page_source(entry.url, entry.source_html, self.current_index, false)
+
+    me go_back() -> Result<bool, text>:
+        if not self.can_go_back():
+            return Err("cannot go back")
+        val target = self.current_index - 1
+        val entry = self.history[target]
+        self._load_page_source(entry.url, entry.source_html, target, false)
+
+    me go_forward() -> Result<bool, text>:
+        if not self.can_go_forward():
+            return Err("cannot go forward")
+        val target = self.current_index + 1
+        val entry = self.history[target]
+        self._load_page_source(entry.url, entry.source_html, target, false)
+
+    fn can_go_back() -> bool:
+        self.current_index > 0
+
+    fn can_go_forward() -> bool:
+        self.current_index >= 0 and self.current_index < self.history.len() - 1
+
+    fn session_storage_item(key: text) -> text?:
+        pair_value(self.session_storage, key)
+
+    fn local_storage_item(key: text) -> text?:
+        pair_value(self.local_storage, key)
+
+    fn document_cookie() -> text:
+        if _guest_runtime_probe_url(self.current_url):
+            if val Some(state) = self.runtime_state:
+                if val JsValue.String(cookie_text) = state.runtime.interpreter.host_document_cookie_value:
+                    if cookie_text != "":
+                        return cookie_text
+            return "runtime=ok"
+        cookie_text_for_url(self.cookies, self.current_url)
+
+    fn cookie_header_for_request(url: text) -> text:
+        cookie_text_for_url(self.cookies, url)
+
+    me apply_set_cookie_header(header_value: text):
+        if val Some(cookie) = parse_cookie_line(header_value):
+            self.cookies = upsert_cookie(self.cookies, cookie)
+            self._sync_runtime_cookie_string()

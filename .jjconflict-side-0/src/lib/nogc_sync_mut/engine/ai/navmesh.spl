@@ -1,0 +1,318 @@
+# NavMesh + A* Pathfinding
+#
+# Navigation mesh with polygon-based A* pathfinding for 2D worlds.
+# Polygons define walkable areas; A* finds shortest path through
+# connected polygon centers.
+#
+# Usage:
+#   var mesh = NavMesh.new()
+#   val id0 = mesh.add_polygon([NavPoint(x: 0.0, y: 0.0), NavPoint(x: 10.0, y: 0.0), NavPoint(x: 5.0, y: 10.0)])
+#   val id1 = mesh.add_polygon([NavPoint(x: 10.0, y: 0.0), NavPoint(x: 20.0, y: 0.0), NavPoint(x: 15.0, y: 10.0)])
+#   mesh.connect(id0, id1)
+#   val path = mesh.find_path(2.0, 3.0, 18.0, 3.0)
+
+use std.common.math.{math_abs, math_sqrt}
+
+# ============================================================================
+# NavPoint — 2D navigation point
+# ============================================================================
+
+struct NavPoint:
+    x: f64
+    y: f64
+
+impl NavPoint:
+    fn distance_to(other: NavPoint) -> f64:
+        """Euclidean distance to another point."""
+        val dx = other.x - self.x
+        val dy = other.y - self.y
+        math_sqrt(dx * dx + dy * dy)
+
+# ============================================================================
+# NavPolygon — walkable polygon with neighbor links
+# ============================================================================
+
+struct NavPolygon:
+    id: i32
+    vertices: [NavPoint]
+    center: NavPoint
+    neighbors: [i32]
+
+impl NavPolygon:
+    static fn new(id: i32, vertices: [NavPoint]) -> NavPolygon:
+        """Create polygon, computing center as average of vertices."""
+        var sum_x = 0.0
+        var sum_y = 0.0
+        var i = 0
+        while i < vertices.len():
+            val v = vertices[i]
+            sum_x = sum_x + v.x
+            sum_y = sum_y + v.y
+            i = i + 1
+        val count = vertices.len()
+        var cx = 0.0
+        var cy = 0.0
+        if count > 0:
+            cx = sum_x / count.to_f64()
+            cy = sum_y / count.to_f64()
+        NavPolygon(
+            id: id,
+            vertices: vertices,
+            center: NavPoint(x: cx, y: cy),
+            neighbors: []
+        )
+
+    me add_neighbor(neighbor_id: i32):
+        """Add a neighbor polygon id."""
+        self.neighbors.push(neighbor_id)
+
+    fn has_neighbor(nid: i32) -> bool:
+        """Check if polygon has a specific neighbor."""
+        var i = 0
+        while i < self.neighbors.len():
+            if self.neighbors[i] == nid:
+                return true
+            i = i + 1
+        false
+
+    fn contains_point(px: f64, py: f64) -> bool:
+        """Point-in-polygon via ray casting (count edge crossings)."""
+        var inside = false
+        val n = self.vertices.len()
+        if n < 3:
+            return false
+        var j = n - 1
+        var i = 0
+        while i < n:
+            val vi = self.vertices[i]
+            val vj = self.vertices[j]
+            val cond_y = (vi.y > py) != (vj.y > py)
+            if cond_y:
+                val slope = (vj.x - vi.x) * (py - vi.y) / (vj.y - vi.y) + vi.x
+                if px < slope:
+                    inside = !inside
+            j = i
+            i = i + 1
+        inside
+
+# ============================================================================
+# A* node tracking struct
+# ============================================================================
+
+struct _AStarNode:
+    polygon_id: i32
+    g_cost: f64
+    f_cost: f64
+    parent_id: i32
+
+# ============================================================================
+# NavMesh — collection of navigation polygons with A* pathfinding
+# ============================================================================
+
+class NavMesh:
+    polygons: [NavPolygon]
+    next_id: i32
+
+impl NavMesh:
+    static fn new() -> NavMesh:
+        """Create an empty navigation mesh."""
+        NavMesh(
+            polygons: [],
+            next_id: 0
+        )
+
+    me add_polygon(vertices: [NavPoint]) -> i32:
+        """Create polygon from vertices, return its id."""
+        val id = self.next_id
+        val poly = NavPolygon.new(id, vertices)
+        self.polygons.push(poly)
+        self.next_id = self.next_id + 1
+        id
+
+    me connect(id_a: i32, id_b: i32):
+        """Add bidirectional neighbor link between two polygons."""
+        var i = 0
+        while i < self.polygons.len():
+            if self.polygons[i].id == id_a:
+                if !self.polygons[i].has_neighbor(id_b):
+                    var poly = self.polygons[i]
+                    poly.add_neighbor(id_b)
+                    self.polygons[i] = poly
+            if self.polygons[i].id == id_b:
+                if !self.polygons[i].has_neighbor(id_a):
+                    var poly = self.polygons[i]
+                    poly.add_neighbor(id_a)
+                    self.polygons[i] = poly
+            i = i + 1
+
+    fn get_polygon(poly_id: i32) -> Option<NavPolygon>:
+        """Find polygon by id."""
+        var i = 0
+        while i < self.polygons.len():
+            if self.polygons[i].id == poly_id:
+                return Some(self.polygons[i])
+            i = i + 1
+        None
+
+    fn find_polygon_at(px: f64, py: f64) -> i32:
+        """Return polygon id containing point, -1 if none."""
+        var i = 0
+        while i < self.polygons.len():
+            if self.polygons[i].contains_point(px, py):
+                return self.polygons[i].id
+            i = i + 1
+        -1
+
+    me find_path(start_x: f64, start_y: f64, end_x: f64, end_y: f64) -> [NavPoint]:
+        """A* pathfinding through polygon centers."""
+        val start_poly_id = self.find_polygon_at(start_x, start_y)
+        val end_poly_id = self.find_polygon_at(end_x, end_y)
+
+        if start_poly_id == -1:
+            return []
+        if end_poly_id == -1:
+            return []
+        if start_poly_id == end_poly_id:
+            val sp = self.get_polygon(start_poly_id)
+            if val Some(p) = sp:
+                return [p.center]
+            return []
+
+        # Get end polygon center for heuristic
+        var end_center = NavPoint(x: end_x, y: end_y)
+        val end_opt = self.get_polygon(end_poly_id)
+        if val Some(ep) = end_opt:
+            end_center = ep.center
+
+        # Open and closed lists
+        var open_list: [_AStarNode] = []
+        var closed_ids: [i32] = []
+
+        # Initialize with start node
+        var start_center = NavPoint(x: start_x, y: start_y)
+        val start_opt = self.get_polygon(start_poly_id)
+        if val Some(sp2) = start_opt:
+            start_center = sp2.center
+        val h = start_center.distance_to(end_center)
+        open_list.push(_AStarNode(
+            polygon_id: start_poly_id,
+            g_cost: 0.0,
+            f_cost: h,
+            parent_id: -1
+        ))
+
+        # A* main loop
+        var found = false
+        var result_nodes: [_AStarNode] = []
+
+        while open_list.len() > 0:
+            # Find node with lowest f_cost in open list
+            var best_idx = 0
+            var best_f = open_list[0].f_cost
+            var oi = 1
+            while oi < open_list.len():
+                if open_list[oi].f_cost < best_f:
+                    best_f = open_list[oi].f_cost
+                    best_idx = oi
+                oi = oi + 1
+
+            val current = open_list[best_idx]
+
+            # Remove from open list by swapping with last
+            val last_idx = open_list.len() - 1
+            if best_idx != last_idx:
+                open_list[best_idx] = open_list[last_idx]
+            open_list.pop()
+
+            # Add to closed
+            closed_ids.push(current.polygon_id)
+            result_nodes.push(current)
+
+            # Check if we reached the goal
+            if current.polygon_id == end_poly_id:
+                found = true
+                break
+
+            # Expand neighbors
+            val cur_opt = self.get_polygon(current.polygon_id)
+            if val Some(cur_poly) = cur_opt:
+                var ni = 0
+                while ni < cur_poly.neighbors.len():
+                    val neighbor_id = cur_poly.neighbors[ni]
+
+                    # Skip if in closed list
+                    var in_closed = false
+                    var ci = 0
+                    while ci < closed_ids.len():
+                        if closed_ids[ci] == neighbor_id:
+                            in_closed = true
+                        ci = ci + 1
+
+                    if !in_closed:
+                        val n_opt = self.get_polygon(neighbor_id)
+                        if val Some(n_poly) = n_opt:
+                            val new_g = current.g_cost + cur_poly.center.distance_to(n_poly.center)
+                            val new_h = n_poly.center.distance_to(end_center)
+                            val new_f = new_g + new_h
+
+                            # Check if already in open list with better cost
+                            var in_open = false
+                            var open_idx = 0
+                            var oj = 0
+                            while oj < open_list.len():
+                                if open_list[oj].polygon_id == neighbor_id:
+                                    in_open = true
+                                    open_idx = oj
+                                oj = oj + 1
+
+                            if in_open:
+                                if new_g < open_list[open_idx].g_cost:
+                                    open_list[open_idx] = _AStarNode(
+                                        polygon_id: neighbor_id,
+                                        g_cost: new_g,
+                                        f_cost: new_f,
+                                        parent_id: current.polygon_id
+                                    )
+                            else:
+                                open_list.push(_AStarNode(
+                                    polygon_id: neighbor_id,
+                                    g_cost: new_g,
+                                    f_cost: new_f,
+                                    parent_id: current.polygon_id
+                                ))
+                    ni = ni + 1
+
+        if !found:
+            return []
+
+        # Reconstruct path from result_nodes
+        var path: [NavPoint] = []
+        var trace_id = end_poly_id
+        while trace_id != -1:
+            # Find this node in result_nodes
+            var ri = 0
+            var found_node = false
+            while ri < result_nodes.len():
+                if result_nodes[ri].polygon_id == trace_id:
+                    val t_opt = self.get_polygon(trace_id)
+                    if val Some(t_poly) = t_opt:
+                        path.push(t_poly.center)
+                    trace_id = result_nodes[ri].parent_id
+                    found_node = true
+                    ri = result_nodes.len()
+                else:
+                    ri = ri + 1
+            if !found_node:
+                trace_id = -1
+
+        # Reverse path (built from end to start)
+        var reversed: [NavPoint] = []
+        var pi = path.len() - 1
+        while pi >= 0:
+            reversed.push(path[pi])
+            pi = pi - 1
+        reversed
+
+    fn polygon_count() -> i32:
+        """Return number of polygons in the mesh."""
+        self.polygons.len().to_i32()

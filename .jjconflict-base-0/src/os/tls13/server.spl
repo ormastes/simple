@@ -1,0 +1,211 @@
+# ============================================================================
+# TLS 1.3 Server-side handshake skeleton — RFC 8446
+# ============================================================================
+#
+# Provides the server-side counterpart to the client state machine in tls13.spl.
+# This file is the public entry point. Implementation details live in:
+#
+#   server_types.spl    — data classes and enums
+#   server_builders.spl — pure byte builders (SH, EE, Cert, CV, Finished)
+#   server_handshake.spl — CH parsing, cipher/group selection, crypto pipeline,
+#                          tls13_accept, and test-helper entry points
+#
+# `tls13_accept` now drives the happy-path TLS 1.3 server handshake through the
+# encrypted client Finished record and returns application traffic keys. The
+# pure builders + selectors below are bytes-only and exercised by
+# test/unit/os/tls13/server_accept_spec.spl.
+#
+# Out of scope (Wave 9+):
+#   - Session tickets / 0-RTT / PSK
+#   - HRR FROM the server side (we currently only accept ClientHellos that
+#     already include a key_share for X25519 or P-256; a CH that needs HRR
+#     fast-fails with reason "hrr_not_implemented_server_side").
+#   - Multiple key_share entries in CH
+#   - CertificateRequest (mTLS server side)
+#
+# Reference: RFC 8446 §4.1.2 (ClientHello), §4.1.3 (ServerHello),
+#            §4.3.1 (EncryptedExtensions), §4.4.2 (Certificate),
+#            §4.4.3 (CertificateVerify), §4.4.4 (Finished).
+
+# Re-export all public symbols from sub-modules so existing importers of
+# `os.tls13.server` continue to work without change.
+export use os.tls13.server_types.*
+export use os.tls13.server_builders.*
+export use os.tls13.server_handshake.*
+
+use os.tls13.handshake13.{GROUP_X25519, GROUP_SECP256R1}
+use os.tls13.key_schedule.{tls13_finished_key}
+use os.crypto.random.{random_bytes}
+
+extern fn rt_tls13_recv_record(sock_fd: i64) -> [u8]
+extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
+
+# ============================================================================
+# Constants — TLS 1.3 cipher suites and named groups (RFC 8446 §B.4, §4.2.7)
+# ============================================================================
+
+val CIPHER_AES_128_GCM_SHA256: u16       = 0x1301
+val CIPHER_AES_256_GCM_SHA384: u16       = 0x1302
+val CIPHER_CHACHA20_POLY1305_SHA256: u16 = 0x1303
+
+# HandshakeType bytes (local copies — handshake13 keeps the canonical defs).
+val HS_SERVER_HELLO: u8         = 2
+val HS_ENCRYPTED_EXTENSIONS: u8 = 8
+val TLS_CONTENT_HANDSHAKE: u8   = 0x16
+val TLS_MAX_RECORD_PAYLOAD: u64 = 18432
+
+# ServerHello extension type bytes (RFC 8446 §4.2)
+val EXT_SUPPORTED_VERSIONS: u16 = 43
+val EXT_KEY_SHARE: u16          = 51
+
+# ============================================================================
+# Private byte helpers (used by _send_all_record and _validate_server_config)
+# ============================================================================
+
+fn _u8_at(data: [u8], offset: u64) -> u8:
+    if offset >= data.len():
+        return 0u8
+    data[offset]
+
+fn _slice(data: [u8], offset: u64, length: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < length and offset + i < data.len():
+        out.push(data[offset + i])
+        i = i + 1
+    out
+
+fn _validate_server_config(server_config: Tls13ServerConfig) -> text:
+    if server_config.cert_chain.len() == 0:
+        return "missing_certificate_chain"
+    if server_config.server_pkcs8.len() == 0:
+        return "missing_server_private_key"
+    if server_config.server_sig_scheme == 0u16:
+        return "missing_signature_scheme"
+    ""
+
+fn _send_all_record(socket_fd: i64, record: [u8]) -> bool:
+    if record.len() == 0u64:
+        return false
+    var sent: u64 = 0
+    var zero_writes: u64 = 0
+    while sent < record.len():
+        val remaining = _slice(record, sent, record.len() - sent)
+        val wrote_i = rt_net_send_bytes(socket_fd, remaining)
+        if wrote_i < 0:
+            return false
+        val wrote = wrote_i.to_u64()
+        if wrote == 0u64:
+            zero_writes = zero_writes + 1u64
+            if zero_writes > 1024u64:
+                return false
+        else:
+            zero_writes = 0u64
+            if wrote > remaining.len():
+                sent = record.len()
+            else:
+                sent = sent + wrote
+    true
+
+fn _send_server_flight(socket_fd: i64, material: Tls13ServerHandshakeMaterial) -> text:
+    if not _send_all_record(socket_fd, material.server_hello_record):
+        return "server_hello_send_failed"
+    if not _send_all_record(socket_fd, material.encrypted_extensions_record):
+        return "encrypted_extensions_send_failed"
+    if not _send_all_record(socket_fd, material.certificate_record):
+        return "certificate_send_failed"
+    if not _send_all_record(socket_fd, material.certificate_verify_record):
+        return "certificate_verify_send_failed"
+    if not _send_all_record(socket_fd, material.server_finished_record):
+        return "server_finished_send_failed"
+    ""
+
+# ============================================================================
+# Public: tls13_accept — top-level entry stub
+# ============================================================================
+
+fn tls13_accept(socket_fd: i64, server_config: Tls13ServerConfig) -> Tls13AcceptResult:
+    """Top-level server-side handshake entry point.
+
+    Validates server prerequisites before entering the socket record path.
+    The byte-level builders + selectors below are exercised standalone. The
+    server now writes SH+EE+Cert+CV+Finished, reads client Finished, verifies
+    it, and returns application record keys.
+
+    Documented behaviour for the full flow:
+      1. Read ClientHello record from `socket_fd`.
+      2. process_client_hello -> ClientHello13.
+      3. If !ch.has_supported_versions_tls13 → Failed("not_tls13").
+      4. cipher = select_cipher_suite(ch.cipher_suites, [0x1301,0x1302,0x1303])
+         -> Failed("no_shared_cipher_suite") if 0.
+      5. group  = select_named_group(ch.key_share_groups, [X25519, P256])
+         -> Failed("hrr_not_implemented_server_side") if 0.
+      6. Generate server keyshare for `group` and ECDH-derive shared secret.
+      7. build_server_hello + send.
+      8. Derive handshake secrets, switch record layer to encrypted.
+      9. send build_encrypted_extensions_server_side, build_certificate,
+         build_certificate_verify, build_server_finished.
+     10. Read client Finished, verify, derive app secrets, return Accepted.
+    """
+    if socket_fd < 0:
+        return Tls13AcceptResult.Failed("invalid_socket_fd")
+    val config_error = _validate_server_config(server_config)
+    if config_error != "":
+        return Tls13AcceptResult.Failed(config_error)
+
+    val ch_record = rt_tls13_recv_record(socket_fd)
+    val ch_result = validate_client_hello_record_sh(ch_record)
+    if ch_result.is_err():
+        return Tls13AcceptResult.Failed(ch_result.err().unwrap())
+    val prep = prepare_server_handshake_from_client_hello_record(
+        ch_result.unwrap(),
+        server_config,
+        random_bytes(32u64),
+        random_bytes(32u64)
+    )
+    match prep:
+        case Tls13ServerHandshakeResult.Failed(reason):
+            Tls13AcceptResult.Failed(reason)
+        case Tls13ServerHandshakeResult.Prepared(material):
+            val send_error = _send_server_flight(socket_fd, material)
+            if send_error != "":
+                return Tls13AcceptResult.Failed(send_error)
+            val client_finished_record = rt_tls13_recv_record(socket_fd)
+            verify_client_finished_record_sh(material, client_finished_record)
+
+fn tls13_accept_client_hello_record_for_test(raw_record: [u8], server_config: Tls13ServerConfig) -> Tls13AcceptResult:
+    """Validate the first plaintext ClientHello record for the server path.
+
+    This is the record-I/O core used by tls13_accept after reading from the
+    socket. It intentionally stops before key generation and encrypted flight
+    writing, which remain the next server-side TLS production step.
+    """
+    val config_error = _validate_server_config(server_config)
+    if config_error != "":
+        return Tls13AcceptResult.Failed(config_error)
+
+    val ch_result = validate_client_hello_record_sh(raw_record)
+    if ch_result.is_err():
+        return Tls13AcceptResult.Failed(ch_result.err().unwrap())
+    val ch = ch_result.unwrap().ch
+
+    val cipher = select_cipher_suite(ch.cipher_suites, [
+        CIPHER_AES_128_GCM_SHA256,
+        CIPHER_AES_256_GCM_SHA384,
+        CIPHER_CHACHA20_POLY1305_SHA256
+    ])
+    if cipher == 0u16:
+        return Tls13AcceptResult.Failed("no_shared_cipher_suite")
+
+    val group = select_named_group(ch.key_share_groups, [GROUP_X25519, GROUP_SECP256R1])
+    if group == 0u16:
+        return Tls13AcceptResult.Failed("hrr_not_implemented_server_side")
+
+    Tls13AcceptResult.Failed("server_crypto_pending")
+
+# ============================================================================
+# Helper: server_finished_key — thin wrapper re-exported for tests
+# ============================================================================
+
+fn server_finished_key(server_hs_secret: [u8]) -> [u8]:
+    tls13_finished_key(server_hs_secret)

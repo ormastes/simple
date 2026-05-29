@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CC_BIN="${CC:-cc}"
+OUT="${TMPDIR:-/tmp}/cfat32_4k_baseline"
+VFAT_MNT="${VFAT_MNT:-/tmp/simple_vfat_bench_mnt}"
+RUNS="${FAT32_4K_RUNS:-3}"
+BENCH_SRC="$ROOT/test/perf/bench/fat32_4k_compare.spl"
+BENCH_RUN="$BENCH_SRC"
+CUSTOM_BENCH_RUN="$ROOT/build/os/perf/fat32_4k_compare_vfat_mnt.spl"
+VFAT_ARTIFACT="$ROOT/build/os/perf/VFAT4K.TXT"
+
+if [ "${REQUIRE_VFAT_BASELINE:-0}" = "1" ]; then
+    mkdir -p "$ROOT/build/os/perf"
+    rm -f "$CUSTOM_BENCH_RUN"
+    rm -f "$VFAT_ARTIFACT"
+fi
+
+case "$RUNS" in
+    ''|*[!0-9]*)
+        echo "FAILED: FAT32_4K_RUNS must be a positive integer" >&2
+        exit 1
+        ;;
+esac
+if [ "$RUNS" -lt 1 ]; then
+    echo "FAILED: FAT32_4K_RUNS must be a positive integer" >&2
+    exit 1
+fi
+
+case "$VFAT_MNT" in
+    /*)
+        ;;
+    *)
+        echo "FAILED: VFAT_MNT must be an absolute path without control characters" >&2
+        exit 1
+        ;;
+esac
+case "$VFAT_MNT" in
+    *[![:print:]]*)
+        echo "FAILED: VFAT_MNT must be an absolute path without control characters" >&2
+        exit 1
+        ;;
+esac
+if [ "$VFAT_MNT" = "/" ]; then
+    echo "FAILED: VFAT_MNT must not be the filesystem root" >&2
+    exit 1
+fi
+
+if [ "$VFAT_MNT" != "/tmp/simple_vfat_bench_mnt" ]; then
+    mkdir -p "$ROOT/build/os/perf"
+    BENCH_RUN="$CUSTOM_BENCH_RUN"
+    escaped_vfat_mnt="$(printf '%s' "$VFAT_MNT" | sed 's/[\/&]/\\&/g')"
+    sed "s#/tmp/simple_vfat_bench_mnt#$escaped_vfat_mnt#g" "$BENCH_SRC" > "$BENCH_RUN"
+fi
+
+vfat_seeded() {
+    local read_file="$VFAT_MNT/simple_fat32_4k_vfat_read.bin"
+    local write_file="$VFAT_MNT/simple_fat32_4k_vfat_write.bin"
+    local fstype
+    fstype="$(findmnt -T "$VFAT_MNT" -n -o FSTYPE 2>/dev/null | head -1 || true)"
+    { [ "$fstype" = "vfat" ] || [ "$fstype" = "msdos" ]; } &&
+        [ -r "$read_file" ] &&
+        [ -w "$write_file" ] &&
+        [ "$(wc -c < "$read_file" 2>/dev/null || echo 0)" -ge 32768 ] &&
+        [ "$(wc -c < "$write_file" 2>/dev/null || echo 0)" -ge 32768 ]
+}
+
+vfat_evidence() {
+    local status="$1"
+    local read_file="$VFAT_MNT/simple_fat32_4k_vfat_read.bin"
+    local write_file="$VFAT_MNT/simple_fat32_4k_vfat_write.bin"
+    local source
+    local fstype
+    local options
+    local read_bytes
+    local write_bytes
+    source="$(findmnt -T "$VFAT_MNT" -n -o SOURCE 2>/dev/null | head -1 || true)"
+    fstype="$(findmnt -T "$VFAT_MNT" -n -o FSTYPE 2>/dev/null | head -1 || true)"
+    options="$(findmnt -T "$VFAT_MNT" -n -o OPTIONS 2>/dev/null | head -1 || true)"
+    read_bytes="$(wc -c < "$read_file" 2>/dev/null || echo 0)"
+    write_bytes="$(wc -c < "$write_file" 2>/dev/null || echo 0)"
+    {
+        echo "vfat_baseline_evidence: $status"
+        echo "vfat_mount: $VFAT_MNT"
+        echo "vfat_source: ${source:-unknown}"
+        echo "vfat_fstype: ${fstype:-unknown}"
+        echo "vfat_options: ${options:-unknown}"
+        echo "vfat_read_file: $read_file"
+        echo "vfat_read_readable: $([ -r "$read_file" ] && echo true || echo false)"
+        echo "vfat_read_bytes: $read_bytes"
+        echo "vfat_write_file: $write_file"
+        echo "vfat_write_writable: $([ -w "$write_file" ] && echo true || echo false)"
+        echo "vfat_write_bytes: $write_bytes"
+    }
+}
+
+if [ "${REQUIRE_VFAT_BASELINE:-0}" = "1" ]; then
+    if ! vfat_seeded; then
+        vfat_evidence "not-ready" >&2
+        echo "FAILED: VFAT baseline is required but $VFAT_MNT is missing, unseeded, unwritable, or not vfat/msdos; run scripts/perf/prepare-fat32-4k-vfat.shs first" >&2
+        exit 1
+    fi
+    vfat_evidence "ready" | tee "$VFAT_ARTIFACT"
+fi
+
+"$CC_BIN" -O2 "$ROOT/scripts/perf/cfat32_4k_baseline.c" -o "$OUT"
+
+extract_p50() {
+    local name="$1"
+    local text="$2"
+    printf '%s\n' "$text" | awk -v name="$name" '
+        index($0, name ":") == 1 && index($0, "p50=") > 0 {
+            sub(/^.*p50=/, "", $0)
+            sub(/us.*$/, "", $0)
+            print $0
+            exit
+        }
+    '
+}
+
+median_values() {
+    printf '%s\n' "$1" | awk 'NF > 0 { print $1 }' | sort -n | awk '
+        { values[++n] = $1 }
+        END {
+            if (n == 0) {
+                exit 1
+            }
+            print values[int((n + 1) / 2)]
+        }
+    '
+}
+
+simple_read_values=""
+simple_write_values=""
+vfat_read_values=""
+vfat_write_values=""
+c_read_values=""
+c_write_values=""
+vfat_missing=0
+run=1
+while [ "$run" -le "$RUNS" ]; do
+    echo "=== Simple FAT32 4K benchmark (run $run/$RUNS) ==="
+    SIMPLE_OUT="$(SIMPLE_LIB="$ROOT/src" "$ROOT/src/compiler_rust/target/debug/simple" "$BENCH_RUN")"
+    printf '%s\n' "$SIMPLE_OUT"
+
+    echo
+    echo "=== C FAT32 direct-image baseline (run $run/$RUNS) ==="
+    C_OUT="$("$OUT")"
+    printf '%s\n' "$C_OUT"
+    BASELINE_LINE="$(printf '%s\n' "$C_OUT" | awk '/^cfat4k_baseline / { print; exit }')"
+    if [ -n "$BASELINE_LINE" ]; then
+        mkdir -p "$ROOT/build/os/perf"
+        printf '%s\n' "$BASELINE_LINE" > "$ROOT/build/os/perf/CFAT4K.TXT"
+        echo "baseline artifact: build/os/perf/CFAT4K.TXT"
+    fi
+
+    sr="$(extract_p50 simple_fat32_read4k "$SIMPLE_OUT")"
+    sw="$(extract_p50 simple_fat32_write4k "$SIMPLE_OUT")"
+    vr="$(extract_p50 c_fat_vfat_read4k "$SIMPLE_OUT")"
+    vw="$(extract_p50 c_fat_vfat_write4k "$SIMPLE_OUT")"
+    cr="$(extract_p50 c_fat_direct_read4k "$C_OUT")"
+    cw="$(extract_p50 c_fat_direct_write4k "$C_OUT")"
+    if [ -z "$sr" ] || [ -z "$sw" ] || [ -z "$cr" ] || [ -z "$cw" ]; then
+        echo "FAILED: could not parse benchmark p50 values" >&2
+        exit 1
+    fi
+    simple_read_values="${simple_read_values}${sr}
+"
+    simple_write_values="${simple_write_values}${sw}
+"
+    c_read_values="${c_read_values}${cr}
+"
+    c_write_values="${c_write_values}${cw}
+"
+    if [ -z "$vr" ] || [ -z "$vw" ]; then
+        vfat_missing=1
+    else
+        vfat_read_values="${vfat_read_values}${vr}
+"
+        vfat_write_values="${vfat_write_values}${vw}
+"
+    fi
+    run=$((run + 1))
+    echo
+done
+
+simple_read="$(median_values "$simple_read_values")"
+simple_write="$(median_values "$simple_write_values")"
+c_read="$(median_values "$c_read_values")"
+c_write="$(median_values "$c_write_values")"
+vfat_read=""
+vfat_write=""
+if [ "$vfat_missing" = "0" ]; then
+    vfat_read="$(median_values "$vfat_read_values")"
+    vfat_write="$(median_values "$vfat_write_values")"
+fi
+
+if [ -z "$simple_read" ] || [ -z "$simple_write" ] || [ -z "$c_read" ] || [ -z "$c_write" ]; then
+    echo "FAILED: could not parse benchmark p50 values" >&2
+    exit 1
+fi
+
+echo "=== Median p50 across $RUNS run(s) ==="
+echo "simple_fat32_read4k_median_p50=${simple_read}us"
+echo "simple_fat32_write4k_median_p50=${simple_write}us"
+echo "c_fat_direct_read4k_median_p50=${c_read}us"
+echo "c_fat_direct_write4k_median_p50=${c_write}us"
+if [ -n "$vfat_read" ] && [ -n "$vfat_write" ]; then
+    echo "c_fat_vfat_read4k_median_p50=${vfat_read}us"
+    echo "c_fat_vfat_write4k_median_p50=${vfat_write}us"
+fi
+
+if [ "${REQUIRE_VFAT_BASELINE:-0}" = "1" ]; then
+    if [ -z "$vfat_read" ] || [ -z "$vfat_write" ]; then
+        echo "FAILED: VFAT baseline is required but missing, unseeded, unwritable, or not vfat/msdos; run scripts/perf/prepare-fat32-4k-vfat.shs first" >&2
+        exit 1
+    fi
+    if [ "$simple_read" -lt "$vfat_read" ] && [ "$simple_write" -lt "$vfat_write" ]; then
+        echo
+        echo "PASS: simple_fat32 is faster than Linux VFAT for 4K random read/write p50"
+    else
+        echo
+        echo "FAIL: simple_fat32 is not faster than Linux VFAT for both 4K random read/write p50" >&2
+        echo "read p50: simple=${simple_read}us vfat=${vfat_read}us" >&2
+        echo "write p50: simple=${simple_write}us vfat=${vfat_write}us" >&2
+        exit 1
+    fi
+fi
+
+if [ "$simple_read" -lt "$c_read" ] && [ "$simple_write" -lt "$c_write" ]; then
+    echo
+    echo "PASS: simple_fat32 is faster than direct C FAT32 for 4K random read/write p50"
+else
+    echo
+    echo "FAIL: simple_fat32 is not faster than direct C FAT32 for both 4K random read/write p50" >&2
+    echo "read p50: simple=${simple_read}us c_fat=${c_read}us" >&2
+    echo "write p50: simple=${simple_write}us c_fat=${c_write}us" >&2
+    exit 1
+fi

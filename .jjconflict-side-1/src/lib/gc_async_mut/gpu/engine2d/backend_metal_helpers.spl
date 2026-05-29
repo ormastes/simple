@@ -1,0 +1,326 @@
+# 2D Engine — Metal Backend Helpers
+#
+# Extension impl for MetalBackend: compute dispatch methods, download/upload,
+# and text fallback. Also defines GridDim/BlockDim structs and free functions
+# for grid helpers, parameter packing, pixel conversion, and type casts.
+#
+# Depends on: backend_metal.spl (MetalBackend class)
+
+use std.gpu.engine2d.backend_metal.{MetalBackend}
+use std.gpu.engine2d.glyph.{render_text_to_buffer}
+use std.nogc_sync_mut.io.metal_sffi.{
+    metal_sffi_create_command_buffer, metal_sffi_commit_command_buffer,
+    metal_sffi_wait_completed, metal_sffi_dispatch_compute,
+    metal_sffi_create_compute_encoder, metal_sffi_end_compute_encoder,
+    metal_sffi_set_buffer, metal_sffi_set_bytes,
+    metal_sffi_buffer_download, metal_sffi_buffer_upload
+}
+
+# ============================================================================
+# Metal SFFI (re-declared for use in this module)
+# ============================================================================
+
+# ============================================================================
+# Grid / Block Dimension Structs
+# ============================================================================
+
+struct GridDim:
+    x: i64
+    y: i64
+
+struct BlockDim:
+    x: i64
+    y: i64
+
+# ============================================================================
+# Compute Dispatch Methods
+# ============================================================================
+
+impl MetalBackend:
+
+    me _dispatch_1d(pipeline: i64, grid_x: i64, block_x: i64, params: [u8]):
+        """Create command buffer, encode a 1D compute dispatch, commit and wait."""
+        val cmd = metal_sffi_create_command_buffer(self.command_queue)
+        if cmd == 0:
+            return
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            return
+        # Bind framebuffer at index 0
+        metal_sffi_set_buffer(encoder, self.d_framebuffer, 0, 0)
+        # Bind push constants (params) at index 1
+        metal_sffi_set_bytes(encoder, params, _i64(params.len()), 1)
+        # Dispatch
+        metal_sffi_dispatch_compute(encoder, pipeline, grid_x, 1, 1, block_x, 1, 1)
+        metal_sffi_end_compute_encoder(encoder)
+        metal_sffi_commit_command_buffer(cmd)
+        metal_sffi_wait_completed(cmd)
+
+    me _dispatch_2d(pipeline: i64, grid_dim: GridDim, block_dim: BlockDim, params: [u8]):
+        """Create command buffer, encode a 2D compute dispatch, commit and wait."""
+        val cmd = metal_sffi_create_command_buffer(self.command_queue)
+        if cmd == 0:
+            return
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            return
+        # Bind framebuffer at index 0
+        metal_sffi_set_buffer(encoder, self.d_framebuffer, 0, 0)
+        # Bind push constants (params) at index 1
+        metal_sffi_set_bytes(encoder, params, _i64(params.len()), 1)
+        # Dispatch with 2D grid
+        metal_sffi_dispatch_compute(encoder, pipeline, grid_dim.x * block_dim.x, grid_dim.y * block_dim.y, 1, block_dim.x, block_dim.y, 1)
+        metal_sffi_end_compute_encoder(encoder)
+        metal_sffi_commit_command_buffer(cmd)
+        metal_sffi_wait_completed(cmd)
+
+    me _dispatch_blit(pipeline: i64, grid_dim: GridDim, block_dim: BlockDim, params: [u8], src_buffer: i64):
+        """Dispatch blit kernel with source image buffer bound at index 2."""
+        val cmd = metal_sffi_create_command_buffer(self.command_queue)
+        if cmd == 0:
+            return
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            return
+        # Bind framebuffer at index 0
+        metal_sffi_set_buffer(encoder, self.d_framebuffer, 0, 0)
+        # Bind push constants (params) at index 1
+        metal_sffi_set_bytes(encoder, params, _i64(params.len()), 1)
+        # Bind source image buffer at index 2
+        metal_sffi_set_buffer(encoder, src_buffer, 0, 2)
+        # Dispatch
+        metal_sffi_dispatch_compute(encoder, pipeline, grid_dim.x * block_dim.x, grid_dim.y * block_dim.y, 1, block_dim.x, block_dim.y, 1)
+        metal_sffi_end_compute_encoder(encoder)
+        metal_sffi_commit_command_buffer(cmd)
+        metal_sffi_wait_completed(cmd)
+
+    me _download_framebuffer(byte_size: i64):
+        """Download device framebuffer to host buffer via Metal buffer download."""
+        val host_bytes: [u8] = [0u8; byte_size]
+        metal_sffi_buffer_download(host_bytes, self.d_framebuffer, byte_size)
+        # Convert byte array back to u32 pixel array
+        val pixel_count = self.w * self.h
+        var i = 0
+        while i < pixel_count:
+            val base = i * 4
+            val b0 = _u8_to_i32(host_bytes[base])
+            val b1 = _u8_to_i32(host_bytes[base + 1])
+            val b2 = _u8_to_i32(host_bytes[base + 2])
+            val b3 = _u8_to_i32(host_bytes[base + 3])
+            # Little-endian u32 reconstruction
+            var pixel: u32 = 0
+            pixel = pixel | (_to_u32(b0))
+            pixel = pixel | (_to_u32(b1) << 8)
+            pixel = pixel | (_to_u32(b2) << 16)
+            pixel = pixel | (_to_u32(b3) << 24)
+            self.host_buf[i] = pixel
+            i = i + 1
+
+    me _upload_host_to_device(byte_size: i64):
+        """Upload host buffer to device framebuffer."""
+        val pixel_count = self.w * self.h
+        val host_bytes = _pixels_to_bytes(self.host_buf, _i64(pixel_count))
+        metal_sffi_buffer_upload(self.d_framebuffer, host_bytes, byte_size)
+
+    me _metal_draw_text_fallback(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        """Render text on CPU and upload affected region to GPU.
+
+        For production use, a glyph atlas would be pre-uploaded to GPU memory
+        and sampled by a text-rendering kernel. This fallback is acceptable
+        for low-frequency text draws (UI labels, debug overlays).
+        """
+        # Ensure host buffer is current
+        if self.dirty:
+            val fb_size = _i64(self.w) * _i64(self.h) * 4
+            self._download_framebuffer(fb_size)
+
+        # Render glyphs into host buffer using shared glyph module
+        render_text_to_buffer(self.host_buf, self.w, self.h, x, y, text_val, color, font_size)
+
+        # Re-upload entire framebuffer to GPU
+        val fb_size = _i64(self.w) * _i64(self.h) * 4
+        self._upload_host_to_device(fb_size)
+
+# ============================================================================
+# Type Conversion Helpers
+# ============================================================================
+
+fn _i64(v: i32) -> i64:
+    v as i64
+
+fn _i64_from_u32(v: u32) -> i64:
+    v as i64
+
+fn _to_u32(v: i32) -> u32:
+    v as u32
+
+fn _to_i32(v: u32) -> i32:
+    v as i32
+
+fn _i32_to_u8(v: i32) -> u8:
+    v as u8
+
+fn _u8_to_i32(v: u8) -> i32:
+    v as i32
+
+# ============================================================================
+# Grid / Block Dimension Helpers
+# ============================================================================
+
+fn _grid_for_rect(w: i32, h: i32) -> GridDim:
+    """Compute grid dimensions for a rectangular region with 16x16 threadgroups."""
+    val bx: i64 = 16
+    val by: i64 = 16
+    GridDim(
+        x: (_i64(w) + bx - 1) / bx,
+        y: (_i64(h) + by - 1) / by
+    )
+
+fn _block_for_rect() -> BlockDim:
+    """Standard 16x16 threadgroup for 2D operations."""
+    BlockDim(x: 16, y: 16)
+
+# ============================================================================
+# Parameter Packing
+#
+# Metal uses setBytes for small push-constant-style data. We pack
+# parameters into a [u8] byte array matching the MSL struct layout.
+# All fields are packed as little-endian 32-bit integers.
+# ============================================================================
+
+fn _pack_i32_le(buf: [u8], offset: i32, v: i32) -> i32:
+    """Pack a 32-bit integer as 4 little-endian bytes into buf at offset."""
+    buf[offset] = _i32_to_u8(v & 0xFF)
+    buf[offset + 1] = _i32_to_u8((v >> 8) & 0xFF)
+    buf[offset + 2] = _i32_to_u8((v >> 16) & 0xFF)
+    buf[offset + 3] = _i32_to_u8((v >> 24) & 0xFF)
+    offset + 4
+
+fn _pack_u32_le(buf: [u8], offset: i32, v: u32) -> i32:
+    """Pack a u32 as 4 little-endian bytes into buf at offset."""
+    _pack_i32_le(buf, offset, v as i32)
+
+fn _pack_clear_params(color: u32, fb_w: i32, fb_h: i32) -> [u8]:
+    """Pack params for clear kernel: (color, width, height)."""
+    var buf: [u8] = [0u8; 12]
+    var off = 0
+    off = _pack_u32_le(buf, off, color)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    buf
+
+fn _pack_rect_params(x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i32) -> [u8]:
+    """Pack params for rect kernels: (x, y, w, h, color, fb_w, fb_h)."""
+    var buf: [u8] = [0u8; 28]
+    var off = 0
+    off = _pack_i32_le(buf, off, x)
+    off = _pack_i32_le(buf, off, y)
+    off = _pack_i32_le(buf, off, w)
+    off = _pack_i32_le(buf, off, h)
+    off = _pack_u32_le(buf, off, color)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    buf
+
+fn _pack_line_params(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32, fb_w: i32, fb_h: i32) -> [u8]:
+    """Pack params for line kernel: (x1, y1, x2, y2, color, thickness, fb_w, fb_h)."""
+    var buf: [u8] = [0u8; 32]
+    var off = 0
+    off = _pack_i32_le(buf, off, x1)
+    off = _pack_i32_le(buf, off, y1)
+    off = _pack_i32_le(buf, off, x2)
+    off = _pack_i32_le(buf, off, y2)
+    off = _pack_u32_le(buf, off, color)
+    off = _pack_i32_le(buf, off, thickness)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    buf
+
+fn _pack_circle_params(cx: i32, cy: i32, r: i32, color: u32, fb_w: i32, fb_h: i32, filled: i32) -> [u8]:
+    """Pack params for circle kernels: (cx, cy, r, color, fb_w, fb_h, filled)."""
+    var buf: [u8] = [0u8; 28]
+    var off = 0
+    off = _pack_i32_le(buf, off, cx)
+    off = _pack_i32_le(buf, off, cy)
+    off = _pack_i32_le(buf, off, r)
+    off = _pack_u32_le(buf, off, color)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    off = _pack_i32_le(buf, off, filled)
+    buf
+
+fn _pack_rounded_rect_params(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, fb_w: i32, fb_h: i32) -> [u8]:
+    """Pack params for rounded rect kernel: (x, y, w, h, radius, color, fb_w, fb_h)."""
+    var buf: [u8] = [0u8; 32]
+    var off = 0
+    off = _pack_i32_le(buf, off, x)
+    off = _pack_i32_le(buf, off, y)
+    off = _pack_i32_le(buf, off, w)
+    off = _pack_i32_le(buf, off, h)
+    off = _pack_i32_le(buf, off, radius)
+    off = _pack_u32_le(buf, off, color)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    buf
+
+fn _pack_triangle_params(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, fb_w: i32, fb_h: i32, min_x: i32, min_y: i32) -> [u8]:
+    """Pack params for triangle kernel: (x1..x3, y1..y3, color, fb_w, fb_h, min_x, min_y)."""
+    var buf: [u8] = [0u8; 44]
+    var off = 0
+    off = _pack_i32_le(buf, off, x1)
+    off = _pack_i32_le(buf, off, y1)
+    off = _pack_i32_le(buf, off, x2)
+    off = _pack_i32_le(buf, off, y2)
+    off = _pack_i32_le(buf, off, x3)
+    off = _pack_i32_le(buf, off, y3)
+    off = _pack_u32_le(buf, off, color)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    off = _pack_i32_le(buf, off, min_x)
+    off = _pack_i32_le(buf, off, min_y)
+    buf
+
+fn _pack_gradient_params(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32, fb_w: i32, fb_h: i32) -> [u8]:
+    """Pack params for gradient kernel: (x, y, w, h, top_color, bottom_color, fb_w, fb_h)."""
+    var buf: [u8] = [0u8; 32]
+    var off = 0
+    off = _pack_i32_le(buf, off, x)
+    off = _pack_i32_le(buf, off, y)
+    off = _pack_i32_le(buf, off, w)
+    off = _pack_i32_le(buf, off, h)
+    off = _pack_u32_le(buf, off, top_color)
+    off = _pack_u32_le(buf, off, bottom_color)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    buf
+
+fn _pack_blit_params(x: i32, y: i32, w: i32, h: i32, fb_w: i32, fb_h: i32) -> [u8]:
+    """Pack params for blit kernel: (x, y, w, h, fb_w, fb_h)."""
+    var buf: [u8] = [0u8; 24]
+    var off = 0
+    off = _pack_i32_le(buf, off, x)
+    off = _pack_i32_le(buf, off, y)
+    off = _pack_i32_le(buf, off, w)
+    off = _pack_i32_le(buf, off, h)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    buf
+
+# ============================================================================
+# Byte / Pixel Conversion
+# ============================================================================
+
+fn _pixels_to_bytes(pixels: [u32], count: i64) -> [u8]:
+    """Convert a u32 pixel array to a [u8] byte array (little-endian)."""
+    val byte_count = count * 4
+    var buf: [u8] = [0u8; byte_count]
+    var i: i64 = 0
+    while i < count:
+        val px = pixels[i]
+        val base = i * 4
+        buf[base] = _i32_to_u8(_to_i32(px & 0xFF))
+        buf[base + 1] = _i32_to_u8(_to_i32((px >> 8) & 0xFF))
+        buf[base + 2] = _i32_to_u8(_to_i32((px >> 16) & 0xFF))
+        buf[base + 3] = _i32_to_u8(_to_i32((px >> 24) & 0xFF))
+        i = i + 1
+    buf

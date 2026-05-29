@@ -1,0 +1,347 @@
+# VHDL RV32I instruction decode template renderer.
+#
+# Generates synthesizable VHDL constants and combinational logic for RV32I
+# instruction decoding. Produces:
+# - Opcode constants (R/I/S/B/U/J types)
+# - Funct3/funct7 constants for ALU and branch operations
+# - Instruction field extraction signals (bit slices)
+# - ALU control decode logic
+#
+# All generated VHDL is deterministic, synthesizable, and GHDL-compatible.
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use .vhdl_builder.{VhdlBuilder}
+
+# ============================================================================
+# Decode Template Structures
+# ============================================================================
+
+struct VhdlRv32iDecodeArtifact:
+    """Rendered RV32I decode VHDL artifact."""
+    package_vhdl: text
+    decode_entity_vhdl: text
+
+struct VhdlRv32iDecodeDiagnostic:
+    """Diagnostic for decode template errors."""
+    code: text
+    message: text
+
+# ============================================================================
+# RV32I Opcode Constants Package
+# ============================================================================
+
+fn render_rv32i_opcode_package() -> text:
+    """Render a VHDL package with RV32I opcode and function code constants.
+
+    Covers all base RV32I instruction types:
+    - R-type: register-register ALU (ADD, SUB, SLL, SLT, etc.)
+    - I-type: immediate ALU, loads, JALR
+    - S-type: stores
+    - B-type: branches
+    - U-type: LUI, AUIPC
+    - J-type: JAL
+    - SYSTEM: ECALL, EBREAK
+    """
+    val builder = VhdlBuilder.create("rv32i_pkg")
+    builder.emit_library_header()
+
+    builder.emit_package_begin("rv32i")
+
+    # Instruction width
+    builder.emit_comment("Instruction word width")
+    builder.emit_constant_decl("XLEN", "integer", "32")
+    builder.emit_raw("")
+
+    # Opcode constants (bits 6 downto 0)
+    builder.emit_comment("RV32I base opcodes (bits 6 downto 0)")
+    builder.emit_constant_decl("OP_LUI", "std_logic_vector(6 downto 0)", "\"0110111\"")
+    builder.emit_constant_decl("OP_AUIPC", "std_logic_vector(6 downto 0)", "\"0010111\"")
+    builder.emit_constant_decl("OP_JAL", "std_logic_vector(6 downto 0)", "\"1101111\"")
+    builder.emit_constant_decl("OP_JALR", "std_logic_vector(6 downto 0)", "\"1100111\"")
+    builder.emit_constant_decl("OP_BRANCH", "std_logic_vector(6 downto 0)", "\"1100011\"")
+    builder.emit_constant_decl("OP_LOAD", "std_logic_vector(6 downto 0)", "\"0000011\"")
+    builder.emit_constant_decl("OP_STORE", "std_logic_vector(6 downto 0)", "\"0100011\"")
+    builder.emit_constant_decl("OP_IMM", "std_logic_vector(6 downto 0)", "\"0010011\"")
+    builder.emit_constant_decl("OP_REG", "std_logic_vector(6 downto 0)", "\"0110011\"")
+    builder.emit_constant_decl("OP_FENCE", "std_logic_vector(6 downto 0)", "\"0001111\"")
+    builder.emit_constant_decl("OP_SYSTEM", "std_logic_vector(6 downto 0)", "\"1110011\"")
+    builder.emit_raw("")
+
+    # Funct3 for ALU register/immediate operations
+    builder.emit_comment("Funct3 codes for ALU operations")
+    builder.emit_constant_decl("F3_ADD_SUB", "std_logic_vector(2 downto 0)", "\"000\"")
+    builder.emit_constant_decl("F3_SLL", "std_logic_vector(2 downto 0)", "\"001\"")
+    builder.emit_constant_decl("F3_SLT", "std_logic_vector(2 downto 0)", "\"010\"")
+    builder.emit_constant_decl("F3_SLTU", "std_logic_vector(2 downto 0)", "\"011\"")
+    builder.emit_constant_decl("F3_XOR", "std_logic_vector(2 downto 0)", "\"100\"")
+    builder.emit_constant_decl("F3_SRL_SRA", "std_logic_vector(2 downto 0)", "\"101\"")
+    builder.emit_constant_decl("F3_OR", "std_logic_vector(2 downto 0)", "\"110\"")
+    builder.emit_constant_decl("F3_AND", "std_logic_vector(2 downto 0)", "\"111\"")
+    builder.emit_raw("")
+
+    # Funct3 for branch operations
+    builder.emit_comment("Funct3 codes for branch operations")
+    builder.emit_constant_decl("F3_BEQ", "std_logic_vector(2 downto 0)", "\"000\"")
+    builder.emit_constant_decl("F3_BNE", "std_logic_vector(2 downto 0)", "\"001\"")
+    builder.emit_constant_decl("F3_BLT", "std_logic_vector(2 downto 0)", "\"100\"")
+    builder.emit_constant_decl("F3_BGE", "std_logic_vector(2 downto 0)", "\"101\"")
+    builder.emit_constant_decl("F3_BLTU", "std_logic_vector(2 downto 0)", "\"110\"")
+    builder.emit_constant_decl("F3_BGEU", "std_logic_vector(2 downto 0)", "\"111\"")
+    builder.emit_raw("")
+
+    # Funct3 for load/store width
+    builder.emit_comment("Funct3 codes for load/store width")
+    builder.emit_constant_decl("F3_BYTE", "std_logic_vector(2 downto 0)", "\"000\"")
+    builder.emit_constant_decl("F3_HALF", "std_logic_vector(2 downto 0)", "\"001\"")
+    builder.emit_constant_decl("F3_WORD", "std_logic_vector(2 downto 0)", "\"010\"")
+    builder.emit_constant_decl("F3_BYTE_U", "std_logic_vector(2 downto 0)", "\"100\"")
+    builder.emit_constant_decl("F3_HALF_U", "std_logic_vector(2 downto 0)", "\"101\"")
+    builder.emit_raw("")
+
+    # Funct7 for ALU sub-operations
+    builder.emit_comment("Funct7 codes for ALU sub-operations")
+    builder.emit_constant_decl("F7_ZERO", "std_logic_vector(6 downto 0)", "\"0000000\"")
+    builder.emit_constant_decl("F7_SUB_SRA", "std_logic_vector(6 downto 0)", "\"0100000\"")
+    builder.emit_raw("")
+
+    # ALU control encoding (internal, 4-bit)
+    builder.emit_comment("Internal ALU control encoding (4 bits)")
+    builder.emit_constant_decl("ALU_ADD", "std_logic_vector(3 downto 0)", "\"0000\"")
+    builder.emit_constant_decl("ALU_SUB", "std_logic_vector(3 downto 0)", "\"0001\"")
+    builder.emit_constant_decl("ALU_SLL", "std_logic_vector(3 downto 0)", "\"0010\"")
+    builder.emit_constant_decl("ALU_SLT", "std_logic_vector(3 downto 0)", "\"0011\"")
+    builder.emit_constant_decl("ALU_SLTU", "std_logic_vector(3 downto 0)", "\"0100\"")
+    builder.emit_constant_decl("ALU_XOR", "std_logic_vector(3 downto 0)", "\"0101\"")
+    builder.emit_constant_decl("ALU_SRL", "std_logic_vector(3 downto 0)", "\"0110\"")
+    builder.emit_constant_decl("ALU_SRA", "std_logic_vector(3 downto 0)", "\"0111\"")
+    builder.emit_constant_decl("ALU_OR", "std_logic_vector(3 downto 0)", "\"1000\"")
+    builder.emit_constant_decl("ALU_AND", "std_logic_vector(3 downto 0)", "\"1001\"")
+    builder.emit_constant_decl("ALU_PASS_B", "std_logic_vector(3 downto 0)", "\"1010\"")
+
+    builder.emit_package_end("rv32i")
+
+    builder.build()
+
+# ============================================================================
+# RV32I Instruction Field Extraction Entity
+# ============================================================================
+
+fn render_rv32i_field_extractor() -> text:
+    """Render a combinational entity that extracts RV32I instruction fields.
+
+    Inputs:
+    - instr : std_logic_vector(31 downto 0)  -- raw 32-bit instruction
+
+    Outputs:
+    - opcode  : std_logic_vector(6 downto 0)   -- bits 6:0
+    - rd      : unsigned(4 downto 0)           -- bits 11:7
+    - funct3  : std_logic_vector(2 downto 0)   -- bits 14:12
+    - rs1     : unsigned(4 downto 0)           -- bits 19:15
+    - rs2     : unsigned(4 downto 0)           -- bits 24:20
+    - funct7  : std_logic_vector(6 downto 0)   -- bits 31:25
+    - imm_i   : std_logic_vector(31 downto 0)  -- I-type immediate (sign-extended)
+    - imm_s   : std_logic_vector(31 downto 0)  -- S-type immediate (sign-extended)
+    - imm_b   : std_logic_vector(31 downto 0)  -- B-type immediate (sign-extended)
+    - imm_u   : std_logic_vector(31 downto 0)  -- U-type immediate (upper 20 bits)
+    - imm_j   : std_logic_vector(31 downto 0)  -- J-type immediate (sign-extended)
+    """
+    val builder = VhdlBuilder.create("rv32i_decoder")
+    builder.emit_library_header()
+    builder.emit_use_package("work", "rv32i_pkg")
+
+    # Entity
+    builder.emit_entity_begin("rv32i_decoder")
+    builder.emit_port_begin()
+    builder.emit_port("instr", "in", "std_logic_vector(31 downto 0)", false)
+    builder.emit_port("opcode", "out", "std_logic_vector(6 downto 0)", false)
+    builder.emit_port("rd", "out", "unsigned(4 downto 0)", false)
+    builder.emit_port("funct3", "out", "std_logic_vector(2 downto 0)", false)
+    builder.emit_port("rs1", "out", "unsigned(4 downto 0)", false)
+    builder.emit_port("rs2", "out", "unsigned(4 downto 0)", false)
+    builder.emit_port("funct7", "out", "std_logic_vector(6 downto 0)", false)
+    builder.emit_port("imm_i", "out", "std_logic_vector(31 downto 0)", false)
+    builder.emit_port("imm_s", "out", "std_logic_vector(31 downto 0)", false)
+    builder.emit_port("imm_b", "out", "std_logic_vector(31 downto 0)", false)
+    builder.emit_port("imm_u", "out", "std_logic_vector(31 downto 0)", false)
+    builder.emit_port("imm_j", "out", "std_logic_vector(31 downto 0)", true)
+    builder.emit_port_end()
+    builder.emit_entity_end("rv32i_decoder")
+
+    # Architecture
+    builder.emit_architecture_begin("rv32i_decoder", "rtl")
+    builder.emit_architecture_body_begin()
+
+    # Direct field extraction
+    builder.emit_comment("Direct field extraction (combinational)")
+    builder.emit_signal_assign("opcode", "instr(6 downto 0)")
+    builder.emit_signal_assign("rd", "unsigned(instr(11 downto 7))")
+    builder.emit_signal_assign("funct3", "instr(14 downto 12)")
+    builder.emit_signal_assign("rs1", "unsigned(instr(19 downto 15))")
+    builder.emit_signal_assign("rs2", "unsigned(instr(24 downto 20))")
+    builder.emit_signal_assign("funct7", "instr(31 downto 25)")
+    builder.emit_raw("")
+
+    # I-type immediate: sign-extend instr[31:20]
+    builder.emit_comment("I-type immediate: sign-extend bits 31:20")
+    builder.emit_signal_assign("imm_i", "(31 downto 12 => instr(31)) & instr(31 downto 20)")
+    builder.emit_raw("")
+
+    # S-type immediate: sign-extend {instr[31:25], instr[11:7]}
+    builder.emit_comment("S-type immediate: sign-extend {bits 31:25, bits 11:7}")
+    builder.emit_signal_assign("imm_s", "(31 downto 12 => instr(31)) & instr(31 downto 25) & instr(11 downto 7)")
+    builder.emit_raw("")
+
+    # B-type immediate: sign-extend {instr[31], instr[7], instr[30:25], instr[11:8], 1'b0}
+    builder.emit_comment("B-type immediate: sign-extend {bit 31, bit 7, bits 30:25, bits 11:8, 0}")
+    builder.emit_signal_assign("imm_b", "(31 downto 13 => instr(31)) & instr(31) & instr(7) & instr(30 downto 25) & instr(11 downto 8) & '0'")
+    builder.emit_raw("")
+
+    # U-type immediate: {instr[31:12], 12'b0}
+    builder.emit_comment("U-type immediate: bits 31:12 shifted left by 12")
+    builder.emit_signal_assign("imm_u", "instr(31 downto 12) & (11 downto 0 => '0')")
+    builder.emit_raw("")
+
+    # J-type immediate: sign-extend {instr[31], instr[19:12], instr[20], instr[30:21], 1'b0}
+    builder.emit_comment("J-type immediate: sign-extend {bit 31, bits 19:12, bit 20, bits 30:21, 0}")
+    builder.emit_signal_assign("imm_j", "(31 downto 21 => instr(31)) & instr(31) & instr(19 downto 12) & instr(20) & instr(30 downto 21) & '0'")
+
+    builder.emit_architecture_end("rtl")
+
+    builder.build()
+
+# ============================================================================
+# RV32I ALU Control Decoder Entity
+# ============================================================================
+
+fn render_rv32i_alu_control() -> text:
+    """Render a combinational ALU control decoder for RV32I.
+
+    Takes opcode, funct3, and funct7 and produces a 4-bit ALU control signal.
+    Supports R-type and I-type ALU operations.
+    """
+    val builder = VhdlBuilder.create("rv32i_alu_ctrl")
+    builder.emit_library_header()
+    builder.emit_use_package("work", "rv32i_pkg")
+
+    builder.emit_entity_begin("rv32i_alu_ctrl")
+    builder.emit_port_begin()
+    builder.emit_port("opcode", "in", "std_logic_vector(6 downto 0)", false)
+    builder.emit_port("funct3", "in", "std_logic_vector(2 downto 0)", false)
+    builder.emit_port("funct7", "in", "std_logic_vector(6 downto 0)", false)
+    builder.emit_port("alu_op", "out", "std_logic_vector(3 downto 0)", true)
+    builder.emit_port_end()
+    builder.emit_entity_end("rv32i_alu_ctrl")
+
+    builder.emit_architecture_begin("rv32i_alu_ctrl", "rtl")
+    builder.emit_architecture_body_begin()
+
+    builder.emit_process_begin(Some("alu_decode"), ["opcode", "funct3", "funct7"])
+    builder.emit_process_body_begin()
+
+    # Default to ADD
+    builder.emit_signal_assign("alu_op", "ALU_ADD")
+    builder.emit_raw("")
+
+    # R-type operations
+    builder.emit_if_begin("opcode = OP_REG")
+
+    builder.emit_if_begin("funct3 = F3_ADD_SUB")
+    builder.emit_if_begin("funct7 = F7_SUB_SRA")
+    builder.emit_signal_assign("alu_op", "ALU_SUB")
+    builder.emit_else()
+    builder.emit_signal_assign("alu_op", "ALU_ADD")
+    builder.emit_if_end()
+
+    builder.emit_elsif("funct3 = F3_SLL")
+    builder.emit_signal_assign("alu_op", "ALU_SLL")
+
+    builder.emit_elsif("funct3 = F3_SLT")
+    builder.emit_signal_assign("alu_op", "ALU_SLT")
+
+    builder.emit_elsif("funct3 = F3_SLTU")
+    builder.emit_signal_assign("alu_op", "ALU_SLTU")
+
+    builder.emit_elsif("funct3 = F3_XOR")
+    builder.emit_signal_assign("alu_op", "ALU_XOR")
+
+    builder.emit_elsif("funct3 = F3_SRL_SRA")
+    builder.emit_if_begin("funct7 = F7_SUB_SRA")
+    builder.emit_signal_assign("alu_op", "ALU_SRA")
+    builder.emit_else()
+    builder.emit_signal_assign("alu_op", "ALU_SRL")
+    builder.emit_if_end()
+
+    builder.emit_elsif("funct3 = F3_OR")
+    builder.emit_signal_assign("alu_op", "ALU_OR")
+
+    builder.emit_elsif("funct3 = F3_AND")
+    builder.emit_signal_assign("alu_op", "ALU_AND")
+
+    builder.emit_if_end()
+
+    # I-type ALU operations
+    builder.emit_elsif("opcode = OP_IMM")
+
+    builder.emit_if_begin("funct3 = F3_ADD_SUB")
+    builder.emit_signal_assign("alu_op", "ALU_ADD")
+
+    builder.emit_elsif("funct3 = F3_SLL")
+    builder.emit_signal_assign("alu_op", "ALU_SLL")
+
+    builder.emit_elsif("funct3 = F3_SLT")
+    builder.emit_signal_assign("alu_op", "ALU_SLT")
+
+    builder.emit_elsif("funct3 = F3_SLTU")
+    builder.emit_signal_assign("alu_op", "ALU_SLTU")
+
+    builder.emit_elsif("funct3 = F3_XOR")
+    builder.emit_signal_assign("alu_op", "ALU_XOR")
+
+    builder.emit_elsif("funct3 = F3_SRL_SRA")
+    builder.emit_if_begin("funct7 = F7_SUB_SRA")
+    builder.emit_signal_assign("alu_op", "ALU_SRA")
+    builder.emit_else()
+    builder.emit_signal_assign("alu_op", "ALU_SRL")
+    builder.emit_if_end()
+
+    builder.emit_elsif("funct3 = F3_OR")
+    builder.emit_signal_assign("alu_op", "ALU_OR")
+
+    builder.emit_elsif("funct3 = F3_AND")
+    builder.emit_signal_assign("alu_op", "ALU_AND")
+
+    builder.emit_if_end()
+
+    # LUI: pass B (immediate)
+    builder.emit_elsif("opcode = OP_LUI")
+    builder.emit_signal_assign("alu_op", "ALU_PASS_B")
+
+    # AUIPC, JAL, JALR, LOAD, STORE, BRANCH: default ADD for address calc
+    builder.emit_elsif("opcode = OP_AUIPC or opcode = OP_JAL or opcode = OP_JALR or opcode = OP_LOAD or opcode = OP_STORE or opcode = OP_BRANCH")
+    builder.emit_signal_assign("alu_op", "ALU_ADD")
+
+    builder.emit_if_end()
+
+    builder.emit_process_end(Some("alu_decode"))
+
+    builder.emit_architecture_end("rtl")
+
+    builder.build()
+
+# ============================================================================
+# Combined Render
+# ============================================================================
+
+fn render_rv32i_decode_bundle() -> VhdlRv32iDecodeArtifact:
+    """Render the complete RV32I decode bundle: package + field extractor + ALU control.
+
+    Returns a single artifact containing both VHDL source texts.
+    """
+    val pkg = render_rv32i_opcode_package()
+    val field_ext = render_rv32i_field_extractor()
+    val alu_ctrl = render_rv32i_alu_control()
+
+    VhdlRv32iDecodeArtifact(
+        package_vhdl: pkg,
+        decode_entity_vhdl: "{field_ext}\n\n{alu_ctrl}"
+    )

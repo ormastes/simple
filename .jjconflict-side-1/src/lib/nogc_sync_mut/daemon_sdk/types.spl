@@ -1,0 +1,136 @@
+# Daemon SDK Types — Core types for generic daemon infrastructure
+#
+# Provides configuration, state, request/response envelopes used by
+# the daemon runner, protocol, lock, and client modules.
+
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_getpid() -> i64
+
+# ============================================================================
+# Daemon State Constants
+# ============================================================================
+
+val DAEMON_IDLE: i64 = 0
+val DAEMON_POLLING: i64 = 1
+val DAEMON_PROCESSING: i64 = 2
+val DAEMON_SHUTTING_DOWN: i64 = 3
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct DaemonConfig:
+    lock_path: text
+    request_dir: text
+    response_dir: text
+    poll_interval_ms: i64
+    request_timeout_ms: i64
+    max_concurrent: i64
+
+fn daemon_config_new(lock_path: text, request_dir: text, response_dir: text) -> DaemonConfig:
+    DaemonConfig(
+        lock_path: lock_path,
+        request_dir: request_dir,
+        response_dir: response_dir,
+        poll_interval_ms: 500,
+        request_timeout_ms: 30000,
+        max_concurrent: 50
+    )
+
+impl DaemonConfig:
+    fn to_text() -> text:
+        "DaemonConfig(lock: {self.lock_path}, req: {self.request_dir}, resp: {self.response_dir})"
+
+# ============================================================================
+# State
+# ============================================================================
+
+struct DaemonState:
+    status: i64
+    last_poll_time: i64
+    items_processed: i64
+    errors_count: i64
+    cycle_count: i64
+
+fn daemon_state_new() -> DaemonState:
+    DaemonState(
+        status: DAEMON_IDLE,
+        last_poll_time: 0,
+        items_processed: 0,
+        errors_count: 0,
+        cycle_count: 0
+    )
+
+impl DaemonState:
+    fn is_idle() -> bool:
+        self.status == DAEMON_IDLE
+
+    fn is_running() -> bool:
+        self.status == DAEMON_POLLING or self.status == DAEMON_PROCESSING
+
+    fn status_text() -> text:
+        match self.status:
+            case 0: "idle"
+            case 1: "polling"
+            case 2: "processing"
+            case 3: "shutting_down"
+            case _: "unknown"
+
+# ============================================================================
+# Request Envelope
+# ============================================================================
+
+struct DaemonRequest:
+    id: text
+    kind: i64
+    timestamp: i64
+    fields: {text: text}
+
+fn daemon_request_new(kind: i64) -> DaemonRequest:
+    val pid = rt_getpid()
+    val ts = rt_time_now_unix_micros()
+    DaemonRequest(
+        id: "{pid}_{ts}",
+        kind: kind,
+        timestamp: ts,
+        fields: {}
+    )
+
+impl DaemonRequest:
+    fn to_text() -> text:
+        "DaemonRequest(id: {self.id}, kind: {self.kind}, ts: {self.timestamp})"
+
+    fn get_field(key: text) -> text:
+        self.fields[key] ?? ""
+
+    me set_field(key: text, value: text):
+        self.fields[key] = value
+
+# ============================================================================
+# Response Envelope
+# ============================================================================
+
+struct DaemonResponse:
+    request_id: text
+    status: i64
+    timestamp: i64
+    fields: {text: text}
+
+fn daemon_response_new(request_id: text, status: i64) -> DaemonResponse:
+    DaemonResponse(
+        request_id: request_id,
+        status: status,
+        timestamp: rt_time_now_unix_micros(),
+        fields: {}
+    )
+
+impl DaemonResponse:
+    fn to_text() -> text:
+        "DaemonResponse(req: {self.request_id}, status: {self.status})"
+
+    fn get_field(key: text) -> text:
+        self.fields[key] ?? ""
+
+    me set_field(key: text, value: text):
+        self.fields[key] = value

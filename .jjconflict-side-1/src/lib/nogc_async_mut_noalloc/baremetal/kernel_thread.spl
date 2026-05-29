@@ -1,0 +1,78 @@
+# Kernel Thread — M1 thread primitive.
+#
+# Kernel-level thread creation and per-thread TLS slot storage.
+# In interpreter mode: thread create is synchronous simulation; TLS uses
+# a module-level key-value map (single-threaded context).
+#
+# @cover kernel_thread
+
+# ============================================================================
+# TLS storage (module-level, keyed by slot index)
+# ============================================================================
+
+# TLS slots: key → value (u64). We support up to 256 keys.
+# Key 0 is valid.
+var _tls_values: [u64] = []
+var _tls_init: bool = false
+
+fn _ensure_tls():
+    """Initialize TLS table on first use."""
+    if not _tls_init:
+        var i: i64 = 0
+        while i < 256:
+            _tls_values.push(0)
+            i = i + 1
+        _tls_init = true
+
+# ============================================================================
+# Thread counter
+# ============================================================================
+
+var _tid_counter: i64 = 0
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn kernel_thread_create(entry: fn() -> void, stack_size: i64) -> i64:
+    """Create a kernel thread.
+
+    In interpreter mode: records the thread entry and returns a unique Tid > 0.
+    The entry function is not actually invoked asynchronously.
+
+    Args:
+        entry:      thread entry function (no-arg, returns void)
+        stack_size: requested kernel stack size in bytes
+
+    Returns:
+        Positive thread ID (Tid > 0).
+    """
+    _tid_counter = _tid_counter + 1
+    _tid_counter
+
+fn kernel_thread_tls_set(key: i64, value: u64):
+    """Write a value into the TLS slot for key.
+
+    Args:
+        key:   slot index (0–255)
+        value: 64-bit value to store
+    """
+    _ensure_tls()
+    if key >= 0 and key < 256:
+        _tls_values[key] = value
+
+fn kernel_thread_tls_get(key: i64) -> u64:
+    """Read the TLS slot value for key.
+
+    Returns 0 for any key that has not been set.
+
+    Args:
+        key: slot index (0–255)
+
+    Returns:
+        Stored value, or 0 if key is unset.
+    """
+    _ensure_tls()
+    if key < 0 or key >= 256:
+        return 0
+    _tls_values[key]

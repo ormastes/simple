@@ -1,0 +1,170 @@
+# Engine2D API
+#
+# Session-aware Engine2D constructors and core rendering operations.
+#
+# Three construction paths:
+#   Engine2D.create(w, h)                          — legacy no-session (backward compat)
+#   Engine2D.create_managed(w, h, kind, policy)    — managed shared session
+#   Engine2D.create_with_session(w, h, handle_id)  — caller-owned session by handle id
+#
+# Usage:
+#   val e = Engine2D.create(800, 600)
+#   e.fill(0, 0, 800, 600, 0)
+#   e.present()
+#   val sid = e.get_session_handle()
+
+# ============================================================================
+# Replicated minimal enums (no import — avoids interpreter timeout)
+# ============================================================================
+
+enum BackendSessionMode:
+    LegacyNoSession
+    ManagedShared
+    PerfExclusive
+
+enum BackendSessionKind:
+    Cpu
+    Cuda
+    Vulkan
+    Metal
+    WebGpu
+
+# ============================================================================
+# Helpers — kind/mode resolution from text
+# ============================================================================
+
+fn resolve_kind(kind: text) -> BackendSessionKind:
+    """Map a string backend name to BackendSessionKind. Defaults to Cpu."""
+    if kind == "cuda":
+        return BackendSessionKind.Cuda
+    if kind == "vulkan":
+        return BackendSessionKind.Vulkan
+    if kind == "metal":
+        return BackendSessionKind.Metal
+    if kind == "webgpu":
+        return BackendSessionKind.WebGpu
+    BackendSessionKind.Cpu
+
+fn resolve_mode(policy: text) -> BackendSessionMode:
+    """Map a string policy name to BackendSessionMode. Defaults to ManagedShared."""
+    if policy == "legacy":
+        return BackendSessionMode.LegacyNoSession
+    if policy == "perf":
+        return BackendSessionMode.PerfExclusive
+    BackendSessionMode.ManagedShared
+
+# ============================================================================
+# Engine2D
+# ============================================================================
+
+class Engine2D:
+    """2D rendering surface with optional shared backend session.
+
+    The three constructors cover legacy, managed-shared, and caller-supplied
+    session paths.  All rendering methods (fill, blit, present, read_pixels)
+    are API-surface stubs that delegate to the backend in the full impl.
+
+    Fields:
+      width / height    — surface dimensions
+      session_handle_id — 0 for legacy no-session, non-zero for shared/exclusive
+      session_mode      — tracks which construction path was used
+      session_kind      — backend technology (Cpu, Cuda, Vulkan, Metal, WebGpu)
+      initialized       — true once a constructor has completed successfully
+    """
+    width: i64
+    height: i64
+    session_handle_id: i64
+    session_mode: BackendSessionMode
+    session_kind: BackendSessionKind
+    initialized: bool
+
+    static fn create(w: i64, h: i64) -> Engine2D:
+        """Legacy no-session constructor — one hidden session per surface.
+
+        Backward-compatible path.  session_handle_id is 0.
+        """
+        Engine2D(
+            width: w,
+            height: h,
+            session_handle_id: 0,
+            session_mode: BackendSessionMode.LegacyNoSession,
+            session_kind: BackendSessionKind.Cpu,
+            initialized: true
+        )
+
+    static fn create_managed(w: i64, h: i64, kind: text, policy: text) -> Engine2D:
+        """Managed shared session constructor.
+
+        `kind`   — backend name: "cpu" | "cuda" | "vulkan" | "metal" | "webgpu"
+        `policy` — session mode: "managed" (default) | "legacy" | "perf"
+
+        A synthetic session handle id is derived from width * height as a
+        lightweight placeholder; production code would use backend_session_create.
+        """
+        val bkind = resolve_kind(kind)
+        val bmode = resolve_mode(policy)
+        val hid = w * h
+        Engine2D(
+            width: w,
+            height: h,
+            session_handle_id: hid,
+            session_mode: bmode,
+            session_kind: bkind,
+            initialized: true
+        )
+
+    static fn create_with_session(w: i64, h: i64, session_handle: i64) -> Engine2D:
+        """Explicit caller-owned session constructor.
+
+        The caller is responsible for the session lifecycle (retain / release).
+        `session_handle` is the BackendSessionHandle.id of the live session.
+        """
+        Engine2D(
+            width: w,
+            height: h,
+            session_handle_id: session_handle,
+            session_mode: BackendSessionMode.ManagedShared,
+            session_kind: BackendSessionKind.Cpu,
+            initialized: true
+        )
+
+    me fill(x: i64, y: i64, rw: i64, rh: i64, color: i64) -> i64:
+        """Fill a rectangle with a solid color.
+
+        Returns 0 on success, non-zero on error (not initialized, OOB, etc.).
+        """
+        if not self.initialized:
+            return 1
+        0
+
+    me blit(src_x: i64, src_y: i64, dst_x: i64, dst_y: i64, bw: i64, bh: i64) -> i64:
+        """Copy a rectangle from (src_x, src_y) to (dst_x, dst_y).
+
+        Returns 0 on success.
+        """
+        if not self.initialized:
+            return 1
+        0
+
+    me present() -> i64:
+        """Flush the rendered frame to the display / compositor.
+
+        Returns 0 on success.
+        """
+        if not self.initialized:
+            return 1
+        0
+
+    me read_pixels(x: i64, y: i64, rw: i64, rh: i64) -> i64:
+        """Initiate a GPU-to-host readback for the given region.
+
+        Returns a token id (> 0) that identifies the readback buffer, or 0
+        if readback is unavailable or the session is uninitialized.
+        """
+        if not self.initialized:
+            return 0
+        1
+
+    fn get_session_handle() -> i64:
+        """Return the session handle id (0 for legacy no-session)."""
+        self.session_handle_id

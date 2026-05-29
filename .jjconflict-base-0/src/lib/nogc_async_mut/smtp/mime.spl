@@ -1,0 +1,128 @@
+# MIME Content Types
+# RFC 2045-2049 (MIME)
+
+fn mime_type_text_plain() -> text:
+    return "text/plain; charset=utf-8"
+
+fn mime_type_text_html() -> text:
+    return "text/html; charset=utf-8"
+
+fn mime_type_multipart_mixed() -> text:
+    return "multipart/mixed"
+
+fn mime_type_multipart_alternative() -> text:
+    return "multipart/alternative"
+
+fn mime_type_multipart_related() -> text:
+    return "multipart/related"
+
+fn mime_type_application_octet_stream() -> text:
+    return "application/octet-stream"
+
+fn mime_type_image_png() -> text:
+    return "image/png"
+
+fn mime_type_image_jpeg() -> text:
+    return "image/jpeg"
+
+fn mime_type_application_pdf() -> text:
+    return "application/pdf"
+
+# Boundary Generation
+
+fn mime_generate_boundary() -> text:
+    var timestamp = "1234567890"
+    var random = "abcdef"
+    return "----=_Part_{timestamp}_{random}"
+
+fn mime_boundary_start(boundary: text) -> text:
+    return "--{boundary}\r\n"
+
+fn mime_boundary_end(boundary: text) -> text:
+    return "--{boundary}--\r\n"
+
+# MIME Part Building
+
+fn mime_part_build(content_type: text, encoding: text, body: text) -> text:
+    var part = ""
+    part = part + header_content_type(content_type)
+    part = part + header_content_transfer_encoding(encoding)
+    part = part + "\r\n"
+    part = part + body
+    part = part + "\r\n"
+    return part
+
+fn mime_attachment_build(filename: text, content_type: text, data: text) -> text:
+    var part = ""
+    part = part + header_content_type(content_type)
+    var disposition = "attachment; filename=\"{filename}\""
+    part = part + header_content_disposition(disposition)
+    part = part + header_content_transfer_encoding("base64")
+    part = part + "\r\n"
+    var encoded = base64_encode_with_line_breaks(data, 76)
+    part = part + encoded
+    part = part + "\r\n"
+    return part
+
+fn mime_encode_header_value(value: text) -> text:
+    var needs_encoding = false
+    var i = 0
+    var len = value.length()
+
+    while i < len:
+        var code = value.char_code_at(i)
+        if code > 127:
+            needs_encoding = true
+        i = i + 1
+
+    if needs_encoding:
+        var encoded = base64_encode_bytes(value)
+        return "=?utf-8?B?{encoded}?="
+
+    return value
+
+# Content Encoding Detection
+
+fn content_needs_base64(data: text) -> bool:
+    var i = 0
+    var len = data.length()
+    var non_ascii_count = 0
+
+    while i < len:
+        var code = data.char_code_at(i)
+        if code > 127:
+            non_ascii_count = non_ascii_count + 1
+        i = i + 1
+
+    var threshold = len / 3
+    return non_ascii_count > threshold
+
+fn content_needs_qp(data: text) -> bool:
+    var i = 0
+    var len = data.length()
+    var special_count = 0
+
+    while i < len:
+        var ch = data.char_at(i)
+        if qp_needs_encoding(ch):
+            special_count = special_count + 1
+        i = i + 1
+
+    var needs_encoding = special_count > 0
+    var not_too_many = special_count < (len / 3)
+    return needs_encoding and not_too_many
+
+fn content_choose_encoding(data: text) -> text:
+    if content_needs_base64(data):
+        return "base64"
+    if content_needs_qp(data):
+        return "quoted-printable"
+    return "7bit"
+
+# Forward declarations
+fn header_content_type(content_type: text) -> text
+fn header_content_transfer_encoding(encoding: text) -> text
+fn header_content_disposition(disposition: text) -> text
+fn base64_encode_bytes(data: text) -> text
+fn base64_encode_with_line_breaks(data: text, line_length: i64) -> text
+fn qp_needs_encoding(ch: text) -> bool

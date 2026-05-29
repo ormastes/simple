@@ -1,0 +1,113 @@
+# @tag: os, driver, mdsoc, exokernel, gpu, audio, input
+# @cover src/os/drivers/driver_platform_contract.spl 80%
+
+use std.spec.{describe, it, expect}
+use os.drivers.desktop_driver_summary.{desktop_driver_platform_marker, desktop_driver_summary_for_uefi_qemu}
+use os.drivers.driver_platform_contract.{
+    audio_codec_reason,
+    audio_hda_probe,
+    audio_hda_reason,
+    audio_probe_cirrus_logic_hda,
+    audio_probe_realtek_hda,
+    cpu_accel_features,
+    cpu_audio_kernel,
+    cpu_pixel_kernel,
+    driver_team_lane,
+    driver_team_plan,
+    driver_team_plan_blocker,
+    driver_team_plan_ready,
+    driver_platform_accepts,
+    driver_platform_baseline,
+    driver_platform_false_claim,
+    driver_platform_marker,
+    driver_platform_summary,
+    exokernel_device_grant,
+    exokernel_grant_reason,
+    gpu_probe_amd,
+    gpu_probe_cuda,
+    gpu_probe_intel,
+    gpu_probe_qualcomm_arm,
+    gpu_probe_reason,
+    gpu_probe_riscv,
+    input_probe_ps2,
+    input_probe_reason,
+    input_probe_usb_hid
+}
+
+describe "SimpleOS driver platform contract":
+    it "accepts baseline and rejects false claims":
+        val bad_gpu = driver_platform_summary("virtio-gpu", true, "intel-hda", "realtek-hda", true, true, "ps2", true, "ps2", true, "bar,irq,dma,iommu:brokered", "brokered", false)
+        val bad_audio = driver_platform_summary("virtio-gpu", false, "intel-hda", "realtek-hda", true, false, "ps2", true, "ps2", true, "bar,irq,dma,iommu:brokered", "brokered", false)
+        val bad_raw = driver_platform_summary("virtio-gpu", false, "intel-hda", "realtek-hda", true, true, "ps2", true, "ps2", true, "bar,irq,dma", "none", true)
+        expect driver_platform_accepts(driver_platform_baseline()) == true
+        expect driver_platform_false_claim(bad_gpu) == true
+        expect driver_platform_false_claim(bad_audio) == true
+        expect driver_platform_false_claim(bad_raw) == true
+        expect (driver_platform_marker(driver_platform_baseline())).contains("[driver-platform] gpu=virtio-gpu")
+
+    it "selects CPU fallback kernels":
+        val x86 = cpu_accel_features("x86_64", true, true, true, true, false, false, false)
+        val mmx = cpu_accel_features("x86", true, false, false, false, false, false, false)
+        val arm = cpu_accel_features("arm64", false, false, false, false, true, true, false)
+        val riscv = cpu_accel_features("riscv64", false, false, false, false, false, false, true)
+        expect cpu_pixel_kernel(x86) == "x86-avx2"
+        expect cpu_audio_kernel(x86) == "x86-avx2-audio"
+        expect cpu_pixel_kernel(mmx) == "x86-mmx-legacy"
+        expect cpu_audio_kernel(mmx) == "scalar-audio"
+        expect cpu_pixel_kernel(arm) == "arm-sve"
+        expect cpu_pixel_kernel(riscv) == "riscv-rvv"
+
+    it "reports GPU vendor probe evidence":
+        expect gpu_probe_reason(gpu_probe_cuda(true, true, true)) == "supported"
+        expect gpu_probe_reason(gpu_probe_cuda(false, true, true)) == "missing-runtime:nvidia-cuda"
+        expect gpu_probe_reason(gpu_probe_amd(true, true, false, true)) == "missing-queue:amd-rocm-radv"
+        expect gpu_probe_reason(gpu_probe_intel(true, false, false, false)) == "missing-device:intel-anv-level-zero"
+        expect gpu_probe_reason(gpu_probe_qualcomm_arm(true, true, false)) == "missing-queue:qualcomm-arm-freedreno-turnip-panfrost"
+        expect gpu_probe_reason(gpu_probe_riscv(false, true)) == "missing-runtime:riscv"
+
+    it "reports Intel HDA and Realtek codec probe requirements":
+        expect audio_hda_reason(audio_hda_probe(true, true, true, true, "x86-sse2-audio")) == "supported"
+        expect audio_hda_reason(audio_hda_probe(false, true, true, true, "x86-sse2-audio")) == "missing-controller:intel-hda"
+        expect audio_hda_reason(audio_hda_probe(true, false, true, true, "x86-sse2-audio")) == "missing-codec:realtek-hda"
+        expect audio_hda_reason(audio_hda_probe(true, true, false, true, "x86-sse2-audio")) == "missing-dma-ring:intel-hda"
+        expect audio_hda_reason(audio_hda_probe(true, true, true, false, "x86-sse2-audio")) == "missing-period:intel-hda"
+
+    it "tracks two concrete audio codec brands with CPU acceleration":
+        val realtek = audio_probe_realtek_hda(true, true, true, true, true, "x86-sse2-audio")
+        val cirrus = audio_probe_cirrus_logic_hda(true, true, true, true, true, "arm-neon-audio")
+        val slow = audio_probe_cirrus_logic_hda(true, true, true, true, true, "scalar-audio")
+        expect audio_codec_reason(realtek) == "supported:realtek-hda"
+        expect audio_codec_reason(cirrus) == "supported:cirrus-logic-hda"
+        expect audio_codec_reason(slow) == "missing-cpu-accel:cirrus-logic-hda"
+
+    it "reports keyboard and mouse input evidence":
+        expect input_probe_reason(input_probe_ps2(true, true, true)) == "supported:ps2"
+        expect input_probe_reason(input_probe_ps2(true, false, true)) == "missing-mouse:ps2"
+        expect input_probe_reason(input_probe_usb_hid(true, true, true, false, true)) == "partial:usb-hid"
+        expect input_probe_reason(input_probe_usb_hid(true, true, true, true, true)) == "supported:usb-hid"
+
+    it "requires exokernel grants to protect raw device access":
+        expect exokernel_grant_reason(exokernel_device_grant(true, true, true, true, false, true)) == "supported"
+        expect exokernel_grant_reason(exokernel_device_grant(true, true, true, false, false, false)) == "missing-iommu-or-broker"
+        expect exokernel_grant_reason(exokernel_device_grant(true, true, true, false, true, false)) == "supported"
+        expect exokernel_grant_reason(exokernel_device_grant(true, true, true, false, true, true)) == "unsafe-raw-device-without-iommu"
+
+    it "prepares team lanes with owner, contract, test, doc, and review gates":
+        val gpu_lane = driver_team_lane("gpu", "driver-gpu", true, true, true, true)
+        val audio_lane = driver_team_lane("audio", "driver-audio", true, true, true, true)
+        val input_lane = driver_team_lane("input", "driver-input", true, true, true, true)
+        val exokernel_lane = driver_team_lane("exokernel", "driver-exokernel", true, true, true, true)
+        val mdsoc_lane = driver_team_lane("mdsoc", "driver-architect", true, true, true, true)
+        val no_audio_tests = driver_team_lane("audio", "driver-audio", true, false, true, true)
+        expect driver_team_plan_ready(driver_team_plan(gpu_lane, audio_lane, input_lane, exokernel_lane, mdsoc_lane)) == true
+        expect driver_team_plan_blocker(driver_team_plan(gpu_lane, no_audio_tests, input_lane, exokernel_lane, mdsoc_lane)) == "missing-tests:audio"
+
+    it "bridges desktop summaries to platform markers":
+        val summary = desktop_driver_summary_for_uefi_qemu(true, 5, "nvme", "virtio-gpu", "virtio-gpu", true, "virtio-net")
+        val marker = desktop_driver_platform_marker(summary)
+        expect (marker).contains("[driver-platform] gpu=virtio-gpu")
+        expect (marker).contains("audio=intel-hda")
+        expect (marker).contains("audio_codec=realtek-hda")
+        expect (marker).contains("keyboard=ps2")
+        expect (marker).contains("mouse=ps2")
+        expect (marker).contains("exokernel=bar,irq,dma,iommu:")

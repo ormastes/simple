@@ -1,0 +1,147 @@
+# FR-DRIVER-0002b regression: `>>` signedness dispatch in the Cranelift backend.
+#
+# Before FR-0002b, `compile_binop::ShiftRight` always emitted `ensure_i64`
+# (which uses `uextend`) followed by `sshr`. For a signed narrow integer
+# like `i32 -16`, the `uextend` loses the sign bit (`-16` becomes a large
+# positive i64), so the subsequent `sshr` produces `2147483640` instead of
+# `-8`. The fix reads the LHS VReg's signedness from `InstrContext.vreg_types`
+# (populated by FR-0002a) and dispatches `sshr + sextend` for signed ints
+# vs `ushr + uextend` for unsigned ints.
+#
+# Coverage:
+# - Signed-negative narrow ints (i8/i16/i32) — primary regression.
+# - Unsigned-high-bit narrow ints (u8/u16/u32) — logical shift correctness.
+# - Mixed-width chains — ensures widening picks the right extend at each
+#   hop, not just at the shift itself.
+# - Shift-by-zero and all-ones shift — identity + extremal counts.
+#
+# @tag: compiler,regression,cranelift,shift,fr-driver-0002b
+
+# ---------------------------------------------------------------------------
+# Signed cases — the interim fix that used to live in core.rs covered these.
+# ---------------------------------------------------------------------------
+
+fn shr_i32_minus16_by_1() -> i32:
+    val x: i32 = -16
+    x >> 1
+
+fn shr_i32_minus1_by_31() -> i32:
+    val x: i32 = -1
+    x >> 31
+
+fn shr_i16_minus16_by_1() -> i16:
+    val x: i16 = -16 as i16
+    x >> 1
+
+fn shr_i8_minus16_by_1() -> i8:
+    val x: i8 = -16 as i8
+    x >> 1
+
+fn shr_i64_minus16_by_1() -> i64:
+    val x: i64 = -16
+    x >> 1
+
+# ---------------------------------------------------------------------------
+# Unsigned cases — these were the explicit acceptance criterion in the plan.
+# ---------------------------------------------------------------------------
+
+fn shr_u32_high_bit_by_1() -> u32:
+    val x: u32 = 0x80000000 as u32
+    x >> 1
+
+fn shr_u16_high_bit_by_1() -> u16:
+    val x: u16 = 0x8000 as u16
+    x >> 1
+
+fn shr_u8_high_bit_by_1() -> u8:
+    val x: u8 = 0x80 as u8
+    x >> 1
+
+fn shr_u32_all_ones_by_1() -> u32:
+    val x: u32 = 0xFFFFFFFF as u32
+    x >> 1
+
+# ---------------------------------------------------------------------------
+# Mixed-width + chained shifts — guards the widening-at-boundary logic.
+# ---------------------------------------------------------------------------
+
+fn shr_chained_signed() -> i32:
+    # (((-64 >> 1) >> 1) >> 1) = -8
+    val x: i32 = -64
+    val a: i32 = x >> 1
+    val b: i32 = a >> 1
+    b >> 1
+
+fn shr_chained_unsigned() -> u32:
+    # ((0x80000000 >> 1) >> 1) = 0x20000000
+    val x: u32 = 0x80000000 as u32
+    val a: u32 = x >> 1
+    a >> 1
+
+# ---------------------------------------------------------------------------
+# Extremal counts — shift-by-zero and full-width shift.
+# ---------------------------------------------------------------------------
+
+fn shr_signed_by_zero() -> i32:
+    val x: i32 = -16
+    x >> 0
+
+fn shr_unsigned_by_zero() -> u32:
+    val x: u32 = 0x80000000 as u32
+    x >> 0
+
+describe "Cranelift `>>` signedness regression (FR-DRIVER-0002b)":
+    it "signed i32 -16 >> 1 yields -8 (sextend + sshr)":
+        expect(shr_i32_minus16_by_1()).to_equal(-8)
+
+    it "signed i32 -1 >> 31 yields -1 (arithmetic shift preserves all bits set)":
+        expect(shr_i32_minus1_by_31()).to_equal(-1)
+
+    it "signed i16 -16 >> 1 yields -8":
+        val got: i16 = shr_i16_minus16_by_1()
+        val expected: i16 = -8 as i16
+        expect(got).to_equal(expected)
+
+    it "signed i8 -16 >> 1 yields -8":
+        val got: i8 = shr_i8_minus16_by_1()
+        val expected: i8 = -8 as i8
+        expect(got).to_equal(expected)
+
+    it "signed i64 -16 >> 1 yields -8":
+        expect(shr_i64_minus16_by_1()).to_equal(-8)
+
+    it "unsigned u32 0x80000000 >> 1 yields 0x40000000 (logical shift)":
+        val got: u32 = shr_u32_high_bit_by_1()
+        val expected: u32 = 0x40000000 as u32
+        expect(got).to_equal(expected)
+
+    it "unsigned u16 0x8000 >> 1 yields 0x4000":
+        val got: u16 = shr_u16_high_bit_by_1()
+        val expected: u16 = 0x4000 as u16
+        expect(got).to_equal(expected)
+
+    it "unsigned u8 0x80 >> 1 yields 0x40":
+        val got: u8 = shr_u8_high_bit_by_1()
+        val expected: u8 = 0x40 as u8
+        expect(got).to_equal(expected)
+
+    it "unsigned u32 0xFFFFFFFF >> 1 yields 0x7FFFFFFF":
+        val got: u32 = shr_u32_all_ones_by_1()
+        val expected: u32 = 0x7FFFFFFF as u32
+        expect(got).to_equal(expected)
+
+    it "chained signed >> 1 three times: -64 yields -8":
+        expect(shr_chained_signed()).to_equal(-8)
+
+    it "chained unsigned >> 1 twice: 0x80000000 yields 0x20000000":
+        val got: u32 = shr_chained_unsigned()
+        val expected: u32 = 0x20000000 as u32
+        expect(got).to_equal(expected)
+
+    it "signed >> 0 is identity":
+        expect(shr_signed_by_zero()).to_equal(-16)
+
+    it "unsigned >> 0 is identity":
+        val got: u32 = shr_unsigned_by_zero()
+        val expected: u32 = 0x80000000 as u32
+        expect(got).to_equal(expected)

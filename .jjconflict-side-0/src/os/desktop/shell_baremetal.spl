@@ -1,0 +1,110 @@
+# Desktop Shell Baremetal Overlay — Direct Engine2D rendering
+#
+# Companion to shell.spl. Draws the taskbar, launcher grid, launched-app
+# windows, and process panel directly via Engine2D — no WidgetNode DSL,
+# which crashes in baremetal.
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use os.desktop.app_manifest.{load_app_manifests}
+
+# ============================================================================
+# Baremetal Overlay (direct Engine2D, no WidgetNode DSL)
+# ============================================================================
+
+fn _draw_baremetal_overlay(
+    engine: Engine2D,
+    apps: [text],
+    process_rows: [text],
+    selected_process_idx: i64,
+    screen_w: i32,
+    screen_h: i32,
+    clock: text
+):
+    """Draw the taskbar, launcher grid, and launched-app windows directly
+    via Engine2D. Bypasses the widget builder DSL that crashes in baremetal.
+
+    Layout:
+      - Top: title banner
+      - Middle: launcher grid with each app as a colored tile
+      - Bottom: taskbar with clock and list of running apps
+    """
+    # --- Title banner ---
+    engine.draw_rect_filled(0, 0, screen_w, 28, 0xFF1E1E2E)
+    engine.draw_text(12, 6, "SimpleOS Desktop", 0xFFFFFFFF, 14)
+
+    # --- Launcher grid (4 apps per row) ---
+    val grid_x0: i32 = 40
+    val grid_y0: i32 = 60
+    val tile_w: i32 = 140
+    val tile_h: i32 = 60
+    val gap: i32 = 16
+
+    val demo_apps = load_app_manifests()
+
+    var idx: i32 = 0
+    for manifest in demo_apps:
+        val col = idx % 4
+        val row_i = idx / 4
+        val tx = grid_x0 + col * (tile_w + gap)
+        val ty = grid_y0 + row_i * (tile_h + gap)
+        engine.draw_rect_filled(tx, ty, tile_w, tile_h, 0xFF2E2E3E)
+        engine.draw_rect_filled(tx, ty, tile_w, 18, 0xFF3498DB)
+        engine.draw_text(tx + 8, ty + 2, manifest.name, 0xFFFFFFFF, 12)
+        engine.draw_text(tx + 8, ty + 26, manifest.icon, 0xFF8BD3FF, 12)
+        engine.draw_text(tx + 28, ty + 26, manifest.category, 0xFFB8D8D8, 11)
+        idx = idx + 1
+        if idx >= 12:
+            break
+
+    # --- Launched app "windows" (stacked cascading) ---
+    val win_w: i32 = 280
+    val win_h: i32 = 160
+    var win_idx: i32 = 0
+    for name in apps:
+        val wx = 260 + win_idx * 20
+        val wy = 220 + win_idx * 24
+        engine.draw_rect_filled(wx + 4, wy + 4, win_w, win_h, 0xFF000000)
+        engine.draw_rect_filled(wx, wy, win_w, win_h, 0xFF1E1E2E)
+        engine.draw_rect_filled(wx, wy, win_w, 22, 0xFFE74C3C)
+        engine.draw_text(wx + 8, wy + 4, name, 0xFFFFFFFF, 12)
+        engine.draw_text(wx + 12, wy + 36, "Welcome to {name}", 0xFFCCCCCC, 12)
+        win_idx = win_idx + 1
+
+    # --- Process panel (all launched processes, including headless) ---
+    val panel_w: i32 = 250
+    val panel_x = screen_w - panel_w - 20
+    val panel_y: i32 = 60
+    val panel_h = screen_h - panel_y - 60
+    engine.draw_rect_filled(panel_x, panel_y, panel_w, panel_h, 0xFF182430)
+    engine.draw_rect_filled(panel_x, panel_y, panel_w, 22, 0xFF16A085)
+    engine.draw_text(panel_x + 8, panel_y + 4, "Process Manager", 0xFFFFFFFF, 12)
+    engine.draw_text(panel_x + 12, panel_y + 30, "all launched processes", 0xFFB8D8D8, 11)
+    var row_y = panel_y + 52
+    var proc_idx: u64 = 0
+    while proc_idx < process_rows.len() and proc_idx < 8:
+        val row_color = if proc_idx.to_i64() == selected_process_idx: 0xFF2E5266 else: 0xFF22313F
+        engine.draw_rect_filled(panel_x + 10, row_y, panel_w - 20, 26, row_color)
+        engine.draw_text(panel_x + 16, row_y + 6, process_rows[proc_idx], 0xFFFFFFFF, 11)
+        row_y = row_y + 32
+        proc_idx = proc_idx + 1
+    if process_rows.len() == 0:
+        engine.draw_text(panel_x + 12, panel_y + 60, "no running processes", 0xFF9AA5B1, 11)
+    else:
+        engine.draw_text(panel_x + 12, panel_h + panel_y - 34, "Ctrl+Alt J/K select  F focus", 0xFF9AA5B1, 10)
+        engine.draw_text(panel_x + 12, panel_h + panel_y - 20, "Ctrl+Alt X terminate  R relaunch", 0xFF9AA5B1, 10)
+
+    # --- Taskbar at the bottom ---
+    val tb_h: i32 = 32
+    val tb_y = screen_h - tb_h
+    engine.draw_rect_filled(0, tb_y, screen_w, tb_h, 0xFF1E1E2E)
+    engine.draw_rect_filled(0, tb_y, 60, tb_h, 0xFF3498DB)
+    engine.draw_text(10, tb_y + 8, "Apps", 0xFFFFFFFF, 14)
+
+    var tb_x: i32 = 70
+    for name in apps:
+        engine.draw_rect_filled(tb_x, tb_y + 4, 110, tb_h - 8, 0xFF2E2E3E)
+        engine.draw_text(tb_x + 6, tb_y + 8, name, 0xFFFFFFFF, 12)
+        tb_x = tb_x + 118
+
+    val clock_x = screen_w - 80
+    engine.draw_text(clock_x, tb_y + 8, clock, 0xFFFFFFFF, 14)

@@ -1,0 +1,197 @@
+# HTTP/3 Stream Multiplexing Types — RFC 9114 §6, RFC 9000 §2
+#
+# HTTP/3 runs over QUIC streams. Each QUIC stream is either:
+#   - Bidirectional: carries request/response exchanges (RFC 9114 §6.1)
+#   - Unidirectional: carries control/push/QPACK data (RFC 9114 §6.2)
+#
+# Unidirectional stream type codes (first varint on the wire — RFC 9114 §6.2):
+#   0x00 → Control stream    (one per side, carries SETTINGS)
+#   0x01 → Push stream       (server-initiated, carries PUSH_PROMISE data)
+#   0x02 → QPACK encoder     (dynamic table updates from encoder to decoder)
+#   0x03 → QPACK decoder     (acknowledgements from decoder to encoder)
+#
+# QUIC stream-id encoding (RFC 9000 §2.1):
+#   low 2 bits:  bit 0 = initiator (0=client, 1=server)
+#                bit 1 = directionality (0=bidi, 1=uni)
+#
+# This module provides:
+#   - H3StreamKind enum (Bidi / UniControl / UniPush / UniQpackEncoder / UniQpackDecoder)
+#   - H3StreamState enum (Idle / Open / HalfClosedLocal / HalfClosedRemote / Closed)
+#   - H3StreamStateResult for transition errors
+#   - h3_stream_transition(state, event) → H3StreamStateResult
+#   - h3_stream_kind_from_type_byte(type_varint) → H3StreamKind?
+#   - h3_stream_id_is_client_initiated(stream_id) → bool
+#   - h3_stream_id_is_bidi(stream_id) → bool
+#
+# Out of scope (deferred):
+#   - Flow control credit accounting (RFC 9000 §4)
+#   - Stream priority / dependency trees (RFC 9114 §4.3 / RFC 9218)
+#   - Actual QUIC transport send/receive (RFC 9000)
+#
+# Reference: RFC 9114 §6, RFC 9000 §2
+
+# ============================================================================
+# Unidirectional stream type codes — RFC 9114 §6.2
+# ============================================================================
+
+val H3_UNI_STREAM_CONTROL: i64       = 0x00
+val H3_UNI_STREAM_PUSH: i64          = 0x01
+val H3_UNI_STREAM_QPACK_ENCODER: i64 = 0x02
+val H3_UNI_STREAM_QPACK_DECODER: i64 = 0x03
+
+# ============================================================================
+# Stream kind — logical classification of a QUIC stream in HTTP/3
+# ============================================================================
+
+enum H3StreamKind:
+    """Logical classification of an HTTP/3 QUIC stream."""
+    # RFC 9114 §6.1: bidirectional stream carrying one request/response pair.
+    Bidi
+    # RFC 9114 §6.2.1: unidirectional control stream (SETTINGS, GOAWAY, etc.).
+    UniControl
+    # RFC 9114 §6.2.2: unidirectional server push stream.
+    UniPush
+    # RFC 9114 §6.2.3: unidirectional QPACK encoder stream (dynamic table updates).
+    UniQpackEncoder
+    # RFC 9114 §6.2.4: unidirectional QPACK decoder stream (acknowledgements).
+    UniQpackDecoder
+    # Unknown / reserved unidirectional stream type (RFC 9114 §6.2 ¶ unknown).
+    UniUnknown(type_code: i64)
+
+# ============================================================================
+# Stream state enum — RFC 9114 §6 + RFC 9000 §3
+# ============================================================================
+
+enum H3StreamState:
+    """HTTP/3 / QUIC stream lifecycle state."""
+    # Stream not yet opened.
+    Idle
+    # Stream open; data may flow in both directions (bidi) or one (uni).
+    Open
+    # Local side sent FIN / STREAM with FIN; remote still sending.
+    HalfClosedLocal
+    # Remote side sent FIN; local still sending.
+    HalfClosedRemote
+    # Both sides closed; stream ID may be reclaimed.
+    Closed
+
+# ============================================================================
+# Stream events
+# ============================================================================
+
+enum H3StreamEvent:
+    """Events that drive H3StreamState transitions."""
+    # Stream created (QUIC stream opened).
+    Opened
+    # Local endpoint finished sending (sent FIN).
+    LocalFinished
+    # Remote endpoint finished sending (received FIN).
+    RemoteFinished
+    # Stream reset (RST_STREAM or STOP_SENDING from either side).
+    Reset
+
+# ============================================================================
+# Result type
+# ============================================================================
+
+class H3StreamTransitionOk:
+    """Successful stream state transition."""
+    next: H3StreamState
+
+enum H3StreamTransitionResult:
+    """Result of a stream state transition."""
+    Ok(H3StreamTransitionOk)
+    Err(msg: text)
+
+# ============================================================================
+# Stream state machine — RFC 9000 §3
+#
+# Transitions:
+#   Idle              + Opened          → Open
+#   Open              + LocalFinished   → HalfClosedLocal
+#   Open              + RemoteFinished  → HalfClosedRemote
+#   HalfClosedLocal   + RemoteFinished  → Closed
+#   HalfClosedRemote  + LocalFinished   → Closed
+#   any               + Reset           → Closed
+# ============================================================================
+
+pub fn h3_stream_transition(state: H3StreamState, event: H3StreamEvent) -> H3StreamTransitionResult:
+    """Apply event to stream state and return the next state.
+
+    Reset closes from any state. Returns Err for invalid transitions.
+    """
+    match event:
+        case Reset:
+            return H3StreamTransitionResult.Ok(H3StreamTransitionOk(next: H3StreamState.Closed))
+        case Opened:
+            match state:
+                case Idle:
+                    return H3StreamTransitionResult.Ok(H3StreamTransitionOk(next: H3StreamState.Open))
+                case _:
+                    return H3StreamTransitionResult.Err("Opened only valid from Idle")
+        case LocalFinished:
+            match state:
+                case Open:
+                    return H3StreamTransitionResult.Ok(H3StreamTransitionOk(next: H3StreamState.HalfClosedLocal))
+                case HalfClosedRemote:
+                    return H3StreamTransitionResult.Ok(H3StreamTransitionOk(next: H3StreamState.Closed))
+                case _:
+                    return H3StreamTransitionResult.Err("LocalFinished invalid in current state")
+        case RemoteFinished:
+            match state:
+                case Open:
+                    return H3StreamTransitionResult.Ok(H3StreamTransitionOk(next: H3StreamState.HalfClosedRemote))
+                case HalfClosedLocal:
+                    return H3StreamTransitionResult.Ok(H3StreamTransitionOk(next: H3StreamState.Closed))
+                case _:
+                    return H3StreamTransitionResult.Err("RemoteFinished invalid in current state")
+    return H3StreamTransitionResult.Err("unreachable")
+
+# ============================================================================
+# Stream kind classification
+# ============================================================================
+
+pub fn h3_stream_kind_from_type_byte(type_varint: i64) -> H3StreamKind:
+    """Map a unidirectional stream type varint to H3StreamKind.
+
+    Called after reading the first varint from a unidirectional stream.
+    Unknown types yield UniUnknown(type_code) — callers should ignore such
+    streams per RFC 9114 §6.2 paragraph on unknown types.
+    """
+    if type_varint == H3_UNI_STREAM_CONTROL:
+        return H3StreamKind.UniControl
+    elif type_varint == H3_UNI_STREAM_PUSH:
+        return H3StreamKind.UniPush
+    elif type_varint == H3_UNI_STREAM_QPACK_ENCODER:
+        return H3StreamKind.UniQpackEncoder
+    elif type_varint == H3_UNI_STREAM_QPACK_DECODER:
+        return H3StreamKind.UniQpackDecoder
+    else:
+        return H3StreamKind.UniUnknown(type_code: type_varint)
+
+# ============================================================================
+# QUIC stream-id helpers — RFC 9000 §2.1
+#
+# Bit 0 of stream_id: 0 = client-initiated, 1 = server-initiated
+# Bit 1 of stream_id: 0 = bidirectional,    1 = unidirectional
+# ============================================================================
+
+pub fn h3_stream_id_is_client_initiated(stream_id: i64) -> bool:
+    """True if the stream was opened by the client (bit 0 of stream_id is 0)."""
+    return (stream_id & 0x01) == 0
+
+pub fn h3_stream_id_is_bidi(stream_id: i64) -> bool:
+    """True if the stream is bidirectional (bit 1 of stream_id is 0)."""
+    return (stream_id & 0x02) == 0
+
+pub fn h3_stream_id_kind(stream_id: i64) -> H3StreamKind:
+    """Return Bidi for bidirectional streams; UniUnknown(-1) for unidirectional.
+
+    For unidirectional streams the actual H3StreamKind is determined by the
+    stream-type varint on the wire — use h3_stream_kind_from_type_byte() after
+    reading the first varint of the stream payload.
+    """
+    if h3_stream_id_is_bidi(stream_id):
+        return H3StreamKind.Bidi
+    else:
+        return H3StreamKind.UniUnknown(type_code: -1)

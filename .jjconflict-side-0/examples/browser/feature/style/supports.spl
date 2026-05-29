@@ -1,0 +1,169 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+# CSS @supports query evaluation.
+# Parses (property: value) feature detection queries.
+# Supports not(), and, or combinators.
+# Pure string matching — no style resolution or rendering.
+
+# ---------------------------------------------------------------------------
+# known_properties — list of CSS properties this engine supports.
+# ---------------------------------------------------------------------------
+
+fn known_properties() -> [text]:
+    val props: [text] = [
+        "display",
+        "color",
+        "background-color",
+        "background",
+        "opacity",
+        "position",
+        "top",
+        "left",
+        "right",
+        "bottom",
+        "width",
+        "height",
+        "min-width",
+        "min-height",
+        "max-width",
+        "max-height",
+        "margin",
+        "margin-top",
+        "margin-left",
+        "margin-right",
+        "margin-bottom",
+        "padding",
+        "padding-top",
+        "padding-left",
+        "padding-right",
+        "padding-bottom",
+        "border",
+        "border-width",
+        "border-color",
+        "border-style",
+        "border-radius",
+        "font-size",
+        "font-family",
+        "font-weight",
+        "font-style",
+        "line-height",
+        "text-align",
+        "text-decoration",
+        "color",
+        "overflow",
+        "overflow-x",
+        "overflow-y",
+        "transform",
+        "transition",
+        "animation",
+        "object-fit",
+        "object-position",
+        "visibility",
+        "z-index",
+        "cursor",
+        "pointer-events",
+        "box-sizing",
+        "flex",
+        "flex-direction",
+        "flex-wrap",
+        "flex-grow",
+        "flex-shrink",
+        "flex-basis",
+        "align-items",
+        "align-self",
+        "justify-content",
+        "gap",
+        "outline",
+        "box-shadow",
+        "text-shadow",
+        "white-space",
+        "word-break",
+        "overflow-wrap",
+        "vertical-align",
+        "float",
+        "clear",
+        "content",
+        "list-style",
+        "counter-reset",
+        "counter-increment"
+    ]
+    props
+
+# ---------------------------------------------------------------------------
+# eval_supports_query — evaluate a @supports condition string.
+# ---------------------------------------------------------------------------
+
+fn eval_supports_query(query: text) -> bool:
+    val trimmed = query.trim()
+    if trimmed.len() == 0:
+        return false
+
+    # Handle "not (condition)"
+    if trimmed.starts_with("not "):
+        val rest = trimmed.slice(4, trimmed.len()).trim()
+        return not eval_supports_query(rest)
+
+    # Handle "A and B" — split on " and "
+    val and_pos = _find_combinator(trimmed, " and ")
+    if and_pos >= 0:
+        val left = trimmed.slice(0, and_pos).trim()
+        val right = trimmed.slice(and_pos + 5, trimmed.len()).trim()
+        return eval_supports_query(left) and eval_supports_query(right)
+
+    # Handle "A or B" — split on " or "
+    val or_pos = _find_combinator(trimmed, " or ")
+    if or_pos >= 0:
+        val left = trimmed.slice(0, or_pos).trim()
+        val right = trimmed.slice(or_pos + 4, trimmed.len()).trim()
+        return eval_supports_query(left) or eval_supports_query(right)
+
+    # Handle "(property: value)" single condition
+    if trimmed.starts_with("(") and trimmed.ends_with(")"):
+        val inner = trimmed.slice(1, trimmed.len() - 1).trim()
+        return _eval_single(inner)
+
+    false
+
+# ---------------------------------------------------------------------------
+# Internal helpers.
+# ---------------------------------------------------------------------------
+
+fn _eval_single(condition: text) -> bool:
+    # Custom properties (--name: value) are always supported
+    if condition.starts_with("--"):
+        return true
+
+    # Find the colon separating property from value
+    val colon_pos = condition.index_of(":")
+    if colon_pos < 0:
+        return false
+
+    val prop = condition.slice(0, colon_pos).trim()
+    # Check if property is in the known list
+    val props = known_properties()
+    for p in props:
+        if p == prop:
+            return true
+    false
+
+fn _find_combinator(s: text, combinator: text) -> i64:
+    # Find combinator outside parentheses (depth=0)
+    var depth = 0
+    var i = 0
+    val slen = s.len()
+    val clen = combinator.len()
+    while i < slen:
+        val ch = s.slice(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        else if ch == ")":
+            depth = depth - 1
+        else if depth == 0:
+            # Check if combinator starts here
+            if i + clen <= slen:
+                val candidate = s.slice(i, i + clen)
+                if candidate == combinator:
+                    return i
+        i = i + 1
+    -1

@@ -1,0 +1,94 @@
+# Editor Document — file path, language ID, and cached metadata for open files.
+#
+# Provides: EditorDocument.
+
+use std.editor.buffer.buffer.{EditorBuffer}
+use std.editor.common.types.{EditorBufferId, EditorDocumentId}
+use std.editor.view.markdown_state.{MarkdownState}
+use std.editor.view.md_editing.{MdEditorState, md_editor_state_new}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn _language_id_from_path(path: text) -> text:
+    if path.ends_with(".md") or path.ends_with(".markdown"):
+        return "markdown"
+    if path.ends_with(".spl"):
+        return "simple"
+    if path.ends_with(".rs"):
+        return "rust"
+    if path.ends_with(".json"):
+        return "json"
+    if path.ends_with(".ts") or path.ends_with(".tsx"):
+        return "typescript"
+    if path.ends_with(".js") or path.ends_with(".jsx"):
+        return "javascript"
+    "plaintext"
+
+class EditorDocument:
+    id: EditorDocumentId
+    _path: text
+    language_id: text
+    content: text
+    cached_md_stats: text
+    modified: bool
+    buffer: EditorBuffer
+    md_state: MarkdownState?
+
+    static fn from_path(path: text) -> EditorDocument:
+        val content = rt_file_read_text(path)
+        val lang = _language_id_from_path(path)
+        EditorDocument(
+            id: EditorDocumentId(value: 0),
+            _path: path,
+            language_id: lang,
+            content: content,
+            cached_md_stats: "",
+            modified: false,
+            buffer: EditorBuffer.from_text(EditorBufferId(value: 0), content),
+            md_state: nil
+        )
+
+    static fn empty() -> EditorDocument:
+        EditorDocument(
+            id: EditorDocumentId(value: 0),
+            _path: "",
+            language_id: "plaintext",
+            content: "",
+            cached_md_stats: "",
+            modified: false,
+            buffer: EditorBuffer.new(),
+            md_state: nil
+        )
+
+    fn path() -> text:
+        me._path
+
+    fn has_markdown_state() -> bool:
+        me.md_state != nil
+
+    fn markdown_state() -> MdEditorState:
+        val ms = me.md_state
+        if ms == nil:
+            return md_editor_state_new()
+        MdEditorState(preview_visible: ms.preview_visible, outline_visible: ms.outline_visible)
+
+    me set_markdown_state(state: MdEditorState):
+        var ms = me.md_state
+        if ms == nil:
+            ms = MarkdownState.new()
+        ms.preview_visible = state.preview_visible
+        ms.outline_visible = state.outline_visible
+        me.md_state = ms
+
+    fn doc_id() -> EditorDocumentId:
+        me.id
+
+    me save(new_content: text) -> bool:
+        if me._path == "":
+            return false
+        val ok = rt_file_write_text(me._path, new_content)
+        if ok:
+            me.content = new_content
+            me.modified = false
+        ok

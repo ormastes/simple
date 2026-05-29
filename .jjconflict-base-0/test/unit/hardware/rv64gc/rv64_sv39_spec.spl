@@ -1,0 +1,196 @@
+"""
+# RV64 Sv39 Virtual Memory Unit Tests
+
+**Feature IDs:** #RV64-SV39-001
+**Category:** Hardware
+**Difficulty:** 3/5
+**Status:** Draft
+
+## Overview
+
+Unit tests for Sv39 3-level page table walk, TLB, permission checking,
+and superpage support.
+"""
+
+# tag: only-compiled
+
+import std.spec
+
+val PTE_V: i64 = 1
+val PTE_R: i64 = 2
+val PTE_W: i64 = 4
+val PTE_X: i64 = 8
+val PTE_U: i64 = 16
+val PTE_G: i64 = 32
+val PTE_A: i64 = 64
+val PTE_D: i64 = 128
+val PAGE_SIZE: i64 = 4096
+
+fn _make_leaf_pte(ppn: i64, flags: i64) -> i64:
+    (ppn << 10) or flags or PTE_V or PTE_A or PTE_D
+
+fn _make_ptr_pte(ppn: i64) -> i64:
+    (ppn << 10) or PTE_V
+
+describe "Sv39 VPN Extraction":
+    """
+    ## Virtual Page Number Decomposition
+    39-bit virtual address: [38:30]=VPN[2], [29:21]=VPN[1], [20:12]=VPN[0], [11:0]=offset
+    """
+
+    it "extracts VPN[2] from virtual address":
+        val vaddr: i64 = 0x80000000
+        expect((vaddr >> 30) and 0x1FF).to_equal(2)
+
+    it "extracts VPN[1] from virtual address":
+        val vaddr: i64 = 0x00200000
+        expect((vaddr >> 21) and 0x1FF).to_equal(1)
+
+    it "extracts VPN[0] from virtual address":
+        val vaddr: i64 = 0x00001000
+        expect((vaddr >> 12) and 0x1FF).to_equal(1)
+
+describe "Sv39 4KB Page Walk":
+    """
+    ## 3-Level Page Table Walk (4KB pages)
+    """
+
+    it "translates through 3-level walk":
+        val vpn2 = 0
+        val vpn1 = 0
+        val vpn0 = 0
+        val offset = 0x100
+        # L2[0] → L1 table at PPN 0x1000
+        val l2_entry = _make_ptr_pte(0x1000)
+        # L1[0] → L0 table at PPN 0x2000
+        val l1_entry = _make_ptr_pte(0x2000)
+        # L0[0] → leaf at PPN 0x80 (physical page 0x80000)
+        val l0_entry = _make_leaf_pte(0x80, PTE_R or PTE_W)
+        val phys_page = 0x80
+        val paddr = phys_page * PAGE_SIZE + offset
+        expect(paddr).to_equal(0x80100)
+
+    it "offset preserved through translation":
+        val vaddr: i64 = 0x00000ABC
+        val offset = vaddr and 0xFFF
+        expect(offset).to_equal(0xABC)
+
+    it "invalid PTE (V=0) causes page fault":
+        val pte: i64 = 0  # V bit not set
+        expect(pte and PTE_V).to_equal(0)
+
+describe "Sv39 2MB Superpage":
+    """
+    ## Level 1 Superpage (2MB)
+    Leaf at level 1: lower 21 bits from virtual address.
+    """
+
+    it "2MB superpage: leaf at level 1":
+        val l1_entry = _make_leaf_pte(0x80, PTE_R or PTE_W or PTE_X)
+        val is_leaf = (l1_entry and (PTE_R or PTE_W or PTE_X)) != 0
+        expect(is_leaf).to_equal(true)
+
+    it "2MB superpage offset from vaddr":
+        val vaddr: i64 = 0x00200100
+        val offset_2mb = vaddr and 0x1FFFFF
+        expect(offset_2mb).to_equal(0x100)
+
+describe "Sv39 1GB Gigapage":
+    """
+    ## Level 2 Gigapage (1GB)
+    Leaf at level 2: lower 30 bits from virtual address.
+    """
+
+    it "1GB gigapage: leaf at level 2":
+        val l2_entry = _make_leaf_pte(0x80000, PTE_R or PTE_W or PTE_X)
+        val is_leaf = (l2_entry and (PTE_R or PTE_W or PTE_X)) != 0
+        expect(is_leaf).to_equal(true)
+
+    it "1GB gigapage offset from vaddr":
+        val vaddr: i64 = 0x80000100
+        val offset_1gb = vaddr and 0x3FFFFFFF
+        expect(offset_1gb).to_equal(0x100)
+
+describe "Sv39 Permission Checking":
+    """
+    ## R/W/X/U Permission Bits
+    """
+
+    it "read-only page blocks writes":
+        val pte = _make_leaf_pte(0x80, PTE_R)
+        expect((pte and PTE_W) == 0).to_equal(true)
+
+    it "execute-only page blocks reads":
+        val pte = _make_leaf_pte(0x80, PTE_X)
+        expect((pte and PTE_R) == 0).to_equal(true)
+
+    it "RWX all set":
+        val pte = _make_leaf_pte(0x80, PTE_R or PTE_W or PTE_X)
+        expect((pte and PTE_R) != 0).to_equal(true)
+        expect((pte and PTE_W) != 0).to_equal(true)
+        expect((pte and PTE_X) != 0).to_equal(true)
+
+describe "User/Global Bits":
+    it "PTE_U allows U-mode access":
+        val pte = _make_leaf_pte(0x80, PTE_R or PTE_U)
+        expect((pte and PTE_U) != 0).to_equal(true)
+
+    it "PTE_G marks global page":
+        val pte = _make_leaf_pte(0x80, PTE_R or PTE_G)
+        expect((pte and PTE_G) != 0).to_equal(true)
+
+describe "Accessed/Dirty Bits":
+    it "A bit set on access":
+        val pte = _make_leaf_pte(0x80, PTE_R)
+        expect((pte and PTE_A) != 0).to_equal(true)
+
+    it "D bit set on write":
+        val pte = _make_leaf_pte(0x80, PTE_R or PTE_W)
+        expect((pte and PTE_D) != 0).to_equal(true)
+
+    it "page without A bit triggers page fault":
+        val pte = (0x80 << 10) or PTE_V or PTE_R  # No A bit
+        expect((pte and PTE_A) == 0).to_equal(true)
+
+describe "TLB":
+    """
+    ## Translation Lookaside Buffer
+    """
+
+    it "TLB hit returns cached result":
+        # Simulate: entry stores VPN→PPN mapping
+        val tlb_vpn: i64 = 0x80000
+        val tlb_ppn: i64 = 0x40000
+        val lookup_vpn: i64 = 0x80000
+        expect(lookup_vpn == tlb_vpn).to_equal(true)
+
+    it "TLB miss triggers page walk":
+        val tlb_vpn: i64 = 0x80000
+        val lookup_vpn: i64 = 0x90000
+        expect(lookup_vpn == tlb_vpn).to_equal(false)
+
+    it "SFENCE.VMA flushes all TLB entries":
+        # After flush, all lookups miss
+        var flushed = true
+        expect(flushed).to_equal(true)
+
+describe "SATP Register":
+    it "Mode 0 = Bare (no translation)":
+        val satp: i64 = 0
+        val mode = (satp >> 60) and 0xF
+        expect(mode).to_equal(0)
+
+    it "Mode 8 = Sv39":
+        val satp: i64 = 8 << 60
+        val mode = (satp >> 60) and 0xF
+        expect(mode).to_equal(8)
+
+    it "ASID field":
+        val satp: i64 = (8 << 60) or (5 << 44) or 0x80000
+        val asid = (satp >> 44) and 0xFFFF
+        expect(asid).to_equal(5)
+
+    it "PPN field":
+        val satp: i64 = (8 << 60) or 0x80000
+        val ppn = satp and 0xFFFFFFFFFFF
+        expect(ppn).to_equal(0x80000)

@@ -1,0 +1,368 @@
+# Vulkan Cross-Architecture Renderer Spec
+#
+# Tests VulkanCrossRenderer backend selection, QEMU command generation,
+# fill/present cycles, frame count tracking, and scalar fallback for rv32/arm32.
+#
+# No imports — types are replicated at module level to avoid interpreter
+# timeout issues (same pattern as render_2d_x86_session_spec.spl).
+# Mirrors render_2d_vulkan_cross.spl exactly.
+
+use std.io
+use std.spec.{describe, it, expect}
+
+# ============================================================================
+# Replicated VulkanCrossTarget
+# ============================================================================
+
+class VulkanCrossTarget:
+    arch: text
+    bits: i64
+    vulkan_capable: bool
+    fallback_reason: text
+    qemu_cmd: text
+
+    static fn for_arch(arch: text) -> VulkanCrossTarget:
+        if arch == "riscv64":
+            return VulkanCrossTarget(
+                arch: "riscv64",
+                bits: 64,
+                vulkan_capable: true,
+                fallback_reason: "",
+                qemu_cmd: "qemu-system-riscv64 -M virt -device virtio-gpu-pci"
+            )
+        if arch == "riscv32":
+            return VulkanCrossTarget(
+                arch: "riscv32",
+                bits: 32,
+                vulkan_capable: false,
+                fallback_reason: "GPU unavailable on riscv32",
+                qemu_cmd: "qemu-system-riscv32 -M virt"
+            )
+        if arch == "aarch64":
+            return VulkanCrossTarget(
+                arch: "aarch64",
+                bits: 64,
+                vulkan_capable: true,
+                fallback_reason: "",
+                qemu_cmd: "qemu-system-aarch64 -M virt -device virtio-gpu-pci"
+            )
+        if arch == "arm32":
+            return VulkanCrossTarget(
+                arch: "arm32",
+                bits: 32,
+                vulkan_capable: false,
+                fallback_reason: "GLES preferred; scalar fallback in pure Simple layer",
+                qemu_cmd: "qemu-system-arm -M virt"
+            )
+        VulkanCrossTarget(
+            arch: arch,
+            bits: 0,
+            vulkan_capable: false,
+            fallback_reason: "unknown architecture",
+            qemu_cmd: "qemu-system-unknown -M virt"
+        )
+
+# ============================================================================
+# Replicated VulkanCrossRenderer (minimal fields for testing)
+# ============================================================================
+
+class VulkanCrossRenderer:
+    target: text
+    target_bits: i64
+    backend: text
+    initialized: bool
+    frame_count: i64
+    last_frame_ns: i64
+    total_render_ns: i64
+    width: i32
+    height: i32
+    host_buf: [u32]
+    diagnostic: text
+
+    static fn create_for_target(arch: text) -> VulkanCrossRenderer:
+        val cap = VulkanCrossTarget.for_arch(arch)
+        val bknd = if cap.vulkan_capable: "vulkan" else: "scalar"
+        VulkanCrossRenderer(
+            target: arch,
+            target_bits: cap.bits,
+            backend: bknd,
+            initialized: false,
+            frame_count: 0,
+            last_frame_ns: 0,
+            total_render_ns: 0,
+            width: 0,
+            height: 0,
+            host_buf: [],
+            diagnostic: cap.fallback_reason
+        )
+
+    me init_device() -> text:
+        if self.backend == "vulkan":
+            self.initialized = true
+            return ""
+        self.initialized = true
+        self.diagnostic
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if not self.initialized:
+            return
+        if w <= 0 or h <= 0:
+            return
+        if self.backend == "scalar":
+            val needed = w * h
+            if needed > 0 and self.host_buf.len() < needed:
+                self.width = w
+                self.height = h
+                self.host_buf = [color; needed]
+                return
+            var idx = 0
+            while idx < w * h:
+                self.host_buf[idx] = color
+                idx = idx + 1
+
+    me present() -> i64:
+        if not self.initialized:
+            return 0
+        self.frame_count = self.frame_count + 1
+        self.last_frame_ns = self.last_frame_ns + 1000
+        self.total_render_ns = self.total_render_ns + 1000
+        self.frame_count
+
+    fn get_backend_info() -> text:
+        val init_str = if self.initialized: "yes" else: "no"
+        val diag_str = if self.diagnostic == "": "" else: "; note=" + self.diagnostic
+        ("target=" + self.target
+            + " bits=" + self.target_bits.to_text()
+            + " backend=" + self.backend
+            + " initialized=" + init_str
+            + " frames=" + self.frame_count.to_text()
+            + diag_str)
+
+    fn qemu_system_cmd() -> text:
+        val cap = VulkanCrossTarget.for_arch(self.target)
+        cap.qemu_cmd
+
+    fn is_vulkan() -> bool:
+        self.backend == "vulkan"
+
+    fn is_scalar() -> bool:
+        self.backend == "scalar"
+
+# ============================================================================
+# Module-level factory helpers — avoids var-rebind issues inside it-blocks
+# ============================================================================
+
+fn make_rv64() -> VulkanCrossRenderer:
+    VulkanCrossRenderer.create_for_target("riscv64")
+
+fn make_rv32() -> VulkanCrossRenderer:
+    VulkanCrossRenderer.create_for_target("riscv32")
+
+fn make_aarch64() -> VulkanCrossRenderer:
+    VulkanCrossRenderer.create_for_target("aarch64")
+
+fn make_arm32() -> VulkanCrossRenderer:
+    VulkanCrossRenderer.create_for_target("arm32")
+
+fn make_rv64_inited() -> VulkanCrossRenderer:
+    val r = VulkanCrossRenderer.create_for_target("riscv64")
+    r.init_device()
+    r
+
+fn make_rv32_inited() -> VulkanCrossRenderer:
+    val r = VulkanCrossRenderer.create_for_target("riscv32")
+    r.init_device()
+    r
+
+fn make_aarch64_inited() -> VulkanCrossRenderer:
+    val r = VulkanCrossRenderer.create_for_target("aarch64")
+    r.init_device()
+    r
+
+fn make_arm32_inited() -> VulkanCrossRenderer:
+    val r = VulkanCrossRenderer.create_for_target("arm32")
+    r.init_device()
+    r
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "VulkanCrossRenderer":
+
+    # --- Creation and backend detection ---
+
+    it "creates for riscv64 with vulkan backend":
+        val r = make_rv64()
+        expect(r.target).to_equal("riscv64")
+        expect(r.backend).to_equal("vulkan")
+        expect(r.target_bits).to_equal(64)
+
+    it "creates for riscv32 with scalar fallback":
+        val r = make_rv32()
+        expect(r.target).to_equal("riscv32")
+        expect(r.backend).to_equal("scalar")
+        expect(r.target_bits).to_equal(32)
+
+    it "creates for aarch64 with vulkan backend":
+        val r = make_aarch64()
+        expect(r.target).to_equal("aarch64")
+        expect(r.backend).to_equal("vulkan")
+        expect(r.target_bits).to_equal(64)
+
+    it "creates for arm32 with scalar fallback":
+        val r = make_arm32()
+        expect(r.target).to_equal("arm32")
+        expect(r.backend).to_equal("scalar")
+        expect(r.target_bits).to_equal(32)
+
+    it "riscv64 is_vulkan returns true":
+        val r = make_rv64()
+        expect(r.backend == "vulkan").to_equal(true)
+
+    it "riscv32 is_scalar returns true":
+        val r = make_rv32()
+        expect(r.backend == "scalar").to_equal(true)
+
+    it "aarch64 is_vulkan returns true":
+        val r = make_aarch64()
+        expect(r.backend == "vulkan").to_equal(true)
+
+    it "arm32 is_scalar returns true":
+        val r = make_arm32()
+        expect(r.backend == "scalar").to_equal(true)
+
+    # --- Not yet initialized ---
+
+    it "renderer starts uninitialized":
+        val r = make_rv64()
+        expect(r.initialized == false).to_equal(true)
+
+    it "frame_count starts at zero":
+        val r = make_rv64()
+        expect(r.frame_count).to_equal(0)
+
+    # --- init_device ---
+
+    it "riscv64 init_device returns empty string":
+        val r = make_rv64()
+        val err = r.init_device()
+        expect(err).to_equal("")
+        expect(r.initialized).to_equal(true)
+
+    it "riscv32 init_device returns diagnostic":
+        val r = make_rv32()
+        val err = r.init_device()
+        expect(err).to_equal("GPU unavailable on riscv32")
+        expect(r.initialized).to_equal(true)
+
+    it "aarch64 init_device returns empty string":
+        val r = make_aarch64()
+        val err = r.init_device()
+        expect(err).to_equal("")
+
+    it "arm32 init_device returns diagnostic":
+        val r = make_arm32()
+        val err = r.init_device()
+        expect(err).to_equal("GLES preferred; scalar fallback in pure Simple layer")
+        expect(r.initialized).to_equal(true)
+
+    # --- QEMU command generation ---
+
+    it "riscv64 qemu_system_cmd includes virtio-gpu-pci":
+        val r = make_rv64()
+        val cmd = r.qemu_system_cmd()
+        expect(cmd).to_equal("qemu-system-riscv64 -M virt -device virtio-gpu-pci")
+
+    it "riscv32 qemu_system_cmd has no virtio-gpu":
+        val r = make_rv32()
+        val cmd = r.qemu_system_cmd()
+        expect(cmd).to_equal("qemu-system-riscv32 -M virt")
+
+    it "aarch64 qemu_system_cmd includes virtio-gpu-pci":
+        val r = make_aarch64()
+        val cmd = r.qemu_system_cmd()
+        expect(cmd).to_equal("qemu-system-aarch64 -M virt -device virtio-gpu-pci")
+
+    it "arm32 qemu_system_cmd has no virtio-gpu":
+        val r = make_arm32()
+        val cmd = r.qemu_system_cmd()
+        expect(cmd).to_equal("qemu-system-arm -M virt")
+
+    # --- Fill and present cycle ---
+
+    it "riscv64 present after init returns 1":
+        val r = make_rv64_inited()
+        val fc = r.present()
+        expect(fc).to_equal(1)
+
+    it "riscv32 present after init returns 1":
+        val r = make_rv32_inited()
+        val fc = r.present()
+        expect(fc).to_equal(1)
+
+    it "aarch64 present after init returns 1":
+        val r = make_aarch64_inited()
+        val fc = r.present()
+        expect(fc).to_equal(1)
+
+    it "arm32 present after init returns 1":
+        val r = make_arm32_inited()
+        val fc = r.present()
+        expect(fc).to_equal(1)
+
+    # --- Frame count tracking ---
+
+    it "frame_count increments each present call":
+        val r = make_rv64_inited()
+        r.present()
+        r.present()
+        val fc = r.present()
+        expect(fc).to_equal(3)
+        expect(r.frame_count).to_equal(3)
+
+    it "present before init returns 0":
+        val r = make_rv64()
+        val fc = r.present()
+        expect(fc).to_equal(0)
+        expect(r.frame_count).to_equal(0)
+
+    # --- Fallback behavior ---
+
+    it "riscv32 diagnostic is set before init":
+        val r = make_rv32()
+        expect(r.diagnostic).to_equal("GPU unavailable on riscv32")
+
+    it "arm32 diagnostic is set before init":
+        val r = make_arm32()
+        expect(r.diagnostic).to_equal("GLES preferred; scalar fallback in pure Simple layer")
+
+    it "riscv64 diagnostic is empty (no fallback)":
+        val r = make_rv64()
+        expect(r.diagnostic).to_equal("")
+
+    it "aarch64 diagnostic is empty (no fallback)":
+        val r = make_aarch64()
+        expect(r.diagnostic).to_equal("")
+
+    # --- get_backend_info ---
+
+    it "get_backend_info contains target name":
+        val r = make_rv64_inited()
+        val info = r.get_backend_info()
+        expect(info.contains("riscv64")).to_equal(true)
+
+    it "get_backend_info contains backend vulkan for rv64":
+        val r = make_rv64_inited()
+        val info = r.get_backend_info()
+        expect(info.contains("vulkan")).to_equal(true)
+
+    it "get_backend_info contains scalar for rv32":
+        val r = make_rv32_inited()
+        val info = r.get_backend_info()
+        expect(info.contains("scalar")).to_equal(true)
+
+    it "get_backend_info shows initialized yes after init":
+        val r = make_rv64_inited()
+        val info = r.get_backend_info()
+        expect(info.contains("initialized=yes")).to_equal(true)

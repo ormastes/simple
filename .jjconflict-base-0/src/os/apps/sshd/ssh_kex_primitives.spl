@@ -1,0 +1,624 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SSH Key Exchange — Low-level byte primitives, structs, and algorithm name builders.
+# Split from ssh_kex.spl to keep file sizes manageable.
+
+use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_bool, ssh_put_mpint, ssh_get_string, SshStringResult}
+use std.format.{format_hex}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SSH_MSG_KEX_ECDH_INIT: u8 = 30
+val SSH_MSG_KEX_ECDH_REPLY: u8 = 31
+val _SSH_KEX_HANDLE_TAG: [u8] = [0x53, 0x53, 0x48, 0x4b, 0x45, 0x58, 0x31, 0x39]
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct SshKexState:
+    """State for Curve25519 key exchange."""
+    server_private: [u8]    # 32-byte ephemeral private key
+    server_public: [u8]     # 32-byte ephemeral public key
+    client_public: [u8]     # Client's ephemeral public key
+    shared_secret: [u8]     # 32-byte DH shared secret
+    exchange_hash: [u8]     # H = SHA-256(...)
+    session_id: [u8]        # First exchange hash (stays fixed)
+
+struct SshSessionKeys:
+    """Derived session keys for encryption and MAC."""
+    iv_c2s: [u8]            # Initial IV, client-to-server (12 bytes for GCM)
+    iv_s2c: [u8]            # Initial IV, server-to-client
+    enc_key_c2s: [u8]       # Encryption key, client-to-server (32 bytes)
+    enc_key_s2c: [u8]       # Encryption key, server-to-client
+    mac_key_c2s: [u8]       # Integrity key, client-to-server (32 bytes)
+    mac_key_s2c: [u8]       # Integrity key, server-to-client
+
+struct HostKeySet:
+    """Server host key material for all supported host key algorithms.
+
+    Each field holds an optional private key in the format expected by the
+    corresponding signing primitive:
+      ed25519_seed       — 32-byte Ed25519 private seed (RFC 8709)
+      rsa_pkcs8          — PKCS#8 v1 DER RSA private key (RFC 8332)
+      rsa_public_blob    — SSH wire-format RSA public key blob
+      ecdsa_p256_pkcs8   — PKCS#8 v1 DER ECDSA P-256 private key (RFC 5656)
+
+    Algorithms are advertised in priority order by advertised_algorithms().
+    """
+    ed25519_seed: [u8]?
+    rsa_pkcs8: [u8]?
+    rsa_public_blob: [u8]?
+    ecdsa_p256_pkcs8: [u8]?
+
+struct HostCertificateSet:
+    """Optional OpenSSH host certificate blobs keyed by advertised algorithm."""
+    ssh_ed25519_cert: [u8]?
+    rsa_sha2_256_cert: [u8]?
+    rsa_sha2_512_cert: [u8]?
+
+# ============================================================================
+# Core byte helpers
+# ============================================================================
+
+fn _u8_at(data: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(data, idx.to_i64()).to_u8()
+
+fn _append_byte(buf: [u8], byte_val: u8) -> [u8]:
+    var out = buf
+    out.push(byte_val)
+    out
+
+fn _concat_bytes(a: [u8], b: [u8]) -> [u8]:
+    var out = a
+    var i: u64 = 0
+    while i < b.len():
+        out.push(_u8_at(b, i))
+        i = i + 1
+    out
+
+fn _encode_handle_backed_private_key(handle: i64) -> [u8]:
+    var encoded = _SSH_KEX_HANDLE_TAG
+    var remaining = handle.to_u64()
+    var i: u64 = 0
+    while i < 8:
+        encoded.push((remaining & 0xFF).to_u8())
+        remaining = remaining >> 8
+        i = i + 1
+    while encoded.len() < 32:
+        encoded.push(0)
+    encoded
+
+fn _is_handle_backed_private_key(private: [u8]) -> bool:
+    if private.len() != 32:
+        return false
+    var i: u64 = 0
+    while i < _SSH_KEX_HANDLE_TAG.len():
+        if private[i] != _SSH_KEX_HANDLE_TAG[i]:
+            return false
+        i = i + 1
+    true
+
+fn _decode_handle_backed_private_key(private: [u8]) -> i64:
+    var handle: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        handle = handle | (private[8 + i].to_u64() << (i * 8))
+        i = i + 1
+    handle.to_i64()
+
+fn _zeroed_32_bytes() -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _x25519_basepoint() -> [u8]:
+    var base: [u8] = [9]
+    var i: u64 = 1
+    while i < 32:
+        base.push(0)
+        i = i + 1
+    base
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _reverse_bytes(data: [u8]) -> [u8]:
+    var out: [u8] = []
+    if data.len() == 0:
+        return out
+    var i: i64 = data.len().to_i64() - 1
+    while i >= 0:
+        out.push(_u8_at(data, i.to_u64()))
+        i = i - 1
+    out
+
+fn _bytes_to_hex(data: [u8]) -> text:
+    var out = ""
+    var i: u64 = 0
+    while i < data.len():
+        val piece = format_hex(_u8_at(data, i).to_i64())
+        if piece.len() == 1:
+            out = out + "0" + piece
+        else:
+            out = out + piece
+        i = i + 1
+    out
+
+fn _push_bytes(buf: [u8], data: [u8]) -> [u8]:
+    var out = buf
+    var i: u64 = 0
+    while i < data.len():
+        out = _append_byte(out, _u8_at(data, i))
+        i = i + 1
+    out
+
+fn _push_u32_literal(buf: [u8], b0: u8, b1: u8, b2: u8, b3: u8) -> [u8]:
+    var out = buf
+    out = _append_byte(out, b0)
+    out = _append_byte(out, b1)
+    out = _append_byte(out, b2)
+    out = _append_byte(out, b3)
+    out
+
+fn _u32_be_bytes(data_len: u64) -> [u8]:
+    _push_u32_literal(
+        [],
+        ((data_len >> 24) & 0xFF).to_u8(),
+        ((data_len >> 16) & 0xFF).to_u8(),
+        ((data_len >> 8) & 0xFF).to_u8(),
+        (data_len & 0xFF).to_u8()
+    )
+
+fn _push_string_bytes(buf: [u8], data: [u8]) -> [u8]:
+    var data_len: u64 = data.len()
+    var out = _push_u32_literal(
+        buf,
+        ((data_len >> 24) & 0xFF).to_u8(),
+        ((data_len >> 16) & 0xFF).to_u8(),
+        ((data_len >> 8) & 0xFF).to_u8(),
+        (data_len & 0xFF).to_u8()
+    )
+    out = _push_bytes(out, data)
+    out
+
+fn _push_string_32(buf: [u8], data: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x20)
+    out = _push_bytes(out, data)
+    out
+
+fn _push_string_64(buf: [u8], data: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x40)
+    out = _push_bytes(out, data)
+    out
+
+fn _concat_ssh_string_field(data: [u8]) -> [u8]:
+    _concat_bytes(_u32_be_bytes(data.len()), data)
+
+fn _slice_bytes(data: [u8], start: u64, length: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < length and start + i < data.len():
+        out.push(_u8_at(data, start + i))
+        i = i + 1
+    out
+
+fn _concat_mpint_field(val_bytes: [u8]) -> [u8]:
+    var start: u64 = 0
+    while start < val_bytes.len() and _u8_at(val_bytes, start) == 0:
+        start = start + 1
+
+    if start >= val_bytes.len():
+        return _u32_be_bytes(0)
+
+    var body: [u8] = []
+    if (_u8_at(val_bytes, start) & 0x80) != 0:
+        body = _append_byte(body, 0)
+    body = _concat_bytes(body, _slice_bytes(val_bytes, start, val_bytes.len() - start))
+    _concat_ssh_string_field(body)
+
+fn _push_mpint_bytes(buf: [u8], val_bytes: [u8]) -> [u8]:
+    var start: u64 = 0
+    while start < val_bytes.len() and _u8_at(val_bytes, start) == 0:
+        start = start + 1
+
+    if start >= val_bytes.len():
+        return _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x00)
+
+    var body: [u8] = []
+    if (_u8_at(val_bytes, start) & 0x80) != 0:
+        body = _append_byte(body, 0)
+
+    var i: u64 = start
+    while i < val_bytes.len():
+        body = _append_byte(body, _u8_at(val_bytes, i))
+        i = i + 1
+
+    _push_string_bytes(buf, body)
+
+fn _push_ascii_text(buf: [u8], bytes: [u8]) -> [u8]:
+    """Append a fixed ASCII SSH string without relying on text-to-bytes externs."""
+    ssh_put_string(buf, bytes)
+
+# ============================================================================
+# Algorithm name byte builders
+# ============================================================================
+
+fn _push_ssh_ed25519_bytes(buf: [u8]) -> [u8]:
+    var out = buf
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x68)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x65)
+    out = _append_byte(out, 0x64)
+    out = _append_byte(out, 0x32)
+    out = _append_byte(out, 0x35)
+    out = _append_byte(out, 0x35)
+    out = _append_byte(out, 0x31)
+    out = _append_byte(out, 0x39)
+    out
+
+fn _push_rsa_sha2_pair_bytes(buf: [u8]) -> [u8]:
+    var out = buf
+    out = _append_byte(out, 0x72)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x61)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x68)
+    out = _append_byte(out, 0x61)
+    out = _append_byte(out, 0x32)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x32)
+    out = _append_byte(out, 0x35)
+    out = _append_byte(out, 0x36)
+    out = _append_byte(out, 0x2C)
+    out = _append_byte(out, 0x72)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x61)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x68)
+    out = _append_byte(out, 0x61)
+    out = _append_byte(out, 0x32)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x35)
+    out = _append_byte(out, 0x31)
+    out = _append_byte(out, 0x32)
+    out
+
+fn _push_ecdsa_p256_bytes(buf: [u8]) -> [u8]:
+    var out = buf
+    out = _append_byte(out, 0x65)
+    out = _append_byte(out, 0x63)
+    out = _append_byte(out, 0x64)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x61)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x68)
+    out = _append_byte(out, 0x61)
+    out = _append_byte(out, 0x32)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x6E)
+    out = _append_byte(out, 0x69)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x74)
+    out = _append_byte(out, 0x70)
+    out = _append_byte(out, 0x32)
+    out = _append_byte(out, 0x35)
+    out = _append_byte(out, 0x36)
+    out
+
+fn _push_ssh_ed25519(buf: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x0B)
+    out = _push_ssh_ed25519_bytes(out)
+    out
+
+fn _push_rsa_sha2_pair(buf: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x19)
+    out = _push_rsa_sha2_pair_bytes(out)
+    out
+
+fn _push_ecdsa_p256(buf: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x13)
+    out = _push_ecdsa_p256_bytes(out)
+    out
+
+fn _push_ed25519_rsa_pair(buf: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x25)
+    out = _push_ssh_ed25519_bytes(out)
+    out = _append_byte(out, 0x2C)
+    out = _push_rsa_sha2_pair_bytes(out)
+    out
+
+fn _push_ed25519_ecdsa(buf: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x1F)
+    out = _push_ssh_ed25519_bytes(out)
+    out = _append_byte(out, 0x2C)
+    out = _push_ecdsa_p256_bytes(out)
+    out
+
+fn _push_rsa_pair_ecdsa(buf: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x2D)
+    out = _push_rsa_sha2_pair_bytes(out)
+    out = _append_byte(out, 0x2C)
+    out = _push_ecdsa_p256_bytes(out)
+    out
+
+fn _push_all_host_key_algorithms(buf: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x39)
+    out = _push_ssh_ed25519_bytes(out)
+    out = _append_byte(out, 0x2C)
+    out = _push_rsa_sha2_pair_bytes(out)
+    out = _append_byte(out, 0x2C)
+    out = _push_ecdsa_p256_bytes(out)
+    out
+
+fn _push_curve25519_sha256(buf: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x2E)
+    out = _append_byte(out, 0x63)
+    out = _append_byte(out, 0x75)
+    out = _append_byte(out, 0x72)
+    out = _append_byte(out, 0x76)
+    out = _append_byte(out, 0x65)
+    out = _append_byte(out, 0x32)
+    out = _append_byte(out, 0x35)
+    out = _append_byte(out, 0x35)
+    out = _append_byte(out, 0x31)
+    out = _append_byte(out, 0x39)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x68)
+    out = _append_byte(out, 0x61)
+    out = _append_byte(out, 0x32)
+    out = _append_byte(out, 0x35)
+    out = _append_byte(out, 0x36)
+    out = _append_byte(out, 0x2C)
+    out = _append_byte(out, 0x6B)
+    out = _append_byte(out, 0x65)
+    out = _append_byte(out, 0x78)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x74)
+    out = _append_byte(out, 0x72)
+    out = _append_byte(out, 0x69)
+    out = _append_byte(out, 0x63)
+    out = _append_byte(out, 0x74)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x76)
+    out = _append_byte(out, 0x30)
+    out = _append_byte(out, 0x30)
+    out = _append_byte(out, 0x40)
+    out = _append_byte(out, 0x6F)
+    out = _append_byte(out, 0x70)
+    out = _append_byte(out, 0x65)
+    out = _append_byte(out, 0x6E)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x68)
+    out = _append_byte(out, 0x2E)
+    out = _append_byte(out, 0x63)
+    out = _append_byte(out, 0x6F)
+    out = _append_byte(out, 0x6D)
+    out
+
+fn _push_aes256_gcm_openssh(buf: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x16)
+    out = _append_byte(out, 0x61)
+    out = _append_byte(out, 0x65)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x31)
+    out = _append_byte(out, 0x32)
+    out = _append_byte(out, 0x38)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x67)
+    out = _append_byte(out, 0x63)
+    out = _append_byte(out, 0x6D)
+    out = _append_byte(out, 0x40)
+    out = _append_byte(out, 0x6F)
+    out = _append_byte(out, 0x70)
+    out = _append_byte(out, 0x65)
+    out = _append_byte(out, 0x6E)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x68)
+    out = _append_byte(out, 0x2E)
+    out = _append_byte(out, 0x63)
+    out = _append_byte(out, 0x6F)
+    out = _append_byte(out, 0x6D)
+    out
+
+fn _push_server_kex_algorithms(buf: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x39)
+    out = _append_byte(out, 0x63)
+    out = _append_byte(out, 0x75)
+    out = _append_byte(out, 0x72)
+    out = _append_byte(out, 0x76)
+    out = _append_byte(out, 0x65)
+    out = _append_byte(out, 0x32)
+    out = _append_byte(out, 0x35)
+    out = _append_byte(out, 0x35)
+    out = _append_byte(out, 0x31)
+    out = _append_byte(out, 0x39)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x68)
+    out = _append_byte(out, 0x61)
+    out = _append_byte(out, 0x32)
+    out = _append_byte(out, 0x35)
+    out = _append_byte(out, 0x36)
+    out = _append_byte(out, 0x2C)
+    out = _append_byte(out, 0x65)
+    out = _append_byte(out, 0x78)
+    out = _append_byte(out, 0x74)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x69)
+    out = _append_byte(out, 0x6E)
+    out = _append_byte(out, 0x66)
+    out = _append_byte(out, 0x6F)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x2C)
+    out = _append_byte(out, 0x6B)
+    out = _append_byte(out, 0x65)
+    out = _append_byte(out, 0x78)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x74)
+    out = _append_byte(out, 0x72)
+    out = _append_byte(out, 0x69)
+    out = _append_byte(out, 0x63)
+    out = _append_byte(out, 0x74)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x76)
+    out = _append_byte(out, 0x30)
+    out = _append_byte(out, 0x30)
+    out = _append_byte(out, 0x40)
+    out = _append_byte(out, 0x6F)
+    out = _append_byte(out, 0x70)
+    out = _append_byte(out, 0x65)
+    out = _append_byte(out, 0x6E)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x68)
+    out = _append_byte(out, 0x2E)
+    out = _append_byte(out, 0x63)
+    out = _append_byte(out, 0x6F)
+    out = _append_byte(out, 0x6D)
+    out
+
+fn _push_gcm_cipher_pair(buf: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x16)
+    out = _append_byte(out, 0x61)
+    out = _append_byte(out, 0x65)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x31)
+    out = _append_byte(out, 0x32)
+    out = _append_byte(out, 0x38)
+    out = _append_byte(out, 0x2D)
+    out = _append_byte(out, 0x67)
+    out = _append_byte(out, 0x63)
+    out = _append_byte(out, 0x6D)
+    out = _append_byte(out, 0x40)
+    out = _append_byte(out, 0x6F)
+    out = _append_byte(out, 0x70)
+    out = _append_byte(out, 0x65)
+    out = _append_byte(out, 0x6E)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x73)
+    out = _append_byte(out, 0x68)
+    out = _append_byte(out, 0x2E)
+    out = _append_byte(out, 0x63)
+    out = _append_byte(out, 0x6F)
+    out = _append_byte(out, 0x6D)
+    out
+
+fn _push_none(buf: [u8]) -> [u8]:
+    var out = _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x04)
+    out = _append_byte(out, 0x6E)
+    out = _append_byte(out, 0x6F)
+    out = _append_byte(out, 0x6E)
+    out = _append_byte(out, 0x65)
+    out
+
+fn _push_empty_string(buf: [u8]) -> [u8]:
+    _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x00)
+
+fn _push_bool_false(buf: [u8]) -> [u8]:
+    _append_byte(buf, 0)
+
+fn _push_zero_u32(buf: [u8]) -> [u8]:
+    _push_u32_literal(buf, 0x00, 0x00, 0x00, 0x00)
+
+# ============================================================================
+# Host key set helpers
+# ============================================================================
+
+fn _push_host_key_algorithms(buf: [u8], host_keys: HostKeySet) -> [u8]:
+    if host_keys.ed25519_seed != nil:
+        if host_keys.rsa_pkcs8 != nil:
+            if host_keys.ecdsa_p256_pkcs8 != nil:
+                return _push_all_host_key_algorithms(buf)
+            return _push_ed25519_rsa_pair(buf)
+        if host_keys.ecdsa_p256_pkcs8 != nil:
+            return _push_ed25519_ecdsa(buf)
+        return _push_ssh_ed25519(buf)
+
+    if host_keys.rsa_pkcs8 != nil:
+        if host_keys.ecdsa_p256_pkcs8 != nil:
+            return _push_rsa_pair_ecdsa(buf)
+        return _push_rsa_sha2_pair(buf)
+
+    if host_keys.ecdsa_p256_pkcs8 != nil:
+        return _push_ecdsa_p256(buf)
+
+    _push_ssh_ed25519(buf)
+
+fn host_key_set_advertised_algorithms(host_keys: HostKeySet) -> text:
+    """Return comma-separated list of host key algorithms the server can offer.
+
+    Priority order: ssh-ed25519, rsa-sha2-256, rsa-sha2-512, ecdsa-sha2-nistp256.
+    RSA algorithms are both listed when an RSA key is present (same key, two hash choices).
+    """
+    var algos: text = ""
+    if host_keys.ed25519_seed != nil:
+        algos = "ssh-ed25519"
+    if host_keys.rsa_pkcs8 != nil:
+        if algos.len() > 0:
+            algos = algos + ",rsa-sha2-256,rsa-sha2-512"
+        else:
+            algos = "rsa-sha2-256,rsa-sha2-512"
+    if host_keys.ecdsa_p256_pkcs8 != nil:
+        if algos.len() > 0:
+            algos = algos + ",ecdsa-sha2-nistp256"
+        else:
+            algos = "ecdsa-sha2-nistp256"
+    if algos.len() == 0:
+        algos = "ssh-ed25519"
+    algos
+
+fn host_key_algorithms_with_certificates(host_keys: HostKeySet, host_certs: HostCertificateSet) -> text:
+    """Return host key algorithms, preferring configured OpenSSH certificates."""
+    var algos: text = ""
+    if host_certs.ssh_ed25519_cert != nil:
+        algos = "ssh-ed25519-cert-v01@openssh.com"
+    if host_keys.ed25519_seed != nil:
+        algos = if algos.len() > 0: algos + ",ssh-ed25519" else: "ssh-ed25519"
+
+    if host_certs.rsa_sha2_256_cert != nil:
+        algos = if algos.len() > 0: algos + ",rsa-sha2-256-cert-v01@openssh.com" else: "rsa-sha2-256-cert-v01@openssh.com"
+    if host_certs.rsa_sha2_512_cert != nil:
+        algos = if algos.len() > 0: algos + ",rsa-sha2-512-cert-v01@openssh.com" else: "rsa-sha2-512-cert-v01@openssh.com"
+    if host_keys.rsa_pkcs8 != nil:
+        algos = if algos.len() > 0: algos + ",rsa-sha2-256,rsa-sha2-512" else: "rsa-sha2-256,rsa-sha2-512"
+
+    if host_keys.ecdsa_p256_pkcs8 != nil:
+        algos = if algos.len() > 0: algos + ",ecdsa-sha2-nistp256" else: "ecdsa-sha2-nistp256"
+
+    if algos.len() == 0:
+        algos = "ssh-ed25519"
+    algos
+
+fn _host_certificates_empty(host_certs: HostCertificateSet) -> bool:
+    host_certs.ssh_ed25519_cert == nil and
+    host_certs.rsa_sha2_256_cert == nil and
+    host_certs.rsa_sha2_512_cert == nil

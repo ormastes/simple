@@ -1,0 +1,409 @@
+# Simple optimizer - analysis engine
+# General-purpose optimization analysis: MIR passes and DB query patterns.
+
+use std.io (file_read)
+use std.log.{error}
+
+# ── Types ─────────────────────────────────────────────────────────────────────
+
+enum OptDomain:
+    Mir
+    DbQuery
+    General
+
+struct OptOpportunity:
+    pass_name:       text
+    location:        text   # "line:col" or "function:name"
+    description:     text
+    expected_speedup: text  # qualitative: "low" | "medium" | "high"
+    domain:          OptDomain
+
+# ── Level → pass list ─────────────────────────────────────────────────────────
+
+fn passes_for_level(level: text) -> [text]:
+    if level == "O0":
+        return []
+    if level == "O1":
+        return ["dead_code_elimination", "constant_folding"]
+    if level == "O3":
+        return [
+            "dead_code_elimination", "constant_folding",
+            "copy_propagation", "common_subexpr_elim",
+            "inline_small_functions", "loop_invariant_motion",
+            "loop_unroll", "bounds_check_elimination", "strength_reduction"
+        ]
+    # O2 default
+    [
+        "dead_code_elimination", "constant_folding",
+        "copy_propagation", "common_subexpr_elim",
+        "inline_small_functions"
+    ]
+
+# ── Simple static scan (no full MIR parse) ────────────────────────────────────
+
+fn _scan_source_for_opportunities(source: text, passes: [text]) -> [OptOpportunity]:
+    var results: [OptOpportunity] = []
+    val lines = source.split("\n")
+    var line_num: i64 = 1
+
+    while line_num <= lines.len():
+        val ln = lines[line_num - 1].trim()
+
+        # dead_code_elimination: unreachable after return
+        if _passes_contain(passes, "dead_code_elimination"):
+            if ln.starts_with("return ") or ln == "return":
+                if line_num < lines.len():
+                    val next_ln = lines[line_num].trim()
+                    if next_ln != "" and not next_ln.starts_with("#") and not next_ln.starts_with("}"):
+                        results.push(OptOpportunity(
+                            pass_name:        "dead_code_elimination",
+                            location:         "{line_num}:1",
+                            description:      "Unreachable code after return statement",
+                            expected_speedup: "low",
+                            domain:           OptDomain.Mir
+                        ))
+
+        # constant_folding: obvious literal ops
+        if _passes_contain(passes, "constant_folding"):
+            if (ln.contains("* 1") or ln.contains("+ 0") or ln.contains("- 0") or ln.contains("/ 1")):
+                results.push(OptOpportunity(
+                    pass_name:        "constant_folding",
+                    location:         "{line_num}:1",
+                    description:      "Identity operation with constant (e.g. x*1, x+0)",
+                    expected_speedup: "low",
+                    domain:           OptDomain.Mir
+                ))
+
+        # loop_invariant_motion: variable access in loop body
+        if _passes_contain(passes, "loop_invariant_motion"):
+            if ln.starts_with("while ") or ln.starts_with("for "):
+                results.push(OptOpportunity(
+                    pass_name:        "loop_invariant_motion",
+                    location:         "{line_num}:1",
+                    description:      "Loop detected — invariant expressions may be hoistable",
+                    expected_speedup: "medium",
+                    domain:           OptDomain.Mir
+                ))
+
+        # bounds_check_elimination: indexed access inside loop
+        if _passes_contain(passes, "bounds_check_elimination"):
+            if ln.contains("[") and ln.contains("]") and not ln.starts_with("#"):
+                results.push(OptOpportunity(
+                    pass_name:        "bounds_check_elimination",
+                    location:         "{line_num}:1",
+                    description:      "Array index access — bounds check may be eliminable if bounds are statically known",
+                    expected_speedup: "low",
+                    domain:           OptDomain.Mir
+                ))
+
+        # strength_reduction: multiply by power of 2
+        if _passes_contain(passes, "strength_reduction"):
+            if ln.contains("* 2") or ln.contains("* 4") or ln.contains("* 8") or ln.contains("* 16"):
+                results.push(OptOpportunity(
+                    pass_name:        "strength_reduction",
+                    location:         "{line_num}:1",
+                    description:      "Multiply by power-of-2 constant — can be replaced with shift",
+                    expected_speedup: "low",
+                    domain:           OptDomain.Mir
+                ))
+
+        line_num = line_num + 1
+
+    results
+
+fn _passes_contain(passes: [text], name: text) -> bool:
+    var i = 0
+    while i < passes.len():
+        if passes[i] == name:
+            return true
+        i = i + 1
+    false
+
+fn _speedup_weight(s: text) -> i64:
+    if s == "high":   return 15
+    if s == "medium": return 5
+    1
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+fn optimize_analyze(file_path: text, level: text) -> i64:
+    print "=== Optimizer Analysis: {file_path} (level={level}) ==="
+    print ""
+
+    val source = file_read(file_path)
+    if source.trim() == "":
+        print "Error: could not read file: {file_path}"
+        return 1
+
+    val passes = passes_for_level(level)
+
+    if passes.is_empty():
+        print "Level O0: no optimization passes selected."
+        return 0
+
+    print "Passes enabled: {passes.len()}"
+    var pi = 0
+    while pi < passes.len():
+        print "  - {passes[pi]}"
+        pi = pi + 1
+    print ""
+
+    val opps = _scan_source_for_opportunities(source, passes)
+
+    if opps.is_empty():
+        print "No optimization opportunities found."
+        return 0
+
+    print "Optimization opportunities found: {opps.len()}"
+    print ""
+    var i = 0
+    while i < opps.len():
+        val opp = opps[i]
+        print "  [{opp.expected_speedup}] {opp.pass_name} @ line {opp.location}"
+        print "         {opp.description}"
+        i = i + 1
+
+    # Estimate total speedup
+    var total_weight: i64 = 0
+    var j = 0
+    while j < opps.len():
+        total_weight = total_weight + _speedup_weight(opps[j].expected_speedup)
+        j = j + 1
+    val est_pct = if total_weight > 30: 30 else: total_weight
+
+    print ""
+    print "Summary: Found {opps.len()} optimization opportunities, estimated ~{est_pct}% total speedup"
+    print "Run with --apply to automatically apply safe passes."
+
+    0
+
+# ── DB query pattern analysis ────────────────────────────────────────────────
+
+fn _scan_db_query_patterns(source: text) -> [OptOpportunity]:
+    var results: [OptOpportunity] = []
+    val lines = source.split("\n")
+    var line_num: i64 = 1
+
+    while line_num <= lines.len():
+        val ln = lines[line_num - 1].trim()
+
+        if ln.contains("db_prefix_scan(") and ln.contains(".rows"):
+            results.push(OptOpportunity(
+                pass_name:        "db_use_indexed_prefix",
+                location:         "{line_num}:1",
+                description:      "Linear prefix scan on raw rows — use db_table_prefix_scan for indexed lookup",
+                expected_speedup: "high",
+                domain:           OptDomain.DbQuery
+            ))
+
+        if ln.contains("db_keys_matching(") and ln.contains(".rows"):
+            results.push(OptOpportunity(
+                pass_name:        "db_use_indexed_exact",
+                location:         "{line_num}:1",
+                description:      "Linear exact-match on raw rows — use db_table_exact_match for indexed lookup",
+                expected_speedup: "high",
+                domain:           OptDomain.DbQuery
+            ))
+
+        if ln.contains(".contains(") and ln.contains("while ") or ln.contains(".contains(") and ln.contains("rows"):
+            results.push(OptOpportunity(
+                pass_name:        "db_use_text_index",
+                location:         "{line_num}:1",
+                description:      "Manual contains loop — use db_table_contains_scan with TextIndex",
+                expected_speedup: "medium",
+                domain:           OptDomain.DbQuery
+            ))
+
+        if ln.contains("find_by_key(") and not ln.contains("_ensure_indexes"):
+            results.push(OptOpportunity(
+                pass_name:        "db_index_aware_lookup",
+                location:         "{line_num}:1",
+                description:      "Key lookup — ensure table indexes are maintained for O(1) access",
+                expected_speedup: "medium",
+                domain:           OptDomain.DbQuery
+            ))
+
+        if (ln.contains(".insert(") or ln.contains(".delete_by_key(") or ln.contains(".update(")):
+            if line_num < lines.len():
+                val next_ln = lines[line_num].trim()
+                val has_query = next_ln.contains("db_prefix_scan") or next_ln.contains("db_keys_matching") or next_ln.contains("find_by_key")
+                if has_query:
+                    results.push(OptOpportunity(
+                        pass_name:        "db_cache_invalidation",
+                        location:         "{line_num}:1",
+                        description:      "Query immediately after mutation — verify index cache is invalidated",
+                        expected_speedup: "low",
+                        domain:           OptDomain.DbQuery
+                    ))
+
+        line_num = line_num + 1
+
+    results
+
+# ── General-purpose pattern analysis ─────────────────────────────────────────
+
+fn _scan_general_patterns(source: text) -> [OptOpportunity]:
+    var results: [OptOpportunity] = []
+    val lines = source.split("\n")
+    var line_num: i64 = 1
+
+    while line_num <= lines.len():
+        val ln = lines[line_num - 1].trim()
+
+        if ln.contains(".len()") and ln.contains("while"):
+            results.push(OptOpportunity(
+                pass_name:        "hoist_len_call",
+                location:         "{line_num}:1",
+                description:      "Collection .len() called in loop condition — hoist to local variable",
+                expected_speedup: "low",
+                domain:           OptDomain.General
+            ))
+
+        if ln.contains("var ") and ln.contains(": [") and ln.contains(" = []"):
+            var has_push = false
+            var scan = line_num
+            while scan < lines.len() and scan < line_num + 20:
+                if lines[scan].trim().contains(".push("):
+                    has_push = true
+                scan = scan + 1
+            if has_push:
+                results.push(OptOpportunity(
+                    pass_name:        "preallocate_collection",
+                    location:         "{line_num}:1",
+                    description:      "Empty collection followed by repeated push — consider preallocating capacity",
+                    expected_speedup: "low",
+                    domain:           OptDomain.General
+                ))
+
+        line_num = line_num + 1
+
+    results
+
+fn _domain_label(d: OptDomain) -> text:
+    match d:
+        case OptDomain.Mir:
+            "MIR"
+        case OptDomain.DbQuery:
+            "DB"
+        case OptDomain.General:
+            "General"
+
+# ── DB analyze public API ────────────────────────────────────────────────────
+
+fn optimize_db_analyze(file_path: text) -> i64:
+    print "=== DB Query Optimization Analysis: {file_path} ==="
+    print ""
+
+    val source = file_read(file_path)
+    if source.trim() == "":
+        print "Error: could not read file: {file_path}"
+        return 1
+
+    val db_opps = _scan_db_query_patterns(source)
+    val gen_opps = _scan_general_patterns(source)
+
+    var all_opps: [OptOpportunity] = []
+    var di = 0
+    while di < db_opps.len():
+        all_opps.push(db_opps[di])
+        di = di + 1
+    var gi = 0
+    while gi < gen_opps.len():
+        all_opps.push(gen_opps[gi])
+        gi = gi + 1
+
+    if all_opps.is_empty():
+        print "No DB or general optimization opportunities found."
+        return 0
+
+    print "Optimization opportunities found: {all_opps.len()}"
+    print "  DB query patterns:    {db_opps.len()}"
+    print "  General patterns:     {gen_opps.len()}"
+    print ""
+
+    var i = 0
+    while i < all_opps.len():
+        val opp = all_opps[i]
+        val dom = _domain_label(opp.domain)
+        print "  [{dom}:{opp.expected_speedup}] {opp.pass_name} @ line {opp.location}"
+        print "         {opp.description}"
+        i = i + 1
+
+    var total_weight: i64 = 0
+    var j = 0
+    while j < all_opps.len():
+        total_weight = total_weight + _speedup_weight(all_opps[j].expected_speedup)
+        j = j + 1
+    val est_pct = if total_weight > 30: 30 else: total_weight
+
+    print ""
+    print "Summary: {all_opps.len()} opportunities, estimated ~{est_pct}% improvement"
+    print "Recommendations:"
+    if db_opps.len() > 0:
+        print "  - Replace raw-row queries with indexed db_table_* functions"
+        print "  - Verify cache invalidation after mutations"
+    if gen_opps.len() > 0:
+        print "  - Hoist loop-invariant len() calls"
+        print "  - Preallocate collections when final size is predictable"
+
+    0
+
+# ── Full analysis (MIR + DB + General) ───────────────────────────────────────
+
+fn optimize_full_analyze(file_path: text, level: text) -> i64:
+    print "=== Full Optimization Analysis: {file_path} (level={level}) ==="
+    print ""
+
+    val source = file_read(file_path)
+    if source.trim() == "":
+        print "Error: could not read file: {file_path}"
+        return 1
+
+    val passes = passes_for_level(level)
+    val mir_opps = _scan_source_for_opportunities(source, passes)
+    val db_opps = _scan_db_query_patterns(source)
+    val gen_opps = _scan_general_patterns(source)
+
+    var all_opps: [OptOpportunity] = []
+    var mi = 0
+    while mi < mir_opps.len():
+        all_opps.push(mir_opps[mi])
+        mi = mi + 1
+    var di = 0
+    while di < db_opps.len():
+        all_opps.push(db_opps[di])
+        di = di + 1
+    var gi = 0
+    while gi < gen_opps.len():
+        all_opps.push(gen_opps[gi])
+        gi = gi + 1
+
+    if all_opps.is_empty():
+        print "No optimization opportunities found across any domain."
+        return 0
+
+    print "Optimization opportunities found: {all_opps.len()}"
+    print "  MIR passes:           {mir_opps.len()}"
+    print "  DB query patterns:    {db_opps.len()}"
+    print "  General patterns:     {gen_opps.len()}"
+    print ""
+
+    var i = 0
+    while i < all_opps.len():
+        val opp = all_opps[i]
+        val dom = _domain_label(opp.domain)
+        print "  [{dom}:{opp.expected_speedup}] {opp.pass_name} @ line {opp.location}"
+        print "         {opp.description}"
+        i = i + 1
+
+    var total_weight: i64 = 0
+    var j = 0
+    while j < all_opps.len():
+        total_weight = total_weight + _speedup_weight(all_opps[j].expected_speedup)
+        j = j + 1
+    val est_pct = if total_weight > 50: 50 else: total_weight
+
+    print ""
+    print "Summary: {all_opps.len()} opportunities, estimated ~{est_pct}% total improvement"
+
+    0

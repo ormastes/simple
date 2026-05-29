@@ -1,0 +1,196 @@
+use common.wine_nt_dispatch_table.{
+    nt_dispatch_table_count,
+    nt_dispatch_table_implemented_count,
+    nt_dispatch_table_list_all,
+    nt_dispatch_table_list_implemented,
+    nt_dispatch_table_lookup,
+    nt_dispatch_table_call,
+    nt_dispatch_table_reset
+}
+use common.wine_nt_bridge.{
+    wine_nt_bridge_dispatch_call,
+    wine_nt_bridge_stdout_handle
+}
+
+describe "wine_nt_dispatch_table":
+    it "has 22+ entries":
+        val count = nt_dispatch_table_count()
+        expect(count >= 22).to_equal(true)
+
+    it "has 16+ implemented entries":
+        val count = nt_dispatch_table_implemented_count()
+        expect(count >= 16).to_equal(true)
+
+    it "lists all entries":
+        val all = nt_dispatch_table_list_all()
+        expect(all.len() >= 22).to_equal(true)
+
+    it "lists implemented entries":
+        val impl_list = nt_dispatch_table_list_implemented()
+        expect(impl_list.len() >= 16).to_equal(true)
+
+    it "looks up CreateFileW entry":
+        val entry = nt_dispatch_table_lookup("CreateFileW")
+        expect(entry.symbol).to_equal("CreateFileW")
+        expect(entry.dll).to_equal("kernel32.dll")
+        expect(entry.category).to_equal("file")
+        expect(entry.implemented).to_equal(true)
+
+    it "looks up unimplemented MessageBoxW entry":
+        val entry = nt_dispatch_table_lookup("MessageBoxW")
+        expect(entry.symbol).to_equal("MessageBoxW")
+        expect(entry.dll).to_equal("user32.dll")
+        expect(entry.implemented).to_equal(false)
+
+    it "returns empty entry for unknown symbol":
+        val entry = nt_dispatch_table_lookup("FakeFunction")
+        expect(entry.dll).to_equal("")
+        expect(entry.implemented).to_equal(false)
+
+    it "CreateFileW returns valid handle":
+        nt_dispatch_table_reset()
+        val result = nt_dispatch_table_call("CreateFileW", 0, 0, "C:\\test.txt")
+        expect(result.is_ok).to_equal(true)
+        expect(result.symbol).to_equal("CreateFileW")
+        expect(result.i64_value >= 100).to_equal(true)
+        expect(result.text_value).to_equal("C:\\test.txt")
+
+    it "ReadFile and WriteFile round-trip":
+        nt_dispatch_table_reset()
+        val opened = nt_dispatch_table_call("CreateFileW", 0, 0, "C:\\data.bin")
+        expect(opened.is_ok).to_equal(true)
+        val handle = opened.i64_value
+
+        val written = nt_dispatch_table_call("WriteFile", handle, 5, "hello")
+        expect(written.is_ok).to_equal(true)
+        expect(written.i64_value).to_equal(5)
+
+        val read = nt_dispatch_table_call("ReadFile", handle, 5, "")
+        expect(read.is_ok).to_equal(true)
+        expect(read.i64_value).to_equal(5)
+
+    it "CloseHandle marks handle closed":
+        nt_dispatch_table_reset()
+        val opened = nt_dispatch_table_call("CreateFileW", 0, 0, "C:\\close_test.txt")
+        expect(opened.is_ok).to_equal(true)
+        val handle = opened.i64_value
+
+        val closed = nt_dispatch_table_call("CloseHandle", handle, 0, "")
+        expect(closed.is_ok).to_equal(true)
+
+        val double_close = nt_dispatch_table_call("CloseHandle", handle, 0, "")
+        expect(double_close.is_ok).to_equal(false)
+        expect(double_close.error).to_equal("already-closed")
+
+    it "VirtualAlloc returns positive address and VirtualFree succeeds":
+        nt_dispatch_table_reset()
+        val alloc = nt_dispatch_table_call("VirtualAlloc", 0, 4096, "")
+        expect(alloc.is_ok).to_equal(true)
+        expect(alloc.i64_value > 0).to_equal(true)
+
+        val freed = nt_dispatch_table_call("VirtualFree", alloc.i64_value, 0, "")
+        expect(freed.is_ok).to_equal(true)
+
+    it "HeapCreate HeapAlloc HeapFree lifecycle":
+        nt_dispatch_table_reset()
+        val heap = nt_dispatch_table_call("HeapCreate", 0, 0, "")
+        expect(heap.is_ok).to_equal(true)
+        val heap_handle = heap.i64_value
+
+        val block = nt_dispatch_table_call("HeapAlloc", heap_handle, 64, "")
+        expect(block.is_ok).to_equal(true)
+        expect(block.i64_value > 0).to_equal(true)
+
+        val freed = nt_dispatch_table_call("HeapFree", heap_handle, block.i64_value, "")
+        expect(freed.is_ok).to_equal(true)
+
+    it "GetProcessHeap returns valid handle":
+        nt_dispatch_table_reset()
+        val result = nt_dispatch_table_call("GetProcessHeap", 0, 0, "")
+        expect(result.is_ok).to_equal(true)
+        expect(result.i64_value).to_equal(0x70000000)
+
+    it "GetProcessHeap HeapAlloc HeapFree on process heap":
+        nt_dispatch_table_reset()
+        val heap = nt_dispatch_table_call("GetProcessHeap", 0, 0, "")
+        expect(heap.is_ok).to_equal(true)
+
+        val block = nt_dispatch_table_call("HeapAlloc", heap.i64_value, 32, "")
+        expect(block.is_ok).to_equal(true)
+        expect(block.i64_value).to_equal(0x71000000)
+
+        val freed = nt_dispatch_table_call("HeapFree", heap.i64_value, block.i64_value, "")
+        expect(freed.is_ok).to_equal(true)
+
+    it "GetCommandLineW returns text":
+        nt_dispatch_table_reset()
+        val result = nt_dispatch_table_call("GetCommandLineW", 0, 0, "")
+        expect(result.is_ok).to_equal(true)
+        expect(result.text_value).to_equal("simple.exe")
+        expect(result.i64_value > 0).to_equal(true)
+
+    it "GetModuleHandleW returns handle for kernel32":
+        nt_dispatch_table_reset()
+        val result = nt_dispatch_table_call("GetModuleHandleW", 0, 0, "kernel32.dll")
+        expect(result.is_ok).to_equal(true)
+        expect(result.i64_value).to_equal(0x10000)
+        expect(result.text_value).to_equal("kernel32.dll")
+
+    it "LoadLibraryExW and GetProcAddress round-trip":
+        nt_dispatch_table_reset()
+        val loaded = nt_dispatch_table_call("LoadLibraryExW", 0, 0, "kernel32.dll")
+        expect(loaded.is_ok).to_equal(true)
+        val mod_handle = loaded.i64_value
+
+        val proc = nt_dispatch_table_call("GetProcAddress", mod_handle, 0, "GetProcAddress")
+        expect(proc.is_ok).to_equal(true)
+        expect(proc.text_value).to_equal("GetProcAddress")
+
+    it "unimplemented calls return structured error":
+        val result = nt_dispatch_table_call("MessageBoxW", 0, 0, "")
+        expect(result.is_ok).to_equal(false)
+        expect(result.error).to_equal("not-implemented:MessageBoxW")
+        expect(result.symbol).to_equal("MessageBoxW")
+        expect(result.category).to_equal("user32")
+
+    it "unknown symbol returns error":
+        val result = nt_dispatch_table_call("FakeAPI", 0, 0, "")
+        expect(result.is_ok).to_equal(false)
+        expect(result.error).to_equal("unknown-symbol:FakeAPI")
+
+    it "wine_nt_bridge_dispatch_call routes new symbols correctly":
+        nt_dispatch_table_reset()
+        val result = wine_nt_bridge_dispatch_call("CreateFileW", 0, "C:\\bridge_test.txt", 0)
+        expect(result.ok).to_equal(true)
+        expect(result.symbol).to_equal("CreateFileW")
+
+    it "wine_nt_bridge_dispatch_call routes VirtualAlloc":
+        nt_dispatch_table_reset()
+        val result = wine_nt_bridge_dispatch_call("VirtualAlloc", 0, "", 4096)
+        expect(result.ok).to_equal(true)
+        expect(result.symbol).to_equal("VirtualAlloc")
+        expect(result.i64_value > 0).to_equal(true)
+
+    it "wine_nt_bridge_dispatch_call routes HeapCreate":
+        nt_dispatch_table_reset()
+        val result = wine_nt_bridge_dispatch_call("HeapCreate", 0, "", 0)
+        expect(result.ok).to_equal(true)
+        expect(result.symbol).to_equal("HeapCreate")
+
+    it "existing bridge GetStdHandle still works":
+        val result = wine_nt_bridge_dispatch_call("GetStdHandle", 0, "", wine_nt_bridge_stdout_handle())
+        expect(result.ok).to_equal(true)
+        expect(result.symbol).to_equal("GetStdHandle")
+        expect(result.i64_value).to_equal(wine_nt_bridge_stdout_handle())
+
+    it "existing bridge WriteFile still works":
+        val result = wine_nt_bridge_dispatch_call("WriteFile", wine_nt_bridge_stdout_handle(), "hello", 5)
+        expect(result.ok).to_equal(true)
+        expect(result.symbol).to_equal("WriteFile")
+        expect(result.text_value).to_equal("hello")
+
+    it "existing bridge ExitProcess still works":
+        val result = wine_nt_bridge_dispatch_call("ExitProcess", 0, "", 0)
+        expect(result.ok).to_equal(true)
+        expect(result.symbol).to_equal("ExitProcess")
+        expect(result.i64_value).to_equal(0)

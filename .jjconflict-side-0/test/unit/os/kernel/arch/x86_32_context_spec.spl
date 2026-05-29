@@ -1,0 +1,44 @@
+use std.spec
+use os.kernel.arch.x86_32.context.{X86_32ContextSwitch}
+use os.kernel.arch.x86_32.cpu.{GDT_KERNEL_CODE, GDT_KERNEL_DATA, GDT_USER_CODE, GDT_USER_DATA}
+
+describe "x86_32 context construction":
+    """Pure register-frame construction for the x86_32 HAL context path."""
+
+    it "creates a kernel context with aligned stack and ring-0 selectors":
+        """Kernel contexts should start at the requested EIP with ring-0 segments."""
+        val ctx = X86_32ContextSwitch.create(0x100123u32, 0x80000fffu32, false)
+        expect(ctx.eip).to_equal(0x100123u32)
+        expect(ctx.esp).to_equal(0x80000ff0u32)
+        expect(ctx.ebp).to_equal(0x80000ff0u32)
+        expect(ctx.cs).to_equal(GDT_KERNEL_CODE as u32)
+        expect(ctx.ss).to_equal(GDT_KERNEL_DATA as u32)
+        expect(ctx.ds).to_equal(GDT_KERNEL_DATA as u32)
+        expect(ctx.es).to_equal(GDT_KERNEL_DATA as u32)
+        expect(ctx.eflags).to_equal(0x202u32)
+        expect(ctx.fpu_state).to_equal(0u32)
+
+    it "creates a user context with ring-3 selectors":
+        """User contexts should use RPL=3 code/data selectors and aligned ESP."""
+        val ctx = X86_32ContextSwitch.create(0x00401000u32, 0xBFFFFFEFu32, true)
+        expect(ctx.eip).to_equal(0x00401000u32)
+        expect(ctx.esp).to_equal(0xBFFFFFE0u32)
+        expect(ctx.cs).to_equal((GDT_USER_CODE as u32) | 3u32)
+        expect(ctx.ss).to_equal((GDT_USER_DATA as u32) | 3u32)
+        expect(ctx.ds).to_equal((GDT_USER_DATA as u32) | 3u32)
+        expect(ctx.es).to_equal((GDT_USER_DATA as u32) | 3u32)
+        expect(ctx.eflags).to_equal(0x202u32)
+
+    it "routes context switch through the runtime hook":
+        """The hosted test runtime should tolerate the x86_32 switch hook call."""
+        val from_ctx = X86_32ContextSwitch.create(0x1000u32, 0x9000u32, false)
+        val to_ctx = X86_32ContextSwitch.create(0x2000u32, 0xA000u32, false)
+        X86_32ContextSwitch.switch(from_ctx, to_ctx)
+        expect(to_ctx.eip).to_equal(0x2000u32)
+
+    it "skips FPU hooks until a state buffer is assigned":
+        """Zero fpu_state is a valid lazy-FPU state and should be a no-op."""
+        val ctx = X86_32ContextSwitch.create(0x1000u32, 0x9000u32, false)
+        X86_32ContextSwitch.save_fpu(ctx)
+        X86_32ContextSwitch.restore_fpu(ctx)
+        expect(ctx.fpu_state).to_equal(0u32)

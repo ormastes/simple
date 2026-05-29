@@ -1,0 +1,142 @@
+"""WebGPU Session — Instance, Adapter, Device, Queue with real/stub diagnostics
+
+@tag:stdlib
+@tag:gpu
+
+Owns the full WebGPU object chain (instance → adapter → device → queue)
+and reports whether the runtime is backed by a real GPU or a null/stub adapter.
+
+Usage:
+    val session = WebGpuSession.create("auto")
+    val err = session.init_adapter()
+    val err2 = session.create_device()
+    val shader = session.load_shader(wgsl_src)
+    val result = session.submit(1)
+    val diag = session.diagnostics()
+"""
+
+# ============================================================================
+# Extern declarations
+# ============================================================================
+
+extern fn rt_wgpu_create_instance() -> i64
+extern fn rt_wgpu_request_adapter(instance: i64) -> i64
+extern fn rt_wgpu_adapter_name(adapter: i64) -> text
+extern fn rt_wgpu_adapter_backend(adapter: i64) -> text
+extern fn rt_wgpu_is_stub(adapter: i64) -> bool
+extern fn rt_wgpu_create_device(adapter: i64) -> i64
+extern fn rt_wgpu_get_queue(device: i64) -> i64
+extern fn rt_wgpu_create_shader(device: i64, wgsl_source: text) -> i64
+extern fn rt_wgpu_submit(queue: i64, cmd_count: i64) -> text
+extern fn rt_wgpu_present(device: i64) -> text
+extern fn rt_wgpu_cleanup(device: i64) -> i64
+
+# ============================================================================
+# WebGpuSession
+# ============================================================================
+
+class WebGpuSession:
+    instance_handle: i64
+    adapter_handle: i64
+    device_handle: i64
+    queue_handle: i64
+    adapter_name: text
+    backend_type: text
+    is_stub: bool
+    mode: text
+    shader_count: i64
+    submit_count: i64
+    initialized: bool
+    generation: i64
+
+impl WebGpuSession:
+    static fn create(mode: text) -> WebGpuSession:
+        WebGpuSession(
+            instance_handle: 0,
+            adapter_handle: 0,
+            device_handle: 0,
+            queue_handle: 0,
+            adapter_name: "",
+            backend_type: "none",
+            is_stub: true,
+            mode: mode,
+            shader_count: 0,
+            submit_count: 0,
+            initialized: false,
+            generation: 0
+        )
+
+    me init_adapter() -> text:
+        val inst = rt_wgpu_create_instance()
+        if inst == 0:
+            return "error:instance_failed"
+        self.instance_handle = inst
+        val adapter = rt_wgpu_request_adapter(inst)
+        if adapter == 0:
+            return "error:adapter_failed"
+        self.adapter_handle = adapter
+        self.adapter_name = rt_wgpu_adapter_name(adapter)
+        self.backend_type = rt_wgpu_adapter_backend(adapter)
+        self.is_stub = rt_wgpu_is_stub(adapter)
+        self.generation = self.generation + 1
+        "ok"
+
+    me create_device() -> text:
+        if self.adapter_handle == 0:
+            return "error:no_adapter"
+        val dev = rt_wgpu_create_device(self.adapter_handle)
+        if dev == 0:
+            return "error:device_failed"
+        self.device_handle = dev
+        val q = rt_wgpu_get_queue(dev)
+        if q == 0:
+            return "error:queue_failed"
+        self.queue_handle = q
+        self.initialized = true
+        "ok"
+
+    me is_real() -> bool:
+        if self.is_stub:
+            return false
+        true
+
+    me load_shader(wgsl_source: text) -> i64:
+        if self.initialized == false:
+            return 0
+        val handle = rt_wgpu_create_shader(self.device_handle, wgsl_source)
+        if handle != 0:
+            self.shader_count = self.shader_count + 1
+        handle
+
+    me submit(cmd_count: i64) -> text:
+        if self.initialized == false:
+            return "error:not_initialized"
+        val result = rt_wgpu_submit(self.queue_handle, cmd_count)
+        self.submit_count = self.submit_count + 1
+        result
+
+    me present() -> text:
+        if self.initialized == false:
+            return "error:not_initialized"
+        rt_wgpu_present(self.device_handle)
+
+    me release() -> text:
+        if self.initialized == false:
+            return "not_initialized"
+        val result = rt_wgpu_cleanup(self.device_handle)
+        self.device_handle = 0
+        self.queue_handle = 0
+        self.initialized = false
+        if result == 0:
+            "ok"
+        else:
+            "error:cleanup_failed"
+
+    me diagnostics() -> text:
+        var real_or_stub = "real"
+        if self.is_stub:
+            real_or_stub = "stub"
+        "backend={self.backend_type} adapter={self.adapter_name} mode={real_or_stub} initialized={self.initialized}"
+
+    me stats() -> text:
+        "mode={self.mode} backend={self.backend_type} gen={self.generation} shaders={self.shader_count} submits={self.submit_count}"

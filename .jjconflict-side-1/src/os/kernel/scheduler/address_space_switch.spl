@@ -1,0 +1,172 @@
+# Address Space Switch — arch_adapt Transform Bridge
+#
+# Provides the kernel-level primitives for switching the active address
+# space on a context switch. On x86_64 this writes CR3 (the page-table
+# root register); on riscv64 it writes SATP; on arm64 it writes TTBR0_EL1.
+# The arch_adapt transform replaces the @cfg-guarded bodies for each target.
+#
+# Called by switch_context_with_as (context_switch.spl) immediately before
+# restoring the incoming task's GPR context so the new address space is
+# active before execution resumes.
+#
+# MDSOC-only — no ECS, no userland patterns.
+
+use os.kernel.types.task_types.{AddressSpace}
+use os.kernel.memory.vmm_address_space.{create_user_address_space, destroy_user_address_space}
+
+# ============================================================================
+# Current Address Space Tracking
+# ============================================================================
+#
+# Per-CPU current AS root. A single global suffices for UP/interpreter mode;
+# SMP would index by CPU id. Zero means kernel identity (no user AS active).
+
+var _g_current_as_phys_root: u64 = 0
+
+fn as_current_phys_root() -> u64:
+    """Return the physical root of the currently loaded address space."""
+    _g_current_as_phys_root
+
+# ============================================================================
+# Address Space Switch — x86_64
+# ============================================================================
+
+@cfg(x86_64)
+fn as_switch_to(phys_root: u64):
+    """Load phys_root into CR3, switching the active address space.
+
+    Only writes CR3 when the new root differs from the current one (avoids a
+    TLB flush when the incoming task shares the kernel identity mapping).
+
+    On x86_64 writing CR3 flushes all non-global TLB entries.
+    """
+    if phys_root == _g_current_as_phys_root:
+        return
+    _g_current_as_phys_root = phys_root
+    if phys_root == 0:
+        return
+    asm:
+        "mov rax, rdi"
+        "mov cr3, rax"
+        # options: [volatile]
+
+# ============================================================================
+# Address Space Switch — riscv64
+# ============================================================================
+
+@cfg(riscv64)
+fn as_switch_to(phys_root: u64):
+    """Write SATP to switch the active address space on riscv64.
+
+    Encodes phys_root as a Sv48 SATP value (mode=9, ASID=0, PPN = phys_root>>12).
+    Follows with sfence.vma to flush stale TLB entries.
+    """
+    if phys_root == _g_current_as_phys_root:
+        return
+    _g_current_as_phys_root = phys_root
+    if phys_root == 0:
+        return
+    val ppn: u64 = phys_root / 4096
+    val satp: u64 = (9 << 60) | ppn          # Sv48 mode
+    asm:
+        "mv t0, a0"
+        "csrw satp, t0"
+        "sfence.vma"
+        # options: [volatile]
+
+# ============================================================================
+# Address Space Switch — arm64
+# ============================================================================
+
+@cfg(arm64)
+fn as_switch_to(phys_root: u64):
+    """Write TTBR0_EL1 to switch user address space on arm64.
+
+    Follows with ISB to synchronise the instruction stream.
+    """
+    if phys_root == _g_current_as_phys_root:
+        return
+    _g_current_as_phys_root = phys_root
+    if phys_root == 0:
+        return
+    asm:
+        "msr ttbr0_el1, x0"
+        "isb"
+        # options: [volatile]
+
+# ============================================================================
+# Address Space Switch — arm32
+# ============================================================================
+
+@cfg(arm32)
+fn as_switch_to(phys_root: u64):
+    """Write TTBR0 to switch user address space on arm32."""
+    if phys_root == _g_current_as_phys_root:
+        return
+    _g_current_as_phys_root = phys_root
+    if phys_root == 0:
+        return
+    val root32: u32 = phys_root as u32
+    asm:
+        "mcr p15, 0, r0, c2, c0, 0"
+        "dsb"
+        "isb"
+        # options: [volatile]
+
+# ============================================================================
+# Address Space Switch — riscv32
+# ============================================================================
+
+@cfg(riscv32)
+fn as_switch_to(phys_root: u64):
+    """Write SATP (Sv32) to switch user address space on riscv32."""
+    if phys_root == _g_current_as_phys_root:
+        return
+    _g_current_as_phys_root = phys_root
+    if phys_root == 0:
+        return
+    val ppn32: u64 = phys_root / 4096
+    val satp32: u64 = (1 << 31) | ppn32      # Sv32 mode
+    asm:
+        "mv t0, a0"
+        "csrw satp, t0"
+        "sfence.vma"
+        # options: [volatile]
+
+# ============================================================================
+# AddressSpace Handle Accessors
+# ============================================================================
+
+fn as_phys_root(space: AddressSpace) -> u64:
+    """Return the physical page-table root from an AddressSpace handle."""
+    space.phys_root
+
+fn as_id(space: AddressSpace) -> u64:
+    """Return the monotonic id from an AddressSpace handle."""
+    space.id
+
+fn as_is_kernel(space: AddressSpace) -> bool:
+    """True if this is the sentinel kernel-only address space (phys_root == 0)."""
+    space.phys_root == 0
+
+fn as_kernel_sentinel() -> AddressSpace:
+    """Return the kernel-only sentinel (no user address space loaded)."""
+    AddressSpace(phys_root: 0, id: 0)
+
+fn as_switch_handle(space: AddressSpace):
+    """Switch to the address space described by space.
+
+    Convenience wrapper over as_switch_to for callers that hold an
+    AddressSpace handle rather than a raw physical root.
+    """
+    as_switch_to(space.phys_root)
+
+fn as_create() -> AddressSpace:
+    """Allocate a fresh user address space. Thin wrapper over VMM."""
+    create_user_address_space()
+
+fn as_destroy(space: AddressSpace):
+    """Release a user address space and its page-table pages."""
+    if space.phys_root == 0 or space.phys_root == 1:
+        return
+    destroy_user_address_space(space)

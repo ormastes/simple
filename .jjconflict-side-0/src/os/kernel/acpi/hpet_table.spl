@@ -1,0 +1,70 @@
+# ACPI HPET Table Parser — FR-SIMPLEOS-ACPI-001
+#
+# Extracts the HPET MMIO base address from the ACPI HPET table.
+#
+# HPET ACPI table layout (ACPI spec §5.2.12 + HPET spec §3.2.4):
+#   Offset  0 : Signature          (4 bytes, "HPET")
+#   Offset  4 : Length             (4 bytes)
+#   Offset  8 : Revision           (1 byte)
+#   Offset 36 : EventTimerBlockID  (u32, hardware revision + comparator info)
+#   Offset 40 : (4 bytes padding / reserved)
+#   Offset 44 : BaseAddress (GAS, 12 bytes total):
+#     GAS layout:
+#       +0 (offset 44) : address_space_id  (u8, 0=SystemMemory)
+#       +1 (offset 45) : bit_width         (u8)
+#       +2 (offset 46) : bit_offset        (u8)
+#       +3 (offset 47) : access_size       (u8)
+#       +4 (offset 48) : address           (u64) ← HPET MMIO physical base
+#
+# The returned address is the PHYSICAL MMIO base.
+# Callers must convert to virtual via phys_to_virt() before MMIO reads.
+# (QEMU default HPET MMIO base is 0xFED00000.)
+
+use os.kernel.boot.mmio.{mmio_read8, mmio_read32}
+use os.kernel.boot.limine_boot.{phys_to_virt}
+
+# ============================================================================
+# HPET table field offsets
+# ============================================================================
+
+val HPET_TBL_OFF_GAS:         u64 = 44   # GAS struct starts here
+val HPET_TBL_GAS_OFF_SPACE:   u64 = 0    # u8 address_space_id
+val HPET_TBL_GAS_OFF_ADDRESS: u64 = 4    # u64 MMIO base address
+
+val GAS_SPACE_SYSTEM_MEMORY: u8 = 0
+
+# ============================================================================
+# Pure parser — injectable reader for unit tests
+# ============================================================================
+
+fn acpi_hpet_base_raw(read8: fn(u64) -> u8, read32: fn(u64) -> u32, base: u64) -> u64?:
+    """Extract HPET MMIO base using caller-supplied byte readers.
+
+    base is an opaque offset: in production, the HHDM virtual address of the
+    HPET table; in tests, 0 with read8/read32 indexing a [u8] fixture array.
+    """
+    val gas_base  = base + HPET_TBL_OFF_GAS
+    val space_id  = read8(gas_base + HPET_TBL_GAS_OFF_SPACE)
+    val addr_lo   = read32(gas_base + HPET_TBL_GAS_OFF_ADDRESS) as u64
+    val addr_hi   = read32(gas_base + HPET_TBL_GAS_OFF_ADDRESS + 4) as u64
+    val mmio_phys = (addr_hi << 32) | addr_lo
+    if (space_id == GAS_SPACE_SYSTEM_MEMORY) and (mmio_phys != 0):
+        mmio_phys
+    else:
+        nil
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn acpi_hpet_base(hpet_phys: u64) -> u64?:
+    """Extract HPET MMIO physical base from the ACPI HPET table.
+
+    Returns the physical address of the HPET MMIO region, or nil if the
+    GAS address_space_id is not SystemMemory or the address field is zero.
+
+    Callers must call phys_to_virt() on the returned address before
+    passing it to hpet_read_counter() / hpet_enable().
+    """
+    val virt = phys_to_virt(hpet_phys)
+    acpi_hpet_base_raw(mmio_read8, mmio_read32, virt)

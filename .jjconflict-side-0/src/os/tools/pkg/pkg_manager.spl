@@ -1,0 +1,354 @@
+# Package Manager — Install/Remove/Update
+# MDSOC: feature dimension, apps layer
+
+use os.tools.pkg.pkg_manifest.{PackageManifest, PackageVersion, parse_manifest, serialize_manifest}
+use os.tools.pkg.pkg_resolver.{resolve, ResolvedSet}
+use os.tools.pkg.pkg_repository.{Repository, PackageIndex, load_repositories, fetch_index, search, load_local_index}
+use os.userlib.fs.{read_text, write_text, stat, mkdir, remove, readdir}
+
+val INSTALLED_DB_PATH = "/pkg/installed"
+val PKG_ARCHIVE_DIR = "/pkg/repo"
+
+struct InstalledDb:
+    packages: [PackageManifest]
+
+class PkgManager:
+    installed: InstalledDb
+    repositories: [Repository]
+
+impl PkgManager:
+    static fn new() -> PkgManager:
+        PkgManager(
+            installed: InstalledDb(packages: []),
+            repositories: []
+        )
+
+    me load() -> Result<bool, text>:
+        """Load installed package database from /pkg/installed/."""
+        val db_result = _load_installed_db()
+        if val Err(e) = db_result:
+            return Result.Err(e)
+        self.installed = db_result.unwrap()
+
+        val repo_result = load_repositories()
+        if val Err(e) = repo_result:
+            return Result.Err(e)
+        self.repositories = repo_result.unwrap()
+
+        return Result.Ok(true)
+
+    me install(name: text) -> Result<bool, text>:
+        """Install a package and its dependencies.
+
+        1. Load available packages from repositories
+        2. Resolve dependencies
+        3. Download/extract each package
+        4. Register in installed database
+        """
+        if self.is_installed(name):
+            return Result.Err("Package already installed: {name}")
+
+        # Gather all available packages from repositories
+        var available: [PackageManifest] = []
+        for repo in self.repositories:
+            val idx_result = fetch_index(repo)
+            if val Ok(idx) = idx_result:
+                for pkg in idx.packages:
+                    available.push(pkg)
+
+        # Resolve dependencies
+        val resolve_result = resolve(name, available, self.installed.packages)
+        if val Err(e) = resolve_result:
+            return Result.Err(e)
+        val resolved = resolve_result.unwrap()
+
+        # Install each package in dependency order
+        for pkg_name in resolved.install_order:
+            if self.is_installed(pkg_name):
+                pass_dn
+            else:
+                val install_result = _install_single(pkg_name, resolved.packages)
+                if val Err(e) = install_result:
+                    return Result.Err("Failed to install {pkg_name}: {e}")
+                val manifest = install_result.unwrap()
+                self.installed.packages.push(manifest)
+
+        # Save updated database
+        val save_result = _save_installed_db(self.installed)
+        if val Err(e) = save_result:
+            return Result.Err("Failed to save installed database: {e}")
+
+        return Result.Ok(true)
+
+    me remove(name: text) -> Result<bool, text>:
+        """Remove a package.
+
+        1. Check no other installed package depends on it
+        2. Remove files listed in manifest
+        3. Remove from installed database
+        """
+        if self.is_installed(name) == false:
+            return Result.Err("Package not installed: {name}")
+
+        # Check reverse dependencies
+        for pkg in self.installed.packages:
+            if pkg.name == name:
+                pass_dn
+            else:
+                for dep in pkg.dependencies:
+                    val dep_name = dep.split(">=")[0]
+                    if dep_name == name:
+                        return Result.Err("Cannot remove {name}: required by {pkg.name}")
+
+        # Find the manifest
+        var target_manifest: PackageManifest? = nil
+        for pkg in self.installed.packages:
+            if pkg.name == name:
+                target_manifest = pkg
+                break
+
+        if val Some(manifest) = target_manifest:
+            # Remove installed files
+            for file_path in manifest.files:
+                remove(file_path)
+
+            # Remove manifest file
+            remove("{INSTALLED_DB_PATH}/{name}.sdn")
+
+            # Remove from in-memory list
+            var new_packages: [PackageManifest] = []
+            for pkg in self.installed.packages:
+                if pkg.name != name:
+                    new_packages.push(pkg)
+            self.installed.packages = new_packages
+
+            val save_result = _save_installed_db(self.installed)
+            if val Err(e) = save_result:
+                return Result.Err("Failed to save installed database: {e}")
+
+        return Result.Ok(true)
+
+    me update(name: text?) -> Result<bool, text>:
+        """Update a package (or all if name is nil).
+
+        1. Fetch latest index
+        2. Compare versions
+        3. Reinstall if newer available
+        """
+        var available: [PackageManifest] = []
+        for repo in self.repositories:
+            val idx_result = fetch_index(repo)
+            if val Ok(idx) = idx_result:
+                for pkg in idx.packages:
+                    available.push(pkg)
+
+        var to_update: [text] = []
+        if val Some(n) = name:
+            to_update.push(n)
+        else:
+            for pkg in self.installed.packages:
+                to_update.push(pkg.name)
+
+        var updated_any = false
+        for pkg_name in to_update:
+            val current = self.info(pkg_name)
+            if current.? == false:
+                pass_dn
+            else:
+                val cur = current.unwrap()
+                # Find available version
+                for avail in available:
+                    if avail.name == pkg_name:
+                        val cmp = avail.version.compare(cur.version)
+                        if cmp > 0:
+                            # Newer version available - remove old, install new
+                            val rm_result = self.remove(pkg_name)
+                            if val Err(e) = rm_result:
+                                return Result.Err("Failed to remove old {pkg_name}: {e}")
+                            val inst_result = self.install(pkg_name)
+                            if val Err(e) = inst_result:
+                                return Result.Err("Failed to install new {pkg_name}: {e}")
+                            updated_any = true
+                        break
+
+        if updated_any == false:
+            print "All packages are up to date."
+        return Result.Ok(true)
+
+    fn list_installed() -> [PackageManifest]:
+        self.installed.packages
+
+    fn search_available(query: text) -> Result<[PackageManifest], text>:
+        """Search across all repositories."""
+        var results: [PackageManifest] = []
+        for repo in self.repositories:
+            val idx_result = fetch_index(repo)
+            if val Ok(idx) = idx_result:
+                val matches = search(idx, query)
+                for m in matches:
+                    results.push(m)
+        return Result.Ok(results)
+
+    fn info(name: text) -> PackageManifest?:
+        """Get info for an installed package."""
+        for pkg in self.installed.packages:
+            if pkg.name == name:
+                return pkg
+        return nil
+
+    fn is_installed(name: text) -> bool:
+        for pkg in self.installed.packages:
+            if pkg.name == name:
+                return true
+        return false
+
+fn _print_pkg_usage():
+    print "Usage: pkg install|remove|update|list|search|info [ARGS...]"
+    print ""
+    print "Commands:"
+    print "  install NAME   Install a package and its dependencies"
+    print "  remove NAME    Remove an installed package"
+    print "  update [NAME]  Update a package (or all)"
+    print "  list           List installed packages"
+    print "  search QUERY   Search available packages"
+    print "  info NAME      Show package details"
+    print ""
+    print "Options:"
+    print "  -h             Show this help"
+
+fn run_pkg(args: [text]) -> i32:
+    ## Check -h early before any cross-module calls (load_repositories, parse_manifest, etc.)
+    for arg in args:
+        if arg == "-h":
+            _print_pkg_usage()
+            return 0
+
+    if args.len() < 1:
+        _print_pkg_usage()
+        return 1
+
+    val subcommand = args[0]
+    var mgr = PkgManager.new()
+    val load_result = mgr.load()
+    if val Err(e) = load_result:
+        print "Error loading package database: {e}"
+        return 1
+
+    if subcommand == "install":
+        if args.len() < 2:
+            print "Usage: pkg install NAME"
+            return 1
+        val result = mgr.install(args[1])
+        if val Ok(_) = result:
+            print "Installed: {args[1]}"
+            return 0
+        else if val Err(e) = result:
+            print "Error: {e}"
+            return 1
+
+    else if subcommand == "remove":
+        if args.len() < 2:
+            print "Usage: pkg remove NAME"
+            return 1
+        val result = mgr.remove(args[1])
+        if val Ok(_) = result:
+            print "Removed: {args[1]}"
+            return 0
+        else if val Err(e) = result:
+            print "Error: {e}"
+            return 1
+
+    else if subcommand == "update":
+        var name: text? = nil
+        if args.len() >= 2:
+            name = args[1]
+        val result = mgr.update(name)
+        if val Ok(_) = result:
+            return 0
+        else if val Err(e) = result:
+            print "Error: {e}"
+            return 1
+
+    else if subcommand == "list":
+        val installed = mgr.list_installed()
+        if installed.len() == 0:
+            print "No packages installed."
+        else:
+            for pkg in installed:
+                print "{pkg.name}\t{pkg.version.to_text()}\t{pkg.description}"
+        return 0
+
+    else if subcommand == "search":
+        if args.len() < 2:
+            print "Usage: pkg search QUERY"
+            return 1
+        val result = mgr.search_available(args[1])
+        if val Ok(matches) = result:
+            if matches.len() == 0:
+                print "No packages found matching: {args[1]}"
+            else:
+                for pkg in matches:
+                    print "{pkg.name}\t{pkg.version.to_text()}\t{pkg.description}"
+            return 0
+        else if val Err(e) = result:
+            print "Error: {e}"
+            return 1
+
+    else if subcommand == "info":
+        if args.len() < 2:
+            print "Usage: pkg info NAME"
+            return 1
+        val pkg = mgr.info(args[1])
+        if val Some(m) = pkg:
+            print "Name:         {m.name}"
+            print "Version:      {m.version.to_text()}"
+            print "Description:  {m.description}"
+            print "Dependencies: {m.dependencies.len()}"
+            for dep in m.dependencies:
+                print "  - {dep}"
+            print "Files:        {m.files.len()}"
+            for f in m.files:
+                print "  - {f}"
+            return 0
+        else:
+            print "Package not installed: {args[1]}"
+            return 1
+
+    else:
+        print "Unknown subcommand: {subcommand}"
+        _print_pkg_usage()
+        return 1
+
+    return 0
+
+fn _load_installed_db() -> Result<InstalledDb, text>:
+    """Load all installed package manifests from /pkg/installed/."""
+    var packages: [PackageManifest] = []
+    val entries = readdir(INSTALLED_DB_PATH)
+    for entry in entries:
+        if entry.ends_with(".sdn"):
+            val content = read_text("{INSTALLED_DB_PATH}/{entry}")
+            val result = parse_manifest(content)
+            if val Ok(manifest) = result:
+                packages.push(manifest)
+    return Result.Ok(InstalledDb(packages: packages))
+
+fn _save_installed_db(db: InstalledDb) -> Result<bool, text>:
+    """Save all installed package manifests to /pkg/installed/."""
+    mkdir(INSTALLED_DB_PATH)
+    for pkg in db.packages:
+        val content = serialize_manifest(pkg)
+        write_text("{INSTALLED_DB_PATH}/{pkg.name}.sdn", content)
+    return Result.Ok(true)
+
+fn _install_single(name: text, resolved: [PackageManifest]) -> Result<PackageManifest, text>:
+    """Install a single package from the resolved set."""
+    for pkg in resolved:
+        if pkg.name == name:
+            # Copy files from package archive to destination
+            for file_path in pkg.files:
+                val src = "{PKG_ARCHIVE_DIR}/{name}/{file_path}"
+                val content = read_text(src)
+                write_text(file_path, content)
+            return Result.Ok(pkg)
+    return Result.Err("Package not found in resolved set: {name}")

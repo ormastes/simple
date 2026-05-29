@@ -1,0 +1,96 @@
+#!/bin/sh
+# Chrome vs Simple Comparison Runner
+#
+# Takes Chrome screenshots and compares them against Simple renderer output.
+# Simplified version of pixel_suite_runner.shs for quick comparison.
+#
+# Usage:
+#   ./chrome_vs_simple_runner.shs [html_dir] [output_dir]
+#
+# Output:
+#   output_dir/report.md — Comparison report with per-test RMSE
+
+HTML_DIR="${1:-$(cd "$(dirname "$0")" && pwd)/html}"
+OUTPUT_DIR="${2:-/tmp/chrome_vs_simple}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+SIMPLE_BIN="${SIMPLE_BIN:-$PROJECT_ROOT/src/compiler_rust/target/debug/simple}"
+CHROME_SCRIPT="$SCRIPT_DIR/chrome_screenshot.shs"
+RENDER_HELPER="$SCRIPT_DIR/simple_render_html.spl"
+COMPARE_HELPER="$SCRIPT_DIR/compare_render_pair.spl"
+
+# Source-mode smoke-suite viewport. Larger sizes currently exceed the interpreter watchdog.
+WIDTH=64
+HEIGHT=64
+
+echo "=== Chrome vs Simple Runner ==="
+echo "HTML dir: $HTML_DIR"
+echo "Output:   $OUTPUT_DIR"
+echo "Simple:   $SIMPLE_BIN"
+echo ""
+
+mkdir -p "$OUTPUT_DIR/chrome" "$OUTPUT_DIR/simple" "$OUTPUT_DIR/diff"
+
+render_with_simple_test() {
+    html_file="$1"
+    output_ppm="$2"
+    "$SIMPLE_BIN" "$RENDER_HELPER" "$html_file" "$output_ppm" "$WIDTH" "$HEIGHT" >/dev/null 2>&1
+}
+
+compare_with_simple_test() {
+    baseline_path="$1"
+    candidate_path="$2"
+    metrics_path="$3"
+    diff_path="$4"
+    "$SIMPLE_BIN" "$COMPARE_HELPER" "$baseline_path" "$candidate_path" "$WIDTH" "$HEIGHT" "$metrics_path" "$diff_path" >/dev/null 2>&1
+}
+
+TOTAL=0
+COMPARED=0
+
+for category_dir in "$HTML_DIR"/*/; do
+    category="$(basename "$category_dir")"
+    for html_file in "$category_dir"*.html; do
+        [ -f "$html_file" ] || continue
+        test_name="$(basename "$html_file" .html)"
+        TOTAL=$((TOTAL + 1))
+
+        chrome_png="$OUTPUT_DIR/chrome/${test_name}.png"
+        sh "$CHROME_SCRIPT" "$html_file" "$chrome_png" "$WIDTH" "$HEIGHT" 2>/dev/null
+        if [ ! -f "$chrome_png" ]; then
+            echo "SKIP $category/$test_name (no Chrome)"
+            continue
+        fi
+
+        chrome_bmp="$OUTPUT_DIR/chrome/${test_name}.bmp"
+        if ! /usr/bin/sips -s format bmp "$chrome_png" --out "$chrome_bmp" >/dev/null 2>&1; then
+            echo "SKIP $category/$test_name (chrome conversion failed)"
+            continue
+        fi
+
+        simple_ppm="$OUTPUT_DIR/simple/${test_name}.ppm"
+        render_with_simple_test "$html_file" "$simple_ppm"
+        if [ ! -f "$simple_ppm" ]; then
+            echo "SKIP $category/$test_name (simple render failed)"
+            continue
+        fi
+
+        metrics_txt="$OUTPUT_DIR/diff/${test_name}.txt"
+        diff_ppm="$OUTPUT_DIR/diff/${test_name}.ppm"
+        compare_with_simple_test "$chrome_bmp" "$simple_ppm" "$metrics_txt" "$diff_ppm"
+        if [ -f "$metrics_txt" ]; then
+            match_pct=$(awk -F= '/^match_percentage=/{print $2}' "$metrics_txt")
+            rmse=$(awk -F= '/^rmse=/{print $2}' "$metrics_txt")
+            echo "$category/$test_name: match=${match_pct}% rmse=$rmse"
+            COMPARED=$((COMPARED + 1))
+        else
+            echo "SKIP $category/$test_name (compare failed)"
+        fi
+    done
+done
+
+echo ""
+echo "=== Results: $COMPARED/$TOTAL compared ==="
+echo "Chrome:  $OUTPUT_DIR/chrome/"
+echo "Simple:  $OUTPUT_DIR/simple/"
+echo "Diff:    $OUTPUT_DIR/diff/"

@@ -1,0 +1,81 @@
+# Permission resolution chain: direct grant -> role-based -> inherited -> DENY.
+#
+# The resolver combines the CapabilityStore with a role-capability mapping
+# to determine whether a principal has access. The resolution order is:
+# 1. Check direct grants in the CapabilityStore
+# 2. Check role-based capabilities for each role the principal holds
+# 3. If neither grants access, return Denied (default-deny)
+
+use std.security.enforcement.capability.{Capability, CapabilityGrant, CapabilityStore}
+
+# Result of a permission resolution attempt.
+enum PermissionResult:
+    Granted(grant: CapabilityGrant)
+    GrantedByRole(role: text)
+    Denied(reason: text)
+
+# Check whether a permission result represents an access grant.
+fn is_granted(result: PermissionResult) -> bool:
+    """
+    Returns true for Granted or GrantedByRole, false for Denied.
+
+    sdoctest:
+        val denied = PermissionResult.Denied(reason: "no grant")
+        expect(is_granted(denied)).to_equal(false)
+
+        val by_role = PermissionResult.GrantedByRole(role: "admin")
+        expect(is_granted(by_role)).to_equal(true)
+    """
+    match result:
+        Granted(_): true
+        GrantedByRole(_): true
+        Denied(_): false
+
+# Resolves permissions by combining direct grants and role-based capabilities.
+#
+# Resolution order: direct grant -> role-based -> DENY.
+class PermissionResolver:
+    store: CapabilityStore
+    role_capabilities: Dict<text, List<Capability>>
+
+    # Create a resolver with the given store and an empty role mapping.
+    static fn new(store: CapabilityStore) -> PermissionResolver:
+        PermissionResolver(
+            store: store,
+            role_capabilities: {}
+        )
+
+    # Resolve whether a principal has a required capability.
+    #
+    # Checks direct grants first, then iterates through the principal's
+    # roles looking for a matching role capability. Returns Denied if
+    # no path grants access.
+    fn resolve(principal_id: text, required: Capability, roles: List<text>) -> PermissionResult:
+        # Step 1: Check direct grants
+        val grants = self.store.list_grants(principal_id)
+        for g in grants:
+            if g.capability.matches(required):
+                return PermissionResult.Granted(grant: g)
+
+        # Step 2: Check role-based capabilities
+        for role in roles:
+            val role_caps = self.role_capabilities.get(role)
+            if val caps = role_caps:
+                for cap in caps:
+                    if cap.matches(required):
+                        return PermissionResult.GrantedByRole(role: role)
+
+        # Step 3: Default deny
+        PermissionResult.Denied(
+            reason: "no grant found for {required.to_string()} (principal: {principal_id})"
+        )
+
+    # Add a set of capabilities for a role.
+    #
+    # If the role already exists, the capabilities are replaced.
+    me add_role(role: text, capabilities: List<Capability>):
+        self.role_capabilities = self.role_capabilities.set(role, capabilities)
+
+    # Remove a role and its associated capabilities.
+    me remove_role(role: text):
+        self.role_capabilities = self.role_capabilities.remove(role)

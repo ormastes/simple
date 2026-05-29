@@ -1,0 +1,332 @@
+# Deprecated Usage Lint
+#
+# Detects usage of deprecated patterns and syntax forms that are being
+# phased out of the Simple language.
+#
+# DEPR001: Usage of Type__method() call syntax (use Type.method() instead)    WARNING
+# DEPR002: Usage of .new() constructor (use StructName(field: value) instead) WARNING
+# DEPR003: Usage of bare 'pass' (use pass_do_nothing or pass_todo instead)   WARNING
+# DEPR004: Usage of deprecated global widget functions (use WidgetStore)      WARNING
+#
+# Does NOT flag:
+# - extern fn declarations (no body)
+# - Functions named with __ in non-method context (e.g., __init__)
+# - Empty function bodies
+#
+# Works with the arena-based core AST (integer-tagged nodes).
+
+use compiler.core.ast_expr.{
+    EXPR_IDENT, EXPR_CALL, EXPR_METHOD_CALL, EXPR_PASS,
+    EXPR_BINARY, EXPR_UNARY, EXPR_INDEX, EXPR_FIELD_ACCESS,
+    EXPR_ARRAY_LIT, EXPR_IF, EXPR_MATCH, EXPR_FOR, EXPR_WHILE,
+    EXPR_BLOCK, EXPR_RETURN, EXPR_LAMBDA, EXPR_ASSIGN,
+    EXPR_COMPOUND_ASSIGN, EXPR_STRUCT_LIT, EXPR_DO_BLOCK,
+    expr_tag, expr_s_val, expr_left, expr_right, expr_args, expr_stmts
+}
+use compiler.core.ast_stmt.{
+    STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_IF, STMT_FOR,
+    STMT_WHILE, STMT_BLOCK, STMT_MATCH,
+    stmt_tag, stmt_expr, stmt_body
+}
+use compiler.core.ast.{
+    DECL_FN, DECL_EXTERN_FN, DECL_VAL, DECL_VAR, DECL_LAZY_VAL,
+    decl_tag, decl_name, decl_body_stmts
+}
+
+# ============================================================================
+# Known deprecated patterns
+# ============================================================================
+
+# Type__method() patterns: any identifier containing __ that looks like
+# a static method call in the old syntax (e.g., Vec__new(), String__from())
+# Excluded: __init__, __main__, __test__ and similar dunder names
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct DeprecatedWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    fn_name: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message} in '{self.fn_name}' — {self.hint}"
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn check_deprecated(decl_indices: [i64]) -> [DeprecatedWarning]:
+    """Run deprecated-usage lint on module declarations.
+
+    Scans all function bodies for deprecated patterns:
+    1. DEPR001: Type__method() call syntax
+    2. DEPR002: .new() constructor calls
+    3. DEPR003: Bare 'pass' usage
+    4. DEPR004: Deprecated global widget functions
+    """
+    var warnings: [DeprecatedWarning] = []
+
+    for idx in decl_indices:
+        val tag = decl_tag[idx]
+
+        if tag == DECL_FN:
+            val fn_name = decl_name[idx]
+            val body = decl_body_stmts[idx]
+
+            if body.len() == 0:
+                continue
+
+            val fn_warnings = check_stmts_deprecated(body, fn_name)
+            for w in fn_warnings:
+                warnings.push(w)
+
+        elif tag == DECL_VAL or tag == DECL_VAR or tag == DECL_LAZY_VAL:
+            val var_name = decl_name[idx]
+            val body = decl_body_stmts[idx]
+            for s in body:
+                if s >= 0:
+                    val ws = check_expr_deprecated(s, var_name)
+                    for w in ws:
+                        warnings.push(w)
+
+    warnings
+
+# ============================================================================
+# Statement Walker
+# ============================================================================
+
+fn check_stmts_deprecated(stmts: [i64], fn_name: text) -> [DeprecatedWarning]:
+    """Check a list of statements for deprecated patterns."""
+    var warnings: [DeprecatedWarning] = []
+
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_tag[s]
+
+        # Check expression
+        if tag == STMT_EXPR:
+            val e = stmt_expr[s]
+            if e >= 0:
+                val ws = check_expr_deprecated(e, fn_name)
+                for w in ws:
+                    warnings.push(w)
+
+        elif tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            val e = stmt_expr[s]
+            if e >= 0:
+                val ws = check_expr_deprecated(e, fn_name)
+                for w in ws:
+                    warnings.push(w)
+
+        # Recurse into nested blocks
+        if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_MATCH:
+            val nested = check_stmts_deprecated(stmt_body[s], fn_name)
+            for w in nested:
+                warnings.push(w)
+
+    warnings
+
+# ============================================================================
+# Expression Checker
+# ============================================================================
+
+fn check_expr_deprecated(e: i64, fn_name: text) -> [DeprecatedWarning]:
+    """Recursively check an expression for deprecated patterns."""
+    var warnings: [DeprecatedWarning] = []
+    if e < 0:
+        return warnings
+
+    val tag = expr_tag[e]
+
+    # DEPR003: Bare 'pass' — should use pass_do_nothing or pass_todo
+    if tag == EXPR_PASS:
+        warnings.push(DeprecatedWarning(
+            code: "DEPR003",
+            severity: "WARNING",
+            message: "bare 'pass' is deprecated",
+            hint: "use 'pass_do_nothing' for intentional no-ops or 'pass_todo' for unimplemented code",
+            fn_name: fn_name
+        ))
+        return warnings
+
+    # DEPR001: Type__method() call syntax
+    if tag == EXPR_CALL:
+        val callee = expr_left[e]
+        if callee >= 0:
+            if expr_tag[callee] == EXPR_IDENT:
+                val callee_name = expr_s_val[callee]
+                if is_deprecated_double_underscore(callee_name):
+                    val parts = split_on_double_underscore(callee_name)
+                    val type_name = parts[0]
+                    val method_name = parts[1]
+                    warnings.push(DeprecatedWarning(
+                        code: "DEPR001",
+                        severity: "WARNING",
+                        message: "'{callee_name}()' uses deprecated Type__method() syntax",
+                        hint: "use '{type_name}.{method_name}()' instead",
+                        fn_name: fn_name
+                    ))
+
+                # DEPR004: Deprecated global widget functions
+                val widget_hint = deprecated_global_widget_hint(callee_name)
+                if widget_hint != "":
+                    warnings.push(DeprecatedWarning(
+                        code: "DEPR004",
+                        severity: "WARNING",
+                        message: "'{callee_name}()' is a deprecated global widget function",
+                        hint: widget_hint,
+                        fn_name: fn_name
+                    ))
+
+            # Recurse into callee
+            val callee_ws = check_expr_deprecated(callee, fn_name)
+            for w in callee_ws:
+                warnings.push(w)
+
+        # Recurse into arguments
+        val call_args = expr_args[e]
+        for arg in call_args:
+            val arg_ws = check_expr_deprecated(arg, fn_name)
+            for w in arg_ws:
+                warnings.push(w)
+        return warnings
+
+    # DEPR002: .new() constructor calls
+    if tag == EXPR_METHOD_CALL:
+        val method_name = expr_s_val[e]
+        if method_name == "new":
+            warnings.push(DeprecatedWarning(
+                code: "DEPR002",
+                severity: "WARNING",
+                message: "'.new()' constructor is deprecated",
+                hint: "use 'StructName(field: value)' constructor syntax instead",
+                fn_name: fn_name
+            ))
+
+        # Recurse into receiver
+        val receiver = expr_left[e]
+        if receiver >= 0:
+            val recv_ws = check_expr_deprecated(receiver, fn_name)
+            for w in recv_ws:
+                warnings.push(w)
+
+        # Recurse into arguments
+        val call_args = expr_args[e]
+        for arg in call_args:
+            val arg_ws = check_expr_deprecated(arg, fn_name)
+            for w in arg_ws:
+                warnings.push(w)
+        return warnings
+
+    # Recurse into sub-expressions for other node types
+    collect_deprecated_recursive(e, fn_name, warnings)
+    warnings
+
+fn collect_deprecated_recursive(e: i64, fn_name: text, warnings: [DeprecatedWarning]):
+    """Recurse into sub-expressions of generic expression nodes."""
+    if e < 0:
+        return
+
+    val left = expr_left[e]
+    if left >= 0:
+        val ws = check_expr_deprecated(left, fn_name)
+        for w in ws:
+            warnings.push(w)
+
+    val right = expr_right[e]
+    if right >= 0:
+        val ws = check_expr_deprecated(right, fn_name)
+        for w in ws:
+            warnings.push(w)
+
+    for arg in expr_args[e]:
+        val ws = check_expr_deprecated(arg, fn_name)
+        for w in ws:
+            warnings.push(w)
+
+    for child_stmt in expr_stmts[e]:
+        if child_stmt >= 0:
+            val child_e = stmt_expr[child_stmt]
+            if child_e >= 0:
+                val ws = check_expr_deprecated(child_e, fn_name)
+                for w in ws:
+                    warnings.push(w)
+            val child_body = stmt_body[child_stmt]
+            val nested = check_stmts_deprecated(child_body, fn_name)
+            for w in nested:
+                warnings.push(w)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn deprecated_global_widget_hint(name: text) -> text:
+    """Return a hint string if the function name is a deprecated global widget function.
+
+    Returns empty string if the name is not deprecated.
+    """
+    if name == "upsert_widget_record":
+        return "use WidgetStore.upsert_record(record) instead"
+    if name == "get_widget_record":
+        return "use WidgetStore.get_record(id) instead"
+    if name == "require_widget_record":
+        return "use WidgetStore.require_record(id) instead"
+    if name == "get_widget":
+        return "use WidgetStore.get_node(id) instead"
+    if name == "get_widget_child_ids":
+        return "use WidgetStore.get_child_ids(node_id) instead"
+    if name == "register_widget_child":
+        return "use WidgetStore.register_child(parent_id, child_id) instead"
+    if name == "widget_props":
+        return "use WidgetStore.all_props() instead"
+    if name == "set_widget_props":
+        return "use WidgetStore.set_prop(node_id, key, value) instead"
+    if name == "get_internal_prop":
+        return "use WidgetStore.get_prop(node_id, key) instead"
+    if name == "set_internal_prop":
+        return "use WidgetStore.set_prop(node_id, key, value) instead"
+    return ""
+
+fn is_deprecated_double_underscore(name: text) -> bool:
+    """Check if an identifier uses the deprecated Type__method() pattern.
+
+    Returns true for names like 'Vec__new', 'String__from', etc.
+    Returns false for dunder names like '__init__', '__main__'.
+    """
+    # Must contain __ but not start or end with __
+    if name.starts_with("__"):
+        return false
+    if name.ends_with("__"):
+        return false
+
+    # Check for __ in the middle
+    val len = name.len()
+    var i = 0
+    while i < len - 1:
+        if name.char_at(i) == "_" and name.char_at(i + 1) == "_":
+            # Found __ in the middle — check both sides have content
+            if i > 0 and i + 2 < len:
+                return true
+        i = i + 1
+    false
+
+fn split_on_double_underscore(name: text) -> [text]:
+    """Split 'Type__method' into ['Type', 'method']."""
+    val len = name.len()
+    var i = 0
+    while i < len - 1:
+        if name.char_at(i) == "_" and name.char_at(i + 1) == "_":
+            val type_part = name.slice(0, i)
+            val method_part = name.slice(i + 2, len)
+            return [type_part, method_part]
+        i = i + 1
+    [name, ""]
+
+# ============================================================================
+# Exports
+# ============================================================================

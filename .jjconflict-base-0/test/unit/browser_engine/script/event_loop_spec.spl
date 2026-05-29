@@ -1,0 +1,94 @@
+"""
+# EventLoop Specification
+
+**Feature IDs:** #M15-EVENT-LOOP
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Draft
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Tests for `EventLoop` in
+`src/lib/gc_async_mut/gpu/browser_engine/script/event_loop.spl` (REQ-4 / AC-3).
+All specs FAIL until that module is implemented.
+
+## Key Behaviors
+
+- `EventLoop.new()` creates an empty event loop with no pending timers.
+- `schedule_raf(callback_id)` registers a callback for the next rAF slot.
+- `cancel_timer(timer_id)` removes a pending macrotask timer.
+- `pending_timer_count()` returns number of pending timers.
+- `pending_raf_count()` returns number of pending rAF callbacks.
+- Timers scheduled with a future deadline are not fired before their time.
+- Timers scheduled with a past/current deadline fire on the next `tick`.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.script.event_loop.{
+    EventLoop
+}
+
+# ===========================================================================
+# Helper functions
+# ===========================================================================
+
+fn _make_empty_loop() -> EventLoop:
+    return EventLoop.new()
+
+fn _loop_with_one_raf() -> EventLoop:
+    var el = EventLoop.new()
+    el.schedule_raf(42)
+    return el
+
+fn _loop_with_two_rafs() -> EventLoop:
+    var el = EventLoop.new()
+    el.schedule_raf(10)
+    el.schedule_raf(20)
+    return el
+
+# ===========================================================================
+# Specs
+# ===========================================================================
+
+describe "EventLoop":
+    describe "AC-3: creation":
+        it "AC-3: new event loop has zero pending timers":
+            val el = _make_empty_loop()
+            val count = el.pending_timer_count()
+            expect(count).to_equal(0)
+
+        it "AC-3: new event loop has zero pending rAF callbacks":
+            val el = _make_empty_loop()
+            val count = el.pending_raf_count()
+            expect(count).to_equal(0)
+
+    describe "AC-3: rAF scheduling":
+        it "AC-3: schedule_raf increments pending rAF count":
+            val el = _loop_with_one_raf()
+            val count = el.pending_raf_count()
+            expect(count).to_equal(1)
+
+        it "AC-3: two schedule_raf calls produce count of 2":
+            val el = _loop_with_two_rafs()
+            val count = el.pending_raf_count()
+            expect(count).to_equal(2)
+
+    describe "AC-3: timer cancellation":
+        it "AC-3: cancel_timer on absent id leaves timer count unchanged":
+            val el = _make_empty_loop()
+            el.cancel_timer(999)
+            val count = el.pending_timer_count()
+            expect(count).to_equal(0)
+
+    describe "AC-3: macrotask ordering — timers fire only after deadline":
+        it "AC-3: timer with future deadline does not increment expired count before tick":
+            val el = _make_empty_loop()
+            # A timer set 10 seconds in the future should not have fired yet
+            val future_us = 10000000000
+            val fired = el.expired_timer_count_before(future_us)
+            expect(fired).to_equal(0)

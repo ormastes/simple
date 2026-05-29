@@ -1,0 +1,166 @@
+"""2D Engine — Shared Availability & Backend Identity Helpers
+
+Pure functions for backend name canonicalization, feature-gate description,
+and common numeric conversions used in GPU kernel argument packing.
+
+No SFFI calls are made here. Actual hardware queries (cuda_available,
+vulkan_sffi_is_available) remain in each backend's own file to keep SFFI
+dependencies contained. This module provides the logic *around* those
+checks — description strings, priority ordering, and name normalization.
+
+Usage:
+    use std.gpu.engine2d.helpers_availability.{
+        backend_display_name, backend_priority, backend_is_hardware,
+        backend_requires_gpu, feature_gate_description
+    }
+
+@tag:stdlib
+@tag:gpu
+"""
+
+# ============================================================================
+# Backend Name & Identity
+# ============================================================================
+
+fn backend_display_name(name: text) -> text:
+    """Return a human-readable display name for a backend identifier.
+
+    Maps canonical backend keys (as used in Engine2D.create_with_backend_strict)
+    to the strings shown in diagnostics and probe output.
+    """
+    if name == "cuda":
+        return "NVIDIA CUDA"
+    if name == "rocm":
+        return "AMD ROCm"
+    if name == "metal":
+        return "Apple Metal"
+    if name == "qualcomm":
+        return "Qualcomm Adreno"
+    if name == "vulkan":
+        return "Vulkan Compute"
+    if name == "opengl":
+        return "OpenGL"
+    if name == "intel":
+        return "Intel Arc / oneAPI"
+    if name == "webgpu":
+        return "WebGPU"
+    if name == "software":
+        return "Optimized Software (SIMD)"
+    if name == "cpu":
+        return "CPU Software (fallback)"
+    "Unknown backend ({name})"
+
+fn backend_priority(name: text) -> i32:
+    """Return probe priority for a backend (lower = tried first).
+
+    Matches the order in Engine2D.create_with_backend_strict:
+    cuda < rocm < metal < qualcomm < vulkan < opengl < intel < webgpu < software < cpu.
+    """
+    if name == "cuda":
+        return 0
+    if name == "rocm":
+        return 1
+    if name == "metal":
+        return 2
+    if name == "qualcomm":
+        return 3
+    if name == "vulkan":
+        return 4
+    if name == "opengl":
+        return 5
+    if name == "intel":
+        return 6
+    if name == "webgpu":
+        return 7
+    if name == "software":
+        return 8
+    if name == "cpu":
+        return 9
+    99
+
+fn backend_is_hardware(name: text) -> bool:
+    """Return true if the backend uses dedicated GPU hardware."""
+    name == "cuda" or name == "rocm" or name == "metal" or
+    name == "qualcomm" or name == "vulkan" or name == "opengl" or
+    name == "intel" or name == "webgpu"
+
+fn backend_requires_gpu(name: text) -> bool:
+    """Return true if the backend cannot fall back to CPU execution."""
+    name == "cuda" or name == "rocm" or name == "metal" or name == "qualcomm"
+
+# ============================================================================
+# Feature Gate Descriptions
+# ============================================================================
+
+fn feature_gate_description(name: text) -> text:
+    """Return a one-line description of what hardware/driver is required."""
+    if name == "cuda":
+        return "Requires NVIDIA GPU with CUDA driver >= 11.0"
+    if name == "rocm":
+        return "Requires AMD GPU with ROCm >= 5.0"
+    if name == "metal":
+        return "Requires Apple Silicon or AMD GPU on macOS >= 12"
+    if name == "qualcomm":
+        return "Requires Qualcomm Adreno GPU with QDSS driver"
+    if name == "vulkan":
+        return "Requires Vulkan runtime with compute shader support"
+    if name == "opengl":
+        return "Requires OpenGL >= 3.3 with GLSL compute extensions"
+    if name == "intel":
+        return "Requires Intel Arc GPU with Level Zero / oneAPI runtime"
+    if name == "webgpu":
+        return "Requires WebGPU-capable browser or wgpu native runtime"
+    if name == "software":
+        return "No external dependencies; uses SIMD-friendly memory layout"
+    if name == "cpu":
+        return "No external dependencies; always available as final fallback"
+    "Unknown backend — no feature gate information available"
+
+fn backend_unavailable_reason(name: text) -> text:
+    """Return a suggested diagnosis message when a backend fails to init."""
+    if name == "cuda":
+        return "Check NVIDIA driver installation and CUDA toolkit version"
+    if name == "rocm":
+        return "Check AMD driver and ROCm installation"
+    if name == "metal":
+        return "Metal is only available on macOS/iOS with Apple GPU drivers"
+    if name == "qualcomm":
+        return "Qualcomm backend requires Adreno device and matching SDK"
+    if name == "vulkan":
+        return "Check Vulkan runtime (vulkan-loader) and GPU driver support"
+    if name == "opengl":
+        return "Check OpenGL driver version and compute extension support"
+    if name == "intel":
+        return "Check Intel Arc driver and Level Zero runtime installation"
+    if name == "webgpu":
+        return "Check wgpu native runtime or browser WebGPU flag"
+    "Check system configuration and driver installation"
+
+# ============================================================================
+# Common Numeric Helpers (shared by GPU arg-packing code in all backends)
+# ============================================================================
+
+fn backend_i64(v: i32) -> i64:
+    """Widen i32 to i64 for GPU kernel argument packing.
+
+    All backends contain a private `_i64(v)` fn with this body.
+    Centralizing it here allows backends to import once rather than
+    defining the same helper independently.
+    """
+    v as i64
+
+fn backend_i32_to_u32(v: i32) -> u32:
+    """Reinterpret-cast i32 to u32 for pixel buffer storage."""
+    v as u32
+
+fn backend_u32_to_u8(v: u32) -> u8:
+    """Truncate u32 to u8 (lower 8 bits)."""
+    (v & 0xFFu32) as u8
+
+fn backend_u8_to_u32(v: u8) -> u32:
+    """Zero-extend u8 to u32."""
+    v as u32
+
+fn backend_bool_to_i32(v: bool) -> i32:
+    """Convert bool to i32 (1 = true, 0 = false) for GPU push-constant packing."""
+    if v: 1 else: 0

@@ -1,0 +1,300 @@
+# MS-DOS MZ EXE Writer
+#
+# Generates MS-DOS executables for 8086 16-bit real mode.
+# Supports:
+#   - MZ EXE format (magic 0x5A4D) with relocation table
+#   - Flat COM format (raw binary, ORG 0x100)
+#
+# MZ Header layout (28 bytes minimum):
+#   0x00  e_magic       "MZ" (0x4D5A little-endian)
+#   0x02  e_cblp        Bytes on last page (0 = full page)
+#   0x04  e_cp          Pages in file (512 bytes each)
+#   0x06  e_crlc        Relocation entries count
+#   0x08  e_cparhdr     Header size in paragraphs (16 bytes each)
+#   0x0A  e_minalloc    Min extra paragraphs
+#   0x0C  e_maxalloc    Max extra paragraphs
+#   0x0E  e_ss          Initial SS (segment relative to load)
+#   0x10  e_sp          Initial SP
+#   0x12  e_csum        Checksum (usually 0)
+#   0x14  e_ip          Initial IP (entry point offset)
+#   0x16  e_cs          Initial CS (segment relative to load)
+#   0x18  e_lfarlc      Offset to relocation table
+#   0x1A  e_ovno        Overlay number (0 for main)
+
+use format.irtc_binary.{encode_u16_le, encode_u32_le}
+use linker.linker.{
+    LinkerConfig, LinkerError, LinkResult,
+    MergedSection, ResolvedSymbol, OutputFormat
+}
+
+# ============================================================================
+# MZ Constants
+# ============================================================================
+
+val MZ_MAGIC_0: i64 = 0x4D          # 'M'
+val MZ_MAGIC_1: i64 = 0x5A          # 'Z'
+val MZ_PAGE_SIZE: i64 = 512          # DOS page = 512 bytes
+val MZ_PARAGRAPH: i64 = 16           # DOS paragraph = 16 bytes
+val MZ_HEADER_SIZE: i64 = 28         # Minimum MZ header size
+val MZ_RELOC_ENTRY_SIZE: i64 = 4     # Each relocation is segment:offset (4 bytes)
+
+# COM format
+val COM_ORG: i64 = 0x100             # COM files loaded at offset 0x100
+val COM_MAX_SIZE: i64 = 65280        # 64KB - 256 bytes (0xFF00)
+
+# ============================================================================
+# Relocation Entry
+# ============================================================================
+
+struct MzRelocation:
+    """A segment relocation entry for MZ EXE."""
+    offset: i64             # Offset within segment
+    segment: i64            # Segment index
+
+impl MzRelocation:
+    static fn new(offset: i64, segment: i64) -> MzRelocation:
+        MzRelocation(offset: offset, segment: segment)
+
+# ============================================================================
+# MZ EXE Writer
+# ============================================================================
+
+fn write_mz_exe(result: LinkResult, config: LinkerConfig) -> Result<[i64], LinkerError>:
+    """Generate an MS-DOS MZ EXE file.
+
+    Layout:
+      MZ Header (28+ bytes, padded to paragraph boundary)
+      Relocation Table
+      Padding to paragraph boundary
+      Code Segment (.text)
+      Data Segment (.data)
+      BSS is not stored (just declared in header for memory allocation)
+    """
+    # Collect relocations from symbols that need segment fixups
+    var relocations: [MzRelocation] = []
+
+    # Merge all code into one contiguous block
+    var code_data: [i64] = []
+    var data_data: [i64] = []
+    var bss_size: i64 = 0
+
+    for sect in result.sections:
+        if sect.name == ".bss":
+            bss_size = bss_size + sect.size()
+        else if sect.is_writable():
+            for b in sect.data:
+                data_data.push(b)
+        else:
+            for b in sect.data:
+                code_data.push(b)
+
+    # Calculate header size (must be paragraph-aligned)
+    val reloc_table_offset = MZ_HEADER_SIZE
+    val reloc_table_size = relocations.len() * MZ_RELOC_ENTRY_SIZE
+    var header_total = reloc_table_offset + reloc_table_size
+    # Pad to paragraph boundary
+    if header_total % MZ_PARAGRAPH != 0:
+        header_total = header_total + (MZ_PARAGRAPH - header_total % MZ_PARAGRAPH)
+    val header_paragraphs = header_total / MZ_PARAGRAPH
+
+    # Calculate load image size
+    val image_size = code_data.len() + data_data.len()
+    val total_file_size = header_total + image_size
+
+    # Calculate pages
+    val pages = (total_file_size + MZ_PAGE_SIZE - 1) / MZ_PAGE_SIZE
+    val last_page_bytes = total_file_size % MZ_PAGE_SIZE
+
+    # BSS needs extra paragraphs
+    val bss_paragraphs = (bss_size + MZ_PARAGRAPH - 1) / MZ_PARAGRAPH
+
+    # Segment layout: CS=0 (code at start), DS=code_paragraphs
+    val code_paragraphs = (code_data.len() + MZ_PARAGRAPH - 1) / MZ_PARAGRAPH
+
+    # Entry point relative to load segment
+    # Find entry point within code
+    var entry_ip = result.entry_address
+    var entry_cs: i64 = 0
+
+    # Stack: place after data + bss
+    val stack_segment = code_paragraphs + ((data_data.len() + MZ_PARAGRAPH - 1) / MZ_PARAGRAPH) + bss_paragraphs
+    val stack_pointer: i64 = 0x0100     # 256 bytes of stack
+
+    # --- Build output ---
+    var output: [i64] = []
+
+    # MZ Header (28 bytes)
+    output.push(MZ_MAGIC_0)                       # e_magic[0] = 'M'
+    output.push(MZ_MAGIC_1)                       # e_magic[1] = 'Z'
+    _push_u16_le(output, last_page_bytes)         # e_cblp
+    _push_u16_le(output, pages)                   # e_cp
+    _push_u16_le(output, relocations.len())       # e_crlc
+    _push_u16_le(output, header_paragraphs)       # e_cparhdr
+    _push_u16_le(output, bss_paragraphs)          # e_minalloc
+    _push_u16_le(output, 0xFFFF)                  # e_maxalloc (request max)
+    _push_u16_le(output, stack_segment)           # e_ss
+    _push_u16_le(output, stack_pointer)           # e_sp
+    _push_u16_le(output, 0)                       # e_csum (unused)
+    _push_u16_le(output, entry_ip)                # e_ip
+    _push_u16_le(output, entry_cs)                # e_cs
+    _push_u16_le(output, reloc_table_offset)      # e_lfarlc
+    _push_u16_le(output, 0)                       # e_ovno
+
+    # Relocation table
+    for reloc in relocations:
+        _push_u16_le(output, reloc.offset)
+        _push_u16_le(output, reloc.segment)
+
+    # Pad header to paragraph boundary
+    while output.len() < header_total:
+        output.push(0)
+
+    # Code segment
+    for b in code_data:
+        output.push(b)
+
+    # Data segment
+    for b in data_data:
+        output.push(b)
+
+    Ok(output)
+
+# ============================================================================
+# COM Writer
+# ============================================================================
+
+fn write_com(result: LinkResult, config: LinkerConfig) -> Result<[i64], LinkerError>:
+    """Generate a flat MS-DOS COM binary.
+
+    COM files are loaded at CS:0100h. Maximum size is 64KB - 256 bytes.
+    No header, no relocations — pure flat binary.
+    All sections are merged into a single flat image.
+    """
+    var output: [i64] = []
+
+    # Merge all sections into flat image, ordered by address
+    # Collect all non-BSS sections
+    var all_sections: [MergedSection] = []
+    for sect in result.sections:
+        if sect.name != ".bss" and sect.data.len() > 0:
+            all_sections.push(sect)
+
+    # Sort by address (simple insertion sort)
+    for i in 1..all_sections.len():
+        var j = i
+        while j > 0 and all_sections[j].addr < all_sections[j - 1].addr:
+            val tmp = all_sections[j]
+            all_sections[j] = all_sections[j - 1]
+            all_sections[j - 1] = tmp
+            j = j - 1
+
+    # Build flat image
+    val base = config.base_address   # Usually 0x100
+    var current_pos: i64 = 0
+
+    for sect in all_sections:
+        val sect_offset = sect.addr - base
+        # Pad gap
+        while current_pos < sect_offset:
+            output.push(0)
+            current_pos = current_pos + 1
+        # Write section data
+        for b in sect.data:
+            output.push(b)
+            current_pos = current_pos + 1
+
+    # Validate size
+    if output.len() > COM_MAX_SIZE:
+        return Err(LinkerError.OutputTooLarge(
+            size: output.len(),
+            max_size: COM_MAX_SIZE
+        ))
+
+    Ok(output)
+
+# ============================================================================
+# MZ EXE with explicit relocations
+# ============================================================================
+
+fn write_mz_exe_with_relocs(sections: [MergedSection], entry_ip: i64, entry_cs: i64, relocations: [MzRelocation]) -> Result<[i64], LinkerError>:
+    """Generate MZ EXE with explicit relocation table.
+
+    For cases where the caller has already computed segment relocations.
+    """
+    var code_data: [i64] = []
+    var data_data: [i64] = []
+    var bss_size: i64 = 0
+
+    for sect in sections:
+        if sect.name == ".bss":
+            bss_size = bss_size + sect.size()
+        else if sect.is_writable():
+            for b in sect.data:
+                data_data.push(b)
+        else:
+            for b in sect.data:
+                code_data.push(b)
+
+    val reloc_table_offset = MZ_HEADER_SIZE
+    val reloc_table_size = relocations.len() * MZ_RELOC_ENTRY_SIZE
+    var header_total = reloc_table_offset + reloc_table_size
+    if header_total % MZ_PARAGRAPH != 0:
+        header_total = header_total + (MZ_PARAGRAPH - header_total % MZ_PARAGRAPH)
+    val header_paragraphs = header_total / MZ_PARAGRAPH
+
+    val image_size = code_data.len() + data_data.len()
+    val total_file_size = header_total + image_size
+    val pages = (total_file_size + MZ_PAGE_SIZE - 1) / MZ_PAGE_SIZE
+    val last_page_bytes = total_file_size % MZ_PAGE_SIZE
+    val bss_paragraphs = (bss_size + MZ_PARAGRAPH - 1) / MZ_PARAGRAPH
+    val code_paragraphs = (code_data.len() + MZ_PARAGRAPH - 1) / MZ_PARAGRAPH
+    val stack_segment = code_paragraphs + ((data_data.len() + MZ_PARAGRAPH - 1) / MZ_PARAGRAPH) + bss_paragraphs
+    val stack_pointer: i64 = 0x0100
+
+    var output: [i64] = []
+
+    output.push(MZ_MAGIC_0)
+    output.push(MZ_MAGIC_1)
+    _push_u16_le(output, last_page_bytes)
+    _push_u16_le(output, pages)
+    _push_u16_le(output, relocations.len())
+    _push_u16_le(output, header_paragraphs)
+    _push_u16_le(output, bss_paragraphs)
+    _push_u16_le(output, 0xFFFF)
+    _push_u16_le(output, stack_segment)
+    _push_u16_le(output, stack_pointer)
+    _push_u16_le(output, 0)
+    _push_u16_le(output, entry_ip)
+    _push_u16_le(output, entry_cs)
+    _push_u16_le(output, reloc_table_offset)
+    _push_u16_le(output, 0)
+
+    for reloc in relocations:
+        _push_u16_le(output, reloc.offset)
+        _push_u16_le(output, reloc.segment)
+
+    while output.len() < header_total:
+        output.push(0)
+
+    for b in code_data:
+        output.push(b)
+    for b in data_data:
+        output.push(b)
+
+    Ok(output)
+
+# ============================================================================
+# Byte Encoding Helpers
+# ============================================================================
+
+fn _push_u16_le(output: [i64], value: i64):
+    """Append a 16-bit little-endian value to the output."""
+    output.push(value % 256)
+    output.push((value / 256) % 256)
+
+fn _push_u32_le(output: [i64], value: i64):
+    """Append a 32-bit little-endian value to the output."""
+    output.push(value % 256)
+    output.push((value / 256) % 256)
+    output.push((value / 65536) % 256)
+    output.push((value / 16777216) % 256)

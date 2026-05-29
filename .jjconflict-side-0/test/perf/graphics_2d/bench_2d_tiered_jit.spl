@@ -1,0 +1,112 @@
+# Tiered JIT Benchmark — real native execution after tier promotion
+#
+# Demonstrates the full tiered JIT pipeline:
+#   1. Register function source with the JIT manager
+#   2. Loop 1 (warmup): interpreted calls accumulate, triggers Cranelift compilation
+#   3. Loop 2 (measured): calls route to native Cranelift-compiled code
+#
+# After tier promotion, hot_compute runs as native x86_64 machine code
+# compiled via Cranelift JIT — not through the interpreter.
+
+use compiler.interp.execution.tiered_jit.{TieredJitManager, TieredJitConfig, JitTier, default_config}
+
+extern fn rt_time_now_seconds() -> f64
+
+fn hot_compute(n: i64) -> i64:
+    var sum = 0
+    var i = 0
+    while i < n:
+        sum = sum + i * i
+        i = i + 1
+    sum
+
+fn tier_name(tier: JitTier) -> text:
+    if tier == JitTier.Interpreted:
+        "Interpreted (Tier 0)"
+    else if tier == JitTier.Fast:
+        "Cranelift (Tier 1)"
+    else:
+        "LLVM (Tier 2)"
+
+# Source for the hot function — compiled to native at tier promotion
+val HOT_COMPUTE_SOURCE = "fn hot_compute(n: i64) -> i64:\n    var sum = 0\n    var i = 0\n    while i < n:\n        sum = sum + i * i\n        i = i + 1\n    sum\n"
+
+fn main():
+    print("=== Tiered JIT Benchmark (Native Cranelift Compilation) ===")
+    print("")
+
+    var config = default_config()
+    var jit = TieredJitManager.create(config)
+
+    # Register the function source so JIT can compile it at promotion
+    jit.register_function("hot_compute", HOT_COMPUTE_SOURCE)
+
+    # Loop 1: Warmup — interpreted, triggers tier promotion + Cranelift compile
+    print("--- Loop 1: Warmup (interpreter + tier promotion) ---")
+    var warmup_calls = 128
+    var work_size = 100000
+    var t0 = rt_time_now_seconds()
+    var i = 0
+    while i < warmup_calls:
+        jit.record_call("hot_compute")
+        hot_compute(work_size)
+        i = i + 1
+    var t1 = rt_time_now_seconds()
+    var warmup_s = t1 - t0
+
+    print("  Warmup: " + warmup_calls.to_string() + " calls in " + warmup_s.to_string() + " s")
+    print("  hot_compute tier: " + tier_name(jit.get_tier("hot_compute")))
+    print("  Native available: " + jit.is_native("hot_compute").to_string())
+
+    # Loop 2: Measured — runs through native Cranelift-compiled code
+    print("")
+    print("--- Loop 2: Measured (native Cranelift execution) ---")
+    var measured_calls = 2000
+    var t2 = rt_time_now_seconds()
+    i = 0
+    if jit.is_native("hot_compute"):
+        while i < measured_calls:
+            jit.call_i64("hot_compute", work_size)
+            i = i + 1
+    else:
+        print("  WARNING: native compilation failed, falling back to interpreter")
+        while i < measured_calls:
+            hot_compute(work_size)
+            i = i + 1
+    var t3 = rt_time_now_seconds()
+    var measured_s = t3 - t2
+
+    print("  Measured: " + measured_calls.to_string() + " calls in " + measured_s.to_string() + " s")
+
+    # Results
+    print("")
+    print("--- Results ---")
+    print("  Warmup total (interpreted): " + warmup_s.to_string() + " s (" + warmup_calls.to_string() + " calls)")
+    print("  Measured total (native): " + measured_s.to_string() + " s (" + measured_calls.to_string() + " calls)")
+
+    if measured_s > 0.0:
+        var warmup_per_call = warmup_s / warmup_calls.to_f64()
+        var measured_per_call = measured_s / measured_calls.to_f64()
+        var ratio = warmup_per_call / measured_per_call
+        print("  Per-call warmup: " + warmup_per_call.to_string() + " s")
+        print("  Per-call native: " + measured_per_call.to_string() + " s")
+        print("  Speedup (interpreted/native): " + ratio.to_string() + "x")
+    else:
+        print("  Native execution too fast to measure at this timer resolution")
+        print("  (sub-second for " + measured_calls.to_string() + " native calls)")
+
+    # Verify correctness
+    print("")
+    print("--- Correctness Check ---")
+    var expected = hot_compute(work_size)
+    var native_result = jit.call_i64("hot_compute", work_size)
+    print("  Interpreted result: " + expected.to_string())
+    print("  Native result: " + native_result.to_string())
+    if expected == native_result:
+        print("  PASS: results match")
+    else:
+        print("  FAIL: mismatch!")
+
+    print("")
+    jit.print_stats()
+    jit.cleanup()

@@ -1,0 +1,104 @@
+use std.spec
+use os.game.steam.sffi_backend.{
+    steam_sffi_backend_plan,
+    steam_sffi_bridge_abi,
+    steam_sffi_bridge_candidates,
+    steam_sffi_bridge_env_var,
+    steam_sffi_bridge_health_symbols,
+    steam_sffi_find_bridge_path_from_candidates,
+    steam_sffi_missing_os_capabilities,
+    steam_sffi_missing_symbols,
+    steam_sffi_probe_from_evidence,
+    steam_sffi_probe_from_evidence_with_health
+}
+use os.game.steam.support_api.{
+    steam_api_backend_required_os_capabilities,
+    steam_api_backend_required_symbols
+}
+
+describe "Steam SFFI backend contract":
+    it "publishes the configured bridge discovery contract":
+        val plan = steam_sffi_backend_plan()
+        expect(plan.env_var).to_equal("SIMPLE_STEAM_BRIDGE_PATH")
+        expect(plan.bridge_abi).to_equal("simple-steam-sffi-v1")
+        expect(plan.candidates.len()).to_equal(8)
+        expect(plan.required_symbols.len()).to_equal(20)
+        expect(plan.required_os_capabilities.len()).to_equal(11)
+        expect(steam_sffi_bridge_env_var()).to_equal("SIMPLE_STEAM_BRIDGE_PATH")
+        expect(steam_sffi_bridge_abi()).to_equal("simple-steam-sffi-v1")
+        expect(steam_sffi_bridge_candidates().join(",")).to_contain("libsteam_api.so")
+        expect(steam_sffi_bridge_health_symbols().join(",")).to_equal("simple_steam_bridge_is_mock,simple_steam_bridge_real_backend_ready")
+
+    it "resolves explicit paths before known candidates":
+        val explicit = steam_sffi_find_bridge_path_from_candidates("/opt/steam/libsimple_steam_bridge.so", [])
+        expect(explicit).to_equal("/opt/steam/libsimple_steam_bridge.so")
+
+        val known = steam_sffi_find_bridge_path_from_candidates("", ["build/os/game/steam/libsimple_steam_bridge.so"])
+        expect(known).to_equal("build/os/game/steam/libsimple_steam_bridge.so")
+
+        val missing = steam_sffi_find_bridge_path_from_candidates("", ["other/path/libsimple_steam_bridge.so"])
+        expect(missing).to_equal("")
+
+    it "reports missing bridge path before symbol readiness":
+        val status = steam_sffi_probe_from_evidence("", 0, true, steam_api_backend_required_symbols(), steam_api_backend_required_os_capabilities())
+        expect(status.ready).to_equal(false)
+        expect(status.blocker).to_equal("missing Steam SFFI bridge path")
+        expect(status.matched_symbol_count).to_equal(20)
+        expect(status.matched_os_capability_count).to_equal(11)
+
+    it "reports loaded bridge readiness from real symbol evidence":
+        val loaded_missing_client = steam_sffi_probe_from_evidence(
+            "build/os/game/steam/libsimple_steam_bridge.so",
+            42,
+            false,
+            steam_api_backend_required_symbols(),
+            steam_api_backend_required_os_capabilities()
+        )
+        expect(loaded_missing_client.ready).to_equal(false)
+        expect(loaded_missing_client.blocker).to_equal("missing authenticated Steam client")
+
+        val ready = steam_sffi_probe_from_evidence(
+            "build/os/game/steam/libsimple_steam_bridge.so",
+            42,
+            true,
+            steam_api_backend_required_symbols(),
+            steam_api_backend_required_os_capabilities()
+        )
+        expect(ready.ready).to_equal(true)
+        expect(ready.blocker).to_equal("")
+
+    it "does not treat mock bridge symbols as real backend readiness":
+        val mock = steam_sffi_probe_from_evidence_with_health(
+            "build/os/game/steam/libsimple_steam_bridge.so",
+            42,
+            true,
+            steam_api_backend_required_symbols(),
+            steam_api_backend_required_os_capabilities(),
+            true,
+            false
+        )
+        expect(mock.ready).to_equal(false)
+        expect(mock.mock_bridge).to_equal(true)
+        expect(mock.real_backend_ready).to_equal(false)
+        expect(mock.blocker).to_equal("Steam SFFI bridge is a mock fixture")
+
+        val no_backend = steam_sffi_probe_from_evidence_with_health(
+            "build/os/game/steam/libsimple_steam_bridge.so",
+            42,
+            true,
+            steam_api_backend_required_symbols(),
+            steam_api_backend_required_os_capabilities(),
+            false,
+            false
+        )
+        expect(no_backend.ready).to_equal(false)
+        expect(no_backend.blocker).to_equal("Steam SFFI bridge has no real Valve backend")
+
+    it "lists exact missing symbols and SimpleOS capabilities":
+        val missing_symbols = steam_sffi_missing_symbols(["SteamAPI_Init", "SteamAPI_Shutdown"])
+        expect(missing_symbols.len()).to_equal(18)
+        expect(missing_symbols.join(",")).to_contain("SteamInternal_CreateInterface")
+
+        val missing_os = steam_sffi_missing_os_capabilities(["elf64_dynamic_loader"])
+        expect(missing_os.len()).to_equal(10)
+        expect(missing_os.join(",")).to_contain("steam_runtime_container")

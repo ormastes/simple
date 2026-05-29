@@ -1,0 +1,190 @@
+# RISC-V Core Local Interruptor (CLINT)
+#
+# The CLINT provides per-hart timer and software interrupt functionality.
+# It is present on most RISC-V platforms (QEMU virt, SiFive, etc.).
+#
+# Memory-mapped registers (base: 0x02000000 on QEMU virt):
+#   MSIP[hartid]     — 0x0000 + (hartid * 4)     — software interrupt pending
+#   MTIMECMP[hartid] — 0x4000 + (hartid * 8)     — timer compare value
+#   MTIME            — 0xBFF8                     — global timer counter
+#
+# The CLINT is separate from the PLIC. CLINT handles timer and software
+# interrupts; PLIC handles external device interrupts.
+#
+# Reference: SiFive CLINT specification, RISC-V Privileged ISA v1.12
+#
+# ============================================================================
+# CLINT Base Address and Register Offsets
+# ============================================================================
+
+val CLINT_BASE: u64 = 0x02000000
+
+val CLINT_MSIP_OFFSET: u64 = 0x0000
+val CLINT_MTIMECMP_OFFSET: u64 = 0x4000
+val CLINT_MTIME_OFFSET: u64 = 0xBFF8
+
+# Default timer frequency (QEMU virt: 10 MHz)
+val CLINT_TIMER_FREQ: u64 = 10000000
+
+# ============================================================================
+# CLINT Register Interface
+# ============================================================================
+
+struct ClintRegisters:
+    """CLINT memory-mapped register interface."""
+    base: u64
+
+fn clint_regs_default() -> ClintRegisters:
+    """Create CLINT registers with the default QEMU virt base address."""
+    ClintRegisters(base: CLINT_BASE)
+
+fn clint_regs_with_base(b: u64) -> ClintRegisters:
+    """Create CLINT registers with a custom base address."""
+    ClintRegisters(base: b)
+
+fn clint_msip_addr(regs: ClintRegisters, hart_id: u64) -> u64:
+    """Get address of MSIP register for a hart."""
+    regs.base + CLINT_MSIP_OFFSET + (hart_id * 4)
+
+fn clint_mtimecmp_addr(regs: ClintRegisters, hart_id: u64) -> u64:
+    """Get address of MTIMECMP register for a hart."""
+    regs.base + CLINT_MTIMECMP_OFFSET + (hart_id * 8)
+
+fn clint_mtime_addr(regs: ClintRegisters) -> u64:
+    """Get address of MTIME register."""
+    regs.base + CLINT_MTIME_OFFSET
+
+# ============================================================================
+# MTIME (Global Timer Counter)
+# ============================================================================
+
+fn clint_get_mtime() -> u64:
+    """Read the current value of the MTIME counter.
+
+    Stub — on real hardware reads from the memory-mapped MTIME register.
+    Returns 0 in interpreter mode.
+    """
+    val regs = clint_regs_default()
+    val addr = clint_mtime_addr(regs)
+    # unsafe:
+    #     val reg = @address(addr) @volatile val: u64
+    #     return reg
+    0
+
+fn clint_set_mtime(value: u64):
+    """Write to the MTIME counter.
+
+    Note: Writing to mtime is rarely needed; some platforms disallow it.
+    Stub in interpreter mode.
+    """
+    val regs = clint_regs_default()
+    val addr = clint_mtime_addr(regs)
+    # unsafe:
+    #     val reg = @address(addr) @volatile var: u64
+    #     reg = value
+    pass
+
+# ============================================================================
+# MTIMECMP (Per-Hart Timer Compare)
+# ============================================================================
+
+fn clint_get_mtimecmp(hart_id: u64) -> u64:
+    """Read MTIMECMP for a given hart.
+
+    A timer interrupt fires when mtime >= mtimecmp.
+    Stub — returns 0 in interpreter mode.
+    """
+    val regs = clint_regs_default()
+    val addr = clint_mtimecmp_addr(regs, hart_id)
+    # unsafe:
+    #     val reg = @address(addr) @volatile val: u64
+    #     return reg
+    0
+
+fn clint_set_mtimecmp(hart_id: u64, value: u64):
+    """Set MTIMECMP for a given hart.
+
+    Setting mtimecmp clears the pending timer interrupt for that hart.
+    To schedule the next timer interrupt, set mtimecmp = mtime + delta.
+    Stub in interpreter mode.
+    """
+    val regs = clint_regs_default()
+    val addr = clint_mtimecmp_addr(regs, hart_id)
+    # unsafe:
+    #     val reg = @address(addr) @volatile var: u64
+    #     reg = value
+    pass
+
+fn clint_set_timer(hart_id: u64, delta_ticks: u64):
+    """Schedule a timer interrupt delta_ticks from now.
+
+    Convenience wrapper: reads mtime, adds delta, writes to mtimecmp.
+    Stub — no-op in interpreter mode.
+    """
+    val now = clint_get_mtime()
+    clint_set_mtimecmp(hart_id, now + delta_ticks)
+
+fn clint_set_timer_ms(hart_id: u64, ms: u64):
+    """Schedule a timer interrupt ms milliseconds from now.
+
+    Uses CLINT_TIMER_FREQ to convert milliseconds to ticks.
+    """
+    val ticks = (ms * CLINT_TIMER_FREQ) / 1000
+    clint_set_timer(hart_id, ticks)
+
+fn clint_clear_timer(hart_id: u64):
+    """Clear pending timer interrupt by setting mtimecmp to max value."""
+    clint_set_mtimecmp(hart_id, 0xFFFFFFFFFFFFFFFF)
+
+# ============================================================================
+# MSIP (Per-Hart Software Interrupt Pending)
+# ============================================================================
+
+fn clint_send_ipi(hart_id: u64):
+    """Send a software interrupt (IPI) to a hart by writing 1 to its MSIP.
+
+    Stub in interpreter mode.
+    """
+    val regs = clint_regs_default()
+    val addr = clint_msip_addr(regs, hart_id)
+    # unsafe:
+    #     val reg = @address(addr) @volatile var: u32
+    #     reg = 1
+    pass
+
+fn clint_clear_ipi(hart_id: u64):
+    """Clear software interrupt for a hart by writing 0 to its MSIP.
+
+    Stub in interpreter mode.
+    """
+    val regs = clint_regs_default()
+    val addr = clint_msip_addr(regs, hart_id)
+    # unsafe:
+    #     val reg = @address(addr) @volatile var: u32
+    #     reg = 0
+    pass
+
+fn clint_get_ipi_pending(hart_id: u64) -> bool:
+    """Check if a software interrupt is pending for a hart.
+
+    Stub — returns false in interpreter mode.
+    """
+    val regs = clint_regs_default()
+    val addr = clint_msip_addr(regs, hart_id)
+    # unsafe:
+    #     val reg = @address(addr) @volatile val: u32
+    #     return reg != 0
+    false
+
+# ============================================================================
+# CLINT Initialization
+# ============================================================================
+
+fn clint_init(hart_id: u64):
+    """Initialize CLINT for a hart.
+
+    Clears software interrupt and disables timer interrupt (sets
+    mtimecmp to max).
+    """
+    clint_clear_ipi(hart_id)
+    clint_clear_timer(hart_id)

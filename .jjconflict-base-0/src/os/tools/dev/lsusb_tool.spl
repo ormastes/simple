@@ -1,0 +1,77 @@
+use os.userlib.device.{DeviceEntry, enumerate_devices}
+use os.drivers.usb.xhci_driver.{xhci_probe, xhci_init}
+use os.drivers.usb.xhci_enum.{xhci_enumerate, UsbDevice}
+
+## List USB host controllers + attached USB devices.
+## Flags: -h (help)
+##
+## First lists PCI USB controllers (class 0x0C, subclass 0x03), then probes
+## XHCI and enumerates any attached USB devices via port scan + descriptor fetch.
+
+val USB_CLASS: u8 = 0x0C
+val USB_SUBCLASS: u8 = 0x03
+
+fn is_usb_controller(class_code: u8, subclass: u8) -> bool:
+    """Return true when class/subclass identify a USB host controller (0x0C/0x03)."""
+    class_code == USB_CLASS and subclass == USB_SUBCLASS
+
+fn _format_usb_line(entry: DeviceEntry) -> text:
+    val bus = entry.bus
+    val device = entry.device
+    val func = entry.func
+    val vendor = entry.vendor_id
+    val dev_id = entry.device_id
+    "Bus {bus:02x} Device {device:02x} Function {func}: USB Controller [{vendor:04x}:{dev_id:04x}]"
+
+fn _print_usage():
+    print "Usage: lsusb [-h]"
+    print ""
+    print "List USB host controllers (PCI class 0x0C, subclass 0x03)."
+    print ""
+    print "Options:"
+    print "  -h    Show this help"
+
+fn run_lsusb(args: [text]) -> i32:
+    for arg in args:
+        if arg == "-h":
+            _print_usage()
+            return 0
+
+    val result = enumerate_devices()
+    if val Err(msg) = result:
+        print "lsusb: error enumerating devices: {msg}"
+        return 1
+
+    val devices = result.unwrap()
+    var found: i32 = 0
+    for entry in devices:
+        if is_usb_controller(entry.class_code, entry.subclass):
+            val line = _format_usb_line(entry)
+            print line
+            found = found + 1
+
+    if found == 0:
+        print "No USB host controllers found"
+
+    # Attempt XHCI device enumeration for attached USB devices
+    val ctrl_opt = xhci_probe()
+    if val Some(ctrl) = ctrl_opt:
+        if val Ok(_) = xhci_init(ctrl):
+            val devices = xhci_enumerate(ctrl)
+            if devices.len() == 0:
+                print ""
+                print "No USB devices attached"
+            else:
+                print ""
+                print "Attached USB devices:"
+                for dev in devices:
+                    val bus = dev.bus
+                    val port = dev.port
+                    val slot = dev.slot
+                    val vid = dev.vid
+                    val pid = dev.pid
+                    val cls = dev.dev_class
+                    val spd = dev.speed
+                    print "  Bus {bus:02x} Port {port:02x} Slot {slot}: ID {vid:04x}:{pid:04x} (class {cls:02x}, speed {spd})"
+
+    0

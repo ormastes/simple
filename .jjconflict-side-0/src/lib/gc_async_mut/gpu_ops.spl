@@ -1,0 +1,497 @@
+@allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
+# GPU Operations — high-level API, intrinsics, typed transfers, BLAS/Thrust stubs
+
+use gc_async_mut.gpu_sffi.{
+    cuda_init,
+    cuda_mem_alloc,
+    cuda_mem_free,
+    cuda_memcpy_htod,
+    cuda_memcpy_dtoh,
+    cuda_memcpy_dtod,
+    cuda_memset,
+    cuda_launch_kernel,
+    cuda_sync,
+    cuda_device_get,
+    cuda_device_count,
+    cuda_device_name,
+    cuda_device_compute_capability,
+    cuda_ctx_create
+}
+use gc_async_mut.gpu_types.{GpuError, GpuPtr, GpuModule, GpuLaunchConfig}
+
+# ============================================================================
+# Top-Level API Functions
+# ============================================================================
+
+fn gpu_init() -> Result<(), GpuError>:
+    """Initialize the GPU runtime. Must be called before any other GPU operations."""
+    val result = cuda_init()
+    if result < 0:
+        return Err(GpuError.from_code(result))
+    Ok(())
+
+fn gpu_alloc(size: i64) -> Result<GpuPtr, GpuError>:
+    """Allocate device memory of given size in bytes."""
+    val ptr = cuda_mem_alloc(size)
+    if ptr < 0:
+        return Err(GpuError.from_code(ptr))
+    Ok(GpuPtr(device_ptr: ptr, size: size, is_valid: true))
+
+fn gpu_free(gpu_ptr: GpuPtr) -> Result<(), GpuError>:
+    """Free device memory."""
+    if gpu_ptr.is_null():
+        return Ok(())
+    val result = cuda_mem_free(gpu_ptr.device_ptr)
+    if result < 0:
+        return Err(GpuError.from_code(result))
+    Ok(())
+
+fn gpu_upload(gpu_ptr: GpuPtr, host_ptr: i64, size: i64) -> Result<(), GpuError>:
+    """Copy data from host memory to device memory."""
+    val result = cuda_memcpy_htod(gpu_ptr.device_ptr, host_ptr, size)
+    if result < 0:
+        return Err(GpuError.from_code(result))
+    Ok(())
+
+fn gpu_download(gpu_ptr: GpuPtr, host_ptr: i64, size: i64) -> Result<(), GpuError>:
+    """Copy data from device memory to host memory."""
+    val result = cuda_memcpy_dtoh(host_ptr, gpu_ptr.device_ptr, size)
+    if result < 0:
+        return Err(GpuError.from_code(result))
+    Ok(())
+
+fn gpu_memset(gpu_ptr: GpuPtr, value: i64, size: i64) -> Result<(), GpuError>:
+    """Set device memory to a value."""
+    val result = cuda_memset(gpu_ptr.device_ptr, value, size)
+    if result < 0:
+        return Err(GpuError.from_code(result))
+    Ok(())
+
+fn gpu_launch(module: GpuModule, func_name: text, config: GpuLaunchConfig, args_ptr: i64) -> Result<(), GpuError>:
+    """Launch a GPU kernel with the given configuration."""
+    val result = cuda_launch_kernel(
+        module.handle,
+        func_name,
+        config.grid_x,
+        config.grid_y,
+        config.grid_z,
+        config.block_x,
+        config.block_y,
+        config.block_z,
+        args_ptr
+    )
+    if result < 0:
+        return Err(GpuError.from_code(result))
+    Ok(())
+
+fn gpu_sync() -> Result<(), GpuError>:
+    """Synchronize the device - wait for all pending operations to complete."""
+    val result = cuda_sync()
+    if result < 0:
+        return Err(GpuError.from_code(result))
+    Ok(())
+
+# ============================================================================
+# Device Info Wrappers
+# ============================================================================
+
+fn gpu_device_name(device_id: i64) -> text:
+    """Get GPU device name by ID."""
+    cuda_device_name(cuda_device_get(device_id))
+
+fn gpu_device_compute_capability(device_id: i64) -> (i64, i64):
+    """Get compute capability as (major, minor) tuple."""
+    val cap = cuda_device_compute_capability(cuda_device_get(device_id))
+    (cap / 10, cap % 10)
+
+fn gpu_device_total_memory(device_id: i64) -> i64:
+    """Get total device memory in bytes.
+    Note: Returns 0 until memory query SFFI is added."""
+    0
+
+fn gpu_set_device(device_id: i64) -> Result<(), GpuError>:
+    """Set the active GPU device (creates context)."""
+    val handle = cuda_ctx_create(cuda_device_get(device_id))
+    if handle < 0:
+        return Err(GpuError.from_code(handle))
+    Ok(())
+
+fn gpu_device_count() -> i64:
+    """Get number of available GPU devices."""
+    cuda_device_count()
+
+# ============================================================================
+# Typed Memory Transfer
+# ============================================================================
+
+fn gpu_upload_f32(gpu_ptr: GpuPtr, data: [f32]) -> Result<(), GpuError>:
+    """Upload f32 array from host to device."""
+    val byte_size = data.len() * 4  # f32 = 4 bytes
+    gpu_upload(gpu_ptr, data.data_ptr(), byte_size)
+
+fn gpu_download_f32(gpu_ptr: GpuPtr, count: i64) -> Result<[f32], GpuError>:
+    """Download f32 array from device to host."""
+    var result = [for i in 0..count: 0.0]
+    val byte_size = count * 4
+    val dl_result = gpu_download(gpu_ptr, result.data_ptr(), byte_size)
+    match dl_result:
+        case Ok(_):
+            Ok(result)
+        case Err(e):
+            Err(e)
+
+fn gpu_upload_i32(gpu_ptr: GpuPtr, data: [i32]) -> Result<(), GpuError>:
+    """Upload i32 array from host to device."""
+    gpu_upload(gpu_ptr, data.data_ptr(), data.len() * 4)
+
+fn gpu_upload_i64(gpu_ptr: GpuPtr, data: [i64]) -> Result<(), GpuError>:
+    """Upload i64 array from host to device."""
+    gpu_upload(gpu_ptr, data.data_ptr(), data.len() * 8)
+
+fn gpu_upload_f64(gpu_ptr: GpuPtr, data: [f64]) -> Result<(), GpuError>:
+    """Upload f64 array from host to device."""
+    gpu_upload(gpu_ptr, data.data_ptr(), data.len() * 8)
+
+fn gpu_download_i32(gpu_ptr: GpuPtr, count: i64) -> Result<[i32], GpuError>:
+    """Download i32 array from device to host."""
+    var result = [for i in 0..count: 0]
+    val byte_size = count * 4
+    val dl_result = gpu_download(gpu_ptr, result.data_ptr(), byte_size)
+    match dl_result:
+        case Ok(_):
+            Ok(result)
+        case Err(e):
+            Err(e)
+
+fn gpu_download_i64(gpu_ptr: GpuPtr, count: i64) -> Result<[i64], GpuError>:
+    """Download i64 array from device to host."""
+    var result = [for i in 0..count: 0]
+    val byte_size = count * 8
+    val dl_result = gpu_download(gpu_ptr, result.data_ptr(), byte_size)
+    match dl_result:
+        case Ok(_):
+            Ok(result)
+        case Err(e):
+            Err(e)
+
+fn gpu_download_f64(gpu_ptr: GpuPtr, count: i64) -> Result<[f64], GpuError>:
+    """Download f64 array from device to host."""
+    var result = [for i in 0..count: 0.0]
+    val byte_size = count * 8
+    val dl_result = gpu_download(gpu_ptr, result.data_ptr(), byte_size)
+    match dl_result:
+        case Ok(_):
+            Ok(result)
+        case Err(e):
+            Err(e)
+
+# ============================================================================
+# Typed Allocation
+# ============================================================================
+
+fn gpu_alloc_f32(count: i64) -> Result<GpuPtr, GpuError>:
+    """Allocate f32 device memory by element count."""
+    gpu_alloc(count * 4)
+
+fn gpu_alloc_i32(count: i64) -> Result<GpuPtr, GpuError>:
+    """Allocate i32 device memory by element count."""
+    gpu_alloc(count * 4)
+
+fn gpu_alloc_i64(count: i64) -> Result<GpuPtr, GpuError>:
+    """Allocate i64 device memory by element count."""
+    gpu_alloc(count * 8)
+
+fn gpu_alloc_f64(count: i64) -> Result<GpuPtr, GpuError>:
+    """Allocate f64 device memory by element count."""
+    gpu_alloc(count * 8)
+
+# ============================================================================
+# Typed Memset/Copy
+# ============================================================================
+
+fn gpu_memset_f32(ptr: GpuPtr, value: f32, count: i64) -> Result<(), GpuError>:
+    """Memset f32 device memory."""
+    gpu_memset(ptr, 0, count * 4)
+
+fn gpu_memset_i32(ptr: GpuPtr, value: i64, count: i64) -> Result<(), GpuError>:
+    """Memset i32 device memory."""
+    gpu_memset(ptr, value, count * 4)
+
+fn gpu_copy_f32(dst: GpuPtr, src: GpuPtr, count: i64) -> Result<(), GpuError>:
+    """Copy f32 device memory between buffers."""
+    val result = cuda_memcpy_dtod(dst.device_ptr, src.device_ptr, count * 4)
+    if result < 0:
+        return Err(GpuError.from_code(result))
+    Ok(())
+
+fn gpu_copy_i32(dst: GpuPtr, src: GpuPtr, count: i64) -> Result<(), GpuError>:
+    """Copy i32 device memory between buffers."""
+    val result = cuda_memcpy_dtod(dst.device_ptr, src.device_ptr, count * 4)
+    if result < 0:
+        return Err(GpuError.from_code(result))
+    Ok(())
+
+fn gpu_copy(dst: GpuPtr, src: GpuPtr, bytes: i64) -> Result<(), GpuError>:
+    """Copy bytes between device buffers."""
+    val result = cuda_memcpy_dtod(dst.device_ptr, src.device_ptr, bytes)
+    if result < 0:
+        return Err(GpuError.from_code(result))
+    Ok(())
+
+# ============================================================================
+# GPU Intrinsic Stubs (interpreter mode)
+# These are recognized as intrinsics by the MIR->PTX backend at compile time.
+# In interpreter mode, they return dummy values for testing.
+# ============================================================================
+
+fn gpu_block_id_x() -> i64:
+    """Block ID in X dimension. PTX: %ctaid.x"""
+    0
+
+fn gpu_block_id_y() -> i64:
+    """Block ID in Y dimension. PTX: %ctaid.y"""
+    0
+
+fn gpu_block_id_z() -> i64:
+    """Block ID in Z dimension. PTX: %ctaid.z"""
+    0
+
+fn gpu_block_dim_x() -> i64:
+    """Block dimension in X. PTX: %ntid.x"""
+    1
+
+fn gpu_block_dim_y() -> i64:
+    """Block dimension in Y. PTX: %ntid.y"""
+    1
+
+fn gpu_block_dim_z() -> i64:
+    """Block dimension in Z. PTX: %ntid.z"""
+    1
+
+fn gpu_local_id_x() -> i64:
+    """Thread ID within block, X. PTX: %tid.x"""
+    0
+
+fn gpu_local_id_y() -> i64:
+    """Thread ID within block, Y. PTX: %tid.y"""
+    0
+
+fn gpu_local_id_z() -> i64:
+    """Thread ID within block, Z. PTX: %tid.z"""
+    0
+
+fn gpu_thread_id_x() -> i64:
+    """Alias for thread ID within block, X. PTX: %tid.x"""
+    gpu_local_id_x()
+
+fn gpu_thread_id_y() -> i64:
+    """Alias for thread ID within block, Y. PTX: %tid.y"""
+    gpu_local_id_y()
+
+fn gpu_thread_id_z() -> i64:
+    """Alias for thread ID within block, Z. PTX: %tid.z"""
+    gpu_local_id_z()
+
+fn gpu_grid_dim_x() -> i64:
+    """Grid dimension in X. PTX: %nctaid.x"""
+    1
+
+fn gpu_grid_dim_y() -> i64:
+    """Grid dimension in Y. PTX: %nctaid.y"""
+    1
+
+fn gpu_grid_dim_z() -> i64:
+    """Grid dimension in Z. PTX: %nctaid.z"""
+    1
+
+fn gpu_global_id_x() -> i64:
+    """Global thread ID in X = blockIdx.x * blockDim.x + threadIdx.x"""
+    0
+
+fn gpu_global_id_y() -> i64:
+    """Global thread ID in Y = blockIdx.y * blockDim.y + threadIdx.y"""
+    0
+
+fn gpu_global_id_z() -> i64:
+    """Global thread ID in Z = blockIdx.z * blockDim.z + threadIdx.z"""
+    0
+
+fn gpu_syncthreads():
+    """Synchronize threads within a block. PTX: bar.sync 0"""
+    pass_dn
+
+fn gpu_barrier():
+    """Block-level barrier synchronization."""
+    pass_dn
+
+fn gpu_load_f32(ptr: GpuPtr, index: i64) -> f32:
+    """Load f32 from device memory at index. PTX: ld.global.f32"""
+    0.0
+
+fn gpu_store_f32(ptr: GpuPtr, index: i64, value: f32):
+    """Store f32 to device memory at index. PTX: st.global.f32"""
+    pass_dn
+
+fn gpu_atomic_add_i64(ptr: GpuPtr, index: i64, value: i64) -> i64:
+    """Atomic add on device memory. PTX: atom.global.add.s64"""
+    0
+
+fn gpu_atomic_add_i32(ptr: GpuPtr, index: i64, value: i64) -> i64:
+    """Atomic add on device memory (i32). PTX: atom.global.add.s32"""
+    0
+
+fn gpu_atomic_add_f32(ptr: GpuPtr, index: i64, value: f64) -> f64:
+    """Atomic add on device memory (f32). PTX: atom.global.add.f32"""
+    0.0
+
+fn gpu_atomic_min_i64(ptr: GpuPtr, index: i64, value: i64) -> i64:
+    """Atomic min on device memory. PTX: atom.global.min.s64"""
+    0
+
+fn gpu_atomic_max_i64(ptr: GpuPtr, index: i64, value: i64) -> i64:
+    """Atomic max on device memory. PTX: atom.global.max.s64"""
+    0
+
+fn gpu_atomic_cas_i64(ptr: GpuPtr, index: i64, compare: i64, value: i64) -> i64:
+    """Atomic compare-and-swap on device memory. PTX: atom.global.cas.b64"""
+    0
+
+fn gpu_load_f64(ptr: i64, index: i64) -> f64:
+    """Load f64 from device memory at index. PTX: ld.global.f64"""
+    0.0
+
+fn gpu_store_f64(ptr: i64, index: i64, value: f64):
+    """Store f64 to device memory at index. PTX: st.global.f64"""
+    pass_dn
+
+fn gpu_load_i64(ptr: i64, index: i64) -> i64:
+    """Load i64 from device memory at index. PTX: ld.global.s64"""
+    0
+
+fn gpu_store_i64(ptr: i64, index: i64, value: i64):
+    """Store i64 to device memory at index. PTX: st.global.s64"""
+    pass_dn
+
+fn gpu_load_i32(ptr: GpuPtr, index: i64) -> i64:
+    """Load i32 from device memory at index. PTX: ld.global.s32"""
+    0
+
+fn gpu_store_i32(ptr: GpuPtr, index: i64, value: i64):
+    """Store i32 to device memory at index. PTX: st.global.s32"""
+    pass_dn
+
+# ============================================================================
+# Shared Memory Stubs (interpreter mode)
+# ============================================================================
+
+fn gpu_shared_array_f32(size: i64) -> i64:
+    """Allocate shared memory for f32 array. Returns handle."""
+    0
+
+fn gpu_shared_store_f32(shared: i64, index: i64, value: f32):
+    """Store f32 into shared memory."""
+    pass_dn
+
+fn gpu_shared_load_f32(shared: i64, index: i64) -> f32:
+    """Load f32 from shared memory."""
+    0.0
+
+fn gpu_shared_array_i32(size: i64) -> i64:
+    """Allocate shared memory for i32 array. Returns handle."""
+    0
+
+fn gpu_shared_store_i32(shared: i64, index: i64, value: i64):
+    """Store i32 into shared memory."""
+    pass_dn
+
+fn gpu_shared_load_i32(shared: i64, index: i64) -> i64:
+    """Load i32 from shared memory."""
+    0
+
+# ============================================================================
+# BLAS CPU-fallback Stubs
+# ============================================================================
+
+fn gpu_gemm(a: [f32], b: [f32], m: i64, n: i64, k: i64) -> Result<[f32], GpuError>:
+    # Matrix multiply C[i,j] = sum(A[i,p] * B[p,j]) for p in 0..k. CPU fallback.
+    var result = [for idx in 0..(m * n): 0.0]
+    var i = 0
+    while i < m:
+        var j = 0
+        while j < n:
+            var sum = 0.0
+            var p = 0
+            while p < k:
+                sum = sum + a[i * k + p] * b[p * n + j]
+                p = p + 1
+            result[i * n + j] = sum
+            j = j + 1
+        i = i + 1
+    Ok(result)
+
+fn gpu_dot(x: [f32], y: [f32]) -> Result<f32, GpuError>:
+    # Dot product of two vectors. CPU fallback.
+    var sum = 0.0
+    var i = 0
+    while i < x.len():
+        sum = sum + x[i] * y[i]
+        i = i + 1
+    Ok(sum)
+
+fn gpu_axpy(alpha: f32, x: [f32], y: [f32]) -> Result<[f32], GpuError>:
+    # AXPY: result[i] = alpha * x[i] + y[i]. CPU fallback.
+    var result = [for idx in 0..x.len(): 0.0]
+    var i = 0
+    while i < x.len():
+        result[i] = alpha * x[i] + y[i]
+        i = i + 1
+    Ok(result)
+
+# ============================================================================
+# Thrust CPU-fallback Stubs
+# ============================================================================
+
+fn gpu_map(data: [f32], op: fn(f32) -> f32) -> Result<[f32], GpuError>:
+    # Apply op to each element. CPU fallback.
+    var result = [for idx in 0..data.len(): 0.0]
+    var i = 0
+    while i < data.len():
+        result[i] = op(data[i])
+        i = i + 1
+    Ok(result)
+
+fn gpu_reduce(data: [f32], init: f32, op: fn(f32, f32) -> f32) -> Result<f32, GpuError>:
+    # Reduce array with binary op. CPU fallback.
+    var acc = init
+    var i = 0
+    while i < data.len():
+        acc = op(acc, data[i])
+        i = i + 1
+    Ok(acc)
+
+fn gpu_scan(data: [f32], init: f32, op: fn(f32, f32) -> f32) -> Result<[f32], GpuError>:
+    # Inclusive prefix scan. CPU fallback.
+    var result = [for idx in 0..data.len(): 0.0]
+    var acc = init
+    var i = 0
+    while i < data.len():
+        acc = op(acc, data[i])
+        result[i] = acc
+        i = i + 1
+    Ok(result)
+
+fn gpu_filter(data: [f32], pred: fn(f32) -> bool) -> Result<[f32], GpuError>:
+    # Filter elements matching predicate. CPU fallback.
+    var result: [f32] = []
+    var i = 0
+    while i < data.len():
+        if pred(data[i]):
+            result.push(data[i])
+        i = i + 1
+    Ok(result)
+
+fn gpu_sort(data: [f32]) -> Result<[f32], GpuError>:
+    # Sort array. CPU fallback.
+    var result = [for x in data: x]
+    result.sort()
+    Ok(result)

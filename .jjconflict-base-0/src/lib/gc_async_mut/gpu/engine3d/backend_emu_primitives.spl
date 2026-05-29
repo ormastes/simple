@@ -1,0 +1,323 @@
+"""3D Engine — Stateless Emulation Primitives
+
+@tag:stdlib
+@tag:api
+@tag:gpu
+
+Primitive shape drawing (cube, sphere, plane, cylinder, cone, line, wireframe)
+using ONLY RenderBackend3DCore methods. All functions are stateless.
+"""
+
+use std.gpu.engine3d.backend_core.{RenderBackend3DCore}
+use std.gpu.engine3d.types3d.{Vertex3D, Material3DParams, vertex3d, vertex3d_pos_normal, material_unlit, mat4_identity, mat4_transform_point, vec3_cross, vec3_normalize}
+
+# ============================================================================
+# Internal math helpers
+# ============================================================================
+
+use std.nogc_sync_mut.gpu.engine3d.math_hooks.{gpu3d_sqrt_f32, gpu3d_sin_f32, gpu3d_cos_f32}
+
+fn _emu3_sin(x: f32) -> f32:
+    gpu3d_sin_f32(x)
+
+fn _emu3_cos(x: f32) -> f32:
+    gpu3d_cos_f32(x)
+
+fn _emu3_sqrt(x: f32) -> f32:
+    gpu3d_sqrt_f32(x)
+
+fn _emu3_pi() -> f32:
+    3.14159265
+
+fn _emu3_clamp_i32(v: i32, lo: i32, hi: i32) -> i32:
+    if v < lo:
+        lo
+    else if v > hi:
+        hi
+    else:
+        v
+
+fn _emu3_clamp_f32(v: f32, lo: f32, hi: f32) -> f32:
+    if v < lo:
+        lo
+    else if v > hi:
+        hi
+    else:
+        v
+
+fn _emu3_max_i32(a: i32, b: i32) -> i32:
+    if a > b:
+        a
+    else:
+        b
+
+# ============================================================================
+# Cube — 12 triangles (6 faces × 2)
+# ============================================================================
+
+fn emu_draw_cube(core: RenderBackend3DCore, model: [f32], material: Material3DParams):
+    # Front face (z = +0.5, normal 0,0,1)
+    val v0 = vertex3d(-0.5, -0.5, 0.5, 0.0, 0.0, 1.0, 0.0, 0.0, 0xFFFFFFFF)
+    val v1 = vertex3d(0.5, -0.5, 0.5, 0.0, 0.0, 1.0, 1.0, 0.0, 0xFFFFFFFF)
+    val v2 = vertex3d(0.5, 0.5, 0.5, 0.0, 0.0, 1.0, 1.0, 1.0, 0xFFFFFFFF)
+    val v3 = vertex3d(-0.5, 0.5, 0.5, 0.0, 0.0, 1.0, 0.0, 1.0, 0xFFFFFFFF)
+    core.submit_triangle(v0, v1, v2, material, model)
+    core.submit_triangle(v0, v2, v3, material, model)
+
+    # Back face (z = -0.5, normal 0,0,-1)
+    val b0 = vertex3d(0.5, -0.5, -0.5, 0.0, 0.0, -1.0, 0.0, 0.0, 0xFFFFFFFF)
+    val b1 = vertex3d(-0.5, -0.5, -0.5, 0.0, 0.0, -1.0, 1.0, 0.0, 0xFFFFFFFF)
+    val b2 = vertex3d(-0.5, 0.5, -0.5, 0.0, 0.0, -1.0, 1.0, 1.0, 0xFFFFFFFF)
+    val b3 = vertex3d(0.5, 0.5, -0.5, 0.0, 0.0, -1.0, 0.0, 1.0, 0xFFFFFFFF)
+    core.submit_triangle(b0, b1, b2, material, model)
+    core.submit_triangle(b0, b2, b3, material, model)
+
+    # Right face (x = +0.5, normal 1,0,0)
+    val r0 = vertex3d(0.5, -0.5, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+    val r1 = vertex3d(0.5, -0.5, -0.5, 1.0, 0.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+    val r2 = vertex3d(0.5, 0.5, -0.5, 1.0, 0.0, 0.0, 1.0, 1.0, 0xFFFFFFFF)
+    val r3 = vertex3d(0.5, 0.5, 0.5, 1.0, 0.0, 0.0, 0.0, 1.0, 0xFFFFFFFF)
+    core.submit_triangle(r0, r1, r2, material, model)
+    core.submit_triangle(r0, r2, r3, material, model)
+
+    # Left face (x = -0.5, normal -1,0,0)
+    val l0 = vertex3d(-0.5, -0.5, -0.5, -1.0, 0.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+    val l1 = vertex3d(-0.5, -0.5, 0.5, -1.0, 0.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+    val l2 = vertex3d(-0.5, 0.5, 0.5, -1.0, 0.0, 0.0, 1.0, 1.0, 0xFFFFFFFF)
+    val l3 = vertex3d(-0.5, 0.5, -0.5, -1.0, 0.0, 0.0, 0.0, 1.0, 0xFFFFFFFF)
+    core.submit_triangle(l0, l1, l2, material, model)
+    core.submit_triangle(l0, l2, l3, material, model)
+
+    # Top face (y = +0.5, normal 0,1,0)
+    val t0 = vertex3d(-0.5, 0.5, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+    val t1 = vertex3d(0.5, 0.5, 0.5, 0.0, 1.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+    val t2 = vertex3d(0.5, 0.5, -0.5, 0.0, 1.0, 0.0, 1.0, 1.0, 0xFFFFFFFF)
+    val t3 = vertex3d(-0.5, 0.5, -0.5, 0.0, 1.0, 0.0, 0.0, 1.0, 0xFFFFFFFF)
+    core.submit_triangle(t0, t1, t2, material, model)
+    core.submit_triangle(t0, t2, t3, material, model)
+
+    # Bottom face (y = -0.5, normal 0,-1,0)
+    val d0 = vertex3d(-0.5, -0.5, -0.5, 0.0, -1.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+    val d1 = vertex3d(0.5, -0.5, -0.5, 0.0, -1.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+    val d2 = vertex3d(0.5, -0.5, 0.5, 0.0, -1.0, 0.0, 1.0, 1.0, 0xFFFFFFFF)
+    val d3 = vertex3d(-0.5, -0.5, 0.5, 0.0, -1.0, 0.0, 0.0, 1.0, 0xFFFFFFFF)
+    core.submit_triangle(d0, d1, d2, material, model)
+    core.submit_triangle(d0, d2, d3, material, model)
+
+# ============================================================================
+# Sphere — UV sphere with latitude/longitude subdivision
+# ============================================================================
+
+fn emu_draw_sphere(core: RenderBackend3DCore, model: [f32], material: Material3DParams, segments: i32):
+    val seg = _emu3_max_i32(segments, 4)
+    val pi = _emu3_pi()
+
+    var lat: i32 = 0
+    while lat < seg:
+        val theta0 = pi * (lat as f32) / (seg as f32)
+        val theta1 = pi * ((lat + 1) as f32) / (seg as f32)
+        val st0 = _emu3_sin(theta0)
+        val ct0 = _emu3_cos(theta0)
+        val st1 = _emu3_sin(theta1)
+        val ct1 = _emu3_cos(theta1)
+
+        var lon: i32 = 0
+        while lon < seg:
+            val phi0 = 2.0 * pi * (lon as f32) / (seg as f32)
+            val phi1 = 2.0 * pi * ((lon + 1) as f32) / (seg as f32)
+            val sp0 = _emu3_sin(phi0)
+            val cp0 = _emu3_cos(phi0)
+            val sp1 = _emu3_sin(phi1)
+            val cp1 = _emu3_cos(phi1)
+
+            # 4 corners of the quad on the sphere surface
+            val x00 = st0 * cp0
+            val y00 = ct0
+            val z00 = st0 * sp0
+
+            val x10 = st1 * cp0
+            val y10 = ct1
+            val z10 = st1 * sp0
+
+            val x01 = st0 * cp1
+            val y01 = ct0
+            val z01 = st0 * sp1
+
+            val x11 = st1 * cp1
+            val y11 = ct1
+            val z11 = st1 * sp1
+
+            # Normals = position for a unit sphere
+            val va = vertex3d_pos_normal(x00, y00, z00, x00, y00, z00)
+            val vb = vertex3d_pos_normal(x10, y10, z10, x10, y10, z10)
+            val vc = vertex3d_pos_normal(x11, y11, z11, x11, y11, z11)
+            val vd = vertex3d_pos_normal(x01, y01, z01, x01, y01, z01)
+
+            # First triangle
+            if lat != 0:
+                core.submit_triangle(va, vb, vc, material, model)
+
+            # Second triangle
+            if lat != seg - 1:
+                core.submit_triangle(va, vc, vd, material, model)
+
+            lon = lon + 1
+        lat = lat + 1
+
+# ============================================================================
+# Plane — 2 triangles in XZ at Y=0
+# ============================================================================
+
+fn emu_draw_plane(core: RenderBackend3DCore, model: [f32], material: Material3DParams):
+    val v0 = vertex3d(-0.5, 0.0, -0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+    val v1 = vertex3d(0.5, 0.0, -0.5, 0.0, 1.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+    val v2 = vertex3d(0.5, 0.0, 0.5, 0.0, 1.0, 0.0, 1.0, 1.0, 0xFFFFFFFF)
+    val v3 = vertex3d(-0.5, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 1.0, 0xFFFFFFFF)
+    core.submit_triangle(v0, v1, v2, material, model)
+    core.submit_triangle(v0, v2, v3, material, model)
+
+# ============================================================================
+# Cylinder — Side quads + top/bottom cap fans
+# ============================================================================
+
+fn emu_draw_cylinder(core: RenderBackend3DCore, model: [f32], material: Material3DParams, segments: i32):
+    val seg = _emu3_max_i32(segments, 4)
+    val pi = _emu3_pi()
+    val half = 0.5
+
+    var i: i32 = 0
+    while i < seg:
+        val a0 = 2.0 * pi * (i as f32) / (seg as f32)
+        val a1 = 2.0 * pi * ((i + 1) as f32) / (seg as f32)
+        val c0 = _emu3_cos(a0)
+        val s0 = _emu3_sin(a0)
+        val c1 = _emu3_cos(a1)
+        val s1 = _emu3_sin(a1)
+
+        # Side quad — normals point outward radially
+        val sb0 = vertex3d(c0 * half, -half, s0 * half, c0, 0.0, s0, 0.0, 0.0, 0xFFFFFFFF)
+        val sb1 = vertex3d(c1 * half, -half, s1 * half, c1, 0.0, s1, 1.0, 0.0, 0xFFFFFFFF)
+        val st0 = vertex3d(c0 * half, half, s0 * half, c0, 0.0, s0, 0.0, 1.0, 0xFFFFFFFF)
+        val st1 = vertex3d(c1 * half, half, s1 * half, c1, 0.0, s1, 1.0, 1.0, 0xFFFFFFFF)
+        core.submit_triangle(sb0, sb1, st1, material, model)
+        core.submit_triangle(sb0, st1, st0, material, model)
+
+        # Top cap fan — normal up
+        val tc = vertex3d(0.0, half, 0.0, 0.0, 1.0, 0.0, 0.5, 0.5, 0xFFFFFFFF)
+        val te0 = vertex3d(c0 * half, half, s0 * half, 0.0, 1.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+        val te1 = vertex3d(c1 * half, half, s1 * half, 0.0, 1.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+        core.submit_triangle(tc, te0, te1, material, model)
+
+        # Bottom cap fan — normal down
+        val bc = vertex3d(0.0, -half, 0.0, 0.0, -1.0, 0.0, 0.5, 0.5, 0xFFFFFFFF)
+        val be0 = vertex3d(c1 * half, -half, s1 * half, 0.0, -1.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+        val be1 = vertex3d(c0 * half, -half, s0 * half, 0.0, -1.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+        core.submit_triangle(bc, be0, be1, material, model)
+
+        i = i + 1
+
+# ============================================================================
+# Cone — Triangles from apex to base circle + bottom cap fan
+# ============================================================================
+
+fn emu_draw_cone(core: RenderBackend3DCore, model: [f32], material: Material3DParams, segments: i32):
+    val seg = _emu3_max_i32(segments, 4)
+    val pi = _emu3_pi()
+    val half = 0.5
+    # Cone side normal slope: for unit cone radius=0.5, height=1.0
+    # The normal tilts outward at angle atan(0.5/1.0)
+    val ny_side = 0.4472  # 1/sqrt(5) approximation
+    val nr_side = 0.8944  # 2/sqrt(5) approximation
+
+    var i: i32 = 0
+    while i < seg:
+        val a0 = 2.0 * pi * (i as f32) / (seg as f32)
+        val a1 = 2.0 * pi * ((i + 1) as f32) / (seg as f32)
+        val c0 = _emu3_cos(a0)
+        val s0 = _emu3_sin(a0)
+        val c1 = _emu3_cos(a1)
+        val s1 = _emu3_sin(a1)
+
+        # Side triangle — apex at top center
+        val apex = vertex3d(0.0, half, 0.0, 0.0, ny_side, 0.0, 0.5, 0.0, 0xFFFFFFFF)
+        val base0 = vertex3d(c0 * half, -half, s0 * half, c0 * nr_side, ny_side, s0 * nr_side, 0.0, 1.0, 0xFFFFFFFF)
+        val base1 = vertex3d(c1 * half, -half, s1 * half, c1 * nr_side, ny_side, s1 * nr_side, 1.0, 1.0, 0xFFFFFFFF)
+        core.submit_triangle(apex, base0, base1, material, model)
+
+        # Bottom cap fan — normal down
+        val bc = vertex3d(0.0, -half, 0.0, 0.0, -1.0, 0.0, 0.5, 0.5, 0xFFFFFFFF)
+        val be0 = vertex3d(c1 * half, -half, s1 * half, 0.0, -1.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+        val be1 = vertex3d(c0 * half, -half, s0 * half, 0.0, -1.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+        core.submit_triangle(bc, be0, be1, material, model)
+
+        i = i + 1
+
+# ============================================================================
+# Line 3D — Thin quad (2 triangles) along the line direction
+# ============================================================================
+
+fn emu_draw_line_3d(core: RenderBackend3DCore, x1: f32, y1: f32, z1: f32, x2: f32, y2: f32, z2: f32, color: u32, thickness: f32):
+    val mat = material_unlit(color)
+    val identity = mat4_identity()
+
+    # Direction vector
+    val dx = x2 - x1
+    val dy = y2 - y1
+    val dz = z2 - z1
+
+    # Find a perpendicular vector for the quad width
+    # Try cross with Y-up; fall back to X-axis if line is nearly vertical
+    var px: f32 = 0.0
+    var py: f32 = 0.0
+    var pz: f32 = 0.0
+    val cross_y = vec3_cross(dx, dy, dz, 0.0, 1.0, 0.0)
+    val cx_len = _emu3_sqrt(cross_y[0] * cross_y[0] + cross_y[1] * cross_y[1] + cross_y[2] * cross_y[2])
+    if cx_len > 0.001:
+        val n = vec3_normalize(cross_y[0], cross_y[1], cross_y[2])
+        px = n[0]
+        py = n[1]
+        pz = n[2]
+    else:
+        val cross_x = vec3_cross(dx, dy, dz, 1.0, 0.0, 0.0)
+        val n = vec3_normalize(cross_x[0], cross_x[1], cross_x[2])
+        px = n[0]
+        py = n[1]
+        pz = n[2]
+
+    val ht = thickness / 2.0
+    val ox = px * ht
+    val oy = py * ht
+    val oz = pz * ht
+
+    val va = vertex3d_pos_normal(x1 - ox, y1 - oy, z1 - oz, px, py, pz)
+    val vb = vertex3d_pos_normal(x1 + ox, y1 + oy, z1 + oz, px, py, pz)
+    val vc = vertex3d_pos_normal(x2 + ox, y2 + oy, z2 + oz, px, py, pz)
+    val vd = vertex3d_pos_normal(x2 - ox, y2 - oy, z2 - oz, px, py, pz)
+
+    core.submit_triangle(va, vb, vc, mat, identity)
+    core.submit_triangle(va, vc, vd, mat, identity)
+
+# ============================================================================
+# Wireframe — Draw edges of each triangle as 3D lines
+# ============================================================================
+
+fn emu_draw_wireframe(core: RenderBackend3DCore, vertices: [Vertex3D], indices: [u32], model: [f32], color: u32):
+    val n = indices.len()
+    var i: i32 = 0
+    while i + 2 < n:
+        val i0 = indices[i] as i32
+        val i1 = indices[i + 1] as i32
+        val i2 = indices[i + 2] as i32
+        val va = vertices[i0]
+        val vb = vertices[i1]
+        val vc = vertices[i2]
+
+        # Transform positions by model matrix
+        val pa = mat4_transform_point(model, va.px, va.py, va.pz)
+        val pb = mat4_transform_point(model, vb.px, vb.py, vb.pz)
+        val pc = mat4_transform_point(model, vc.px, vc.py, vc.pz)
+
+        emu_draw_line_3d(core, pa[0], pa[1], pa[2], pb[0], pb[1], pb[2], color, 1.0)
+        emu_draw_line_3d(core, pb[0], pb[1], pb[2], pc[0], pc[1], pc[2], color, 1.0)
+        emu_draw_line_3d(core, pc[0], pc[1], pc[2], pa[0], pa[1], pa[2], color, 1.0)
+        i = i + 3

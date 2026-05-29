@@ -1,0 +1,83 @@
+# ============================================================================
+# RISC-V XLEN Configuration
+# ============================================================================
+#
+# Provides an XLEN descriptor that downstream modules use to parameterise
+# register widths, sign-extension masks, and address sizes for RV32 vs RV64.
+# ============================================================================
+
+# ============================================================================
+# XLEN enumeration
+# ============================================================================
+
+val XLEN_32: i64 = 32
+val XLEN_64: i64 = 64
+
+# ============================================================================
+# XlenConfig — carries width-dependent constants
+# ============================================================================
+
+struct XlenConfig:
+    """Configuration bundle for a specific XLEN."""
+    xlen: i64              # 32 or 64
+    mask: i64              # Value mask: 0xFFFFFFFF or full 64-bit
+    sign_bit: i64          # MSB position: 31 or 63
+    bytes_per_reg: i64     # 4 or 8
+    cause_interrupt_bit: i64  # Bit 31 (RV32) or Bit 63 (RV64)
+
+impl XlenConfig:
+    static fn rv32() -> XlenConfig:
+        """Create configuration for RV32."""
+        XlenConfig(
+            xlen: XLEN_32,
+            mask: 0xFFFFFFFF,
+            sign_bit: 31,
+            bytes_per_reg: 4,
+            cause_interrupt_bit: 0x80000000
+        )
+
+    static fn rv64() -> XlenConfig:
+        """Create configuration for RV64."""
+        XlenConfig(
+            xlen: XLEN_64,
+            mask: 0x7FFFFFFFFFFFFFFF,
+            sign_bit: 63,
+            bytes_per_reg: 8,
+            cause_interrupt_bit: 0x8000000000000000
+        )
+
+    fn is_rv32() -> bool:
+        """Return true if this is an RV32 configuration."""
+        self.xlen == XLEN_32
+
+    fn is_rv64() -> bool:
+        """Return true if this is an RV64 configuration."""
+        self.xlen == XLEN_64
+
+    fn truncate(value: i64) -> i64:
+        """Truncate a value to XLEN bits."""
+        if self.xlen == XLEN_32:
+            value & 0xFFFFFFFF
+        else:
+            value
+
+    fn sign_extend_32(value: i64) -> i64:
+        """Sign-extend a 32-bit value to XLEN width."""
+        if self.xlen == XLEN_32:
+            value & 0xFFFFFFFF
+        else:
+            # Sign-extend from bit 31
+            if value & 0x80000000:
+                value | 0xFFFFFFFF00000000
+            else:
+                value & 0xFFFFFFFF
+
+    fn sign_extend_imm(value: i64, width: i64) -> i64:
+        """Sign-extend an immediate of the given bit-width to XLEN."""
+        val sign_mask = 1 << (width - 1)
+        var extended = value
+        if extended & sign_mask:
+            # Set all bits above the immediate width
+            val fill = -1 << width
+            extended = extended | fill
+        self.truncate(extended)

@@ -1,0 +1,298 @@
+#![allow(unnamed_duplicate_typed_args)]
+# IR_TC Constant Folding Pass
+#
+# Walks each instruction: if all operands are known constants,
+# compute the result at compile time and replace with a Const assignment.
+# Handles arithmetic, bitwise, comparison, extension, and truncation ops.
+
+use core.types.{IrTcValue, IrTcTypeKind, IrTcCond}
+use core.ops.{IrTcOp, IrTcInst}
+use core.block.{IrTcBlock, IrTcFunction, IrTcModule}
+
+# ============================================================================
+# Constant Map — tracks which SSA values have known constant values
+# ============================================================================
+
+struct ConstEntry:
+    """Maps a value id to its known constant."""
+    id: i64
+    value: i64
+
+impl ConstEntry:
+    static fn new(id: i64, value: i64) -> ConstEntry:
+        ConstEntry(id: id, value: value)
+
+struct ConstMap:
+    """Sparse map from value id -> known constant value."""
+    entries: [ConstEntry]
+
+impl ConstMap:
+    static fn new() -> ConstMap:
+        ConstMap(entries: [])
+
+    me put(id: i64, value: i64):
+        # Update if exists
+        for i in 0..self.entries.len():
+            if self.entries[i].id == id:
+                self.entries[i] = ConstEntry.new(id, value)
+                return
+        self.entries.push(ConstEntry.new(id, value))
+
+    fn get(id: i64) -> i64?:
+        for entry in self.entries:
+            if entry.id == id:
+                return Some(entry.value)
+        nil
+
+    fn has(id: i64) -> bool:
+        for entry in self.entries:
+            if entry.id == id:
+                return true
+        false
+
+# ============================================================================
+# Helper: mask to width
+# ============================================================================
+
+fn _mask_for_type(type_: IrTcTypeKind) -> i64:
+    """Mask to truncate result to the type's bit width."""
+    val bits = type_.bit_width()
+    if bits == 0:
+        return -1
+    if bits >= 64:
+        return -1
+    (1 << bits) - 1
+
+fn _sign_extend(value: i64, from_bits: i64) -> i64:
+    """Sign-extend a value from `from_bits` width to i64."""
+    if from_bits >= 64:
+        return value
+    val sign_bit = 1 << (from_bits - 1)
+    if (value & sign_bit) != 0:
+        value | (-1 << from_bits)
+    else:
+        value & ((1 << from_bits) - 1)
+
+# ============================================================================
+# Constant Folding Pass
+# ============================================================================
+
+struct ConstFoldPass:
+    """Constant folding optimization pass.
+
+    Evaluates instructions with all-constant operands at compile time.
+    Replaces them with Nop and records the destination as a known constant.
+    Subsequent instructions that reference the folded value will use the
+    constant directly.
+    """
+    _placeholder: i64   # Structs need at least one field
+
+impl ConstFoldPass:
+    static fn new() -> ConstFoldPass:
+        ConstFoldPass(_placeholder: 0)
+
+    fn name() -> text:
+        "const_fold"
+
+    fn run_on_function(func: IrTcFunction) -> IrTcFunction:
+        """Fold constants across all blocks in a function."""
+        var consts = ConstMap.new()
+        var new_blocks: [IrTcBlock] = []
+
+        for block in func.blocks:
+            var new_block = IrTcBlock.new(block.id)
+            new_block = IrTcBlock(..new_block, label: block.label)
+
+            for inst in block.instructions:
+                val folded = _try_fold_inst(inst, consts)
+                if val Some(result) = folded:
+                    # Record the constant and emit a Nop
+                    consts.put(result.id, result.value)
+                    new_block.append(IrTcInst.new(IrTcOp.Nop))
+                else:
+                    new_block.append(inst)
+
+            new_blocks.push(new_block)
+
+        IrTcFunction(..func, blocks: new_blocks)
+
+# ============================================================================
+# Core folding logic
+# ============================================================================
+
+struct _FoldResult:
+    """Result of a successful fold: dest value id and its constant."""
+    id: i64
+    value: i64
+
+impl _FoldResult:
+    static fn new(id: i64, value: i64) -> _FoldResult:
+        _FoldResult(id: id, value: value)
+
+fn _try_fold_inst(inst: IrTcInst, consts: ConstMap) -> _FoldResult?:
+    """Try to constant-fold an instruction. Returns fold result or nil."""
+    match inst.kind:
+        # ---- Arithmetic ----
+        IrTcOp.Add(dest, a, b):
+            if val Some(va) = consts.get(a.id):
+                if val Some(vb) = consts.get(b.id):
+                    val result = (va + vb) & _mask_for_type(dest.type_)
+                    return Some(_FoldResult.new(dest.id, result))
+            nil
+
+        IrTcOp.Sub(dest, a, b):
+            if val Some(va) = consts.get(a.id):
+                if val Some(vb) = consts.get(b.id):
+                    val result = (va - vb) & _mask_for_type(dest.type_)
+                    return Some(_FoldResult.new(dest.id, result))
+            nil
+
+        IrTcOp.Mul(dest, a, b):
+            if val Some(va) = consts.get(a.id):
+                if val Some(vb) = consts.get(b.id):
+                    val result = (va * vb) & _mask_for_type(dest.type_)
+                    return Some(_FoldResult.new(dest.id, result))
+            nil
+
+        IrTcOp.Div(dest, a, b, signed):
+            if val Some(va) = consts.get(a.id):
+                if val Some(vb) = consts.get(b.id):
+                    if vb != 0:
+                        val bits = dest.type_.bit_width()
+                        var result: i64 = 0
+                        if signed:
+                            val sa = _sign_extend(va, bits)
+                            val sb = _sign_extend(vb, bits)
+                            result = (sa / sb) & _mask_for_type(dest.type_)
+                        else:
+                            result = (va / vb) & _mask_for_type(dest.type_)
+                        return Some(_FoldResult.new(dest.id, result))
+            nil
+
+        IrTcOp.Rem(dest, a, b, signed):
+            if val Some(va) = consts.get(a.id):
+                if val Some(vb) = consts.get(b.id):
+                    if vb != 0:
+                        val bits = dest.type_.bit_width()
+                        var result: i64 = 0
+                        if signed:
+                            val sa = _sign_extend(va, bits)
+                            val sb = _sign_extend(vb, bits)
+                            result = (sa % sb) & _mask_for_type(dest.type_)
+                        else:
+                            result = (va % vb) & _mask_for_type(dest.type_)
+                        return Some(_FoldResult.new(dest.id, result))
+            nil
+
+        IrTcOp.Neg(dest, a):
+            if val Some(va) = consts.get(a.id):
+                val result = (0 - va) & _mask_for_type(dest.type_)
+                return Some(_FoldResult.new(dest.id, result))
+            nil
+
+        # ---- Bitwise ----
+        IrTcOp.And(dest, a, b):
+            if val Some(va) = consts.get(a.id):
+                if val Some(vb) = consts.get(b.id):
+                    return Some(_FoldResult.new(dest.id, va & vb))
+            nil
+
+        IrTcOp.Or(dest, a, b):
+            if val Some(va) = consts.get(a.id):
+                if val Some(vb) = consts.get(b.id):
+                    return Some(_FoldResult.new(dest.id, va | vb))
+            nil
+
+        IrTcOp.Xor(dest, a, b):
+            if val Some(va) = consts.get(a.id):
+                if val Some(vb) = consts.get(b.id):
+                    return Some(_FoldResult.new(dest.id, va ^ vb))
+            nil
+
+        IrTcOp.Not(dest, a):
+            if val Some(va) = consts.get(a.id):
+                val result = (~va) & _mask_for_type(dest.type_)
+                return Some(_FoldResult.new(dest.id, result))
+            nil
+
+        IrTcOp.Shl(dest, a, b):
+            if val Some(va) = consts.get(a.id):
+                if val Some(vb) = consts.get(b.id):
+                    val result = (va << vb) & _mask_for_type(dest.type_)
+                    return Some(_FoldResult.new(dest.id, result))
+            nil
+
+        IrTcOp.Shr(dest, a, b):
+            if val Some(va) = consts.get(a.id):
+                if val Some(vb) = consts.get(b.id):
+                    # Logical shift right: zero-fill from left
+                    val masked = va & _mask_for_type(dest.type_)
+                    val result = masked >> vb
+                    return Some(_FoldResult.new(dest.id, result))
+            nil
+
+        IrTcOp.Sar(dest, a, b):
+            if val Some(va) = consts.get(a.id):
+                if val Some(vb) = consts.get(b.id):
+                    # Arithmetic shift right: sign-extend then shift
+                    val bits = dest.type_.bit_width()
+                    val extended = _sign_extend(va, bits)
+                    val result = (extended >> vb) & _mask_for_type(dest.type_)
+                    return Some(_FoldResult.new(dest.id, result))
+            nil
+
+        # ---- Comparison ----
+        IrTcOp.Cmp(dest, cond, a, b):
+            if val Some(va) = consts.get(a.id):
+                if val Some(vb) = consts.get(b.id):
+                    val bits = a.type_.bit_width()
+                    val result = _eval_cmp(cond, va, vb, bits)
+                    return Some(_FoldResult.new(dest.id, result))
+            nil
+
+        # ---- Width Conversion ----
+        IrTcOp.Ext(dest, src, signed):
+            if val Some(vs) = consts.get(src.id):
+                var result: i64 = 0
+                if signed:
+                    result = _sign_extend(vs, src.type_.bit_width())
+                    result = result & _mask_for_type(dest.type_)
+                else:
+                    result = vs & _mask_for_type(dest.type_)
+                return Some(_FoldResult.new(dest.id, result))
+            nil
+
+        IrTcOp.Trunc(dest, src):
+            if val Some(vs) = consts.get(src.id):
+                val result = vs & _mask_for_type(dest.type_)
+                return Some(_FoldResult.new(dest.id, result))
+            nil
+
+        _: nil
+
+# ============================================================================
+# Comparison evaluator
+# ============================================================================
+
+fn _eval_cmp(cond: IrTcCond, a: i64, b: i64, bits: i64) -> i64:
+    """Evaluate a comparison at compile time. Returns 1 (true) or 0 (false)."""
+    val sa = _sign_extend(a, bits)
+    val sb = _sign_extend(b, bits)
+    val mask = _mask_for_type(IrTcTypeKind.I64)
+    val ua = a & mask
+    val ub = b & mask
+
+    var result = false
+    match cond:
+        IrTcCond.Eq:  result = (ua == ub)
+        IrTcCond.Ne:  result = (ua != ub)
+        IrTcCond.Lt:  result = (sa < sb)
+        IrTcCond.Le:  result = (sa <= sb)
+        IrTcCond.Gt:  result = (sa > sb)
+        IrTcCond.Ge:  result = (sa >= sb)
+        IrTcCond.Ltu: result = (ua < ub)
+        IrTcCond.Leu: result = (ua <= ub)
+        IrTcCond.Gtu: result = (ua > ub)
+        IrTcCond.Geu: result = (ua >= ub)
+
+    if result: 1 else: 0

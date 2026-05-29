@@ -1,0 +1,78 @@
+# Game2D InputSnapshot (AC-3)
+#
+# Frame-frozen input view. Once produced by `freeze_from(...)`, the snapshot
+# does not change for the rest of the frame — `App.update`/`App.fixed_update`
+# always read the same values. This is the *only* read path used by user
+# `App` callbacks (no direct OS calls); see `examples/game2d/hello/main.spl`.
+#
+# Edge case: simultaneous press+release in the same frame — the press wins
+# (frame-coalesced press wins). `keys_pressed_this_frame` retains the press
+# even if the key was released later in the same frame.
+#
+# Wave-A scope: this is the data class + a stub `freeze_from` that takes raw
+# arrays so the deterministic-replay spec can construct snapshots in tests
+# without needing the full InputManager. Wiring to the live engine
+# `InputManager` happens in Wave B once the loop driver lands.
+
+use std.common.engine.math2d.{Vec2}
+use std.common.engine.units.{KeyCode, MouseButtonId}
+
+class InputSnapshot:
+    keys_down: [KeyCode]
+    keys_pressed: [KeyCode]
+    mouse_pos: Vec2
+    mouse_buttons: [MouseButtonId]
+
+impl InputSnapshot:
+    static fn create() -> InputSnapshot:
+        """Empty snapshot — no keys, no buttons, mouse at origin."""
+        InputSnapshot(
+            keys_down: [],
+            keys_pressed: [],
+            mouse_pos: Vec2(x: 0.0, y: 0.0),
+            mouse_buttons: []
+        )
+
+    static fn from_raw(keys_down: [KeyCode], keys_pressed: [KeyCode],
+                        pos: Vec2, buttons: [MouseButtonId]) -> InputSnapshot:
+        """Deterministic-test constructor: build a snapshot directly from
+        scripted arrays. Used by `ScriptedInput` in the replay spec."""
+        InputSnapshot(
+            keys_down: keys_down,
+            keys_pressed: keys_pressed,
+            mouse_pos: pos,
+            mouse_buttons: buttons
+        )
+
+    fn key_down(k: KeyCode) -> bool:
+        """True if `k` was held at the moment the frame was frozen."""
+        for d in self.keys_down:
+            if d.code == k.code:
+                return true
+        false
+
+    fn key_pressed_this_frame(k: KeyCode) -> bool:
+        """True if `k` transitioned from up→down on this frame.
+        Edge: press + release in same frame — press wins (frame-coalesced)."""
+        for p in self.keys_pressed:
+            if p.code == k.code:
+                return true
+        false
+
+    fn mouse_position() -> Vec2:
+        """Frame-frozen mouse cursor position in window pixels."""
+        self.mouse_pos
+
+    fn mouse_down(b: MouseButtonId) -> bool:
+        """True if mouse button `b` is held."""
+        for mb in self.mouse_buttons:
+            if mb.code == b.code:
+                return true
+        false
+
+# `freeze_from` — Wave-B will overload this to read from the live
+# `InputManager`. Wave-A keeps the deterministic-test entry point only:
+# pass raw key arrays + pos and get an immutable snapshot back.
+fn freeze_from(keys_down: [KeyCode], keys_pressed: [KeyCode],
+               pos: Vec2, buttons: [MouseButtonId]) -> InputSnapshot:
+    InputSnapshot.from_raw(keys_down, keys_pressed, pos, buttons)

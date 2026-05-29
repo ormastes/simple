@@ -1,0 +1,293 @@
+# PE/COFF Inspector
+# Structured PE header parser using BinaryReader.
+# Builds on pe_coff_header.spl gate functions; adds structured section/header types.
+
+use std.binary_io.{BinaryReader, ByteOrder}
+use std.pe_coff_header.{PeHeaderSummary, parse_pe_header_summary, pe_rva_to_file_offset}
+
+# ============================================================================
+# PE Constants
+# ============================================================================
+
+val IMAGE_FILE_MACHINE_AMD64: i64 = 0x8664
+val IMAGE_FILE_MACHINE_I386: i64 = 0x014c
+val IMAGE_FILE_MACHINE_ARM64: i64 = 0xaa64
+
+val IMAGE_OPTIONAL_MAGIC_PE32: i64 = 0x10b
+val IMAGE_OPTIONAL_MAGIC_PE32_PLUS: i64 = 0x20b
+
+val IMAGE_SUBSYSTEM_CONSOLE: i64 = 3
+val IMAGE_SUBSYSTEM_WINDOWS_GUI: i64 = 2
+
+val IMAGE_SCN_CNT_CODE: i64 = 0x00000020
+val IMAGE_SCN_CNT_INITIALIZED_DATA: i64 = 0x00000040
+val IMAGE_SCN_CNT_UNINITIALIZED_DATA: i64 = 0x00000080
+val IMAGE_SCN_MEM_EXECUTE: i64 = 0x20000000
+val IMAGE_SCN_MEM_READ: i64 = 0x40000000
+val IMAGE_SCN_MEM_WRITE: i64 = 0x80000000
+val IMAGE_SCN_MEM_DISCARDABLE: i64 = 0x02000000
+
+val IMAGE_DEBUG_TYPE_CODEVIEW: i64 = 2
+val IMAGE_DEBUG_TYPE_MISC: i64 = 4
+val IMAGE_DEBUG_TYPE_FPO: i64 = 3
+val IMAGE_DEBUG_TYPE_POGO: i64 = 13
+val IMAGE_DEBUG_TYPE_ILTCG: i64 = 14
+val IMAGE_DEBUG_TYPE_REPRO: i64 = 16
+
+val PE_SECTION_HEADER_SIZE: i64 = 40
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct PeHeader:
+    machine: i64
+    section_count: i64
+    timestamp: i64
+    symbol_table_offset: i64
+    symbol_count: i64
+    optional_header_size: i64
+    characteristics: i64
+    pe_offset: i64
+    optional_magic: i64
+    entry_point_rva: i64
+    image_base: i64
+    section_alignment: i64
+    file_alignment: i64
+    size_of_image: i64
+    size_of_headers: i64
+    data_directory_count: i64
+
+struct PeSectionHeader:
+    name: text
+    virtual_size: i64
+    virtual_address: i64
+    raw_size: i64
+    raw_pointer: i64
+    reloc_pointer: i64
+    reloc_count: i64
+    characteristics: i64
+
+    fn is_code() -> bool:
+        (self.characteristics & IMAGE_SCN_CNT_CODE) != 0
+
+    fn is_executable() -> bool:
+        (self.characteristics & IMAGE_SCN_MEM_EXECUTE) != 0
+
+    fn is_writable() -> bool:
+        (self.characteristics & IMAGE_SCN_MEM_WRITE) != 0
+
+    fn is_discardable() -> bool:
+        (self.characteristics & IMAGE_SCN_MEM_DISCARDABLE) != 0
+
+struct PeDataDirectory:
+    rva: i64
+    size: i64
+
+struct PeInspector:
+    header: PeHeader
+    sections: [PeSectionHeader]
+    data_directories: [PeDataDirectory]
+    is_valid: bool
+
+# ============================================================================
+# Parsing Functions
+# ============================================================================
+
+fn _read_section_name(data: [u8], offset: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < 8:
+        val idx = offset + i
+        if idx >= data.len():
+            break
+        val b = data[idx]
+        if b == 0:
+            break
+        result = result + text.from_char_code(b)
+        i = i + 1
+    result
+
+fn pe_parse_header(data: [u8]) -> Result<PeHeader, text>:
+    val summary = parse_pe_header_summary(data)
+    if not summary.ok:
+        return Err(summary.error)
+
+    val pe_off = summary.pe_offset
+    var reader = BinaryReader.new(data)
+    val order = ByteOrder.LittleEndian
+
+    reader.skip(pe_off + 4)
+
+    val machine = reader.read_u16(order) ?? 0
+    val section_count = reader.read_u16(order) ?? 0
+    val timestamp = reader.read_u32(order) ?? 0
+    val symbol_table_offset = reader.read_u32(order) ?? 0
+    val symbol_count = reader.read_u32(order) ?? 0
+    val optional_header_size = reader.read_u16(order) ?? 0
+    val characteristics = reader.read_u16(order) ?? 0
+
+    val opt_off = pe_off + 24
+    var opt_reader = BinaryReader.new(data)
+    opt_reader.skip(opt_off)
+
+    val optional_magic = opt_reader.read_u16(order) ?? 0
+
+    var entry_point_rva: i64 = 0
+    var image_base: i64 = 0
+    var section_alignment: i64 = 0
+    var file_alignment: i64 = 0
+    var size_of_image: i64 = 0
+    var size_of_headers: i64 = 0
+    var data_directory_count: i64 = 0
+
+    if optional_magic == IMAGE_OPTIONAL_MAGIC_PE32_PLUS:
+        opt_reader.skip(14)
+        entry_point_rva = opt_reader.read_u32(order) ?? 0
+        opt_reader.skip(4)
+        image_base = opt_reader.read_u64(order) ?? 0
+        section_alignment = opt_reader.read_u32(order) ?? 0
+        file_alignment = opt_reader.read_u32(order) ?? 0
+        opt_reader.skip(16)
+        size_of_image = opt_reader.read_u32(order) ?? 0
+        size_of_headers = opt_reader.read_u32(order) ?? 0
+        opt_reader.skip(4)
+        opt_reader.skip(2)
+        opt_reader.skip(8)
+        opt_reader.skip(8)
+        opt_reader.skip(4)
+        data_directory_count = opt_reader.read_u32(order) ?? 0
+
+    Ok(PeHeader(
+        machine: machine,
+        section_count: section_count,
+        timestamp: timestamp,
+        symbol_table_offset: symbol_table_offset,
+        symbol_count: symbol_count,
+        optional_header_size: optional_header_size,
+        characteristics: characteristics,
+        pe_offset: pe_off,
+        optional_magic: optional_magic,
+        entry_point_rva: entry_point_rva,
+        image_base: image_base,
+        section_alignment: section_alignment,
+        file_alignment: file_alignment,
+        size_of_image: size_of_image,
+        size_of_headers: size_of_headers,
+        data_directory_count: data_directory_count,
+    ))
+
+fn pe_parse_sections(data: [u8], header: PeHeader) -> [PeSectionHeader]:
+    val section_table_offset = header.pe_offset + 24 + header.optional_header_size
+    val order = ByteOrder.LittleEndian
+    var sections: [PeSectionHeader] = []
+
+    var i = 0
+    while i < header.section_count:
+        val sec_off = section_table_offset + (i * PE_SECTION_HEADER_SIZE)
+        if sec_off + PE_SECTION_HEADER_SIZE > data.len():
+            break
+
+        val name = _read_section_name(data, sec_off)
+        var reader = BinaryReader.new(data)
+        reader.skip(sec_off + 8)
+
+        val virtual_size = reader.read_u32(order) ?? 0
+        val virtual_address = reader.read_u32(order) ?? 0
+        val raw_size = reader.read_u32(order) ?? 0
+        val raw_pointer = reader.read_u32(order) ?? 0
+        val reloc_pointer = reader.read_u32(order) ?? 0
+        reader.skip(4)
+        val reloc_count = reader.read_u16(order) ?? 0
+        reader.skip(2)
+        val characteristics = reader.read_u32(order) ?? 0
+
+        sections = sections.push(PeSectionHeader(
+            name: name,
+            virtual_size: virtual_size,
+            virtual_address: virtual_address,
+            raw_size: raw_size,
+            raw_pointer: raw_pointer,
+            reloc_pointer: reloc_pointer,
+            reloc_count: reloc_count,
+            characteristics: characteristics,
+        ))
+        i = i + 1
+
+    sections
+
+fn pe_parse_data_directories(data: [u8], header: PeHeader) -> [PeDataDirectory]:
+    val opt_off = header.pe_offset + 24
+    val order = ByteOrder.LittleEndian
+
+    var dir_base: i64 = 0
+    if header.optional_magic == IMAGE_OPTIONAL_MAGIC_PE32_PLUS:
+        dir_base = opt_off + 0x70
+    else:
+        dir_base = opt_off + 0x60
+
+    var dirs: [PeDataDirectory] = []
+    var i = 0
+    while i < header.data_directory_count:
+        val off = dir_base + (i * 8)
+        if off + 8 > data.len():
+            break
+        var reader = BinaryReader.new(data)
+        reader.skip(off)
+        val rva = reader.read_u32(order) ?? 0
+        val size = reader.read_u32(order) ?? 0
+        dirs = dirs.push(PeDataDirectory(rva: rva, size: size))
+        i = i + 1
+
+    dirs
+
+fn pe_inspect(data: [u8]) -> Result<PeInspector, text>:
+    val header_result = pe_parse_header(data)
+    if header_result.is_err():
+        return Err(header_result.err()!)
+
+    val header = header_result.ok()!
+    val sections = pe_parse_sections(data, header)
+    val data_dirs = pe_parse_data_directories(data, header)
+
+    Ok(PeInspector(
+        header: header,
+        sections: sections,
+        data_directories: data_dirs,
+        is_valid: true,
+    ))
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+fn pe_machine_name(machine: i64) -> text:
+    if machine == IMAGE_FILE_MACHINE_AMD64:
+        return "x86_64"
+    if machine == IMAGE_FILE_MACHINE_I386:
+        return "x86"
+    if machine == IMAGE_FILE_MACHINE_ARM64:
+        return "arm64"
+    "unknown(0x{machine})"
+
+fn pe_find_section(inspector: PeInspector, name: text) -> PeSectionHeader?:
+    for sec in inspector.sections:
+        if sec.name == name:
+            return sec
+    return nil
+
+fn pe_has_debug_directory(inspector: PeInspector) -> bool:
+    if inspector.data_directories.len() > 6:
+        val debug_dir = inspector.data_directories[6]
+        return debug_dir.rva != 0 and debug_dir.size > 0
+    return false
+
+fn pe_debug_directory_rva(inspector: PeInspector) -> i64:
+    if inspector.data_directories.len() > 6:
+        return inspector.data_directories[6].rva
+    return 0
+
+fn pe_debug_directory_size(inspector: PeInspector) -> i64:
+    if inspector.data_directories.len() > 6:
+        return inspector.data_directories[6].size
+    return 0

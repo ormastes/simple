@@ -1,0 +1,170 @@
+# Project Operations
+# ProjectContext unified view and source file operations
+
+use host.async_nogc_mut.io.fs
+use host.common.io.types.{FileType, DirEntry, FilePath, DirPath}
+use core.result.{Result, Ok, Err}
+use tooling.core.project.{Language, ProjectConfig, LanguageConfig, ProjectDetector}
+
+# Project context - unified view of multi-language project
+pub class ProjectContext:
+    pub config: ProjectConfig
+    pub languages: List<LanguageConfig>
+
+    pub fn new(root: text) -> ProjectContext:
+        """Create project context.
+
+        Args:
+            root: Project root directory
+
+        Returns:
+            Project context with auto-detected languages
+
+        Example:
+            val project = ProjectContext.new(".")
+            for lang_config in project.languages:
+                print("Language: {lang_config.language}")
+                print("Root: {lang_config.root}")
+        """
+        val detector = ProjectDetector.new(root)
+        val languages = detector.detect_all_languages()
+
+        val config = ProjectConfig.new(root)
+        for lang_config in languages:
+            config.add_language(lang_config)
+
+        ProjectContext {
+            config: config,
+            languages: languages
+        }
+
+    pub fn from_config_file(path: text) -> Result<ProjectContext, text>:
+        """Load project from simple.sdn.
+
+        Args:
+            path: Path to simple.sdn config file
+
+        Returns:
+            Project context or error
+        """
+        match ProjectConfig.load_from_file(path):
+            Ok(config):
+                Ok(ProjectContext {
+                    config: config,
+                    languages: config.languages
+                })
+            Err(err):
+                Err(err)
+
+    pub fn get_build_dir(self) -> text:
+        """Get build output directory.
+
+        Returns:
+            Build directory path
+        """
+        self.config.build_dir
+
+    pub fn get_test_dir(self) -> text:
+        """Get test directory.
+
+        Returns:
+            Test directory path
+        """
+        self.config.test_dir
+
+    pub fn get_language_roots(self) -> Dict<Language, text>:
+        """Get map of languages to their root directories.
+
+        Returns:
+            Dictionary mapping languages to roots
+        """
+        val roots: Dict<Language, text> = {}
+        for lang_config in self.languages:
+            roots[lang_config.language] = lang_config.root
+        roots
+
+    pub fn has_language(self, language: Language) -> bool:
+        """Check if project uses given language.
+
+        Args:
+            language: Language to check
+
+        Returns:
+            True if language is used in project
+        """
+        for lang_config in self.languages:
+            if lang_config.language == language:
+                return true
+        false
+
+    pub fn get_all_source_files(self, language: Language) -> List<text>:
+        """Get all source files for given language.
+
+        Args:
+            language: Language to get files for
+
+        Returns:
+            List of source file paths
+        """
+        # Get language configuration
+        match self.config.get_language_config(language):
+            some(lang_config):
+                val files: List<text> = []
+                # Scan each source directory
+                for src_dir in lang_config.source_dirs:
+                    val full_path = lang_config.root + "/" + src_dir
+                    val ext = self.get_extension_for_language(language)
+                    self.collect_files_with_extension(full_path, ext, lang_config.exclude_patterns, files)
+                files
+            none:
+                []
+
+    fn get_extension_for_language(language: Language) -> text:
+        """Get file extension for language."""
+        match language:
+            Language.Simple: ".spl"
+            Language.Rust: ".rs"
+            Language.Python: ".py"
+            Language.JavaScript: ".js"
+            Language.TypeScript: ".ts"
+            Language.Go: ".go"
+            Language.C: ".c"
+            Language.Cpp: ".cpp"
+
+    fn collect_files_with_extension(dir: text,
+        ext: text,
+        exclude_patterns: List<text>,
+        results: List<text>
+    ):
+        """Recursively collect files with given extension."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    val name = entry.name() as text
+                    val path = entry.path() as text
+
+                    # Skip excluded directories
+                    if self.is_excluded(name, exclude_patterns):
+                        continue
+
+                    match entry.file_type():
+                        FileType.File:
+                            # Add file if it matches extension
+                            if name.ends_with(ext):
+                                results.append(path)
+                        FileType.Directory:
+                            # Recursively scan subdirectories
+                            self.collect_files_with_extension(path, ext, exclude_patterns, results)
+                        _:
+                            # Skip symlinks and other types
+                            pass
+            Err(_):
+                # Ignore errors
+                pass
+
+    fn is_excluded(name: text, patterns: List<text>) -> bool:
+        """Check if name matches any exclusion pattern."""
+        for pattern in patterns:
+            if name == pattern or name.starts_with(pattern):
+                return true
+        false

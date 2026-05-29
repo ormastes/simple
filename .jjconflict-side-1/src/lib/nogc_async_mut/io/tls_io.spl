@@ -1,0 +1,175 @@
+"""
+# TLS I/O Primitives and Record-Layer Wire Helpers
+
+IoDriver-based send/receive primitives, TLS record I/O, and the
+wire-building helpers used by both the handshake and the stream layer.
+"""
+
+use std.nogc_async_mut.io.driver.{IoDriver}
+use std.tls.types.{
+    CONTENT_TYPE_ALERT,
+    CONTENT_TYPE_HANDSHAKE,
+    CONTENT_TYPE_CHANGE_CIPHER_SPEC,
+    TLS_VERSION_1_2,
+    ALERT_LEVEL_FATAL,
+    TLS_RECORD_HEADER_SIZE,
+    TLS_MAX_FRAGMENT_LENGTH
+}
+use std.nogc_async_mut.io.tls_common.{
+    encode_u8,
+    encode_u16_be,
+    encode_u24_be,
+    bytes_to_wire,
+    wire_to_bytes
+}
+use std.tls.utilities.{byte_at}
+use std.nogc_sync_mut.io.tcp.{
+    tcp_backend_bind,
+    tcp_backend_close,
+    tcp_backend_set_nonblocking
+}
+
+# ============================================================================
+# TCP backend helpers
+# ============================================================================
+
+fn tls_tcp_bind(addr: text) -> i64:
+    tcp_backend_bind(addr)
+
+fn tls_tcp_close(fd: i64) -> bool:
+    tcp_backend_close(fd)
+
+fn tls_tcp_set_nonblocking(fd: i64, enabled: bool) -> bool:
+    tcp_backend_set_nonblocking(fd, enabled)
+
+# ============================================================================
+# I/O Primitives (IoDriver-based)
+# ============================================================================
+
+fn read_tls_record(driver: IoDriver, fd: i64) -> text?:
+    """Read one complete TLS record from the fd.
+
+    Reads the 5-byte header first, extracts the payload length, then
+    reads the payload. Returns the full record (header + payload) as wire text.
+    """
+    val header = recv_exact(driver, fd, TLS_RECORD_HEADER_SIZE)
+    if header == nil:
+        return nil
+
+    val header_bytes = wire_to_bytes(header)
+    if len(header_bytes) < TLS_RECORD_HEADER_SIZE:
+        return nil
+
+    val payload_len = (byte_at(header_bytes, 3) * 256) + byte_at(header_bytes, 4)
+    if payload_len > TLS_MAX_FRAGMENT_LENGTH:
+        return nil
+
+    if payload_len == 0:
+        return header
+
+    val payload = recv_exact(driver, fd, payload_len)
+    if payload == nil:
+        return nil
+
+    header + payload
+
+fn recv_exact(driver: IoDriver, fd: i64, needed: i64) -> text?:
+    """Receive exactly `needed` bytes from fd using the IoDriver.
+
+    Loops submit_recv + poll until all bytes are collected.
+    """
+    var collected = ""
+    var remaining = needed
+    var attempts = 0
+    val max_attempts = 100
+
+    while remaining > 0:
+        if attempts >= max_attempts:
+            return nil
+        attempts = attempts + 1
+
+        val op_id = driver.submit_recv(fd, remaining)
+        driver.flush()
+        val completions = driver.poll(1, 10000)
+        if len(completions) == 0:
+            return nil
+
+        val c = completions[0]
+        if c.result <= 0:
+            return nil
+
+        val chunk = driver.poll_data(0)
+        val chunk_len = driver.poll_data_len(0)
+        if chunk_len <= 0:
+            return nil
+
+        collected = collected + chunk
+        remaining = remaining - chunk_len
+
+    collected
+
+fn send_all(driver: IoDriver, fd: i64, data: text) -> bool:
+    """Send all bytes of `data` through the IoDriver."""
+    val op_id = driver.submit_send(fd, data)
+    driver.flush()
+    val completions = driver.poll(1, 10000)
+    if len(completions) == 0:
+        return false
+    val c = completions[0]
+    c.result >= 0
+
+# ============================================================================
+# Record-Layer Wire Helpers
+# ============================================================================
+
+fn build_handshake_wire(msg_type: i64, body: text) -> text:
+    """Build a handshake message as wire bytes: type(1) + length(3) + body."""
+    val body_len = len(wire_to_bytes(body))
+    encode_u8(msg_type) + encode_u24_be(body_len) + body
+
+fn build_record_wire(content_type: i64, version: i64, payload: text) -> text:
+    """Build a TLS record as wire bytes: type(1) + version(2) + length(2) + payload."""
+    val payload_len = len(wire_to_bytes(payload))
+    encode_u8(content_type) + encode_u16_be(version) + encode_u16_be(payload_len) + payload
+
+fn build_gcm_nonce(implicit_iv: text, seq_num: i64) -> text:
+    """Build 12-byte GCM nonce: 4-byte implicit IV + 8-byte explicit seq number.
+
+    The implicit IV comes from key derivation; the explicit part is the
+    sequence number encoded as big-endian 8 bytes.
+    """
+    var explicit = ""
+    explicit = explicit + encode_u8((seq_num >> 56) & 255)
+    explicit = explicit + encode_u8((seq_num >> 48) & 255)
+    explicit = explicit + encode_u8((seq_num >> 40) & 255)
+    explicit = explicit + encode_u8((seq_num >> 32) & 255)
+    explicit = explicit + encode_u8((seq_num >> 24) & 255)
+    explicit = explicit + encode_u8((seq_num >> 16) & 255)
+    explicit = explicit + encode_u8((seq_num >> 8) & 255)
+    explicit = explicit + encode_u8(seq_num & 255)
+    implicit_iv + explicit
+
+fn build_aead_aad(seq_num: i64, content_type: i64, version: i64, length: i64) -> text:
+    """Build the additional authenticated data for AEAD ciphers.
+
+    Format: seq_num(8) + content_type(1) + version(2) + length(2) = 13 bytes
+    """
+    var aad = ""
+    aad = aad + encode_u8((seq_num >> 56) & 255)
+    aad = aad + encode_u8((seq_num >> 48) & 255)
+    aad = aad + encode_u8((seq_num >> 40) & 255)
+    aad = aad + encode_u8((seq_num >> 32) & 255)
+    aad = aad + encode_u8((seq_num >> 24) & 255)
+    aad = aad + encode_u8((seq_num >> 16) & 255)
+    aad = aad + encode_u8((seq_num >> 8) & 255)
+    aad = aad + encode_u8(seq_num & 255)
+    aad = aad + encode_u8(content_type)
+    aad = aad + encode_u16_be(version)
+    aad = aad + encode_u16_be(length)
+    aad
+
+fn send_fatal_alert(driver: IoDriver, fd: i64, description: i64):
+    """Send a fatal TLS alert to the peer."""
+    val alert_body = encode_u8(ALERT_LEVEL_FATAL) + encode_u8(description)
+    val alert_record = build_record_wire(CONTENT_TYPE_ALERT, TLS_VERSION_1_2, alert_body)
+    send_all(driver, fd, alert_record)

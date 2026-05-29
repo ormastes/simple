@@ -1,0 +1,877 @@
+"""
+# Trait Keyword - All Phases
+
+**Feature ID:** #TRAIT-002
+**Category:** Language
+**Status:** Active
+
+## Overview
+
+Comprehensive phase tests for the trait keyword feature covering all
+five phases: trait definition with method signatures (fn/me, parameters,
+return types), default method behavior, forwarding/delegation patterns,
+end-to-end workflows from trait definition through implementation to usage,
+and static dispatch via trait-bounded generics.
+
+## Syntax
+
+```simple
+trait Formatter:
+    fn format(value: text) -> text
+class TextFormatter:
+    inner: BaseFormatter
+    # delegation: fn format(value): self.inner.format(value)
+```
+
+Self-contained tests - no compiler-internal imports needed.
+All types, traits, and functions are defined locally.
+"""
+
+# ============================================================================
+# Phase 1 - Trait Detection (trait definitions are recognized and usable)
+# ============================================================================
+
+describe "Trait Keyword: Phase 1 - Trait detection":
+
+    context "basic detection":
+        it "trait declaration is recognized":
+            trait Display:
+                fn to_string() -> text
+
+            struct ShowPoint:
+                x: i64
+                y: i64
+
+            impl Display for ShowPoint:
+                fn to_string() -> text:
+                    "({self.x}, {self.y})"
+
+            val p = ShowPoint(x: 3, y: 4)
+            expect(p.to_string()).to_equal("(3, 4)")
+
+        it "trait name is extracted correctly":
+            trait Container:
+                fn size() -> i64
+
+            struct Bag:
+                count: i64
+
+            impl Container for Bag:
+                fn size() -> i64:
+                    self.count
+
+            val b = Bag(count: 5)
+            expect(b.size()).to_equal(5)
+
+        it "trait without methods acts as marker":
+            trait Marker:
+                fn is_marked() -> bool:
+                    true
+
+            struct Token:
+                id: i64
+
+            impl Marker for Token:
+                pass_dn
+
+            val t = Token(id: 1)
+            expect(t.is_marked()).to_equal(true)
+
+        it "struct without trait impl has no trait methods":
+            trait Special:
+                fn special_value() -> i64
+
+            struct Plain:
+                x: i64
+                fn get_x() -> i64:
+                    self.x
+
+            val p = Plain(x: 10)
+            expect(p.get_x()).to_equal(10)
+
+    context "multiple traits":
+        it "finds two traits and implements both":
+            trait Readable:
+                fn read() -> text
+
+            trait Writable:
+                fn write_label() -> text
+
+            struct FileObj:
+                name: text
+
+            impl Readable for FileObj:
+                fn read() -> text:
+                    "reading {self.name}"
+
+            impl Writable for FileObj:
+                fn write_label() -> text:
+                    "writing {self.name}"
+
+            val f = FileObj(name: "data.txt")
+            expect(f.read()).to_equal("reading data.txt")
+            expect(f.write_label()).to_equal("writing data.txt")
+
+        it "traits mixed with non-trait declarations work together":
+            trait Sizeable:
+                fn size() -> i64
+
+            struct Helper:
+                x: i64
+                fn get_x() -> i64:
+                    self.x
+
+            struct Collection:
+                count: i64
+
+            impl Sizeable for Collection:
+                fn size() -> i64:
+                    self.count
+
+            val h = Helper(x: 42)
+            val c = Collection(count: 10)
+            expect(h.get_x()).to_equal(42)
+            expect(c.size()).to_equal(10)
+
+    context "trait lookup":
+        it "correct trait impl is found for the right type":
+            trait Identifiable:
+                fn get_id() -> i64
+
+            struct User:
+                uid: i64
+
+            struct Device:
+                did: i64
+
+            impl Identifiable for User:
+                fn get_id() -> i64:
+                    self.uid
+
+            impl Identifiable for Device:
+                fn get_id() -> i64:
+                    self.did * 100
+
+            val u = User(uid: 7)
+            val d = Device(did: 3)
+            expect(u.get_id()).to_equal(7)
+            expect(d.get_id()).to_equal(300)
+
+        it "type without matching trait impl uses own methods":
+            trait Logger:
+                fn log_entry() -> text
+
+            struct SimpleObj:
+                label: text
+                fn get_label() -> text:
+                    self.label
+
+            val obj = SimpleObj(label: "test")
+            expect(obj.get_label()).to_equal("test")
+
+# ============================================================================
+# Phase 2 - Struct Generation (Method Signatures)
+# ============================================================================
+
+describe "Trait Keyword: Phase 2 - Method signature extraction":
+
+    context "fn methods":
+        it "fn method is immutable and returns value":
+            trait Inspect:
+                fn inspect() -> text
+
+            struct Item:
+                name: text
+
+            impl Inspect for Item:
+                fn inspect() -> text:
+                    "Item: {self.name}"
+
+            val item = Item(name: "widget")
+            expect(item.inspect()).to_equal("Item: widget")
+
+        it "fn method with return type works for multiple methods":
+            trait Measurable:
+                fn length() -> i64
+                fn weight() -> i64
+
+            struct Box:
+                l: i64
+                w: i64
+
+            impl Measurable for Box:
+                fn length() -> i64:
+                    self.l
+                fn weight() -> i64:
+                    self.w
+
+            val b = Box(l: 10, w: 25)
+            expect(b.length()).to_equal(10)
+            expect(b.weight()).to_equal(25)
+
+    context "me methods":
+        it "me method can mutate state":
+            trait Mutable:
+                me update(amount: i64)
+
+            struct Accumulator:
+                total: i64
+
+            impl Mutable for Accumulator:
+                me update(amount: i64):
+                    self.total = self.total + amount
+
+            var acc = Accumulator(total: 0)
+            acc.update(10)
+            acc.update(20)
+            expect(acc.total).to_equal(30)
+
+        it "mixed fn and me methods in same trait":
+            trait Repository:
+                fn get_count() -> i64
+                me add_entry(val: i64)
+                me remove_entry()
+
+            struct Store:
+                count: i64
+                last_val: i64
+
+            impl Repository for Store:
+                fn get_count() -> i64:
+                    self.count
+                me add_entry(val: i64):
+                    self.count = self.count + 1
+                    self.last_val = val
+                me remove_entry():
+                    if self.count > 0:
+                        self.count = self.count - 1
+
+            var s = Store(count: 0, last_val: 0)
+            s.add_entry(42)
+            s.add_entry(99)
+            expect(s.get_count()).to_equal(2)
+            expect(s.last_val).to_equal(99)
+            s.remove_entry()
+            expect(s.get_count()).to_equal(1)
+
+    context "parameter extraction":
+        it "no-arg method works":
+            trait Closeable:
+                me close()
+
+            struct Handle:
+                open: bool
+
+            impl Closeable for Handle:
+                me close():
+                    self.open = false
+
+            var h = Handle(open: true)
+            h.close()
+            expect(h.open).to_equal(false)
+
+        it "single-param method works":
+            trait Processor:
+                me process(item: text)
+
+            struct TextProcessor:
+                result: text
+
+            impl Processor for TextProcessor:
+                me process(item: text):
+                    self.result = item
+
+            var tp = TextProcessor(result: "")
+            tp.process("hello")
+            expect(tp.result).to_equal("hello")
+
+        it "multi-param method extracts all params correctly":
+            trait Transformer:
+                fn transform(input: text, count: i64, flag: bool) -> text
+
+            struct Fmt:
+                prefix: text
+
+            impl Transformer for Fmt:
+                fn transform(input: text, count: i64, flag: bool) -> text:
+                    if flag:
+                        "{self.prefix}:{input}x{count}"
+                    else:
+                        input
+
+            val f = Fmt(prefix: "T")
+            expect(f.transform("data", 3, true)).to_equal("T:datax3")
+            expect(f.transform("data", 3, false)).to_equal("data")
+
+    context "comments and type lines in trait body":
+        it "trait with only relevant methods works":
+            trait Iter:
+                fn next_val() -> i64
+
+            struct Counter:
+                n: i64
+
+            impl Iter for Counter:
+                fn next_val() -> i64:
+                    self.n + 1
+
+            val c = Counter(n: 5)
+            expect(c.next_val()).to_equal(6)
+
+        it "trait with associated type declaration works":
+            trait Collection:
+                type Item
+                fn get_item() -> i64
+
+            struct IntCollection:
+                value: i64
+
+            impl Collection for IntCollection:
+                type Item = i64
+                fn get_item() -> i64:
+                    self.value
+
+            val ic = IntCollection(value: 42)
+            expect(ic.get_item()).to_equal(42)
+
+# ============================================================================
+# Phase 3 - Default Method Detection
+# ============================================================================
+
+describe "Trait Keyword: Phase 3 - Default method detection":
+
+    context "abstract vs default methods":
+        it "abstract method must be implemented":
+            trait Eq:
+                fn eq_val(other_val: i64) -> bool
+
+            struct Number:
+                n: i64
+
+            impl Eq for Number:
+                fn eq_val(other_val: i64) -> bool:
+                    self.n == other_val
+
+            val num = Number(n: 42)
+            expect(num.eq_val(42)).to_equal(true)
+            expect(num.eq_val(10)).to_equal(false)
+
+        it "default method is used when not overridden":
+            trait Comparable:
+                fn compare_to(other_val: i64) -> i64
+                fn less_than(other_val: i64) -> bool:
+                    self.compare_to(other_val) < 0
+                fn greater_than(other_val: i64) -> bool:
+                    self.compare_to(other_val) > 0
+
+            struct Priority:
+                level: i64
+
+            impl Comparable for Priority:
+                fn compare_to(other_val: i64) -> i64:
+                    self.level - other_val
+
+            val p = Priority(level: 5)
+            # abstract method works
+            expect(p.compare_to(3)).to_equal(2)
+            # default methods work without explicit implementation
+            expect(p.less_than(10)).to_equal(true)
+            expect(p.less_than(2)).to_equal(false)
+            expect(p.greater_than(2)).to_equal(true)
+            expect(p.greater_than(10)).to_equal(false)
+
+        it "default method with inline body works":
+            trait StringProvider:
+                fn prefix() -> text:
+                    "default_prefix"
+
+            struct Widget:
+                name: text
+
+            impl StringProvider for Widget:
+                pass_dn
+
+            val w = Widget(name: "btn")
+            expect(w.prefix()).to_equal("default_prefix")
+
+    context "default method override":
+        it "overriding default method replaces it":
+            trait Greetable:
+                fn greet() -> text:
+                    "hello"
+
+            struct FormalPerson:
+                title: text
+
+            impl Greetable for FormalPerson:
+                fn greet() -> text:
+                    "Good day, {self.title}"
+
+            val fp = FormalPerson(title: "Sir")
+            expect(fp.greet()).to_equal("Good day, Sir")
+
+        it "default method calls abstract method correctly":
+            trait Calculator:
+                fn compute() -> i64
+                fn double() -> i64:
+                    self.compute() * 2
+
+            struct Val:
+                n: i64
+
+            impl Calculator for Val:
+                fn compute() -> i64:
+                    self.n
+
+            val v = Val(n: 21)
+            expect(v.compute()).to_equal(21)
+            expect(v.double()).to_equal(42)
+
+        it "all-abstract trait requires all methods implemented":
+            trait Printable:
+                fn print_text() -> text
+                fn print_count() -> i64
+
+            struct Document:
+                content: text
+                pages: i64
+
+            impl Printable for Document:
+                fn print_text() -> text:
+                    self.content
+                fn print_count() -> i64:
+                    self.pages
+
+            val doc = Document(content: "Hello", pages: 3)
+            expect(doc.print_text()).to_equal("Hello")
+            expect(doc.print_count()).to_equal(3)
+
+# ============================================================================
+# Phase 4 - Forwarding (Delegation Pattern)
+# ============================================================================
+
+describe "Trait Keyword: Phase 4 - Forwarding":
+
+    context "immutable forwarding (alias fn pattern)":
+        it "delegates immutable method to field":
+            struct Inner:
+                data: i64
+                fn get_len() -> i64:
+                    self.data
+
+            # This represents what desugar would generate from alias fn len = inner.len
+            struct Wrapper:
+                inner: Inner
+                fn get_len() -> i64:
+                    self.inner.get_len()
+
+            val w = Wrapper(inner: Inner(data: 42))
+            expect(w.get_len()).to_equal(42)
+
+        it "delegates fn with args to field":
+            struct InnerCalc:
+                base: i64
+                fn get(key: i64, default_val: i64) -> i64:
+                    if key > 0:
+                        self.base + key
+                    else:
+                        default_val
+
+            struct CalcWrapper:
+                inner: InnerCalc
+                fn get(key: i64, default_val: i64) -> i64:
+                    self.inner.get(key, default_val)
+
+            val w = CalcWrapper(inner: InnerCalc(base: 100))
+            expect(w.get(5, 0)).to_equal(105)
+            expect(w.get(0, 99)).to_equal(99)
+
+    context "mutable forwarding (alias me pattern)":
+        it "delegates mutable method to field":
+            struct InnerList:
+                length: i64
+                me push(item: i64):
+                    self.length = self.length + 1
+
+            struct ListWrapper:
+                inner: InnerList
+                me push(item: i64):
+                    self.inner.push(item)
+                fn size() -> i64:
+                    self.inner.length
+
+            var w = ListWrapper(inner: InnerList(length: 0))
+            w.push(1)
+            w.push(2)
+            w.push(3)
+            expect(w.size()).to_equal(3)
+
+    context "trait-based forwarding (alias TraitName = field pattern)":
+        it "forwards fn methods from trait to field":
+            trait Sizeable:
+                fn size() -> i64
+                fn is_empty() -> bool
+
+            struct Storage:
+                count: i64
+
+            impl Sizeable for Storage:
+                fn size() -> i64:
+                    self.count
+                fn is_empty() -> bool:
+                    self.count == 0
+
+            # This is what desugar generates from: alias Sizeable = items
+            struct MyList:
+                items: Storage
+                fn size() -> i64:
+                    self.items.size()
+                fn is_empty() -> bool:
+                    self.items.is_empty()
+
+            val ml = MyList(items: Storage(count: 5))
+            expect(ml.size()).to_equal(5)
+            expect(ml.is_empty()).to_equal(false)
+
+            val empty_ml = MyList(items: Storage(count: 0))
+            expect(empty_ml.size()).to_equal(0)
+            expect(empty_ml.is_empty()).to_equal(true)
+
+        it "forwards me methods from trait to field":
+            trait Writable:
+                me write_data(data: text)
+                me clear_data()
+
+            struct Buffer:
+                content: text
+                entries: i64
+
+            impl Writable for Buffer:
+                me write_data(data: text):
+                    self.content = self.content + data
+                    self.entries = self.entries + 1
+                me clear_data():
+                    self.content = ""
+                    self.entries = 0
+
+            # Desugar generates: me write_data(data): self.buf.write_data(data)
+            struct StreamObj:
+                buf: Buffer
+                me write_data(data: text):
+                    self.buf.write_data(data)
+                me clear_data():
+                    self.buf.clear_data()
+                fn read() -> text:
+                    self.buf.content
+                fn count() -> i64:
+                    self.buf.entries
+
+            var s = StreamObj(buf: Buffer(content: "", entries: 0))
+            s.write_data("hello")
+            s.write_data(" world")
+            expect(s.read()).to_equal("hello world")
+            expect(s.count()).to_equal(2)
+            s.clear_data()
+            expect(s.read()).to_equal("")
+            expect(s.count()).to_equal(0)
+
+        it "unknown trait generates no forwarding - wrapper has only own methods":
+            struct InnerData:
+                value: i64
+
+            struct WrapperOwn:
+                inner: InnerData
+                fn get_value() -> i64:
+                    self.inner.value
+
+            val w = WrapperOwn(inner: InnerData(value: 99))
+            expect(w.get_value()).to_equal(99)
+
+    context "blanket forwarding (alias field pattern)":
+        it "forwards all methods from field type":
+            struct StorageFull:
+                count: i64
+                fn size() -> i64:
+                    self.count
+                me clear_all():
+                    self.count = 0
+
+            # Desugar generates forwarding for all methods of StorageFull
+            struct WrapperFull:
+                store: StorageFull
+                fn size() -> i64:
+                    self.store.size()
+                me clear_all():
+                    self.store.clear_all()
+
+            var w = WrapperFull(store: StorageFull(count: 10))
+            expect(w.size()).to_equal(10)
+            w.clear_all()
+            expect(w.size()).to_equal(0)
+
+# ============================================================================
+# Phase 5 - End-to-End Usage
+# ============================================================================
+
+describe "Trait Keyword: Phase 5 - End-to-end usage":
+
+    context "complete trait workflow":
+        it "define a trait, implement it, use methods":
+            trait EventHandler:
+                me on_event(event: text)
+                fn handler_name() -> text
+
+            struct ClickHandler:
+                name: text
+                click_count: i64
+
+            impl EventHandler for ClickHandler:
+                me on_event(event: text):
+                    self.click_count = self.click_count + 1
+                fn handler_name() -> text:
+                    self.name
+
+            var handler = ClickHandler(name: "btn_click", click_count: 0)
+            expect(handler.handler_name()).to_equal("btn_click")
+            handler.on_event("click")
+            handler.on_event("click")
+            expect(handler.click_count).to_equal(2)
+
+        it "complete define-implement-forward workflow":
+            trait Formattable:
+                fn format_val(value: text) -> text
+                fn fmt_name() -> text
+
+            struct BaseFormatter:
+                prefix: text
+
+            impl Formattable for BaseFormatter:
+                fn format_val(value: text) -> text:
+                    "{self.prefix}: {value}"
+                fn fmt_name() -> text:
+                    self.prefix
+
+            # TextFormatter delegates to inner BaseFormatter
+            struct TextFormatter:
+                inner: BaseFormatter
+                fn format_val(value: text) -> text:
+                    self.inner.format_val(value)
+                fn fmt_name() -> text:
+                    self.inner.fmt_name()
+
+            val tf = TextFormatter(inner: BaseFormatter(prefix: "bold"))
+            expect(tf.format_val("test")).to_equal("bold: test")
+            expect(tf.fmt_name()).to_equal("bold")
+
+        it "multiple traits in source: each generates correct forwarding":
+            trait ReadCapable:
+                fn read_data() -> text
+
+            trait CloseCapable:
+                me close_handle()
+
+            struct Reader:
+                data: text
+                fn read_data() -> text:
+                    self.data
+
+            struct HandleObj:
+                open: bool
+                me close_handle():
+                    self.open = false
+
+            impl ReadCapable for Reader:
+                fn read_data() -> text:
+                    self.data
+
+            impl CloseCapable for HandleObj:
+                me close_handle():
+                    self.open = false
+
+            # FileStream delegates to both reader and handle
+            struct FileStream:
+                reader: Reader
+                handle: HandleObj
+                fn read_data() -> text:
+                    self.reader.read_data()
+                me close_handle():
+                    self.handle.close_handle()
+
+            var fs = FileStream(reader: Reader(data: "content"), handle: HandleObj(open: true))
+            expect(fs.read_data()).to_equal("content")
+            fs.close_handle()
+            expect(fs.handle.open).to_equal(false)
+
+        it "trait with default methods: only abstract methods need implementation":
+            trait ComparableItem:
+                fn compare_to_val(other_val: i64) -> i64
+                fn is_less_than(other_val: i64) -> bool:
+                    self.compare_to_val(other_val) < 0
+                fn is_greater_than(other_val: i64) -> bool:
+                    self.compare_to_val(other_val) > 0
+
+            struct PriorityItem:
+                level: i64
+
+            impl ComparableItem for PriorityItem:
+                fn compare_to_val(other_val: i64) -> i64:
+                    self.level - other_val
+
+            val p = PriorityItem(level: 7)
+            # Abstract method (compare_to_val) works
+            expect(p.compare_to_val(3)).to_equal(4)
+            # Default methods work without explicit impl
+            expect(p.is_less_than(10)).to_equal(true)
+            expect(p.is_less_than(5)).to_equal(false)
+            expect(p.is_greater_than(5)).to_equal(true)
+            expect(p.is_greater_than(10)).to_equal(false)
+
+        it "trait scanner and forwarding agree on method count":
+            trait Pipeline:
+                me run(input: text)
+                fn status() -> text
+                fn pipeline_name() -> text
+
+            struct PipelineImpl:
+                state: text
+                label: text
+
+            impl Pipeline for PipelineImpl:
+                me run(input: text):
+                    self.state = input
+                fn status() -> text:
+                    self.state
+                fn pipeline_name() -> text:
+                    self.label
+
+            # DataPipeline delegates all 3 methods to impl field
+            struct DataPipeline:
+                impl_field: PipelineImpl
+                me run(input: text):
+                    self.impl_field.run(input)
+                fn status() -> text:
+                    self.impl_field.status()
+                fn pipeline_name() -> text:
+                    self.impl_field.pipeline_name()
+
+            var dp = DataPipeline(impl_field: PipelineImpl(state: "idle", label: "ETL"))
+            expect(dp.pipeline_name()).to_equal("ETL")
+            expect(dp.status()).to_equal("idle")
+            dp.run("processing")
+            expect(dp.status()).to_equal("processing")
+
+# ============================================================================
+# Phase 6 - Static Dispatch (trait bounds on generics)
+# ============================================================================
+
+describe "Trait Keyword: Phase 6 - Static dispatch":
+
+    context "trait params become generic":
+        it "fn with trait-bounded param uses static dispatch":
+            trait PrintCapable:
+                fn print_text() -> text
+
+            struct Circle:
+                radius: i64
+
+            impl PrintCapable for Circle:
+                fn print_text() -> text:
+                    "Circle(r={self.radius})"
+
+            struct Square:
+                side: i64
+
+            impl PrintCapable for Square:
+                fn print_text() -> text:
+                    "Square(s={self.side})"
+
+            # Function accepting trait-bounded type
+            fn show(x: PrintCapable) -> text:
+                x.print_text()
+
+            val c = Circle(radius: 5)
+            val s = Square(side: 3)
+            expect(show(c)).to_equal("Circle(r=5)")
+            expect(show(s)).to_equal("Square(s=3)")
+
+        it "multiple trait params dispatch correctly":
+            trait ReadOp:
+                fn read_op() -> text
+
+            trait CloseOp:
+                fn close_op() -> text
+
+            struct FileReader:
+                name: text
+
+            impl ReadOp for FileReader:
+                fn read_op() -> text:
+                    "read:{self.name}"
+
+            struct FileCloser:
+                name: text
+
+            impl CloseOp for FileCloser:
+                fn close_op() -> text:
+                    "close:{self.name}"
+
+            fn use_both(r: ReadOp, c: CloseOp) -> text:
+                "{r.read_op()} {c.close_op()}"
+
+            val r = FileReader(name: "a.txt")
+            val c = FileCloser(name: "b.txt")
+            expect(use_both(r, c)).to_equal("read:a.txt close:b.txt")
+
+    context "dyn prefix stays dynamic":
+        it "dyn Trait param uses dynamic dispatch":
+            trait Displayable:
+                fn display() -> text
+
+            struct Tag:
+                label: text
+
+            impl Displayable for Tag:
+                fn display() -> text:
+                    self.label
+
+            struct Badge:
+                title: text
+
+            impl Displayable for Badge:
+                fn display() -> text:
+                    "[{self.title}]"
+
+            fn show_dyn(x: dyn Displayable) -> text:
+                x.display()
+
+            val t = Tag(label: "info")
+            val b = Badge(title: "admin")
+            expect(show_dyn(t)).to_equal("info")
+            expect(show_dyn(b)).to_equal("[admin]")
+
+    context "interface stays dynamic":
+        it "interface-typed param dispatches at runtime":
+            trait Drawable:
+                fn draw() -> text
+
+            struct Line:
+                length: i64
+
+            impl Drawable for Line:
+                fn draw() -> text:
+                    "line({self.length})"
+
+            struct Dot:
+                x: i64
+
+            impl Drawable for Dot:
+                fn draw() -> text:
+                    "dot({self.x})"
+
+            fn render(x: Drawable) -> text:
+                x.draw()
+
+            val line = Line(length: 10)
+            val dot = Dot(x: 5)
+            expect(render(line)).to_equal("line(10)")
+            expect(render(dot)).to_equal("dot(5)")

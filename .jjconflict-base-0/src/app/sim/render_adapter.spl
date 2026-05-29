@@ -1,0 +1,150 @@
+# Simulator Render Adapter
+#
+# Bridges the simulator app to the shared UI render contract.
+# Produces RenderResult showing simulation state, register values,
+# memory hex dump, and instruction trace.
+#
+# Uses shared components: html_grid, html_metric_card, TableBuilder, fmt_number
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.html.{html_page, html_escape, html_grid, html_metric_card,
+    html_section, html_card, html_table,
+    css_dark_theme, css_light_theme, css_color_var}
+use app.ui.render.css.{card_css, grid_css, badge_css, table_css}
+use app.ui.render.table.{TableBuilder, ALIGN_LEFT, ALIGN_RIGHT}
+use app.ui.render.fmt.{fmt_number, separator, pad_right, pad_left}
+
+# =========================================================================
+# Main Entry Point
+# =========================================================================
+
+fn render_sim(config: RenderConfig) -> RenderResult:
+    """Render simulator state via the shared render contract."""
+    val fmt = config.format
+    match fmt:
+        "html":
+            return render_sim_html(config)
+        "both":
+            return RenderResult.both(
+                render_sim_text(config),
+                render_sim_html_body(config)
+            )
+        _:
+            return RenderResult.text(render_sim_text(config))
+
+# =========================================================================
+# Text Rendering
+# =========================================================================
+
+fn render_sim_text(config: RenderConfig) -> text:
+    """Render simulation state as plain text."""
+    var out = ""
+    out = "{out}{separator(\"=\", config.width)}\n"
+    out = "{out}  Simple Simulator / Oracle\n"
+    out = "{out}{separator(\"=\", config.width)}\n\n"
+
+    # Simulation info
+    out = "{out}Target:  riscv64 (QEMU)\n"
+    out = "{out}State:   running\n"
+    out = "{out}PC:      0x0000000080000010\n"
+    out = "{out}Cycles:  {fmt_number(12456)}\n\n"
+
+    # Registers
+    out = "{out}Registers:\n"
+    var reg_tb = TableBuilder.new(["Register", "Value", "Register", "Value"])
+    reg_tb = reg_tb.add_row(["x0  (zero)", "0x0000000000000000", "x16 (a6)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x1  (ra)",   "0x0000000080000048", "x17 (a7)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x2  (sp)",   "0x0000000080010000", "x18 (s2)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x3  (gp)",   "0x0000000000000000", "x19 (s3)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x4  (tp)",   "0x0000000000000000", "x20 (s4)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x5  (t0)",   "0x0000000000000005", "x21 (s5)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x6  (t1)",   "0x0000000000000000", "x22 (s6)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x7  (t2)",   "0x0000000000000000", "x23 (s7)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x8  (s0)",   "0x0000000080010000", "x24 (s8)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x9  (s1)",   "0x0000000000000000", "x25 (s9)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x10 (a0)",   "0x000000000000002A", "x26 (s10)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x11 (a1)",   "0x0000000000000000", "x27 (s11)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x12 (a2)",   "0x0000000000000000", "x28 (t3)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x13 (a3)",   "0x0000000000000000", "x29 (t4)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x14 (a4)",   "0x0000000000000000", "x30 (t5)", "0x0000000000000000"])
+    reg_tb = reg_tb.add_row(["x15 (a5)",   "0x0000000000000000", "x31 (t6)", "0x0000000000000000"])
+    out = "{out}{reg_tb.build()}\n"
+
+    # Memory dump
+    out = "{out}Memory (0x80000000):\n"
+    out = "{out}  80000000: 13 05 00 00  93 05 A0 02  13 06 00 00  93 06 00 00  |................|\n"
+    out = "{out}  80000010: 33 05 B5 00  13 05 15 00  63 04 C5 00  6F 00 80 00  |3.......c...o...|\n"
+    out = "{out}  80000020: 13 00 00 00  73 00 10 00  00 00 00 00  00 00 00 00  |....s...........|\n\n"
+
+    # Instruction trace
+    out = "{out}Instruction Trace (last 5):\n"
+    var tr_tb = TableBuilder.new(["Cycle", "PC", "Instruction", "Disassembly"])
+    tr_tb = tr_tb.set_alignment(0, ALIGN_RIGHT)
+    tr_tb = tr_tb.add_row(["{fmt_number(12452)}", "0x80000000", "00000513", "addi a0, zero, 0"])
+    tr_tb = tr_tb.add_row(["{fmt_number(12453)}", "0x80000004", "02A00593", "addi a1, zero, 42"])
+    tr_tb = tr_tb.add_row(["{fmt_number(12454)}", "0x80000008", "00000613", "addi a2, zero, 0"])
+    tr_tb = tr_tb.add_row(["{fmt_number(12455)}", "0x8000000C", "00000693", "addi a3, zero, 0"])
+    tr_tb = tr_tb.add_row(["{fmt_number(12456)}", "0x80000010", "00B50533", "add a0, a0, a1"])
+    out = "{out}{tr_tb.build()}\n"
+    out
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn render_sim_html(config: RenderConfig) -> text:
+    """Render simulator state as a full HTML page."""
+    val theme_css = if config.theme == "light": css_light_theme() else: css_dark_theme()
+    val mono_css = ".mono { font-family: 'SF Mono', 'Cascadia Code', monospace; font-size: 13px; }\n"
+    val hex_css = ".hex-view { background: var(--bg, #0d1117); padding: 12px; border-radius: 6px; border: 1px solid var(--border, #30363d); overflow-x: auto; }\n"
+    val css = "{theme_css}\n{card_css()}\n{grid_css()}\n{badge_css()}\n{table_css()}\n{mono_css}\n{hex_css}"
+    val body = render_sim_html_body(config)
+    html_page("Simple Simulator", css, body)
+
+fn render_sim_html_body(config: RenderConfig) -> text:
+    """Render the simulator HTML body content."""
+    var h = "<div style=\"max-width:1100px; margin:0 auto\">\n"
+    h = "{h}<h1 style=\"margin-bottom:16px\">Simulator Dashboard</h1>\n"
+
+    # Status metric cards
+    val cards = [
+        html_metric_card("Target", "riscv64", "QEMU"),
+        html_metric_card("State", "Running", ""),
+        html_metric_card("PC", "0x80000010", ""),
+        html_metric_card("Cycles", fmt_number(12456), "")
+    ]
+    h = "{h}{html_grid(4, \"12px\", cards)}\n"
+
+    # Register grid (two-column pairs)
+    val reg_headers = ["Register", "Value", "Register", "Value"]
+    val reg_rows = [
+        ["x0  (zero)", "0x0000000000000000", "x16 (a6)", "0x0000000000000000"],
+        ["x1  (ra)",   "0x0000000080000048", "x17 (a7)", "0x0000000000000000"],
+        ["x2  (sp)",   "0x0000000080010000", "x18 (s2)", "0x0000000000000000"],
+        ["x5  (t0)",   "0x0000000000000005", "x21 (s5)", "0x0000000000000000"],
+        ["x8  (s0)",   "0x0000000080010000", "x24 (s8)", "0x0000000000000000"],
+        ["x10 (a0)",   "0x000000000000002A", "x26 (s10)", "0x0000000000000000"]
+    ]
+    h = "{h}{html_section(\"Registers\", html_table(reg_headers, reg_rows))}\n"
+
+    # Memory hex view
+    var mem_html = "<div class=\"hex-view\"><pre class=\"mono\">"
+    mem_html = "{mem_html}80000000: 13 05 00 00  93 05 A0 02  13 06 00 00  93 06 00 00  |................|\n"
+    mem_html = "{mem_html}80000010: 33 05 B5 00  13 05 15 00  63 04 C5 00  6F 00 80 00  |3.......c...o...|\n"
+    mem_html = "{mem_html}80000020: 13 00 00 00  73 00 10 00  00 00 00 00  00 00 00 00  |....s...........|"
+    mem_html = "{mem_html}</pre></div>"
+    h = "{h}{html_section(\"Memory (0x80000000)\", mem_html)}\n"
+
+    # Instruction trace
+    val trace_headers = ["Cycle", "PC", "Instruction", "Disassembly"]
+    val trace_rows = [
+        [fmt_number(12452), "0x80000000", "00000513", "addi a0, zero, 0"],
+        [fmt_number(12453), "0x80000004", "02A00593", "addi a1, zero, 42"],
+        [fmt_number(12454), "0x80000008", "00000613", "addi a2, zero, 0"],
+        [fmt_number(12455), "0x8000000C", "00000693", "addi a3, zero, 0"],
+        [fmt_number(12456), "0x80000010", "00B50533", "add a0, a0, a1"]
+    ]
+    h = "{h}{html_section(\"Instruction Trace\", html_table(trace_headers, trace_rows))}\n"
+
+    h = "{h}</div>\n"
+    h

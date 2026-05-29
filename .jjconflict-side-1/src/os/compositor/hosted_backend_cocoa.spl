@@ -1,0 +1,169 @@
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+
+extern fn rt_cocoa_window_new(w: i64, h: i64, title_rv: i64) -> i64
+extern fn rt_cocoa_window_resize(win: i64, w: i64, h: i64) -> bool
+extern fn rt_cocoa_window_close(win: i64) -> bool
+extern fn rt_cocoa_layer_create(win: i64, w: i64, h: i64, fill_color: i64) -> i64
+extern fn rt_cocoa_layer_fill_rect(layer: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool
+extern fn rt_cocoa_layer_present(win: i64, layer: i64) -> bool
+extern fn rt_cocoa_layer_free(layer: i64) -> bool
+extern fn rt_cocoa_layer_read_pixel(layer: i64, x: i64, y: i64) -> i64
+extern fn rt_cocoa_layer_blend_rect(layer: i64, x: i64, y: i64, w: i64, h: i64, color: i64, alpha: i64) -> bool
+extern fn rt_cocoa_layer_blur(layer: i64, x: i64, y: i64, w: i64, h: i64, radius: i64) -> bool
+extern fn rt_cocoa_layer_gradient_v(layer: i64, x: i64, y: i64, w: i64, h: i64, color_top: i64, color_bottom: i64) -> bool
+extern fn rt_cocoa_event_pump(win: i64) -> i64
+
+class HostedCocoaBackend:
+    window_id: i64
+    buffer_id: i64
+    w: i32
+    h: i32
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        self
+
+    static fn implementation_name() -> text:
+        "cocoa-real-sffi"
+
+    static fn uses_native_cocoa_symbols() -> bool:
+        true
+
+    static fn new(window_id: i64, buffer_id: i64, w: i32, h: i32) -> HostedCocoaBackend:
+        HostedCocoaBackend(window_id: window_id, buffer_id: buffer_id, w: w, h: h)
+
+    static fn try_create(window_id: i64, w: i32, h: i32, clear_color: u32) -> HostedCocoaBackend?:
+        if w <= 0 or h <= 0:
+            return nil
+        var win = window_id
+        if win <= 0:
+            win = rt_cocoa_window_new(w.to_i64(), h.to_i64(), 0)
+        if win <= 0:
+            return nil
+        val layer = rt_cocoa_layer_create(win, w.to_i64(), h.to_i64(), clear_color.to_i64())
+        if layer <= 0:
+            if window_id <= 0:
+                rt_cocoa_window_close(win)
+            return nil
+        HostedCocoaBackend.new(win, layer, w, h)
+
+    me clear(color: u32):
+        if self.buffer_id > 0:
+            rt_cocoa_layer_fill_rect(self.buffer_id, 0, 0, self.w.to_i64(), self.h.to_i64(), color.to_i64())
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if self.buffer_id > 0:
+            rt_cocoa_layer_fill_rect(self.buffer_id, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64(), color.to_i64())
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        if text_str.len() > 0:
+            self.fill_rect(x, y, text_str.len().to_i32() * 8, 16, bg)
+            self.put_pixel(x, y, fg)
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        self.fill_rect(x, y, 8, 16, bg)
+        self.put_pixel(x, y, fg)
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        self.fill_rect(x, y, 1, 1, color)
+
+    me present():
+        if self.window_id > 0 and self.buffer_id > 0:
+            rt_cocoa_layer_present(self.window_id, self.buffer_id)
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        self.present()
+
+    me blend_rect(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
+        if self.buffer_id > 0:
+            rt_cocoa_layer_blend_rect(self.buffer_id, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64(), color.to_i64(), alpha.to_i64())
+
+    me blur_region(x: i32, y: i32, w: i32, h: i32, radius: u32):
+        if self.buffer_id > 0:
+            rt_cocoa_layer_blur(self.buffer_id, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64(), radius.to_i64())
+
+    me gradient_v(x: i32, y: i32, w: i32, h: i32, color_top: u32, color_bottom: u32):
+        if self.buffer_id > 0:
+            rt_cocoa_layer_gradient_v(self.buffer_id, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64(), color_top.to_i64(), color_bottom.to_i64())
+
+    fn read_pixel(x: i32, y: i32) -> u32:
+        if self.buffer_id > 0:
+            return rt_cocoa_layer_read_pixel(self.buffer_id, x.to_i64(), y.to_i64()).to_u32()
+        0u32
+
+    me resize(w: i32, h: i32) -> bool:
+        if self.window_id > 0 and not rt_cocoa_window_resize(self.window_id, w.to_i64(), h.to_i64()):
+            return false
+        self.w = w
+        self.h = h
+        true
+
+    me free():
+        if self.buffer_id > 0:
+            rt_cocoa_layer_free(self.buffer_id)
+            self.buffer_id = 0
+        if self.window_id > 0:
+            rt_cocoa_window_close(self.window_id)
+            self.window_id = 0
+
+impl CompositorBackend for HostedCocoaBackend:
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        if self.buffer_id > 0:
+            rt_cocoa_layer_fill_rect(self.buffer_id, 0, 0, self.w.to_i64(), self.h.to_i64(), color.to_i64())
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if self.buffer_id > 0:
+            rt_cocoa_layer_fill_rect(self.buffer_id, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64(), color.to_i64())
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        if text_str.len() > 0:
+            self.fill_rect(x, y, text_str.len().to_i32() * 8, 16, bg)
+            self.put_pixel(x, y, fg)
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        self.fill_rect(x, y, 8, 16, bg)
+        self.put_pixel(x, y, fg)
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        self.fill_rect(x, y, 1, 1, color)
+
+    me present():
+        if self.window_id > 0 and self.buffer_id > 0:
+            rt_cocoa_layer_present(self.window_id, self.buffer_id)
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        self.present()
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        self
+
+impl CompositorGlassCapable for HostedCocoaBackend:
+
+    me blend_rect(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
+        if self.buffer_id > 0:
+            rt_cocoa_layer_blend_rect(self.buffer_id, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64(), color.to_i64(), alpha.to_i64())
+
+    me blur_region(x: i32, y: i32, w: i32, h: i32, radius: u32):
+        if self.buffer_id > 0:
+            rt_cocoa_layer_blur(self.buffer_id, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64(), radius.to_i64())
+
+    me gradient_v(x: i32, y: i32, w: i32, h: i32, color_top: u32, color_bottom: u32):
+        if self.buffer_id > 0:
+            rt_cocoa_layer_gradient_v(self.buffer_id, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64(), color_top.to_i64(), color_bottom.to_i64())
+
+    fn read_pixel(x: i32, y: i32) -> u32:
+        if self.buffer_id > 0:
+            return rt_cocoa_layer_read_pixel(self.buffer_id, x.to_i64(), y.to_i64()).to_u32()
+        0u32

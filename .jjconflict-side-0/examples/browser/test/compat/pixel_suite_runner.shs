@@ -1,0 +1,126 @@
+#!/bin/sh
+# Pixel Suite Runner — Full pixel comparison pipeline
+#
+# 1. Takes Chrome screenshots of all HTML test files
+# 2. Converts PNG to BMP for pixel comparison
+# 3. Runs Simple renderer on same files
+# 4. Compares pixels via Simple test-mode helpers
+# 5. Generates markdown report
+
+OUTPUT_DIR="${1:-/tmp/pixel_suite}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+SIMPLE_BIN="${SIMPLE_BIN:-$PROJECT_ROOT/src/compiler_rust/target/debug/simple}"
+HTML_DIR="$SCRIPT_DIR/html"
+CHROME_SCRIPT="$SCRIPT_DIR/chrome_screenshot.shs"
+RENDER_HELPER="$SCRIPT_DIR/simple_render_html.spl"
+COMPARE_HELPER="$SCRIPT_DIR/compare_render_pair.spl"
+
+# Source-mode smoke-suite viewport. Larger sizes currently exceed the interpreter watchdog.
+WIDTH=64
+HEIGHT=64
+
+echo "=== Pixel Suite Runner ==="
+echo "HTML dir: $HTML_DIR"
+echo "Output:   $OUTPUT_DIR"
+echo "Viewport: ${WIDTH}x${HEIGHT}"
+echo "Simple:   $SIMPLE_BIN"
+echo ""
+
+mkdir -p "$OUTPUT_DIR/chrome" "$OUTPUT_DIR/simple" "$OUTPUT_DIR/diff"
+
+render_with_simple_test() {
+    html_file="$1"
+    output_ppm="$2"
+    "$SIMPLE_BIN" "$RENDER_HELPER" "$html_file" "$output_ppm" "$WIDTH" "$HEIGHT" >/dev/null 2>&1
+}
+
+compare_with_simple_test() {
+    baseline_path="$1"
+    candidate_path="$2"
+    metrics_path="$3"
+    diff_path="$4"
+    "$SIMPLE_BIN" "$COMPARE_HELPER" "$baseline_path" "$candidate_path" "$WIDTH" "$HEIGHT" "$metrics_path" "$diff_path" >/dev/null 2>&1
+}
+
+if ! sh "$CHROME_SCRIPT" --help >/dev/null 2>&1; then
+    echo "Warning: Chrome may not be available"
+fi
+
+TOTAL=0
+FAIL=0
+SKIP=0
+
+REPORT="$OUTPUT_DIR/report.md"
+echo "# Pixel Suite Report" > "$REPORT"
+echo "" >> "$REPORT"
+echo "Viewport: ${WIDTH}x${HEIGHT}" >> "$REPORT"
+echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$REPORT"
+echo "" >> "$REPORT"
+echo "| Test | Category | Chrome | Simple | Status |" >> "$REPORT"
+echo "|------|----------|--------|--------|--------|" >> "$REPORT"
+
+for category_dir in "$HTML_DIR"/*/; do
+    category="$(basename "$category_dir")"
+    for html_file in "$category_dir"*.html; do
+        [ -f "$html_file" ] || continue
+        test_name="$(basename "$html_file" .html)"
+        TOTAL=$((TOTAL + 1))
+
+        echo "--- [$category] $test_name ---"
+
+        chrome_png="$OUTPUT_DIR/chrome/${test_name}.png"
+        sh "$CHROME_SCRIPT" "$html_file" "$chrome_png" "$WIDTH" "$HEIGHT" 2>/dev/null
+
+        chrome_ok="NO"
+        if [ -f "$chrome_png" ]; then
+            chrome_ok="YES"
+            echo "  Chrome: OK"
+            /usr/bin/sips -s format bmp "$chrome_png" --out "$OUTPUT_DIR/chrome/${test_name}.bmp" >/dev/null 2>&1
+        else
+            echo "  Chrome: FAILED"
+        fi
+
+        simple_ppm="$OUTPUT_DIR/simple/${test_name}.ppm"
+        render_with_simple_test "$html_file" "$simple_ppm"
+        if [ ! -f "$simple_ppm" ]; then
+            echo "  Simple: FAILED"
+            SKIP=$((SKIP + 1))
+            echo "| $test_name | $category | $chrome_ok | NO | simple render failed |" >> "$REPORT"
+            continue
+        fi
+        echo "  Simple: OK"
+
+        chrome_bmp="$OUTPUT_DIR/chrome/${test_name}.bmp"
+        metrics_txt="$OUTPUT_DIR/diff/${test_name}.txt"
+        diff_ppm="$OUTPUT_DIR/diff/${test_name}.ppm"
+        if [ "$chrome_ok" = "YES" ] && [ -f "$chrome_bmp" ]; then
+            compare_with_simple_test "$chrome_bmp" "$simple_ppm" "$metrics_txt" "$diff_ppm"
+            if [ -f "$metrics_txt" ]; then
+                match_pct=$(awk -F= '/^match_percentage=/{print $2}' "$metrics_txt")
+                rmse=$(awk -F= '/^rmse=/{print $2}' "$metrics_txt")
+                echo "  Diff match: ${match_pct}%"
+                echo "| $test_name | $category | $chrome_ok | YES | match ${match_pct}% rmse ${rmse} |" >> "$REPORT"
+            else
+                FAIL=$((FAIL + 1))
+                echo "| $test_name | $category | $chrome_ok | YES | compare failed |" >> "$REPORT"
+            fi
+        else
+            SKIP=$((SKIP + 1))
+            echo "| $test_name | $category | $chrome_ok | YES | skipped |" >> "$REPORT"
+        fi
+    done
+done
+
+echo "" >> "$REPORT"
+echo "## Summary" >> "$REPORT"
+echo "- Total: $TOTAL" >> "$REPORT"
+echo "- Failed: $FAIL" >> "$REPORT"
+echo "- Skipped: $SKIP" >> "$REPORT"
+
+echo ""
+echo "=== Done: $TOTAL tests ==="
+echo "Report: $REPORT"
+echo "Chrome screenshots: $OUTPUT_DIR/chrome/"
+echo "Simple output:      $OUTPUT_DIR/simple/"
+echo "Diff images:        $OUTPUT_DIR/diff/"

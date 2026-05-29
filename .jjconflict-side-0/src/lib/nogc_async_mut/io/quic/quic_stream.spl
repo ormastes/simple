@@ -1,0 +1,263 @@
+# QUIC Stream Management — RFC 9000 §2, §3
+#
+# Models individual QUIC streams with:
+#   - Stream state machine (Open / HalfClosed / Closed) — RFC 9000 §3
+#   - Send and receive buffers with offset tracking
+#   - Flow control limits per stream — RFC 9000 §4.1
+#
+# Stream IDs encode initiator and directionality in low 2 bits (§2.1):
+#   bit 0: 0 = client-initiated, 1 = server-initiated
+#   bit 1: 0 = bidirectional,    1 = unidirectional
+#
+# This module provides value types (struct) for stream data and enums
+# for state tracking. QuicStream is a class because it holds mutable
+# send/recv buffers.
+#
+# Reference: RFC 9000 §2, §3, §4.1
+
+# ============================================================================
+# Stream state enum — RFC 9000 §3
+# ============================================================================
+
+enum StreamState:
+    """QUIC stream lifecycle state."""
+    # Stream created but no data exchanged yet.
+    Open
+    # Local side sent FIN; still receiving from remote.
+    HalfClosedLocal
+    # Remote side sent FIN; still sending locally.
+    HalfClosedRemote
+    # Both sides finished; stream fully closed.
+    Closed
+
+# ============================================================================
+# Stream events — drive state transitions
+# ============================================================================
+
+enum StreamEvent:
+    """Events that trigger stream state changes."""
+    # Local endpoint finished sending (FIN).
+    LocalFinished
+    # Remote endpoint finished sending (FIN received).
+    RemoteFinished
+    # Stream reset by either side (RESET_STREAM or STOP_SENDING).
+    Reset
+
+# ============================================================================
+# Result type
+# ============================================================================
+
+class StreamTransitionOk:
+    """Successful transition: new state."""
+    next: StreamState
+
+enum StreamTransitionResult:
+    """Result of a stream state transition attempt."""
+    Ok(StreamTransitionOk)
+    Err(msg: text)
+
+# ============================================================================
+# Stream state machine — RFC 9000 §3
+#
+# Transitions:
+#   Open              + LocalFinished  → HalfClosedLocal
+#   Open              + RemoteFinished → HalfClosedRemote
+#   HalfClosedLocal   + RemoteFinished → Closed
+#   HalfClosedRemote  + LocalFinished  → Closed
+#   any               + Reset          → Closed
+# ============================================================================
+
+pub fn stream_transition(state: StreamState, event: StreamEvent) -> StreamTransitionResult:
+    """Apply an event to a stream state, returning the new state or an error."""
+    match event:
+        case Reset:
+            return StreamTransitionResult.Ok(StreamTransitionOk(next: StreamState.Closed))
+        case _:
+            pass
+
+    match state:
+        case Open:
+            match event:
+                case LocalFinished:
+                    return StreamTransitionResult.Ok(StreamTransitionOk(
+                        next: StreamState.HalfClosedLocal
+                    ))
+                case RemoteFinished:
+                    return StreamTransitionResult.Ok(StreamTransitionOk(
+                        next: StreamState.HalfClosedRemote
+                    ))
+                case _:
+                    pass
+
+        case HalfClosedLocal:
+            match event:
+                case RemoteFinished:
+                    return StreamTransitionResult.Ok(StreamTransitionOk(
+                        next: StreamState.Closed
+                    ))
+                case _:
+                    pass
+
+        case HalfClosedRemote:
+            match event:
+                case LocalFinished:
+                    return StreamTransitionResult.Ok(StreamTransitionOk(
+                        next: StreamState.Closed
+                    ))
+                case _:
+                    pass
+
+        case Closed:
+            return StreamTransitionResult.Err("stream already closed")
+
+    return StreamTransitionResult.Err("invalid transition: state + event")
+
+# ============================================================================
+# Stream-ID helpers — RFC 9000 §2.1
+# ============================================================================
+
+pub fn stream_id_is_client_initiated(stream_id: i64) -> bool:
+    """True if stream was opened by the client (bit 0 == 0)."""
+    return (stream_id & 0x01) == 0
+
+pub fn stream_id_is_bidi(stream_id: i64) -> bool:
+    """True if stream is bidirectional (bit 1 == 0)."""
+    return (stream_id & 0x02) == 0
+
+pub fn next_client_bidi_stream_id(current: i64) -> i64:
+    """Next client-initiated bidirectional stream ID after current.
+
+    Client bidi IDs: 0, 4, 8, 12, ... (low 2 bits = 0b00).
+    """
+    return current + 4
+
+pub fn next_server_bidi_stream_id(current: i64) -> i64:
+    """Next server-initiated bidirectional stream ID after current.
+
+    Server bidi IDs: 1, 5, 9, 13, ... (low 2 bits = 0b01).
+    """
+    return current + 4
+
+pub fn next_client_uni_stream_id(current: i64) -> i64:
+    """Next client-initiated unidirectional stream ID.
+
+    Client uni IDs: 2, 6, 10, 14, ... (low 2 bits = 0b10).
+    """
+    return current + 4
+
+pub fn next_server_uni_stream_id(current: i64) -> i64:
+    """Next server-initiated unidirectional stream ID.
+
+    Server uni IDs: 3, 7, 11, 15, ... (low 2 bits = 0b11).
+    """
+    return current + 4
+
+# ============================================================================
+# QuicStream — mutable stream with buffers
+# ============================================================================
+
+class QuicStream:
+    """One QUIC stream: state, buffers, flow control.
+
+    Holds send/recv byte buffers and tracks offsets for ordered delivery.
+    Flow control limit caps how much data the peer may send before
+    receiving a MAX_STREAM_DATA frame.
+    """
+    stream_id: i64
+    state: StreamState
+    recv_buffer: [u8]
+    send_buffer: [u8]
+    recv_offset: i64
+    send_offset: i64
+    flow_control_limit: i64
+
+    static fn create(stream_id: i64, flow_limit: i64) -> QuicStream:
+        """Create a new stream in Open state with empty buffers."""
+        return QuicStream(
+            stream_id: stream_id,
+            state: StreamState.Open,
+            recv_buffer: [],
+            send_buffer: [],
+            recv_offset: 0,
+            send_offset: 0,
+            flow_control_limit: flow_limit
+        )
+
+    me enqueue_send(data: [u8]):
+        """Append data to the send buffer."""
+        var i = 0
+        loop:
+            if i >= data.len():
+                break
+            self.send_buffer.push(data[i])
+            i = i + 1
+
+    me receive_data(data: [u8], offset: i64):
+        """Accept received data at the given stream offset.
+
+        For this skeleton, data is appended to recv_buffer. A full
+        implementation would handle out-of-order and overlapping segments.
+        """
+        var i = 0
+        loop:
+            if i >= data.len():
+                break
+            self.recv_buffer.push(data[i])
+            i = i + 1
+        self.recv_offset = offset + data.len()
+
+    me drain_send(max_bytes: i64) -> [u8]:
+        """Remove up to max_bytes from the front of the send buffer.
+
+        Returns the drained bytes and advances send_offset.
+        """
+        val take = max_bytes
+        if take > self.send_buffer.len():
+            val actual = self.send_buffer.len()
+            val drained = self.send_buffer
+            self.send_buffer = []
+            self.send_offset = self.send_offset + actual
+            return drained
+        var drained: [u8] = []
+        var i = 0
+        loop:
+            if i >= take:
+                break
+            drained.push(self.send_buffer[i])
+            i = i + 1
+        # Rebuild remaining buffer
+        var remaining: [u8] = []
+        loop:
+            if i >= self.send_buffer.len():
+                break
+            remaining.push(self.send_buffer[i])
+            i = i + 1
+        self.send_buffer = remaining
+        self.send_offset = self.send_offset + take
+        return drained
+
+    me apply_event(event: StreamEvent) -> StreamTransitionResult:
+        """Transition this stream's state via an event."""
+        val result = stream_transition(self.state, event)
+        match result:
+            case Ok(ok):
+                self.state = ok.next
+            case _:
+                pass
+        return result
+
+    fn is_closed() -> bool:
+        """True if stream is fully closed."""
+        match self.state:
+            case Closed:
+                return true
+            case _:
+                return false
+
+    fn has_pending_send() -> bool:
+        """True if send buffer has data waiting."""
+        return self.send_buffer.len() > 0
+
+    fn has_pending_recv() -> bool:
+        """True if recv buffer has data available."""
+        return self.recv_buffer.len() > 0

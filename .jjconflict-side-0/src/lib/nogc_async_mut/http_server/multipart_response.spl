@@ -1,0 +1,496 @@
+"""
+Multi-File Download — Multipart/Byteranges, ZIP, and TAR Streaming
+
+Provides multi-file download capabilities for the async HTTP server:
+- Multipart/byteranges for multi-range requests on a single file (RFC 7233)
+- ZIP archive streaming (STORE-only, no compression) for bulk file downloads
+- TAR archive streaming (USTAR format) for bulk file downloads
+
+## Usage
+
+```simple
+use std.http_server.multipart_response.{MultipartResponse}
+
+# Multi-file ZIP download: GET /download?files=a.txt,b.txt&format=zip
+val multi = MultipartResponse.new("/var/www")
+val resp = multi.serve_bulk_download(request)
+```
+
+## Endpoints
+
+The bulk download handler recognizes:
+- `?files=a,b,c&format=zip` — ZIP archive (default)
+- `?files=a,b,c&format=tar` — TAR archive
+"""
+
+use std.http_server.types.{HttpRequestData, HttpResponseData}
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_read_bytes, file_exists, file_size}
+
+# ============================================================================
+# Multi-File Download Response Builder
+# ============================================================================
+
+class MultipartResponse:
+    """Builds multi-file download responses (ZIP or TAR).
+
+    Serves a list of files from a root directory as either a ZIP or TAR
+    archive. Uses STORE-only compression for ZIP to avoid deflate overhead
+    and keep implementation simple.
+    """
+    root: text
+
+    static fn new(root: text) -> MultipartResponse:
+        """Create a new multipart response builder rooted at the given directory.
+
+        Args:
+            root: Base directory for file lookups
+        """
+        MultipartResponse(root: root)
+
+    fn serve_bulk_download(self, request: HttpRequestData) -> HttpResponseData:
+        """Handle a bulk download request.
+
+        Parses ?files= and ?format= from query string, validates all files
+        exist, and builds the appropriate archive response.
+
+        Args:
+            request: HTTP request with query parameters
+
+        Returns:
+            HttpResponseData with archive body_bytes, or 400/404 error
+        """
+        val files_param = query_param(request.query, "files")
+        if files_param == "":
+            return error_response(400, "Bad Request", "Missing 'files' query parameter")
+
+        val format_param = query_param(request.query, "format")
+        var format = "zip"
+        if format_param == "tar":
+            format = "tar"
+
+        val file_names = split_comma(files_param)
+        if file_names.len() == 0:
+            return error_response(400, "Bad Request", "No files specified")
+
+        # Validate all files exist
+        for name in file_names:
+            val full_path = self.root + "/" + name
+            if not file_exists(full_path):
+                return error_response(404, "Not Found", "File not found: {name}")
+
+        if format == "tar":
+            return self.build_tar_response(file_names)
+        return self.build_zip_response(file_names)
+
+    fn build_zip_response(self, file_names: [text]) -> HttpResponseData:
+        """Build a ZIP archive response (STORE-only, no compression).
+
+        ZIP format: [local file header + data]... + [central directory]... + EOCD
+
+        Limitation: CRC-32 is set to 0 for all entries. STORE mode does not
+        exempt CRC-32 per the ZIP spec; some strict extractors (e.g. unzip -t)
+        may warn about checksum mismatches. A CRC-32 implementation would fix
+        this but is not yet available in the stdlib.
+
+        Args:
+            file_names: List of relative file paths to include
+
+        Returns:
+            HttpResponseData with body_bytes containing the ZIP archive
+        """
+        var archive: [u8] = []
+        var central_dir: [u8] = []
+        var offset: i64 = 0
+
+        for name in file_names:
+            val full_path = self.root + "/" + name
+            val fsize = file_size(full_path)
+            val data = file_read_bytes(full_path)
+
+            # Local file header (30 + name_len bytes)
+            val name_bytes = text_to_bytes(name)
+            val name_len = name_bytes.len()
+
+            # Signature: PK\x03\x04
+            archive.push(0x50)
+            archive.push(0x4B)
+            archive.push(0x03)
+            archive.push(0x04)
+            # Version needed: 2.0
+            push_u16_le(archive, 20)
+            # General purpose bit flag
+            push_u16_le(archive, 0)
+            # Compression method: 0 = STORE
+            push_u16_le(archive, 0)
+            # Last mod time / date (zero — not significant)
+            push_u16_le(archive, 0)
+            push_u16_le(archive, 0)
+            # CRC-32 (zero — STORE mode, skip CRC for simplicity)
+            push_u32_le(archive, 0)
+            # Compressed size
+            push_u32_le(archive, fsize)
+            # Uncompressed size
+            push_u32_le(archive, fsize)
+            # Filename length
+            push_u16_le(archive, name_len)
+            # Extra field length
+            push_u16_le(archive, 0)
+            # Filename
+            for b in name_bytes:
+                archive.push(b.to_u8())
+            # File data
+            for b in data:
+                archive.push(b.to_u8())
+
+            val local_header_size = 30 + name_len
+
+            # Central directory entry
+            # Signature: PK\x01\x02
+            central_dir.push(0x50)
+            central_dir.push(0x4B)
+            central_dir.push(0x01)
+            central_dir.push(0x02)
+            # Version made by: 2.0
+            push_u16_le(central_dir, 20)
+            # Version needed: 2.0
+            push_u16_le(central_dir, 20)
+            # Flags
+            push_u16_le(central_dir, 0)
+            # Compression: STORE
+            push_u16_le(central_dir, 0)
+            # Mod time / date
+            push_u16_le(central_dir, 0)
+            push_u16_le(central_dir, 0)
+            # CRC-32
+            push_u32_le(central_dir, 0)
+            # Compressed size
+            push_u32_le(central_dir, fsize)
+            # Uncompressed size
+            push_u32_le(central_dir, fsize)
+            # Filename length
+            push_u16_le(central_dir, name_len)
+            # Extra field length
+            push_u16_le(central_dir, 0)
+            # File comment length
+            push_u16_le(central_dir, 0)
+            # Disk number start
+            push_u16_le(central_dir, 0)
+            # Internal file attributes
+            push_u16_le(central_dir, 0)
+            # External file attributes
+            push_u32_le(central_dir, 0)
+            # Relative offset of local header
+            push_u32_le(central_dir, offset)
+            # Filename
+            for b in name_bytes:
+                central_dir.push(b.to_u8())
+
+            offset = offset + local_header_size + fsize
+
+        val cd_offset = offset
+        val cd_size = central_dir.len()
+        val file_count = file_names.len()
+
+        # Append central directory
+        for b in central_dir:
+            archive.push(b)
+
+        # End of central directory record (EOCD)
+        # Signature: PK\x05\x06
+        archive.push(0x50)
+        archive.push(0x4B)
+        archive.push(0x05)
+        archive.push(0x06)
+        # Disk number
+        push_u16_le(archive, 0)
+        # Disk where CD starts
+        push_u16_le(archive, 0)
+        # Number of CD entries on this disk
+        push_u16_le(archive, file_count)
+        # Total CD entries
+        push_u16_le(archive, file_count)
+        # Size of central directory
+        push_u32_le(archive, cd_size)
+        # Offset of start of central directory
+        push_u32_le(archive, cd_offset)
+        # Comment length
+        push_u16_le(archive, 0)
+
+        HttpResponseData(
+            status: 200,
+            reason: "OK",
+            headers: [
+                ("Content-Type", "application/zip"),
+                ("Content-Disposition", "attachment; filename=\"download.zip\""),
+                ("Content-Length", "{archive.len()}"),
+                ("Server", "SimpleServer")
+            ],
+            body: "",
+            body_bytes: archive,
+            body_file: "",
+            body_offset: 0,
+            body_length: 0,
+            chunked: false
+        )
+
+    fn build_tar_response(self, file_names: [text]) -> HttpResponseData:
+        """Build a TAR archive response (USTAR format).
+
+        TAR format: [512-byte header + padded data]... + 1024 zero bytes
+
+        Args:
+            file_names: List of relative file paths to include
+
+        Returns:
+            HttpResponseData with body_bytes containing the TAR archive
+        """
+        var archive: [u8] = []
+
+        for name in file_names:
+            val full_path = self.root + "/" + name
+            val fsize = file_size(full_path)
+            val data = file_read_bytes(full_path)
+
+            # 512-byte USTAR header
+            var header: [u8] = []
+            # Name (100 bytes, null-padded)
+            val name_bytes = text_to_bytes(name)
+            var ni = 0
+            while ni < 100:
+                if ni < name_bytes.len():
+                    header.push(name_bytes[ni].to_u8())
+                else:
+                    header.push(0)
+                ni = ni + 1
+            # Mode (8 bytes): "0000644\0"
+            tar_write_field(header, "0000644", 8)
+            # UID (8 bytes): "0000000\0"
+            tar_write_field(header, "0000000", 8)
+            # GID (8 bytes): "0000000\0"
+            tar_write_field(header, "0000000", 8)
+            # Size (12 bytes): octal zero-padded to 11 chars, null-terminated
+            val size_oct = to_octal_padded(fsize, 11)
+            tar_write_field(header, size_oct, 12)
+            # Mtime (12 bytes): "00000000000\0"
+            tar_write_field(header, "00000000000", 12)
+            # Checksum (8 bytes): spaces initially (computed below)
+            var checksum_offset = header.len()
+            var ci = 0
+            while ci < 8:
+                header.push(0x20)
+                ci = ci + 1
+            # Type flag: '0' (regular file)
+            header.push(0x30)
+            # Link name (100 bytes)
+            var li = 0
+            while li < 100:
+                header.push(0)
+                li = li + 1
+            # USTAR magic "ustar\0" (6 bytes)
+            tar_write_exact(header, "ustar", 6)
+            # Version "00" (2 bytes)
+            header.push(0x30)
+            header.push(0x30)
+            # User name (32 bytes)
+            var ui = 0
+            while ui < 32:
+                header.push(0)
+                ui = ui + 1
+            # Group name (32 bytes)
+            var gi = 0
+            while gi < 32:
+                header.push(0)
+                gi = gi + 1
+            # Dev major (8 bytes)
+            var dmi = 0
+            while dmi < 8:
+                header.push(0)
+                dmi = dmi + 1
+            # Dev minor (8 bytes)
+            var dmi2 = 0
+            while dmi2 < 8:
+                header.push(0)
+                dmi2 = dmi2 + 1
+            # Prefix (155 bytes)
+            var pi = 0
+            while pi < 155:
+                header.push(0)
+                pi = pi + 1
+            # Pad to 512 bytes
+            while header.len() < 512:
+                header.push(0)
+
+            # Compute checksum (sum of all bytes, treating checksum field as spaces)
+            var checksum: i64 = 0
+            var hi = 0
+            while hi < 512:
+                checksum = checksum + header[hi].to_i64()
+                hi = hi + 1
+            val checksum_oct = to_octal_padded(checksum, 6)
+            # Write checksum back into header at checksum_offset (6 octal digits + null + space)
+            var csi = 0
+            val cs_bytes = text_to_bytes(checksum_oct)
+            while csi < 6:
+                header[checksum_offset + csi] = cs_bytes[csi].to_u8()
+                csi = csi + 1
+            header[checksum_offset + 6] = 0
+            header[checksum_offset + 7] = 0x20
+
+            # Append header
+            for b in header:
+                archive.push(b)
+
+            # Append file data
+            for b in data:
+                archive.push(b.to_u8())
+
+            # Pad to 512-byte boundary
+            val remainder = fsize % 512
+            if remainder > 0:
+                var pad = 512 - remainder
+                while pad > 0:
+                    archive.push(0)
+                    pad = pad - 1
+
+        # End-of-archive: two 512-byte blocks of zeros
+        var end_pad = 0
+        while end_pad < 1024:
+            archive.push(0)
+            end_pad = end_pad + 1
+
+        HttpResponseData(
+            status: 200,
+            reason: "OK",
+            headers: [
+                ("Content-Type", "application/x-tar"),
+                ("Content-Disposition", "attachment; filename=\"download.tar\""),
+                ("Content-Length", "{archive.len()}"),
+                ("Server", "SimpleServer")
+            ],
+            body: "",
+            body_bytes: archive,
+            body_file: "",
+            body_offset: 0,
+            body_length: 0,
+            chunked: false
+        )
+
+# ============================================================================
+# Query String Helpers
+# ============================================================================
+
+fn query_param(query: text, name: text) -> text:
+    """Extract a query parameter value by name."""
+    if query == "":
+        return ""
+    for part in query.split("&"):
+        val kv = part.split("=")
+        if kv.len() >= 2 and kv[0] == name:
+            return kv[1]
+    ""
+
+fn split_comma(s: text) -> [text]:
+    """Split a comma-separated string into a list of trimmed parts."""
+    var result: [text] = []
+    for part in s.split(","):
+        val trimmed = part.trim()
+        if trimmed.len() > 0:
+            result.push(trimmed)
+    result
+
+# ============================================================================
+# Error Response Helper
+# ============================================================================
+
+fn error_response(status: i64, reason: text, body: text) -> HttpResponseData:
+    """Build a simple error response."""
+    HttpResponseData(
+        status: status,
+        reason: reason,
+        headers: [
+            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Server", "SimpleServer")
+        ],
+        body: body,
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+# ============================================================================
+# Binary Encoding Helpers
+# ============================================================================
+
+fn push_u16_le(buf: [u8], value: i64):
+    """Append a 16-bit little-endian value to a byte buffer."""
+    buf.push((value % 256).to_u8())
+    buf.push((value / 256).to_u8())
+
+fn push_u32_le(buf: [u8], value: i64):
+    """Append a 32-bit little-endian value to a byte buffer."""
+    buf.push((value % 256).to_u8())
+    buf.push(((value / 256) % 256).to_u8())
+    buf.push(((value / 65536) % 256).to_u8())
+    buf.push(((value / 16777216) % 256).to_u8())
+
+fn text_to_bytes(s: text) -> [i64]:
+    """Convert a text string to a list of byte values."""
+    var result: [i64] = []
+    var i = 0
+    while i < s.len():
+        result.push(s.byte_at(i))
+        i = i + 1
+    result
+
+# ============================================================================
+# TAR Helpers
+# ============================================================================
+
+fn tar_write_field(buf: [u8], value: text, field_size: i64):
+    """Write a null-terminated field into a TAR header, padding with zeros."""
+    var i = 0
+    while i < field_size:
+        if i < value.len():
+            buf.push(value.byte_at(i).to_u8())
+        else:
+            buf.push(0)
+        i = i + 1
+
+fn tar_write_exact(buf: [u8], value: text, field_size: i64):
+    """Write a field into a TAR header with null terminator, padding rest."""
+    var i = 0
+    while i < value.len() and i < field_size:
+        buf.push(value.byte_at(i).to_u8())
+        i = i + 1
+    while i < field_size:
+        buf.push(0)
+        i = i + 1
+
+fn to_octal(n: i64) -> text:
+    """Convert an integer to its octal string representation.
+
+    Note: returns variable-width octal. For TAR USTAR fields, callers
+    use tar_write_field which null-pads to the required width.
+    """
+    if n == 0:
+        return "0"
+    var result = ""
+    var v = n
+    while v > 0:
+        val digit = v % 8
+        result = "{digit}" + result
+        v = v / 8
+    result
+
+fn to_octal_padded(n: i64, width: i64) -> text:
+    """Convert an integer to a zero-padded octal string of the given width.
+
+    USTAR convention: octal fields are right-justified, zero-padded on the left.
+    For example, to_octal_padded(420, 7) returns "0000644".
+    """
+    var raw = to_octal(n)
+    while raw.len() < width:
+        raw = "0" + raw
+    raw

@@ -1,0 +1,452 @@
+# TLS 1.3 HelloRetryRequest Parsing and CH2 Construction.
+#
+# HRR detection helpers, parse_hello_retry_request, cookie extension builder,
+# build_client_hello2_bytes / build_client_hello2_bytes_with_p256, and the
+# process_hrr_after_serverhello decision routine.
+# Imported by handshake13.spl (the hub).
+#
+# Constants and data classes that are needed externally are redeclared locally
+# (canonical definitions live in handshake13.spl) to avoid import cycles.
+
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+# Local constant copies (canonical defs in handshake13.spl)
+val _HRR_HS_CLIENT_HELLO: u8    = 1
+val _HRR_EXT_SUPPORTED_VERSIONS: u16 = 43
+val _HRR_EXT_KEY_SHARE: u16     = 51
+val _HRR_EXT_COOKIE: u16        = 44
+val _HRR_GROUP_X25519: u16      = 0x001D
+val _HRR_GROUP_SECP256R1: u16   = 0x0017
+val _HRR_HS_MESSAGE_HASH: u8    = 254
+
+val _HRR_MAGIC_LOCAL: [u8] = [
+    0xCFu8, 0x21u8, 0xADu8, 0x74u8, 0xE5u8, 0x9Au8, 0x61u8, 0x11u8,
+    0xBEu8, 0x1Du8, 0x8Cu8, 0x02u8, 0x1Eu8, 0x65u8, 0xB8u8, 0x91u8,
+    0xC2u8, 0xA2u8, 0x11u8, 0x16u8, 0x7Au8, 0xBBu8, 0x8Cu8, 0x5Eu8,
+    0x07u8, 0x9Eu8, 0x09u8, 0xE2u8, 0xC8u8, 0xA8u8, 0x33u8, 0x9Cu8
+]
+
+# Data classes used by the HRR flow (re-declared locally; hub re-exports them)
+class HelloRetryRequest13:
+    """Decoded TLS 1.3 HelloRetryRequest (RFC 8446 §4.1.4)."""
+    cipher_suite: u16
+    selected_group: u16
+    cookie: [u8]
+
+enum HrrResult:
+    Ok(value: HelloRetryRequest13)
+    Err(reason: text)
+
+enum HrrFlowResult:
+    Ok(value: HrrFlowOk)
+    Reject(reason: text)
+
+class HrrFlowOk:
+    """Result of HRR processing: bytes to send + transcript seed for §4.4.1."""
+    client_hello2_bytes: [u8]
+    selected_group: u16
+    transcript_seed: [u8]
+    hrr_hs_bytes: [u8]
+
+fn _u8_at_hrr(data: [u8], offset: u64) -> u8:
+    rt_bytes_u8_at(data, offset.to_i64()).to_u8()
+
+fn _byte_buf_hrr(cap: u64) -> [u8]:
+    rt_array_new_with_cap(cap.to_i64())
+
+fn _push_byte_hrr(buf: [u8], byte_val: i64) -> [u8]:
+    buf.push(byte_val.to_u8())
+    buf
+
+fn _put_u16_be_hrr(value: u16) -> [u8]:
+    var out: [u8] = _byte_buf_hrr(2)
+    out = _push_byte_hrr(out, ((value.to_u32() >> 8) & 0xFF).to_i64())
+    out = _push_byte_hrr(out, (value.to_u32() & 0xFF).to_i64())
+    out
+
+fn _put_u24_be_hrr(value: u64) -> [u8]:
+    var out: [u8] = _byte_buf_hrr(3)
+    out = _push_byte_hrr(out, ((value >> 16) & 0xFF).to_i64())
+    out = _push_byte_hrr(out, ((value >> 8) & 0xFF).to_i64())
+    out = _push_byte_hrr(out, (value & 0xFF).to_i64())
+    out
+
+fn _u16_be_hrr(data: [u8], offset: u64) -> u16:
+    ((_u8_at_hrr(data, offset).to_u16() << 8) | _u8_at_hrr(data, offset + 1).to_u16()).to_u16()
+
+fn _append_into_hrr(dst: [u8], src: [u8]):
+    var i: u64 = 0
+    while i < src.len():
+        dst = _push_byte_hrr(dst, _u8_at_hrr(src, i).to_u64().to_i64())
+        i = i + 1
+
+# ============================================================================
+# HRR detection
+# ============================================================================
+
+fn _is_hrr_random(sh_random: [u8]) -> bool:
+    """Return true if a ServerHello random equals HRR_MAGIC."""
+    if sh_random.len() != 32:
+        return false
+    var i: u64 = 0
+    while i < 32:
+        if _u8_at_hrr(sh_random, i) != _u8_at_hrr(_HRR_MAGIC_LOCAL, i):
+            return false
+        i = i + 1
+    true
+
+# ============================================================================
+# HRR extension sub-parsers
+# ============================================================================
+
+fn _hrr_find_selected_group(extensions: [u8]) -> u16:
+    var offset: u64 = 0
+    val end = extensions.len().to_u64()
+    while offset + 4 <= end:
+        val ext_type = _u16_be_hrr(extensions, offset)
+        val ext_len = _u16_be_hrr(extensions, offset + 2).to_u64()
+        val data_start = offset + 4
+        if data_start + ext_len > end:
+            return 0u16
+        if ext_type == _HRR_EXT_KEY_SHARE and ext_len == 2:
+            return _u16_be_hrr(extensions, data_start)
+        offset = data_start + ext_len
+    0u16
+
+fn _hrr_extract_cookie(extensions: [u8]) -> [u8]:
+    var offset: u64 = 0
+    val end = extensions.len().to_u64()
+    while offset + 4 <= end:
+        val ext_type = _u16_be_hrr(extensions, offset)
+        val ext_len = _u16_be_hrr(extensions, offset + 2).to_u64()
+        val data_start = offset + 4
+        if data_start + ext_len > end:
+            return []
+        if ext_type == _HRR_EXT_COOKIE and ext_len >= 2:
+            val cookie_len = _u16_be_hrr(extensions, data_start).to_u64()
+            if cookie_len + 2 != ext_len:
+                return []
+            var out: [u8] = _byte_buf_hrr(cookie_len)
+            var i: u64 = 0
+            while i < cookie_len:
+                out = _push_byte_hrr(out, _u8_at_hrr(extensions, data_start + 2 + i).to_u64().to_i64())
+                i = i + 1
+            return out
+        offset = data_start + ext_len
+    []
+
+fn _hrr_supported_versions_is_tls13(extensions: [u8]) -> bool:
+    var offset: u64 = 0
+    val end = extensions.len().to_u64()
+    while offset + 4 <= end:
+        val ext_type = _u16_be_hrr(extensions, offset)
+        val ext_len = _u16_be_hrr(extensions, offset + 2).to_u64()
+        val data_start = offset + 4
+        if data_start + ext_len > end:
+            return false
+        if ext_type == _HRR_EXT_SUPPORTED_VERSIONS:
+            if ext_len != 2:
+                return false
+            return _u16_be_hrr(extensions, data_start) == 0x0304u16
+        offset = data_start + ext_len
+    false
+
+# ============================================================================
+# Public: parse_hello_retry_request
+# ============================================================================
+
+fn parse_hello_retry_request(body: [u8]) -> HrrResult:
+    """Parse a HelloRetryRequest body (after the 4-byte handshake header).
+
+    Validates per RFC 8446 §4.1.4.
+    Returns HrrResult.Ok(HelloRetryRequest13) or HrrResult.Err(reason).
+    """
+    if body.len() < 38:
+        return HrrResult.Err(reason: "decode_error: HRR truncated")
+
+    var i: u64 = 0
+    while i < 32:
+        if _u8_at_hrr(body, 2 + i) != _u8_at_hrr(_HRR_MAGIC_LOCAL, i):
+            return HrrResult.Err(reason: "illegal_parameter: HRR random mismatch")
+        i = i + 1
+
+    val session_id_len = _u8_at_hrr(body, 34).to_u64()
+    if 35u64 + session_id_len + 3u64 > body.len().to_u64():
+        return HrrResult.Err(reason: "decode_error: HRR truncated session_id")
+
+    val cipher_suite = _u16_be_hrr(body, 35u64 + session_id_len)
+    val compression = _u8_at_hrr(body, 35u64 + session_id_len + 2u64)
+    if compression != 0x00u8:
+        return HrrResult.Err(reason: "illegal_parameter: HRR compression must be 0x00")
+
+    var ext_offset = 35u64 + session_id_len + 3u64
+    if ext_offset + 2 > body.len().to_u64():
+        return HrrResult.Err(reason: "decode_error: HRR missing extensions length")
+    val extensions_len = _u16_be_hrr(body, ext_offset).to_u64()
+    ext_offset = ext_offset + 2
+    if ext_offset + extensions_len > body.len().to_u64():
+        return HrrResult.Err(reason: "decode_error: HRR extensions truncated")
+
+    var extensions: [u8] = _byte_buf_hrr(extensions_len)
+    var k: u64 = 0
+    while k < extensions_len:
+        extensions = _push_byte_hrr(extensions, _u8_at_hrr(body, ext_offset + k).to_u64().to_i64())
+        k = k + 1
+
+    if not _hrr_supported_versions_is_tls13(extensions):
+        return HrrResult.Err(reason: "illegal_parameter: HRR supported_versions must be TLS 1.3")
+
+    val selected_group = _hrr_find_selected_group(extensions)
+    if selected_group == 0u16:
+        return HrrResult.Err(reason: "missing_extension: HRR key_share absent")
+
+    val cookie = _hrr_extract_cookie(extensions)
+
+    HrrResult.Ok(value: HelloRetryRequest13(
+        cipher_suite: cipher_suite,
+        selected_group: selected_group,
+        cookie: cookie))
+
+# ============================================================================
+# Synthetic message_hash (RFC 8446 §4.4.1)
+# ============================================================================
+
+fn build_hrr_synthetic_message_hash(ch1_hash: [u8]) -> [u8]:
+    """Build the synthetic message_hash bytes for HRR transcript replacement."""
+    val hash_len = ch1_hash.len().to_u64()
+    var out: [u8] = _byte_buf_hrr(hash_len + 4)
+    out = _push_byte_hrr(out, _HRR_HS_MESSAGE_HASH.to_i64())
+    out = _push_byte_hrr(out, ((hash_len >> 16) & 0xFF).to_i64())
+    out = _push_byte_hrr(out, ((hash_len >> 8) & 0xFF).to_i64())
+    out = _push_byte_hrr(out, (hash_len & 0xFF).to_i64())
+    var i: u64 = 0
+    while i < hash_len:
+        out = _push_byte_hrr(out, _u8_at_hrr(ch1_hash, i).to_u64().to_i64())
+        i = i + 1
+    out
+
+# ============================================================================
+# Cookie extension builder (used by CH2)
+# ============================================================================
+
+fn _build_ext_cookie_hrr(cookie: [u8]) -> [u8]:
+    if cookie.len() == 0:
+        return []
+    val ext_type = _put_u16_be_hrr(_HRR_EXT_COOKIE)
+    val cookie_len = _put_u16_be_hrr(cookie.len().to_u16())
+    var ext_data: [u8] = _byte_buf_hrr(cookie.len() + 2)
+    _append_into_hrr(ext_data, cookie_len)
+    _append_into_hrr(ext_data, cookie)
+    val ext_len = _put_u16_be_hrr(ext_data.len().to_u16())
+    var out: [u8] = _byte_buf_hrr(ext_data.len() + 4)
+    _append_into_hrr(out, ext_type)
+    _append_into_hrr(out, ext_len)
+    _append_into_hrr(out, ext_data)
+    out
+
+# ============================================================================
+# Public: Build ClientHello2
+# ============================================================================
+
+fn _build_ext_sv_hrr() -> [u8]:
+    val ext_type = _put_u16_be_hrr(_HRR_EXT_SUPPORTED_VERSIONS)
+    var versions: [u8] = _byte_buf_hrr(3)
+    versions = _push_byte_hrr(versions, 0x02)
+    versions = _push_byte_hrr(versions, 0x03)
+    versions = _push_byte_hrr(versions, 0x04)
+    val ext_len = _put_u16_be_hrr(versions.len().to_u16())
+    var out: [u8] = _byte_buf_hrr(7)
+    _append_into_hrr(out, ext_type)
+    _append_into_hrr(out, ext_len)
+    _append_into_hrr(out, versions)
+    out
+
+fn _build_ks_entry_hrr(group: u16, key: [u8]) -> [u8]:
+    var entry: [u8] = _byte_buf_hrr(key.len() + 4)
+    _append_into_hrr(entry, _put_u16_be_hrr(group))
+    _append_into_hrr(entry, _put_u16_be_hrr(key.len().to_u16()))
+    _append_into_hrr(entry, key)
+    entry
+
+fn _build_ext_ks_x25519_hrr(x25519_pub: [u8]) -> [u8]:
+    val entry = _build_ks_entry_hrr(_HRR_GROUP_X25519, x25519_pub)
+    val list_len = _put_u16_be_hrr(entry.len().to_u16())
+    var cs: [u8] = _byte_buf_hrr(entry.len() + 2)
+    _append_into_hrr(cs, list_len)
+    _append_into_hrr(cs, entry)
+    val ext_type = _put_u16_be_hrr(_HRR_EXT_KEY_SHARE)
+    val ext_len = _put_u16_be_hrr(cs.len().to_u16())
+    var out: [u8] = _byte_buf_hrr(cs.len() + 4)
+    _append_into_hrr(out, ext_type)
+    _append_into_hrr(out, ext_len)
+    _append_into_hrr(out, cs)
+    out
+
+fn _build_ext_ks_p256_hrr(p256_pub: [u8]) -> [u8]:
+    val entry = _build_ks_entry_hrr(_HRR_GROUP_SECP256R1, p256_pub)
+    val list_len = _put_u16_be_hrr(entry.len().to_u16())
+    var cs: [u8] = _byte_buf_hrr(entry.len() + 2)
+    _append_into_hrr(cs, list_len)
+    _append_into_hrr(cs, entry)
+    val ext_type = _put_u16_be_hrr(_HRR_EXT_KEY_SHARE)
+    val ext_len = _put_u16_be_hrr(cs.len().to_u16())
+    var out: [u8] = _byte_buf_hrr(cs.len() + 4)
+    _append_into_hrr(out, ext_type)
+    _append_into_hrr(out, ext_len)
+    _append_into_hrr(out, cs)
+    out
+
+fn _build_ch2_common_prefix(random: [u8]) -> [u8]:
+    var body: [u8] = _byte_buf_hrr(192)
+    body = _push_byte_hrr(body, 0x03)
+    body = _push_byte_hrr(body, 0x03)
+    _append_into_hrr(body, random)
+    body = _push_byte_hrr(body, 0x20)
+    var i: u64 = 0
+    while i < 32:
+        body = _push_byte_hrr(body, 0x00)
+        i = i + 1
+    body = _push_byte_hrr(body, 0x00)
+    body = _push_byte_hrr(body, 0x02)
+    body = _push_byte_hrr(body, 0x13)
+    body = _push_byte_hrr(body, 0x01)
+    body = _push_byte_hrr(body, 0x01)
+    body = _push_byte_hrr(body, 0x00)
+    body
+
+fn _finalize_ch2(body: [u8], exts: [u8]) -> [u8]:
+    val exts_len_bytes = _put_u16_be_hrr(exts.len().to_u16())
+    _append_into_hrr(body, exts_len_bytes)
+    _append_into_hrr(body, exts)
+    val body_len = _put_u24_be_hrr(body.len().to_u64())
+    var out: [u8] = _byte_buf_hrr(body.len() + 4)
+    out = _push_byte_hrr(out, _HRR_HS_CLIENT_HELLO)
+    _append_into_hrr(out, body_len)
+    _append_into_hrr(out, body)
+    out
+
+fn build_client_hello2_bytes(random: [u8], x25519_pub: [u8], sni_host: text, cookie: [u8]) -> [u8]:
+    """Build a TLS 1.3 ClientHello2 retrying after HRR (X25519 only)."""
+    build_client_hello2_bytes_with_p256(random, x25519_pub, [], sni_host, cookie)
+
+fn build_client_hello2_bytes_with_p256(random: [u8], x25519_pub: [u8], p256_pub: [u8], sni_host: text, cookie: [u8]) -> [u8]:
+    """Build a TLS 1.3 ClientHello2 (X25519 + secp256r1) retrying after HRR."""
+    # Build SNI extension inline (no import cycle)
+    val _EB2_ASCII: text = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var host_bytes: [u8] = []
+    val chars = sni_host.split("")
+    for ch in chars:
+        if ch != "":
+            var idx: i64 = 0
+            var found = false
+            while idx < _EB2_ASCII.len() and not found:
+                if _EB2_ASCII[idx:idx + 1] == ch:
+                    host_bytes.push((idx + 32).to_u8())
+                    found = true
+                idx = idx + 1
+    val host_len_bytes = _put_u16_be_hrr(host_bytes.len().to_u16())
+    var sn_entry: [u8] = _byte_buf_hrr(host_bytes.len() + 3)
+    sn_entry = _push_byte_hrr(sn_entry, 0x00)
+    _append_into_hrr(sn_entry, host_len_bytes)
+    _append_into_hrr(sn_entry, host_bytes)
+    var sn_list: [u8] = _byte_buf_hrr(sn_entry.len() + 2)
+    _append_into_hrr(sn_list, _put_u16_be_hrr(sn_entry.len().to_u16()))
+    _append_into_hrr(sn_list, sn_entry)
+    var ext_sni: [u8] = _byte_buf_hrr(sn_list.len() + 4)
+    _append_into_hrr(ext_sni, _put_u16_be_hrr(0u16))  # EXT_SNI = 0
+    _append_into_hrr(ext_sni, _put_u16_be_hrr(sn_list.len().to_u16()))
+    _append_into_hrr(ext_sni, sn_list)
+
+    # sig_algs
+    var alg_bytes: [u8] = []
+    _append_into_hrr(alg_bytes, _put_u16_be_hrr(0x0807u16))  # Ed25519
+    _append_into_hrr(alg_bytes, _put_u16_be_hrr(0x0503u16))  # ECDSA-P384
+    _append_into_hrr(alg_bytes, _put_u16_be_hrr(0x0603u16))  # ECDSA-P521
+    var alg_list: [u8] = _byte_buf_hrr(alg_bytes.len() + 2)
+    _append_into_hrr(alg_list, _put_u16_be_hrr(alg_bytes.len().to_u16()))
+    _append_into_hrr(alg_list, alg_bytes)
+    var ext_sa: [u8] = _byte_buf_hrr(alg_list.len() + 4)
+    _append_into_hrr(ext_sa, _put_u16_be_hrr(13u16))  # EXT_SIG_ALGS = 13
+    _append_into_hrr(ext_sa, _put_u16_be_hrr(alg_list.len().to_u16()))
+    _append_into_hrr(ext_sa, alg_list)
+
+    # supported_groups
+    var sg_bytes: [u8] = _byte_buf_hrr(4)
+    _append_into_hrr(sg_bytes, _put_u16_be_hrr(_HRR_GROUP_X25519))
+    _append_into_hrr(sg_bytes, _put_u16_be_hrr(_HRR_GROUP_SECP256R1))
+    var sg_list: [u8] = _byte_buf_hrr(sg_bytes.len() + 2)
+    _append_into_hrr(sg_list, _put_u16_be_hrr(sg_bytes.len().to_u16()))
+    _append_into_hrr(sg_list, sg_bytes)
+    var ext_sg: [u8] = _byte_buf_hrr(sg_list.len() + 4)
+    _append_into_hrr(ext_sg, _put_u16_be_hrr(10u16))  # EXT_SUPPORTED_GROUPS = 10
+    _append_into_hrr(ext_sg, _put_u16_be_hrr(sg_list.len().to_u16()))
+    _append_into_hrr(ext_sg, sg_list)
+
+    var exts: [u8] = _byte_buf_hrr(160)
+    _append_into_hrr(exts, _build_ext_sv_hrr())
+    if p256_pub.len() > 0:
+        _append_into_hrr(exts, _build_ext_ks_p256_hrr(p256_pub))
+    else:
+        _append_into_hrr(exts, _build_ext_ks_x25519_hrr(x25519_pub))
+    _append_into_hrr(exts, ext_sni)
+    _append_into_hrr(exts, ext_sa)
+    _append_into_hrr(exts, ext_sg)
+    if cookie.len() > 0:
+        _append_into_hrr(exts, _build_ext_cookie_hrr(cookie))
+
+    _finalize_ch2(_build_ch2_common_prefix(random), exts)
+
+# ============================================================================
+# Public: process_hrr_after_serverhello
+# ============================================================================
+
+fn process_hrr_after_serverhello(
+        sh_hs_bytes: [u8],
+        sh_body: [u8],
+        ch1_random: [u8],
+        ch1_x25519_pub: [u8],
+        ch1_hash: [u8],
+        new_x25519_pub: [u8],
+        new_p256_pub: [u8],
+        sni_host: text,
+        seen_hrr: bool,
+        ch1_offered_x25519: bool,
+        ch1_offered_p256: bool) -> HrrFlowResult:
+    """Decide CH2 + transcript seed when a ServerHello is actually a HRR."""
+    if seen_hrr:
+        return HrrFlowResult.Reject(reason: "unexpected_message: second HRR in connection")
+
+    val parsed = parse_hello_retry_request(sh_body)
+    var hrr: HelloRetryRequest13 = HelloRetryRequest13(cipher_suite: 0u16, selected_group: 0u16, cookie: [])
+    if val HrrResult.Ok(value) = parsed:
+        hrr = value
+    else:
+        if val HrrResult.Err(reason) = parsed:
+            return HrrFlowResult.Reject(reason: reason)
+
+    if hrr.selected_group == _HRR_GROUP_X25519 and ch1_offered_x25519:
+        return HrrFlowResult.Reject(reason: "illegal_parameter: HRR selected_group equals CH1 key_share group (X25519)")
+    if hrr.selected_group == _HRR_GROUP_SECP256R1 and ch1_offered_p256:
+        return HrrFlowResult.Reject(reason: "illegal_parameter: HRR selected_group equals CH1 key_share group (secp256r1)")
+
+    if hrr.selected_group != _HRR_GROUP_X25519 and hrr.selected_group != _HRR_GROUP_SECP256R1:
+        return HrrFlowResult.Reject(reason: "illegal_parameter: HRR selected_group not in client supported_groups")
+
+    val ch2 = if hrr.selected_group == _HRR_GROUP_SECP256R1 {
+        build_client_hello2_bytes_with_p256(ch1_random, [], new_p256_pub, sni_host, hrr.cookie)
+    } else {
+        build_client_hello2_bytes(ch1_random, new_x25519_pub, sni_host, hrr.cookie)
+    }
+
+    val synth = build_hrr_synthetic_message_hash(ch1_hash)
+    var seed: [u8] = _byte_buf_hrr(synth.len() + sh_hs_bytes.len())
+    _append_into_hrr(seed, synth)
+    _append_into_hrr(seed, sh_hs_bytes)
+
+    HrrFlowResult.Ok(value: HrrFlowOk(
+        client_hello2_bytes: ch2,
+        selected_group: hrr.selected_group,
+        transcript_seed: seed,
+        hrr_hs_bytes: sh_hs_bytes,
+    ))

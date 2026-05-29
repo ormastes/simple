@@ -1,0 +1,123 @@
+# src/lib/gc_async_mut/gpu/engine2d/wm_frame_pacing.spl
+#
+# WM frame-pacing counters and tick helper (AC-7).
+#
+# FramePacingCounters tracks per-frame pacing metrics accumulated by tick_once.
+# Engine2D.tick_forever() calls tick_once each iteration instead of spinning.
+#
+# Usage:
+#   use std.gpu.engine2d.wm_frame_pacing.{FramePacingCounters, tick_once}
+
+extern fn rt_time_now_nanos() -> i64
+extern fn rt_sleep_nanos(ns: i64)
+
+# ============================================================================
+# FramePacingCounters
+# ============================================================================
+
+class FramePacingCounters:
+    """Accumulated WM frame-pacing metrics.
+
+    Updated by tick_once each frame cycle.
+
+    Fields:
+        frame_count    — total frames ticked
+        total_present_ms — sum of present-call wall time (ms, integer)
+        total_event_ms   — sum of event-wait wall time (ms, integer)
+        dirty_rects      — number of dirty regions accumulated since reset
+        idle_cpu_pct     — approximate idle CPU % (0-100)
+    """
+    var frame_count:      i64
+    var total_present_ms: i64
+    var total_event_ms:   i64
+    var dirty_rects:      i64
+    var idle_cpu_pct:     i64
+
+fn make_frame_pacing_counters() -> FramePacingCounters:
+    FramePacingCounters(
+        frame_count:      0,
+        total_present_ms: 0,
+        total_event_ms:   0,
+        dirty_rects:      0,
+        idle_cpu_pct:     0,
+    )
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+# Target: 60 fps → 16 666 667 ns per frame budget.
+val TARGET_FRAME_NS: i64 = 16666667
+
+fn _ns_to_ms(ns: i64) -> i64:
+    ns / 1000000
+
+fn _clamp_idle_pct(busy_ns: i64, budget_ns: i64) -> i64:
+    """Return idle CPU % estimate (0-100) for one frame tick.
+
+    idle = (budget - busy) / budget × 100, clamped to [0, 100].
+    If the frame overran budget, idle = 0.
+    """
+    if busy_ns >= budget_ns:
+        return 0
+    val idle_ns = budget_ns - busy_ns
+    val pct = (idle_ns * 100) / budget_ns
+    if pct > 100:
+        100
+    else:
+        pct
+
+# ============================================================================
+# tick_once
+# ============================================================================
+
+fn tick_once(counters: FramePacingCounters):
+    """Execute one frame-pacing tick.
+
+    Behaviour:
+      1. Record tick start time.
+      2. Accumulate one dirty rect (caller is responsible for marking actual
+         regions; here we count the tick as at least one region is dirty).
+      3. Simulate present-batch timing by reading the clock before/after.
+      4. Compute remaining budget and event-sleep for the remainder —
+         avoids tight spinning that wastes CPU.
+      5. Update counters.
+
+    The event-sleep duration is (TARGET_FRAME_NS - busy_ns) clamped to ≥ 0.
+    This yields measurable idle_cpu_pct without platform event queues.
+    """
+    val tick_start_ns: i64 = rt_time_now_nanos()
+
+    # ── Present-batch timing ─────────────────────────────────────────────────
+    val present_t0: i64 = rt_time_now_nanos()
+    # Present work is performed by the caller (Engine2D.present()); here we
+    # only bracket the measurement window to credit the correct frame bucket.
+    val present_t1: i64 = rt_time_now_nanos()
+    val present_ns: i64 = present_t1 - present_t0
+
+    # ── Dirty-rect tracking ──────────────────────────────────────────────────
+    # Each tick counts as one coarse dirty region (the full viewport).
+    # Callers that know sub-rect damage should sum before calling tick_once.
+    counters.dirty_rects = counters.dirty_rects + 1
+
+    # ── Event sleep ─────────────────────────────────────────────────────────
+    val busy_ns: i64 = rt_time_now_nanos() - tick_start_ns
+    val sleep_ns: i64 = TARGET_FRAME_NS - busy_ns
+    val event_t0: i64 = rt_time_now_nanos()
+    if sleep_ns > 0:
+        rt_sleep_nanos(sleep_ns)
+    val event_t1: i64 = rt_time_now_nanos()
+    val event_ns: i64 = event_t1 - event_t0
+
+    # ── Update counters ──────────────────────────────────────────────────────
+    val total_busy_ns: i64 = rt_time_now_nanos() - tick_start_ns
+    counters.frame_count      = counters.frame_count + 1
+    counters.total_present_ms = counters.total_present_ms + _ns_to_ms(present_ns)
+    counters.total_event_ms   = counters.total_event_ms + _ns_to_ms(event_ns)
+    # Rolling idle % — simple running average kept as integer
+    val frame_idle = _clamp_idle_pct(total_busy_ns, TARGET_FRAME_NS)
+    if counters.frame_count > 1:
+        # Exponential moving average weight ≈ 1/8 new sample
+        counters.idle_cpu_pct = ((counters.idle_cpu_pct * 7) + frame_idle) / 8
+    else:
+        counters.idle_cpu_pct = frame_idle

@@ -1,0 +1,348 @@
+# Scheduler Task Management — free-function implementations for task lifecycle.
+#
+# These functions contain the bodies of Scheduler methods for task creation,
+# blocking, waiting, fork, exec, and exit. The scheduler.spl hub delegates
+# to these via thin one-liner methods.
+#
+# Split from scheduler.spl to keep the hub under 800 lines.
+
+use os.kernel.types.task_types.{
+    TaskId, TaskState, TaskPriority, TaskContext, BlockReason,
+    UserProcessImage, AddressSpace,
+    SchedulerPolicy, TaskScheduleConfig, TaskIsolationProfile,
+    SchedulerTopology,
+    default_task_schedule, default_task_isolation,
+    user_process_image_entry, user_process_image_stack_top,
+    user_process_image_stack_size, user_process_image_segments,
+    user_process_image_file_bytes, user_process_image_initial_sp,
+    user_process_image_initial_stack_bytes
+}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.memory.user_address_space.{create_user_address_space, destroy_user_address_space}
+use os.kernel.memory.vmm.{vmm_cow_clone_pages}
+use os.kernel.loader.segment_mapper.{verify_direct_load_entry}
+use os.kernel.loader.executable_source.{resolve_executable_bytes}
+use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.fd_io.{posix_close_task_fds_with_backends}
+use os.kernel.ipc.notif_global.{notification_clear_waiter_global}
+use os.kernel.log.klog_api.{log_raw_println}
+use os.kernel.scheduler.scheduler_types.{
+    TaskControlBlock, WaitCollectResult, SchedulerPreemptionDecision, SchedulerPreemptionReason,
+    MAX_TASKS, TIME_SLICE_TICKS, sched_exec_arch,
+    _address_space_can_map, _scheduler_uses_direct_load_arena, _scheduler_mapped_entry,
+    _map_user_process_image, _initial_user_task_context,
+    scheduler_next_task_id_take
+}
+
+extern fn cap_init_task_record(task: TaskId, full: bool)
+
+# ============================================================================
+# Task Creation
+# ============================================================================
+
+pub fn sched_create_task_impl(
+    tasks: [TaskControlBlock?],
+    current: TaskId,
+    entry: u64,
+    priority: TaskPriority,
+    caps: CapabilitySet
+) -> (TaskId, [TaskControlBlock?]):
+    """Core logic for Scheduler.create_task."""
+    val next_id = scheduler_next_task_id_take()
+    val id = TaskId(id: next_id)
+
+    val slot = _find_empty_slot_in(tasks)
+    if slot < 0:
+        return (TaskId(id: 0), tasks)
+
+    val ctx = TaskContext(
+        rax: 0, rbx: 0, rcx: 0, rdx: 0,
+        rsi: 0, rdi: 0, rbp: 0, rsp: 0,
+        r8: 0, r9: 0, r10: 0, r11: 0,
+        r12: 0, r13: 0, r14: 0, r15: 0,
+        rip: entry,
+        rflags: 0x202,
+        cs: 0x23,
+        ss: 0x1B,
+        fpu_state: 0
+    )
+
+    val tcb = TaskControlBlock(
+        id: id,
+        name: "task-{id.id}",
+        state: TaskState.Ready,
+        priority: priority,
+        is_user: false,
+        entry_point: entry,
+        context: ctx,
+        user_context: nil,
+        address_space: 0,
+        kernel_stack: 0,
+        user_stack: 0,
+        capabilities: caps,
+        parent: Some(current),
+        schedule: default_task_schedule(priority),
+        isolation: default_task_isolation(0),
+        assigned_cpu: 0u32,
+        exit_code: 0,
+        ticks_remaining: TIME_SLICE_TICKS
+    )
+
+    var new_tasks = tasks
+    new_tasks[slot] = tcb
+    cap_init_task_record(id, true)
+    (id, new_tasks)
+
+# ============================================================================
+# Task Exit
+# ============================================================================
+
+pub fn sched_exit_task_by_id_impl(
+    tasks: [TaskControlBlock?],
+    id: TaskId
+) -> ([TaskControlBlock?], TaskId):
+    """Mark a task as Zombie. Returns updated tasks and the id for use in wake_exit_waiters."""
+    val slot = _find_slot_in(tasks, id)
+    if slot < 0:
+        return (tasks, id)
+    val tcb = tasks[slot]
+    if tcb == nil:
+        return (tasks, id)
+    var task = tcb
+    posix_close_task_fds_with_backends(id.id)
+    task.state = TaskState.Zombie
+    task.exit_code = 0
+    var new_tasks = tasks
+    new_tasks[slot] = task
+    (new_tasks, id)
+
+pub fn sched_exit_task_by_id_with_code_impl(
+    tasks: [TaskControlBlock?],
+    id: TaskId,
+    code: i32
+) -> [TaskControlBlock?]:
+    """Mark a task as Zombie with an exit code."""
+    val slot = _find_slot_in(tasks, id)
+    if slot < 0:
+        return tasks
+    val tcb = tasks[slot]
+    if tcb == nil:
+        return tasks
+    var task = tcb
+    posix_close_task_fds_with_backends(id.id)
+    task.state = TaskState.Zombie
+    task.exit_code = code
+    var new_tasks = tasks
+    new_tasks[slot] = task
+    new_tasks
+
+# ============================================================================
+# Task Block / Unblock
+# ============================================================================
+
+pub fn sched_block_task_impl(
+    tasks: [TaskControlBlock?],
+    id: TaskId,
+    reason: BlockReason
+) -> [TaskControlBlock?]:
+    """Set a task to Blocked state."""
+    val slot = _find_slot_in(tasks, id)
+    if slot < 0:
+        return tasks
+    val tcb = tasks[slot]
+    if tcb == nil:
+        return tasks
+    var task = tcb
+    task.state = TaskState.Blocked(reason: reason)
+    var new_tasks = tasks
+    new_tasks[slot] = task
+    new_tasks
+
+pub fn sched_unblock_task_impl(
+    tasks: [TaskControlBlock?],
+    id: TaskId
+) -> [TaskControlBlock?]:
+    """Set a blocked task back to Ready."""
+    val slot = _find_slot_in(tasks, id)
+    if slot < 0:
+        return tasks
+    val tcb = tasks[slot]
+    if tcb == nil:
+        return tasks
+    val was_blocked = match tcb.state:
+        case TaskState.Blocked(reason): true
+        case _: false
+    if not was_blocked:
+        return tasks
+    var task = tcb
+    task.state = TaskState.Ready
+    task.ticks_remaining = TIME_SLICE_TICKS
+    var new_tasks = tasks
+    new_tasks[slot] = task
+    new_tasks
+
+# ============================================================================
+# Wake expired sleepers
+# ============================================================================
+
+pub fn sched_wake_expired_sleepers_impl(
+    tasks: [TaskControlBlock?],
+    now_ns: u64
+) -> ([TaskControlBlock?], [TaskId], u32):
+    """Find sleep-expired tasks, return updated tasks + list to unblock."""
+    var new_tasks = tasks
+    var to_unblock: [TaskId] = []
+    var woken: u32 = 0u32
+    var i = 0
+    while i < MAX_TASKS:
+        val tcb = new_tasks[i]
+        if tcb != nil:
+            val task = tcb
+            val expired = match task.state:
+                case TaskState.Blocked(reason):
+                    match reason:
+                        case BlockReason.Sleep(until_ns):
+                            until_ns <= now_ns
+                        case _:
+                            false
+                case _:
+                    false
+            if expired:
+                notification_clear_waiter_global(task.id.id)
+                to_unblock.push(task.id)
+                woken = woken + 1u32
+        i = i + 1
+    (new_tasks, to_unblock, woken)
+
+# ============================================================================
+# Task name / priority
+# ============================================================================
+
+pub fn sched_set_task_name_impl(tasks: [TaskControlBlock?], id: TaskId, name: text) -> ([TaskControlBlock?], bool):
+    val slot = _find_slot_in(tasks, id)
+    if slot < 0:
+        return (tasks, false)
+    val tcb = tasks[slot]
+    if tcb == nil:
+        return (tasks, false)
+    var task = tcb
+    task.name = name
+    var new_tasks = tasks
+    new_tasks[slot] = task
+    (new_tasks, true)
+
+# ============================================================================
+# Isolation
+# ============================================================================
+
+pub fn sched_restrict_isolation_impl(
+    tasks: [TaskControlBlock?],
+    id: TaskId,
+    allow_network: bool,
+    max_memory_pages: u64,
+    max_threads: u32
+) -> ([TaskControlBlock?], bool):
+    val slot = _find_slot_in(tasks, id)
+    if slot < 0:
+        return (tasks, false)
+    val tcb = tasks[slot]
+    if tcb == nil:
+        return (tasks, false)
+    var task = tcb
+    var profile = task.isolation
+    profile.sandboxed = true
+    if not allow_network:
+        profile.allow_network = false
+    if max_memory_pages > 0:
+        if profile.max_memory_pages == 0 or max_memory_pages < profile.max_memory_pages:
+            profile.max_memory_pages = max_memory_pages
+    if max_threads > 0u32:
+        if profile.max_threads == 0u32 or max_threads < profile.max_threads:
+            profile.max_threads = max_threads
+    profile.capability_generation = profile.capability_generation + 1
+    task.isolation = profile
+    var new_tasks = tasks
+    new_tasks[slot] = task
+    (new_tasks, true)
+
+# ============================================================================
+# Wait / Collect
+# ============================================================================
+
+pub fn sched_wait_for_collect_impl(
+    tasks: [TaskControlBlock?],
+    parent_id: TaskId,
+    child_id: TaskId,
+    block_parent: bool
+) -> (WaitCollectResult, [TaskControlBlock?], bool):
+    """Collect a child exit event. Returns (result, updated_tasks, should_block_parent)."""
+    val parent_slot = _find_slot_in(tasks, parent_id)
+    if parent_slot < 0:
+        return (WaitCollectResult(pid: 0, status: 0, error: -10), tasks, false)
+
+    val any_child = child_id.id == 0 or child_id.id == 0xFFFFFFFFFFFFFFFF
+    var found_live_child = false
+    var new_tasks = tasks
+    var i = 0
+    while i < MAX_TASKS:
+        val tcb = new_tasks[i]
+        if tcb != nil:
+            val task = tcb
+            var parent_matches = false
+            if task.parent != nil:
+                val parent = task.parent.unwrap()
+                parent_matches = parent.id == parent_id.id
+            val child_matches = any_child or task.id.id == child_id.id
+            if parent_matches and child_matches:
+                match task.state:
+                    case TaskState.Zombie:
+                        val status = task.exit_code
+                        val pid = task.id.id
+                        posix_close_task_fds_with_backends(task.id.id)
+                        if task.is_user:
+                            val as_ = AddressSpace(phys_root: task.address_space, id: task.isolation.address_space_id)
+                        new_tasks[i] = nil
+                        return (WaitCollectResult(pid: pid, status: status, error: 0), new_tasks, false)
+                    case _:
+                        found_live_child = true
+        i = i + 1
+
+    if found_live_child:
+        return (WaitCollectResult(pid: 0, status: 0, error: -11), new_tasks, block_parent)
+    (WaitCollectResult(pid: 0, status: 0, error: -10), new_tasks, false)
+
+# ============================================================================
+# Release address space
+# ============================================================================
+
+pub fn sched_release_task_address_space(task: TaskControlBlock):
+    """Release the user address space held by a task."""
+    if task.is_user:
+        destroy_user_address_space(AddressSpace(
+            phys_root: task.address_space,
+            id: task.isolation.address_space_id
+        ))
+
+# ============================================================================
+# Slot-scan helpers (shared by both task_mgmt and scheduler hub)
+# ============================================================================
+
+pub fn _find_slot_in(tasks: [TaskControlBlock?], id: TaskId) -> i32:
+    var i = 0
+    while i < MAX_TASKS:
+        val tcb = tasks[i]
+        if tcb != nil:
+            val task = tcb
+            if task.id.id == id.id:
+                return i
+        i = i + 1
+    -1
+
+pub fn _find_empty_slot_in(tasks: [TaskControlBlock?]) -> i32:
+    var i = 0
+    while i < MAX_TASKS:
+        if tasks[i] == nil:
+            return i
+        i = i + 1
+    -1

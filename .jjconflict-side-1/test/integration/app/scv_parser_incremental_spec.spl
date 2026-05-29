@@ -1,0 +1,19 @@
+use app.io.mod (process_run)
+
+fn _run_parser_incremental_script(script: text) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", script])
+    "{out}{err}\nexit={code}\n"
+
+describe "scv parser incremental reuse":
+    it "reuses unchanged fallback line nodes across single-line edits":
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-parse-incremental.XXXXXX)\nprintf 'alpha\\nbeta\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parse-gate a.txt >/dev/null\nROOT1=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parse-index | sed -n 's/.*|node=\\(syntax_node_[^|]*\\).*/\\1/p' | head -1)\nCHILD1=$(sed -n 's/^children: \\(syntax_node_[^,]*\\),.*/\\1/p' \".scv/objects/syntax/$ROOT1.sdn\")\nCOUNT1=$(find .scv/objects/syntax -type f | wc -l | tr -d ' ')\nprintf 'alpha\\ngamma\\n' > a.txt\nSECOND=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parse-gate a.txt)\nROOT2=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parse-index | sed -n 's/.*|node=\\(syntax_node_[^|]*\\).*/\\1/p' | head -1)\nCHILD2=$(sed -n 's/^children: \\(syntax_node_[^,]*\\),.*/\\1/p' \".scv/objects/syntax/$ROOT2.sdn\")\nCOUNT2=$(find .scv/objects/syntax -type f | wc -l | tr -d ' ')\nprintf '%s\\nroot1=%s\\nroot2=%s\\nchild1=%s\\nchild2=%s\\ncount1=%s\\ncount2=%s\\n' \"$SECOND\" \"$ROOT1\" \"$ROOT2\" \"$CHILD1\" \"$CHILD2\" \"$COUNT1\" \"$COUNT2\"\ntest \"$ROOT1\" != \"$ROOT2\"\ntest \"$CHILD1\" = \"$CHILD2\"\ntest \"$COUNT1\" = 3\ntest \"$COUNT2\" = 5\n"
+        val out = _run_parser_incremental_script(script)
+        expect(out).to_contain("root1=syntax_node_")
+        expect(out).to_contain("root2=syntax_node_")
+        expect(out).to_contain("child1=syntax_node_")
+        expect(out).to_contain("child2=syntax_node_")
+        expect(out).to_contain("reused_lines=1")
+        expect(out).to_contain("changed_lines=1")
+        expect(out).to_contain("count1=3")
+        expect(out).to_contain("count2=5")
+        expect(out).to_contain("exit=0")

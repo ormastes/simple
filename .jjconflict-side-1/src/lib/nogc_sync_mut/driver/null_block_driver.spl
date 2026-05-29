@@ -1,0 +1,74 @@
+# stdlib null block driver reference implementation.
+#
+# Kept in std.driver so registry tests and SimpleOS examples depend on the
+# library driver contract instead of importing example OS code.
+
+use std.driver.error.{DriverError}
+use std.driver.manifest.{DriverManifest, DRVS_ABI_REV}
+use std.driver.registry.{DriverOps}
+use std.driver.static_table.{register_static_driver, static_driver_count}
+use std.driver.types.{DriverClass, DriverHandle, DriverContext, DeviceId,
+                      IoctlCmd, PowerState, ProbeResult}
+use std.log.{log_info, SUBSYS_DRIVER_BLOCK}
+
+fn null_block_abi_rev() -> i32:
+    DRVS_ABI_REV
+
+fn null_block_init(ctx: DriverContext) -> Result<(), DriverError>:
+    Ok(())
+
+fn null_block_probe(dev: DeviceId) -> Result<ProbeResult, DriverError>:
+    if dev.value == 0:
+        return Ok(ProbeResult.Accept)
+    Ok(ProbeResult.Reject)
+
+fn null_block_attach(dev: DeviceId) -> Result<DriverHandle, DriverError>:
+    Ok(DriverHandle(value: 1))
+
+fn null_block_detach(h: DriverHandle) -> Result<(), DriverError>:
+    if h.value != 1:
+        return Err(DriverError.BadArg)
+    Ok(())
+
+fn null_block_suspend(h: DriverHandle, s: PowerState) -> Result<(), DriverError>:
+    Ok(())
+
+fn null_block_resume(h: DriverHandle) -> Result<(), DriverError>:
+    Ok(())
+
+fn null_block_ioctl(h: DriverHandle, cmd: IoctlCmd) -> Result<i64, DriverError>:
+    Ok(cmd.code as i64)
+
+fn null_block_make_ops() -> DriverOps:
+    DriverOps(
+        self_ptr: 0,
+        manifest_abi: null_block_abi_rev,
+        init_fn:   null_block_init,
+        probe_fn:  null_block_probe,
+        attach_fn: null_block_attach,
+        detach_fn: null_block_detach,
+        suspend_fn: null_block_suspend,
+        resume_fn:  null_block_resume,
+        ioctl_fn:   null_block_ioctl,
+    )
+
+@driver(0, 0, [0], "0.1")
+fn register_null_block_driver() -> Result<i32, DriverError>:
+    val m: DriverManifest = DriverManifest.for_driver(
+        "null_block", "0.1", DriverClass.Block, 0, [0])
+    return register_static_driver(m, null_block_make_ops())
+
+@driver(class=DriverClass.Block, vendor=0, device=[0], version="0.1", ops=null_block_make_ops())
+fn register_null_block_driver_auto() -> Result<i32, DriverError>:
+    val m: DriverManifest = DriverManifest.for_driver(
+        "register_null_block_driver_auto", "0.1", DriverClass.Block, 0, [0])
+    return register_static_driver(m, null_block_make_ops())
+
+fn null_block_smoke() -> i32:
+    match register_null_block_driver():
+        Ok(_)  -> return static_driver_count()
+        Err(_) -> return -1
+
+fn null_block_register() -> i32:
+    log_info(SUBSYS_DRIVER_BLOCK, "null_block: registered")
+    null_block_smoke()

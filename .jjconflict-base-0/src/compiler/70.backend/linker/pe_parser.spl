@@ -1,0 +1,308 @@
+# PE/COFF Full Parser
+# Parses PE debug directories, COFF symbols, and CodeView PDB references.
+# Uses BinaryReader ([u8]) and builds on pe_inspect for header/section parsing.
+
+use std.binary_io.{BinaryReader, ByteOrder}
+use std.pe_coff_header.{pe_rva_to_file_offset}
+use compiler.linker.pe_inspect.{
+    PeHeader, PeSectionHeader, PeDataDirectory, PeInspector,
+    pe_inspect, pe_find_section, pe_has_debug_directory,
+    pe_debug_directory_rva, pe_debug_directory_size,
+    IMAGE_DEBUG_TYPE_CODEVIEW, PE_SECTION_HEADER_SIZE,
+}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val COFF_SYMBOL_SIZE: i64 = 18
+val DEBUG_DIRECTORY_ENTRY_SIZE: i64 = 28
+val CV_SIGNATURE_RSDS: i64 = 0x53445352
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct PeDebugDirectory:
+    characteristics: i64
+    timestamp: i64
+    major_version: i64
+    minor_version: i64
+    type_val: i64
+    size_of_data: i64
+    address_of_raw: i64
+    pointer_to_raw: i64
+
+struct PeCoffSymbol:
+    name: text
+    value: i64
+    section_number: i64
+    type_val: i64
+    storage_class: i64
+    aux_count: i64
+
+struct PeCodeViewInfo:
+    signature: i64
+    guid: [u8]
+    age: i64
+    pdb_path: text
+
+struct PeObject:
+    header: PeHeader
+    sections: [PeSectionHeader]
+    data_directories: [PeDataDirectory]
+    debug_directories: [PeDebugDirectory]
+    codeview: PeCodeViewInfo?
+    raw: [u8]
+
+# ============================================================================
+# Debug Directory Parsing
+# ============================================================================
+
+fn pe_parse_debug_directories(data: [u8], inspector: PeInspector) -> [PeDebugDirectory]:
+    if not pe_has_debug_directory(inspector):
+        return []
+
+    val debug_rva = pe_debug_directory_rva(inspector)
+    val debug_size = pe_debug_directory_size(inspector)
+    val debug_file_off = pe_rva_to_file_offset(data, debug_rva)
+
+    if debug_file_off < 0:
+        return []
+
+    val entry_count = debug_size / DEBUG_DIRECTORY_ENTRY_SIZE
+    val order = ByteOrder.LittleEndian
+    var entries: [PeDebugDirectory] = []
+
+    var i = 0
+    while i < entry_count:
+        val off = debug_file_off + (i * DEBUG_DIRECTORY_ENTRY_SIZE)
+        if off + DEBUG_DIRECTORY_ENTRY_SIZE > data.len():
+            break
+
+        var reader = BinaryReader.new(data)
+        reader.skip(off)
+
+        val characteristics = reader.read_u32(order) ?? 0
+        val timestamp = reader.read_u32(order) ?? 0
+        val major_version = reader.read_u16(order) ?? 0
+        val minor_version = reader.read_u16(order) ?? 0
+        val type_val = reader.read_u32(order) ?? 0
+        val size_of_data = reader.read_u32(order) ?? 0
+        val address_of_raw = reader.read_u32(order) ?? 0
+        val pointer_to_raw = reader.read_u32(order) ?? 0
+
+        entries = entries.push(PeDebugDirectory(
+            characteristics: characteristics,
+            timestamp: timestamp,
+            major_version: major_version,
+            minor_version: minor_version,
+            type_val: type_val,
+            size_of_data: size_of_data,
+            address_of_raw: address_of_raw,
+            pointer_to_raw: pointer_to_raw,
+        ))
+        i = i + 1
+
+    entries
+
+# ============================================================================
+# CodeView / PDB Reference Parsing
+# ============================================================================
+
+fn pe_parse_codeview(data: [u8], debug_dirs: [PeDebugDirectory]) -> PeCodeViewInfo?:
+    var cv_dir: PeDebugDirectory? = nil
+    for dir in debug_dirs:
+        if dir.type_val == IMAGE_DEBUG_TYPE_CODEVIEW:
+            cv_dir = dir
+            break
+
+    if cv_dir.? == false:
+        return nil
+
+    val dir = cv_dir!
+    val off = dir.pointer_to_raw
+    if off + 24 > data.len():
+        return nil
+
+    val order = ByteOrder.LittleEndian
+    var reader = BinaryReader.new(data)
+    reader.skip(off)
+
+    val sig = reader.read_u32(order) ?? 0
+    if sig != CV_SIGNATURE_RSDS:
+        return nil
+
+    var guid: [u8] = []
+    var g = 0
+    while g < 16:
+        val b = reader.read_u8() ?? 0
+        guid = guid.push(b)
+        g = g + 1
+
+    val age = reader.read_u32(order) ?? 0
+
+    var pdb_path = ""
+    val path_start = off + 24
+    var pos = path_start
+    while pos < data.len() and pos < off + dir.size_of_data:
+        val b = data[pos]
+        if b == 0:
+            break
+        pdb_path = pdb_path + text.from_char_code(b)
+        pos = pos + 1
+
+    PeCodeViewInfo(
+        signature: sig,
+        guid: guid,
+        age: age,
+        pdb_path: pdb_path,
+    )
+
+# ============================================================================
+# COFF Symbol Table Parsing
+# ============================================================================
+
+fn pe_parse_coff_symbols(data: [u8], header: PeHeader) -> [PeCoffSymbol]:
+    if header.symbol_table_offset == 0 or header.symbol_count == 0:
+        return []
+
+    val str_table_off = header.symbol_table_offset + (header.symbol_count * COFF_SYMBOL_SIZE)
+    val order = ByteOrder.LittleEndian
+    var symbols: [PeCoffSymbol] = []
+
+    var i = 0
+    while i < header.symbol_count:
+        val off = header.symbol_table_offset + (i * COFF_SYMBOL_SIZE)
+        if off + COFF_SYMBOL_SIZE > data.len():
+            break
+
+        var name = ""
+        val name_zeroes = _read_u32_at(data, off)
+        if name_zeroes == 0:
+            val str_offset = _read_u32_at(data, off + 4)
+            name = _read_coff_string(data, str_table_off + str_offset)
+        else:
+            name = _read_fixed_ascii(data, off, 8)
+
+        var reader = BinaryReader.new(data)
+        reader.skip(off + 8)
+
+        val value = reader.read_u32(order) ?? 0
+        val section_number = reader.read_u16(order) ?? 0
+        val type_val = reader.read_u16(order) ?? 0
+        val storage_class = reader.read_u8() ?? 0
+        val aux_count = reader.read_u8() ?? 0
+
+        symbols = symbols.push(PeCoffSymbol(
+            name: name,
+            value: value,
+            section_number: section_number,
+            type_val: type_val,
+            storage_class: storage_class,
+            aux_count: aux_count,
+        ))
+
+        i = i + 1 + aux_count
+    symbols
+
+fn _read_u32_at(data: [u8], offset: i64) -> i64:
+    if offset + 3 >= data.len():
+        return 0
+    val b0 = data[offset] as i64
+    val b1 = data[offset + 1] as i64
+    val b2 = data[offset + 2] as i64
+    val b3 = data[offset + 3] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+fn _read_coff_string(data: [u8], offset: i64) -> text:
+    if offset >= data.len():
+        return ""
+    var result = ""
+    var pos = offset
+    while pos < data.len():
+        val b = data[pos]
+        if b == 0:
+            break
+        result = result + text.from_char_code(b)
+        pos = pos + 1
+    result
+
+fn _read_fixed_ascii(data: [u8], offset: i64, max_len: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < max_len:
+        val idx = offset + i
+        if idx >= data.len():
+            break
+        val b = data[idx]
+        if b == 0:
+            break
+        result = result + text.from_char_code(b)
+        i = i + 1
+    result
+
+# ============================================================================
+# Section Data Extraction
+# ============================================================================
+
+fn pe_section_data(data: [u8], section: PeSectionHeader) -> [u8]:
+    if section.raw_pointer + section.raw_size > data.len():
+        return []
+    var result: [u8] = []
+    var i = 0
+    while i < section.raw_size:
+        result = result.push(data[section.raw_pointer + i])
+        i = i + 1
+    result
+
+# ============================================================================
+# High-Level Parser
+# ============================================================================
+
+fn pe_parse_object(data: [u8]) -> Result<PeObject, text>:
+    val inspect_result = pe_inspect(data)
+    if inspect_result.is_err():
+        return Err(inspect_result.err()!)
+
+    val inspector = inspect_result.ok()!
+    val debug_dirs = pe_parse_debug_directories(data, inspector)
+    val codeview = pe_parse_codeview(data, debug_dirs)
+
+    Ok(PeObject(
+        header: inspector.header,
+        sections: inspector.sections,
+        data_directories: inspector.data_directories,
+        debug_directories: debug_dirs,
+        codeview: codeview,
+        raw: data,
+    ))
+
+# ============================================================================
+# Query Helpers
+# ============================================================================
+
+fn pe_find_debug_directory(obj: PeObject, type_val: i64) -> PeDebugDirectory?:
+    for dir in obj.debug_directories:
+        if dir.type_val == type_val:
+            return dir
+    return nil
+
+fn pe_pdb_path(obj: PeObject) -> text?:
+    if obj.codeview.?:
+        val cv = obj.codeview!
+        if cv.pdb_path.len() > 0:
+            return cv.pdb_path
+    return nil
+
+fn pe_has_codeview(obj: PeObject) -> bool:
+    obj.codeview.?
+
+fn pe_has_debug_info(obj: PeObject) -> bool:
+    obj.debug_directories.len() > 0
+
+fn pe_debug_section(obj: PeObject) -> PeSectionHeader?:
+    for sec in obj.sections:
+        if sec.name == ".debug" or sec.name == ".debug$S" or sec.name == ".debug$T":
+            return sec
+    return nil

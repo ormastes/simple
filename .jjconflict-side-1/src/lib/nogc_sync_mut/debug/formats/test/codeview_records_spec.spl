@@ -1,0 +1,323 @@
+"""CodeView record parser specification tests.
+
+Tests cv_decode_proc_symbol(), cv_parse_symbol_records(),
+cv_parse_line_subsections(), cv_parse_file_checksums(),
+cv_extract_string_table(), and cv_string_table_get().
+"""
+
+use std.debug.formats.pdb_constants.{
+    S_GPROC32, S_LPROC32, S_GPROC32_ID, S_LPROC32_ID,
+    S_PUB32, S_END,
+    DEBUG_S_LINES, DEBUG_S_FILECHKSMS, DEBUG_S_STRINGTABLE,
+}
+use std.debug.formats.codeview_records.{
+    CvSymRecord, CvProcSymbol, CvLineBlock, CvLinePair, CvFileChecksum,
+    cv_parse_symbol_records, cv_decode_proc_symbol,
+    cv_parse_line_subsections, cv_parse_file_checksums,
+    cv_extract_string_table, cv_string_table_get,
+}
+
+# ============================================================================
+# Helpers — build little-endian byte sequences
+# ============================================================================
+
+fn u16_le(v: i64) -> [u8]:
+    [(v & 0xff) as u8, ((v >> 8) & 0xff) as u8]
+
+fn u32_le(v: i64) -> [u8]:
+    [
+        (v & 0xff) as u8,
+        ((v >> 8) & 0xff) as u8,
+        ((v >> 16) & 0xff) as u8,
+        ((v >> 24) & 0xff) as u8,
+    ]
+
+fn concat(a: [u8], b: [u8]) -> [u8]:
+    var result = a
+    for byte in b:
+        result = result.push(byte)
+    result
+
+fn zeros(n: i64) -> [u8]:
+    var result: [u8] = []
+    var i = 0
+    while i < n:
+        result = result.push(0x00)
+        i = i + 1
+    result
+
+# Build a raw S_GPROC32 symbol record data payload (>= 35 bytes).
+# Layout of CvSymRecord.data for S_GPROC32:
+#   [0..16)   = parent/end/next/pLen/dbgStart/dbgEnd (24 bytes total? no — per code)
+#   Actually the code reads:
+#     code_size  = u32 at data[16]
+#     type_index = u32 at data[24]
+#     offset     = u32 at data[28]
+#     segment    = u16 at data[32]
+#     flags      = u8  at data[34]
+#     name       = cstr at data[35]
+fn make_proc_data(name_bytes: [u8], code_size: i64, type_idx: i64, offset: i64, segment: i64) -> [u8]:
+    # Pad first 16 bytes (parent/end/next/pLen/dbgStart/dbgEnd — unused by decoder)
+    var data = zeros(16)
+    # [16..20) code_size
+    data = concat(data, u32_le(code_size))
+    # [20..24) padding (debug_start/debug_end)
+    data = concat(data, zeros(4))
+    # [24..28) type_index
+    data = concat(data, u32_le(type_idx))
+    # [28..32) offset
+    data = concat(data, u32_le(offset))
+    # [32..34) segment
+    data = concat(data, u16_le(segment))
+    # [34] flags byte
+    data = data.push(0x00)
+    # [35..] name (null-terminated)
+    data = concat(data, name_bytes)
+    data = data.push(0x00)
+    data
+
+# Build a raw symbol stream from a single CvSymRecord.
+# Format: u16 rec_len, u16 rec_kind, then data bytes.
+# rec_len = 2 (for kind) + data.len()
+fn make_sym_stream(kind: i64, data: [u8]) -> [u8]:
+    val rec_len = 2 + data.len()
+    var result = u16_le(rec_len)
+    result = concat(result, u16_le(kind))
+    result = concat(result, data)
+    # Pad to 4-byte alignment
+    while result.len() % 4 != 0:
+        result = result.push(0x00)
+    result
+
+# ============================================================================
+# cv_decode_proc_symbol Tests
+# ============================================================================
+
+describe "cv_decode_proc_symbol":
+    it "returns nil for non-proc record kind":
+        val rec = CvSymRecord(kind: S_PUB32, size: 40, data: zeros(40))
+        val result = cv_decode_proc_symbol(rec)
+        expect(result.?).to_equal(false)
+
+    it "returns nil for S_END record":
+        val rec = CvSymRecord(kind: S_END, size: 40, data: zeros(40))
+        val result = cv_decode_proc_symbol(rec)
+        expect(result.?).to_equal(false)
+
+    it "returns nil when data too short":
+        val rec = CvSymRecord(kind: S_GPROC32, size: 20, data: zeros(20))
+        val result = cv_decode_proc_symbol(rec)
+        expect(result.?).to_equal(false)
+
+    # NOTE: Positive decode tests are skipped because cv_decode_proc_symbol
+    # internally calls _read_cstr which uses text.from_char_code — unavailable
+    # in interpreter mode. The nil-rejection paths above still verify the
+    # kind-check and size-guard logic. Full decode tests require compiled mode.
+
+# ============================================================================
+# cv_parse_symbol_records Tests
+# ============================================================================
+
+describe "cv_parse_symbol_records":
+    it "returns empty for empty data":
+        val data: [u8] = []
+        val records = cv_parse_symbol_records(data)
+        expect(records.len()).to_equal(0)
+
+    it "returns empty for short data":
+        val data: [u8] = [0x01, 0x02]
+        val records = cv_parse_symbol_records(data)
+        expect(records.len()).to_equal(0)
+
+    it "parses a single S_GPROC32 record":
+        val name_bytes: [u8] = [0x66, 0x6e]
+        val proc_data = make_proc_data(name_bytes, 10, 0, 0, 1)
+        val stream = make_sym_stream(S_GPROC32, proc_data)
+        val records = cv_parse_symbol_records(stream)
+        expect(records.len()).to_equal(1)
+        expect(records[0].kind).to_equal(S_GPROC32)
+
+    it "parses two consecutive records":
+        val name1: [u8] = [0x61]
+        val name2: [u8] = [0x62]
+        val data1 = make_proc_data(name1, 10, 0, 0, 1)
+        val data2 = make_proc_data(name2, 20, 0, 0, 1)
+        var stream = make_sym_stream(S_GPROC32, data1)
+        stream = concat(stream, make_sym_stream(S_LPROC32, data2))
+        val records = cv_parse_symbol_records(stream)
+        expect(records.len()).to_equal(2)
+        expect(records[0].kind).to_equal(S_GPROC32)
+        expect(records[1].kind).to_equal(S_LPROC32)
+
+# ============================================================================
+# cv_parse_line_subsections Tests
+# ============================================================================
+
+describe "cv_parse_line_subsections":
+    it "returns empty for empty data":
+        val data: [u8] = []
+        val blocks = cv_parse_line_subsections(data)
+        expect(blocks.len()).to_equal(0)
+
+    it "returns empty for short data":
+        val data: [u8] = [0x01, 0x02, 0x03]
+        val blocks = cv_parse_line_subsections(data)
+        expect(blocks.len()).to_equal(0)
+
+    it "skips non-LINES subsection":
+        # subsection type = 0x00 (not DEBUG_S_LINES), size = 0
+        var data = u32_le(0x00)
+        data = concat(data, u32_le(0))
+        val blocks = cv_parse_line_subsections(data)
+        expect(blocks.len()).to_equal(0)
+
+    it "parses a minimal LINES subsection with one line":
+        # Build: subsection header + lines header + one block + one line pair
+        var data: [u8] = []
+        # Subsection type = DEBUG_S_LINES (0xf2)
+        data = concat(data, u32_le(DEBUG_S_LINES))
+        # Subsection size: lines header (12) + block header (12) + 1 line (8) = 32
+        data = concat(data, u32_le(32))
+        # Lines header: off_con=0x1000, seg=1, flags=0, cb=64
+        data = concat(data, u32_le(0x1000))
+        data = concat(data, u16_le(1))
+        data = concat(data, u16_le(0))
+        data = concat(data, u32_le(64))
+        # Block: file_id=0, n_lines=1, block_size=20
+        data = concat(data, u32_le(0))
+        data = concat(data, u32_le(1))
+        data = concat(data, u32_le(20))
+        # Line pair: offset=0x10, line_info=42 (line 42)
+        data = concat(data, u32_le(0x10))
+        data = concat(data, u32_le(42))
+
+        val blocks = cv_parse_line_subsections(data)
+        expect(blocks.len()).to_equal(1)
+        expect(blocks[0].file_index).to_equal(0)
+        expect(blocks[0].lines.len()).to_equal(1)
+        # offset = off_con + line_offset = 0x1000 + 0x10 = 0x1010
+        expect(blocks[0].lines[0].offset).to_equal(0x1010)
+        expect(blocks[0].lines[0].line_start).to_equal(42)
+
+    it "parses two lines in one block":
+        var data: [u8] = []
+        data = concat(data, u32_le(DEBUG_S_LINES))
+        # size: 12 (lines header) + 12 (block header) + 2*8 (lines) = 40
+        data = concat(data, u32_le(40))
+        # off_con=0, seg=1, flags=0, cb=100
+        data = concat(data, u32_le(0))
+        data = concat(data, u16_le(1))
+        data = concat(data, u16_le(0))
+        data = concat(data, u32_le(100))
+        # block: file_id=8, n_lines=2, block_size=28
+        data = concat(data, u32_le(8))
+        data = concat(data, u32_le(2))
+        data = concat(data, u32_le(28))
+        # line 1: offset=0, line=10
+        data = concat(data, u32_le(0))
+        data = concat(data, u32_le(10))
+        # line 2: offset=0x20, line=15
+        data = concat(data, u32_le(0x20))
+        data = concat(data, u32_le(15))
+
+        val blocks = cv_parse_line_subsections(data)
+        expect(blocks.len()).to_equal(1)
+        expect(blocks[0].lines.len()).to_equal(2)
+        expect(blocks[0].lines[0].line_start).to_equal(10)
+        expect(blocks[0].lines[1].line_start).to_equal(15)
+        expect(blocks[0].lines[1].offset).to_equal(0x20)
+
+# ============================================================================
+# cv_parse_file_checksums Tests
+# ============================================================================
+
+describe "cv_parse_file_checksums":
+    it "returns empty for empty data":
+        val data: [u8] = []
+        val checksums = cv_parse_file_checksums(data)
+        expect(checksums.len()).to_equal(0)
+
+    it "returns empty when no FILECHKSMS subsection present":
+        # Type = DEBUG_S_LINES (not FILECHKSMS), size = 0
+        var data = u32_le(DEBUG_S_LINES)
+        data = concat(data, u32_le(0))
+        val checksums = cv_parse_file_checksums(data)
+        expect(checksums.len()).to_equal(0)
+
+    it "parses a single file checksum entry":
+        var data: [u8] = []
+        # Subsection type = DEBUG_S_FILECHKSMS (0xf4)
+        data = concat(data, u32_le(DEBUG_S_FILECHKSMS))
+        # Subsection size: one entry = name_off(4) + cb(1) + hash_type(1) = 6, padded to 8
+        data = concat(data, u32_le(8))
+        # Entry: name_offset=100, checksum_size=0, checksum_type=0 (none)
+        data = concat(data, u32_le(100))
+        data = data.push(0x00)
+        data = data.push(0x00)
+        # Pad to 4-byte alignment
+        data = data.push(0x00)
+        data = data.push(0x00)
+
+        val checksums = cv_parse_file_checksums(data)
+        expect(checksums.len()).to_equal(1)
+        expect(checksums[0].name_offset).to_equal(100)
+        expect(checksums[0].checksum_size).to_equal(0)
+        expect(checksums[0].checksum_type).to_equal(0)
+
+    it "parses two file checksum entries":
+        var data: [u8] = []
+        data = concat(data, u32_le(DEBUG_S_FILECHKSMS))
+        # Two entries: each 6 bytes padded to 8 = 16 total
+        data = concat(data, u32_le(16))
+        # Entry 1: name_offset=0, cb=0, type=0
+        data = concat(data, u32_le(0))
+        data = data.push(0x00)
+        data = data.push(0x00)
+        data = data.push(0x00)
+        data = data.push(0x00)
+        # Entry 2: name_offset=50, cb=0, type=1 (MD5)
+        data = concat(data, u32_le(50))
+        data = data.push(0x00)
+        data = data.push(0x01)
+        data = data.push(0x00)
+        data = data.push(0x00)
+
+        val checksums = cv_parse_file_checksums(data)
+        expect(checksums.len()).to_equal(2)
+        expect(checksums[0].name_offset).to_equal(0)
+        expect(checksums[1].name_offset).to_equal(50)
+        expect(checksums[1].checksum_type).to_equal(1)
+
+# ============================================================================
+# String Table Tests
+# ============================================================================
+
+describe "cv_extract_string_table and cv_string_table_get":
+    it "returns empty for data without string table":
+        val data: [u8] = []
+        val table = cv_extract_string_table(data)
+        expect(table.len()).to_equal(0)
+
+    it "extracts string table bytes from subsection":
+        var data: [u8] = []
+        # Subsection type = DEBUG_S_STRINGTABLE (0xf3)
+        data = concat(data, u32_le(DEBUG_S_STRINGTABLE))
+        # Table contents: "\0hello\0world\0" = 13 bytes
+        val table_bytes: [u8] = [
+            0x00,
+            0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x00,
+            0x77, 0x6f, 0x72, 0x6c, 0x64, 0x00,
+        ]
+        data = concat(data, u32_le(table_bytes.len()))
+        data = concat(data, table_bytes)
+
+        val table = cv_extract_string_table(data)
+        expect(table.len()).to_equal(table_bytes.len())
+        # Verify raw bytes were extracted correctly
+        expect(table[0] as i64).to_equal(0x00)
+        expect(table[1] as i64).to_equal(0x68)
+        expect(table[6] as i64).to_equal(0x00)
+        expect(table[7] as i64).to_equal(0x77)
+
+    # NOTE: cv_string_table_get calls _read_cstr which uses text.from_char_code,
+    # unavailable in interpreter mode. String lookup tests require compiled mode.

@@ -1,0 +1,325 @@
+# ============================================================================
+# RV32I RTL Core — Single-Cycle Datapath
+# ============================================================================
+#
+# Translates rv32i_core.vhd into Simple.  Top-level module that wires the
+# decoder, ALU, register file, and LSU into a single-cycle pipeline.
+#
+# Architecture:
+#   - core_combinational()  — all combinational datapath logic
+#   - core_update()         — clocked sequential logic (PC, semihosting, halt)
+#   - core_reset()          — initial state at reset
+#
+# Semihosting: detects the 3-instruction magic sequence
+#   slli zero,zero,0x1f  /  ebreak  /  srai zero,zero,0x7
+# and triggers a semihosting call with a0=op, a1=param.
+# ============================================================================
+
+use std.hardware.rv32i_rtl.pkg.{OP_LUI, OP_AUIPC, OP_JAL, OP_JALR}
+use std.hardware.rv32i_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_SYSTEM}
+use std.hardware.rv32i_rtl.pkg.{BR_BEQ, BR_BNE, BR_BLT, BR_BGE, BR_BLTU, BR_BGEU}
+use std.hardware.rv32i_rtl.pkg.{SEMI_ENTRY, SEMI_BREAK, SEMI_EXIT, SYS_EXIT}
+use std.hardware.rv32i_rtl.decode.{DecodeResult, decode_instruction}
+use std.hardware.rv32i_rtl.alu.{AluResult, alu_compute, u32_signed_lt}
+use std.hardware.rv32i_rtl.regfile.{RegFile, RegReadResult, regfile_read}
+use std.hardware.rv32i_rtl.lsu.lsu_load
+
+# ============================================================================
+# Core sequential state (clocked registers)
+# ============================================================================
+
+struct CoreState:
+    """Sequential state updated on each clock edge."""
+    pc: u32             # Program counter
+    halt: bool          # CPU halted
+    semi_phase: u32     # Semihosting sequence detector (0/1/2)
+    semi_op: u32        # Latched semihosting operation (a0)
+    semi_param: u32     # Latched semihosting parameter (a1)
+    semi_suppress: bool # Suppress normal execution during semihost sequence
+    semi_trigger: bool  # One-cycle pulse when semihosting completes
+
+# ============================================================================
+# Combinational result bundle
+# ============================================================================
+
+struct CoreCombResult:
+    """All combinational outputs from one cycle of the datapath."""
+    # Decoder outputs
+    dec: DecodeResult
+
+    # Register file read results
+    rs1_data: u32
+    rs2_data: u32
+    a0_val: u32
+    a1_val: u32
+
+    # ALU results
+    alu_result: u32
+    alu_zero: bool
+
+    # Branch evaluation
+    branch_taken: bool
+    branch_target: u32
+
+    # Next PC (combinational)
+    pc_next: u32
+    pc_plus4: u32
+
+    # Write-back data for rd
+    rd_data: u32
+
+    # Data memory interface
+    dmem_addr: u32
+    dmem_wdata: u32
+    dmem_we: bool
+    dmem_re: bool
+    dmem_width: u32
+
+    # Instruction memory address
+    imem_addr: u32
+
+# ============================================================================
+# External port bundle (top-level I/O)
+# ============================================================================
+
+struct CorePorts:
+    """Top-level external port signals for the core."""
+    # Instruction memory interface
+    imem_addr: u32
+
+    # Data memory interface
+    dmem_addr: u32
+    dmem_wdata: u32
+    dmem_we: bool
+    dmem_re: bool
+    dmem_width: u32
+
+    # Status
+    halted: bool
+
+    # Semihosting interface
+    semi_trigger: bool
+    semi_op: u32
+    semi_param: u32
+
+# ============================================================================
+# Signed comparison helpers for branch evaluation
+# ============================================================================
+
+fn u32_signed_ge(a: u32, b: u32) -> bool:
+    """Signed greater-than-or-equal for u32 (two's complement)."""
+    # a >= b  iff  NOT (a < b)
+    not u32_signed_lt(a, b)
+
+# ============================================================================
+# Branch evaluation
+# ============================================================================
+
+fn eval_branch(funct3: u32, rs1_data: u32, rs2_data: u32) -> bool:
+    """Evaluate branch condition. Returns true if branch is taken."""
+    if funct3 == BR_BEQ:
+        return rs1_data == rs2_data
+    if funct3 == BR_BNE:
+        return rs1_data != rs2_data
+    if funct3 == BR_BLT:
+        return u32_signed_lt(rs1_data, rs2_data)
+    if funct3 == BR_BGE:
+        return u32_signed_ge(rs1_data, rs2_data)
+    if funct3 == BR_BLTU:
+        return rs1_data < rs2_data
+    if funct3 == BR_BGEU:
+        return rs1_data >= rs2_data
+    false
+
+# ============================================================================
+# Combinational datapath
+# ============================================================================
+
+fn core_combinational(state: CoreState, imem_data: u32, dmem_rdata: u32, rf: RegFile) -> CoreCombResult:
+    """Compute all combinational signals for one cycle.
+    Mirrors VHDL concurrent assignments and combinational processes."""
+
+    val pc = state.pc
+    val pc_plus4 = pc + 4
+
+    # Instruction memory address
+    val imem_addr = pc
+
+    # Decode
+    val dec = decode_instruction(imem_data)
+
+    # Register file read
+    val rr = regfile_read(rf, dec.rs1, dec.rs2)
+    val rs1_data = rr.rs1_data
+    val rs2_data = rr.rs2_data
+
+    # ALU input muxes
+    # op_a: PC for AUIPC and JAL, else rs1_data
+    var alu_a: u32 = rs1_data
+    if dec.opcode == OP_AUIPC or dec.opcode == OP_JAL:
+        alu_a = pc
+
+    # op_b: immediate when alu_src, else rs2_data
+    var alu_b: u32 = rs2_data
+    if dec.alu_src:
+        alu_b = dec.imm
+
+    # ALU
+    val alu_res = alu_compute(alu_a, alu_b, dec.alu_op)
+
+    # Branch evaluation
+    var branch_taken: bool = false
+    if dec.branch:
+        branch_taken = eval_branch(dec.funct3, rs1_data, rs2_data)
+
+    val branch_target = pc + dec.imm
+
+    # Next PC mux
+    var pc_next: u32 = pc_plus4
+    if dec.opcode == OP_JALR:
+        pc_next = alu_res.result
+    else if branch_taken or dec.jump:
+        pc_next = branch_target
+
+    # Write-back data mux
+    var rd_data: u32 = alu_res.result
+    if dec.mem_to_reg:
+        # Load: apply sign/zero extension
+        rd_data = lsu_load(dmem_rdata, dec.funct3)
+    else if dec.jump:
+        rd_data = pc_plus4
+
+    # Data memory interface
+    val dmem_addr = alu_res.result
+    val dmem_wdata = rs2_data
+    val dmem_we = dec.mem_write and (state.semi_suppress == false)
+    val dmem_re = dec.mem_read
+    val dmem_width = dec.funct3 & 0x3
+
+    CoreCombResult(
+        dec: dec,
+        rs1_data: rs1_data,
+        rs2_data: rs2_data,
+        a0_val: rr.a0_val,
+        a1_val: rr.a1_val,
+        alu_result: alu_res.result,
+        alu_zero: alu_res.zero,
+        branch_taken: branch_taken,
+        branch_target: branch_target,
+        pc_next: pc_next,
+        pc_plus4: pc_plus4,
+        rd_data: rd_data,
+        dmem_addr: dmem_addr,
+        dmem_wdata: dmem_wdata,
+        dmem_we: dmem_we,
+        dmem_re: dmem_re,
+        dmem_width: dmem_width,
+        imem_addr: imem_addr
+    )
+
+# ============================================================================
+# Sequential update (clocked logic)
+# ============================================================================
+
+fn core_update(state: CoreState, imem_data: u32, comb: CoreCombResult, a0_val: u32, a1_val: u32) -> CoreState:
+    """Update sequential state on rising clock edge.
+    Handles PC advancement, semihosting detection, and halt.
+    Mirrors the VHDL clocked process."""
+
+    var new_pc = state.pc
+    var new_halt = state.halt
+    var new_semi_phase = state.semi_phase
+    var new_semi_op = state.semi_op
+    var new_semi_param = state.semi_param
+    var new_semi_suppress = state.semi_suppress
+    var new_semi_trigger: bool = false   # Pulse — cleared every cycle by default
+
+    if state.halt == false:
+        # Semihosting magic sequence detection
+        if imem_data == SEMI_ENTRY and state.semi_phase == 0:
+            # Phase 1: slli zero,zero,0x1f detected
+            new_semi_phase = 1
+            new_pc = comb.pc_plus4
+
+        else if imem_data == SEMI_BREAK and state.semi_phase == 1:
+            # Phase 2: ebreak detected after entry magic
+            new_semi_phase = 2
+            new_semi_op = a0_val
+            new_semi_param = a1_val
+            new_semi_suppress = true
+            new_pc = comb.pc_plus4
+
+        else if imem_data == SEMI_EXIT and state.semi_phase == 2:
+            # Phase 3: srai zero,zero,0x7 — trigger semihosting
+            new_semi_phase = 0
+            new_semi_suppress = false
+            new_semi_trigger = true
+            # Check for SYS_EXIT
+            if new_semi_op == SYS_EXIT:
+                new_halt = true
+            else:
+                new_pc = comb.pc_plus4
+
+        else if comb.dec.opcode == OP_SYSTEM and state.semi_phase == 0:
+            # ecall/ebreak outside semihosting = halt
+            new_halt = true
+
+        else:
+            # Normal execution
+            new_semi_phase = 0
+            new_semi_suppress = false
+            new_pc = comb.pc_next
+
+    CoreState(
+        pc: new_pc,
+        halt: new_halt,
+        semi_phase: new_semi_phase,
+        semi_op: new_semi_op,
+        semi_param: new_semi_param,
+        semi_suppress: new_semi_suppress,
+        semi_trigger: new_semi_trigger
+    )
+
+# ============================================================================
+# Semihosting trigger detection
+# ============================================================================
+
+fn core_semi_triggered(state: CoreState, imem_data: u32) -> bool:
+    """Return true if this cycle completes a semihosting sequence.
+    The caller uses this as a one-cycle pulse."""
+    imem_data == SEMI_EXIT and state.semi_phase == 2
+
+# ============================================================================
+# External port extraction
+# ============================================================================
+
+fn core_ports(state: CoreState, comb: CoreCombResult) -> CorePorts:
+    """Extract top-level port signals from the core state and combinational results."""
+    CorePorts(
+        imem_addr: comb.imem_addr,
+        dmem_addr: comb.dmem_addr,
+        dmem_wdata: comb.dmem_wdata,
+        dmem_we: comb.dmem_we,
+        dmem_re: comb.dmem_re,
+        dmem_width: comb.dmem_width,
+        halted: state.halt,
+        semi_trigger: state.semi_trigger,
+        semi_op: state.semi_op,
+        semi_param: state.semi_param
+    )
+
+# ============================================================================
+# Reset state
+# ============================================================================
+
+fn core_reset(reset_addr: u32) -> CoreState:
+    """Create initial core state after reset."""
+    CoreState(
+        pc: reset_addr,
+        halt: false,
+        semi_phase: 0,
+        semi_op: 0,
+        semi_param: 0,
+        semi_suppress: false,
+        semi_trigger: false
+    )

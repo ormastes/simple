@@ -1,0 +1,762 @@
+# RSA-PSS Sign and Verify Primitives — Pure Simple
+#
+# Implements RFC 8017 (PKCS#1 v2.2):
+#   - §8.1 RSASSA-PSS sign / verify
+#   - §9.1 EMSA-PSS-ENCODE / EMSA-PSS-VERIFY
+#   - §B.2.1 MGF1 mask generation function
+#
+# Hash variants: SHA-256, SHA-384 (synthesised from SHA-512 truncation
+# is not used; we restrict to SHA-256 + SHA-512 today since the
+# os/crypto stack does not yet expose SHA-384 — SHA-384 KAT is therefore
+# deferred to a follow-up wave once sha384 lands).
+#
+# Wave 14-E lands the primitives. Sigalgs glue (rsa_pss_rsae_*) into
+# tls13.spl is wave 15+.
+#
+# Big-integer arithmetic and DER parsing are duplicated locally rather
+# than imported from rsa_fallback.spl because Simple's underscore-
+# prefixed module-private names are not exported across files. This
+# keeps the module self-contained for baremetal/freestanding callers
+# (matches the slh_dsa / ml_dsa pattern).
+#
+# tag: crypto, rsa, pss
+
+use os.crypto.sha256.{sha256}
+use os.crypto.sha512.{sha512}
+
+# ============================================================================
+# Big-integer arithmetic (30-bit limbs, little-endian limb order)
+#   - List<i64> with each limb in [0, 2^30)
+#   - Matches the layout used by rsa_fallback.spl
+# ============================================================================
+
+val _PSS_BIGINT_BASE: i64 = 1073741824
+val _PSS_BIGINT_BITS_PER_LIMB: i64 = 30
+
+fn _pss_bi_zero() -> list:
+    var r: list = []
+    r.push(0)
+    r
+
+fn _pss_bi_normalize(a: list) -> list:
+    var r: list = []
+    var i = 0
+    while i < a.len().to_i64():
+        r.push(a[i])
+        i = i + 1
+    while r.len().to_i64() > 1 and r[r.len().to_i64() - 1] == 0:
+        r.pop()
+    r
+
+fn _pss_bi_is_zero(a: list) -> bool:
+    val n = _pss_bi_normalize(a)
+    n.len().to_i64() == 1 and n[0] == 0
+
+fn _pss_bi_compare(a: list, b: list) -> i64:
+    val na = _pss_bi_normalize(a)
+    val nb = _pss_bi_normalize(b)
+    if na.len() > nb.len(): return 1
+    if na.len() < nb.len(): return -1
+    var i: i64 = na.len().to_i64() - 1
+    while i >= 0:
+        if na[i] > nb[i]: return 1
+        if na[i] < nb[i]: return -1
+        i = i - 1
+    0
+
+fn _pss_bi_add(a: list, b: list) -> list:
+    var result: list = []
+    var carry: i64 = 0
+    var i: i64 = 0
+    val max_len = if a.len() > b.len() { a.len().to_i64() } else { b.len().to_i64() }
+    while i < max_len or carry != 0:
+        var sum = carry
+        if i < a.len().to_i64():
+            sum = sum + a[i]
+        if i < b.len().to_i64():
+            sum = sum + b[i]
+        result.push(sum % _PSS_BIGINT_BASE)
+        carry = sum / _PSS_BIGINT_BASE
+        i = i + 1
+    _pss_bi_normalize(result)
+
+fn _pss_bi_sub(a: list, b: list) -> list:
+    # Precondition: a >= b
+    var result: list = []
+    var borrow: i64 = 0
+    var i: i64 = 0
+    while i < a.len().to_i64():
+        var limb_a = a[i] - borrow
+        if i < b.len().to_i64():
+            limb_a = limb_a - b[i]
+        if limb_a < 0:
+            limb_a = limb_a + _PSS_BIGINT_BASE
+            borrow = 1
+        else:
+            borrow = 0
+        result.push(limb_a)
+        i = i + 1
+    _pss_bi_normalize(result)
+
+fn _pss_bi_mul(a: list, b: list) -> list:
+    var result: list = []
+    var i: i64 = 0
+    while i < a.len().to_i64() + b.len().to_i64():
+        result.push(0)
+        i = i + 1
+    var ia: i64 = 0
+    while ia < a.len().to_i64():
+        var carry: i64 = 0
+        var ib: i64 = 0
+        while ib < b.len().to_i64():
+            val idx = ia + ib
+            val prod = result[idx] + a[ia] * b[ib] + carry
+            result[idx] = prod % _PSS_BIGINT_BASE
+            carry = prod / _PSS_BIGINT_BASE
+            ib = ib + 1
+        if carry > 0:
+            result[ia + b.len().to_i64()] = result[ia + b.len().to_i64()] + carry
+        ia = ia + 1
+    _pss_bi_normalize(result)
+
+fn _pss_bi_bit_length(a: list) -> i64:
+    val norm = _pss_bi_normalize(a)
+    if norm.len().to_i64() == 1 and norm[0] == 0: return 0
+    var top = norm[norm.len().to_i64() - 1]
+    var bits: i64 = 0
+    while top > 0:
+        bits = bits + 1
+        top = top / 2
+    (norm.len().to_i64() - 1) * _PSS_BIGINT_BITS_PER_LIMB + bits
+
+fn _pss_bi_get_bit(a: list, n: i64) -> i64:
+    val limb_idx = n / _PSS_BIGINT_BITS_PER_LIMB
+    val bit_idx = n % _PSS_BIGINT_BITS_PER_LIMB
+    if limb_idx >= a.len().to_i64(): return 0
+    var v = a[limb_idx]
+    var k: i64 = 0
+    while k < bit_idx:
+        v = v / 2
+        k = k + 1
+    v % 2
+
+fn _pss_bi_shift_left_one(a: list) -> list:
+    var result: list = []
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < a.len().to_i64():
+        val shifted = a[i] * 2 + carry
+        result.push(shifted % _PSS_BIGINT_BASE)
+        carry = shifted / _PSS_BIGINT_BASE
+        i = i + 1
+    if carry > 0:
+        result.push(carry)
+    _pss_bi_normalize(result)
+
+fn _pss_bi_mod(a: list, m: list) -> list:
+    # Schoolbook mod via repeated subtraction of shifted modulus.
+    if _pss_bi_compare(a, m) < 0:
+        return _pss_bi_normalize(a)
+    var r = _pss_bi_normalize(a)
+    val r_bits = _pss_bi_bit_length(r)
+    val m_bits = _pss_bi_bit_length(m)
+    var shift = r_bits - m_bits
+    var shifted_m = m
+    var k: i64 = 0
+    while k < shift:
+        shifted_m = _pss_bi_shift_left_one(shifted_m)
+        k = k + 1
+    while shift >= 0:
+        if _pss_bi_compare(r, shifted_m) >= 0:
+            r = _pss_bi_sub(r, shifted_m)
+        if shift > 0:
+            # Halve shifted_m: drop low bit by integer division by 2 across limbs.
+            var halved: list = []
+            var i: i64 = shifted_m.len().to_i64() - 1
+            var carry: i64 = 0
+            while i >= 0:
+                val v = shifted_m[i] + carry * _PSS_BIGINT_BASE
+                halved.push(v / 2)
+                carry = v % 2
+                i = i - 1
+            # Reverse halved (we built it MSB-first).
+            var rev: list = []
+            var j: i64 = halved.len().to_i64() - 1
+            while j >= 0:
+                rev.push(halved[j])
+                j = j - 1
+            shifted_m = _pss_bi_normalize(rev)
+        shift = shift - 1
+    _pss_bi_normalize(r)
+
+fn _pss_bi_mod_exp(base: list, exp: list, modulus: list) -> list:
+    # Square-and-multiply, MSB-first.
+    var result = _pss_bi_zero()
+    result[0] = 1
+    var b = _pss_bi_mod(base, modulus)
+    val bits = _pss_bi_bit_length(exp)
+    var i: i64 = bits - 1
+    while i >= 0:
+        result = _pss_bi_mod(_pss_bi_mul(result, result), modulus)
+        if _pss_bi_get_bit(exp, i) == 1:
+            result = _pss_bi_mod(_pss_bi_mul(result, b), modulus)
+        i = i - 1
+    result
+
+fn _pss_bytes_to_bigint_be(bytes: [u8]) -> list:
+    # Big-endian bytes -> bigint
+    if bytes.len() == 0:
+        return _pss_bi_zero()
+    var result = _pss_bi_zero()
+    var i: u64 = 0
+    while i < bytes.len():
+        # result = result * 256 + bytes[i]
+        var prod: list = []
+        var carry: i64 = bytes[i].to_i64()
+        var j: i64 = 0
+        while j < result.len().to_i64():
+            val v = result[j] * 256 + carry
+            prod.push(v % _PSS_BIGINT_BASE)
+            carry = v / _PSS_BIGINT_BASE
+            j = j + 1
+        while carry > 0:
+            prod.push(carry % _PSS_BIGINT_BASE)
+            carry = carry / _PSS_BIGINT_BASE
+        result = _pss_bi_normalize(prod)
+        i = i + 1
+    result
+
+fn _pss_bigint_to_bytes_be(n: list, length: u64) -> [u8]:
+    # Output `length` big-endian bytes (left-padded with zeros).
+    var bytes: [u8] = []
+    var v = _pss_bi_normalize(n)
+    while v.len().to_i64() > 1 or v[0] != 0:
+        # divmod by 256
+        var quot: list = []
+        var i: i64 = v.len().to_i64() - 1
+        var rem: i64 = 0
+        while i >= 0:
+            val cur = rem * _PSS_BIGINT_BASE + v[i]
+            quot.push(cur / 256)
+            rem = cur % 256
+            i = i - 1
+        # Reverse quot.
+        var rev: list = []
+        var j: i64 = quot.len().to_i64() - 1
+        while j >= 0:
+            rev.push(quot[j])
+            j = j - 1
+        bytes.push(rem.to_u8())
+        v = _pss_bi_normalize(rev)
+    # bytes is little-endian; pad and reverse.
+    while bytes.len() < length:
+        bytes.push(0u8)
+    var out: [u8] = []
+    var k: i64 = bytes.len().to_i64() - 1
+    while k >= 0:
+        out.push(bytes[k.to_u64()])
+        k = k - 1
+    out
+
+# ============================================================================
+# Helper byte routines
+# ============================================================================
+
+fn _pss_append(dst: [u8], src: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < dst.len():
+        out.push(dst[i])
+        i = i + 1
+    var j: u64 = 0
+    while j < src.len():
+        out.push(src[j])
+        j = j + 1
+    out
+
+fn _pss_slice(data: [u8], start: u64, length: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < length:
+        out.push(data[start + i])
+        i = i + 1
+    out
+
+fn _pss_strip_int_padding(data: [u8]) -> [u8]:
+    if data.len() > 1 and data[0] == 0u8:
+        return _pss_slice(data, 1, data.len() - 1)
+    data
+
+fn _pss_zero_bytes(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        out.push(0u8)
+        i = i + 1
+    out
+
+# ============================================================================
+# Hash dispatch — RsaPssHash discriminates SHA-256 vs SHA-512.
+#   SHA-384 omitted until os.crypto exposes a sha384 primitive.
+# ============================================================================
+
+enum RsaPssHash:
+    Sha256
+    Sha512
+
+fn _pss_hlen(h: RsaPssHash) -> i64:
+    if h == RsaPssHash.Sha256: return 32
+    64
+
+fn _pss_hash(h: RsaPssHash, data: [u8]) -> [u8]:
+    if h == RsaPssHash.Sha256:
+        return sha256(data)
+    sha512(data)
+
+# ============================================================================
+# MGF1 (RFC 8017 §B.2.1)
+#   MGF1(seed, out_len) = T = T || Hash(seed || I2OSP(counter, 4))
+# ============================================================================
+
+fn _pss_mgf1(h: RsaPssHash, seed: [u8], out_len: i64) -> [u8]:
+    var out: [u8] = []
+    var counter: i64 = 0
+    while out.len().to_i64() < out_len:
+        var seeded: [u8] = []
+        var s: u64 = 0
+        while s < seed.len():
+            seeded.push(seed[s])
+            s = s + 1
+        # I2OSP(counter, 4) big-endian
+        seeded.push(((counter / 16777216) % 256).to_u8())
+        seeded.push(((counter / 65536) % 256).to_u8())
+        seeded.push(((counter / 256) % 256).to_u8())
+        seeded.push((counter % 256).to_u8())
+        val block = _pss_hash(h, seeded)
+        var b: u64 = 0
+        while b < block.len() and out.len().to_i64() < out_len:
+            out.push(block[b])
+            b = b + 1
+        counter = counter + 1
+    out
+
+# ============================================================================
+# EMSA-PSS-ENCODE (RFC 8017 §9.1.1)
+#
+# Inputs:  M (message), em_bits (modBits-1), salt, hash variant
+# Output:  EM of length ceil(em_bits/8) octets, or [] on error
+#
+# Steps:
+#   1. mHash = Hash(M)
+#   2. If em_len < hlen + slen + 2 -> error
+#   3. M' = (0x00 * 8) || mHash || salt
+#   4. H = Hash(M')
+#   5. PS = (0x00 * (em_len - slen - hlen - 2))
+#   6. DB = PS || 0x01 || salt
+#   7. dbMask = MGF1(H, em_len - hlen - 1)
+#   8. maskedDB = DB XOR dbMask, with leftmost (8*em_len - em_bits) bits zeroed
+#   9. EM = maskedDB || H || 0xbc
+# ============================================================================
+
+fn _pss_emsa_encode(message: [u8], em_bits: i64, salt: [u8], h: RsaPssHash) -> [u8]:
+    val hlen = _pss_hlen(h)
+    val slen = salt.len().to_i64()
+    val em_len = (em_bits + 7) / 8
+    if em_len < hlen + slen + 2:
+        return []
+
+    val mhash = _pss_hash(h, message)
+
+    # M' = 8 zero bytes || mHash || salt
+    var mprime: [u8] = []
+    var z: i64 = 0
+    while z < 8:
+        mprime.push(0u8)
+        z = z + 1
+    var mh_i: u64 = 0
+    while mh_i < mhash.len():
+        mprime.push(mhash[mh_i])
+        mh_i = mh_i + 1
+    var s_i: u64 = 0
+    while s_i < salt.len():
+        mprime.push(salt[s_i])
+        s_i = s_i + 1
+    val h_out = _pss_hash(h, mprime)
+
+    # DB = PS (em_len - slen - hlen - 2 zeros) || 0x01 || salt
+    val ps_len: i64 = em_len - slen - hlen - 2
+    var db: [u8] = []
+    var ps_i: i64 = 0
+    while ps_i < ps_len:
+        db.push(0u8)
+        ps_i = ps_i + 1
+    db.push(0x01u8)
+    var ss_i: u64 = 0
+    while ss_i < salt.len():
+        db.push(salt[ss_i])
+        ss_i = ss_i + 1
+
+    # dbMask = MGF1(H, em_len - hlen - 1)
+    val db_mask = _pss_mgf1(h, h_out, em_len - hlen - 1)
+
+    # maskedDB = DB XOR dbMask
+    var masked_db: [u8] = []
+    var i: u64 = 0
+    while i < db.len():
+        masked_db.push((db[i].to_i64() ^ db_mask[i].to_i64()).to_u8())
+        i = i + 1
+
+    # Zero leftmost (8*em_len - em_bits) bits of maskedDB[0]
+    val zero_bits: i64 = 8 * em_len - em_bits
+    if zero_bits > 0:
+        var mask: i64 = 0xff
+        var k: i64 = 0
+        while k < zero_bits:
+            mask = mask / 2
+            k = k + 1
+        masked_db[0u64] = (masked_db[0u64].to_i64() & mask).to_u8()
+
+    # EM = maskedDB || H || 0xbc
+    var em: [u8] = []
+    var mi: u64 = 0
+    while mi < masked_db.len():
+        em.push(masked_db[mi])
+        mi = mi + 1
+    var hi: u64 = 0
+    while hi < h_out.len():
+        em.push(h_out[hi])
+        hi = hi + 1
+    em.push(0xbcu8)
+    em
+
+# ============================================================================
+# EMSA-PSS-VERIFY (RFC 8017 §9.1.2)
+#
+# Inputs:  M, EM, em_bits, slen, hash
+# Output:  bool
+#
+# Steps (RFC 8017 §9.1.2):
+#   1. mHash = Hash(M)
+#   2. If em_len < hlen + slen + 2 -> false
+#   3. If EM[em_len-1] != 0xbc -> false
+#   4. maskedDB = leftmost em_len-hlen-1 octets, H = next hlen, trailer = last
+#   5. If leftmost (8*em_len - em_bits) bits of maskedDB are not zero -> false
+#   6. dbMask = MGF1(H, em_len - hlen - 1)
+#   7. DB = maskedDB XOR dbMask
+#   8. Zero leftmost (8*em_len - em_bits) bits of DB
+#   9. If DB[0..em_len-hlen-slen-2] != 0 -> false
+#  10. If DB[em_len-hlen-slen-2] != 0x01 -> false
+#  11. salt = DB[em_len-hlen-slen-1..em_len-hlen-1]
+#  12. M' = (0x00 * 8) || mHash || salt
+#  13. H' = Hash(M')
+#  14. Return H == H'
+# ============================================================================
+
+fn _pss_emsa_verify(message: [u8], em: [u8], em_bits: i64, slen: i64, h: RsaPssHash) -> bool:
+    val hlen = _pss_hlen(h)
+    val em_len = (em_bits + 7) / 8
+
+    if em.len().to_i64() != em_len:
+        return false
+    if em_len < hlen + slen + 2:
+        return false
+
+    val mhash = _pss_hash(h, message)
+
+    if em[em.len() - 1u64] != 0xbcu8:
+        return false
+
+    val masked_db_len: i64 = em_len - hlen - 1
+    val masked_db = _pss_slice(em, 0, masked_db_len.to_u64())
+    val h_field = _pss_slice(em, masked_db_len.to_u64(), hlen.to_u64())
+
+    val zero_bits: i64 = 8 * em_len - em_bits
+    if zero_bits > 0:
+        var top_byte: i64 = masked_db[0u64].to_i64()
+        # The leftmost zero_bits of top_byte must be zero.
+        var mask: i64 = 0xff
+        var k: i64 = 0
+        while k < zero_bits:
+            mask = mask / 2
+            k = k + 1
+        if (top_byte & (0xff ^ mask)) != 0:
+            return false
+
+    val db_mask = _pss_mgf1(h, h_field, masked_db_len)
+    var db: [u8] = []
+    var i: u64 = 0
+    while i < masked_db.len():
+        db.push((masked_db[i].to_i64() ^ db_mask[i].to_i64()).to_u8())
+        i = i + 1
+    if zero_bits > 0:
+        var mask2: i64 = 0xff
+        var k2: i64 = 0
+        while k2 < zero_bits:
+            mask2 = mask2 / 2
+            k2 = k2 + 1
+        db[0u64] = (db[0u64].to_i64() & mask2).to_u8()
+
+    val ps_len: i64 = em_len - hlen - slen - 2
+    var pi: i64 = 0
+    while pi < ps_len:
+        if db[pi.to_u64()] != 0u8:
+            return false
+        pi = pi + 1
+    if db[ps_len.to_u64()] != 0x01u8:
+        return false
+
+    val salt = _pss_slice(db, (ps_len + 1).to_u64(), slen.to_u64())
+
+    var mprime: [u8] = []
+    var z: i64 = 0
+    while z < 8:
+        mprime.push(0u8)
+        z = z + 1
+    var mh_i: u64 = 0
+    while mh_i < mhash.len():
+        mprime.push(mhash[mh_i])
+        mh_i = mh_i + 1
+    var s_i: u64 = 0
+    while s_i < salt.len():
+        mprime.push(salt[s_i])
+        s_i = s_i + 1
+    val h_check = _pss_hash(h, mprime)
+
+    if h_check.len() != h_field.len():
+        return false
+    var c_i: u64 = 0
+    while c_i < h_check.len():
+        if h_check[c_i] != h_field[c_i]:
+            return false
+        c_i = c_i + 1
+    true
+
+# ============================================================================
+# DER helpers — minimal SPKI / PKCS#8 RSA key parser
+# ============================================================================
+
+class _PssTlv:
+    val tag: u8
+    val value_off: u64
+    val value_len: u64
+    val next_off: u64
+    val ok: bool
+
+fn _pss_read_tlv(data: [u8], off: u64) -> _PssTlv:
+    if off >= data.len():
+        return _PssTlv(tag: 0u8, value_off: 0u64, value_len: 0u64, next_off: 0u64, ok: false)
+    val tag = data[off]
+    var pos = off + 1u64
+    if pos >= data.len():
+        return _PssTlv(tag: 0u8, value_off: 0u64, value_len: 0u64, next_off: 0u64, ok: false)
+    val first = data[pos].to_i64()
+    pos = pos + 1u64
+    var length: u64 = 0u64
+    if first < 0x80:
+        length = first.to_u64()
+    else:
+        val n = (first - 0x80).to_u64()
+        var l: i64 = 0
+        var i: u64 = 0
+        while i < n:
+            if pos >= data.len():
+                return _PssTlv(tag: 0u8, value_off: 0u64, value_len: 0u64, next_off: 0u64, ok: false)
+            l = l * 256 + data[pos].to_i64()
+            pos = pos + 1u64
+            i = i + 1u64
+        length = l.to_u64()
+    val value_off = pos
+    val next_off = pos + length
+    if next_off > data.len():
+        return _PssTlv(tag: 0u8, value_off: 0u64, value_len: 0u64, next_off: 0u64, ok: false)
+    _PssTlv(tag: tag, value_off: value_off, value_len: length, next_off: next_off, ok: true)
+
+# ============================================================================
+# Public RSA key (n, e) extraction from SubjectPublicKeyInfo DER.
+#   SPKI ::= SEQUENCE { algorithm AlgorithmIdentifier, subjectPublicKey BIT STRING }
+#   BIT STRING contents (after unused-bits byte 0x00) ::= RSAPublicKey ::=
+#       SEQUENCE { modulus INTEGER, publicExponent INTEGER }
+# ============================================================================
+
+class RsaPssPublicKey:
+    val modulus: [u8]
+    val exponent: [u8]
+    val ok: bool
+
+fn rsa_pss_parse_spki(spki: [u8]) -> RsaPssPublicKey:
+    val outer = _pss_read_tlv(spki, 0u64)
+    if not outer.ok or outer.tag != 0x30u8:
+        return RsaPssPublicKey(modulus: [], exponent: [], ok: false)
+    var pos = outer.value_off
+    val alg = _pss_read_tlv(spki, pos)
+    if not alg.ok or alg.tag != 0x30u8:
+        return RsaPssPublicKey(modulus: [], exponent: [], ok: false)
+    pos = alg.next_off
+    val bitstr = _pss_read_tlv(spki, pos)
+    if not bitstr.ok or bitstr.tag != 0x03u8:
+        return RsaPssPublicKey(modulus: [], exponent: [], ok: false)
+    # Strip leading "unused bits" octet.
+    if bitstr.value_len < 1u64:
+        return RsaPssPublicKey(modulus: [], exponent: [], ok: false)
+    val rsa_pk = _pss_slice(spki, bitstr.value_off + 1u64, bitstr.value_len - 1u64)
+    val seq = _pss_read_tlv(rsa_pk, 0u64)
+    if not seq.ok or seq.tag != 0x30u8:
+        return RsaPssPublicKey(modulus: [], exponent: [], ok: false)
+    var inner = seq.value_off
+    val mod_tlv = _pss_read_tlv(rsa_pk, inner)
+    if not mod_tlv.ok or mod_tlv.tag != 0x02u8:
+        return RsaPssPublicKey(modulus: [], exponent: [], ok: false)
+    val modulus = _pss_strip_int_padding(_pss_slice(rsa_pk, mod_tlv.value_off, mod_tlv.value_len))
+    inner = mod_tlv.next_off
+    val exp_tlv = _pss_read_tlv(rsa_pk, inner)
+    if not exp_tlv.ok or exp_tlv.tag != 0x02u8:
+        return RsaPssPublicKey(modulus: [], exponent: [], ok: false)
+    val exponent = _pss_strip_int_padding(_pss_slice(rsa_pk, exp_tlv.value_off, exp_tlv.value_len))
+    RsaPssPublicKey(modulus: modulus, exponent: exponent, ok: true)
+
+# ============================================================================
+# Private RSA key (n, d) extraction from PKCS#8 v1 DER.
+#   We need only modulus + private exponent for the textbook (non-CRT)
+#   sign path. PKCS#8 layout matches rsa_fallback._parse_pkcs8_rsa_private_key.
+# ============================================================================
+
+class RsaPssPrivateKey:
+    val modulus: [u8]
+    val private_exp: [u8]
+    val ok: bool
+
+fn rsa_pss_parse_pkcs8(pkcs8: [u8]) -> RsaPssPrivateKey:
+    val outer = _pss_read_tlv(pkcs8, 0u64)
+    if not outer.ok or outer.tag != 0x30u8:
+        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+    var pos = outer.value_off
+    # version
+    val ver = _pss_read_tlv(pkcs8, pos)
+    if not ver.ok:
+        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+    pos = ver.next_off
+    # algorithm
+    val alg = _pss_read_tlv(pkcs8, pos)
+    if not alg.ok:
+        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+    pos = alg.next_off
+    # privateKey OCTET STRING
+    val pkey = _pss_read_tlv(pkcs8, pos)
+    if not pkey.ok or pkey.tag != 0x04u8:
+        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+    val rsa_der = _pss_slice(pkcs8, pkey.value_off, pkey.value_len)
+    # RSAPrivateKey SEQUENCE
+    val rsa_seq = _pss_read_tlv(rsa_der, 0u64)
+    if not rsa_seq.ok or rsa_seq.tag != 0x30u8:
+        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+    var inner = rsa_seq.value_off
+    # version
+    val rver = _pss_read_tlv(rsa_der, inner)
+    if not rver.ok:
+        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+    inner = rver.next_off
+    # modulus
+    val mod_tlv = _pss_read_tlv(rsa_der, inner)
+    if not mod_tlv.ok or mod_tlv.tag != 0x02u8:
+        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+    val modulus = _pss_strip_int_padding(_pss_slice(rsa_der, mod_tlv.value_off, mod_tlv.value_len))
+    inner = mod_tlv.next_off
+    # publicExponent
+    val pub_exp = _pss_read_tlv(rsa_der, inner)
+    if not pub_exp.ok:
+        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+    inner = pub_exp.next_off
+    # privateExponent
+    val priv_exp = _pss_read_tlv(rsa_der, inner)
+    if not priv_exp.ok or priv_exp.tag != 0x02u8:
+        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+    val d = _pss_strip_int_padding(_pss_slice(rsa_der, priv_exp.value_off, priv_exp.value_len))
+    RsaPssPrivateKey(modulus: modulus, private_exp: d, ok: true)
+
+# ============================================================================
+# RSASSA-PSS-SIGN (RFC 8017 §8.1.1) — pure-Simple, textbook (n,d) modexp.
+#
+# Steps:
+#   1. EMSA-PSS-ENCODE(M, modBits-1) -> EM
+#   2. m = OS2IP(EM)
+#   3. s = m^d mod n  (RSASP1)
+#   4. signature = I2OSP(s, k) where k = octet length of n
+# ============================================================================
+
+fn _pss_modbits(modulus: [u8]) -> i64:
+    var bits: i64 = (modulus.len().to_i64() - 1) * 8
+    var top: i64 = modulus[0u64].to_i64()
+    while top > 0:
+        bits = bits + 1
+        top = top / 2
+    bits
+
+fn _rsa_pss_sign_internal(pkcs8: [u8], message: [u8], salt: [u8], h: RsaPssHash) -> [u8]:
+    val key = rsa_pss_parse_pkcs8(pkcs8)
+    if not key.ok:
+        return []
+    val k = key.modulus.len().to_i64()
+    val mod_bits = _pss_modbits(key.modulus)
+    val em_bits = mod_bits - 1
+    val em = _pss_emsa_encode(message, em_bits, salt, h)
+    if em.len().to_i64() == 0:
+        return []
+    val n = _pss_bytes_to_bigint_be(key.modulus)
+    val d = _pss_bytes_to_bigint_be(key.private_exp)
+    val m_int = _pss_bytes_to_bigint_be(em)
+    val s = _pss_bi_mod_exp(m_int, d, n)
+    _pss_bigint_to_bytes_be(s, k.to_u64())
+
+# Public signing entry points. `salt` is caller-provided so callers can run
+# deterministic KAT tests and supply a fresh random salt in production.
+
+fn rsa_pss_sha256_sign(pkcs8: [u8], message: [u8], salt: [u8]) -> [u8]:
+    _rsa_pss_sign_internal(pkcs8, message, salt, RsaPssHash.Sha256)
+
+fn rsa_pss_sha512_sign(pkcs8: [u8], message: [u8], salt: [u8]) -> [u8]:
+    _rsa_pss_sign_internal(pkcs8, message, salt, RsaPssHash.Sha512)
+
+# ============================================================================
+# RSASSA-PSS-VERIFY (RFC 8017 §8.1.2)
+#
+# Steps:
+#   1. If signature length != k -> false
+#   2. s = OS2IP(signature); if s >= n -> false
+#   3. m = s^e mod n  (RSAVP1)
+#   4. EM = I2OSP(m, em_len)  where em_len = ceil((modBits-1)/8)
+#   5. EMSA-PSS-VERIFY(M, EM, modBits-1, slen)
+# ============================================================================
+
+fn _rsa_pss_verify_internal(spki: [u8], message: [u8], signature: [u8], slen: i64, h: RsaPssHash) -> bool:
+    val key = rsa_pss_parse_spki(spki)
+    if not key.ok:
+        return false
+    val k = key.modulus.len().to_i64()
+    if signature.len().to_i64() != k:
+        return false
+    val mod_bits = _pss_modbits(key.modulus)
+    val em_bits = mod_bits - 1
+    val em_len = (em_bits + 7) / 8
+    val n = _pss_bytes_to_bigint_be(key.modulus)
+    val e = _pss_bytes_to_bigint_be(key.exponent)
+    val s = _pss_bytes_to_bigint_be(signature)
+    if _pss_bi_compare(s, n) >= 0:
+        return false
+    val m_int = _pss_bi_mod_exp(s, e, n)
+    val em = _pss_bigint_to_bytes_be(m_int, em_len.to_u64())
+    _pss_emsa_verify(message, em, em_bits, slen, h)
+
+fn rsa_pss_sha256_verify(spki: [u8], message: [u8], signature: [u8]) -> bool:
+    _rsa_pss_verify_internal(spki, message, signature, 32, RsaPssHash.Sha256)
+
+fn rsa_pss_sha512_verify(spki: [u8], message: [u8], signature: [u8]) -> bool:
+    _rsa_pss_verify_internal(spki, message, signature, 64, RsaPssHash.Sha512)
+
+# Variant: explicit salt length (some callers — e.g. TLS 1.3 — fix slen=hLen
+# but other deployments use slen != hLen). Useful for cross-checking against
+# OpenSSL output where saltlen is configurable.
+fn rsa_pss_sha256_verify_with_slen(spki: [u8], message: [u8], signature: [u8], slen: i64) -> bool:
+    _rsa_pss_verify_internal(spki, message, signature, slen, RsaPssHash.Sha256)
+
+fn rsa_pss_sha512_verify_with_slen(spki: [u8], message: [u8], signature: [u8], slen: i64) -> bool:
+    _rsa_pss_verify_internal(spki, message, signature, slen, RsaPssHash.Sha512)

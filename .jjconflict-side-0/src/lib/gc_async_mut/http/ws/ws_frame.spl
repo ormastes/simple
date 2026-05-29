@@ -1,0 +1,165 @@
+# WebSocket Frame Types — RFC 6455 §5
+#
+# Pure-Simple seed for WebSocket framing (W16-E).
+#
+# Scope (W16-E):
+#   - Frame header layout: FIN:1 + RSV1-3:3 + opcode:4 + MASK:1 + payload-len:7
+#     + ext-len:0/16/64 + masking-key:0/32 + payload
+#   - Tagged union WsFrame covering RFC 6455 §5.6/§5.5 frame types
+#   - Opcode + control-frame constants
+#   - Close status codes (RFC 6455 §7.4)
+#   - Payloads are ALWAYS [u8] (text frames carry the raw UTF-8 bytes;
+#     UTF-8 validation is a separate layer and is NOT performed here).
+#     This avoids the "text-only API byte cliffs" pattern where bytes flowing
+#     through `text` get silently mangled by from_utf8_lossy.
+#
+# Out of scope (deferred):
+#   - HTTP-Upgrade handshake (RFC 6455 §4) — separate wave
+#   - Connection state machine (RFC 6455 §5.5/§7) — separate wave
+#   - Per-message-deflate / extensions (RFC 7692)
+#   - UTF-8 validation of Text frame payloads (caller-side check)
+
+# ============================================================================
+# Frame opcodes (RFC 6455 §5.2)
+# ============================================================================
+
+val WS_OPCODE_CONTINUATION: i64 = 0x0
+val WS_OPCODE_TEXT: i64         = 0x1
+val WS_OPCODE_BINARY: i64       = 0x2
+# 0x3-0x7 reserved for further non-control frames
+val WS_OPCODE_CLOSE: i64        = 0x8
+val WS_OPCODE_PING: i64         = 0x9
+val WS_OPCODE_PONG: i64         = 0xa
+# 0xb-0xf reserved for further control frames
+
+# ============================================================================
+# Header bit masks (RFC 6455 §5.2)
+# ============================================================================
+
+# Byte 1: FIN | RSV1 | RSV2 | RSV3 | opcode (4 bits)
+val WS_FIN_BIT: i64        = 0x80
+val WS_RSV1_BIT: i64       = 0x40
+val WS_RSV2_BIT: i64       = 0x20
+val WS_RSV3_BIT: i64       = 0x10
+val WS_OPCODE_MASK: i64    = 0x0f
+
+# Byte 2: MASK | payload-len (7 bits)
+val WS_MASK_BIT: i64       = 0x80
+val WS_PAYLOAD_LEN_MASK: i64 = 0x7f
+
+# Payload length sentinels (RFC 6455 §5.2)
+val WS_LEN_EXT_16: i64     = 126   # next 2 bytes are 16-bit big-endian length
+val WS_LEN_EXT_64: i64     = 127   # next 8 bytes are 64-bit big-endian length
+
+# Length thresholds for payload encoding selection
+val WS_LEN_THRESH_16: i64  = 126     # >= 126 → use 16-bit ext
+val WS_LEN_THRESH_64: i64  = 65536   # >= 65536 → use 64-bit ext
+
+# Control frames MUST have payload <= 125 (RFC 6455 §5.5)
+val WS_MAX_CONTROL_PAYLOAD: i64 = 125
+
+# Masking key length (always 4 bytes when MASK=1)
+val WS_MASK_KEY_LEN: i64   = 4
+
+# ============================================================================
+# Close status codes (RFC 6455 §7.4.1)
+# ============================================================================
+
+val WS_CLOSE_NORMAL: i64              = 1000
+val WS_CLOSE_GOING_AWAY: i64          = 1001
+val WS_CLOSE_PROTOCOL_ERROR: i64      = 1002
+val WS_CLOSE_UNSUPPORTED_DATA: i64    = 1003
+# 1004 reserved
+val WS_CLOSE_NO_STATUS: i64           = 1005   # MUST NOT be sent on the wire
+val WS_CLOSE_ABNORMAL: i64            = 1006   # MUST NOT be sent on the wire
+val WS_CLOSE_INVALID_PAYLOAD: i64     = 1007
+val WS_CLOSE_POLICY_VIOLATION: i64    = 1008
+val WS_CLOSE_MESSAGE_TOO_BIG: i64     = 1009
+val WS_CLOSE_MANDATORY_EXTENSION: i64 = 1010
+val WS_CLOSE_INTERNAL_ERROR: i64      = 1011
+val WS_CLOSE_TLS_HANDSHAKE: i64       = 1015   # MUST NOT be sent on the wire
+
+# ============================================================================
+# Per-type payload structs
+# ============================================================================
+#
+# All payload-bearing structs use [u8]. RSV1-3 are surfaced for extension
+# negotiation (e.g. permessage-deflate, RFC 7692) but not interpreted by
+# this framing layer. `masked` + `mask_key` reflect on-wire state — the
+# parser unmasks the payload before constructing the frame, so `payload`
+# is always the *unmasked* application bytes.
+
+class WsTextFrame:
+    """RFC 6455 §5.6 Text frame. payload = raw UTF-8 bytes (validation deferred)."""
+    fin: bool
+    rsv1: bool
+    rsv2: bool
+    rsv3: bool
+    payload: [u8]
+
+class WsBinaryFrame:
+    """RFC 6455 §5.6 Binary frame."""
+    fin: bool
+    rsv1: bool
+    rsv2: bool
+    rsv3: bool
+    payload: [u8]
+
+class WsContinuationFrame:
+    """RFC 6455 §5.4 Continuation frame for fragmented messages."""
+    fin: bool
+    rsv1: bool
+    rsv2: bool
+    rsv3: bool
+    payload: [u8]
+
+class WsCloseFrame:
+    """RFC 6455 §5.5.1 Close frame.
+    `has_status` distinguishes a zero-length payload (no status, RFC §5.5.1)
+    from an explicit code+reason. When `has_status` is true, payload-on-wire
+    is a 2-byte big-endian status code followed by an optional UTF-8 reason."""
+    fin: bool                # MUST be true for control frames
+    has_status: bool
+    code: i64                # 0 when has_status is false
+    reason: [u8]             # may be empty; validated UTF-8 by caller
+
+class WsPingFrame:
+    """RFC 6455 §5.5.2 Ping. payload <= 125 bytes."""
+    fin: bool                # MUST be true
+    payload: [u8]
+
+class WsPongFrame:
+    """RFC 6455 §5.5.3 Pong. payload <= 125 bytes."""
+    fin: bool                # MUST be true
+    payload: [u8]
+
+# ============================================================================
+# Tagged union: WsFrame
+# ============================================================================
+
+enum WsFrame:
+    """Discriminated union of WebSocket frame types (RFC 6455 §5.6 + §5.5)."""
+    Text(WsTextFrame)
+    Binary(WsBinaryFrame)
+    Continuation(WsContinuationFrame)
+    Close(WsCloseFrame)
+    Ping(WsPingFrame)
+    Pong(WsPongFrame)
+
+# ============================================================================
+# Opcode classification helpers
+# ============================================================================
+
+# True for opcodes 0x8-0xf (control frames per RFC 6455 §5.5).
+fn ws_is_control_opcode(opcode: i64) -> bool:
+    return (opcode & 0x08) != 0
+
+# True if opcode is one of the defined data opcodes (CONTINUATION/TEXT/BINARY).
+fn ws_is_data_opcode(opcode: i64) -> bool:
+    if opcode == WS_OPCODE_CONTINUATION:
+        return true
+    if opcode == WS_OPCODE_TEXT:
+        return true
+    if opcode == WS_OPCODE_BINARY:
+        return true
+    return false

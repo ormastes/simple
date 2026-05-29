@@ -1,0 +1,118 @@
+//! Target: `library/std/src/sys/pal/simpleos/sync.rs`
+//!
+//! Single-threaded `Mutex`/`RwLock`/`Condvar`. Because SimpleOS userspace
+//! has exactly one scheduling context, any contention would mean a deadlock
+//! — we call `abort_internal()` rather than silently spin forever.
+
+use crate::cell::Cell;
+use crate::sys::common::abort_internal;
+use crate::time::Duration;
+
+fn contend() -> ! {
+    // Reached only if libstd somehow re-enters a held primitive on a
+    // single-threaded target — treat as a hard logic bug.
+    abort_internal()
+}
+
+// ---- Mutex ---------------------------------------------------------------
+
+pub struct Mutex { locked: Cell<bool> }
+
+// SAFETY: single-threaded — no real cross-thread sharing can occur.
+unsafe impl Sync for Mutex {}
+unsafe impl Send for Mutex {}
+
+impl Mutex {
+    pub const fn new() -> Mutex { Mutex { locked: Cell::new(false) } }
+
+    #[inline]
+    pub fn lock(&self) {
+        if self.locked.get() { contend(); }
+        self.locked.set(true);
+    }
+
+    #[inline]
+    pub fn try_lock(&self) -> bool {
+        if self.locked.get() { return false; }
+        self.locked.set(true);
+        true
+    }
+
+    #[inline]
+    pub unsafe fn unlock(&self) {
+        debug_assert!(self.locked.get());
+        self.locked.set(false);
+    }
+}
+
+// ---- RwLock --------------------------------------------------------------
+
+pub struct RwLock { state: Cell<i32> } // -1 = write, >0 = readers
+
+unsafe impl Sync for RwLock {}
+unsafe impl Send for RwLock {}
+
+impl RwLock {
+    pub const fn new() -> RwLock { RwLock { state: Cell::new(0) } }
+
+    #[inline]
+    pub fn read(&self) {
+        if self.state.get() < 0 { contend(); }
+        self.state.set(self.state.get() + 1);
+    }
+
+    #[inline]
+    pub fn try_read(&self) -> bool {
+        if self.state.get() < 0 { return false; }
+        self.state.set(self.state.get() + 1);
+        true
+    }
+
+    #[inline]
+    pub fn write(&self) {
+        if self.state.get() != 0 { contend(); }
+        self.state.set(-1);
+    }
+
+    #[inline]
+    pub fn try_write(&self) -> bool {
+        if self.state.get() != 0 { return false; }
+        self.state.set(-1);
+        true
+    }
+
+    #[inline]
+    pub unsafe fn read_unlock(&self) {
+        debug_assert!(self.state.get() > 0);
+        self.state.set(self.state.get() - 1);
+    }
+
+    #[inline]
+    pub unsafe fn write_unlock(&self) {
+        debug_assert_eq!(self.state.get(), -1);
+        self.state.set(0);
+    }
+}
+
+// ---- Condvar -------------------------------------------------------------
+//
+// With one thread there is nobody to wake. `wait` on a single-thread target
+// would block forever → treat as a bug and abort.
+
+pub struct Condvar;
+
+unsafe impl Sync for Condvar {}
+unsafe impl Send for Condvar {}
+
+impl Condvar {
+    pub const fn new() -> Condvar { Condvar }
+
+    #[inline] pub fn notify_one(&self) {}
+    #[inline] pub fn notify_all(&self) {}
+
+    #[inline]
+    pub unsafe fn wait(&self, _m: &Mutex) { contend() }
+
+    #[inline]
+    pub unsafe fn wait_timeout(&self, _m: &Mutex, _t: Duration) -> bool { false }
+}

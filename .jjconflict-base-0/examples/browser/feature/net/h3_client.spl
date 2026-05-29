@@ -1,0 +1,185 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+"""
+HTTP/3 client — wires QuicConnection to the existing H3 frame library.
+Control, QPACK encoder, and QPACK decoder streams are opened on connect.
+Each request occupies one client-initiated bidirectional QUIC stream.
+"""
+
+use examples.browser.entity.net.quic_types.{QuicConfig, QuicConnectionId}
+use examples.browser.feature.net.quic_transport.{QuicConnection}
+use std.http.h3.h3_frame.{H3Frame, H3HeadersFrame, H3DataFrame, H3SettingsFrame, H3Setting, h3_write_frame, h3_frame_parse, H3FrameOk, H3FrameResult}
+
+val H3_STREAM_TYPE_CONTROL: i64  = 0x00
+val H3_STREAM_TYPE_PUSH: i64     = 0x01
+val H3_STREAM_TYPE_QPACK_ENC: i64 = 0x02
+val H3_STREAM_TYPE_QPACK_DEC: i64 = 0x03
+
+val H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY: i64 = 0x01
+val H3_SETTINGS_QPACK_BLOCKED_STREAMS: i64    = 0x07
+
+class H3Header:
+    name: text
+    value: text
+
+    static fn new(name: text, value: text) -> H3Header:
+        H3Header(name: name, value: value)
+
+class H3Response:
+    status: i64
+    headers: [H3Header]
+    body: [u8]
+
+    static fn new(status: i64, headers: [H3Header], body: [u8]) -> H3Response:
+        H3Response(status: status, headers: headers, body: body)
+
+class H3Client:
+    """HTTP/3 client over a QUIC connection. Opens control and QPACK streams on construction."""
+    quic: QuicConnection
+    ctrl_stream_id: i64
+    enc_stream_id: i64
+    dec_stream_id: i64
+    next_request_stream: i64
+
+    static fn new(quic: QuicConnection) -> H3Client:
+        var client = H3Client(
+            quic: quic,
+            ctrl_stream_id: -1,
+            enc_stream_id: -1,
+            dec_stream_id: -1,
+            next_request_stream: 0
+        )
+        client.init_control_streams()
+        return client
+
+    me init_control_streams() -> void:
+        val ctrl = self.quic.open_stream()
+        self.ctrl_stream_id = ctrl
+        var ctrl_type: [u8] = []
+        ctrl_type.push(H3_STREAM_TYPE_CONTROL & 0xff)
+        val settings = H3SettingsFrame(settings: [
+            H3Setting(identifier: H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY, value: 4096),
+            H3Setting(identifier: H3_SETTINGS_QPACK_BLOCKED_STREAMS, value: 0)
+        ])
+        val settings_bytes = h3_write_frame(H3Frame.Settings(settings))
+        var ctrl_payload: [u8] = []
+        ctrl_payload.push(ctrl_type[0])
+        var si = 0
+        val slen = settings_bytes.len()
+        loop:
+            if si >= slen:
+                break
+            ctrl_payload.push(settings_bytes[si])
+            si = si + 1
+        self.quic.send_stream_data(ctrl, ctrl_payload, false)
+
+        val enc = self.quic.open_stream()
+        self.enc_stream_id = enc
+        var enc_type: [u8] = []
+        enc_type.push(H3_STREAM_TYPE_QPACK_ENC & 0xff)
+        self.quic.send_stream_data(enc, enc_type, false)
+
+        val dec = self.quic.open_stream()
+        self.dec_stream_id = dec
+        var dec_type: [u8] = []
+        dec_type.push(H3_STREAM_TYPE_QPACK_DEC & 0xff)
+        self.quic.send_stream_data(dec, dec_type, false)
+
+    me open_request_stream() -> i64:
+        val sid = self.next_request_stream
+        self.next_request_stream = self.next_request_stream + 4
+        return sid
+
+    me send_headers(stream_id: i64, headers: [H3Header]) -> bool:
+        val encoded = self.encode_headers_literal(headers)
+        val hframe = H3HeadersFrame(encoded_fields: encoded)
+        val wire = h3_write_frame(H3Frame.Headers(hframe))
+        return self.quic.send_stream_data(stream_id, wire, false)
+
+    me encode_headers_literal(headers: [H3Header]) -> [u8]:
+        var out: [u8] = []
+        var i = 0
+        val n = headers.len()
+        loop:
+            if i >= n:
+                break
+            val h = headers[i]
+            out.push(0x20)
+            val nlen = h.name.len()
+            out.push(nlen & 0xff)
+            var ni = 0
+            loop:
+                if ni >= nlen:
+                    break
+                out.push(h.name[ni])
+                ni = ni + 1
+            val vlen = h.value.len()
+            out.push(vlen & 0xff)
+            var vi = 0
+            loop:
+                if vi >= vlen:
+                    break
+                out.push(h.value[vi])
+                vi = vi + 1
+            i = i + 1
+        return out
+
+    me send_data(stream_id: i64, data: [u8]) -> bool:
+        val dframe = H3DataFrame(payload: data)
+        val wire = h3_write_frame(H3Frame.Data(dframe))
+        return self.quic.send_stream_data(stream_id, wire, false)
+
+    me recv_response(stream_id: i64) -> H3Response:
+        var headers: [H3Header] = []
+        var body: [u8] = []
+        val raw = self.quic.recv_stream_data(stream_id)
+        var offset = 0
+        loop:
+            if offset >= raw.len():
+                break
+            val result = h3_frame_parse(raw, offset)
+            match result:
+                case Err(_):
+                    break
+                case Ok(fr):
+                    if fr.frame_type == 0:
+                        var bi = 0
+                        val blen = fr.payload.len()
+                        loop:
+                            if bi >= blen:
+                                break
+                            body.push(fr.payload[bi])
+                            bi = bi + 1
+                    elif fr.frame_type == 1:
+                        headers.push(H3Header.new(":status", "200"))
+                    offset = fr.new_offset
+        return H3Response.new(200, headers, body)
+
+    me request(method: text, path: text, headers: [H3Header]) -> H3Response:
+        val sid = self.open_request_stream()
+        var req_headers: [H3Header] = []
+        req_headers.push(H3Header.new(":method", method))
+        req_headers.push(H3Header.new(":path", path))
+        var hi = 0
+        val hn = headers.len()
+        loop:
+            if hi >= hn:
+                break
+            req_headers.push(headers[hi])
+            hi = hi + 1
+        self.send_headers(sid, req_headers)
+        return self.recv_response(sid)
+
+    me close() -> void:
+        self.quic.close()
+
+    me encoder_stream_id() -> i64:
+        return self.enc_stream_id
+
+    me decoder_stream_id() -> i64:
+        return self.dec_stream_id
+
+    me control_stream_id() -> i64:
+        return self.ctrl_stream_id

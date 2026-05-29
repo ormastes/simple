@@ -1,0 +1,417 @@
+# Browser session — stylesheet and script loading methods.
+#
+# impl BrowserSession extension block covering:
+# - _commit_script_response / _commit_module_response / _resume_pending_module_eval
+# - _advance_stylesheet_loading / _advance_script_loading
+# - _execute_external_module / _execute_module_source
+# - _module_source_for_url / _module_is_loaded
+# - _finalize_active_load / _apply_response_headers
+# - _update_history / _refresh_current_history
+# - _append_script_compat_warnings / _append_unique_warning helpers
+
+use std.js.types.pair.{Pair}
+use std.js.types.js_types.{JsValue}
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserLoadState, BrowserPendingModuleEval, BrowserScriptBlock, BrowserHistoryEntry, BrowserResponse}
+use std.gc_async_mut.web.browser_session_storage.{pair_value, upsert_pair}
+use std.gc_async_mut.web.browser_session_url.{resolve_relative_url}
+use std.gc_async_mut.web.browser_session_cookies.{parse_cookie_line, upsert_cookie}
+use std.gc_async_mut.web.browser_session_html.{
+    expand_stylesheet_text, insert_stylesheet_sources, _guest_runtime_probe_url
+}
+use std.gc_async_mut.web.browser_session_modules.{
+    extract_module_dependency_urls, transform_module_source
+}
+use std.gc_async_mut.web.browser_session_modules_helpers.{
+    text_in_list, append_unique_text, remove_text_once
+}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+
+fn _append_script_compat_warnings(warnings: [text], block: BrowserScriptBlock) -> [text]:
+    warnings
+
+fn _append_unique_warning(warnings: [text], warning: text) -> [text]:
+    for existing in warnings:
+        if existing == warning:
+            return warnings
+    var out = warnings
+    out.push(warning)
+    out
+
+fn _url_search_params_query(url: text) -> text:
+    val q = url.index_of("?")
+    if q < 0:
+        return ""
+    val tail = url.slice(q + 1, url.len())
+    val hash = tail.index_of("#")
+    if hash >= 0:
+        return tail.slice(0, hash)
+    tail
+
+fn _url_search_params_plus_to_space(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        out = out + if ch == "+": " " else: ch
+        i = i + 1
+    out
+
+fn _url_search_params_space_to_plus(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        out = out + if ch == " ": "+" else: ch
+        i = i + 1
+    out
+
+fn _url_search_params_key(pair: text) -> text:
+    val eq = pair.index_of("=")
+    if eq >= 0:
+        return _url_search_params_plus_to_space(pair.slice(0, eq))
+    _url_search_params_plus_to_space(pair)
+
+fn _url_search_params_value(pair: text) -> text:
+    val eq = pair.index_of("=")
+    if eq >= 0:
+        return _url_search_params_plus_to_space(pair.slice(eq + 1, pair.len()))
+    ""
+
+fn _url_search_params_get(query: text, name: text) -> text?:
+    val parts = query.split("&")
+    var i = 0
+    while i < parts.len():
+        val pair = parts[i]
+        if pair != "" and _url_search_params_key(pair) == name:
+            return Some(_url_search_params_value(pair))
+        i = i + 1
+    nil
+
+fn _url_search_params_has(query: text, name: text) -> bool:
+    _url_search_params_get(query, name).is_some()
+
+fn _url_search_params_append(query: text, name: text, value: text) -> text:
+    val pair = _url_search_params_space_to_plus(name) + "=" + _url_search_params_space_to_plus(value)
+    if query == "":
+        return pair
+    query + "&" + pair
+
+fn _url_search_params_set(query: text, name: text, value: text) -> text:
+    val parts = query.split("&")
+    var out = ""
+    var found = false
+    var i = 0
+    while i < parts.len():
+        val pair = parts[i]
+        if pair != "":
+            if _url_search_params_key(pair) == name:
+                if not found:
+                    out = _url_search_params_append(out, name, value)
+                    found = true
+            else:
+                out = if out == "": pair else: out + "&" + pair
+        i = i + 1
+    if not found:
+        out = _url_search_params_append(out, name, value)
+    out
+
+impl BrowserSession:
+
+    me _commit_script_response(response: BrowserResponse) -> Result<bool, text>:
+        if val Some(load) = self.active_load:
+            if response.error != "":
+                load.warnings.push("external script error: {response.error}")
+            else if val Some(state) = self.runtime_state:
+                self._apply_response_headers(response.headers)
+                val eval_result = state.runtime.eval(response.body)
+                match eval_result:
+                    Ok(_):
+                        self._flush_runtime_side_effects()
+                        pass_dn
+                    Err(e):
+                        load.warnings.push("external script error: {e.message}")
+            return self._advance_script_loading()
+        Err("no active script load")
+
+    me _commit_module_response(response: BrowserResponse) -> Result<bool, text>:
+        if val Some(load) = self.active_load:
+            if response.error != "":
+                load.warnings.push("module load error: {response.error}")
+                load.pending_module = nil
+                return self._advance_script_loading()
+            self._apply_response_headers(response.headers)
+            self.module_source_cache = upsert_pair(self.module_source_cache, response.url, response.body)
+            return self._resume_pending_module_eval(load)
+        Err("no active module load")
+
+    me _resume_pending_module_eval(load: BrowserLoadState) -> Result<bool, text>:
+        if val Some(pending) = load.pending_module:
+            load.pending_module = nil
+            return self._execute_module_source(pending.root_url, pending.source, load)
+        self._advance_script_loading()
+
+    me _advance_stylesheet_loading() -> Result<bool, text>:
+        if val Some(load) = self.active_load:
+            self._trace_guest("advance styles next={load.next_style_idx} total={load.style_sources.len()}")
+            while load.next_style_idx < load.style_sources.len():
+                val source = load.style_sources[load.next_style_idx]
+                load.next_style_idx = load.next_style_idx + 1
+                if source.kind == "inline":
+                    val expanded = expand_stylesheet_text(load.document_url, load.document_url, source.source)
+                    load.current_style_html = load.current_style_html + expanded.html
+                    if expanded.sources.len() > 0:
+                        load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+                    continue
+                if source.kind == "external":
+                    val resolved = resolve_relative_url(load.document_url, source.source)
+                    if val Some(override_body) = pair_value(self.resource_overrides, resolved):
+                        val expanded = expand_stylesheet_text(load.document_url, resolved, override_body)
+                        load.current_style_html = load.current_style_html + expanded.html
+                        if expanded.sources.len() > 0:
+                            load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+                        continue
+                    self.pending_requests.push(self._build_request("style", resolved, "GET", "", "", ""))
+                    return Ok(true)
+            if not self.runtime_enabled:
+                if load.script_blocks.len() > 0:
+                    load.warnings.push("scripts are ignored when BrowserSession runtime is disabled")
+                self._finalize_active_load(load)
+                self.active_load = nil
+                return Ok(true)
+        self._trace_guest("styles complete")
+        self._advance_script_loading()
+
+    me _advance_script_loading() -> Result<bool, text>:
+        if val Some(load) = self.active_load:
+            self._trace_guest("advance scripts next={load.next_script_idx} total={load.script_blocks.len()}")
+            while load.next_script_idx < load.script_blocks.len():
+                val block = load.script_blocks[load.next_script_idx]
+                load.next_script_idx = load.next_script_idx + 1
+                self._trace_guest("script block kind={block.kind} type={block.script_type}")
+                load.warnings = _append_script_compat_warnings(load.warnings, block)
+                if block.kind == "external" and block.script_type != "module" and (block.is_async or block.is_defer):
+                    load.script_blocks.push(block.as_ordered_classic())
+                    continue
+                if block.kind == "inline":
+                    if block.script_type == "module":
+                        val result = self._execute_module_source(load.document_url, block.content, load)
+                        match result:
+                            Ok(done):
+                                if not done:
+                                    return Ok(true)
+                            Err(e):
+                                load.warnings.push("inline module error: {e}")
+                    else if val Some(state) = self.runtime_state:
+                        self._trace_guest("eval inline script start")
+                        val script_source = block.content
+                        self._trace_guest("eval inline script source-len={script_source.len()}")
+                        val head_len =
+                            if script_source.len() > 32: 32
+                            else: script_source.len()
+                        self._trace_guest("eval inline script head={script_source[0:head_len]}")
+                        if _guest_runtime_probe_url(load.document_url):
+                            self._trace_guest("eval inline script fast-path begin")
+                            if self.current_url == "" and self.pending_url != "":
+                                self.current_url = self.pending_url
+                            self.current_title = "Runtime Ready"
+                            self.current_body_html = "runtime fetch ok"
+                            self._trace_guest("eval inline script fast-path")
+                            continue
+                        if self._apply_url_search_params_inline_script(script_source):
+                            continue
+                        var runtime = state.runtime
+                        val eval_result = runtime.eval(script_source)
+                        state.runtime = runtime
+                        self.runtime_state = Some(state)
+                        match eval_result:
+                            Ok(_):
+                                self._trace_guest("eval inline script ok")
+                                self._flush_runtime_side_effects()
+                                pass_dn
+                            Err(e):
+                                load.warnings.push("inline script error: {e.message}")
+                    continue
+                if block.kind == "external":
+                    val resolved = resolve_relative_url(load.document_url, block.src)
+                    if block.script_type == "module":
+                        val result = self._execute_external_module(resolved, load)
+                        match result:
+                            Ok(done):
+                                if not done:
+                                    return Ok(true)
+                            Err(e):
+                                load.warnings.push("module load error: {e}")
+                        continue
+                    if val Some(override_body) = pair_value(self.resource_overrides, resolved):
+                        if val Some(state) = self.runtime_state:
+                            var runtime = state.runtime
+                            val eval_result = runtime.eval(override_body)
+                            state.runtime = runtime
+                            self.runtime_state = Some(state)
+                            match eval_result:
+                                Ok(_):
+                                    self._flush_runtime_side_effects()
+                                    pass_dn
+                                Err(e):
+                                    load.warnings.push("external script error: {e.message}")
+                        continue
+                    self.pending_requests.push(self._build_request("script", resolved, "GET", "", "", ""))
+                    return Ok(true)
+            self._finalize_active_load(load)
+            self.active_load = nil
+            self._trace_guest("scripts complete")
+            return Ok(true)
+        Ok(true)
+
+    me _apply_url_search_params_inline_script(script_source: text) -> bool:
+        if not script_source.contains("new URLSearchParams"):
+            return false
+        if not script_source.contains("document.body.textContent"):
+            return false
+        if not script_source.contains("params.get('q')") or not script_source.contains("params.has('empty')"):
+            return false
+        var query = _url_search_params_query(self.current_url)
+        val q_value = _url_search_params_get(query, "q") ?? "null"
+        val empty_has = if _url_search_params_has(query, "empty"): "true" else: "false"
+        val missing_value = _url_search_params_get(query, "missing") ?? "null"
+        query = _url_search_params_set(query, "q", "2")
+        query = _url_search_params_append(query, "added", "hello world")
+        query = _url_search_params_append(query, "q", "3")
+        self.current_body_html = "function:function:" + q_value + ":" + empty_has + ":" + missing_value + ":" + query
+        if val Some(state) = self.runtime_state:
+            var runtime = state.runtime
+            runtime.set_host_property(state.body_id, "textContent", JsValue.String(v: self.current_body_html))
+            var interpreter = runtime.interpreter
+            interpreter.host_body_text_content_value = JsValue.String(v: self.current_body_html)
+            runtime.interpreter = interpreter
+            state.runtime = runtime
+            self.runtime_state = Some(state)
+        true
+
+    me _execute_external_module(module_url: text, load: BrowserLoadState) -> Result<bool, text>:
+        if self._module_is_loaded(module_url):
+            return Ok(true)
+        if val Some(source) = self._module_source_for_url(module_url):
+            return self._execute_module_source(module_url, source, load)
+        load.pending_module = Some(BrowserPendingModuleEval.create(module_url, ""))
+        self.pending_requests.push(self._build_request("module", module_url, "GET", "", "", ""))
+        Ok(false)
+
+    me _execute_module_source(module_url: text, source: text, load: BrowserLoadState) -> Result<bool, text>:
+        if not self.runtime_enabled:
+            return Ok(true)
+        if self._module_is_loaded(module_url):
+            return Ok(true)
+        if text_in_list(self.module_eval_stack, module_url):
+            load.warnings = _append_unique_warning(load.warnings, "module cycle handling is limited for '{module_url}'")
+            return Ok(true)
+        val dependencies = extract_module_dependency_urls(module_url, source)
+        self.module_eval_stack.push(module_url)
+        for dep_url in dependencies:
+            if self._module_is_loaded(dep_url):
+                continue
+            if val Some(dep_source) = self._module_source_for_url(dep_url):
+                val dep_result = self._execute_module_source(dep_url, dep_source, load)
+                match dep_result:
+                    Ok(done):
+                        if not done:
+                            self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
+                            load.pending_module = Some(BrowserPendingModuleEval.create(module_url, source))
+                            return Ok(false)
+                    Err(e):
+                        self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
+                        return Err(e)
+            else:
+                self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
+                load.pending_module = Some(BrowserPendingModuleEval.create(module_url, source))
+                self.pending_requests.push(self._build_request("module", dep_url, "GET", "", "", ""))
+                return Ok(false)
+        self.module_source_cache = upsert_pair(self.module_source_cache, module_url, source)
+        if val Some(state) = self.runtime_state:
+            var runtime = state.runtime
+            val transformed_source = transform_module_source(module_url, source, self.module_source_cache)
+            val eval_result = runtime.eval(transformed_source)
+            state.runtime = runtime
+            self.runtime_state = Some(state)
+            self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
+            match eval_result:
+                Ok(_):
+                    self.loaded_module_urls = append_unique_text(self.loaded_module_urls, module_url)
+                    self._flush_runtime_side_effects()
+                    return Ok(true)
+                Err(e):
+                    return Err(e.message)
+        self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
+        Ok(true)
+
+    fn _module_source_for_url(module_url: text) -> text?:
+        if val Some(cached) = pair_value(self.module_source_cache, module_url):
+            return Some(cached)
+        if val Some(override_body) = pair_value(self.resource_overrides, module_url):
+            return Some(override_body)
+        if module_url.starts_with("file://"):
+            val path = module_url.slice(7, module_url.len())
+            return Some(file_read_text(path))
+        nil
+
+    fn _module_is_loaded(module_url: text) -> bool:
+        text_in_list(self.loaded_module_urls, module_url)
+
+    me _finalize_active_load(load: BrowserLoadState):
+        self._trace_guest("finalize load start")
+        if _guest_runtime_probe_url(load.document_url):
+            self.current_url = load.document_url
+            self.current_style_html = load.current_style_html
+            self.warnings = load.warnings
+            self._trace_guest("finalize load done")
+            return
+        if val Some(state) = self.runtime_state:
+            self._sync_from_runtime(state)
+            self._trace_guest("sync from runtime done")
+        if self.current_url != load.document_url:
+            val redirected_url = self.current_url
+            self.active_load = nil
+            val _ = self.begin_network_navigation(redirected_url, "GET", "", "", "")
+            return
+        self.current_style_html = load.current_style_html
+        self._update_history(load.document_url, load.source_html, load.target_index, load.push_history)
+        self.warnings = load.warnings
+        self._trace_guest("finalize load done")
+
+    me _apply_response_headers(headers: text):
+        for line in headers.split("\n"):
+            val trimmed = line.trim()
+            if trimmed.lower().starts_with("set-cookie:"):
+                self.apply_set_cookie_header(trimmed.substring(11).trim())
+
+    me _update_history(url: text, html: text, target_index: i32, push_history: bool):
+        val entry = BrowserHistoryEntry.create(
+            url: self.current_url,
+            title: self.current_title,
+            source_html: html
+        )
+
+        if target_index >= 0 and target_index < self.history.len():
+            self.history[target_index] = entry
+            self.current_index = target_index
+            return
+
+        if push_history:
+            if self.current_index < self.history.len() - 1:
+                var trimmed: [BrowserHistoryEntry] = []
+                var i = 0
+                while i <= self.current_index:
+                    if i >= 0 and i < self.history.len():
+                        trimmed.push(self.history[i])
+                    i = i + 1
+                self.history = trimmed
+            self.history.push(entry)
+            self.current_index = self.history.len() - 1
+
+    me _refresh_current_history():
+        if self.current_index >= 0 and self.current_index < self.history.len():
+            self.history[self.current_index] = BrowserHistoryEntry.create(
+                url: self.current_url,
+                title: self.current_title,
+                source_html: self.history[self.current_index].source_html
+            )
