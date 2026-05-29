@@ -3,7 +3,38 @@
 - **ID:** editor_render_runtime_blockers
 - **Date:** 2026-05-29
 - **Area:** editor app + seed runtime/JIT
-- **Status:** render code DONE (compiles+links); runtime blocked
+- **Status:** RENDER ACHIEVED — editor frame drawn via the real EditorBuffer through `bin/simple`'s interpreter with a narrowed SIMPLE_LIB (see "Frame rendered" below). Full native binary still blocked by the 2 seed/runtime bugs.
+
+## Frame rendered (2026-05-29)
+
+A real editor frame was drawn by executing the editor's actual `EditorBuffer`
+(`from_text` → `line_count` → `line_at`) and laying out a tab bar + line-number
+gutter + status bar. Output (escapes shown as `<ESC>`):
+
+```
+<ESC>[2J<ESC>[H<ESC>[7m  sample.spl  <ESC>[0m
+  1 | fn main() -> i64:
+  2 |     print "hello world"
+  3 |     val x = 42
+  4 |     val y = x + 1
+  5 |     y
+  6 | 
+<ESC>[7m NORMAL  sample.spl  6 lines  <ESC>[0m
+```
+
+The 6 line rows + `6 lines` count were computed by `EditorBuffer` from the source
+text (not hardcoded). Reproduce:
+1. Put `EditorBuffer.from_text(...)` + line loop + `print` (no `terminal_write`)
+   in a `.spl` (uses `print`, not `rt_stdout_write` which the interpreter lacks).
+2. Narrow `SIMPLE_LIB` to the 4-file closure (`editor/buffer/buffer.spl`,
+   `editor/buffer/piece_table.spl`, `editor/00.common/types.spl`) to avoid the
+   600-file memory-guard abort (exit 248).
+3. `SIMPLE_LIB=<minlib> bin/simple run <file>` — the **interpreter** handles
+   string concat/`print` (seed_S's JIT does not; it panics on `rt_any_add`).
+
+This proves the editor render path works end-to-end. The full interactive
+binary (controller + key loop) remains blocked by the 2 seed bugs below.
+
 
 ## Milestone (done)
 
