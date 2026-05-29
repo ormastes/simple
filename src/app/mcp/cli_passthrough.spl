@@ -33,8 +33,12 @@ fn handle_cli_passthrough_direct(id: text, body: text, name: text, cli_command: 
     # file so workers hold a file fd (not the popen pipe), then read the file
     # back with `cat` after the command finishes.
     if name == "simple_test":
-        # Use mktemp so concurrent test calls get distinct files.
-        val wrapped = "tmp=$(mktemp /tmp/simple_mcp_test_XXXXXX.txt); { " + cmd + "; } > \"$tmp\" 2>&1; EC=$?; cat \"$tmp\"; rm -f \"$tmp\"; exit $EC"
+        # Wrap in a subshell so that shell_cmd's appended "< /dev/null" binds to
+        # the subshell entry point (harmless), not to individual internal commands.
+        # < /dev/null is explicitly placed on the test command itself so it doesn't
+        # read from the MCP stdin pipe.
+        # mktemp uses trailing X's only (no suffix) for BSD/macOS compatibility.
+        val wrapped = "(tmp=$(mktemp /tmp/simple_mcp_test_XXXXXX); { " + cmd + " < /dev/null; } > \"$tmp\" 2>&1; EC=$?; cat \"$tmp\"; rm -f \"$tmp\"; exit $EC)"
         (out, exit_code) = shell_cmd(wrapped)
     else:
         cmd = cmd + " 2>&1"

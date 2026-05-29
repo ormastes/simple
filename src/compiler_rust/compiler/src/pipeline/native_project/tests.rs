@@ -1872,20 +1872,18 @@ int main(void) {
     rt_array_set(a, -1, rt_value_int(30));
     if (rt_array_get(a, 1) != rt_value_int(30)) return 47;
     extern int64_t rt_array_pop(SplArray*);
-    extern SplArray* rt_array_new_with_cap_u64(int64_t);
-    extern int64_t rt_typed_words_u64_data_at_checked(SplArray*, int64_t*, int64_t);
-    extern int64_t rt_typed_words_u64_raw_data_at(int64_t*, int64_t);
-    extern int8_t rt_typed_words_u64_store_known_data_at(SplArray*, int64_t*, int64_t, int64_t);
+    extern int64_t rt_typed_words_u64_data_at_checked(int64_t, int64_t, int64_t);
     if (rt_array_pop(a) != rt_value_int(30)) return 48;
     if (rt_array_len(a) != 1) return 49;
     if (rt_array_get(a, 99) != 3) return 50;
     SplArray* words = rt_array_new_with_cap_u64(2);
     if (!words) return 51;
-    int64_t* word_items = (int64_t*)words->items;
-    if (!rt_typed_words_u64_store_known_data_at(words, word_items, 0, 0x102030405060708LL)) return 52;
-    if (rt_typed_words_u64_data_at_checked(words, word_items, 0) != 0x102030405060708LL) return 53;
-    if (rt_typed_words_u64_raw_data_at(word_items, 0) != 0x102030405060708LL) return 54;
-    if (rt_typed_words_u64_data_at_checked(words, word_items, 3) != 0) return 55;
+    int64_t word_header = rt_array_header_ptr(words);
+    int64_t word_data = rt_array_data_ptr(words);
+    if (!rt_typed_words_u64_store_known_data_at(word_header, word_data, 0, 0x102030405060708LL)) return 52;
+    if (rt_typed_words_u64_data_at_checked(word_header, word_data, 0) != 0x102030405060708LL) return 53;
+    if (rt_typed_words_u64_raw_data_at(word_data, 0) != 0x102030405060708LL) return 54;
+    if (rt_typed_words_u64_data_at_checked(word_header, word_data, 3) != 0) return 55;
 
     int64_t s = rt_string_new((const uint8_t*)" 123 ", 5);
     if (rt_string_len(s) != 5) return 60;
