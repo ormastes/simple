@@ -6,15 +6,15 @@ Date: 2026-05-29
 
 | Runtime | Status | Binary bytes | Iterations | Total us | Notes |
 |---|---|---:|---:|---:|---|
-| Simple web renderer | ok | n/a | 4 | 6716 | render loop via Simple software renderer |
-| Simple static cache | ok | n/a | 4 | 3140 | persistent HTML artifact cache hit loop |
-| Simple persistent SWBC command plan | ok | n/a | 4 | 825612 | disk-backed compact static-shell plan to retained commands |
-| Simple hot SWBC command plan cache | ok | n/a | 4 | 279460 | in-memory encoded SWBC sidecar cache after persistent warmup |
-| Simple retained command hot cache | ok | n/a | 4 | 975 | in-memory retained command list after persistent warmup |
-| Simple BrowserBackend cached frame | ok | n/a | 4 | 5301214 | integrated browser backend render_frame with static shell HTML cache |
-| Simple SWBC prepared reuse | ok | n/a | 4 | 213 | decoded compact static-shell plan reuse loop |
-| Simple SWBC command plan | ok | n/a | 4 | 208 | decoded command-only static-shell plan, no HTML artifact |
-| GTK | ok | 14472 | 200 | 39222 | widget construction loop; uses xvfb-run when available |
+| Simple web renderer | ok | n/a | 4 | 6324 | render loop via Simple software renderer |
+| Simple static cache | ok | n/a | 4 | 1483 | persistent HTML artifact cache hit loop |
+| Simple persistent SWBC command plan | ok | n/a | 4 | 452984 | disk-backed compact static-shell plan to retained commands |
+| Simple hot SWBC command plan cache | ok | n/a | 4 | 153586 | in-memory encoded SWBC sidecar cache after persistent warmup |
+| Simple retained command hot cache | ok | n/a | 4 | 532 | in-memory retained command list after persistent warmup |
+| Simple BrowserBackend cached frame | ok | n/a | 4 | 11243 | integrated browser backend unchanged-static-frame cache |
+| Simple SWBC prepared reuse | ok | n/a | 4 | 89 | decoded compact static-shell plan reuse loop |
+| Simple SWBC command plan | ok | n/a | 4 | 55 | decoded command-only static-shell plan, no HTML artifact |
+| GTK | ok | 14472 | 200 | 32609 | widget construction loop; uses xvfb-run when available |
 
 ## Static Shell Size
 
@@ -38,7 +38,7 @@ Date: 2026-05-29
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - simple_render_status=ok
 - simple_render_iterations=4
-- simple_render_total_us=6716
+- simple_render_total_us=6324
 - simple_render_pixels=256000
 - simple_cache_schema=simple-web-cache-v1
 - simple_render_plan=static_shell_with_dynamic_islands
@@ -47,25 +47,27 @@ Date: 2026-05-29
 - simple_static_cache_hit_iterations=4
 - simple_static_cache_memory_hits=4
 - simple_static_cache_disk_hits=0
-- simple_static_cache_total_us=3140
+- simple_static_cache_total_us=1483
 - simple_static_disk_plan_warm_stored=true
 - simple_static_disk_plan_hit_iterations=4
 - simple_static_disk_plan_command_count=20
-- simple_static_disk_plan_total_us=825612
+- simple_static_disk_plan_total_us=452984
 - simple_static_plan_cache_warm_stored=true
 - simple_static_plan_cache_hit_iterations=4
 - simple_static_plan_cache_memory_hits=4
 - simple_static_plan_cache_command_count=20
-- simple_static_plan_cache_total_us=279460
+- simple_static_plan_cache_total_us=153586
 - simple_static_command_cache_warm_stored=true
 - simple_static_command_cache_hit_iterations=4
 - simple_static_command_cache_memory_hits=4
 - simple_static_command_cache_command_count=20
-- simple_static_command_cache_total_us=975
+- simple_static_command_cache_total_us=532
 - simple_browser_cached_frame_iterations=4
-- simple_browser_cached_frame_total_us=5301214
-- simple_browser_static_shell_hits=4
+- simple_browser_cached_frame_total_us=11243
+- simple_browser_static_shell_hits=0
 - simple_browser_static_shell_stores=1
+- simple_browser_static_frame_hits=4
+- simple_browser_static_frame_stores=1
 - simple_browser_cached_frame_pixels=3072
 - simple_static_html_bytes=248
 - simple_static_binary_plan_bytes=171
@@ -78,17 +80,17 @@ Date: 2026-05-29
 - simple_static_swbc_prepared_hits=4
 - simple_static_command_reuse_count=20
 - simple_static_command_reuse_hits=4
-- simple_static_swbc_total_us=213
+- simple_static_swbc_total_us=89
 - simple_static_command_plan_valid=true
 - simple_static_command_plan_count=20
 - simple_static_command_plan_hits=4
-- simple_static_command_plan_total_us=208
+- simple_static_command_plan_total_us=55
 
 ## GTK Output
 
 - gtk_render_status=ok
 - gtk_render_iterations=200
-- gtk_widget_total_us=39222
+- gtk_widget_total_us=32609
 
 ## GTK Linked Dependencies
 
