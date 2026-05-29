@@ -50,7 +50,7 @@
     entries and was NOT updated for Phase 1; compiled-mode FFI marshalling for
     Vec4i/Vec8i is a follow-up. Interpreter mode is fully functional.
 - **Date:** 2026-05-01
-- **Status:** Proposed (Phase 1 landed; Phases 2–4 pending)
+- **Status:** CLOSED — All phases landed (2026-05-02)
 - **Module:** `src/lib/nogc_sync_mut/simd.spl` + compiler HIR/codegen
 - **Driver:** Phase 4 of the HTTPS/HTTP2 compression+cipher pass
   (`/home/ormastes/.claude/plans/see-next-and-impl-ethereal-scott.md`)

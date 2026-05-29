@@ -1,6 +1,7 @@
 # Simple mmap Preload Size Gap
 
 Date: 2026-05-27
+Status: RESOLVED (verified 2026-05-29)
 
 ## Summary
 
@@ -43,3 +44,24 @@ size reduced the row by `20568` bytes.
   changes can easily push it back above the C counter.
 - Investigate a thinner runtime-free or syscall-oriented lane only if future
   targets require beating the asm baseline rather than matching C.
+
+## Resolution
+
+All items above are implemented and verified as of 2026-05-29:
+
+- `src/runtime/simple_core/core_fs.spl` provides `pub fn rt_file_preload_pages(path: i64) -> i64`
+  using `open` + `lseek` + `mmap` + page-touch loop + `munmap` — no hosted runtime, no regex,
+  no CLI/parser modules.
+- `scripts/check-startup-size-performance-audit.shs` builds `simple_mmap_preload` using
+  `--runtime-bundle core-c-bootstrap` from a minimal entry `.spl` that declares only
+  `rt_cli_get_args` and `rt_file_preload_pages` as externs.
+- Regression gate `check_mmap_preload_gate` is active at the end of the script; it fails the
+  audit run if Simple bytes exceed the C counter bytes.
+- Verified loaded libraries: `libc.so.6` and `/lib64/ld-linux-x86-64.so.2` only — no
+  TLS/compression/regex stacks.
+- Audit report (`doc/09_report/startup_size_performance_audit_2026-05-27.md`, run 2026-05-29):
+  - C mmap preload argparse: **14472 bytes**, status ok
+  - Simple mmap preload argparse: **14400 bytes**, status ok
+  - Gap: Simple is **72 bytes smaller** than C counter — gate passes.
+- SimpleOS VFS counterpart `VfsManager.preload_file_pages(path, page_size)` keeps the contract
+  path-based, warming block-cache without exposing sector layout at VFS layer.

@@ -6,9 +6,18 @@
 - **Filed-by:** W14-E (RSA-PSS sign/verify wave)
 - **Target:** crypto / interpreter perf
 - **Priority:** P1
-- **Status:** IMPLEMENTED 2026-05-10 — sliding-window w=4 `mod_exp` added to
-  `src/lib/common/math/bignum/bignat.spl`; `rt_bigint_mod_exp` extern declared in
-  `src/lib/nogc_sync_mut/io/signature_ffi.spl` for the runtime-accelerated path.
+- **Status:** PARTIAL 2026-05-10 — `rt_bigint_mod_exp` extern declared in
+  `src/lib/nogc_sync_mut/io/signature_sffi.spl` (runtime-accelerated path stub
+  exists); however `src/lib/common/math/bignum/` does NOT exist and no
+  sliding-window pure-Simple `mod_exp` was written. The status note in the
+  original entry was inaccurate: `bignat.spl` was never created and the
+  acceptance-criteria specs are unverified. Also note: the file referenced in
+  the original status (`signature_ffi.spl`) does not contain the extern — it is
+  in `signature_sffi.spl`.
+  - **Remaining work:** implement sliding-window w=4 `mod_exp` in pure Simple
+    (new file `src/lib/common/math/bignum/bignat.spl` or inline in
+    `os.crypto.rsa_pss` / `rsa_fallback`), wire callers to use it, and verify
+    both acceptance-criteria specs pass in interpreter mode within 60s.
 - **Requested-semantics:**
   Pure-Simple `_pss_bi_mod_exp` against a 2048-bit modulus and 2048-bit
   exponent runs O(bits^3) with the current schoolbook `_pss_bi_mod` doing
