@@ -1,7 +1,5 @@
 use std.spec
 use os.kernel.arch.riscv64.per_cpu.{
-    read_tp,
-    write_tp,
     simulate_tp_write_baremetal,
     read_tp_test,
     simulate_tp_write_hosted,
@@ -15,7 +13,8 @@ use os.kernel.arch.riscv64.per_cpu.{
     trap_frame_save_restore_tp,
     trap_frame_simulate_entry_exit
 }
-use os.kernel.arch.riscv32.cpu.{read_tp_rv32, write_tp_rv32}
+
+extern fn rt_file_read_text(path: text) -> text
 
 # SA-2 scope: tp register convention — write at start.S; trap frame save/restore
 #             preserves x4; cfg(baremetal) guard.
@@ -88,7 +87,7 @@ describe "Per-CPU tp Register Convention":
             val frame = trap_frame_new()
             trap_frame_set_tp(frame, 0x81002000u64)
             val saved = trap_frame_simulate_entry_exit(frame)
-            expect(saved).to_be_greater_than(0u64)
+            expect(saved).to_equal(0x81002000u64)
 
     describe "rv32 tp convention":
         it "AC-4: rv32 tp write uses 32-bit per_cpu_base (upper bits zero)":
@@ -99,26 +98,25 @@ describe "Per-CPU tp Register Convention":
             val tp_value = read_tp_test_rv32()
             expect(tp_value).to_equal(0x81000000u32)
 
-    describe "read_tp / write_tp interface (per_cpu.spl re-export)":
-        it "AC-4: read_tp is callable and returns a u64":
-            # In interpreter mode this exercises the simulation path in cpu.spl.
-            # In compiled mode this maps to real `mv {out}, tp` asm.
-            val tp_val = read_tp()
-            expect(tp_val).to_be_greater_than(0xFFFFFFFFu64 - 0xFFFFFFFFu64)
+    describe "production tp asm surface":
+        it "AC-4: rv64 read/write helpers use the tp register in production source":
+            val source = rt_file_read_text("src/os/kernel/arch/riscv64/cpu.spl")
+            expect(source).to_contain("fn read_tp() -> u64")
+            expect(source).to_contain("fn write_tp(value: u64)")
+            expect(source).to_contain("tp (thread pointer)")
+            expect(source).to_contain("mv")
 
-        it "AC-4: write_tp followed by read_tp in compiled mode round-trips":
-            # Interpreter mode: write_tp performs a real register write only in
-            # compiled (baremetal) mode.  Here we verify the function is callable
-            # with a plausible kernel-space address without panicking.
-            write_tp(0x81000000u64)
-            expect(true).to_equal(true)
+        it "AC-4: rv32 read/write helpers use the tp register in production source":
+            val source = rt_file_read_text("src/os/kernel/arch/riscv32/cpu.spl")
+            expect(source).to_contain("fn read_tp_rv32() -> u32")
+            expect(source).to_contain("fn write_tp_rv32(value: u32)")
+            expect(source).to_contain("tp (thread pointer")
+            expect(source).to_contain("mv")
 
-    describe "read_tp_rv32 / write_tp_rv32 interface (riscv32/cpu.spl)":
-        it "AC-4: read_tp_rv32 is callable and returns a u32":
-            val tp32 = read_tp_rv32()
-            expect(tp32).to_be_greater_than(0u32 - 0u32)
-
-        it "AC-4: write_tp_rv32 is callable with a 32-bit address":
-            # Verifies the function signature accepts u32; real effect only on rv32 hw.
-            write_tp_rv32(0x81000000u32)
-            expect(true).to_equal(true)
+        it "AC-4: baremetal startup writes tp from per_cpu_base_array and trap restores x4":
+            val source = rt_file_read_text("src/lib/nogc_async_mut_noalloc/baremetal/riscv/startup.spl")
+            expect(source).to_contain("var per_cpu_base_array: [u64; MAX_HARTS]")
+            expect(source).to_contain("\"mv tp, a1\"")
+            expect(source).to_contain("\"mv tp, a0\"")
+            expect(source).to_contain("\"sd x4,  24(sp)\"")
+            expect(source).to_contain("\"ld x4,  24(sp)\"")
