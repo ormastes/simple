@@ -14,11 +14,14 @@
 use test.perf.bench.lib.timing.{BenchResult, bench_print, bench_csv, bench_csv_header, bench_measure}
 use std.db.accel.{
     RowBitmap, ScanPredicate, ScanPredicateKind, accel_capability_report,
-    collect_text_row_indices, row_bitmap_indices, scan_text_values
+    PostingList, collect_text_row_indices, posting_bitmap_result_rows,
+    posting_list_new, posting_lists_and_bitmap, posting_lists_or_bitmap,
+    row_bitmap_indices, scan_text_values
 }
 use std.database.core.{SdnRow, SdnTable}
 use std.database.query.{CompareOp, QueryBuilder}
 use std.db.dbfs_engine.schema.{DentryRow, SchemaTable}
+use std.db.learned_index.{LearnedSegmentIndex, learned_segment_build, learned_segment_lookup_exact, learned_segment_probe, learned_segment_window_size}
 
 val BRIN_KIND_INT: u32 = 1u32
 
@@ -126,6 +129,41 @@ fn build_simple_db_brin(row_count: i64, rows_per_range: i64) -> BrinIndex:
         range_id = range_id + 1
     idx
 
+fn build_static_segment_keys(row_count: i64) -> [i64]:
+    var keys: [i64] = []
+    var idx = 0
+    while idx < row_count:
+        keys.push(idx * 10)
+        idx = idx + 1
+    keys
+
+fn build_static_segment_row_ids(row_count: i64) -> [i64]:
+    var row_ids: [i64] = []
+    var idx = 0
+    while idx < row_count:
+        row_ids.push(idx + 1000)
+        idx = idx + 1
+    row_ids
+
+fn build_posting_lists(row_count: i64) -> [PostingList]:
+    var simple_rows: [i64] = []
+    var database_rows: [i64] = []
+    var index_rows: [i64] = []
+    var idx = 0
+    while idx < row_count:
+        if idx % 7 == 0:
+            simple_rows.push(idx)
+        if idx % 11 == 0:
+            database_rows.push(idx)
+        if idx % 13 == 0:
+            index_rows.push(idx)
+        idx = idx + 1
+    [
+        posting_list_new("simple", simple_rows),
+        posting_list_new("database", database_rows),
+        posting_list_new("index", index_rows)
+    ]
+
 fn build_sdn_table(row_count: i64) -> SdnTable:
     val table = SdnTable.new("bench_rows", ["id", "path", "valid"])
     var idx = 0
@@ -228,6 +266,42 @@ fn scalar_simple_db_brin_refine_count(values: [text], range_ids: [u32], idx: Bri
         row_idx = row_idx + 1
     matched_rows.len()
 
+fn scalar_static_segment_lookup(keys: [i64], row_ids: [i64], key: i64) -> [i64]:
+    var hits: [i64] = []
+    var idx = 0
+    while idx < keys.len():
+        if keys[idx as i32] == key:
+            hits.push(row_ids[idx as i32])
+        idx = idx + 1
+    hits
+
+fn bitmap_static_segment_eq_count(keys: [i64], key: i64) -> i64:
+    var bitmap = RowBitmap.empty(keys.len())
+    var idx = 0
+    while idx < keys.len():
+        if keys[idx as i32] == key:
+            bitmap.set(idx)
+        idx = idx + 1
+    bitmap.count()
+
+fn scalar_posting_and_count(row_count: i64) -> i64:
+    var count = 0
+    var row = 0
+    while row < row_count:
+        if row % 7 == 0 and row % 11 == 0 and row % 13 == 0:
+            count = count + 1
+        row = row + 1
+    count
+
+fn scalar_posting_or_count(row_count: i64) -> i64:
+    var count = 0
+    var row = 0
+    while row < row_count:
+        if row % 7 == 0 or row % 11 == 0 or row % 13 == 0:
+            count = count + 1
+        row = row + 1
+    count
+
 fn bench_accel_text_scan(values: [text]) -> BenchResult:
     val predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "token=user", key_value: 0)
     bench_measure("shared_text_scan_fallback_contains", 40, \:
@@ -262,6 +336,30 @@ fn bench_sdn_query_batch(table: SdnTable) -> BenchResult:
 fn bench_sdn_query_scalar(table: SdnTable) -> BenchResult:
     bench_measure("sdn_handrolled_scalar_filter_rows", 24, \:
         val _rows = scalar_sdn_query_rows(table)
+    )
+
+fn bench_sdn_prefix_cached(table: SdnTable) -> BenchResult:
+    var query = QueryBuilder.for_table(table)
+        .filter_by("path", CompareOp.StartsWith, "src/")
+    val _warm = query.execute()
+    bench_measure("sdn_querybuilder_prefix_cached_repeated", 40, \:
+        val _rows = query.execute()
+    )
+
+fn bench_sdn_prefix_rebuild(table: SdnTable) -> BenchResult:
+    bench_measure("sdn_querybuilder_prefix_rebuild_each_query", 40, \:
+        val _rows = QueryBuilder.for_table(table)
+            .filter_by("path", CompareOp.StartsWith, "src/")
+            .execute()
+    )
+
+fn bench_sdn_prefix_scalar(table: SdnTable) -> BenchResult:
+    bench_measure("sdn_handrolled_scalar_prefix_rows", 40, \:
+        var rows: [SdnRow] = []
+        for row in table.rows:
+            val path = row.get("path") ?? ""
+            if path.starts_with("src/"):
+                rows.push(row)
     )
 
 fn bench_dbfs_find_child_accel(table: SchemaTable, target: text) -> BenchResult:
@@ -318,12 +416,53 @@ fn bench_simple_db_text_search(values: [text]) -> BenchResult:
         val _rows = simple_db_text_search(values, "user")
     )
 
+fn bench_simple_db_learned_exact(idx: LearnedSegmentIndex, key: i64) -> BenchResult:
+    bench_measure("simple_db_learned_segment_exact_opt_in", 40, \:
+        val _rows = learned_segment_lookup_exact(idx, key)
+    )
+
+fn bench_simple_db_learned_scalar(keys: [i64], row_ids: [i64], key: i64) -> BenchResult:
+    bench_measure("simple_db_static_segment_scalar_exact", 40, \:
+        val _rows = scalar_static_segment_lookup(keys, row_ids, key)
+    )
+
+fn bench_simple_db_bitmap_exact(keys: [i64], key: i64) -> BenchResult:
+    bench_measure("simple_db_bitmap_only_exact_scan", 40, \:
+        val _count = bitmap_static_segment_eq_count(keys, key)
+    )
+
+fn bench_simple_db_posting_and(lists: [PostingList], row_count: i64) -> BenchResult:
+    bench_measure("simple_db_posting_bitmap_token_and", 40, \:
+        val _rows = posting_bitmap_result_rows(posting_lists_and_bitmap(lists, row_count))
+    )
+
+fn bench_simple_db_posting_or(lists: [PostingList], row_count: i64) -> BenchResult:
+    bench_measure("simple_db_posting_bitmap_token_or", 40, \:
+        val _rows = posting_bitmap_result_rows(posting_lists_or_bitmap(lists, row_count))
+    )
+
+fn bench_simple_db_posting_and_scalar(row_count: i64) -> BenchResult:
+    bench_measure("simple_db_scalar_token_and_fullscan", 40, \:
+        val _count = scalar_posting_and_count(row_count)
+    )
+
+fn bench_simple_db_posting_or_scalar(row_count: i64) -> BenchResult:
+    bench_measure("simple_db_scalar_token_or_fullscan", 40, \:
+        val _count = scalar_posting_or_count(row_count)
+    )
+
 fn run_correctness_preflight(values: [text],
                              range_ids: [u32],
                              brin_idx: BrinIndex,
                              sdn_table: SdnTable,
                              dentry_table: SchemaTable,
-                             target_name: text):
+                             target_name: text,
+                             learned_idx: LearnedSegmentIndex,
+                             learned_keys: [i64],
+                             learned_row_ids: [i64],
+                             learned_key: i64,
+                             posting_lists: [PostingList],
+                             posting_row_count: i64):
     val text_predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "token=user", key_value: 0)
     val (text_bitmap, text_stats) = scan_text_values(values, text_predicate)
     val shared_text_count = text_bitmap.count()
@@ -340,6 +479,17 @@ fn run_correctness_preflight(values: [text],
     val sdn_scalar_rows = scalar_sdn_query_rows(sdn_table)
     if sdn_shared_rows.len() != sdn_scalar_rows.len():
         panic("sdn shared/scalar row-count mismatch: shared={sdn_shared_rows.len()} scalar={sdn_scalar_rows.len()}")
+
+    var prefix_query = QueryBuilder.for_table(sdn_table)
+        .filter_by("path", CompareOp.StartsWith, "src/")
+    val prefix_first = prefix_query.execute()
+    val prefix_first_builds = prefix_query.prefix_index_build_count()
+    val prefix_second = prefix_query.execute()
+    val prefix_second_builds = prefix_query.prefix_index_build_count()
+    if prefix_first.len() != prefix_second.len():
+        panic("sdn prefix cache row-count mismatch: first={prefix_first.len()} second={prefix_second.len()}")
+    if prefix_first_builds != 1 or prefix_second_builds != 1:
+        panic("sdn prefix cache rebuild mismatch: first_builds={prefix_first_builds} second_builds={prefix_second_builds}")
 
     val accel_child = dentry_table.find_child_accel(7, target_name).unwrap()
     val scalar_child = scalar_dentry_find_child(dentry_table, target_name)
@@ -368,6 +518,28 @@ fn run_correctness_preflight(values: [text],
     if simple_db_brin_shared.matched_rows.len() != simple_db_brin_scalar:
         panic("simple_db BRIN refine mismatch: shared={simple_db_brin_shared.matched_rows.len()} scalar={simple_db_brin_scalar}")
 
+    val learned_hits = learned_segment_lookup_exact(learned_idx, learned_key)
+    val scalar_learned_hits = scalar_static_segment_lookup(learned_keys, learned_row_ids, learned_key)
+    val bitmap_learned_count = bitmap_static_segment_eq_count(learned_keys, learned_key)
+    val learned_probe = learned_segment_probe(learned_idx, learned_key)
+    if learned_hits.len() != scalar_learned_hits.len():
+        panic("learned segment/scalar row-count mismatch: learned={learned_hits.len()} scalar={scalar_learned_hits.len()}")
+    if learned_hits.len() != bitmap_learned_count:
+        panic("learned segment/bitmap row-count mismatch: learned={learned_hits.len()} bitmap={bitmap_learned_count}")
+    if learned_segment_window_size(learned_probe) >= learned_keys.len():
+        panic("learned segment did not narrow candidate window: window={learned_segment_window_size(learned_probe)} rows={learned_keys.len()}")
+
+    val posting_and = posting_lists_and_bitmap(posting_lists, posting_row_count)
+    val posting_or = posting_lists_or_bitmap(posting_lists, posting_row_count)
+    val scalar_and = scalar_posting_and_count(posting_row_count)
+    val scalar_or = scalar_posting_or_count(posting_row_count)
+    if posting_and.rows_matched != scalar_and:
+        panic("posting-list AND mismatch: posting={posting_and.rows_matched} scalar={scalar_and}")
+    if posting_or.rows_matched != scalar_or:
+        panic("posting-list OR mismatch: posting={posting_or.rows_matched} scalar={scalar_or}")
+    if posting_and.postings_scanned >= posting_row_count:
+        panic("posting-list AND scanned full row count: postings={posting_and.postings_scanned} rows={posting_row_count}")
+
 fn main():
     val capability = accel_capability_report()
     val text_values = build_text_values(1024)
@@ -376,13 +548,22 @@ fn main():
     val sdn_table = build_sdn_table(512)
     val dentry_table = build_dentry_table(384)
     val target_name = "src_entry_381"
+    val learned_keys = build_static_segment_keys(2048)
+    val learned_row_ids = build_static_segment_row_ids(2048)
+    val learned_idx = learned_segment_build(learned_keys, learned_row_ids, true)
+    val learned_key = 12340
+    val posting_row_count = 4096
+    val posting_lists = build_posting_lists(posting_row_count)
 
     print "=== simple_db_shared_accel benchmark ==="
     print "capability tier={capability.tier_name} simd_available={capability.simd_available} simd_active={capability.simd_active} scalar_fallback={capability.scalar_fallback} width_bits={capability.simd_width_bits}"
     print "note: Phase 1 shared accel still uses scalar kernels; shared/fallback benches measure API, bitmap construction, row-id materialization, and coarse-filter behavior as much as kernel speed."
     print "note: SDN labels now compare row-materializing QueryBuilder fallback against a row-materializing scalar loop. simple_db BRIN is now paired fairly with a scalar BRIN-refine baseline, while the scalar fullscan baseline remains count-only."
-    run_correctness_preflight(text_values, simple_db_range_ids, simple_db_brin, sdn_table, dentry_table, target_name)
+    run_correctness_preflight(text_values, simple_db_range_ids, simple_db_brin, sdn_table, dentry_table, target_name, learned_idx, learned_keys, learned_row_ids, learned_key, posting_lists, posting_row_count)
     print "preflight: shared-path counts match current scalar-oracle behavior for text, SDN, DBFS, and simple_db."
+    print "preflight: SDN repeated prefix query reuses one cached field prefix index across repeated execute() calls."
+    print "preflight: learned static segment lookup is opt-in, exact-checked, and narrows the candidate window versus bitmap-only scan."
+    print "preflight: posting-list AND/OR bitmap execution matches scalar full-scan counts without scanning every row."
     print ""
 
     val results = [
@@ -392,6 +573,9 @@ fn main():
         bench_scalar_text_scan_bitmap(text_values),
         bench_sdn_query_batch(sdn_table),
         bench_sdn_query_scalar(sdn_table),
+        bench_sdn_prefix_cached(sdn_table),
+        bench_sdn_prefix_rebuild(sdn_table),
+        bench_sdn_prefix_scalar(sdn_table),
         bench_dbfs_find_child_accel(dentry_table, target_name),
         bench_dbfs_find_child_scalar(dentry_table, target_name),
         bench_dbfs_prefix_accel(dentry_table),
@@ -400,7 +584,14 @@ fn main():
         bench_simple_db_brin(text_values, simple_db_range_ids, simple_db_brin),
         bench_simple_db_brin_scalar(text_values, simple_db_range_ids, simple_db_brin),
         bench_simple_db_scalar(text_values),
-        bench_simple_db_text_search(text_values)
+        bench_simple_db_text_search(text_values),
+        bench_simple_db_learned_exact(learned_idx, learned_key),
+        bench_simple_db_learned_scalar(learned_keys, learned_row_ids, learned_key),
+        bench_simple_db_bitmap_exact(learned_keys, learned_key),
+        bench_simple_db_posting_and(posting_lists, posting_row_count),
+        bench_simple_db_posting_and_scalar(posting_row_count),
+        bench_simple_db_posting_or(posting_lists, posting_row_count),
+        bench_simple_db_posting_or_scalar(posting_row_count)
     ]
 
     for result in results:

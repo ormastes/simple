@@ -128,5 +128,153 @@ class SchemaExportFormat:
         return SchemaExportFormat(target: "protobuf", schema_name: name, compatible: covered == total, field_coverage: covered, total_fields: total, notes: "")
 
 
+class SchemaContractField:
+    name: text
+    type_name: text
+    required: bool
+    default_value: text
+    unit_name: text
+    identity: text
+    field_id: i64
+    min_value: text
+    max_value: text
+    regex: text
+
+    me is_optional() -> bool:
+        not self.required
+
+    me json_type() -> text:
+        if self.type_name == "i32" or self.type_name == "i64" or self.type_name == "u32" or self.type_name == "u64":
+            return "integer"
+        if self.type_name == "f32" or self.type_name == "f64":
+            return "number"
+        if self.type_name == "bool":
+            return "boolean"
+        if self.type_name == "text":
+            return "string"
+        "object"
+
+    me json_property() -> text:
+        var parts: [text] = []
+        parts.push("\"type\":\"{self.json_type()}\"")
+        parts.push("\"x-field-id\":{self.field_id}")
+        if self.default_value != "":
+            parts.push("\"default\":\"{self.default_value}\"")
+        if self.unit_name != "":
+            parts.push("\"x-unit\":\"{self.unit_name}\"")
+        if self.identity != "":
+            parts.push("\"x-identity\":\"{self.identity}\"")
+        if self.min_value != "":
+            parts.push("\"minimum\":{self.min_value}")
+        if self.max_value != "":
+            parts.push("\"maximum\":{self.max_value}")
+        if self.regex != "":
+            parts.push("\"pattern\":\"{self.regex}\"")
+        "{" + parts.join(",") + "}"
+
+    me canonical() -> text:
+        "{self.field_id}:{self.name}:{self.type_name}:{self.required}:{self.default_value}:{self.unit_name}:{self.identity}:{self.min_value}:{self.max_value}:{self.regex}"
+
+
+class SchemaContractModel:
+    name: text
+    version: text
+    fields: [SchemaContractField]
+
+    me field_count() -> i64:
+        self.fields.len()
+
+    me required_names() -> [text]:
+        var names: [text] = []
+        for field in self.fields:
+            if field.required:
+                names.push(field.name)
+        names
+
+    me has_field(name: text) -> bool:
+        for field in self.fields:
+            if field.name == name:
+                return true
+        false
+
+    me field_by_id(field_id: i64) -> SchemaContractField:
+        for field in self.fields:
+            if field.field_id == field_id:
+                return field
+        SchemaContractField(name: "", type_name: "", required: false, default_value: "", unit_name: "", identity: "", field_id: -1, min_value: "", max_value: "", regex: "")
+
+    static fn new(name: text, version: text, fields: [SchemaContractField]) -> SchemaContractModel:
+        SchemaContractModel(name: name, version: version, fields: fields)
+
+
+class SchemaCompatibilityResult:
+    compatible: bool
+    error_count: i64
+    error_0: text
+
+    me is_compatible() -> bool:
+        self.compatible
+
+
+class SchemaReference:
+    consumer_kind: text
+    contract_name: text
+    version: text
+    resolved: bool
+
+
+fn schema_field_required(name: text, type_name: text, field_id: i64, unit_name: text, identity: text) -> SchemaContractField:
+    SchemaContractField(name: name, type_name: type_name, required: true, default_value: "", unit_name: unit_name, identity: identity, field_id: field_id, min_value: "", max_value: "", regex: "")
+
+fn schema_field_optional(name: text, type_name: text, field_id: i64, default_value: text, unit_name: text, identity: text) -> SchemaContractField:
+    SchemaContractField(name: name, type_name: type_name, required: false, default_value: default_value, unit_name: unit_name, identity: identity, field_id: field_id, min_value: "", max_value: "", regex: "")
+
+fn schema_field_with_constraints(field: SchemaContractField, min_value: text, max_value: text, regex: text) -> SchemaContractField:
+    SchemaContractField(name: field.name, type_name: field.type_name, required: field.required, default_value: field.default_value, unit_name: field.unit_name, identity: field.identity, field_id: field.field_id, min_value: min_value, max_value: max_value, regex: regex)
+
+fn schema_contract_canonical(contract: SchemaContractModel) -> text:
+    var fields: [text] = []
+    for field in contract.fields:
+        fields.push(field.canonical())
+    "{contract.name}@{contract.version}|" + fields.join("|")
+
+fn schema_contract_to_json_schema(contract: SchemaContractModel) -> text:
+    var props: [text] = []
+    for field in contract.fields:
+        props.push("\"{field.name}\":" + field.json_property())
+    var required: [text] = []
+    for field in contract.fields:
+        if field.required:
+            required.push("\"{field.name}\"")
+    "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"title\":\"{contract.name}\",\"type\":\"object\",\"properties\":{" + props.join(",") + "},\"required\":[" + required.join(",") + "]}"
+
+fn schema_contract_check_compat(old_contract: SchemaContractModel, new_contract: SchemaContractModel) -> SchemaCompatibilityResult:
+    var seen_new_ids: [i64] = []
+    for new_field in new_contract.fields:
+        for seen in seen_new_ids:
+            if seen == new_field.field_id:
+                return SchemaCompatibilityResult(compatible: false, error_count: 1, error_0: "duplicate field id {new_field.field_id}")
+        seen_new_ids.push(new_field.field_id)
+    for old_field in old_contract.fields:
+        val new_by_id = new_contract.field_by_id(old_field.field_id)
+        if new_by_id.field_id >= 0:
+            if new_by_id.name != old_field.name:
+                return SchemaCompatibilityResult(compatible: false, error_count: 1, error_0: "field id {old_field.field_id} reused by {new_by_id.name}; was {old_field.name}")
+            if new_by_id.type_name != old_field.type_name:
+                return SchemaCompatibilityResult(compatible: false, error_count: 1, error_0: "field id {old_field.field_id} changed type from {old_field.type_name} to {new_by_id.type_name}")
+        elif old_field.required:
+            return SchemaCompatibilityResult(compatible: false, error_count: 1, error_0: "required field {old_field.name} removed")
+    SchemaCompatibilityResult(compatible: true, error_count: 0, error_0: "")
+
+fn schema_reference_for_api(contract: SchemaContractModel) -> SchemaReference:
+    SchemaReference(consumer_kind: "api", contract_name: contract.name, version: contract.version, resolved: true)
+
+fn schema_reference_for_sqp(contract: SchemaContractModel) -> SchemaReference:
+    SchemaReference(consumer_kind: "sqp", contract_name: contract.name, version: contract.version, resolved: true)
+
+fn schema_reference_matches(reference: SchemaReference, contract: SchemaContractModel) -> bool:
+    reference.resolved and reference.contract_name == contract.name and reference.version == contract.version
+
+
 fn main():
     print("schema_contract loaded")

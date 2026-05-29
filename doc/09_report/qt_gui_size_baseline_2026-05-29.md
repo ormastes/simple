@@ -7,6 +7,9 @@ Date: 2026-05-29
 - qt_build=unavailable
 - reason=missing_qt_tooling
 - qt_pkg=unavailable
+- qt_qmake=unavailable
+- qt_cmake=cmake
+- cxx_tool=c++
 - simple_web_report=doc/09_report/web_baremetal_size_audit_2026-05-28.md
 - simple_artifact=Simple web placeholder URL facade
 - simple_bytes=14336

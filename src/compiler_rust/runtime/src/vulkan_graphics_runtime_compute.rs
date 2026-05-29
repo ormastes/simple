@@ -19,7 +19,14 @@ pub extern "C" fn rt_vulkan_create_descriptor_set(pipe: i64) -> i64 {
         }
     };
 
-    let layout = match DescriptorSetLayout::new_uniform_buffer(device.clone()) {
+    let binding_count = state
+        .compute_pipelines
+        .get(&pipe)
+        .map(|p| p.descriptor_binding_count())
+        .unwrap_or(1)
+        .max(1);
+
+    let layout = match DescriptorSetLayout::new_storage_buffers(device.clone(), binding_count) {
         Ok(l) => l,
         Err(e) => {
             state.set_error(format!("create_descriptor_set layout: {e}"));
@@ -27,7 +34,7 @@ pub extern "C" fn rt_vulkan_create_descriptor_set(pipe: i64) -> i64 {
         }
     };
 
-    let pool = match DescriptorPool::new_for_uniform_buffers(device.clone(), 16) {
+    let pool = match DescriptorPool::new_for_storage_buffers(device.clone(), 16, binding_count) {
         Ok(p) => p,
         Err(e) => {
             state.set_error(format!("create_descriptor_set pool: {e}"));
@@ -74,7 +81,7 @@ pub extern "C" fn rt_vulkan_bind_buffer(desc_set: i64, binding: i64, buf: i64) -
     };
 
     let size = buffer.size();
-    match ds.update_buffer(binding as u32, buffer, 0, size) {
+    match ds.update_storage_buffer(binding as u32, buffer, 0, size) {
         Ok(()) => 1,
         Err(e) => {
             tracing::error!("bind_buffer: {e}");
@@ -145,7 +152,7 @@ pub extern "C" fn rt_vulkan_begin_compute() -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_bind_pipeline(cmd: i64, pipe: i64) -> i64 {
-    let state = STATE.lock();
+    let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
         Err(_) => return 0,
@@ -154,12 +161,14 @@ pub extern "C" fn rt_vulkan_bind_pipeline(cmd: i64, pipe: i64) -> i64 {
         Some(p) => p,
         None => return 0,
     };
+    let layout = pipeline.layout();
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     unsafe {
         device
             .handle()
             .cmd_bind_pipeline(vk_cmd, vk::PipelineBindPoint::COMPUTE, pipeline.pipeline());
     }
+    state.active_compute_layout = Some(layout);
     1
 }
 
@@ -185,9 +194,8 @@ pub extern "C" fn rt_vulkan_bind_descriptors(cmd: i64, desc_set: i64) -> i64 {
         None => return 0,
     };
 
-    // TODO: associate descriptor sets with their pipeline layout properly.
-    let layout = match state.compute_pipelines.values().last() {
-        Some(p) => p.layout(),
+    let layout = match state.active_compute_layout {
+        Some(layout) => layout,
         None => return 0,
     };
 
@@ -211,14 +219,30 @@ pub extern "C" fn rt_vulkan_bind_descriptors(_cmd: i64, _desc_set: i64) -> i64 {
 
 #[no_mangle]
 #[cfg(feature = "vulkan")]
-pub extern "C" fn rt_vulkan_push_constants(_cmd: i64, pipeline_handle: i64, _data: i64) -> i64 {
+pub extern "C" fn rt_vulkan_push_constants(cmd: i64, pipeline_handle: i64, data: i64) -> i64 {
     let state = STATE.lock();
-    if !state.graphics_pipelines.contains_key(&pipeline_handle)
-        && !state.compute_pipelines.contains_key(&pipeline_handle)
-    {
+    let device = match state.require_device() {
+        Ok(d) => d,
+        Err(_) => return 0,
+    };
+    let pipeline = match state.compute_pipelines.get(&pipeline_handle) {
+        Some(p) => p,
+        None => return 0,
+    };
+    let size = pipeline.push_constant_size();
+    if size == 0 {
+        return 1;
+    }
+    if data == 0 {
         return 0;
     }
-    // Push constants data marshalling not yet implemented; pipeline is valid so return success.
+    let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
+    let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, size as usize) };
+    unsafe {
+        device
+            .handle()
+            .cmd_push_constants(vk_cmd, pipeline.layout(), vk::ShaderStageFlags::COMPUTE, 0, bytes);
+    }
     1
 }
 

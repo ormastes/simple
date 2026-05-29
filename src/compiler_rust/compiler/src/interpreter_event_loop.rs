@@ -621,9 +621,13 @@ pub fn event_loop_backend_name() -> &'static str {
 
 pub fn rt_kqueue_create_interp(_args: &[Value]) -> Result<Value, CompileError> {
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    { return Ok(Value::Int(platform::create())); }
+    {
+        return Ok(Value::Int(platform::create()));
+    }
     #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
-    { Ok(Value::Int(-1)) }
+    {
+        Ok(Value::Int(-1))
+    }
 }
 
 pub fn rt_kqueue_register_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -689,9 +693,13 @@ pub fn rt_kqueue_close_interp(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_iocp_create_interp(_args: &[Value]) -> Result<Value, CompileError> {
     #[cfg(target_os = "windows")]
-    { return Ok(Value::Int(platform::create())); }
+    {
+        return Ok(Value::Int(platform::create()));
+    }
     #[cfg(not(target_os = "windows"))]
-    { Ok(Value::Int(-1)) }
+    {
+        Ok(Value::Int(-1))
+    }
 }
 
 pub fn rt_iocp_register_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -757,9 +765,13 @@ pub fn rt_iocp_close_interp(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_event_ports_create_interp(_args: &[Value]) -> Result<Value, CompileError> {
     #[cfg(any(target_os = "solaris", target_os = "illumos"))]
-    { return Ok(Value::Int(platform::create())); }
+    {
+        return Ok(Value::Int(platform::create()));
+    }
     #[cfg(not(any(target_os = "solaris", target_os = "illumos")))]
-    { Ok(Value::Int(-1)) }
+    {
+        Ok(Value::Int(-1))
+    }
 }
 
 pub fn rt_event_ports_register_interp(args: &[Value]) -> Result<Value, CompileError> {

@@ -59,6 +59,20 @@ impl NativeProjectBuilder {
                 crate::module_resolver::ModuleResolver::new(self.project_root.clone(), canonical_dir)
             })
             .collect();
+        let project_src = self.project_root.join("src");
+        if project_src.is_dir() {
+            let canonical_project_src = safe_canonicalize(&project_src);
+            if !self
+                .source_dirs
+                .iter()
+                .any(|dir| safe_canonicalize(dir) == canonical_project_src)
+            {
+                resolvers.push(crate::module_resolver::ModuleResolver::new(
+                    self.project_root.clone(),
+                    canonical_project_src,
+                ));
+            }
+        }
 
         // Ensure at least the effective root for the entry file is covered.
         if resolvers.is_empty() {
@@ -70,7 +84,13 @@ impl NativeProjectBuilder {
         }
 
         // Canonicalize source dirs once for the filesystem fallback.
-        let canonical_source_dirs: Vec<PathBuf> = self.source_dirs.iter().map(|d| safe_canonicalize(d)).collect();
+        let mut canonical_source_dirs: Vec<PathBuf> = self.source_dirs.iter().map(|d| safe_canonicalize(d)).collect();
+        if project_src.is_dir() {
+            let canonical_project_src = safe_canonicalize(&project_src);
+            if !canonical_source_dirs.contains(&canonical_project_src) {
+                canonical_source_dirs.push(canonical_project_src);
+            }
+        }
 
         let mut queue = VecDeque::from([canonical_entry.clone()]);
         let mut seen = HashSet::new();

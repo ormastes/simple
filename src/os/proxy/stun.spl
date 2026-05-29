@@ -68,6 +68,7 @@ enum StunMethod:
 enum StunAttr:
     """Decoded STUN attribute."""
     Username(value: text)
+    Software(value: text)
     MessageIntegrity(hmac: [u8])
     XorMappedAddress(family: i64, addr: [u8], port: i64)
     MappedAddress(family: i64, addr: [u8], port: i64)
@@ -370,6 +371,26 @@ fn _parse_one_attr(data: [u8], pos: i64, txn_id: [u8]) -> _AttrParseResult?:
             next_pos: next_pos
         )
 
+    if attr_type == STUN_ATTR_SOFTWARE:
+        # UTF-8 text
+        var chars: [u8] = []
+        var j: i64 = 0
+        while j < attr_len:
+            chars = _pb(chars, _read_u8(data, value_pos + j))
+            j = j + 1
+        var software = ""
+        var k: i64 = 0
+        while k < chars.len().to_i64():
+            val byte_val = rt_bytes_u8_at(chars, k)
+            if byte_val >= 0x20 and byte_val <= 0x7E:
+                val ch = byte_val.chr()
+                software = software + ch
+            k = k + 1
+        return _AttrParseResult(
+            attr: StunAttr.Software(value: software),
+            next_pos: next_pos
+        )
+
     if attr_type == STUN_ATTR_MESSAGE_INTEGRITY:
         if attr_len != 20:
             return null
@@ -540,6 +561,20 @@ fn _emit_attr(buf: [u8], attr: StunAttr, txn_id: [u8]) -> [u8]:
         val vlen = uname_bytes.len().to_i64()
         b = _emit_attr_header(b, STUN_ATTR_USERNAME, vlen)
         b = _append_bytes(b, uname_bytes)
+        b = _emit_attr_padding(b, vlen)
+        return b
+
+    if val StunAttr.Software(value) = attr:
+        var software_bytes: [u8] = []
+        var ci: i64 = 0
+        while ci < value.len():
+            val ch = value[ci:ci+1]
+            val cp = ch.ord()
+            software_bytes = _pb(software_bytes, cp & 0xFF)
+            ci = ci + 1
+        val vlen = software_bytes.len().to_i64()
+        b = _emit_attr_header(b, STUN_ATTR_SOFTWARE, vlen)
+        b = _append_bytes(b, software_bytes)
         b = _emit_attr_padding(b, vlen)
         return b
 

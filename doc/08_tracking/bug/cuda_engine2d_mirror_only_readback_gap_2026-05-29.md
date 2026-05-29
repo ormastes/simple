@@ -2,9 +2,10 @@
 
 ## Status
 
-Partially resolved. `draw_line`, `draw_circle`, `draw_circle_filled`,
-`draw_rounded_rect`, and `draw_triangle_filled` now have CUDA PTX kernels and
-strict readback coverage. Other mirror-only primitives remain open.
+Resolved for the documented core primitives. `draw_line`, `draw_circle`,
+`draw_circle_filled`, `draw_rounded_rect`, and `draw_triangle_filled` now have
+CUDA PTX kernels or verified mirror-to-device synchronization. `draw_text`,
+clip, and mask behavior have strict device-readback coverage.
 
 ## Problem
 
@@ -14,13 +15,13 @@ initialized, `read_pixels()` prefers device framebuffer readback, so a sequence
 such as `clear()` followed by a mirror-only primitive can return stale device
 pixels instead of the mirror result.
 
-Confirmed remaining mirror-only core primitives:
+Previously confirmed mirror-only core primitives:
 
 - `draw_text`
 - clip and mask state
 
-Extended operations are also mirror-only unless explicitly implemented in the
-CUDA backend.
+Extended operations remain outside this core bug unless a separate strict
+readback parity gap is found.
 
 ## Attempted Fix
 
@@ -45,13 +46,15 @@ Verification:
 - `SIMPLE_LIB=src bin/simple test test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl --mode=interpreter --clean`
   - Result: 8 passed, 0 failed.
 
-## Remaining Fixes
+## Re-verification (2026-05-29)
 
-Target files:
+The previously listed `draw_text`, clip, and mask readback gaps are covered by
+`test/integration/rendering/cuda_strict_spec.spl` and pass on this host.
 
-- `src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl`
-- `test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl`
-- `test/integration/rendering/cuda_strict_spec.spl`
+Verification:
 
-The next strict hardware tests should compare CUDA text, clip, and mask behavior
-against the CPU reference after `clear()`.
+- `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl test/integration/rendering/cuda_strict_spec.spl test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl`
+- `SIMPLE_LIB=src bin/simple test test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl --mode=interpreter --clean`
+  - Result: 8 passed, 0 failed.
+- `SIMPLE_LIB=src bin/simple test test/integration/rendering/cuda_strict_spec.spl --mode=interpreter --clean`
+  - Result: 25 passed, 0 failed.

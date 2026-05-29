@@ -3,7 +3,7 @@
 **Date:** 2026-05-29
 **Component:** compiler value/reference semantics (method receiver passing)
 **Severity:** High (silent data loss; breaks helper-function refactors)
-**Status:** Open
+**Status:** Fixed in pure Simple interpreter path
 **Found via:** 2D engine software backend rendering — only `draw_rect_filled`
 produced pixels; circle/line/gradient/rounded/text drew nothing.
 
@@ -19,6 +19,23 @@ JIT/compiled run path.
 A local variable passed to the same free function from `main` (or from a method)
 **does** persist, so the defect is specific to passing the method *receiver* or
 a *field read of the receiver*.
+
+## 2026-05-29 Repair
+
+Worker B fixed the pure Simple tree-walking interpreter in
+`src/compiler/10.frontend/core/interpreter/eval_ops_part1.spl`.
+`eval_function_call` now records mutable aggregate parameters after the callee
+body and writes them back to the original caller argument when that argument is
+an identifier or field access. This covers both regression forms:
+`write_first(self.values, next)` and `write_holder_first(self, next)`.
+
+Focused verification passed:
+
+```bash
+SIMPLE_LIB=src bin/simple check src/compiler/10.frontend/core/interpreter/eval_ops_part1.spl test/unit/compiler/interpreter/self_field_assign_spec.spl --mode=interpreter
+SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/self_field_assign_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/self_field_assign_spec.spl --clean
+```
 
 ## Minimal Reproduction
 

@@ -273,6 +273,8 @@ pub struct MirLowerer<'a> {
     pub(super) inject_functions: HashMap<String, Vec<(TypeId, Option<String>, bool)>>,
     /// All lowered function names, used by convention DI to avoid inventing constructors.
     pub(super) available_functions: HashSet<String>,
+    /// Parameter types for direct function calls whose global expression only carries return type.
+    pub(super) function_param_types: HashMap<String, Vec<TypeId>>,
     /// Singleton instance cache for DI (impl_type -> VReg)
     pub(super) singleton_cache: HashMap<String, super::super::instructions::VReg>,
     /// Dependency graph for cycle detection (#1009)
@@ -324,6 +326,7 @@ impl<'a> MirLowerer<'a> {
             di_profile: "default".to_string(),
             inject_functions: HashMap::new(),
             available_functions: HashSet::new(),
+            function_param_types: HashMap::new(),
             singleton_cache: HashMap::new(),
             dependency_graph: crate::di::DependencyGraph::default(),
             di_resolution_stack: Vec::new(),
@@ -357,6 +360,7 @@ impl<'a> MirLowerer<'a> {
             di_profile: "default".to_string(),
             inject_functions: HashMap::new(),
             available_functions: HashSet::new(),
+            function_param_types: HashMap::new(),
             singleton_cache: HashMap::new(),
             dependency_graph: crate::di::DependencyGraph::default(),
             di_resolution_stack: Vec::new(),
@@ -1062,12 +1066,17 @@ impl<'a> MirLowerer<'a> {
         }
         self.inject_functions.clear();
         self.available_functions.clear();
+        self.function_param_types.clear();
         self.singleton_cache.clear(); // Clear singleton cache for each module
         self.dependency_graph = crate::di::DependencyGraph::default(); // Reset dependency graph per module (#1009)
         self.di_resolution_stack.clear(); // Clear DI resolution stack per module
 
         for func in &hir.functions {
             self.available_functions.insert(func.name.clone());
+            self.function_param_types.insert(
+                func.name.clone(),
+                func.params.iter().filter(|p| p.name != "self").map(|p| p.ty).collect(),
+            );
             // For per-parameter injection (#1013), we need to track which params are injectable
             // A function is injectable if it has @inject decorator OR any parameter has @inject
             let has_any_injectable = func.inject || func.params.iter().any(|p| p.inject);

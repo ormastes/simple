@@ -40,22 +40,22 @@ extern fn rt_dma_alloc(size: i64, dir_raw: i32) -> i64
 extern fn rt_dma_phys_of(handle: i64) -> i64
 
 val NVME_DRIVER_MAX_DATA_QUEUE_ID: u16 = 3
-var g_nvme_user_queue_ids: [u16] = []
-var g_nvme_user_queue_controller_ids: [u32] = []
-var g_nvme_user_queue_nsids: [u32] = []
-var g_nvme_user_queue_owner_tasks: [u64] = []
-var g_nvme_user_queue_depths: [u16] = []
-var g_nvme_system_queue_nsids: [u32] = []
+val NVME_DRIVER_MAX_TRACKED_QUEUE_OWNERS: u64 = 8
+val NVME_DRIVER_MAX_SYSTEM_NAMESPACES: u64 = 8
+var g_nvme_user_queue_owner_count: u64 = 0
+var g_nvme_user_queue_ids: [u16; 8] = [0; 8]
+var g_nvme_user_queue_controller_ids: [u32; 8] = [0; 8]
+var g_nvme_user_queue_nsids: [u32; 8] = [0; 8]
+var g_nvme_user_queue_owner_tasks: [u64; 8] = [0; 8]
+var g_nvme_user_queue_depths: [u16; 8] = [0; 8]
+var g_nvme_system_namespace_count: u64 = 0
+var g_nvme_system_queue_nsids: [u32; 8] = [0; 8]
 # Timeout for controller ready transitions (spin iterations)
 impl NvmeDriver:
     static fn new() -> NvmeDriver:
         """Create an uninitialized NVMe driver."""
-        g_nvme_user_queue_ids = []
-        g_nvme_user_queue_controller_ids = []
-        g_nvme_user_queue_nsids = []
-        g_nvme_user_queue_owner_tasks = []
-        g_nvme_user_queue_depths = []
-        g_nvme_system_queue_nsids = []
+        g_nvme_user_queue_owner_count = 0
+        g_nvme_system_namespace_count = 0
         NvmeDriver(
             bar0_virt: 0,
             admin_queue: NvmeQueuePair.new(0, 32),
@@ -542,8 +542,9 @@ impl NvmeDriver:
             return "NVMe: user data queue depth zero"
         if self.system_namespace_owned_for_raw_access(nsid):
             return "NVMe: namespace mode conflict system/user"
-        var idx: i32 = 0
-        for existing_queue_id in g_nvme_user_queue_ids:
+        var idx: u64 = 0
+        while idx < g_nvme_user_queue_owner_count:
+            val existing_queue_id = g_nvme_user_queue_ids[idx]
             if existing_queue_id == queue_id:
                 if g_nvme_user_queue_controller_ids[idx] != controller_id:
                     return "NVMe: user data queue controller conflict"
@@ -558,51 +559,37 @@ impl NvmeDriver:
         "ready"
 
     me remember_user_data_queue_owner(queue_id: u16, depth: u16, controller_id: u32, nsid: u32, owner_task: u64):
-        var queue_ids: [u16] = []
-        var controller_ids: [u32] = []
-        var nsids: [u32] = []
-        var owner_tasks: [u64] = []
-        var depths: [u16] = []
-        var replaced = false
-        var idx: i32 = 0
-        for existing_queue_id in g_nvme_user_queue_ids:
+        var idx: u64 = 0
+        while idx < g_nvme_user_queue_owner_count:
+            val existing_queue_id = g_nvme_user_queue_ids[idx]
             if existing_queue_id == queue_id:
-                queue_ids = queue_ids.push(queue_id)
-                controller_ids = controller_ids.push(controller_id)
-                nsids = nsids.push(nsid)
-                owner_tasks = owner_tasks.push(owner_task)
-                depths = depths.push(depth)
-                replaced = true
-            else:
-                queue_ids = queue_ids.push(existing_queue_id)
-                controller_ids = controller_ids.push(g_nvme_user_queue_controller_ids[idx])
-                nsids = nsids.push(g_nvme_user_queue_nsids[idx])
-                owner_tasks = owner_tasks.push(g_nvme_user_queue_owner_tasks[idx])
-                depths = depths.push(g_nvme_user_queue_depths[idx])
+                g_nvme_user_queue_ids[idx] = queue_id
+                g_nvme_user_queue_controller_ids[idx] = controller_id
+                g_nvme_user_queue_nsids[idx] = nsid
+                g_nvme_user_queue_owner_tasks[idx] = owner_task
+                g_nvme_user_queue_depths[idx] = depth
+                return
             idx = idx + 1
-        if not replaced:
-            queue_ids = queue_ids.push(queue_id)
-            controller_ids = controller_ids.push(controller_id)
-            nsids = nsids.push(nsid)
-            owner_tasks = owner_tasks.push(owner_task)
-            depths = depths.push(depth)
-        g_nvme_user_queue_ids = queue_ids
-        g_nvme_user_queue_controller_ids = controller_ids
-        g_nvme_user_queue_nsids = nsids
-        g_nvme_user_queue_owner_tasks = owner_tasks
-        g_nvme_user_queue_depths = depths
+        if g_nvme_user_queue_owner_count >= NVME_DRIVER_MAX_TRACKED_QUEUE_OWNERS:
+            return
+        g_nvme_user_queue_ids[g_nvme_user_queue_owner_count] = queue_id
+        g_nvme_user_queue_controller_ids[g_nvme_user_queue_owner_count] = controller_id
+        g_nvme_user_queue_nsids[g_nvme_user_queue_owner_count] = nsid
+        g_nvme_user_queue_owner_tasks[g_nvme_user_queue_owner_count] = owner_task
+        g_nvme_user_queue_depths[g_nvme_user_queue_owner_count] = depth
+        g_nvme_user_queue_owner_count = g_nvme_user_queue_owner_count + 1u64
 
     me system_namespace_owned_for_raw_access(nsid: u32) -> bool:
-        var idx = 0
-        while idx < g_nvme_system_queue_nsids.len():
+        var idx: u64 = 0
+        while idx < g_nvme_system_namespace_count:
             if g_nvme_system_queue_nsids[idx] == nsid:
                 return true
             idx = idx + 1
         false
 
     me user_namespace_owned_for_raw_access(nsid: u32) -> bool:
-        var idx = 0
-        while idx < g_nvme_user_queue_nsids.len():
+        var idx: u64 = 0
+        while idx < g_nvme_user_queue_owner_count:
             if g_nvme_user_queue_nsids[idx] == nsid:
                 return true
             idx = idx + 1
@@ -611,7 +598,10 @@ impl NvmeDriver:
     me remember_system_namespace_raw_access(nsid: u32):
         if self.system_namespace_owned_for_raw_access(nsid):
             return
-        g_nvme_system_queue_nsids = g_nvme_system_queue_nsids.push(nsid)
+        if g_nvme_system_namespace_count >= NVME_DRIVER_MAX_SYSTEM_NAMESPACES:
+            return
+        g_nvme_system_queue_nsids[g_nvme_system_namespace_count] = nsid
+        g_nvme_system_namespace_count = g_nvme_system_namespace_count + 1u64
 
     me raw_namespace_queue_access_reason(nsid: u32, queue_id: u16) -> text:
         if nvme_queue_is_system_reserved(queue_id):
@@ -620,8 +610,9 @@ impl NvmeDriver:
             return "ready"
         if self.system_namespace_owned_for_raw_access(nsid):
             return "NVMe: namespace mode conflict system/user"
-        var idx: i32 = 0
-        for existing_queue_id in g_nvme_user_queue_ids:
+        var idx: u64 = 0
+        while idx < g_nvme_user_queue_owner_count:
+            val existing_queue_id = g_nvme_user_queue_ids[idx]
             if existing_queue_id == queue_id:
                 if g_nvme_user_queue_nsids[idx] != nsid:
                     return "NVMe: user data queue namespace conflict"
@@ -631,29 +622,22 @@ impl NvmeDriver:
 
     me release_user_data_queue_owner(queue_id: u16, controller_id: u32, nsid: u32, owner_task: u64) -> bool:
         """Release the remembered owner of a user data queue after its namespace lease is gone."""
-        var queue_ids: [u16] = []
-        var controller_ids: [u32] = []
-        var nsids: [u32] = []
-        var owner_tasks: [u64] = []
-        var depths: [u16] = []
-        var removed = false
-        var idx: i32 = 0
-        for existing_queue_id in g_nvme_user_queue_ids:
-            if not removed and existing_queue_id == queue_id and g_nvme_user_queue_controller_ids[idx] == controller_id and g_nvme_user_queue_nsids[idx] == nsid and g_nvme_user_queue_owner_tasks[idx] == owner_task:
-                removed = true
-            else:
-                queue_ids = queue_ids.push(existing_queue_id)
-                controller_ids = controller_ids.push(g_nvme_user_queue_controller_ids[idx])
-                nsids = nsids.push(g_nvme_user_queue_nsids[idx])
-                owner_tasks = owner_tasks.push(g_nvme_user_queue_owner_tasks[idx])
-                depths = depths.push(g_nvme_user_queue_depths[idx])
+        var idx: u64 = 0
+        while idx < g_nvme_user_queue_owner_count:
+            val existing_queue_id = g_nvme_user_queue_ids[idx]
+            if existing_queue_id == queue_id and g_nvme_user_queue_controller_ids[idx] == controller_id and g_nvme_user_queue_nsids[idx] == nsid and g_nvme_user_queue_owner_tasks[idx] == owner_task:
+                var move_idx = idx
+                while move_idx + 1u64 < g_nvme_user_queue_owner_count:
+                    g_nvme_user_queue_ids[move_idx] = g_nvme_user_queue_ids[move_idx + 1u64]
+                    g_nvme_user_queue_controller_ids[move_idx] = g_nvme_user_queue_controller_ids[move_idx + 1u64]
+                    g_nvme_user_queue_nsids[move_idx] = g_nvme_user_queue_nsids[move_idx + 1u64]
+                    g_nvme_user_queue_owner_tasks[move_idx] = g_nvme_user_queue_owner_tasks[move_idx + 1u64]
+                    g_nvme_user_queue_depths[move_idx] = g_nvme_user_queue_depths[move_idx + 1u64]
+                    move_idx = move_idx + 1u64
+                g_nvme_user_queue_owner_count = g_nvme_user_queue_owner_count - 1u64
+                return true
             idx = idx + 1
-        g_nvme_user_queue_ids = queue_ids
-        g_nvme_user_queue_controller_ids = controller_ids
-        g_nvme_user_queue_nsids = nsids
-        g_nvme_user_queue_owner_tasks = owner_tasks
-        g_nvme_user_queue_depths = depths
-        removed
+        false
 
     me ensure_user_data_queue_for_assignment(queue_id: u16, depth: u16, controller_id: u32, nsid: u32, owner_task: u64) -> Result<bool, text>:
         """Create or reuse a user data queue only for the same controller/namespace owner."""
@@ -760,11 +744,13 @@ impl NvmeDriver:
 
         var status_dw3: u32 = 0u32
         if queue_id == self.io_queue.qid:
-            self.io_queue.submit_command(
+            val cmd_id = self.io_queue.submit_command(
                 cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
                 cmd.cdw10, cmd.cdw11, cmd.cdw12
             )
-            if not self.io_queue.wait_completion(CMD_TIMEOUT):
+            if cmd_id == 0xFFFFu16:
+                return Result.Err("NVMe: read submit failed")
+            if not self.io_queue.wait_completion_for_command(cmd_id, CMD_TIMEOUT):
                 return Result.Err("NVMe: read timeout at LBA {lba}")
             status_dw3 = self.io_queue.get_completion_status()
         else:
@@ -773,11 +759,13 @@ impl NvmeDriver:
             for existing in self.user_io_queues:
                 if existing.qid == queue_id:
                     var q = existing
-                    q.submit_command(
+                    val cmd_id = q.submit_command(
                         cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
                         cmd.cdw10, cmd.cdw11, cmd.cdw12
                     )
-                    if not q.wait_completion(CMD_TIMEOUT):
+                    if cmd_id == 0xFFFFu16:
+                        return Result.Err("NVMe: read submit failed")
+                    if not q.wait_completion_for_command(cmd_id, CMD_TIMEOUT):
                         return Result.Err("NVMe: read timeout at LBA {lba}")
                     status_dw3 = q.get_completion_status()
                     updated_queues.push(q)

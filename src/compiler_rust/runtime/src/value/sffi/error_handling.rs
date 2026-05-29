@@ -15,8 +15,8 @@ fn runtime_error_value() -> RuntimeValue {
     RuntimeValue::from_special(tags::SPECIAL_ERROR)
 }
 
-#[inline(always)]
-pub unsafe fn rt_function_not_found(name_ptr: *const u8, name_len: u64) -> RuntimeValue {
+#[no_mangle]
+pub unsafe extern "C" fn rt_function_not_found(name_ptr: *const u8, name_len: u64) -> RuntimeValue {
     if name_ptr.is_null() {
         eprintln!("Runtime error: Function not found (unknown name)");
     } else {
@@ -25,8 +25,8 @@ pub unsafe fn rt_function_not_found(name_ptr: *const u8, name_len: u64) -> Runti
     }
     runtime_error_value()
 }
-#[inline(always)]
-pub unsafe fn rt_method_not_found(
+#[no_mangle]
+pub unsafe extern "C" fn rt_method_not_found(
     type_ptr: *const u8,
     type_len: u64,
     method_ptr: *const u8,

@@ -13,6 +13,7 @@ use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::{Env, Value};
 use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef};
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -28,6 +29,46 @@ pub fn clear_pinned_strings() {
     PINNED_STRINGS.with(|cell| {
         cell.borrow_mut().clear();
     });
+}
+
+fn numeric_ordering(left: &Value, right: &Value) -> Option<Ordering> {
+    match (left, right) {
+        (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
+        (Value::UInt { value: a, .. }, Value::UInt { value: b, .. }) => Some(a.cmp(b)),
+        (Value::Int(a), Value::UInt { value: b, .. }) => {
+            if *a < 0 {
+                Some(Ordering::Less)
+            } else {
+                Some((*a as u64).cmp(b))
+            }
+        }
+        (Value::UInt { value: a, .. }, Value::Int(b)) => {
+            if *b < 0 {
+                Some(Ordering::Greater)
+            } else {
+                Some(a.cmp(&(*b as u64)))
+            }
+        }
+        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
+        (Value::Float32(a), Value::Float32(b)) => a.partial_cmp(b),
+        (Value::Float(a), Value::Float32(b)) => a.partial_cmp(&(*b as f64)),
+        (Value::Float32(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
+        (Value::Float(a), b) => a.partial_cmp(&numeric_as_f64(b)?),
+        (a, Value::Float(b)) => numeric_as_f64(a)?.partial_cmp(b),
+        (Value::Float32(a), b) => (*a as f64).partial_cmp(&numeric_as_f64(b)?),
+        (a, Value::Float32(b)) => numeric_as_f64(a)?.partial_cmp(&(*b as f64)),
+        _ => None,
+    }
+}
+
+fn numeric_as_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Int(i) => Some(*i as f64),
+        Value::UInt { value, .. } => Some(*value as f64),
+        Value::Float(f) => Some(*f),
+        Value::Float32(f) => Some(*f as f64),
+        _ => None,
+    }
 }
 
 // Re-export the with-self-update functions
@@ -221,13 +262,7 @@ pub(crate) fn evaluate_method_call(
         }
         "to_be_greater_than" => {
             let expected = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
-            let matched = match (&recv_val, &expected) {
-                (Value::Int(a), Value::Int(b)) => a > b,
-                (Value::Float(a), Value::Float(b)) => a > b,
-                (Value::Int(a), Value::Float(b)) => (*a as f64) > *b,
-                (Value::Float(a), Value::Int(b)) => *a > (*b as f64),
-                _ => false,
-            };
+            let matched = numeric_ordering(&recv_val, &expected).is_some_and(|ordering| ordering.is_gt());
             use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
@@ -246,13 +281,7 @@ pub(crate) fn evaluate_method_call(
         }
         "to_be_less_than" => {
             let expected = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
-            let matched = match (&recv_val, &expected) {
-                (Value::Int(a), Value::Int(b)) => a < b,
-                (Value::Float(a), Value::Float(b)) => a < b,
-                (Value::Int(a), Value::Float(b)) => (*a as f64) < *b,
-                (Value::Float(a), Value::Int(b)) => *a < (*b as f64),
-                _ => false,
-            };
+            let matched = numeric_ordering(&recv_val, &expected).is_some_and(|ordering| ordering.is_lt());
             use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
@@ -271,13 +300,8 @@ pub(crate) fn evaluate_method_call(
         }
         "to_be_greater_than_or_equal" | "to_be_gte" => {
             let expected = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
-            let matched = match (&recv_val, &expected) {
-                (Value::Int(a), Value::Int(b)) => a >= b,
-                (Value::Float(a), Value::Float(b)) => a >= b,
-                (Value::Int(a), Value::Float(b)) => (*a as f64) >= *b,
-                (Value::Float(a), Value::Int(b)) => *a >= (*b as f64),
-                _ => false,
-            };
+            let matched =
+                numeric_ordering(&recv_val, &expected).is_some_and(|ordering| ordering.is_gt() || ordering.is_eq());
             use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
@@ -296,13 +320,8 @@ pub(crate) fn evaluate_method_call(
         }
         "to_be_less_than_or_equal" | "to_be_lte" => {
             let expected = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
-            let matched = match (&recv_val, &expected) {
-                (Value::Int(a), Value::Int(b)) => a <= b,
-                (Value::Float(a), Value::Float(b)) => a <= b,
-                (Value::Int(a), Value::Float(b)) => (*a as f64) <= *b,
-                (Value::Float(a), Value::Int(b)) => *a <= (*b as f64),
-                _ => false,
-            };
+            let matched =
+                numeric_ordering(&recv_val, &expected).is_some_and(|ordering| ordering.is_lt() || ordering.is_eq());
             use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
@@ -1390,4 +1409,46 @@ pub(crate) fn evaluate_method_call_with_self_update(
             None
         };
     Ok((result, updated_self))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_ordering_compares_unsigned_matcher_values() {
+        assert_eq!(
+            numeric_ordering(
+                &Value::UInt {
+                    value: 117_440_512,
+                    width: 64,
+                },
+                &Value::Int(0),
+            ),
+            Some(Ordering::Greater),
+        );
+        assert_eq!(
+            numeric_ordering(
+                &Value::UInt {
+                    value: 2_264_924_160,
+                    width: 64,
+                },
+                &Value::UInt {
+                    value: 2_147_483_648,
+                    width: 64,
+                },
+            ),
+            Some(Ordering::Greater),
+        );
+        assert_eq!(
+            numeric_ordering(
+                &Value::Int(-1),
+                &Value::UInt {
+                    value: u64::MAX,
+                    width: 64,
+                },
+            ),
+            Some(Ordering::Less),
+        );
+    }
 }

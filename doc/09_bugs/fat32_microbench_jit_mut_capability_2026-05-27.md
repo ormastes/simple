@@ -2,6 +2,9 @@
 
 Date: 2026-05-27
 
+Status: Original crash resolved 2026-05-29; VFAT/C-FAT proof remains
+environment-gated. VFAT setup diagnosis now reports exact remediation.
+
 ## Summary
 
 `bin/simple run test/perf/bench/fat32_microbench.spl` does not complete after
@@ -130,6 +133,13 @@ src/compiler_rust/target/debug/simple test/perf/bench/fat32_microbench.spl
   test/perf/bench/fat32_4k_compare.spl` completes Simple FAT 4K random read and
   write in the focused in-memory harness; VFAT/C-FAT same-device proof remains
   missing.
+- Rechecked 2026-05-29 by spawned agent:
+  `src/compiler_rust/target/debug/simple run test/perf/bench/fat32_microbench.spl`
+  exits 0, and
+  `src/compiler_rust/target/debug/simple run test/perf/bench/fat32_4k_compare.spl`
+  exits 0 with Simple FAT read/write complete. The remaining `c_fat_vfat_*`
+  paths are skipped because `/tmp/simple_vfat_bench_mnt` is mounted as `vfat`
+  but not writable/seeded and passwordless sudo is unavailable.
 
 ## Expected
 
@@ -141,3 +151,37 @@ should handle the trait `self` usage correctly enough to complete the benchmark.
 The benchmark imports `std.fs_driver.fat32_core`, which resolves to the sync
 stdlib FAT core used by the SimpleOS FAT adapter. Fixing this blocker is
 required before claiming final 4K random read/write perf parity or superiority.
+
+## Remaining Follow-up
+
+The JIT mutation-capability blocker is no longer the active issue. The next
+implementation item is the VFAT baseline setup path: make
+`scripts/perf/prepare-fat32-4k-vfat.shs --diagnose` either recreate a writable
+fixture via the documented flow or report a precise manual setup requirement,
+then rerun `fat32_4k_compare.spl` until `c_fat_vfat_read4k` and
+`c_fat_vfat_write4k` are measured rather than skipped.
+
+Update 2026-05-29: the VFAT setup path now gives an exact next action in
+`--diagnose` output. On this host the default mount is already `vfat` but is
+not writable by the current user and not seeded, so diagnosis reports:
+`next: unmount or remount /tmp/simple_vfat_bench_mnt with uid=1000,gid=1000`
+and prints the corresponding `sudo umount ... && VFAT_MNT=... VFAT_IMG=...`
+manual command. For custom unmounted paths, diagnosis reports the exact
+`VFAT_MNT=... VFAT_IMG=... scripts/perf/prepare-fat32-4k-vfat.shs` command and
+the need for passwordless sudo or polkit udisks authorization. The benchmark
+now honors `VFAT_MNT` instead of hardcoding `/tmp/simple_vfat_bench_mnt`, so a
+prepared non-default mount can be measured by the same command.
+
+Verification:
+
+```bash
+bash -n scripts/perf/prepare-fat32-4k-vfat.shs
+scripts/perf/prepare-fat32-4k-vfat.shs --diagnose
+VFAT_MNT=/tmp/simple_vfat_diag_smoke.<tmp> VFAT_IMG=/tmp/simple_vfat_diag_smoke.img scripts/perf/prepare-fat32-4k-vfat.shs --diagnose
+SIMPLE_LIB=src bin/simple check test/perf/bench/fat32_4k_compare.spl
+```
+
+Remaining environment-gated proof: rerun the full comparison after the VFAT
+mount is remounted writable/seeded or a polkit-authorized loop mount is
+available, and require both `c_fat_vfat_read4k` and `c_fat_vfat_write4k` to be
+measured rather than skipped.

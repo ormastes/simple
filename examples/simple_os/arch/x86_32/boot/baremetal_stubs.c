@@ -701,8 +701,65 @@ static void _serial_init(void)
 
 extern void spl_start(void) __attribute__((weak));
 
-void _start(void)
+static uint32_t x86_32_initrd_start = 0;
+static uint32_t x86_32_initrd_end = 0;
+
+static void x86_32_capture_multiboot_modules(uint32_t magic, uint32_t mbi_addr)
 {
+    if (magic != 0x2BADB002U || mbi_addr == 0U) return;
+    uint32_t *mbi = (uint32_t *)(uintptr_t)mbi_addr;
+    uint32_t flags = mbi[0];
+    if ((flags & (1U << 3)) == 0U) return;
+    uint32_t mods_count = mbi[5];
+    uint32_t mods_addr = mbi[6];
+    if (mods_count == 0U || mods_addr == 0U) return;
+    uint32_t *mod = (uint32_t *)(uintptr_t)mods_addr;
+    if (mod[1] > mod[0]) {
+        x86_32_initrd_start = mod[0];
+        x86_32_initrd_end = mod[1];
+    }
+}
+
+static int x86_32_initrd_contains_ascii(const char *needle)
+{
+    if (x86_32_initrd_start == 0U || x86_32_initrd_end <= x86_32_initrd_start) return 0;
+    const uint8_t *base = (const uint8_t *)(uintptr_t)x86_32_initrd_start;
+    uint32_t len = x86_32_initrd_end - x86_32_initrd_start;
+    uint32_t needle_len = 0;
+    while (needle[needle_len] != '\0') needle_len++;
+    if (needle_len == 0U || len < needle_len) return 0;
+    for (uint32_t i = 0; i + needle_len <= len; i++) {
+        uint32_t j = 0;
+        while (j < needle_len && base[i + j] == (uint8_t)needle[j]) j++;
+        if (j == needle_len) return 1;
+    }
+    return 0;
+}
+
+RuntimeValue rt_x86_32_initrd_present(void)
+{
+    return (x86_32_initrd_end > x86_32_initrd_start) ? 1 : 0;
+}
+
+RuntimeValue rt_x86_32_initrd_contains_hello_smf(void)
+{
+    return x86_32_initrd_contains_ascii("HELLOSMF") ? 1 : 0;
+}
+
+RuntimeValue rt_x86_32_initrd_contains_browser_smf(void)
+{
+    return x86_32_initrd_contains_ascii("BROWSMF") ? 1 : 0;
+}
+
+RuntimeValue rt_x86_32_initrd_contains_x86_32_marker(void)
+{
+    if (x86_32_initrd_contains_ascii("SIMPLEOS_X86_32_HELLO_ELF")) return 1;
+    return x86_32_initrd_contains_ascii("elf-machine=x86_32") ? 1 : 0;
+}
+
+void _start(uint32_t multiboot_magic, uint32_t multiboot_info)
+{
+    x86_32_capture_multiboot_modules(multiboot_magic, multiboot_info);
     _serial_init();
 
     serial_puts("SimpleOS x86_32 boot\r\n");
@@ -952,41 +1009,186 @@ S1(rt_closure_new) S2(rt_closure_call) S1(rt_closure_bind)
 
 RuntimeValue rt_port_outb_real(RuntimeValue port, RuntimeValue val)
 {
-    outb((uint16_t)DECODE_INT(port), (uint8_t)DECODE_INT(val));
+    outb((uint16_t)port, (uint8_t)val);
     return NIL_VALUE;
 }
 
 RuntimeValue rt_port_outw_real(RuntimeValue port, RuntimeValue val)
 {
-    outw((uint16_t)DECODE_INT(port), (uint16_t)DECODE_INT(val));
+    outw((uint16_t)port, (uint16_t)val);
     return NIL_VALUE;
 }
 
 RuntimeValue rt_port_outl_real(RuntimeValue port, RuntimeValue val)
 {
-    outl((uint16_t)DECODE_INT(port), (uint32_t)DECODE_INT(val));
+    outl((uint16_t)port, (uint32_t)val);
     return NIL_VALUE;
 }
 
 RuntimeValue rt_port_inb_real(RuntimeValue port)
 {
-    return ENCODE_INT(inb((uint16_t)DECODE_INT(port)));
+    return (RuntimeValue)inb((uint16_t)port);
 }
 
 RuntimeValue rt_port_inw_real(RuntimeValue port)
 {
-    return ENCODE_INT(inw((uint16_t)DECODE_INT(port)));
+    return (RuntimeValue)inw((uint16_t)port);
 }
 
 RuntimeValue rt_port_inl_real(RuntimeValue port)
 {
-    return ENCODE_INT(inl((uint16_t)DECODE_INT(port)));
+    return (RuntimeValue)inl((uint16_t)port);
 }
 
 RuntimeValue rt_port_io_wait_real(void)
 {
     io_wait();
     return NIL_VALUE;
+}
+
+/* --- int 0x80 live trap proof support --- */
+
+typedef struct __attribute__((packed)) {
+    uint16_t offset_low;
+    uint16_t selector;
+    uint8_t zero;
+    uint8_t type_attr;
+    uint16_t offset_high;
+} X86_32IdtEntry;
+
+typedef struct __attribute__((packed)) {
+    uint16_t limit;
+    uint32_t base;
+} X86_32IdtPointer;
+
+extern int32_t x86_32_dispatch_installed_syscall_abi(
+    uint32_t id,
+    uint32_t arg0,
+    uint32_t arg1,
+    uint32_t arg2,
+    uint32_t arg3,
+    uint32_t arg4,
+    uint32_t arg5
+) __attribute__((weak));
+extern int32_t arch__x86_32__int80_probe_entry__x86_32_dispatch_installed_syscall_abi(
+    uint32_t id,
+    uint32_t arg0,
+    uint32_t arg1,
+    uint32_t arg2,
+    uint32_t arg3,
+    uint32_t arg4,
+    uint32_t arg5
+) __attribute__((weak));
+extern int32_t arch__x86_32__initrd_fs_exec_probe_entry__x86_32_dispatch_installed_syscall_abi(
+    uint32_t id,
+    uint32_t arg0,
+    uint32_t arg1,
+    uint32_t arg2,
+    uint32_t arg3,
+    uint32_t arg4,
+    uint32_t arg5
+) __attribute__((weak));
+extern int32_t os__kernel__arch__x86_32__early_syscall__x86_32_dispatch_installed_syscall_abi(
+    uint32_t id,
+    uint32_t arg0,
+    uint32_t arg1,
+    uint32_t arg2,
+    uint32_t arg3,
+    uint32_t arg4,
+    uint32_t arg5
+) __attribute__((weak));
+
+static X86_32IdtEntry x86_32_probe_idt[256] __attribute__((aligned(8)));
+static X86_32IdtPointer x86_32_probe_idtr;
+
+int32_t simpleos_x86_32_dispatch_int80_probe(
+    uint32_t id,
+    uint32_t arg0,
+    uint32_t arg1,
+    uint32_t arg2,
+    uint32_t arg3,
+    uint32_t arg4,
+    uint32_t arg5
+)
+{
+    if (os__kernel__arch__x86_32__early_syscall__x86_32_dispatch_installed_syscall_abi) {
+        return os__kernel__arch__x86_32__early_syscall__x86_32_dispatch_installed_syscall_abi(
+            id, arg0, arg1, arg2, arg3, arg4, arg5
+        );
+    }
+    if (x86_32_dispatch_installed_syscall_abi) {
+        return x86_32_dispatch_installed_syscall_abi(id, arg0, arg1, arg2, arg3, arg4, arg5);
+    }
+    if (arch__x86_32__int80_probe_entry__x86_32_dispatch_installed_syscall_abi) {
+        return arch__x86_32__int80_probe_entry__x86_32_dispatch_installed_syscall_abi(
+            id, arg0, arg1, arg2, arg3, arg4, arg5
+        );
+    }
+    if (arch__x86_32__initrd_fs_exec_probe_entry__x86_32_dispatch_installed_syscall_abi) {
+        return arch__x86_32__initrd_fs_exec_probe_entry__x86_32_dispatch_installed_syscall_abi(
+            id, arg0, arg1, arg2, arg3, arg4, arg5
+        );
+    }
+    return -38;
+}
+
+__attribute__((naked)) void x86_32_int80_probe_handler(void)
+{
+    __asm__ volatile(
+        "pusha\n\t"
+        "pushl $0\n\t"
+        "pushl 4(%esp)\n\t"
+        "pushl 12(%esp)\n\t"
+        "pushl 32(%esp)\n\t"
+        "pushl 40(%esp)\n\t"
+        "pushl 36(%esp)\n\t"
+        "pushl 52(%esp)\n\t"
+        "call simpleos_x86_32_dispatch_int80_probe\n\t"
+        "addl $28, %esp\n\t"
+        "movl %eax, 28(%esp)\n\t"
+        "popa\n\t"
+        "iret\n\t"
+    );
+}
+
+RuntimeValue rt_x86_32_install_int80_probe(void)
+{
+    uint32_t handler = (uint32_t)(uintptr_t)x86_32_int80_probe_handler;
+    x86_32_probe_idt[0x80].offset_low = (uint16_t)(handler & 0xFFFFU);
+    x86_32_probe_idt[0x80].selector = 0x08U;
+    x86_32_probe_idt[0x80].zero = 0;
+    x86_32_probe_idt[0x80].type_attr = 0xEEU;
+    x86_32_probe_idt[0x80].offset_high = (uint16_t)((handler >> 16) & 0xFFFFU);
+    x86_32_probe_idtr.limit = (uint16_t)(sizeof(x86_32_probe_idt) - 1U);
+    x86_32_probe_idtr.base = (uint32_t)(uintptr_t)x86_32_probe_idt;
+    __asm__ volatile("lidt (%0)" : : "r"(&x86_32_probe_idtr) : "memory");
+    return (RuntimeValue)1;
+}
+
+RuntimeValue rt_x86_32_trigger_int80(
+    RuntimeValue id,
+    RuntimeValue arg0,
+    RuntimeValue arg1,
+    RuntimeValue arg2,
+    RuntimeValue arg3,
+    RuntimeValue arg4,
+    RuntimeValue arg5
+)
+{
+    uint32_t eax = (uint32_t)id;
+    uint32_t ebx = (uint32_t)arg0;
+    uint32_t ecx = (uint32_t)arg1;
+    uint32_t edx = (uint32_t)arg2;
+    uint32_t esi = (uint32_t)arg3;
+    uint32_t edi = (uint32_t)arg4;
+    __asm__ volatile(
+        "int $0x80\n\t"
+        : "+a"(eax), "+b"(ebx), "+c"(ecx), "+d"(edx), "+S"(esi), "+D"(edi)
+        :
+        : "memory", "cc"
+    );
+    (void)arg5;
+    return (RuntimeValue)eax;
 }
 
 RuntimeValue rt_port_outb(RuntimeValue port, RuntimeValue val)
@@ -1100,19 +1302,19 @@ RuntimeValue rt_rdtsc_real(void)
 
 RuntimeValue rt_lgdt_real(RuntimeValue desc)
 {
-    __asm__ volatile("lgdt (%0)" : : "r"((uintptr_t)DECODE_INT(desc)) : "memory");
+    __asm__ volatile("lgdt (%0)" : : "r"((uintptr_t)desc) : "memory");
     return NIL_VALUE;
 }
 
 RuntimeValue rt_lidt_real(RuntimeValue desc)
 {
-    __asm__ volatile("lidt (%0)" : : "r"((uintptr_t)DECODE_INT(desc)) : "memory");
+    __asm__ volatile("lidt (%0)" : : "r"((uintptr_t)desc) : "memory");
     return NIL_VALUE;
 }
 
 RuntimeValue rt_ltr_real(RuntimeValue sel)
 {
-    uint16_t selector = (uint16_t)DECODE_INT(sel);
+    uint16_t selector = (uint16_t)sel;
     __asm__ volatile("ltr %0" : : "r"(selector));
     return NIL_VALUE;
 }

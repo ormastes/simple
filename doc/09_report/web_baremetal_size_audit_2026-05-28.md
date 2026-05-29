@@ -1,18 +1,18 @@
 # Web And Bare-Metal Binary Size Audit
 
-Date: 2026-05-28
+Date: 2026-05-29
 
 ## Build Status
 
 | Artifact | Check | Native/ELF Build | Bytes | Dec Section Bytes | Log |
 |---|---|---|---:|---:|---|
-| Browser smoke | ok | ok | 34968 | 26189 | `build/web_baremetal_size_audit/browser_smoke_native.log` |
-| Browser simple render HTML | ok | ok | 18480 | 7923 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
-| Simple web static facade | n/a | ok | 14352 | 4090 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
+| Browser smoke | ok | ok | 34968 | 26480 | `build/web_baremetal_size_audit/browser_smoke_native.log` |
+| Browser simple render HTML | ok | ok | 18480 | 8747 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
+| Simple web static facade | n/a | ok | 14352 | 5289 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
 | Simple web placeholder URL facade | n/a | ok | 14336 | 3889 | `build/web_baremetal_size_audit/simple_web_placeholder_native.log` |
-| Simple web file facade | n/a | ok | 14344 | 6335 | `build/web_baremetal_size_audit/simple_web_file_native.log` |
+| Simple web file facade | n/a | ok | 18448 | 6778 | `build/web_baremetal_size_audit/simple_web_file_native.log` |
 | Simple web script placeholder facade | n/a | ok | 14336 | 3905 | `build/web_baremetal_size_audit/simple_web_script_placeholder_native.log` |
-| Simple web script file facade | n/a | ok | 26712 | 16126 | `build/web_baremetal_size_audit/simple_web_script_file_native.log` |
+| Simple web script file facade | n/a | ok | 26704 | 16406 | `build/web_baremetal_size_audit/simple_web_script_file_native.log` |
 | Bare-metal pure policy probe | ok | ok | 18432 | 6758 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
 | RV32 semihost stdout hello | n/a | ok | 4892 | 156 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | RV32 semihost trap capsule | n/a | ok | 652 | 48 | `build/web_baremetal_size_audit/riscv32_semihost_trap.build.log` |
@@ -41,16 +41,16 @@ Date: 2026-05-28
 | Budget | Limit Bytes |
 |---|---:|
 | Browser smoke native file / dec section | 35200 / 27000 |
-| Browser simple render HTML native file / dec section | 19000 / 8500 |
-| Browser engine source | 46960 |
-| x86_64 monolithic bare-metal stubs source | 555800 |
+| Browser simple render HTML native file / dec section | 19000 / 8800 |
+| Browser engine source | 68000 |
+| x86_64 monolithic bare-metal stubs source | 556500 |
 | ARM64 monolithic bare-metal stubs source | 141800 |
 | ARM32 monolithic bare-metal stubs source | 64200 |
 | RV64 monolithic bare-metal stubs source | 60723 |
 | RV32 monolithic bare-metal stubs source | 20336 |
-| Simple web static facade native file / dec section | 14500 / 5000 |
+| Simple web static facade native file / dec section | 14500 / 5300 |
 | Simple web placeholder URL facade native file / dec section | 14500 / 4100 |
-| Simple web file facade native file / dec section | 14500 / 6400 |
+| Simple web file facade native file / dec section | 18500 / 6800 |
 | Simple web script placeholder facade native file / dec section | 14500 / 4200 |
 | Simple web script file facade native file / dec section | 27000 / 16500 |
 | Bare-metal pure policy probe native file / dec section | 18500 / 6850 |
@@ -123,7 +123,7 @@ Date: 2026-05-28
 | Surface | Files | Lines | Bytes |
 |---|---:|---:|---:|
 | `examples/browser` | 304 | 75035 | 2850509 |
-| `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` | 1 | 15079 | 555747 |
+| `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` | 1 | 15095 | 556456 |
 | `examples/simple_os/arch/arm64/boot/baremetal_stubs.c` | 1 | 3472 | 141741 |
 | `examples/simple_os/arch/arm32/boot/baremetal_stubs.c` | 1 | 1906 | 64107 |
 | `examples/simple_os/arch/riscv64/boot/baremetal_stubs.c` | 1 | 1806 | 60723 |
@@ -183,7 +183,7 @@ Date: 2026-05-28
 | `examples/browser/feature/dom` | 9 | 4854 | 181376 |
 | `examples/browser/feature/style` | 13 | 3914 | 150153 |
 | `src/lib/gc_async_mut/web` | 13 | 3928 | 170664 |
-| `src/lib/gc_async_mut/gpu/browser_engine` | 17 | 1296 | 46940 |
+| `src/lib/gc_async_mut/gpu/browser_engine` | 19 | 1801 | 67975 |
 
 ## Retention Checks
 
@@ -195,7 +195,7 @@ Date: 2026-05-28
 | Simple web file facade | 0 | 0 |
 | Simple web script placeholder facade | 0 | 0 |
 | Simple web script file facade expected retention | 0 | 3 |
-| Simple web script file facade script execution retention | n/a | 2 |
+| Simple web script file facade script execution retention | n/a | 1 |
 | Simple web script file facade forbidden full renderer | 0 | 0 |
 | Bare-metal pure policy probe | 0 | 0 |
 | RV32 semihost trap capsule | 0 | n/a |

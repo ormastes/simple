@@ -58,6 +58,7 @@ pub(super) struct VulkanState {
     pub buffers: HashMap<i64, VulkanBuffer>,
     pub compute_pipelines: HashMap<i64, ComputePipeline>,
     pub shader_modules: HashMap<i64, Arc<ShaderModule>>,
+    pub shader_spirv: HashMap<i64, Vec<u8>>,
     pub fences: HashMap<i64, Fence>,
     pub semaphores: HashMap<i64, Semaphore>,
     pub images: HashMap<i64, Arc<VulkanImage>>,
@@ -69,6 +70,7 @@ pub(super) struct VulkanState {
     pub descriptor_pools: HashMap<i64, Arc<DescriptorPool>>,
     pub descriptor_set_layouts: HashMap<i64, Arc<DescriptorSetLayout>>,
     pub descriptor_sets: HashMap<i64, Arc<DescriptorSet>>,
+    pub active_compute_layout: Option<vk::PipelineLayout>,
     pub semaphore_pool: Option<SemaphorePool>,
     pub window_manager: Option<WindowManager>,
     pub surfaces: HashMap<i64, Surface>,
@@ -85,6 +87,7 @@ impl VulkanState {
             buffers: HashMap::new(),
             compute_pipelines: HashMap::new(),
             shader_modules: HashMap::new(),
+            shader_spirv: HashMap::new(),
             fences: HashMap::new(),
             semaphores: HashMap::new(),
             images: HashMap::new(),
@@ -96,6 +99,7 @@ impl VulkanState {
             descriptor_pools: HashMap::new(),
             descriptor_set_layouts: HashMap::new(),
             descriptor_sets: HashMap::new(),
+            active_compute_layout: None,
             semaphore_pool: None,
             window_manager: None,
             surfaces: HashMap::new(),
@@ -195,6 +199,7 @@ pub extern "C" fn rt_vulkan_init() -> i64 {
 pub extern "C" fn rt_vulkan_shutdown() -> i64 {
     let mut state = STATE.lock();
     state.descriptor_sets.clear();
+    state.active_compute_layout = None;
     state.descriptor_pools.clear();
     state.descriptor_set_layouts.clear();
     state.framebuffers.clear();
@@ -206,6 +211,7 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
     state.samplers.clear();
     state.compute_pipelines.clear();
     state.shader_modules.clear();
+    state.shader_spirv.clear();
     state.buffers.clear();
     state.fences.clear();
     state.semaphores.clear();

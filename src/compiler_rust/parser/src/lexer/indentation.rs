@@ -150,6 +150,14 @@ impl<'a> super::Lexer<'a> {
 
                             // Check if this is a multi-line doc block (/// on its own line)
                             if self.peek() == Some('\n') || self.peek().is_none() {
+                                if self.next_line_starts_with_triple_slash_doc_line() {
+                                    pending_token = Some(Token::new(
+                                        TokenKind::DocComment(String::new()),
+                                        Span::new(start_pos, self.current_pos, start_line, start_col),
+                                        self.source[start_pos..self.current_pos].to_string(),
+                                    ));
+                                    break;
+                                }
                                 // Multi-line doc block: ///\n...\n///
                                 // Use pending_token to allow Dedent handling first
                                 pending_token =

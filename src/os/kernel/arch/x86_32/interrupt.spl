@@ -24,7 +24,6 @@ use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
-use os.kernel.ipc.syscall.{syscall_handler, syscall_handler_ipc_state}
 
 # ============================================================================
 # PIC 8259 Port Addresses
@@ -55,6 +54,10 @@ val IDT_ENTRY_SIZE: u32 = 8       # 8 bytes per 32-bit IDT entry
 val IDT_GATE_INT32: u8 = 0x8E     # Present, DPL=0, 32-bit interrupt gate
 val IDT_GATE_TRAP32: u8 = 0x8F    # Present, DPL=0, 32-bit trap gate
 val IDT_GATE_USER: u8 = 0xEE      # Present, DPL=3, 32-bit interrupt gate (user-callable)
+
+val X86_32_USER_BRK_BASE: u64 = 0x30000000
+val X86_32_USER_BRK_LIMIT: u64 = 0x38000000
+var g_x86_32_current_brk: u64 = X86_32_USER_BRK_BASE
 
 # ============================================================================
 # IDT Entry Structure
@@ -310,18 +313,39 @@ fn x86_32_runtime_installed() -> bool:
     g_x86_32_runtime_installed
 
 fn x86_32_dispatch_installed_syscall(args: SyscallArgs) -> Result<SyscallResult, text>:
-    """Dispatch syscall arguments through the installed x86_32 runtime."""
+    """Dispatch syscall arguments through the installed x86_32 runtime.
+
+    The i386 live boot lane currently owns the early process syscalls needed to
+    prove the int 0x80 path. Broader SOSIX dispatch remains in syscall.spl and
+    is not imported here because its full OS closure is not freestanding-i386
+    clean yet.
+    """
     if not x86_32_runtime_installed():
         return Err("x86_32 trap runtime is not installed")
-    if args.id >= 20 and args.id <= 23:
-        val ipc_state = syscall_handler_ipc_state(args, g_x86_32_scheduler, g_x86_32_ipc, g_x86_32_klog)
-        g_x86_32_scheduler = ipc_state.scheduler
-        g_x86_32_ipc = ipc_state.ipc
-        _sync_x86_32_runtime_state()
-        return Ok(ipc_state.result)
-    val result = syscall_handler(args, g_x86_32_scheduler, g_x86_32_ipc, g_x86_32_klog)
+    val result = x86_32_dispatch_early_syscall(args)
     _sync_x86_32_runtime_state()
     Ok(result)
+
+fn x86_32_dispatch_early_syscall(args: SyscallArgs) -> SyscallResult:
+    """Handle the freestanding-clean i386 early syscall subset."""
+    if args.id == 4:
+        val current = g_x86_32_scheduler.get_current()
+        return SyscallResult(value: current.id.to_i64())
+    if args.id == 15:
+        return x86_32_handle_brk(args)
+    SyscallResult(value: -38)
+
+fn x86_32_handle_brk(args: SyscallArgs) -> SyscallResult:
+    """Minimal brk handler for early i386 trap-path validation."""
+    val requested = args.arg0
+    if requested == 0:
+        return SyscallResult(value: g_x86_32_current_brk as i64)
+    if requested < X86_32_USER_BRK_BASE:
+        return SyscallResult(value: -22)
+    if requested > X86_32_USER_BRK_LIMIT:
+        return SyscallResult(value: -12)
+    g_x86_32_current_brk = requested
+    SyscallResult(value: requested as i64)
 
 fn x86_32_dispatch_context(ctx: X86Context) -> Result<X86Context, text>:
     """Dispatch a trapped int 0x80 context and return the updated context."""

@@ -890,7 +890,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_metal_destroy_shader", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_metal_create_compute_pipeline", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_metal_destroy_pipeline", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_metal_dispatch_compute", &[I64, I64, I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_metal_dispatch_compute",
+        &[I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
     RuntimeFuncSpec::new("rt_metal_create_render_pipeline", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_metal_destroy_render_pipeline", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_metal_create_texture", &[I64, I64, I64, I64], &[I64]),
@@ -918,9 +922,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_metal_present", &[I64], &[I64]),
     RuntimeFuncSpec::new(
         "rt_metal_run_blit_frame",
-        &[
-            I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64,
-        ],
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
         &[I64],
     ),
     RuntimeFuncSpec::new(
@@ -1244,6 +1246,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cli_handle_lock", &[I64], &[I64]),
     // Explicit run command
     RuntimeFuncSpec::new("rt_cli_handle_run", &[I64, I8, I8], &[I64]),
+    RuntimeFuncSpec::new("rt_compile_to_native", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_compile_to_native_with_opt", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_compile_to_llvm_ir", &[I64], &[I64]),
     // Fault detection configuration
     RuntimeFuncSpec::new("rt_fault_set_stack_overflow_detection", &[I8], &[]),
     RuntimeFuncSpec::new("rt_fault_set_max_recursion_depth", &[I64], &[]),
@@ -1397,12 +1402,16 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_platform_name", &[], &[I64]), // () -> RuntimeValue
     RuntimeFuncSpec::new("rt_term_enable_ansi", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_term_get_size", &[], &[I64]), // () -> RuntimeValue (tuple of i32, i32)
+    RuntimeFuncSpec::new("rt_terminal_get_size", &[], &[I64]), // () -> RuntimeValue (tuple of i64, i64)
+    RuntimeFuncSpec::new("rt_terminal_enable_raw_mode", &[], &[I64]), // () -> RuntimeValue (bool)
+    RuntimeFuncSpec::new("rt_terminal_disable_raw_mode", &[], &[I64]), // () -> RuntimeValue (bool)
+    RuntimeFuncSpec::new("rt_stdin_read_byte", &[], &[I64]), // () -> byte or -1
     RuntimeFuncSpec::new("rt_ssh_userauth_password_only_failure_payload", &[], &[I64]),
     // =========================================================================
     // File I/O Metadata Operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_file_exists", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
-    RuntimeFuncSpec::new("rt_file_stat", &[I64, I64], &[I64]), // path_ptr, path_len -> i64 (mtime seconds)
+    RuntimeFuncSpec::new("rt_file_stat", &[I64, I64], &[I64]),  // path_ptr, path_len -> i64 (mtime seconds)
     // =========================================================================
     // File I/O Operations
     // =========================================================================
@@ -1513,6 +1522,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("spl_dlsym", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_dlclose", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_wffi_call_i64", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_wffi_call_f64", &[I64, I64, I64], &[F64]),
 ];
 
 #[cfg(test)]

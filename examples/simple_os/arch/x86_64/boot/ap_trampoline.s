@@ -4,8 +4,9 @@
  * The BSP copies this template to SIMPLEOS_AP_TRAMPOLINE_PHYS (0x8000) before
  * sending SIPI vector 0x08. The code is written for that fixed physical
  * address so real-mode and protected-mode absolute operands remain valid after
- * the copy. Runtime patch slots for the boot GDT descriptor and PML4 physical
- * address are filled by rt_x86_prepare_ap_startup() in baremetal_stubs.c.
+ * the copy. Runtime patch slots for the AP-local GDT descriptor and PML4
+ * physical address are filled by rt_x86_prepare_ap_startup() in
+ * baremetal_stubs.c.
  */
 
     .set SIMPLEOS_AP_TRAMPOLINE_PHYS, 0x8000
@@ -14,6 +15,8 @@
     .globl simpleos_ap_trampoline_template_start
     .globl simpleos_ap_trampoline_template_end
     .globl simpleos_ap_trampoline_gdt_desc
+    .globl simpleos_ap_trampoline_gdt
+    .globl simpleos_ap_trampoline_gdt_end
     .globl simpleos_ap_trampoline_pml4_phys_slot
     .type simpleos_ap_trampoline_template_start, @function
 
@@ -56,7 +59,7 @@ simpleos_ap_trampoline_pm32:
     movl    %cr0, %eax
     orl     $0x80010000, %eax
     movl    %eax, %cr0
-    ljmpl   $0x08, $SIMPLEOS_AP_TRAMPOLINE_PHYS + (simpleos_ap_trampoline_lm64 - simpleos_ap_trampoline_template_start)
+    ljmpl   $0x18, $SIMPLEOS_AP_TRAMPOLINE_PHYS + (simpleos_ap_trampoline_lm64 - simpleos_ap_trampoline_template_start)
 
     .code64
 simpleos_ap_trampoline_lm64:
@@ -91,6 +94,14 @@ simpleos_ap_trampoline_gdt_desc:
     .align 4
 simpleos_ap_trampoline_pml4_phys_slot:
     .long   0
+
+    .align 8
+simpleos_ap_trampoline_gdt:
+    .quad   0x0000000000000000  /* 0x00: null */
+    .quad   0x00cf9a000000ffff  /* 0x08: 32-bit kernel code */
+    .quad   0x00cf92000000ffff  /* 0x10: 32-bit/64-bit kernel data */
+    .quad   0x00af9a000000ffff  /* 0x18: 64-bit kernel code */
+simpleos_ap_trampoline_gdt_end:
 
     .align 16
 simpleos_ap_trampoline_template_end:

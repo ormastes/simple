@@ -391,3 +391,19 @@ fn test_region_domain_unclosed_block_reports_kind() {
         TokenKind::Error(message) if message.contains("Unclosed schema block")
     ));
 }
+
+#[test]
+fn test_region_domain_unclosed_block_reports_opening_span() {
+    let mut lexer = crate::lexer::Lexer::new("schema{Building: id Uuid");
+    let token = lexer.next_token();
+
+    match &token.kind {
+        TokenKind::Error(message) => {
+            assert!(message.contains("opening '{' at line 1, column 7, byte 6"));
+            assert_eq!(token.span.line, 1);
+            assert_eq!(token.span.column, 1);
+            assert_eq!(token.span.start, 0);
+        }
+        other => panic!("expected unclosed domain block error, got {:?}", other),
+    }
+}

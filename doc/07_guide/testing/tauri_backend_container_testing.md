@@ -77,6 +77,18 @@ The Tauri shell accepts two types of entry files:
 | `.spl` | `simple <file>` | Any Simple binary |
 | `.ui.sdn` | `simple tauri-entry <file>` | Simple binary with `ui` command |
 
+The `.ui.sdn` path must emit the common WebRender envelope, not legacy
+HTML-only JSON. A valid first render contains:
+
+```json
+{"type":"render","target":"tauri","surface_id":"main","width":1280,"height":720,"html":"..."}
+```
+
+The native shell preserves that metadata as
+`window.__SIMPLE_WEB_RENDER_ENVELOPE__` before injecting the HTML into the
+WebView. Host-origin key/action/resize events are sent back as common
+`type:"input"` envelopes.
+
 Current limitation:
 - `simple-tauri-shell` is standalone single-window mode only.
 - `--shared-wm` and `SIMPLE_UI_TAURI_SHARED_WM=1` are rejected explicitly because the Tauri shell does not yet wire the shared host WM event loop through its native window bootstrap.

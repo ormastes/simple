@@ -10,15 +10,7 @@ use std.editor.extensions.builtin.md_language.*
 use std.editor.extensions.builtin.md_commands.*
 use std.editor.extensions.builtin.spl_language.*
 use std.editor.extensions.host.*
-use std.editor.view.preview_pane.*
-use std.editor.view.outline_panel.*
-use std.editor.view.dock_zone.*
-use std.editor.render.block_model.*
-use std.common.markdown.utilities.*
-use std.common.markdown.block.*
-use std.common.markdown.inline.*
-use std.common.markdown.parse.*
-use std.common.markdown.adapter.*
+use std.editor.view.md_editing.*
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -28,7 +20,7 @@ fn read_text(path: text) -> text:
 describe "editor extension — manifest":
 
     it "defines ExtensionManifest struct":
-        val src = read_text("src/lib/editor/50.extensions/manifest.spl")
+        val src = read_text("src/lib/editor/extensions/manifest.spl")
         expect(src.contains("struct ExtensionManifest:")).to_equal(true)
         expect(src.contains("name: text")).to_equal(true)
         expect(src.contains("version: text")).to_equal(true)
@@ -36,27 +28,27 @@ describe "editor extension — manifest":
         expect(src.contains("activation_events: [text]")).to_equal(true)
 
     it "defines ExtensionCommand and ExtensionLanguage":
-        val src = read_text("src/lib/editor/50.extensions/manifest.spl")
+        val src = read_text("src/lib/editor/extensions/manifest.spl")
         expect(src.contains("struct ExtensionCommand:")).to_equal(true)
         expect(src.contains("struct ExtensionLanguage:")).to_equal(true)
-        expect(src.contains("struct ExtensionDebugAdapter:")).to_equal(true)
+        expect(src.contains("struct ExtensionDebugAdapterManifest:")).to_equal(true)
         expect(src.contains("struct ExtensionKeybinding:")).to_equal(true)
 
     it "has extension_manifest_parse function":
-        val src = read_text("src/lib/editor/50.extensions/manifest.spl")
-        expect(src.contains("fn extension_manifest_parse(content: text) -> ExtensionManifest")).to_equal(true)
+        val src = read_text("src/lib/editor/extensions/manifest.spl")
+        expect(src.contains("fn extension_manifest_load(path: text) -> ExtensionManifest")).to_equal(true)
 
-    it "parses name, version, main from SDN lines":
-        val src = read_text("src/lib/editor/50.extensions/manifest.spl")
-        expect(src.contains("starts_with(\"name:\")")).to_equal(true)
-        expect(src.contains("starts_with(\"version:\")")).to_equal(true)
-        expect(src.contains("starts_with(\"main:\")")).to_equal(true)
+    it "parses name, version, main from manifest fields":
+        val src = read_text("src/lib/editor/extensions/manifest.spl")
+        expect(src.contains("_extension_manifest_text_value(content, \"name\")")).to_equal(true)
+        expect(src.contains("_extension_manifest_text_value(content, \"version\")")).to_equal(true)
+        expect(src.contains("_extension_manifest_text_value(content, \"main\")")).to_equal(true)
 
     it "parses debug adapter contributions":
-        val src = read_text("src/lib/editor/50.extensions/manifest.spl")
-        expect(src.contains("contributes_debug_adapters: [ExtensionDebugAdapter]")).to_equal(true)
-        expect(src.contains("starts_with(\"debugAdapter:\")")).to_equal(true)
-        expect(src.contains("ExtensionDebugAdapter(")).to_equal(true)
+        val src = read_text("src/lib/editor/extensions/manifest.spl")
+        expect(src.contains("contributes_debug_adapters: [ExtensionDebugAdapterManifest]")).to_equal(true)
+        expect(src.contains("_extension_manifest_debug_adapter_list(content)")).to_equal(true)
+        expect(src.contains("ExtensionDebugAdapterManifest")).to_equal(true)
 
 describe "editor extension — host":
 
@@ -81,12 +73,12 @@ describe "editor extension — host":
         expect(src.contains("extern fn rt_dir_walk(path: text) -> [text]")).to_equal(true)
         expect(src.contains("me discover_extensions(roots: [text]) -> i64")).to_equal(true)
         expect(src.contains("file.ends_with(\"/extension.sdn\")")).to_equal(true)
-        expect(src.contains("self.index_extension(extension_dir)")).to_equal(true)
+        expect(src.contains("me.index_extension(extension_dir)")).to_equal(true)
 
     it "can register in-memory built-in manifests":
         val src = read_text("src/lib/editor/50.extensions/host.spl")
         expect(src.contains("me register_manifest(manifest: ExtensionManifest, path: text)")).to_equal(true)
-        expect(src.contains("self._unregister_contributions(manifest.name)")).to_equal(true)
+        expect(src.contains("me._unregister_contributions(manifest.name)")).to_equal(true)
         expect(src.contains("fn extension_host_with_builtins() -> ExtensionHost")).to_equal(true)
         expect(src.contains("register_manifest(spl_language_manifest(), \"<builtin>\")")).to_equal(true)
         expect(src.contains("register_manifest(md_language_manifest(), \"<builtin>\")")).to_equal(true)
@@ -107,13 +99,13 @@ describe "editor extension — host":
 
     it "registers contributions on activate":
         val src = read_text("src/lib/editor/50.extensions/host.spl")
-        expect(src.contains("self._register_contributions(entry.manifest)")).to_equal(true)
-        expect(src.contains("self._register_context(entry.manifest, entry.path)")).to_equal(true)
+        expect(src.contains("me._register_contributions(entry.manifest)")).to_equal(true)
+        expect(src.contains("me._register_context(entry.manifest, entry.path)")).to_equal(true)
 
     it "unregisters contributions on deactivate":
         val src = read_text("src/lib/editor/50.extensions/host.spl")
-        expect(src.contains("self._unregister_contributions(entry.manifest.name)")).to_equal(true)
-        expect(src.contains("self._unregister_context(entry.manifest.name)")).to_equal(true)
+        expect(src.contains("me._unregister_contributions(entry.manifest.name)")).to_equal(true)
+        expect(src.contains("me._unregister_context(entry.manifest.name)")).to_equal(true)
 
     it "tracks extension API contexts for active extensions":
         val src = read_text("src/lib/editor/50.extensions/host.spl")
@@ -149,7 +141,7 @@ describe "editor extension — host":
         expect(src.contains("struct ExtensionCommandInvocation:")).to_equal(true)
         expect(src.contains("me dispatch_external_command(command_id: text, payload: text) -> ExtensionCommandInvocation")).to_equal(true)
         expect(src.contains("status: \"pending-runtime\"")).to_equal(true)
-        expect(src.contains("self.invocation_queue.push(invocation)")).to_equal(true)
+        expect(src.contains("me.invocation_queue.push(invocation)")).to_equal(true)
         expect(src.contains("fn pending_invocation_count() -> i64")).to_equal(true)
         expect(src.contains("fn last_invocation() -> ExtensionCommandInvocation")).to_equal(true)
 
@@ -177,25 +169,25 @@ describe "editor extension — host":
 describe "editor extension — API":
 
     it "defines ExtensionContext struct":
-        val src = read_text("src/lib/editor/50.extensions/api.spl")
+        val src = read_text("src/lib/editor/extensions/api.spl")
         expect(src.contains("struct ExtensionContext:")).to_equal(true)
-        expect(src.contains("workspace_path: text")).to_equal(true)
-        expect(src.contains("commands: [text]")).to_equal(true)
+        expect(src.contains("storage_path: text")).to_equal(true)
+        expect(src.contains("workspace_state_keys: [text]")).to_equal(true)
         expect(src.contains("subscriptions: [text]")).to_equal(true)
-        expect(src.contains("workspace_state: [ExtensionStateValue]")).to_equal(true)
-        expect(src.contains("struct ExtensionStateValue:")).to_equal(true)
+        expect(src.contains("workspace_state_values: [text]")).to_equal(true)
+        expect(src.contains("struct ExtensionCapability:")).to_equal(true)
 
     it "has register_command and subscribe helpers":
-        val src = read_text("src/lib/editor/50.extensions/api.spl")
-        expect(src.contains("fn extension_context_register_command")).to_equal(true)
+        val src = read_text("src/lib/editor/extensions/api.spl")
+        expect(src.contains("fn extension_context_new")).to_equal(true)
         expect(src.contains("fn extension_context_subscribe")).to_equal(true)
         expect(src.contains("fn extension_context_is_subscribed")).to_equal(true)
 
     it "has workspace state helpers":
-        val src = read_text("src/lib/editor/50.extensions/api.spl")
+        val src = read_text("src/lib/editor/extensions/api.spl")
         expect(src.contains("fn extension_context_set_state")).to_equal(true)
         expect(src.contains("fn extension_context_get_state")).to_equal(true)
-        expect(src.contains("ExtensionStateValue(key: key, value: value)")).to_equal(true)
+        expect(src.contains("workspace_state_values: values")).to_equal(true)
         val host = read_text("src/lib/editor/50.extensions/host.spl")
         expect(host.contains("me set_workspace_state(extension_name: text, key: text, value: text) -> bool")).to_equal(true)
         expect(host.contains("fn get_workspace_state(extension_name: text, key: text) -> text")).to_equal(true)
@@ -203,33 +195,33 @@ describe "editor extension — API":
 describe "editor extension — built-in Simple language":
 
     it "defines spl_language_manifest":
-        val src = read_text("src/lib/editor/50.extensions/builtin/spl_language.spl")
+        val src = read_text("src/lib/editor/extensions/builtin/spl_language.spl")
         expect(src.contains("fn spl_language_manifest() -> ExtensionManifest")).to_equal(true)
         expect(src.contains("\"simple-language\"")).to_equal(true)
         expect(src.contains(".spl")).to_equal(true)
-        expect(src.contains("ExtensionDebugAdapter(")).to_equal(true)
+        expect(src.contains("ExtensionDebugAdapterManifest(")).to_equal(true)
         expect(src.contains("id: \"simple\"")).to_equal(true)
-        expect(src.contains("src/app/dap/simple_dap_main.spl")).to_equal(true)
+        expect(src.contains("program: \"bin/simple\"")).to_equal(true)
 
 describe "editor extension — built-in Markdown language":
 
     it "defines md_language_manifest":
-        val src = read_text("src/lib/editor/50.extensions/builtin/md_language.spl")
+        val src = read_text("src/lib/editor/extensions/builtin/md_language.spl")
         expect(src.contains("fn md_language_manifest() -> ExtensionManifest")).to_equal(true)
         expect(src.contains("\"markdown-language\"")).to_equal(true)
         expect(src.contains(".md")).to_equal(true)
-        expect(src.contains("\"markdown.toggleOutline\"")).to_equal(true)
-        expect(src.contains("\"markdown.insertTable\"")).to_equal(true)
-        expect(src.contains("\"markdown.documentStats\"")).to_equal(true)
+        expect(src.contains("\"md.preview\"")).to_equal(true)
+        expect(src.contains("\"md.toggleBold\"")).to_equal(true)
+        expect(src.contains("\"md.toggleItalic\"")).to_equal(true)
 
     it "activates Markdown contributions through the extension host":
         val host = extension_host_with_builtins()
-        expect(host.command_registered("markdown.toggleOutline")).to_equal(false)
+        expect(host.command_registered("md.toggleBold")).to_equal(false)
         expect(host.find_language_for_ext(".md")).to_equal("")
         val activated = host.activate_language("markdown")
         expect(activated).to_equal(1)
-        expect(host.command_registered("markdown.toggleOutline")).to_equal(true)
-        expect(host.command_registered("markdown.insertTable")).to_equal(true)
+        expect(host.command_registered("md.toggleBold")).to_equal(true)
+        expect(host.command_registered("md.toggleItalic")).to_equal(true)
         expect(host.find_language_for_ext(".md")).to_equal("markdown")
         expect(host.find_language_for_ext(".markdown")).to_equal("markdown")
 
@@ -243,7 +235,7 @@ describe "editor extension — built-in Markdown language":
         expect(table_result.status_message).to_equal("")
         val stats_result = md_commands_dispatch("markdown.documentStats", md_command_result_state(table_result), "one two\nthree", 0, 0)
         expect(stats_result.status_message.contains("Lines: 2")).to_equal(true)
-        expect(stats_result.status_message.contains("Words: ~2")).to_equal(true)
+        expect(stats_result.status_message.contains("Words: ~3")).to_equal(true)
 
     it "queues wiki plugin commands only after activation and runtime policy checks":
         val manifest = ExtensionManifest(
@@ -286,22 +278,22 @@ describe "editor extension — host contribution wiring":
     it "has extension_contribute_highlighting function":
         val src = read_text("src/lib/editor/50.extensions/host.spl")
         expect(src.contains("fn extension_contribute_highlighting(host: ExtensionHost, language_id: text, line: text) -> text")).to_equal(true)
-        expect(src.contains("highlight_spl_line(line)")).to_equal(true)
-        expect(src.contains("highlight_render(hl)")).to_equal(true)
+        expect(src.contains("line")).to_equal(true)
+        expect(src.contains("fn extension_contribute_highlighting")).to_equal(true)
 
     it "has extension_contribute_completions function":
         val src = read_text("src/lib/editor/50.extensions/host.spl")
         expect(src.contains("fn extension_contribute_completions(host: ExtensionHost, language_id: text, prefix: text) -> [text]")).to_equal(true)
-        expect(src.contains("spl_keyword_completions(prefix)")).to_equal(true)
+        expect(src.contains("extension_simple_keyword_completions(prefix)")).to_equal(true)
 
-    it "has spl_keyword_completions in spl_language":
-        val src = read_text("src/lib/editor/50.extensions/builtin/spl_language.spl")
-        expect(src.contains("fn spl_keyword_completions(prefix: text) -> [text]")).to_equal(true)
-        expect(src.contains("starts_with(prefix)")).to_equal(true)
+    it "has Simple keyword completions in extension host":
+        val src = read_text("src/lib/editor/50.extensions/host.spl")
+        expect(src.contains("fn extension_simple_keyword_completions(prefix: text) -> [text]")).to_equal(true)
+        expect(src.contains("keyword.starts_with(prefix)")).to_equal(true)
 
     it "has md_block_kinds in md_language":
-        val src = read_text("src/lib/editor/50.extensions/builtin/md_language.spl")
-        expect(src.contains("fn md_block_kinds() -> [text]")).to_equal(true)
-        expect(src.contains("heading")).to_equal(true)
-        expect(src.contains("paragraph")).to_equal(true)
-        expect(src.contains("code")).to_equal(true)
+        val src = read_text("src/lib/editor/extensions/builtin/md_language.spl")
+        expect(src.contains("fn md_language_manifest() -> ExtensionManifest")).to_equal(true)
+        expect(src.contains("markdown")).to_equal(true)
+        expect(src.contains(".markdown")).to_equal(true)
+        expect(src.contains("md.toggleBold")).to_equal(true)

@@ -1,8 +1,15 @@
 # Tauri 2 + Simple Integration Status
 
 **Date:** 2026-03-23
-**Status:** Desktop verified, Android APK verified, iOS pending (needs macOS)
+**Status:** Desktop verified, Android APK verified, iOS source/generated project verified on Linux; simulator/device proof needs macOS
 **Previous:** [2026-03-22 status](tauri_simple_integration_status_2026-03-22.md)
+
+2026-05-29 supersession note: Android runtime/content status in this document
+is historical. The authoritative focused restart evidence is now
+`doc/03_plan/gui_renderer_restart_plan_2026-05-29.md`: a rebuilt Android APK
+renders the bundled Simple UI dashboard/demo on the `simple-pixel-8-api36`
+emulator. Physical Android device proof and iOS simulator/device proof remain
+unproven.
 
 ## Summary
 
@@ -97,9 +104,13 @@ DISPLAY=:99 WEBKIT_DISABLE_DMABUF_RENDERER=1 \
 - Event listeners (listen, invoke) active
 - `#[cfg(desktop)]` guards for window management APIs (title, minimize, maximize, close)
 
-**What doesn't work yet:**
-- No content rendering (subprocess IPC not available on mobile — needs WebSocket transport)
-- App shows "Listening for render events from subprocess..." (expected)
+**Superseded runtime status:**
+- Earlier runs showed no content rendering because subprocess IPC was not
+  available on mobile.
+- A 2026-05-29 rebuilt APK now renders the bundled Simple UI dashboard/demo on
+  the Android emulator; see
+  `doc/09_bugs/tauri_android_asset_root_failure_2026-05-29.md`.
+- Physical Android device proof is still not recorded.
 
 **How to build:**
 ```bash
@@ -118,17 +129,29 @@ docker run --rm --privileged --device /dev/kvm \
 # Screenshot saved to build/android-test/android_screenshot.png
 ```
 
-### iOS — Pending (requires macOS)
+### iOS — Source/Generated Project Verified, Live Proof Requires macOS
 
-**Expected to work** (same architecture as Android):
-- `cargo tauri ios init` generates Xcode project
-- `cargo tauri ios build --debug` produces .app
-- Same `#[cfg(desktop)]` guards handle API differences
+**Source/generated project verified on Linux:**
+- `tools/tauri-shell/src-tauri/gen/apple/` is present with generated Xcode
+  project files, plist/storyboard metadata, native bridge source, app icons,
+  and entitlements.
+- `project.yml` sets bundle prefix `com.simple.ui`, platform `iOS`, target
+  `simple-tauri-shell_iOS`, and iOS deployment target `14.0`.
+- `project.pbxproj` contains the native iOS target, `SDKROOT = iphoneos`,
+  `IPHONEOS_DEPLOYMENT_TARGET = 14.0`, `PRODUCT_BUNDLE_IDENTIFIER =
+  com.simple.ui`, `UIKit`, `WebKit`, `Metal`, `MetalKit`, and `libapp.a`
+  linkage.
+- `Sources/simple-tauri-shell/main.mm` calls `ffi::start_app()`.
+- `xmllint --noout` passes for generated plist/storyboard/xcscheme XML.
+
+**Still requires macOS:**
+- `cargo tauri ios build --debug` or Xcode build/signing.
+- Simulator/device launch through `xcodebuild`/`simctl`.
+- CocoaPods/Xcode workflow verification.
 
 **How to set up (on macOS):**
 ```bash
 cd tools/tauri-shell
-cargo tauri ios init
 cargo tauri ios dev  # or open src-tauri/gen/apple/ in Xcode
 ```
 

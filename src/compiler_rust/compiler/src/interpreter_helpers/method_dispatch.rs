@@ -37,6 +37,35 @@ pub(crate) fn call_method_on_value(
             "trim" | "strip" => return Ok(Value::Str(s.trim().to_string())),
             "to_upper" | "upper" | "uppercase" => return Ok(Value::Str(s.to_uppercase())),
             "to_lower" | "lower" | "lowercase" => return Ok(Value::Str(s.to_lowercase())),
+            "contains" | "includes" => {
+                if let Some(Value::Str(needle)) = _args.first() {
+                    return Ok(Value::Bool(s.contains(needle)));
+                }
+                return Ok(Value::Bool(false));
+            }
+            "starts_with" => {
+                if let Some(Value::Str(needle)) = _args.first() {
+                    return Ok(Value::Bool(s.starts_with(needle)));
+                }
+                return Ok(Value::Bool(false));
+            }
+            "ends_with" => {
+                if let Some(Value::Str(needle)) = _args.first() {
+                    return Ok(Value::Bool(s.ends_with(needle)));
+                }
+                return Ok(Value::Bool(false));
+            }
+            "index_of" => {
+                if let Some(Value::Str(needle)) = _args.first() {
+                    if let Some(idx) = s.find(needle) {
+                        return Ok(Value::Int(s[..idx].chars().count() as i64));
+                    }
+                }
+                return Ok(Value::Int(-1));
+            }
+            "to_i64" | "to_int" => {
+                return Ok(s.trim().parse::<i64>().map(Value::Int).unwrap_or(Value::Nil));
+            }
             _ => {}
         },
 
@@ -182,7 +211,11 @@ pub(crate) fn call_method_on_value(
                         }
                         return Ok(Value::array(result));
                     }
-                    Some(Value::Lambda { params, body, env: captured }) => {
+                    Some(Value::Lambda {
+                        params,
+                        body,
+                        env: captured,
+                    }) => {
                         let mut result = Vec::new();
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
@@ -219,7 +252,11 @@ pub(crate) fn call_method_on_value(
                         }
                         return Ok(Value::array(result));
                     }
-                    Some(Value::Lambda { params, body, env: captured }) => {
+                    Some(Value::Lambda {
+                        params,
+                        body,
+                        env: captured,
+                    }) => {
                         let mut result = Vec::new();
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
@@ -260,7 +297,11 @@ pub(crate) fn call_method_on_value(
                         }
                         return Ok(Value::array(result));
                     }
-                    Some(Value::Lambda { params, body, env: captured }) => {
+                    Some(Value::Lambda {
+                        params,
+                        body,
+                        env: captured,
+                    }) => {
                         let mut result = Vec::new();
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
@@ -340,7 +381,11 @@ pub(crate) fn call_method_on_value(
                         }
                         return Ok(Value::Bool(false));
                     }
-                    Some(Value::Lambda { params, body, env: captured }) => {
+                    Some(Value::Lambda {
+                        params,
+                        body,
+                        env: captured,
+                    }) => {
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
                             if let Some(param) = params.first() {
@@ -377,7 +422,11 @@ pub(crate) fn call_method_on_value(
                         }
                         return Ok(Value::Bool(true));
                     }
-                    Some(Value::Lambda { params, body, env: captured }) => {
+                    Some(Value::Lambda {
+                        params,
+                        body,
+                        env: captured,
+                    }) => {
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
                             if let Some(param) = params.first() {

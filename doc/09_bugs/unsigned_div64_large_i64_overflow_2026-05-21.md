@@ -1,5 +1,7 @@
 # unsigned_div64 Arithmetic Overflow for Large i64 Values - 2026-05-21
 
+Status: Resolved 2026-05-29
+
 ## Summary
 
 `unsigned_div64` in `src/lib/hardware/rv64gc_rtl/mul_div.spl` produces wrong
@@ -45,5 +47,15 @@ Use a bit-manipulation approach that avoids sign-extension pitfalls:
 
 ## Status
 
-Open. Discovered 2026-05-21 while fixing import errors in `core64_integration_spec.spl`.
-The spec correctly tests the DIVU/REMU behavior; the bug is in the library implementation.
+Resolved. The wrapper path already used `unsigned_div64`/`unsigned_rem64`; the
+remaining direct `mul_div_start` + `mul_div_tick` path still used signed
+division/remainder for `MULDIV_DIVU` and `MULDIV_REMU`. That tick path now
+delegates to the unsigned helpers, and `core64_integration_spec.spl` covers both
+large-operand tick cases directly.
+
+Verified:
+
+```bash
+SIMPLE_LIB=src bin/simple check src/lib/hardware/rv64gc_rtl/mul_div.spl --mode=interpreter
+SIMPLE_LIB=src bin/simple test test/unit/lib/hardware/rv64gc_rtl/core64_integration_spec.spl --mode=interpreter
+```

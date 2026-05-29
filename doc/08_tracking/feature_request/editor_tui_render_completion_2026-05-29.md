@@ -2,7 +2,7 @@
 
 - **Date:** 2026-05-29
 - **Area:** `app/editor` + `lib/editor` + seed runtime/JIT
-- **Status:** open
+- **Status:** resolved 2026-05-29
 - **Priority:** medium
 
 ## Context
@@ -15,12 +15,13 @@ editor compiles again. The AOT duplicate-`_rt_file_exists` link blocker was fixe
 earlier (`61b29213`). A real frame was already drawn via the `EditorBuffer` through
 the interpreter (see bug doc below).
 
-What is NOT yet done: an AOT/JIT build of the **full interactive editor** still
-does not draw a frame, and two numbered controller-module splits remain.
+The `rust-hosted` and `core-c-bootstrap` builds of the full TUI now draw
+active-buffer frames. Palette and LSP popup overlays are restored and verified
+with visible native probes.
 
 ## Ask
 
-### 1. Consolidate numbered controller-module splits
+### 1. Consolidate numbered controller-module splits — done 2026-05-29
 Per the "no numbered/versioned module splits" rule, merge:
 - `editor_ctrl_core2.spl` (739L) → `editor_ctrl_core.spl`
 - `editor_ctrl_lsp2.spl` (344L) → `editor_ctrl_lsp.spl`
@@ -30,25 +31,43 @@ collisions** against their base (verified) and import-supersets of the base (lsp
 adds `std.editor.services.{md_lsp_config,simple_lsp_config}`). Only
 `editor_controller.spl` imports the `*2` modules. Merge = append bodies + union
 imports + drop the two `use ...editor_ctrl_{core2,lsp2}.*` lines + delete the
-`*2` files. (Attempted once; reverted by a concurrent agent's working-copy
-checkout — must be done as a single scoped commit, fast.)
+`*2` files. Completed by merging the bodies/imports into the base modules,
+removing the `editor_controller.spl` imports, deleting both numbered modules,
+and updating palette/controller source-contract specs to the consolidated
+module boundaries.
 
-### 2. Make the AOT/JIT editor actually render a frame
-Resolve the runtime-level blockers (NOT editor code) tracked in
+Verification:
+- `SIMPLE_LIB=src bin/simple check src/app/editor/editor_controller.spl src/app/editor/editor_ctrl_core.spl src/app/editor/editor_ctrl_lsp.spl src/app/editor/tui_main.spl src/app/editor/tui_shell.spl test/system/editor_palette_spec.spl`
+- `SIMPLE_LIB=src bin/simple test test/system/editor_palette_spec.spl --mode=interpreter --clean` (`11/11`)
+
+### 2. Make the AOT/JIT editor actually render a frame — partial 2026-05-29
+The `rust-hosted` and `core-c-bootstrap` lanes now build and render repeated
+active-buffer terminal frames under a 3-second timeout with no stderr. The
+frames include the status bar (`NORMAL`, `[No Name]`, `1 files`, `ready`) and no
+longer rely on the fallback `No file open...` placeholder.
+
+Verification:
+- `SIMPLE_LIB=src bin/simple native-build --runtime-bundle rust-hosted --source src/lib --source src/app --entry-closure --entry src/app/editor/tui_main.spl --output /tmp/simple_editor_tui_rust_hosted`
+- `TERM=xterm timeout 3 /tmp/simple_editor_tui_rust_hosted /tmp/simple_editor_empty.spl`
+- `SIMPLE_LIB=src bin/simple native-build --runtime-bundle core-c-bootstrap --source src/lib --source src/app --entry-closure --entry src/app/editor/tui_main.spl --output /tmp/simple_editor_tui_corec`
+- `TERM=xterm timeout 3 /tmp/simple_editor_tui_corec /tmp/simple_editor_empty.spl`
+
+Resolved runtime/fidelity blockers are tracked in
 `doc/08_tracking/bug/editor_render_runtime_blockers_2026-05-29.md`:
-- AOT "function not found: `discover_extensions`" — the method exists at
-  `host.spl:113`; an AOT method-dispatch/symbol-resolution bug.
-- AOT per-frame poll-call crash — `ctrl._refresh_lsp_results()` /
-  `_poll_file_watcher()` / `_poll_inlay_hint_refresh_after()` /
-  `_poll_debug_dap_client()` hit AOT-stubbed externs.
-- `rust-hosted` JIT: unresolved `rt_compile_to_native_with_opt` (interpreter-host
-  extern with no C-ABI symbol).
+- The prior core-C startup segfault is fixed by skipping absent extension roots
+  before calling `rt_dir_walk`.
+- The prior active-buffer render crash is fixed with explicit native result
+  types in `tui_shell.spl`.
+- The prior overlay guard is removed. Visible palette and LSP popup native
+  probes render their expected text.
+- The prior `rust-hosted` missing `rt_compile_to_native_with_opt` symbol is
+  fixed.
 
-### 3. Define `PaletteState`
-Referenced at `editor_controller.spl:98/166` and `tui_shell_panels.spl:437` but
-defined nowhere. `--entry-closure` builds because the palette code is unreached,
-but a full-tree compile / GUI palette path needs a real `PaletteState` struct
-(+ `palette_new`/`palette_show` API).
+### 3. Define `PaletteState` — done 2026-05-29
+`src/lib/editor/60.services/command_palette.spl` now defines `PaletteState`,
+fuzzy matching/ranking, and the `palette_new`/`palette_show` API used by the
+controller and TUI palette renderer. `test/system/editor_palette_spec.spl`
+passes 11/11.
 
 ## See also
 - `doc/08_tracking/bug/editor_render_runtime_blockers_2026-05-29.md`

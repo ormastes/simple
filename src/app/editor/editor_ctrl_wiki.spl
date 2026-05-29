@@ -35,7 +35,9 @@ fn ctrl_wiki_daily_note_create(ctrl: EditorController, payload: text) -> EditorA
     if not ok:
         ctrl.status_msg = "failed to create daily note"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
-    val target_doc_id = ctrl.session.open_file(path)
+    var session_daily = ctrl.session
+    val target_doc_id = session_daily.open_file(path)
+    ctrl._replace_session(session_daily)
     ctrl_focus_lsp_target_doc(ctrl, target_doc_id)
     ctrl.status_msg = "created daily note: " + path
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -187,7 +189,7 @@ fn ctrl_markdown_table_insert_row(ctrl: EditorController) -> EditorAction:
     if doc == nil or buffer == nil or doc.language_id != "markdown":
         ctrl.status_msg = "no markdown table"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
-    val edit = md_table_insert_row_after(buffer.to_text(), buffer.cursor_row_value())
+    val edit = md_table_insert_row_after(buffer.to_text(), buffer.cursor_row)
     if not edit.changed:
         ctrl.status_msg = edit.message
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -207,7 +209,7 @@ fn ctrl_markdown_table_insert_column(ctrl: EditorController) -> EditorAction:
     if doc == nil or buffer == nil or doc.language_id != "markdown":
         ctrl.status_msg = "no markdown table"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
-    val edit = md_table_insert_column_after(buffer.to_text(), buffer.cursor_row_value(), buffer.cursor_col_value())
+    val edit = md_table_insert_column_after(buffer.to_text(), buffer.cursor_row, buffer.cursor_col)
     if not edit.changed:
         ctrl.status_msg = edit.message
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -247,7 +249,7 @@ fn ctrl_markdown_table_cell_nav(ctrl: EditorController, direction: text) -> Edit
     if doc == nil or buffer == nil or doc.language_id != "markdown":
         ctrl.status_msg = "no markdown table"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
-    val nav = if direction == "prev" then md_table_prev_cell(buffer.to_text(), buffer.cursor_row_value(), buffer.cursor_col_value()) else: md_table_next_cell(buffer.to_text(), buffer.cursor_row_value(), buffer.cursor_col_value())
+    val nav = if direction == "prev" then md_table_prev_cell(buffer.to_text(), buffer.cursor_row, buffer.cursor_col) else: md_table_next_cell(buffer.to_text(), buffer.cursor_row, buffer.cursor_col)
     if not nav.found:
         ctrl.status_msg = nav.message
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -262,7 +264,7 @@ fn ctrl_toggle_active_callout_fold(ctrl: EditorController) -> EditorAction:
     if doc == nil or buffer == nil or doc.language_id != "markdown":
         ctrl.status_msg = "no callout"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
-    val result = md_callout_toggle_fold(buffer.to_text(), buffer.cursor_row_value())
+    val result = md_callout_toggle_fold(buffer.to_text(), buffer.cursor_row)
     if not result.changed:
         ctrl.status_msg = result.message
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -282,13 +284,13 @@ fn ctrl_wiki_show_backlinks(ctrl: EditorController) -> EditorAction:
         ctrl.status_msg = "no markdown note open"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     ctrl.wiki_property_vault_root = _editor_dirname(doc.path())
-    val index = ctrl._wiki_index_open_documents()
+    val index = ctrl_wiki_index_open_documents(ctrl)
     ctrl.wiki_panel = wiki_panel_from_backlinks(md_wiki_backlinks(index, doc.path()))
     ctrl_show_wiki_panel(ctrl, "wiki backlinks panel")
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
 fn ctrl_wiki_show_tasks(ctrl: EditorController, filter: text) -> EditorAction:
-    val index = ctrl._wiki_index_open_documents()
+    val index = ctrl_wiki_index_open_documents(ctrl)
     val normalized = if _editor_payload_part(filter, 0).trim() == "" then "open" else: _editor_payload_part(filter, 0).trim().to_lower()
     val query = _editor_payload_part(filter, 1).trim().to_lower()
     ctrl.wiki_task_filter = normalized
@@ -316,7 +318,7 @@ fn ctrl_wiki_task_batch(ctrl: EditorController, payload: text) -> EditorAction:
     ctrl.session.update_active_buffer(buffer)
     ctrl_notify_active_lsp_changed(ctrl)
     ctrl.wiki_property_vault_root = _editor_dirname(doc.path())
-    val index = ctrl._wiki_index_open_documents()
+    val index = ctrl_wiki_index_open_documents(ctrl)
     ctrl.wiki_panel = wiki_panel_from_tasks(md_wiki_tasks_filtered(index, if checked then "done" else: "open"))
     ctrl_show_wiki_panel(ctrl, if checked then "tasks marked done" else: "tasks marked open")
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -349,7 +351,7 @@ fn ctrl_wiki_show_properties(ctrl: EditorController) -> EditorAction:
     if doc == nil or doc.language_id != "markdown":
         ctrl.status_msg = "no markdown note open"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
-    val index = ctrl._wiki_index_open_documents()
+    val index = ctrl_wiki_index_open_documents(ctrl)
     ctrl.wiki_panel = wiki_panel_from_properties(md_wiki_properties_for_path(index, doc.path()))
     ctrl_show_wiki_panel(ctrl, "wiki properties panel")
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -372,7 +374,7 @@ fn ctrl_wiki_set_property(ctrl: EditorController, payload: text) -> EditorAction
     ctrl_update_markdown_preview(ctrl, doc, buffer)
     ctrl.session.update_active_buffer(buffer)
     ctrl_notify_active_lsp_changed(ctrl)
-    val index = ctrl._wiki_index_open_documents()
+    val index = ctrl_wiki_index_open_documents(ctrl)
     ctrl.wiki_panel = wiki_panel_from_properties(md_wiki_properties_for_path(index, doc.path()))
     ctrl_show_wiki_panel(ctrl, "property set: " + parsed.key)
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -445,7 +447,7 @@ fn ctrl_wiki_show_tags(ctrl: EditorController, tag: text) -> EditorAction:
     if needle == "":
         ctrl.status_msg = "missing wiki tag"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
-    val index = ctrl._wiki_index_open_documents()
+    val index = ctrl_wiki_index_open_documents(ctrl)
     ctrl.wiki_panel = wiki_panel_from_tags(md_wiki_tags(index, needle))
     ctrl_show_wiki_panel(ctrl, "wiki tags panel")
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -453,7 +455,7 @@ fn ctrl_wiki_show_tags(ctrl: EditorController, tag: text) -> EditorAction:
 fn ctrl_wiki_show_graph(ctrl: EditorController) -> EditorAction:
     val doc = ctrl.session.active_document()
     val path = if doc == nil then "" else: doc.path()
-    val index = ctrl._wiki_index_open_documents()
+    val index = ctrl_wiki_index_open_documents(ctrl)
     ctrl.wiki_panel = wiki_panel_from_graph_edges_with_index(md_wiki_graph_edges(index, path), index)
     ctrl_show_wiki_panel(ctrl, "wiki graph panel")
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -461,7 +463,7 @@ fn ctrl_wiki_show_graph(ctrl: EditorController) -> EditorAction:
 fn ctrl_wiki_quick_switch(ctrl: EditorController, query: text) -> EditorAction:
     val needle = query.trim()
     ctrl.wiki_quick_switch_query = needle
-    val index = ctrl._wiki_index_open_documents()
+    val index = ctrl_wiki_index_open_documents(ctrl)
     ctrl.wiki_panel = wiki_panel_from_documents(md_wiki_quick_switch(index, needle))
     ctrl_show_wiki_panel(ctrl, "wiki quick switch panel")
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -518,7 +520,7 @@ fn ctrl_open_markdown_link_under_cursor(ctrl: EditorController) -> EditorAction:
         ctrl.status_msg = "not a markdown file"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     val content = md_buffer_content(buffer)
-    val raw_target = md_vim_open_link_under_cursor(content, buffer.cursor_row_value(), buffer.cursor_col_value())
+    val raw_target = md_vim_open_link_under_cursor(content, buffer.cursor_row, buffer.cursor_col)
     if raw_target == "":
         ctrl.status_msg = "no link under cursor"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -547,7 +549,9 @@ fn ctrl_open_markdown_link_target(ctrl: EditorController, raw_target: text) -> E
             ctrl.status_msg = "failed to create note: " + path
             return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
         ctrl.vault_search_index = md_vault_search_index_apply_file_change(ctrl.vault_search_index, path, note_content, 1)
-    ctrl.session.open_file(path)
+    var session_link = ctrl.session
+    session_link.open_file(path)
+    ctrl._replace_session(session_link)
     ctrl_focus_lsp_target_path(ctrl, path)
     ctrl.status_msg = if should_create then "created note: " + path else: "opened link: " + path
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -579,7 +583,9 @@ fn ctrl_wiki_jump_selected(ctrl: EditorController) -> EditorAction:
         ctrl.status_msg = "no wiki result target"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     val line = wiki_panel_target_line(ctrl.wiki_panel)
-    ctrl.session.open_file(path)
+    var session_jump = ctrl.session
+    session_jump.open_file(path)
+    ctrl._replace_session(session_jump)
     ctrl_focus_lsp_target_path(ctrl, path)
     val buffer = ctrl.session.active_buffer()
     if buffer != nil:

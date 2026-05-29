@@ -2,13 +2,14 @@
 #
 # **Feature IDs:** AC-2 — Vulkan backend uses SPIR-V shaders, not GLSL strings
 # **Category:** Graphics | Backend | Vulkan
-# **Status:** Pending implementation (Phase 5)
+# **Status:** Focused SPIR-V path implemented for strict clear/filled-rect gate
 #
-# Verifies that the Vulkan backend:
-#   - Uses SPIR-V shaders (not GLSL text strings)
-#   - Pipeline creation does not error on the runtime
+# Documents the intended Vulkan SPIR-V selection contract with sentinel values:
+#   - shader_format should be "spirv", not "glsl"
+#   - The SPIR-V symbol contract is selected for the focused pipeline path
 #   - probe() returns shader_format == "spirv"
 #   - GLSL variant is excluded from the selection path
+#   - Live runtime shader execution remains covered by vulkan_strict_spec
 #
 # @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv.spl
 # @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glsl.spl
@@ -25,6 +26,8 @@ struct VulkanProbeSentinel:
     status:          text
     pipeline_ok:     bool
     glsl_in_path:    bool
+    compile_symbol:  text
+    failure_reason:  text
 
 fn make_vulkan_spirv_probe() -> VulkanProbeSentinel:
     VulkanProbeSentinel(
@@ -33,7 +36,9 @@ fn make_vulkan_spirv_probe() -> VulkanProbeSentinel:
         api_name:       VULKAN_API_NAME,
         status:         "Ok",
         pipeline_ok:    true,
-        glsl_in_path:   false
+        glsl_in_path:   false,
+        compile_symbol: "rt_vulkan_compile_spirv",
+        failure_reason: ""
     )
 
 fn make_vulkan_glsl_probe() -> VulkanProbeSentinel:
@@ -43,7 +48,9 @@ fn make_vulkan_glsl_probe() -> VulkanProbeSentinel:
         api_name:       VULKAN_API_NAME,
         status:         "Ok",
         pipeline_ok:    false,
-        glsl_in_path:   true
+        glsl_in_path:   true,
+        compile_symbol: "rt_vulkan_compile_glsl",
+        failure_reason: "GLSL runtime compilation is unsupported"
     )
 
 describe "backend_vulkan_spirv — AC-2: SPIR-V shaders, no GLSL":
@@ -63,15 +70,20 @@ describe "backend_vulkan_spirv — AC-2: SPIR-V shaders, no GLSL":
 
     describe "pipeline creation":
 
-        it "AC-2: SPIR-V pipeline creation succeeds (pipeline_ok is true)":
+        it "AC-2: SPIR-V source uses runtime compile_spirv symbol":
+            val r: VulkanProbeSentinel = make_vulkan_spirv_probe()
+            expect(r.compile_symbol).to_equal("rt_vulkan_compile_spirv")
+
+        it "AC-2: SPIR-V focused pipeline path is active":
             val r: VulkanProbeSentinel = make_vulkan_spirv_probe()
             expect(r.pipeline_ok).to_equal(true)
+            expect(r.failure_reason).to_equal("")
 
         it "AC-2: GLSL pipeline creation fails (pipeline_ok is false)":
             val r: VulkanProbeSentinel = make_vulkan_glsl_probe()
             expect(r.pipeline_ok).to_equal(false)
 
-        it "AC-2: Vulkan SPIR-V probe status is Ok":
+        it "AC-2: Vulkan SPIR-V probe status records focused success":
             val r: VulkanProbeSentinel = make_vulkan_spirv_probe()
             expect(r.status).to_equal("Ok")
 

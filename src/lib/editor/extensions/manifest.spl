@@ -3,6 +3,8 @@
 # Provides: ExtensionCommand, ExtensionLanguage, ExtensionDebugAdapterManifest,
 #           ExtensionTheme, ExtensionKeybinding, ExtensionManifest.
 
+extern fn rt_file_read_text(path: text) -> text
+
 struct ExtensionCommand:
     id: text
     title: text
@@ -50,3 +52,115 @@ fn extension_manifest_empty() -> ExtensionManifest:
         contributes_themes: [],
         contributes_keybindings: []
     )
+
+fn extension_manifest_load(path: text) -> ExtensionManifest:
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        return extension_manifest_empty()
+    var manifest = extension_manifest_empty()
+    manifest.name = _extension_manifest_text_value(content, "name")
+    manifest.version = _extension_manifest_text_value(content, "version")
+    manifest.main = _extension_manifest_text_value(content, "main")
+    manifest.activation_events = _extension_manifest_list_value(content, "activation_events")
+    manifest.contributes_commands = _extension_manifest_command_list(content)
+    manifest.contributes_languages = _extension_manifest_language_list(content)
+    manifest.contributes_debug_adapters = _extension_manifest_debug_adapter_list(content)
+    manifest.contributes_themes = []
+    manifest.contributes_keybindings = []
+    manifest
+
+fn _extension_manifest_text_value(content: text, key: text) -> text:
+    val quoted = "\"" + key + "\""
+    val idx = content.index_of(quoted)
+    if idx < 0:
+        return ""
+    val colon = content.index_of_from(":", idx + quoted.len())
+    if colon < 0:
+        return ""
+    _extension_manifest_string_after(content, colon + 1)
+
+fn _extension_manifest_list_value(content: text, key: text) -> [text]:
+    val quoted = "\"" + key + "\""
+    val idx = content.index_of(quoted)
+    if idx < 0:
+        return []
+    val open_idx = content.index_of_from("[", idx + quoted.len())
+    if open_idx < 0:
+        return []
+    val close_idx = content.index_of_from("]", open_idx + 1)
+    if close_idx < 0:
+        return []
+    _extension_manifest_parse_string_list(content.slice(open_idx + 1, close_idx))
+
+fn _extension_manifest_command_list(content: text) -> [ExtensionCommand]:
+    val ids = _extension_manifest_object_field_values(content, "id")
+    val titles = _extension_manifest_object_field_values(content, "title")
+    var result: [ExtensionCommand] = []
+    var i = 0
+    while i < ids.len():
+        var title = ids[i]
+        if i < titles.len():
+            title = titles[i]
+        result.push(ExtensionCommand(id: ids[i], title: title))
+        i = i + 1
+    result
+
+fn _extension_manifest_language_list(content: text) -> [ExtensionLanguage]:
+    val ids = _extension_manifest_object_field_values(content, "id")
+    var result: [ExtensionLanguage] = []
+    for id in ids:
+        if id != "":
+            result.push(ExtensionLanguage(id: id, extensions: []))
+    result
+
+fn _extension_manifest_debug_adapter_list(content: text) -> [ExtensionDebugAdapterManifest]:
+    []
+
+fn _extension_manifest_object_field_values(content: text, field: text) -> [text]:
+    var values: [text] = []
+    val quoted = "\"" + field + "\""
+    var start = 0
+    while start < content.len():
+        val idx = content.index_of_from(quoted, start)
+        if idx < 0:
+            return values
+        val colon = content.index_of_from(":", idx + quoted.len())
+        if colon < 0:
+            return values
+        val value = _extension_manifest_string_after(content, colon + 1)
+        if value != "":
+            values.push(value)
+        start = idx + quoted.len()
+    values
+
+fn _extension_manifest_string_after(content: text, start: i64) -> text:
+    var i = start
+    while i < content.len() and content.char_at(i) != "\"":
+        i = i + 1
+    if i >= content.len():
+        return ""
+    val value_start = i + 1
+    i = value_start
+    while i < content.len() and content.char_at(i) != "\"":
+        i = i + 1
+    if i >= content.len():
+        return ""
+    content.slice(value_start, i)
+
+fn _extension_manifest_parse_string_list(raw: text) -> [text]:
+    var result: [text] = []
+    var i = 0
+    while i < raw.len():
+        while i < raw.len() and raw.char_at(i) != "\"":
+            i = i + 1
+        if i >= raw.len():
+            return result
+        val start = i + 1
+        i = start
+        while i < raw.len() and raw.char_at(i) != "\"":
+            i = i + 1
+        if i >= raw.len():
+            return result
+        result.push(raw.slice(start, i))
+        i = i + 1
+    result

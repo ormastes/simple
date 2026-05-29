@@ -4,7 +4,7 @@
 - **Severity:** P1 (blocks native string ops) — *needs confirmation of scope*
 - **Date:** 2026-05-29
 - **Area:** compiler / seed native codegen (string method dispatch)
-- **Status:** fix in source, NOT deployed — seed rebuild required (verified 2026-05-29)
+- **Status:** RESOLVED — deployed seed reverified 2026-05-29
 
 ## Summary
 
@@ -91,9 +91,25 @@ the seed binary was last written (05:33 UTC). The source files (`common_backend.
 `helpers.rs`) contain the correct changes, but the deployed `bin/simple` seed binary
 does not include them.
 
-**Resolution needed:** Run `scripts/bootstrap/bootstrap-from-scratch.sh --deploy` to rebuild
-and redeploy the seed binary incorporating commit `27b41b8340`. This is a Rust-seed
-codegen change — not fixable in pure Simple.
+## Re-verification (2026-05-29, deployed seed)
+
+The currently deployed `bin/simple` now contains the source fix. Focused native
+core-C bootstrap repro:
+
+```bash
+bin/simple native-build --entry /tmp/string_method_repro.spl --entry-closure --backend cranelift --runtime-bundle core-c-bootstrap --output /tmp/string_method_repro_bin
+/tmp/string_method_repro_bin
+```
+
+Observed output:
+
+```text
+3
+bc
+bc
+```
+
+This closes the deployment gap for `.len()`, `.slice()`, and `.substring()`.
 
 ## Files changed
 

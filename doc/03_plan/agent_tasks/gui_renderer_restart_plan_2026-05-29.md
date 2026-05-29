@@ -1,5 +1,10 @@
 # GUI Renderer Restart Plan — 2026-05-29
 
+Superseded status: this agent note is preserved as the original pause/recovery
+record. The authoritative merged restart plan is now
+`doc/03_plan/gui_renderer_restart_plan_2026-05-29.md`, which links the current
+lane notes, fresh focused verification, and remaining platform evidence gates.
+
 ## Objective
 
 Resume the GUI renderer goal without relying on chat history:
@@ -11,34 +16,12 @@ Resume the GUI renderer goal without relying on chat history:
 - Open and verify the Simple browser app using the Simple web renderer.
 - Keep Pure Simple as the main implementation. Rust changes are only seed/runtime bridge work.
 
-## Current Pause State
+## Historical Pause State
 
-The current worktree at pause time contains only:
-
-- `doc/test/test_db_runs.sdn.lock` as an uncommitted generated lock file.
-- This restart plan.
-
-The previous GUI/browser source fix was committed as jj change `yqupqtwunsnr`
-(`fix: open simple renderer browser and tauri gui paths`) during the session,
-but a later rebase left current `main` without those source edits. If the same
-fix is still needed, recover it with:
-
-```bash
-jj restore --from yqupqtwunsnr --to @ \
-  scripts/macos-gui-run.shs \
-  src/app/ui.browser/app.spl \
-  src/lib/gc_async_mut/gpu/engine2d/backend_software.spl \
-  src/lib/nogc_sync_mut/io/string_helpers.spl \
-  src/lib/nogc_sync_mut/ui/access_store.spl \
-  test/unit/lib/gpu/engine2d/backend_software_simd_spec.spl
-```
-
-Also confirm whether `examples/ui/web_engine2d_gui.spl` on current `main`
-already has the wall-clock visibility loop. If not, recover or reapply:
-
-- `extern fn rt_time_now_unix_micros() -> i64`
-- `val end_at = rt_time_now_unix_micros() + 60000000`
-- `while running and rt_time_now_unix_micros() < end_at:`
+This note originally captured pause/recovery instructions for an interrupted
+GUI/browser run. Those restore instructions are stale for the current worktree.
+Use the authoritative merged restart plan for current lane status, focused
+verification, and remaining platform gates.
 
 ## Evidence Already Collected
 

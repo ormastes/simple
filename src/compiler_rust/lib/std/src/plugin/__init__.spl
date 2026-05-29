@@ -11,6 +11,7 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn spl_dlopen(path: text) -> i64
 extern fn spl_dlsym(handle: i64, name: text) -> i64
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
+extern fn spl_wffi_call_f64(fptr: i64, args: [f64], nargs: i64) -> f64
 
 class LoadedPlugin:
     name: text
@@ -38,17 +39,16 @@ fn use_plugin_from(manifest_path: text, name: text) -> bool:
         return false
     val manifest_text = rt_file_read_text(manifest_path) ?? ""
     val entries = parse_plugin_manifest_text(manifest_text)
-    val entry_opt = _entry_in(entries, name)
-    if not entry_opt.?:
-        return false
-    val entry = entry_opt.unwrap()
-    if not rt_file_exists(entry.library):
-        return false
-    val handle = spl_dlopen(entry.library)
-    if handle == 0:
-        return false
-    _loaded_plugins.push(LoadedPlugin(name: entry.name, library: entry.library, handle: handle))
-    true
+    for entry in entries:
+        if entry.name == name:
+            if not rt_file_exists(entry.library):
+                return false
+            val handle = spl_dlopen(entry.library)
+            if handle == 0:
+                return false
+            _loaded_plugins.push(LoadedPlugin(name: entry.name, library: entry.library, handle: handle))
+            return true
+    false
 
 fn use_plugin(name: text) -> bool:
     use_plugin_from(plugin_manifest_path(), name)
@@ -65,3 +65,10 @@ fn plugin_call_i64(symbol: text, args: [i64]) -> i64:
         if fptr != 0:
             return spl_wffi_call_i64(fptr, args, args.len())
     0
+
+fn plugin_call_f64(symbol: text, args: [f64]) -> f64:
+    for plug in _loaded_plugins:
+        val fptr = spl_dlsym(plug.handle, symbol)
+        if fptr != 0:
+            return spl_wffi_call_f64(fptr, args, args.len())
+    0.0

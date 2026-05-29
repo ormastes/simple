@@ -27,7 +27,7 @@ describe "Module Loader":
     it "loads an existing path and tracks it as loaded":
         var loader = ModuleLoader.with_defaults()
         val path = existing_module_path()
-        val result = moduleloader_load(loader, path)
+        val result = loader.load(path)
 
         match result:
             case LoadResult.Success(module):
@@ -42,7 +42,7 @@ describe "Module Loader":
     it "loads a module with a symbol and resolves it from globals":
         var loader = ModuleLoader.with_defaults()
         val path = existing_module_path()
-        val loaded = moduleloader_load(loader, path)
+        val loaded = loader.load(path)
 
         match loaded:
             case LoadResult.Success(module):
@@ -79,8 +79,8 @@ describe "Module Loader":
         var loader = ModuleLoader.with_defaults()
         val first_path = existing_module_path()
         val second_path = second_module_path()
-        val first = moduleloader_load(loader, first_path)
-        val second = moduleloader_load(loader, second_path)
+        val first = loader.load(first_path)
+        val second = loader.load(second_path)
 
         match first:
             case LoadResult.Success(module):
@@ -103,8 +103,8 @@ describe "Module Loader":
         var loader = ModuleLoader.with_defaults()
         val first_path = existing_module_path()
         val second_path = second_module_path()
-        _ = moduleloader_load(loader, first_path)
-        _ = moduleloader_load(loader, second_path)
+        _ = loader.load(first_path)
+        _ = loader.load(second_path)
         val first_entry = PossibleInstantiation(
             template_name: "Vec",
             type_args: "i64",
@@ -118,13 +118,13 @@ describe "Module Loader":
         loader.jit.set_metadata_for_test(first_path, LoadedMetadata(possible: [first_entry], instantiations: []))
         loader.jit.set_metadata_for_test(second_path, LoadedMetadata(possible: [second_entry], instantiations: []))
 
-        match moduleloader_resolve_symbol(loader, "vec_runtime_i64"):
+        match loader.resolve_symbol("vec_runtime_i64"):
             case SymbolResult.JitCompiled(symbol, _):
                 expect(symbol.name).to_equal("vec_runtime_i64")
             case _:
                 expect("missing").to_equal("vec_runtime_i64")
 
-        match moduleloader_resolve_symbol(loader, "map_runtime_text_i64"):
+        match loader.resolve_symbol("map_runtime_text_i64"):
             case SymbolResult.JitCompiled(symbol, _):
                 expect(symbol.name).to_equal("map_runtime_text_i64")
             case _:
@@ -154,7 +154,7 @@ describe "Module Loader":
         )
         loader.jit.set_metadata_for_test(path, LoadedMetadata(possible: [entry], instantiations: []))
 
-        val result = moduleloader_resolve_symbol(loader, "vec_runtime_i64")
+        val result = loader.resolve_symbol("vec_runtime_i64")
         match result:
             case SymbolResult.JitCompiled(symbol, code):
                 expect(symbol.name).to_equal("vec_runtime_i64")
@@ -164,7 +164,7 @@ describe "Module Loader":
                 expect("missing").to_equal("vec_runtime_i64")
 
         expect(loader.global_symbols.has("vec_runtime_i64")).to_equal(true)
-        val cached = moduleloader_resolve_symbol(loader, "vec_runtime_i64")
+        val cached = loader.resolve_symbol("vec_runtime_i64")
         match cached:
             case SymbolResult.Found(symbol, code):
                 expect(symbol.name).to_equal("vec_runtime_i64")
@@ -180,7 +180,7 @@ describe "Module Loader":
     it "mangles explicit generic type arguments":
         var loader = ModuleLoader.with_defaults()
         expect(loader.config.enable_jit).to_equal(true)
-        val result = moduleloader_resolve_generic(loader, "Vec", [make_named_type("Int"), make_named_type("String")])
+        val result = loader.resolve_generic("Vec", [make_named_type("Int"), make_named_type("String")])
 
         match result:
             case SymbolResult.NotFound(name):
@@ -224,13 +224,13 @@ describe "Module Loader":
             mangled_name: "hot_reload_fn"
         )
         loader.jit.set_metadata_for_test(path, LoadedMetadata(possible: [entry], instantiations: []))
-        _ = moduleloader_load(loader, path)
-        _ = moduleloader_resolve_symbol(loader, "hot_reload_fn")
+        _ = loader.load(path)
+        _ = loader.resolve_symbol("hot_reload_fn")
 
-        moduleloader_unload(loader, path)
+        loader.unload(path)
 
         expect(loader.is_loaded(path)).to_equal(false)
-        match moduleloader_resolve_symbol(loader, "hot_reload_fn"):
+        match loader.resolve_symbol("hot_reload_fn"):
             case SymbolResult.NotFound(name):
                 expect(name).to_equal("hot_reload_fn")
             case _:
@@ -240,7 +240,7 @@ describe "Module Loader":
         var loader = ModuleLoader.with_defaults()
         val path = existing_module_path()
         val symbol_name = "Vec$i64"
-        _ = moduleloader_load(loader, path)
+        _ = loader.load(path)
         loader.jit.set_metadata_for_test(
             path,
             LoadedMetadata(
@@ -262,16 +262,16 @@ describe "Module Loader":
         loader.jit.exec_mapper.set_record(symbol_name, "__jit__", 4096)
         loader.jit.set_cache_for_test(symbol_name, [1, 2, 3], 4096)
 
-        match moduleloader_resolve_symbol(loader, symbol_name):
+        match loader.resolve_symbol(symbol_name):
             case SymbolResult.JitCompiled(symbol, _):
                 expect(symbol.name).to_equal(symbol_name)
             case _:
                 expect("missing").to_equal(symbol_name)
 
-        moduleloader_unload(loader, path)
+        loader.unload(path)
 
         expect(loader.global_symbols.has(symbol_name)).to_equal(false)
-        match moduleloader_resolve_symbol(loader, symbol_name):
+        match loader.resolve_symbol(symbol_name):
             case SymbolResult.NotFound(name):
                 expect(name).to_equal(symbol_name)
             case _:
@@ -284,7 +284,7 @@ describe "Module Loader":
         val owned_symbol_name = "module_owned_fn"
         val unrelated_symbol_name = "other_module_fn"
         val jit_symbol_name = "Vec$i64"
-        _ = moduleloader_load(loader, path)
+        _ = loader.load(path)
 
         val owned_symbol = LoadedSymbol(
             name: owned_symbol_name,
@@ -327,13 +327,13 @@ describe "Module Loader":
         loader.jit.exec_mapper.set_record(jit_symbol_name, "__jit__", 20480)
         loader.jit.set_cache_for_test(jit_symbol_name, [1, 2, 3], 20480)
 
-        match moduleloader_resolve_symbol(loader, jit_symbol_name):
+        match loader.resolve_symbol(jit_symbol_name):
             case SymbolResult.JitCompiled(symbol, _):
                 expect(symbol.name).to_equal(jit_symbol_name)
             case _:
                 expect("missing").to_equal(jit_symbol_name)
 
-        moduleloader_unload(loader, path)
+        loader.unload(path)
 
         expect(loader.global_symbols.has(owned_symbol_name)).to_equal(false)
         expect(loader.global_symbols.has(jit_symbol_name)).to_equal(false)
@@ -353,7 +353,7 @@ describe "Module Loader":
     it "impl-method unload clears modules entry for the path":
         var loader = ModuleLoader.with_defaults()
         val path = existing_module_path()
-        _ = moduleloader_load(loader, path)
+        _ = loader.load(path)
         expect(loader.is_loaded(path)).to_equal(true)
 
         loader.unload(path)
@@ -364,7 +364,7 @@ describe "Module Loader":
     it "impl-method unload drops global symbols owned by that module":
         var loader = ModuleLoader.with_defaults()
         val path = existing_module_path()
-        _ = moduleloader_load(loader, path)
+        _ = loader.load(path)
         val sym = LoadedSymbol(
             name: "owned_sym",
             address: 8192,
@@ -388,7 +388,7 @@ describe "Module Loader":
             mangled_name: "vec_runtime_i64"
         )
         loader.jit.set_metadata_for_test(path, LoadedMetadata(possible: [entry], instantiations: []))
-        _ = moduleloader_load(loader, path)
+        _ = loader.load(path)
 
         loader.unload(path)
 
@@ -398,7 +398,7 @@ describe "Module Loader":
         var loader = ModuleLoader.with_defaults()
         val path = existing_module_path()
         val sym_name = "Vec$i64"
-        _ = moduleloader_load(loader, path)
+        _ = loader.load(path)
         loader.jit.set_metadata_for_test(
             path,
             LoadedMetadata(
@@ -419,7 +419,7 @@ describe "Module Loader":
         )
         loader.jit.exec_mapper.set_record(sym_name, "__jit__", 4096)
         loader.jit.set_cache_for_test(sym_name, [1, 2, 3], 4096)
-        _ = moduleloader_resolve_symbol(loader, sym_name)
+        _ = loader.resolve_symbol(sym_name)
 
         loader.unload(path)
 
@@ -430,7 +430,7 @@ describe "Module Loader":
         var loader = ModuleLoader.with_defaults()
         val path = existing_module_path()
         val other_path = second_module_path()
-        _ = moduleloader_load(loader, path)
+        _ = loader.load(path)
         val other_sym = LoadedSymbol(
             name: "other_fn",
             address: 32768,
@@ -457,7 +457,7 @@ describe "Module Loader":
     it "impl-method double-unload is idempotent: second call is a no-op":
         var loader = ModuleLoader.with_defaults()
         val path = existing_module_path()
-        _ = moduleloader_load(loader, path)
+        _ = loader.load(path)
         val sym = LoadedSymbol(
             name: "idempotent_sym",
             address: 4096,
@@ -474,14 +474,14 @@ describe "Module Loader":
         expect(loader.is_loaded(path)).to_equal(false)
         expect(loader.global_symbols.has("idempotent_sym")).to_equal(false)
 
-    it "impl-method unload and free-function unload produce identical module-table state":
+    it "impl-method unload produces identical module-table state across loaders":
         var loader_a = ModuleLoader.with_defaults()
         var loader_b = ModuleLoader.with_defaults()
         val path = existing_module_path()
         val sym_name = "parity_sym"
 
-        _ = moduleloader_load(loader_a, path)
-        _ = moduleloader_load(loader_b, path)
+        _ = loader_a.load(path)
+        _ = loader_b.load(path)
 
         val sym_a = LoadedSymbol(
             name: sym_name,
@@ -502,9 +502,8 @@ describe "Module Loader":
         loader_a.global_symbols = {sym_name: (path, sym_a)}
         loader_b.global_symbols = {sym_name: (path, sym_b)}
 
-        # Apply unload via the two paths
-        loader_a.unload(path)        # impl-method path (the delegator under test)
-        moduleloader_unload(loader_b, path)  # free-function path (reference)
+        loader_a.unload(path)
+        loader_b.unload(path)
 
         # Observable state must be identical
         expect(loader_a.is_loaded(path)).to_equal(loader_b.is_loaded(path))
@@ -521,13 +520,13 @@ describe "Module Loader":
             mangled_name: jit_sym
         )
         loader.jit.set_metadata_for_test(path, LoadedMetadata(possible: [entry], instantiations: []))
-        _ = moduleloader_load(loader, path)
-        _ = moduleloader_resolve_symbol(loader, jit_sym)
+        _ = loader.load(path)
+        _ = loader.resolve_symbol(jit_sym)
 
         loader.unload(path)
 
         expect(loader.global_symbols.has(jit_sym)).to_equal(false)
-        match moduleloader_resolve_symbol(loader, jit_sym):
+        match loader.resolve_symbol(jit_sym):
             case SymbolResult.NotFound(name):
                 expect(name).to_equal(jit_sym)
             case _:
@@ -538,7 +537,7 @@ describe "Module Loader":
         val path = existing_module_path()
         val persisted_symbol = "Vec$i64"
 
-        match moduleloader_load(loader, path):
+        match loader.load(path):
             case LoadResult.Success(module):
                 expect(module.path).to_equal(path)
             case _:
@@ -546,7 +545,7 @@ describe "Module Loader":
 
         expect(loader.jit.loaded_metadata.has(path)).to_equal(true)
 
-        match moduleloader_resolve_symbol(loader, persisted_symbol):
+        match loader.resolve_symbol(persisted_symbol):
             case SymbolResult.JitCompiled(symbol, code):
                 expect(symbol.name).to_equal(persisted_symbol)
                 expect(code.len()).to_be_greater_than(0)
@@ -562,7 +561,7 @@ describe "Module Loader":
                 expect("unexpected").to_equal(path)
 
         expect(loader.jit.loaded_metadata.has(path)).to_equal(true)
-        match moduleloader_resolve_symbol(loader, persisted_symbol):
+        match loader.resolve_symbol(persisted_symbol):
             case SymbolResult.JitCompiled(symbol, code):
                 expect(symbol.name).to_equal(persisted_symbol)
                 expect(code.len()).to_be_greater_than(0)

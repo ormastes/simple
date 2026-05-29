@@ -59,7 +59,11 @@ pub(crate) fn eval_array_filter(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     match func {
-        Value::Function { ref def, ref captured_env, .. } => {
+        Value::Function {
+            ref def,
+            ref captured_env,
+            ..
+        } => {
             let mut results = Vec::new();
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
@@ -104,7 +108,11 @@ pub(crate) fn eval_array_reduce(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     match func {
-        Value::Function { ref def, ref captured_env, .. } => {
+        Value::Function {
+            ref def,
+            ref captured_env,
+            ..
+        } => {
             let mut acc = init;
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
@@ -162,7 +170,11 @@ pub(crate) fn eval_array_find(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     match func {
-        Value::Function { ref def, ref captured_env, .. } => {
+        Value::Function {
+            ref def,
+            ref captured_env,
+            ..
+        } => {
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
                 let mut call_env = Env::clone(captured_env);
@@ -204,7 +216,11 @@ pub(crate) fn eval_array_any(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     match func {
-        Value::Function { ref def, ref captured_env, .. } => {
+        Value::Function {
+            ref def,
+            ref captured_env,
+            ..
+        } => {
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
                 let mut call_env = Env::clone(captured_env);
@@ -246,7 +262,11 @@ pub(crate) fn eval_array_all(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     match func {
-        Value::Function { ref def, ref captured_env, .. } => {
+        Value::Function {
+            ref def,
+            ref captured_env,
+            ..
+        } => {
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
                 let mut call_env = Env::clone(captured_env);

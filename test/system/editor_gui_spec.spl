@@ -8,7 +8,6 @@ use std.editor.common.types.*
 use std.editor.common.config.*
 use std.editor.common.platform.*
 use std.editor.buffer.piece_table.*
-use std.editor.buffer.undo.*
 use std.editor.buffer.buffer.*
 use std.editor.core.document.*
 use std.editor.core.session.{EditSession}
@@ -20,7 +19,6 @@ use std.editor.view.preview_pane.*
 use std.editor.view.outline_panel.*
 use std.editor.view.wiki_panel.*
 use std.editor.render.block_model.*
-use std.editor.extensions.host.*
 use std.editor.extensions.manifest.*
 use std.editor.extensions.api.*
 use std.editor.extensions.builtin.md_commands.*
@@ -28,7 +26,6 @@ use std.editor.extensions.builtin.md_language.*
 use std.editor.extensions.builtin.md_vim_motions.*
 use std.editor.extensions.builtin.spl_language.*
 use std.editor.services.diagnostics.*
-use std.editor.services.debug_session.*
 use std.editor.services.lsp_transport.*
 use std.editor.services.lsp_client.*
 use std.editor.services.md_wiki_index.*
@@ -37,13 +34,9 @@ use std.editor.services.simple_lsp_config.*
 use std.editor.services.md_doc_stats.*
 use std.editor.backend.gui_backend.*
 use std.editor.backend.headless_backend.*
-use std.common.markdown.utilities.*
-use std.common.markdown.block.*
-use std.common.markdown.inline.*
-use std.common.markdown.parse.*
-use std.common.markdown.adapter.*
 use app.editor.editor_controller.*
-use app.editor.gui_shell.*
+use app.editor.gui_shell_core.*
+use app.editor.gui_shell_render.*
 use app.editor.md_dispatch.*
 
 extern fn rt_file_read_text(path: text) -> text
@@ -52,6 +45,11 @@ extern fn rt_dir_create_all(path: text) -> bool
 
 fn read_text(path: text) -> text:
     rt_file_read_text(path) ?? ""
+
+fn editor_gui_tmp_path(name: text) -> text:
+    val dir = "build/test/editor_gui"
+    rt_dir_create_all(dir)
+    dir + "/" + name
 
 describe "editor platform — detection":
 
@@ -174,7 +172,7 @@ describe "editor GUI backend — Surface integration":
 
     it "renders wiki property panels as editable GUI forms":
         val panel = wiki_panel_with_rows("Properties", [
-            WikiPanelRow(icon: "property", label: "status", detail: "active", path: "/tmp/note.md", line: 0)
+            WikiPanelRow(icon: "property", label: "status", detail: "active", path: editor_gui_tmp_path("note.md"), line: 0)
         ])
         val html = gui_render_wiki_property_form_html(panel)
         expect(html.contains("class=\"wiki-property-form\"")).to_equal(true)
@@ -182,11 +180,12 @@ describe "editor GUI backend — Surface integration":
         expect(html.contains("class=\"wiki-property-value\"")).to_equal(true)
         expect(html.contains("data-event=\"wiki-property-submit\"")).to_equal(true)
         expect(html.contains("data-payload=\"status|active\"")).to_equal(true)
-        val vault_html = gui_render_wiki_property_form_html_with_root(panel, "/tmp/vault")
+        val vault_root = editor_gui_tmp_path("vault")
+        val vault_html = gui_render_wiki_property_form_html_with_root(panel, vault_root)
         expect(vault_html.contains("data-event=\"wiki-vault-property-submit\"")).to_equal(true)
-        expect(vault_html.contains("data-payload=\"/tmp/vault|status|active\"")).to_equal(true)
+        expect(vault_html.contains("data-payload=\"" + vault_root + "|status|active\"")).to_equal(true)
         expect(vault_html.contains("data-event=\"wiki-vault-property-review\"")).to_equal(true)
-        val schema_html = gui_render_wiki_property_form_html_with_root_and_schema(panel, "/tmp/vault", "status|required|active,draft")
+        val schema_html = gui_render_wiki_property_form_html_with_root_and_schema(panel, vault_root, "status|required|active,draft")
         expect(schema_html.contains("<select class=\"wiki-property-value schema-aware\"")).to_equal(true)
         expect(schema_html.contains("data-required=\"required\"")).to_equal(true)
         expect(schema_html.contains("<option value=\"active\" selected>active</option>")).to_equal(true)
@@ -239,7 +238,7 @@ describe "editor GUI backend — Surface integration":
 
     it "renders markdown links with GUI hit-test metadata":
         var buffer = EditorBuffer.from_text(EditorBufferId(value: 1), "Title\nSee [Target](target.md) and [[Wiki Note]]\n")
-        buffer.path = "/tmp/gui_link_source.md"
+        buffer.path = editor_gui_tmp_path("gui_link_source.md")
         buffer.move_cursor(0, 0)
         val html = gui_render_editor_area(buffer, "markdown", buffer.viewport)
         expect(html.contains("class=\"md-link\"")).to_equal(true)
@@ -249,8 +248,8 @@ describe "editor GUI backend — Surface integration":
         expect(html.contains("data-target=\"Wiki Note\"")).to_equal(true)
 
     it "opens markdown links from GUI click events":
-        val source_path = "/tmp/simple_gui_click_source.md"
-        val target_path = "/tmp/target.md"
+        val source_path = editor_gui_tmp_path("simple_gui_click_source.md")
+        val target_path = editor_gui_tmp_path("target.md")
         expect(rt_file_write_text(source_path, "See [Target](target.md)\n")).to_equal(true)
         expect(rt_file_write_text(target_path, "# Target\n")).to_equal(true)
         var session = EditSession.new()
@@ -262,8 +261,8 @@ describe "editor GUI backend — Surface integration":
         expect(state.ctrl.session.active_document().path()).to_equal(target_path)
 
     it "opens markdown links from GUI ctrl-click cursor hit testing":
-        val source_path = "/tmp/simple_gui_ctrl_click_source.md"
-        val target_path = "/tmp/simple_gui_ctrl_click_target.md"
+        val source_path = editor_gui_tmp_path("simple_gui_ctrl_click_source.md")
+        val target_path = editor_gui_tmp_path("simple_gui_ctrl_click_target.md")
         expect(rt_file_write_text(source_path, "See [Target](simple_gui_ctrl_click_target.md)\n")).to_equal(true)
         expect(rt_file_write_text(target_path, "# Target\n")).to_equal(true)
         var session = EditSession.new()
@@ -276,7 +275,7 @@ describe "editor GUI backend — Surface integration":
 
     it "toggles markdown task checkboxes from GUI task events":
         var session = EditSession.new()
-        val path = "/tmp/simple_gui_task_toggle.md"
+        val path = editor_gui_tmp_path("simple_gui_task_toggle.md")
         expect(rt_file_write_text(path, "- [ ] Todo\n- [x] Done\n")).to_equal(true)
         session.open_file(path)
         var state = gui_shell_new(session)
@@ -289,7 +288,7 @@ describe "editor GUI backend — Surface integration":
 
     it "filters and batches markdown tasks from GUI task controls":
         var session = EditSession.new()
-        val path = "/tmp/simple_gui_task_batch.md"
+        val path = editor_gui_tmp_path("simple_gui_task_batch.md")
         expect(rt_file_write_text(path, "- [ ] Todo\n- [ ] Review notes\n- [x] Done\n")).to_equal(true)
         session.open_file(path)
         var state = gui_shell_new(session)
@@ -313,10 +312,10 @@ describe "editor GUI backend — Surface integration":
 
     it "filters vault search results from GUI search controls":
         var suffix = 0
-        var root = "/tmp/simple_gui_vault_search"
+        var root = editor_gui_tmp_path("simple_gui_vault_search")
         while rt_file_exists(root + "/Alpha.md") or rt_file_exists(root + "/Projects/Project.md"):
             suffix = suffix + 1
-            root = "/tmp/simple_gui_vault_search_" + suffix.to_text()
+            root = editor_gui_tmp_path("simple_gui_vault_search_") + suffix.to_text()
         expect(rt_dir_create_all(root + "/Projects")).to_equal(true)
         val path = root + "/Alpha.md"
         val project_path = root + "/Projects/Project.md"
@@ -351,8 +350,8 @@ describe "editor GUI backend — Surface integration":
 
     it "renders and filters the quick switch picker from GUI controls":
         var session = EditSession.new()
-        val alpha_path = "/tmp/simple_gui_quick_switch_alpha.md"
-        val beta_path = "/tmp/simple_gui_quick_switch_beta.md"
+        val alpha_path = editor_gui_tmp_path("simple_gui_quick_switch_alpha.md")
+        val beta_path = editor_gui_tmp_path("simple_gui_quick_switch_beta.md")
         expect(rt_file_write_text(alpha_path, "# Alpha\n")).to_equal(true)
         expect(rt_file_write_text(beta_path, "# Beta\n\n")).to_equal(true)
         session.open_file(alpha_path)
@@ -385,7 +384,7 @@ describe "editor GUI backend — Surface integration":
         expect(state.ctrl.wiki_panel.rows.len()).to_equal(2)
 
     it "renders and submits the daily note date picker from GUI controls":
-        val daily_root = "/tmp/simple_gui_daily_note_picker"
+        val daily_root = editor_gui_tmp_path("simple_gui_daily_note_picker")
         expect(rt_dir_create_all(daily_root)).to_equal(true)
         var session = EditSession.new()
         var state = gui_shell_new(session)
@@ -408,8 +407,8 @@ describe "editor GUI backend — Surface integration":
         expect(rt_file_read_text(daily_root + "/2026-05-21-daily.md")).to_equal("# 2026-05-21-daily\nDate: 2026-05-21\n")
 
     it "renders filters and submits the template picker variable form from GUI controls":
-        val tpl_root = "/tmp/simple_gui_template_picker"
-        val target_path = "/tmp/simple_gui_template_picker_target.md"
+        val tpl_root = editor_gui_tmp_path("simple_gui_template_picker")
+        val target_path = editor_gui_tmp_path("simple_gui_template_picker_target.md")
         expect(rt_dir_create_all(tpl_root + "/nested")).to_equal(true)
         expect(rt_file_write_text(tpl_root + "/Meeting.md", "## {{title}}\nDate: {{date}}\n")).to_equal(true)
         expect(rt_file_write_text(tpl_root + "/nested/Review.md", "# {{title}}\n")).to_equal(true)
@@ -440,8 +439,8 @@ describe "editor GUI backend — Surface integration":
         expect(rt_file_read_text(target_path).contains("# Review")).to_equal(true)
 
     it "renders filters and submits the attachment picker target controls from GUI events":
-        val attachment_root = "/tmp/simple_gui_attachment_picker"
-        val target_path = "/tmp/simple_gui_attachment_picker_target.md"
+        val attachment_root = editor_gui_tmp_path("simple_gui_attachment_picker")
+        val target_path = editor_gui_tmp_path("simple_gui_attachment_picker_target.md")
         expect(rt_dir_create_all(attachment_root + "/assets")).to_equal(true)
         expect(rt_file_write_text(attachment_root + "/assets/screenshot.png", "png")).to_equal(true)
         expect(rt_file_write_text(attachment_root + "/assets/diagram.svg", "svg")).to_equal(true)
@@ -472,8 +471,8 @@ describe "editor GUI backend — Surface integration":
         expect(rt_file_read_text(target_path).contains("![screenshot.png](attachments/screenshot")).to_equal(true)
 
     it "filters and groups Problems panel rows from GUI controls":
-        val first_path = "/tmp/simple_gui_problem_filter_first.spl"
-        val second_path = "/tmp/simple_gui_problem_filter_second.spl"
+        val first_path = editor_gui_tmp_path("simple_gui_problem_filter_first.spl")
+        val second_path = editor_gui_tmp_path("simple_gui_problem_filter_second.spl")
         expect(rt_file_write_text(first_path, "fn first():\n    return\n")).to_equal(true)
         expect(rt_file_write_text(second_path, "fn second():\n    return\n")).to_equal(true)
         var session = EditSession.new()
@@ -519,7 +518,7 @@ describe "editor GUI backend — Surface integration":
         expect(state.ctrl.diagnostics_panel.rows[0].label).to_equal("simple error")
 
     it "renders WorkspaceEdit preview controls in the LSP panel":
-        val path = "/tmp/simple_gui_workspace_edit_tools.spl"
+        val path = editor_gui_tmp_path("simple_gui_workspace_edit_tools.spl")
         expect(rt_file_write_text(path, "fn main():\n  return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
@@ -541,8 +540,8 @@ describe "editor GUI backend — Surface integration":
         expect(frame.editor_html.contains("    return")).to_equal(true)
 
     it "renders rename preview conflicts in the LSP panel":
-        val path = "/tmp/simple_gui_rename_conflict_ui.spl"
-        val missing_path = "/tmp/simple_gui_rename_conflict_missing/target.spl"
+        val path = editor_gui_tmp_path("simple_gui_rename_conflict_ui.spl")
+        val missing_path = editor_gui_tmp_path("simple_gui_rename_conflict_missing/target.spl")
         expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
@@ -561,7 +560,7 @@ describe "editor GUI backend — Surface integration":
         expect(frame.editor_html.contains("conflict_answer")).to_equal(true)
 
     it "applies and cancels WorkspaceEdit previews from GUI controls":
-        val apply_path = "/tmp/simple_gui_workspace_edit_apply.spl"
+        val apply_path = editor_gui_tmp_path("simple_gui_workspace_edit_apply.spl")
         expect(rt_file_write_text(apply_path, "fn main():\n  return\n")).to_equal(true)
         var apply_session = EditSession.new()
         apply_session.open_file(apply_path)
@@ -577,7 +576,7 @@ describe "editor GUI backend — Surface integration":
         expect(apply_state.ctrl.pending_workspace_edit_json).to_equal("")
         expect(apply_state.ctrl.session.active_buffer().line_at(1)).to_equal("    return")
 
-        val cancel_path = "/tmp/simple_gui_workspace_edit_cancel.spl"
+        val cancel_path = editor_gui_tmp_path("simple_gui_workspace_edit_cancel.spl")
         expect(rt_file_write_text(cancel_path, "fn main():\n  return\n")).to_equal(true)
         var cancel_session = EditSession.new()
         cancel_session.open_file(cancel_path)
@@ -594,8 +593,8 @@ describe "editor GUI backend — Surface integration":
         expect(cancel_state.ctrl.session.active_buffer().line_at(1)).to_equal("  return")
 
     it "renders and uses LSP navigation history controls":
-        val first_path = "/tmp/simple_gui_lsp_history_first.spl"
-        val second_path = "/tmp/simple_gui_lsp_history_second.spl"
+        val first_path = editor_gui_tmp_path("simple_gui_lsp_history_first.spl")
+        val second_path = editor_gui_tmp_path("simple_gui_lsp_history_second.spl")
         expect(rt_file_write_text(first_path, "fn first():\n    return\n")).to_equal(true)
         expect(rt_file_write_text(second_path, "fn second():\n    return\n")).to_equal(true)
         var session = EditSession.new()
@@ -622,8 +621,8 @@ describe "editor GUI backend — Surface integration":
         expect(state.ctrl.lsp_location_stack.len()).to_equal(0)
 
     it "renders and selects LSP result rows from GUI clicks":
-        val first_path = "/tmp/simple_gui_lsp_result_first.spl"
-        val second_path = "/tmp/simple_gui_lsp_result_second.spl"
+        val first_path = editor_gui_tmp_path("simple_gui_lsp_result_first.spl")
+        val second_path = editor_gui_tmp_path("simple_gui_lsp_result_second.spl")
         expect(rt_file_write_text(first_path, "fn first():\n    return\n")).to_equal(true)
         expect(rt_file_write_text(second_path, "fn second():\n    return\n")).to_equal(true)
         var session = EditSession.new()
@@ -648,7 +647,7 @@ describe "editor GUI backend — Surface integration":
         expect(state.ctrl.lsp_result_panel.selected).to_equal(1)
 
     it "renders non-Markdown LSP document symbols in the outline pane":
-        val path = "/tmp/simple_gui_simple_outline.spl"
+        val path = editor_gui_tmp_path("simple_gui_simple_outline.spl")
         expect(rt_file_write_text(path, "fn main():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
@@ -747,7 +746,7 @@ describe "editor SimpleOS adapter":
 describe "editor GUI shell":
 
     it "defines GuiShellState struct with controller and GUI config":
-        val src = read_text("src/app/editor/gui_shell.spl")
+        val src = read_text("src/app/editor/gui_shell_core.spl") + read_text("src/app/editor/gui_shell_render.spl")
         expect(src.contains("struct GuiShellState:")).to_equal(true)
         expect(src.contains("ctrl: EditorController")).to_equal(true)
         expect(src.contains("extension_host: ExtensionHost")).to_equal(true)
@@ -755,50 +754,50 @@ describe "editor GUI shell":
         expect(src.contains("platform_config: PlatformConfig")).to_equal(true)
 
     it "has gui_shell_init that activates built-in extensions":
-        val src = read_text("src/app/editor/gui_shell.spl")
+        val src = read_text("src/app/editor/gui_shell_core.spl") + read_text("src/app/editor/gui_shell_render.spl")
         expect(src.contains("fn gui_shell_init(state: GuiShellState)")).to_equal(true)
         expect(src.contains("extension_host: ctrl.extension_host")).to_equal(true)
         expect(src.contains("activate_language(\"simple\")")).to_equal(true)
         expect(src.contains("activate_language(\"markdown\")")).to_equal(true)
 
     it "activates extension language events when GUI opens files":
-        val src = read_text("src/app/editor/gui_shell.spl")
+        val src = read_text("src/app/editor/gui_shell_core.spl") + read_text("src/app/editor/gui_shell_render.spl")
         expect(src.contains("fn _gui_activate_active_language")).to_equal(true)
         expect(src.contains("state.ctrl.extension_host.activate_language(doc.language_id)")).to_equal(true)
         expect(src.contains("state.ctrl.extension_host.emit_event(\"onDidOpenTextDocument\", doc.path())")).to_equal(true)
         expect(src.contains("_gui_activate_active_language(state)")).to_equal(true)
 
     it "has gui_shell_run entry point":
-        val src = read_text("src/app/editor/gui_shell.spl")
+        val src = read_text("src/app/editor/gui_shell_core.spl") + read_text("src/app/editor/gui_shell_render.spl")
         expect(src.contains("fn gui_shell_run(session: EditSession)")).to_equal(true)
         expect(src.contains("gui_shell_render_frame(state)")).to_equal(true)
 
     it "has GuiFrame for rendered output":
-        val src = read_text("src/app/editor/gui_shell.spl")
+        val src = read_text("src/app/editor/gui_shell_core.spl") + read_text("src/app/editor/gui_shell_render.spl")
         expect(src.contains("struct GuiFrame:")).to_equal(true)
         expect(src.contains("tab_bar_html: text")).to_equal(true)
         expect(src.contains("editor_html: text")).to_equal(true)
 
     it "handle_resize parses width and height from data":
-        val src = read_text("src/app/editor/gui_shell.spl")
+        val src = read_text("src/app/editor/gui_shell_core.spl") + read_text("src/app/editor/gui_shell_render.spl")
         expect(src.contains("fn _gui_handle_resize")).to_equal(true)
         expect(src.contains("index_of(\",\")")).to_equal(true)
         expect(src.contains("initial_width")).to_equal(true)
         expect(src.contains("initial_height")).to_equal(true)
 
     it "handle_tab_select selects tab by index":
-        val src = read_text("src/app/editor/gui_shell.spl")
+        val src = read_text("src/app/editor/gui_shell_core.spl") + read_text("src/app/editor/gui_shell_render.spl")
         expect(src.contains("fn _gui_handle_tab_select")).to_equal(true)
         expect(src.contains("select_tab(tab_index)")).to_equal(true)
 
     it "gui_shell_present_frame calls rt_gui_present_html":
-        val src = read_text("src/app/editor/gui_shell.spl")
+        val src = read_text("src/app/editor/gui_shell_core.spl") + read_text("src/app/editor/gui_shell_render.spl")
         expect(src.contains("extern fn rt_gui_present_html")).to_equal(true)
         expect(src.contains("rt_gui_present_html(html)")).to_equal(true)
 
     it "renders and opens wiki panel rows from GUI click events":
-        val source_path = "/tmp/simple_gui_wiki_source.md"
-        val target_path = "/tmp/simple_gui_wiki_target.md"
+        val source_path = editor_gui_tmp_path("simple_gui_wiki_source.md")
+        val target_path = editor_gui_tmp_path("simple_gui_wiki_target.md")
         expect(rt_file_write_text(source_path, "[[simple_gui_wiki_target]]\n")).to_equal(true)
         expect(rt_file_write_text(target_path, "# Target\n")).to_equal(true)
         var session = EditSession.new()
@@ -815,7 +814,7 @@ describe "editor GUI shell":
         ctrl.session.dock_layout = dock
         state.ctrl = ctrl
 
-        val gui_src = read_text("src/app/editor/gui_shell.spl")
+        val gui_src = read_text("src/app/editor/gui_shell_core.spl") + read_text("src/app/editor/gui_shell_render.spl")
         expect(gui_src.contains("class=\\\"wiki-row")).to_equal(true)
         expect(gui_src.contains("data-row=\\\"")).to_equal(true)
         expect(gui_src.contains("data-path=\\\"")).to_equal(true)
@@ -834,7 +833,7 @@ describe "editor GUI shell":
         expect(gui_render_lsp_hover_popup_html(lsp_hover_popup_hidden())).to_equal("")
 
     it "requests and debounces LSP hover from GUI editor hover events":
-        val path = "/tmp/simple_gui_hover_event.spl"
+        val path = editor_gui_tmp_path("simple_gui_hover_event.spl")
         expect(rt_file_write_text(path, "fn main():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
@@ -856,14 +855,14 @@ describe "editor GUI shell":
         expect(state.ctrl.simple_lsp_state.client.next_id).to_equal(next_id)
 
     it "delays configurable GUI LSP hover until the hover threshold elapses":
-        val path = "/tmp/simple_gui_hover_delay_event.spl"
+        val path = editor_gui_tmp_path("simple_gui_hover_delay_event.spl")
         expect(rt_file_write_text(path, "fn main():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var state = gui_shell_new(session)
         state.ctrl.config = editor_config_set_by_key(state.ctrl.config, "hover_delay_ms", "500")
         val backend_src = read_text("src/lib/editor/70.backend/gui_backend.spl")
-        val shell_src = read_text("src/app/editor/gui_shell.spl")
+        val shell_src = read_text("src/app/editor/gui_shell_core.spl") + read_text("src/app/editor/gui_shell_render.spl")
         expect(backend_src.contains("data-hover-delay-ms")).to_equal(true)
         expect(shell_src.contains("state.ctrl.config.hover_delay_ms")).to_equal(true)
         val next_id = state.ctrl.simple_lsp_state.client.next_id
@@ -936,7 +935,7 @@ describe "editor GUI shell":
         expect(state.ctrl.debug_status).to_equal("starting")
 
     it "moves the cursor from GUI inlay hint clicks":
-        val path = "/tmp/simple_gui_inlay_hint_click.spl"
+        val path = editor_gui_tmp_path("simple_gui_inlay_hint_click.spl")
         expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
@@ -956,7 +955,7 @@ describe "editor GUI shell":
         var state = gui_shell_new(session)
         var ctrl = state.ctrl
         ctrl.wiki_panel = wiki_panel_with_rows("Graph", [
-            WikiPanelRow(icon: "link", label: "Target", detail: "source -> Target link resolved", path: "/tmp/simple_gui_graph_target.md", line: 0)
+            WikiPanelRow(icon: "link", label: "Target", detail: "source -> Target link resolved", path: editor_gui_tmp_path("simple_gui_graph_target.md"), line: 0)
         ])
         var dock = ctrl.session.dock_layout
         dock.right_visible = true
@@ -976,7 +975,7 @@ describe "editor GUI shell":
         expect(graph_html.contains("source -&gt; Target link resolved")).to_equal(true)
 
     it "submits wiki property form edits through the existing property command":
-        val note_path = "/tmp/simple_gui_wiki_property.md"
+        val note_path = editor_gui_tmp_path("simple_gui_wiki_property.md")
         expect(rt_file_write_text(note_path, "---\nstatus: active\n---\n# Note\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(note_path)
@@ -986,7 +985,7 @@ describe "editor GUI shell":
         expect(state.ctrl.session.active_buffer().to_text().contains("status: done")).to_equal(true)
 
     it "submits wiki property vault edits through the bulk property command":
-        val root = "/tmp/simple_gui_wiki_property_vault"
+        val root = editor_gui_tmp_path("simple_gui_wiki_property_vault")
         expect(rt_dir_create_all(root + "/Projects")).to_equal(true)
         val note_path = root + "/Home.md"
         val other_path = root + "/Projects/Other.md"
@@ -1004,7 +1003,7 @@ describe "editor GUI shell":
         expect(rt_file_read_text(other_path).contains("status: done")).to_equal(true)
 
     it "routes GUI table edit controls through markdown table commands":
-        val note_path = "/tmp/simple_gui_table_edit.md"
+        val note_path = editor_gui_tmp_path("simple_gui_table_edit.md")
         expect(rt_file_write_text(note_path, "| A | B |\n| --- | --- |\n| 1 | 2 |\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(note_path)
@@ -1023,7 +1022,7 @@ describe "editor GUI shell":
         expect(state.ctrl.session.active_buffer().dirty).to_equal(true)
 
     it "commits GUI table cell edits back to markdown source":
-        val note_path = "/tmp/simple_gui_table_cell_edit.md"
+        val note_path = editor_gui_tmp_path("simple_gui_table_cell_edit.md")
         expect(rt_file_write_text(note_path, "| A | B |\n| --- | --- |\n| 1 | 2 |\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(note_path)
@@ -1091,7 +1090,7 @@ describe "editor GUI backend — rendering":
 
     it "renders diagnostic gutter markers in GUI source lines":
         var buffer = EditorBuffer.from_text(EditorBufferId(value: 1), "first\nsecond\n")
-        buffer.path = "/tmp/simple_editor_gui_gutter.spl"
+        buffer.path = editor_gui_tmp_path("simple_editor_gui_gutter.spl")
         buffer.viewport.height = 3
         val html = gui_render_editor_area_with_diagnostics(buffer, "simple", buffer.viewport, buffer.path, [
             EditorDiagnostic(path: buffer.path, line: 1, col: 0, end_line: 1, end_col: 1, severity: "error", message: "bad", source: "test")
@@ -1121,7 +1120,7 @@ describe "editor GUI backend — rendering":
         expect(html.contains("body")).to_equal(false)
 
     it "unfolds folded source ranges from GUI fold badges":
-        val note_path = "/tmp/simple_gui_fold_badge.md"
+        val note_path = editor_gui_tmp_path("simple_gui_fold_badge.md")
         expect(rt_file_write_text(note_path, "# One\nbody\n# Two\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(note_path)
@@ -1192,7 +1191,7 @@ describe "editor MCP tools":
         expect(src.contains("ctrl_cmd._execute_palette_command(args[0], \"\")")).to_equal(true)
 
     it "maps VSCode-style GUI shortcuts to editor IDE actions":
-        val src = read_text("src/app/editor/gui_shell.spl")
+        val src = read_text("src/app/editor/gui_shell_core.spl") + read_text("src/app/editor/gui_shell_render.spl")
         expect(src.contains("gui_key == \"Ctrl+Space\"")).to_equal(true)
         expect(src.contains("gui_key == \"F12\"")).to_equal(true)
         expect(src.contains("gui_key == \"Ctrl+.\"")).to_equal(true)

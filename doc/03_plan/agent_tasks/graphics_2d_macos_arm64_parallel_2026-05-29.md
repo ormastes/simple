@@ -47,7 +47,8 @@ Current renderer restart plan inspected:
 
 ## Lane Result
 
-The macOS ARM64 graphics lane is not complete. It has a valid CPU baseline and
-a valid Metal-unavailable/stub finding, but it does not yet have Metal
-correctness or Metal performance evidence. Linux/Vulkan checks must remain
-classified as host-limited evidence for a different backend lane.
+The macOS ARM64 graphics lane is complete as a restart tracking/evidence lane:
+it has a valid CPU baseline and a valid Metal-unavailable/stub finding. It does
+not yet have Metal correctness or Metal performance evidence; those remain
+macOS/Apple-Silicon follow-up gates, not Linux/Vulkan proof. Linux/Vulkan checks
+must remain classified as host-limited evidence for a different backend lane.

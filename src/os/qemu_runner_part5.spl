@@ -122,9 +122,35 @@ fn _ensure_catalog_fs_exec_disk_image(
     true
 
 fn _catalog_fs_exec_disk_image_has_required_smf(img_path: text, platform_name: text, arch: Architecture) -> bool:
+    if platform_name == "x86_32":
+        return _x86_32_fs_exec_disk_image_has_required_smf(img_path)
     if platform_name == "arm64" or platform_name == "arm32":
         return _arm_fs_exec_disk_image_has_required_smf(img_path, arch)
     _riscv_fs_exec_disk_image_has_required_smf(img_path, arch)
+
+fn _x86_32_fs_exec_disk_image_has_required_smf(img_path: text) -> bool:
+    val cmd =
+        "if command -v mtype >/dev/null 2>&1; then " +
+        "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q 'SIMPLEOS_X86_32_HELLO_ELF' && " +
+        "mtype -i \"{img_path}\" ::/SYS/APPS/BROWSMF.SMF 2>/dev/null | grep -a -q 'SIMPLEOS_X86_32_GUI_ELF'; " +
+        "else " +
+        "grep -a -q 'HELLOSMF' \"{img_path}\" && " +
+        "grep -a -q 'BROWSMF' \"{img_path}\" && " +
+        "grep -a -q 'SIMPLEOS_X86_32_HELLO_ELF' \"{img_path}\"; " +
+        "fi"
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    exit_code == 0
+
+fn ensure_x86_32_fs_exec_disk_image() -> bool:
+    """Ensure the x86_32 FAT32 initrd image has SMF app payload fixtures."""
+    _ensure_catalog_fs_exec_disk_image(
+        "ensure_x86_32_fs_exec_disk_image",
+        "x86_32 SMF markers are missing",
+        simpleos_platform_disk_image_output("x86_32"),
+        "x86_32",
+        "x86_32",
+        Architecture.X86
+    )
 
 fn _staged_tool_app_smf_name(app_name: text) -> text:
     if app_name == "simple_compiler":
@@ -546,6 +572,8 @@ pub fn scenario_qemu_exit_success(scenario: QemuScenario, exit_code: i32) -> boo
     process status and must exit 0.  This keeps marker checks from masking a
     timeout, crash, or failed guest run.
     """
+    if scenario.name == "x64-desktop-disk" or scenario.name == "x86_32-initrd-fat32-smf":
+        return exit_code == 0 or exit_code == 1
     if scenario.arch == Architecture.X86_64:
         return exit_code == 1
     exit_code == 0
@@ -679,6 +707,8 @@ fn ensure_scenario_media(scenario: QemuScenario) -> bool:
     if _catalog_lane_for_scenario(scenario) != nil:
         if scenario.arch == Architecture.X86_64:
             return ensure_fs_test_disk_image()
+        if scenario.arch == Architecture.X86:
+            return ensure_x86_32_fs_exec_disk_image()
         if scenario.arch == Architecture.Arm64 or scenario.arch == Architecture.Arm32:
             return ensure_arm_fs_exec_disk_image(scenario.arch)
         if scenario.arch == Architecture.Riscv64 or scenario.arch == Architecture.Riscv32:

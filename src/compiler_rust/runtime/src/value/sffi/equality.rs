@@ -7,16 +7,16 @@ use crate::value::{tags, RuntimeString};
 
 const MIN_HEAP_ADDR: usize = 0x100000;
 
-#[inline(always)]
-pub fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
+#[no_mangle]
+pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
     if value_eq(a, b) {
         1
     } else {
         0
     }
 }
-#[inline(always)]
-pub fn rt_value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
+#[no_mangle]
+pub extern "C" fn rt_value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
     value_compare(a, b)
 }
 #[no_mangle]

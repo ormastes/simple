@@ -294,6 +294,31 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
         if had_explicit_return == false:
             last_val = val_make_array(yielded)
 
+    var write_back_names: [text] = []
+    var write_back_field_bases: [i64] = []
+    var write_back_field_names: [text] = []
+    var write_back_values: [i64] = []
+
+    var arg_i: i64 = 0
+    while arg_i < arg_eids.len():
+        if arg_i < param_names.len():
+            val arg_eid = arg_eids[arg_i]
+            val arg_tag = expr_get_tag(arg_eid)
+            val current_val = env_lookup(param_names[arg_i])
+            val current_kind = val_get_kind(current_val)
+            if current_kind == VAL_ARRAY or current_kind == VAL_STRUCT:
+                if arg_tag == EXPR_IDENT:
+                    write_back_names.push(expr_get(arg_eid).s_val)
+                    write_back_field_bases.push(-1)
+                    write_back_field_names.push("")
+                    write_back_values.push(current_val)
+                elif arg_tag == EXPR_FIELD_ACCESS:
+                    write_back_names.push("")
+                    write_back_field_bases.push(expr_get(arg_eid).left)
+                    write_back_field_names.push(expr_get(arg_eid).s_val)
+                    write_back_values.push(current_val)
+        arg_i = arg_i + 1
+
     # Run defer/errdefer at this depth (mirrors eval_block pattern)
     val saved_returning = eval_returning
     val saved_had_error = eval_had_error
@@ -342,6 +367,19 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
     if local_count > 0:
         env_pop_frame()
     eval_current_decl_id = prev_decl_id
+
+    var wb_i: i64 = 0
+    while wb_i < write_back_values.len():
+        if write_back_field_bases[wb_i] >= 0:
+            val base_val = eval_expr(write_back_field_bases[wb_i])
+            if eval_had_error:
+                return -1
+            if val_is_struct(base_val):
+                val_struct_set_field(base_val, write_back_field_names[wb_i], write_back_values[wb_i])
+        else:
+            env_assign(write_back_names[wb_i], write_back_values[wb_i])
+        wb_i = wb_i + 1
+
     last_val
 
 fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64]) -> i64:

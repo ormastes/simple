@@ -14,11 +14,13 @@ pub struct ComputePipeline {
     descriptor_set_layout: vk::DescriptorSetLayout,
     shader_module: vk::ShaderModule,
     descriptor_pool: vk::DescriptorPool,
+    descriptor_binding_count: u32,
+    push_constant_size: u32,
 }
 
 impl ComputePipeline {
     /// Create a compute pipeline from SPIR-V bytecode
-    pub fn new(device: Arc<VulkanDevice>, spirv_code: &[u8]) -> VulkanResult<Self> {
+    pub fn new(device: Arc<VulkanDevice>, spirv_code: &[u8], push_constant_size: u32) -> VulkanResult<Self> {
         // Validate SPIR-V magic number
         if spirv_code.len() < 4 {
             return Err(VulkanError::SpirvCompilationFailed("Code too short".to_string()));
@@ -83,7 +85,17 @@ impl ComputePipeline {
 
         // Create pipeline layout
         let set_layouts = [descriptor_set_layout];
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+        let push_ranges = if push_constant_size > 0 {
+            vec![vk::PushConstantRange::default()
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                .offset(0)
+                .size(push_constant_size)]
+        } else {
+            Vec::new()
+        };
+        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(&push_ranges);
 
         let pipeline_layout = unsafe {
             device
@@ -138,6 +150,8 @@ impl ComputePipeline {
             descriptor_set_layout,
             shader_module,
             descriptor_pool,
+            descriptor_binding_count: bindings.len() as u32,
+            push_constant_size,
         })
     }
 
@@ -228,6 +242,16 @@ impl ComputePipeline {
     /// Get pipeline layout
     pub fn layout(&self) -> vk::PipelineLayout {
         self.pipeline_layout
+    }
+
+    /// Number of reflected descriptor bindings in set 0.
+    pub fn descriptor_binding_count(&self) -> u32 {
+        self.descriptor_binding_count
+    }
+
+    /// Push constant byte size configured for the pipeline layout.
+    pub fn push_constant_size(&self) -> u32 {
+        self.push_constant_size
     }
 }
 

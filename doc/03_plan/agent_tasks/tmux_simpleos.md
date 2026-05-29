@@ -1,7 +1,7 @@
 <!-- codex-design -->
 # `tmux_simpleos` Agent Tasks
 
-> Status: DONE (interpreter-mode) — slices 1–5 complete. Slice 2 .spl is fully implemented; PTY externs (rt_pty_open / rt_pty_spawn) in runtime.c are assigned to Team 2a and out of scope here — scrollback fallback is active. Slice 5 system spec (test/system/smux_system_spec.spl) covers REQ-001–REQ-012 + NFR-007 with 57 passing assertions.
+> Status: DONE (interpreter-mode) — slices 1–5 complete. Slice 2 .spl is fully implemented; PTY externs (rt_pty_open / rt_pty_spawn) are exported by the Rust runtime and interpreter paths. Slice 5 system spec (test/system/smux_system_spec.spl) covers REQ-001–REQ-012 + NFR-007 with 57 passing assertions.
 
 ## Slice 1: Core Native Service — DONE
 
@@ -13,7 +13,7 @@
 ## Slice 2: Native Backend — PARTIAL
 
 - `src/os/apps/smux/smux_backend.spl` — PtyConfig, OutputBuffer, PaneBackend, ShellBinding
-- PTY spawn gated on `rt_pty_open` / `rt_pty_spawn` externs (TODO: add to runtime.c)
+- PTY spawn uses `rt_pty_open` / `rt_pty_spawn` externs exported by `src/compiler_rust/runtime/src/value/pty.rs`
 - stdin dispatch loop functional via `smux_remote.spl`
 
 ## Slice 3: Compatibility API — DONE

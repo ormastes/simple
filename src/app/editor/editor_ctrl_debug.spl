@@ -13,16 +13,39 @@ use app.editor.editor_debug_helpers.*
 use app.editor.editor_path_text_helpers.*
 use app.editor.debug_process_runtime.*
 
-fn ctrl_start_debug_adapter(ctrl: EditorController, debug_type: text) -> EditorAction:
-    val adapter_id = if debug_type == "" then "simple" else debug_type
+fn _editor_debug_resolve_adapter_id(ctrl: mut EditorController, adapter_id: text) -> text:
     ctrl.extension_host.activate_language(adapter_id)
-    val adapter = ctrl.extension_host.find_debug_adapter(adapter_id)
-    if extension_debug_adapter_id(adapter) == "":
+    val direct = ctrl.extension_host.find_debug_adapter(adapter_id)
+    if extension_debug_adapter_id(direct) != "":
+        return adapter_id
+    val dap_adapter_id = adapter_id + "-dap"
+    val dap = ctrl.extension_host.find_debug_adapter(dap_adapter_id)
+    if extension_debug_adapter_id(dap) != "":
+        return dap_adapter_id
+    adapter_id
+
+fn _editor_debug_adapter_missing(adapter: ExtensionDebugAdapterEntry, adapter_id: text) -> bool:
+    extension_debug_adapter_id(adapter) == "" and adapter_id != "simple"
+
+fn _editor_debug_adapter_program_or_default(adapter: ExtensionDebugAdapterEntry, adapter_id: text) -> text:
+    val program = extension_debug_adapter_program(adapter)
+    if program != "":
+        return program
+    if adapter_id == "simple":
+        return "bin/simple"
+    ""
+
+fn ctrl_start_debug_adapter(ctrl: mut EditorController, debug_type: text) -> EditorAction:
+    val adapter_id = if debug_type == "" then "simple" else debug_type
+    val lookup_adapter_id = _editor_debug_resolve_adapter_id(ctrl, adapter_id)
+    val adapter = ctrl.extension_host.find_debug_adapter(lookup_adapter_id)
+    if _editor_debug_adapter_missing(adapter, adapter_id):
         ctrl.status_msg = "debug adapter not found: " + adapter_id
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     val doc = ctrl.session.active_document()
-    val program = if doc == nil or doc.path() == "" then extension_debug_adapter_program(adapter) else: doc.path()
+    val program = if doc == nil or doc.path() == "" then _editor_debug_adapter_program_or_default(adapter, adapter_id) else: doc.path()
     val launch_config = _editor_debug_launch_config_for_doc(program, adapter_id)
+    val session_id = ctrl.debug_registry.next_session_id
     ctrl.debug_registry = editor_debug_registry_start(
         ctrl.debug_registry,
         launch_config
@@ -34,12 +57,12 @@ fn ctrl_start_debug_adapter(ctrl: EditorController, debug_type: text) -> EditorA
     val launched = editor_debug_dap_client_launch(dap, launch_config)
     dap = launched.0
     ctrl.debug_dap_client = dap
-    ctrl.debug_dap_clients.push(dap)
+    ctrl_debug_store_client_for_session(ctrl, session_id, dap)
     ctrl.debug_status = "starting"
     ctrl.status_msg = "debug adapter: " + editor_debug_launch_config_name(launch_config)
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_start_debug_process_adapter(ctrl: EditorController, debug_type: text) -> EditorAction:
+fn ctrl_start_debug_process_adapter(ctrl: mut EditorController, debug_type: text) -> EditorAction:
     val adapter_id = if debug_type == "" then "simple" else debug_type
     val adapter_program = if adapter_id == "simple" then "src/app/dap/simple_dap_main.spl" else: ""
     if adapter_program == "":
@@ -72,22 +95,22 @@ fn ctrl_start_debug_process_adapter(ctrl: EditorController, debug_type: text) ->
     ctrl.status_msg = "debug process adapter: " + editor_debug_launch_config_name(launch_config)
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_show_launch_configs(ctrl: EditorController, debug_type: text) -> EditorAction:
+fn ctrl_debug_show_launch_configs(ctrl: mut EditorController, debug_type: text) -> EditorAction:
     val adapter_id = if debug_type == "" then "simple" else: debug_type
-    ctrl.extension_host.activate_language(adapter_id)
-    val adapter = ctrl.extension_host.find_debug_adapter(adapter_id)
-    if extension_debug_adapter_id(adapter) == "":
+    val lookup_adapter_id = _editor_debug_resolve_adapter_id(ctrl, adapter_id)
+    val adapter = ctrl.extension_host.find_debug_adapter(lookup_adapter_id)
+    if _editor_debug_adapter_missing(adapter, adapter_id):
         ctrl.status_msg = "debug adapter not found: " + adapter_id
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     val doc = ctrl.session.active_document()
-    val program = if doc == nil or doc.path() == "" then extension_debug_adapter_program(adapter) else: doc.path()
+    val program = if doc == nil or doc.path() == "" then _editor_debug_adapter_program_or_default(adapter, adapter_id) else: doc.path()
     ctrl.debug_launch_source_path = _editor_find_launch_json(program)
     ctrl.debug_launch_configs = _editor_debug_launch_configs_for_doc(program, adapter_id)
     ctrl.wiki_panel = _editor_debug_launch_config_panel(ctrl.debug_launch_configs)
     ctrl_show_wiki_panel(ctrl, "debug launch configs: " + ctrl.debug_launch_configs.len().to_text())
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_start_selected_launch_config(ctrl: EditorController) -> EditorAction:
+fn ctrl_debug_start_selected_launch_config(ctrl: mut EditorController) -> EditorAction:
     if ctrl.debug_launch_configs.len() == 0:
         ctrl.status_msg = "no debug launch config"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -100,11 +123,12 @@ fn ctrl_debug_start_selected_launch_config(ctrl: EditorController) -> EditorActi
     if editor_debug_launch_config_is_compound(config):
         return ctrl_debug_start_compound_launch_config(ctrl, config)
     val config_debug_type = editor_debug_launch_config_debug_type(config)
-    ctrl.extension_host.activate_language(config_debug_type)
-    val adapter = ctrl.extension_host.find_debug_adapter(config_debug_type)
-    if extension_debug_adapter_id(adapter) == "":
+    val lookup_adapter_id = _editor_debug_resolve_adapter_id(ctrl, config_debug_type)
+    val adapter = ctrl.extension_host.find_debug_adapter(lookup_adapter_id)
+    if _editor_debug_adapter_missing(adapter, config_debug_type):
         ctrl.status_msg = "debug adapter not found: " + config_debug_type
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+    val session_id = ctrl.debug_registry.next_session_id
     ctrl.debug_registry = editor_debug_registry_start(ctrl.debug_registry, config)
     var dap = ctrl.debug_dap_client
     dap.start()
@@ -113,12 +137,12 @@ fn ctrl_debug_start_selected_launch_config(ctrl: EditorController) -> EditorActi
     val launched = editor_debug_dap_client_launch(dap, config)
     dap = launched.0
     ctrl.debug_dap_client = dap
-    ctrl.debug_dap_clients.push(dap)
+    ctrl_debug_store_client_for_session(ctrl, session_id, dap)
     ctrl.debug_status = "starting"
     ctrl.status_msg = "debug adapter: " + editor_debug_launch_config_name(config)
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_start_compound_launch_config(ctrl: EditorController, compound_config: EditorDebugLaunchConfig) -> EditorAction:
+fn ctrl_debug_start_compound_launch_config(ctrl: mut EditorController, compound_config: EditorDebugLaunchConfig) -> EditorAction:
     val launch_path = ctrl.debug_launch_source_path
     if launch_path == "":
         ctrl.status_msg = "debug compound source not found: " + editor_debug_launch_config_name(compound_config)
@@ -142,11 +166,12 @@ fn ctrl_debug_start_compound_launch_config(ctrl: EditorController, compound_conf
     aggregate.start()
     for config in member_configs:
         val config_debug_type = editor_debug_launch_config_debug_type(config)
-        ctrl.extension_host.activate_language(config_debug_type)
-        val adapter = ctrl.extension_host.find_debug_adapter(config_debug_type)
-        if extension_debug_adapter_id(adapter) == "":
+        val lookup_adapter_id = _editor_debug_resolve_adapter_id(ctrl, config_debug_type)
+        val adapter = ctrl.extension_host.find_debug_adapter(lookup_adapter_id)
+        if _editor_debug_adapter_missing(adapter, config_debug_type):
             ctrl.status_msg = "debug adapter not found: " + config_debug_type
             return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+        val session_id = ctrl.debug_registry.next_session_id
         ctrl.debug_registry = editor_debug_registry_start(ctrl.debug_registry, config)
         var dap = EditorDebugDapClient.new()
         dap.start()
@@ -154,7 +179,7 @@ fn ctrl_debug_start_compound_launch_config(ctrl: EditorController, compound_conf
         dap = initialized.0
         val launched = editor_debug_dap_client_launch(dap, config)
         dap = launched.0
-        ctrl.debug_dap_clients.push(dap)
+        ctrl_debug_store_client_for_session(ctrl, session_id, dap)
         for frame in dap.send_buffer:
             aggregate.send_buffer.push(frame)
     ctrl.debug_dap_client = aggregate
@@ -162,7 +187,7 @@ fn ctrl_debug_start_compound_launch_config(ctrl: EditorController, compound_conf
     ctrl.status_msg = "debug compound: " + editor_debug_launch_config_name(compound_config) + " (" + member_configs.len().to_text() + " sessions)"
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_show_session(ctrl: EditorController) -> EditorAction:
+fn ctrl_debug_show_session(ctrl: mut EditorController) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -170,12 +195,12 @@ fn ctrl_debug_show_session(ctrl: EditorController) -> EditorAction:
     ctrl_show_debug_session_panel(ctrl, "debug session")
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_show_sessions(ctrl: EditorController) -> EditorAction:
+fn ctrl_debug_show_sessions(ctrl: mut EditorController) -> EditorAction:
     ctrl.wiki_panel = _editor_debug_sessions_panel(ctrl.debug_registry)
     ctrl_show_wiki_panel(ctrl, "debug sessions: " + editor_debug_session_count(ctrl.debug_registry).to_text())
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_switch_selected_session(ctrl: EditorController) -> EditorAction:
+fn ctrl_debug_switch_selected_session(ctrl: mut EditorController) -> EditorAction:
     if ctrl.wiki_panel.rows.len() == 0:
         ctrl.status_msg = "no debug session"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -186,7 +211,7 @@ fn ctrl_debug_switch_selected_session(ctrl: EditorController) -> EditorAction:
         index = ctrl.wiki_panel.rows.len() - 1
     return ctrl_debug_switch_session(ctrl, ctrl.wiki_panel.rows[index].line)
 
-fn ctrl_debug_switch_session(ctrl: EditorController, session_id: i64) -> EditorAction:
+fn ctrl_debug_switch_session(ctrl: mut EditorController, session_id: i64) -> EditorAction:
     if session_id <= 0:
         ctrl.status_msg = "no debug session"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -200,17 +225,17 @@ fn ctrl_debug_switch_session(ctrl: EditorController, session_id: i64) -> EditorA
     ctrl_show_debug_session_panel(ctrl, "debug session: " + editor_debug_session_id(session).to_text())
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_activate_client_for_session(ctrl: EditorController, session_id: i64):
+fn ctrl_debug_activate_client_for_session(ctrl: mut EditorController, session_id: i64):
     val index = session_id - 1
     if index >= 0 and index < ctrl.debug_dap_clients.len():
         ctrl.debug_dap_client = ctrl.debug_dap_clients[index]
 
-fn ctrl_show_keyboard_shortcuts(ctrl: EditorController) -> EditorAction:
+fn ctrl_show_keyboard_shortcuts(ctrl: mut EditorController) -> EditorAction:
     ctrl.wiki_panel = _editor_keyboard_shortcuts_panel(default_keybindings())
     ctrl_show_wiki_panel(ctrl, "keyboard shortcuts")
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_add_breakpoint(ctrl: EditorController, path: text, line: i64, condition: text, log_message: text, hit_condition: text) -> EditorAction:
+fn ctrl_debug_add_breakpoint(ctrl: mut EditorController, path: text, line: i64, condition: text, log_message: text, hit_condition: text) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -232,7 +257,7 @@ fn ctrl_debug_add_breakpoint(ctrl: EditorController, path: text, line: i64, cond
     ctrl.status_msg = "breakpoint set: " + path + ":" + line.to_text()
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_add_watch(ctrl: EditorController, expression: text) -> EditorAction:
+fn ctrl_debug_add_watch(ctrl: mut EditorController, expression: text) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -242,7 +267,7 @@ fn ctrl_debug_add_watch(ctrl: EditorController, expression: text) -> EditorActio
     ctrl_show_debug_session_panel(ctrl, "watch added: " + expression)
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_evaluate(ctrl: EditorController, expression: text) -> EditorAction:
+fn ctrl_debug_evaluate(ctrl: mut EditorController, expression: text) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -256,7 +281,7 @@ fn ctrl_debug_evaluate(ctrl: EditorController, expression: text) -> EditorAction
     ctrl_show_debug_session_panel(ctrl, "debug evaluate: " + expression)
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_queue_watch_evaluate(ctrl: EditorController, expression: text):
+fn ctrl_debug_queue_watch_evaluate(ctrl: mut EditorController, expression: text):
     var dap = ctrl.debug_dap_client
     if not dap.running:
         return
@@ -265,7 +290,7 @@ fn ctrl_debug_queue_watch_evaluate(ctrl: EditorController, expression: text):
     ctrl.debug_dap_client = dap
     ctrl.debug_pending_watch_expressions.push(expression)
 
-fn ctrl_debug_refresh_watches(ctrl: EditorController) -> EditorAction:
+fn ctrl_debug_refresh_watches(ctrl: mut EditorController) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -277,7 +302,7 @@ fn ctrl_debug_refresh_watches(ctrl: EditorController) -> EditorAction:
     ctrl.status_msg = "debug watches refreshed: " + refreshed.to_text()
     EditorAction(redraw: refreshed > 0, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_update_watch_result(ctrl: EditorController, expression: text, value: text, status: text) -> EditorAction:
+fn ctrl_debug_update_watch_result(ctrl: mut EditorController, expression: text, value: text, status: text) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -286,7 +311,7 @@ fn ctrl_debug_update_watch_result(ctrl: EditorController, expression: text, valu
     ctrl_show_debug_session_panel(ctrl, "watch: " + expression)
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_record_evaluate_result(ctrl: EditorController, expression: text, value: text, status: text) -> EditorAction:
+fn ctrl_debug_record_evaluate_result(ctrl: mut EditorController, expression: text, value: text, status: text) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -295,7 +320,7 @@ fn ctrl_debug_record_evaluate_result(ctrl: EditorController, expression: text, v
     ctrl_show_debug_session_panel(ctrl, "debug result: " + expression)
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_update_stack_frames(ctrl: EditorController, frames: [EditorDebugStackFrame]) -> EditorAction:
+fn ctrl_debug_update_stack_frames(ctrl: mut EditorController, frames: [EditorDebugStackFrame]) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -304,7 +329,7 @@ fn ctrl_debug_update_stack_frames(ctrl: EditorController, frames: [EditorDebugSt
     ctrl_show_debug_session_panel(ctrl, "debug stack")
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_update_scopes(ctrl: EditorController, scopes: [EditorDebugScope]) -> EditorAction:
+fn ctrl_debug_update_scopes(ctrl: mut EditorController, scopes: [EditorDebugScope]) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -313,7 +338,7 @@ fn ctrl_debug_update_scopes(ctrl: EditorController, scopes: [EditorDebugScope]) 
     ctrl_show_debug_session_panel(ctrl, "debug scopes")
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_update_scope_variables(ctrl: EditorController, scope_name: text, variables: [EditorDebugVariable]) -> EditorAction:
+fn ctrl_debug_update_scope_variables(ctrl: mut EditorController, scope_name: text, variables: [EditorDebugVariable]) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -322,7 +347,7 @@ fn ctrl_debug_update_scope_variables(ctrl: EditorController, scope_name: text, v
     ctrl_show_debug_session_panel(ctrl, "debug variables: " + scope_name)
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_hydrate_dap_response(ctrl: EditorController, response_json: text) -> EditorAction:
+fn ctrl_debug_hydrate_dap_response(ctrl: mut EditorController, response_json: text) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -357,7 +382,7 @@ fn ctrl_debug_hydrate_dap_response(ctrl: EditorController, response_json: text) 
     ctrl.status_msg = "debug response ignored: " + command
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_hydrate_dap_event(ctrl: EditorController, event_json: text) -> EditorAction:
+fn ctrl_debug_hydrate_dap_event(ctrl: mut EditorController, event_json: text) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -379,7 +404,7 @@ fn ctrl_debug_hydrate_dap_event(ctrl: EditorController, event_json: text) -> Edi
         ctrl.status_msg = event_status
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_set_exception_filters(ctrl: EditorController, filters: [text]) -> EditorAction:
+fn ctrl_debug_set_exception_filters(ctrl: mut EditorController, filters: [text]) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -393,14 +418,14 @@ fn ctrl_debug_set_exception_filters(ctrl: EditorController, filters: [text]) -> 
     ctrl_show_debug_session_panel(ctrl, "exception breakpoints set")
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_poll_dap_client(ctrl: EditorController) -> EditorAction:
+fn ctrl_debug_poll_dap_client(ctrl: mut EditorController) -> EditorAction:
     val action = ctrl_poll_debug_dap_client(ctrl)
     if action.redraw:
         return action
     ctrl.status_msg = "no debug messages"
     EditorAction(redraw: false, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_poll_debug_dap_client(ctrl: EditorController) -> EditorAction:
+fn ctrl_poll_debug_dap_client(ctrl: mut EditorController) -> EditorAction:
     var messages: [EditorDebugDapInboundMessage] = []
     if ctrl.debug_process_pid > 0:
         if editor_debug_process_wait_simple_stopped(ctrl.debug_process_pid):
@@ -430,7 +455,7 @@ fn ctrl_poll_debug_dap_client(ctrl: EditorController) -> EditorAction:
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     EditorAction(redraw: false, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_request_stack_trace(ctrl: EditorController) -> EditorAction:
+fn ctrl_debug_request_stack_trace(ctrl: mut EditorController) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -445,7 +470,7 @@ fn ctrl_debug_request_stack_trace(ctrl: EditorController) -> EditorAction:
     ctrl.status_msg = "debug stack requested"
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_request_scopes(ctrl: EditorController, frame_id: i64) -> EditorAction:
+fn ctrl_debug_request_scopes(ctrl: mut EditorController, frame_id: i64) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -460,7 +485,7 @@ fn ctrl_debug_request_scopes(ctrl: EditorController, frame_id: i64) -> EditorAct
     ctrl.status_msg = "debug scopes requested"
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_request_variables(ctrl: EditorController, variables_reference: i64) -> EditorAction:
+fn ctrl_debug_request_variables(ctrl: mut EditorController, variables_reference: i64) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -475,7 +500,7 @@ fn ctrl_debug_request_variables(ctrl: EditorController, variables_reference: i64
     ctrl.status_msg = "debug variables requested"
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_sync_active_breakpoints(ctrl: EditorController) -> EditorAction:
+fn ctrl_debug_sync_active_breakpoints(ctrl: mut EditorController) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -496,7 +521,7 @@ fn ctrl_debug_sync_active_breakpoints(ctrl: EditorController) -> EditorAction:
     ctrl.status_msg = "debug breakpoints requested"
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_continue(ctrl: EditorController) -> EditorAction:
+fn ctrl_debug_continue(ctrl: mut EditorController) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -511,7 +536,7 @@ fn ctrl_debug_continue(ctrl: EditorController) -> EditorAction:
     ctrl.status_msg = "debug continue"
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_pause(ctrl: EditorController) -> EditorAction:
+fn ctrl_debug_pause(ctrl: mut EditorController) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -526,7 +551,7 @@ fn ctrl_debug_pause(ctrl: EditorController) -> EditorAction:
     ctrl.status_msg = "debug pause"
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_step(ctrl: EditorController, step_kind: text) -> EditorAction:
+fn ctrl_debug_step(ctrl: mut EditorController, step_kind: text) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -541,7 +566,7 @@ fn ctrl_debug_step(ctrl: EditorController, step_kind: text) -> EditorAction:
     ctrl.status_msg = "debug " + step_kind
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_terminate_first(ctrl: EditorController) -> EditorAction:
+fn ctrl_debug_terminate_first(ctrl: mut EditorController) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -562,7 +587,7 @@ fn ctrl_debug_terminate_first(ctrl: EditorController) -> EditorAction:
     ctrl.status_msg = "debug terminated"
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_restart_first(ctrl: EditorController) -> EditorAction:
+fn ctrl_debug_restart_first(ctrl: mut EditorController) -> EditorAction:
     val session = editor_debug_first_session(ctrl.debug_registry)
     if editor_debug_session_id(session) == 0:
         ctrl.status_msg = "no debug session"
@@ -582,7 +607,7 @@ fn ctrl_debug_restart_first(ctrl: EditorController) -> EditorAction:
     ctrl.status_msg = "debug restart"
     EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
 
-fn ctrl_debug_store_client_for_session(ctrl: EditorController, session_id: i64, dap: EditorDebugDapClient):
+fn ctrl_debug_store_client_for_session(ctrl: mut EditorController, session_id: i64, dap: EditorDebugDapClient):
     val index = session_id - 1
     if index < 0:
         return

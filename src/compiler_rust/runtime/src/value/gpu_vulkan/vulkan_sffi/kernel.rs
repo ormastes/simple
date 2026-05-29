@@ -42,7 +42,7 @@ pub extern "C" fn rt_vk_kernel_compile(device_handle: u64, spirv_data: *const u8
         if let Some(device) = registry.get(&device_handle) {
             let spirv_bytes = unsafe { std::slice::from_raw_parts(spirv_data, spirv_len as usize) };
 
-            match ComputePipeline::new(device.clone(), spirv_bytes) {
+            match ComputePipeline::new(device.clone(), spirv_bytes, 0) {
                 Ok(pipeline) => {
                     drop(registry); // Release device registry lock
                     let handle = next_handle();

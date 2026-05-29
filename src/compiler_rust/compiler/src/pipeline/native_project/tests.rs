@@ -524,6 +524,38 @@ fn test_discover_files_from_entry_excludes_unrelated_source_files() {
 }
 
 #[test]
+fn test_entry_closure_resolves_project_src_imports_from_narrow_source_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_os_dir = project_root.join("src/os/kernel/arch/x86_32");
+    let examples_dir = project_root.join("examples/simple_os/arch/x86_32");
+    std::fs::create_dir_all(&src_os_dir).unwrap();
+    std::fs::create_dir_all(&examples_dir).unwrap();
+
+    let dep_file = src_os_dir.join("interrupt.spl");
+    let entry_file = examples_dir.join("main.spl");
+    std::fs::write(&dep_file, "fn x86_32_install_bootstrap_runtime(cap: u64): pass").unwrap();
+    std::fs::write(
+        &entry_file,
+        "use os.kernel.arch.x86_32.interrupt.{x86_32_install_bootstrap_runtime}\nfn main():\n    x86_32_install_bootstrap_runtime(8)\n",
+    )
+    .unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(examples_dir.clone())
+        .entry_file(entry_file.clone());
+
+    let files = builder.discover_files().unwrap();
+    assert!(files.iter().any(|path| same_file_path(path, &entry_file)));
+    assert!(files.iter().any(|path| same_file_path(path, &dep_file)));
+    assert_eq!(files.len(), 2);
+}
+
+#[test]
 fn test_discover_files_from_entry_uses_matching_source_root() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("project");

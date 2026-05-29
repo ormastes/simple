@@ -696,17 +696,29 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_metal_compile_shader", gpu::rt_metal_compile_shader_fn);
     insert_simple!("rt_metal_create_command_buffer", gpu::rt_metal_create_command_buffer_fn);
     insert_simple!("rt_metal_create_command_queue", gpu::rt_metal_create_command_queue_fn);
-    insert_simple!("rt_metal_create_compute_encoder", gpu::rt_metal_create_compute_encoder_fn);
-    insert_simple!("rt_metal_create_compute_pipeline", gpu::rt_metal_create_compute_pipeline_fn);
+    insert_simple!(
+        "rt_metal_create_compute_encoder",
+        gpu::rt_metal_create_compute_encoder_fn
+    );
+    insert_simple!(
+        "rt_metal_create_compute_pipeline",
+        gpu::rt_metal_create_compute_pipeline_fn
+    );
     insert_simple!("rt_metal_create_device", gpu::rt_metal_create_device_fn);
-    insert_simple!("rt_metal_create_render_pipeline", gpu::rt_metal_create_render_pipeline_fn);
+    insert_simple!(
+        "rt_metal_create_render_pipeline",
+        gpu::rt_metal_create_render_pipeline_fn
+    );
     insert_simple!("rt_metal_create_sampler", gpu::rt_metal_create_sampler_fn);
     insert_simple!("rt_metal_create_swapchain", gpu::rt_metal_create_swapchain_fn);
     insert_simple!("rt_metal_create_texture", gpu::rt_metal_create_texture_fn);
     insert_simple!("rt_metal_destroy_command_queue", gpu::rt_metal_destroy_command_queue_fn);
     insert_simple!("rt_metal_destroy_device", gpu::rt_metal_destroy_device_fn);
     insert_simple!("rt_metal_destroy_pipeline", gpu::rt_metal_destroy_pipeline_fn);
-    insert_simple!("rt_metal_destroy_render_pipeline", gpu::rt_metal_destroy_render_pipeline_fn);
+    insert_simple!(
+        "rt_metal_destroy_render_pipeline",
+        gpu::rt_metal_destroy_render_pipeline_fn
+    );
     insert_simple!("rt_metal_destroy_sampler", gpu::rt_metal_destroy_sampler_fn);
     insert_simple!("rt_metal_destroy_shader", gpu::rt_metal_destroy_shader_fn);
     insert_simple!("rt_metal_destroy_swapchain", gpu::rt_metal_destroy_swapchain_fn);
@@ -836,10 +848,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     // Per-backend event loop externs for cross-platform PlatformEvent dispatch
     insert_simple!("rt_kqueue_create", interpreter_event_loop::rt_kqueue_create_interp);
-    insert_simple!(
-        "rt_kqueue_register",
-        interpreter_event_loop::rt_kqueue_register_interp
-    );
+    insert_simple!("rt_kqueue_register", interpreter_event_loop::rt_kqueue_register_interp);
     insert_simple!(
         "rt_kqueue_deregister",
         interpreter_event_loop::rt_kqueue_deregister_interp
@@ -847,14 +856,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_kqueue_poll", interpreter_event_loop::rt_kqueue_poll_interp);
     insert_simple!("rt_kqueue_close", interpreter_event_loop::rt_kqueue_close_interp);
     insert_simple!("rt_iocp_create", interpreter_event_loop::rt_iocp_create_interp);
-    insert_simple!(
-        "rt_iocp_register",
-        interpreter_event_loop::rt_iocp_register_interp
-    );
-    insert_simple!(
-        "rt_iocp_deregister",
-        interpreter_event_loop::rt_iocp_deregister_interp
-    );
+    insert_simple!("rt_iocp_register", interpreter_event_loop::rt_iocp_register_interp);
+    insert_simple!("rt_iocp_deregister", interpreter_event_loop::rt_iocp_deregister_interp);
     insert_simple!("rt_iocp_poll", interpreter_event_loop::rt_iocp_poll_interp);
     insert_simple!("rt_iocp_close", interpreter_event_loop::rt_iocp_close_interp);
     insert_simple!(
@@ -1487,7 +1490,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_bind_buffer", gpu::rt_vulkan_bind_buffer_fn);
     insert_simple!("rt_vulkan_bind_descriptors", gpu::rt_vulkan_bind_descriptors_fn);
     insert_simple!("rt_vulkan_bind_pipeline", gpu::rt_vulkan_bind_pipeline_fn);
+    insert_simple!("rt_vulkan_copy_to_buffer", gpu::rt_vulkan_copy_to_buffer_fn);
     insert_simple!("rt_vulkan_compile_glsl", gpu::rt_vulkan_compile_glsl_fn);
+    insert_simple!("rt_vulkan_compile_spirv", gpu::rt_vulkan_compile_spirv_fn);
+    insert_simple!("rt_vulkan_read_buffer_bytes", gpu::rt_vulkan_read_buffer_bytes_fn);
     insert_simple!(
         "rt_vulkan_create_compute_pipeline",
         gpu::rt_vulkan_create_compute_pipeline_fn
@@ -1582,6 +1588,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_f64_to_bits", wsffi::spl_f64_to_bits);
     insert_simple!("spl_i64_is_zero", memory::spl_i64_is_zero);
     insert_simple!("spl_str_ptr", wsffi::spl_str_ptr);
+    insert_simple!("spl_wffi_call_f64", wsffi::spl_wffi_call_f64);
     insert_simple!("spl_wffi_call_i64", wsffi::spl_wffi_call_i64);
     insert_simple!("sqrt", math::sqrt);
     insert_simple!("stderr_flush", io::stderr_flush);

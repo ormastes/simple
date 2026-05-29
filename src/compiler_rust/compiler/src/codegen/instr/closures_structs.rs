@@ -228,6 +228,26 @@ pub(crate) fn compile_method_call_static<M: Module>(
         None
     };
     let lookup_name = lookup_name_storage.as_deref().unwrap_or(func_name);
+    let ctype_method_imported = ctx
+        .use_map
+        .iter()
+        .chain(ctx.import_map.iter())
+        .any(|(raw, mangled)| {
+            (raw.contains("ctype") || mangled.contains("ctype"))
+                && (raw.ends_with(lookup_name) || mangled.ends_with(lookup_name))
+        });
+    if ctype_method_imported {
+        if super::calls::compile_inline_ctype_call(
+            ctx,
+            builder,
+            dest,
+            &format!("ctype.{lookup_name}"),
+            lookup_name,
+            args,
+        )? {
+            return Ok(());
+        }
+    }
     if lookup_name.ends_with(".char_code_at") {
         if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, "char_code_at", args)? {
             if let Some(d) = dest {
@@ -933,7 +953,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => "rt_string_to_float",
         "index_of" | "find_str" => "rt_string_find",
         "rfind" | "last_index_of" => "rt_string_rfind",
-        "to_string" | "str" => "rt_to_string",
+        "to_string" | "to_text" | "str" => "rt_to_string",
         // Dict/collection methods
         "get" => "rt_index_get",
         "set" => {

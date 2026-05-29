@@ -2,6 +2,8 @@
 
 Date: 2026-05-21
 
+Status: Resolved 2026-05-29
+
 ## Summary
 
 `bin/simple check` reports `unexpected token` / `expected: expression` at EOF when a blank `///` doc-comment line appears in a doc-comment block immediately before an `extern fn`.
@@ -33,4 +35,12 @@ Removed the blank `///` line in `src/lib/common/science_math/perf_sugar.spl`. Th
 
 ## Follow-up
 
-Fix the parser/checker so blank doc-comment separator lines are accepted consistently before extern declarations.
+Resolved in the Rust seed lexer/parser by treating a bare `///` between adjacent
+line-style doc comments as an empty doc-comment separator instead of the opener
+for a `/// ... ///` block.
+
+Verification:
+
+- `cargo fmt -p simple-parser`
+- `cargo test -p simple-parser --lib lexer::tests -- --nocapture`
+- `cargo test -p simple-parser --test declaration_tests -- --nocapture`

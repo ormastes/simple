@@ -122,6 +122,35 @@ fn primitive_field_method_call_is_builtin_qualified() {
     )));
 }
 
+#[test]
+fn primitive_to_text_method_call_is_builtin_qualified() {
+    let mir = compile_to_mir("fn test() -> text:\n    val n = 42\n    return n.to_text()\n").unwrap();
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "i64.to_text"
+    )));
+}
+
+#[test]
+fn direct_call_boxes_integer_args_for_any_params() {
+    let mir =
+        compile_to_mir("fn add(a: Any, b: Any) -> Any:\n    return a + b\n\nfn test() -> Any:\n    return add(1, 2)\n")
+            .unwrap();
+    let box_count = mir
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.instructions.iter())
+        .filter(|i| matches!(i, MirInst::BoxInt { .. }))
+        .count();
+    assert!(box_count >= 2, "expected both integer ANY call args to be boxed");
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_any_add")
+    )));
+}
+
 // =============================================================================
 // Regression: lint_val_crash 2026-04-28 (RESOLVED) — field access on for-loop
 // binding (`for r in rs:` where `rs: [R]`) must lower to FieldGet, NOT a

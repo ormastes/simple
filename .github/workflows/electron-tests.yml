@@ -11,9 +11,9 @@
 #   - Runs advisory-only: the job sets continue-on-error: true so a red
 #     run never blocks other CI or branch-protection gates.
 #   - Does lint + compile-check of the .spl files and a syntax smoke of
-#     the tools/electron-shell/ bridge scripts. No heavy e2e - full
-#     Electron runtime e2e is out-of-scope until work-plan Sec.4 item 6
-#     re-opens.
+#     the tools/electron-shell/ bridge scripts.
+#   - Runs the live Electron WebView common-envelope smoke under Xvfb when
+#     bin/simple is available in the checkout.
 #
 # Proposed (not applied) follow-up diff to
 # doc/01_research/domain/v4_electron_packaging_2026-04-14.md Sec.5:
@@ -40,6 +40,7 @@ on:
       - 'src/app/wm_compare/html_compat.spl'
       - 'src/app/wm_compare/live_capture.spl'
       - 'tools/electron-shell/**'
+      - 'scripts/check-electron-live-smoke.shs'
       - '.github/workflows/electron-tests.yml'
   pull_request:
     branches: [main]
@@ -49,6 +50,7 @@ on:
       - 'src/app/wm_compare/html_compat.spl'
       - 'src/app/wm_compare/live_capture.spl'
       - 'tools/electron-shell/**'
+      - 'scripts/check-electron-live-smoke.shs'
       - '.github/workflows/electron-tests.yml'
   workflow_dispatch:
 
@@ -93,13 +95,31 @@ jobs:
           fi
 
       - name: Syntax-check electron-shell bridge scripts
-        working-directory: tools/electron-shell
         run: |
-          for f in main.js preload.js screenshot.js wm.js bridge.js export_snapshot.js ; do
+          for f in \
+            src/app/ui.electron/bridge_envelopes.js \
+            src/app/ui.electron/bridge.js \
+            src/app/ui.electron/preload.js \
+            tools/electron-shell/main.js \
+            tools/electron-shell/preload.js \
+            tools/electron-shell/screenshot.js \
+            tools/electron-shell/wm.js \
+            tools/electron-shell/export_snapshot.js ; do
             if [ -f "$f" ]; then
               node --check "$f" && echo "ok: $f" || echo "::warning::syntax: $f"
             fi
           done
+
+      - name: Install live Electron smoke dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb \
+            libnss3 \
+            libxss1 \
+            libgtk-3-0
+          sudo apt-get install -y libasound2t64 || sudo apt-get install -y libasound2
+          npm install --prefix tools/electron-shell
 
       - name: Compile-check src/app/ui.electron/*.spl
         run: |
@@ -109,6 +129,14 @@ jobs:
               || echo "::warning::ui.electron compile-check failed (advisory)"
           else
             echo "::notice::bin/simple not present in CI seed; skip compile-check"
+          fi
+
+      - name: Live Electron WebView common-envelope smoke
+        run: |
+          if [ -x bin/simple ]; then
+            npm --prefix tools/electron-shell run live-smoke-ci
+          else
+            echo "::notice::bin/simple not present in CI seed; skip live Electron smoke"
           fi
 
       - name: Summary

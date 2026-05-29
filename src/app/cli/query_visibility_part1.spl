@@ -58,8 +58,6 @@ fn query_visibility_main() -> i64:
         return query_visibility_semantic_tokens(file: args[1], start_line: start_line, end_line: end_line)
     1
 
-query_visibility_main()
-
 fn query_visibility_hover(file: text, line_num: i64, col: i64) -> i64:
     val clean_file = sanitize_path(file)
     if clean_file == "":
@@ -132,8 +130,7 @@ fn query_visibility_symbols(file: text, requester_file: text) -> i64:
     val symbols = parse_symbols_in_file(file_path: clean_file)
     for parsed in symbols:
         val vis = visibility_json(symbol: parsed.name, owner_file: clean_file, requester_file: requester)
-        val line_idx = if parsed.line_num > 0: parsed.line_num - 1 else: 0
-        val range = "{\"start\":{\"line\":" + str(line_idx) + ",\"character\":0},\"end\":{\"line\":" + str(line_idx) + ",\"character\":0}" + "}"
+        val range = symbol_range_json(parsed)
         items = items.push("{\"name\":" + json_text(parsed.name) + ",\"kind\":" + str(symbol_kind_number(parsed.kind)) + ",\"detail\":" + json_text("[" + visibility_display(symbol: parsed.name, owner_file: clean_file) + "]") + ",\"range\":" + range + ",\"selectionRange\":" + range + ",\"simpleVisibility\":" + vis + "}")
     print "[" + items.join(",") + "]"
     0
@@ -157,8 +154,7 @@ fn query_visibility_workspace_symbols(query: text, requester_file: text) -> i64:
     for entry in ranked:
         val candidate = entry.symbol
         val vis = visibility_json(symbol: candidate.name, owner_file: candidate.file_path, requester_file: requester)
-        val line_idx = if candidate.line_num > 0: candidate.line_num - 1 else: 0
-        val range = "{\"start\":{\"line\":" + str(line_idx) + ",\"character\":0},\"end\":{\"line\":" + str(line_idx) + ",\"character\":0}" + "}"
+        val range = symbol_range_json(candidate)
         items = items.push("{\"name\":" + json_text(candidate.name) + ",\"kind\":" + str(symbol_kind_number(candidate.kind)) + ",\"location\":{\"uri\":" + json_text("file://" + candidate.file_path) + ",\"range\":" + range + "},\"simpleVisibility\":" + vis + "}")
         if items.len() >= 100:
             break
@@ -218,6 +214,8 @@ struct ParsedSymbol:
     name: text
     kind: text
     line_num: i64
+    start_col: i64
+    end_col: i64
     file_path: text
 
 struct ScoredSymbol:
@@ -233,10 +231,23 @@ fn parse_symbols_in_file(file_path: text) -> [ParsedSymbol]:
     var line_num = 1
     for line in lines:
         val trimmed = line.trim()
-        val kind = declaration_kind(trimmed)
-        val name = declaration_name(trimmed)
+        var kind = ""
+        var name = ""
+        var start_col = leading_space_count(line)
+        var end_col = start_col
+        val domain_kind = domain_block_kind(trimmed)
+        if domain_kind != "":
+            kind = "domain"
+            name = domain_kind + "{}"
+            end_col = start_col + query_text_len(domain_kind)
+        else:
+            kind = declaration_kind(trimmed)
+            name = declaration_name(trimmed)
+            val name_col = declaration_name_column(trimmed, name)
+            start_col = start_col + name_col
+            end_col = start_col + query_text_len(name)
         if name != "" and kind != "":
-            items = items.push(ParsedSymbol(name: name, kind: kind, line_num: line_num, file_path: file_path))
+            items = items.push(ParsedSymbol(name: name, kind: kind, line_num: line_num, start_col: start_col, end_col: end_col, file_path: file_path))
         line_num = line_num + 1
     items
 
@@ -294,14 +305,52 @@ fn parse_grep_symbol_candidate(line: text) -> ParsedSymbol:
                 break
         idx = idx + 1
     if first_colon < 0 or second_colon < 0:
-        return ParsedSymbol(name: "", kind: "", line_num: 0, file_path: "")
+        return ParsedSymbol(name: "", kind: "", line_num: 0, start_col: 0, end_col: 0, file_path: "")
     val file_path = join_char_slice(chars: chars, start_idx: 0, end_idx: first_colon)
     val line_num_str = join_char_slice(chars: chars, start_idx: first_colon + 1, end_idx: second_colon)
     val source_line = join_char_slice(chars: chars, start_idx: second_colon + 1, end_idx: chars.len())
     val trimmed = source_line.trim()
     val kind = declaration_kind(trimmed)
     val name = declaration_name(trimmed)
-    ParsedSymbol(name: name, kind: kind, line_num: line_num_str.to_int(), file_path: file_path)
+    val start_col = leading_space_count(source_line) + declaration_name_column(trimmed, name)
+    val end_col = start_col + query_text_len(name)
+    ParsedSymbol(name: name, kind: kind, line_num: line_num_str.to_int(), start_col: start_col, end_col: end_col, file_path: file_path)
+
+fn symbol_range_json(parsed: ParsedSymbol) -> text:
+    val line_idx = if parsed.line_num > 0: parsed.line_num - 1 else: 0
+    val start_col = if parsed.start_col >= 0: parsed.start_col else: 0
+    val end_col = if parsed.end_col > start_col: parsed.end_col else: start_col
+    "{\"start\":{\"line\":" + str(line_idx) + ",\"character\":" + str(start_col) + "},\"end\":{\"line\":" + str(line_idx) + ",\"character\":" + str(end_col) + "}}"
+
+fn leading_space_count(line: text) -> i64:
+    var count = 0
+    val line_len = query_text_len(line)
+    while count < line_len:
+        val ch = line.substring(count, count + 1)
+        if ch != " " and ch != "\t":
+            return count
+        count = count + 1
+    count
+
+fn declaration_name_column(trimmed: text, name: text) -> i64:
+    if name == "":
+        return 0
+    val name_len = query_text_len(name)
+    val trimmed_len = query_text_len(trimmed)
+    var i = 0
+    while i + name_len <= trimmed_len:
+        if trimmed.substring(i, i + name_len) == name:
+            return i
+        i = i + 1
+    0
+
+fn query_text_len(value: text) -> i64:
+    var count = 0
+    val parts = value.split("")
+    for part in parts:
+        if part != "":
+            count = count + 1
+    count
 
 fn rank_workspace_symbol_candidate(candidate: ParsedSymbol, query: text, requester: text) -> i64:
     var score = 1000
@@ -447,6 +496,25 @@ fn declaration_kind(line: text) -> text:
         return "var"
     ""
 
+fn domain_block_kind(line: text) -> text:
+    if line.starts_with("schema") and not line.starts_with("schema "):
+        return "schema"
+    if line.starts_with("style") and not line.starts_with("style "):
+        return "style"
+    if line.starts_with("ui") and not line.starts_with("ui "):
+        return "ui"
+    if line.starts_with("music") and not line.starts_with("music "):
+        return "music"
+    if line.starts_with("bim") and not line.starts_with("bim "):
+        return "bim"
+    if line.starts_with("cad") and not line.starts_with("cad "):
+        return "cad"
+    if line.starts_with("city") and not line.starts_with("city "):
+        return "city"
+    if line.starts_with("rtl") and not line.starts_with("rtl "):
+        return "rtl"
+    ""
+
 fn declaration_name(line: text) -> text:
     var trimmed = strip_visibility_prefix(line.trim())
     if trimmed.starts_with("static "):
@@ -459,18 +527,47 @@ fn declaration_name(line: text) -> text:
         trimmed = trimmed.substring(6).trim()
     if trimmed.starts_with("kernel "):
         trimmed = trimmed.substring(7).trim()
+    if trimmed.starts_with("val "):
+        return declaration_token(trimmed.substring(4))
+    if trimmed.starts_with("var "):
+        return declaration_token(trimmed.substring(4))
+    if trimmed.starts_with("fn "):
+        return declaration_token(trimmed.substring(3))
+    if trimmed.starts_with("me "):
+        return declaration_token(trimmed.substring(3))
+    if trimmed.starts_with("class "):
+        return declaration_token(trimmed.substring(6))
+    if trimmed.starts_with("struct "):
+        return declaration_token(trimmed.substring(7))
+    if trimmed.starts_with("enum "):
+        return declaration_token(trimmed.substring(5))
+    if trimmed.starts_with("trait "):
+        return declaration_token(trimmed.substring(6))
     val prefixes = ["fn ", "me ", "class ", "struct ", "enum ", "trait ", "val ", "var "]
     for prefix in prefixes:
         if trimmed.starts_with(prefix):
             trimmed = trimmed.substring(prefix.len())
             break
-    var chars: [text] = []
-    for ch in trimmed:
-        if is_ident_char(ch):
-            chars = chars.push(ch)
-        else:
-            break
-    chars.join("")
+    declaration_token(trimmed)
+
+fn declaration_token(rest: text) -> text:
+    var token = rest.trim()
+    val space_parts = token.split(" ")
+    if space_parts.len() > 0:
+        token = space_parts[0]
+    val paren_parts = token.split("(")
+    if paren_parts.len() > 0:
+        token = paren_parts[0]
+    val colon_parts = token.split(":")
+    if colon_parts.len() > 0:
+        token = colon_parts[0]
+    val eq_parts = token.split("=")
+    if eq_parts.len() > 0:
+        token = eq_parts[0]
+    val dot_parts = token.split(".")
+    if dot_parts.len() > 0:
+        token = dot_parts[0]
+    token.trim()
 
 fn strip_visibility_prefix(line: text) -> text:
     var trimmed = line

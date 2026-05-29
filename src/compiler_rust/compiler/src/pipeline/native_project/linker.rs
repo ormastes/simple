@@ -113,8 +113,8 @@ impl NativeProjectBuilder {
         // (e.g. freestanding `x86_64-unknown-none` kernels) the symbols have no
         // prefix, and stripping would turn `__module_init_X` into
         // `_module_init_X`, breaking module-init discovery.
-        let strip_macho_underscore = cfg!(target_os = "macos")
-            && effective_target().os == simple_common::target::TargetOS::MacOS;
+        let strip_macho_underscore =
+            cfg!(target_os = "macos") && effective_target().os == simple_common::target::TargetOS::MacOS;
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(|line| line.split_whitespace().last())

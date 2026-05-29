@@ -1,7 +1,9 @@
 # FR-SOS-025 x86_32 OS Parity Design
 
 **Feature request:** `FR-SOS-025`
-**Status:** Partial; x86_32 remains a boot/probe lane.
+**Status:** Acceptance criteria implemented; x86_32 remains documented
+separately from the x86_64 full OS lane until broader release verification
+promotes it.
 
 ## Scope
 
@@ -42,6 +44,24 @@ Promote `x86_32` from boot/probe to full OS only after all of these are true:
   the same acceptance level as the x86_64 desktop/app lane;
 - public docs and runners continue to say that `x86_64` is the full OS lane
   until every item above is proven.
+
+## 2026-05-29 Acceptance Evidence
+
+The live x86_32 QEMU spec now covers boot, `int 0x80`, installed early syscall
+dispatch, process/shell smoke, and an equivalent FAT32 initrd filesystem app
+lane. The filesystem lane passes a FAT32 image as a Multiboot module, verifies
+staged `HELLOSMF`/`BROWSMF` x86_32 payloads, and gates app spawn pids on those
+payloads through the i386 syscall bridge.
+
+Command:
+`SIMPLEOS_QEMU_X86_32_BOOT_LIVE=1 SIMPLE_LIB=src bin/simple test test/system/simpleos_x86_32_boot_probe_live_spec.spl --mode=interpreter --clean`
+
+Result: `5/5` live checks passed.
+
+Catalog scenario:
+`SIMPLE_LIB=src bin/simple os test --scenario=x86_32-initrd-fat32-smf`
+
+Result: passed with `[x86_32 fs] app execution ok` and `TEST PASSED`.
 
 ## Documentation Rule
 

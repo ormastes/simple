@@ -603,7 +603,7 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
             let zero = builder.ins().iconst(types::I64, 0);
             Ok(Some(zero))
         }
-        "str" | "to_string" => {
+        "str" | "to_string" | "to_text" => {
             // Convert value to string: calls rt_to_string directly.
             // Arguments should already be RuntimeValues (tagged ints, heap strings, etc.)
             if args.is_empty() {

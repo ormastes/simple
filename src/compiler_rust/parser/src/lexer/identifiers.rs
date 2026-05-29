@@ -572,6 +572,9 @@ impl<'a> super::Lexer<'a> {
     pub(super) fn scan_custom_block_payload(&mut self, kind: &str) -> TokenKind {
         use crate::token::{PreLexInfo, TextSpan};
 
+        let opening_byte = self.current_pos.saturating_sub(1);
+        let opening_line = self.line;
+        let opening_column = self.column.saturating_sub(1);
         let mut payload = String::new();
         let mut depth: i32 = 1; // We've already consumed the opening {
         let mut pre_lex = PreLexInfo::default();
@@ -768,7 +771,10 @@ impl<'a> super::Lexer<'a> {
         }
 
         // Unclosed block - return error
-        TokenKind::Error(format!("Unclosed {} block (missing '}}')", kind))
+        TokenKind::Error(format!(
+            "Unclosed {} block (missing '}}'; opening '{{' at line {}, column {}, byte {})",
+            kind, opening_line, opening_column, opening_byte
+        ))
     }
 
     /// Scan a backtick atom literal: `symbol`

@@ -5,7 +5,9 @@
 
 use common.ui.builder.{column, panel, statusbar, text_widget, build_tree_with_title}
 use common.ui.widget.{UITree}
+use common.ui.web_render_api.{WebRenderRequest, WEB_RENDER_TARGET_SIMPLE_WEB}
 use os.compositor.compositor.{Compositor}
+use os.compositor.web_render_surface.{compositor_default_web_page_html}
 use os.services.wm.wm_world.{WmAction, wm_action_none}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 
@@ -61,6 +63,11 @@ fn wm_action_remote_tree(window_id: u64, content: text) -> UITree:
     ])
     build_tree_with_title(root, "Window {wid_str}", "dark")
 
+fn wm_action_web_window_request(window_id: u64, title: text, url: text, width: i32, height: i32) -> WebRenderRequest:
+    val surface_id = "web_window_{window_id}"
+    val body = compositor_default_web_page_html(url)
+    WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, title, body, "", "", width, height).with_surface(surface_id).with_pixel_output()
+
 fn apply_wm_action_to_compositor(compositor: Compositor, action: WmAction) -> WmActionApplyResult:
     var next = compositor
     match action.kind:
@@ -70,6 +77,7 @@ fn apply_wm_action_to_compositor(compositor: Compositor, action: WmAction) -> Wm
             return WmActionApplyResult(compositor: next, window_id: wid.value, applied: true)
         "create_web_window":
             val web_wid = next.create_remote_window(action.title, action.x, action.y, action.width, action.height, action.owner_port)
+            next.update_window_tree(web_wid.value, wm_action_web_window_request(web_wid.value, action.title, action.content, action.width, action.height))
             next.set_window_identity(web_wid.value.to_i32(), action.process_id.to_i64(), action.app_id)
             return WmActionApplyResult(compositor: next, window_id: web_wid.value, applied: true)
         "destroy_window":

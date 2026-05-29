@@ -7,6 +7,7 @@
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 use std::ffi::{CStr, CString};
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 // dlopen-based CUDA fallback when compiled without cuda feature
@@ -141,20 +142,16 @@ use simple_runtime::cuda_runtime::{
 };
 
 use simple_runtime::metal_graphics_runtime::{
-    rt_metal_alloc_buffer, rt_metal_buffer_download, rt_metal_buffer_upload,
-    rt_metal_begin_render_pass,
+    rt_metal_alloc_buffer, rt_metal_buffer_download, rt_metal_buffer_upload, rt_metal_begin_render_pass,
     rt_metal_commit_command_buffer, rt_metal_compile_shader, rt_metal_create_command_buffer,
     rt_metal_create_command_queue, rt_metal_create_compute_encoder, rt_metal_create_compute_pipeline,
-    rt_metal_create_device, rt_metal_create_render_pipeline, rt_metal_create_sampler,
-    rt_metal_create_swapchain, rt_metal_create_texture, rt_metal_destroy_command_queue,
-    rt_metal_destroy_device, rt_metal_destroy_pipeline, rt_metal_destroy_render_pipeline,
-    rt_metal_destroy_sampler, rt_metal_destroy_shader, rt_metal_destroy_swapchain,
-    rt_metal_device_count, rt_metal_device_memory, rt_metal_device_name,
-    rt_metal_dispatch_compute, rt_metal_draw_indexed, rt_metal_draw_primitives,
-    rt_metal_end_compute_encoder, rt_metal_end_render_pass, rt_metal_free_buffer,
-    rt_metal_free_texture, rt_metal_get_last_error,
-    rt_metal_init, rt_metal_is_available, rt_metal_run_blit_frame,
-    rt_metal_run_compute_frame, rt_metal_set_buffer, rt_metal_set_bytes, rt_metal_set_scissor,
+    rt_metal_create_device, rt_metal_create_render_pipeline, rt_metal_create_sampler, rt_metal_create_swapchain,
+    rt_metal_create_texture, rt_metal_destroy_command_queue, rt_metal_destroy_device, rt_metal_destroy_pipeline,
+    rt_metal_destroy_render_pipeline, rt_metal_destroy_sampler, rt_metal_destroy_shader, rt_metal_destroy_swapchain,
+    rt_metal_device_count, rt_metal_device_memory, rt_metal_device_name, rt_metal_dispatch_compute,
+    rt_metal_draw_indexed, rt_metal_draw_primitives, rt_metal_end_compute_encoder, rt_metal_end_render_pass,
+    rt_metal_free_buffer, rt_metal_free_texture, rt_metal_get_last_error, rt_metal_init, rt_metal_is_available,
+    rt_metal_run_blit_frame, rt_metal_run_compute_frame, rt_metal_set_buffer, rt_metal_set_bytes, rt_metal_set_scissor,
     rt_metal_set_viewport, rt_metal_present, rt_metal_wait_completed,
 };
 
@@ -245,27 +242,57 @@ pub fn rt_metal_device_count_fn(_args: &[Value]) -> Result<Value, CompileError> 
 }
 
 pub fn rt_metal_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Str(c_ptr_to_string(rt_metal_device_name(arg_i64(args, 0, "rt_metal_device_name", 1)?))))
+    Ok(Value::Str(c_ptr_to_string(rt_metal_device_name(arg_i64(
+        args,
+        0,
+        "rt_metal_device_name",
+        1,
+    )?))))
 }
 
 pub fn rt_metal_device_memory_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_device_memory(arg_i64(args, 0, "rt_metal_device_memory", 1)?)))
+    Ok(Value::Int(rt_metal_device_memory(arg_i64(
+        args,
+        0,
+        "rt_metal_device_memory",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_create_device_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_create_device(arg_i64(args, 0, "rt_metal_create_device", 1)?)))
+    Ok(Value::Int(rt_metal_create_device(arg_i64(
+        args,
+        0,
+        "rt_metal_create_device",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_destroy_device_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_destroy_device(arg_i64(args, 0, "rt_metal_destroy_device", 1)?)))
+    Ok(Value::Int(rt_metal_destroy_device(arg_i64(
+        args,
+        0,
+        "rt_metal_destroy_device",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_create_command_queue_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_create_command_queue(arg_i64(args, 0, "rt_metal_create_command_queue", 1)?)))
+    Ok(Value::Int(rt_metal_create_command_queue(arg_i64(
+        args,
+        0,
+        "rt_metal_create_command_queue",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_destroy_command_queue_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_destroy_command_queue(arg_i64(args, 0, "rt_metal_destroy_command_queue", 1)?)))
+    Ok(Value::Int(rt_metal_destroy_command_queue(arg_i64(
+        args,
+        0,
+        "rt_metal_destroy_command_queue",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_alloc_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -276,7 +303,12 @@ pub fn rt_metal_alloc_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 pub fn rt_metal_free_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_free_buffer(arg_i64(args, 0, "rt_metal_free_buffer", 1)?)))
+    Ok(Value::Int(rt_metal_free_buffer(arg_i64(
+        args,
+        0,
+        "rt_metal_free_buffer",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_buffer_upload_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -298,7 +330,10 @@ pub fn rt_metal_buffer_download_fn(args: &[Value]) -> Result<Value, CompileError
 }
 
 pub fn rt_metal_compile_shader_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let source = c_string_or_error(arg_text(args, 1, "rt_metal_compile_shader", 2)?, "rt_metal_compile_shader")?;
+    let source = c_string_or_error(
+        arg_text(args, 1, "rt_metal_compile_shader", 2)?,
+        "rt_metal_compile_shader",
+    )?;
     Ok(Value::Int(rt_metal_compile_shader(
         arg_i64(args, 0, "rt_metal_compile_shader", 2)?,
         source.as_ptr() as i64,
@@ -306,11 +341,19 @@ pub fn rt_metal_compile_shader_fn(args: &[Value]) -> Result<Value, CompileError>
 }
 
 pub fn rt_metal_destroy_shader_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_destroy_shader(arg_i64(args, 0, "rt_metal_destroy_shader", 1)?)))
+    Ok(Value::Int(rt_metal_destroy_shader(arg_i64(
+        args,
+        0,
+        "rt_metal_destroy_shader",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let entry = c_string_or_error(arg_text(args, 2, "rt_metal_create_compute_pipeline", 3)?, "rt_metal_create_compute_pipeline")?;
+    let entry = c_string_or_error(
+        arg_text(args, 2, "rt_metal_create_compute_pipeline", 3)?,
+        "rt_metal_create_compute_pipeline",
+    )?;
     Ok(Value::Int(rt_metal_create_compute_pipeline(
         arg_i64(args, 0, "rt_metal_create_compute_pipeline", 3)?,
         arg_i64(args, 1, "rt_metal_create_compute_pipeline", 3)?,
@@ -319,15 +362,30 @@ pub fn rt_metal_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, Comp
 }
 
 pub fn rt_metal_destroy_pipeline_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_destroy_pipeline(arg_i64(args, 0, "rt_metal_destroy_pipeline", 1)?)))
+    Ok(Value::Int(rt_metal_destroy_pipeline(arg_i64(
+        args,
+        0,
+        "rt_metal_destroy_pipeline",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_create_command_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_create_command_buffer(arg_i64(args, 0, "rt_metal_create_command_buffer", 1)?)))
+    Ok(Value::Int(rt_metal_create_command_buffer(arg_i64(
+        args,
+        0,
+        "rt_metal_create_command_buffer",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_create_compute_encoder_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_create_compute_encoder(arg_i64(args, 0, "rt_metal_create_compute_encoder", 1)?)))
+    Ok(Value::Int(rt_metal_create_compute_encoder(arg_i64(
+        args,
+        0,
+        "rt_metal_create_compute_encoder",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_set_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -372,7 +430,12 @@ pub fn rt_metal_create_render_pipeline_fn(args: &[Value]) -> Result<Value, Compi
 }
 
 pub fn rt_metal_destroy_render_pipeline_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_destroy_render_pipeline(arg_i64(args, 0, "rt_metal_destroy_render_pipeline", 1)?)))
+    Ok(Value::Int(rt_metal_destroy_render_pipeline(arg_i64(
+        args,
+        0,
+        "rt_metal_destroy_render_pipeline",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_create_texture_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -385,7 +448,12 @@ pub fn rt_metal_create_texture_fn(args: &[Value]) -> Result<Value, CompileError>
 }
 
 pub fn rt_metal_free_texture_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_free_texture(arg_i64(args, 0, "rt_metal_free_texture", 1)?)))
+    Ok(Value::Int(rt_metal_free_texture(arg_i64(
+        args,
+        0,
+        "rt_metal_free_texture",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_begin_render_pass_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -400,7 +468,12 @@ pub fn rt_metal_begin_render_pass_fn(args: &[Value]) -> Result<Value, CompileErr
 }
 
 pub fn rt_metal_end_render_pass_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_end_render_pass(arg_i64(args, 0, "rt_metal_end_render_pass", 1)?)))
+    Ok(Value::Int(rt_metal_end_render_pass(arg_i64(
+        args,
+        0,
+        "rt_metal_end_render_pass",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_draw_indexed_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -419,15 +492,30 @@ pub fn rt_metal_draw_primitives_fn(args: &[Value]) -> Result<Value, CompileError
 }
 
 pub fn rt_metal_end_compute_encoder_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_end_compute_encoder(arg_i64(args, 0, "rt_metal_end_compute_encoder", 1)?)))
+    Ok(Value::Int(rt_metal_end_compute_encoder(arg_i64(
+        args,
+        0,
+        "rt_metal_end_compute_encoder",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_commit_command_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_commit_command_buffer(arg_i64(args, 0, "rt_metal_commit_command_buffer", 1)?)))
+    Ok(Value::Int(rt_metal_commit_command_buffer(arg_i64(
+        args,
+        0,
+        "rt_metal_commit_command_buffer",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_wait_completed_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_wait_completed(arg_i64(args, 0, "rt_metal_wait_completed", 1)?)))
+    Ok(Value::Int(rt_metal_wait_completed(arg_i64(
+        args,
+        0,
+        "rt_metal_wait_completed",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_get_last_error_fn(_args: &[Value]) -> Result<Value, CompileError> {
@@ -435,11 +523,21 @@ pub fn rt_metal_get_last_error_fn(_args: &[Value]) -> Result<Value, CompileError
 }
 
 pub fn rt_metal_create_sampler_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_create_sampler(arg_i64(args, 0, "rt_metal_create_sampler", 1)?)))
+    Ok(Value::Int(rt_metal_create_sampler(arg_i64(
+        args,
+        0,
+        "rt_metal_create_sampler",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_destroy_sampler_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_destroy_sampler(arg_i64(args, 0, "rt_metal_destroy_sampler", 1)?)))
+    Ok(Value::Int(rt_metal_destroy_sampler(arg_i64(
+        args,
+        0,
+        "rt_metal_destroy_sampler",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_set_viewport_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -472,7 +570,12 @@ pub fn rt_metal_create_swapchain_fn(args: &[Value]) -> Result<Value, CompileErro
 }
 
 pub fn rt_metal_destroy_swapchain_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_destroy_swapchain(arg_i64(args, 0, "rt_metal_destroy_swapchain", 1)?)))
+    Ok(Value::Int(rt_metal_destroy_swapchain(arg_i64(
+        args,
+        0,
+        "rt_metal_destroy_swapchain",
+        1,
+    )?)))
 }
 
 pub fn rt_metal_present_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -1801,6 +1904,13 @@ mod vulkan_dlopen {
         pub(super) signal_semaphore_count: u32,
         pub(super) p_signal_semaphores: *const u64,
     }
+    #[repr(C)]
+    pub(super) struct VkMemoryBarrier {
+        pub(super) s_type: i32,
+        pub(super) p_next: *const c_void,
+        pub(super) src_access_mask: u32,
+        pub(super) dst_access_mask: u32,
+    }
 
     // ---- Function pointer types ----
     type FnVkCreateInstance =
@@ -1875,6 +1985,18 @@ mod vulkan_dlopen {
         unsafe extern "C" fn(VkCommandBuffer, u32, VkPipelineLayout, u32, u32, *const VkDescriptorSet, u32, *const u32);
     type FnVkCmdPushConstants = unsafe extern "C" fn(VkCommandBuffer, VkPipelineLayout, u32, u32, u32, *const c_void);
     type FnVkCmdDispatch = unsafe extern "C" fn(VkCommandBuffer, u32, u32, u32);
+    type FnVkCmdPipelineBarrier = unsafe extern "C" fn(
+        VkCommandBuffer,
+        u32,
+        u32,
+        u32,
+        u32,
+        *const VkMemoryBarrier,
+        u32,
+        *const c_void,
+        u32,
+        *const c_void,
+    );
     type FnVkQueueSubmit = unsafe extern "C" fn(VkQueue, u32, *const VkSubmitInfo, u64) -> VkResult;
     type FnVkQueueWaitIdle = unsafe extern "C" fn(VkQueue) -> VkResult;
     type FnVkDeviceWaitIdle = unsafe extern "C" fn(VkDevice) -> VkResult;
@@ -1934,6 +2056,7 @@ mod vulkan_dlopen {
         pub cmd_bind_descriptor_sets: FnVkCmdBindDescriptorSets,
         pub cmd_push_constants: FnVkCmdPushConstants,
         pub cmd_dispatch: FnVkCmdDispatch,
+        pub cmd_pipeline_barrier: FnVkCmdPipelineBarrier,
         pub queue_submit: FnVkQueueSubmit,
         pub queue_wait_idle: FnVkQueueWaitIdle,
         pub device_wait_idle: FnVkDeviceWaitIdle,
@@ -2047,6 +2170,7 @@ mod vulkan_dlopen {
             cmd_bind_descriptor_sets: sym!("vkCmdBindDescriptorSets"),
             cmd_push_constants: sym!("vkCmdPushConstants"),
             cmd_dispatch: sym!("vkCmdDispatch"),
+            cmd_pipeline_barrier: sym!("vkCmdPipelineBarrier"),
             queue_submit: sym!("vkQueueSubmit"),
             queue_wait_idle: sym!("vkQueueWaitIdle"),
             device_wait_idle: sym!("vkDeviceWaitIdle"),
@@ -2512,6 +2636,48 @@ pub fn rt_vulkan_free_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(0))
 }
 
+/// `rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool`
+pub fn rt_vulkan_copy_to_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+
+    let handle = arg_i64(args, 0, "rt_vulkan_copy_to_buffer", 3)? as usize;
+    let (bytes, _ptr) = arg_bytes_ptr(args, 1, "rt_vulkan_copy_to_buffer", 3)?;
+    let offset = arg_i64(args, 2, "rt_vulkan_copy_to_buffer", 3)?;
+    if handle == 0 || offset < 0 {
+        return Ok(Value::Int(0));
+    }
+
+    let guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_ref() {
+        Some(s) => s,
+        None => return Ok(Value::Int(0)),
+    };
+    if handle > s.buffers.len() {
+        return Ok(Value::Int(0));
+    }
+    let buffer = match s.buffers[handle - 1].as_ref() {
+        Some(buffer) => buffer,
+        None => return Ok(Value::Int(0)),
+    };
+    let offset_u = offset as u64;
+    let count_u = bytes.len() as u64;
+    if offset_u > buffer.size || count_u > buffer.size.saturating_sub(offset_u) {
+        return Ok(Value::Int(0));
+    }
+
+    unsafe {
+        let mut mapped: *mut std::os::raw::c_void = std::ptr::null_mut();
+        let ok = (s.fns.map_memory)(s.device, buffer.memory, offset_u, count_u, 0, &mut mapped);
+        if ok != VK_SUCCESS || mapped.is_null() {
+            return Ok(Value::Int(0));
+        }
+        let dst = std::slice::from_raw_parts_mut(mapped as *mut u8, bytes.len());
+        dst.copy_from_slice(&bytes);
+        (s.fns.unmap_memory)(s.device, buffer.memory);
+    }
+    Ok(Value::Int(1))
+}
+
 /// `rt_vulkan_compile_glsl(glsl_source: text) -> i64`
 /// Returns a shader handle (1-based), or 0 on failure.
 pub fn rt_vulkan_compile_glsl_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -2586,6 +2752,97 @@ pub fn rt_vulkan_compile_glsl_fn(args: &[Value]) -> Result<Value, CompileError> 
         }
         s.shaders.push(Some(shader));
         Ok(Value::Int(s.shaders.len() as i64))
+    }
+}
+
+/// `rt_vulkan_compile_spirv(spirv_bytes: [u8]) -> i64`
+/// Returns a shader handle (1-based), or 0 on failure.
+pub fn rt_vulkan_compile_spirv_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+    use std::ptr;
+
+    let (bytes, _ptr) = arg_bytes_ptr(args, 0, "rt_vulkan_compile_spirv", 1)?;
+    if bytes.len() < 20 || bytes.len() % 4 != 0 {
+        return Ok(Value::Int(0));
+    }
+    let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    if magic != 0x0723_0203 {
+        return Ok(Value::Int(0));
+    }
+    let words: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect();
+
+    let mut guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_mut() {
+        Some(s) => s,
+        None => return Ok(Value::Int(0)),
+    };
+
+    unsafe {
+        let shader_ci = VkShaderModuleCreateInfo {
+            s_type: 16,
+            p_next: ptr::null(),
+            flags: 0,
+            code_size: bytes.len(),
+            p_code: words.as_ptr(),
+        };
+        let mut shader: VkShaderModule = 0;
+        let ok = (s.fns.create_shader_module)(s.device, &shader_ci, ptr::null(), &mut shader);
+        if ok != VK_SUCCESS {
+            return Ok(Value::Int(0));
+        }
+        s.shaders.push(Some(shader));
+        Ok(Value::Int(s.shaders.len() as i64))
+    }
+}
+
+/// `rt_vulkan_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> [u8]`
+pub fn rt_vulkan_read_buffer_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+
+    let handle = arg_i64(args, 0, "rt_vulkan_read_buffer_bytes", 3)? as usize;
+    let byte_count = arg_i64(args, 1, "rt_vulkan_read_buffer_bytes", 3)?;
+    let offset = arg_i64(args, 2, "rt_vulkan_read_buffer_bytes", 3)?;
+    if handle == 0 || byte_count < 0 || offset < 0 {
+        return Ok(Value::Array(Arc::new(Vec::new())));
+    }
+
+    let guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_ref() {
+        Some(s) => s,
+        None => return Ok(Value::Array(Arc::new(Vec::new()))),
+    };
+    if handle > s.buffers.len() {
+        return Ok(Value::Array(Arc::new(Vec::new())));
+    }
+    let buffer = match s.buffers[handle - 1].as_ref() {
+        Some(buffer) => buffer,
+        None => return Ok(Value::Array(Arc::new(Vec::new()))),
+    };
+    let offset_u = offset as u64;
+    let count_u = byte_count as u64;
+    if offset_u > buffer.size || count_u > buffer.size.saturating_sub(offset_u) {
+        return Ok(Value::Array(Arc::new(Vec::new())));
+    }
+
+    unsafe {
+        let mut mapped: *mut std::os::raw::c_void = std::ptr::null_mut();
+        let ok = (s.fns.map_memory)(s.device, buffer.memory, offset_u, count_u, 0, &mut mapped);
+        if ok != VK_SUCCESS || mapped.is_null() {
+            return Ok(Value::Array(Arc::new(Vec::new())));
+        }
+        let bytes = std::slice::from_raw_parts(mapped as *const u8, count_u as usize);
+        let values = bytes
+            .iter()
+            .map(|b| Value::UInt {
+                value: *b as u64,
+                width: 8,
+            })
+            .collect();
+        (s.fns.unmap_memory)(s.device, buffer.memory);
+        Ok(Value::Array(Arc::new(values)))
     }
 }
 
@@ -2971,16 +3228,9 @@ pub fn rt_vulkan_bind_descriptors_fn(args: &[Value]) -> Result<Value, CompileErr
 /// `rt_vulkan_push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool`
 pub fn rt_vulkan_push_constants_fn(args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::VK_STATE;
-    use std::sync::Arc;
     let ch = arg_i64(args, 0, "rt_vulkan_push_constants", 3)? as usize;
     let _ph = arg_i64(args, 1, "rt_vulkan_push_constants", 3)?;
-    let bytes: Vec<u8> = match args.get(2) {
-        Some(Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| if let Value::Int(i) = v { Some(*i as u8) } else { None })
-            .collect(),
-        _ => return Ok(Value::Int(0)),
-    };
+    let (bytes, _ptr) = arg_bytes_ptr(args, 2, "rt_vulkan_push_constants", 3)?;
     let mut guard = VK_STATE.lock().unwrap();
     let s = match guard.as_mut() {
         Some(s) => s,
@@ -3017,6 +3267,7 @@ pub fn rt_vulkan_push_constants_fn(args: &[Value]) -> Result<Value, CompileError
 /// `rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool`
 pub fn rt_vulkan_dispatch_fn(args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::VK_STATE;
+    use std::ptr;
     let ch = arg_i64(args, 0, "rt_vulkan_dispatch", 4)? as usize;
     let x = arg_i64(args, 1, "rt_vulkan_dispatch", 4)? as u32;
     let y = arg_i64(args, 2, "rt_vulkan_dispatch", 4)? as u32;
@@ -3035,6 +3286,24 @@ pub fn rt_vulkan_dispatch_fn(args: &[Value]) -> Result<Value, CompileError> {
     };
     unsafe {
         (s.fns.cmd_dispatch)(cmd, x, y, z);
+        let memory_barrier = vulkan_dlopen::VkMemoryBarrier {
+            s_type: 6,
+            p_next: ptr::null(),
+            src_access_mask: 0x40,  // VK_ACCESS_SHADER_WRITE_BIT
+            dst_access_mask: 0x2000, // VK_ACCESS_HOST_READ_BIT
+        };
+        (s.fns.cmd_pipeline_barrier)(
+            cmd,
+            0x800,  // VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+            0x4000, // VK_PIPELINE_STAGE_HOST_BIT
+            0,
+            1,
+            &memory_barrier,
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+        );
     }
     Ok(Value::Int(1))
 }

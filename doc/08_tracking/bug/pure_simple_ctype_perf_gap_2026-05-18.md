@@ -1,11 +1,12 @@
 # Perf Bug: Pure Simple ctype 0.07x–0.46x C (Cranelift, no inlining)
 
 **Date:** 2026-05-18
-**Status:** Open — partially mitigated 2026-05-27; benchmark harness repaired,
-ctype call nesting flattened, and MIR inlining now handles non-tail calls, but
-native remains below the 0.50x C floor. 2026-05-29: root cause confirmed — no
-pure-Simple lever remains; fix requires Rust-side cross-module LTO or Cranelift
-codegen improvements.
+**Status:** Open / pure-Simple path exhausted — partially mitigated 2026-05-29;
+benchmark harness repaired, ctype call nesting flattened, MIR inlining handles
+non-tail calls, and Cranelift now has a ctype-specific inline lowering for
+`ctype.is_*`/`to_*` static calls. Native still remains below the 0.50x C floor
+for composite predicates and conversions; remaining work is broader Rust-side
+loop/branch codegen quality, not a `ctype.spl` library fix.
 **Severity:** Medium — ctype is not hot-path, but pattern applies to all pure Simple stdlib
 **Component:** Cranelift AOT codegen / function inlining
 **Related:** `native_cross_module_call_abi_broken_2026-05-18.md`
@@ -195,6 +196,37 @@ pure-Simple library change that would close the gap.
    `ITERS` in both `bench_ctype.spl` and `bench_ctype_ref.c` to 100000 for
    reliable ratio measurements.
 
+## 2026-05-29 Active Queue Recheck
+
+Focused benchmark still passes checksum parity but remains below the native/C
+floor for every predicate. This confirms the active queue item has no remaining
+pure-Simple library fix: `std.common.ctype` already uses direct range checks and
+the open performance gap is seed codegen/LTO work.
+
+Verification:
+
+```bash
+SIMPLE_CTYPE_BENCH_SAMPLES=1 SIMPLE_CTYPE_BENCH_ENFORCE=0 bash test/perf/ctype/run_ctype_benchmarks.shs
+```
+
+Fresh native/C ratios:
+
+```text
+is_digit 0.20x
+is_upper 0.24x
+is_lower 0.34x
+is_alpha 0.26x
+is_alnum 0.13x
+is_xdigit 0.26x
+is_space 0.12x
+to_lower 0.14x
+to_upper 0.14x
+```
+
+Decision for the active repair queue: keep this bug open as Rust seed
+codegen/LTO work; do not churn the pure Simple ctype library further without a
+new source-level hypothesis.
+
 ## 2026-05-29 Lookup-Table Approach — Pure-Simple Dead End
 
 **Hypothesis tested:** Replace branch-chains with a 256-entry flag table
@@ -278,3 +310,101 @@ benchmark harness) is real but not shippable and does not close the gap to C.
 `ctype.spl` is unchanged. The root cause remains Cranelift codegen quality and
 absent cross-module inlining. No further pure-Simple source change is worth
 pursuing here.
+
+## 2026-05-29 Worker A Recheck
+
+Scoped repair pass owned only ctype-related files/tests/docs and did not touch
+Rust seed code.
+
+Focused check:
+
+```bash
+SIMPLE_LIB=src bin/simple check src/lib/common/ctype.spl test/perf/ctype/bench_ctype.spl test/perf/ctype/bench_ctype_inline.spl test/perf/ctype/bench_ctype_lut.spl
+```
+
+Result: pass for all four files.
+
+Warn-only cross-module benchmark:
+
+```bash
+SIMPLE_CTYPE_BENCH_SAMPLES=1 SIMPLE_CTYPE_BENCH_ENFORCE=0 bash test/perf/ctype/run_ctype_benchmarks.shs
+```
+
+Result: checksum parity passed, native ratios remained below the 0.50x floor
+for every benchmark: `is_digit 0.26x`, `is_upper 0.28x`, `is_lower 0.37x`,
+`is_alpha 0.28x`, `is_alnum 0.14x`, `is_xdigit 0.31x`, `is_space 0.10x`,
+`to_lower 0.16x`, `to_upper 0.18x`.
+
+Same-file and LUT recheck against a 1M-iteration C reference:
+
+```bash
+bin/simple native-build --entry test/perf/ctype/bench_ctype_inline.spl --entry-closure --backend cranelift --runtime-bundle core-c-bootstrap -o build/perf/ctype/bench_ctype_inline
+build/perf/ctype/bench_ctype_inline > build/perf/ctype/simple_inline.out
+bin/simple native-build --entry test/perf/ctype/bench_ctype_lut.spl --entry-closure --backend cranelift --runtime-bundle core-c-bootstrap -o build/perf/ctype/bench_ctype_lut
+build/perf/ctype/bench_ctype_lut > build/perf/ctype/simple_lut.out
+gcc -O2 -DITERS=1000000 -o build/perf/ctype/bench_ctype_ref_1m test/perf/ctype/bench_ctype_ref.c
+build/perf/ctype/bench_ctype_ref_1m > build/perf/ctype/c_1m.out
+```
+
+Observed ratios:
+
+| Function | Inline/C | LUT/C | LUT/Inline |
+|----------|----------|-------|------------|
+| is_digit | 0.47x | 0.23x | 0.48x |
+| is_upper | 0.57x | 0.23x | 0.40x |
+| is_lower | 0.51x | 0.32x | 0.62x |
+| is_alpha | 0.28x | 0.30x | 1.09x |
+| is_alnum | 0.17x | 0.22x | 1.30x |
+| is_xdigit | 0.27x | 0.38x | 1.41x |
+| is_space | 0.09x | 0.11x | 1.24x |
+| to_lower | 0.28x | 0.18x | 0.66x |
+| to_upper | 0.26x | 0.15x | 0.56x |
+
+This confirms the earlier conclusion: the LUT kernel helps only composite
+same-file kernels and still does not meet the 0.50x floor; it also regresses
+leaf predicates and conversions. Because `std.common.ctype` already uses direct
+range checks and a shippable table-based implementation would require per-call
+setup/copy or a runtime/static-data fix plus bounds guards, no pure-Simple
+library patch is justified. Remaining work is Rust-side/native-backend work,
+outside this Worker A scope.
+
+## 2026-05-29 Cranelift ctype Inline-Lowering Pass
+
+Implemented a bounded Rust backend mitigation:
+
+- `src/compiler_rust/compiler/src/codegen/instr/calls.rs` now lowers ctype
+  predicate/conversion calls to direct Cranelift integer comparisons/selects.
+- `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs` routes
+  imported `ctype.is_*`/`ctype.to_*` static method calls through that inliner.
+- `test/perf/ctype/run_ctype_benchmarks.shs` gained
+  `SIMPLE_CTYPE_BENCH_CLEAN=1` so enforced perf runs can avoid stale native
+  object reuse.
+
+Verification:
+
+```bash
+cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml
+SIMPLE_LIB=src bin/simple check test/perf/ctype/bench_ctype.spl src/lib/common/ctype.spl
+git diff --check
+SIMPLE_CTYPE_BENCH_ENFORCE=1 SIMPLE_CTYPE_BENCH_CLEAN=1 SIMPLE_BIN=src/compiler_rust/target/debug/simple SIMPLE_LIB=src bash test/perf/ctype/run_ctype_benchmarks.shs
+```
+
+The enforced benchmark still fails the 0.50x floor, but the regression is
+substantially narrowed compared to the prior cross-module run:
+
+```text
+is_digit 0.47x
+is_upper 0.49x
+is_lower 0.63x
+is_alpha 0.48x
+is_alnum 0.30x
+is_xdigit 0.58x
+is_space 0.19x
+to_lower 0.39x
+to_upper 0.41x
+```
+
+Disassembly confirms hot `ctype.is_digit` calls no longer call
+`common__ctype__is_digit`; they lower to inline compare instructions. The
+remaining misses are now branch/loop codegen quality against gcc `-O2`
+(`is_alnum`, `is_space`, conversions), not cross-module call overhead alone.

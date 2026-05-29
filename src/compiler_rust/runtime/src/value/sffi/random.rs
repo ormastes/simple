@@ -39,44 +39,44 @@ fn advance(state: &mut RandomState) -> u64 {
     state.state
 }
 
-#[inline(always)]
-pub fn rt_random_seed(seed: i64) {
+#[no_mangle]
+pub extern "C" fn rt_random_seed(seed: i64) {
     let mut state = RANDOM_STATE.lock().expect("random state lock");
     state.state = (seed as u64) % LCG_M;
     state.initialized = true;
 }
-#[inline(always)]
-pub fn rt_random_getstate() -> i64 {
+#[no_mangle]
+pub extern "C" fn rt_random_getstate() -> i64 {
     let mut state = RANDOM_STATE.lock().expect("random state lock");
     ensure_initialized(&mut state);
     state.state as i64
 }
-#[inline(always)]
-pub fn rt_random_setstate(new_state: i64) {
+#[no_mangle]
+pub extern "C" fn rt_random_setstate(new_state: i64) {
     let mut state = RANDOM_STATE.lock().expect("random state lock");
     state.state = (new_state as u64) % LCG_M;
     state.initialized = true;
 }
-#[inline(always)]
-pub fn rt_random_next() -> i64 {
+#[no_mangle]
+pub extern "C" fn rt_random_next() -> i64 {
     let mut state = RANDOM_STATE.lock().expect("random state lock");
     ensure_initialized(&mut state);
     advance(&mut state) as i64
 }
-#[inline(always)]
-pub fn rt_random_randint(min: i64, max: i64) -> i64 {
+#[no_mangle]
+pub extern "C" fn rt_random_randint(min: i64, max: i64) -> i64 {
     if min > max {
         return min;
     }
     let range = max - min + 1;
     min + (rt_random_next() % range)
 }
-#[inline(always)]
-pub fn rt_random_random() -> f64 {
+#[no_mangle]
+pub extern "C" fn rt_random_random() -> f64 {
     rt_random_next() as f64 / LCG_M_F
 }
-#[inline(always)]
-pub fn rt_random_uniform(min: f64, max: f64) -> f64 {
+#[no_mangle]
+pub extern "C" fn rt_random_uniform(min: f64, max: f64) -> f64 {
     min + rt_random_random() * (max - min)
 }
 

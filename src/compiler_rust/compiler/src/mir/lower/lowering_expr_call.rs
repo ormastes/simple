@@ -47,6 +47,71 @@ impl<'a> MirLowerer<'a> {
         matches!(registry.get(*ret), Some(HirType::Array { element, .. }) if *element == element_type)
     }
 
+    fn box_arg_for_any_param(&mut self, arg: VReg, arg_expr: &HirExpr) -> MirLowerResult<VReg> {
+        let arg_ty = arg_expr.ty;
+        let needs_int_box = matches!(
+            arg_ty,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+        ) || (arg_ty == TypeId::ANY && matches!(arg_expr.kind, HirExprKind::Integer(_)));
+        if needs_int_box {
+            self.with_func(|func, current_block| {
+                let boxed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::BoxInt {
+                    dest: boxed,
+                    value: arg,
+                });
+                boxed
+            })
+        } else if matches!(arg_ty, TypeId::F32 | TypeId::F64)
+            || (arg_ty == TypeId::ANY && matches!(arg_expr.kind, HirExprKind::Float(_)))
+        {
+            self.with_func(|func, current_block| {
+                let boxed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::BoxFloat {
+                    dest: boxed,
+                    value: arg,
+                });
+                boxed
+            })
+        } else {
+            Ok(arg)
+        }
+    }
+
+    fn box_args_for_any_params(
+        &mut self,
+        callee: &HirExpr,
+        args: &[HirExpr],
+        arg_regs: &mut [VReg],
+    ) -> MirLowerResult<()> {
+        let params = if let Some(registry) = self.type_registry {
+            if let Some(HirType::Function { params, .. }) = registry.get(callee.ty) {
+                params.clone()
+            } else if let HirExprKind::Global(name) = &callee.kind {
+                self.function_param_types.get(name).cloned().unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        } else if let HirExprKind::Global(name) = &callee.kind {
+            self.function_param_types.get(name).cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if params.is_empty() {
+            return Ok(());
+        }
+        for (i, arg_reg) in arg_regs.iter_mut().enumerate() {
+            if params.get(i).copied() == Some(TypeId::ANY) {
+                if let Some(arg_expr) = args.get(i) {
+                    *arg_reg = self.box_arg_for_any_param(*arg_reg, arg_expr)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn lower_call_expr(&mut self, callee: &HirExpr, args: &[HirExpr]) -> MirLowerResult<VReg> {
         let mut arg_regs = Vec::new();
         for arg in args {
@@ -278,6 +343,8 @@ impl<'a> MirLowerer<'a> {
             // So we don't inject at call sites during MIR lowering
             // NOTE: DI injection at MIR level was causing signature mismatches
             // because functions were registered with all params but calls tried to inject again
+
+            self.box_args_for_any_params(callee, args, &mut arg_regs)?;
 
             let call_target_name = if name == "rt_array_new_with_cap" && self.call_returns_array_of(callee, TypeId::U64)
             {

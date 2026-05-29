@@ -142,6 +142,20 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                     types_map.insert(*d, *return_type);
                 }
                 MirInst::MethodCallVirtual { dest: None, .. } => {}
+                MirInst::MethodCallStatic {
+                    dest: Some(d),
+                    func_name,
+                    ..
+                } if func_name == "to_text"
+                    || func_name == "to_string"
+                    || func_name == "str"
+                    || func_name.ends_with(".to_text")
+                    || func_name.ends_with(".to_string")
+                    || func_name.ends_with(".str") =>
+                {
+                    types_map.insert(*d, TypeId::STRING);
+                }
+                MirInst::MethodCallStatic { .. } => {}
                 MirInst::Call {
                     dest: Some(d), target, ..
                 } => {

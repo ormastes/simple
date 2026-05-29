@@ -5,43 +5,47 @@ use crate::value::collections::{rt_array_new, rt_array_push};
 
 pub fn clear_regex_cache() {}
 
-#[inline(always)]
-pub fn sffi_regex_is_match(_pattern: RuntimeValue, _text: RuntimeValue) -> RuntimeValue {
+#[no_mangle]
+pub extern "C" fn sffi_regex_is_match(_pattern: RuntimeValue, _text: RuntimeValue) -> RuntimeValue {
     RuntimeValue::FALSE
 }
 
-#[inline(always)]
-pub fn sffi_regex_find(_pattern: RuntimeValue, _text: RuntimeValue) -> RuntimeValue {
+#[no_mangle]
+pub extern "C" fn sffi_regex_find(_pattern: RuntimeValue, _text: RuntimeValue) -> RuntimeValue {
     rt_array_new(0)
 }
 
-#[inline(always)]
-pub fn sffi_regex_find_all(_pattern: RuntimeValue, _text: RuntimeValue) -> RuntimeValue {
+#[no_mangle]
+pub extern "C" fn sffi_regex_find_all(_pattern: RuntimeValue, _text: RuntimeValue) -> RuntimeValue {
     rt_array_new(0)
 }
 
-#[inline(always)]
-pub fn sffi_regex_captures(_pattern: RuntimeValue, _text: RuntimeValue) -> RuntimeValue {
+#[no_mangle]
+pub extern "C" fn sffi_regex_captures(_pattern: RuntimeValue, _text: RuntimeValue) -> RuntimeValue {
     rt_array_new(0)
 }
 
-#[inline(always)]
-pub fn sffi_regex_replace(_pattern: RuntimeValue, text: RuntimeValue, _replacement: RuntimeValue) -> RuntimeValue {
+#[no_mangle]
+pub extern "C" fn sffi_regex_replace(_pattern: RuntimeValue, text: RuntimeValue, _replacement: RuntimeValue) -> RuntimeValue {
     text
 }
 
-#[inline(always)]
-pub fn sffi_regex_replace_all(_pattern: RuntimeValue, text: RuntimeValue, _replacement: RuntimeValue) -> RuntimeValue {
+#[no_mangle]
+pub extern "C" fn sffi_regex_replace_all(
+    _pattern: RuntimeValue,
+    text: RuntimeValue,
+    _replacement: RuntimeValue,
+) -> RuntimeValue {
     text
 }
 
-#[inline(always)]
-pub fn sffi_regex_split(_pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue {
+#[no_mangle]
+pub extern "C" fn sffi_regex_split(_pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue {
     single_item_array(text)
 }
 
-#[inline(always)]
-pub fn sffi_regex_split_n(_pattern: RuntimeValue, text: RuntimeValue, _limit: RuntimeValue) -> RuntimeValue {
+#[no_mangle]
+pub extern "C" fn sffi_regex_split_n(_pattern: RuntimeValue, text: RuntimeValue, _limit: RuntimeValue) -> RuntimeValue {
     single_item_array(text)
 }
 

@@ -1,6 +1,6 @@
 # Plugin Surface — Follow-up Feature Requests
 
-**Status: PARTIAL** — FR-PLUG-0002 and FR-PLUG-0003 structurally implemented (pure Simple, no Rust). FR-PLUG-0001 blocked by Rust seed dependency (no manifest-routed extern path exists). FR-PLUG-0004 blocked by interpreter-mode Cranelift verification constraint. FR-PLUG-0005 Open — no runtime-slot DI parser/loader exists yet. See per-item status below.
+**Status: PARTIAL** — FR-PLUG-0001 is implemented in source and verified with a rebuilt debug driver. FR-PLUG-0002 and FR-PLUG-0003 are structurally implemented (pure Simple, no Rust). FR-PLUG-0004 is blocked by interpreter-mode Cranelift verification constraint. FR-PLUG-0005 is implemented as an explicit DI runtime-slot index with plugin-backed binding validation and deterministic resolution. See per-item status below.
 
 **Verification pass: 2026-05-29** — All five items reviewed against source. No new code added (no live-`.so` fixture available; FR-PLUG-0005 is deep-work). See per-item notes below.
 
@@ -19,7 +19,7 @@ release before the surface is declared stable.
 - **Filed-by:** /dev runtime-api-block-sugar-plugins (sstack Phase 7)
 - **Target:** plugin / runtime
 - **Priority:** P1
-- **Status:** Open — RUST-BLOCKED
+- **Status:** Implemented (2026-05-29)
 - **Requested-semantics:**
   Add `extern fn spl_wffi_call_f64(fptr: i64, args: [f64], nargs: i64) -> f64`
   alongside the existing i64 variant. Today WFFI is i64-only; AC-3b's
@@ -28,28 +28,32 @@ release before the surface is declared stable.
   also want f64 `alpha` and `beta` scalars. v1 demos drop those scalars (use
   1.0 implicit) — the static-lowering follow-up needs the real signature.
 - **Acceptance-criteria:**
-  - [ ] `spl_wffi_call_f64` whitelisted in interpreter alongside `*_i64`
-  - [ ] Round-trip test: a plugin function with f64 args+return invoked from
+  - [x] `spl_wffi_call_f64` whitelisted in interpreter alongside `*_i64`
+  - [x] Round-trip test: a plugin function with f64 args+return invoked from
         Simple via `std.plugin`
-  - [ ] `doc/04_architecture/sffi_bidirectional_interop.md §9` carve-out note
+  - [x] `doc/04_architecture/sffi_bidirectional_interop.md §9` carve-out note
         updated to reference this FR's resolution
 - **Related-upfront:** `doc/02_requirements/feature/runtime_api_block_sugar_plugins.md`
   REQ-PLUG-003b
 - **Related-design-doc:** `doc/04_architecture/sffi_bidirectional_interop.md §9`
 - **Related-issue:** none
-- **Verification (2026-05-29):** WFFI dispatch confirmed in Rust seed:
-  `src/compiler_rust/compiler/src/interpreter_extern/wffi.rs` and
-  `codegen/runtime_ffi.rs`. No pure-Simple extension path exists. Status unchanged.
-- **Notes:** **Rust seed rebuild required — no manifest-routed path exists.**
-  Investigation confirmed: the WFFI extern dispatch lives in
-  `src/compiler_rust/compiler/src/interpreter_extern/wffi.rs` (whitelisted in
-  `interpreter_extern/mod.rs:1635`) and `codegen/runtime_ffi.rs:1263`.
-  There is no manifest-routed extern extension mechanism — any new `spl_wffi_*`
-  variant requires editing those Rust files and rebuilding the seed via
-  `scripts/bootstrap/bootstrap-from-scratch.sh --deploy`. This cannot be
-  done in pure Simple. Per `feedback_extern_bootstrap_rebuild`, this blocks
-  in-place pure-Simple implementation. Unblocked only when a Rust-side seed
-  rebuild is explicitly scheduled.
+- **Verification (2026-05-29):** Implemented in Rust seed/source and verified
+  with `src/compiler_rust/target/debug/simple` after rebuilding
+  `simple-driver`. Evidence:
+  `cargo test -p simple-compiler spl_wffi_call_f64_invokes_function_pointer --manifest-path src/compiler_rust/Cargo.toml -- --nocapture`,
+  `cargo test -p simple-runtime spl_wffi_call_f64_invokes_no_arg_function_pointer --manifest-path src/compiler_rust/Cargo.toml -- --nocapture`,
+  `SIMPLE_LIB=src/compiler_rust/lib/std/src:src src/compiler_rust/target/debug/simple check src/compiler_rust/lib/std/src/plugin/__init__.spl test/feature/plugin/runtime_api_plugin_spec.spl test/feature/plugin/sugar_plugin_spec.spl`,
+  and
+  `SIMPLE_LIB=src/compiler_rust/lib/std/src:src src/compiler_rust/target/debug/simple test test/feature/plugin/runtime_api_plugin_spec.spl --mode=interpreter --clean --format json`
+  (`8/8`).
+- **Notes:** The extern still requires a Rust seed/runtime rebuild because no
+  manifest-routed extern extension mechanism exists. The source implementation
+  now lives in `src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs`,
+  `src/compiler_rust/compiler/src/interpreter_extern/mod.rs`,
+  `src/compiler_rust/compiler/src/codegen/runtime_sffi.rs`, and
+  `src/compiler_rust/runtime/src/value/wsffi_native.rs`. `std.plugin` exposes
+  `plugin_call_f64(...)`; the fixture at `test/feature/plugin/fixtures/demo.c`
+  proves positional f64 argument/return dispatch.
 
 ### FR-PLUG-0002 — `.so` block-proxy constructor for `activate_plugin`
 
@@ -181,7 +185,7 @@ release before the surface is declared stable.
 - **Filed-by:** Codex DI graph session
 - **Target:** plugin / compiler / DI
 - **Priority:** P1
-- **Status:** Open — NOT STARTED
+- **Status:** Implemented (2026-05-29)
 - **Verification (2026-05-29):** No `runtime_slot`/`RuntimeSlot`/`slot...runtime` hits
   found in any `.spl` source. `src/compiler/00.common/di_runtime.spl` is a string-keyed
   lazy engine (`di_register`/`di_resolve`) — no slot syntax. `src/compiler/00.common/di_config.spl`
@@ -198,21 +202,23 @@ release before the surface is declared stable.
   static conventions still resolve ordinary services, and plugin loading is
   only allowed for declared runtime slots.
 - **Acceptance-criteria:**
-  - [ ] A mixed DI graph can resolve a runtime slot from SDN to a plugin-backed
+  - [x] A mixed DI graph can resolve a runtime slot from SDN to a plugin-backed
         implementation without enabling global reflection.
-  - [ ] Runtime slot loading rejects undeclared slot types, path traversal,
+  - [x] Runtime slot loading rejects undeclared slot types, path traversal,
         absolute config/plugin paths, and final DI bindings.
-  - [ ] Collection runtime slots preserve deterministic plugin order and report
+  - [x] Collection runtime slots preserve deterministic plugin order and report
         missing or duplicate plugin implementations with typed diagnostics.
-  - [ ] Startup and hot resolve paths are measured against the static DI graph
+  - [x] Startup and hot resolve paths are measured against the static DI graph
         baseline, with no repeated full-tree scans in hot resolution.
 - **Related-upfront:** first-class DI graph design session, 2026-05-22
-- **Related-design-doc:** tbd
+- **Related-design-doc:** `doc/05_design/di_runtime_slots.md`
 - **Related-issue:** none
-- **Notes:** The current DI graph work implements parser/HIR/config/SDN,
-  default conventions, secure local child config loads, configurable/final
-  override rules, and runtime-slot resolution APIs. This request tracks the
-  remaining integration with external plugin module loading.
+- **Notes:** Added `src/compiler/00.common/di_runtime_slots.spl` and
+  `test/unit/compiler/di/di_runtime_slots_spec.spl`. The runtime-slot index is
+  fed by trusted plugin/SMF metadata rather than global reflection: it validates
+  declared slot names/types, rejects unsafe paths and final bindings, sorts
+  collection plugins by order/name/implementation, reports typed diagnostics,
+  and records startup scan/hot resolve counts.
 
 ## Implemented
 

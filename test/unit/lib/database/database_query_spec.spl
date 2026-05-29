@@ -33,10 +33,11 @@ describe "Database Query — shared accel batching":
 
     it "supports shared prefix and suffix filtering":
         val table = make_table("paths", ["path"], [
-            [("path", "src/main.spl")],
+            [("path", "src/zeta.spl")],
             [("path", "src/lib.rs")],
             [("path", "doc/readme.md")],
-            [("path", "main.spl")]
+            [("path", "main.spl")],
+            [("path", "src/alpha.spl")]
         ])
 
         val prefix_results = QueryBuilder.for_table(table)
@@ -46,8 +47,29 @@ describe "Database Query — shared accel batching":
             .filter_by("path", CompareOp.EndsWith, ".spl")
             .execute()
 
-        expect(prefix_results.len()).to_equal(2)
-        expect(suffix_results.len()).to_equal(2)
+        expect(prefix_results.len()).to_equal(3)
+        expect(prefix_results[0].get("path")?).to_equal("src/zeta.spl")
+        expect(prefix_results[1].get("path")?).to_equal("src/lib.rs")
+        expect(suffix_results.len()).to_equal(3)
+
+    it "reuses a field prefix index across repeated StartsWith executions":
+        val table = make_table("paths", ["path"], [
+            [("path", "src/a.spl")],
+            [("path", "src/b.spl")],
+            [("path", "doc/readme.md")]
+        ])
+        var query = QueryBuilder.for_table(table)
+            .filter_by("path", CompareOp.StartsWith, "src/")
+
+        val first = query.execute()
+        val first_builds = query.prefix_index_build_count()
+        val second = query.execute()
+        val second_builds = query.prefix_index_build_count()
+
+        expect(first.len()).to_equal(2)
+        expect(second.len()).to_equal(2)
+        expect(first_builds).to_equal(1)
+        expect(second_builds).to_equal(1)
 
     it "sorts ascending and descending without optional-field interpreter gaps":
         val table = make_table("scores", ["id", "score"], [

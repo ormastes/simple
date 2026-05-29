@@ -168,6 +168,93 @@ fn compile_inline_len<M: Module>(
     Ok(true)
 }
 
+fn ctype_call_name<M: Module>(ctx: &InstrContext<'_, M>, func_name: &str, sffi_name: &str) -> Option<&'static str> {
+    let resolved = ctx
+        .use_map
+        .get(func_name)
+        .or_else(|| ctx.import_map.get(func_name))
+        .map(|name| name.as_str())
+        .unwrap_or(func_name);
+    if !func_name.contains("ctype") && !resolved.contains("ctype") {
+        return None;
+    }
+    match sffi_name {
+        "digit" | "is_digit" => Some("digit"),
+        "upper" | "is_upper" => Some("upper"),
+        "lower" | "is_lower" => Some("lower"),
+        "alpha" | "is_alpha" => Some("alpha"),
+        "alnum" | "is_alnum" => Some("alnum"),
+        "xdigit" | "is_xdigit" => Some("xdigit"),
+        "space" | "is_space" => Some("space"),
+        "to_lower" => Some("to_lower"),
+        "to_upper" => Some("to_upper"),
+        _ => None,
+    }
+}
+
+fn inline_char_range(builder: &mut FunctionBuilder, ch: Value, lo: i64, hi: i64) -> Value {
+    let shifted = builder.ins().iadd_imm(ch, -lo);
+    builder.ins().icmp_imm(IntCC::UnsignedLessThanOrEqual, shifted, hi - lo)
+}
+
+pub(crate) fn compile_inline_ctype_call<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    func_name: &str,
+    sffi_name: &str,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    let Some(kind) = ctype_call_name(ctx, func_name, sffi_name) else {
+        return Ok(false);
+    };
+    if args.len() != 1 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(true);
+    };
+
+    let ch = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let digit = inline_char_range(builder, ch, 48, 57);
+    let upper = inline_char_range(builder, ch, 65, 90);
+    let lower = inline_char_range(builder, ch, 97, 122);
+    let case_fold_mask = builder.ins().iconst(types::I64, 32);
+    let folded = builder.ins().bor(ch, case_fold_mask);
+    let alpha_folded = inline_char_range(builder, folded, 97, 122);
+    let result = match kind {
+        "digit" => digit,
+        "upper" => upper,
+        "lower" => lower,
+        "alpha" => alpha_folded,
+        "alnum" => {
+            builder.ins().bor(alpha_folded, digit)
+        }
+        "xdigit" => {
+            let hex_alpha = inline_char_range(builder, folded, 97, 102);
+            builder.ins().bor(digit, hex_alpha)
+        }
+        "space" => {
+            let sp = builder.ins().icmp_imm(IntCC::Equal, ch, 32);
+            let control_space = inline_char_range(builder, ch, 9, 13);
+            builder.ins().bor(sp, control_space)
+        }
+        "to_lower" => {
+            let delta = builder.ins().iconst(types::I64, 32);
+            let converted = builder.ins().iadd(ch, delta);
+            builder.ins().select(upper, converted, ch)
+        }
+        "to_upper" => {
+            let delta = builder.ins().iconst(types::I64, 32);
+            let converted = builder.ins().isub(ch, delta);
+            builder.ins().select(lower, converted, ch)
+        }
+        _ => return Ok(false),
+    };
+    ctx.vreg_values.insert(*dest, result);
+    Ok(true)
+}
+
 fn compile_inline_bytes_u8_at<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -2385,7 +2472,6 @@ pub fn compile_call<M: Module>(
     // Use raw name for user-function lookups (func_ids, use_map, import_map)
     // but mapped SFFI name for runtime_funcs and builtin I/O checks
     let func_name: &str = func_name_raw;
-
     // Handle Result/Option constructor builtins (Ok, Err, Some, None)
     // Also handle qualified names like "MyResult::Ok", "Option::None", etc.
     let variant_name = func_name
@@ -2418,6 +2504,9 @@ pub fn compile_call<M: Module>(
     }
 
     if compile_simple_runtime_memory_intrinsic(ctx, builder, dest, func_name_for_sffi, args)? {
+        return Ok(());
+    }
+    if compile_inline_ctype_call(ctx, builder, dest, func_name, sffi_name, args)? {
         return Ok(());
     }
     if sffi_name == "rt_array_data_ptr" && compile_inline_array_data_ptr(ctx, builder, dest, args)? {
@@ -2760,7 +2849,7 @@ pub fn compile_call<M: Module>(
                 "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
                 "index_of" | "find" | "find_str" => Some("rt_string_find"),
                 "rfind" | "last_index_of" => Some("rt_string_rfind"),
-                "to_string" | "str" => Some("rt_to_string"),
+                "to_string" | "to_text" | "str" => Some("rt_to_string"),
                 "slice" | "substring" => Some("rt_slice"),
                 "get" => Some("rt_index_get"),
                 "keys" => Some("rt_dict_keys"),

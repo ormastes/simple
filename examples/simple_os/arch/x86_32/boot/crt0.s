@@ -36,6 +36,10 @@ _entry32:
     /* Disable interrupts */
     cli
 
+    /* Preserve Multiboot handoff registers across BSS clearing. */
+    movl %eax, %edx
+    movl %ebx, %esi
+
     /* Set up 32-bit stack */
     movl $_stack_top, %esp
 
@@ -47,7 +51,9 @@ _entry32:
     xorl %eax, %eax
     rep stosl
 
-    /* Call C _start */
+    /* Call C _start(multiboot_magic, multiboot_info) */
+    pushl %esi
+    pushl %edx
     call _start
 
     /* Halt if it returns */

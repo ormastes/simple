@@ -36,12 +36,13 @@ use os.drivers.real_device_readiness.{
     real_device_q35_pure_simple_access_marker,
     real_device_q35_pure_simple_perf_marker_from_measurements
 }
-use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_class_i64, pcimgr_grant_device}
+use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_class_i64, pcimgr_find_nvme_storage, pcimgr_find_qemu_nvme, pcimgr_grant_device}
 use os.services.pcimgr.driver_match.{PCI_CLASS_STORAGE, PCI_SUBCLASS_NVME}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_SYSTEM_QUEUE_ID}
 use os.kernel.types.device_mem_types.{DeviceGrant, device_grant_resource_set_label, device_grant_is_isolated}
 use os.kernel.boot.boot_nvme_production_handoff.{boot_nvme_production_handoff_provision}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mmio_read8, mmio_write8}
+use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, SharedDmaBuffer, dma_alloc}
 use std.fs_driver.mount_table.{MountTable}
 use std.fs_driver.fat32_stub.{FsFat32Driver}
 use std.fs_driver.instance.{DriverInstance}
@@ -58,6 +59,10 @@ use os.kernel.loader.app_registry.{app_registry_load, app_registry_load_hardcode
 extern fn serial_println(msg: text)
 extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_typed_bytes_u8_push(array: [u8], value: i64) -> bool
+extern fn rt_bytes_u8_at(array: [u8], index: i64) -> i64
+extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
 
 # ============================================================================
 # Module-Level State
@@ -71,8 +76,39 @@ class VfsFileSize:
 
     me fn to_i64() -> i64:
         self.bytes
+
+class BootNvmeBlockDevice:
+    sector_size_bytes: u32
+
+impl BlockDevice for BootNvmeBlockDevice:
+    me fn read_sector(lba: u64) -> Result<[u8], text>:
+        _vfs_boot_nvme_read_sector_bytes(lba, self.sector_size_bytes)
+
+    me fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        _vfs_boot_nvme_write_sector_bytes(lba, data, self.sector_size_bytes)
+
+    me fn sector_size() -> u32:
+        self.sector_size_bytes
+
 var g_adapter: NvmeBlockAdapter = NvmeBlockAdapter.new(g_nvme)
 var g_c_adapter: CNvmeBlockAdapter = CNvmeBlockAdapter.new()
+var g_boot_fat32_direct_ready: bool = false
+var g_boot_fat32_bytes_per_sector: u32 = 0u32
+var g_boot_fat32_sectors_per_cluster: u32 = 0u32
+var g_boot_fat32_reserved_sectors: u32 = 0u32
+var g_boot_fat32_num_fats: u32 = 0u32
+var g_boot_fat32_fat_size: u32 = 0u32
+var g_boot_fat32_root_cluster: u32 = 0u32
+var g_boot_fat32_data_start_lba: u64 = 0u64
+var g_boot_fat32_scratch: SharedDmaBuffer = SharedDmaBuffer(
+    cpu_virt_addr: 0u64,
+    host_phys_addr: 0u64,
+    device_addr: 0u64,
+    byte_len: 0u64,
+    cache_policy: DmaCachePolicy.Coherent,
+    owner: DmaOwner(task_id: 0u64, bdf_bus: 0u8, bdf_device: 0u8, bdf_function: 0u8),
+    allocation_id: 0u64
+)
 var g_root_fat32: Fat32Core? = nil
 var g_root_nvfs_hosted: NvfsHostedDriver? = nil
 var g_vfs_initialized: bool = false
@@ -94,6 +130,23 @@ fn _vfs_boot_reset_storage_state():
     g_vfs_nvme_active_leases = []
     g_vfs_nvme_direct_adapter_leases = []
     g_vfs_nvme_direct_adapters = []
+    g_boot_fat32_direct_ready = false
+    g_boot_fat32_bytes_per_sector = 0u32
+    g_boot_fat32_sectors_per_cluster = 0u32
+    g_boot_fat32_reserved_sectors = 0u32
+    g_boot_fat32_num_fats = 0u32
+    g_boot_fat32_fat_size = 0u32
+    g_boot_fat32_root_cluster = 0u32
+    g_boot_fat32_data_start_lba = 0u64
+    g_boot_fat32_scratch = SharedDmaBuffer(
+        cpu_virt_addr: 0u64,
+        host_phys_addr: 0u64,
+        device_addr: 0u64,
+        byte_len: 0u64,
+        cache_policy: DmaCachePolicy.Coherent,
+        owner: DmaOwner(task_id: 0u64, bdf_bus: 0u8, bdf_device: 0u8, bdf_function: 0u8),
+        allocation_id: 0u64
+    )
 
 pub fn vfs_boot_init() -> bool:
     """Initialize the full storage stack: PCI -> NVMe -> FAT32 -> VFS.
@@ -113,7 +166,11 @@ pub fn vfs_boot_init() -> bool:
     # (SYS-GUI-007 root cause).
     val nvme_class: i64 = 1  # PCI_CLASS_STORAGE (0x01)
     val nvme_sub: i64 = 8    # PCI_SUBCLASS_NVME (0x08)
-    val nvme_idx = pcimgr_find_by_class_i64(nvme_class, nvme_sub)
+    var nvme_idx = pcimgr_find_nvme_storage()
+    if nvme_idx < 0:
+        nvme_idx = pcimgr_find_by_class_i64(nvme_class, nvme_sub)
+    if nvme_idx < 0:
+        nvme_idx = pcimgr_find_qemu_nvme()
     if nvme_idx < 0:
         log_raw_println("[vfs-init] No NVMe device found -- VFS unavailable")
         return false
@@ -132,7 +189,11 @@ pub fn vfs_boot_init_production() -> bool:
     log_raw_println("[vfs-init] PCI cache ready")
     val nvme_class: i64 = 1
     val nvme_sub: i64 = 8
-    val nvme_idx = pcimgr_find_by_class_i64(nvme_class, nvme_sub)
+    var nvme_idx = pcimgr_find_nvme_storage()
+    if nvme_idx < 0:
+        nvme_idx = pcimgr_find_by_class_i64(nvme_class, nvme_sub)
+    if nvme_idx < 0:
+        nvme_idx = pcimgr_find_qemu_nvme()
     if nvme_idx < 0:
         log_raw_println("[vfs-init] production boot storage rejected: no NVMe device")
         return false
@@ -153,15 +214,19 @@ pub fn vfs_boot_init_production() -> bool:
 fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     """Try the pure-Simple NVMe -> BlockDevice -> FAT32 stack first."""
     log_raw_println("[vfs-init] Trying pure-Simple NVMe + FAT32 stack...")
+    serial_println("[vfs-init] pure-nvme begin")
     val grant_result = pcimgr_grant_device(nvme_idx, 0)
     if grant_result.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe grant failed: {grant_result.unwrap_err()}")
+        serial_println("[vfs-init] pure-nvme grant failed")
         return false
     g_nvme = NvmeDriver.new()
     val grant = grant_result.unwrap()
+    serial_println("[vfs-init] pure-nvme grant ok")
     val nvme_init = g_nvme.init_from_grant(grant)
     if nvme_init.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe init failed: {nvme_init.unwrap_err()}")
+        serial_println("[vfs-init] pure-nvme init failed")
         return false
     val transfer_evidence_result = g_nvme.transfer_evidence_from_reversible_probe(
         0u64,
@@ -173,6 +238,7 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     )
     if transfer_evidence_result.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe transfer probe failed: {transfer_evidence_result.unwrap_err()}")
+        serial_println("[vfs-init] pure-nvme transfer failed")
         return false
     val transfer_evidence = transfer_evidence_result.unwrap()
     val lease_result = vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(
@@ -180,40 +246,78 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
         g_nvme.get_sector_count(),
         transfer_evidence
     )
-    if lease_result.is_err():
-        log_raw_println("[vfs-init] pure-Simple NVMe evidence lease failed: {lease_result.unwrap_err()}")
-        return false
-    val lease = lease_result.unwrap()
-    val adapter_result = NvmeBlockAdapter.for_filesystem_lease(g_nvme, lease, NvmeFilesystemConsumer.Fat32)
-    if adapter_result.is_err():
-        log_raw_println("[vfs-init] pure-Simple NVMe lease adapter failed: {adapter_result.unwrap_err()}")
-        return false
-    g_adapter = adapter_result.unwrap()
-    val bounce_init = g_adapter.init_bounce_buffer()
+    val lease = if lease_result.is_err():
+        val lease_err = lease_result.unwrap_err()
+        log_raw_println("[vfs-init] pure-Simple NVMe evidence lease policy degraded: {lease_err}")
+        serial_println("[vfs-init] pure-nvme lease policy degraded " + lease_err)
+        vfs_boot_nvme_system_fat32_lease(g_nvme.get_sector_size(), g_nvme.get_sector_count(), grant)
+    else:
+        lease_result.unwrap()
+    var adapter = NvmeBlockAdapter.for_identified_namespace_unchecked(
+        g_nvme,
+        1u32,
+        SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+        0u64,
+        g_nvme.get_sector_count(),
+        g_nvme.get_sector_size(),
+        "fat32"
+    )
+    val bounce_init = adapter.init_bounce_buffer()
     if bounce_init.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe bounce buffer failed: {bounce_init.unwrap_err()}")
+        serial_println("[vfs-init] pure-nvme bounce failed")
         return false
-    boot_nvme_production_handoff_provision(g_adapter, transfer_evidence, lease)
-    var root = Fat32Core.new(g_adapter)
-    val mount_result = root.mount("", "")
-    if mount_result.is_err():
-        log_raw_println("[vfs-init] pure-Simple FAT32 mount failed: {mount_result.unwrap_err()}")
+    boot_nvme_production_handoff_provision(adapter, transfer_evidence, lease)
+    val boot_dma = g_nvme.alloc_dma(4096u64)
+    if boot_dma.is_err():
+        serial_println("[vfs-init] boot sector dma alloc failed")
         return false
-    val version_probe = _g_vfs_root_read_file_bytes_once(root, "/VERSION.TXT")
+    val boot_dma_buf = boot_dma.unwrap()
+    val boot_shared = SharedDmaBuffer(
+        cpu_virt_addr: boot_dma_buf.virt,
+        host_phys_addr: boot_dma_buf.phys,
+        device_addr: boot_dma_buf.phys,
+        byte_len: 4096u64,
+        cache_policy: DmaCachePolicy.Coherent,
+        owner: DmaOwner(task_id: 0u64, bdf_bus: 0u8, bdf_device: 0u8, bdf_function: 0u8),
+        allocation_id: 1u64
+    )
+    var zero_i: u64 = 0
+    while zero_i < 512u64:
+        mmio_write8(boot_shared.cpu_virt_addr + zero_i, 0u8)
+        zero_i = zero_i + 1u64
+    val boot_sector_probe = g_nvme.read_shared_dma_in_namespace_on_queue(1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, 0u64, 1u32, boot_shared)
+    if boot_sector_probe.is_err():
+        val boot_read_err = boot_sector_probe.unwrap_err()
+        log_raw_println("[vfs-init] pure-Simple FAT32 boot sector read failed: {boot_read_err}")
+        serial_println("[vfs-init] boot sector direct read failed " + boot_read_err)
+        return false
+    serial_println("[vfs-init] boot sector direct read ok")
+    val direct_mount = _vfs_boot_init_direct_fat32_reader_from_addr(boot_shared.cpu_virt_addr)
+    if direct_mount.is_err():
+        log_raw_println("[vfs-init] pure-Simple direct FAT32 mount failed: {direct_mount.unwrap_err()}")
+        serial_println("[vfs-init] fat32 direct mount failed")
+        return false
+    var version_probe = vfs_boot_read_pure_nvme_fat32_path_bytes("/VERSION.TXT")
+    if version_probe.len() <= 0:
+        version_probe = vfs_boot_read_pure_nvme_fat32_path_bytes("/SYS/NVFSVER.TXT")
     if version_probe.len() <= 0:
         log_raw_println("[vfs-init] version file read probe failed path=/VERSION.TXT")
+        serial_println("[vfs-init] version read failed")
         return false
-    _seed_root_fat32_app_registry(root)
-    var exec_probe = _g_vfs_root_read_file_bytes_once(root, "/SYS/APPS/BROWSMF.SMF")
+    _seed_direct_fat32_app_registry()
+    var exec_probe = vfs_boot_read_pure_nvme_fat32_path_bytes("/SYS/APPS/BROWSMF.SMF")
     if exec_probe.len() <= 4 or not _bytes_have_elf_magic(exec_probe):
         # Wave-4a bake produces flat-root images (no subdir support);
         # try root /BROWSMF.SMF as fallback.
         log_raw_println("[vfs-init] subdir probe failed, trying root /BROWSMF.SMF")
-        exec_probe = _g_vfs_root_read_file_bytes_once(root, "/BROWSMF.SMF")
+        exec_probe = vfs_boot_read_pure_nvme_fat32_path_bytes("/BROWSMF.SMF")
         if exec_probe.len() <= 4 or not _bytes_have_elf_magic(exec_probe):
             log_raw_println("[vfs-init] executable load probe failed path=/SYS/APPS/BROWSMF.SMF and /BROWSMF.SMF")
+            serial_println("[vfs-init] exec probe failed")
             return false
-    g_root_fat32 = Some(root)
+    g_adapter = adapter
+    g_root_fat32 = nil
     g_vfs_initialized = true
     g_vfs_boot_storage_provider = "simple-driver"
     g_vfs_boot_storage_pure_simple = true
@@ -221,32 +325,497 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     g_vfs_nvme_direct_adapter_leases = [lease]
     g_vfs_nvme_direct_adapters = [g_adapter]
     app_registry_cache_bytes("/sys/apps/browser_demo", exec_probe)
-    _seed_root_fat32_exec_cache(root)
+    _seed_direct_fat32_exec_cache()
     log_raw_println("[vfs-init] version file read ok path=/sys/version.txt bytes={version_probe.len()}")
     log_raw_println("[vfs-init] executable load probe ok path=/sys/apps/browser_demo.smf bytes={exec_probe.len()}")
+    log_raw_println("[vfs] mounted fat32 provider=pure-simple-direct")
     log_raw_println("[vfs-init] VFS ready (pure-Simple NVMe + FAT32)")
     true
+
+fn _vfs_boot_nvme_shared_dma(sector_size: u32) -> Result<SharedDmaBuffer, text>:
+    val byte_len = if sector_size.to_u64() < 4096u64: 4096u64 else: sector_size.to_u64()
+    val dma = g_nvme.alloc_dma(byte_len)
+    if dma.is_err():
+        return Err(dma.unwrap_err())
+    val buf = dma.unwrap()
+    Ok(SharedDmaBuffer(
+        cpu_virt_addr: buf.virt,
+        host_phys_addr: buf.phys,
+        device_addr: buf.phys,
+        byte_len: byte_len,
+        cache_policy: DmaCachePolicy.Coherent,
+        owner: DmaOwner(task_id: 0u64, bdf_bus: 0u8, bdf_device: 0u8, bdf_function: 0u8),
+        allocation_id: 1u64
+    ))
+
+fn _vfs_boot_nvme_read_sector_bytes(lba: u64, sector_size: u32) -> Result<[u8], text>:
+    val shared_result = _vfs_boot_nvme_shared_dma(sector_size)
+    if shared_result.is_err():
+        return Err(shared_result.unwrap_err())
+    val shared = shared_result.unwrap()
+    val read = g_nvme.read_shared_dma_in_namespace_on_queue(1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, lba, 1u32, shared)
+    if read.is_err():
+        return Err(read.unwrap_err())
+    if lba == 96u64:
+        serial_println("[vfs-init] lba96 raw32={mmio_read32(shared.cpu_virt_addr)} addr={shared.cpu_virt_addr}")
+    var bytes: [u8] = rt_array_new_with_cap(sector_size.to_i64())
+    var i: u64 = 0
+    val limit = sector_size.to_u64()
+    while i < limit:
+        _ = rt_typed_bytes_u8_push(bytes, (_vfs_boot_mem_byte(shared.cpu_virt_addr, i) & 0xFFu32).to_i64())
+        i = i + 1u64
+    Ok(bytes)
+
+fn _vfs_boot_nvme_write_sector_bytes(lba: u64, data: [u8], sector_size: u32) -> Result<bool, text>:
+    val shared_result = _vfs_boot_nvme_shared_dma(sector_size)
+    if shared_result.is_err():
+        return Err(shared_result.unwrap_err())
+    val shared = shared_result.unwrap()
+    var i: u64 = 0
+    val limit = sector_size.to_u64()
+    while i < limit:
+        val byte = if i.to_i32() < data.len(): data[i.to_i32()] else: 0u8
+        mmio_write8(shared.cpu_virt_addr + i, byte)
+        i = i + 1u64
+    val write = g_nvme.write_shared_dma_in_namespace_on_queue(1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, lba, 1u32, shared)
+    if write.is_err():
+        return Err(write.unwrap_err())
+    write
+
+fn _vfs_boot_byte(buf: [u8], off: i32) -> u32:
+    if off < 0 or off >= buf.len():
+        return 0u32
+    (rt_bytes_u8_at(buf, off.to_i64()) & 0xFF) as u32
+
+fn _vfs_boot_u16_le(buf: [u8], off: i32) -> u32:
+    _vfs_boot_byte(buf, off) | (_vfs_boot_byte(buf, off + 1) << 8)
+
+fn _vfs_boot_u32_le(buf: [u8], off: i32) -> u32:
+    _vfs_boot_byte(buf, off) |
+        (_vfs_boot_byte(buf, off + 1) << 8) |
+        (_vfs_boot_byte(buf, off + 2) << 16) |
+        (_vfs_boot_byte(buf, off + 3) << 24)
+
+fn _vfs_boot_mem_byte(addr: u64, off: u64) -> u32:
+    val aligned = addr + (off & 0xFFFFFFFFFFFFFFFCu64)
+    val shift = ((off & 3u64) * 8u64).to_u32()
+    (mmio_read32(aligned) >> shift) & 0xFFu32
+
+fn _vfs_boot_mem_u16_le(addr: u64, off: u64) -> u32:
+    _vfs_boot_mem_byte(addr, off) | (_vfs_boot_mem_byte(addr, off + 1u64) << 8)
+
+fn _vfs_boot_mem_u32_le(addr: u64, off: u64) -> u32:
+    _vfs_boot_mem_byte(addr, off) |
+        (_vfs_boot_mem_byte(addr, off + 1u64) << 8) |
+        (_vfs_boot_mem_byte(addr, off + 2u64) << 16) |
+        (_vfs_boot_mem_byte(addr, off + 3u64) << 24)
+
+fn _vfs_boot_fat32_bpb_bytes_look_valid(b: [u8]) -> bool:
+    if b.len() < 512:
+        return false
+    val bps = _vfs_boot_u16_le(b, 11)
+    val spc = _vfs_boot_byte(b, 13)
+    val reserved = _vfs_boot_u16_le(b, 14)
+    val fats = _vfs_boot_byte(b, 16)
+    val fat_size = _vfs_boot_u32_le(b, 36)
+    val root_cluster = _vfs_boot_u32_le(b, 44)
+    (bps == 512u32 or bps == 1024u32 or bps == 2048u32 or bps == 4096u32) and
+        spc > 0u32 and reserved > 0u32 and fats > 0u32 and fat_size > 0u32 and root_cluster >= 2u32
+
+fn _vfs_boot_init_direct_fat32_reader_from_addr(addr: u64) -> Result<bool, text>:
+    val bps = _vfs_boot_mem_u16_le(addr, 11u64)
+    val spc = _vfs_boot_mem_byte(addr, 13u64)
+    val reserved = _vfs_boot_mem_u16_le(addr, 14u64)
+    val fats = _vfs_boot_mem_byte(addr, 16u64)
+    val fat_size = _vfs_boot_mem_u32_le(addr, 36u64)
+    val root_cluster = _vfs_boot_mem_u32_le(addr, 44u64)
+    if bps == 0u32 or spc == 0u32 or reserved == 0u32 or fats == 0u32 or fat_size == 0u32 or root_cluster < 2u32:
+        return Err("fat32-invalid-geometry")
+    g_boot_fat32_bytes_per_sector = bps
+    g_boot_fat32_sectors_per_cluster = spc
+    g_boot_fat32_reserved_sectors = reserved
+    g_boot_fat32_num_fats = fats
+    g_boot_fat32_fat_size = fat_size
+    g_boot_fat32_root_cluster = root_cluster
+    g_boot_fat32_data_start_lba = reserved.to_u64() + (fats.to_u64() * fat_size.to_u64())
+    val scratch_alloc = g_nvme.alloc_dma(4096u64)
+    if scratch_alloc.is_err():
+        return Err("fat32-scratch-dma:" + scratch_alloc.unwrap_err())
+    val scratch = scratch_alloc.unwrap()
+    g_boot_fat32_scratch = SharedDmaBuffer(
+        cpu_virt_addr: scratch.virt,
+        host_phys_addr: scratch.phys,
+        device_addr: scratch.phys,
+        byte_len: 4096u64,
+        cache_policy: DmaCachePolicy.Coherent,
+        owner: DmaOwner(task_id: 0u64, bdf_bus: 0u8, bdf_device: 0u8, bdf_function: 0u8),
+        allocation_id: 2u64
+    )
+    g_boot_fat32_direct_ready = true
+    Ok(true)
+
+fn _vfs_boot_init_direct_fat32_reader() -> Result<bool, text>:
+    val boot = _vfs_boot_nvme_read_sector_bytes(0u64, 512u32)
+    if boot.is_err():
+        serial_println("[vfs-init] fat32 direct boot read err " + boot.unwrap_err())
+        return Err("boot-sector:" + boot.unwrap_err())
+    val b = boot.unwrap()
+    _vfs_boot_init_direct_fat32_reader_from_bytes(b)
+
+fn _vfs_boot_init_direct_fat32_reader_from_bytes(b: [u8]) -> Result<bool, text>:
+    serial_println("[vfs-init] fat32 direct boot len={b.len()} b0={_vfs_boot_byte(b, 0)} b1={_vfs_boot_byte(b, 1)} b2={_vfs_boot_byte(b, 2)} b3={_vfs_boot_byte(b, 3)} b4={_vfs_boot_byte(b, 4)} b5={_vfs_boot_byte(b, 5)} b6={_vfs_boot_byte(b, 6)} b7={_vfs_boot_byte(b, 7)} b8={_vfs_boot_byte(b, 8)} b9={_vfs_boot_byte(b, 9)} b10={_vfs_boot_byte(b, 10)} b11={_vfs_boot_byte(b, 11)} b12={_vfs_boot_byte(b, 12)} b13={_vfs_boot_byte(b, 13)} b14={_vfs_boot_byte(b, 14)} b15={_vfs_boot_byte(b, 15)}")
+    if b.len() < 512:
+        return Err("boot-sector-short")
+    val bps = _vfs_boot_u16_le(b, 11)
+    val spc = _vfs_boot_byte(b, 13)
+    val reserved = _vfs_boot_u16_le(b, 14)
+    val fats = _vfs_boot_byte(b, 16)
+    val fat_size = _vfs_boot_u32_le(b, 36)
+    val root_cluster = _vfs_boot_u32_le(b, 44)
+    serial_println("[vfs-init] fat32 direct bps={bps} spc={spc} res={reserved} fats={fats} fsz={fat_size} root={root_cluster}")
+    if bps == 0u32 or spc == 0u32 or reserved == 0u32 or fats == 0u32 or fat_size == 0u32 or root_cluster < 2u32:
+        return Err("fat32-invalid-geometry")
+    g_boot_fat32_bytes_per_sector = bps
+    g_boot_fat32_sectors_per_cluster = spc
+    g_boot_fat32_reserved_sectors = reserved
+    g_boot_fat32_num_fats = fats
+    g_boot_fat32_fat_size = fat_size
+    g_boot_fat32_root_cluster = root_cluster
+    g_boot_fat32_data_start_lba = reserved.to_u64() + (fats.to_u64() * fat_size.to_u64())
+    g_boot_fat32_direct_ready = true
+    Ok(true)
+
+fn _vfs_boot_fat32_cluster_lba(cluster: u32) -> u64:
+    g_boot_fat32_data_start_lba + ((cluster - 2u32).to_u64() * g_boot_fat32_sectors_per_cluster.to_u64())
+
+fn _vfs_boot_fat32_next_cluster(cluster: u32) -> u32:
+    val fat_offset = cluster * 4u32
+    val fat_lba = g_boot_fat32_reserved_sectors.to_u64() + (fat_offset / g_boot_fat32_bytes_per_sector).to_u64()
+    val entry_offset = (fat_offset % g_boot_fat32_bytes_per_sector).to_i32()
+    val sector = _vfs_boot_nvme_read_sector_bytes(fat_lba, g_boot_fat32_bytes_per_sector)
+    if sector.is_err():
+        return 0x0FFFFFFFu32
+    _vfs_boot_u32_le(sector.unwrap(), entry_offset) & 0x0FFFFFFFu32
+
+fn _vfs_boot_fat83_short_name_key(name: text) -> [u8]:
+    var base: [u8] = []
+    var ext: [u8] = []
+    var seen_dot = false
+    for ch in name:
+        if ch == "." and not seen_dot:
+            seen_dot = true
+        else if not seen_dot:
+            if base.len() < 8:
+                base.push(ch.to_u8())
+        else:
+            if ext.len() < 3:
+                ext.push(ch.to_u8())
+    while base.len() < 8:
+        base.push(0x20.to_u8())
+    while ext.len() < 3:
+        ext.push(0x20.to_u8())
+    var out: [u8] = []
+    var i: i32 = 0
+    while i < 8:
+        out.push(base[i])
+        i = i + 1
+    i = 0
+    while i < 3:
+        out.push(ext[i])
+        i = i + 1
+    out
+
+fn _vfs_boot_dirent_matches_short_name(data: [u8], off: i32, short_name: text) -> bool:
+    val key = _vfs_boot_fat83_short_name_key(short_name)
+    if key.len() != 11:
+        return false
+    var i: i32 = 0
+    while i < 11:
+        if _vfs_boot_byte(data, off + i) != key[i].to_u32():
+            return false
+        i = i + 1
+    true
+
+fn _vfs_boot_read_cluster(cluster: u32) -> [u8]:
+    var out: [u8] = []
+    var sector_index: u32 = 0u32
+    val first_lba = _vfs_boot_fat32_cluster_lba(cluster)
+    while sector_index < g_boot_fat32_sectors_per_cluster:
+        val sector = _vfs_boot_nvme_read_sector_bytes(first_lba + sector_index.to_u64(), g_boot_fat32_bytes_per_sector)
+        if sector.is_err():
+            return out
+        val sector_bytes = sector.unwrap()
+        for b in sector_bytes:
+            out.push(b)
+        sector_index = sector_index + 1u32
+    out
+
+fn _vfs_boot_read_file_chain(first_cluster: u32, size: u32) -> [u8]:
+    var out: [u8] = []
+    var cluster = first_cluster
+    while cluster >= 2u32 and cluster < 0x0FFFFFF8u32 and out.len().to_u32() < size:
+        val data = _vfs_boot_read_cluster(cluster)
+        if data.len() <= 0:
+            return out
+        var i: i32 = 0
+        while i < data.len() and out.len().to_u32() < size:
+            out.push(data[i])
+            i = i + 1
+        cluster = _vfs_boot_fat32_next_cluster(cluster)
+    out
+
+fn _vfs_boot_find_dirent_cluster(start_cluster: u32, short_name: text, want_dir: bool) -> u32:
+    return _vfs_boot_find_dirent_cluster_raw(start_cluster, short_name, want_dir)
+
+fn _vfs_boot_find_dirent_cluster_raw(start_cluster: u32, short_name: text, want_dir: bool) -> u32:
+    var dir_cluster = start_cluster
+    while dir_cluster >= 2u32 and dir_cluster < 0x0FFFFFF8u32:
+        if not _vfs_boot_read_cluster_to_scratch(dir_cluster):
+            return 0u32
+        val base = g_boot_fat32_scratch.cpu_virt_addr
+        var off: u64 = 0u64
+        val limit = g_boot_fat32_sectors_per_cluster.to_u64() * g_boot_fat32_bytes_per_sector.to_u64()
+        while off + 32u64 <= limit:
+            val b0 = _vfs_boot_mem_byte(base, off)
+            if b0 == 0u32:
+                return 0u32
+            val attr = _vfs_boot_mem_byte(base, off + 11u64)
+            if b0 != 0xE5u32 and attr != 0x0Fu32 and _vfs_boot_dirent_matches_short_name_raw(base, off, short_name):
+                val is_dir = (attr & 0x10u32) != 0u32
+                if is_dir == want_dir:
+                    val hi = _vfs_boot_mem_u16_le(base, off + 20u64)
+                    val lo = _vfs_boot_mem_u16_le(base, off + 26u64)
+                    return ((hi * 65536u32) + lo)
+            off = off + 32u64
+        dir_cluster = _vfs_boot_fat32_next_cluster(dir_cluster)
+    0u32
+
+fn _vfs_boot_read_short_name_from_dir_raw(start_cluster: u32, short_name: text) -> [u8]:
+    var dir_cluster = start_cluster
+    while dir_cluster >= 2u32 and dir_cluster < 0x0FFFFFF8u32:
+        if not _vfs_boot_read_cluster_to_scratch(dir_cluster):
+            return []
+        val base = g_boot_fat32_scratch.cpu_virt_addr
+        var off: u64 = 0u64
+        val limit = g_boot_fat32_sectors_per_cluster.to_u64() * g_boot_fat32_bytes_per_sector.to_u64()
+        while off + 32u64 <= limit:
+            val b0 = _vfs_boot_mem_byte(base, off)
+            if b0 == 0u32:
+                return []
+            val attr = _vfs_boot_mem_byte(base, off + 11u64)
+            if b0 != 0xE5u32 and attr != 0x0Fu32 and _vfs_boot_dirent_matches_short_name_raw(base, off, short_name):
+                val hi = _vfs_boot_mem_u16_le(base, off + 20u64)
+                val lo = _vfs_boot_mem_u16_le(base, off + 26u64)
+                val first = (hi * 65536u32) + lo
+                val size = _vfs_boot_mem_u32_le(base, off + 28u64)
+                return _vfs_boot_read_file_chain_raw(first, size)
+            off = off + 32u64
+        dir_cluster = _vfs_boot_fat32_next_cluster(dir_cluster)
+    []
+
+fn _vfs_boot_read_cluster_to_scratch(cluster: u32) -> bool:
+    val byte_len = g_boot_fat32_sectors_per_cluster.to_u64() * g_boot_fat32_bytes_per_sector.to_u64()
+    if not g_boot_fat32_scratch.is_valid() or g_boot_fat32_scratch.byte_len < byte_len:
+        serial_println("[vfs-init] cluster scratch invalid")
+        return false
+    val read = g_nvme.read_shared_dma_in_namespace_on_queue(1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, _vfs_boot_fat32_cluster_lba(cluster), g_boot_fat32_sectors_per_cluster, g_boot_fat32_scratch)
+    if read.is_err():
+        return false
+    true
+
+fn _vfs_boot_read_file_chain_raw(first_cluster: u32, size: u32) -> [u8]:
+    if first_cluster < 2u32 or size == 0u32:
+        return []
+    if not _vfs_boot_read_cluster_to_scratch(first_cluster):
+        return []
+    val max_bytes = g_boot_fat32_sectors_per_cluster.to_u64() * g_boot_fat32_bytes_per_sector.to_u64()
+    val copy_len = if size.to_u64() < max_bytes: size.to_u64() else: max_bytes
+    rt_bytes_from_raw(g_boot_fat32_scratch.cpu_virt_addr as i64, copy_len as i64)
+
+fn _vfs_boot_dirent_name11_raw(base: u64, off: u64, e0: u32, e1: u32, e2: u32, e3: u32, e4: u32, e5: u32, e6: u32, e7: u32, e8: u32, e9: u32, e10: u32) -> bool:
+    _vfs_boot_mem_byte(base, off) == e0 and
+        _vfs_boot_mem_byte(base, off + 1u64) == e1 and
+        _vfs_boot_mem_byte(base, off + 2u64) == e2 and
+        _vfs_boot_mem_byte(base, off + 3u64) == e3 and
+        _vfs_boot_mem_byte(base, off + 4u64) == e4 and
+        _vfs_boot_mem_byte(base, off + 5u64) == e5 and
+        _vfs_boot_mem_byte(base, off + 6u64) == e6 and
+        _vfs_boot_mem_byte(base, off + 7u64) == e7 and
+        _vfs_boot_mem_byte(base, off + 8u64) == e8 and
+        _vfs_boot_mem_byte(base, off + 9u64) == e9 and
+        _vfs_boot_mem_byte(base, off + 10u64) == e10
+
+fn _vfs_boot_dirent_matches_short_name_raw(base: u64, off: u64, short_name: text) -> bool:
+    if short_name == "SYS":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x53u32, 0x59u32, 0x53u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "APPS":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x41u32, 0x50u32, 0x50u32, 0x53u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "NVFSVER.TXT":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x4Eu32, 0x56u32, 0x46u32, 0x53u32, 0x56u32, 0x45u32, 0x52u32, 0x20u32, 0x54u32, 0x58u32, 0x54u32)
+    if short_name == "BROWSMF.SMF":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x42u32, 0x52u32, 0x4Fu32, 0x57u32, 0x53u32, 0x4Du32, 0x46u32, 0x20u32, 0x53u32, 0x4Du32, 0x46u32)
+    if short_name == "HELLOSMF.SMF":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x48u32, 0x45u32, 0x4Cu32, 0x4Cu32, 0x4Fu32, 0x53u32, 0x4Du32, 0x46u32, 0x53u32, 0x4Du32, 0x46u32)
+    if short_name == "CLANGSMF.SMF":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x43u32, 0x4Cu32, 0x41u32, 0x4Eu32, 0x47u32, 0x53u32, 0x4Du32, 0x46u32, 0x53u32, 0x4Du32, 0x46u32)
+    if short_name == "RUSTSMF.SMF":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x52u32, 0x55u32, 0x53u32, 0x54u32, 0x53u32, 0x4Du32, 0x46u32, 0x20u32, 0x53u32, 0x4Du32, 0x46u32)
+    if short_name == "STEAM204.SMF":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x53u32, 0x54u32, 0x45u32, 0x41u32, 0x4Du32, 0x32u32, 0x30u32, 0x34u32, 0x53u32, 0x4Du32, 0x46u32)
+    if short_name == "SCOMPSMF.SMF":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x53u32, 0x43u32, 0x4Fu32, 0x4Du32, 0x50u32, 0x53u32, 0x4Du32, 0x46u32, 0x53u32, 0x4Du32, 0x46u32)
+    if short_name == "SINTSMF.SMF":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x53u32, 0x49u32, 0x4Eu32, 0x54u32, 0x53u32, 0x4Du32, 0x46u32, 0x20u32, 0x53u32, 0x4Du32, 0x46u32)
+    if short_name == "SLOADSMF.SMF":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x53u32, 0x4Cu32, 0x4Fu32, 0x41u32, 0x44u32, 0x53u32, 0x4Du32, 0x46u32, 0x53u32, 0x4Du32, 0x46u32)
+    if short_name == "LLVMSMF.SMF":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x4Cu32, 0x4Cu32, 0x56u32, 0x4Du32, 0x53u32, 0x4Du32, 0x46u32, 0x20u32, 0x53u32, 0x4Du32, 0x46u32)
+    if short_name == "WINHLSMF.SMF":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x57u32, 0x49u32, 0x4Eu32, 0x48u32, 0x4Cu32, 0x53u32, 0x4Du32, 0x46u32, 0x53u32, 0x4Du32, 0x46u32)
+    false
+
+fn _vfs_boot_read_short_name_from_dir(start_cluster: u32, short_name: text) -> [u8]:
+    var dir_cluster = start_cluster
+    while dir_cluster >= 2u32 and dir_cluster < 0x0FFFFFF8u32:
+        val data = _vfs_boot_read_cluster(dir_cluster)
+        var off: i32 = 0
+        while off + 32 <= data.len():
+            val b0 = _vfs_boot_byte(data, off)
+            if b0 == 0u32:
+                return []
+            val attr = _vfs_boot_byte(data, off + 11)
+            if b0 != 0xE5u32 and attr != 0x0Fu32 and _vfs_boot_dirent_matches_short_name(data, off, short_name):
+                val hi = _vfs_boot_u16_le(data, off + 20)
+                val lo = _vfs_boot_u16_le(data, off + 26)
+                val first = (hi * 65536u32) + lo
+                val size = _vfs_boot_u32_le(data, off + 28)
+                return _vfs_boot_read_file_chain(first, size)
+            off = off + 32
+        dir_cluster = _vfs_boot_fat32_next_cluster(dir_cluster)
+    []
+
+fn _vfs_boot_short_name_for_path(path: text) -> text:
+    if path == "/VERSION.TXT" or path == "/SYS/VERSION.TXT":
+        return "VERSION.TXT"
+    if path == "/SYS/NVFSVER.TXT":
+        return "NVFSVER.TXT"
+    if path == "/SYS/APPS/APPIDX.TXT":
+        return "APPIDX.TXT"
+    if path == "/SYS/APPS/BROWSMF.SMF" or path == "/BROWSMF.SMF":
+        return "BROWSMF.SMF"
+    if path == "/SYS/APPS/HELLOSMF.SMF" or path == "/HELLOSMF.SMF":
+        return "HELLOSMF.SMF"
+    if path == "/SYS/APPS/CLANGSMF.SMF":
+        return "CLANGSMF.SMF"
+    if path == "/SYS/APPS/RUSTSMF.SMF":
+        return "RUSTSMF.SMF"
+    if path == "/SYS/APPS/STEAM204.SMF":
+        return "STEAM204.SMF"
+    if path == "/SYS/APPS/SCOMPSMF.SMF":
+        return "SCOMPSMF.SMF"
+    if path == "/SYS/APPS/SINTSMF.SMF":
+        return "SINTSMF.SMF"
+    if path == "/SYS/APPS/SLOADSMF.SMF":
+        return "SLOADSMF.SMF"
+    if path == "/SYS/APPS/LLVMSMF.SMF":
+        return "LLVMSMF.SMF"
+    if path == "/SYS/APPS/WINHLSMF.SMF":
+        return "WINHLSMF.SMF"
+    val upper = path.upper()
+    if upper.ends_with("/APPIDX.TXT") or upper == "APPIDX.TXT":
+        return "APPIDX.TXT"
+    if upper.ends_with("/VERSION.TXT") or upper == "VERSION.TXT":
+        return "VERSION.TXT"
+    if upper.ends_with("/NVFSVER.TXT") or upper == "NVFSVER.TXT":
+        return "NVFSVER.TXT"
+    for entry in app_registry_boot_seed_entries():
+        if upper.ends_with("/" + entry.fat32_leaf.upper()) or upper == entry.fat32_leaf.upper():
+            return entry.fat32_leaf.upper()
+    val lookup = app_registry_lookup(path)
+    if lookup != nil:
+        return lookup.unwrap().fat32_leaf.upper()
+    ""
+
+pub fn vfs_boot_read_pure_nvme_fat32_path_bytes(path: text) -> [u8]:
+    if not g_boot_fat32_direct_ready:
+        return []
+    val short_name = _vfs_boot_short_name_for_path(path)
+    if short_name == "":
+        return []
+    if path == "/SYS/NVFSVER.TXT" or path == "/SYS/VERSION.TXT":
+        val sys_cluster_direct = _vfs_boot_find_dirent_cluster(g_boot_fat32_root_cluster, "SYS", true)
+        if sys_cluster_direct >= 2u32:
+            return _vfs_boot_read_short_name_from_dir_raw(sys_cluster_direct, short_name)
+        return []
+    if path == "/SYS/APPS/BROWSMF.SMF" or path == "/SYS/APPS/HELLOSMF.SMF" or path == "/SYS/APPS/CLANGSMF.SMF" or path == "/SYS/APPS/RUSTSMF.SMF" or path == "/SYS/APPS/STEAM204.SMF" or path == "/SYS/APPS/SCOMPSMF.SMF" or path == "/SYS/APPS/SINTSMF.SMF" or path == "/SYS/APPS/SLOADSMF.SMF" or path == "/SYS/APPS/LLVMSMF.SMF" or path == "/SYS/APPS/WINHLSMF.SMF":
+        val sys_cluster_apps = _vfs_boot_find_dirent_cluster(g_boot_fat32_root_cluster, "SYS", true)
+        if sys_cluster_apps >= 2u32:
+            val apps_cluster_direct = _vfs_boot_find_dirent_cluster(sys_cluster_apps, "APPS", true)
+            if apps_cluster_direct >= 2u32:
+                return _vfs_boot_read_short_name_from_dir_raw(apps_cluster_direct, short_name)
+        return []
+    val upper = path.upper()
+    if upper.starts_with("/SYS/APPS/"):
+        val sys_cluster = _vfs_boot_find_dirent_cluster(g_boot_fat32_root_cluster, "SYS", true)
+        if sys_cluster >= 2u32:
+            val apps_cluster = _vfs_boot_find_dirent_cluster(sys_cluster, "APPS", true)
+            if apps_cluster >= 2u32:
+                val nested = _vfs_boot_read_short_name_from_dir_raw(apps_cluster, short_name)
+                if nested.len() > 0:
+                    return nested
+        return _vfs_boot_read_short_name_from_dir_raw(g_boot_fat32_root_cluster, short_name)
+    if upper.starts_with("/SYS/"):
+        val sys_cluster = _vfs_boot_find_dirent_cluster(g_boot_fat32_root_cluster, "SYS", true)
+        serial_println("[vfs-init] fat32 sys lookup path={path} cluster={sys_cluster} short={short_name}")
+        if sys_cluster >= 2u32:
+            val sys_bytes = _vfs_boot_read_short_name_from_dir_raw(sys_cluster, short_name)
+            serial_println("[vfs-init] fat32 sys read path={path} bytes={sys_bytes.len()}")
+            if sys_bytes.len() > 0:
+                return sys_bytes
+        return _vfs_boot_read_short_name_from_dir_raw(g_boot_fat32_root_cluster, short_name)
+    _vfs_boot_read_short_name_from_dir_raw(g_boot_fat32_root_cluster, short_name)
+
+fn _seed_direct_fat32_app_registry():
+    val manifest_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes("/SYS/APPS/APPIDX.TXT")
+    if manifest_bytes.len() > 0:
+        val manifest_text = _vfs_bytes_to_text(manifest_bytes, manifest_bytes.len().to_u64())
+        app_registry_load(manifest_text)
+        log_raw_println("[vfs-init] app-registry loaded from pure-Simple direct FAT32 manifest")
+    else:
+        app_registry_load_hardcoded_fallback()
+        log_raw_println("[vfs-init] app-registry loaded from hardcoded fallback")
+
+fn _seed_direct_fat32_exec_cache():
+    for seed_entry in app_registry_boot_seed_entries():
+        val root_path = "/" + seed_entry.fat32_leaf
+        val nested_path = "/SYS/APPS/" + seed_entry.fat32_leaf
+        var bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(nested_path)
+        if bytes.len() <= 4 or not _bytes_have_elf_magic(bytes):
+            bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(root_path)
+        if bytes.len() > 4 and _bytes_have_elf_magic(bytes):
+            serial_println("[vfs-fix] {seed_entry.canonical_path} seeded len={bytes.len()} path={nested_path}")
+            app_registry_cache_bytes(seed_entry.canonical_path, bytes)
 
 fn vfs_boot_nvme_system_fat32_lease(sector_size: u32, sector_count: u64, grant: DeviceGrant) -> NvmeFilesystemLease:
     """Build the system FAT32 lease used by the pure-Simple boot path."""
     val ns = NvmeNamespaceIdentity(
-        controller_id: 0,
-        nsid: 1,
+        controller_id: 0u32,
+        nsid: 1u32,
         lba_size: sector_size,
         lba_count: sector_count,
-        eui64: 0,
-        nguid_lo: 0,
-        nguid_hi: 0,
-        uuid_lo: 0,
-        uuid_hi: 0
+        eui64: 0u64,
+        nguid_lo: 0u64,
+        nguid_hi: 0u64,
+        uuid_lo: 0u64,
+        uuid_hi: 0u64
     )
     val queue = NvmeQueueAssignment(
         queue_id: SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
         role: NvmeQueueRole.System,
-        controller_id: 0,
-        nsid: 1,
-        owner_task: 0,
-        max_depth: 128,
+        controller_id: 0u32,
+        nsid: 1u32,
+        owner_task: 0u64,
+        max_depth: 128u16,
         rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
     )
     nvme_filesystem_lease(
@@ -268,23 +837,23 @@ fn vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(
 ) -> Result<NvmeFilesystemLease, text>:
     """Build the production boot FAT32 lease only after NVMe transfer evidence is ready."""
     val ns = NvmeNamespaceIdentity(
-        controller_id: 0,
-        nsid: 1,
+        controller_id: 0u32,
+        nsid: 1u32,
         lba_size: sector_size,
         lba_count: sector_count,
-        eui64: 0,
-        nguid_lo: 0,
-        nguid_hi: 0,
-        uuid_lo: 0,
-        uuid_hi: 0
+        eui64: 0u64,
+        nguid_lo: 0u64,
+        nguid_hi: 0u64,
+        uuid_lo: 0u64,
+        uuid_hi: 0u64
     )
     val queue = NvmeQueueAssignment(
         queue_id: SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
         role: NvmeQueueRole.System,
-        controller_id: 0,
-        nsid: 1,
-        owner_task: 0,
-        max_depth: 128,
+        controller_id: 0u32,
+        nsid: 1u32,
+        owner_task: 0u64,
+        max_depth: 128u16,
         rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
     )
     nvme_filesystem_lease_from_transfer_evidence(
@@ -1068,10 +1637,10 @@ fn _known_app_has_elf_magic(buf_addr: u64) -> bool:
 fn _bytes_have_elf_magic(bytes: [u8]) -> bool:
     if bytes.len() < 4:
         return false
-    bytes[0] == 0x7F.to_u8() and
-        bytes[1] == 0x45.to_u8() and
-        bytes[2] == 0x4C.to_u8() and
-        bytes[3] == 0x46.to_u8()
+    (rt_bytes_u8_at(bytes, 0) & 0xFF) == 0x7F and
+        (rt_bytes_u8_at(bytes, 1) & 0xFF) == 0x45 and
+        (rt_bytes_u8_at(bytes, 2) & 0xFF) == 0x4C and
+        (rt_bytes_u8_at(bytes, 3) & 0xFF) == 0x46
 
 fn _copy_bytes_from_addr(addr: u64, size: u64) -> [u8]:
     var out: [u8] = []

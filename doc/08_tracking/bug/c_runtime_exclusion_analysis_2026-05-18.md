@@ -1,7 +1,7 @@
 # C Runtime Exclusion Analysis
 
 **Date:** 2026-05-18
-**Last audited:** 2026-05-29 (follow-up pass — pty blocker cleared, A2 blockers reconfirmed, no new C files)
+**Last audited:** 2026-05-29 (follow-up pass — pty, math/random/error/config, contracts, regex_stub, equality, format, value, and env removed)
 **Status:** Open — audit still tracks removable C runtime candidates and blocked removals.
 **Context:** Pure Simple conversion project — which C files can be removed
 
@@ -14,6 +14,17 @@
 | `runtime_hash.c` | `rt_fnv_hash` | Deleted 2026-05-27. `simple-runtime` now implements FNV-1a in Rust and the legacy Rust std hash shim computes FNV in Simple instead of declaring the C extern. Removed from the core-C native-project runtime input list. |
 | `runtime_crypto.c` | `rt_constant_time_compare` | Deleted 2026-05-27. `simple-runtime` and interpreter dispatch both implement constant-time comparison in Rust/Simple runtime code; no native-project runtime input remains. |
 | `runtime_base64.c` | `__c_rt_base64_encode`, `__c_rt_base64_decode` | Already deleted from disk (confirmed 2026-05-29). Was listed under Group B but the file is gone. `sffi/utils.rs` wraps both symbols; no C file callers remain. |
+| `runtime_pty.c` | `rt_pty_open`, `rt_pty_spawn` | Deleted 2026-05-29 after zero build refs were reconfirmed. `value/pty.rs` exports both symbols via `#[no_mangle]`; interpreter dispatch remains in `interpreter_extern/pty.rs`. |
+| `runtime_math.c` | `rt_math_*` | Deleted 2026-05-29 after Rust replacements were promoted to exported C ABI symbols in `value/sffi/math.rs`; not in build inputs, SFFI dispatch table, or calls.rs. |
+| `runtime_random.c` | `rt_random_*`, `__c_rt_random_hex_buf` | Deleted 2026-05-29 after Rust replacements for the public `rt_random_*` ABI were exported from `value/sffi/random.rs`; `__c_rt_random_hex_buf` had zero callers. |
+| `runtime_error.c` | `rt_function_not_found`, `rt_method_not_found` | Deleted 2026-05-29 after Rust replacements were promoted to exported C ABI symbols in `value/sffi/error_handling.rs`; `runtime_native.c` still provides its own core-C implementation for the tiny-native bundle. |
+| `runtime_config.c` | `rt_set_macro_trace`, `rt_is_macro_trace_enabled`, `rt_set_debug_mode`, `rt_is_debug_mode_enabled` | Deleted 2026-05-29 after Rust replacements were promoted to exported C ABI symbols in `value/sffi/config.rs`; not in build inputs. |
+| `runtime_contracts.c` | `simple_contract_check`, `simple_contract_check_msg` | Deleted 2026-05-29 after Rust replacements were promoted to exported C ABI symbols in `value/sffi/contracts.rs`; calls.rs dispatch resolves the same symbols. |
+| `runtime_regex_stub.c` | `sffi_regex_is_match/find/find_all/captures/replace/replace_all/split/split_n` | Deleted 2026-05-29 after the disabled-regex Rust stub was promoted to exported C ABI symbols in `value/sffi/regex_stub.rs`; the `runtime-regex` feature path already exports the real implementation. |
+| `runtime_equality.c` | `rt_native_eq`, `rt_native_neq`, `rt_value_eq`, `rt_value_compare` | Deleted 2026-05-29 after `rt_value_eq` and `rt_value_compare` were promoted to exported Rust C ABI symbols in `value/sffi/equality.rs`; native equality wrappers were already exported. |
+| `runtime_format.c` | `__c_rt_value_format_string`, `__c_rt_raw_u64_to_str`, `__c_rt_value_to_display_str` | Deleted 2026-05-29 after no callers for the legacy `__c_rt_*` helpers were reconfirmed; active formatting SFFI symbols are exported from `value/sffi/io_print.rs`. |
+| `runtime_value.c` | `rt_value_int/float/bool/nil`, `rt_value_as_*`, `rt_value_is_*`, `rt_value_truthy`, `rt_value_type_tag`, `rt_is_error`, `rt_ptr_to_value`, `rt_value_to_ptr` | Deleted 2026-05-29 after Rust value helpers and pointer conversion helpers were promoted to exported C ABI symbols in `value/sffi/value_ops.rs` and `value/sffi/memory.rs`; `runtime_value.h` remains as a C ABI header. |
+| `runtime_env.c` | `__c_rt_env_*`, `__c_rt_exit`, `__c_rt_stdout_flush`, `__c_rt_stderr_flush`, `__c_rt_platform_name`, `__c_rt_term_get_size` | Deleted 2026-05-29 after no callers for the legacy `__c_rt_*` helpers were reconfirmed; active env/process/platform/flush SFFI symbols are exported from `value/sffi/env_process.rs` and `value/sffi/io_print.rs`. |
 
 ## Cannot Remove (active Rust/codegen callers)
 
@@ -39,28 +50,20 @@ No other build.rs compiles any `src/runtime/*.c` file. Neither `runtime.c` nor `
 
 ### Group A2 — On-disk but NOT in any build input (removal candidates pending SFFI/codegen audit)
 
-These files exist on disk, `simple-runtime` no longer compiles them, and they do NOT appear in any `build.rs` `c_sources[]` or `tools.rs` `runtime_inputs[]` list (verified 2026-05-29). They remain only if codegen or the SFFI dispatch table still resolves their symbols at link time. A follow-up codegen/linker audit is needed before deletion.
+All files in this candidate group have now been audited and removed or shown to
+be stale exact-ABI compatibility shims (verified 2026-05-29). `runtime_value.h`
+remains on disk because remaining C runtime sources include it as an ABI header.
 
-Verified blocker categories (2026-05-29, confirmed unchanged in follow-up pass):
-- **SFFI dispatch table** (`codegen/runtime_sffi.rs`): `rt_value_*`, `rt_env_*`, `rt_value_format_string`, `rt_value_eq`, `rt_value_compare`, `rt_native_eq` confirmed still present → those files cannot be deleted until the SFFI table routes to Rust exports.
-- **`calls.rs` codegen dispatch**: `simple_contract_check`, `simple_contract_check_msg`, `sffi_regex_*` (8 variants) confirmed still present → contracts/regex_stub blocked.
-- **Interpreter extern Rust FFI** (`interpreter_extern/math.rs`): `rt_math_*` symbols are resolved from the Rust `simple-runtime` crate directly — NOT from the C file. Same for pty (now confirmed: pty C file not in any build input).
-- **Core-C tiny-native lane** (`build_core_c_runtime_library` in `native_project/tools.rs`): confirmed runtime_inputs = `[runtime_native.c, runtime_legacy_core.c, runtime_mcp_core.c, runtime_simd_utf8.c]` plus optional `runtime_https_openssl_core.c`. Does NOT include pty, math, random, error, config. This lane does NOT link the Rust `simple-runtime` crate. Remaining gate for math/random/error/config.
-- **No new C files** since 2026-05-29 first pass — 36 C files on disk, exactly matching the prior audit.
+Verified blocker categories (2026-05-29 follow-up pass):
+- **SFFI dispatch table** (`codegen/runtime_sffi.rs`): former `rt_value_*` and `rt_env_*` blockers now resolve to exported Rust replacements.
+- **`calls.rs` codegen dispatch**: `simple_contract_check`, `simple_contract_check_msg`, and `sffi_regex_*` resolve to Rust exports now; the stale C files were deleted.
+- **Interpreter extern Rust FFI** (`interpreter_extern/math.rs`): `rt_math_*` symbols are resolved from the Rust `simple-runtime` crate directly — NOT from the deleted C file. Same for pty.
+- **Core-C tiny-native lane** (`build_core_c_runtime_library` in `native_project/tools.rs`): confirmed runtime_inputs = `[runtime_native.c, runtime_legacy_core.c, runtime_mcp_core.c, runtime_simd_utf8.c]` plus optional `runtime_https_openssl_core.c`. This lane keeps its own `rt_function_not_found` implementation in `runtime_native.c`; it did not require the deleted `runtime_error.c`.
+- **C file count after removals:** 25 top-level `src/runtime/*.c` files remain.
 
 | C File | Key Symbols | Rust Replacement | .spl Callers | Confirmed Blocker |
 |--------|-------------|-----------------|-------------|---------|
-| `runtime_math.c` | 27 (`rt_math_*`) | `value/sffi/math.rs`; interpreter via `interpreter_extern/math.rs` | 12 files | **Core-C tiny-native lane only** — interpreter and `simple-runtime` already use Rust; tiny-native build does not link Rust crate so these symbols would be unresolved. Not in SFFI dispatch table. |
-| `runtime_random.c` | 8 (`rt_random_*`) | `value/sffi/random.rs` | 10 files | Same as math — core-C tiny-native lane gap. Not in SFFI dispatch table. |
-| `runtime_contracts.c` | 2 (`simple_contract_check*`) | `value/sffi/contracts.rs` | 3 files | `calls.rs` codegen dispatch confirmed (`simple_contract_check`, `simple_contract_check_msg`). |
-| `runtime_error.c` | `rt_function_not_found`, `rt_method_not_found` | `value/sffi/error_handling.rs` | 2 files | Core-C tiny-native lane gap (not in SFFI dispatch or calls.rs). Verify Rust export `#[export_name]` is visible to native link. |
-| `runtime_equality.c` | `rt_native_eq`, `rt_native_neq`, `rt_value_eq`, `rt_value_compare` | `value/sffi/equality.rs` | 0 direct | `rt_value_eq`/`rt_value_compare` confirmed in SFFI dispatch table (`runtime_sffi.rs`). |
-| `runtime_value.c` | `rt_value_int/float/bool/nil`, `rt_value_as_int`, `rt_value_truthy`, `rt_value_is_nil/int/float/bool/heap`, `rt_value_type_tag` | `value/sffi/value_ops.rs`, `value/sffi/memory.rs` | 0 direct | `rt_value_int/float/bool/nil/as_int/truthy/to_ptr` confirmed in SFFI dispatch table. `runtime_value.h` header must stay even if `.c` is removed. |
-| `runtime_format.c` | `__c_rt_value_format_string`, `__c_rt_raw_u64_to_str`, `__c_rt_value_to_display_str` | `value/sffi/io_print.rs` | 0 direct | `rt_value_format_string` confirmed in SFFI dispatch table. |
-| `runtime_config.c` | `rt_set_macro_trace`, `rt_is_macro_trace_enabled`, `rt_set_debug_mode`, `rt_is_debug_mode_enabled` | `value/sffi/config.rs` (AtomicBool) | 0 direct | Core-C tiny-native lane gap (not confirmed in SFFI dispatch or calls.rs). |
-| `runtime_env.c` | `__c_rt_env_get_i64`, `__c_rt_env_set/exists/remove/get_str/cwd/home/temp`, `__c_rt_exit`, `__c_rt_stdout/stderr_flush`, `__c_rt_platform_name`, `__c_rt_term_get_size` | `value/sffi/env_process.rs`, `value/sffi/io_print.rs` | 0 direct | `rt_env_get/set/exists/remove/cwd/home/temp/get_i64` confirmed in SFFI dispatch table. `calls.rs` also references `rt_env_get*`. |
-| `runtime_regex_stub.c` | `sffi_regex_is_match/find/find_all/captures/replace/replace_all/split/split_n` | `value/sffi/regex_stub.rs` | `nogc_sync_mut/io/regex_simple.spl` | `sffi_regex_*` confirmed in `calls.rs` codegen dispatch. |
-| `runtime_pty.c` | `rt_pty_open`, `rt_pty_spawn` | `value/pty.rs` (runtime `#[no_mangle]`), `interpreter_extern/pty.rs` (interp) | `sys/pty.spl`, `smux/smux_remote.spl` | **Blocker cleared** (follow-up 2026-05-29). Zero build refs confirmed. `value/pty.rs` line 121/135: `#[no_mangle] pub extern "C" fn rt_pty_open/rt_pty_spawn` — both symbols exported from Rust. `runtime/build.rs` `-lutil` linkage is for the Rust `openpty` call, not the C file. Not in SFFI dispatch or calls.rs. Move to "Safe to delete" candidates. Also: `pty.spl` line 5 comment and `interpreter_extern/pty.rs` doc-comment are stale — both still claim compiled mode uses `runtime_pty.c`. |
+| _none_ | _n/a_ | _n/a_ | _n/a_ | Group A2 completed 2026-05-29. |
 
 ### Group B — SPL FFI surface (blocked by no Simple replacement yet)
 
@@ -101,7 +104,6 @@ Discovered on-disk 2026-05-29. These files were not in any previous audit pass.
 
 | C File | Symbols | Status | Blocker |
 |--------|---------|--------|---------|
-| `runtime_pty.c` | `rt_pty_open`, `rt_pty_spawn` | **Safe to delete** — zero refs in all `build.rs`/`tools.rs` confirmed. `value/pty.rs` exports both symbols via `#[no_mangle]`; `runtime/build.rs` links `-lutil` for the *Rust* `openpty` call, not the C file. No native build path compiles this C file. `interpreter_extern/pty.rs` provides the interpreter path independently. Stale comments in `pty.spl` (line 5: "implemented in runtime_pty.c") and `interpreter_extern/pty.rs` (doc comment claims compiled mode uses C) need updating after deletion. | — (blocker cleared 2026-05-29 follow-up) |
 | `runtime_base64.c` | `__c_rt_base64_encode`, `__c_rt_base64_decode` | **Already deleted** — confirmed GONE from disk 2026-05-29. Moved to Removed table. | — |
 
 Verification for the 2026-05-27 runtime hash/crypto removal:
@@ -114,44 +116,41 @@ bin/simple check src/compiler_rust/lib/std/src/infra/hash.spl src/lib/nogc_sync_
 cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml
 ```
 
-**2026-05-29 build-input audit correction:** Prior entries for runtime_math/random/contracts/error/equality/value/format/config/env/regex_stub claimed "the core-C runtime bundle still compiles it." This was **incorrect** — verified 2026-05-29 that none of these files appear in `runtime/build.rs` c_sources OR `tools.rs` runtime_inputs. The actual blockers differ per file: SFFI dispatch table (`rt_value_*`, `rt_env_*`), `calls.rs` codegen dispatch (`simple_contract_check*`, `sffi_regex_*`), or the core-C tiny-native lane gap (math/random/error/config — interpreter already uses Rust, tiny-native build does not link Rust crate). They are reclassified to Group A2.
+**2026-05-29 build-input audit correction:** Prior entries for runtime_math/random/contracts/error/equality/value/format/config/env/regex_stub claimed "the core-C runtime bundle still compiles it." This was **incorrect** — verified 2026-05-29 that none of these files appear in `runtime/build.rs` c_sources OR `tools.rs` runtime_inputs. `runtime_math.c`, `runtime_random.c`, `runtime_error.c`, `runtime_config.c`, `runtime_contracts.c`, `runtime_regex_stub.c`, `runtime_equality.c`, `runtime_format.c`, `runtime_value.c`, and `runtime_env.c` were deleted after their Rust replacements were exported with stable ABI symbols or no legacy helper callers remained.
 
 Additional 2026-05-27 simple-runtime reductions:
 
-- `value/sffi/math.rs` now implements the `rt_math_*` wrappers directly in
-  Rust using standard `f64` operations and a Rust `gcd`, so
-  `runtime/build.rs` no longer compiles `runtime_math.c`.
-- `value/sffi/random.rs` now implements the legacy LCG state and random-hex
-  helper directly in Rust, so `runtime/build.rs` no longer compiles
-  `runtime_random.c`.
-- `value/sffi/config.rs` now implements the macro-trace and debug-mode flags as
-  Rust `AtomicBool` state, so `runtime/build.rs` no longer compiles
-  `runtime_config.c`.
+- `value/sffi/math.rs` now implements and exports the `rt_math_*` wrappers
+  directly in Rust using standard `f64` operations and a Rust `gcd`, so
+  `runtime_math.c` was deleted.
+- `value/sffi/random.rs` now implements and exports the legacy LCG state and
+  random-hex helper directly in Rust, so `runtime_random.c` was deleted.
+- `value/sffi/config.rs` now implements and exports the macro-trace and
+  debug-mode flags as Rust `AtomicBool` state, so `runtime_config.c` was
+  deleted.
 - `value/sffi/error_handling.rs` now emits the not-found diagnostics and
-  returns the Rust runtime error sentinel directly, so `runtime/build.rs` no
-  longer compiles `runtime_error.c`.
+  returns the Rust runtime error sentinel directly via exported ABI symbols, so
+  `runtime_error.c` was deleted.
 - `value/sffi/value_ops.rs` and the pointer conversion helpers in
-  `value/sffi/memory.rs` now implement the value helpers directly in Rust, so
-  `runtime/build.rs` no longer compiles `runtime_value.c`.
-- `value/sffi/equality.rs` now implements value/native equality and comparison
-  directly in Rust, so `runtime/build.rs` no longer compiles
-  `runtime_equality.c`.
+  `value/sffi/memory.rs` now implement and export the value helpers directly
+  in Rust, so `runtime_value.c` was deleted. `runtime_value.h` stays as the C
+  ABI header for remaining C runtime sources.
+- `value/sffi/equality.rs` now implements and exports value/native equality
+  and comparison directly in Rust, so `runtime_equality.c` was deleted.
 - The stale `runtime_ctype.c` entry was removed from `runtime/build.rs`; that
   C source was already deleted and skipped by the build when absent.
-- `value/sffi/contracts.rs` now implements the contract diagnostics and abort
-  behavior directly in Rust, so `runtime/build.rs` no longer compiles
-  `runtime_contracts.c`.
-- `value/sffi/regex_stub.rs` now implements the disabled-regex stub behavior
-  directly in Rust, so `runtime/build.rs` no longer compiles
-  `runtime_regex_stub.c`.
-- `value/sffi/io_print.rs` now implements value formatting, raw u64
+- `value/sffi/contracts.rs` now implements and exports the contract diagnostics
+  and abort behavior directly in Rust, so `runtime_contracts.c` was deleted.
+- `value/sffi/regex_stub.rs` now implements and exports the disabled-regex
+  stub behavior directly in Rust, so `runtime_regex_stub.c` was deleted.
+- `value/sffi/io_print.rs` now implements and exports value formatting, raw u64
   stringification, and display-string conversion directly in Rust, so
-  `runtime/build.rs` no longer compiles `runtime_format.c`.
+  `runtime_format.c` was deleted.
+- `value/sffi/env_process.rs` and `value/sffi/io_print.rs` now implement and
+  export env/platform/process/terminal and flush helpers directly in Rust, so
+  `runtime_env.c` was deleted.
 - `value/pty.rs` now exports `rt_pty_open` and `rt_pty_spawn` directly in
   Rust, so `runtime/build.rs` no longer compiles `runtime_pty.c`.
-- `value/sffi/env_process.rs` and `value/sffi/io_print.rs` now implement
-  env/platform/terminal helpers, process exit, and stdout/stderr flush directly
-  in Rust, so `runtime/build.rs` no longer compiles `runtime_env.c`.
 
 Verification:
 
@@ -174,17 +173,31 @@ cargo test -p simple-runtime sffi::env_process --manifest-path src/compiler_rust
 
 **Verified build inputs (2026-05-29):** The core-C runtime bundle compiles exactly the files listed in `runtime/build.rs` c_sources and `tools.rs` runtime_inputs. No glob sweep; no amalgamation. Files absent from both lists are only kept if codegen/SFFI dispatch resolves their symbols at link time.
 
-For **math/random/config/error** (Group A2 — core-C tiny-native lane gap):
-Not in any build.rs or tools.rs compile list. `simple-runtime` and the interpreter resolve these from Rust. The remaining gate is the **core-C tiny-native lane** (`build_core_c_runtime_library`), which does NOT link the Rust crate. For any native binary using these symbols, the Rust `#[export_name]` exports must be visible to the link step. Removal requires confirming the tiny-native lane can find these symbols through the native archive or a Rust-compiled object.
+For **math/random/config/error**:
+Deleted 2026-05-29. Their Rust replacements now use exported C ABI symbols
+where a stable native symbol is required. The core-C tiny-native bundle did not
+compile these files; `runtime_native.c` retains the tiny-native
+`rt_function_not_found` implementation it already owned.
 
 For **equality/value/format/env** (Group A2 — SFFI dispatch table):
-Symbols confirmed in `codegen/runtime_sffi.rs` dispatch table (`rt_value_*`, `rt_env_*`, `rt_value_eq`, `rt_value_format_string`). Removal requires the SFFI table to resolve these from Rust exports (`#[export_name]`) rather than a C object. Pending SFFI audit.
+Deleted 2026-05-29. Former `rt_value_*`, `rt_env_*`, `rt_value_eq`, and
+`rt_value_format_string` SFFI blockers now resolve to Rust-exported symbols, or
+the exact legacy `__c_rt_*` helpers had no active callers.
 
-For **contracts/regex_stub** (Group A2 — calls.rs codegen dispatch):
-`simple_contract_check*` and `sffi_regex_*` confirmed in `codegen/instr/calls.rs`. Removal requires confirming the Rust `#[export_name]` implementations satisfy the codegen link step.
+For **contracts/regex_stub**:
+Deleted 2026-05-29. `simple_contract_check*` and `sffi_regex_*` are still
+referenced by codegen dispatch, but both the always-on contract module and the
+disabled-regex stub module now export the required symbols from Rust. The
+`runtime-regex` feature path already exported the real regex implementation.
 
 For **runtime_pty.c**:
-**Safe to delete** (confirmed follow-up 2026-05-29). Zero build references — not in `runtime/build.rs` c_sources, not in `native_project/tools.rs` runtime_inputs, no other build.rs references it. `value/pty.rs` exports `rt_pty_open` and `rt_pty_spawn` via `#[no_mangle]`; the `-lutil` link in `runtime/build.rs` is for the Rust `openpty(3)` call inside `value/pty.rs`. The `interpreter_extern/pty.rs` handles interpreter mode independently. After deletion: update stale comment in `src/compiler_rust/lib/std/src/sys/pty.spl` (line 5) and doc-comment in `src/compiler_rust/compiler/src/interpreter_extern/pty.rs` (says "compiled/native path uses the C symbols").
+Deleted 2026-05-29. Zero build references were reconfirmed before deletion:
+not in `runtime/build.rs` c_sources, not in `native_project/tools.rs`
+runtime_inputs, and no other build.rs references it. `value/pty.rs` exports
+`rt_pty_open` and `rt_pty_spawn` via `#[no_mangle]`; the `-lutil` link in
+`runtime/build.rs` is for the Rust `openpty(3)` call inside `value/pty.rs`.
+The `interpreter_extern/pty.rs` handles interpreter mode independently, and the
+std PTY comments now point at the Rust implementations.
 
 For **memory/time** (`runtime/build.rs` c_sources):
 Compiled directly into `libruntime_sffi_c.a`. `runtime_memory.c` is core ABI (codegen emits `rt_alloc` for every alloc). `runtime_time.c` wraps `clock_gettime`/`gettimeofday` — must stay native. Pure Simple `time_utils.spl` provides civil-date arithmetic on top.

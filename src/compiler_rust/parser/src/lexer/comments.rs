@@ -131,6 +131,13 @@ impl<'a> super::Lexer<'a> {
 
         // Check if this is a multi-line doc block (/// on its own line)
         if self.peek() == Some('\n') || self.peek().is_none() {
+            if self.next_line_starts_with_triple_slash_doc_line() {
+                return Token::new(
+                    TokenKind::DocComment(String::new()),
+                    Span::new(start_pos, self.current_pos, start_line, start_column),
+                    self.source[start_pos..self.current_pos].to_string(),
+                );
+            }
             // This might be a multi-line doc block opener: ///\n...\n///
             return self.read_doc_block_triple_slash(start_pos, start_line, start_column);
         }
@@ -149,6 +156,15 @@ impl<'a> super::Lexer<'a> {
             Span::new(start_pos, self.current_pos, start_line, start_column),
             self.source[start_pos..self.current_pos].to_string(),
         )
+    }
+
+    pub(super) fn next_line_starts_with_triple_slash_doc_line(&self) -> bool {
+        let Some(newline_offset) = self.source[self.current_pos..].find('\n') else {
+            return false;
+        };
+        let mut rest = &self.source[self.current_pos + newline_offset + 1..];
+        rest = rest.trim_start_matches([' ', '\t']);
+        rest.starts_with("///")
     }
 
     /// Read a multi-line doc block delimited by /// on separate lines

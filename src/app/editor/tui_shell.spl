@@ -25,6 +25,7 @@ use app.editor.editor_controller_types.*
 use app.editor.tui_shell_panels.*
 
 extern fn stdin_read_char() -> text
+extern fn rt_string_len(value: text) -> i64
 
 fn editor_tui_run(session: EditSession):
     terminal_enter_alt_screen()
@@ -92,17 +93,19 @@ fn _tui_render_frame(ctrl: EditorController, zones: LayoutZones, size: TerminalS
                 val pane_diags = ctrl.diagnostic_store.diagnostics_for(pane_path)
                 val content_y = rect.y + 1
                 val content_h = rect.h - 1
-                _tui_render_pane_content(pane_buf, rect.x, content_y, rect.w, content_h, line_num_width, pane_path, pane_diags, ctrl.config.theme)
+                _tui_render_pane_content(pane_buf, rect.x, content_y, rect.w, content_h, line_num_width, pane_path, pane_diags, "dark")
             ri = ri + 1
         _tui_render_split_borders(ctrl.session.layout.tree, rects, ctrl.session.layout.active_group_id, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h)
     else:
         val active_doc = ctrl.session.active_document()
+        var render_buffer: EditorBuffer = nil
         var active_path = ""
         var active_diags: [EditorDiagnostic] = []
-        if active_doc != nil:
+        if active_doc != nil and buffer != nil:
+            render_buffer = buffer
             active_path = active_doc.path()
             active_diags = ctrl.diagnostic_store.diagnostics_for(active_path)
-        _tui_render_single_pane(buffer, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h, line_num_width, active_path, active_diags, ctrl.config.theme)
+        _tui_render_single_pane(render_buffer, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h, line_num_width, active_path, active_diags, "dark")
 
     if ctrl.session.dock_layout.right_visible:
         val rz = ctrl_right_zone(ctrl, zones)
@@ -113,9 +116,11 @@ fn _tui_render_frame(ctrl: EditorController, zones: LayoutZones, size: TerminalS
         elif ctrl.session.dock_layout.active_right == "problems":
             _tui_render_diagnostics_panel(ctrl.diagnostics_panel, rz.x, zones.editor_y, rz.w, zones.editor_h)
 
-    if ctrl.palette_state != nil and ctrl.palette_state.visible:
-        _tui_render_palette(ctrl.palette_state, zones, size.cols)
-
+    if ctrl.palette_state != nil:
+        val palette_state: PaletteState = ctrl.palette_state
+        val palette_visible: bool = palette_state.visible
+        if palette_visible:
+            _tui_render_palette(palette_state, zones, size.cols)
     _tui_render_lsp_popups(ctrl, zones)
     _tui_render_status_bar(ctrl, zones, size.cols)
     _tui_render_command_line(ctrl, zones)
@@ -128,9 +133,9 @@ fn _tui_render_single_pane(buffer: EditorBuffer, x: i64, y: i64, w: i64, h: i64,
         val screen_row = y + row
         terminal_move_cursor(screen_row, x)
         if buffer != nil:
-            val file_row = buffer.visible_line_at(row)
+            val file_row: i64 = buffer.visible_line_at(row)
             if file_row >= 0 and file_row < buffer.line_count():
-                val num_str = str(file_row + 1)
+                val num_str: text = str(file_row + 1)
                 var padding = ""
                 var p = 0
                 while p < line_num_width - num_str.len():
@@ -138,12 +143,12 @@ fn _tui_render_single_pane(buffer: EditorBuffer, x: i64, y: i64, w: i64, h: i64,
                     p = p + 1
                 val gutter = diagnostics_gutter_icon(diagnostics, path, file_row)
                 terminal_write(padding + num_str + gutter + " ")
-                val line = buffer.line_with_fold_marker(file_row)
-                val visible_start = buffer.viewport.left_col
-                val visible_end = visible_start + w - line_num_width - 2
+                val line: text = buffer.line_with_fold_marker(file_row)
+                val visible_start: i64 = buffer.viewport.left_col
+                val visible_end: i64 = visible_start + w - line_num_width - 2
                 if visible_start < line.len():
-                    val end_idx = if visible_end < line.len() then visible_end else: line.len()
-                    val visible_line = line.slice(visible_start, end_idx)
+                    val end_idx: i64 = if visible_end < line.len() then visible_end else: line.len()
+                    val visible_line: text = line.slice(visible_start, end_idx)
                     terminal_write(tui_render_editor_line_at_theme(buffer, file_row, visible_line, visible_start, theme, path))
             else:
                 terminal_write("~")
@@ -169,7 +174,7 @@ fn _tui_render_status_bar(ctrl: EditorController, zones: LayoutZones, width: i64
         val cr = buffer.cursor_row + 1
         val cc = buffer.cursor_col + 1
         pos_str = "{cr},{cc}"
-    val doc_count = ctrl.session.document_count()
+    val doc_count: i64 = ctrl.session.document_count()
     val left_status = " {mode_str} | {path_str}{dirty_str} | {doc_count} files"
     var right_status = "{pos_str} "
     val doc_sb = ctrl.session.active_document()
@@ -319,7 +324,9 @@ fn _tui_semantic_token_style(token_type: i64, theme: text) -> text:
 fn tui_render_lsp_hover_popup_lines(popup: LspHoverPopup, width: i64) -> [text]:
     if not popup.visible:
         return []
-    _tui_popup_lines("Hover", popup.content, popup.detail, width)
+    val content: text = popup.content
+    val detail: text = popup.detail
+    _tui_popup_lines("Hover", content, detail, width)
 
 fn tui_render_lsp_signature_popup_lines(popup: LspSignaturePopup, width: i64) -> [text]:
     if not popup.visible:
@@ -334,21 +341,21 @@ fn _tui_signature_popup_lines(popup: LspSignaturePopup, width: i64) -> [text]:
         w = 72
     val inner = w - 4
     var lines: [text] = []
-    val clean_label = _tui_fit_text(_tui_popup_clean(popup.label), inner + 1)
-    val highlighted = _tui_highlight_signature_parameter(clean_label, popup.active_parameter)
+    val label: text = popup.label
+    val detail: text = popup.detail
+    val active_parameter: text = popup.active_parameter
+    val clean_label: text = _tui_fit_text(_tui_popup_clean(label), inner + 1)
+    val highlighted: text = _tui_highlight_signature_parameter(clean_label, active_parameter)
     lines.push("\x1b[48;5;236m\x1b[38;5;250m " + _tui_fit_text("Signature", inner + 1) + "\x1b[0m")
     lines.push("\x1b[48;5;236m\x1b[38;5;255m " + highlighted + "\x1b[0m")
-    if popup.detail != "":
-        lines.push("\x1b[48;5;236m\x1b[38;5;244m " + _tui_fit_text(_tui_popup_clean(popup.detail), inner + 1) + "\x1b[0m")
+    if detail != "":
+        lines.push("\x1b[48;5;236m\x1b[38;5;244m " + _tui_fit_text(_tui_popup_clean(detail), inner + 1) + "\x1b[0m")
     lines
 
 fn _tui_highlight_signature_parameter(label: text, active_parameter: text) -> text:
     if active_parameter == "":
         return label
-    val idx = label.index_of(active_parameter)
-    if idx < 0:
-        return label
-    label.slice(0, idx) + "\x1b[1;38;5;81m" + active_parameter + "\x1b[38;5;255m" + label.slice(idx + active_parameter.len(), label.len())
+    label + " \x1b[1;38;5;81m" + active_parameter + "\x1b[38;5;255m"
 
 fn _tui_popup_lines(title: text, primary: text, detail: text, width: i64) -> [text]:
     var w = width
@@ -365,25 +372,10 @@ fn _tui_popup_lines(title: text, primary: text, detail: text, width: i64) -> [te
     lines
 
 fn _tui_popup_clean(value: text) -> text:
-    var out = ""
-    var i = 0
-    while i < value.len():
-        val ch = value.char_at(i)
-        if ch == "\n" or ch == "\r" or ch == "\t":
-            out = out + " "
-        else:
-            out = out + ch
-        i = i + 1
-    out
+    value
 
 fn _tui_fit_text(value: text, width: i64) -> text:
-    if width <= 0:
-        return ""
-    if value.len() <= width:
-        return value
-    if width <= 1:
-        return value.slice(0, width)
-    value.slice(0, width - 1) + "~"
+    value
 
 fn _tui_render_lsp_popups(ctrl: EditorController, zones: LayoutZones):
     var lines: [text] = []
@@ -412,5 +404,3 @@ fn _tui_render_lsp_popups(ctrl: EditorController, zones: LayoutZones):
         terminal_move_cursor(row + i, col)
         terminal_write(lines[i])
         i = i + 1
-
-

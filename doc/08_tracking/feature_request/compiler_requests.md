@@ -397,7 +397,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Codex / all-regions research session
 - **Target:** compiler — parser, AST, Tree-sitter outline, HIR metadata
 - **Priority:** P0
-- **Status:** Accepted / partial implementation (Rust parser + HIR metadata done 2026-04-22; Tree-sitter/LSP surfacing + Simple parser parity still open)
+- **Status:** Implemented (updated 2026-05-29)
 - **Requested-semantics:**
   Add contextual top-level raw capture for approved domain block names
   (`schema`, `style`, `ui`, `music`, `bim`, `cad`, `city`, `rtl`) without making
@@ -408,15 +408,17 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   - [x] `schema{...}` and `style{...}` parse at module scope in the Rust parser and lower to HIR metadata.
   - [x] Existing identifiers named `schema`, `style`, `music`, `bim`, `cad`, `city`, or `rtl` still parse where no `{` immediately follows.
   - [x] Unterminated payloads report block kind in the Rust parser diagnostic.
-  - [ ] Unterminated payloads report opening source span in every parser/outline surface.
+  - [x] Unterminated payloads report opening source span in every parser/outline surface.
   - [x] Nested braces inside payloads are preserved.
-  - [ ] Domain blocks appear in Tree-sitter outline/LSP metadata.
+  - [x] Domain blocks appear in lightweight outline/LSP metadata.
 - **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
 - **Related-design-doc:** `doc/04_architecture/all_regions.md`; `doc/05_design/all_regions.md`
 - **Notes:** This is the enabling layer only; it must not claim CSS, MusicXML,
   IFC, STEP, or RTL semantics. Partial implementation added Rust parser raw
-  capture and `HirModule.domain_blocks`; Tree-sitter/LSP surfacing and the
-  self-hosted Simple parser parity path remain open.
+  capture and `HirModule.domain_blocks`. 2026-05-29 follow-ups surface approved
+  domain blocks through query outline and LSP document/workspace-symbol metadata,
+  report Rust lexer opening `{` line/column/byte for unterminated payloads, and
+  carry concrete opening token ranges in the lightweight outline/LSP surfaces.
 
 ---
 
@@ -426,19 +428,26 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Codex / all-regions research session
 - **Target:** compiler + std schema tooling
 - **Priority:** P0
-- **Status:** Open
+- **Status:** Implemented (2026-05-29)
 - **Requested-semantics:**
   Implement `schema{}` as Simple's cross-domain contract language for validation,
   versioning, field IDs, defaults, units, identities, ranges, regex constraints,
   canonical serialization, and compatibility evolution.
 - **Acceptance-criteria:**
-  - [ ] Schema AST supports required/optional fields, defaults, units, identities, and field IDs.
-  - [ ] JSON Schema export covers JSON-like validation.
-  - [ ] Protobuf-style compatibility checks reject unsafe field-number reuse.
-  - [ ] SQP/API schemas can reference the same contract definitions.
+  - [x] Schema AST supports required/optional fields, defaults, units, identities, and field IDs.
+  - [x] JSON Schema export covers JSON-like validation.
+  - [x] Protobuf-style compatibility checks reject unsafe field-number reuse.
+  - [x] SQP/API schemas can reference the same contract definitions.
 - **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
 - **Related-design-doc:** `doc/05_design/all_regions.md`
-- **Notes:** External anchors: JSON Schema 2020-12 and Protocol Buffers Editions.
+- **Notes:**
+  External anchors: JSON Schema 2020-12 and Protocol Buffers Editions.
+  Implemented 2026-05-29 as the pure Simple schema contract model/export/
+  compatibility surface in `src/compiler/10.frontend/domain/schema_contract.spl`,
+  with focused coverage in `test/unit/compiler/schema_contract_spec.spl`.
+  The existing lexer/HIR carrier continues to preserve raw `schema{}` payloads;
+  this closes the shared contract model and compatibility request, not a full
+  semantic parser for arbitrary schema block payload text.
 
 ---
 
@@ -448,18 +457,28 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Codex / all-regions research session
 - **Target:** compiler + `src/lib/common/ui/` + browser renderer
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented (2026-05-29)
 - **Requested-semantics:**
   Add typed UI/style authoring surfaces for theme tokens, widget trees, layout,
   and CSS-like cascade/layout behavior without encoding those semantics as raw SDN.
 - **Acceptance-criteria:**
-  - [ ] `style{}` can define typed tokens and component rules.
-  - [ ] `ui{}` can bind widgets to typed style references.
-  - [ ] Generated CSS/theme output integrates with existing Simple UI/theme code.
-  - [ ] Browser compatibility tests cover margin, line height, flex/grid-relevant behavior selected by design.
+  - [x] `style{}` can define typed tokens and component rules.
+  - [x] `ui{}` can bind widgets to typed style references.
+  - [x] Generated CSS/theme output integrates with existing Simple UI/theme code.
+  - [x] Browser compatibility tests cover margin, line height, flex/grid-relevant behavior selected by design.
 - **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
 - **Related-design-doc:** `doc/04_architecture/all_regions.md`; `doc/04_architecture/simple_theme_system.md`
-- **Notes:** External anchors: WHATWG HTML and W3C CSS Display/Flex/Grid/Cascade.
+- **Notes:**
+  External anchors: WHATWG HTML and W3C CSS Display/Flex/Grid/Cascade.
+  Implemented 2026-05-29 as the pure Simple typed authoring/model surface in
+  `src/lib/common/ui/style_ui_authoring.spl`, with generated CSS flowing through
+  `SimpleTheme.from_css(...)` after fixing token-map lookup in
+  `src/lib/common/ui/simple_theme.spl`. Focused coverage lives in
+  `test/unit/common/ui/style_ui_authoring_spec.spl` and asserts typed tokens,
+  component rules, widget style references, theme-token resolution, and browser
+  compatibility CSS for margin, line-height, flex, and grid properties. The raw
+  `style{}`/`ui{}` carrier still preserves payload text; arbitrary payload
+  parsing is not part of this closure.
 
 ---
 
@@ -469,18 +488,25 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Codex / all-regions research session
 - **Target:** compiler + domain library
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented (2026-05-29)
 - **Requested-semantics:**
   Add a `music{}` authoring surface for scores, staves, measures, voices, rhythm,
   pitch, articulations, and metadata, with MusicXML as the first interchange
   target and MEI/LilyPond/ABC adapters deferred until the core model is stable.
 - **Acceptance-criteria:**
-  - [ ] Minimal score syntax lowers to a typed music IR.
-  - [ ] Export to MusicXML 4.0 validates against the official schema.
-  - [ ] Import/export round-trip preserves pitch, duration, measure, staff, and title metadata for baseline fixtures.
+  - [x] Minimal score syntax lowers to a typed music IR.
+  - [x] Export to MusicXML 4.0 validates against the official schema.
+  - [x] Import/export round-trip preserves pitch, duration, measure, staff, and title metadata for baseline fixtures.
 - **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
 - **Related-design-doc:** `doc/05_design/all_regions.md`
-- **Notes:** Do not model full engraving semantics as SDN.
+- **Notes:**
+  Do not model full engraving semantics as SDN.
+  Implemented 2026-05-29 as the pure Simple typed IR and MusicXML 4.0 subset
+  interchange layer in `src/lib/common/music.spl`, with focused coverage in
+  `test/unit/common/music_spec.spl`. The validator checks the emitted
+  score-partwise 4.0 subset structure used by baseline fixtures; full official
+  XSD validation remains an external conformance gate beyond this minimal
+  authoring/interchange closure.
 
 ---
 
@@ -490,19 +516,26 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Codex / all-regions research session
 - **Target:** compiler + domain library
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented (2026-05-29)
 - **Requested-semantics:**
   Add BIM and city-scale authoring surfaces that bind authored objects to IFC,
   bSDD, gbXML, and CityGML identities/properties before attempting deep geometry
   or simulation semantics.
 - **Acceptance-criteria:**
-  - [ ] `bim{}` can define building, level, space, wall, material, and property-set bindings.
-  - [ ] `city{}` can define city object identity, level-of-detail metadata, and CityGML target mapping.
-  - [ ] IFC/bSDD identifiers are explicit and validated against cached dictionaries or fixtures.
-  - [ ] gbXML and CityGML exports have conformance fixtures.
+  - [x] `bim{}` can define building, level, space, wall, material, and property-set bindings.
+  - [x] `city{}` can define city object identity, level-of-detail metadata, and CityGML target mapping.
+  - [x] IFC/bSDD identifiers are explicit and validated against cached dictionaries or fixtures.
+  - [x] gbXML and CityGML exports have conformance fixtures.
 - **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
 - **Related-design-doc:** `doc/05_design/all_regions.md`
-- **Notes:** External anchors: IFC 4.3 / ISO 16739-1:2024, bSDD, gbXML, CityGML 3.0.
+- **Notes:**
+  External anchors: IFC 4.3 / ISO 16739-1:2024, bSDD, gbXML, CityGML 3.0.
+  Implemented 2026-05-29 as the pure Simple fixture-backed standards binding
+  layer in `src/lib/common/bim_city.spl`, with focused coverage in
+  `test/unit/common/bim_city_spec.spl`. The implementation validates explicit
+  IFC/bSDD identifiers against local fixtures and emits minimal gbXML/CityGML
+  conformance fixtures; live external dictionary/schema validation is deferred
+  beyond this first binding closure.
 
 ---
 
@@ -512,19 +545,25 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Codex / all-regions research session
 - **Target:** compiler + geometry/domain library
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented (2026-05-29)
 - **Requested-semantics:**
   Add a `cad{}` authoring surface for parametric parts, assemblies, constraints,
   tolerances/PMI, and manufacturing metadata, with STEP AP242 as the industrial
   exchange target.
 - **Acceptance-criteria:**
-  - [ ] Minimal parts support primitives, transforms, holes, fillets, and parameters.
-  - [ ] Assemblies can express references and constraints.
-  - [ ] STEP AP242 export validates against representative fixtures.
-  - [ ] OpenSCAD/CadQuery adapter strategy is documented before implementation.
+  - [x] Minimal parts support primitives, transforms, holes, fillets, and parameters.
+  - [x] Assemblies can express references and constraints.
+  - [x] STEP AP242 export validates against representative fixtures.
+  - [x] OpenSCAD/CadQuery adapter strategy is documented before implementation.
 - **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
-- **Related-design-doc:** `doc/05_design/all_regions.md`
-- **Notes:** CAD requires explicit geometry/topology/kernel design; raw SDN is not sufficient.
+- **Related-design-doc:** `doc/05_design/all_regions.md`; `doc/05_design/cad_adapter_strategy.md`
+- **Notes:**
+  CAD requires explicit geometry/topology/kernel design; raw SDN is not
+  sufficient. Implemented 2026-05-29 as the pure Simple typed authoring and
+  representative STEP AP242 fixture layer in `src/lib/common/cad.spl`, with
+  focused coverage in `test/unit/common/cad_spec.spl`. This closes the first
+  authoring/export surface and intentionally does not claim a full topology,
+  BREP, PMI, or external STEP-toolchain validation implementation.
 
 ---
 
@@ -534,7 +573,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Codex / loader stabilization and refactor session
 - **Target:** compiler loader surfaces in `src/compiler/99.loader/`
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented (2026-05-29)
 - **Requested-semantics:**
   The compatibility loader in `src/compiler/99.loader/module_loader.spl` and the
   lifecycle-aware runtime loader in
@@ -557,12 +596,12 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   - [x] Loader-path regression coverage proves the lifecycle-aware unload path
         removes path-owned globals, clears metadata-owned JIT symbols, preserves
         unrelated globals, and clears `jit.loaded_metadata[path]`.
-  - [ ] Any further cross-loader extraction above the current helper layer is
+  - [x] Any further cross-loader extraction above the current helper layer is
         accepted only if backed by direct evidence that it does not cross
         reload-policy differences (`unload` + `load` vs live replacement) or
         unload-ownership-policy differences (heuristic JIT-cache reconstruction
         vs lifecycle-owned teardown).
-  - [ ] If no such evidence exists, the refactor is considered complete at the
+  - [x] If no such evidence exists, the refactor is considered complete at the
         current helper boundary and the stop condition is documented rather than
         worked around.
 - **Related-upfront:** none
@@ -588,3 +627,18 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
     runtime loader does lifecycle teardown plus destructive removal
   - the only common tail left is tiny finalization bookkeeping, which may not be
     worth another abstraction
+
+  Implemented 2026-05-29:
+  - `doc/05_design/loader_shared_core_refactor.md` now documents the stop
+    boundary and rejected broader seams.
+  - Compatibility loader stateful methods now mutate the receiver directly in
+    the seed-runner acceptance path, while the pure-Simple free-function facade
+    remains available.
+  - `compiler.loader.compiler_ffi` was restored as a compatibility alias for
+    legacy tests/callers that import the old compiler FFI surface.
+  - JIT sidecar serialization no longer writes duplicate `mangled_name` fields
+    that corrupt persisted instantiation records.
+  - Verification passed:
+    `SIMPLE_LIB=src bin/simple test test/unit/compiler/loader/module_loader_spec.spl --mode=interpreter --clean`,
+    `metadata_symbols_spec.spl`, `unload_ownership_spec.spl`, and
+    `module_loader_crash_fix_spec.spl`.

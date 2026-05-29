@@ -1,6 +1,7 @@
 //! Wrapped SFFI (WFFI) functions for dynamic library loading
 //!
 //! Provides spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64,
+//! spl_wffi_call_f64,
 //! spl_f64_to_bits, spl_bits_to_f64, spl_str_ptr, and rt_cstring_to_text
 //! for the interpreter, enabling dynamic loading of native shared libraries
 //! (e.g., libspl_torch.so) at runtime.
@@ -269,6 +270,94 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(result))
 }
 
+/// Call a function pointer with f64 arguments and return an f64 result.
+///
+/// Callable from Simple as: `spl_wffi_call_f64(fptr: i64, args: [f64], nargs: i64) -> f64`
+///
+/// Supports 0-8 arguments. Integer arguments are accepted and widened to f64
+/// for parity with normal Simple numeric conversion.
+pub fn spl_wffi_call_f64(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 3 {
+        return Err(CompileError::runtime(
+            "spl_wffi_call_f64 requires 3 arguments (fptr, args, nargs)",
+        ));
+    }
+
+    let fptr = match &args[0] {
+        Value::Int(p) => *p as usize,
+        _ => return Err(CompileError::runtime("spl_wffi_call_f64: fptr must be an integer")),
+    };
+
+    if fptr == 0 {
+        return Err(CompileError::runtime("spl_wffi_call_f64: null function pointer"));
+    }
+
+    let call_args: Vec<f64> = match &args[1] {
+        Value::Array(arr) => arr.iter().map(Value::as_float).collect::<Result<Vec<_>, _>>()?,
+        _ => return Err(CompileError::runtime("spl_wffi_call_f64: args must be an array")),
+    };
+
+    let nargs = match &args[2] {
+        Value::Int(n) => *n as usize,
+        _ => return Err(CompileError::runtime("spl_wffi_call_f64: nargs must be an integer")),
+    };
+
+    let result: f64 = unsafe {
+        match nargs {
+            0 => {
+                let f: extern "C" fn() -> f64 = std::mem::transmute(fptr);
+                f()
+            }
+            1 => {
+                let f: extern "C" fn(f64) -> f64 = std::mem::transmute(fptr);
+                f(call_args[0])
+            }
+            2 => {
+                let f: extern "C" fn(f64, f64) -> f64 = std::mem::transmute(fptr);
+                f(call_args[0], call_args[1])
+            }
+            3 => {
+                let f: extern "C" fn(f64, f64, f64) -> f64 = std::mem::transmute(fptr);
+                f(call_args[0], call_args[1], call_args[2])
+            }
+            4 => {
+                let f: extern "C" fn(f64, f64, f64, f64) -> f64 = std::mem::transmute(fptr);
+                f(call_args[0], call_args[1], call_args[2], call_args[3])
+            }
+            5 => {
+                let f: extern "C" fn(f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(fptr);
+                f(call_args[0], call_args[1], call_args[2], call_args[3], call_args[4])
+            }
+            6 => {
+                let f: extern "C" fn(f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(fptr);
+                f(call_args[0], call_args[1], call_args[2], call_args[3], call_args[4], call_args[5])
+            }
+            7 => {
+                let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(fptr);
+                f(call_args[0], call_args[1], call_args[2], call_args[3], call_args[4], call_args[5], call_args[6])
+            }
+            8 => {
+                let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(fptr);
+                f(
+                    call_args[0],
+                    call_args[1],
+                    call_args[2],
+                    call_args[3],
+                    call_args[4],
+                    call_args[5],
+                    call_args[6],
+                    call_args[7],
+                )
+            }
+            _ => {
+                return Err(CompileError::runtime("spl_wffi_call_f64: max 8 arguments supported"));
+            }
+        }
+    };
+
+    Ok(Value::Float(result))
+}
+
 /// Convert f64 to its bit representation as i64.
 ///
 /// Callable from Simple as: `spl_f64_to_bits(f: f64) -> i64`
@@ -349,4 +438,31 @@ pub fn rt_cstring_to_text(args: &[Value]) -> Result<Value, CompileError> {
     let c_str = unsafe { CStr::from_ptr(ptr) };
     let s = c_str.to_string_lossy().into_owned();
     Ok(Value::Str(s))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    extern "C" fn add_scaled(a: f64, b: f64, scale: f64) -> f64 {
+        (a + b) * scale
+    }
+
+    #[test]
+    fn spl_wffi_call_f64_invokes_function_pointer() {
+        let fptr = add_scaled as usize as i64;
+        let args = Value::Array(Arc::new(vec![
+            Value::Float(1.25),
+            Value::Float(2.75),
+            Value::Float(0.5),
+        ]));
+
+        let result = spl_wffi_call_f64(&[Value::Int(fptr), args, Value::Int(3)]).unwrap();
+
+        match result {
+            Value::Float(v) => assert_eq!(v, 2.0),
+            other => panic!("expected float result, got {other:?}"),
+        }
+    }
 }

@@ -2,12 +2,13 @@
 #
 # Provides: EditSession.
 
-use std.editor.buffer.buffer.{EditorBuffer}
-use std.editor.core.document.{EditorDocument}
-use std.editor.view.layout.{EditorLayout, LayoutPane, layout_new}
-use std.editor.view.split_tree.{SplitTree, SplitNode, SplitDirection, split_tree_leaf, split_tree_split}
-use std.editor.view.dock_zone.{DockLayout}
-use std.editor.common.types.{EditorMode, editor_mode_normal, EditorBufferId, EditorDocumentId}
+use std.editor.buffer.buffer.*
+use std.editor.buffer.piece_table.*
+use std.editor.core.document.*
+use std.editor.view.layout.*
+use std.editor.view.split_tree.*
+use std.editor.view.dock_zone.*
+use std.editor.common.types.*
 
 # Pane — maps a pane_id to a buffer index.
 class Pane:
@@ -41,15 +42,31 @@ class EditSession:
             status_message: ""
         )
 
-    me open_file(path: text):
+    me open_file(path: text) -> EditorDocumentId:
         val doc = EditorDocument.from_path(path)
-        val buf = EditorBuffer.from_text(EditorBufferId(value: me.documents.len()), doc.content)
-        buf.path = path
+        val doc_id = EditorDocumentId(value: me.documents.len())
+        doc.id = doc_id
+        val buf = EditorBuffer(
+            table: PieceTable.new(doc.content),
+            id: EditorBufferId(value: me.documents.len()),
+            path: path,
+            cursor_row: 0,
+            cursor_col: 0,
+            dirty: false,
+            viewport: EditorViewport(top_row: 0, left_col: 0, width: 80, height: 24),
+            semantic_tokens: [],
+            inlay_hints: [],
+            code_lenses: [],
+            selection_range: SelectionRangeState(active: false, start_row: 0, start_col: 0, end_row: 0, end_col: 0),
+            selection_ranges: [],
+            fold_ranges: [],
+            folded_ranges: []
+        )
         me.documents.push(doc)
         me.buffers.push(buf)
         me.active_index = me.documents.len() - 1
-        # Bind the active pane to the new buffer
-        me._bind_active_pane(me.active_index)
+        me.panes = editor_session_bind_panes(me.panes, me.split.active_pane_id, me.active_index)
+        doc_id
 
     me open_empty():
         val doc = EditorDocument.empty()
@@ -57,20 +74,20 @@ class EditSession:
         me.documents.push(doc)
         me.buffers.push(buf)
         me.active_index = me.documents.len() - 1
-        me._bind_active_pane(me.active_index)
+        me.panes = editor_session_bind_panes(me.panes, me.split.active_pane_id, me.active_index)
 
     me switch_tab(delta: i64):
         if me.documents.len() == 0:
             return
         val n = me.documents.len()
         me.active_index = (me.active_index + delta + n) % n
-        me._bind_active_pane(me.active_index)
+        me.panes = editor_session_bind_panes(me.panes, me.split.active_pane_id, me.active_index)
 
     me switch_to_index(index: i64):
         if index < 0 or index >= me.documents.len():
             return
         me.active_index = index
-        me._bind_active_pane(me.active_index)
+        me.panes = editor_session_bind_panes(me.panes, me.split.active_pane_id, me.active_index)
 
     me switch_to_name(name: text) -> bool:
         """Switch to the buffer whose path contains the given name. Returns true if found."""
@@ -79,7 +96,7 @@ class EditSession:
             val doc_path = me.documents[i].path()
             if doc_path == name or doc_path.ends_with(name):
                 me.active_index = i
-                me._bind_active_pane(i)
+                me.panes = editor_session_bind_panes(me.panes, me.split.active_pane_id, i)
                 return true
             i = i + 1
         false
@@ -99,7 +116,7 @@ class EditSession:
         me.buffers = new_bufs
         if me.active_index >= me.documents.len():
             me.active_index = me.documents.len() - 1
-        me._bind_active_pane(me.active_index)
+        me.panes = editor_session_bind_panes(me.panes, me.split.active_pane_id, me.active_index)
 
     me split_editor():
         """Vertical split — add a new pane to the right of the active pane."""
@@ -193,12 +210,38 @@ class EditSession:
     fn active_buffer() -> EditorBuffer:
         if me.active_index < 0 or me.active_index >= me.buffers.len():
             return EditorBuffer.new()
-        me.buffers[me.active_index]
+        val raw = me.buffers[me.active_index]
+        EditorBuffer(
+            table: raw.table,
+            id: raw.id,
+            path: raw.path,
+            cursor_row: raw.cursor_row,
+            cursor_col: raw.cursor_col,
+            dirty: raw.dirty,
+            viewport: raw.viewport,
+            semantic_tokens: raw.semantic_tokens,
+            inlay_hints: raw.inlay_hints,
+            code_lenses: raw.code_lenses,
+            selection_range: raw.selection_range,
+            selection_ranges: raw.selection_ranges,
+            fold_ranges: raw.fold_ranges,
+            folded_ranges: raw.folded_ranges
+        )
 
     fn active_document() -> EditorDocument:
         if me.active_index < 0 or me.active_index >= me.documents.len():
             return EditorDocument.empty()
-        me.documents[me.active_index]
+        val raw = me.documents[me.active_index]
+        EditorDocument(
+            id: raw.id,
+            _path: raw._path,
+            language_id: raw.language_id,
+            content: raw.content,
+            cached_md_stats: raw.cached_md_stats,
+            modified: raw.modified,
+            buffer: raw.buffer,
+            md_state: raw.md_state
+        )
 
     fn active_doc_id() -> EditorDocumentId:
         if me.active_index < 0 or me.active_index >= me.documents.len():
@@ -225,12 +268,15 @@ class EditSession:
     me _bind_active_pane(buf_index: i64):
         """Bind the currently active pane to a buffer index."""
         val target = me.split.active_pane_id
+        var panes: [Pane] = []
         var i = 0
         while i < me.panes.len():
             if me.panes[i].pane_id == target:
-                me.panes[i].buffer_index = buf_index
-                return
+                panes.push(Pane(pane_id: me.panes[i].pane_id, buffer_index: buf_index))
+            else:
+                panes.push(me.panes[i])
             i = i + 1
+        me.panes = panes
 
     me _sync_active_from_pane():
         """Set active_index from the buffer bound to the active pane."""
@@ -251,3 +297,14 @@ class EditSession:
             ids.push(me.panes[i].pane_id)
             i = i + 1
         ids
+
+fn editor_session_bind_panes(panes_in: [Pane], active_pane_id: i64, buf_index: i64) -> [Pane]:
+    var panes: [Pane] = []
+    var i = 0
+    while i < panes_in.len():
+        if panes_in[i].pane_id == active_pane_id:
+            panes.push(Pane(pane_id: panes_in[i].pane_id, buffer_index: buf_index))
+        else:
+            panes.push(panes_in[i])
+        i = i + 1
+    panes

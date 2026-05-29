@@ -993,6 +993,10 @@ pub extern "C" fn rt_compile_to_llvm_ir(_source: i64) -> i64 {
 pub extern "C" fn rt_compile_to_native(_source: i64, _output: i64) -> i64 {
     0
 }
+#[no_mangle]
+pub extern "C" fn rt_compile_to_native_with_opt(_source: i64, _output: i64, _opt_level: i64) -> i64 {
+    0
+}
 
 /// Execute a native binary with arguments and timeout.
 ///

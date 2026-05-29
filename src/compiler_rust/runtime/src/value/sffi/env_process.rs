@@ -23,6 +23,13 @@ unsafe fn ptr_string(ptr: *const u8, len: u64, max_len: usize) -> Option<String>
     Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
+unsafe fn ptr_string_value(ptr: *const u8, len: u64, max_len: usize) -> Option<String> {
+    if len == 0 {
+        return Some(String::new());
+    }
+    ptr_string(ptr, len, max_len)
+}
+
 fn clear_simple_child_stack_env(command: &mut std::process::Command) {
     command.env_remove("_SIMPLE_STACK_SET");
 }
@@ -163,7 +170,7 @@ pub unsafe extern "C" fn rt_env_set(name_ptr: *const u8, name_len: u64, value_pt
     let Some(name) = ptr_string(name_ptr, name_len, 4095) else {
         return false;
     };
-    let Some(value) = ptr_string(value_ptr, value_len, 65535) else {
+    let Some(value) = ptr_string_value(value_ptr, value_len, 65535) else {
         return false;
     };
     std::env::set_var(name, value);
@@ -956,6 +963,31 @@ pub extern "C" fn rt_term_get_size() -> RuntimeValue {
         super::super::collections::rt_tuple_set(tuple, 0, RuntimeValue::from_int(cols as i64));
         super::super::collections::rt_tuple_set(tuple, 1, RuntimeValue::from_int(rows as i64));
         tuple
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_terminal_get_size() -> RuntimeValue {
+    rt_term_get_size()
+}
+
+#[no_mangle]
+pub extern "C" fn rt_terminal_enable_raw_mode() -> RuntimeValue {
+    RuntimeValue::from_bool(true)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_terminal_disable_raw_mode() -> RuntimeValue {
+    RuntimeValue::from_bool(true)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_stdin_read_byte() -> i64 {
+    use std::io::Read;
+    let mut byte = [0u8; 1];
+    match std::io::stdin().read(&mut byte) {
+        Ok(1) => byte[0] as i64,
+        _ => -1,
     }
 }
 

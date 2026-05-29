@@ -34,11 +34,13 @@ pub extern "C" fn rt_vulkan_compile_spirv(spirv_ptr: i64) -> i64 {
     }
 
     let spirv_bytes = read_spirv_bytes(base);
+    let spirv_owned = spirv_bytes.to_vec();
 
     match ShaderModule::new(device, spirv_bytes) {
         Ok(module) => {
             let h = alloc_handle();
             state.shader_modules.insert(h, module);
+            state.shader_spirv.insert(h, spirv_owned);
             h
         }
         Err(e) => {
@@ -78,6 +80,7 @@ pub extern "C" fn rt_vulkan_compile_glsl(_source: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_shader(module: i64) -> i64 {
     let mut state = STATE.lock();
+    state.shader_spirv.remove(&module);
     if state.shader_modules.remove(&module).is_some() {
         1
     } else {
@@ -109,31 +112,35 @@ pub extern "C" fn rt_vulkan_create_compute_pipeline(shader: i64, _entry: i64, _p
         }
     };
 
-    if state.shader_modules.contains_key(&shader) {
-        // TODO: cache SPIR-V bytes alongside the shader module handle.
-        state.set_error(
-            "create_compute_pipeline: pass raw SPIR-V pointer via compile_spirv handle \
-             is not yet supported; pass SPIR-V bytes directly"
-                .to_string(),
-        );
-        return 0;
-    }
-
     if shader == 0 {
         state.set_error("create_compute_pipeline: null shader".to_string());
         return 0;
     }
 
-    let base = shader as *const u8;
-    let magic = unsafe { *(base as *const u32) };
-    if magic != 0x07230203 {
-        state.set_error(format!("create_compute_pipeline: bad SPIR-V magic 0x{magic:08x}"));
-        return 0;
-    }
+    let spirv_owned;
+    let spirv_bytes = if state.shader_modules.contains_key(&shader) {
+        match state.shader_spirv.get(&shader) {
+            Some(bytes) => {
+                spirv_owned = bytes.clone();
+                spirv_owned.as_slice()
+            }
+            None => {
+                state.set_error("create_compute_pipeline: shader handle has no cached SPIR-V bytes".to_string());
+                return 0;
+            }
+        }
+    } else {
+        let base = shader as *const u8;
+        let magic = unsafe { *(base as *const u32) };
+        if magic != 0x07230203 {
+            state.set_error(format!("create_compute_pipeline: bad SPIR-V magic 0x{magic:08x}"));
+            return 0;
+        }
 
-    let spirv_bytes = read_spirv_bytes(base);
+        read_spirv_bytes(base)
+    };
 
-    match ComputePipeline::new(device, spirv_bytes) {
+    match ComputePipeline::new(device, spirv_bytes, _push_size as u32) {
         Ok(pipe) => {
             let h = alloc_handle();
             state.compute_pipelines.insert(h, pipe);

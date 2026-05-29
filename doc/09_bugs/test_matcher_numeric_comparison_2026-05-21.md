@@ -1,5 +1,7 @@
 # Test Matcher Numeric Comparison Bug - 2026-05-21
 
+Status: Resolved 2026-05-29
+
 ## Summary
 
 `to_be_greater_than` failed in interpreter-run SPipe specs even when the displayed
@@ -42,3 +44,17 @@ Observed during the RISC-V FPGA verification session: false failure.
 - `src/lib/nogc_sync_mut/spec.spl`
 - `src/std/nogc_sync_mut/spec.spl`
 - interpreter/runtime handling for comparison inside matcher methods
+
+## Resolution
+
+The current Simple-level repro now passes under `bin/simple test --mode=interpreter`.
+The Rust seed matcher path also handles typed unsigned numeric receivers now:
+`to_be_greater_than`, `to_be_less_than`, `to_be_greater_than_or_equal`, and
+`to_be_less_than_or_equal` share numeric ordering across `Int`, `UInt`, `Float`,
+and `Float32` values instead of treating `UInt` as a matcher failure.
+
+Verified:
+
+```bash
+cargo test -p simple-compiler interpreter_method::tests::numeric_ordering_compares_unsigned_matcher_values -- --nocapture
+```

@@ -44,7 +44,7 @@ process and produce a compile artifact from an input source file.
   from FAT32 but the parser could not find the EOF trailer.
 - `bin/simple run src/os/port/deploy_toolchains.spl -- --status` now reports
   the exact readiness of the real guest compiler payload path. Current status
-  on 2026-05-05: `llvm-cross NOT BUILT`, `compiler-rt NOT BUILT`,
+  on 2026-05-29: `llvm-cross NOT BUILT`, `compiler-rt NOT BUILT`,
   `rust-examples NOT BUILT`, `clang-static-guest NOT BUILT`, `rustc-static-guest
   NOT BUILT`, and `toolchain-disk-bake DISABLED`.
 
@@ -53,10 +53,10 @@ process and produce a compile artifact from an input source file.
 Two independent blockers must both be resolved before any real in-guest compiler
 execution is possible. Neither is addressable in pure Simple today.
 
-### Blocker 1 — Kernel exec control transfer not wired (x86_64)
+### Blocker 1 — Live kernel exec control transfer proof missing (x86_64)
 
-Earlier on 2026-05-29, `src/os/kernel/loader/x86_64_fs_exec_spawn.spl`
-implemented two spawn paths:
+Historical context: earlier on 2026-05-29,
+`src/os/kernel/loader/x86_64_fs_exec_spawn.spl` implemented two spawn paths:
 
 - **Static-seeded path** (`_x86_64_spawn_static_seeded`): reads a hardcoded
   stub size, prints `spawn:image` and `spawn:bytes` serial markers, bumps
@@ -95,9 +95,11 @@ SIMPLE_LIB=src bin/simple test test/system/os/port/x86_64_elf_load_spec.spl --mo
 Results: check passed; `x86_64_fs_exec_spawn_spec.spl` passed `2/2`;
 `x86_64_elf_load_spec.spl` passed `1/1`.
 
-Remaining kernel-side gap: live context transfer is still not proven by an
-in-guest compiler-operation lane. The existing VFS probe intentionally returns
-after spawn markers so it can continue checking all payload fixtures.
+Remaining kernel-side gap: the real-byte path now constructs a process image
+and scheduler task, but live context transfer into a deterministic x86_64 guest
+payload is still not proven. The existing VFS probe intentionally returns after
+spawn markers so it can continue checking all payload fixtures; it should not
+be counted as compiler-operation or post-entry handoff evidence.
 
 ### Blocker 2 — No real compiler payloads (clang_static, rustc_static)
 

@@ -12,8 +12,13 @@ fn contract_kind_name(kind: i64) -> &'static str {
     }
 }
 
-#[inline(always)]
-pub unsafe fn simple_contract_check(condition: i64, kind: i64, func_name_ptr: *const u8, func_name_len: i64) {
+#[no_mangle]
+pub unsafe extern "C" fn simple_contract_check(
+    condition: i64,
+    kind: i64,
+    func_name_ptr: *const u8,
+    func_name_len: i64,
+) {
     if condition != 0 {
         return;
     }
@@ -24,8 +29,8 @@ pub unsafe fn simple_contract_check(condition: i64, kind: i64, func_name_ptr: *c
     std::process::abort();
 }
 
-#[inline(always)]
-pub unsafe fn simple_contract_check_msg(
+#[no_mangle]
+pub unsafe extern "C" fn simple_contract_check_msg(
     condition: i64,
     kind: i64,
     func_name_ptr: *const u8,

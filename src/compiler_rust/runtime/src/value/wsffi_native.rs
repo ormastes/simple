@@ -1,4 +1,5 @@
-//! Native implementations of spl_dlopen/spl_dlsym/spl_dlclose/spl_wffi_call_i64.
+//! Native implementations of spl_dlopen/spl_dlsym/spl_dlclose/spl_wffi_call_i64
+//! and spl_wffi_call_f64.
 //!
 //! These accept tagged RuntimeValues (as Cranelift/LLVM passes them) and decode
 //! text arguments to raw C strings before calling libc. This bridges the gap
@@ -150,5 +151,100 @@ pub extern "C" fn spl_wffi_call_i64(fptr: i64, args_rv: RuntimeValue, nargs: i64
             ),
             _ => 0,
         }
+    }
+}
+
+/// spl_wffi_call_f64(fptr: i64, args: RuntimeValue_array, nargs: i64) -> f64
+#[no_mangle]
+pub extern "C" fn spl_wffi_call_f64(fptr: i64, args_rv: RuntimeValue, nargs: i64) -> f64 {
+    if fptr == 0 {
+        return 0.0;
+    }
+
+    let n = nargs as usize;
+    let mut raw_args: [f64; 8] = [0.0; 8];
+    for (i, slot) in raw_args.iter_mut().enumerate().take(n.min(8)) {
+        let val = rt_array_get(args_rv, i as i64);
+        *slot = runtime_value_to_f64(val);
+    }
+
+    type Fn0 = unsafe extern "C" fn() -> f64;
+    type Fn1 = unsafe extern "C" fn(f64) -> f64;
+    type Fn2 = unsafe extern "C" fn(f64, f64) -> f64;
+    type Fn3 = unsafe extern "C" fn(f64, f64, f64) -> f64;
+    type Fn4 = unsafe extern "C" fn(f64, f64, f64, f64) -> f64;
+    type Fn5 = unsafe extern "C" fn(f64, f64, f64, f64, f64) -> f64;
+    type Fn6 = unsafe extern "C" fn(f64, f64, f64, f64, f64, f64) -> f64;
+    type Fn7 = unsafe extern "C" fn(f64, f64, f64, f64, f64, f64, f64) -> f64;
+    type Fn8 = unsafe extern "C" fn(f64, f64, f64, f64, f64, f64, f64, f64) -> f64;
+
+    unsafe {
+        match n {
+            0 => std::mem::transmute::<usize, Fn0>(fptr as usize)(),
+            1 => std::mem::transmute::<usize, Fn1>(fptr as usize)(raw_args[0]),
+            2 => std::mem::transmute::<usize, Fn2>(fptr as usize)(raw_args[0], raw_args[1]),
+            3 => std::mem::transmute::<usize, Fn3>(fptr as usize)(raw_args[0], raw_args[1], raw_args[2]),
+            4 => std::mem::transmute::<usize, Fn4>(fptr as usize)(raw_args[0], raw_args[1], raw_args[2], raw_args[3]),
+            5 => std::mem::transmute::<usize, Fn5>(fptr as usize)(
+                raw_args[0],
+                raw_args[1],
+                raw_args[2],
+                raw_args[3],
+                raw_args[4],
+            ),
+            6 => std::mem::transmute::<usize, Fn6>(fptr as usize)(
+                raw_args[0],
+                raw_args[1],
+                raw_args[2],
+                raw_args[3],
+                raw_args[4],
+                raw_args[5],
+            ),
+            7 => std::mem::transmute::<usize, Fn7>(fptr as usize)(
+                raw_args[0],
+                raw_args[1],
+                raw_args[2],
+                raw_args[3],
+                raw_args[4],
+                raw_args[5],
+                raw_args[6],
+            ),
+            8 => std::mem::transmute::<usize, Fn8>(fptr as usize)(
+                raw_args[0],
+                raw_args[1],
+                raw_args[2],
+                raw_args[3],
+                raw_args[4],
+                raw_args[5],
+                raw_args[6],
+                raw_args[7],
+            ),
+            _ => 0.0,
+        }
+    }
+}
+
+fn runtime_value_to_f64(value: RuntimeValue) -> f64 {
+    if value.is_float() {
+        return value.as_float();
+    }
+    if value.0 & 0x7 == 0 {
+        return value.as_int() as f64;
+    }
+    0.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe extern "C" fn f64_no_args() -> f64 {
+        6.25
+    }
+
+    #[test]
+    fn spl_wffi_call_f64_invokes_no_arg_function_pointer() {
+        let result = spl_wffi_call_f64(f64_no_args as usize as i64, RuntimeValue::NIL, 0);
+        assert_eq!(result, 6.25);
     }
 }

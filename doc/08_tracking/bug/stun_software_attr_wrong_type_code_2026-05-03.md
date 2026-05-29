@@ -1,10 +1,13 @@
 # Bug — `STUN_ATTR_SOFTWARE` constant uses wrong type code (0x802b vs RFC 0x8022)
 
-**Status:** FIXED 2026-05-08
+**Status:** FIXED 2026-05-29
 
 **Filed:** 2026-05-03 (W29-L STUN KAT spec, RFC 5769 §2 vector work)
 **Resolved:** 2026-05-08 — `STUN_ATTR_SOFTWARE` already corrected to `0x8022` in
 `src/os/proxy/stun.spl` (line 49); confirming comment added at fix time.
+**Follow-up resolved:** 2026-05-29 — `StunAttr.Software(value: text)` is now
+parsed and emitted directly, and the RFC 5769 KAT spec now asserts SOFTWARE
+instead of preserving the old `Unknown(0x8022)` expectation.
 **Severity:** Medium — SOFTWARE attributes in RFC 5769 §2.1/§2.2/§2.3 vectors parse as
 `Unknown(type_code: 0x8022, value: ...)` instead of `Software(value: ...)`. Emit also
 writes 0x802b on the wire instead of 0x8022, breaking interoperability.
@@ -43,7 +46,16 @@ val STUN_ATTR_SOFTWARE: i64 = 0x802b
 val STUN_ATTR_SOFTWARE: i64 = 0x8022
 ```
 
-Single-line fix; no logic changes needed. After fix, re-run RFC 5769 §2 KAT spec.
+Follow-up implementation also added `StunAttr.Software(value: text)` parse/emit
+support so RFC SOFTWARE attributes no longer round-trip through `Unknown`.
+
+Verification:
+
+```bash
+SIMPLE_LIB=src bin/simple check src/os/proxy/stun.spl test/unit/os/proxy/stun_spec.spl
+SIMPLE_LIB=src bin/simple test test/unit/os/proxy/stun_spec.spl --mode=interpreter
+git diff --check
+```
 
 ## References
 

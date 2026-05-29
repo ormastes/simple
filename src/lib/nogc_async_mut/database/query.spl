@@ -8,6 +8,11 @@ use std.db.accel.{
     DB_ACCEL_DEFAULT_BATCH_SIZE, RowBitmap,
     row_bitmap_indices, text_equals_span
 }
+use std.db.prefix_index.{
+    PrefixIndex,
+    prefix_index_insert, prefix_index_lookup_prefix, prefix_index_new,
+    prefix_index_sort
+}
 
 val QUERY_ACCEL_SIMD_ACTIVE = accel_capability_report().simd_active
 
@@ -82,6 +87,8 @@ class QueryBuilder:
     sort_desc: bool
     limit_count: i64
     has_limit_count: bool
+    prefix_indexes: Dict<text, PrefixIndex>
+    prefix_index_builds: i64
 
     # Create query builder for table
     static fn for_table(table: SdnTable) -> QueryBuilder:
@@ -92,7 +99,9 @@ class QueryBuilder:
             has_sort_field: false,
             sort_desc: false,
             limit_count: 0,
-            has_limit_count: false
+            has_limit_count: false,
+            prefix_indexes: {},
+            prefix_index_builds: 0
         )
 
     # Add filter condition
@@ -123,7 +132,7 @@ class QueryBuilder:
         self
 
     # Execute query
-    fn execute() -> [SdnRow]:
+    me execute() -> [SdnRow]:
         if self.has_limit_count and self.limit_count == 0:
             return []
 
@@ -156,14 +165,17 @@ class QueryBuilder:
         results
 
     # Count results
-    fn count() -> i64:
+    me count() -> i64:
         self.execute().len()
 
     # Check if any match
-    fn exists() -> bool:
+    me exists() -> bool:
         self.count() > 0
 
-    fn execute_scalar_row_ids() -> [i64]:
+    fn prefix_index_build_count() -> i64:
+        self.prefix_index_builds
+
+    me execute_scalar_row_ids() -> [i64]:
         var results: [i64] = []
         val stop_early = self.has_limit_count and not self.has_sort_field and self.limit_count > 0
         val filter_count = self.filters.len()
@@ -171,6 +183,8 @@ class QueryBuilder:
 
         if filter_count == 1:
             val filter0 = self.filters[0]
+            if filter0.op == CompareOp.StartsWith:
+                return self.execute_prefix_index_row_ids(filter0)
             val field0 = filter0.field
             for row in self.table.rows:
                 if val Some(fv0) = row.get(field0):
@@ -205,6 +219,33 @@ class QueryBuilder:
                 if stop_early and results.len() >= self.limit_count:
                     break
             row_idx = row_idx + 1
+        results
+
+    me prefix_index_for_field(field: text) -> PrefixIndex:
+        if self.prefix_indexes.contains_key(field):
+            return self.prefix_indexes[field]
+        var idx = prefix_index_new()
+        var row_idx = 0
+        for row in self.table.rows:
+            if val Some(fv) = row.get(field):
+                idx = prefix_index_insert(idx, fv, row_idx)
+            row_idx = row_idx + 1
+        val sorted_idx = prefix_index_sort(idx)
+        self.prefix_indexes[field] = sorted_idx
+        self.prefix_index_builds = self.prefix_index_builds + 1
+        sorted_idx
+
+    me execute_prefix_index_row_ids(filter: Filter) -> [i64]:
+        val sorted_idx = self.prefix_index_for_field(filter.field)
+        val candidates = sort_row_ids_ascending(prefix_index_lookup_prefix(sorted_idx, filter.value))
+        var results: [i64] = []
+        for candidate in candidates:
+            if candidate >= 0 and candidate < self.table.rows.len():
+                val row = self.table.rows[candidate]
+                if row_matches_filter_fast(row, filter):
+                    results.push(candidate)
+                    if self.has_limit_count and not self.has_sort_field and results.len() >= self.limit_count:
+                        return results
         results
 
     fn execute_bitmap() -> RowBitmap:
@@ -303,6 +344,19 @@ fn all_row_ids(row_count: i64) -> [i64]:
         row_ids.push(row_idx)
         row_idx = row_idx + 1
     row_ids
+
+fn sort_row_ids_ascending(row_ids: [i64]) -> [i64]:
+    var sorted = row_ids
+    var i = 1
+    while i < sorted.len():
+        val key = sorted[i]
+        var j = i - 1
+        while j >= 0 and sorted[j] > key:
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+        sorted[j + 1] = key
+        i = i + 1
+    sorted
 
 fn query_table(db: SdnDatabase, table_name: text) -> QueryBuilder?:
     val table = db.get_table(table_name)?

@@ -69,12 +69,17 @@ Repo-wide scan of all owned `.spl` source for `ch.len().to_u8()` and `str_char_a
 - `src/os/services/fat32/fat32.spl` — `str_char_at` used for path-splitting and byte comparison via `.bytes()[0]`. Safe.
 - No other FAT32 file in owned code carries the `ch.len().to_u8()` pattern.
 
-Parity gap noted (not part of original bug): `nogc_async_mut` `Fat32Core.create_file` does not call
-`invalidate_dentry_cache()` after writing the directory cluster, unlike the `nogc_sync_mut` version.
-The async version does invalidate the raw cluster cache (via `write_cluster` → `_cluster_cache_put`),
-but the parsed `DirEntry` cache (`_dcache_valid`) may serve stale entries on a subsequent `read_dir_entries`
-for the same directory cluster. This is a separate correctness gap — not the named bug — and requires
-its own failing test before a fix is applied.
+Async parity gap closed 2026-05-29: `nogc_async_mut` `Fat32Core.create_file`
+now invalidates dentry, cluster, and chain caches on the real receiver after the
+free-function directory mutation returns. The focused FAT32 file I/O spec now
+passes 14/14 again.
+
+Verification:
+
+```bash
+SIMPLE_LIB=src bin/simple check src/lib/nogc_async_mut/fs_driver/fat32_core.spl src/lib/nogc_sync_mut/fs_driver/fat32_core.spl test/unit/lib/driver/fat32_file_io_spec.spl
+SIMPLE_LIB=src bin/simple test test/unit/lib/driver/fat32_file_io_spec.spl --mode=interpreter --clean
+```
 
 ## Impact (before fix)
 

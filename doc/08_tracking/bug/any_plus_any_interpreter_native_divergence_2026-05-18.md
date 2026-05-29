@@ -1,7 +1,7 @@
 # BUG: ANY+ANY semantic divergence between interpreter and native codegen
 
 **Date:** 2026-05-18
-**Status:** BLOCKED — fix in commit `e533e54c0b` is incomplete (see verification section below)
+**Status:** RESOLVED (reverified 2026-05-29)
 **Severity:** Low (no known user-facing breakage)
 **Related fix:** 5054eb144c — native `+` operator in non-main functions
 
@@ -64,7 +64,7 @@ from prior state.
 
 Add type annotations to function parameters: `fn add(a: int, b: int)` or `fn concat(a: text, b: text)`.
 
-## Behavioral Verification (2026-05-29) — Status: BLOCKED
+## Behavioral Verification (2026-05-29) — Status: RESOLVED
 
 ### Test program
 
@@ -137,11 +137,68 @@ full bootstrap redeploy. This is a broad call-site change with regression risk
 and is deferred. Rule: "fix in `.spl` not Rust" applies, and the change is
 beyond the scope of this task.
 
-### Status
+### 2026-05-29 Repair
 
-The original commit `e533e54c0b` was incomplete:
-- Interpreter path: correct (already worked)
-- Native path: diverges at any call to a function with `ANY` params and
-  integer literal args (pre-existing untagged-arg bug, not gated by `rt_any_add`)
+The residual native divergence was fixed in the Rust seed MIR call lowering:
 
-Workaround still applies: annotate parameters with concrete types.
+- `src/compiler_rust/compiler/src/mir/lower/lowering_core.rs` now records direct
+  function parameter types during module lowering.
+- `src/compiler_rust/compiler/src/mir/lower/lowering_expr_call.rs` now boxes
+  integer and float arguments when the callee parameter type is `Any`, including
+  direct integer/float literal expressions whose HIR expression type has already
+  widened to `Any`.
+- `src/compiler_rust/compiler/src/mir/lower/tests/branch_coverage/calls.rs`
+  covers integer arguments passed to `Any` params and verifies `rt_any_add`
+  still appears for the `Any + Any` body.
+
+This is a Rust seed patch because the active native backend is Rust/Cranelift;
+the interpreter behavior was already correct.
+
+Verification:
+
+```bash
+cargo test -p simple-compiler direct_call_boxes_integer_args_for_any_params -- --nocapture
+cargo build -p simple-driver
+src/compiler_rust/target/debug/simple native-build --entry /tmp/any_plus_any_probe.spl --entry-closure --backend cranelift --runtime-bundle core-c-bootstrap --output /tmp/any_plus_any_probe_debug
+/tmp/any_plus_any_probe_debug
+cargo build --profile bootstrap -p simple-driver
+install -m 0755 src/compiler_rust/target/bootstrap/simple bin/simple
+bin/simple native-build --entry /tmp/any_plus_any_probe.spl --entry-closure --backend cranelift --runtime-bundle core-c-bootstrap --output /tmp/any_plus_any_probe_bin
+/tmp/any_plus_any_probe_bin
+```
+
+Expected and observed native output after refresh:
+
+```text
+3
+1x
+x1
+```
+
+## Re-verification (2026-05-29)
+
+The tracker status was reconciled after a fresh focused run:
+
+```bash
+cat > /tmp/any_plus_any_probe.spl <<'EOF'
+fn add(a, b):
+    return a + b
+
+fn main():
+    print(add(1, 2))
+    print(add(1, "x"))
+    print(add("x", 1))
+EOF
+bin/simple run /tmp/any_plus_any_probe.spl
+cargo test -p simple-compiler direct_call_boxes_integer_args_for_any_params --manifest-path src/compiler_rust/Cargo.toml
+bin/simple native-build --entry /tmp/any_plus_any_probe.spl --entry-closure --backend cranelift --runtime-bundle core-c-bootstrap --output /tmp/any_plus_any_probe_bin
+/tmp/any_plus_any_probe_bin
+```
+
+Interpreter and native output both matched:
+
+```text
+3
+1x
+x1
+```

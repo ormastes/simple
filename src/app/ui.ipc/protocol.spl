@@ -164,6 +164,44 @@ pub fn parse_ipc_message(json_str: text) -> UIEvent?:
         if tid != "":
             return UIEvent.FocusEvent(target_id: tid, kind: kind)
     if msg_type == "input":
+        val event_type = extract_json_field(json, "event_type")
+        if event_type != "":
+            if event_type == "key":
+                val key = extract_json_field(json, "key")
+                if key != "":
+                    return UIEvent.KeyPress(key: key)
+            if event_type == "action":
+                val value = extract_json_field(json, "value")
+                if value != "":
+                    return UIEvent.Action(name: value)
+            if event_type == "resize":
+                val width_str = extract_json_field(json, "x")
+                val height_str = extract_json_field(json, "y")
+                if width_str != "" and height_str != "":
+                    return UIEvent.Resize(width: width_str.to_int(), height: height_str.to_int())
+            if event_type == "input":
+                val env_tid = extract_json_field(json, "target_id")
+                val env_val = extract_json_field(json, "value")
+                if env_tid != "":
+                    return UIEvent.InputChange(target_id: env_tid, value: env_val)
+            if event_type == "mouse_down" or event_type == "mouse_up" or event_type == "mouse_move":
+                val x_str = extract_json_field(json, "x")
+                val y_str = extract_json_field(json, "y")
+                val button = extract_json_field(json, "button")
+                if x_str != "" and y_str != "":
+                    return UIEvent.MouseEvent(x: x_str.to_f64(), y: y_str.to_f64(), button: button, kind: event_type.replace("mouse_", ""))
+            if event_type == "scroll":
+                val x_str = extract_json_field(json, "x")
+                val y_str = extract_json_field(json, "y")
+                val dx_str = extract_json_field(json, "dx")
+                val dy_str = extract_json_field(json, "dy")
+                val px = if x_str != "": x_str.to_f64() else: 0.0
+                val py = if y_str != "": y_str.to_f64() else: 0.0
+                val pdx = if dx_str != "": dx_str.to_f64() else: 0.0
+                val pdy = if dy_str != "": dy_str.to_f64() else: 0.0
+                return UIEvent.ScrollEvent(x: px, y: py, dx: pdx, dy: pdy)
+            if event_type == "quit":
+                return UIEvent.Quit
         var tid = extract_json_field(json, "targetId")
         if tid == "":
             tid = extract_json_field(json, "id")
@@ -393,17 +431,28 @@ pub fn extract_json_field(json_str: text, field_name: text) -> text:
     numbers are returned as text up to the next comma/brace/whitespace."""
     val json = _normalize_ipc_json(json_str)
     val search = "\"{field_name}\""
-    val key_idx = json.find(search)
-    if key_idx < 0:
-        return ""
     val total = json.len()
-    var pos = key_idx + search.len()
-    while pos < total:
-        val ch = json.substring(pos, pos + 1)
-        if ch == ":":
+    var search_start = 0
+    var pos = 0
+    var found_key = false
+    while search_start < total:
+        val tail = json.substring(search_start, total)
+        val rel_idx = tail.find(search)
+        if rel_idx < 0:
+            return ""
+        val key_idx = search_start + rel_idx
+        pos = key_idx + search.len()
+        while pos < total:
+            val ch = json.substring(pos, pos + 1)
+            if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+                pos = pos + 1
+            else:
+                break
+        if pos < total and json.substring(pos, pos + 1) == ":":
+            found_key = true
             break
-        pos = pos + 1
-    if pos >= total:
+        search_start = key_idx + search.len()
+    if not found_key:
         return ""
     pos = pos + 1
     # Skip whitespace after the colon.

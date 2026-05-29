@@ -327,8 +327,9 @@ RuntimeValue rt_u32_alloc_filled(uint64_t len, uint32_t fill)
 extern uint8_t simpleos_ap_trampoline_template_start[];
 extern uint8_t simpleos_ap_trampoline_template_end[];
 extern uint8_t simpleos_ap_trampoline_gdt_desc[];
+extern uint8_t simpleos_ap_trampoline_gdt[];
+extern uint8_t simpleos_ap_trampoline_gdt_end[];
 extern uint8_t simpleos_ap_trampoline_pml4_phys_slot[];
-extern uint8_t gdt64_ptr[];
 extern uint8_t boot_pml4[];
 extern int64_t spl_x86_mark_current_ap_online(void) __attribute__((weak));
 
@@ -358,8 +359,8 @@ RuntimeValue rt_x86_ap_trampoline_phys(void)
 
 RuntimeValue rt_x86_prepare_ap_startup(RuntimeValue cpu_id_rv, RuntimeValue vector_rv)
 {
-    uint32_t cpu_id = (uint32_t)simpleos_raw_or_encoded_int(cpu_id_rv);
-    uint32_t vector = (uint32_t)simpleos_raw_or_encoded_int(vector_rv);
+    uint32_t cpu_id = (uint32_t)cpu_id_rv;
+    uint32_t vector = (uint32_t)vector_rv;
     uint8_t *dst = (uint8_t *)(uintptr_t)SIMPLEOS_AP_TRAMPOLINE_PHYS;
     uint64_t size = (uint64_t)(simpleos_ap_trampoline_template_end - simpleos_ap_trampoline_template_start);
 
@@ -379,8 +380,11 @@ RuntimeValue rt_x86_prepare_ap_startup(RuntimeValue cpu_id_rv, RuntimeValue vect
     __builtin_memcpy(dst, simpleos_ap_trampoline_template_start, (size_t)size);
 
     uint64_t gdt_off = (uint64_t)(simpleos_ap_trampoline_gdt_desc - simpleos_ap_trampoline_template_start);
+    uint64_t gdt_table_off = (uint64_t)(simpleos_ap_trampoline_gdt - simpleos_ap_trampoline_template_start);
+    uint64_t gdt_table_size = (uint64_t)(simpleos_ap_trampoline_gdt_end - simpleos_ap_trampoline_gdt);
     uint64_t pml4_off = (uint64_t)(simpleos_ap_trampoline_pml4_phys_slot - simpleos_ap_trampoline_template_start);
-    __builtin_memcpy(dst + gdt_off, gdt64_ptr, 6);
+    *(volatile uint16_t *)(void *)(dst + gdt_off) = (uint16_t)(gdt_table_size - 1U);
+    *(volatile uint32_t *)(void *)(dst + gdt_off + 2U) = (uint32_t)(SIMPLEOS_AP_TRAMPOLINE_PHYS + gdt_table_off);
     *(volatile uint32_t *)(void *)(dst + pml4_off) = (uint32_t)(uintptr_t)boot_pml4;
 
     simpleos_ap_boot_stack_top = (uint64_t)(uintptr_t)&simpleos_ap_boot_stacks[cpu_id][SIMPLEOS_AP_STACK_SIZE];
@@ -400,10 +404,13 @@ RuntimeValue rt_x86_ap_entry_count(void)
 void simpleos_ap_entry64(void)
 {
     simpleos_ap_entry_count++;
-    serial_puts("[smp] AP reached 64-bit entry\r\n");
     if (spl_x86_mark_current_ap_online) {
         (void)spl_x86_mark_current_ap_online();
     }
+    for (volatile uint32_t i = 0; i < 1000000U; i++) {
+        __asm__ volatile("" ::: "memory");
+    }
+    serial_puts("[smp] AP reached 64-bit entry\r\n");
     for (;;) {
         __asm__ volatile("hlt");
     }

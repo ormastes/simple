@@ -58,9 +58,8 @@ fn _collect_unload_jit_symbols(self: ModuleLoader, path: text) -> [text]:
         if not _name_in(remove_jit, sym_name):
             remove_jit.push(sym_name)
 
-    for item in self.jit.jit_cache:
-        val sym_name = item[0]
-        val rec_cache = item[1]
+    for sym_name in self.jit.jit_cache.keys():
+        val rec_cache = self.jit.jit_cache[sym_name]
         val owner = _jit_cache_owner(self, sym_name, rec_cache)
 
         if owner == path or (owner == "__jit__" and _symbol_matches_path(sym_name, path)):
@@ -77,9 +76,8 @@ me _moduleloader_unload_impl(self: ModuleLoader, path: text):
     val removed_symbols = owned_symbols + remove_jit
     var rebuilt_globals: Dict<text, (text, LoadedSymbol)> = global_symbols_without_names(self.global_symbols, removed_symbols)
 
-    for item in self.jit.jit_cache:
-        val sym_name = item[0]
-        val rec_cache = item[1]
+    for sym_name in self.jit.jit_cache.keys():
+        val rec_cache = self.jit.jit_cache[sym_name]
         val mapped_owner = _jit_cache_owner(self, sym_name, rec_cache)
         rebuilt_globals[sym_name] = (mapped_owner, _jit_cached_loaded_symbol(sym_name, rec_cache))
 
@@ -177,21 +175,50 @@ impl ModuleLoader:
 
     fn loaded_modules() -> [text]:
         var out: [text] = []
-        for item in self.modules:
-            out.push(item[0])
+        for path in self.modules.keys():
+            out.push(path)
         out
 
     me load(path: text) -> LoadResult:
-        moduleloader_load(self, path)
+        if self.modules.has(path):
+            return LoadResult.AlreadyLoaded(module: self.modules[path])
+        if not rt_file_exists(path):
+            return LoadResult.Error(message: "module not found: " + path)
+        val metadata_result = self.jit.load_smf_metadata(path)
+        if metadata_result.is_err():
+            return LoadResult.Error(message: metadata_result.unwrap_err())
+
+        val m = LoadedModule(path: path, reader: "", symbols: {}, load_time: 0, version: 1)
+        self.modules[path] = m
+        LoadResult.Success(module: m)
 
     me reload(path: text) -> LoadResult:
         self.unload(path)
+        if self.modules.has(path):
+            self.modules = self.modules.remove(path)
         self.load(path)
 
     me unload(path: text):
         if not self.modules.has(path):
             return
-        _moduleloader_unload_impl(self, path)
+        val remove_jit = _collect_unload_jit_symbols(self, path)
+        for sym_name in remove_jit:
+            self.jit.drop_cached_symbol(sym_name)
+
+        val owned_symbols = owned_global_symbol_names(self.global_symbols, path)
+        val removed_symbols = owned_symbols + remove_jit
+        var rebuilt_globals: Dict<text, (text, LoadedSymbol)> = global_symbols_without_names(self.global_symbols, removed_symbols)
+
+        for sym_name in self.jit.jit_cache.keys():
+            val rec_cache = self.jit.jit_cache[sym_name]
+            val mapped_owner = _jit_cache_owner(self, sym_name, rec_cache)
+            rebuilt_globals[sym_name] = (mapped_owner, _jit_cached_loaded_symbol(sym_name, rec_cache))
+
+        self.global_symbols = rebuilt_globals
+        self.jit.loaded_metadata = loaded_metadata_remove_path(self.jit.loaded_metadata, path)
+
+        if self.modules.has(path):
+            self.modules = self.modules.remove(path)
 
     me resolve_symbol(name: text) -> SymbolResult:
         if self.global_symbols.has(name):
@@ -270,7 +297,7 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
 fn moduleloader_with_defaults() -> ModuleLoader:
     moduleloader_new(moduleloaderconfig_default())
 
-me moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
+fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
     if self.modules.has(path):
         return LoadResult.AlreadyLoaded(module: self.modules[path])
     if not rt_file_exists(path):
@@ -283,21 +310,21 @@ me moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
     self.modules[path] = m
     LoadResult.Success(module: m)
 
-me moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
+fn moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
     moduleloader_unload(self, path)
     if self.modules.has(path):
         self.modules = self.modules.remove(path)
     moduleloader_load(self, path)
 
-me moduleloader_unload(self: ModuleLoader, path: text):
+fn moduleloader_unload(self: ModuleLoader, path: text):
     if not self.modules.has(path):
         return
     _moduleloader_unload_impl(self, path)
 
-me moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
+fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
     self.resolve_symbol(name)
 
-me moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [TypeInfo]) -> SymbolResult:
+fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [TypeInfo]) -> SymbolResult:
     self.resolve_symbol(mangle_name(name, type_args))
 
 fn mangle_name(base: text, type_args: [TypeInfo]) -> text:

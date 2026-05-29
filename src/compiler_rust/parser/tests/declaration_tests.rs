@@ -248,6 +248,19 @@ fn multiply(x: Int, y: Int) -> Int:
 }
 
 #[test]
+fn test_blank_doc_comment_separator_before_extern_fn() {
+    let source = "/// a\n///\n/// b\nextern fn f(len: i64) -> [f64]\n";
+    let module = parse(source).unwrap();
+    if let Node::Extern(extern_fn) = &module.items[0] {
+        assert_eq!(extern_fn.name, "f");
+        assert_eq!(extern_fn.params.len(), 1);
+        assert!(extern_fn.return_type.is_some());
+    } else {
+        panic!("Expected extern function");
+    }
+}
+
+#[test]
 fn test_doc_comment_on_struct() {
     let source = r#"/** A point in 2D space */
 struct Point:

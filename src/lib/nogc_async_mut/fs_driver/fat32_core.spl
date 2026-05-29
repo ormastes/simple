@@ -52,6 +52,22 @@ struct OpenFile:
     is_dir: bool
     is_open: bool
 
+fn _fat32_saved_open_files(files: [OpenFile], idx: i32, of: OpenFile) -> [OpenFile]:
+    var updated = files
+    updated[idx] = of
+    updated
+
+fn _fat32_cluster_bytes_to_i32(bytes_per_sector: u32, sectors_per_cluster: u32) -> i32:
+    var total: i32 = 0
+    var sector: u32 = 0
+    while sector < sectors_per_cluster:
+        if bytes_per_sector == 512u32:
+            total = total + 512
+        else:
+            total = total + bytes_per_sector.to_i32()
+        sector = sector + 1
+    total
+
 class Fat32Core:
     device: BlockDevice
     bytes_per_sector: u32
@@ -367,7 +383,7 @@ impl Fat32Core:
         val cluster_bytes = self.bytes_per_sector * self.sectors_per_cluster
         if source_offset == 0:
             val data_len = data.len()
-            val cluster_len = self._cluster_bytes_to_i32(self.bytes_per_sector, self.sectors_per_cluster)
+            val cluster_len = _fat32_cluster_bytes_to_i32(self.bytes_per_sector, self.sectors_per_cluster)
             if data_len == cluster_len:
                 return self.write_cluster(cluster, data)
         val end_offset = source_offset + cluster_bytes.to_i64()
@@ -779,7 +795,7 @@ impl Fat32Core:
         Err("file not found")
 
     me fn _save_open_file(idx: i32, of: OpenFile):
-        self.open_files[idx] = of
+        self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
 
     me fn close(handle: FileHandle) -> Result<(), text>:
         fat32_close(self, handle)
@@ -796,7 +812,7 @@ impl Fat32Core:
         if not of.is_open:
             return Err("file handle not open")
         of.position = position
-        self._save_open_file(idx, of)
+        self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
         Ok(())
 
     me fn restore_open_file_cursor(handle: FileHandle, current_cluster: u32, current_offset: i64) -> Result<bool, text>:
@@ -810,7 +826,7 @@ impl Fat32Core:
             return Err("file handle not open")
         of.current_cluster = current_cluster
         of.position = current_offset
-        self._save_open_file(idx, of)
+        self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
         Ok(true)
 
     me fn read_bytes(handle: FileHandle, len: i64) -> Result<[u8], text>:
@@ -830,7 +846,7 @@ impl Fat32Core:
         if to_read > remaining:
             to_read = remaining
         val cluster_bytes = (self.bytes_per_sector * self.sectors_per_cluster).to_i64()
-        val cluster_limit = self._cluster_bytes_to_i32(self.bytes_per_sector, self.sectors_per_cluster)
+        val cluster_limit = _fat32_cluster_bytes_to_i32(self.bytes_per_sector, self.sectors_per_cluster)
         val chain_rc = self.follow_chain(of.start_cluster)
         if chain_rc.is_err():
             return Err(chain_rc.unwrap_err())
@@ -842,7 +858,7 @@ impl Fat32Core:
                 if cdata_rc.is_err():
                     return Err(cdata_rc.unwrap_err())
                 of.position = of.position + cluster_bytes
-                self._save_open_file(idx, of)
+                self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
                 return Ok(cdata_rc.unwrap())
         if to_read > 0 and (of.position % cluster_bytes) == 0 and (to_read % cluster_bytes) == 0:
             var result: [u8] = []
@@ -851,17 +867,17 @@ impl Fat32Core:
                 val cluster_index = (pos / cluster_bytes).to_i32()
                 if cluster_index >= chain.len():
                     of.position = pos
-                    self._save_open_file(idx, of)
+                    self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
                     return Ok(result)
                 val cdata_rc = self.read_cluster(chain[cluster_index])
                 if cdata_rc.is_err():
                     of.position = pos
-                    self._save_open_file(idx, of)
+                    self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
                     return Err(cdata_rc.unwrap_err())
                 result = result + cdata_rc.unwrap()
                 pos = pos + cluster_bytes
             of.position = pos
-            self._save_open_file(idx, of)
+            self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
             return Ok(result)
         var result: [u8] = []
         var pos = of.position
@@ -870,12 +886,12 @@ impl Fat32Core:
             val offset_in_cluster = (pos % cluster_bytes).to_i32()
             if cluster_index >= chain.len():
                 of.position = pos
-                self._save_open_file(idx, of)
+                self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
                 return Ok(result)
             val cdata_rc = self.read_cluster(chain[cluster_index])
             if cdata_rc.is_err():
                 of.position = pos
-                self._save_open_file(idx, of)
+                self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
                 return Err(cdata_rc.unwrap_err())
             val cdata = cdata_rc.unwrap()
             var bi = offset_in_cluster
@@ -884,7 +900,7 @@ impl Fat32Core:
                 pos = pos + 1
                 bi = bi + 1
         of.position = pos
-        self._save_open_file(idx, of)
+        self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
         Ok(result)
 
     me fn read(handle: FileHandle, mut buf: [u8], len: i64) -> Result<i64, text>:
@@ -903,7 +919,7 @@ impl Fat32Core:
         if to_read > remaining:
             to_read = remaining
         val cluster_bytes = (self.bytes_per_sector * self.sectors_per_cluster).to_i64()
-        val cluster_limit = self._cluster_bytes_to_i32(self.bytes_per_sector, self.sectors_per_cluster)
+        val cluster_limit = _fat32_cluster_bytes_to_i32(self.bytes_per_sector, self.sectors_per_cluster)
         val chain_rc = self.follow_chain(of.start_cluster)
         if chain_rc.is_err():
             return Err(chain_rc.unwrap_err())
@@ -920,7 +936,7 @@ impl Fat32Core:
                     buf[bi] = cdata[bi]
                     bi = bi + 1
                 of.position = of.position + bi.to_i64()
-                self._save_open_file(idx, of)
+                self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
                 return Ok(bi.to_i64())
         var bytes_read: i64 = 0
         var pos = of.position
@@ -929,12 +945,12 @@ impl Fat32Core:
             val offset_in_cluster = (pos % cluster_bytes).to_i32()
             if cluster_index >= chain.len():
                 of.position = pos
-                self._save_open_file(idx, of)
+                self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
                 return Ok(bytes_read)
             val cdata_rc = self.read_cluster(chain[cluster_index])
             if cdata_rc.is_err():
                 of.position = pos
-                self._save_open_file(idx, of)
+                self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
                 return Err(cdata_rc.unwrap_err())
             val cdata = cdata_rc.unwrap()
             var bi = offset_in_cluster
@@ -945,7 +961,7 @@ impl Fat32Core:
                 pos = pos + 1
                 bi = bi + 1
         of.position = pos
-        self._save_open_file(idx, of)
+        self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
         Ok(bytes_read)
 
     me fn write(handle: FileHandle, buf: [u8], len: i64) -> Result<i64, text>:
@@ -989,7 +1005,7 @@ impl Fat32Core:
         of.position = offset + 4096
         if of.position > of.size:
             of.size = of.position
-        self._save_open_file(idx, of)
+        self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
         Ok(4096)
 
     me fn write_4k_overwrite_cluster_at(start_cluster: u32, offset: i64, buf: [u8]) -> Result<i64, text>:
@@ -1034,6 +1050,10 @@ impl Fat32Core:
             return Err(rc.unwrap_err())
         val clusters = rc.unwrap()
         val new_cluster = clusters[0]
+        self._cluster_cache_keys = []
+        self._cluster_cache_values = []
+        self._chain_valid = false
+        self.invalidate_dentry_cache()
         val handle = self.alloc_file_handle(new_cluster, 0, false)
         Ok(handle)
 
@@ -1072,7 +1092,7 @@ impl Fat32Core:
                         val mark_rc = self.write_fat_entry(chain[0], FAT32_EOC)
             of.size = 0
             of.position = 0
-            self._save_open_file(idx, of)
+            self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
             return Ok(())
         # Truncate to a specific size: compute needed clusters
         var needed_clusters = (size / cluster_bytes).to_i32()
@@ -1093,7 +1113,7 @@ impl Fat32Core:
         of.size = size
         if of.position > size:
             of.position = size
-        self._save_open_file(idx, of)
+        self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
         Ok(())
 
 fn fat32_close(mut core: Fat32Core, handle: FileHandle) -> Result<(), text>:
@@ -1114,7 +1134,7 @@ fn fat32_close(mut core: Fat32Core, handle: FileHandle) -> Result<(), text>:
         flush_i = flush_i + 1
     core._dirty_clusters = []
     of.is_open = false
-    core._save_open_file(idx, of)
+    core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
     Ok(())
 
 fn fat32_write(mut core: Fat32Core, handle: FileHandle, buf: [u8], len: i64) -> Result<i64, text>:
@@ -1159,21 +1179,21 @@ fn fat32_write(mut core: Fat32Core, handle: FileHandle, buf: [u8], len: i64) -> 
                 of.position = pos
                 if of.size < pos:
                     of.size = pos
-                core._save_open_file(idx, of)
+                core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
                 return Err(new_rc.unwrap_err())
             val new_cluster = core._next_free_hint - 1
             val last = chain[chain.len() - 1]
             val link_rc = core.write_fat_entry(last, new_cluster)
             if link_rc.is_err():
                 of.position = pos
-                core._save_open_file(idx, of)
+                core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
                 return Err(link_rc.unwrap_err())
             chain.push(new_cluster)
         if offset_in_cluster == 0 and (len - bytes_written) >= cluster_bytes and buf.len().to_i64() >= bytes_written + cluster_bytes:
             val wrc = core.write_cluster_from(chain[cluster_index], buf, bytes_written)
             if wrc.is_err():
                 of.position = pos
-                core._save_open_file(idx, of)
+                core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
                 return Err(wrc.unwrap_err())
             bytes_written = bytes_written + cluster_bytes
             pos = pos + cluster_bytes
@@ -1181,7 +1201,7 @@ fn fat32_write(mut core: Fat32Core, handle: FileHandle, buf: [u8], len: i64) -> 
         val cdata_rc = core.read_cluster(chain[cluster_index])
         if cdata_rc.is_err():
             of.position = pos
-            core._save_open_file(idx, of)
+            core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
             return Err(cdata_rc.unwrap_err())
         var cdata = cdata_rc.unwrap()
         var bi = offset_in_cluster
@@ -1196,7 +1216,7 @@ fn fat32_write(mut core: Fat32Core, handle: FileHandle, buf: [u8], len: i64) -> 
         val wrc = core.write_cluster(chain[cluster_index], cdata)
         if wrc.is_err():
             of.position = pos
-            core._save_open_file(idx, of)
+            core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
             return Err(wrc.unwrap_err())
     of.position = pos
     if pos > of.size:
@@ -1204,7 +1224,7 @@ fn fat32_write(mut core: Fat32Core, handle: FileHandle, buf: [u8], len: i64) -> 
     core._chain_start = start
     core._chain_values = chain
     core._chain_valid = true
-    core._save_open_file(idx, of)
+    core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
     Ok(bytes_written)
 
 fn fat32_write_4k_overwrite(mut core: Fat32Core, handle: FileHandle, buf: [u8]) -> Result<i64, text>:
@@ -1238,5 +1258,5 @@ fn fat32_write_4k_overwrite(mut core: Fat32Core, handle: FileHandle, buf: [u8]) 
     of.position = of.position + 4096
     if of.position > of.size:
         of.size = of.position
-    core._save_open_file(idx, of)
+    core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
     Ok(4096)

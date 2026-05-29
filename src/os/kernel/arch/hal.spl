@@ -20,6 +20,11 @@
 use os.kernel.boot.ports.{BootOutputPort}
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags}
 use os.kernel.arch.arch_context.{ArchContext, JmpBuf, ExtendedCtx, BootArgs}
+use os.kernel.arch.reset.{
+    hal_reset_set_test_mode as reset_set_test_mode,
+    hal_reset_requested_for_test as reset_requested_for_test,
+    hal_system_reset as reset_system_reset
+}
 use os.kernel.arch_adapt.hal_current.{
     hal_console_init as current_hal_console_init,
     hal_console_write_byte as current_hal_console_write_byte,
@@ -30,7 +35,6 @@ use os.kernel.arch_adapt.hal_current.{
     hal_enable_interrupts as current_hal_enable_interrupts,
     hal_halt as current_hal_halt,
     hal_halt_loop as current_hal_halt_loop,
-    _hal_system_reset_arch as current_hal_system_reset_arch,
     hal_flush_tlb as current_hal_flush_tlb,
     hal_flush_tlb_all as current_hal_flush_tlb_all,
     hal_cpu_id as current_hal_cpu_id,
@@ -260,21 +264,13 @@ fn hal_halt_loop():
 # Power Control
 # ============================================================================
 
-var _hal_reset_test_mode: u64 = 0
-var _hal_reset_requested_for_test: u64 = 0
-
 fn hal_reset_set_test_mode(enabled: bool):
     """Enable a test-only reset latch so syscall tests cannot reset QEMU."""
-    if enabled:
-        _hal_reset_test_mode = 1
-        _hal_reset_requested_for_test = 0
-    else:
-        _hal_reset_test_mode = 0
-        _hal_reset_requested_for_test = 0
+    reset_set_test_mode(enabled)
 
 fn hal_reset_requested_for_test() -> bool:
     """Return whether hal_system_reset() was requested while test mode was active."""
-    _hal_reset_requested_for_test != 0
+    reset_requested_for_test()
 
 fn hal_system_reset() -> i64:
     """Request a machine reset through the active architecture backend.
@@ -283,15 +279,7 @@ fn hal_system_reset() -> i64:
     return; if it does, callers receive -38 to match ENOSYS-style syscall
     fallback behavior.
     """
-    if _hal_reset_test_mode != 0:
-        _hal_reset_requested_for_test = 1
-        return 0
-    _hal_system_reset_arch()
-
-@cfg(x86_64)
-fn _hal_system_reset_arch() -> i64:
-    """Reset x86_64 via the reset control register."""
-    current_hal_system_reset_arch()
+    reset_system_reset()
 
 @cfg(x86_64)
 fn hal_flush_tlb(addr: u64):

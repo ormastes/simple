@@ -170,6 +170,16 @@ struct RowBitmap:
             idx = idx + 1
         RowBitmap(row_count: self.row_count, words: words)
 
+struct PostingList:
+    term: text
+    row_ids: [i64]
+
+struct PostingBitmapResult:
+    bitmap: RowBitmap
+    terms_evaluated: i64
+    postings_scanned: i64
+    rows_matched: i64
+
 fn row_bitmap_word_count(row_count: i64) -> i64:
     if row_count <= 0:
         0
@@ -218,6 +228,58 @@ fn row_bitmap_indices(bitmap: RowBitmap) -> [i64]:
                     bit_idx = bit_idx + 1
         word_idx = word_idx + 1
     result
+
+fn posting_list_new(term: text, row_ids: [i64]) -> PostingList:
+    PostingList(term: term, row_ids: row_ids)
+
+fn posting_list_to_bitmap(list: PostingList, row_count: i64) -> PostingBitmapResult:
+    var bitmap = RowBitmap.empty(row_count)
+    var idx = 0
+    while idx < list.row_ids.len():
+        bitmap.set(list.row_ids[idx as i32])
+        idx = idx + 1
+    PostingBitmapResult(
+        bitmap: bitmap,
+        terms_evaluated: 1,
+        postings_scanned: list.row_ids.len(),
+        rows_matched: bitmap.count()
+    )
+
+fn posting_lists_or_bitmap(lists: [PostingList], row_count: i64) -> PostingBitmapResult:
+    var bitmap = RowBitmap.empty(row_count)
+    var postings_scanned = 0
+    for list in lists:
+        val item = posting_list_to_bitmap(list, row_count)
+        bitmap = bitmap.or_with(item.bitmap)
+        postings_scanned = postings_scanned + item.postings_scanned
+    PostingBitmapResult(
+        bitmap: bitmap,
+        terms_evaluated: lists.len(),
+        postings_scanned: postings_scanned,
+        rows_matched: bitmap.count()
+    )
+
+fn posting_lists_and_bitmap(lists: [PostingList], row_count: i64) -> PostingBitmapResult:
+    if lists.len() == 0:
+        return PostingBitmapResult(bitmap: RowBitmap.empty(row_count), terms_evaluated: 0, postings_scanned: 0, rows_matched: 0)
+    val first = posting_list_to_bitmap(lists[0], row_count)
+    var bitmap = first.bitmap
+    var postings_scanned = first.postings_scanned
+    var idx = 1
+    while idx < lists.len():
+        val item = posting_list_to_bitmap(lists[idx as i32], row_count)
+        bitmap = bitmap.and_with(item.bitmap)
+        postings_scanned = postings_scanned + item.postings_scanned
+        idx = idx + 1
+    PostingBitmapResult(
+        bitmap: bitmap,
+        terms_evaluated: lists.len(),
+        postings_scanned: postings_scanned,
+        rows_matched: bitmap.count()
+    )
+
+fn posting_bitmap_result_rows(result: PostingBitmapResult) -> [i64]:
+    row_bitmap_indices(result.bitmap)
 
 fn popcount_u32(word: u32) -> i64:
     var value = word

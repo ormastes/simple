@@ -141,6 +141,15 @@ pub extern "C" fn rt_compile_to_native(_source_path: RuntimeValue, _output_path:
 }
 
 #[no_mangle]
+pub extern "C" fn rt_compile_to_native_with_opt(
+    _source_path: RuntimeValue,
+    _output_path: RuntimeValue,
+    _opt_level: RuntimeValue,
+) -> i64 {
+    0
+}
+
+#[no_mangle]
 pub extern "C" fn rt_compile_to_llvm_ir(
     _source_file: RuntimeValue,
     _target_triple: RuntimeValue,

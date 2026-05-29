@@ -366,3 +366,23 @@ Phase 4: C++ -> Simple (P2)
 | GC interaction with C consumers | Use-after-free if C holds stale handle | Reference counting on handles, weak handle support |
 | Windows DLL complexity (import lib, DllMain) | Platform-specific build failures | Comprehensive CI on Windows (MSVC + MinGW) |
 | Thread safety of runtime init | Race condition on first call | Guarded init state + auto-init hooks; tighten with `call_once` if lifecycle complexity grows |
+
+---
+
+## 9. Plugin WFFI Scalar Calls
+
+FR-PLUG-0001 resolves the old i64-only WFFI scalar carve-out. The Rust seed
+interpreter and native runtime now expose:
+
+```simple
+extern fn spl_wffi_call_f64(fptr: i64, args: [f64], nargs: i64) -> f64
+```
+
+`std.plugin` layers this as `plugin_call_f64(symbol, args)`, parallel to the
+existing `plugin_call_i64(...)` path. The accepted calling convention is
+positional scalar arguments, not the earlier pointer-to-argument-array fixture
+comment. This is sufficient for plugin functions that accept and return f64
+scalars, including future GEMM `alpha`/`beta` hooks.
+
+This does not change pointer-heavy plugin calls; existing i64/pointer WFFI
+paths remain valid for buffer handles and raw addresses.

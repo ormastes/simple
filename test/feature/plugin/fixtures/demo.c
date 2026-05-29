@@ -1,12 +1,13 @@
 /* AC-1 demo plugin fixture.
- * WFFI calling convention: int64_t fn(int64_t* args, int64_t nargs).
- * simple_demo_add returns args[0] + args[1]. */
+ * WFFI calling convention: positional scalar arguments.
+ * simple_demo_add returns a + b. */
 
 #include <stdint.h>
 
-int64_t simple_demo_add(int64_t* args, int64_t nargs) {
-    if (nargs < 2) {
-        return 0;
-    }
-    return args[0] + args[1];
+int64_t simple_demo_add(int64_t a, int64_t b) {
+    return a + b;
+}
+
+double simple_demo_add_scaled(double a, double b, double scale) {
+    return (a + b) * scale;
 }

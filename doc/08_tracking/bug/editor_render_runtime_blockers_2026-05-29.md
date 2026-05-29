@@ -1,9 +1,9 @@
-# Status/Bug: Editor TUI render code complete; runnable binary blocked by 2 seed/runtime bugs
+# Status/Bug: Editor TUI render code complete; full runtime behavior still degraded
 
 - **ID:** editor_render_runtime_blockers
 - **Date:** 2026-05-29
 - **Area:** editor app + seed runtime/JIT
-- **Status:** RENDER ACHIEVED (interpreter, narrowed SIMPLE_LIB — see "Frame rendered" below). AOT (`core-c-bootstrap`) now **builds + links + runs**: the duplicate-`_rt_file_exists` blocker is fixed (weak attr, main `61b29213`) and the render-loop SIGSEGV is fixed (main `knrqtpow`). The missing UI-state types + the `.id` deref crash fix are on main (`knrqtpow`). Remaining: 3 AOT/JIT-runtime issues below (NOT editor code), plus `PaletteState` is still an undefined type.
+- **Status:** RESOLVED. The narrowed interpreter proof draws a real buffer-backed frame. The full `rust-hosted` and `core-c-bootstrap` TUI binaries now build and render active-buffer terminal frames under timeout with no stderr. Palette and LSP popup overlays are restored and have native visible-overlay probes.
 
 ## Frame rendered (2026-05-29)
 
@@ -32,8 +32,61 @@ text (not hardcoded). Reproduce:
 3. `SIMPLE_LIB=<minlib> bin/simple run <file>` — the **interpreter** handles
    string concat/`print` (seed_S's JIT does not; it panics on `rt_any_add`).
 
-This proves the editor render path works end-to-end. The full interactive
-binary (controller + key loop) remains blocked by the 2 seed bugs below.
+This proves the editor render path works end-to-end in the interpreter. The
+full interactive binary now also reaches active-buffer frame rendering in the
+`rust-hosted` and `core-c-bootstrap` lanes.
+
+## Full rust-hosted frame rendered (2026-05-29)
+
+The editor now builds with the hosted Rust runtime and reaches the live TUI
+render loop:
+
+```
+SIMPLE_LIB=src bin/simple native-build --runtime-bundle rust-hosted \
+  --source src/lib --source src/app --entry-closure \
+  --entry src/app/editor/tui_main.spl \
+  --output /tmp/simple_editor_tui_rust_hosted
+TERM=xterm timeout 3 /tmp/simple_editor_tui_rust_hosted /tmp/simple_editor_empty.spl
+```
+
+Result after the active-buffer fix:
+- build completed with `2 compiled, 62 cached, 0 failed`
+- process timed out after 3 seconds as expected for an interactive loop
+- stderr was empty
+- stdout contained repeated alternate-screen frames and a status bar with
+  `NORMAL`, `[No Name]`, `1 files`, and `ready`
+- stdout did not contain the fallback `No file open...` placeholder
+
+This fixed the prior `rust-hosted` startup blocker by exporting
+`rt_compile_to_native_with_opt` through the Rust seed runtime/JIT symbol tables.
+It also required hosted terminal SFFI exports and a layout clamp for corrupted
+native controller defaults.
+
+## Full core-C frame rendered (2026-05-29)
+
+The `core-c-bootstrap` lane also reaches the live TUI render loop:
+
+```
+SIMPLE_LIB=src bin/simple native-build --runtime-bundle core-c-bootstrap \
+  --source src/lib --source src/app --entry-closure \
+  --entry src/app/editor/tui_main.spl \
+  --output /tmp/simple_editor_tui_corec
+TERM=xterm timeout 3 /tmp/simple_editor_tui_corec /tmp/simple_editor_empty.spl
+```
+
+Result:
+- build completed with `1 compiled, 63 cached, 0 failed`
+- process timed out after 3 seconds as expected for an interactive loop
+- stderr was empty
+- stdout contained repeated frames with `NORMAL`, `[No Name]`, `1 files`, and
+  `ready`
+- stdout did not contain the fallback `No file open...` placeholder
+
+The prior startup segfault was caused by extension discovery calling
+`rt_dir_walk` for absent extension roots. In this core-C bundle `rt_dir_walk`
+is currently stubbed; the generated stub returns an invalid array-like value and
+segfaults. `ExtensionHost.discover_extensions` now skips roots that do not exist
+before walking them.
 
 
 ## Milestone (done)
@@ -65,40 +118,74 @@ instead of degrading source.
 (The markdown subsystem + string-method/octal seed fixes from the other session
 were prerequisites and are already on main.)
 
-## Remaining blockers (NOT editor code — seed/runtime level)
+## Remaining blockers / follow-up bugs
 
-### 1. `rust-hosted` binary crashes at startup (JIT)
-Running the binary panics immediately (SIGSEGV, 0 bytes output):
-`can't resolve symbol rt_compile_to_native_with_opt`
-(`cranelift-jit/src/backend.rs:345`, via `ExecCore::run_file_jit` →
-`JitCompiler::compile_module`). The editor's transitive closure references
-`rt_compile_to_native_with_opt`, an `insert_simple!`-registered interpreter-host
-extern with no C-ABI symbol — the JIT-at-startup path can't resolve it. This is
-the architectural interpreter↔JIT-extern bridge gap (see
-`editor_jit_run_route_blockers_2026-05-28.md` item 2). Use `core-c-bootstrap`
-(AOT) instead, which now builds + links + runs.
+None for this editor render tracker.
 
-### 2. AOT runtime: `discover_extensions` reports "function not found"
-`EditorController.new()` calls `host.discover_extensions(editor_extension_roots())`
-(`editor_controller.spl:154`). The method **exists** (`host.spl:113
-me discover_extensions(...)`), yet the `core-c-bootstrap` binary reports
-"function not found" for it at runtime — an AOT method-dispatch/symbol-resolution
-bug, not a missing function. Built-in extensions suffice to draw a frame, so this
-blocks extension loading rather than render.
+### (fixed) Palette and LSP popup overlays were guarded off
+Fixed 2026-05-29 by restoring the overlay calls in `tui_shell.spl` with typed
+locals for optional palette state and by using explicit/bridged text lengths in
+popup text helpers. The underlying native issue was the same inference family
+seen in the buffer renderer: text method calls on function parameters could
+produce bad values (`value.len()` returned `-1` in a focused native repro), so
+the popup cleaner/fit helpers now use `rt_string_len(value)`.
 
-### 3. AOT runtime: per-frame poll calls crash
-The TUI shell's per-frame `ctrl._refresh_lsp_results()` / `_poll_file_watcher()` /
-`_poll_inlay_hint_refresh_after(100)` / `_poll_debug_dap_client()`
-(`tui_shell.spl`, before `_tui_render_frame`) call AOT-stubbed runtime externs and
-crash. The methods are real (`editor_controller.spl:367/664/682/700`); the fix is
-at the AOT-stub/extern level, not removing the calls.
+Verification:
+- visible palette + LSP popup native probe rendered `Command Palette`,
+  `hover text`, `detail text`, and reached `after-lsp`
+- full `rust-hosted` editor TUI timed out normally with no stderr and `1 files`
+- full `core-c-bootstrap` editor TUI timed out normally with no stderr and
+  `1 files`
 
-### 4. `PaletteState` is an undefined type
-Referenced at `editor_controller.spl:98` (`palette_state: PaletteState`), `:166`
-(`palette_state: nil`), and `tui_shell_panels.spl:437` (`_tui_render_palette`
-param), but defined nowhere in the tree. `--entry-closure` builds because the
-palette code is unreached, but a full-tree compile / the GUI palette path will
-fail. Needs a real `PaletteState` struct (+ the `palette_new`/`palette_show` API).
+### (fixed) Active-buffer render crashed in native hosted lanes
+Fixed 2026-05-29 by restoring `_tui_render_single_pane(render_buffer, ...)` and
+adding explicit local result types for buffer method calls in the single-pane
+renderer. The root symptom was native inference treating
+`val n = buffer.line_count()` as `nil`; `val n: i64 = buffer.line_count()`
+returns the correct line count. The status bar document count needed the same
+explicit `i64` annotation.
+
+### (fixed) AOT/core-C startup segfault after alternate-screen entry
+Fixed 2026-05-29 by guarding `ExtensionHost.discover_extensions` against absent
+roots before calling `rt_dir_walk`. A stage probe now reaches `stage:done`, and
+the full core-C editor render loop times out normally with frame markers and no
+stderr.
+
+### (fixed) `rust-hosted` missing `rt_compile_to_native_with_opt`
+Fixed 2026-05-29 by exporting `rt_compile_to_native_with_opt` from the Rust seed
+runtime/native-all surfaces and adding it to the compiler runtime SFFI symbol
+specs. A focused extern probe builds/runs and the full editor no longer fails on
+the missing JIT symbol.
+
+### (stale) AOT `discover_extensions` method-dispatch failure
+Fresh verification:
+
+```
+use std.editor.extensions.host.*
+
+fn main():
+    val host = extension_host_with_builtins()
+    val count = host.discover_extensions([])
+    print count.to_text()
+```
+
+`SIMPLE_LIB=src bin/simple check` passes, `core-c-bootstrap` native-build passes,
+and the binary exits `0` with output `0`.
+
+### (fixed) `PaletteState` was an undefined type
+Fixed 2026-05-29 in `src/lib/editor/60.services/command_palette.spl` by adding
+`PaletteState`, fuzzy matching/ranking, and the `palette_new` /
+`palette_show` / `palette_hide` / `palette_update_query` / selection helpers
+used by the controller and TUI palette renderer.
+
+Verification:
+
+```bash
+SIMPLE_LIB=src bin/simple check src/app/editor/tui_main.spl src/app/editor/editor_controller.spl src/app/editor/editor_ctrl_core.spl src/app/editor/editor_ctrl_core2.spl src/app/editor/tui_shell.spl src/app/editor/tui_shell_panels.spl src/lib/editor/60.services/command_palette.spl src/lib/editor/extensions/builtin/md_commands.spl test/system/editor_palette_spec.spl
+SIMPLE_LIB=src bin/simple test test/system/editor_palette_spec.spl --mode=interpreter --clean
+```
+
+`test/system/editor_palette_spec.spl` passes 11/11.
 
 ### (fixed) `core-c-bootstrap` (AOT) duplicate-symbol link error
 Was: `duplicate symbol '_rt_file_exists'` (`runtime_native.o` + legacy_core.o).

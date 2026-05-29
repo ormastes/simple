@@ -65,16 +65,16 @@ pub fn rt_memcpy(dst: *mut u8, src: *const u8, n: i64) -> *mut u8 {
     unsafe { c_sffi::rt_memcpy(dst, src, n) }
 }
 
-#[inline(always)]
-pub fn rt_ptr_to_value(ptr: *mut u8) -> RuntimeValue {
+#[no_mangle]
+pub extern "C" fn rt_ptr_to_value(ptr: *mut u8) -> RuntimeValue {
     if ptr.is_null() {
         RuntimeValue::NIL
     } else {
         unsafe { RuntimeValue::from_heap_ptr(ptr.cast::<HeapHeader>()) }
     }
 }
-#[inline(always)]
-pub fn rt_value_to_ptr(v: RuntimeValue) -> *mut u8 {
+#[no_mangle]
+pub extern "C" fn rt_value_to_ptr(v: RuntimeValue) -> *mut u8 {
     if v.is_heap() {
         v.as_heap_ptr().cast::<u8>()
     } else {

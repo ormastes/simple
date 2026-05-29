@@ -42,6 +42,25 @@ impl DescriptorSetLayout {
         Self::new(device, &[binding])
     }
 
+    /// Create a compute storage-buffer layout with sequential bindings.
+    pub fn new_storage_buffers(device: Arc<VulkanDevice>, binding_count: u32) -> VulkanResult<Arc<Self>> {
+        let count = binding_count.max(1);
+        let mut bindings = Vec::new();
+        let mut binding_index = 0;
+        while binding_index < count {
+            bindings.push(
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(binding_index)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            );
+            binding_index += 1;
+        }
+
+        Self::new(device, &bindings)
+    }
+
     /// Create a combined image sampler layout (binding 0, fragment shader)
     pub fn new_combined_image_sampler(device: Arc<VulkanDevice>) -> VulkanResult<Arc<Self>> {
         let binding = vk::DescriptorSetLayoutBinding::default()
@@ -103,6 +122,19 @@ impl DescriptorPool {
         let pool_size = vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(max_sets);
+
+        Self::new(device, max_sets, &[pool_size])
+    }
+
+    /// Create a pool for compute storage buffers.
+    pub fn new_for_storage_buffers(
+        device: Arc<VulkanDevice>,
+        max_sets: u32,
+        descriptors_per_set: u32,
+    ) -> VulkanResult<Arc<Self>> {
+        let pool_size = vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(max_sets * descriptors_per_set.max(1));
 
         Self::new(device, max_sets, &[pool_size])
     }
@@ -200,6 +232,39 @@ impl DescriptorSet {
         }
 
         tracing::debug!("Descriptor set updated with buffer at binding {}", binding);
+
+        Ok(())
+    }
+
+    /// Update descriptor set with a compute storage buffer.
+    pub fn update_storage_buffer(
+        &self,
+        binding: u32,
+        buffer: &VulkanBuffer,
+        offset: u64,
+        range: u64,
+    ) -> VulkanResult<()> {
+        let buffer_info = vk::DescriptorBufferInfo::default()
+            .buffer(buffer.handle())
+            .offset(offset)
+            .range(range);
+
+        let buffer_infos = [buffer_info];
+
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(self.set)
+            .dst_binding(binding)
+            .dst_array_element(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(&buffer_infos);
+
+        let writes = [write];
+
+        unsafe {
+            self.device.handle().update_descriptor_sets(&writes, &[]);
+        }
+
+        tracing::debug!("Descriptor set updated with storage buffer at binding {}", binding);
 
         Ok(())
     }

@@ -182,7 +182,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val timeout_ms = _os_build_timeout_ms()
     val args = os_native_build_args(target, backend_name)
     val objcopy_prefix = _objcopy_path_prefix()
-    val simple_bin = _find_simple_binary()
+    val simple_bin = _find_simple_binary_for_target(target, backend_name)
     val stamp_content = _native_build_stamp_content(target, backend_name, args, simple_bin, log_mode)
     if build_marker == "" and _native_build_cache_hit(target, stamp_content, simple_bin):
         print "[build][{arch_label}] phase=native-build persistent-cache output={target.output}"
@@ -357,11 +357,16 @@ fn _find_simple_binary() -> text:
             return cand
     "bin/simple"
 
+fn _find_simple_binary_for_target(target: OsTarget, backend_name: text) -> text:
+    if backend_name == "llvm" and target.arch == Architecture.X86 and _simple_binary_is_valid("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    _find_simple_binary()
+
 fn _build_sources(target: OsTarget) -> [text]:
     if _is_ssh_live_target(target):
         return ["build/os/generated", "src/os", "src/lib", "examples/simple_os"]
-    if _is_x86_32_browser_probe_target(target):
-        return ["build/os/generated", "src/os", "src/lib", "examples/simple_os"]
+    if _is_x86_32_probe_target(target):
+        return ["build/os/generated", "examples/simple_os/arch/x86_32"]
     if _is_x86_64_kernel_target(target):
         return ["build/os/generated", "src/os", "src/lib", "examples/simple_os"]
     if _is_browser_wrapper_target(target):
@@ -388,7 +393,7 @@ fn _build_sources(target: OsTarget) -> [text]:
 
 fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
     var envs: [text] = []
-    if _is_x86_64_kernel_target(target) or _is_x86_32_browser_probe_target(target) or _uses_baremetal_wrapper_profile(target):
+    if _is_x86_64_kernel_target(target) or _is_x86_32_probe_target(target) or _uses_baremetal_wrapper_profile(target):
         envs.push("SIMPLE_BOOTSTRAP=1")
         envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
     if _is_arm64_wm_qemu_target(target):
@@ -480,7 +485,7 @@ fn _restore_build_env(old_bootstrap: text, old_lib: text, old_boot_minimal: text
 
 fn _apply_build_env(target: OsTarget, objcopy_prefix: text) -> bool:
     val cwd = rt_env_cwd()
-    if _is_x86_64_kernel_target(target) or _is_x86_32_browser_probe_target(target) or _uses_baremetal_wrapper_profile(target):
+    if _is_x86_64_kernel_target(target) or _is_x86_32_probe_target(target) or _uses_baremetal_wrapper_profile(target):
         if not rt_env_set("SIMPLE_BOOTSTRAP", "1"):
             return false
         if not rt_env_set("SIMPLE_LIB", "{cwd}/src"):
@@ -525,6 +530,9 @@ fn _is_x86_64_kernel_target(target: OsTarget) -> bool:
 
 fn _is_x86_32_browser_probe_target(target: OsTarget) -> bool:
     target.entry == "examples/simple_os/arch/x86_32/browser_probe_entry.spl"
+
+fn _is_x86_32_probe_target(target: OsTarget) -> bool:
+    target.entry.starts_with("examples/simple_os/arch/x86_32/")
 
 fn _is_browser_wrapper_target(target: OsTarget) -> bool:
     target.entry == "examples/simple_os/arch/x86_64/browser_soft_entry.spl" or

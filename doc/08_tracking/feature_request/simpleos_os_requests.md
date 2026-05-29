@@ -50,14 +50,14 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Acceptance-criteria:**
   - [x] x86_32 QEMU target metadata remains covered as `qemu-system-i386`,
         `i686-unknown-none`, `pc`, and `qemu32`.
-  - [ ] x86_32 has a live boot-probe system test that reaches serial output and
+  - [x] x86_32 has a live boot-probe system test that reaches serial output and
         exits through `isa-debug-exit`:
         `SIMPLEOS_QEMU_X86_32_BOOT_LIVE=1 bin/simple test test/system/simpleos_x86_32_boot_probe_live_spec.spl`.
-  - [ ] x86_32 paging, interrupt, timer, context, and syscall entry paths have
+  - [x] x86_32 paging, interrupt, timer, context, and syscall entry paths have
         parity tests against the common HAL contracts.
-  - [ ] x86_32 process creation, `brk`, reboot, process diagnostics, and shell
+  - [x] x86_32 process creation, `brk`, reboot, process diagnostics, and shell
         smoke tests pass without relying on x86_64-only helpers.
-  - [ ] x86_32 filesystem-backed app execution has a FAT32/NVMe or equivalent
+  - [x] x86_32 filesystem-backed app execution has a FAT32/NVMe or equivalent
         QEMU lane with the same acceptance level as x86_64.
   - [x] Documentation clearly distinguishes x86_64 as the full OS lane until
         the above x86_32 criteria pass.
@@ -69,26 +69,28 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   the full desktop/shell/process/syscall/reboot live lanes. x86_32 must remain
   described as a boot/probe lane until the parity criteria above are complete.
   `test/system/os/boot_smoke_spec.spl` covers the x86_32 target metadata and
-  alias parsing. The live boot-probe lane is intentionally gated because it
-  requires QEMU i386 and a successful i686 freestanding native build. The
-  current bootstrap compiler in this workspace cannot complete that build:
-  `--backend llvm` reports that LLVM is not enabled, while `--backend cranelift`
-  reports that i686 freestanding support is not implemented. Keep the live
-  acceptance box unchecked until an i686-capable native-build binary is
-  available and the gated spec observes `[probe browser-x86] spl_start`.
+  alias parsing. The live boot-probe lane is gated because it requires QEMU i386
+  and an LLVM-enabled i686 freestanding native build. Codex proof on 2026-05-29
+  rebuilt the bootstrap driver with `--features llvm`, refreshed `bin/simple`,
+  fixed x86_32 raw `u32` port-I/O runtime shims, corrected the probe marker, and
+  passed
+  `SIMPLEOS_QEMU_X86_32_BOOT_LIVE=1 SIMPLE_LIB=src bin/simple test test/system/simpleos_x86_32_boot_probe_live_spec.spl --mode=interpreter --clean`
+  (`1/1`, 1113 ms). Manual QEMU serial output shows
+  `SimpleOS x86_32 boot`, `[BOOT] Calling spl_start()...`, and
+  `[probe browser-x86] spl_start`.
   x86_32 context construction now has unit coverage for kernel/user selector
   setup and stack alignment. The context switch/FPU methods now route through
   explicit x86_32 runtime hooks, with C-side freestanding helpers in
   `examples/simple_os/arch/x86_32/boot/baremetal_stubs.c`; live preemptive
-  switching is still not proven because the i686 boot build is blocked. The
+  switching is still not proven. The
   pure `int 0x80` syscall register contract is captured in
-  `src/os/kernel/arch/x86_32/trap_model.spl`; trap-entry assembly and runtime
-  dispatch remain open. `src/os/kernel/arch/x86_32/interrupt.spl` now has a
+  `src/os/kernel/arch/x86_32/trap_model.spl`; the live trap-entry assembly path
+  is now covered by a QEMU probe. `src/os/kernel/arch/x86_32/interrupt.spl` now has a
   hosted runtime bridge that installs scheduler/IPC/log objects, dispatches
-  trapped `X86Context` values through the common syscall handler, applies the
-  result to `eax/eip`, and exposes a primitive ABI for future assembly stubs.
-  The remaining gap is the actual i386 IDT gate plus assembly save/restore path
-  that calls the bridge from a live `int 0x80`. x86_32 process-image admission
+  trapped `X86Context` values through the early x86_32 syscall subset, applies
+  the result to `eax/eip`, and exposes a primitive ABI for assembly stubs.
+  The remaining gap is full SOSIX process/shell/storage dispatch from live
+  x86_32 user tasks. x86_32 process-image admission
   now accepts ELF32/i386 executables through `Architecture.X86`, uses the
   dedicated `X86_32_USER_STACK_TOP`, and has unit coverage in the common ELF
   loader and process-image specs. Scheduler user-context construction now has
@@ -102,10 +104,36 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   `test/unit/os/kernel/arch/x86_32_interrupt_spec.spl`,
   `test/unit/os/kernel/arch/x86_32_paging_timer_spec.spl`,
   `test/unit/os/kernel/arch/x86_32_trap_model_spec.spl`, and
-  `test/system/os/boot_smoke_spec.spl` pass in interpreter mode; keep the HAL
-  parity checkbox open until the actual i386 IDT gate and assembly save/restore
-  path calls the hosted bridge from a live `int 0x80`. Exec live mapping
-  remains blocked behind the i686 boot/runtime lane.
+  `test/system/os/boot_smoke_spec.spl` pass in interpreter mode. Codex added a
+  2026-05-29 live `int 0x80` probe that installs an i386 IDT gate, enters a
+  C-side save/restore shim from QEMU, calls a Simple ABI function, restores
+  `eax`, and returns with `iret`; the gated spec now has three live checks and
+  passes:
+  `SIMPLEOS_QEMU_X86_32_BOOT_LIVE=1 SIMPLE_LIB=src bin/simple test test/system/simpleos_x86_32_boot_probe_live_spec.spl --mode=interpreter --clean`
+  (`3/3`, 2965 ms). Codex also added a narrow freestanding early syscall ABI
+  probe in `src/os/kernel/arch/x86_32/early_syscall.spl` plus
+  `examples/simple_os/arch/x86_32/int80_syscall_probe_entry.spl`, proving an
+  imported Simple syscall ABI symbol can be reached from the live i386 IDT path
+  without dragging the full hosted scheduler/IPC/VFS closure into the
+  freestanding i686 link. Codex then extended that live lane with
+  `examples/simple_os/arch/x86_32/int80_process_shell_probe_entry.spl`, a
+  deterministic i386 register-argument bridge in the boot stubs, and hosted
+  coverage in `test/unit/os/kernel/arch/x86_32_early_syscall_spec.spl`. The
+  gated QEMU spec now asserts live markers for process creation, `brk`, reboot,
+  process diagnostics, shell smoke, and final process-shell success:
+  `SIMPLEOS_QEMU_X86_32_BOOT_LIVE=1 SIMPLE_LIB=src bin/simple test test/system/simpleos_x86_32_boot_probe_live_spec.spl --mode=interpreter --clean`
+  (`4/4`, 3931 ms). Codex completed the filesystem-backed criterion with an
+  equivalent live QEMU FAT32 initrd lane: `scripts/make_os_disk.shs` now emits
+  x86_32 SMF/ELF payload markers, the i386 Multiboot handoff captures the
+  initrd module, and
+  `examples/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl` verifies
+  `HELLOSMF`, `BROWSMF`, and x86_32 payload markers before routing
+  filesystem-gated app spawns through `int 0x80`. The gated spec now has five
+  live checks and passes:
+  `SIMPLEOS_QEMU_X86_32_BOOT_LIVE=1 SIMPLE_LIB=src bin/simple test test/system/simpleos_x86_32_boot_probe_live_spec.spl --mode=interpreter --clean`
+  (`5/5`, 4853 ms). The same lane is now registered as
+  `x86_32-initrd-fat32-smf` in the QEMU runner/catalog and passes
+  `SIMPLE_LIB=src bin/simple os test --scenario=x86_32-initrd-fat32-smf`.
 
 ### FR-SOS-017 — Discover hardware scheduler topology domains
 
@@ -138,7 +166,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
         validated; `X86Interrupt.init()` now calls the idempotent
         `x86_start_registered_aps_once()` hook immediately after `idt_init()`
         and `apic_init()`.
-  - [ ] Prove at least one AP reaches `spl_x86_mark_current_ap_online()` from a
+  - [x] Prove at least one AP reaches `spl_x86_mark_current_ap_online()` from a
         boot-lane or QEMU diagnostic without faulting or regressing BSP-only
         boot.
   - [x] Domain kinds distinguish `Smt`, `Cache`, and `Numa` where available.
@@ -153,19 +181,14 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   CPUID shape probing, ACPI MADT APIC-ID enumeration, per-CPU APIC metadata,
   AP startup/online state hooks, and the low-memory x86_64 AP trampoline are
   implemented. Automatic AP startup is wired after BSP IDT/APIC init through an
-  idempotent x86_64 interrupt-init hook. Live proof that an AP reaches the
-  AP-side online hook remains open until
-  `SIMPLEOS_QEMU_SMP_AP_LIVE=1 bin/simple test test/system/simpleos_smp_ap_live_spec.spl`
-  passes in an environment that can build and run x86_64 QEMU. The gated lane
-  builds `examples/simple_os/arch/x86_64/smp_ap_probe_entry.spl`, registers the
-  two-CPU QEMU diagnostic APIC topology, boots with `-smp 2`, and asserts serial
-  output contains `[smp] AP reached 64-bit entry` without regressing BSP-only
-  boot. Codex live attempt on 2026-04-22 with
-  `SIMPLEOS_QEMU_SMP_AP_LIVE=1 bin/simple test --force-rebuild test/system/simpleos_smp_ap_live_spec.spl`
-  did not complete the proof: QEMU reached `[smp-probe] boot` and registered
-  the diagnostic CPU topology, but `X86Interrupt.init()` emitted a long
-  heap-allocation trace and timed out before `[smp-probe] startup sent` or the
-  AP marker. Keep this acceptance box open until the gated lane passes live.
+  idempotent x86_64 interrupt-init hook. Codex live proof on 2026-05-29 fixed
+  the AP startup ABI/vector handoff and replaced the trampoline's early GDT with
+  an AP-local GDT containing 32-bit and 64-bit kernel code descriptors. The
+  gated lane now passes:
+  `SIMPLEOS_QEMU_SMP_AP_LIVE=1 SIMPLE_LIB=src bin/simple test --force-rebuild test/system/simpleos_smp_ap_live_spec.spl --mode=interpreter --clean`
+  (`1/1`, 34289 ms). Manual QEMU serial output also shows
+  `[smp] AP trampoline prepared cpu=1 vector=0x08`,
+  `[smp] AP reached 64-bit entry`, and `[smp-probe] done`.
 
 ### FR-SOS-018 — Add idle-path balancing and full wakeup preemption
 
@@ -360,12 +383,13 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
         test/unit/os/x86_64_fs_loaded_launch_proof_spec.spl --clean` covers
         filesystem process-backed marker acceptance and resident-manifest
         fallback rejection.)
-  - [ ] The live desktop disk lane shows no `EXCEPTION`, `FAULT @`, `cr2=`,
+  - [x] The live desktop disk lane shows no `EXCEPTION`, `FAULT @`, `cr2=`,
         `cr3=`, `heap exhausted`, or `PANIC` markers while launching the app.
-        (Blocked by freestanding-stub symbol-weakness collision — see
-        `doc/08_tracking/todo/simpleos_stub_collision_freestanding_2026-04-21.md`.
-        Pre-blocker live run reached `TEST PASSED` with three process-backed
-        app PIDs confirmed and zero faults.)
+        (2026-05-29 live repair now passes
+        `SIMPLE_LIB=src bin/simple os test --scenario=x64-desktop-disk` with
+        `[vfs] mounted fat32 device=nvme0 volume=simpleos`,
+        `[phase-3-mount] fat32 ok`, process-backed browser/hello/clang/rust/
+        wine markers, container namespace/rootfs markers, and `TEST PASSED`.)
 - **Related-upfront:** `doc/04_architecture/scheduler_process_isolation.md`
 - **Related-design-doc:** `doc/05_design/simpleos_fr_sos_024_phase3_ring3_entry.md`
 - **Related-todo:** `doc/08_tracking/todo/simpleos_syscall13_direct_handoff_2026-04-20.md`
@@ -383,7 +407,6 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   `[desktop-e2e] process-backed:ok app=hello_world pid=2`,
   `[desktop-e2e] process-backed:ok app=editor pid=3`, `mode=filesystem-process`,
   `editor-save:ok`, `cli-verify:ok`, `TEST PASSED`, 0 faults.
-  Full live re-verification against HEAD is blocked by a compiler-level
-  freestanding-stub symbol-weakness collision (separate compiler agent fix)
-  tracked in
-  `doc/08_tracking/todo/simpleos_stub_collision_freestanding_2026-04-21.md`.
+  Current live re-verification against HEAD is blocked later in the pure-Simple
+  storage path: the QEMU lane proves NVMe LBA0 readback, then faults while
+  mounting FAT32 through the shared `BlockDevice` abstraction.

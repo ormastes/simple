@@ -111,6 +111,35 @@ fn test_triple_slash_doc_comment() {
 }
 
 #[test]
+fn test_triple_slash_empty_line_between_doc_lines() {
+    assert_eq!(
+        tokenize("/// a\n///\n/// b\nextern fn f(len: i64) -> [f64]\n"),
+        vec![
+            TokenKind::DocComment("a".to_string()),
+            TokenKind::Newline,
+            TokenKind::DocComment(String::new()),
+            TokenKind::Newline,
+            TokenKind::DocComment("b".to_string()),
+            TokenKind::Newline,
+            TokenKind::Extern,
+            TokenKind::Fn,
+            TokenKind::Identifier { name: "f".to_string(), pattern: NamePattern::Immutable },
+            TokenKind::LParen,
+            TokenKind::Identifier { name: "len".to_string(), pattern: NamePattern::Immutable },
+            TokenKind::Colon,
+            TokenKind::Identifier { name: "i64".to_string(), pattern: NamePattern::Immutable },
+            TokenKind::RParen,
+            TokenKind::Arrow,
+            TokenKind::LBracket,
+            TokenKind::Identifier { name: "f64".to_string(), pattern: NamePattern::Immutable },
+            TokenKind::RBracket,
+            TokenKind::Newline,
+            TokenKind::Eof,
+        ]
+    );
+}
+
+#[test]
 fn test_double_slash_still_floor_div() {
     // // is still floor division, not a comment
     assert_eq!(

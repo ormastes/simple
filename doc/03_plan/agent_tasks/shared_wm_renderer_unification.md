@@ -2,17 +2,23 @@
 
 Date: 2026-05-29
 
+Precedence: this is a lane note and evidence record, not the authoritative
+focused restart status. Use `doc/03_plan/gui_renderer_restart_plan_2026-05-29.md`
+for the focused GUI renderer restart status and
+`doc/03_plan/shared_wm_renderer_unification_completion_audit.md` for the
+broader shared-WM completion audit.
+
 ## Current Status
 
-Local agent research found the requested end state is now partially implemented. Existing contracts cover the shared web render API in `src/lib/common/ui/web_render_api.spl`, concrete Web/Electron/Tauri consumers, and concrete CPU/Metal/CUDA Engine2D backend files. Remaining work is to keep the docs/specs aligned with those API files, prove pure Simple browser parity, and close any host WM versus SimpleOS WM service/core gaps.
+Local agent research originally found the requested end state partially implemented. Current recovery evidence has since closed the shared web render API, CPU/Metal/CUDA Engine2D interface, host WM/SimpleOS WM lifecycle sharing, shared web renderer API, and shared 2D compositor API rows in `doc/03_plan/shared_wm_renderer_unification_completion_audit.md`. The remaining shared-WM audit gap is the Qt size/memory comparison row, because Qt Widgets development files are not available on this host. The focused GUI renderer restart has rechecked pure Simple renderer behavior (`simple_web_renderer_spec` `29/29`, bounded browser smoke `4/4`) and Web/Tauri/UI-layer contracts.
 
 2026-05-29 recovery note: the active shared-renderer session
 `rollout-2026-05-29T04-59-01-019e7219-9d9f-7351-a37a-67b45c65584f.jsonl`
-was interrupted while `web_surface_blit_test` was still alive. Resume with a
-read-only reconciliation first, then rerun the stalled test with an explicit
-timeout and log capture before making new boundary edits.
+was interrupted while `web_surface_blit_test` was still alive. The recovery
+has been performed: the old stalled `_test.spl` coverage was replaced by the
+bounded `_spec.spl` coverage recorded below.
 
-## Recommended Path
+## Historical Recommended Path
 
 Recommended selection: Feature Option C with NFR Option 3 if the goal is to make the complete objective true. If the next turn should be lower risk, choose Feature Option B with NFR Option 2 first, then follow with WM service unification.
 
@@ -56,11 +62,69 @@ Recommended selection: Feature Option C with NFR Option 3 if the goal is to make
    the established common UI adapter surface.
 4. Preserve behavior for browser, compositor, pixel backend, Electron, and Tauri
    paths with focused tests before removing old calls.
-5. Rerun the previously stalled `web_surface_blit_test`; if it stalls again,
-   record command, duration, last output, and process cleanup result before
-   retrying.
+5. Keep the bounded `web_surface_blit_spec.spl` coverage passing; if it stalls
+   again, record command, duration, last output, and process cleanup result
+   before retrying.
 6. Keep this lane separate from GUI size/performance and GTK comparison work in
    `doc/03_plan/simple_gui_wm_restart_2026-05-28.md`.
+
+## 2026-05-29 Web Surface Blit Recovery
+
+- The old `test/unit/os/compositor/web_surface_blit_test.spl` still stalled
+  under `bin/simple test` and left an orphaned `bin/simple run` child until
+  cleaned up.
+- The coverage was converted to
+  `test/unit/os/compositor/web_surface_blit_spec.spl` and bounded to smaller
+  fixture dimensions.
+- Verification:
+  - `SIMPLE_LIB=src timeout 45s bin/simple check test/unit/os/compositor/web_surface_blit_spec.spl`
+    passed.
+  - `SIMPLE_LIB=src timeout 45s bin/simple test test/unit/os/compositor/web_surface_blit_spec.spl --mode=interpreter --clean --format json`
+    passed `7/7` in 3846 ms.
+  - 2026-05-29 continuation rerun: the same check passed, and the same
+    bounded test passed `7/7` in 4949 ms.
+
+## 2026-05-29 create_web_window Surface Plumbing
+
+- `wm_action_applier.spl` now converts `create_web_window` actions into a
+  compositor surface carrying a `WebRenderRequest` with target `simple_web`,
+  stable `web_window_{id}` surface identity, viewport dimensions, and pixel
+  output enabled.
+- `wm_action_applier_spec.spl` covers the shared render request helper and the
+  create-web-window action path.
+- Verification:
+  - `SIMPLE_LIB=src timeout 120s bin/simple check src/os/compositor/wm_action_applier.spl test/unit/os/compositor/wm_action_applier_spec.spl test/unit/os/compositor/web_surface_blit_spec.spl test/unit/os/compositor/simple_web_window_renderer_spec.spl`
+    passed.
+  - `SIMPLE_LIB=src timeout 80s bin/simple test test/unit/os/compositor/wm_action_applier_spec.spl --mode=interpreter --clean --format json`
+    passed `10/10` in 1022 ms.
+  - `SIMPLE_LIB=src timeout 80s bin/simple test test/unit/os/compositor/web_surface_blit_spec.spl --mode=interpreter --clean --format json`
+    passed `7/7` in 2504 ms.
+  - `SIMPLE_LIB=src timeout 80s bin/simple test test/unit/os/compositor/simple_web_window_renderer_spec.spl --mode=interpreter --clean --format json`
+    passed `5/5` in 2450 ms.
+
+## 2026-05-29 SimpleOS GUI Adapter Lifecycle Coverage
+
+- Added focused coverage to
+  `test/unit/os/compositor/simpleos_gui_shared_wm_adapter_spec.spl` proving
+  `SimpleOsGuiAdapter.deliver_bridge_request(...)` routes create, move,
+  resize, minimize, and restore through the shared host compositor lifecycle
+  path.
+- Verification:
+  - `SIMPLE_LIB=src timeout 60s bin/simple check test/unit/os/compositor/simpleos_gui_shared_wm_adapter_spec.spl`
+    passed.
+  - `SIMPLE_LIB=src timeout 60s bin/simple test test/unit/os/compositor/simpleos_gui_shared_wm_adapter_spec.spl --mode=interpreter --clean --format json`
+    passed `2/2` in 5240 ms.
+
+2026-05-29 continuation:
+- Extended the same adapter bridge proof to set-title, focus, maximize,
+  update-tree, and destroy.
+- Verification:
+  - `SIMPLE_LIB=src timeout 120s bin/simple check test/unit/os/compositor/simpleos_gui_shared_wm_adapter_spec.spl src/os/compositor/host_compositor_entry.spl src/os/compositor/wm_action_applier.spl`
+    passed.
+  - `SIMPLE_LIB=src timeout 80s bin/simple test test/unit/os/compositor/simpleos_gui_shared_wm_adapter_spec.spl --mode=interpreter --clean --format json`
+    passed `3/3` in 5111 ms.
+  - `SIMPLE_LIB=src timeout 80s bin/simple test test/unit/os/compositor/wm_action_applier_spec.spl --mode=interpreter --clean --format json`
+    passed `9/9` in 487 ms.
 
 ## Danger / Possible Crash Adjacent Work
 
@@ -149,6 +213,12 @@ above have explicit pass/fail evidence or are deliberately parked.
 
 ## Open Decisions
 
-- Whether `UI_SURFACE_KIND_TAURI` should be added or whether Tauri remains represented through capability policy without a distinct surface kind.
-- Whether CUDA must become a real accelerated renderer in this feature or remain a capability-gated backend that returns unavailable without pretending to render.
-- Whether host TUI is in scope for this goal or should remain an explicit unsupported backend while Web/Electron/Tauri/pure Simple are unified.
+- Resolved: `UI_SURFACE_KIND_TAURI`/the Tauri surface kind is present in the surface registry and covered by focused binding evidence in the completion audit.
+- Resolved for this feature: CUDA remains a capability-gated backend. It must
+  return typed unavailable diagnostics when hardware/runtime proof is absent
+  and must not pretend to render; strict CUDA integration evidence covers the
+  available accelerated path and software-mirror fallback behavior.
+- Resolved for this feature: host TUI is outside the shared Web/Electron/Tauri
+  renderer unification scope. TUI work remains tracked by the editor/TUI lane,
+  while Web, Electron, Tauri, pure Simple web, host WM, and SimpleOS WM are the
+  unified renderer surfaces for this plan.

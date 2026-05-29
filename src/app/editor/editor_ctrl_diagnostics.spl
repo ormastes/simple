@@ -4,6 +4,8 @@
 
 use app.editor.editor_controller_types.*
 use app.editor.editor_controller.*
+use std.editor.buffer.buffer.*
+use std.editor.core.document.*
 use std.editor.services.diagnostics.*
 use std.editor.view.diagnostics_panel.*
 use std.editor.view.lsp_result_panel.*
@@ -11,17 +13,20 @@ use app.editor.editor_lsp_helpers.*
 use app.editor.editor_path_text_helpers.*
 
 fn ctrl_request_quickfix(ctrl: EditorController) -> EditorAction:
-    val doc = ctrl.session.active_document()
-    val buffer = ctrl.session.active_buffer()
-    if doc == nil or buffer == nil:
+    val doc: EditorDocument = ctrl.session.documents[ctrl.session.active_index]
+    if ctrl.session.active_index < 0 or ctrl.session.active_index >= ctrl.session.buffers.len():
+        ctrl.status_msg = "no file open"
+        return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+    if doc == nil:
         ctrl.status_msg = "no file open"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     if doc.language_id == "markdown":
-        val content = md_buffer_content(buffer)
-        val line = buffer.line_at(buffer.cursor_row_value())
+        val content = md_buffer_content(ctrl.session.buffers[ctrl.session.active_index])
+        val row = ctrl.session.buffers[ctrl.session.active_index].cursor_row
+        val line = ctrl.session.buffers[ctrl.session.active_index].line_at(row)
         val fixed = _editor_markdown_quickfix_line(line)
         if fixed != line:
-            val edit_json = "{\"line\":" + str(buffer.cursor_row_value()) + ",\"newText\":\"" + _editor_escape_json(fixed) + "\"}"
+            val edit_json = "{\"line\":" + str(row) + ",\"newText\":\"" + _editor_escape_json(fixed) + "\"}"
             ctrl.code_actions = [EditorCodeAction(title: "Apply Markdown quick fix", kind: "quickfix", edit_json: edit_json, command: "")]
             ctrl.status_msg = "1 quick fix"
             return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -107,12 +112,12 @@ fn ctrl_apply_code_action_at(ctrl: EditorController, index: i64) -> EditorAction
         action_index = 0
     if action_index >= ctrl.code_actions.len():
         action_index = ctrl.code_actions.len() - 1
-    val buffer = ctrl.session.active_buffer()
-    if buffer == nil:
+    if ctrl.session.active_index < 0 or ctrl.session.active_index >= ctrl.session.buffers.len():
         ctrl.status_msg = "no file open"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+    var buffer: EditorBuffer = ctrl.session.buffers[ctrl.session.active_index]
     val action = ctrl.code_actions[action_index]
-    val doc = ctrl.session.active_document()
+    val doc: EditorDocument = ctrl.session.documents[ctrl.session.active_index]
     val doc_path = if doc == nil then "" else: doc.path()
     val applied = _editor_apply_code_action_content(buffer, doc_path, action.edit_json)
     if not applied.applied:
@@ -135,7 +140,7 @@ fn ctrl_apply_code_action_at(ctrl: EditorController, index: i64) -> EditorAction
     ctrl.session.update_active_buffer(buffer)
     ctrl_replace_open_document_buffer(ctrl, doc_path, buffer)
     ctrl.code_actions = []
-    val doc = ctrl.session.active_document()
+    val doc: EditorDocument = ctrl.session.active_document()
     if doc != nil and doc.language_id == "markdown":
         ctrl_update_markdown_preview(ctrl, doc, buffer)
     if extra_file_edits > 0:
@@ -168,9 +173,11 @@ fn ctrl_diagnostics_jump_selected(ctrl: EditorController) -> EditorAction:
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     val line = diagnostics_panel_target_line(ctrl.diagnostics_panel)
     val col = diagnostics_panel_target_col(ctrl.diagnostics_panel)
-    ctrl.session.open_file(path)
+    var session = ctrl.session
+    session.open_file(path)
+    ctrl.session = session
     ctrl_focus_lsp_target_path(ctrl, path)
-    val buffer = ctrl.session.active_buffer()
+    val buffer: EditorBuffer = ctrl.session.active_buffer()
     if buffer != nil:
         buffer.move_cursor(line, col)
         ctrl.session.update_active_buffer(buffer)

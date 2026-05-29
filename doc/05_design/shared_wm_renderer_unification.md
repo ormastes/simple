@@ -22,6 +22,21 @@ Adapters use the API as follows:
 - `src/os/compositor/host_compositor_entry.spl` reports the shared `WEB_RENDER_TARGET_SIMPLE_WEB` target for host and SimpleOS framebuffer paths.
 - Pure Simple browser participation is verified by `test/unit/app/ui/web_render_backend_api_spec.spl`.
 
+Host-native surface and input capture code is adapter-private. It is allowed to
+own native window handles, host process effects, and backend-specific event
+plumbing, but not SimpleOS web content serialization. The shared web renderer
+boundary is:
+
+- Host WM content renderer names for Browser, Electron, and Tauri resolve to
+  `WEB_RENDER_TARGET_SIMPLE_WEB`.
+- `create_web_window` maps to a `WebRenderRequest` with target `simple_web`,
+  a stable `web_window_<id>` surface id, pixel output requested, and the same
+  URL-derived body helper used by SimpleOS.
+- SimpleOS web app content uses `simple_web_window_renderer.spl` to produce the
+  same request/artifact shape before blitting pixels to `CompositorBackend`.
+- Native host surfaces remain outside this web-render API because they are
+  platform/windowing effects, not web content renderers.
+
 Host native window command JSON uses `WebRenderHostWindowCommand` and `web_render_host_window_command_to_json` in `src/lib/common/ui/web_render_api.spl`. `src/app/ui.web/host_adapter_contract.spl` keeps its existing `HostWindowCommand` wrapper for callers and delegates serialization to the common API.
 
 ## Engine2D API
@@ -31,6 +46,40 @@ Host native window command JSON uses `WebRenderHostWindowCommand` and `web_rende
 ## WM API
 
 `src/os/services/wm/wm_service.spl` and `src/os/compositor/wm_core.spl` are the shared WM authority targets. `src/os/compositor/host_compositor_entry.spl` now uses the real `WmService` as its lifecycle handle and converts host bridge messages plus pointer-driven drag/resize into shared `WmAction` lifecycle operations. `src/os/desktop/shell.spl` routes remote create, create-web, destroy, focus, resize, move, set-title, minimize, maximize, restore, and update-tree compositor mutation through `apply_wm_action_to_compositor(...)` and keeps shell-owned side effects local. `src/os/compositor/wm_action_applier.spl` owns the shared remote update-tree materialization. `src/os/compositor/simple_web_window_renderer.spl` is the SimpleOS adapter that turns common web render requests into compositor pixels. Remaining host WM work should keep moving host-native input/surface policy into shared WM paths and keep platform effects below the adapter boundary.
+
+The host adapter uses `HostedWindow` only as the platform projection of
+`WmLifecycleWindowState`. Conversion helpers
+`host_windows_to_lifecycle_state(...)` and
+`host_windows_from_lifecycle_state(...)` define the boundary. The only allowed
+host-side lifecycle entry points are:
+
+- bridge request conversion through `wm_action_from_bridge_request(...)`;
+- lifecycle application through `host_compositor_apply_lifecycle_action(...)`,
+  which delegates to `apply_wm_action_to_lifecycle_windows(...)`;
+- pointer motion through `host_compositor_pointer_move(...)`, which delegates to
+  `wm_lifecycle_pointer_move(...)`;
+- left-button state through `host_compositor_left_button(...)`, which delegates
+  to `wm_lifecycle_left_button(...)`;
+- taskbar hit testing through `wm_lifecycle_hit_taskbar(...)`.
+
+Host process launch failure windows, native backend construction, event-loop
+pumping, and presentation remain adapter-owned side effects. They are not WM
+policy and must not duplicate lifecycle rules.
+
+## Baremetal Overlay Design Boundary
+
+The x86 baremetal desktop overlay is not a WM-owned surface. It is boot-shell
+chrome rendered after shared compositor state through `CompositorBackend`.
+`src/os/desktop/shell_baremetal.spl` owns this immediate-mode overlay because
+the `WidgetNode` DSL and full surface materialization path are not verified as
+safe boot dependencies in the baremetal lane.
+
+The implementation rule is narrow: shell overlay drawing may use
+`CompositorBackend` primitives only. It must not call raw `Engine2D` directly,
+and it must not duplicate WM lifecycle state for app windows. When the boot lane
+can safely materialize WidgetNode surfaces, this boundary can be revisited; until
+then, shell-owned chrome is the explicit non-WM boundary and application/window
+state remains in the shared WM path.
 
 ## Size Baseline Design
 

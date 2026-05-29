@@ -134,8 +134,9 @@ fn pcimgr_find_by_class_i64(class_code: i64, subclass: i64) -> i64:
     """Find first device by PCI class/subclass. Returns index or -1."""
     var i: u64 = 0
     while i < pcimgr_device_count():
-        val target = pcimgr_nth_target(i)
-        if target.?:
+        val target_opt = pcimgr_nth_target(i)
+        if target_opt != nil:
+            val target = target_opt.unwrap()
             val bus = pcimgr_target_bus(target)
             val dev = pcimgr_target_device(target)
             val func = pcimgr_target_func(target)
@@ -155,12 +156,39 @@ fn pcimgr_find_by_vendor_i64(vendor: i64, device_id: i64) -> i64:
     """Find first device by vendor/device ID. Returns index or -1."""
     var i: u64 = 0
     while i < pcimgr_device_count():
-        val target = pcimgr_nth_target(i)
-        if target.?:
+        val target_opt = pcimgr_nth_target(i)
+        if target_opt != nil:
+            val target = target_opt.unwrap()
             val id = pci_read_config(pcimgr_target_bus(target), pcimgr_target_device(target), pcimgr_target_func(target), 0x00)
             val ve = (id & 0xFFFFu32).to_i64()
             val di = ((id >> 16) & 0xFFFFu32).to_i64()
             if ve == vendor and di == device_id:
+                return i as i64
+        i = i + 1u64
+    -1
+
+fn pcimgr_find_qemu_nvme() -> i64:
+    """Find QEMU's emulated NVMe controller by raw vendor/device id."""
+    var i: u64 = 0
+    while i < pcimgr_device_count():
+        val target_opt = pcimgr_nth_target(i)
+        if target_opt != nil:
+            val target = target_opt.unwrap()
+            val id = pci_read_config(pcimgr_target_bus(target), pcimgr_target_device(target), pcimgr_target_func(target), 0x00)
+            if (id & 0xFFFFu32) == 0x1B36u32 and ((id >> 16) & 0xFFFFu32) == 0x0010u32:
+                return i as i64
+        i = i + 1u64
+    -1
+
+fn pcimgr_find_nvme_storage() -> i64:
+    """Find first NVMe storage controller using raw PCI class/subclass bits."""
+    var i: u64 = 0
+    while i < pcimgr_device_count():
+        val target_opt = pcimgr_nth_target(i)
+        if target_opt != nil:
+            val target = target_opt.unwrap()
+            val class_info = pci_read_config(pcimgr_target_bus(target), pcimgr_target_device(target), pcimgr_target_func(target), 0x08)
+            if ((class_info >> 24) & 0xFFu32) == 0x01u32 and ((class_info >> 16) & 0xFFu32) == 0x08u32:
                 return i as i64
         i = i + 1u64
     -1
@@ -183,9 +211,10 @@ fn pcimgr_grant_device(dev_idx: u64, requester_task: u64) -> Result<DeviceGrant,
     if dev_idx >= dev_count:
         return Err("invalid device index: {dev_idx}")
 
-    val target = pcimgr_nth_target(dev_idx)
-    if not target.?:
+    val target_opt = pcimgr_nth_target(dev_idx)
+    if target_opt == nil:
         return Err("invalid device index: {dev_idx}")
+    val target = target_opt.unwrap()
     val bus_u8 = pcimgr_target_bus(target)
     val dev_u8 = pcimgr_target_device(target)
     val func_u8 = pcimgr_target_func(target)
@@ -255,27 +284,30 @@ fn pcimgr_get_device_class(dev_idx: u64) -> i64:
     """Return class code for a device."""
     if dev_idx >= dev_count:
         return -1
-    val target = pcimgr_nth_target(dev_idx)
-    if not target.?:
+    val target_opt = pcimgr_nth_target(dev_idx)
+    if target_opt == nil:
         return -1
+    val target = target_opt.unwrap()
     ((pci_read_config(pcimgr_target_bus(target), pcimgr_target_device(target), pcimgr_target_func(target), 0x08) >> 24) & 0xFFu32).to_i64()
 
 fn pcimgr_get_device_subclass(dev_idx: u64) -> i64:
     """Return subclass for a device."""
     if dev_idx >= dev_count:
         return -1
-    val target = pcimgr_nth_target(dev_idx)
-    if not target.?:
+    val target_opt = pcimgr_nth_target(dev_idx)
+    if target_opt == nil:
         return -1
+    val target = target_opt.unwrap()
     ((pci_read_config(pcimgr_target_bus(target), pcimgr_target_device(target), pcimgr_target_func(target), 0x08) >> 16) & 0xFFu32).to_i64()
 
 fn pcimgr_get_device_vendor(dev_idx: u64) -> i64:
     """Return vendor ID for a device."""
     if dev_idx >= dev_count:
         return -1
-    val target = pcimgr_nth_target(dev_idx)
-    if not target.?:
+    val target_opt = pcimgr_nth_target(dev_idx)
+    if target_opt == nil:
         return -1
+    val target = target_opt.unwrap()
     (pci_read_config(pcimgr_target_bus(target), pcimgr_target_device(target), pcimgr_target_func(target), 0x00) & 0xFFFFu32).to_i64()
 
 fn pcimgr_get_device_state(dev_idx: u64) -> i64:
@@ -374,18 +406,20 @@ fn pcimgr_config_read(dev_idx: u64, offset: u8) -> u32:
     """Read a 32-bit word from PCI configuration space for a tracked device."""
     if dev_idx >= dev_count:
         return 0xFFFFFFFF
-    val target = pcimgr_nth_target(dev_idx)
-    if not target.?:
+    val target_opt = pcimgr_nth_target(dev_idx)
+    if target_opt == nil:
         return 0xFFFFFFFF
+    val target = target_opt.unwrap()
     pci_read_config(pcimgr_target_bus(target), pcimgr_target_device(target), pcimgr_target_func(target), offset)
 
 fn pcimgr_config_write(dev_idx: u64, offset: u8, value: u32):
     """Write a 32-bit word to PCI configuration space for a tracked device."""
     if dev_idx >= dev_count:
         return
-    val target = pcimgr_nth_target(dev_idx)
-    if not target.?:
+    val target_opt = pcimgr_nth_target(dev_idx)
+    if target_opt == nil:
         return
+    val target = target_opt.unwrap()
     pci_write_config(pcimgr_target_bus(target), pcimgr_target_device(target), pcimgr_target_func(target), offset, value)
 
 # ============================================================================
@@ -404,9 +438,10 @@ fn pcimgr_bar_size(dev_idx: u64, bar_num: u8) -> u64:
     """
     if dev_idx >= dev_count:
         return 0
-    val target = pcimgr_nth_target(dev_idx)
-    if not target.?:
+    val target_opt = pcimgr_nth_target(dev_idx)
+    if target_opt == nil:
         return 0
+    val target = target_opt.unwrap()
     val bus = pcimgr_target_bus(target)
     val dev = pcimgr_target_device(target)
     val func = pcimgr_target_func(target)
@@ -431,9 +466,10 @@ fn pcimgr_get_bar(dev_idx: u64, bar_num: u8) -> PciBar:
     """
     if dev_idx >= dev_count:
         return PciBar(index: bar_num, phys_addr: 0, size: 0, is_mmio: false, is_prefetchable: false, cap_token: 0)
-    val target = pcimgr_nth_target(dev_idx)
-    if not target.?:
+    val target_opt = pcimgr_nth_target(dev_idx)
+    if target_opt == nil:
         return PciBar(index: bar_num, phys_addr: 0, size: 0, is_mmio: false, is_prefetchable: false, cap_token: 0)
+    val target = target_opt.unwrap()
     val bus = pcimgr_target_bus(target)
     val dev = pcimgr_target_device(target)
     val func = pcimgr_target_func(target)
@@ -473,9 +509,10 @@ fn pcimgr_get_irq(dev_idx: u64) -> u32:
     """
     if dev_idx >= dev_count:
         return 0xFF
-    val target = pcimgr_nth_target(dev_idx)
-    if not target.?:
+    val target_opt = pcimgr_nth_target(dev_idx)
+    if target_opt == nil:
         return 0xFF
+    val target = target_opt.unwrap()
     val irq_dword = pci_read_config(pcimgr_target_bus(target), pcimgr_target_device(target), pcimgr_target_func(target), 0x3C)
     (irq_dword & 0xFF) as u32
 
@@ -519,9 +556,10 @@ fn pcimgr_dump_devices():
     serial_println("[pcimgr] === Device Table ({dev_count} devices) ===")
     var i: u64 = 0
     while i < dev_count:
-        val target = pcimgr_nth_target(i)
-        if not target.?:
+        val target_opt = pcimgr_nth_target(i)
+        if target_opt == nil:
             return
+        val target = target_opt.unwrap()
         val bus = pcimgr_target_bus(target).to_i64()
         val dev = pcimgr_target_device(target).to_i64()
         val func = pcimgr_target_func(target).to_i64()

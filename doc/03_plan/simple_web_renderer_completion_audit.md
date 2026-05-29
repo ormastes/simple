@@ -28,8 +28,8 @@ Prompt-to-artifact checklist:
 | Chrome DOM metrics data | `tools/electron-shell/measure_famous_site_corpus_chrome.js` writes browser metrics for one sample or all samples with `--all`. All 132 corpus baseline directories now contain `chrome_metrics.json`; the manifest includes `chrome_metrics`; the corpus spec validates every metrics file has the matching sample id, 160x120 viewport, body/div style data, 16px font, text client rects, per-line text strings, canvas `TextMetrics`, and fixture text. `site_0_google/chrome_metrics.json` records body margin, computed font, div box, text client rects, line strings, canvas widths, and ascent/descent fields for the first failing sample. | Present and BDD-validated for all 132 corpus samples. |
 | Simple-side text line diagnostics | `br_famous_site_corpus_layout_lines()`, `br_famous_site_corpus_layout_lines_sdn()`, and `br_famous_site_corpus_layout_line_widths_sdn()` serialize BrowserRenderer's own `FontRenderer.layout_text()` line grouping and measured line widths for corpus labels. The corpus spec checks `site_0_google` produces the same four wrapped line strings as Chrome's metrics sidecar, verifies the full corpus has `132` matched and `0` mismatched line strings at the renderer-aligned width `122`, and keeps boundary probes for the old too-tight width `120` plus over-wide width `132`. | Present for focused parity and broader gap tracking; line strings now match the full corpus at width 122. |
 | PPM delta diagnostics | `tools/electron-shell/analyze_ppm_delta.js` compares Chrome/Simple PPMs and reports diff bbox, color-class bboxes, gray/chromatic non-white classes, row/column hot spots, SAD, exact diff count, max channel delta, region totals, per-line expected/actual non-white boxes, non-white coverage ratios, dominant-background ink boxes, ink coverage ratios, and text-line segments split at the colored div bottom. It can derive regions from Chrome metrics JSON. `test/system/wm_compare/famous_site_corpus_spec.spl` runs it against `site_0_google` and current-worst `site_44_the_new_york_times` with `chrome_metrics.json` and asserts the known diagnostics, including refreshed overflow text coverage around 75% and `site_0_google` in-div ink coverage around 19%. | Present as BDD-covered diagnostic evidence, not an acceptance gate. |
-| Corpus report summary | `tools/electron-shell/summarize_famous_site_corpus_reports.js` parses all corpus `report.sdn` files, recomputes PPM `differentPixels` freshness from the checked-in Chrome/Simple artifacts, and ranks worst/best samples with exact/accepted/divergent totals. Current verifier evidence is 132 reports, 132 exact/accepted, 0 divergent, and 0 stale reports. | Present as status evidence. |
-| Corpus completion gate | `tools/electron-shell/verify_famous_site_corpus_completion.js` is the executable stop-condition check. It scans checked-in corpus reports directly, requires reports to be fresh, and exits nonzero unless every report is exact/accepted with 0 divergent reports. It currently exits `0` with `status: "PASS"` for the checked-in corpus fixture artifacts. `src/app/wm_compare/site_corpus_compat.spl --production-renderer` bypasses fixture/oracle fallbacks; the focused `site_0_google` production run is divergent while fixture mode is exact. | Present and passing for the fixture gate; production renderer parity is explicitly not passing. |
+| Corpus report summary | `tools/electron-shell/summarize_famous_site_corpus_reports.js` parses all corpus `report.sdn` files, recomputes PPM `differentPixels` freshness from the checked-in Chrome/Simple artifacts, and ranks worst/best samples with exact/accepted/divergent totals. Current fixture-corpus verifier evidence is 132 reports, 132 exact/accepted, 0 divergent, and 0 stale reports. This does not prove production Chrome parity. | Present as fixture-gate status evidence. |
+| Corpus completion gate | `tools/electron-shell/verify_famous_site_corpus_completion.js` is the executable stop-condition check for checked-in fixture artifacts. It scans checked-in corpus reports directly, requires reports to be fresh, and exits nonzero unless every fixture report is exact/accepted with 0 divergent reports. It currently exits `0` with `status: "PASS"` for the checked-in corpus fixture artifacts. `src/app/wm_compare/site_corpus_compat.spl --production-renderer` bypasses fixture/oracle fallbacks; the focused `site_0_google` production run is divergent while fixture mode is exact. | Present and passing for the fixture gate; production renderer parity is explicitly not passing. |
 | Corpus coverage summary | `tools/electron-shell/summarize_famous_site_corpus_coverage.js` ranks corpus samples by text non-white and dominant-background ink coverage deficit using Chrome/Simple PPMs plus Chrome metrics sidecars. The corpus spec asserts the current worst overflow target, `site_0_google`, with `963` expected pixels, `685` actual pixels, `278` missing pixels, and `actualPct10000: 7113`; it also asserts the current worst in-div ink target, `site_15_twitch`, with `1432` expected ink pixels, `149` actual, and `actualPct10000: 1040`, while keeping `site_60_tripadvisor` present as a tracked refreshed target. | Present as BDD-covered compositing target evidence. |
 | Colored-background text compositing summary | `tools/electron-shell/summarize_famous_site_text_compositing.js` clips Chrome text client rects to the colored div, compares expected/actual dominant-background ink, ranks worst samples by in-div text ink and diff, and reports chromatic-vs-gray text plus signed/absolute RGB channel error evidence. The corpus spec asserts the current worst ink target, `site_15_twitch`, and the current worst in-div text diff target, `site_37_soundcloud`. | Present as BDD-covered target evidence for the remaining text-compositing gap. |
 | Colored-background text mask overlap summary | `tools/electron-shell/summarize_famous_site_text_mask_overlap.js` compares Chrome and Simple ink masks inside Chrome text rects clipped to the colored div, then ranks worst recall and false-positive overlap. The corpus spec asserts the current worst recall target, `site_119_wordpress`, with `1490` expected ink pixels, `174` actual, `131` overlapping, `43` false-positive, and `recallPct10000: 879`; it also keeps `site_15_twitch` and `site_31_whatsapp` as covered mask-overlap targets. | Present as BDD-covered evidence that the remaining colored-text issue is mainly low recall with high-ish precision, not wholesale placement failure. |
@@ -46,7 +46,8 @@ Current verification evidence:
 
 - `bin/simple test test/system/wm_compare/html_compat_spec.spl --clean` passed.
 - `bin/simple test test/unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl --clean` passed 37 examples, including fallback CSS color parsing, `#RGBA` alpha compositing, inline and style-block `background: url(...) #color ...` scene painting, `currentColor` resolution for `background-color` and `background` including reversed declaration order inside a block and later matched style-rule color resolution, unknown-backend fallback reporting as deterministic software, and the current famous-site colored-background-text clip contract.
-- `bin/simple test test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl --clean` passed 23 examples, including actual backend reporting after invalid backend fallback, Simple-vs-Engine2D pixel parity, fallback CSS color parsing, `#RGBA` alpha compositing, fallback `currentColor` backgrounds, and RenderScene coverage for inline/style-block `background: url(...) #color ...`.
+- `SIMPLE_LIB=src timeout 120s bin/simple test test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl --mode=interpreter --clean --format json` passed 29 examples on 2026-05-29, including actual backend reporting after invalid backend fallback, Simple-vs-Engine2D pixel parity, fallback CSS color parsing, `#RGBA` alpha compositing, fallback `currentColor` backgrounds, and RenderScene coverage for inline/style-block `background: url(...) #color ...`.
+- `SIMPLE_LIB=src timeout 60s bin/simple test test/unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_smoke_spec.spl --mode=interpreter --clean --format json` passed 4 bounded browser-renderer smoke examples on 2026-05-29.
 - `bin/simple test test/system/wm_compare/famous_site_corpus_spec.spl --clean`
   passed 32 examples with all 132 corpus pages rendered non-empty, visible
   overflow text guarded against exact-oracle text omission, all 132
@@ -166,7 +167,13 @@ Current verification evidence:
   after a production run it recomputes the Chrome/production PPM delta, requires
   `renderer_mode: "production"`, requires `simple.production.ppm`, and currently
   reports `differentPixels: 2717`, `computedDifferentPixels: 2717`, and
-  `maxDifferentPixels: 2717` with `status: "PASS"`. The corpus system spec
+  `maxDifferentPixels: 2717` with `status: "PASS"`. A 2026-05-29 rerun also
+  confirms the text-region guardrail: div-box text delta `1612` pixels,
+  overflow-text delta `1104` pixels, Simple layout-line diagnostics present,
+  Chrome text-line count `4`, Simple geometry line count `1`, and
+  `layoutTextMatch: false`. A full 2026-05-29 rerun of
+  `test/system/wm_compare/famous_site_corpus_spec.spl` passed `36/36` in
+  101954 ms. The corpus system spec
   covers both the missing-report failure path and the checked-in
   `site_0_google` production-artifact success path. `site_corpus_compat.spl` also prints
   selected-run counts, so focused production probes expose `divergent=1` while
@@ -385,9 +392,11 @@ Current verification evidence:
   appears after the background declaration.
 - SimpleWebRenderer's facade fallback now also parses `background-color:
   rgb(...)` and fills the full fallback pixel buffer with the parsed background
-  before overlaying the built-in demo bands. `bin/simple test
+  before overlaying the built-in demo bands.
+  `SIMPLE_LIB=src timeout 120s bin/simple test
   test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl
-  --clean` now passes 23 examples, including the same `rgba(...)` over-white
+  --mode=interpreter --clean --format json` now passes 29 examples, including
+  the same `rgba(...)` over-white
   fallback behavior, shorthand hex parsing, named CSS color parsing, and
   transparent backgrounds composited to white, plus `hsl(...)` parsing and
   color-first/function-color `background:` shorthand plus fallback colors after
@@ -497,7 +506,8 @@ Uncovered or weak areas:
   because it reports Simple-specific PPM, DOM-region, SAD, color-class, and
   per-line evidence needed to debug the current Chrome mismatch.
 - The remaining TTF/font parity blocker is recorded in
-  `doc/bugs/simple_web_renderer_ttf_glyph_metrics.md`.
+  `doc/08_tracking/bug/simple_web_renderer_ttf_glyph_metrics.md`; fixture
+  acceptance and focused smoke coverage do not imply production Chrome parity.
 - `tools/electron-shell/analyze_ppm_delta.js` is covered by
   `test/system/wm_compare/famous_site_corpus_spec.spl --clean`, which now passes
   32 examples. The tool confirms the current
@@ -528,8 +538,17 @@ Uncovered or weak areas:
   differing pixels, 1,432 differences in the div box, 1,896 in overflow text,
   0 below-overflow pixels, and line 5 under-coverage of `302` expected
   non-white pixels versus `225` actual.
-- Engine2D `draw_text_bg` facade dispatch is resolved and recorded in
-  `doc/bugs/engine2d_draw_text_bg_dispatch.md`.
+- A 2026-05-29 local experiment that drew wrapped corpus text directly in the
+  production `simple_web_engine2d_render_html_pixels(...)` famous-site branch
+  with the Engine2D bitmap font was rejected: the focused `site_0_google`
+  production probe worsened from `2717` to `3072` differing pixels. The patch
+  and generated production artifacts were reverted, and the probe was rerun to
+  restore the current bounded baseline (`differentPixels: 2717`,
+  `simpleGeometryLineCount: 1`, Chrome text lines: `4`). This confirms the
+  next production-parity work is the tracked font metrics/compositing model,
+  not merely drawing the existing bitmap text into the corpus branch.
+- Engine2D `draw_text_bg` facade dispatch is resolved in prior tracking; the
+  current checkout has no separate draw-text-bg bug artifact to link here.
 
 Conclusion:
 

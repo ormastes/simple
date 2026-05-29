@@ -7,7 +7,7 @@
 use common.ui.builder.{button, panel, text_widget, build_tree_with_title}
 use common.ui.state.{init_state}
 use common.ui.widget.{UIEvent}
-use common.ui.web_render_api.{WEB_RENDER_TARGET_ELECTRON, WEB_RENDER_TARGET_PURE_SIMPLE, WEB_RENDER_TARGET_TAURI, WebRenderHostWindowCommand, WebRenderRequest, web_render_cache_key, web_render_dynamic_region_count, web_render_ipc_json, web_render_ipc_json_with_html, web_render_optimization_profile, web_render_transport_bundle, web_render_url_request}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_ELECTRON, WEB_RENDER_TARGET_PURE_SIMPLE, WEB_RENDER_TARGET_TAURI, WebRenderHostWindowCommand, WebRenderRequest, web_render_cache_key, web_render_dynamic_region_count, web_render_ipc_json, web_render_ipc_json_with_html, web_render_optimization_profile, web_render_to_artifact, web_render_transport_bundle, web_render_url_request}
 use app.ui.web.backend.{WebBackend, web_render_patch_transport_json, web_render_snapshot_transport_json}
 use app.ui.electron.backend.{ElectronBackend, electron_render_ipc_json}
 use app.ui.tauri.backend.{TauriBackend, tauri_render_ipc_json}
@@ -42,10 +42,13 @@ describe "web render backends use the shared common API":
             Ok(electron):
                 val electron_html = electron.render_html(state)
                 expect(electron_html).to_equal(web_html)
-                expect(electron_render_ipc_json(state, 1280, 720)).to_contain("\"target\":\"electron\"")
-                expect(electron_render_ipc_json(state, 1280, 720)).to_contain("\"surface_id\":\"\"")
+                val electron_req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", web_html, "", "", 1280, 720)
+                expect(electron_render_ipc_json(state, 1280, 720)).to_equal(web_render_to_artifact(electron_req).ipc_json)
                 expect(ipc_writer_message(electron_render_ipc_json(state, 1280, 720))).to_contain("\"target\":\"electron\"")
                 expect(electron.input_envelope_json("main", UIEvent.KeyPress(key: "enter"))).to_contain("\"target\":\"electron\"")
+                expect(electron.input_envelope_json("main", UIEvent.Resize(width: 640, height: 480))).to_contain("\"event_type\":\"resize\"")
+                expect(electron.input_envelope_json("main", UIEvent.InputChange(target_id: "name", value: "Ada"))).to_contain("\"event_type\":\"input\"")
+                expect(electron.input_envelope_json("main", UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "left", kind: "down"))).to_contain("\"event_type\":\"mouse_down\"")
                 expect(electron.snapshot_envelope_json("main", 3u64, "{\"mode\":\"NORMAL\"}")).to_contain("\"revision\":3")
                 expect(electron.patch_envelope_json("main", 3u64, 4u64, "[]", "")).to_contain("\"to_sequence\":4")
 
@@ -113,6 +116,10 @@ describe "web render backends use the shared common API":
         val electron = ElectronBackend.new(4016).unwrap()
         expect(electron_render_ipc_json(state, 1280, 720)).to_contain("\"target\":\"electron\"")
         expect(electron.input_envelope_json("main", UIEvent.KeyPress(key: "enter"))).to_equal(electron_bundle.input_json)
+        expect(electron.input_envelope_json("main", UIEvent.Resize(width: 640, height: 480))).to_contain("\"target\":\"electron\"")
+        expect(electron.input_envelope_json("main", UIEvent.Resize(width: 640, height: 480))).to_contain("\"event_type\":\"resize\"")
+        expect(electron.input_envelope_json("main", UIEvent.InputChange(target_id: "name", value: "Ada"))).to_contain("\"event_type\":\"input\"")
+        expect(electron.input_envelope_json("main", UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "left", kind: "down"))).to_contain("\"event_type\":\"mouse_down\"")
         expect(electron.snapshot_envelope_json("main", 8u64, "{\"mode\":\"NORMAL\"}")).to_equal(electron_bundle.snapshot_json)
         expect(electron.patch_envelope_json("main", 8u64, 9u64, "[]", "{\"mode\":\"NORMAL\"}")).to_equal(electron_bundle.patch_json)
         expect(electron.host_window_command_json(cmd)).to_equal(electron_bundle.host_window_json)

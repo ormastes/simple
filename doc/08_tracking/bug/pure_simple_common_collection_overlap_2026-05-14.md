@@ -111,3 +111,36 @@ hashset_insert    1.86x C / 13.09x Rust
 4. Keep rejected shortcuts documented; do not repeat raw-probe, short-string
    equality, split-vector contains, source-level unroll, or stale runtime-helper
    experiments without a new codegen reason.
+
+## 2026-05-29 refresh
+
+The retained collection benchmark regressed locally because the script defaulted
+back to the `core-c` lane, which does not export the pure Simple
+`rt_array_new_with_cap_text` helper used by the `HashSet` path. The benchmark
+script now defaults to the intended pure `simple-core` source-closure lane, with
+clean rebuilds enabled.
+
+The `list_traverse` lane also used `data.len().to_u64()` in the simple-core
+native executable; that produced an 8192 length for the typed `[u64]` benchmark
+array and made the checksum exactly one-eighth of the C/Rust value. The lane now
+uses the canonical `data_size()` constant already shared by construction and
+reporting.
+
+Fresh evidence:
+
+```text
+list_traverse     5.40x C / 4.14x Rust
+list_push         0.94x C / 1.95x Rust
+set_contains      64.80x C / 27.15x Rust
+hashset_contains  1.10x C / 1.81x Rust
+hashset_insert    1.68x C / 12.52x Rust
+```
+
+Verification:
+
+```bash
+bin/simple native-build --source src/runtime/simple_core --no-mangle --emit-archive --output build/simple-core/libsimple_runtime.a --clean
+SIMPLE_COLLECTION_BENCH_SAMPLES=1 SIMPLE_COLLECTION_BENCH_ENFORCE=0 bash test/perf/collections/run_collection_benchmarks.shs
+SIMPLE_LIB=src bin/simple test test/unit/lib/immut/persistent_trie_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src bin/simple test test/unit/lib/gc_async_immut/map_facade_native_spec.spl --mode=interpreter --clean
+```

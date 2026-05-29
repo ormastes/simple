@@ -353,13 +353,23 @@ fn exec_function_inner(
             // For FieldAccess args (e.g., `self.values`), we track separately
             // so we can write back into the object field after the call.
             enum ArgSource {
-                Ident { caller_name: String, param_name: String },
-                Field { obj_name: String, field_name: String, param_name: String },
+                Ident {
+                    caller_name: String,
+                    param_name: String,
+                },
+                Field {
+                    obj_name: String,
+                    field_name: String,
+                    param_name: String,
+                },
             }
             let source = if let Some(name) = &arg.name {
                 // Named argument: match param by name
                 if let simple_parser::ast::Expr::Identifier(caller) = &arg.value {
-                    ArgSource::Ident { caller_name: caller.clone(), param_name: name.clone() }
+                    ArgSource::Ident {
+                        caller_name: caller.clone(),
+                        param_name: name.clone(),
+                    }
                 } else {
                     continue;
                 }
@@ -373,10 +383,17 @@ fn exec_function_inner(
                 };
                 positional_idx += 1;
                 if let simple_parser::ast::Expr::Identifier(caller) = &arg.value {
-                    ArgSource::Ident { caller_name: caller.clone(), param_name: param.name.clone() }
+                    ArgSource::Ident {
+                        caller_name: caller.clone(),
+                        param_name: param.name.clone(),
+                    }
                 } else if let simple_parser::ast::Expr::FieldAccess { receiver, field } = &arg.value {
                     if let simple_parser::ast::Expr::Identifier(obj) = receiver.as_ref() {
-                        ArgSource::Field { obj_name: obj.clone(), field_name: field.clone(), param_name: param.name.clone() }
+                        ArgSource::Field {
+                            obj_name: obj.clone(),
+                            field_name: field.clone(),
+                            param_name: param.name.clone(),
+                        }
                     } else {
                         continue;
                     }
@@ -385,7 +402,10 @@ fn exec_function_inner(
                 }
             };
             match source {
-                ArgSource::Ident { caller_name, param_name } => {
+                ArgSource::Ident {
+                    caller_name,
+                    param_name,
+                } => {
                     if caller_name == METHOD_SELF && self_ctx.is_some() {
                         continue;
                     }
@@ -400,7 +420,11 @@ fn exec_function_inner(
                         }
                     }
                 }
-                ArgSource::Field { obj_name, field_name, param_name } => {
+                ArgSource::Field {
+                    obj_name,
+                    field_name,
+                    param_name,
+                } => {
                     // Write back mutated field value into the caller's object.
                     // e.g., `write_first(self.values, next)` — after the call,
                     // write the callee's `values` param back into `self.values`.
