@@ -12,8 +12,10 @@ use compiler.interp.execution.tiered_jit.{
     jit_hotspot_rebuild_backend_name,
     jit_hotspot_cost_allowed,
     jit_var_optimization_facts,
+    jit_var_optimization_facts_none,
     jit_var_optimization_fact_list,
     jit_var_optimization_reason,
+    jit_hotspot_plan_from_profile_var_facts,
     jit_hotspot_plan_invalidate,
     jit_hotspot_consume_plan,
     jit_hotspot_specialization_provider,
@@ -32,7 +34,8 @@ fn hot_profile(call_count: i64) -> FunctionProfile:
         typed_mir: true,
         safe_deopt: true,
         hotspot_specialized_source: "",
-        hotspot_semantic_proof: false
+        hotspot_semantic_proof: false,
+        var_facts: jit_var_optimization_facts_none()
     )
 
 fn hotspot_config() -> TieredJitConfig:
@@ -102,6 +105,25 @@ describe "Tiered JIT hotspot facts":
         expect(plan.facts.contains("profile.hot_count")).to_equal(true)
         expect(plan.facts.contains("ssa.var_transform")).to_equal(true)
         expect(plan.facts.contains("borrow.reassign_safe")).to_equal(true)
+
+    it "uses stored FunctionProfile var facts for manager-style hotspot planning":
+        val profile = FunctionProfile(
+            name: "hot_loop",
+            call_count: 64,
+            tier: JitTier.Interpreted,
+            compile_time_ms: 0.0,
+            source: "fn hot_loop(x: i64) -> i64: x + 1",
+            typed_mir: true,
+            safe_deopt: true,
+            hotspot_specialized_source: "",
+            hotspot_semantic_proof: false,
+            var_facts: jit_var_optimization_facts(true, 2, true, true, false, true)
+        )
+        val plan = jit_hotspot_plan_from_profile_var_facts(profile, hotspot_config(), true, true)
+        expect(plan.eligible).to_equal(false)
+        expect(plan.reason).to_equal("missing escape.no_escape")
+        expect(plan.facts.contains("var.reassignment")).to_equal(true)
+        expect(plan.facts.contains("escape.no_escape")).to_equal(false)
 
     it "plans Cranelift hotspot rebuilds at tier1 cost":
         val plan = jit_hotspot_rebuild_plan(hot_profile(8), hotspot_config(), "cranlift", true)

@@ -57,6 +57,7 @@ struct FunctionProfile:
     safe_deopt: bool
     hotspot_specialized_source: text
     hotspot_semantic_proof: bool
+    var_facts: JitVarOptimizationFacts
 
 struct JitStats:
     tier1_compilations: i64
@@ -194,6 +195,9 @@ fn jit_var_optimization_facts(
         borrow_reassign_safe: borrow_reassign_safe
     )
 
+fn jit_var_optimization_facts_none() -> JitVarOptimizationFacts:
+    jit_var_optimization_facts(false, 0, false, false, true, true)
+
 fn jit_var_optimization_fact_list(var_facts: JitVarOptimizationFacts) -> [text]:
     var facts: [text] = []
     if var_facts.has_var_reassignment:
@@ -262,6 +266,14 @@ fn jit_hotspot_plan_with_var_facts(
         reason: base.reason,
         facts: merged_facts
     )
+
+fn jit_hotspot_plan_from_profile_var_facts(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    typed_mir: bool,
+    safe_deopt: bool
+) -> JitHotspotPlan:
+    jit_hotspot_plan_with_var_facts(profile, config, typed_mir, safe_deopt, profile.var_facts)
 
 fn jit_hotspot_rebuild_backend_name(backend: text) -> text:
     if backend == "cranlift":
@@ -756,12 +768,17 @@ class TieredJitManager:
 
     me register_function(name: text, source: text):
         if not self.profiles.has(name):
-            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source, typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false)
+            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source, typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false, var_facts: jit_var_optimization_facts_none())
             self.profiles[name] = p
 
     me register_function_with_hotspot_facts(name: text, source: text, typed_mir: bool, safe_deopt: bool):
         if not self.profiles.has(name):
-            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source, typed_mir: typed_mir, safe_deopt: safe_deopt, hotspot_specialized_source: "", hotspot_semantic_proof: false)
+            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source, typed_mir: typed_mir, safe_deopt: safe_deopt, hotspot_specialized_source: "", hotspot_semantic_proof: false, var_facts: jit_var_optimization_facts_none())
+            self.profiles[name] = p
+
+    me register_function_with_var_hotspot_facts(name: text, source: text, typed_mir: bool, safe_deopt: bool, var_facts: JitVarOptimizationFacts):
+        if not self.profiles.has(name):
+            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source, typed_mir: typed_mir, safe_deopt: safe_deopt, hotspot_specialized_source: "", hotspot_semantic_proof: false, var_facts: var_facts)
             self.profiles[name] = p
 
     me register_function_with_hotspot_specialization(
@@ -773,7 +790,7 @@ class TieredJitManager:
         semantic_proof: bool
     ):
         if not self.profiles.has(name):
-            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source, typed_mir: typed_mir, safe_deopt: safe_deopt, hotspot_specialized_source: specialized_source, hotspot_semantic_proof: semantic_proof)
+            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source, typed_mir: typed_mir, safe_deopt: safe_deopt, hotspot_specialized_source: specialized_source, hotspot_semantic_proof: semantic_proof, var_facts: jit_var_optimization_facts_none())
             self.profiles[name] = p
 
     me record_call(name: text) -> JitTier:
@@ -782,10 +799,10 @@ class TieredJitManager:
             var new_count = p.call_count + 1
             var new_tier = p.tier
             var compile_ms = p.compile_time_ms
-            var updated = FunctionProfile(name: name, call_count: new_count, tier: new_tier, compile_time_ms: compile_ms, source: p.source, typed_mir: p.typed_mir, safe_deopt: p.safe_deopt, hotspot_specialized_source: p.hotspot_specialized_source, hotspot_semantic_proof: p.hotspot_semantic_proof)
+            var updated = FunctionProfile(name: name, call_count: new_count, tier: new_tier, compile_time_ms: compile_ms, source: p.source, typed_mir: p.typed_mir, safe_deopt: p.safe_deopt, hotspot_specialized_source: p.hotspot_specialized_source, hotspot_semantic_proof: p.hotspot_semantic_proof, var_facts: p.var_facts)
             if p.tier == JitTier.Interpreted:
                 if new_count >= self.config.tier1_threshold:
-                    val plan = jit_hotspot_plan_from_profile(updated, self.config, p.typed_mir, p.safe_deopt)
+                    val plan = jit_hotspot_plan_from_profile_var_facts(updated, self.config, p.typed_mir, p.safe_deopt)
                     val provider = jit_hotspot_specialization_provider("tiered-jit-profile-specialization", p.hotspot_specialized_source, p.hotspot_semantic_proof)
                     val decision = jit_hotspot_consume_plan_with_provider(plan, p.source, provider)
                     if decision.provider_used:
@@ -798,11 +815,11 @@ class TieredJitManager:
                 if new_count >= self.config.tier2_threshold:
                     new_tier = JitTier.Optimized
                     self.tier2_compilations = self.tier2_compilations + 1
-            updated = FunctionProfile(name: name, call_count: new_count, tier: new_tier, compile_time_ms: compile_ms, source: p.source, typed_mir: p.typed_mir, safe_deopt: p.safe_deopt, hotspot_specialized_source: p.hotspot_specialized_source, hotspot_semantic_proof: p.hotspot_semantic_proof)
+            updated = FunctionProfile(name: name, call_count: new_count, tier: new_tier, compile_time_ms: compile_ms, source: p.source, typed_mir: p.typed_mir, safe_deopt: p.safe_deopt, hotspot_specialized_source: p.hotspot_specialized_source, hotspot_semantic_proof: p.hotspot_semantic_proof, var_facts: p.var_facts)
             self.profiles[name] = updated
             new_tier
         else:
-            var p = FunctionProfile(name: name, call_count: 1, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false)
+            var p = FunctionProfile(name: name, call_count: 1, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false, var_facts: jit_var_optimization_facts_none())
             self.profiles[name] = p
             JitTier.Interpreted
 
@@ -849,10 +866,10 @@ class TieredJitManager:
 
     fn get_hotspot_plan(name: text, typed_mir: bool, safe_deopt: bool) -> JitHotspotPlan:
         if self.profiles.has(name):
-            jit_hotspot_plan_from_profile(self.profiles[name], self.config, typed_mir, safe_deopt)
+            jit_hotspot_plan_from_profile_var_facts(self.profiles[name], self.config, typed_mir, safe_deopt)
         else:
-            val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false)
-            jit_hotspot_plan_from_profile(profile, self.config, typed_mir, safe_deopt)
+            val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false, var_facts: jit_var_optimization_facts_none())
+            jit_hotspot_plan_from_profile_var_facts(profile, self.config, typed_mir, safe_deopt)
 
     fn get_hotspot_rebuild_choice(
         name: text,
@@ -863,7 +880,7 @@ class TieredJitManager:
         if self.profiles.has(name):
             jit_hotspot_rebuild_choice(self.profiles[name], self.config, cranelift_available, llvm_available, max_cost_class)
         else:
-            val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false)
+            val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false, var_facts: jit_var_optimization_facts_none())
             jit_hotspot_rebuild_choice(profile, self.config, cranelift_available, llvm_available, max_cost_class)
 
     fn get_hotspot_optimization_plan(
@@ -875,7 +892,7 @@ class TieredJitManager:
         if self.profiles.has(name):
             jit_hotspot_optimization_plan(self.profiles[name], self.config, cranelift_available, llvm_available, max_cost_class)
         else:
-            val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false)
+            val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false, var_facts: jit_var_optimization_facts_none())
             jit_hotspot_optimization_plan(profile, self.config, cranelift_available, llvm_available, max_cost_class)
 
     fn get_hotspot_plan_with_rules(
