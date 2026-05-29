@@ -194,3 +194,66 @@ pure-Simple library change that would close the gap.
    that corrupts C reference readings for fast functions. Consider raising
    `ITERS` in both `bench_ctype.spl` and `bench_ctype_ref.c` to 100000 for
    reliable ratio measurements.
+
+## 2026-05-29 Lookup-Table Approach — Pure-Simple Dead End
+
+**Hypothesis tested:** Replace branch-chains with a 256-entry flag table
+(`CTYPE_FLAG_TABLE[ch] & FLAG`) to reduce Cranelift branch overhead. Each ctype
+predicate becomes a single array load + bitwise AND instead of 3–6 conditional
+branches.
+
+**Benchmark:** `test/perf/ctype/bench_ctype_lut.spl` — same structure as
+`bench_ctype_inline.spl`, table built as local var before timed loop (module-level
+`val` arrays return nil in the interpreter). Correctness verified: checksums
+match `bench_ctype_inline.spl` for all nine functions.
+
+**Discovery — module-level `val` array nil bug:** `val TABLE = [...]` at module
+scope returns nil for all elements in the interpreter (segfault on arithmetic).
+The table must be built as a function-local `var` returned and captured before
+timing. This is a separate interpreter bug worth tracking.
+
+**Results (1M iters × 128 range, Cranelift native, single sample):**
+
+| Function   | C (ops/ms) | Inline (ops/ms) | LUT (ops/ms) | Inline/C | LUT/C | LUT/Inline |
+|------------|-----------|-----------------|--------------|----------|-------|------------|
+| is_digit   | 1,855,072 |         765,399 |      416,120 |    0.41x | 0.22x |      0.54x |
+| is_upper   | 1,580,246 |         960,405 |      404,456 |    0.61x | 0.26x |      0.42x |
+| is_lower   | 1,280,000 |         670,571 |      381,107 |    0.52x | 0.30x |      0.57x |
+| is_alpha   | 1,488,372 |         391,999 |      405,548 |    0.26x | 0.27x |      1.03x |
+| is_alnum   | 2,206,896 |         260,580 |      338,022 |    0.12x | 0.15x |      1.30x |
+| is_xdigit  | 1,066,666 |         261,199 |      397,856 |    0.24x | 0.37x |      1.52x |
+| is_space   | 3,368,421 |         292,292 |      367,515 |    0.09x | 0.11x |      1.26x |
+| to_lower   | 2,844,444 |         739,444 |      511,488 |    0.26x | 0.18x |      0.69x |
+| to_upper   | 3,121,951 |         767,091 |      449,113 |    0.25x | 0.14x |      0.59x |
+
+**Findings:**
+
+- **Composite functions benefit (is_alpha, is_alnum, is_xdigit, is_space):**
+  LUT is 1.03–1.52x faster than inline branch-chain. Replacing 3–6 short-circuit
+  branches with one array load + bitwise AND is a real win for Cranelift.
+  Improvement over inline: +25% for is_alnum, +52% for is_xdigit, +26% for is_space.
+
+- **Leaf functions regress (is_digit, is_upper, is_lower):** LUT is 0.42–0.57x
+  of inline. The bounds-check + array load + bitmasking costs more than two
+  direct integer compares. The table overhead overwhelms the branch savings for
+  simple range checks.
+
+- **to_lower / to_upper regress:** LUT 0.59–0.69x of inline. Array lookup plus
+  setup overhead exceeds the simple conditional add/subtract.
+
+- **Does not close the gap to C:** LUT ratios vs C are 0.11–0.37x — worse or
+  comparable to the inline baseline. The bottleneck remains Cranelift's general
+  code quality, not branch count alone. C -O2 benefits from LTO, loop unrolling,
+  and vectorization that LUT cannot replicate at the Simple source level.
+
+- **Scope of fix:** LUT addresses problem #2 (composite branch-chain codegen)
+  partially, but at the cost of regressions on leaf functions. It does not
+  address problem #1 (cross-module call overhead). Adopting LUT selectively only
+  for composite predicates is possible but the absolute C-ratio improvement is
+  marginal (0.09→0.11x for is_space).
+
+**Conclusion:** The lookup-table approach is a pure-Simple dead end for this
+bug. The composite function improvements (22–52% over inline) are real but still
+leave all functions below 0.40x C. The root cause remains Cranelift codegen
+quality and the absence of cross-module inlining. No further pure-Simple source
+change is worth pursuing here.
