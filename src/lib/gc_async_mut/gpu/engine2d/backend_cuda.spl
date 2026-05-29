@@ -1,0 +1,108 @@
+# 2D Engine — CUDA backend facade.
+#
+# CUDA shares the same RenderBackend contract as CPU and Metal. When CUDA is
+# unavailable, init() returns false and Engine2D falls back through its normal
+# backend selection path without claiming CUDA rendered the frame.
+
+use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
+use std.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count, cuda_device_name, CUDA_SUCCESS}
+
+fn probe_cuda_2d() -> BackendProbeResult:
+    if not cuda_available():
+        var unavailable = BackendProbeResult.unavailable("cuda", "CUDA runtime unavailable")
+        unavailable.api_name = "cuda"
+        unavailable.feature_gate = "cuda_runtime"
+        unavailable.shader_format = "ptx"
+        return unavailable
+    val init_result = cuda_init()
+    if init_result != CUDA_SUCCESS:
+        var failed = BackendProbeResult.failed("cuda", "CUDA init failed")
+        failed.api_name = "cuda"
+        failed.feature_gate = "cuda_init"
+        failed.shader_format = "ptx"
+        return failed
+    if cuda_device_count() < 1:
+        var no_device = BackendProbeResult.unavailable("cuda", "no CUDA device")
+        no_device.api_name = "cuda"
+        no_device.feature_gate = "cuda_device"
+        no_device.shader_format = "ptx"
+        return no_device
+    var ok = BackendProbeResult.success("cuda", "CUDA 2D backend available")
+    ok.api_name = "cuda"
+    ok.feature_gate = "cuda_runtime"
+    ok.shader_format = "ptx"
+    ok.device_name = cuda_device_name(0)
+    ok
+
+class CudaBackend:
+    mirror: SoftwareBackend
+    initialized: bool
+    last_probe: BackendProbeResult
+
+    static fn create() -> CudaBackend:
+        CudaBackend(
+            mirror: SoftwareBackend.create(),
+            initialized: false,
+            last_probe: BackendProbeResult.unavailable("cuda", "not probed")
+        )
+
+impl RenderBackend for CudaBackend:
+    fn name() -> text:
+        "cuda"
+
+    me init(width: i32, height: i32) -> bool:
+        self.last_probe = probe_cuda_2d()
+        if self.last_probe.status != BackendStatus.Initialized:
+            self.initialized = false
+            return false
+        self.initialized = self.mirror.init(width, height)
+        self.initialized
+
+    me shutdown():
+        self.mirror.shutdown()
+        self.initialized = false
+
+    me clear(color: u32):
+        self.mirror.clear(color)
+    me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.mirror.draw_rect(x, y, w, h, color)
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.mirror.draw_rect_filled(x, y, w, h, color)
+    me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
+    me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        self.mirror.draw_circle(cx, cy, r, color)
+    me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        self.mirror.draw_circle_filled(cx, cy, r, color)
+    me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
+    me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+        self.mirror.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+    me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+    me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        self.mirror.draw_text(x, y, text_val, color, font_size)
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        self.mirror.draw_image(x, y, w, h, pixels)
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        self.mirror.set_clip(x, y, w, h)
+    me clear_clip():
+        self.mirror.clear_clip()
+    me set_mask(mask_pixels: [u8], w: i32, h: i32):
+        self.mirror.set_mask(mask_pixels, w, h)
+    me clear_mask():
+        self.mirror.clear_mask()
+    me present():
+        self.mirror.present()
+    fn read_pixels() -> [u32]:
+        self.mirror.read_pixels()
+    fn width() -> i32:
+        self.mirror.width()
+    fn height() -> i32:
+        self.mirror.height()
+
+impl Engine2DExtended for CudaBackend:
+    me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
+        self.mirror.draw_text_bg(x, y, text_val, fg, bg, font_size)

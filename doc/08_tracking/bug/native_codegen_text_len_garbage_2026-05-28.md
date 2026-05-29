@@ -68,3 +68,15 @@ val body_len = rt_string_len(body)   # correctly returns 13
 - All native-compiled code using `text.len()` gets wrong values
 - Benchmark code (`bench_raw_tcp_static.spl`) uses `rt_string_len` workaround
 - Any native HTTP server building Content-Length headers from `.len()` would send corrupt headers
+
+## Fix
+
+Changed `compile_inline_len` in both the LLVM and Cranelift backends to load the
+`kind` field as `u32` (4 bytes) and compare to `RT_VALUE_HEAP_STRING = 0x53545231U`
+for string detection, instead of loading `i8` and comparing to `1`.
+
+Files changed:
+- `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs` — LLVM inline len
+- `src/compiler_rust/compiler/src/codegen/instr/helpers.rs` — Cranelift inline len
+
+Verified: `body.len()` returns 13 (correct), `arr.len()` returns 5 (no regression).

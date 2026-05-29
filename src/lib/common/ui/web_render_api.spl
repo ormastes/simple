@@ -1,0 +1,130 @@
+# Shared web render API for GUI backends and pure Simple web rendering.
+
+use common.ui.capability.{Capability}
+use common.text_advanced.{escape_json}
+
+val WEB_RENDER_TARGET_SIMPLE_WEB: text = "simple_web"
+val WEB_RENDER_TARGET_ELECTRON: text = "electron"
+val WEB_RENDER_TARGET_TAURI: text = "tauri"
+val WEB_RENDER_TARGET_PURE_SIMPLE: text = "pure_simple"
+
+class WebRenderRequest:
+    target: text
+    surface_id: text
+    title: text
+    body_html: text
+    css: text
+    js: text
+    viewport_w: i32
+    viewport_h: i32
+    wants_pixels: bool
+
+    static fn html(target: text, title: text, body_html: text, css: text, js: text, viewport_w: i32, viewport_h: i32) -> WebRenderRequest:
+        WebRenderRequest(
+            target: target,
+            surface_id: "",
+            title: title,
+            body_html: body_html,
+            css: css,
+            js: js,
+            viewport_w: viewport_w,
+            viewport_h: viewport_h,
+            wants_pixels: false
+        )
+
+    fn with_surface(surface_id: text) -> WebRenderRequest:
+        WebRenderRequest(
+            target: self.target,
+            surface_id: surface_id,
+            title: self.title,
+            body_html: self.body_html,
+            css: self.css,
+            js: self.js,
+            viewport_w: self.viewport_w,
+            viewport_h: self.viewport_h,
+            wants_pixels: self.wants_pixels
+        )
+
+    fn with_pixel_output() -> WebRenderRequest:
+        WebRenderRequest(
+            target: self.target,
+            surface_id: self.surface_id,
+            title: self.title,
+            body_html: self.body_html,
+            css: self.css,
+            js: self.js,
+            viewport_w: self.viewport_w,
+            viewport_h: self.viewport_h,
+            wants_pixels: true
+        )
+
+class WebRenderArtifact:
+    target: text
+    html: text
+    ipc_json: text
+    pixels: [u32]
+    viewport_w: i32
+    viewport_h: i32
+    capability_summary: text
+
+    static fn empty(target: text, viewport_w: i32, viewport_h: i32) -> WebRenderArtifact:
+        WebRenderArtifact(
+            target: target,
+            html: "",
+            ipc_json: "",
+            pixels: [],
+            viewport_w: viewport_w,
+            viewport_h: viewport_h,
+            capability_summary: ""
+        )
+
+fn web_render_capabilities_for_target(target: text) -> [Capability]:
+    if target == WEB_RENDER_TARGET_ELECTRON:
+        return [Capability.Mouse, Capability.Color, Capability.Images, Capability.NativeDialogs, Capability.Notification]
+    if target == WEB_RENDER_TARGET_TAURI:
+        return [Capability.Mouse, Capability.Color, Capability.Images, Capability.NativeDialogs, Capability.Notification]
+    [Capability.Mouse, Capability.Color, Capability.Images, Capability.Touch]
+
+fn web_render_capability_summary(target: text) -> text:
+    if target == WEB_RENDER_TARGET_ELECTRON:
+        return "mouse,color,images,native_dialogs,notification"
+    if target == WEB_RENDER_TARGET_TAURI:
+        return "mouse,color,images,native_dialogs,notification"
+    "mouse,color,images,touch"
+
+fn web_render_full_html(req: WebRenderRequest) -> text:
+    val title = if req.title != "": "<title>" + escape_json(req.title) + "</title>" else: ""
+    val css = if req.css != "": "<style>" + req.css + "</style>" else: ""
+    val js = if req.js != "": "<script>" + req.js + "</script>" else: ""
+    "<html><head>" + title + css + "</head><body><div id=\"app\">" + req.body_html + "</div>" + js + "</body></html>"
+
+fn web_render_ipc_json(req: WebRenderRequest) -> text:
+    "{\"type\":\"render\",\"target\":\"" + escape_json(req.target) + "\",\"surface_id\":\"" + escape_json(req.surface_id) + "\",\"width\":" + str(req.viewport_w) + ",\"height\":" + str(req.viewport_h) + ",\"html\":\"" + escape_json(web_render_full_html(req)) + "\"}"
+
+fn web_render_to_artifact(req: WebRenderRequest) -> WebRenderArtifact:
+    val html = web_render_full_html(req)
+    val ipc = if req.target == WEB_RENDER_TARGET_ELECTRON or req.target == WEB_RENDER_TARGET_TAURI:
+        web_render_ipc_json(req)
+    else:
+        ""
+    WebRenderArtifact(
+        target: req.target,
+        html: html,
+        ipc_json: ipc,
+        pixels: [],
+        viewport_w: req.viewport_w,
+        viewport_h: req.viewport_h,
+        capability_summary: web_render_capability_summary(req.target)
+    )
+
+fn web_render_pixel_artifact(req: WebRenderRequest, pixels: [u32]) -> WebRenderArtifact:
+    val base = web_render_to_artifact(req.with_pixel_output())
+    WebRenderArtifact(
+        target: base.target,
+        html: base.html,
+        ipc_json: base.ipc_json,
+        pixels: pixels,
+        viewport_w: base.viewport_w,
+        viewport_h: base.viewport_h,
+        capability_summary: base.capability_summary
+    )
