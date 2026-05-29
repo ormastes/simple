@@ -1,6 +1,8 @@
 # Plugin Surface — Follow-up Feature Requests
 
-**Status: PARTIAL** — FR-PLUG-0002 and FR-PLUG-0003 structurally implemented (pure Simple, no Rust). FR-PLUG-0001 blocked by Rust seed dependency (no manifest-routed extern path exists). FR-PLUG-0004 blocked by interpreter-mode Cranelift verification constraint. See per-item status below.
+**Status: PARTIAL** — FR-PLUG-0002 and FR-PLUG-0003 structurally implemented (pure Simple, no Rust). FR-PLUG-0001 blocked by Rust seed dependency (no manifest-routed extern path exists). FR-PLUG-0004 blocked by interpreter-mode Cranelift verification constraint. FR-PLUG-0005 Open — no runtime-slot DI parser/loader exists yet. See per-item status below.
+
+**Verification pass: 2026-05-29** — All five items reviewed against source. No new code added (no live-`.so` fixture available; FR-PLUG-0005 is deep-work). See per-item notes below.
 
 Tracker for items deferred during the `runtime-api-block-sugar-plugins` work
 (landed 2026-04-28 across commits `717b5d62`/`8a8c9145`/`0277f590`).
@@ -53,6 +55,11 @@ release before the surface is declared stable.
 - **Target:** plugin / 15.blocks
 - **Priority:** P1
 - **Status:** Structurally-implemented — pending live `.so` roundtrip test
+- **Verification (2026-05-29):** `_SoBlockProxy` struct present and `activate_plugin`
+  constructs+registers it for each `"block:"` manifest entry via `spl_dlsym` in
+  `src/compiler/15.blocks/plugin_startup.spl` (see `activate_plugin` loop, FR-PLUG-0002 DONE
+  comment). `TODO-FR-PLUG-0003-COMPATIBLE` at line 267 intentionally left — manifest
+  `desugar_rules` wiring is speculative without a live fixture.
 - **Requested-semantics:**
   `activate_plugin(name)` in `src/compiler/15.blocks/plugin_startup.spl`
   currently returns true after dlopen for `.so`-backed manifest entries but
@@ -87,6 +94,13 @@ release before the surface is declared stable.
 - **Target:** plugin / 15.blocks / 10.frontend.desugar
 - **Priority:** P1
 - **Status:** Structurally-implemented — live rewrite demo deferred (no test .so)
+- **Verification (2026-05-29):** `DesugarRule` has `ast_rewrite_fn: i64` field in
+  `src/compiler/15.blocks/sugar_registry.spl`. `apply_rule_ast` and
+  `apply_sugar_rules_ast` implemented and exported. `desugar_collections` loop in
+  `src/compiler/10.frontend/desugar/collection_desugar.spl` carries `[FR-PLUG-0003 DONE]`
+  comment confirming wiring. Two spec scenarios in
+  `test/feature/plugin/sugar_plugin_spec.spl` verify struct shape and sentinel round-trip.
+  `[STATIC-NEXT]` marker present in both `sugar_registry.spl` and `collection_desugar.spl`.
 - **Requested-semantics:**
   `apply_sugar_rules(tag, "")` in
   `src/compiler/10.frontend/desugar/collection_desugar.spl:64` consults the
@@ -157,7 +171,14 @@ release before the surface is declared stable.
 - **Filed-by:** Codex DI graph session
 - **Target:** plugin / compiler / DI
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Open — NOT STARTED
+- **Verification (2026-05-29):** No `runtime_slot`/`RuntimeSlot`/`slot...runtime` hits
+  found in any `.spl` source. `src/compiler/00.common/di_runtime.spl` is a string-keyed
+  lazy engine (`di_register`/`di_resolve`) — no slot syntax. `src/compiler/00.common/di_config.spl`
+  parses `config/di.sdn` for `DiServiceConfig` entries but has no slot-type concept.
+  The `slot` keyword in the interpreter codebase refers to variable slots in the eval
+  engine, not DI plugin slots. This FR requires parser/HIR/SDN/secure-loader work;
+  blocked until design-doc (`Related-design-doc: tbd`) is written.
 - **Requested-semantics:**
   Connect first-class DI runtime slots (`slot PaymentProvider runtime`,
   collection slots such as `slot [ToolPlugin] runtime named plugins`, and SDN

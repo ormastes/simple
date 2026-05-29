@@ -40,7 +40,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Codex x86_32 parity follow-up
 - **Target:** simpleos-os x86_32
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Partial
 - **Requested-semantics:**
   Treat x86_32 as a documented boot/probe target until it has the same
   observable OS surface as the x86_64 lane. Do not mark x86_32 as a full OS
@@ -59,10 +59,10 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
         smoke tests pass without relying on x86_64-only helpers.
   - [ ] x86_32 filesystem-backed app execution has a FAT32/NVMe or equivalent
         QEMU lane with the same acceptance level as x86_64.
-  - [ ] Documentation clearly distinguishes x86_64 as the full OS lane until
+  - [x] Documentation clearly distinguishes x86_64 as the full OS lane until
         the above x86_32 criteria pass.
 - **Related-upfront:** none
-- **Related-design-doc:** tbd
+- **Related-design-doc:** `doc/05_design/simpleos_fr_sos_025_x86_32_parity.md`
 - **Related-issue:** none
 - **Notes:** As of 2026-04-22, `examples/simple_os/arch/x86_32` contains only
   a minimal entry, linker/runtime stubs, and a browser probe, while x86_64 owns

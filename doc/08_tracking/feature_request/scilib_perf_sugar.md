@@ -34,7 +34,7 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
 - **Filed-on:** 2026-04-27
 - **Filed-by:** scilib-port research agent
 - **Priority:** P0
-- **Status:** anticipated
+- **Status:** observed
 - **Expected-repro:**
   ```
   let a: NDArray<Float64> = NDArray.zeros(Shape(1024, 1024))
@@ -48,8 +48,15 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
   the `rt_bytes_alloc` pattern. Alternatively, a generic
   `rt_typed_array_alloc<T>(len: u64, default: T) -> [T]` extern if the compiler
   can monomorphize it.
-- **Notes:** `rt_bytes_alloc` fixed the `[u8]` case (B2, 2026-04-25). The typed
-  numeric case has no equivalent yet. This is the top blocking wedge for ndarray.
+- **Notes:** `rt_bytes_alloc` fixed the `[u8]` case (B2, 2026-04-25). Extern
+  declarations `rt_f64_array_alloc`, `rt_f32_array_alloc`, `rt_i64_array_alloc`,
+  `rt_i32_array_alloc` now exist in
+  `src/lib/common/science_math/perf_sugar.spl` and
+  `src/lib/nogc_sync_mut/ndarray/rt_alloc.spl` (2026-05-29). However,
+  `src/lib/common/science_math/linalg.spl` still uses `data.push(0.0)` loops
+  in `mat_zeros` and `mat_identity`, and the Rust interpreter has not yet
+  registered the new externs. Remaining work: (1) wire externs in Rust runtime,
+  (2) update `linalg.spl` callers to use `alloc_f64`.
 
 ---
 
@@ -168,7 +175,7 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
 - **Filed-on:** 2026-04-27
 - **Filed-by:** scilib-port research agent
 - **Priority:** P1
-- **Status:** anticipated
+- **Status:** observed
 - **Expected-repro:**
   ```
   df.select(["revenue", "cost", "profit"])
@@ -184,8 +191,12 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
   extern that returns a stable `u64` id. Column names, schema keys, and
   groupby keys should use `Symbol`. A lighter alternative: a
   `SymbolTable` struct local to each DataFrame schema, avoiding global state.
-- **Notes:** Pandas uses Python's intern mechanism implicitly; Simple's pure
-  type system needs an explicit Symbol primitive or a stdlib-level SymbolTable.
+- **Notes:** The lighter alternative (local `Symbol` struct wrapping `text`) is
+  already implemented: `struct Symbol { text: text }` is defined in
+  `src/lib/nogc_sync_mut/df/mod.spl` and used pervasively for all column names,
+  `select`, `groupby`, `Series.name`, `RowEntry.key`, and `DataFrame.labels`
+  (2026-05-29). Equality is still O(len) text compare — the `rt_intern_symbol`
+  extern for O(1) pointer comparison is the remaining open work.
 
 ---
 
@@ -244,7 +255,7 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
 - **Filed-on:** 2026-04-27
 - **Filed-by:** scilib-port research agent
 - **Priority:** P2
-- **Status:** anticipated
+- **Status:** observed
 - **Expected-repro:**
   ```
   let b = a + Float64(1.0)    // broadcast add scalar to all elements
@@ -260,6 +271,12 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
   `A + scalar` patterns and emit the broadcast extern rather than an element loop.
 - **Notes:** NumPy broadcasting is one of its most-used ergonomic features.
   Without it, the Simple surface is significantly more verbose than NumPy.
+  **Partial progress (2026-05-29):** `HirBinOp.BroadcastAdd/Sub/Mul/Div` and
+  `MirBinOp.BroadcastAdd/Sub/Mul/Div` are defined and lowered through the HIR →
+  MIR → C-backend pipeline (dotted operators `.+`, `.*`, etc. inside `math{}`
+  blocks). The LLVM backend emits an unsupported-panic for these. NDArray
+  operator-overload methods (`fn add(self, rhs)` etc.) still missing — the MIR
+  ops exist in-compiler but are not exposed as user-callable methods on NDArray.
 
 ---
 

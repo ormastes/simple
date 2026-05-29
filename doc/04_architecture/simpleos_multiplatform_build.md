@@ -44,6 +44,12 @@ Build rules:
 - boot ASM source: `examples/simple_os/arch/x86_32/boot/crt0.s`
 - linker mode hint: `elf_i386`
 - QEMU: `qemu-system-i386`
+
+The `x86_32`/`i686` lane is a boot/probe and HAL-development lane, not a full
+SimpleOS lane. `x86_64` remains the full OS acceptance lane until
+`doc/08_tracking/feature_request/simpleos_os_requests.md` FR-SOS-025 closes
+with live boot/probe, HAL contract, syscall/process, shell, and
+filesystem-backed app-execution evidence.
 - default SimpleOS build backend: LLVM
 
 ## Boundary
