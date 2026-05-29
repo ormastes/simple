@@ -123,6 +123,20 @@ fn hot_vector_loop_with_var_facts(call_count: i64, facts) -> FunctionProfile:
         var_facts: facts
     )
 
+fn hot_range_loop_profile(call_count: i64) -> FunctionProfile:
+    FunctionProfile(
+        name: "hot_range_loop",
+        call_count: call_count,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: "fn hot_range_loop(buf: [i64], n: i64) -> i64: var i = 0; var sum = 0; while i < n: sum = sum + buf[i]; i += 1; return sum",
+        typed_mir: true,
+        safe_deopt: true,
+        hotspot_specialized_source: "",
+        hotspot_semantic_proof: false,
+        var_facts: jit_var_optimization_facts_none()
+    )
+
 fn hot_direct_call_profile(call_count: i64) -> FunctionProfile:
     FunctionProfile(
         name: "hot_direct_call",
@@ -492,6 +506,23 @@ describe "Tiered JIT hotspot facts":
             if decision.stable_name == "simple-auto-vectorize" and decision.reason == "llvm_runs_vectorizer_pipeline":
                 found_llvm_skip = true
         expect(found_llvm_skip).to_equal(true)
+
+    it "adds bounds-check elimination recommendations when indexed loops expose range facts":
+        val cranelift = jit_hotspot_optimization_plan(hot_range_loop_profile(256), hotspot_config(), true, true, "medium")
+        expect(cranelift.backend).to_equal("cranelift")
+        expect(cranelift.plugin_recommendations.contains("bounds-check-elim")).to_equal(true)
+
+        val low = jit_hotspot_optimization_plan(hot_range_loop_profile(256), hotspot_config(), true, true, "low")
+        expect(low.plugin_recommendations.contains("bounds-check-elim")).to_equal(false)
+        var found_cost_skip = false
+        for decision in low.skipped_plugin_recommendations:
+            if decision.stable_name == "bounds-check-elim" and decision.reason == "cost budget exceeded":
+                found_cost_skip = true
+        expect(found_cost_skip).to_equal(true)
+
+        val llvm = jit_hotspot_optimization_plan(hot_range_loop_profile(256), hotspot_config(), true, true, "high")
+        expect(llvm.backend).to_equal("llvm")
+        expect(llvm.plugin_recommendations.contains("bounds-check-elim")).to_equal(true)
 
     it "adds hot-call inline recommendations only for high-budget non-LLVM direct calls":
         val cranelift = jit_hotspot_optimization_plan(hot_direct_call_profile(256), hotspot_config(), true, true, "high")
