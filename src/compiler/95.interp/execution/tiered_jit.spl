@@ -364,6 +364,9 @@ fn jit_hotspot_rebuild_plan_with_cost_budget(
 fn jit_hotspot_llvm_preference_threshold(config: TieredJitConfig) -> i64:
     config.tier2_threshold * 2
 
+fn jit_hotspot_var_rebuild_reason(profile: FunctionProfile) -> text:
+    jit_var_optimization_reason(profile.var_facts)
+
 fn jit_hotspot_rebuild_choice(
     profile: FunctionProfile,
     config: TieredJitConfig,
@@ -371,6 +374,17 @@ fn jit_hotspot_rebuild_choice(
     llvm_available: bool,
     max_cost_class: text
 ) -> JitHotspotRebuildChoice:
+    val var_reason = jit_hotspot_var_rebuild_reason(profile)
+    if var_reason != "ready":
+        return JitHotspotRebuildChoice(
+            function_name: profile.name,
+            selected_backend: "",
+            eligible: false,
+            reason: var_reason,
+            cost_class: "none",
+            required_count: config.tier1_threshold,
+            attempted_backends: []
+        )
     val llvm_heat_preferred = profile.call_count >= jit_hotspot_llvm_preference_threshold(config)
     if cranelift_available and profile.call_count >= config.tier1_threshold and jit_hotspot_cost_allowed("medium", max_cost_class):
         if llvm_available and llvm_heat_preferred and jit_hotspot_cost_allowed("high", max_cost_class):
@@ -550,6 +564,21 @@ fn jit_hotspot_optimization_plan(
     llvm_available: bool,
     max_cost_class: text
 ) -> JitHotspotOptimizationPlan:
+    val var_reason = jit_hotspot_var_rebuild_reason(profile)
+    if var_reason != "ready":
+        return JitHotspotOptimizationPlan(
+            function_name: profile.name,
+            backend: "",
+            eligible: false,
+            reason: var_reason,
+            cost_class: "none",
+            max_cost_class: max_cost_class,
+            opt_level: "",
+            passes: [],
+            skipped_passes: [],
+            plugin_recommendations: [],
+            skipped_plugin_recommendations: []
+        )
     val llvm_heat_preferred = profile.call_count >= jit_hotspot_llvm_preference_threshold(config)
     if cranelift_available and profile.call_count >= config.tier1_threshold and max_cost_class == "medium":
         val fast_passes = jit_hotspot_aggressive_passes_for_backend_budget("cranelift", max_cost_class)

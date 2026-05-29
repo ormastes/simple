@@ -39,6 +39,20 @@ fn hot_profile(call_count: i64) -> FunctionProfile:
         var_facts: jit_var_optimization_facts_none()
     )
 
+fn hot_profile_with_var_facts(call_count: i64, facts) -> FunctionProfile:
+    FunctionProfile(
+        name: "hot_loop",
+        call_count: call_count,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: "fn hot_loop(x: i64) -> i64: x + 1",
+        typed_mir: true,
+        safe_deopt: true,
+        hotspot_specialized_source: "",
+        hotspot_semantic_proof: false,
+        var_facts: facts
+    )
+
 fn hotspot_config() -> TieredJitConfig:
     TieredJitConfig(tier1_threshold: 8, tier2_threshold: 128, debug_mode: false)
 
@@ -125,6 +139,30 @@ describe "Tiered JIT hotspot facts":
         expect(plan.reason).to_equal("missing escape.no_escape")
         expect(plan.facts.contains("var.reassignment")).to_equal(true)
         expect(plan.facts.contains("escape.no_escape")).to_equal(false)
+
+    it "rejects hotspot rebuild choices when reassigned var storage may escape":
+        val facts = jit_var_optimization_facts(true, 2, true, true, false, true)
+        val plan = jit_hotspot_rebuild_choice(hot_profile_with_var_facts(256, facts), hotspot_config(), true, true, "high")
+        expect(plan.eligible).to_equal(false)
+        expect(plan.selected_backend).to_equal("")
+        expect(plan.reason).to_equal("missing escape.no_escape")
+        expect(plan.attempted_backends.len()).to_equal(0)
+
+    it "rejects optimization passes and plugins for unsafe var rebuild facts":
+        val facts = jit_var_optimization_facts(true, 2, true, true, false, true)
+        val plan = jit_hotspot_optimization_plan(hot_profile_with_var_facts(256, facts), hotspot_config(), true, true, "high")
+        expect(plan.eligible).to_equal(false)
+        expect(plan.backend).to_equal("")
+        expect(plan.reason).to_equal("missing escape.no_escape")
+        expect(plan.passes.len()).to_equal(0)
+        expect(plan.plugin_recommendations.len()).to_equal(0)
+
+    it "keeps backend rebuild selection eligible for SSA escape-safe var reassignment":
+        val facts = jit_var_optimization_facts(true, 2, true, true, true, true)
+        val plan = jit_hotspot_rebuild_choice(hot_profile_with_var_facts(256, facts), hotspot_config(), true, true, "high")
+        expect(plan.eligible).to_equal(true)
+        expect(plan.selected_backend).to_equal("llvm")
+        expect(plan.reason).to_equal("ready")
 
     it "plans Cranelift hotspot rebuilds at tier1 cost":
         val plan = jit_hotspot_rebuild_plan(hot_profile(8), hotspot_config(), "cranlift", true)
