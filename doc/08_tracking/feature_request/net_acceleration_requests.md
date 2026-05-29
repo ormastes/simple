@@ -360,7 +360,7 @@ Lifecycle: `Open` -> `Accepted` -> `Implemented` or `Rejected`.
 - **Related-design-doc:** `doc/05_design/net_connect_completion.md`
 - **Related-issue:** none
 - **Notes:** Implemented as pure data + pure functions in `connection_pool.spl`.
-  Exported from `std.io` via `nogc_async_mut/io/__init__.spl`. List-iteration
-  helpers (find_idle, remove_at) are stubs returning safe defaults until
-  interpreter list-mutation limitations are resolved (see memory note
-  `feedback_it_block_var_mutation.md`).
+  Exported from `std.io` via `nogc_async_mut/io/__init__.spl`. Recursive
+  list helpers now perform host-key lookup, fd removal, per-host capacity
+  eviction, expired-idle eviction, and stats counting. System coverage:
+  `test/system/net_connection_pool_spec.spl`.
