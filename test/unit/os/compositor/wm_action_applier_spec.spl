@@ -1,0 +1,65 @@
+# @cover src/os/compositor/wm_action_applier.spl 80%
+# @tag: unit, wm, compositor
+
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.compositor.{Compositor}
+use os.compositor.wm_action_applier.{apply_wm_action_to_compositor, wm_action_is_shared_lifecycle}
+use os.services.wm.wm_world.{WmAction}
+
+class ApplierBackend:
+    w: i32
+    h: i32
+
+impl CompositorBackend for ApplierBackend:
+    fn width() -> i32:
+        self.w
+    fn height() -> i32:
+        self.h
+    me clear(color: u32):
+        pass_dn
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        pass_dn
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        pass_dn
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        pass_dn
+    me put_pixel(x: i32, y: i32, color: u32):
+        pass_dn
+    me present():
+        pass_dn
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        pass_dn
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+fn _action(kind: text, window_id: u64) -> WmAction:
+    WmAction(kind: kind, window_id: window_id, title: "Window", x: 10, y: 20, width: 80, height: 60, content: "tree", process_id: 7, app_id: "app.test", owner_port: 9, src_port: 0)
+
+describe "shared WM action applier":
+
+    it "creates windows through shared compositor logic":
+        var compositor = Compositor.with_backends(ApplierBackend(w: 200, h: 120), nil, 200, 120)
+        val result = apply_wm_action_to_compositor(compositor, _action("create_window", 0))
+        compositor = result.compositor
+        val wid = result.window_id
+        expect(wid > 0).to_equal(true)
+        expect(compositor.surfaces.len()).to_equal(1)
+        expect(compositor.surfaces[0].app_id).to_equal("app.test")
+
+    it "applies lifecycle changes through one helper":
+        var compositor = Compositor.with_backends(ApplierBackend(w: 200, h: 120), nil, 200, 120)
+        val created = apply_wm_action_to_compositor(compositor, _action("create_window", 0))
+        compositor = created.compositor
+        val wid = created.window_id
+        compositor = apply_wm_action_to_compositor(compositor, _action("move", wid)).compositor
+        compositor = apply_wm_action_to_compositor(compositor, _action("resize", wid)).compositor
+        expect(compositor.surfaces[0].x).to_equal(10)
+        expect(compositor.surfaces[0].width).to_equal(80)
+        compositor = apply_wm_action_to_compositor(compositor, _action("minimize", wid)).compositor
+        expect(compositor.surfaces[0].visible).to_equal(false)
+        compositor = apply_wm_action_to_compositor(compositor, _action("restore", wid)).compositor
+        expect(compositor.surfaces[0].visible).to_equal(true)
+
+    it "classifies shared lifecycle actions":
+        expect(wm_action_is_shared_lifecycle("resize")).to_equal(true)
+        expect(wm_action_is_shared_lifecycle("none")).to_equal(false)
