@@ -25,7 +25,7 @@ Host native window command JSON uses `WebRenderHostWindowCommand` and `web_rende
 
 ## Engine2D API
 
-`src/lib/gc_async_mut/gpu/engine2d/backend.spl::RenderBackend` is the primitive draw contract. CPU, Metal, and CUDA concrete files must expose the same surface. CUDA uses an explicit `CudaSession` initialization hook so it can share the broader `gc_async_mut` CUDA context model, but it must return unavailable/failed probes when runtime, devices, contexts, or kernels are missing. Tests must reject any path that claims CUDA rendered by silently falling back to CPU.
+`src/lib/gc_async_mut/gpu/engine2d/backend.spl::RenderBackend` is the primitive draw contract. CPU, Metal, and CUDA concrete files must expose the same surface. CUDA uses an explicit `CudaSession` initialization hook so it can share the broader `gc_async_mut` CUDA context model. Its clear/filled-rect PTX and launch/readback path must remain capability-gated until a hardware self-test proves correct pixels. Tests must reject any path that claims CUDA rendered by silently falling back to CPU or by marking unverified kernels usable.
 
 ## WM API
 
@@ -39,4 +39,4 @@ Host native window command JSON uses `WebRenderHostWindowCommand` and `web_rende
 
 - Missing Qt: report `qt_build=unavailable` and `comparison_status=unavailable`; do not fail the script.
 - Missing Simple web report: record Simple artifact as unavailable in the Qt report; rely on the web baremetal audit script for that side.
-- Missing CUDA runtime/device/kernels: typed unavailable or failed probe; no silent success.
+- Missing CUDA runtime/device/kernels or unverified CUDA kernel readback: typed unavailable or failed probe; no silent success.
