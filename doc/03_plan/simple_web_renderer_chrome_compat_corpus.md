@@ -344,10 +344,17 @@ Measured blocker:
   numbers for exact fixture artifacts. The corpus BDD covers this diagnostic so
   future text-compositing work is selected from real artifacts.
 - `tools/electron-shell/calibrate_famous_site_corpus_ink.js --limit=3` ranks
-  threshold/alpha candidates for the current worst ink/exact samples using
-  checked-in Chrome PPMs, Simple PPMs, and Chrome metrics sidecars. It is an
-  offline diagnostic for choosing the next renderer experiment, not a corpus
-  acceptance gate; the BDD only locks the tool contract and default sample set.
+  alpha-fill candidates for the current worst ink/exact samples using checked-in
+  Chrome PPMs, Simple PPMs, and Chrome metrics sidecars. With the current
+  production-only artifact set, the default rows use `site_0_google`
+  `simple.production.ppm` plus exact fixture artifacts for
+  `site_44_the_new_york_times` and `site_60_tripadvisor`. The measured base is
+  `2717` differing pixels, `646916` SAD, `4084` expected in-div ink pixels,
+  `2472` actual, and `1612` missing; the current best simulated SAD candidate is
+  alpha `96` with SAD `570024`, while full alpha `255` wins exact pixels but
+  worsens SAD. It is an offline diagnostic for choosing the next renderer
+  experiment, not a corpus acceptance gate; the BDD locks the artifact-backed
+  contract, default sample set, base totals, and ranking sections.
 - `tools/electron-shell/sweep_famous_site_text_postprocess.js --limit=3` ranks
   renderer-positioned scalar postprocess candidates by strengthening only the
   text pixels already present in Simple's current PPMs. Across

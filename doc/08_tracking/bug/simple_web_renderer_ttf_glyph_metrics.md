@@ -95,10 +95,14 @@ Current focused text/compositing evidence:
     and ink targets (`site_44_the_new_york_times`, `site_60_tripadvisor`), so
     the enabled path stays at alpha `64`.
   - `tools/electron-shell/calibrate_famous_site_corpus_ink.js` now ranks future
-    threshold/alpha candidates across the default worst-sample set from
-    checked-in Chrome/Simple PPMs and Chrome metrics sidecars. It is diagnostic
-    only because it simulates candidate impact from expected Chrome pixels
-    rather than rerasterizing raw glyph coverage through BrowserRenderer.
+    alpha-fill candidates across the default worst-sample set from checked-in
+    Chrome/Simple PPMs and Chrome metrics sidecars, preferring
+    `simple.production.ppm` when present. The current default run measures
+    `2717` differing pixels, `646916` SAD, `4084` expected in-div ink pixels,
+    `2472` actual, and `1612` missing; alpha `96` is the best simulated SAD
+    candidate. It is diagnostic only because it simulates candidate impact from
+    expected Chrome pixels rather than rerasterizing raw glyph coverage through
+    BrowserRenderer.
 - Current Simple wrapped TTF output:
   - text is now thresholded/light enough that the analyzer's `<100` dark-pixel
     class reports no dark core; non-white bbox is `x=8..127 y=8..77`
