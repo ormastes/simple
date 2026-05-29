@@ -11,7 +11,7 @@
 use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect}
 use common.ui.widget.{UIMode}
 use common.layout.box_model.{LayoutBox, BoxKind, BoxModel}
-use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_body_html, web_render_full_html, web_render_input_envelope_from_event, web_render_input_envelope_to_json, web_render_pixel_artifact}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_body_html, web_render_full_html, web_render_input_envelope_from_event, web_render_input_envelope_to_json, web_render_optimization_profile, web_render_pixel_artifact}
 use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.web.html.{generate_css}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
@@ -117,6 +117,10 @@ class BrowserBackend:
     last_artifact_capabilities: text
     last_artifact_pixels: i32
     last_input_envelope_json: text
+    static_shell_cache_key: text
+    static_shell_full_html: text
+    static_shell_html_hits: i32
+    static_shell_html_stores: i32
 
     static fn create(w: i32, h: i32, backend: text) -> Result<BrowserBackend, text>:
         """Create a BrowserBackend with the specified GPU backend.
@@ -138,7 +142,11 @@ class BrowserBackend:
             last_artifact_html: "",
             last_artifact_capabilities: "",
             last_artifact_pixels: 0,
-            last_input_envelope_json: ""
+            last_input_envelope_json: "",
+            static_shell_cache_key: "",
+            static_shell_full_html: "",
+            static_shell_html_hits: 0,
+            static_shell_html_stores: 0
         ))
 
     fn render_html(state: UIState) -> text:
@@ -163,8 +171,19 @@ class BrowserBackend:
         # Step 4: Render the generated UI HTML through the shared SimpleWeb
         # Engine2D pixel path, then mirror those pixels into this backend's
         # legacy framebuffer for host-window present and snapshots.
+        val profile = web_render_optimization_profile(req)
+        var full_html = ""
+        if profile.cacheable_static_shell and self.static_shell_cache_key == profile.cache_key and self.static_shell_full_html != "":
+            self.static_shell_html_hits = self.static_shell_html_hits + 1
+            full_html = self.static_shell_full_html
+        else:
+            full_html = web_render_full_html(req)
+            if profile.cacheable_static_shell:
+                self.static_shell_cache_key = profile.cache_key
+                self.static_shell_full_html = full_html
+                self.static_shell_html_stores = self.static_shell_html_stores + 1
         val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(
-            web_render_full_html(req),
+            full_html,
             self.width,
             self.height,
             self.gpu_backend_name
