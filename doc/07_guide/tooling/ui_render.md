@@ -99,10 +99,20 @@ formats. The shared API owns:
 - snapshot, patch, and input envelopes for Web, Electron, Tauri, and pure Simple
 - `web_render_optimization_profile(req)` for static-shell cache planning
 
-The optimization profile is the first boundary for HTML/CSS binary caching. It
+The optimization profile is the shared boundary for HTML/CSS binary caching. It
 produces a deterministic cache key, classifies fully static shells versus
 dynamic islands, and lets Electron/Tauri IPC reuse already-built full HTML via
 `web_render_ipc_json_with_html(req, full_html)`.
+
+Renderer-owned static shell reuse lives in `src/app/ui.web/render_cache.spl`.
+Use `web_render_cached_static_artifact(cache_dir, req)` for persistent static
+HTML artifacts, `WebRenderStaticArtifactCache` for the hot in-memory front
+layer, and `web_render_static_shell_binary_artifact(req)` for compact `SWBC1`
+static-shell plans. `WebRenderPreparedStaticShellArtifact` decodes and validates
+that plan once, then reuses the prepared HTML and retained draw-command list on
+frame-hot paths. The GTK size/speed report records full HTML bytes, compact
+plan bytes, decoded layout payload estimate, static-cache hits, and prepared
+reuse timing separately.
 
 Related design artifacts:
 

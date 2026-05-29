@@ -157,6 +157,20 @@ and WebSocket-backed JS. The first milestone is documented in
 `doc/04_architecture/html_css_binary_caching.md` and
 `doc/05_design/html_css_binary_caching.md`.
 
+For renderer-owned static HTML reuse, use `src/app/ui.web/render_cache.spl`.
+`web_render_cached_static_artifact(cache_dir, req)` stores cacheable static
+shells by the shared cache-key digest and returns fresh artifacts for dynamic
+island requests. `WebRenderStaticArtifactCache.artifact(req)` adds a hot
+in-memory front layer for repeated static shells while preserving the same
+request/artifact boundary used by Web, Electron, Tauri, and the pure Simple
+browser path.
+
+For static shell binary planning, `web_render_static_shell_binary_artifact(req)`
+emits compact `SWBC1` plans with decoded layout payload estimates. Prepare them
+with `WebRenderPreparedStaticShellArtifact.prepare(req, encoded)` to validate
+once and reuse the generated artifact plus retained draw-command list on
+frame-hot paths.
+
 ### Practical consequences
 
 - If a feature works in `ui.render`, it works in `ui.tui` and the
