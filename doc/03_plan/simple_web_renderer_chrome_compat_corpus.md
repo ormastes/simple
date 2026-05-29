@@ -356,24 +356,18 @@ Measured blocker:
   experiment, not a corpus acceptance gate; the BDD locks the artifact-backed
   contract, default sample set, base totals, and ranking sections.
 - `tools/electron-shell/sweep_famous_site_text_postprocess.js --limit=3` ranks
-  renderer-positioned scalar postprocess candidates by strengthening only the
-  text pixels already present in Simple's current PPMs. Across
-  `site_15_twitch` and `site_102_docker_hub`, the current best SAD factor is
-  `3`, improving SAD from `1223047` to `1193661` while exact differing
-  pixels remain unchanged at `5919`. The corpus BDD covers this diagnostic, so
-  future work does not need to retry flat darkening of existing glyph pixels as
-  an exact-parity strategy.
-  The default sweep also includes lightening factors: factor `0.5` improves
-  exact pixels only from `5919` to `5879` while worsening SAD to `1235091`, so
-  exact-count-only dimming is not a safe renderer direction either.
-  The same tool now sweeps RGB-channel factors. The best exact candidate
-  (`r=3,g=3,b=3`) leaves exact unchanged at `5919` while improving SAD
-  to `1193661`; channel scaling is therefore not a sufficient
-  substitute for a real LCD/filter/gamma text model.
-  It also checks naive adjacent-edge expansion of the current Simple text
-  pixels. The lightest tested expansion alpha `16` worsens exact pixels to
-  `6923` and SAD to `1222849`, ruling out simple dilation as the missing
-  coverage strategy.
+  renderer-positioned scalar postprocess candidates by modifying only the
+  Simple pixels already present inside Chrome text rects clipped to the colored
+  div. It now prefers production artifacts, so the default sweep covers
+  `site_0_google` production mode plus exact fixture artifacts for
+  `site_15_twitch` and `site_102_docker_hub`. The measured base is `2717`
+  differing pixels, `646916` SAD, and `1879` current in-div text pixels. The
+  no-op factor `1` is the best uniform and RGB-channel candidate, proving the
+  current checked-in artifacts no longer support historical scalar darkening or
+  lightening claims. The lightest tested adjacent-edge expansion, alpha `16`,
+  worsens exact pixels to `3632` and SAD to `669701`; naive dilation is still
+  rejected as a missing-coverage strategy. The corpus BDD locks the production
+  artifact selection, base totals, and ranking sections.
   A translation sweep before the retained overflow-only refresh reported a
   postprocess `dx=0,dy=-1` improvement across `site_15_twitch` and
   `site_102_docker_hub` (`6106 -> 6072`, SAD `1245647 -> 1242168`), but the
