@@ -1,0 +1,85 @@
+"""
+FP profile: classifies a target's floating-point tier and
+provides per-family FP capability facts.
+"""
+
+# ============================================================================
+# FpTier — classification of FP support level
+# ============================================================================
+
+enum FpTier:
+    none_tier
+    soft_fp
+    hard_fp_sp
+    hard_fp_dp
+    hard_fp_simd
+
+fn fp_tier_name(tier: FpTier) -> text:
+    """Human-readable name for an FP tier."""
+    match tier:
+        case FpTier.none_tier: return "none"
+        case FpTier.soft_fp: return "soft-fp"
+        case FpTier.hard_fp_sp: return "hard-fp-sp"
+        case FpTier.hard_fp_dp: return "hard-fp-dp"
+        case FpTier.hard_fp_simd: return "hard-fp-simd"
+        case _: return "unknown"
+
+# ============================================================================
+# FpProfile — per-target FP facts
+# ============================================================================
+
+"""
+Per-target FP capability profile.
+
+Fields:
+  arch         — target architecture
+  tier         — highest FP tier available
+  sp_width     — single-precision register width (bits; 0 if none)
+  dp_width     — double-precision register width (bits; 0 if none)
+  has_fma      — fused multiply-add available
+  has_denorm   — denormal number support (IEEE-754 flush-to-zero if false)
+"""
+struct FpProfile:
+    arch: text
+    tier: FpTier
+    sp_width: int
+    dp_width: int
+    has_fma: bool
+    has_denorm: bool
+
+impl FpProfile:
+    static fn for_x86_64() -> FpProfile:
+        """x86_64 baseline: SSE2 DP + SP; FMA needs AVX2 probe."""
+        FpProfile(arch: "x86_64", tier: FpTier.hard_fp_simd, sp_width: 128, dp_width: 128, has_fma: false, has_denorm: true)
+
+    static fn for_riscv64_fd() -> FpProfile:
+        """RISC-V 64-bit with F+D extensions: scalar SP+DP, no SIMD."""
+        FpProfile(arch: "riscv64", tier: FpTier.hard_fp_dp, sp_width: 64, dp_width: 64, has_fma: true, has_denorm: true)
+
+    static fn for_riscv32_int() -> FpProfile:
+        """RISC-V 32-bit integer-only: no FP hardware at all."""
+        FpProfile(arch: "riscv32", tier: FpTier.none_tier, sp_width: 0, dp_width: 0, has_fma: false, has_denorm: false)
+
+    static fn for_arch(arch: text, has_float: bool, has_double: bool, has_simd: bool) -> FpProfile:
+        """Generic factory: derive an FpProfile from capability flags."""
+        val tier = if has_float == false:
+                       FpTier.none_tier
+                   elif has_simd == true:
+                       FpTier.hard_fp_simd
+                   elif has_double == true:
+                       FpTier.hard_fp_dp
+                   else:
+                       FpTier.hard_fp_sp
+        FpProfile(arch: arch, tier: tier, sp_width: if has_float == true: 32 else: 0, dp_width: if has_double == true: 64 else: 0, has_fma: false, has_denorm: has_float)
+
+    fn tier_name() -> text:
+        """Human-readable FP tier name."""
+        fp_tier_name(self.tier)
+
+    fn has_any_fp() -> bool:
+        """True if any hardware FP is present."""
+        self.tier == FpTier.none_tier == false
+
+    fn describe() -> text:
+        """Short human-readable description."""
+        return self.arch + " fp=" + self.tier_name() + " sp=" + self.sp_width.to_text() + " dp=" + self.dp_width.to_text()

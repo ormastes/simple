@@ -1,0 +1,343 @@
+use std.common.science_math.ndarray.*
+
+fn try_zeros(shape: Shape) -> Result<NDArray, NdarrayError>:
+    var i = 0
+    while i < shape.dims.len():
+        if shape.dims[i].value < 0:
+            return Err(NdarrayError.InvalidShape)
+        i = i + 1
+    var out: [Float64] = []
+    i = 0
+    while i < shape.numel().value:
+        out.push(Float64.new(0.0))
+        i = i + 1
+    Ok(make_f64_array(out, shape))
+
+fn zeros(shape: Shape) -> NDArray:
+    try_zeros(shape).unwrap()
+
+fn ones(shape: Shape) -> NDArray:
+    full(shape, Float64.new(1.0))
+
+fn full(shape: Shape, fill: Float64) -> NDArray:
+    var out: [Float64] = []
+    var i = 0
+    while i < shape.numel().value:
+        out.push(fill)
+        i = i + 1
+    make_f64_array(out, shape)
+
+fn empty(shape: Shape) -> NDArray:
+    zeros(shape)
+
+fn eye(size: Index) -> NDArray:
+    var out: [Float64] = []
+    var i = 0
+    while i < size.value * size.value:
+        out.push(Float64.new(0.0))
+        i = i + 1
+    i = 0
+    while i < size.value:
+        out[i * size.value + i] = Float64.new(1.0)
+        i = i + 1
+    make_f64_array(out, Shape.new([size, size]))
+
+fn try_arange(start: Float64, stop: Float64, step: Float64) -> Result<NDArray, NdarrayError>:
+    if step.value == 0.0:
+        return Err(NdarrayError.InvalidStep)
+    var out: [Float64] = []
+    var cursor = start.value
+    if step.value > 0.0:
+        while cursor < stop.value:
+            out.push(Float64.new(cursor))
+            cursor = cursor + step.value
+    else:
+        while cursor > stop.value:
+            out.push(Float64.new(cursor))
+            cursor = cursor + step.value
+    Ok(make_f64_array(out, Shape.new([Index.new(out.len())])))
+
+fn arange(start: Float64, stop: Float64, step: Float64) -> NDArray:
+    try_arange(start, stop, step).unwrap()
+
+fn try_linspace(start: Float64, stop: Float64, count: Index) -> Result<NDArray, NdarrayError>:
+    if count.value <= 0:
+        return Err(NdarrayError.InvalidLinspace)
+    if count.value == 1:
+        return Ok(make_f64_array([start], Shape.new([Index.new(1)])))
+    val step = (stop.value - start.value) / (count.value - 1)
+    var out: [Float64] = []
+    var i = 0
+    while i < count.value:
+        out.push(Float64.new(start.value + step * i))
+        i = i + 1
+    Ok(make_f64_array(out, Shape.new([count])))
+
+fn linspace(start: Float64, stop: Float64, count: Index) -> NDArray:
+    try_linspace(start, stop, count).unwrap()
+
+fn concatenate(arrays: [NDArray]) -> NDArray:
+    try_concatenate(arrays).unwrap()
+
+fn try_concatenate(arrays: [NDArray]) -> Result<NDArray, NdarrayError>:
+    if arrays.len() == 0:
+        return Err(NdarrayError.InvalidShape)
+    val dtype = arrays[0].dtype
+    var total = 0
+    var i = 0
+    while i < arrays.len():
+        val current = arrays[i]
+        if current.shape.dims.len() != 1:
+            return Err(NdarrayError.InvalidShape)
+        if current.dtype != dtype:
+            return Err(NdarrayError.UnsupportedDType)
+        total = total + current.len().value
+        i = i + 1
+    match dtype:
+        case DType.F32:
+            var out: [Float32] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < current.len().value:
+                    out.push(current.flat_f32(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_f32_array(out, Shape.new([Index.new(total)])))
+        case DType.F64:
+            var out: [Float64] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < current.len().value:
+                    out.push(current.flat_f64(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_f64_array(out, Shape.new([Index.new(total)])))
+        case DType.I64:
+            var out: [Int64] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < current.len().value:
+                    out.push(current.flat_i64(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_i64_array(out, Shape.new([Index.new(total)])))
+        case DType.Bool:
+            var out: [Bool] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < current.len().value:
+                    out.push(current.flat_bool(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_bool_array(out, Shape.new([Index.new(total)])))
+
+fn stack(arrays: [NDArray]) -> NDArray:
+    try_stack(arrays).unwrap()
+
+fn try_stack(arrays: [NDArray]) -> Result<NDArray, NdarrayError>:
+    if arrays.len() == 0:
+        return Err(NdarrayError.InvalidShape)
+    val dtype = arrays[0].dtype
+    if dtype == DType.Bool:
+        return Err(NdarrayError.UnsupportedDType)
+    val width = arrays[0].len()
+    var i = 0
+    while i < arrays.len():
+        val current = arrays[i]
+        if current.shape.dims.len() != 1:
+            return Err(NdarrayError.InvalidShape)
+        if current.dtype != dtype:
+            return Err(NdarrayError.UnsupportedDType)
+        if current.len() != width:
+            return Err(NdarrayError.ShapeMismatch)
+        i = i + 1
+    val shape = Shape.new([Index.new(arrays.len()), width])
+    match dtype:
+        case DType.F32:
+            var out: [Float32] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < width.value:
+                    out.push(current.flat_f32(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_f32_array(out, shape))
+        case DType.F64:
+            var out: [Float64] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < width.value:
+                    out.push(current.flat_f64(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_f64_array(out, shape))
+        case DType.I64:
+            var out: [Int64] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < width.value:
+                    out.push(current.flat_i64(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_i64_array(out, shape))
+        case DType.Bool:
+            var out: [Bool] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < width.value:
+                    out.push(current.flat_bool(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_bool_array(out, shape))
+
+fn random_uniform(seed: Int64, count: Index) -> Result<NDArray, NdarrayError>:
+    if count.value < 0:
+        return Err(NdarrayError.InvalidShape)
+    var state = seed.value
+    if state == 0:
+        state = 1
+    var out: [Float64] = []
+    var i = 0
+    while i < count.value:
+        state = next_lcg_state(state)
+        out.push(Float64.new((state % 1000000) as f64 / 1000000.0))
+        i = i + 1
+    Ok(make_f64_array(out, Shape.new([count])))
+
+fn where_bool(mask_values: NDArray, left: NDArray, right: NDArray) -> Result<NDArray, NdarrayError>:
+    if mask_values.dtype != DType.Bool:
+        return Err(NdarrayError.UnsupportedDType)
+    if left.dtype != right.dtype:
+        return Err(NdarrayError.UnsupportedDType)
+    if mask_values.shape != left.shape or left.shape != right.shape:
+        return Err(NdarrayError.ShapeMismatch)
+    if left.dtype == DType.F32:
+        var out: [Float32] = []
+        var i = 0
+        while i < left.len().value:
+            if mask_values.flat_bool(i).value:
+                out.push(left.flat_f32(i))
+            else:
+                out.push(right.flat_f32(i))
+            i = i + 1
+        return Ok(make_f32_array(out, left.shape))
+    if left.dtype == DType.F64:
+        var out: [Float64] = []
+        var i = 0
+        while i < left.len().value:
+            if mask_values.flat_bool(i).value:
+                out.push(left.flat_f64(i))
+            else:
+                out.push(right.flat_f64(i))
+            i = i + 1
+        return Ok(make_f64_array(out, left.shape))
+    if left.dtype == DType.I64:
+        var out: [Int64] = []
+        var i = 0
+        while i < left.len().value:
+            if mask_values.flat_bool(i).value:
+                out.push(left.flat_i64(i))
+            else:
+                out.push(right.flat_i64(i))
+            i = i + 1
+        return Ok(make_i64_array(out, left.shape))
+    var out: [Bool] = []
+    var i = 0
+    while i < left.len().value:
+        if mask_values.flat_bool(i).value:
+            out.push(left.flat_bool(i))
+        else:
+            out.push(right.flat_bool(i))
+        i = i + 1
+    Ok(make_bool_array(out, left.shape))
+
+fn next_lcg_state(state: i64) -> i64:
+    var next = (state * 1103515245 + 12345) % 2147483647
+    if next < 0:
+        next = -next
+    if next == 0:
+        next = 1
+    next
+
+fn array_from_csv_text(payload: text) -> Result<NDArray, NdarrayError>:
+    val cleaned = payload.trim()
+    if cleaned == "":
+        return Err(NdarrayError.InvalidShape)
+    var out_values: [Float64] = []
+    var expected_cols = -1
+    var row_count = 0
+    var current_cols = 0
+    var token: [text] = []
+    var i = 0
+    while i < cleaned.len():
+        val ch = cleaned.substring(i, i + 1)
+        if ch == "," or ch == "\n":
+            if token.len() == 0:
+                return Err(NdarrayError.InvalidShape)
+            val parsed = parse_array_csv_f64(token.join("").trim())?
+            out_values.push(parsed)
+            current_cols = current_cols + 1
+            token = []
+            if ch == "\n":
+                if expected_cols < 0:
+                    expected_cols = current_cols
+                if current_cols != expected_cols:
+                    return Err(NdarrayError.ShapeMismatch)
+                row_count = row_count + 1
+                current_cols = 0
+        else:
+            token.push(ch)
+        i = i + 1
+    if token.len() == 0:
+        return Err(NdarrayError.InvalidShape)
+    val parsed = parse_array_csv_f64(token.join("").trim())?
+    out_values.push(parsed)
+    current_cols = current_cols + 1
+    if expected_cols < 0:
+        expected_cols = current_cols
+    if current_cols != expected_cols:
+        return Err(NdarrayError.ShapeMismatch)
+    row_count = row_count + 1
+    if row_count == 0:
+        return Err(NdarrayError.InvalidShape)
+    if row_count == 1:
+        return Ok(make_f64_array(out_values, Shape.new([Index.new(expected_cols)])))
+    Ok(make_f64_array(out_values, Shape.new([Index.new(row_count), Index.new(expected_cols)])))
+
+fn parse_array_csv_f64(value: String) -> Result<Float64, NdarrayError>:
+    if value == "":
+        return Err(NdarrayError.InvalidShape)
+    val parsed = value.parse_f64()
+    match parsed:
+        case Some(v):
+            Ok(Float64.new(v))
+        case None:
+            Err(NdarrayError.InvalidShape)
+
+fn ndarray_sqrt_f64(value: f64) -> f64:
+    if value <= 0.0:
+        return 0.0
+    var estimate = value
+    if estimate < 1.0:
+        estimate = 1.0
+    var i = 0
+    while i < 20:
+        estimate = 0.5 * (estimate + value / estimate)
+        i = i + 1
+    estimate

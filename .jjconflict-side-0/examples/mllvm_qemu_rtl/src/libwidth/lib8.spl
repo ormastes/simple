@@ -1,0 +1,200 @@
+# 8-bit Width Support Library
+#
+# Wires AVR decoder + AVR runtime (memory, I/O, interrupts) into a
+# complete 8-bit emulation environment. Provides a factory for creating
+# fully configured AvrEmulator instances.
+
+use core.types.{GuestArch}
+use core.ops.{IrTcOp}
+use core.block.{IrTcModule, IrTcModuleMode}
+use core.builder.{IrTcBuilder}
+use guest.cpu_def.{GuestCpuDef, GuestState}
+use guest.avr.cpu.{build_avr_cpu_def, AVR_REG_SREG, AVR_REG_SP, AVR_REG_PC}
+use guest.avr.decoder.{AvrDecoder}
+use runtime.memory.{GuestMemory}
+use runtime.io.{IoController, AvrPortIO, AvrTimerIO, AvrUartIO}
+use runtime.interrupt.{InterruptController}
+
+# ============================================================================
+# Width8 Library
+# ============================================================================
+
+class Width8Lib:
+    """8-bit width support library for AVR architecture.
+
+    Provides factory methods and configuration for complete 8-bit
+    emulation environments.
+    """
+    cpu_def: GuestCpuDef
+
+impl Width8Lib:
+    static fn new() -> Width8Lib:
+        Width8Lib(cpu_def: build_avr_cpu_def())
+
+    fn word_size() -> i64:
+        8
+
+    fn arch() -> GuestArch:
+        GuestArch.Avr
+
+    fn create_avr_emulator() -> AvrEmulator:
+        """Factory: create a fully wired AVR emulation environment.
+
+        Includes:
+        - Guest CPU state (32 GPRs + SREG + SP + PC)
+        - 32KB flash (program memory) + 2KB SRAM (data memory)
+        - I/O controller with GPIO port B, Timer0, UART0
+        - Interrupt controller
+        - AVR instruction decoder
+        """
+        val cpu_def = self.cpu_def
+        val state = GuestState.new(cpu_def)
+        val memory = GuestMemory.new(cpu_def)
+
+        # Wire I/O devices
+        var io = IoController.new()
+        # AVR GPIO Port B (I/O addresses 0x23-0x25: PINB, DDRB, PORTB)
+        io.register_avr_port(0x23, 0x25, AvrPortIO.new("B"))
+        # AVR Timer0 (I/O addresses 0x44-0x48: TCCR0A, TCCR0B, TCNT0, OCR0A, OCR0B)
+        io.register_avr_timer(0x44, 0x48, AvrTimerIO.new())
+        # AVR UART0 (I/O addresses 0xC0-0xC6: UCSR0A through UDR0)
+        io.register_avr_uart(0xC0, 0xC6, AvrUartIO.new())
+
+        val interrupt = InterruptController.new(GuestArch.Avr)
+
+        # Create decoder with a fresh emulation builder
+        var builder = IrTcBuilder.new("avr_tb", IrTcModuleMode.Emulation)
+        val decoder = AvrDecoder(builder: builder, cpu_def: cpu_def)
+
+        AvrEmulator(
+            cpu_def: cpu_def,
+            state: state,
+            memory: memory,
+            decoder: decoder,
+            io: io,
+            interrupt: interrupt,
+            cycle_count: 0,
+            halted: false
+        )
+
+# ============================================================================
+# AVR Emulator
+# ============================================================================
+
+class AvrEmulator:
+    """Complete AVR emulation environment.
+
+    Combines guest state, memory, decoder, I/O, and interrupts into
+    a single step-able emulation engine.
+    """
+    cpu_def: GuestCpuDef
+    state: GuestState
+    memory: GuestMemory
+    decoder: AvrDecoder
+    io: IoController
+    interrupt: InterruptController
+    cycle_count: i64
+    halted: bool
+
+impl AvrEmulator:
+    me step() -> i64:
+        """Execute one AVR instruction.
+
+        Returns the number of cycles consumed by the instruction.
+        Fetches the instruction word from program memory at the current PC,
+        decodes and applies it to the guest state.
+        """
+        if self.halted:
+            return 0
+
+        # Check and deliver pending interrupts
+        self.state = self.interrupt.deliver_avr(
+            self.state,
+            self.memory.data_memory,
+            self.memory.data_size
+        )
+
+        val pc = self.state.pc
+
+        # Fetch instruction word from program memory (16-bit, little-endian)
+        val byte_addr = pc * 2  # AVR PC counts words, memory is byte-addressed
+        val low = self.memory.program_memory[byte_addr] & 0xFF
+        val high = if byte_addr + 1 < self.memory.program_size:
+            self.memory.program_memory[byte_addr + 1] & 0xFF
+        else:
+            0
+        val word1 = low | (high << 8)
+
+        # Fetch potential second word for 32-bit instructions (LDS, STS, etc.)
+        val word2_addr = byte_addr + 2
+        val w2_low = if word2_addr < self.memory.program_size:
+            self.memory.program_memory[word2_addr] & 0xFF
+        else:
+            0
+        val w2_high = if word2_addr + 1 < self.memory.program_size:
+            self.memory.program_memory[word2_addr + 1] & 0xFF
+        else:
+            0
+        val word2 = w2_low | (w2_high << 8)
+
+        # Decode and execute
+        val result = self.decoder.decode_instruction_32(word1, word2, pc)
+        match result:
+            Ok(bytes_consumed):
+                val cycles = bytes_consumed / 2  # Approximate: 1 cycle per word
+                self.cycle_count = self.cycle_count + cycles
+                # Advance PC by words consumed
+                self.state.pc = pc + (bytes_consumed / 2)
+                cycles
+            Err(_):
+                # Unknown instruction: halt
+                self.halted = true
+                0
+
+    me run(max_cycles: i64):
+        """Run the AVR emulator until halted or max_cycles reached.
+
+        Executes instructions in a loop, checking for halt and cycle limit.
+        """
+        var remaining = max_cycles
+        while not self.halted:
+            if remaining <= 0:
+                return
+            val cycles = self.step()
+            if cycles == 0:
+                return
+            remaining = remaining - cycles
+
+    me load_program(data: [i64]):
+        """Load a program into flash (program memory).
+
+        Data is an array of bytes to be placed starting at address 0.
+        """
+        for i in 0..data.len():
+            if i < self.memory.program_size:
+                self.memory.program_memory[i] = data[i] & 0xFF
+
+    me load_data(addr: i64, data: [i64]):
+        """Load data into SRAM (data memory)."""
+        for i in 0..data.len():
+            val target = addr + i
+            if target < self.memory.data_size:
+                self.memory.data_memory[target] = data[i] & 0xFF
+
+    me reset():
+        """Reset the AVR to initial state."""
+        self.state = GuestState.new(self.cpu_def)
+        self.cycle_count = 0
+        self.halted = false
+
+    fn get_reg(name: text) -> i64?:
+        """Read a register by name (e.g., "r0", "SREG", "SP")."""
+        self.state.get_reg_by_name(name)
+
+    me set_reg(name: text, value: i64) -> bool:
+        """Write a register by name."""
+        self.state.set_reg_by_name(name, value)
+
+    fn stats_text() -> text:
+        """Return emulation statistics as text."""
+        "AVR: {self.cycle_count} cycles, PC=0x{self.state.pc}, halted={self.halted}"

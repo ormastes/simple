@@ -1,0 +1,496 @@
+"""3D Engine — Stateless Emulation: Mesh Submission, Post-Processing, GPU Stubs
+
+@tag:stdlib
+@tag:api
+@tag:gpu
+
+Mesh submission, instancing, shadow pass, post-processing (fog, bloom, tonemap,
+SSAO, FXAA, SSR), and GPU resource stubs (textures, shaders, buffers, compute).
+Primitive shape drawing lives in backend_emu_primitives.spl.
+"""
+
+use std.gpu.engine3d.backend_core.{RenderBackend3DCore}
+use std.gpu.engine3d.types3d.{Vertex3D, Material3DParams, material_unlit, mat4_identity, color3d_r, color3d_g, color3d_b, color3d_a, color3d_pack}
+use std.gpu.engine3d.texture3d.{TextureDescriptor3D, SamplerDescriptor3D}
+use std.gpu.engine3d.backend_emu_primitives.{_emu3_clamp_i32, _emu3_clamp_f32, _emu3_sqrt}
+
+# ============================================================================
+# Indexed Mesh Submission — Unpack index triplets to submit_triangle
+# ============================================================================
+
+fn emu_submit_indexed_mesh(core: RenderBackend3DCore, vertices: [Vertex3D], indices: [u32], material: Material3DParams, model: [f32]):
+    val n = indices.len()
+    var i: i32 = 0
+    while i + 2 < n:
+        val i0 = indices[i] as i32
+        val i1 = indices[i + 1] as i32
+        val i2 = indices[i + 2] as i32
+        core.submit_triangle(vertices[i0], vertices[i1], vertices[i2], material, model)
+        i = i + 3
+
+# ============================================================================
+# Instanced Mesh Submission — Repeat indexed mesh for each transform
+# ============================================================================
+
+fn emu_submit_mesh_instanced(core: RenderBackend3DCore, vertices: [Vertex3D], indices: [u32], transforms: [[f32]], count: i32, material: Material3DParams):
+    var i: i32 = 0
+    while i < count:
+        emu_submit_indexed_mesh(core, vertices, indices, material, transforms[i])
+        i = i + 1
+
+# ============================================================================
+# Textures — Not supported in emulation
+# ============================================================================
+
+fn emu_create_texture(core: RenderBackend3DCore, w: i32, h: i32, pixels: [u32]) -> i32:
+    return -1
+
+fn emu_delete_texture(core: RenderBackend3DCore, id: i32):
+    return
+
+# ============================================================================
+# Shadow Pass — Simplified emulation using camera override
+# ============================================================================
+
+fn emu_begin_shadow_pass(core: RenderBackend3DCore, light_view_proj: [f32], shadow_map_size: i32):
+    val identity = mat4_identity()
+    core.set_camera(light_view_proj, identity)
+
+fn emu_end_shadow_pass(core: RenderBackend3DCore):
+    return
+
+fn emu_submit_shadow_caster(core: RenderBackend3DCore, vertices: [Vertex3D], indices: [u32], model: [f32]):
+    val black = material_unlit(0xFF000000)
+    emu_submit_indexed_mesh(core, vertices, indices, black, model)
+
+# ============================================================================
+# Post-Processing: Fog — Depth-based lerp toward fog color
+# ============================================================================
+
+fn emu_apply_fog(core: RenderBackend3DCore, color: u32, density: f32, near: f32, far: f32):
+    val w = core.width()
+    val h = core.height()
+    if w <= 0 or h <= 0:
+        return
+    val pixels = core.read_pixels()
+    val depth = core.read_depth()
+    val fr = color3d_r(color)
+    val fg = color3d_g(color)
+    val fb = color3d_b(color)
+    val fa = color3d_a(color)
+    val range = far - near
+    var result: [u32] = [0u32; w * h]
+
+    var py: i32 = 0
+    while py < h:
+        var px: i32 = 0
+        while px < w:
+            val idx = py * w + px
+            val d = depth[idx]
+            val p = pixels[idx]
+            var factor: f32 = 0.0
+            if range > 0.0001:
+                factor = (d - near) / range
+            factor = _emu3_clamp_f32(factor * density, 0.0, 1.0)
+            val fi = (factor * 255.0) as i32
+            val inv = 255 - fi
+            val pr = color3d_r(p)
+            val pg = color3d_g(p)
+            val pb = color3d_b(p)
+            val pa = color3d_a(p)
+            val rr = (pr * inv + fr * fi) / 255
+            val rg = (pg * inv + fg * fi) / 255
+            val rb = (pb * inv + fb * fi) / 255
+            result[idx] = color3d_pack(rr, rg, rb, pa)
+            px = px + 1
+        py = py + 1
+    core.draw_image(0, 0, w, h, result)
+
+# ============================================================================
+# Post-Processing: Bloom — Extract bright, blur, additive composite
+# ============================================================================
+
+fn emu_apply_bloom(core: RenderBackend3DCore, threshold: f32, intensity: f32):
+    val w = core.width()
+    val h = core.height()
+    if w <= 0 or h <= 0:
+        return
+    val pixels = core.read_pixels()
+    val thresh_i = (threshold * 255.0) as i32
+
+    var bright: [u32] = [0u32; w * h]
+    var i: i32 = 0
+    while i < w * h:
+        val p = pixels[i]
+        val pr = color3d_r(p)
+        val pg = color3d_g(p)
+        val pb = color3d_b(p)
+        val lum = (pr * 77 + pg * 150 + pb * 29) / 256
+        if lum > thresh_i:
+            bright[i] = p
+        else:
+            bright[i] = 0xFF000000
+        i = i + 1
+
+    var blurred: [u32] = [0u32; w * h]
+    var py: i32 = 0
+    while py < h:
+        var px: i32 = 0
+        while px < w:
+            var sr: i32 = 0
+            var sg: i32 = 0
+            var sb: i32 = 0
+            var cnt: i32 = 0
+            var ky: i32 = -1
+            while ky <= 1:
+                var kx: i32 = -1
+                while kx <= 1:
+                    val fx = px + kx
+                    val fy = py + ky
+                    if fx >= 0 and fx < w and fy >= 0 and fy < h:
+                        val bp = bright[fy * w + fx]
+                        sr = sr + color3d_r(bp)
+                        sg = sg + color3d_g(bp)
+                        sb = sb + color3d_b(bp)
+                        cnt = cnt + 1
+                    kx = kx + 1
+                ky = ky + 1
+            if cnt > 0:
+                blurred[py * w + px] = color3d_pack(sr / cnt, sg / cnt, sb / cnt, 255)
+            px = px + 1
+        py = py + 1
+
+    val int_i = (intensity * 255.0) as i32
+    var result: [u32] = [0u32; w * h]
+    var j: i32 = 0
+    while j < w * h:
+        val op = pixels[j]
+        val bp = blurred[j]
+        val rr = _emu3_clamp_i32(color3d_r(op) + color3d_r(bp) * int_i / 255, 0, 255)
+        val rg = _emu3_clamp_i32(color3d_g(op) + color3d_g(bp) * int_i / 255, 0, 255)
+        val rb = _emu3_clamp_i32(color3d_b(op) + color3d_b(bp) * int_i / 255, 0, 255)
+        result[j] = color3d_pack(rr, rg, rb, color3d_a(op))
+        j = j + 1
+    core.draw_image(0, 0, w, h, result)
+
+# ============================================================================
+# Post-Processing: Tonemap — Reinhard operator
+# ============================================================================
+
+fn emu_apply_tonemap(core: RenderBackend3DCore, exposure: f32):
+    val w = core.width()
+    val h = core.height()
+    if w <= 0 or h <= 0:
+        return
+    val pixels = core.read_pixels()
+    var result: [u32] = [0u32; w * h]
+
+    var i: i32 = 0
+    while i < w * h:
+        val p = pixels[i]
+        val pr = (color3d_r(p) as f32) / 255.0
+        val pg = (color3d_g(p) as f32) / 255.0
+        val pb = (color3d_b(p) as f32) / 255.0
+
+        val tr = pr * exposure / (1.0 + pr * exposure)
+        val tg = pg * exposure / (1.0 + pg * exposure)
+        val tb = pb * exposure / (1.0 + pb * exposure)
+
+        val rr = _emu3_clamp_i32((tr * 255.0) as i32, 0, 255)
+        val rg = _emu3_clamp_i32((tg * 255.0) as i32, 0, 255)
+        val rb = _emu3_clamp_i32((tb * 255.0) as i32, 0, 255)
+        result[i] = color3d_pack(rr, rg, rb, color3d_a(p))
+        i = i + 1
+    core.draw_image(0, 0, w, h, result)
+
+# ============================================================================
+# Texture Operations — Host-side stubs
+# ============================================================================
+
+fn emu_bind_texture(core: RenderBackend3DCore, slot: i32, texture_id: i32):
+    return
+
+fn emu_create_depth_texture(core: RenderBackend3DCore, w: i32, h: i32) -> i32:
+    return -1
+
+fn emu_create_cubemap(core: RenderBackend3DCore, size: i32, faces: [[u32]]) -> i32:
+    return -1
+
+fn emu_generate_mipmaps(core: RenderBackend3DCore, texture_id: i32):
+    return
+
+# ============================================================================
+# Shader / Pipeline — Not supported in emulation
+# ============================================================================
+
+fn emu_create_shader(core: RenderBackend3DCore, vertex_src: text, fragment_src: text) -> i32:
+    return -1
+
+fn emu_delete_shader(core: RenderBackend3DCore, shader_id: i32):
+    return
+
+fn emu_create_pipeline(core: RenderBackend3DCore, shader_id: i32, depth_test: bool, blend_mode: i32, cull_mode: i32) -> i32:
+    return -1
+
+fn emu_bind_pipeline(core: RenderBackend3DCore, pipeline_id: i32):
+    return
+
+# ============================================================================
+# Buffer Management — Not supported in emulation
+# ============================================================================
+
+fn emu_create_storage_buffer(core: RenderBackend3DCore, size: i32) -> i32:
+    return -1
+
+fn emu_update_buffer(core: RenderBackend3DCore, buffer_id: i32, data: [u8]):
+    return
+
+fn emu_read_buffer(core: RenderBackend3DCore, buffer_id: i32) -> [u8]:
+    return []
+
+# ============================================================================
+# Render Pass — Simplified emulation
+# ============================================================================
+
+fn emu_begin_render_pass(core: RenderBackend3DCore, color_target: i32, depth_target: i32):
+    return
+
+fn emu_end_render_pass(core: RenderBackend3DCore):
+    return
+
+# ============================================================================
+# Post-Processing — SSAO, FXAA, SSR
+# ============================================================================
+
+fn emu_apply_ssao(core: RenderBackend3DCore, radius: f32, bias: f32, intensity: f32):
+    val w = core.width()
+    val h = core.height()
+    val pixels = core.read_pixels()
+    val depth = core.read_depth()
+    var result: [u32] = []
+    var i = 0
+    while i < pixels.len():
+        result.push(pixels[i])
+        i = i + 1
+    var y = 1
+    while y < h - 1:
+        var x = 1
+        while x < w - 1:
+            val idx = y * w + x
+            val d = depth[idx]
+            val dl = depth[idx - 1]
+            val dr = depth[idx + 1]
+            val du = depth[idx - w]
+            val dd = depth[idx + w]
+            val diff = ((d - dl) * (d - dl) + (d - dr) * (d - dr) + (d - du) * (d - du) + (d - dd) * (d - dd)) * intensity * 1000.0
+            val occ = _emu3_clamp_f32(1.0 - diff, 0.3, 1.0)
+            val p = pixels[idx]
+            val rr = _emu3_clamp_i32((color3d_r(p) as f32 * occ) as i32, 0, 255)
+            val rg = _emu3_clamp_i32((color3d_g(p) as f32 * occ) as i32, 0, 255)
+            val rb = _emu3_clamp_i32((color3d_b(p) as f32 * occ) as i32, 0, 255)
+            result[idx] = color3d_pack(rr, rg, rb, color3d_a(p))
+            x = x + 1
+        y = y + 1
+    core.draw_image(0, 0, w, h, result)
+
+fn emu_apply_fxaa(core: RenderBackend3DCore):
+    val w = core.width()
+    val h = core.height()
+    val pixels = core.read_pixels()
+    var result: [u32] = []
+    var i = 0
+    while i < pixels.len():
+        result.push(pixels[i])
+        i = i + 1
+    var y = 1
+    while y < h - 1:
+        var x = 1
+        while x < w - 1:
+            val idx = y * w + x
+            val c = pixels[idx]
+            val l = pixels[idx - 1]
+            val r = pixels[idx + 1]
+            val cr = color3d_r(c)
+            val lr = color3d_r(l)
+            val rr = color3d_r(r)
+            val edge = (cr - lr) * (cr - lr) + (cr - rr) * (cr - rr)
+            if edge > 1000:
+                val ar = (cr + lr + rr) / 3
+                val ag = (color3d_g(c) + color3d_g(l) + color3d_g(r)) / 3
+                val ab = (color3d_b(c) + color3d_b(l) + color3d_b(r)) / 3
+                result[idx] = color3d_pack(ar, ag, ab, color3d_a(c))
+            x = x + 1
+        y = y + 1
+    core.draw_image(0, 0, w, h, result)
+
+fn emu_apply_ssr(core: RenderBackend3DCore, max_steps: i32, thickness: f32):
+    val w = core.width()
+    val h = core.height()
+    if w <= 0 or h <= 0:
+        return
+    val steps = if max_steps < 4: 4 else: max_steps
+    val pixels = core.read_pixels()
+    val depth = core.read_depth()
+    var result: [u32] = []
+    var i = 0
+    while i < pixels.len():
+        result.push(pixels[i])
+        i = i + 1
+
+    var y = 1
+    while y < h - 1:
+        var x = 1
+        while x < w - 1:
+            val idx = y * w + x
+            val d = depth[idx]
+            if d >= 0.9999:
+                x = x + 1
+                continue
+            val dl = depth[idx - 1]
+            val dr = depth[idx + 1]
+            val du = depth[idx - w]
+            val dd = depth[idx + w]
+            val ndx = dl - dr
+            val ndy = du - dd
+            val ndz = 0.1
+            val nlen = _emu3_sqrt(ndx * ndx + ndy * ndy + ndz * ndz)
+            var nx: f32 = 0.0
+            var ny: f32 = 0.0
+            var nz: f32 = 1.0
+            if nlen > 0.0001:
+                nx = ndx / nlen
+                ny = ndy / nlen
+                nz = ndz / nlen
+
+            val vx: f32 = 0.0
+            val vy: f32 = 0.0
+            val vz: f32 = 1.0
+
+            val vdn = vx * nx + vy * ny + vz * nz
+            val rx = vx - 2.0 * vdn * nx
+            val ry = vy - 2.0 * vdn * ny
+
+            val fresnel = _emu3_clamp_f32(1.0 - (vdn * vdn), 0.0, 1.0)
+            if fresnel < 0.05:
+                x = x + 1
+                continue
+
+            val step_scale = 2.0
+            var hit_color: u32 = 0xFF000000
+            var found = false
+            var s = 1
+            while s <= steps:
+                val sf = (s as f32) * step_scale
+                val sx = x + (rx * sf) as i32
+                val sy = y + (ry * sf) as i32
+                if sx >= 0 and sx < w and sy >= 0 and sy < h:
+                    val sidx = sy * w + sx
+                    val sd = depth[sidx]
+                    val ray_d = d - sf * 0.01
+                    if sd < ray_d and (ray_d - sd) < thickness:
+                        hit_color = pixels[sidx]
+                        found = true
+                        s = steps + 1
+                s = s + 1
+
+            if found:
+                val p = pixels[idx]
+                val fi = (fresnel * 200.0) as i32
+                val inv = 255 - fi
+                val rr = _emu3_clamp_i32((color3d_r(p) * inv + color3d_r(hit_color) * fi) / 255, 0, 255)
+                val rg = _emu3_clamp_i32((color3d_g(p) * inv + color3d_g(hit_color) * fi) / 255, 0, 255)
+                val rb = _emu3_clamp_i32((color3d_b(p) * inv + color3d_b(hit_color) * fi) / 255, 0, 255)
+                result[idx] = color3d_pack(rr, rg, rb, color3d_a(p))
+            x = x + 1
+        y = y + 1
+    core.draw_image(0, 0, w, h, result)
+
+# ============================================================================
+# Occlusion Query — Brute-force emulation
+# ============================================================================
+
+fn emu_occlusion_query(core: RenderBackend3DCore, x: i32, y: i32, w: i32, h: i32) -> i32:
+    val fw = core.width()
+    val pixels = core.read_pixels()
+    var count = 0
+    var row = y
+    while row < y + h:
+        var col = x
+        while col < x + w:
+            if row >= 0 and row < core.height() and col >= 0 and col < fw:
+                val idx = row * fw + col
+                if idx >= 0 and idx < pixels.len():
+                    if pixels[idx] != 0xFF000000:
+                        count = count + 1
+            col = col + 1
+        row = row + 1
+    count
+
+# ============================================================================
+# Animation — Host-side stub
+# ============================================================================
+
+fn emu_upload_bone_transforms(core: RenderBackend3DCore, bones: [[f32]], count: i32):
+    return
+
+# ============================================================================
+# GPU-Driven Rendering — Not supported in emulation
+# ============================================================================
+
+fn emu_draw_indirect(core: RenderBackend3DCore, buffer_id: i32, offset: i32, count: i32):
+    return
+
+# ============================================================================
+# Synchronization — Not needed in emulation
+# ============================================================================
+
+fn emu_pipeline_barrier(core: RenderBackend3DCore):
+    return
+
+# ============================================================================
+# Compute — Not supported in emulation
+# ============================================================================
+
+fn emu_create_compute_kernel(core: RenderBackend3DCore, src: text) -> i32:
+    return -1
+
+fn emu_dispatch_compute(core: RenderBackend3DCore, kernel_id: i32, x: i32, y: i32, z: i32):
+    return
+
+# ============================================================================
+# Extended Texture Ops (Core — Chrome WebGPU parity)
+# ============================================================================
+
+fn emu_create_texture_ex(core: RenderBackend3DCore, desc: TextureDescriptor3D, data: [u8]) -> i32:
+    return -1
+
+fn emu_create_sampler(core: RenderBackend3DCore, desc: SamplerDescriptor3D) -> i32:
+    return -1
+
+fn emu_create_texture_view(core: RenderBackend3DCore, texture_id: i32, dimension: i32, format: i32, base_mip: i32, mip_count: i32, base_layer: i32, layer_count: i32) -> i32:
+    return -1
+
+fn emu_destroy_texture_ex(core: RenderBackend3DCore, texture_id: i32):
+    return
+
+fn emu_destroy_sampler(core: RenderBackend3DCore, sampler_id: i32):
+    return
+
+fn emu_write_texture(core: RenderBackend3DCore, texture_id: i32, x: i32, y: i32, z: i32, w: i32, h: i32, d: i32, data: [u8]):
+    return
+
+fn emu_copy_texture_to_texture(core: RenderBackend3DCore, src_id: i32, dst_id: i32, src_origin: [i32], dst_origin: [i32], copy_size: [i32]):
+    return
+
+# ============================================================================
+# Extended Texture Ops (Adv — Chrome WebGPU parity)
+# ============================================================================
+
+fn emu_generate_mipmaps_ex(core: RenderBackend3DCore, texture_id: i32, format: i32):
+    return
+
+fn emu_compress_texture(core: RenderBackend3DCore, texture_id: i32, target_format: i32) -> i32:
+    return -1
+
+fn emu_read_texture(core: RenderBackend3DCore, texture_id: i32, mip: i32, layer: i32) -> [u8]:
+    return []

@@ -1,0 +1,476 @@
+use os.compositor.cursor.{CursorState}
+use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.input_backend.{InputBackend}
+use os.drivers.framebuffer.fb_driver.{Color}
+use os.kernel.boot.cpu.{port_inb, port_outb}
+use common.window_protocol.geometry.{WindowId}
+
+class WindowSurface:
+    id: i32
+    title: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    visible: bool
+    session: any
+    dirty: bool
+    owner_port: i64
+    process_id: i64
+    app_id: text
+
+class Compositor:
+    surfaces: [WindowSurface]
+    focused_idx: i32
+    backend: CompositorBackend
+    input: InputBackend?
+    cursor: CursorState
+    desktop_bg: Color
+    next_id: i32
+    screen_width: i32
+    screen_height: i32
+    running: bool
+    dragging: bool
+    drag_window_id: i32
+    drag_offset_x: i32
+    drag_offset_y: i32
+    pending_meta_key: i32
+    pending_shortcut: text
+
+    static fn with_backends(backend: CompositorBackend, input: InputBackend?, width: i32, height: i32) -> Compositor:
+        Compositor(
+            surfaces: [],
+            focused_idx: -1,
+            backend: backend,
+            input: input,
+            cursor: CursorState(x: width / 2, y: height / 2, visible: true, hotspot_x: 1, hotspot_y: 1),
+            desktop_bg: Color.rgb(0, 48, 96),
+            next_id: 1,
+            screen_width: width,
+            screen_height: height,
+            running: false,
+            dragging: false,
+            drag_window_id: 0,
+            drag_offset_x: 0,
+            drag_offset_y: 0,
+            pending_meta_key: 0,
+            pending_shortcut: ""
+        )
+
+    me create_window(title: text, x: i32, y: i32, width: i32, height: i32) -> i32:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.surfaces.push(WindowSurface(
+            id: id,
+            title: title,
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            visible: true,
+            session: nil,
+            dirty: true,
+            owner_port: 0,
+            process_id: 0,
+            app_id: ""
+        ))
+        self.focused_idx = self.surfaces.len() - 1
+        id
+
+    me add_surface(title: text, x: i32, y: i32, width: i32, height: i32) -> WindowId:
+        WindowId(value: self.create_window(title, x, y, width, height).to_u64())
+
+    me create_window_with_tree(title: text, x: i32, y: i32, width: i32, height: i32, tree: any) -> WindowId:
+        val id = self.create_window(title, x, y, width, height)
+        self.update_window_tree(id.to_u64(), tree)
+        WindowId(value: id.to_u64())
+
+    me create_remote_window(title: text, x: i32, y: i32, width: i32, height: i32, owner_port: u64) -> WindowId:
+        val id = self.create_window(title, x, y, width, height)
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id == id:
+                var surface = self.surfaces[i]
+                surface.owner_port = owner_port.to_i64()
+                self.surfaces[i] = surface
+            i = i + 1
+        WindowId(value: id.to_u64())
+
+    me destroy_window(id: i32):
+        var out: [WindowSurface] = []
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id != id:
+                out.push(self.surfaces[i])
+            i = i + 1
+        self.surfaces = out
+        if self.surfaces.len() == 0:
+            self.focused_idx = -1
+        elif self.focused_idx >= self.surfaces.len():
+            self.focused_idx = self.surfaces.len() - 1
+
+    me focus_window(id: i32):
+        var found = -1
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id == id:
+                found = i
+            i = i + 1
+        if found < 0:
+            return
+        val chosen = self.surfaces[found]
+        var out: [WindowSurface] = []
+        i = 0
+        while i < self.surfaces.len():
+            if i != found:
+                out.push(self.surfaces[i])
+            i = i + 1
+        out.push(chosen)
+        self.surfaces = out
+        self.focused_idx = self.surfaces.len() - 1
+
+    me cycle_focus():
+        if self.surfaces.len() <= 1:
+            if self.surfaces.len() == 0:
+                self.focused_idx = -1
+            return
+        var idx = self.focused_idx + 1
+        if idx >= self.surfaces.len():
+            idx = 0
+        self.focus_window(self.surfaces[idx].id)
+
+    me move_window(id: i32, x: i32, y: i32):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id == id:
+                var surface = self.surfaces[i]
+                surface.x = x
+                surface.y = y
+                surface.dirty = true
+                self.surfaces[i] = surface
+            i = i + 1
+
+    me resize_window(id: u64, width: i32, height: i32):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                var surface = self.surfaces[i]
+                surface.width = width
+                surface.height = height
+                surface.dirty = true
+                self.surfaces[i] = surface
+            i = i + 1
+
+    me set_window_title(id: u64, title: text):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                var surface = self.surfaces[i]
+                surface.title = title
+                surface.dirty = true
+                self.surfaces[i] = surface
+            i = i + 1
+
+    me minimize_window(id: u64):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                var surface = self.surfaces[i]
+                surface.visible = false
+                self.surfaces[i] = surface
+            i = i + 1
+
+    me maximize_window(id: u64):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                var surface = self.surfaces[i]
+                surface.x = 0
+                surface.y = 0
+                surface.width = self.screen_width
+                surface.height = self.screen_height
+                surface.visible = true
+                surface.dirty = true
+                self.surfaces[i] = surface
+            i = i + 1
+
+    me restore_window(id: u64):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                var surface = self.surfaces[i]
+                surface.visible = true
+                surface.dirty = true
+                self.surfaces[i] = surface
+            i = i + 1
+
+    me update_window_tree(id: u64, tree: any):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                var surface = self.surfaces[i]
+                surface.session = tree
+                surface.dirty = true
+                self.surfaces[i] = surface
+            i = i + 1
+
+    me set_window_identity(id: i32, process_id: i64, app_id: text):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id == id:
+                var surface = self.surfaces[i]
+                surface.process_id = process_id
+                surface.app_id = app_id
+                self.surfaces[i] = surface
+            i = i + 1
+
+    fn window_count() -> i32:
+        self.surfaces.len()
+
+    fn window_titles() -> [text]:
+        var titles: [text] = []
+        for surface in self.surfaces:
+            titles = titles.push(surface.title)
+        titles
+
+    fn get_surface(id: u64) -> WindowSurface?:
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                return self.surfaces[i]
+            i = i + 1
+        nil
+
+    fn window_title(id: u64) -> text:
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                return self.surfaces[i].title
+            i = i + 1
+        ""
+
+    fn window_owner_port(id: u64) -> u64:
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                return self.surfaces[i].owner_port.to_u64()
+            i = i + 1
+        0
+
+    fn window_process_id(id: i32) -> i64:
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id == id:
+                return self.surfaces[i].process_id
+            i = i + 1
+        0
+
+    fn window_app_id(id: i32) -> text:
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id == id:
+                return self.surfaces[i].app_id
+            i = i + 1
+        ""
+
+    fn window_count_for_app(app_id: text) -> i32:
+        var count = 0
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].app_id == app_id:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn window_count_for_process(process_id: i64) -> i32:
+        var count = 0
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].process_id == process_id:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn windows_for_process(process_id: i64) -> [u64]:
+        var out: [u64] = []
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].process_id == process_id:
+                out = out.push(self.surfaces[i].id.to_u64())
+            i = i + 1
+        out
+
+    fn windows_for_app(app_id: text) -> [u64]:
+        var out: [u64] = []
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].app_id == app_id:
+                out = out.push(self.surfaces[i].id.to_u64())
+            i = i + 1
+        out
+
+    me handle_input():
+        if self.input != nil:
+            self._handle_input_backend()
+            return
+        self._handle_input_ps2()
+
+    me _handle_input_backend():
+        val inp = self.input
+        if inp == nil:
+            return
+        val key_event = inp.poll_key()
+        if key_event != nil:
+            if inp.alt_held():
+                self.pending_meta_key = 1
+            val ch = inp.key_to_char(key_event.key)
+            if ch != nil:
+                self.pending_shortcut = ch
+        val mouse_event = inp.poll_mouse()
+        if mouse_event != nil:
+            var new_x = mouse_event.dx
+            var new_y = mouse_event.dy
+            if new_x < 0:
+                new_x = 0
+            if new_x >= self.screen_width:
+                new_x = self.screen_width - 1
+            if new_y < 0:
+                new_y = 0
+            if new_y >= self.screen_height:
+                new_y = self.screen_height - 1
+            var cursor_ref = self.cursor
+            cursor_ref.x = new_x
+            cursor_ref.y = new_y
+            self.cursor = cursor_ref
+            if mouse_event.left:
+                var hit_idx = -1
+                var wi = 0
+                while wi < self.surfaces.len():
+                    val s = self.surfaces[wi]
+                    if (new_x >= s.x and new_x < s.x + s.width and new_y >= s.y and new_y < s.y + s.height):
+                        hit_idx = wi
+                    wi = wi + 1
+                if hit_idx >= 0:
+                    self.focus_window(self.surfaces[hit_idx].id)
+
+    me _handle_input_ps2():
+        var alt_held = false
+        var status = port_inb(0x64)
+        while (status.to_i32() & 1) != 0:
+            var scancode = port_inb(0x60)
+            var sc = scancode.to_i32()
+            if sc == 0x38:
+                alt_held = true
+                self.pending_meta_key = 1
+            elif sc == 0xB8:
+                alt_held = false
+            elif alt_held and sc == 0x0F:
+                self.cycle_focus()
+            elif alt_held and sc == 0x3E:
+                if self.focused_idx >= 0 and self.focused_idx < self.surfaces.len():
+                    val focused_id = self.surfaces[self.focused_idx].id
+                    self.destroy_window(focused_id)
+            var next_status = port_inb(0x64)
+            status = next_status
+
+        var mstatus = port_inb(0x64)
+        if (mstatus.to_i32() & 0x21) == 0x21:
+            var b0 = port_inb(0x60)
+            var ms1 = port_inb(0x64)
+            if (ms1.to_i32() & 1) != 0:
+                var b1 = port_inb(0x60)
+                var ms2 = port_inb(0x64)
+                if (ms2.to_i32() & 1) != 0:
+                    var b2 = port_inb(0x60)
+                    var dx = b1.to_i32()
+                    var dy = b2.to_i32()
+                    if (b0.to_i32() & 0x10) != 0:
+                        dx = dx - 256
+                    if (b0.to_i32() & 0x20) != 0:
+                        dy = dy - 256
+                    var new_x = self.cursor.x + dx
+                    var new_y = self.cursor.y - dy
+                    if new_x < 0:
+                        new_x = 0
+                    if new_x >= self.screen_width:
+                        new_x = self.screen_width - 1
+                    if new_y < 0:
+                        new_y = 0
+                    if new_y >= self.screen_height:
+                        new_y = self.screen_height - 1
+                    var cursor_ref = self.cursor
+                    cursor_ref.x = new_x
+                    cursor_ref.y = new_y
+                    self.cursor = cursor_ref
+                    val left_btn = (b0.to_i32() & 0x01) != 0
+                    if left_btn:
+                        if self.dragging:
+                            val new_win_x = new_x - self.drag_offset_x
+                            val new_win_y = new_y - self.drag_offset_y
+                            self.move_window(self.drag_window_id, new_win_x, new_win_y)
+                        else:
+                            var hit_idx = -1
+                            var wi = 0
+                            while wi < self.surfaces.len():
+                                val s = self.surfaces[wi]
+                                if (new_x >= s.x and new_x < s.x + s.width and
+                                    new_y >= s.y and new_y < s.y + s.height):
+                                    hit_idx = wi
+                                wi = wi + 1
+                            if hit_idx >= 0:
+                                val hit = self.surfaces[hit_idx]
+                                if new_y < hit.y + 24:
+                                    self.dragging = true
+                                    self.drag_window_id = hit.id
+                                    self.drag_offset_x = new_x - hit.x
+                                    self.drag_offset_y = new_y - hit.y
+                                    self.focus_window(hit.id)
+                                else:
+                                    self.focus_window(hit.id)
+                    else:
+                        self.dragging = false
+
+    me render_all():
+        val bg = self.desktop_bg
+        val bg_color: u32 = ((bg.a.to_u32() & 0xFF) << 24) | ((bg.r.to_u32() & 0xFF) << 16) | ((bg.g.to_u32() & 0xFF) << 8) | (bg.b.to_u32() & 0xFF)
+        self.backend.fill_rect(0, 0, self.screen_width, self.screen_height, bg_color)
+        var i = 0
+        while i < self.surfaces.len():
+            val s = self.surfaces[i]
+            if s.visible:
+                self.backend.fill_rect(s.x, s.y, s.width, 24, 0xFF4A90D9)
+                self.backend.fill_rect(s.x, s.y, s.width, 1, 0xFF2A70B9)
+                self.backend.fill_rect(s.x, s.y, 1, s.height, 0xFF2A70B9)
+                self.backend.fill_rect(s.x + s.width - 1, s.y, 1, s.height, 0xFF2A70B9)
+                self.backend.fill_rect(s.x, s.y + s.height - 1, s.width, 1, 0xFF2A70B9)
+                self.backend.fill_rect(s.x + s.width - 24, s.y, 24, 24, 0xFFCC3333)
+                val body_y = s.y + 24
+                val body_h = s.height - 24
+                if body_h > 0:
+                    self.backend.fill_rect(s.x, body_y, s.width, body_h, 0xFF1A1A2E)
+            i = i + 1
+        val cx = self.cursor.x
+        val cy = self.cursor.y
+        self.backend.fill_rect(cx, cy, 8, 8, 0xFFFFFFFF)
+
+    me consume_pending_meta_key() -> i32:
+        val k = self.pending_meta_key
+        self.pending_meta_key = 0
+        k
+
+    me consume_pending_shortcut() -> text:
+        val s = self.pending_shortcut
+        self.pending_shortcut = ""
+        s
+
+    me render_frame():
+        self.render_all()
+        self.backend.present()
+
+    me run_loop():
+        self.running = true
+        while self.running:
+            self.handle_input()
+            self.render_all()
+            self.backend.present()
+            self.running = false

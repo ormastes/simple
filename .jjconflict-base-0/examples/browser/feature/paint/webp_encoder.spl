@@ -1,0 +1,75 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+# WebP encoder — produces a valid RIFF/WEBP container with a minimal VP8 key frame.
+# Full DCT/quantizer encoding is a follow-up; MVP writes a correct container shape.
+
+use examples.browser.entity.media.webp_types.{WebpConfig, WebpImage}
+
+fn _push_u32_le(out: [i64], value: i64):
+    out.push(value % 256)
+    out.push((value / 256) % 256)
+    out.push((value / 65536) % 256)
+    out.push((value / 16777216) % 256)
+
+fn _push_fourcc(out: [i64], a: i64, b: i64, c: i64, d: i64):
+    out.push(a)
+    out.push(b)
+    out.push(c)
+    out.push(d)
+
+fn _build_vp8_payload(width: i64, height: i64) -> [i64]:
+    var payload = [i64]()
+    # Tag byte: keyframe(0) | version(0)<<1 | show_frame(1)<<4 | part_size(0)<<5
+    # Minimal: 0b00010000 = 16, but spec: bits 0=keyframe=0, bits 1-3=version=0, bit4=show=1
+    # first_part_size occupies bits 5-18 of the 3-byte tag; use 0 for minimal
+    payload.push(16)   # tag byte 0: show_frame=1, keyframe=0
+    payload.push(0)    # tag byte 1
+    payload.push(0)    # tag byte 2
+    # Start code
+    payload.push(157)  # 0x9D
+    payload.push(1)    # 0x01
+    payload.push(42)   # 0x2A
+    # Width (lower 14 bits) + h_scale (upper 2 bits) as u16 LE
+    val w_raw = width % 16384
+    payload.push(w_raw % 256)
+    payload.push(w_raw / 256)
+    # Height (lower 14 bits) + v_scale (upper 2 bits) as u16 LE
+    val h_raw = height % 16384
+    payload.push(h_raw % 256)
+    payload.push(h_raw / 256)
+    payload
+
+class WebpEncoder:
+    config: WebpConfig
+
+    static fn new(config: WebpConfig) -> WebpEncoder:
+        WebpEncoder(config: config)
+
+    fn encode_quality() -> i64:
+        self.config.quality
+
+    fn build_container(payload: [i64], fourcc_a: i64, fourcc_b: i64, fourcc_c: i64, fourcc_d: i64) -> [i64]:
+        var out = [i64]()
+        val chunk_size = payload.len()
+        # Total file size = 4 (WEBP) + 4 (fourcc) + 4 (size) + chunk_size
+        val file_size = 4 + 8 + chunk_size
+        # RIFF header
+        _push_fourcc(out, 82, 73, 70, 70)  # RIFF
+        _push_u32_le(out, file_size)
+        _push_fourcc(out, 87, 69, 66, 80)  # WEBP
+        # Chunk header
+        _push_fourcc(out, fourcc_a, fourcc_b, fourcc_c, fourcc_d)
+        _push_u32_le(out, chunk_size)
+        # Chunk data
+        for b in payload:
+            out.push(b)
+        # Pad to even byte boundary
+        if chunk_size % 2 != 0:
+            out.push(0)
+        out
+
+    fn encode(image: WebpImage) -> [i64]:
+        val payload = _build_vp8_payload(image.width, image.height)
+        # VP8 fourcc: 'V'=86 'P'=80 '8'=56 ' '=32
+        self.build_container(payload, 86, 80, 56, 32)

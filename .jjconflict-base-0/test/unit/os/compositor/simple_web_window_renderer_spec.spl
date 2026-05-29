@@ -1,0 +1,53 @@
+use std.spec.*
+use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB}
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use os.compositor.simple_web_window_renderer.{render_simple_web_app_content, simple_web_app_html, simple_web_app_pixel_artifact_with_theme, simple_web_app_render_request_with_theme}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{SimpleWebRenderer}
+
+fn _count_changed(pixels: [u32], bg: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] != bg:
+            count = count + 1
+        idx = idx + 1
+    count
+
+describe "Simple Web compositor adapter":
+
+    it "provides app HTML for the SimpleOS browser window":
+        val html = simple_web_app_html("Simple Browser", "")
+        expect(html.contains("about:network")).to_equal(true)
+        expect(html.contains("Simple Web")).to_equal(true)
+
+    it "exposes SimpleOS app content through the common web render request":
+        val req = simple_web_app_render_request_with_theme("glass_dark", "Terminal", "ready", 80, 40)
+        expect(req.target).to_equal(WEB_RENDER_TARGET_SIMPLE_WEB)
+        expect(req.viewport_w).to_equal(80)
+        expect(req.viewport_h).to_equal(40)
+        expect(req.body_html.contains("wm-app-container")).to_equal(true)
+        expect(req.css.contains("simple-web-line")).to_equal(true)
+
+    it "exposes SimpleOS app pixels through the common web render artifact":
+        val artifact = simple_web_app_pixel_artifact_with_theme("glass_dark", "Terminal", 32, 20, "ready")
+        expect(artifact.target).to_equal(WEB_RENDER_TARGET_SIMPLE_WEB)
+        expect(artifact.viewport_w).to_equal(32)
+        expect(artifact.viewport_h).to_equal(20)
+        expect(artifact.pixels.len()).to_equal(32 * 20)
+        expect(_count_changed(artifact.pixels, 0xFFFFFFFFu32)).to_be_greater_than(0)
+
+    it "blits Simple Web rendered pixels into a compositor backend":
+        var backend = BrowserCompositorBackend.with_color(96, 64, 0xFF000000)
+        render_simple_web_app_content(backend, "Simple Browser", 8, 6, 64, 40, "")
+        val pixels = backend.get_pixel_buffer()
+
+        expect(pixels.len()).to_equal(96 * 64)
+        expect(_count_changed(pixels, 0xFF000000)).to_be_greater_than(0)
+        expect(pixels[0]).to_equal(0xFF000000)
+
+    it "uses the configured Engine2D backend through the renderer facade":
+        val renderer = SimpleWebRenderer.create_with_backend(40, 24, "software")
+        val pixels = renderer.render_html_to_pixels(simple_web_app_html("Simple Browser", ""))
+
+        expect(pixels.len()).to_equal(40 * 24)
+        expect(_count_changed(pixels, 0xFFFFFFFFu32)).to_be_greater_than(0)

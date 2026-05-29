@@ -1,0 +1,208 @@
+# CLib Parity Hotspot Rules — Recogniser Table
+#
+# Hardcoded rule registry for C-library-shape and provider-parity patterns that
+# the pure-Simple compiler can recognise and replace with optimised intrinsics.
+# This stays general-purpose: storage, DB, web, and SimpleOS/QEMU rules all use
+# the same proof-gated provider contract instead of bespoke optimizers.
+
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{
+    Rule, OptimizationRuleProvider,
+    create_rule_with_cost,
+    optimization_rule_provider_clib_parity
+}
+
+enum CLibPatternKind:
+    ByteCopy
+    EndianLoad
+    ChecksumReducer
+    DirectoryScan
+    ClusterChain
+    PrefixLookup
+    WalBatch
+    HeaderScan
+    RouteLookup
+    MmioPoll
+    SerialMarkerScan
+    ProviderGrantCheck
+    CopyGuard
+    BitExtractTable
+    FtsMatch
+    ContainsSearch
+    PageSummaryScan
+    CacheInvalidation
+    ReopenRecovery
+    DictLookupFusion
+    ArrayLenHoist
+    DeadBranchElim
+    StringConcatReduce
+    IntCmpStrengthReduce
+    ScanResultCache
+    VisibilityBatchPrecompute
+    CopyElisionPointLookup
+    FlatKeyIndex
+    TextCmpStrengthReduce
+    LoopInvariantDictHoist
+    CoAllocatedArrayBCE
+    DbHelperInlineForce
+
+struct CLibParityRule:
+    name: text
+    pattern_kind: CLibPatternKind
+    domain: text
+    intrinsic: text
+    requires: text
+    required_proof: text
+    cost_delta: i64
+    software_cost: i64
+
+struct CLibParityRewriteDecision:
+    rule_name: text
+    intrinsic: text
+    eligible: bool
+    reason: text
+
+fn clib_parity_rule(
+    name: text,
+    pattern_kind: CLibPatternKind,
+    domain: text,
+    intrinsic: text,
+    requires: text,
+    required_proof: text,
+    cost_delta: i64,
+    software_cost: i64
+) -> CLibParityRule:
+    CLibParityRule(name, pattern_kind, domain, intrinsic, requires, required_proof, cost_delta, software_cost)
+
+fn clib_parity_rule_table() -> [CLibParityRule]:
+    [
+        clib_parity_rule("match_memcpy_loop",       CLibPatternKind.ByteCopy,           "general",    "clib_memcpy",              "none",             "alias_non_overlap_or_memmove", -5, 800),
+        clib_parity_rule("match_memmove_loop",      CLibPatternKind.ByteCopy,           "general",    "clib_memmove",             "none",             "alias_safe_copy",              -4, 900),
+        clib_parity_rule("match_memset_loop",       CLibPatternKind.ByteCopy,           "general",    "clib_memset",              "none",             "bounds_cover_written_range",   -4, 700),
+        clib_parity_rule("match_le16_load",         CLibPatternKind.EndianLoad,         "general",    "clib_load_le16",           "none",             "byte_order_equivalence",       -2, 500),
+        clib_parity_rule("match_le32_load",         CLibPatternKind.EndianLoad,         "general",    "clib_load_le32",           "none",             "byte_order_equivalence",       -2, 500),
+        clib_parity_rule("match_be32_load",         CLibPatternKind.EndianLoad,         "general",    "clib_load_be32",           "none",             "byte_order_equivalence",       -2, 500),
+        clib_parity_rule("match_be64_load",         CLibPatternKind.EndianLoad,         "general",    "clib_load_be64",           "none",             "byte_order_equivalence",       -2, 500),
+        clib_parity_rule("match_checksum_fold",     CLibPatternKind.ChecksumReducer,    "general",    "clib_checksum_fold",       "none",             "associative_fold_equivalence", -6, 1200),
+        clib_parity_rule("match_crc32_reduce",      CLibPatternKind.ChecksumReducer,    "general",    "clib_crc32_reduce",        "crc32",            "crc_polynomial_equivalence",   -4, 1000),
+        clib_parity_rule("match_adler32_reduce",    CLibPatternKind.ChecksumReducer,    "general",    "clib_adler32_reduce",      "none",             "modular_sum_equivalence",      -3, 900),
+        clib_parity_rule("match_fat_dir_scan",      CLibPatternKind.DirectoryScan,      "filesystem", "fs_dir_scan_indexed",      "fat_dir_entry",    "directory_order_preserved",    -7, 1800),
+        clib_parity_rule("match_fat_cluster_walk",  CLibPatternKind.ClusterChain,       "filesystem", "fs_cluster_chain_prefetch", "fat_cluster_map",  "cluster_chain_equivalence",    -6, 1600),
+        clib_parity_rule("match_nvfs_name_prefix",  CLibPatternKind.PrefixLookup,       "filesystem", "fs_prefix_lookup",         "prefix_index",     "name_table_invalidation",      -5, 1400),
+        clib_parity_rule("match_db_prefix_lookup",  CLibPatternKind.PrefixLookup,       "database",   "db_prefix_lookup",         "prefix_index",     "index_update_delete_drop",     -5, 1500),
+        clib_parity_rule("match_db_wal_batch",      CLibPatternKind.WalBatch,           "database",   "db_wal_batch_write",       "wal_batch",        "durable_replay_equivalence",   -6, 1700),
+        clib_parity_rule("match_http_header_scan",  CLibPatternKind.HeaderScan,         "webserver",  "http_header_scan_fast",    "bounded_headers",  "parser_limit_equivalence",     -4, 1300),
+        clib_parity_rule("match_http_route_lookup", CLibPatternKind.RouteLookup,        "webserver",  "http_route_lookup_fast",   "route_table",      "route_precedence_equivalence", -4, 1200),
+        clib_parity_rule("match_general_bounded_scan",    CLibPatternKind.HeaderScan,   "general",    "bounded_scan_fast",        "none",             "scan_termination_equivalence", -3, 1100),
+        clib_parity_rule("match_general_dispatch_switch", CLibPatternKind.RouteLookup,  "general",    "dispatch_switch_fast",     "none",             "branch_coverage_equivalence",  -3, 1000),
+        clib_parity_rule("match_general_copy_guard",      CLibPatternKind.CopyGuard,    "general",    "copy_elide_guard",         "none",             "fast_path_semantics_preserved",-4, 1100),
+        clib_parity_rule("match_general_bit_extract",     CLibPatternKind.BitExtractTable, "general", "bit_unpack_batch",         "none",             "bit_extraction_equivalence",   -3, 900),
+        clib_parity_rule("match_mmio_poll_loop",    CLibPatternKind.MmioPoll,           "simpleos",   "hal_mmio_poll_bounded",    "volatile_mmio",    "volatile_ordering_preserved",  -3, 1100),
+        clib_parity_rule("match_serial_marker_scan",CLibPatternKind.SerialMarkerScan,   "simpleos",   "qemu_serial_marker_scan",  "bounded_serial",   "marker_contract_preserved",    -3, 1000),
+        clib_parity_rule("match_provider_grants",   CLibPatternKind.ProviderGrantCheck, "simpleos",   "provider_grant_check_fast", "grant_tokens",     "fail_closed_equivalence",      -4, 1200),
+        clib_parity_rule("match_db_fts_match",      CLibPatternKind.FtsMatch,           "database",   "db_fts_match",             "fts_index",        "fts_index_consistency",        -6, 1600),
+        clib_parity_rule("match_db_contains_search", CLibPatternKind.ContainsSearch,    "database",   "db_contains_search",       "text_index",       "text_index_consistency",       -5, 1400),
+        clib_parity_rule("match_db_page_summary_scan", CLibPatternKind.PageSummaryScan, "database",   "db_page_summary_scan",     "page_summary_index", "summary_range_soundness",    -4, 1300),
+        clib_parity_rule("match_db_cache_invalidate", CLibPatternKind.CacheInvalidation, "database",  "db_cache_invalidate",      "fts_dirty_flag",   "mutation_invalidation_complete", -5, 1200),
+        clib_parity_rule("match_db_reopen_recovery", CLibPatternKind.ReopenRecovery,    "database",   "db_reopen_recovery",       "wal_log",          "wal_replay_idempotent",        -7, 1800),
+        clib_parity_rule("match_db_dict_lookup_fusion", CLibPatternKind.DictLookupFusion, "database", "db_dict_lookup_fused",   "hash_index",       "key_immutable_in_sequence",    -5, 1400),
+        clib_parity_rule("match_db_array_len_hoist",  CLibPatternKind.ArrayLenHoist,    "database",   "db_array_len_hoisted",     "loop_invariant",   "array_no_mutation_in_loop",    -4, 1200),
+        clib_parity_rule("match_db_dead_branch_elim", CLibPatternKind.DeadBranchElim,   "database",   "db_dead_branch_removed",   "const_condition",  "branch_condition_is_const",    -3, 900),
+        clib_parity_rule("match_db_string_concat_reduce", CLibPatternKind.StringConcatReduce, "database", "db_string_concat_batch", "string_builder", "concat_order_preserved",       -6, 1500),
+        clib_parity_rule("match_db_int_cmp_strength", CLibPatternKind.IntCmpStrengthReduce, "database", "db_int_cmp_reduced",     "none",             "comparison_semantics_preserved", -3, 800),
+        clib_parity_rule("match_general_dict_lookup_fusion", CLibPatternKind.DictLookupFusion, "general", "dict_lookup_fused",    "hash_index",       "key_immutable_in_sequence",    -5, 1300),
+        clib_parity_rule("match_general_array_len_hoist", CLibPatternKind.ArrayLenHoist, "general",    "array_len_hoisted",        "loop_invariant",   "array_no_mutation_in_loop",    -4, 1100),
+        clib_parity_rule("match_general_dead_branch_elim", CLibPatternKind.DeadBranchElim, "general",  "dead_branch_removed",      "const_condition",  "branch_condition_is_const",    -3, 800),
+        clib_parity_rule("match_general_string_concat_reduce", CLibPatternKind.StringConcatReduce, "general", "string_concat_batch", "string_builder", "concat_order_preserved",      -6, 1400),
+        clib_parity_rule("match_general_int_cmp_strength", CLibPatternKind.IntCmpStrengthReduce, "general", "int_cmp_reduced",     "none",             "comparison_semantics_preserved", -3, 700),
+        clib_parity_rule("match_db_scan_result_cache",    CLibPatternKind.ScanResultCache,          "database", "db_scan_result_cached",     "scan_cache_key",    "mutation_invalidation_complete",  -8, 2000),
+        clib_parity_rule("match_general_scan_result_cache", CLibPatternKind.ScanResultCache,        "general",  "scan_result_cached",        "cache_key",         "mutation_invalidation_complete",  -7, 1800),
+        clib_parity_rule("match_db_visibility_batch",     CLibPatternKind.VisibilityBatchPrecompute, "database", "db_vis_batch_precomputed",  "snapshot_epoch",    "snapshot_monotonic_equivalence",  -6, 1500),
+        clib_parity_rule("match_general_filter_batch",    CLibPatternKind.VisibilityBatchPrecompute, "general",  "filter_batch_precomputed",  "filter_invariant",  "predicate_equivalence_in_epoch",  -5, 1300),
+        clib_parity_rule("match_db_pk_point_lookup",      CLibPatternKind.CopyElisionPointLookup,   "database", "db_pk_point_lookup_direct", "pk_index",          "index_key_immutable_in_lookup",   -7, 1600),
+        clib_parity_rule("match_general_index_point_lookup", CLibPatternKind.CopyElisionPointLookup, "general",  "index_point_lookup_direct", "hash_index",        "index_key_immutable_in_lookup",   -6, 1400),
+        clib_parity_rule("match_db_flat_key_index",           CLibPatternKind.FlatKeyIndex,            "database", "db_flat_key_lookup",        "flat_key_dict",     "composite_key_bijective",         -8, 1800),
+        clib_parity_rule("match_general_flat_key_index",      CLibPatternKind.FlatKeyIndex,            "general",  "flat_key_lookup",           "flat_key_dict",     "composite_key_bijective",         -7, 1600),
+        clib_parity_rule("match_db_text_cmp_strength",        CLibPatternKind.TextCmpStrengthReduce,   "database", "db_text_cmp_direct",        "typed_columns",     "serialize_roundtrip_equivalence", -7, 1700),
+        clib_parity_rule("match_general_text_cmp_strength",   CLibPatternKind.TextCmpStrengthReduce,   "general",  "text_cmp_direct",           "typed_source",      "serialize_roundtrip_equivalence", -6, 1500),
+        clib_parity_rule("match_db_loop_invariant_dict_hoist",    CLibPatternKind.LoopInvariantDictHoist, "database", "db_dict_hoist_loop",     "loop_invariant",    "dict_no_mutation_in_loop",        -5, 1300),
+        clib_parity_rule("match_general_loop_invariant_dict_hoist", CLibPatternKind.LoopInvariantDictHoist, "general", "dict_hoist_loop",       "loop_invariant",    "dict_no_mutation_in_loop",        -4, 1100),
+        clib_parity_rule("match_db_coallocated_array_bce",    CLibPatternKind.CoAllocatedArrayBCE,     "database", "db_bce_coallocated",        "coallocated_arrays","parallel_array_same_length",      -6, 1400),
+        clib_parity_rule("match_general_coallocated_array_bce", CLibPatternKind.CoAllocatedArrayBCE,   "general",  "bce_coallocated",           "coallocated_arrays","parallel_array_same_length",      -5, 1200),
+        clib_parity_rule("match_db_helper_inline_force",      CLibPatternKind.DbHelperInlineForce,     "database", "db_helper_inlined",         "hot_loop_call",     "small_fn_no_side_effects",        -6, 1600),
+        clib_parity_rule("match_general_helper_inline_force", CLibPatternKind.DbHelperInlineForce,     "general",  "helper_inlined",            "hot_loop_call",     "small_fn_no_side_effects",        -5, 1400)
+    ]
+
+fn clib_parity_rule_provider() -> OptimizationRuleProvider:
+    optimization_rule_provider_clib_parity("clib-parity-hotspot-rules", true)
+
+fn clib_parity_rule_is_general(rule: CLibParityRule) -> bool:
+    rule.domain != "optimizer"
+
+fn clib_parity_rule_is_simpleos_safe(rule: CLibParityRule) -> bool:
+    if rule.domain != "simpleos":
+        return true
+    rule.required_proof == "volatile_ordering_preserved" or
+        rule.required_proof == "marker_contract_preserved" or
+        rule.required_proof == "fail_closed_equivalence"
+
+fn clib_parity_text_list_contains(items: [text], value: text) -> bool:
+    var i = 0
+    while i < items.len():
+        if items[i] == value:
+            return true
+        i = i + 1
+    false
+
+fn clib_parity_rule_by_name(name: text) -> CLibParityRule?:
+    val rules = clib_parity_rule_table()
+    var i = 0
+    while i < rules.len():
+        if rules[i].name == name:
+            return Some(rules[i])
+        i = i + 1
+    nil
+
+fn clib_parity_rule_has_required_fact(rule: CLibParityRule, available_facts: [text]) -> bool:
+    rule.requires == "none" or clib_parity_text_list_contains(available_facts, rule.requires)
+
+fn clib_parity_rule_has_required_proof(rule: CLibParityRule, available_proofs: [text]) -> bool:
+    clib_parity_text_list_contains(available_proofs, rule.required_proof)
+
+fn clib_parity_rule_rewrite_decision(
+    rule: CLibParityRule,
+    available_facts: [text],
+    available_proofs: [text]
+) -> CLibParityRewriteDecision:
+    if not clib_parity_rule_is_simpleos_safe(rule):
+        return CLibParityRewriteDecision(rule.name, rule.intrinsic, false, "simpleos_contract_not_preserved")
+    if not clib_parity_rule_has_required_fact(rule, available_facts):
+        return CLibParityRewriteDecision(rule.name, rule.intrinsic, false, "missing_required_fact:" + rule.requires)
+    if not clib_parity_rule_has_required_proof(rule, available_proofs):
+        return CLibParityRewriteDecision(rule.name, rule.intrinsic, false, "missing_required_proof:" + rule.required_proof)
+    CLibParityRewriteDecision(rule.name, rule.intrinsic, true, "eligible")
+
+fn clib_parity_rule_can_rewrite(
+    rule: CLibParityRule,
+    available_facts: [text],
+    available_proofs: [text]
+) -> bool:
+    clib_parity_rule_rewrite_decision(rule, available_facts, available_proofs).eligible
+
+fn clib_parity_domain_rule_count(domain: text) -> i64:
+    val rules = clib_parity_rule_table()
+    var count = 0
+    var i = 0
+    while i < rules.len():
+        if rules[i].domain == domain:
+            count = count + 1
+        i = i + 1
+    count
+
+fn clib_parity_all_rules_are_general() -> bool:
+    val rules = clib_parity_rule_table()
+    var i = 0
+    while i < rules.len():
+        if not clib_parity_rule_is_general(rules[i]):
+            return false
+        i = i + 1
+    true

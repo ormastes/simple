@@ -1,0 +1,132 @@
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_length}
+use std.common.json.types.{json_get_type, json_to_string}
+use app.mcp.assistant.{
+    AssistantSessionRecord, AssistantTimelineRecord, AssistantChildTaskRecord,
+    assistant_store_create_session, assistant_store_load_session, assistant_store_list_sessions,
+    assistant_store_append_event, assistant_store_update_state, assistant_store_create_child_task
+}
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_file_read_text(path: text) -> text
+
+fn test_root(tag: text) -> text:
+    "/tmp/simple-assistant-store-{tag}-{rt_time_now_unix_micros()}"
+
+fn non_empty_lines_count(content: text) -> i64:
+    var count: i64 = 0
+    for line in content.split("\n"):
+        if line.trim() != "":
+            count = count + 1
+    count
+
+describe "assistant session store":
+    it "creates, loads, updates, and tracks child metadata":
+        val root = test_root("roundtrip")
+        val created = assistant_store_create_session(
+            root,
+            json_parse(r"""{"session_id":"assistant-core-1","name":"Assistant Core","summary":"build the store","objective":"build the store","prompt":"build the store","mode":"proactive","state":"running"}""")
+        )
+        match created:
+            case Some(session):
+                expect(session.session_id).to_equal("assistant-core-1")
+                expect(session.name).to_equal("Assistant Core")
+                expect(session.summary).to_equal("build the store")
+                expect(session.state).to_equal("running")
+            case nil:
+                expect(false).to_equal(true)
+
+        val listed = assistant_store_list_sessions(root)
+        expect(listed.len()).to_equal(1)
+
+        val appended = assistant_store_append_event(
+            root,
+            json_parse(r"""{"session_id":"assistant-core-1","kind":"note","message":"first event","signal":""}""")
+        )
+        match appended:
+            case Some(session):
+                expect(session.event_count).to_equal(1)
+                expect(session.last_event_kind).to_equal("note")
+            case nil:
+                expect(false).to_equal(true)
+
+        val updated = assistant_store_update_state(root, "assistant-core-1", "paused", "pause")
+        match updated:
+            case Some(session):
+                expect(session.state).to_equal("paused")
+                expect(session.event_count).to_equal(2)
+                expect(session.last_event_kind).to_equal("state")
+                expect(session.last_signal).to_equal("pause")
+            case nil:
+                expect(false).to_equal(true)
+
+        val child = assistant_store_create_child_task(
+            root,
+            json_parse(r"""{"session_id":"assistant-core-1","objective":"inspect subgraph","owner_kind":"assistant","resource_policy":"bounded","child_session_id":"assistant-child-1","status":"queued"}""")
+        )
+        match child:
+            case Some(session):
+                expect(session.event_count).to_equal(3)
+                expect(session.last_event_kind).to_equal("child_task")
+                expect(session.children.len()).to_equal(1)
+                expect(session.children[0]).to_equal("assistant-child-1")
+                expect(session.child_tasks.len()).to_equal(1)
+                expect(session.child_tasks[0].child_session_id).to_equal("assistant-child-1")
+            case nil:
+                expect(false).to_equal(true)
+
+        val loaded = assistant_store_load_session(root, "assistant-core-1")
+        match loaded:
+            case Some(session):
+                expect(session.session_id).to_equal("assistant-core-1")
+                expect(session.state).to_equal("paused")
+                expect(session.event_count).to_equal(3)
+                expect(session.children.len()).to_equal(1)
+                expect(session.child_tasks.len()).to_equal(1)
+                expect(session.child_tasks[0].child_session_id).to_equal("assistant-child-1")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "writes dashboard-compatible session and timeline files":
+        val root = test_root("compat")
+        val created = assistant_store_create_session(
+            root,
+            json_parse(r"""{"session_id":"assistant-core-compat","name":"Compat Session","summary":"compatibility","objective":"compatibility","prompt":"compatibility","mode":"proactive","state":"running"}""")
+        )
+        match created:
+            case Some(session):
+                expect(session.session_id).to_equal("assistant-core-compat")
+            case nil:
+                expect(false).to_equal(true)
+
+        assistant_store_append_event(
+            root,
+            json_parse(r"""{"session_id":"assistant-core-compat","kind":"note","message":"compat event","signal":""}""")
+        )
+        assistant_store_update_state(root, "assistant-core-compat", "running", "resume")
+        assistant_store_create_child_task(
+            root,
+            json_parse(r"""{"session_id":"assistant-core-compat","objective":"child compatibility","owner_kind":"assistant","resource_policy":"bounded","child_session_id":"assistant-core-child","status":"queued"}""")
+        )
+
+        val session_json = rt_file_read_text("{root}/sessions/assistant-core-compat.json")
+        val session_value = json_parse(session_json)
+        match session_value:
+            case nil:
+                expect(false).to_equal(true)
+            case _:
+                expect(json_to_string(json_object_get(session_value, "id"))).to_equal("assistant-core-compat")
+                expect(json_to_string(json_object_get(session_value, "state"))).to_equal("running")
+                expect(json_get_type(json_object_get(session_value, "updated_at"))).to_equal("number")
+                expect(json_get_type(json_object_get(session_value, "child_tasks"))).to_equal("array")
+                expect(json_array_length(json_object_get(session_value, "child_tasks"))).to_equal(1)
+
+        val timeline_jsonl = rt_file_read_text("{root}/timelines/assistant-core-compat.jsonl")
+        expect(non_empty_lines_count(timeline_jsonl)).to_equal(3)
+        val first_line = json_parse(timeline_jsonl.split("\n")[0])
+        match first_line:
+            case nil:
+                expect(false).to_equal(true)
+            case _:
+                expect(json_to_string(json_object_get(first_line, "kind"))).to_equal("note")

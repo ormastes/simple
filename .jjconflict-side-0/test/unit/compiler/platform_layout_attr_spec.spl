@@ -1,0 +1,244 @@
+use std.io_runtime
+
+fn check(label: text, ok: bool):
+    if ok:
+        print("PASS: " + label)
+    else:
+        print("FAIL: " + label)
+
+class AttrKey:
+    key: text
+    is_valid: bool
+
+    static fn from_text(k: text) -> AttrKey:
+        var valid = k == "cpu" or k == "os" or k == "abi" or k == "bit"
+        return AttrKey(key: k, is_valid: valid)
+
+class AttrValue:
+    key: text
+    value: text
+    is_valid: bool
+
+    static fn create(k: text, v: text) -> AttrValue:
+        var valid = false
+        if k == "bit":
+            valid = v == "32" or v == "64"
+        if k == "cpu":
+            valid = v == "x86_64" or v == "aarch64" or v == "riscv32" or v == "riscv64" or v == "arm" or v == "wasm32"
+        if k == "os":
+            valid = v == "linux" or v == "macos" or v == "windows" or v == "freebsd" or v == "none"
+        if k == "abi":
+            valid = v == "gnu" or v == "musl" or v == "msvc" or v == "eabi" or v == "none"
+        return AttrValue(key: k, value: v, is_valid: valid)
+
+class AttrForm:
+    form: text
+    has_default: bool
+    key_count: i32
+    bit_value: text
+    cpu_value: text
+
+    static fn bare() -> AttrForm:
+        return AttrForm(form: "bare", has_default: false, key_count: 0, bit_value: "", cpu_value: "")
+
+    static fn bit_only(bit: text) -> AttrForm:
+        return AttrForm(form: "bit_only", has_default: false, key_count: 1, bit_value: bit, cpu_value: "")
+
+    static fn full(cpu: text, bit: text) -> AttrForm:
+        return AttrForm(form: "full", has_default: false, key_count: 2, bit_value: bit, cpu_value: cpu)
+
+    me specificity() -> i32:
+        return self.key_count
+
+    me is_default() -> bool:
+        return self.has_default
+
+class Target:
+    cpu: text
+    os: text
+    abi: text
+    bit: text
+
+    static fn x86_linux() -> Target:
+        return Target(cpu: "x86_64", os: "linux", abi: "gnu", bit: "64")
+
+    static fn arm_none() -> Target:
+        return Target(cpu: "riscv32", os: "none", abi: "eabi", bit: "32")
+
+class VarMatch:
+    vid: text
+    matched: bool
+    specificity: i32
+    is_default: bool
+
+    static fn eval(vid: text, is_def: bool, cpu: text, bit: text, target: Target) -> VarMatch:
+        var cpu_ok = cpu == "" or cpu == target.cpu
+        var bit_ok = bit == "" or bit == target.bit
+        var m = cpu_ok and bit_ok
+        var spec = 0
+        if cpu == "" == false:
+            spec = spec + 1
+        if bit == "" == false:
+            spec = spec + 1
+        return VarMatch(vid: vid, matched: m, specificity: spec, is_default: is_def)
+
+    me is_candidate() -> bool:
+        return self.matched
+
+class PtrWidth:
+    bit_text: text
+    byte_size: i32
+
+    static fn from_bit(bit: text) -> PtrWidth:
+        var sz = 8
+        if bit == "32":
+            sz = 4
+        if bit == "64":
+            sz = 8
+        return PtrWidth(bit_text: bit, byte_size: sz)
+
+class LayoutVar:
+    vid: text
+    total_size: i32
+    total_align: i32
+
+    static fn create(vid: text, size: i32, align_val: i32) -> LayoutVar:
+        return LayoutVar(vid: vid, total_size: size, total_align: align_val)
+
+    me size_differs(other_size: i32) -> bool:
+        return self.total_size != other_size
+
+class TypeCheck:
+    type_name: text
+    is_abi: bool
+    has_attr: bool
+    varies: bool
+    has_hint: bool
+
+    static fn create(name: text, abi: bool, attr: bool, vari: bool, hint: bool) -> TypeCheck:
+        return TypeCheck(type_name: name, is_abi: abi, has_attr: attr, varies: vari, has_hint: hint)
+
+    me needs_attr() -> bool:
+        return self.is_abi and self.varies and self.has_attr == false
+
+    me needs_hint() -> bool:
+        return self.has_attr and self.has_hint == false
+
+class MigCandidate:
+    type_name: text
+    category: text
+    s32: i32
+    s64: i32
+
+    static fn create(name: text, cat: text, s32: i32, s64: i32) -> MigCandidate:
+        return MigCandidate(type_name: name, category: cat, s32: s32, s64: s64)
+
+    me varies() -> bool:
+        return self.s32 != self.s64
+
+fn test_valid_key_cpu():
+    val k = AttrKey.from_text("cpu")
+    check("test_valid_key_cpu", k.is_valid == true)
+
+fn test_invalid_key():
+    val k = AttrKey.from_text("foo")
+    check("test_invalid_key", k.is_valid == false)
+
+fn test_valid_bit_value():
+    val v = AttrValue.create("bit", "64")
+    check("test_valid_bit_value", v.is_valid == true)
+
+fn test_invalid_bit_value():
+    val v = AttrValue.create("bit", "128")
+    check("test_invalid_bit_value", v.is_valid == false)
+
+fn test_valid_os_value():
+    val v = AttrValue.create("os", "linux")
+    check("test_valid_os_value", v.is_valid == true)
+
+fn test_invalid_os_value():
+    val v = AttrValue.create("os", "android")
+    check("test_invalid_os_value", v.is_valid == false)
+
+fn test_valid_abi_value():
+    val v = AttrValue.create("abi", "musl")
+    check("test_valid_abi_value", v.is_valid == true)
+
+fn test_bare_specificity_zero():
+    val f = AttrForm.bare()
+    check("test_bare_specificity_zero", f.specificity() == 0)
+
+fn test_bit_only_specificity_one():
+    val f = AttrForm.bit_only("64")
+    check("test_bit_only_specificity_one", f.specificity() == 1)
+
+fn test_full_specificity_two():
+    val f = AttrForm.full("x86_64", "64")
+    check("test_full_specificity_two", f.specificity() == 2)
+
+fn test_match_exact_cpu():
+    val t = Target.x86_linux()
+    val m = VarMatch.eval("v1", false, "x86_64", "", t)
+    check("test_match_exact_cpu", m.matched == true)
+
+fn test_match_wrong_cpu():
+    val t = Target.x86_linux()
+    val m = VarMatch.eval("v1", false, "aarch64", "", t)
+    check("test_match_wrong_cpu", m.matched == false)
+
+fn test_match_empty_predicate():
+    val t = Target.x86_linux()
+    val m = VarMatch.eval("v1", false, "", "", t)
+    check("test_match_empty_predicate", m.matched == true and m.specificity == 0)
+
+fn test_match_cpu_and_bit():
+    val t = Target.x86_linux()
+    val m = VarMatch.eval("v1", false, "x86_64", "64", t)
+    check("test_match_cpu_and_bit", m.matched == true and m.specificity == 2)
+
+fn test_ptr_32bit():
+    val p = PtrWidth.from_bit("32")
+    check("test_ptr_32bit", p.byte_size == 4)
+
+fn test_ptr_64bit():
+    val p = PtrWidth.from_bit("64")
+    check("test_ptr_64bit", p.byte_size == 8)
+
+fn test_layout_size_differs():
+    val lv = LayoutVar.create("v32", 8, 4)
+    check("test_layout_size_differs", lv.size_differs(16) == true)
+
+fn test_layout_size_same():
+    val lv = LayoutVar.create("v64", 16, 8)
+    check("test_layout_size_same", lv.size_differs(16) == false)
+
+fn test_abi_type_needs_attr():
+    val tc = TypeCheck.create("FfiStruct", true, false, true, false)
+    check("test_abi_type_needs_attr", tc.needs_attr() == true)
+
+fn test_non_abi_no_attr_needed():
+    val tc = TypeCheck.create("LocalStruct", false, false, true, false)
+    check("test_non_abi_no_attr_needed", tc.needs_attr() == false)
+
+fn main():
+    test_valid_key_cpu()
+    test_invalid_key()
+    test_valid_bit_value()
+    test_invalid_bit_value()
+    test_valid_os_value()
+    test_invalid_os_value()
+    test_valid_abi_value()
+    test_bare_specificity_zero()
+    test_bit_only_specificity_one()
+    test_full_specificity_two()
+    test_match_exact_cpu()
+    test_match_wrong_cpu()
+    test_match_empty_predicate()
+    test_match_cpu_and_bit()
+    test_ptr_32bit()
+    test_ptr_64bit()
+    test_layout_size_differs()
+    test_layout_size_same()
+    test_abi_type_needs_attr()
+    test_non_abi_no_attr_needed()
+    print("DONE")

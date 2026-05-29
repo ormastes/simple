@@ -1,0 +1,110 @@
+# @tag: rendering, engine2d, text
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_cpu.spl 30%
+# @cover src/lib/gc_async_mut/gpu/engine2d/glyph.spl 50%
+
+# Engine2D Text Rendering Tests
+#
+# Verifies that draw_text and draw_text_bg produce correct pixels in the
+# CPU backend framebuffer.  Uses a 50x20 viewport for deterministic
+# pixel-exact assertions.
+#
+# draw_text delegates to render_text_to_buffer which uses FontRenderer
+# (8x16 bitmap fallback with bearing offsets) — so exact pixel coords
+# are not predicted from the 5x7 glyph table; a region scan is used.
+#
+# draw_text_bg is implemented directly in CpuBackend using the 5x7
+# glyph_data with bilinear AA coverage.  "A" row 0 = 0b01110:
+#   col 0 (x=0) → coverage 0 → pure bg color
+#   col 1 (x=1) → coverage 1 → pure fg color
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.color.{rgb, color_r, color_g, color_b}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn make_text_engine() -> Engine2D:
+    """Create a 50x20 CPU engine cleared to black."""
+    var engine = Engine2D.create_with_backend(50, 20, "cpu")
+    engine.clear(rgb(0, 0, 0))
+    engine.present()
+    engine
+
+fn text_pixel_at(pixels: [u32], x: i32, y: i32, w: i32) -> u32:
+    """Read a single pixel from the flat u32 buffer."""
+    pixels[y * w + x]
+
+fn any_nonblack_in_region(pixels: [u32], x0: i32, y0: i32, x1: i32, y1: i32, w: i32) -> bool:
+    """Return true if any pixel in the rectangle [x0,x1) x [y0,y1) is non-black.
+
+    Module-level helper so that while-loop var mutation works correctly
+    (it-block var mutation is unreliable in interpreter mode).
+    """
+    var found = false
+    var sy = y0
+    while sy < y1:
+        var sx = x0
+        while sx < x1:
+            val p = pixels[sy * w + sx]
+            if p != 0u32:
+                found = true
+            sx = sx + 1
+        sy = sy + 1
+    found
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Engine2D Text Rendering":
+
+    context "cpu backend":
+
+        it "draw_text renders non-zero pixels in the glyph area":
+            # draw_text uses FontRenderer (8x16 bitmap + bearing offsets), so
+            # we scan the first 20x20 region for any non-black pixel rather
+            # than asserting a specific coordinate.
+            var engine = Engine2D.create_with_backend(50, 20, "cpu")
+            engine.clear(rgb(0, 0, 0))
+            engine.draw_text(0, 0, "A", rgb(255, 255, 255), 14)
+            engine.present()
+            val pixels = engine.read_pixels()
+            val found = any_nonblack_in_region(pixels, 0, 0, 20, 20, 50)
+            expect(found).to_equal(true)
+            engine.shutdown()
+
+        it "draw_text leaves pixels outside the glyph area unchanged":
+            # Draw "A" at (0,0) with font_size=14.  The glyph fits in roughly
+            # 8x14 px.  A pixel at (45, 18) is well outside that — must remain
+            # the black background.
+            var engine = Engine2D.create_with_backend(50, 20, "cpu")
+            engine.clear(rgb(0, 0, 0))
+            engine.draw_text(0, 0, "A", rgb(255, 255, 255), 14)
+            engine.present()
+            val pixels = engine.read_pixels()
+            val p = text_pixel_at(pixels, 45, 18, 50)
+            expect(color_r(p)).to_equal(0)
+            expect(color_g(p)).to_equal(0)
+            expect(color_b(p)).to_equal(0)
+            engine.shutdown()
+
+        it "draw_text_bg fills background color where the glyph bit is OFF":
+            # "A" row 0: 0b01110 — x=0 (col 0) is OFF, so that pixel should
+            # take the background color (green = rgb(0,255,0)), not the fg.
+            # At scale=1, font_size=7, the cell is 6px wide x 7px tall.
+            # draw_text_bg uses bilinear AA so the pure-bg pixel is at
+            # the leftmost column of the first row (x=0, y=0), which maps
+            # to font col 0 with coverage 0 → pure bg.
+            var engine = Engine2D.create_with_backend(50, 20, "cpu")
+            engine.clear(rgb(0, 0, 0))
+            engine.draw_text_bg(0, 0, "A", rgb(255, 255, 255), rgb(0, 255, 0), 7)
+            engine.present()
+            val pixels = engine.read_pixels()
+            # x=0, y=0 → font col 0 row 0 → coverage 0 (OFF) → pure bg green
+            val p = text_pixel_at(pixels, 0, 0, 50)
+            expect(color_g(p)).to_be_greater_than(0)
+            # Red component should be much less than green (bg is green, fg is white)
+            expect(color_r(p)).to_be_less_than(color_g(p))
+            engine.shutdown()

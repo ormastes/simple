@@ -1,0 +1,553 @@
+# Strength Reduction
+#
+# Replaces expensive operations with cheaper ones in loops.
+#
+# Example transformations:
+#   - i * 4 -> i << 2 (multiply by power of 2)
+#   - i * c -> i + i + ... (multiply by small constant)
+#   - i / 2 -> i >> 1 (divide by power of 2)
+#
+# Most impactful in loop bodies where operation repeats.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{
+    OptimizationRuleProvider, OptimizationProviderStats, OptimizerProviderKind,
+    OptimizerRuleLookupKind, optimization_rule_provider_builtin_with_contract,
+    optimization_provider_stats_zero, optimization_provider_stats_record_scope
+}
+
+# ============================================================================
+# Strength Reduction
+# ============================================================================
+
+class StrengthReduction:
+    """
+    Replaces expensive operations with cheaper ones in loops.
+
+    Example transformations:
+    - i * 4 -> i << 2 (multiply by power of 2)
+    - i * 3 -> (i << 1) + i (small constant decomposition)
+    - i / 2 -> i >> 1 (divide by power of 2)
+
+    Most impactful in loop bodies where operation repeats.
+    """
+    reduced_count: i64
+    next_local_id: i64
+    provider: OptimizationRuleProvider
+    stats: OptimizationProviderStats
+
+impl StrengthReduction:
+    static fn new() -> StrengthReduction:
+        StrengthReduction(
+            reduced_count: 0,
+            next_local_id: 900000,
+            provider: strength_reduction_provider(),
+            stats: optimization_provider_stats_zero()
+        )
+
+    me optimize_function(func: MirFunction) -> MirFunction:
+        """Run strength reduction on function."""
+        if not self.provider.enabled:
+            self.stats = optimization_provider_stats_record_scope(self.stats, 0)
+            return func
+
+        val before_count = self.reduced_count
+        var optimized_blocks: [MirBlock] = []
+
+        for block in func.blocks:
+            val optimized = self.reduce_block(block)
+            optimized_blocks.push(optimized)
+
+        val function_rewrites = self.reduced_count - before_count
+        self.stats = optimization_provider_stats_record_scope(self.stats, function_rewrites)
+
+        MirFunction(..func, blocks: optimized_blocks)
+
+    me reduce_block(block: MirBlock) -> MirBlock:
+        """Apply strength reduction to block."""
+        var reduced_instructions: [MirInst] = []
+
+        for inst in block.instructions:
+            val expanded = self.try_reduce_instruction(inst)
+            for ei in expanded:
+                reduced_instructions.push(ei)
+
+        MirBlock(
+            id: block.id,
+            label: block.label,
+            instructions: reduced_instructions,
+            terminator: block.terminator
+        )
+
+    me try_reduce_instruction(inst: MirInst) -> [MirInst]:
+        """Try to apply strength reduction to instruction. Returns list (may expand to multiple)."""
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                # Try single-instruction reduction first
+                val reduced = self.try_reduce_binop(dest, op, left, right, inst.span)
+                if reduced.?:
+                    self.reduced_count = self.reduced_count + 1
+                    return [reduced.unwrap()]
+
+                # Try small-constant multiply decomposition (multi-instruction)
+                val decomposed = self.try_decompose_small_mul(dest, op, left, right, inst.span)
+                if decomposed.len() > 0:
+                    self.reduced_count = self.reduced_count + 1
+                    return decomposed
+
+                [inst]
+
+            case _:
+                [inst]
+
+    fn try_reduce_binop(
+        dest: LocalId,
+        op: MirBinOp,
+        left: MirOperand,
+        right: MirOperand,
+        span: Span
+    ) -> MirInst?:
+        """
+        Try to reduce binary operation.
+
+        Patterns:
+        - x * 0 -> 0 (identity)
+        - x * 1 -> x (identity)
+        - x * 2^n -> x << n (shift)
+        - x / 1 -> x (identity)
+        - x / 2^n -> x >> n (shift, unsigned)
+        - x % 1 -> 0 (identity)
+        - x % 2^n -> x & (2^n - 1) (bitmask)
+        - x + 0 -> x, x - 0 -> x (identity)
+        - x | 0 -> x, x ^ 0 -> x, x & 0 -> 0
+        - x << 0 -> x, x >> 0 -> x
+        """
+        match op:
+            case Mul:
+                # Check for multiply by constant on right
+                val right_const = self.operand_const_int_value(right)
+                if right_const.?:
+                    val rv = right_const.unwrap()
+                    # x * 0 -> 0
+                    if rv == 0:
+                        return Some(MirInst(
+                            kind: MirInstKind.Const(dest, MirConstValue.Int(0), MirType.i64()),
+                            span: span
+                        ))
+                    # x * 1 -> x (copy)
+                    if rv == 1:
+                        return self.copy_operand_to_dest(dest, left, span)
+
+                # Check for multiply by constant on left
+                val left_const = self.operand_const_int_value(left)
+                if left_const.?:
+                    val lv = left_const.unwrap()
+                    # 0 * x -> 0
+                    if lv == 0:
+                        return Some(MirInst(
+                            kind: MirInstKind.Const(dest, MirConstValue.Int(0), MirType.i64()),
+                            span: span
+                        ))
+                    # 1 * x -> x (copy)
+                    if lv == 1:
+                        return self.copy_operand_to_dest(dest, right, span)
+
+                # Power-of-2 multiply -> shift left
+                val shift = self.const_log2(right)
+                if shift.?:
+                    return Some(MirInst(
+                        kind: MirInstKind.BinOp(dest, MirBinOp.Shl, left, mir_operand_const_int(shift.unwrap())),
+                        span: span
+                    ))
+                val shift_l = self.const_log2(left)
+                if shift_l.?:
+                    return Some(MirInst(
+                        kind: MirInstKind.BinOp(dest, MirBinOp.Shl, right, mir_operand_const_int(shift_l.unwrap())),
+                        span: span
+                    ))
+                nil
+            case Div:
+                val right_const = self.operand_const_int_value(right)
+                if right_const.?:
+                    val rv = right_const.unwrap()
+                    # x / 1 -> x
+                    if rv == 1:
+                        return self.copy_operand_to_dest(dest, left, span)
+
+                # x / 2^n -> x >> n (for positive divisors)
+                val shift = self.const_log2(right)
+                if shift.?:
+                    return Some(MirInst(
+                        kind: MirInstKind.BinOp(dest, MirBinOp.Shr, left, mir_operand_const_int(shift.unwrap())),
+                        span: span
+                    ))
+                nil
+            case Rem:
+                val right_const = self.operand_const_int_value(right)
+                if right_const.?:
+                    val rv = right_const.unwrap()
+                    # x % 1 -> 0
+                    if rv == 1:
+                        return Some(MirInst(
+                            kind: MirInstKind.Const(dest, MirConstValue.Int(0), MirType.i64()),
+                            span: span
+                        ))
+
+                # x % 2^n -> x & (2^n - 1) (for positive values)
+                val shift = self.const_log2(right)
+                if shift.?:
+                    val shift_bits = shift.unwrap()
+                    val mask = (1 << shift_bits) - 1
+                    return Some(MirInst(
+                        kind: MirInstKind.BinOp(dest, MirBinOp.BitAnd, left, mir_operand_const_int(mask)),
+                        span: span
+                    ))
+                nil
+            case Add:
+                # x + 0 -> x
+                val right_const = self.operand_const_int_value(right)
+                if right_const.? and right_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, left, span)
+                val left_const = self.operand_const_int_value(left)
+                if left_const.? and left_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, right, span)
+                nil
+            case Sub:
+                # x - 0 -> x
+                val right_const = self.operand_const_int_value(right)
+                if right_const.? and right_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, left, span)
+                nil
+            case BitOr:
+                # x | 0 -> x, 0 | x -> x
+                val right_const = self.operand_const_int_value(right)
+                if right_const.? and right_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, left, span)
+                val left_const = self.operand_const_int_value(left)
+                if left_const.? and left_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, right, span)
+                nil
+            case BitXor:
+                # x ^ 0 -> x, 0 ^ x -> x
+                val right_const = self.operand_const_int_value(right)
+                if right_const.? and right_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, left, span)
+                val left_const = self.operand_const_int_value(left)
+                if left_const.? and left_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, right, span)
+                nil
+            case BitAnd:
+                # x & 0 -> 0, 0 & x -> 0
+                val right_const = self.operand_const_int_value(right)
+                if right_const.? and right_const.unwrap() == 0:
+                    return Some(MirInst(
+                        kind: MirInstKind.Const(dest, MirConstValue.Int(0), MirType.i64()),
+                        span: span
+                    ))
+                val left_const = self.operand_const_int_value(left)
+                if left_const.? and left_const.unwrap() == 0:
+                    return Some(MirInst(
+                        kind: MirInstKind.Const(dest, MirConstValue.Int(0), MirType.i64()),
+                        span: span
+                    ))
+                nil
+            case Shl:
+                # x << 0 -> x
+                val right_const = self.operand_const_int_value(right)
+                if right_const.? and right_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, left, span)
+                nil
+            case Shr:
+                # x >> 0 -> x
+                val right_const = self.operand_const_int_value(right)
+                if right_const.? and right_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, left, span)
+                nil
+            case _:
+                nil
+
+    me try_decompose_small_mul(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand, span: Span) -> [MirInst]:
+        """
+        Decompose small-constant multiplies into shift+add/sub sequences.
+
+        x * 3  → tmp = x << 1; dest = tmp + x
+        x * 5  → tmp = x << 2; dest = tmp + x
+        x * 6  → tmp1 = x << 2; tmp2 = x << 1; dest = tmp1 + tmp2
+        x * 7  → tmp = x << 3; dest = tmp - x
+        x * 9  → tmp = x << 3; dest = tmp + x
+        x * 10 → tmp1 = x << 3; tmp2 = x << 1; dest = tmp1 + tmp2
+        x * 11 → tmp1 = x << 3; tmp2 = x << 1; tmp3 = tmp1 + tmp2; dest = tmp3 + x
+        x * 12 → tmp1 = x << 3; tmp2 = x << 2; dest = tmp1 + tmp2
+        x * 13 → tmp1 = x << 3; tmp2 = x << 2; tmp3 = tmp1 + tmp2; dest = tmp3 + x
+        x * 14 → tmp1 = x << 4; tmp2 = x << 1; dest = tmp1 - tmp2
+        x * 15 → tmp = x << 4; dest = tmp - x
+        x * 17 → tmp = x << 4; dest = tmp + x
+        x * 31 → tmp = x << 5; dest = tmp - x
+        """
+        match op:
+            case Mul:
+                pass
+            case _:
+                return []
+
+        # Check right operand for small constant
+        var const_val = self.operand_const_int_value(right)
+        var variable_operand = left
+        if not const_val.?:
+            # Check left operand
+            const_val = self.operand_const_int_value(left)
+            variable_operand = right
+        if not const_val.?:
+            return []
+
+        val c = const_val.unwrap()
+
+        val two_shift = self.try_decompose_two_shift_mul(dest, c, variable_operand, span)
+        if two_shift.len() > 0:
+            return two_shift
+
+        val three_term = self.try_decompose_three_term_mul(dest, c, variable_operand, span)
+        if three_term.len() > 0:
+            return three_term
+
+        # Map: constant → (shift_amount, add_or_sub)
+        # x * 3  = (x << 1) + x  → shift=1, add
+        # x * 5  = (x << 2) + x  → shift=2, add
+        # x * 7  = (x << 3) - x  → shift=3, sub
+        # x * 9  = (x << 3) + x  → shift=3, add
+        # x * 15 = (x << 4) - x  → shift=4, sub
+        # x * 17 = (x << 4) + x  → shift=4, add
+        # x * 31 = (x << 5) - x  → shift=5, sub
+        var shift_amount = 0
+        var use_sub = false
+        var matched = false
+
+        if c == 3:
+            shift_amount = 1
+            matched = true
+        elif c == 5:
+            shift_amount = 2
+            matched = true
+        elif c == 7:
+            shift_amount = 3
+            use_sub = true
+            matched = true
+        elif c == 9:
+            shift_amount = 3
+            matched = true
+        elif c == 15:
+            shift_amount = 4
+            use_sub = true
+            matched = true
+        elif c == 17:
+            shift_amount = 4
+            matched = true
+        elif c == 31:
+            shift_amount = 5
+            use_sub = true
+            matched = true
+
+        if not matched:
+            return []
+
+        # Allocate temp local for the shift result
+        val tmp_id = LocalId(id: self.next_local_id)
+        self.next_local_id = self.next_local_id + 1
+
+        # Instruction 1: tmp = variable_operand << shift_amount
+        val shift_inst = MirInst(
+            kind: MirInstKind.BinOp(tmp_id, MirBinOp.Shl, variable_operand, mir_operand_const_int(shift_amount)),
+            span: span
+        )
+
+        # Instruction 2: dest = tmp +/- variable_operand
+        val tmp_operand = MirOperand(kind: MirOperandKind.Copy(tmp_id))
+        val combine_op = if use_sub: MirBinOp.Sub else: MirBinOp.Add
+        val combine_inst = MirInst(
+            kind: MirInstKind.BinOp(dest, combine_op, tmp_operand, variable_operand),
+            span: span
+        )
+
+        [shift_inst, combine_inst]
+
+    me try_decompose_two_shift_mul(dest: LocalId, c: i64, operand: MirOperand, span: Span) -> [MirInst]:
+        """
+        Decompose small constants that need two shifted terms.
+
+        These patterns are common in checksum and byte-reduction loops where
+        weights such as 6, 10, 12, and 14 appear after unrolling.
+        """
+        var high_shift = 0
+        var low_shift = 0
+        var use_sub = false
+        var matched = false
+
+        if c == 6:
+            high_shift = 2
+            low_shift = 1
+            matched = true
+        elif c == 10:
+            high_shift = 3
+            low_shift = 1
+            matched = true
+        elif c == 12:
+            high_shift = 3
+            low_shift = 2
+            matched = true
+        elif c == 14:
+            high_shift = 4
+            low_shift = 1
+            use_sub = true
+            matched = true
+
+        if not matched:
+            return []
+
+        val high_tmp = LocalId(id: self.next_local_id)
+        self.next_local_id = self.next_local_id + 1
+        val low_tmp = LocalId(id: self.next_local_id)
+        self.next_local_id = self.next_local_id + 1
+
+        val high_inst = MirInst(
+            kind: MirInstKind.BinOp(high_tmp, MirBinOp.Shl, operand, mir_operand_const_int(high_shift)),
+            span: span
+        )
+        val low_inst = MirInst(
+            kind: MirInstKind.BinOp(low_tmp, MirBinOp.Shl, operand, mir_operand_const_int(low_shift)),
+            span: span
+        )
+
+        val high_operand = MirOperand(kind: MirOperandKind.Copy(high_tmp))
+        val low_operand = MirOperand(kind: MirOperandKind.Copy(low_tmp))
+        val combine_op = if use_sub: MirBinOp.Sub else: MirBinOp.Add
+        val combine_inst = MirInst(
+            kind: MirInstKind.BinOp(dest, combine_op, high_operand, low_operand),
+            span: span
+        )
+
+        [high_inst, low_inst, combine_inst]
+
+    me try_decompose_three_term_mul(dest: LocalId, c: i64, operand: MirOperand, span: Span) -> [MirInst]:
+        """
+        Decompose small constants that need two shifted terms plus the source.
+
+        These show up in bit packing, dictionary coding, and weighted byte
+        reductions. C compilers usually lower them to LEA-style arithmetic; this
+        keeps pure Simple MIR in the same optimizer-friendly shape.
+        """
+        var high_shift = 0
+        var low_shift = 0
+        var matched = false
+
+        if c == 11:
+            high_shift = 3
+            low_shift = 1
+            matched = true
+        elif c == 13:
+            high_shift = 3
+            low_shift = 2
+            matched = true
+
+        if not matched:
+            return []
+
+        val high_tmp = LocalId(id: self.next_local_id)
+        self.next_local_id = self.next_local_id + 1
+        val low_tmp = LocalId(id: self.next_local_id)
+        self.next_local_id = self.next_local_id + 1
+        val add_tmp = LocalId(id: self.next_local_id)
+        self.next_local_id = self.next_local_id + 1
+
+        val high_inst = MirInst(
+            kind: MirInstKind.BinOp(high_tmp, MirBinOp.Shl, operand, mir_operand_const_int(high_shift)),
+            span: span
+        )
+        val low_inst = MirInst(
+            kind: MirInstKind.BinOp(low_tmp, MirBinOp.Shl, operand, mir_operand_const_int(low_shift)),
+            span: span
+        )
+
+        val high_operand = MirOperand(kind: MirOperandKind.Copy(high_tmp))
+        val low_operand = MirOperand(kind: MirOperandKind.Copy(low_tmp))
+        val add_inst = MirInst(
+            kind: MirInstKind.BinOp(add_tmp, MirBinOp.Add, high_operand, low_operand),
+            span: span
+        )
+
+        val add_operand = MirOperand(kind: MirOperandKind.Copy(add_tmp))
+        val combine_inst = MirInst(
+            kind: MirInstKind.BinOp(dest, MirBinOp.Add, add_operand, operand),
+            span: span
+        )
+
+        [high_inst, low_inst, add_inst, combine_inst]
+
+    fn operand_const_int_value(op: MirOperand) -> i64?:
+        """Extract constant integer value from operand."""
+        match op.kind:
+            case Const(value, _):
+                match value:
+                    case Int(n): Some(n)
+                    case _: nil
+            case _: nil
+
+    fn copy_operand_to_dest(dest: LocalId, op: MirOperand, span: Span) -> MirInst?:
+        """Create a copy/move/const instruction from operand to dest."""
+        match op.kind:
+            case Copy(src):
+                Some(MirInst(kind: MirInstKind.Copy(dest, src), span: span))
+            case Move(src):
+                Some(MirInst(kind: MirInstKind.Move(dest, src), span: span))
+            case Const(value, type_):
+                Some(MirInst(kind: MirInstKind.Const(dest, value, type_), span: span))
+
+    fn const_log2(operand: MirOperand) -> i64?:
+        """Check if operand is a constant power of 2, return log2 if so."""
+        match operand.kind:
+            case Const(const_val, _):
+                match const_val:
+                    case Int(n):
+                        if n > 0:
+                            # Check if n is a power of 2: n & (n-1) == 0
+                            val is_pow2 = (n & (n - 1)) == 0
+                            if is_pow2:
+                                # Calculate log2 by shifting the single set bit down.
+                                # Net-driver ring logic can use u64-sized
+                                # queue/layout constants, so do not stop at 32-bit.
+                                var shift = 0
+                                var value = n
+                                while value > 1:
+                                    value = value >> 1
+                                    shift = shift + 1
+                                return Some(shift)
+                            nil
+                        else:
+                            nil
+                    case _: nil
+            case _: nil
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+fn create_strength_reduction_pass() -> StrengthReduction:
+    """Create a new strength reduction pass instance."""
+    StrengthReduction.new()
+
+fn strength_reduction_provider() -> OptimizationRuleProvider:
+    """Built-in Simple Optimization Plugin provider for general MIR arithmetic strength reduction."""
+    optimization_rule_provider_builtin_with_contract(
+        "simple.opt.math.strength_reduce",
+        OptimizerProviderKind.Mir,
+        OptimizerRuleLookupKind.PipelinePass,
+        true,
+        ["integer_widths", "non_negative_or_unsigned_operands"],
+        ["canonical_integer_arithmetic"],
+        "pure"
+    )
+
+fn strength_reduction_run_on_function(strength_pass: StrengthReduction, func: MirFunction) -> MirFunction:
+    """Free-function wrapper for strength reduction pass dispatch."""
+    strength_pass.optimize_function(func)

@@ -1,0 +1,1 @@
+../skills/company_bug_report.md

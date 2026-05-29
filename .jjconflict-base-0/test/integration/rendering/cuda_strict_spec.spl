@@ -1,0 +1,278 @@
+"""CUDA Strict Smoke Tests
+
+@tag: rendering, engine2d, cuda, strict, hardware
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl 70%
+@cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 20%
+
+Proves real hardware execution: PTX module load, kernel lookup, kernel launch,
+device sync, and pixel readback. Surfaces device diagnostics via probe_cuda().
+
+On non-NVIDIA hosts, asserts the BackendProbeResult carries a typed
+Failed or Unavailable status rather than silently succeeding.
+On NVIDIA hosts, runs the full clear → draw_rect/draw_rect_filled/draw_image/draw_gradient_rect → present → readback pipeline
+against a CPU reference for a 16x16 framebuffer.
+"""
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.color.{rgb}
+use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+use std.gc_async_mut.gpu.engine2d.backend_cuda.{probe_cuda}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn status_is_terminal_failure(probe: BackendProbeResult) -> bool:
+    var s = probe.status
+    s == BackendStatus.Failed or s == BackendStatus.Unavailable
+
+fn color_red_u32() -> u32:
+    rgb(255, 0, 0)
+
+fn color_blue_u32() -> u32:
+    rgb(0, 0, 255)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "CUDA strict smoke tests":
+
+    context "probe_cuda device diagnostics":
+
+        it "probe_cuda returns a typed BackendProbeResult":
+            val probe = probe_cuda()
+            val ok = probe.is_usable() or status_is_terminal_failure(probe)
+            expect(ok).to_equal(true)
+
+        it "probe_cuda reports requested_name as cuda":
+            val probe = probe_cuda()
+            expect(probe.requested_name).to_equal("cuda")
+
+        it "probe_cuda on success reports device name and ptx shader_format":
+            val probe = probe_cuda()
+            if probe.is_usable():
+                expect(probe.device_name).to_not_equal("")
+                expect(probe.shader_format).to_equal("ptx")
+                expect(probe.api_name).to_equal("cuda")
+
+        it "probe_cuda on failure carries non-empty fallback_reason":
+            val probe = probe_cuda()
+            if not probe.is_usable():
+                expect(probe.fallback_reason).to_not_equal("")
+
+        it "probe_cuda diagnostic_text is non-empty":
+            val probe = probe_cuda()
+            val txt = probe.diagnostic_text()
+            expect(txt.len()).to_be_greater_than(0)
+
+    context "create_with_backend_strict cuda unavailable path":
+
+        it "fails with typed error when CUDA is not available":
+            val probe = probe_cuda()
+            if not probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                expect(result.is_ok()).to_equal(false)
+                val diag = result.unwrap_err()
+                val failed_or_unavail = status_is_terminal_failure(diag)
+                expect(failed_or_unavail).to_equal(true)
+                expect(diag.requested_name).to_equal("cuda")
+
+        it "fallback_reason is non-empty when CUDA fails":
+            val probe = probe_cuda()
+            if not probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                if not result.is_ok():
+                    val diag = result.unwrap_err()
+                    expect(diag.fallback_reason).to_not_equal("")
+
+    context "create_with_backend_strict cuda hardware path":
+
+        it "succeeds and returns Engine2D when hardware available":
+            val probe = probe_cuda()
+            if probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                expect(result.is_ok()).to_equal(true)
+                var engine = result.unwrap()
+                expect(engine.width()).to_equal(16)
+                expect(engine.height()).to_equal(16)
+                engine.shutdown()
+
+        it "backend_name is cuda when hardware available":
+            val probe = probe_cuda()
+            if probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    expect(engine.backend_name()).to_equal("cuda")
+                    engine.shutdown()
+
+    context "PTX kernel: clear and readback":
+
+        it "clear to red produces all-red pixels":
+            val probe = probe_cuda()
+            if probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val red = color_red_u32()
+                    engine.clear(red)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    expect(pixels.len()).to_equal(256)
+                    var all_red = true
+                    var idx = 0
+                    while idx < 256:
+                        if pixels[idx] != red:
+                            all_red = false
+                        idx = idx + 1
+                    expect(all_red).to_equal(true)
+                    engine.shutdown()
+
+        it "draw_rect_filled writes correct pixels in the rect region":
+            val probe = probe_cuda()
+            if probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    # Clear to blue, draw 4x4 red rect at (4,4)
+                    engine.clear(bg)
+                    engine.draw_rect_filled(4, 4, 4, 4, fg)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    expect(pixels.len()).to_equal(256)
+                    # Pixel at (6,6) inside rect must be red
+                    val inside = pixels[6 * 16 + 6]
+                    expect(inside).to_equal(fg)
+                    # Pixel at (0,0) outside rect must be blue
+                    val outside = pixels[0]
+                    expect(outside).to_equal(bg)
+                    engine.shutdown()
+
+        it "draw_rect writes only the outline pixels":
+            val probe = probe_cuda()
+            if probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_rect(4, 4, 6, 5, fg)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    expect(pixels.len()).to_equal(256)
+                    expect(pixels[4 * 16 + 4]).to_equal(fg)
+                    expect(pixels[4 * 16 + 9]).to_equal(fg)
+                    expect(pixels[8 * 16 + 4]).to_equal(fg)
+                    expect(pixels[8 * 16 + 9]).to_equal(fg)
+                    expect(pixels[6 * 16 + 6]).to_equal(bg)
+                    expect(pixels[0]).to_equal(bg)
+                    engine.shutdown()
+
+        it "clear then draw_rect_filled matches CPU reference pixel-for-pixel":
+            val probe = probe_cuda()
+            if probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_rect_filled(2, 2, 6, 6, fg)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    var mismatch_count = 0
+                    var ci = 0
+                    while ci < 256:
+                        val px = ci % 16
+                        val py = ci / 16
+                        val expected = if px >= 2 and px < 8 and py >= 2 and py < 8: fg else: bg
+                        if pixels[ci] != expected:
+                            mismatch_count = mismatch_count + 1
+                        ci = ci + 1
+                    expect(mismatch_count).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_image writes uploaded pixels through the CUDA framebuffer":
+            val probe = probe_cuda()
+            if probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val img0 = 0x01020304 as u32
+                    val img1 = 0x05060708 as u32
+                    val img2 = 0x11121314 as u32
+                    val img3 = 0x15161718 as u32
+                    val img: [u32] = [img0, img1, img2, img3]
+                    engine.clear(bg)
+                    engine.draw_image(5, 6, 2, 2, img)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    expect(pixels.len()).to_equal(256)
+                    var mismatch_count = 0
+                    if pixels[6 * 16 + 5] != img0:
+                        mismatch_count = mismatch_count + 1
+                    if pixels[6 * 16 + 6] != img1:
+                        mismatch_count = mismatch_count + 1
+                    if pixels[7 * 16 + 5] != img2:
+                        mismatch_count = mismatch_count + 1
+                    if pixels[7 * 16 + 6] != img3:
+                        mismatch_count = mismatch_count + 1
+                    expect(mismatch_count).to_equal(0)
+                    expect(pixels[0]).to_equal(bg)
+                    engine.shutdown()
+
+        it "draw_gradient_rect writes interpolated rows through the CUDA framebuffer":
+            val probe = probe_cuda()
+            if probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val top = 0xFF000000 as u32
+                    val bottom = 0xFF0F1E2D as u32
+                    engine.clear(bg)
+                    engine.draw_gradient_rect(3, 4, 5, 4, top, bottom)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    expect(pixels.len()).to_equal(256)
+                    val mid1 = 0xFF050A0F as u32
+                    val mid2 = 0xFF0A141E as u32
+                    var mismatch_count = 0
+                    var row = 0
+                    while row < 4:
+                        val expected = if row == 0: top else: if row == 1: mid1 else: if row == 2: mid2 else: bottom
+                        var col = 0
+                        while col < 5:
+                            if pixels[(4 + row) * 16 + 3 + col] != expected:
+                                mismatch_count = mismatch_count + 1
+                            col = col + 1
+                        row = row + 1
+                    expect(mismatch_count).to_equal(0)
+                    expect(pixels[0]).to_equal(bg)
+                    engine.shutdown()
+
+    context "sync and readback correctness":
+
+        it "read_pixels after present reflects latest draw":
+            val probe = probe_cuda()
+            if probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val first_color = color_blue_u32()
+                    val second_color = color_red_u32()
+                    engine.clear(first_color)
+                    engine.present()
+                    val first_pixels = engine.read_pixels()
+                    engine.clear(second_color)
+                    engine.present()
+                    val second_pixels = engine.read_pixels()
+                    expect(first_pixels[0]).to_equal(first_color)
+                    expect(second_pixels[0]).to_equal(second_color)
+                    engine.shutdown()

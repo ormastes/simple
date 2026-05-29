@@ -1,0 +1,61 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val FIXTURE_DIR = "/tmp/simple_env_log_mode_fixture"
+
+fn _setup_fixture():
+    val (_out, _err, _code) = rt_process_run("/bin/sh", [
+        "-c",
+        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR
+    ])
+
+fn _run_env(args: [text]) -> (text, text, i64):
+    val joined = args.join(" ")
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); cd " + FIXTURE_DIR + " && SIMPLE_LIB=\"$REPO/src\" SIMPLE_ENV= \"$REPO/bin/simple\" run \"$REPO/src/app/env/main.spl\" " + joined
+    ])
+
+describe "env log mode CLI options":
+    it "shows shared log options in help":
+        _setup_fixture()
+        val (out, err, code) = _run_env(["--help"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("--log-mode")
+        expect(out).to_contain("--progress")
+
+    it "supports create log-mode json":
+        _setup_fixture()
+        val (out, err, code) = _run_env(["create", "--name=test-env", "--log-mode=json"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("\"command\":\"create\"")
+        expect(out).to_contain("\"name\":\"test-env\"")
+
+    it "supports status log-mode json":
+        _setup_fixture()
+        val (_create_out, _create_err, _create_code) = _run_env(["create", "--name=test-env"])
+        val (out, err, code) = _run_env(["status", "--name=test-env", "--log-mode=json"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("\"command\":\"status\"")
+        expect(out).to_contain("\"exists\":true")
+
+    it "supports delete log-mode json":
+        _setup_fixture()
+        val (_create_out, _create_err, _create_code) = _run_env(["create", "--name=test-env"])
+        val (out, err, code) = _run_env(["delete", "--name=test-env", "--log-mode=json"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("\"command\":\"delete\"")
+        expect(out).to_contain("\"name\":\"test-env\"")
+
+    it "supports dot progress":
+        _setup_fixture()
+        val (out, err, code) = _run_env(["status", "--progress=dot"])
+        expect(code).to_equal(0)
+        expect(out).to_start_with(".")
+        expect(out).to_contain("No virtual environment found.")
+
+    it "rejects invalid log mode":
+        _setup_fixture()
+        val (out, err, code) = _run_env(["status", "--log-mode=noisy"])
+        expect(code).to_equal(1)

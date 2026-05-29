@@ -1,0 +1,94 @@
+"""
+Portable numeric capability facts derived from TargetPreset.
+
+Encodes what arithmetic/vector widths are available per architecture family.
+Architecture-neutral surface; family-oriented facts.
+"""
+
+# ============================================================================
+# Target Family
+# ============================================================================
+
+enum TargetFamily:
+    x86_64
+    x86_32
+    aarch64
+    riscv64
+    riscv32
+    wasm32
+    unknown
+
+fn family_from_arch(arch: text) -> TargetFamily:
+    """Derive target family from architecture string."""
+    if arch == "x86_64":
+        return TargetFamily.x86_64
+    elif arch == "x86_32" or arch == "i686" or arch == "i386":
+        return TargetFamily.x86_32
+    elif arch == "aarch64":
+        return TargetFamily.aarch64
+    elif arch == "riscv64":
+        return TargetFamily.riscv64
+    elif arch == "riscv32":
+        return TargetFamily.riscv32
+    elif arch == "wasm32":
+        return TargetFamily.wasm32
+    else:
+        return TargetFamily.unknown
+
+# ============================================================================
+# NumericCaps — portable numeric capability facts
+# ============================================================================
+
+"""
+Portable numeric capability facts for a given target.
+
+Fields:
+  arch           — architecture name (e.g. "x86_64")
+  pointer_bits   — pointer width in bits (32 or 64)
+  has_hw_float   — true if hardware FP unit present
+  has_double     — true if 64-bit double is natively supported
+  has_simd_128   — true if 128-bit SIMD is available (SSE2, NEON, RVV-128)
+  has_simd_256   — true if 256-bit SIMD is available (AVX2)
+  has_int_simd   — true if integer SIMD operations are available
+  has_fma        — true if fused multiply-add is available
+  simd_needs_probe — true when runtime CPUID probe is required (x86)
+"""
+struct NumericCaps:
+    arch: text
+    pointer_bits: int
+    has_hw_float: bool
+    has_double: bool
+    has_simd_128: bool
+    has_simd_256: bool
+    has_int_simd: bool
+    has_fma: bool
+    simd_needs_probe: bool
+
+impl NumericCaps:
+    static fn for_arch(arch: text, ptr_bits: int, hw_float: bool, dbl: bool, s128: bool, s256: bool, int_simd: bool, fma: bool, probe: bool) -> NumericCaps:
+        """Low-level constructor; prefer family-specific factories."""
+        NumericCaps(arch: arch, pointer_bits: ptr_bits, has_hw_float: hw_float, has_double: dbl, has_simd_128: s128, has_simd_256: s256, has_int_simd: int_simd, has_fma: fma, simd_needs_probe: probe)
+
+    static fn scalar_only(arch: text, ptr_bits: int) -> NumericCaps:
+        """Scalar-only fallback: no SIMD, software FP assumed."""
+        NumericCaps(arch: arch, pointer_bits: ptr_bits, has_hw_float: false, has_double: false, has_simd_128: false, has_simd_256: false, has_int_simd: false, has_fma: false, simd_needs_probe: false)
+
+    fn supports_vectorization() -> bool:
+        """True if any SIMD tier is available."""
+        self.has_simd_128 == true or self.has_simd_256 == true
+
+    fn max_simd_bits() -> int:
+        """Maximum SIMD register width in bits."""
+        if self.has_simd_256 == true:
+            return 256
+        elif self.has_simd_128 == true:
+            return 128
+        else:
+            return 0
+
+    fn describe() -> text:
+        """Human-readable summary of numeric capabilities."""
+        val simd_bits = self.max_simd_bits()
+        val fp_str = if self.has_hw_float == true: "hw-fp" else: "sw-fp"
+        val simd_str = if simd_bits > 0: "simd-" + simd_bits.to_text() else: "scalar"
+        return self.arch + " ptr=" + self.pointer_bits.to_text() + "b " + fp_str + " " + simd_str

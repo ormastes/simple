@@ -1,0 +1,159 @@
+# Debug Draw API — General-Purpose Debug Drawing
+#
+# Provides a buffered debug drawing API for game use. Each entry has a
+# color and lifetime; expired entries are pruned on update(). Supports
+# lines, boxes, circles, and crosses.
+#
+# Usage:
+#   var buf = DebugDrawBuffer.new(1024)
+#   buf.draw_box(center, 20.0, 10.0, DebugColor.red(), 2.0)
+#   buf.update(dt)
+#   val entries = buf.get_entries()
+
+use std.common.engine.math2d.{Vec2, _sin, _cos}
+use std.common.math.{MATH_PI}
+use std.nogc_sync_mut.engine.physics.simple.debug_draw.{DebugLine}
+
+# ============================================================================
+# DebugColor — RGBA color for debug drawing
+# ============================================================================
+
+struct DebugColor:
+    """RGBA color with components in [0.0, 1.0]."""
+    r: f64
+    g: f64
+    b: f64
+    a: f64
+
+impl DebugColor:
+    static fn red() -> DebugColor:
+        DebugColor(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
+
+    static fn green() -> DebugColor:
+        DebugColor(r: 0.0, g: 1.0, b: 0.0, a: 1.0)
+
+    static fn blue() -> DebugColor:
+        DebugColor(r: 0.0, g: 0.0, b: 1.0, a: 1.0)
+
+    static fn white() -> DebugColor:
+        DebugColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0)
+
+    static fn yellow() -> DebugColor:
+        DebugColor(r: 1.0, g: 1.0, b: 0.0, a: 1.0)
+
+# ============================================================================
+# DebugDrawEntry — a single debug line with color and lifetime
+# ============================================================================
+
+struct DebugDrawEntry:
+    """A debug line paired with color and remaining lifetime in seconds."""
+    line: DebugLine
+    color: DebugColor
+    lifetime: f64
+
+# ============================================================================
+# DebugDrawBuffer — buffered collection of debug draw entries
+# ============================================================================
+
+class DebugDrawBuffer:
+    """Accumulates debug draw entries up to a maximum capacity.
+
+    Call update(dt) each frame to decrement lifetimes and prune expired
+    entries. Entries with lifetime <= 0 after update are removed.
+    """
+    entries: [DebugDrawEntry]
+    max_entries: i64
+
+impl DebugDrawBuffer:
+    static fn new(max_entries: i64) -> DebugDrawBuffer:
+        """Create a buffer with the given maximum entry capacity."""
+        DebugDrawBuffer(
+            entries: [],
+            max_entries: max_entries
+        )
+
+    me draw_line(start: Vec2, end_pt: Vec2, color: DebugColor, lifetime: f64):
+        """Add a single debug line."""
+        if self.entries.len() >= self.max_entries:
+            return
+        val entry = DebugDrawEntry(
+            line: DebugLine(start: start, end_point: end_pt),
+            color: color,
+            lifetime: lifetime
+        )
+        self.entries.push(entry)
+
+    me draw_box(center: Vec2, half_w: f64, half_h: f64, color: DebugColor, lifetime: f64):
+        """Add 4 lines forming an axis-aligned box."""
+        val x0 = center.x - half_w
+        val x1 = center.x + half_w
+        val y0 = center.y - half_h
+        val y1 = center.y + half_h
+
+        val tl = Vec2(x: x0, y: y0)
+        val tr = Vec2(x: x1, y: y0)
+        val br = Vec2(x: x1, y: y1)
+        val bl = Vec2(x: x0, y: y1)
+
+        self.draw_line(tl, tr, color, lifetime)
+        self.draw_line(tr, br, color, lifetime)
+        self.draw_line(br, bl, color, lifetime)
+        self.draw_line(bl, tl, color, lifetime)
+
+    me draw_circle(center: Vec2, radius: f64, color: DebugColor, lifetime: f64):
+        """Add a 16-segment polygon approximating a circle."""
+        val segments = 16
+        val step = 2.0 * MATH_PI / segments.to_f64()
+
+        var prev_x = center.x + radius
+        var prev_y = center.y
+        var i = 1
+        while i <= segments:
+            val angle = step * i.to_f64()
+            val cur_x = center.x + radius * _cos(angle)
+            val cur_y = center.y + radius * _sin(angle)
+            val s = Vec2(x: prev_x, y: prev_y)
+            val e = Vec2(x: cur_x, y: cur_y)
+            self.draw_line(s, e, color, lifetime)
+            prev_x = cur_x
+            prev_y = cur_y
+            i = i + 1
+
+    me draw_cross(center: Vec2, size: f64, color: DebugColor, lifetime: f64):
+        """Add 2 diagonal lines forming an X shape."""
+        val half = size / 2.0
+        val tl = Vec2(x: center.x - half, y: center.y - half)
+        val br = Vec2(x: center.x + half, y: center.y + half)
+        val tr = Vec2(x: center.x + half, y: center.y - half)
+        val bl = Vec2(x: center.x - half, y: center.y + half)
+        self.draw_line(tl, br, color, lifetime)
+        self.draw_line(tr, bl, color, lifetime)
+
+    me update(dt: f64):
+        """Decrement lifetimes by dt and remove expired entries."""
+        var kept: [DebugDrawEntry] = []
+        var i = 0
+        while i < self.entries.len():
+            val entry = self.entries[i]
+            val remaining = entry.lifetime - dt
+            if remaining > 0.0:
+                val updated = DebugDrawEntry(
+                    line: entry.line,
+                    color: entry.color,
+                    lifetime: remaining
+                )
+                kept.push(updated)
+            i = i + 1
+        self.entries = kept
+
+    fn get_entries() -> [DebugDrawEntry]:
+        """Return all current debug draw entries."""
+        self.entries
+
+    fn entry_count() -> i64:
+        """Number of active entries in the buffer."""
+        self.entries.len()
+
+    me clear():
+        """Remove all entries."""
+        self.entries = []

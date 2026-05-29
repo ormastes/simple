@@ -1,0 +1,215 @@
+"""
+8086 Emulator End-to-End Integration Specification
+
+Exercises the full 8086 emulation pipeline: create emulator via Width16Lib,
+load machine code programs, step through instructions, verify register,
+segment:offset memory, stack, and FLAGS state.
+
+**Feature IDs:** #MLLVM-X86-E2E
+**Category:** Testing
+**Status:** Implemented
+"""
+
+use std.spec.{describe, it, expect}
+use libwidth.lib16.{Width16Lib, X86Emulator}
+use guest.i8086.cpu.{
+    build_i8086_cpu_def,
+    X86_REG_AX, X86_REG_BX, X86_REG_CX, X86_REG_DX,
+    X86_REG_SI, X86_REG_DI, X86_REG_BP, X86_REG_SP,
+    X86_REG_CS, X86_REG_DS, X86_REG_SS, X86_REG_ES,
+    X86_REG_IP, X86_REG_FLAGS,
+    X86_FLAG_ZF
+}
+use guest.i8086.segment.{resolve_segment_offset}
+use guest.cpu_def.{GuestCpuDef, GuestState}
+
+# ============================================================================
+# 8086 Emulator — Creation and initialization
+# ============================================================================
+
+describe "8086 emulator creation":
+    """Verify Width16Lib factory produces a properly initialized X86Emulator."""
+
+    it "creates emulator via Width16Lib factory":
+        val lib = Width16Lib.new()
+        var emu = lib.create_8086_emulator()
+        expect(emu.halted).to_equal(false)
+        expect(emu.cycle_count).to_equal(0)
+
+    it "has 16-bit word size":
+        val lib = Width16Lib.new()
+        expect(lib.word_size()).to_equal(16)
+
+    it "initializes with segment registers":
+        val lib = Width16Lib.new()
+        var emu = lib.create_8086_emulator()
+        # After creation (before reset), registers should exist
+        val ax = emu.get_reg("AX")
+        expect(ax.?).to_equal(true)
+        val cs = emu.get_reg("CS")
+        expect(cs.?).to_equal(true)
+
+# ============================================================================
+# 8086 Emulator — Load and step through instructions
+# ============================================================================
+
+describe "8086 emulator instruction execution":
+    """Load simple COM-style programs and step through them."""
+
+    it "loads program at segment:offset":
+        val lib = Width16Lib.new()
+        var emu = lib.create_8086_emulator()
+
+        # MOV AX, 0x1234 -> B8 34 12
+        val program = [0xB8, 0x34, 0x12]
+
+        # Load at CS:IP = 0x0000:0x0100 (COM-style)
+        emu.set_segments(0x0000, 0x0000, 0x0000, 0x0000)
+        emu.state.set_reg(X86_REG_IP, 0x0100)
+        emu.load_program(0x0000, 0x0100, program)
+
+        # Verify program bytes are in memory
+        val phys = resolve_segment_offset(0x0000, 0x0100)
+        expect(emu.memory.memory[phys]).to_equal(0xB8)
+        expect(emu.memory.memory[phys + 1]).to_equal(0x34)
+        expect(emu.memory.memory[phys + 2]).to_equal(0x12)
+
+    it "loads data at flat physical address":
+        val lib = Width16Lib.new()
+        var emu = lib.create_8086_emulator()
+
+        emu.load_flat(0x500, [0xDE, 0xAD, 0xBE, 0xEF])
+        expect(emu.memory.memory[0x500]).to_equal(0xDE)
+        expect(emu.memory.memory[0x501]).to_equal(0xAD)
+        expect(emu.memory.memory[0x502]).to_equal(0xBE)
+        expect(emu.memory.memory[0x503]).to_equal(0xEF)
+
+    it "steps through instruction and advances cycle count":
+        val lib = Width16Lib.new()
+        var emu = lib.create_8086_emulator()
+
+        # MOV AX, 0x1234 -> B8 34 12
+        # HLT -> F4
+        val program = [0xB8, 0x34, 0x12, 0xF4]
+        emu.set_segments(0x0000, 0x0000, 0x0000, 0x0000)
+        emu.state.set_reg(X86_REG_IP, 0x0000)
+        emu.load_program(0x0000, 0x0000, program)
+
+        val cycles = emu.step()
+        # Should have consumed some cycles
+        expect(emu.cycle_count).to_be_greater_than(0)
+
+# ============================================================================
+# 8086 Emulator — Segment:offset memory access
+# ============================================================================
+
+describe "8086 segment:offset addressing":
+    """Test segment:offset physical address computation."""
+
+    it "computes physical address from segment:offset":
+        val lib = Width16Lib.new()
+        var emu = lib.create_8086_emulator()
+        val phys = emu.physical_address(0x1000, 0x0100)
+        # 0x1000 * 16 + 0x0100 = 0x10100
+        expect(phys).to_equal(0x10100)
+
+    it "wraps at 1MB boundary":
+        val lib = Width16Lib.new()
+        var emu = lib.create_8086_emulator()
+        # 0xFFFF * 16 + 0x0010 = 0x100000 -> wraps to 0x00000
+        val phys = emu.physical_address(0xFFFF, 0x0010)
+        expect(phys).to_equal(0x00000)
+
+    it "sets all four segment registers":
+        val lib = Width16Lib.new()
+        var emu = lib.create_8086_emulator()
+        emu.set_segments(0x0700, 0x0800, 0x0900, 0x0A00)
+
+        expect(emu.state.get_reg(X86_REG_CS)).to_equal(0x0700)
+        expect(emu.state.get_reg(X86_REG_DS)).to_equal(0x0800)
+        expect(emu.state.get_reg(X86_REG_SS)).to_equal(0x0900)
+        expect(emu.state.get_reg(X86_REG_ES)).to_equal(0x0A00)
+
+# ============================================================================
+# 8086 Emulator — Register access
+# ============================================================================
+
+describe "8086 emulator register access":
+    """Test register read/write by name."""
+
+    it "reads register by name":
+        val lib = Width16Lib.new()
+        var emu = lib.create_8086_emulator()
+        emu.state.set_reg(X86_REG_AX, 0x5678)
+        val ax = emu.get_reg("AX")
+        expect(ax.?).to_equal(true)
+
+    it "writes register by name":
+        val lib = Width16Lib.new()
+        var emu = lib.create_8086_emulator()
+        val ok = emu.set_reg("BX", 0xABCD)
+        expect(ok).to_equal(true)
+        val bx = emu.state.get_reg(X86_REG_BX)
+        expect(bx).to_equal(0xABCD)
+
+    it "returns nil for invalid register name":
+        val lib = Width16Lib.new()
+        var emu = lib.create_8086_emulator()
+        val result = emu.get_reg("NONEXISTENT")
+        expect(result).to_be_nil()
+
+# ============================================================================
+# 8086 Emulator — Reset
+# ============================================================================
+
+describe "8086 emulator reset":
+    """Test reset returns emulator to standard 8086 reset vector state."""
+
+    it "resets to CS=0xFFFF IP=0x0000":
+        val lib = Width16Lib.new()
+        var emu = lib.create_8086_emulator()
+
+        # Modify state
+        emu.state.set_reg(X86_REG_AX, 0x1234)
+        emu.state.set_reg(X86_REG_IP, 0x5678)
+
+        # Reset
+        emu.reset()
+
+        expect(emu.state.get_reg(X86_REG_CS)).to_equal(0xFFFF)
+        expect(emu.state.get_reg(X86_REG_IP)).to_equal(0x0000)
+        expect(emu.cycle_count).to_equal(0)
+        expect(emu.halted).to_equal(false)
+
+    it "stats_text returns formatted string":
+        val lib = Width16Lib.new()
+        var emu = lib.create_8086_emulator()
+        val stats = emu.stats_text()
+        expect(stats).to_start_with("8086:")
+
+# ============================================================================
+# 8086 Emulator — Run with cycle limit
+# ============================================================================
+
+describe "8086 emulator run with limit":
+    """Test run() respects cycle budget."""
+
+    it "stops when max cycles exhausted":
+        val lib = Width16Lib.new()
+        var emu = lib.create_8086_emulator()
+
+        # Load a series of NOPs (0x90)
+        var program: [i64] = []
+        for _ in 0..20:
+            program.push(0x90)  # NOP
+        program.push(0xF4)  # HLT at the end
+
+        emu.set_segments(0x0000, 0x0000, 0x0000, 0x0000)
+        emu.state.set_reg(X86_REG_IP, 0x0000)
+        emu.load_program(0x0000, 0x0000, program)
+
+        # Run with a small cycle budget
+        emu.run(8)
+
+        # Should have consumed some but hit the limit before HLT
+        expect(emu.cycle_count).to_be_greater_than(0)

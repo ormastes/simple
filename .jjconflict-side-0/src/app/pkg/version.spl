@@ -1,0 +1,188 @@
+# Package Manager - Semantic Version Handling
+#
+# Parses and compares semver-like versions (major.minor.patch).
+# Supports version constraints: exact, ^, ~, >=, <=, >, <, *.
+
+# Semantic version
+struct SemVer:
+    major: i64
+    minor: i64
+    patch: i64
+
+impl SemVer:
+    static fn parse(s: text) -> SemVer?:
+        """Parse version string like '1.2.3', '1.2', or '1'."""
+        val trimmed = s.trim()
+        if trimmed == "" or trimmed == "*":
+            return Some(SemVer(major: 0, minor: 0, patch: 0))
+
+        # Strip leading 'v' if present
+        var ver_str = trimmed
+        if ver_str.starts_with("v"):
+            ver_str = ver_str[1:]
+
+        val parts = ver_str.split(".")
+        if parts.len() == 0:
+            return nil
+
+        var major = 0
+        var minor = 0
+        var patch = 0
+
+        val major_opt = parts[0].to_int()
+        if not major_opt.?:
+            return nil
+        major = major_opt.unwrap()
+
+        if parts.len() >= 2:
+            val minor_opt = parts[1].to_int()
+            if not minor_opt.?:
+                return nil
+            minor = minor_opt.unwrap()
+
+        if parts.len() >= 3:
+            val patch_opt = parts[2].to_int()
+            if not patch_opt.?:
+                return nil
+            patch = patch_opt.unwrap()
+
+        Some(SemVer(major: major, minor: minor, patch: patch))
+
+    fn to_text() -> text:
+        "{self.major}.{self.minor}.{self.patch}"
+
+    fn compare(other: SemVer) -> i64:
+        """Returns -1, 0, or 1 for less, equal, greater."""
+        if self.major != other.major:
+            return if self.major < other.major: -1 else: 1
+        if self.minor != other.minor:
+            return if self.minor < other.minor: -1 else: 1
+        if self.patch != other.patch:
+            return if self.patch < other.patch: -1 else: 1
+        0
+
+    fn equals(other: SemVer) -> bool:
+        self.compare(other) == 0
+
+    fn less_than(other: SemVer) -> bool:
+        self.compare(other) < 0
+
+    fn greater_than(other: SemVer) -> bool:
+        self.compare(other) > 0
+
+    fn less_or_equal(other: SemVer) -> bool:
+        self.compare(other) <= 0
+
+    fn greater_or_equal(other: SemVer) -> bool:
+        self.compare(other) >= 0
+
+
+# Version constraint
+enum VersionConstraint:
+    Any                                     # *
+    Exact(SemVer)                           # =1.2.3
+    Caret(SemVer)                           # ^1.2.3 (compatible with)
+    Tilde(SemVer)                           # ~1.2.3 (patch-level)
+    GreaterThan(SemVer)                     # >1.2.3
+    GreaterOrEqual(SemVer)                  # >=1.2.3
+    LessThan(SemVer)                        # <1.2.3
+    LessOrEqual(SemVer)                     # <=1.2.3
+
+impl VersionConstraint:
+    static fn parse(s: text) -> VersionConstraint?:
+        """Parse version constraint string."""
+        val trimmed = s.trim()
+        if trimmed == "" or trimmed == "*":
+            return Some(VersionConstraint.Any)
+
+        if trimmed.starts_with("^"):
+            val ver = SemVer.parse(trimmed[1:])
+            if ver.?:
+                return Some(VersionConstraint.Caret(ver.unwrap()))
+            return nil
+
+        if trimmed.starts_with("~"):
+            val ver = SemVer.parse(trimmed[1:])
+            if ver.?:
+                return Some(VersionConstraint.Tilde(ver.unwrap()))
+            return nil
+
+        if trimmed.starts_with(">="):
+            val ver = SemVer.parse(trimmed[2:])
+            if ver.?:
+                return Some(VersionConstraint.GreaterOrEqual(ver.unwrap()))
+            return nil
+
+        if trimmed.starts_with("<="):
+            val ver = SemVer.parse(trimmed[2:])
+            if ver.?:
+                return Some(VersionConstraint.LessOrEqual(ver.unwrap()))
+            return nil
+
+        if trimmed.starts_with(">"):
+            val ver = SemVer.parse(trimmed[1:])
+            if ver.?:
+                return Some(VersionConstraint.GreaterThan(ver.unwrap()))
+            return nil
+
+        if trimmed.starts_with("<"):
+            val ver = SemVer.parse(trimmed[1:])
+            if ver.?:
+                return Some(VersionConstraint.LessThan(ver.unwrap()))
+            return nil
+
+        if trimmed.starts_with("="):
+            val ver = SemVer.parse(trimmed[1:])
+            if ver.?:
+                return Some(VersionConstraint.Exact(ver.unwrap()))
+            return nil
+
+        # Bare version string treated as caret constraint
+        val ver = SemVer.parse(trimmed)
+        if ver.?:
+            return Some(VersionConstraint.Caret(ver.unwrap()))
+        nil
+
+    fn satisfies(version: SemVer) -> bool:
+        """Check if a version satisfies this constraint."""
+        match self:
+            case VersionConstraint.Any:
+                true
+            case VersionConstraint.Exact(v):
+                version.equals(v)
+            case VersionConstraint.Caret(v):
+                # ^1.2.3 means >=1.2.3, <2.0.0
+                # ^0.2.3 means >=0.2.3, <0.3.0
+                # ^0.0.3 means >=0.0.3, <0.0.4
+                if not version.greater_or_equal(v):
+                    return false
+                if v.major > 0:
+                    version.major == v.major
+                elif v.minor > 0:
+                    version.major == 0 and version.minor == v.minor
+                else:
+                    version.major == 0 and version.minor == 0 and version.patch == v.patch
+            case VersionConstraint.Tilde(v):
+                # ~1.2.3 means >=1.2.3, <1.3.0
+                if not version.greater_or_equal(v):
+                    return false
+                version.major == v.major and version.minor == v.minor
+            case VersionConstraint.GreaterThan(v):
+                version.greater_than(v)
+            case VersionConstraint.GreaterOrEqual(v):
+                version.greater_or_equal(v)
+            case VersionConstraint.LessThan(v):
+                version.less_than(v)
+            case VersionConstraint.LessOrEqual(v):
+                version.less_or_equal(v)
+
+    fn to_text() -> text:
+        match self:
+            case VersionConstraint.Any: "*"
+            case VersionConstraint.Exact(v): "={v.to_text()}"
+            case VersionConstraint.Caret(v): "^{v.to_text()}"
+            case VersionConstraint.Tilde(v): "~{v.to_text()}"
+            case VersionConstraint.GreaterThan(v): ">{v.to_text()}"
+            case VersionConstraint.GreaterOrEqual(v): ">={v.to_text()}"
+            case VersionConstraint.LessThan(v): "<{v.to_text()}"
+            case VersionConstraint.LessOrEqual(v): "<={v.to_text()}"

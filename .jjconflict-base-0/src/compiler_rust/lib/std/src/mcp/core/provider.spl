@@ -1,0 +1,132 @@
+# MCP Resource Provider Interface
+# Implement this interface to create MCP support for any language/tool
+
+use core.*
+use mcp.core.protocol.*
+
+# Resource provider interface - implement this for your language/tool
+pub trait ResourceProvider:
+    # List all available resources
+    fn list_resources() -> List<Resource>
+    
+    # Read a specific resource by URI
+    fn read_resource(uri: text) -> ResourceContents
+    
+    # Optional: Search for resources
+    fn search_resources(query: text) -> List<Resource>:
+        # Default: return empty list
+        return []
+
+# Base provider implementation with common functionality
+pub class BaseProvider:
+    pub resources: Dict<text, Resource>
+    pub root_path: text
+    
+    pub fn new(root_path: text) -> BaseProvider:
+        return BaseProvider(resources: {}, root_path: root_path)
+    
+    pub fn add_resource(self, resource: Resource):
+        self.resources.set(resource.uri, resource)
+    
+    pub fn get_resource(self, uri: text) -> Option<Resource>:
+        if self.resources.has_key(uri):
+            return Some(self.resources.get(uri))
+        else:
+            return None
+
+# File-based resource provider
+pub class FileProvider:
+    pub base: BaseProvider
+    
+    pub fn new(root_path: text) -> FileProvider:
+        return FileProvider(base: BaseProvider.new(root_path))
+    
+    # Scan directory and register files
+    pub fn scan_directory(self, pattern: text):
+        @extern("runtime", "rt_glob")
+        fn _rt_glob(pattern_ptr: &u8, pattern_len: u64) -> text
+
+        # Use glob to find files matching pattern
+        val full_pattern = self.base.root_path + "/" + pattern
+        val results_json = _rt_glob(full_pattern.ptr(), full_pattern.len())
+
+        # Parse results (newline-separated paths)
+        for path in results_json.split("\n"):
+            if not path.trim().is_empty():
+                # Determine MIME type from extension
+                val mime_type = if path.ends_with(".spl"):
+                    "text/x-simple"
+                elif path.ends_with(".json"):
+                    "application/json"
+                elif path.ends_with(".md"):
+                    "text/markdown"
+                else:
+                    "text/plain"
+                self.register_file(path, mime_type)
+    
+    pub fn register_file(self, path: text, mime_type: text):
+        """Register a file resource.
+
+        Args:
+            path: File path
+            mime_type: MIME type
+        """
+        @extern("runtime", "rt_path_basename")
+        fn _rt_path_basename(path_ptr: &u8, path_len: u64) -> text
+
+        uri = "file://" + path
+        name = _rt_path_basename(path.ptr(), path.len())
+        resource = Resource.new(uri, name, mime_type)
+        self.base.add_resource(resource)
+
+impl ResourceProvider for FileProvider:
+    fn list_resources() -> List<Resource>:
+        result = []
+        for uri in self.base.resources.keys():
+            resource = self.base.resources.get(uri)
+            result.append(resource)
+        return result
+
+    fn read_resource(uri: text) -> ResourceContents:
+        @extern("runtime", "rt_file_read_text")
+        fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+        # Extract file path from URI
+        val path = uri.replace("file://", "")
+        val content = _rt_file_read_text(path.ptr(), path.len())
+
+        # Determine MIME type from path
+        val mime_type = if path.ends_with(".spl"):
+            "text/x-simple"
+        elif path.ends_with(".json"):
+            "application/json"
+        elif path.ends_with(".md"):
+            "text/markdown"
+        else:
+            "text/plain"
+
+        return ResourceContents.new(uri, mime_type, content)
+
+# Symbol-based provider for code navigation
+pub class SymbolProvider:
+    pub base: BaseProvider
+    pub symbols: Dict<text, Symbol>
+    
+    pub fn new(root_path: text) -> SymbolProvider:
+        return SymbolProvider(base: BaseProvider.new(root_path), symbols: {})
+    
+    pub fn register_symbol(self, symbol: Symbol):
+        uri = "symbol://" + symbol.name
+        name = symbol.name
+        resource = Resource.new(uri, name, "text/x-symbol")
+        self.base.add_resource(resource)
+        self.symbols.set(uri, symbol)
+
+# Symbol type (forward declaration - defined by language impl)
+pub class Symbol:
+    pub name: text
+    pub kind: text
+    pub signature: text
+    
+    pub fn new(name: text, kind: text, signature: text) -> Symbol:
+        return Symbol(name: name, kind: kind, signature: signature)

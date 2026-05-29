@@ -1,0 +1,86 @@
+use compiler.backend.{
+    WatBuilder,
+    WasmType,
+    WasmTarget,
+    WasmTypeMapper
+}
+use compiler.mir.mir_data.*
+
+fn wat_for(block: fn(WatBuilder)) -> text:
+    val builder = WatBuilder.create()
+    block(builder)
+    builder.build()
+
+describe "Wasm Codegen":
+    it "emits direct WatBuilder strings":
+        val wat = wat_for(\builder:
+            builder.begin_module("test")
+            builder.emit_i32_const(42)
+            builder.emit_i64_const(100)
+            builder.emit_f64_const(3.14)
+            builder.emit_local_named_get("x")
+            builder.emit_local_named_set("y")
+            builder.emit_call_named("my_func")
+            builder.end_module()
+        )
+
+        expect(wat).to_contain("(module $test")
+        expect(wat).to_contain("i32.const 42")
+        expect(wat).to_contain("i64.const 100")
+        expect(wat).to_contain("f64.const 3.14")
+        expect(wat).to_contain("local.get $x")
+        expect(wat).to_contain("local.set $y")
+        expect(wat).to_contain("call $my_func")
+
+    it "emits control flow and arithmetic instructions":
+        val wat = wat_for(\builder:
+            builder.emit_block("exit")
+            builder.emit_loop("loop_start")
+            builder.emit_br("target")
+            builder.emit_br_if("cond_target")
+            builder.emit_return()
+            builder.emit_unreachable()
+            builder.emit_end()
+            builder.emit_end()
+        )
+
+        expect(wat).to_contain("(block $exit")
+        expect(wat).to_contain("(loop $loop_start")
+        expect(wat).to_contain("br $target")
+        expect(wat).to_contain("br_if $cond_target")
+        expect(wat).to_contain("return")
+        expect(wat).to_contain("unreachable")
+
+    it "renders wasm value types and target helpers":
+        expect(WasmType.I32.to_text()).to_equal("i32")
+        expect(WasmType.I64.to_text()).to_equal("i64")
+        expect(WasmType.F32.to_text()).to_equal("f32")
+        expect(WasmType.F64.to_text()).to_equal("f64")
+        expect(WasmType.FuncRef.to_text()).to_equal("funcref")
+        expect(WasmType.ExternRef.to_text()).to_equal("externref")
+
+        expect(WasmTarget.Browser.needs_js_glue()).to_equal(true)
+        expect(WasmTarget.Wasi.needs_js_glue()).to_equal(false)
+        expect(WasmTarget.Minimal.needs_js_glue()).to_equal(false)
+        expect(WasmTarget.Wasi.needs_wasi_imports()).to_equal(true)
+        expect(WasmTarget.Browser.needs_wasi_imports()).to_equal(false)
+        expect(WasmTarget.Minimal.needs_wasi_imports()).to_equal(false)
+
+    it "maps primitive MIR types for wasm32":
+        val mapper = WasmTypeMapper.create_wasm32()
+
+        expect(mapper.map_type(MirType(kind: MirTypeKind.I64))).to_equal("i64")
+        expect(mapper.map_type(MirType(kind: MirTypeKind.F64))).to_equal("f64")
+        expect(mapper.map_type(MirType(kind: MirTypeKind.Bool))).to_equal("i32")
+        expect(mapper.map_type(MirType(kind: MirTypeKind.I32))).to_equal("i32")
+        expect(mapper.map_type(MirType(kind: MirTypeKind.Unit))).to_equal("i32")
+
+    it "reports primitive sizes and alignments for wasm32":
+        val mapper = WasmTypeMapper.create_wasm32()
+
+        expect(mapper.size_of(MirType(kind: MirTypeKind.I64))).to_equal(8)
+        expect(mapper.size_of(MirType(kind: MirTypeKind.I32))).to_equal(4)
+        expect(mapper.size_of(MirType(kind: MirTypeKind.Bool))).to_equal(1)
+        expect(mapper.align_of(MirType(kind: MirTypeKind.F64))).to_equal(8)
+        expect(mapper.align_of(MirType(kind: MirTypeKind.I16))).to_equal(2)
+        expect(mapper.align_of(MirType(kind: MirTypeKind.Bool))).to_equal(1)

@@ -1,0 +1,114 @@
+# Hosted web_ui render bridge.
+#
+# Owns a compact packed-pixel surface for SDL2 presentation. This stdlib-local
+# renderer deliberately avoids examples/browser dependencies; richer browser
+# engines can be attached above this layer through explicit adapters.
+
+use common.web.logging.{Logger, LogLevel}
+
+# Pack 4 separate RGBA channels into a single i64.
+# Format: R*16777216 + G*65536 + B*256 + A
+# This matches SDL2's expected pixel format for rt_sdl2_present_rgba.
+fn pack_rgba(r: i64, g: i64, b: i64, a: i64) -> i64:
+    r * 16777216 + g * 65536 + b * 256 + a
+
+fn _white_pixel() -> i64:
+    pack_rgba(255, 255, 255, 255)
+
+fn _text_pixel() -> i64:
+    pack_rgba(32, 32, 32, 255)
+
+fn _accent_pixel() -> i64:
+    pack_rgba(37, 99, 235, 255)
+
+fn _alloc_pixels(width: i64, height: i64, pixel: i64) -> List<i64>:
+    var packed: List<i64> = []
+    val pixel_count = width * height
+    var i = 0
+    while i < pixel_count:
+        packed.push(pixel)
+        i = i + 1
+    packed
+
+class RenderBridge:
+    logger: Logger
+    width: i64
+    height: i64
+    current_html: text
+    dirty: bool
+    packed_pixels: List<i64>
+
+    static fn create(width: i64, height: i64, logger: Logger) -> RenderBridge:
+        val packed = _alloc_pixels(width, height, _white_pixel())
+        RenderBridge(
+            logger: logger,
+            width: width,
+            height: height,
+            current_html: "",
+            dirty: true,
+            packed_pixels: packed
+        )
+
+    # Set HTML content and mark dirty for re-render.
+    me set_html(html: text):
+        self.current_html = html
+        self.dirty = true
+
+    # Render a compact hosted surface. This is intentionally small and
+    # dependency-free; browser-engine adapters can replace it above this layer.
+    me render() -> Result<(), text>:
+        self.clear_surface()
+        if self.current_html.len() > 0:
+            self.draw_content_hint()
+        self.dirty = false
+        Ok(())
+
+    me clear_surface():
+        self.packed_pixels = _alloc_pixels(self.width, self.height, _white_pixel())
+
+    me set_pixel(x: i64, y: i64, pixel: i64):
+        if x < 0 or y < 0 or x >= self.width or y >= self.height:
+            return
+        val idx = y * self.width + x
+        if idx >= 0 and idx < self.packed_pixels.len():
+            self.packed_pixels[idx] = pixel
+
+    me fill_rect(x: i64, y: i64, w: i64, h: i64, pixel: i64):
+        var yy = y
+        while yy < y + h:
+            var xx = x
+            while xx < x + w:
+                self.set_pixel(xx, yy, pixel)
+                xx = xx + 1
+            yy = yy + 1
+
+    me draw_content_hint():
+        val bar_h = if self.height < 24: self.height else: 24
+        self.fill_rect(0, 0, self.width, bar_h, _accent_pixel())
+        val rows = if self.height < 80: 1 else: 4
+        var row = 0
+        while row < rows:
+            val y = 40 + row * 18
+            val w = self.width - 32 - row * 24
+            if w > 0:
+                self.fill_rect(16, y, w, 8, _text_pixel())
+            row = row + 1
+
+    # Get packed pixel buffer ready for window_present_rgba.
+    fn get_packed_pixels() -> List<i64>:
+        self.packed_pixels
+
+    # Check if re-render is needed.
+    fn is_dirty() -> bool:
+        self.dirty
+
+    # Handle window resize.
+    me resize(new_width: i64, new_height: i64):
+        self.width = new_width
+        self.height = new_height
+        self.packed_pixels = _alloc_pixels(new_width, new_height, _white_pixel())
+        self.dirty = true
+
+    # Get current dimensions.
+    fn get_width() -> i64: self.width
+    fn get_height() -> i64: self.height

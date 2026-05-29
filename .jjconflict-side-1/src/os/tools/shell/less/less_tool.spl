@@ -1,0 +1,47 @@
+# less — Display file contents (non-interactive pager — dumps all lines)
+# MDSOC: feature dimension, shell layer
+#
+# QEMU serial tests cannot inject stdin for interactive paging, so `less`
+# behaves like `less -F` with a screen large enough to fit the file: all
+# lines are emitted in order and the tool exits. The shell-side pager
+# (smux / terminal scrollback) handles user-side paging.
+
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error, split_lines}
+
+fn tool_less(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Display file contents non-interactively.
+
+    Usage: less [FILE...]
+    Flags:
+      --help    print usage and exit 0
+    Unknown `-` flags are silently accepted for Ubuntu-less compat.
+    """
+    var paths: [text] = []
+    for arg in args:
+        if arg == "--help" or arg == "-h":
+            write_line(terminal, "usage: less [FILE...]")
+            return 0
+        elif arg.starts_with("-"):
+            continue
+        else:
+            paths.push(arg)
+    if paths.len() == 0:
+        write_error(terminal, "less: missing file operand")
+        return 1
+    if vfs == nil:
+        write_error(terminal, "less: no filesystem mounted")
+        return 1
+    var exit_code: i32 = 0
+    for filename in paths:
+        val path = resolve_path(cwd, filename)
+        val result = vfs.read_text(path)
+        if result.is_err():
+            write_error(terminal, "less: {path}: {result.unwrap_err()}")
+            exit_code = 1
+        else:
+            val lines = split_lines(result.unwrap())
+            for line in lines:
+                write_line(terminal, line)
+    exit_code

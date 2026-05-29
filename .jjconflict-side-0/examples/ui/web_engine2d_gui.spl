@@ -1,0 +1,105 @@
+# web_engine2d_gui.spl — GUI app: Simple Web Renderer + Engine2D backend
+#
+# Renders HTML through SimpleWebRenderer with the explicit Engine2D backend
+# requested below, then presents the resulting [u32] pixel buffer to a host
+# winit window via rt_winit_window_present_rgba when SIMPLE_GUI=1.
+#
+# The renderer is corpus-driven, not a full layout engine: it maps recognized
+# HTML markers to colored rects (background color + wm-app-titlebar header +
+# wm-app-content panel + a "Simple Web" title block). This entry uses markers
+# that produce three visually distinct regions.
+#
+# Run (window):   SIMPLE_GUI=1 SIMPLE_EXECUTION_MODE=interpret bin/simple examples/ui/web_engine2d_gui.spl
+# Run (headless):                SIMPLE_EXECUTION_MODE=interpret bin/simple examples/ui/web_engine2d_gui.spl
+#
+# NOTE: must run under SIMPLE_EXECUTION_MODE=interpret — the renderer uses the
+# array-repeat form [bg; w*h] (rt_array_repeat) which the JIT cannot resolve.
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    SimpleWebRenderer,
+    simple_web_resolved_engine2d_backend_name}
+
+extern fn rt_winit_event_loop_new() -> i64
+extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_free(ev: i64)
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
+extern fn rt_thread_sleep(ms: i64)
+extern fn rt_env_get(key: text) -> text
+val SCREEN_W: i32 = 32
+val SCREEN_H: i32 = 24
+val WINDOW_W: i32 = 640
+val WINDOW_H: i32 = 480
+val EVT_CLOSE: i64 = 3
+
+fn demo_html() -> text:
+    # Markers recognized by simple_web_engine2d_renderer:
+    #   background-color: #44aa22  -> green page background (0xFF44AA22)
+    #   wm-app-titlebar            -> blue header bar (0xFF2050A0, top 24px)
+    #   "Simple Web"               -> white title block (24x3 at 6,6)
+    return "<html><body style='background-color: #44aa22'>" +
+        "<div class='wm-app-titlebar'>Simple Web</div>" +
+        "</body></html>"
+
+fn pack_pixels(src: [u32]) -> [i64]:
+    # softbuffer treats each u32 as 0x00RRGGBB (top byte ignored); mask to the
+    # proven 24-bit RGB present format.
+    var out: [i64] = []
+    var i = 0
+    while i < src.len():
+        out = out.push(src[i].to_i64() & 0xFFFFFF)
+        i = i + 1
+    return out
+
+fn render_backend(backend: text) -> [u32]:
+    val renderer = SimpleWebRenderer.create_with_backend(SCREEN_W, SCREEN_H, backend)
+    val pixels = renderer.render_html_to_pixels(demo_html())
+    val resolved = simple_web_resolved_engine2d_backend_name(SCREEN_W, SCREEN_H, renderer.backend_name)
+    print "Rendered {pixels.len()} px via requested backend '{renderer.backend_name}' resolved='{resolved}' sample={pixels[0]}/{pixels[6 + 6 * SCREEN_W]}/{pixels[pixels.len() - 1]}"
+    pixels
+
+fn main() -> i64:
+    print "Simple Web Renderer + Engine2D GUI {SCREEN_W}x{SCREEN_H} presented at {WINDOW_W}x{WINDOW_H}"
+    val cpu_pixels = render_backend("cpu")
+    val metal_pixels = render_backend("metal")
+    if cpu_pixels.len() == metal_pixels.len():
+        print "CPU/Metal render parity sample: {cpu_pixels[0] == metal_pixels[0]} {cpu_pixels[6 + 6 * SCREEN_W] == metal_pixels[6 + 6 * SCREEN_W]}"
+
+    if rt_env_get("SIMPLE_GUI") != "1":
+        print "No GUI requested (set SIMPLE_GUI=1 to open a window); headless render only."
+        return 0
+
+    val el = rt_winit_event_loop_new()
+    if el == 0:
+        print "No GUI runtime (set SIMPLE_GUI=1 to open a window); headless render only."
+        return 0
+    val win = rt_winit_window_new(el, WINDOW_W.to_i64(), WINDOW_H.to_i64(), "Simple Web + Engine2D")
+    if win == 0:
+        print "Window creation failed."
+        rt_winit_event_loop_free(el)
+        return 0
+    val packed = pack_pixels(metal_pixels)
+    rt_winit_window_present_rgba(win, SCREEN_W.to_i64(), SCREEN_H.to_i64(), packed)
+    # macOS: rt_winit_event_loop_poll_events pumps the native event loop, and the
+    # interpreter owns the main thread — so poll CONTINUOUSLY (never rt_thread_sleep)
+    # or AppKit loses its handler between frames and the window never composites.
+    # (Launch via a .app bundle so the process is window-server registered:
+    # scripts/macos-gui-run.shs. See doc/09_bugs/macos_winit_window_not_displayed_*.md)
+    var running = true
+    var iters = 0
+    while running and iters < 20000:
+        var ev = rt_winit_event_loop_poll_events(el, 1)
+        while ev != 0:
+            if rt_winit_event_get_type(ev) == EVT_CLOSE:
+                running = false
+            rt_winit_event_free(ev)
+            ev = rt_winit_event_loop_poll_events(el, 1)
+        if iters % 200 == 0:
+            rt_winit_window_present_rgba(win, SCREEN_W.to_i64(), SCREEN_H.to_i64(), packed)
+        iters = iters + 1
+    rt_winit_window_free(win)
+    rt_winit_event_loop_free(el)
+    return 0

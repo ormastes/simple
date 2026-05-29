@@ -1,0 +1,204 @@
+use std.spec
+use std.replay.container.checkpoint_format.{
+    DirtyPage, FdEntry, ProcessSnapshot, IpcMessage, IpcSnapshot,
+    ContainerCheckpoint, encode_checkpoint, decode_checkpoint,
+    encode_i64, decode_i64, encode_text, decode_text
+}
+use std.replay.container.container_replay.ContainerReplayDriver
+
+# ============================================================================
+# DirtyPage / FdEntry Construction
+# ============================================================================
+
+describe "DirtyPage construction":
+    it "stores address, size, data_offset":
+        val page = DirtyPage(address: 4096, size: 4096, data_offset: 0)
+        expect(page.address).to_equal(4096)
+        expect(page.size).to_equal(4096)
+        expect(page.data_offset).to_equal(0)
+
+    it "stores large address values":
+        val page = DirtyPage(address: 1099511627776, size: 4096, data_offset: 8192)
+        expect(page.address).to_equal(1099511627776)
+        expect(page.data_offset).to_equal(8192)
+
+describe "FdEntry construction":
+    it "stores fd, path, offset, flags":
+        val entry = FdEntry(fd: 3, path: "/tmp/test.txt", offset: 1024, flags: 2)
+        expect(entry.fd).to_equal(3)
+        expect(entry.path).to_equal("/tmp/test.txt")
+        expect(entry.offset).to_equal(1024)
+        expect(entry.flags).to_equal(2)
+
+# ============================================================================
+# ProcessSnapshot
+# ============================================================================
+
+describe "ProcessSnapshot":
+    it "create sets empty collections":
+        val snap = ProcessSnapshot.create(42)
+        expect(snap.pid).to_equal(42)
+        expect(snap.registers.len()).to_equal(0)
+        expect(snap.memory_pages.len()).to_equal(0)
+        expect(snap.fd_count).to_equal(0)
+
+    it "add_fd increments fd_count":
+        var snap = ProcessSnapshot.create(10)
+        snap.add_fd(FdEntry(fd: 0, path: "/dev/stdin", offset: 0, flags: 0))
+        snap.add_fd(FdEntry(fd: 1, path: "/dev/stdout", offset: 0, flags: 1))
+        expect(snap.fd_count).to_equal(2)
+        expect(snap.fd_table.len()).to_equal(2)
+
+# ============================================================================
+# ContainerCheckpoint
+# ============================================================================
+
+describe "ContainerCheckpoint":
+    it "create sets id and timestamp":
+        val cp = ContainerCheckpoint.create(1, 5000)
+        expect(cp.id).to_equal(1)
+        expect(cp.timestamp).to_equal(5000)
+        expect(cp.processes.len()).to_equal(0)
+        expect(cp.ipc.len()).to_equal(0)
+
+    it "process_count returns number of added processes":
+        var cp = ContainerCheckpoint.create(2, 100)
+        cp.add_process(ProcessSnapshot.create(10))
+        cp.add_process(ProcessSnapshot.create(20))
+        expect(cp.process_count()).to_equal(2)
+
+    it "total_pages sums across processes":
+        var cp = ContainerCheckpoint.create(3, 200)
+        var p1 = ProcessSnapshot.create(10)
+        p1.add_page(DirtyPage(address: 4096, size: 4096, data_offset: 0))
+        p1.add_page(DirtyPage(address: 8192, size: 4096, data_offset: 4096))
+        cp.add_process(p1)
+        var p2 = ProcessSnapshot.create(20)
+        p2.add_page(DirtyPage(address: 16384, size: 4096, data_offset: 8192))
+        cp.add_process(p2)
+        expect(cp.total_pages()).to_equal(3)
+
+    it "summary contains id and timestamp":
+        val cp = ContainerCheckpoint.create(7, 999)
+        val s = cp.summary()
+        expect(s).to_contain("id=7")
+        expect(s).to_contain("ts=999")
+
+# ============================================================================
+# encode / decode round-trip
+# ============================================================================
+
+describe "encode_checkpoint / decode_checkpoint round-trip":
+    it "empty checkpoint round-trips":
+        val cp = ContainerCheckpoint.create(1, 100)
+        val data = encode_checkpoint(cp)
+        match decode_checkpoint(data):
+            case Ok(got):
+                expect(got.id).to_equal(1)
+                expect(got.timestamp).to_equal(100)
+                expect(got.process_count()).to_equal(0)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "checkpoint with process round-trips pid":
+        var cp = ContainerCheckpoint.create(2, 200)
+        var proc = ProcessSnapshot.create(42)
+        proc.add_register(100)
+        proc.add_register(200)
+        cp.add_process(proc)
+        val data = encode_checkpoint(cp)
+        match decode_checkpoint(data):
+            case Ok(got):
+                expect(got.processes.len()).to_equal(1)
+                expect(got.processes[0].pid).to_equal(42)
+                expect(got.processes[0].registers.len()).to_equal(2)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "checkpoint with fd_table round-trips entries":
+        var cp = ContainerCheckpoint.create(5, 500)
+        var proc = ProcessSnapshot.create(77)
+        proc.add_fd(FdEntry(fd: 3, path: "/tmp/log", offset: 512, flags: 2))
+        cp.add_process(proc)
+        val data = encode_checkpoint(cp)
+        match decode_checkpoint(data):
+            case Ok(got):
+                expect(got.processes[0].fd_table.len()).to_equal(1)
+                expect(got.processes[0].fd_table[0].fd).to_equal(3)
+                expect(got.processes[0].fd_table[0].path).to_equal("/tmp/log")
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "checkpoint with no fd_table round-trips empty":
+        var cp = ContainerCheckpoint.create(3, 300)
+        var proc = ProcessSnapshot.create(10)
+        cp.add_process(proc)
+        val data = encode_checkpoint(cp)
+        match decode_checkpoint(data):
+            case Ok(got):
+                expect(got.processes[0].fd_table.len()).to_equal(0)
+                expect(got.processes[0].pid).to_equal(10)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "checkpoint with dirty page round-trips address":
+        var cp = ContainerCheckpoint.create(4, 400)
+        var proc = ProcessSnapshot.create(99)
+        proc.add_page(DirtyPage(address: 65536, size: 4096, data_offset: 0))
+        cp.add_process(proc)
+        val data = encode_checkpoint(cp)
+        match decode_checkpoint(data):
+            case Ok(got):
+                expect(got.processes[0].memory_pages.len()).to_equal(1)
+                expect(got.processes[0].memory_pages[0].address).to_equal(65536)
+                expect(got.processes[0].memory_pages[0].size).to_equal(4096)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "decode rejects short data":
+        val data: [i32] = [1, 2]
+        match decode_checkpoint(data):
+            case Ok(_):
+                expect("should not reach").to_equal("")
+            case Err(msg):
+                expect(msg).to_contain("too short")
+
+    it "decode rejects bad magic":
+        val data: [i32] = [0, 1, 0, 0, 0, 0, 0]
+        match decode_checkpoint(data):
+            case Ok(_):
+                expect("should not reach").to_equal("")
+            case Err(msg):
+                expect(msg).to_contain("invalid checkpoint magic")
+
+# ============================================================================
+# ContainerReplayDriver.find_checkpoint_before
+# ============================================================================
+
+describe "ContainerReplayDriver.find_checkpoint_before":
+    it "returns None when no checkpoints exist":
+        val driver = ContainerReplayDriver.create("record", "ctr-1")
+        val result = driver.find_checkpoint_before(100)
+        expect(result.is_none()).to_equal(true)
+
+    it "returns the latest checkpoint at or before timestamp":
+        var driver = ContainerReplayDriver.create("record", "ctr-2")
+        driver.save_checkpoint(0)
+        driver.advance_event()
+        driver.advance_event()
+        driver.advance_event()
+        driver.save_checkpoint(1)
+        val found = driver.find_checkpoint_before(5)
+        match found:
+            case Some(cp):
+                expect(cp.id).to_equal(1)
+            case None:
+                expect("should have found checkpoint").to_equal("")
+
+    it "returns None when all checkpoints are after timestamp":
+        var driver = ContainerReplayDriver.create("record", "ctr-3")
+        driver.advance_event()
+        driver.advance_event()
+        driver.save_checkpoint(0)
+        val found = driver.find_checkpoint_before(0)
+        expect(found.is_none()).to_equal(true)

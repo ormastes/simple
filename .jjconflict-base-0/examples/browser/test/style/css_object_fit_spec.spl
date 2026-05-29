@@ -1,0 +1,213 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+"""
+# CSS object-fit Computation Specification
+
+Tests for object-fit/object-position dimension math:
+cover, contain, fill, none, scale-down.
+Pure arithmetic — no rendering required.
+
+Run with: bin/simple test examples/browser/test/style/css_object_fit_spec.spl
+"""
+
+use std.spec
+
+# ============================================================================
+# Pure-logic helpers that implement the object-fit algorithm.
+# These will be extracted into the paint module during implementation.
+# Testing them here as module-level fns avoids interpreter var-mutation traps.
+# ============================================================================
+
+# Compute rendered (width, height) of the replaced element's content given:
+#   fit_mode  : "fill" | "contain" | "cover" | "none" | "scale-down"
+#   box_w     : container box width
+#   box_h     : container box height
+#   nat_w     : natural (intrinsic) content width
+#   nat_h     : natural (intrinsic) content height
+# Returns pair (rendered_w, rendered_h) as f64 values encoded in a 2-element list.
+
+fn object_fit_size(fit_mode: text, box_w: f64, box_h: f64, nat_w: f64, nat_h: f64) -> [f64]:
+    if fit_mode == "fill":
+        return [box_w, box_h]
+
+    if fit_mode == "none":
+        return [nat_w, nat_h]
+
+    val box_ratio = box_w / box_h
+    val nat_ratio = nat_w / nat_h
+
+    if fit_mode == "contain":
+        if nat_ratio >= box_ratio:
+            val h = box_w / nat_ratio
+            return [box_w, h]
+        else:
+            val w = box_h * nat_ratio
+            return [w, box_h]
+
+    if fit_mode == "cover":
+        if nat_ratio >= box_ratio:
+            val w = box_h * nat_ratio
+            return [w, box_h]
+        else:
+            val h = box_w / nat_ratio
+            return [box_w, h]
+
+    if fit_mode == "scale-down":
+        # scale-down is the smaller of none or contain
+        val none_sz = [nat_w, nat_h]
+        val contain_sz = object_fit_size("contain", box_w, box_h, nat_w, nat_h)
+        val use_none = (none_sz.get(0) <= contain_sz.get(0) and none_sz.get(1) <= contain_sz.get(1))
+        if use_none:
+            return none_sz
+        return contain_sz
+
+    # Unknown mode — default to fill
+    [box_w, box_h]
+
+fn approx(a: f64, b: f64) -> bool:
+    val diff = a - b
+    val abs_diff = if diff < 0.0: -diff else: diff
+    abs_diff < 0.5
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+describe "CSS object-fit: fill":
+    """
+    fill stretches content to match the box exactly.
+    """
+
+    it "fill: content width equals box width":
+        val sz = object_fit_size("fill", 200.0, 100.0, 400.0, 300.0)
+        expect(approx(sz.get(0), 200.0)).to_equal(true)
+
+    it "fill: content height equals box height":
+        val sz = object_fit_size("fill", 200.0, 100.0, 400.0, 300.0)
+        expect(approx(sz.get(1), 100.0)).to_equal(true)
+
+    it "fill: square content in wide box fills both dimensions":
+        val sz = object_fit_size("fill", 300.0, 150.0, 50.0, 50.0)
+        expect(approx(sz.get(0), 300.0)).to_equal(true)
+        expect(approx(sz.get(1), 150.0)).to_equal(true)
+
+
+describe "CSS object-fit: none":
+    """
+    none uses the natural (intrinsic) size of the content unchanged.
+    """
+
+    it "none: returns natural width":
+        val sz = object_fit_size("none", 200.0, 100.0, 400.0, 300.0)
+        expect(approx(sz.get(0), 400.0)).to_equal(true)
+
+    it "none: returns natural height":
+        val sz = object_fit_size("none", 200.0, 100.0, 400.0, 300.0)
+        expect(approx(sz.get(1), 300.0)).to_equal(true)
+
+    it "none: small content stays small":
+        val sz = object_fit_size("none", 200.0, 100.0, 50.0, 30.0)
+        expect(approx(sz.get(0), 50.0)).to_equal(true)
+        expect(approx(sz.get(1), 30.0)).to_equal(true)
+
+
+describe "CSS object-fit: contain":
+    """
+    contain scales content to fit inside the box while preserving aspect ratio.
+    Neither dimension exceeds the box.
+    """
+
+    it "contain: wide image in wide box — constrained by width":
+        # nat 400x200 (ratio 2:1), box 200x200 (ratio 1:1) — nat wider, constrain to width
+        val sz = object_fit_size("contain", 200.0, 200.0, 400.0, 200.0)
+        expect(approx(sz.get(0), 200.0)).to_equal(true)
+        expect(approx(sz.get(1), 100.0)).to_equal(true)
+
+    it "contain: tall image in wide box — constrained by height":
+        # nat 100x400 (ratio 0.25), box 200x200 (ratio 1) — nat narrower, constrain to height
+        val sz = object_fit_size("contain", 200.0, 200.0, 100.0, 400.0)
+        expect(approx(sz.get(0), 50.0)).to_equal(true)
+        expect(approx(sz.get(1), 200.0)).to_equal(true)
+
+    it "contain: neither dimension exceeds box width":
+        val sz = object_fit_size("contain", 200.0, 100.0, 400.0, 300.0)
+        expect(sz.get(0) <= 200.0).to_equal(true)
+
+    it "contain: neither dimension exceeds box height":
+        val sz = object_fit_size("contain", 200.0, 100.0, 400.0, 300.0)
+        expect(sz.get(1) <= 100.0).to_equal(true)
+
+    it "contain: aspect ratio preserved (w/h approx nat_w/nat_h)":
+        # nat 300x200 (ratio 1.5)
+        val sz = object_fit_size("contain", 200.0, 200.0, 300.0, 200.0)
+        val rendered_ratio = sz.get(0) / sz.get(1)
+        val diff = rendered_ratio - 1.5
+        val abs_diff = if diff < 0.0: -diff else: diff
+        expect(abs_diff < 0.01).to_equal(true)
+
+    it "contain: same-ratio content fills box exactly":
+        # nat 400x200, box 200x100 — same ratio 2:1
+        val sz = object_fit_size("contain", 200.0, 100.0, 400.0, 200.0)
+        expect(approx(sz.get(0), 200.0)).to_equal(true)
+        expect(approx(sz.get(1), 100.0)).to_equal(true)
+
+
+describe "CSS object-fit: cover":
+    """
+    cover scales content to cover the entire box while preserving aspect ratio.
+    At least one dimension matches the box; the other may overflow.
+    """
+
+    it "cover: wide image covers tall box — height matches box":
+        # nat 400x200 (ratio 2), box 100x200 — constrain to height
+        val sz = object_fit_size("cover", 100.0, 200.0, 400.0, 200.0)
+        expect(approx(sz.get(1), 200.0)).to_equal(true)
+
+    it "cover: tall image covers wide box — width matches box":
+        # nat 100x400, box 200x100 — constrain to width
+        val sz = object_fit_size("cover", 200.0, 100.0, 100.0, 400.0)
+        expect(approx(sz.get(0), 200.0)).to_equal(true)
+
+    it "cover: no dimension smaller than box":
+        val sz = object_fit_size("cover", 200.0, 100.0, 400.0, 300.0)
+        expect(sz.get(0) >= 200.0).to_equal(true)
+        expect(sz.get(1) >= 100.0).to_equal(true)
+
+    it "cover: aspect ratio preserved":
+        # nat 300x200 (ratio 1.5)
+        val sz = object_fit_size("cover", 200.0, 200.0, 300.0, 200.0)
+        val rendered_ratio = sz.get(0) / sz.get(1)
+        val diff = rendered_ratio - 1.5
+        val abs_diff = if diff < 0.0: -diff else: diff
+        expect(abs_diff < 0.01).to_equal(true)
+
+    it "cover: same-ratio content — both dimensions match box":
+        # nat 400x200, box 200x100 — ratio identical
+        val sz = object_fit_size("cover", 200.0, 100.0, 400.0, 200.0)
+        expect(approx(sz.get(0), 200.0)).to_equal(true)
+        expect(approx(sz.get(1), 100.0)).to_equal(true)
+
+
+describe "CSS object-fit: scale-down":
+    """
+    scale-down is the smaller of none or contain.
+    If the natural size fits inside the box, use it (no upscaling).
+    Otherwise apply contain scaling.
+    """
+
+    it "scale-down: small content stays at natural size":
+        # nat 50x30, box 200x100 — natural fits, keep natural
+        val sz = object_fit_size("scale-down", 200.0, 100.0, 50.0, 30.0)
+        expect(approx(sz.get(0), 50.0)).to_equal(true)
+        expect(approx(sz.get(1), 30.0)).to_equal(true)
+
+    it "scale-down: large content is scaled down (like contain)":
+        # nat 400x200, box 200x100 — same ratio, scale to box
+        val sz = object_fit_size("scale-down", 200.0, 100.0, 400.0, 200.0)
+        expect(approx(sz.get(0), 200.0)).to_equal(true)
+        expect(approx(sz.get(1), 100.0)).to_equal(true)
+
+    it "scale-down: result never larger than natural size":
+        val sz = object_fit_size("scale-down", 200.0, 100.0, 50.0, 30.0)
+        expect(sz.get(0) <= 50.0).to_equal(true)
+        expect(sz.get(1) <= 30.0).to_equal(true)

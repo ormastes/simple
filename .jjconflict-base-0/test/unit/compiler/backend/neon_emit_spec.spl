@@ -1,0 +1,191 @@
+# test/unit/compiler/backend/neon_emit_spec.spl
+#
+# Byte-level golden tests for NEON emit bodies.
+# Verifies neon_encode_3reg_4s_arith, neon_encode_3reg_4s_fma,
+# neon_encode_3reg_16b_bsl and the 4 emit wrappers produce exact ARMv8 ARM bytes.
+#
+# Reference: doc/04_architecture/simd_backend_strict_emit_detail_part1.md §6 (NEON recipes)
+#            doc/04_architecture/simd_backend_strict_emit_detail_part2.md §10.1 (NEON goldens)
+#            doc/01_research/simd_isa_deep_2026-05-02.md §2 (ARMv8 encoding)
+#            doc/01_research/simd_spec_verification_2026-05-02.md V-25 (FCMGT polarity)
+#
+# Register indices used as raw 0-31 (direct Vn index, NOT mach_inst ID range 64-79).
+#   V0=0, V1=1, V2=2, V3=3
+#
+# All instructions are 4-byte fixed-width, little-endian per ARMv8 ABI.
+# Byte derivation uses the 3-reg same-type NEON format:
+#   bit[31:29]: Q/U bits + group
+#   bits[20:16]: Rm (5-bit)
+#   bits[9:5]:   Rn (5-bit)
+#   bits[4:0]:   Rd (5-bit)
+#
+# ARMv8 ARM §C7.2 citations per instruction family.
+# BSL goldens VERIFIED via §C7.2.22 bit-field derivation; ERR-002 corrected doc fixture.
+
+use compiler.backend.native.arm_neon.{emit_neon_vaddq_f32, emit_neon_vmulq_f32, emit_neon_vfmaq_f32, emit_neon_vbslq_u8}
+
+# ============================================================================
+# FADD V0.4S, V0.4S, V0.4S
+# Base opcode 0x4E20D400: Q=1 U=0 size=00 (f32) opcode=11010
+# ARMv8 ARM §C7.2.94 FADD (vector) — derived bytes
+# Expected word: 0x4E20D400 → LE: 0x00 0xD4 0x20 0x4E
+# ============================================================================
+
+describe "NEON emit_neon_vaddq_f32 f32 golden":
+    it "FADD V0.4S V0.4S V0.4S emits 4 bytes":
+        val result = emit_neon_vaddq_f32(0, 0, 0)
+        expect(result.len()).to_equal(4)
+
+    it "FADD V0.4S V0.4S V0.4S byte0 is 0x00":
+        # bits[7:0]: Rd=0, Rn[2:0]=0
+        val result = emit_neon_vaddq_f32(0, 0, 0)
+        expect(result[0]).to_equal(0)
+
+    it "FADD V0.4S V0.4S V0.4S byte1 is 0xD4":
+        # bits[15:8]: opcode=11010 → 0xD4
+        val result = emit_neon_vaddq_f32(0, 0, 0)
+        expect(result[1]).to_equal(212)
+
+    it "FADD V0.4S V0.4S V0.4S byte2 is 0x20":
+        # bits[23:16]: bit21=1, Rm=0 → 0x20
+        val result = emit_neon_vaddq_f32(0, 0, 0)
+        expect(result[2]).to_equal(32)
+
+    it "FADD V0.4S V0.4S V0.4S byte3 is 0x4E":
+        # bits[31:24]: 0=0, Q=1, U=0, 01110 → 0x4E
+        val result = emit_neon_vaddq_f32(0, 0, 0)
+        expect(result[3]).to_equal(78)
+
+    it "FADD V1.4S V2.4S V3.4S byte0 encodes Rd and Rn low":
+        # Rd=1 → bits[4:0]=1; Rn=2 → bits[9:5]=2 → byte0 = 1 + (2*32)%256 = 0x41
+        val result = emit_neon_vaddq_f32(1, 2, 3)
+        expect(result[0]).to_equal(65)
+
+    it "FADD V1.4S V2.4S V3.4S byte2 encodes Rm":
+        # Rm=3 → bits[20:16]=3 → byte2 = 0x20 + 3 = 0x23
+        val result = emit_neon_vaddq_f32(1, 2, 3)
+        expect(result[2]).to_equal(35)
+
+# ============================================================================
+# FMUL V0.4S, V0.4S, V0.4S
+# Base opcode 0x6E20DC00: Q=1 U=1 size=00 (f32) opcode=11011
+# ARMv8 ARM §C7.2.136 FMUL (vector) — derived bytes
+# Expected word: 0x6E20DC00 → LE: 0x00 0xDC 0x20 0x6E
+# ============================================================================
+
+describe "NEON emit_neon_vmulq_f32 f32 golden":
+    it "FMUL V0.4S V0.4S V0.4S emits 4 bytes":
+        val result = emit_neon_vmulq_f32(0, 0, 0)
+        expect(result.len()).to_equal(4)
+
+    it "FMUL V0.4S V0.4S V0.4S byte0 is 0x00":
+        val result = emit_neon_vmulq_f32(0, 0, 0)
+        expect(result[0]).to_equal(0)
+
+    it "FMUL V0.4S V0.4S V0.4S byte1 is 0xDC":
+        # bits[15:8]: opcode=11011 → 0xDC
+        val result = emit_neon_vmulq_f32(0, 0, 0)
+        expect(result[1]).to_equal(220)
+
+    it "FMUL V0.4S V0.4S V0.4S byte2 is 0x20":
+        val result = emit_neon_vmulq_f32(0, 0, 0)
+        expect(result[2]).to_equal(32)
+
+    it "FMUL V0.4S V0.4S V0.4S byte3 is 0x6E":
+        # bits[31:24]: 0=0, Q=1, U=1, 01110 → 0x6E
+        val result = emit_neon_vmulq_f32(0, 0, 0)
+        expect(result[3]).to_equal(110)
+
+    it "FMUL V2.4S V1.4S V0.4S byte0 encodes Rd":
+        # Rd=2, Rn=1 → byte0 = 2 + (1*32)%256 = 0x22
+        val result = emit_neon_vmulq_f32(2, 1, 0)
+        expect(result[0]).to_equal(34)
+
+    it "FMUL V2.4S V1.4S V0.4S byte3 unchanged":
+        val result = emit_neon_vmulq_f32(2, 1, 0)
+        expect(result[3]).to_equal(110)
+
+# ============================================================================
+# FMLA V0.4S, V0.4S, V0.4S
+# Base opcode 0x4E20CC00: Q=1 U=0 size=00 (f32) opcode=11001
+# ARMv8 ARM §C7.2.110 FMLA (vector) — derived bytes
+# Expected word: 0x4E20CC00 → LE: 0x00 0xCC 0x20 0x4E
+# Semantics: Vd += Vn * Vm (Vd accumulates)
+# ============================================================================
+
+describe "NEON emit_neon_vfmaq_f32 f32 golden":
+    it "FMLA V0.4S V0.4S V0.4S emits 4 bytes":
+        val result = emit_neon_vfmaq_f32(0, 0, 0)
+        expect(result.len()).to_equal(4)
+
+    it "FMLA V0.4S V0.4S V0.4S byte0 is 0x00":
+        val result = emit_neon_vfmaq_f32(0, 0, 0)
+        expect(result[0]).to_equal(0)
+
+    it "FMLA V0.4S V0.4S V0.4S byte1 is 0xCC":
+        # bits[15:8]: opcode=11001 → 0xCC
+        val result = emit_neon_vfmaq_f32(0, 0, 0)
+        expect(result[1]).to_equal(204)
+
+    it "FMLA V0.4S V0.4S V0.4S byte2 is 0x20":
+        val result = emit_neon_vfmaq_f32(0, 0, 0)
+        expect(result[2]).to_equal(32)
+
+    it "FMLA V0.4S V0.4S V0.4S byte3 is 0x4E":
+        val result = emit_neon_vfmaq_f32(0, 0, 0)
+        expect(result[3]).to_equal(78)
+
+    it "FMLA V3.4S V1.4S V2.4S byte0 encodes Rd and Rn":
+        # Rd=3, Rn=1 → byte0 = 3 + (1*32)%256 = 0x23
+        val result = emit_neon_vfmaq_f32(3, 1, 2)
+        expect(result[0]).to_equal(35)
+
+    it "FMLA V3.4S V1.4S V2.4S byte2 encodes Rm":
+        # Rm=2 → bits[20:16]=2 → byte2 = 0x20 + 2 = 0x22
+        val result = emit_neon_vfmaq_f32(3, 1, 2)
+        expect(result[2]).to_equal(34)
+
+# ============================================================================
+# BSL V0.16B, V0.16B, V0.16B
+# ARMv8 ARM §C7.2.22 BSL — bit-pattern (Q=1 16B form):
+#   0|Q|1|01110|0|11|Rm[4:0]|000111|Rn[4:0]|Rd[4:0]
+# Base opcode (Rd=Rn=Rm=0): 0x6E601C00 → LE: 0x00 0x1C 0x60 0x6E
+#   byte2=0x60: size=11 (bits[22:21]), Rm=0 (bits[20:16])
+# Fixture N-3 in part2.md corrected per ERR-002 (2026-05-02) — doc previously had
+#   wrong Rm encoding (0x33→Rm=19); corrected to 0x63→Rm=3.
+# V-25 polarity note: for cmp_lt(a,b), caller must pass mask from FCMGT(b,a).
+# ============================================================================
+
+describe "NEON emit_neon_vbslq_u8 16B golden":
+    it "BSL V0.16B V0.16B V0.16B emits 4 bytes":
+        val result = emit_neon_vbslq_u8(0, 0, 0)
+        expect(result.len()).to_equal(4)
+
+    it "BSL V0.16B V0.16B V0.16B byte0 is 0x00":
+        val result = emit_neon_vbslq_u8(0, 0, 0)
+        expect(result[0]).to_equal(0)
+
+    it "BSL V0.16B V0.16B V0.16B byte1 is 0x1C":
+        # bits[15:8]: opcode=000111 lower → 0x1C
+        val result = emit_neon_vbslq_u8(0, 0, 0)
+        expect(result[1]).to_equal(28)
+
+    it "BSL V0.16B V0.16B V0.16B byte2 is 0x60":
+        # bits[23:16]: size=11 (bits[22:21]=11), Rm=0 → 0x60
+        val result = emit_neon_vbslq_u8(0, 0, 0)
+        expect(result[2]).to_equal(96)
+
+    it "BSL V0.16B V0.16B V0.16B byte3 is 0x6E":
+        # bits[31:24]: 0=0, Q=1, U=1, 01110 → 0x6E
+        val result = emit_neon_vbslq_u8(0, 0, 0)
+        expect(result[3]).to_equal(110)
+
+    it "BSL V3.16B V1.16B V2.16B byte0 encodes Rd and Rn":
+        # Rd=3, Rn=1 → byte0 = 3 + (1*32)%256 = 0x23
+        val result = emit_neon_vbslq_u8(3, 1, 2)
+        expect(result[0]).to_equal(35)
+
+    it "BSL V3.16B V1.16B V2.16B byte2 encodes Rm":
+        # Rm=2 → bits[20:16]=2, size=11 → byte2 = 0x60 + 2 = 0x62
+        val result = emit_neon_vbslq_u8(3, 1, 2)
+        expect(result[2]).to_equal(98)

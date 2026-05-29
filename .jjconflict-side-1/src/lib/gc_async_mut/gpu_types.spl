@@ -1,0 +1,209 @@
+@allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
+# GPU Types — GpuError, GpuDevice, GpuContext, GpuPtr, GpuModule, GpuLaunchConfig
+
+use gc_async_mut.gpu_sffi.{
+    cuda_get_error_string,
+    cuda_device_get,
+    cuda_device_count,
+    cuda_device_name,
+    cuda_device_compute_capability,
+    cuda_ctx_create,
+    cuda_ctx_destroy,
+    cuda_ctx_synchronize,
+    cuda_module_load,
+    cuda_module_load_data,
+    cuda_module_unload
+}
+
+# ============================================================================
+# GPU Error Handling
+# ============================================================================
+
+struct GpuError:
+    """GPU operation error."""
+    code: i64
+    message: text
+
+    static fn from_code(code: i64) -> GpuError:
+        """Create error from CUDA error code."""
+        GpuError(
+            code: code,
+            message: cuda_get_error_string(code)
+        )
+
+    fn to_text() -> text:
+        "GpuError({self.code}): {self.message}"
+
+# ============================================================================
+# GPU Device
+# ============================================================================
+
+struct GpuDevice:
+    """Handle to a GPU device."""
+    id: i64
+    handle: i64
+
+    static fn default() -> Result<GpuDevice, GpuError>:
+        """Get the default GPU device (device 0)."""
+        GpuDevice.get(0)
+
+    static fn get(device_id: i64) -> Result<GpuDevice, GpuError>:
+        """Get a GPU device by ID."""
+        val handle = cuda_device_get(device_id)
+        if handle < 0:
+            return Err(GpuError.from_code(handle))
+        Ok(GpuDevice(id: device_id, handle: handle))
+
+    static fn count() -> i64:
+        """Get number of available GPU devices."""
+        cuda_device_count()
+
+    fn name() -> text:
+        """Get device name."""
+        cuda_device_name(self.handle)
+
+    fn compute_capability() -> (i64, i64):
+        """Get compute capability as (major, minor)."""
+        val cap = cuda_device_compute_capability(self.handle)
+        (cap / 10, cap % 10)
+
+# ============================================================================
+# GPU Context
+# ============================================================================
+
+struct GpuContext:
+    """GPU execution context."""
+    handle: i64
+    device: GpuDevice
+
+    static fn create(device: GpuDevice) -> Result<GpuContext, GpuError>:
+        """Create a GPU context for a device."""
+        val handle = cuda_ctx_create(device.handle)
+        if handle < 0:
+            return Err(GpuError.from_code(handle))
+        Ok(GpuContext(handle: handle, device: device))
+
+    fn destroy() -> Result<(), GpuError>:
+        """Destroy this GPU context."""
+        val result = cuda_ctx_destroy(self.handle)
+        if result < 0:
+            return Err(GpuError.from_code(result))
+        Ok(())
+
+    fn synchronize() -> Result<(), GpuError>:
+        """Wait for all operations on this context to complete."""
+        val result = cuda_ctx_synchronize()
+        if result < 0:
+            return Err(GpuError.from_code(result))
+        Ok(())
+
+# ============================================================================
+# GPU Pointer - Device Memory Handle
+# ============================================================================
+
+class GpuPtr:
+    """
+    Handle to GPU device memory.
+
+    Wraps a device pointer with size tracking for safe memory operations.
+    Must be explicitly freed with gpu_free().
+
+    Usage:
+        val ptr = gpu_alloc(1024)
+        gpu_upload(ptr, host_data, 1024)
+        gpu_download(ptr, host_buf, 1024)
+        gpu_free(ptr)
+    """
+
+    device_ptr: i64
+    size: i64
+    is_valid: bool
+
+    static fn null() -> GpuPtr:
+        """Create a null GPU pointer."""
+        GpuPtr(device_ptr: 0, size: 0, is_valid: false)
+
+    fn is_null() -> bool:
+        """Check if pointer is null/invalid."""
+        self.device_ptr == 0 or not self.is_valid
+
+# ============================================================================
+# GPU Module - Compiled Kernel Container
+# ============================================================================
+
+struct GpuModule:
+    """Handle to a loaded GPU module (compiled PTX)."""
+    handle: i64
+
+    static fn load_ptx(ptx_code: text) -> Result<GpuModule, GpuError>:
+        """Load a GPU module from PTX source string."""
+        val handle = cuda_module_load_data(ptx_code)
+        if handle < 0:
+            return Err(GpuError.from_code(handle))
+        Ok(GpuModule(handle: handle))
+
+    static fn load_file(path: text) -> Result<GpuModule, GpuError>:
+        """Load a GPU module from a file path."""
+        val handle = cuda_module_load(path)
+        if handle < 0:
+            return Err(GpuError.from_code(handle))
+        Ok(GpuModule(handle: handle))
+
+    fn unload() -> Result<(), GpuError>:
+        """Unload this GPU module."""
+        val result = cuda_module_unload(self.handle)
+        if result < 0:
+            return Err(GpuError.from_code(result))
+        Ok(())
+
+# ============================================================================
+# Launch Configuration
+# ============================================================================
+
+struct GpuLaunchConfig:
+    """Configuration for launching a GPU kernel."""
+    grid_x: i64
+    grid_y: i64
+    grid_z: i64
+    block_x: i64
+    block_y: i64
+    block_z: i64
+
+    static fn simple(num_blocks: i64, threads_per_block: i64) -> GpuLaunchConfig:
+        """Create a 1D launch configuration."""
+        GpuLaunchConfig(
+            grid_x: num_blocks,
+            grid_y: 1,
+            grid_z: 1,
+            block_x: threads_per_block,
+            block_y: 1,
+            block_z: 1
+        )
+
+    static fn grid_2d(grid_x: i64, grid_y: i64, block_x: i64, block_y: i64) -> GpuLaunchConfig:
+        """Create a 2D launch configuration."""
+        GpuLaunchConfig(
+            grid_x: grid_x,
+            grid_y: grid_y,
+            grid_z: 1,
+            block_x: block_x,
+            block_y: block_y,
+            block_z: 1
+        )
+
+    static fn grid_3d(grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64) -> GpuLaunchConfig:
+        """Create a 3D launch configuration."""
+        GpuLaunchConfig(
+            grid_x: grid_x,
+            grid_y: grid_y,
+            grid_z: grid_z,
+            block_x: block_x,
+            block_y: block_y,
+            block_z: block_z
+        )
+
+    fn total_threads() -> i64:
+        """Get total number of threads."""
+        self.grid_x * self.grid_y * self.grid_z * self.block_x * self.block_y * self.block_z
+
+type GpuBuffer = GpuPtr

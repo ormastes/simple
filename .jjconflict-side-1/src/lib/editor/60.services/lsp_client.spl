@@ -1,0 +1,310 @@
+# LSP Client
+#
+# Language Server Protocol client for editor integration.
+# Communicates via JSON-RPC 2.0 over Content-Length framed stdio transport.
+# Uses lsp_transport.spl for framing, message building, and response parsing.
+
+struct LspClientConfig:
+    server_command: text
+    root_path: text
+    language_id: text
+
+struct LspRequest:
+    id: i64
+    method: text
+    params_json: text
+
+struct LspResponse:
+    id: i64
+    ok: bool
+    result_json: text
+    error_text: text
+
+struct LspNotification:
+    method: text
+    params_json: text
+
+struct LspCompletedResponse:
+    method: text
+    id: i64
+    ok: bool
+    result_json: text
+    error_text: text
+    raw_json: text
+
+class LspClient:
+    config: LspClientConfig
+    transport: StdioTransport
+    next_id: i64
+    initialized: bool
+    capabilities_json: text
+    pending_requests: [LspPendingRequest]
+    completed_responses: [LspCompletedResponse]
+
+impl LspClient:
+
+    static fn new(config: LspClientConfig) -> LspClient:
+        val transport_config = LspTransportConfig(
+            server_command: config.server_command,
+            server_args: [],
+            root_uri: lsp_path_to_uri(config.root_path)
+        )
+        LspClient(
+            config: config,
+            transport: stdio_transport_new(transport_config),
+            next_id: 1,
+            initialized: false,
+            capabilities_json: "",
+            pending_requests: [],
+            completed_responses: []
+        )
+
+    me start() -> bool:
+        self.transport.running = true
+        true
+
+    me stop():
+        self.transport.running = false
+
+    me initialize() -> LspResponse:
+        val params = lsp_build_initialize_params(
+            lsp_path_to_uri(self.config.root_path),
+            "simple-editor"
+        )
+        val resp = self._send_request("initialize", params)
+        if resp.ok:
+            self.initialized = true
+            self.capabilities_json = resp.result_json
+        resp
+
+    me initialized_notification():
+        self._send_notification("initialized", "{}")
+
+    me did_open(path: text, content: text, language_id: text):
+        val params = lsp_build_did_open_params(
+            lsp_path_to_uri(path), language_id, 1, content
+        )
+        self._send_notification("textDocument/didOpen", params)
+
+    me did_change(path: text, content: text, version: i64):
+        val params = lsp_build_did_change_params(
+            lsp_path_to_uri(path), version, content
+        )
+        self._send_notification("textDocument/didChange", params)
+
+    me did_change_watched_file(path: text, change_type: i64):
+        val params = lsp_build_did_change_watched_file_params(lsp_path_to_uri(path), change_type)
+        self._send_notification("workspace/didChangeWatchedFiles", params)
+
+    me did_change_workspace_folder(path: text, name: text, added: bool):
+        val params = lsp_build_workspace_folder_event_params(lsp_path_to_uri(path), name, added)
+        self._send_notification("workspace/didChangeWorkspaceFolders", params)
+
+    me completion(path: text, line: i64, col: i64) -> LspResponse:
+        val params = lsp_build_position_params(lsp_path_to_uri(path), line, col)
+        self._send_request("textDocument/completion", params)
+
+    me definition(path: text, line: i64, col: i64) -> LspResponse:
+        val params = lsp_build_position_params(lsp_path_to_uri(path), line, col)
+        self._send_request("textDocument/definition", params)
+
+    me hover(path: text, line: i64, col: i64) -> LspResponse:
+        val params = lsp_build_position_params(lsp_path_to_uri(path), line, col)
+        self._send_request("textDocument/hover", params)
+
+    me code_action(path: text, line: i64, col: i64) -> LspResponse:
+        val params = lsp_build_code_action_params(lsp_path_to_uri(path), line, col)
+        self._send_request("textDocument/codeAction", params)
+
+    me references(path: text, line: i64, col: i64) -> LspResponse:
+        val params = lsp_build_references_params(lsp_path_to_uri(path), line, col)
+        self._send_request("textDocument/references", params)
+
+    me selection_ranges(path: text, line: i64, col: i64) -> LspResponse:
+        val params = lsp_build_selection_range_params(lsp_path_to_uri(path), line, col)
+        self._send_request("textDocument/selectionRange", params)
+
+    me rename(path: text, line: i64, col: i64, new_name: text) -> LspResponse:
+        val params = lsp_build_rename_params(lsp_path_to_uri(path), line, col, new_name)
+        self._send_request("textDocument/rename", params)
+
+    me prepare_rename(path: text, line: i64, col: i64) -> LspResponse:
+        val params = lsp_build_position_params(lsp_path_to_uri(path), line, col)
+        self._send_request("textDocument/prepareRename", params)
+
+    me document_symbols(path: text) -> LspResponse:
+        val params = lsp_build_document_params(lsp_path_to_uri(path))
+        self._send_request("textDocument/documentSymbol", params)
+
+    me formatting(path: text) -> LspResponse:
+        val params = lsp_build_formatting_params(lsp_path_to_uri(path))
+        self._send_request("textDocument/formatting", params)
+
+    me range_formatting(path: text, start_line: i64, start_col: i64, end_line: i64, end_col: i64) -> LspResponse:
+        val params = lsp_build_range_formatting_params(lsp_path_to_uri(path), start_line, start_col, end_line, end_col)
+        self._send_request("textDocument/rangeFormatting", params)
+
+    me signature_help(path: text, line: i64, col: i64) -> LspResponse:
+        val params = lsp_build_position_params(lsp_path_to_uri(path), line, col)
+        self._send_request("textDocument/signatureHelp", params)
+
+    me document_links(path: text) -> LspResponse:
+        val params = lsp_build_document_params(lsp_path_to_uri(path))
+        self._send_request("textDocument/documentLink", params)
+
+    me folding_ranges(path: text) -> LspResponse:
+        val params = lsp_build_document_params(lsp_path_to_uri(path))
+        self._send_request("textDocument/foldingRange", params)
+
+    me workspace_symbols(query: text) -> LspResponse:
+        val params = lsp_build_workspace_symbol_params(query)
+        self._send_request("workspace/symbol", params)
+
+    me semantic_tokens(path: text) -> LspResponse:
+        val params = lsp_build_document_params(lsp_path_to_uri(path))
+        self._send_request("textDocument/semanticTokens/full", params)
+
+    me inlay_hints(path: text) -> LspResponse:
+        val params = lsp_build_full_range_params(lsp_path_to_uri(path))
+        self._send_request("textDocument/inlayHint", params)
+
+    me code_lens(path: text) -> LspResponse:
+        val params = lsp_build_document_params(lsp_path_to_uri(path))
+        self._send_request("textDocument/codeLens", params)
+
+    me code_lens_resolve(item_json: text) -> LspResponse:
+        self._send_request("codeLens/resolve", item_json)
+
+    me execute_command(params_json: text) -> LspResponse:
+        self._send_request("workspace/executeCommand", params_json)
+
+    me call_hierarchy(path: text, line: i64, col: i64) -> LspResponse:
+        val params = lsp_build_position_params(lsp_path_to_uri(path), line, col)
+        self._send_request("textDocument/prepareCallHierarchy", params)
+
+    me call_hierarchy_incoming(item_json: text) -> LspResponse:
+        self._send_request("callHierarchy/incomingCalls", "{\"item\": " + item_json + "}")
+
+    me call_hierarchy_outgoing(item_json: text) -> LspResponse:
+        self._send_request("callHierarchy/outgoingCalls", "{\"item\": " + item_json + "}")
+
+    me shutdown():
+        self._send_request("shutdown", "{}")
+        self.initialized = false
+
+    me exit():
+        self._send_notification("exit", "")
+        self.stop()
+
+    me poll_notifications() -> [LspNotification]:
+        var notifications: [LspNotification] = []
+        var json = self._receive_json()
+        while json != "":
+            if lsp_is_notification(json):
+                val method = lsp_parse_notification_method(json)
+                val params = lsp_parse_notification_params(json)
+                notifications.push(LspNotification(method: method, params_json: params))
+            elif lsp_is_response(json):
+                self._handle_response(json)
+            json = self._receive_json()
+        notifications
+
+    me poll_responses() -> [LspCompletedResponse]:
+        var responses: [LspCompletedResponse] = []
+        for response in self.completed_responses:
+            responses.push(response)
+        self.completed_responses = []
+        responses
+
+    me _send_request(method: text, params_json: text) -> LspResponse:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        val id_str = str(id)
+        val json = lsp_jsonrpc_request(id_str, method, params_json)
+        self._send_json(json)
+        self.pending_requests.push(LspPendingRequest(id: id, method: method))
+        LspResponse(id: id, ok: true, result_json: "", error_text: "")
+
+    me _send_notification(method: text, params_json: text):
+        val json = lsp_jsonrpc_notification(method, params_json)
+        self._send_json(json)
+
+    me _send_json(json: text) -> bool:
+        if not self.transport.running:
+            return false
+        var transport = self.transport
+        transport.send_buffer.push(lsp_frame_message(json))
+        self.transport = transport
+        true
+
+    me _receive_json() -> text:
+        if self.transport.recv_buffer.len() == 0:
+            return ""
+        val msg = self.transport.recv_buffer[0]
+        var new_buf: [text] = []
+        var i = 1
+        while i < self.transport.recv_buffer.len():
+            new_buf.push(self.transport.recv_buffer[i])
+            i = i + 1
+        var transport = self.transport
+        transport.recv_buffer = new_buf
+        self.transport = transport
+        msg
+
+    me _handle_response(json: text):
+        val id = lsp_parse_response_id(json)
+        var method = ""
+        var new_pending: [LspPendingRequest] = []
+        for p in self.pending_requests:
+            if p.id != id:
+                new_pending.push(p)
+            else:
+                method = p.method
+        self.pending_requests = new_pending
+        val response = lsp_response_from_json(json)
+        self.completed_responses.push(LspCompletedResponse(method: method, id: response.id, ok: response.ok, result_json: response.result_json, error_text: response.error_text, raw_json: json))
+
+    me _make_request(method: text, params_json: text) -> LspRequest:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        LspRequest(id: id, method: method, params_json: params_json)
+
+    me _notify(method: text, params_json: text):
+        val _ = LspNotification(method: method, params_json: params_json)
+
+
+struct LspPendingRequest:
+    id: i64
+    method: text
+
+fn lsp_jsonrpc_request(id: text, method: text, params: text) -> text:
+    "{\"jsonrpc\": \"2.0\", \"id\": " + id + ", \"method\": \"" + method + "\", \"params\": " + params + "}"
+
+fn lsp_jsonrpc_notification(method: text, params: text) -> text:
+    if params == "":
+        return "{\"jsonrpc\": \"2.0\", \"method\": \"" + method + "\"}"
+    "{\"jsonrpc\": \"2.0\", \"method\": \"" + method + "\", \"params\": " + params + "}"
+
+fn lsp_response_from_json(json: text) -> LspResponse:
+    val id = lsp_parse_response_id(json)
+    val error = lsp_parse_response_error(json)
+    if error != "":
+        return LspResponse(id: id, ok: false, result_json: "", error_text: error)
+    val result = lsp_parse_response_result(json)
+    LspResponse(id: id, ok: true, result_json: result, error_text: "")
+
+fn _lsp_escape(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "\"":
+            result = result + "\\\""
+        elif ch == "\\":
+            result = result + "\\\\"
+        elif ch == "\n":
+            result = result + "\\n"
+        else:
+            result = result + ch
+        i = i + 1
+    result

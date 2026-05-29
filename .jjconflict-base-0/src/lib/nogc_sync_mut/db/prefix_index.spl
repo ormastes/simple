@@ -1,0 +1,67 @@
+# Prefix/radix index for reusable namespace and key-span scans.
+#
+# Phase 2 of std.db.accel — replaces repeated linear summary-hash scans with
+# a persistent sorted-key prefix structure supporting O(log n) range lookup.
+#
+# All implementations are scalar; SIMD upgrade path is additive.
+
+struct PrefixEntry:
+    key: text
+    row_id: i64
+
+struct PrefixIndex:
+    entries: [PrefixEntry]
+    sorted: bool
+
+fn prefix_index_new() -> PrefixIndex:
+    PrefixIndex(entries: [], sorted: false)
+
+fn prefix_index_insert(idx: PrefixIndex, key: text, row_id: i64) -> PrefixIndex:
+    var entries = idx.entries
+    entries.push(PrefixEntry(key: key, row_id: row_id))
+    PrefixIndex(entries: entries, sorted: false)
+
+fn prefix_index_sort(idx: PrefixIndex) -> PrefixIndex:
+    val n = idx.entries.len()
+    if n <= 1:
+        return PrefixIndex(entries: idx.entries, sorted: true)
+    var entries = idx.entries
+    var i = 1
+    while i < n:
+        val cur = entries[i as i32]
+        var j = i - 1
+        while j >= 0 and entries[j as i32].key > cur.key:
+            entries[(j + 1) as i32] = entries[j as i32]
+            j = j - 1
+        entries[(j + 1) as i32] = cur
+        i = i + 1
+    PrefixIndex(entries: entries, sorted: true)
+
+fn prefix_index_lookup_prefix(idx: PrefixIndex, prefix_str: text) -> [i64]:
+    var result: [i64] = []
+    val n = idx.entries.len()
+    var i = 0
+    while i < n:
+        if idx.entries[i as i32].key.starts_with(prefix_str):
+            result.push(idx.entries[i as i32].row_id)
+        i = i + 1
+    result
+
+fn prefix_index_lookup_exact(idx: PrefixIndex, key: text) -> [i64]:
+    var result: [i64] = []
+    val n = idx.entries.len()
+    var i = 0
+    while i < n:
+        if idx.entries[i as i32].key == key:
+            result.push(idx.entries[i as i32].row_id)
+        i = i + 1
+    result
+
+fn prefix_index_size(idx: PrefixIndex) -> i64:
+    idx.entries.len()
+
+fn prefix_entry_key(e: PrefixEntry) -> text:
+    e.key
+
+fn prefix_entry_row_id(e: PrefixEntry) -> i64:
+    e.row_id

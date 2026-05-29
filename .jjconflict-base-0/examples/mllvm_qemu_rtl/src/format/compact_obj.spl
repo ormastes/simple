@@ -1,0 +1,488 @@
+# IR_TC Compact Object Format
+#
+# Minimal object format for 8/16-bit targets (AVR, 8086).
+# Much smaller header overhead than ELF — designed for memory-constrained systems.
+#
+# Header (9 bytes):
+#   magic:              "IT" (2 bytes: 0x49, 0x54)
+#   version:            u8 (currently 1)
+#   width:              u8 (8 or 16)
+#   flags:              u8 (module-level flags)
+#   section_count:      u8
+#   symbol_count:       u8
+#   string_table_offset: u16 LE
+#
+# Section (8 bytes each):
+#   name_off:  u8  (offset into string table)
+#   flags:     u8  (R=1, W=2, X=4)
+#   offset:    u16 LE (file offset to section data)
+#   size:      u16 LE (section data size in bytes)
+#   addr:      u16 LE (load address / VMA)
+#
+# Symbol (5 bytes each):
+#   name_off:  u8  (offset into string table)
+#   section:   u8  (section index, 0xFF = absolute)
+#   value:     u16 LE (symbol value / address)
+#   flags:     u8  (bit 0: global, bit 1: weak, bit 2: function)
+
+use format.irtc_binary.{encode_u16_le, decode_u16_le}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val COMPACT_MAGIC_0: i64 = 0x49     # 'I'
+val COMPACT_MAGIC_1: i64 = 0x54     # 'T'
+val COMPACT_VERSION: i64 = 1
+
+# Section flags
+val SECT_FLAG_READ: i64 = 1         # R
+val SECT_FLAG_WRITE: i64 = 2        # W
+val SECT_FLAG_EXEC: i64 = 4         # X
+
+# Symbol flags
+val SYM_FLAG_GLOBAL: i64 = 1        # Global symbol
+val SYM_FLAG_WEAK: i64 = 2          # Weak binding
+val SYM_FLAG_FUNCTION: i64 = 4      # Function symbol (vs data)
+
+# Special section index
+val SECTION_ABS: i64 = 0xFF         # Absolute symbol (no section)
+
+# Header size in bytes
+val COMPACT_HEADER_SIZE: i64 = 9
+# Section entry size in bytes
+val COMPACT_SECTION_SIZE: i64 = 8
+# Symbol entry size in bytes
+val COMPACT_SYMBOL_SIZE: i64 = 5
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct IrTcCompactHeader:
+    """Compact object file header."""
+    version: i64
+    width: i64
+    flags: i64
+    section_count: i64
+    symbol_count: i64
+    string_table_offset: i64
+
+impl IrTcCompactHeader:
+    static fn new(width: i64) -> IrTcCompactHeader:
+        IrTcCompactHeader(
+            version: COMPACT_VERSION,
+            width: width,
+            flags: 0,
+            section_count: 0,
+            symbol_count: 0,
+            string_table_offset: 0
+        )
+
+struct IrTcCompactSection:
+    """A section in the compact object."""
+    name_off: i64       # Offset into string table
+    flags: i64          # R=1, W=2, X=4
+    offset: i64         # File offset to section data
+    size: i64           # Section data size
+    addr: i64           # Load address (VMA)
+    data: [i64]         # Raw section bytes
+
+impl IrTcCompactSection:
+    static fn new(name_off: i64, flags: i64, addr: i64) -> IrTcCompactSection:
+        IrTcCompactSection(
+            name_off: name_off,
+            flags: flags,
+            offset: 0,
+            size: 0,
+            addr: addr,
+            data: []
+        )
+
+    static fn text_section(name_off: i64, addr: i64) -> IrTcCompactSection:
+        """Create a .text section (read + execute)."""
+        IrTcCompactSection.new(name_off, SECT_FLAG_READ + SECT_FLAG_EXEC, addr)
+
+    static fn data_section(name_off: i64, addr: i64) -> IrTcCompactSection:
+        """Create a .data section (read + write)."""
+        IrTcCompactSection.new(name_off, SECT_FLAG_READ + SECT_FLAG_WRITE, addr)
+
+    static fn rodata_section(name_off: i64, addr: i64) -> IrTcCompactSection:
+        """Create a .rodata section (read-only)."""
+        IrTcCompactSection.new(name_off, SECT_FLAG_READ, addr)
+
+    static fn bss_section(name_off: i64, addr: i64) -> IrTcCompactSection:
+        """Create a .bss section (read + write, zero-initialized)."""
+        IrTcCompactSection.new(name_off, SECT_FLAG_READ + SECT_FLAG_WRITE, addr)
+
+    fn is_readable() -> bool:
+        self.flags % 2 == 1
+
+    fn is_writable() -> bool:
+        (self.flags / 2) % 2 == 1
+
+    fn is_executable() -> bool:
+        (self.flags / 4) % 2 == 1
+
+struct IrTcCompactSymbol:
+    """A symbol in the compact object."""
+    name_off: i64       # Offset into string table
+    section: i64        # Section index (0xFF = absolute)
+    value: i64          # Symbol value (address)
+    flags: i64          # bit 0: global, bit 1: weak, bit 2: function
+
+impl IrTcCompactSymbol:
+    static fn new(name_off: i64, section: i64, value: i64, flags: i64) -> IrTcCompactSymbol:
+        IrTcCompactSymbol(
+            name_off: name_off,
+            section: section,
+            value: value,
+            flags: flags
+        )
+
+    static fn global_func(name_off: i64, section: i64, value: i64) -> IrTcCompactSymbol:
+        """Create a global function symbol."""
+        IrTcCompactSymbol(name_off: name_off, section: section, value: value, flags: SYM_FLAG_GLOBAL + SYM_FLAG_FUNCTION)
+
+    static fn global_data(name_off: i64, section: i64, value: i64) -> IrTcCompactSymbol:
+        """Create a global data symbol."""
+        IrTcCompactSymbol(name_off: name_off, section: section, value: value, flags: SYM_FLAG_GLOBAL)
+
+    static fn local_func(name_off: i64, section: i64, value: i64) -> IrTcCompactSymbol:
+        """Create a local function symbol."""
+        IrTcCompactSymbol(name_off: name_off, section: section, value: value, flags: SYM_FLAG_FUNCTION)
+
+    fn is_global() -> bool:
+        self.flags % 2 == 1
+
+    fn is_weak() -> bool:
+        (self.flags / 2) % 2 == 1
+
+    fn is_function() -> bool:
+        (self.flags / 4) % 2 == 1
+
+    fn is_absolute() -> bool:
+        self.section == SECTION_ABS
+
+# ============================================================================
+# Compact Object — aggregate
+# ============================================================================
+
+struct CompactObject:
+    """A complete compact object file."""
+    header: IrTcCompactHeader
+    sections: [IrTcCompactSection]
+    symbols: [IrTcCompactSymbol]
+    string_table: [i64]     # Raw bytes of the string table (null-separated)
+
+impl CompactObject:
+    static fn new(width: i64) -> CompactObject:
+        CompactObject(
+            header: IrTcCompactHeader.new(width),
+            sections: [],
+            symbols: [],
+            string_table: []
+        )
+
+    me add_string(s: text) -> i64:
+        """Add a string to the string table, returning its offset."""
+        val offset = self.string_table.len()
+        for i in 0..s.len():
+            val ch = s[i:i + 1]
+            self.string_table.push(_compact_char_to_byte(ch))
+        self.string_table.push(0)   # Null terminator
+        offset
+
+    me add_section(section: IrTcCompactSection):
+        self.sections.push(section)
+
+    me add_symbol(symbol: IrTcCompactSymbol):
+        self.symbols.push(symbol)
+
+# ============================================================================
+# Writer
+# ============================================================================
+
+fn write_compact_object(sections: [IrTcCompactSection], symbols: [IrTcCompactSymbol], string_table: [i64], width: i64) -> [i64]:
+    """Serialize a compact object to bytes."""
+    var result: [i64] = []
+
+    # Calculate offsets
+    val section_table_offset = COMPACT_HEADER_SIZE
+    val symbol_table_offset = section_table_offset + sections.len() * COMPACT_SECTION_SIZE
+    val str_table_offset = symbol_table_offset + symbols.len() * COMPACT_SYMBOL_SIZE
+
+    # Data starts after string table
+    var data_offset = str_table_offset + string_table.len()
+
+    # Compute section offsets
+    var section_offsets: [i64] = []
+    for sect in sections:
+        section_offsets.push(data_offset)
+        data_offset = data_offset + sect.data.len()
+
+    # --- Header (9 bytes) ---
+    result.push(COMPACT_MAGIC_0)
+    result.push(COMPACT_MAGIC_1)
+    result.push(COMPACT_VERSION)
+    result.push(width)
+    result.push(0)  # flags
+    result.push(sections.len())
+    result.push(symbols.len())
+    var str_off_bytes = encode_u16_le(str_table_offset)
+    result.push(str_off_bytes[0])
+    result.push(str_off_bytes[1])
+
+    # --- Section Table ---
+    for i in 0..sections.len():
+        val sect = sections[i]
+        result.push(sect.name_off % 256)
+        result.push(sect.flags % 256)
+        var off_bytes = encode_u16_le(section_offsets[i])
+        result.push(off_bytes[0])
+        result.push(off_bytes[1])
+        var size_bytes = encode_u16_le(sect.data.len())
+        result.push(size_bytes[0])
+        result.push(size_bytes[1])
+        var addr_bytes = encode_u16_le(sect.addr)
+        result.push(addr_bytes[0])
+        result.push(addr_bytes[1])
+
+    # --- Symbol Table ---
+    for sym in symbols:
+        result.push(sym.name_off % 256)
+        result.push(sym.section % 256)
+        var val_bytes = encode_u16_le(sym.value)
+        result.push(val_bytes[0])
+        result.push(val_bytes[1])
+        result.push(sym.flags % 256)
+
+    # --- String Table ---
+    for b in string_table:
+        result.push(b)
+
+    # --- Section Data ---
+    for sect in sections:
+        for b in sect.data:
+            result.push(b)
+
+    result
+
+# ============================================================================
+# Reader
+# ============================================================================
+
+fn read_compact_object(bytes: [i64]) -> Result<CompactObject, CompactError>:
+    """Deserialize bytes into a CompactObject."""
+    if bytes.len() < COMPACT_HEADER_SIZE:
+        return Err(CompactError.TooShort(message: "file shorter than header"))
+
+    # --- Header ---
+    if bytes[0] != COMPACT_MAGIC_0:
+        return Err(CompactError.InvalidMagic(message: "byte 0 mismatch"))
+    if bytes[1] != COMPACT_MAGIC_1:
+        return Err(CompactError.InvalidMagic(message: "byte 1 mismatch"))
+
+    val version = bytes[2]
+    if version != COMPACT_VERSION:
+        return Err(CompactError.UnsupportedVersion(version: version))
+
+    val width = bytes[3]
+    val flags = bytes[4]
+    val section_count = bytes[5]
+    val symbol_count = bytes[6]
+    val str_table_offset = decode_u16_le(bytes, 7)
+
+    var header = IrTcCompactHeader(
+        version: version,
+        width: width,
+        flags: flags,
+        section_count: section_count,
+        symbol_count: symbol_count,
+        string_table_offset: str_table_offset
+    )
+
+    # --- Section Table ---
+    var sections: [IrTcCompactSection] = []
+    var pos = COMPACT_HEADER_SIZE
+
+    for _ in 0..section_count:
+        if pos + COMPACT_SECTION_SIZE > bytes.len():
+            return Err(CompactError.TooShort(message: "section table truncated"))
+        val name_off = bytes[pos]
+        val sect_flags = bytes[pos + 1]
+        val offset = decode_u16_le(bytes, pos + 2)
+        val size = decode_u16_le(bytes, pos + 4)
+        val addr = decode_u16_le(bytes, pos + 6)
+
+        # Read section data
+        var data: [i64] = []
+        if offset + size <= bytes.len():
+            for j in 0..size:
+                data.push(bytes[offset + j])
+
+        var sect = IrTcCompactSection(
+            name_off: name_off,
+            flags: sect_flags,
+            offset: offset,
+            size: size,
+            addr: addr,
+            data: data
+        )
+        sections.push(sect)
+        pos = pos + COMPACT_SECTION_SIZE
+
+    # --- Symbol Table ---
+    var symbols: [IrTcCompactSymbol] = []
+    for _ in 0..symbol_count:
+        if pos + COMPACT_SYMBOL_SIZE > bytes.len():
+            return Err(CompactError.TooShort(message: "symbol table truncated"))
+        val name_off = bytes[pos]
+        val section = bytes[pos + 1]
+        val value = decode_u16_le(bytes, pos + 2)
+        val sym_flags = bytes[pos + 4]
+        symbols.push(IrTcCompactSymbol(
+            name_off: name_off,
+            section: section,
+            value: value,
+            flags: sym_flags
+        ))
+        pos = pos + COMPACT_SYMBOL_SIZE
+
+    # --- String Table ---
+    var string_table: [i64] = []
+    if str_table_offset < bytes.len():
+        # String table ends where section data begins (or end of file)
+        var str_end = bytes.len()
+        if sections.len() > 0:
+            str_end = sections[0].offset
+        for i in str_table_offset..str_end:
+            if i < bytes.len():
+                string_table.push(bytes[i])
+
+    var obj = CompactObject(
+        header: header,
+        sections: sections,
+        symbols: symbols,
+        string_table: string_table
+    )
+    Ok(obj)
+
+# ============================================================================
+# Error Type
+# ============================================================================
+
+enum CompactError:
+    """Errors during compact object deserialization."""
+    InvalidMagic(message: text)
+    UnsupportedVersion(version: i64)
+    TooShort(message: text)
+    CorruptData(message: text)
+
+impl CompactError:
+    fn to_text() -> text:
+        match self:
+            InvalidMagic(msg): "invalid magic: {msg}"
+            UnsupportedVersion(v): "unsupported compact version: {v}"
+            TooShort(msg): "data too short: {msg}"
+            CorruptData(msg): "corrupt data: {msg}"
+
+# ============================================================================
+# String Table Helpers
+# ============================================================================
+
+fn read_string_at(string_table: [i64], offset: i64) -> text:
+    """Read a null-terminated string from the string table at the given offset."""
+    var result = ""
+    var pos = offset
+    while pos < string_table.len():
+        val b = string_table[pos]
+        if b == 0:
+            return result
+        result = result + _compact_byte_to_char(b)
+        pos = pos + 1
+    result
+
+fn _compact_char_to_byte(ch: text) -> i64:
+    """Map a single character to its ASCII byte value (compact format)."""
+    if ch == ".": return 46
+    if ch == "0": return 48
+    if ch == "1": return 49
+    if ch == "2": return 50
+    if ch == "3": return 51
+    if ch == "4": return 52
+    if ch == "5": return 53
+    if ch == "6": return 54
+    if ch == "7": return 55
+    if ch == "8": return 56
+    if ch == "9": return 57
+    if ch == "_": return 95
+    if ch == "a": return 97
+    if ch == "b": return 98
+    if ch == "c": return 99
+    if ch == "d": return 100
+    if ch == "e": return 101
+    if ch == "f": return 102
+    if ch == "g": return 103
+    if ch == "h": return 104
+    if ch == "i": return 105
+    if ch == "j": return 106
+    if ch == "k": return 107
+    if ch == "l": return 108
+    if ch == "m": return 109
+    if ch == "n": return 110
+    if ch == "o": return 111
+    if ch == "p": return 112
+    if ch == "q": return 113
+    if ch == "r": return 114
+    if ch == "s": return 115
+    if ch == "t": return 116
+    if ch == "u": return 117
+    if ch == "v": return 118
+    if ch == "w": return 119
+    if ch == "x": return 120
+    if ch == "y": return 121
+    if ch == "z": return 122
+    63  # '?' fallback
+
+fn _compact_byte_to_char(b: i64) -> text:
+    """Map an ASCII byte to a character (compact format)."""
+    if b == 46: return "."
+    if b == 48: return "0"
+    if b == 49: return "1"
+    if b == 50: return "2"
+    if b == 51: return "3"
+    if b == 52: return "4"
+    if b == 53: return "5"
+    if b == 54: return "6"
+    if b == 55: return "7"
+    if b == 56: return "8"
+    if b == 57: return "9"
+    if b == 95: return "_"
+    if b == 97: return "a"
+    if b == 98: return "b"
+    if b == 99: return "c"
+    if b == 100: return "d"
+    if b == 101: return "e"
+    if b == 102: return "f"
+    if b == 103: return "g"
+    if b == 104: return "h"
+    if b == 105: return "i"
+    if b == 106: return "j"
+    if b == 107: return "k"
+    if b == 108: return "l"
+    if b == 109: return "m"
+    if b == 110: return "n"
+    if b == 111: return "o"
+    if b == 112: return "p"
+    if b == 113: return "q"
+    if b == 114: return "r"
+    if b == 115: return "s"
+    if b == 116: return "t"
+    if b == 117: return "u"
+    if b == 118: return "v"
+    if b == 119: return "w"
+    if b == 120: return "x"
+    if b == 121: return "y"
+    if b == 122: return "z"
+    "?"  # Fallback

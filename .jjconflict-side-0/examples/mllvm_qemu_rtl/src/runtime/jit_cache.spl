@@ -1,0 +1,298 @@
+# Translation Block Cache (JIT Cache)
+#
+# Maps guest program counter values to compiled host code (translation blocks).
+# Supports lookup, insertion, invalidation, TB chaining, and statistics.
+#
+# This is the runtime counterpart to the compile-time TB chaining pass
+# in opt/tb_chain.spl — it manages cached compiled code at execution time.
+
+use core.types.{GuestArch}
+
+# ============================================================================
+# Translation Block
+# ============================================================================
+
+struct TranslationBlock:
+    """A single cached translation block — compiled host code for a guest PC range."""
+    guest_pc: i64               # Guest address this TB starts at
+    host_code: [i64]            # Machine code bytes (each element 0-255)
+    size: i64                   # Host code size in bytes
+    guest_size: i64             # Number of guest instruction bytes covered
+    exec_count: i64             # How many times this TB has been executed
+    chained_to: i64             # Guest PC of chained target (-1 = no chain)
+    is_valid: bool              # False if invalidated (pending eviction)
+
+impl TranslationBlock:
+    static fn new(guest_pc: i64, host_code: [i64], guest_size: i64) -> TranslationBlock:
+        TranslationBlock(
+            guest_pc: guest_pc,
+            host_code: host_code,
+            size: host_code.len(),
+            guest_size: guest_size,
+            exec_count: 0,
+            chained_to: -1,
+            is_valid: true
+        )
+
+    fn to_text() -> text:
+        "TB(pc=0x{self.guest_pc}, host_size={self.size}, guest_size={self.guest_size}, exec={self.exec_count})"
+
+# ============================================================================
+# Cache Bucket (hash chain entry)
+# ============================================================================
+
+struct CacheBucket:
+    """One entry in the hash table — holds a TB and links via array indexing."""
+    tb: TranslationBlock
+    occupied: bool
+
+impl CacheBucket:
+    static fn empty() -> CacheBucket:
+        val empty_tb = TranslationBlock(
+            guest_pc: -1,
+            host_code: [],
+            size: 0,
+            guest_size: 0,
+            exec_count: 0,
+            chained_to: -1,
+            is_valid: false
+        )
+        CacheBucket(tb: empty_tb, occupied: false)
+
+# ============================================================================
+# JIT Cache
+# ============================================================================
+
+val DEFAULT_CACHE_SIZE: i64 = 4096      # Number of hash buckets
+
+struct JitCache:
+    """Translation block cache — maps guest PC to compiled host code.
+
+    Uses open-addressing hash table with linear probing.
+    """
+    buckets: [CacheBucket]
+    capacity: i64
+    count: i64                  # Number of occupied entries
+
+    # Statistics
+    hit_count: i64
+    miss_count: i64
+    eviction_count: i64
+    chain_count: i64
+
+impl JitCache:
+    static fn new() -> JitCache:
+        JitCache.with_capacity(DEFAULT_CACHE_SIZE)
+
+    static fn with_capacity(capacity: i64) -> JitCache:
+        var buckets: [CacheBucket] = []
+        for _ in 0..capacity:
+            buckets.push(CacheBucket.empty())
+        JitCache(
+            buckets: buckets,
+            capacity: capacity,
+            count: 0,
+            hit_count: 0,
+            miss_count: 0,
+            eviction_count: 0,
+            chain_count: 0
+        )
+
+    # ========================================================================
+    # Hash function
+    # ========================================================================
+
+    fn _hash(guest_pc: i64) -> i64:
+        """Simple hash for guest PC values.
+
+        Shift-xor hash to spread sequential PCs across buckets.
+        """
+        var h = guest_pc
+        h = h ^ (h >> 16)
+        h = h * 0x45d9f3b
+        h = h ^ (h >> 16)
+        # Ensure positive result and mod capacity
+        val result = h & 0x7FFFFFFF
+        result % self.capacity
+
+    # ========================================================================
+    # Lookup
+    # ========================================================================
+
+    me lookup(guest_pc: i64) -> TranslationBlock?:
+        """Look up a translation block by guest PC.
+
+        Returns the TB if found and valid, nil otherwise.
+        """
+        val start = self._hash(guest_pc)
+        # Linear probe up to capacity
+        for i in 0..self.capacity:
+            val idx = (start + i) % self.capacity
+            val bucket = self.buckets[idx]
+            if !bucket.occupied:
+                # Empty slot — not found
+                self.miss_count = self.miss_count + 1
+                return nil
+            if bucket.tb.guest_pc == guest_pc:
+                if bucket.tb.is_valid:
+                    self.hit_count = self.hit_count + 1
+                    return Some(bucket.tb)
+                else:
+                    self.miss_count = self.miss_count + 1
+                    return nil
+        self.miss_count = self.miss_count + 1
+        nil
+
+    # ========================================================================
+    # Insert
+    # ========================================================================
+
+    me insert(guest_pc: i64, tb: TranslationBlock):
+        """Insert or replace a translation block for the given guest PC."""
+        val start = self._hash(guest_pc)
+        for i in 0..self.capacity:
+            val idx = (start + i) % self.capacity
+            val bucket = self.buckets[idx]
+
+            if !bucket.occupied:
+                # Empty slot — insert here
+                self.buckets[idx] = CacheBucket(tb: tb, occupied: true)
+                self.count = self.count + 1
+                return
+
+            if bucket.tb.guest_pc == guest_pc:
+                # Replace existing entry
+                self.buckets[idx] = CacheBucket(tb: tb, occupied: true)
+                self.eviction_count = self.eviction_count + 1
+                return
+
+        # Table is full — evict the start bucket
+        self.buckets[start] = CacheBucket(tb: tb, occupied: true)
+        self.eviction_count = self.eviction_count + 1
+
+    # ========================================================================
+    # Invalidation
+    # ========================================================================
+
+    me invalidate(guest_pc: i64):
+        """Invalidate a single TB by guest PC (for self-modifying code)."""
+        val start = self._hash(guest_pc)
+        for i in 0..self.capacity:
+            val idx = (start + i) % self.capacity
+            val bucket = self.buckets[idx]
+            if !bucket.occupied:
+                return
+            if bucket.tb.guest_pc == guest_pc:
+                var invalid_tb = bucket.tb
+                invalid_tb = TranslationBlock(..invalid_tb, is_valid: false)
+                self.buckets[idx] = CacheBucket(tb: invalid_tb, occupied: true)
+                return
+
+    me invalidate_range(start_addr: i64, end_addr: i64):
+        """Invalidate all TBs whose guest_pc falls within [start_addr, end_addr).
+
+        Used when guest memory is modified (self-modifying code, DMA, etc.).
+        """
+        for i in 0..self.capacity:
+            val bucket = self.buckets[i]
+            if bucket.occupied:
+                if bucket.tb.is_valid:
+                    val pc = bucket.tb.guest_pc
+                    if (pc >= start_addr) & (pc < end_addr):
+                        var invalid_tb = bucket.tb
+                        invalid_tb = TranslationBlock(..invalid_tb, is_valid: false)
+                        self.buckets[i] = CacheBucket(tb: invalid_tb, occupied: true)
+
+    me flush():
+        """Clear all entries from the cache."""
+        for i in 0..self.capacity:
+            self.buckets[i] = CacheBucket.empty()
+        self.count = 0
+        self.eviction_count = self.eviction_count + 1
+
+    # ========================================================================
+    # TB Chaining
+    # ========================================================================
+
+    me chain(from_pc: i64, to_pc: i64):
+        """Chain two translation blocks: patch the exit of from_tb to jump directly to to_tb.
+
+        This avoids returning to the dispatcher for known sequential blocks.
+        The from_tb's chained_to field records the target for later unchaining.
+        """
+        val start = self._hash(from_pc)
+        for i in 0..self.capacity:
+            val idx = (start + i) % self.capacity
+            val bucket = self.buckets[idx]
+            if !bucket.occupied:
+                return
+            if bucket.tb.guest_pc == from_pc:
+                if bucket.tb.is_valid:
+                    var chained_tb = bucket.tb
+                    chained_tb = TranslationBlock(..chained_tb, chained_to: to_pc)
+                    self.buckets[idx] = CacheBucket(tb: chained_tb, occupied: true)
+                    self.chain_count = self.chain_count + 1
+                return
+
+    me unchain(guest_pc: i64):
+        """Remove chaining from a TB, restoring indirect dispatch lookup.
+
+        Called when a chained target becomes invalid (e.g., SMC invalidation).
+        """
+        val start = self._hash(guest_pc)
+        for i in 0..self.capacity:
+            val idx = (start + i) % self.capacity
+            val bucket = self.buckets[idx]
+            if !bucket.occupied:
+                return
+            if bucket.tb.guest_pc == guest_pc:
+                var unchained_tb = bucket.tb
+                unchained_tb = TranslationBlock(..unchained_tb, chained_to: -1)
+                self.buckets[idx] = CacheBucket(tb: unchained_tb, occupied: true)
+                return
+
+    # ========================================================================
+    # Execution tracking
+    # ========================================================================
+
+    me record_execution(guest_pc: i64):
+        """Increment execution count for the TB at guest_pc."""
+        val start = self._hash(guest_pc)
+        for i in 0..self.capacity:
+            val idx = (start + i) % self.capacity
+            val bucket = self.buckets[idx]
+            if !bucket.occupied:
+                return
+            if bucket.tb.guest_pc == guest_pc:
+                var updated_tb = bucket.tb
+                updated_tb = TranslationBlock(..updated_tb, exec_count: updated_tb.exec_count + 1)
+                self.buckets[idx] = CacheBucket(tb: updated_tb, occupied: true)
+                return
+
+    # ========================================================================
+    # Statistics
+    # ========================================================================
+
+    fn hit_rate() -> i64:
+        """Return hit rate as percentage (0-100)."""
+        val total = self.hit_count + self.miss_count
+        if total == 0:
+            0
+        else:
+            (self.hit_count * 100) / total
+
+    fn stats_text() -> text:
+        """Return cache statistics as text."""
+        var s = "JitCache(capacity={self.capacity}, count={self.count})"
+        s = s + "\n  hits: {self.hit_count}, misses: {self.miss_count}"
+        s = s + "\n  hit rate: {self.hit_rate()}%"
+        s = s + "\n  evictions: {self.eviction_count}"
+        s = s + "\n  chains: {self.chain_count}"
+        s
+
+    me reset_stats():
+        """Reset statistics counters."""
+        self.hit_count = 0
+        self.miss_count = 0
+        self.eviction_count = 0
+        self.chain_count = 0

@@ -1,0 +1,40 @@
+use compiler.backend.linker.smf_writer.{SmfWriter, SectionType, SECTION_FLAG_READ}
+use std.driver.manifest.{DriverManifest, ManifestKind, DRVS_MAGIC}
+use std.driver.loader.{encode_manifest, decode_manifest}
+use std.driver.types.{DriverClass}
+
+describe "SMF driver manifest section":
+    it "reserves .drv_manifest section type and wire value":
+        expect(SectionType.DrvManifest.name()).to_equal(".drv_manifest")
+        expect(SectionType.DrvManifest.to_wire_u8()).to_equal(14u8)
+
+    it "adds DRVS manifest payload as a read-only 8-byte-aligned section":
+        val manifest = DriverManifest.for_driver("ahci", "1.0", DriverClass.Block, 0x8086, [0x2922, 0x2829])
+        val bytes = encode_manifest(manifest)
+        var writer = SmfWriter.create()
+        val idx = writer.add_driver_manifest_section(bytes)
+        expect(idx).to_equal(0)
+        expect(writer.section_count()).to_equal(1)
+        val section = writer.sections[0]
+        expect(section.name).to_equal(".drv_manifest")
+        expect(section.section_type).to_equal(SectionType.DrvManifest)
+        expect(section.flags).to_equal(SECTION_FLAG_READ)
+        expect(section.alignment).to_equal(8)
+        expect(section.data.len()).to_equal(bytes.len())
+        expect(section.data[0]).to_equal(DRVS_MAGIC & 0xFF)
+
+    it "section payload decodes back to the original driver manifest":
+        val manifest = DriverManifest.for_driver("virtio_blk", "0.2", DriverClass.Block, 0x1AF4, [0x1001])
+        val bytes = encode_manifest(manifest)
+        var writer = SmfWriter.create()
+        writer.add_driver_manifest_section(bytes)
+        var payload: [u8] = []
+        for b in writer.sections[0].data:
+            payload.push(b as u8)
+        val decoded = decode_manifest(payload, 0).unwrap()
+        expect(decoded.kind).to_equal(ManifestKind.Driver)
+        expect(decoded.dclass).to_equal(DriverClass.Block)
+        expect(decoded.vendor).to_equal(0x1AF4)
+        expect(decoded.device_ids[0]).to_equal(0x1001)
+        expect(decoded.name).to_equal("virtio_blk")
+        expect(decoded.version).to_equal("0.2")

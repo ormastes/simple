@@ -1,0 +1,142 @@
+# Lighting System Tests
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.engine.render.lighting.{LightColor, DirectionalLight, PointLight, SpotLight, LightManager}
+
+describe "LightColor":
+    it "creates white color":
+        val c = LightColor.white()
+        expect(c.r).to_equal(1.0)
+        expect(c.g).to_equal(1.0)
+        expect(c.b).to_equal(1.0)
+
+    it "creates warm color":
+        val c = LightColor.warm()
+        expect(c.r).to_equal(1.0)
+        expect(c.g).to_equal(0.9)
+        expect(c.b).to_equal(0.7)
+
+    it "creates cool color":
+        val c = LightColor.cool()
+        expect(c.r).to_equal(0.7)
+        expect(c.g).to_equal(0.85)
+        expect(c.b).to_equal(1.0)
+
+    it "scales intensity":
+        val c = LightColor.white()
+        val scaled = c.intensity_scaled(0.5)
+        expect(scaled.r).to_equal(0.5)
+        expect(scaled.g).to_equal(0.5)
+        expect(scaled.b).to_equal(0.5)
+
+describe "DirectionalLight":
+    it "creates with correct defaults":
+        val light = DirectionalLight.new(0.0, -1.0, 0.0, LightColor.white(), 1.0)
+        expect(light.direction_x).to_equal(0.0)
+        expect(light.direction_y).to_equal(-1.0)
+        expect(light.direction_z).to_equal(0.0)
+        expect(light.intensity).to_equal(1.0)
+        expect(light.cast_shadows).to_equal(true)
+        expect(light.active).to_equal(true)
+
+describe "PointLight":
+    it "creates with correct fields":
+        val light = PointLight.new(1.0, 2.0, 3.0, LightColor.warm(), 0.8, 15.0)
+        expect(light.position_x).to_equal(1.0)
+        expect(light.position_y).to_equal(2.0)
+        expect(light.position_z).to_equal(3.0)
+        expect(light.intensity).to_equal(0.8)
+        expect(light.radius).to_equal(15.0)
+        expect(light.active).to_equal(true)
+
+    it "computes attenuation at zero distance":
+        val light = PointLight.new(0.0, 0.0, 0.0, LightColor.white(), 1.0, 10.0)
+        expect(light.attenuation_at(0.0)).to_equal(1.0)
+
+    it "returns zero attenuation beyond radius":
+        val light = PointLight.new(0.0, 0.0, 0.0, LightColor.white(), 1.0, 10.0)
+        expect(light.attenuation_at(11.0)).to_equal(0.0)
+
+    it "computes falloff within radius":
+        val light = PointLight.new(0.0, 0.0, 0.0, LightColor.white(), 1.0, 10.0)
+        val atten = light.attenuation_at(1.0)
+        # 1.0 / (1.0 + 1.0 * 1.0 * 1.0) = 0.5
+        expect(atten).to_equal(0.5)
+
+describe "SpotLight":
+    it "creates with correct fields":
+        val light = SpotLight.new(0.0, 5.0, 0.0, 0.0, -1.0, 0.0, 2.0, 0.3, 0.5, 20.0)
+        expect(light.position_y).to_equal(5.0)
+        expect(light.direction_y).to_equal(-1.0)
+        expect(light.intensity).to_equal(2.0)
+        expect(light.inner_angle).to_equal(0.3)
+        expect(light.outer_angle).to_equal(0.5)
+        expect(light.range).to_equal(20.0)
+        expect(light.active).to_equal(true)
+
+describe "LightManager":
+    it "starts empty":
+        val mgr = LightManager.new()
+        expect(mgr.directional_count()).to_equal(0)
+        expect(mgr.point_count()).to_equal(0)
+        expect(mgr.spot_count()).to_equal(0)
+        expect(mgr.total_light_count()).to_equal(0)
+
+    it "sets ambient light":
+        var mgr = LightManager.new()
+        mgr.set_ambient(LightColor.warm(), 0.3)
+        expect(mgr.ambient_color.r).to_equal(1.0)
+        expect(mgr.ambient_color.g).to_equal(0.9)
+        expect(mgr.ambient_intensity).to_equal(0.3)
+
+    it "adds directional light":
+        var mgr = LightManager.new()
+        val light = DirectionalLight.new(0.0, -1.0, 0.0, LightColor.white(), 1.0)
+        val idx = mgr.add_directional(light)
+        expect(idx).to_equal(0)
+        expect(mgr.directional_count()).to_equal(1)
+        expect(mgr.total_light_count()).to_equal(1)
+
+    it "adds point light":
+        var mgr = LightManager.new()
+        val light = PointLight.new(0.0, 5.0, 0.0, LightColor.white(), 1.0, 10.0)
+        val idx = mgr.add_point(light)
+        expect(idx).to_equal(0)
+        expect(mgr.point_count()).to_equal(1)
+
+    it "adds spot light":
+        var mgr = LightManager.new()
+        val light = SpotLight.new(0.0, 5.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.3, 0.5, 20.0)
+        val idx = mgr.add_spot(light)
+        expect(idx).to_equal(0)
+        expect(mgr.spot_count()).to_equal(1)
+
+    it "removes point light":
+        var mgr = LightManager.new()
+        val l1 = PointLight.new(1.0, 0.0, 0.0, LightColor.white(), 1.0, 5.0)
+        val l2 = PointLight.new(2.0, 0.0, 0.0, LightColor.white(), 1.0, 5.0)
+        mgr.add_point(l1)
+        mgr.add_point(l2)
+        expect(mgr.point_count()).to_equal(2)
+        val removed = mgr.remove_point(0)
+        expect(removed).to_equal(true)
+        expect(mgr.point_count()).to_equal(1)
+
+    it "returns false for invalid remove index":
+        var mgr = LightManager.new()
+        expect(mgr.remove_point(0)).to_equal(false)
+        expect(mgr.remove_point(-1)).to_equal(false)
+
+    it "counts total lights across types":
+        var mgr = LightManager.new()
+        mgr.add_directional(DirectionalLight.new(0.0, -1.0, 0.0, LightColor.white(), 1.0))
+        mgr.add_point(PointLight.new(0.0, 5.0, 0.0, LightColor.white(), 1.0, 10.0))
+        mgr.add_spot(SpotLight.new(0.0, 5.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.3, 0.5, 20.0))
+        expect(mgr.total_light_count()).to_equal(3)
+
+    it "clears all lights":
+        var mgr = LightManager.new()
+        mgr.add_directional(DirectionalLight.new(0.0, -1.0, 0.0, LightColor.white(), 1.0))
+        mgr.add_point(PointLight.new(0.0, 5.0, 0.0, LightColor.white(), 1.0, 10.0))
+        mgr.clear()
+        expect(mgr.total_light_count()).to_equal(0)

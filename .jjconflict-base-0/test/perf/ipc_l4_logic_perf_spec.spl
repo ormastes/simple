@@ -1,0 +1,67 @@
+use std.spec.{describe, slow_it, expect}
+use test.perf.bench.lib.timing.{bench_now_ns}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.ipc.l4_fast_ipc.{l4_inline_round_trip_32bit_index, l4_inline_round_trip_64bit_index}
+use os.kernel.types.ipc_types.{IpcMessage}
+use os.kernel.types.task_types.{TaskId}
+
+fn _perf_ipc_message(port_id: u64, i: i64) -> IpcMessage:
+    IpcMessage(
+        src_port: 1,
+        dst_port: port_id,
+        method: (i & 1023).to_u32(),
+        flags: 0,
+        payload_len: 32,
+        cap_count: 0
+    )
+
+fn _bench_current_ipc_queue_ns(iters: i64) -> (i64, u64):
+    var manager = IpcManager.new()
+    val owner = TaskId(id: 7)
+    val port = manager.create_port(owner, "perf-ipc")
+    var checksum: u64 = 0.to_u64()
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val msg = _perf_ipc_message(port.id, i)
+        val send_rc = manager.send(msg)
+        val got = manager.recv(port, 0)
+        if got != nil:
+            checksum = checksum + got.method.to_u64() + send_rc.to_u64()
+        i = i + 1
+    val t1 = bench_now_ns()
+    (t1 - t0, checksum)
+
+fn _bench_l4_inline32_ns(iters: i64) -> (i64, u64):
+    var checksum: u64 = 0.to_u64()
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        checksum = checksum + l4_inline_round_trip_32bit_index(i)
+        i = i + 1
+    val t1 = bench_now_ns()
+    (t1 - t0, checksum)
+
+fn _bench_l4_inline64_ns(iters: i64) -> (i64, u64):
+    var checksum: u64 = 0.to_u64()
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        checksum = checksum + l4_inline_round_trip_64bit_index(i)
+        i = i + 1
+    val t1 = bench_now_ns()
+    (t1 - t0, checksum)
+
+describe "L4 IPC logic performance contract":
+    slow_it "keeps inline register IPC materially faster than queued manager send/recv":
+        val iters: i64 = 20000
+        val current = _bench_current_ipc_queue_ns(iters)
+        val inline32 = _bench_l4_inline32_ns(iters)
+        val inline64 = _bench_l4_inline64_ns(iters)
+
+        print "ipc-perf current_ns={current[0]} inline32_ns={inline32[0]} inline64_ns={inline64[0]} iters={iters}"
+        expect(current[1]).to_be_greater_than(0)
+        expect(inline32[1]).to_be_greater_than(0)
+        expect(inline64[1]).to_be_greater_than(0)
+        expect(inline32[0] * 2).to_be_less_than(current[0])
+        expect(inline64[0] * 2).to_be_less_than(current[0])

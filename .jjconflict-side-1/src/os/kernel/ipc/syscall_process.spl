@@ -1,0 +1,736 @@
+# Process Syscall Handlers — split from syscall.spl.
+# Contains _handle_exit, _handle_yield, _handle_spawn, _handle_wait,
+# _handle_fork, _handle_exec, _handle_waitpid, _handle_pipe, _handle_dup2,
+# _handle_dup, _handle_dlopen, _handle_dlsym, _handle_dlclose,
+# _handle_poll, _handle_fcntl, _handle_getpid,
+# and copy-from-user helpers.
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.types.task_types.{TaskId, TaskPriority, BlockReason}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.types.vmspace_types.{ProcessVmSpace}
+use os.kernel.scheduler.scheduler.{Scheduler, wait_collect_result_pid, wait_collect_result_status, wait_collect_result_error}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.ipc.notif_global.{g_notification_table}
+use os.kernel.ipc.notification.{notification_wait_any, notification_register_multi_waiter}
+use os.kernel.log.klog.{KernelLog, klog_write}
+use os.kernel.log.klog_api.{log_raw_println}
+use os.kernel.loader.executable_source.{resolve_executable_bytes, resolve_executable_bytes_from_path_bytes}
+use os.kernel.loader.app_registry.{app_registry_lookup}
+use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
+use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.loader.dylib_registry.{dylib_registry_register, dylib_registry_symbol, dylib_registry_close}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.memory.vmm.{vmm_new_process_space, vmm_teardown_user_space, vmm_verify_user_write, vmm_copyin_string_vector, vmm_copyin_bytes_from_space, vmm_copy_string_vector_result_ok, vmm_copy_string_vector_result_errno, vmm_copy_string_vector_result_values}
+use os.kernel.boot.mmio.{mmio_read16, mmio_read32, mmio_write16, mmio_write32}
+use os.kernel.ipc.capability.{register_task_vmspace, task_vmspace_of}
+use os.kernel.pipe_compat.{posix_pipe}
+use os.kernel.fd_io.{posix_close, posix_dup, posix_dup2, posix_lseek}
+use os.kernel.fd_table.{fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS}
+use os.kernel.errno.{EFAULT, EINVAL, ENAMETOOLONG}
+use os.kernel.ipc.syscall.{_u64_to_priority, g_scheduler_next_task_id, CURRENT_EXEC_ARCH, MAX_BINARY_PATH_LEN, MAX_EXEC_ARG_COUNT, MAX_EXEC_ENV_COUNT, MAX_EXEC_STRING_LEN, MAX_EXEC_TOTAL_STRING_BYTES, _is_userspace_ptr, _is_userspace_range, g_current_vmspace, _use_x86_64_direct_spawn_handoff, _alloc_x86_64_direct_spawn_pid}
+use os.kernel.ipc.syscall_device.{_dma_release_task_allocs}
+use os.kernel.lifecycle.task_cleanup.{task_cleanup}
+use os.kernel.ipc.capability.{_vma_range_readable}
+use os.kernel.types.task_types.{TaskState}
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
+extern fn rt_copy_user_byte(ptr_addr: u64) -> u8
+
+# ============================================================================
+# Process Syscall Handlers
+# ============================================================================
+
+fn _close_all_live_fds_with_backends() -> u32:
+    """Close every live descriptor through the backend-aware POSIX path."""
+    var closed: u32 = 0u32
+    var i: u64 = 0
+    while i < MAX_FDS:
+        if fd_is_valid(i as i32):
+            posix_close(i as i32)
+            closed = closed + 1u32
+        i = i + 1
+    closed
+
+fn _close_cloexec_fds_with_backends() -> u32:
+    """Apply exec close-on-exec cleanup through backend-aware close."""
+    var closed: u32 = 0u32
+    var i: u64 = 0
+    while i < MAX_FDS:
+        if fd_is_valid(i as i32) and fd_get_cloexec(i as i32):
+            posix_close(i as i32)
+            closed = closed + 1u32
+        i = i + 1
+    closed
+
+fn _handle_exit(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Exit the current task with the given exit code.
+
+    Performs full resource cleanup before marking the task as zombie:
+      1. Clean up kernel resources (notifications, IRQ routes, DMA, BAR mappings)
+      2. Revoke all capabilities granted to the task
+      3. Mark the task as zombie in the scheduler
+    """
+    val code = args.arg0
+    var sched = scheduler
+    val exiting_task = sched.get_current()
+
+    # Step 1: Release DMA records first so the ownership table cannot retain
+    # stale live entries after task_cleanup unmaps resources.
+    _dma_release_task_allocs(exiting_task)
+
+    # Step 2: Clean up remaining kernel resources tracked by task_cleanup
+    task_cleanup(exiting_task.id)
+
+    # Step 3: Revoke all capabilities held by this task
+    var ipc_mgr = ipc
+    ipc_mgr.cap_manager.revoke_all_for_task(exiting_task)
+
+    # Step 4: Close process descriptors for the current process lifecycle.
+    _close_all_live_fds_with_backends()
+
+    # Step 4: Mark as zombie in scheduler
+    sched.exit_task(code.to_i32())
+
+    # exit_task does not return to the caller; the scheduler picks next task.
+    # This result is never seen by the exiting task.
+    SyscallResult(value: 0)
+
+fn _handle_yield(scheduler: Scheduler) -> SyscallResult:
+    """Yield the current task's time slice."""
+    var sched = scheduler
+    sched.yield_current()
+    SyscallResult(value: 0)
+
+fn _handle_spawn(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Spawn a new task.
+
+    Args:
+      arg0: entry point address
+      arg1: priority (0=Realtime, 1=High, 2=Normal, 3=Low, 4=Idle)
+    """
+    val entry = args.arg0
+    val priority = _u64_to_priority(args.arg1)
+    val caps = CapabilitySet.full()
+
+    var sched = scheduler
+    val task_id = sched.create_task(entry, priority, caps)
+    SyscallResult(value: task_id.id.to_i64())
+
+fn _handle_wait(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Wait for a child task to exit.
+
+    Args:
+      arg0: child task ID (0 = any child)
+      arg1: options (bit 0 = WNOHANG)
+
+    Blocks the caller until the child exits, then returns the exit code.
+    """
+    var sched = scheduler
+    val current = sched.get_current()
+    val result = sched.wait_for(current, TaskId(id: args.arg0))
+    if result == -11:
+        return SyscallResult(value: 0)
+    SyscallResult(value: result.to_i64())
+
+fn _handle_fork(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Fork the current scheduler task.
+
+    Args are reserved for future clone flags. Returns the child task ID in the
+    parent. Child-side register fixup to return 0 lands with context resume.
+    """
+    val _a = args
+    var sched = scheduler
+    val parent = sched.get_current()
+    val child = sched.clone_task(parent)
+    if child.id == 0:
+        return SyscallResult(value: -12)
+    fd_prepare_fork_to_task(child.id)
+    SyscallResult(value: child.id.to_i64())
+
+fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Execve process-image replacement.
+
+    This kernel-facing ABI accepts arg0=path pointer and arg1=path length.
+    arg2/arg3 are optional userspace char** vectors for argv/envp. Null
+    vectors preserve the legacy path where the image builder seeds argv[0]
+    from the executable path.
+    """
+    if args.arg0 == 0 or args.arg1 == 0:
+        return SyscallResult(value: 0 - EINVAL as i64)
+    if args.arg1 > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: 0 - ENAMETOOLONG as i64)
+    val path_bytes_result = _copy_user_bytes(args.arg0, args.arg1)
+    if path_bytes_result.is_err():
+        return SyscallResult(value: 0 - EFAULT as i64)
+
+    val path_bytes = path_bytes_result.unwrap()
+    val path = _path_bytes_to_text(path_bytes)
+    val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, CURRENT_EXEC_ARCH)
+    if bytes_result.is_err():
+        return SyscallResult(value: -2)
+
+    val argv_result = vmm_copyin_string_vector(
+        args.arg2,
+        MAX_EXEC_ARG_COUNT,
+        MAX_EXEC_STRING_LEN,
+        MAX_EXEC_TOTAL_STRING_BYTES
+    )
+    if not vmm_copy_string_vector_result_ok(argv_result):
+        return SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(argv_result) as i64)
+    val envp_result = vmm_copyin_string_vector(
+        args.arg3,
+        MAX_EXEC_ENV_COUNT,
+        MAX_EXEC_STRING_LEN,
+        MAX_EXEC_TOTAL_STRING_BYTES
+    )
+    if not vmm_copy_string_vector_result_ok(envp_result):
+        return SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(envp_result) as i64)
+
+    val image_result = build_user_process_image(
+        path,
+        bytes_result.unwrap(),
+        CURRENT_EXEC_ARCH,
+        vmm_copy_string_vector_result_values(argv_result),
+        vmm_copy_string_vector_result_values(envp_result)
+    )
+    if image_result.is_err():
+        return SyscallResult(value: -8)
+
+    var sched = scheduler
+    val current = sched.get_current()
+    val result = sched.exec_image(current, image_result.unwrap())
+    if result == 0:
+        _close_cloexec_fds_with_backends()
+        val old_space = task_vmspace_of(current.id.to_u32())
+        if old_space != nil:
+            vmm_teardown_user_space(old_space.unwrap())
+        val exec_space = vmm_new_process_space(0, 0)
+        register_task_vmspace(current.id.to_u32(), exec_space)
+    SyscallResult(value: result.to_i64())
+
+fn _encode_wait_status(exit_code: i32) -> u32:
+    """Encode a normal-exit status compatible with WEXITSTATUS."""
+    (((exit_code as u32) & 0xFF) << 8)
+
+fn _write_wait_status(ptr: u64, exit_code: i32) -> i64:
+    """Copy an encoded wait status to userspace when the pointer is present."""
+    if ptr == 0:
+        return 0
+    if not _is_userspace_ptr(ptr):
+        return -14
+    if not vmm_verify_user_write(ptr, 4):
+        return -14
+    mmio_write32(ptr, _encode_wait_status(exit_code))
+    0
+
+fn _validate_wait_status_ptr(ptr: u64) -> i64:
+    """Validate waitpid status copyout before consuming a zombie child."""
+    if ptr == 0:
+        return 0
+    if not _is_userspace_ptr(ptr):
+        return -14
+    if not vmm_verify_user_write(ptr, 4):
+        return -14
+    0
+
+fn _handle_waitpid(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Waitpid-compatible wrapper around Scheduler.wait_for.
+
+    Args:
+      arg0: pid, or u64::MAX for any child
+      arg1: status pointer, optional
+      arg2: options (bit 0 = WNOHANG)
+    """
+    val any_child = args.arg0 == 0xFFFFFFFFFFFFFFFF
+    val selector = if any_child: TaskId(id: 0) else: TaskId(id: args.arg0)
+    val nohang = (args.arg2 & 1) != 0
+    var sched = scheduler
+    val current = sched.get_current()
+    val status_ptr_check = _validate_wait_status_ptr(args.arg1)
+    if status_ptr_check < 0:
+        return SyscallResult(value: status_ptr_check)
+    val result = sched.wait_for_collect(current, selector, not nohang)
+    val result_error = wait_collect_result_error(result)
+    if result_error == -11:
+        return SyscallResult(value: 0)
+    if result_error < 0:
+        return SyscallResult(value: result_error.to_i64())
+
+    val status_write = _write_wait_status(args.arg1, wait_collect_result_status(result))
+    if status_write < 0:
+        return SyscallResult(value: status_write)
+    SyscallResult(value: wait_collect_result_pid(result).to_i64())
+
+fn _handle_pipe(args: SyscallArgs) -> SyscallResult:
+    """Create a POSIX pipe and copy fd[0]/fd[1] to the user array."""
+    if args.arg0 == 0:
+        return SyscallResult(value: -14)
+    if not _is_userspace_ptr(args.arg0):
+        return SyscallResult(value: -14)
+    if not vmm_verify_user_write(args.arg0, 8):
+        return SyscallResult(value: -14)
+    SyscallResult(value: posix_pipe(args.arg0, args.arg0 + 4) as i64)
+
+fn _handle_dup2(args: SyscallArgs) -> SyscallResult:
+    """Duplicate oldfd onto newfd using POSIX dup2 replacement semantics."""
+    SyscallResult(value: posix_dup2(args.arg0 as i32, args.arg1 as i32) as i64)
+
+fn _handle_dup(args: SyscallArgs) -> SyscallResult:
+    """Duplicate oldfd to the lowest available descriptor."""
+    SyscallResult(value: posix_dup(args.arg0 as i32) as i64)
+
+fn _handle_dlopen(args: SyscallArgs) -> SyscallResult:
+    """Load a path-backed dynamic object and return a kernel registry handle.
+
+    ABI:
+      arg0: path pointer
+      arg1: path length
+      arg2: mode flags (reserved)
+    """
+    val _mode = args.arg2
+    val path_result = _copy_user_text(args.arg0, args.arg1)
+    if path_result.is_err():
+        return SyscallResult(value: -14)
+    val path = path_result.unwrap()
+    val bytes_result = resolve_executable_bytes(path, CURRENT_EXEC_ARCH)
+    if bytes_result.is_err():
+        return SyscallResult(value: -2)
+    SyscallResult(value: dylib_registry_register(path, bytes_result.unwrap()))
+
+fn _handle_dlsym(args: SyscallArgs) -> SyscallResult:
+    """Resolve a symbol from a kernel dynamic-library handle.
+
+    ABI:
+      arg0: handle returned by DlOpen
+      arg1: symbol-name pointer
+      arg2: symbol-name length
+    """
+    val name_result = _copy_user_text(args.arg1, args.arg2)
+    if name_result.is_err():
+        return SyscallResult(value: -14)
+    SyscallResult(value: dylib_registry_symbol(args.arg0 as i64, name_result.unwrap()))
+
+fn _handle_dlclose(args: SyscallArgs) -> SyscallResult:
+    """Close one reference to a kernel dynamic-library handle."""
+    SyscallResult(value: dylib_registry_close(args.arg0 as i64))
+
+fn _handle_poll(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """poll(2)-compatible readiness scan over user pollfd entries.
+
+    ABI:
+      arg0: struct pollfd* (fd: i32, events: i16, revents: i16)
+      arg1: nfds
+      arg2: timeout_ms (-1 = block on fd notifications, 0 = nonblocking,
+            >0 = block until fd notification or scheduler sleep deadline)
+    """
+    val fds_ptr = args.arg0
+    val nfds = args.arg1
+    var sched = scheduler
+    val current = sched.get_current()
+    val task_id = current.id
+    val timeout_infinite = (args.arg2 & 0x8000000000000000) != 0
+    if nfds == 0:
+        if timeout_infinite:
+            sched.block_task(current, BlockReason.Sleep(until_ns: 0xFFFFFFFFFFFFFFFF))
+        elif args.arg2 > 0:
+            val timeout_ticks = (args.arg2 + 9) / 10
+            val ticks = if timeout_ticks == 0: 1 else: timeout_ticks
+            val deadline_ns = (sched.tick_count() + ticks) * 10000000
+            sched.block_task(current, BlockReason.Sleep(until_ns: deadline_ns))
+        return SyscallResult(value: 0)
+    if fds_ptr == 0:
+        return SyscallResult(value: -14)
+    if nfds > 64:
+        return SyscallResult(value: -22)
+    val bytes = nfds * 8
+    if fds_ptr + bytes < fds_ptr:
+        return SyscallResult(value: -14)
+    if not _is_userspace_ptr(fds_ptr):
+        return SyscallResult(value: -14)
+    if not _is_userspace_ptr(fds_ptr + bytes - 1):
+        return SyscallResult(value: -14)
+    if not vmm_verify_user_write(fds_ptr, bytes):
+        return SyscallResult(value: -14)
+
+    var ready: i64 = 0
+    var i: u64 = 0
+    while i < nfds:
+        val entry = fds_ptr + i * 8
+        val fd = mmio_read32(entry) as i32
+        val events = mmio_read16(entry + 4) as i16
+        var revents: i16 = 0
+        if fd >= 0:
+            revents = fd_poll_ready(fd, events)
+        mmio_write16(entry + 6, revents as u16)
+        if revents != 0:
+            ready = ready + 1
+        i = i + 1
+    if ready > 0:
+        return SyscallResult(value: ready)
+    if args.arg2 == 0:
+        return SyscallResult(value: 0)
+
+    var ids: [u64] = []
+    var blockable_count: u64 = 0
+    i = 0
+    while i < nfds:
+        val entry = fds_ptr + i * 8
+        val fd = mmio_read32(entry) as i32
+        val events = mmio_read16(entry + 4) as i16
+        if fd >= 0:
+            val notif = fd_poll_notification(fd, events)
+            if notif != 0:
+                blockable_count = blockable_count + 1
+                if ids.len() < 4:
+                    ids.push(notif)
+        i = i + 1
+    if blockable_count > 4:
+        return SyscallResult(value: -22)
+
+    if ids.len() == 0:
+        if timeout_infinite:
+            sched.block_task(current, BlockReason.Sleep(until_ns: 0xFFFFFFFFFFFFFFFF))
+        elif args.arg2 > 0:
+            val timeout_ticks = (args.arg2 + 9) / 10
+            val ticks = if timeout_ticks == 0: 1 else: timeout_ticks
+            val deadline_ns = (sched.tick_count() + ticks) * 10000000
+            sched.block_task(current, BlockReason.Sleep(until_ns: deadline_ns))
+        return SyscallResult(value: 0)
+
+    val count = ids.len()
+    val result = notification_wait_any(g_notification_table, ids, count, task_id)
+    if result != 0:
+        ready = 0
+        i = 0
+        while i < nfds:
+            val entry = fds_ptr + i * 8
+            val fd = mmio_read32(entry) as i32
+            val events = mmio_read16(entry + 4) as i16
+            var revents: i16 = 0
+            if fd >= 0:
+                revents = fd_poll_ready(fd, events)
+            mmio_write16(entry + 6, revents as u16)
+            if revents != 0:
+                ready = ready + 1
+            i = i + 1
+        return SyscallResult(value: ready)
+
+    if timeout_infinite:
+        notification_register_multi_waiter(g_notification_table, ids, count, task_id)
+        sched.block_task(current, BlockReason.Notification(id: ids[0]))
+    elif args.arg2 > 0:
+        notification_register_multi_waiter(g_notification_table, ids, count, task_id)
+        val timeout_ticks = (args.arg2 + 9) / 10
+        val ticks = if timeout_ticks == 0: 1 else: timeout_ticks
+        val deadline_ns = (sched.tick_count() + ticks) * 10000000
+        sched.block_task(current, BlockReason.Sleep(until_ns: deadline_ns))
+    SyscallResult(value: 0)
+
+fn _handle_fcntl(args: SyscallArgs) -> SyscallResult:
+    """fcntl subset for descriptor flags and nonblocking status flags."""
+    val fd = args.arg0 as i32
+    val cmd = args.arg1 as i32
+    val arg = args.arg2
+    val F_DUPFD: i32 = 0
+    val F_GETFD: i32 = 1
+    val F_SETFD: i32 = 2
+    val F_GETFL: i32 = 3
+    val F_SETFL: i32 = 4
+    val F_DUPFD_CLOEXEC: i32 = 1030
+    val F_SIMPLEOS_GET_OFD: i32 = 1397686273
+
+    if cmd == F_DUPFD:
+        return SyscallResult(value: fd_dup_from(fd, arg as i32, false) as i64)
+    if cmd == F_DUPFD_CLOEXEC:
+        return SyscallResult(value: fd_dup_from(fd, arg as i32, true) as i64)
+    if not fd_is_valid(fd):
+        return SyscallResult(value: -9)
+    if cmd == F_GETFD:
+        return SyscallResult(value: if fd_get_cloexec(fd): 1 else: 0)
+    if cmd == F_SETFD:
+        return SyscallResult(value: fd_set_cloexec(fd, (arg & 1) != 0) as i64)
+    if cmd == F_GETFL:
+        return SyscallResult(value: fd_get_status_flags(fd) as i64)
+    if cmd == F_SETFL:
+        return SyscallResult(value: fd_set_status_flags(fd, arg as u32) as i64)
+    if cmd == F_SIMPLEOS_GET_OFD:
+        return SyscallResult(value: fd_get_object_id(fd) as i64)
+    SyscallResult(value: -22)
+
+fn _handle_getpid(scheduler: Scheduler) -> SyscallResult:
+    """Return the current task's ID."""
+    val current = scheduler.get_current()
+    SyscallResult(value: current.id.to_i64())
+
+# ============================================================================
+# Copy-from-user helpers (used by spawn/exec/dlopen only)
+# ============================================================================
+
+fn _path_bytes_to_text(bytes: [u8]) -> text:
+    rt_string_from_byte_array(bytes)
+
+fn _copy_user_bytes(ptr_addr: u64, len: u64) -> Result<[u8], text>:
+    if ptr_addr == 0:
+        return Err("null path pointer")
+    if len == 0:
+        return Err("empty path")
+    if len > MAX_BINARY_PATH_LEN:
+        return Err("path too long")
+    var bytes: [u8] = []
+    var i: u64 = 0
+    while i < len:
+        bytes.push(rt_copy_user_byte(ptr_addr + i))
+        i = i + 1
+    Ok(bytes)
+
+fn _copy_user_text(ptr_addr: u64, len: u64) -> Result<text, text>:
+    log_raw_println("[syscall13] copy_user_text enter")
+    val bytes_result = _copy_user_bytes(ptr_addr, len)
+    if bytes_result.is_err():
+        return Err(bytes_result.err().unwrap())
+    log_raw_println("[syscall13] copy_user_text ok")
+    Ok(_path_bytes_to_text(bytes_result.unwrap()))
+
+fn _is_user_read_range(ptr: u64, len: u64) -> bool:
+    if not _is_userspace_range(ptr, len):
+        return false
+    if g_current_vmspace.vma_count > 0 as u64:
+        return _vma_range_readable(g_current_vmspace, ptr, len)
+    true
+
+fn _copy_user_u64(ptr_addr: u64) -> Result<u64, text>:
+    if not _is_user_read_range(ptr_addr, 8):
+        return Err("bad user pointer")
+    var value: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        val current = ptr_addr + i
+        if current < ptr_addr:
+            return Err("u64 pointer overflow")
+        if not _is_user_read_range(current, 1):
+            return Err("bad user pointer")
+        val b = rt_copy_user_byte(current)
+        value = value | (b.to_u64() << (i * 8))
+        i = i + 1
+    Ok(value)
+
+fn _copy_user_cstr(ptr_addr: u64, max_len: u64) -> Result<text, text>:
+    if ptr_addr == 0:
+        return Err("null string pointer")
+    var bytes: [u8] = []
+    var i: u64 = 0
+    while i < max_len:
+        val current = ptr_addr + i
+        if current < ptr_addr:
+            return Err("string pointer overflow")
+        if not _is_user_read_range(current, 1):
+            return Err("bad string pointer")
+        val b = rt_copy_user_byte(current)
+        if b == 0u8:
+            return Ok(_path_bytes_to_text(bytes))
+        bytes.push(b)
+        i = i + 1
+    Err("unterminated string")
+
+fn _copy_user_string_vector(vec_ptr: u64, max_count: u64) -> Result<[text], text>:
+    if vec_ptr == 0:
+        return Ok([])
+    var out: [text] = []
+    var total_bytes: u64 = 0
+    var i: u64 = 0
+    while i < max_count:
+        val offset = i * 8
+        val slot = vec_ptr + offset
+        if slot < vec_ptr:
+            return Err("vector pointer overflow")
+        val item_ptr_result = _copy_user_u64(slot)
+        if item_ptr_result.is_err():
+            return Err(item_ptr_result.err().unwrap())
+        val item_ptr = item_ptr_result.unwrap()
+        if item_ptr == 0:
+            return Ok(out)
+        val item_result = _copy_user_cstr(item_ptr, MAX_EXEC_STRING_LEN)
+        if item_result.is_err():
+            return Err(item_result.err().unwrap())
+        val item = item_result.unwrap()
+        val item_bytes = (item.len() as u64) + 1
+        if total_bytes + item_bytes < total_bytes:
+            return Err("argument byte overflow")
+        total_bytes = total_bytes + item_bytes
+        if total_bytes > MAX_EXEC_TOTAL_STRING_BYTES:
+            return Err("argument bytes too large")
+        out.push(item)
+        i = i + 1
+    Err("string vector not terminated")
+
+fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog) -> SyscallResult:
+    """Spawn a task from a binary path.
+
+    Args:
+      arg0: userspace pointer to path bytes
+      arg1: path length
+      arg2: priority
+    """
+    log_raw_println("[syscall13] handle_spawn_binary enter")
+    if args.arg0 == 0 or args.arg1 == 0:
+        return SyscallResult(value: -22)
+    val path_bytes_result = _copy_user_bytes(args.arg0, args.arg1)
+    if path_bytes_result.is_err():
+        return SyscallResult(value: -22)
+
+    val path_bytes = path_bytes_result.unwrap()
+    val path = _path_bytes_to_text(path_bytes)
+    log_raw_println("[syscall13] path decoded")
+    val arch = CURRENT_EXEC_ARCH
+    val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, arch)
+    log_raw_println("[syscall13] resolve_executable_bytes returned")
+    if bytes_result.is_err():
+        var log = klog
+        klog_write(log, 3, 1, 0, "spawn_binary rejected unknown binary: {path}")
+        return SyscallResult(value: -2)
+    val _sp_argv: [text] = []
+    val _sp_envp: [text] = []
+    val image_result = build_user_process_image(path, bytes_result.unwrap(), arch, _sp_argv, _sp_envp)
+    if image_result.is_ok():
+        val priority = _u64_to_priority(args.arg2)
+        val caps = CapabilitySet.full()
+        var sched = scheduler
+        val before_next_task_id = g_scheduler_next_task_id
+        val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
+        val pid = if g_scheduler_next_task_id > before_next_task_id:
+            g_scheduler_next_task_id - 1
+        elif raw_pid > 0 and raw_pid < 0x40000000:
+            raw_pid
+        else:
+            0
+        if pid == 0:
+            return SyscallResult(value: -12)
+
+        val child_space = vmm_new_process_space(0, 0)
+        register_task_vmspace(pid.to_u32(), child_space)
+        return SyscallResult(value: pid.to_i64())
+
+    var log = klog
+    klog_write(log, 3, 1, 0, "spawn_binary rejected invalid executable: {path}")
+    SyscallResult(value: -8)
+
+fn _direct_spawn_app_id_path(app_id: u64) -> text?:
+    val canonical = _legacy_app_id_to_name(app_id)
+    if canonical == nil:
+        return nil
+    val entry = app_registry_lookup(canonical.unwrap())
+    if entry == nil:
+        return nil
+    Some(entry.unwrap().canonical_path)
+
+fn _legacy_app_id_to_name(app_id: u64) -> text?:
+    match app_id:
+        case 1:
+            Some("/sys/apps/browser_demo")
+        case 2:
+            Some("/sys/apps/file_manager")
+        case 3:
+            Some("/sys/apps/hello_world")
+        case 103:
+            Some("/sys/apps/hello_world")
+        case 4:
+            Some("/sys/apps/shell")
+        case 5:
+            Some("/sys/apps/editor")
+        case _:
+            nil
+
+fn _spawn_from_resolved_bytes_for_arch(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog, arch: Architecture) -> i64:
+    val _sp_argv: [text] = []
+    val _sp_envp: [text] = []
+    val _path_bytes = path_bytes
+    log_raw_println("[syscall13] build_user_process_image begin")
+    val image_result = build_user_process_image(path, bytes, arch, _sp_argv, _sp_envp)
+    if image_result.is_ok():
+        log_raw_println("[syscall13] build_user_process_image ok")
+        if _use_x86_64_direct_spawn_handoff(arch):
+            val pid = _alloc_x86_64_direct_spawn_pid()
+            val pid_value = pid as i64
+            log_raw_println("[syscall13] user image handoff ok pid={pid_value}")
+            return pid_value
+        val priority = _u64_to_priority(priority_raw)
+        val caps = CapabilitySet.full()
+        var sched = scheduler
+        log_raw_println("[syscall13] create_user_task begin")
+        val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
+        log_raw_println("[syscall13] create_user_task returned")
+        val pid = raw_pid
+        log_raw_println("[syscall13] pid resolved")
+        if pid == 0:
+            log_raw_println("[syscall13] create_user_task failed")
+            return -12
+
+        val pid_value = pid as i64
+        log_raw_println("[syscall13] log begin")
+        log_raw_println("[syscall13] log done")
+        log_raw_println("[syscall13] user image handoff ok pid={pid_value}")
+        return pid_value
+    else:
+        log_raw_println("[syscall13] build_user_process_image failed")
+
+    var log = klog
+    klog_write(log, 3, 1, 0, "spawn_binary rejected invalid executable: {path}")
+    log_raw_println("[syscall13] rejected invalid filesystem executable")
+    -8
+
+fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
+    _spawn_from_resolved_bytes_for_arch(path, path_bytes, bytes, priority_raw, scheduler, klog, CURRENT_EXEC_ARCH)
+
+fn _builtin_binary_path_for_spawn(path: text) -> text:
+    if path.ends_with(".smf") and path.len() > 4:
+        return path.substring(0, path.len() - 4)
+    path
+
+fn _is_builtin_binary_path(path: text) -> bool:
+    resolve_builtin_binary(_builtin_binary_path_for_spawn(path)) != nil
+
+fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
+    """Dedicated SpawnBinary bridge that avoids the generic syscall wrapper."""
+    log_raw_println("[syscall13] dispatch_direct enter")
+    if path_len == 0:
+        val sentinel_path = _direct_spawn_app_id_path(path_ptr)
+        if sentinel_path != nil:
+            val path = sentinel_path.unwrap()
+            val bytes_result = resolve_executable_bytes(path, CURRENT_EXEC_ARCH)
+            if bytes_result.is_ok():
+                return _spawn_from_resolved_bytes(path, [], bytes_result.unwrap(), priority_raw, scheduler, klog)
+            if _is_builtin_binary_path(path):
+                log_raw_println("[syscall13] builtin resident fallback path={path}")
+                return -2
+        return -14
+
+    if path_len > MAX_BINARY_PATH_LEN:
+        log_raw_println("[syscall13] dispatch_direct path too long")
+        return -14
+    val path_bytes_result = _copy_user_bytes(path_ptr, path_len)
+    if path_bytes_result.is_err():
+        log_raw_println("[syscall13] dispatch_direct path copy failed")
+        return -14
+
+    val path_bytes = path_bytes_result.unwrap()
+    val path = _path_bytes_to_text(path_bytes)
+    log_raw_println("[syscall13] dispatch_direct path-ready len={path_len} path={path}")
+    val arch = CURRENT_EXEC_ARCH
+    log_raw_println("[syscall13] dispatch_direct arch-ready")
+
+    val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, arch)
+    log_raw_println("[syscall13] dispatch_direct resolve returned")
+    if bytes_result.is_ok():
+        log_raw_println("[syscall13] vfs bytes ok; exec handoff active")
+        return _spawn_from_resolved_bytes(path, path_bytes, bytes_result.unwrap(), priority_raw, scheduler, klog)
+
+    if _is_builtin_binary_path(path):
+        log_raw_println("[syscall13] builtin resident fallback path={path}")
+        return -2
+
+    if bytes_result.is_err():
+        var log = klog
+        klog_write(log, 3, 1, 0, "spawn_binary rejected unknown binary: {path}")
+        return -2
+
+    -2

@@ -1,0 +1,91 @@
+#!/bin/sh
+set -eu
+
+# Install the upstream mold linker into the location preferred by the Simple
+# native linker wrapper: bin/mold/mold.
+#
+# Environment:
+#   MOLD_VERSION=latest|vX.Y.Z  Release tag to install. Defaults to latest.
+#   MOLD_INSTALL_DIR=path       Install directory. Defaults to bin/mold.
+
+version="${MOLD_VERSION:-latest}"
+install_dir="${MOLD_INSTALL_DIR:-bin/mold}"
+tmp_dir="${TMPDIR:-/tmp}/simple-mold-install-$$"
+
+cleanup() {
+    rm -rf "$tmp_dir"
+}
+trap cleanup EXIT INT TERM
+
+mkdir -p "$tmp_dir" "$install_dir"
+
+python3 - "$version" "$tmp_dir/mold.tar.gz" <<'PY'
+import json
+import platform
+import sys
+import urllib.request
+
+version = sys.argv[1]
+output = sys.argv[2]
+
+machine = platform.machine().lower()
+system = platform.system().lower()
+
+if machine in ("x86_64", "amd64"):
+    arch_terms = ("x86_64", "amd64")
+elif machine in ("aarch64", "arm64"):
+    arch_terms = ("aarch64", "arm64")
+else:
+    raise SystemExit(f"unsupported mold installer architecture: {machine}")
+
+if system not in ("linux", "freebsd"):
+    raise SystemExit(f"unsupported mold installer OS: {system}")
+
+api = "https://api.github.com/repos/rui314/mold/releases/latest"
+if version != "latest":
+    tag = version if version.startswith("v") else "v" + version
+    api = f"https://api.github.com/repos/rui314/mold/releases/tags/{tag}"
+
+with urllib.request.urlopen(api, timeout=60) as response:
+    release = json.load(response)
+
+selected = None
+for asset in release.get("assets", []):
+    name = asset.get("name", "").lower()
+    url = asset.get("browser_download_url")
+    if not url:
+        continue
+    if not name.endswith((".tar.gz", ".tgz")):
+        continue
+    if system not in name:
+        continue
+    if any(term in name for term in arch_terms):
+        selected = (asset.get("name", ""), url)
+        break
+
+if selected is None:
+    available = ", ".join(asset.get("name", "") for asset in release.get("assets", []))
+    raise SystemExit(f"no matching mold release asset for {system}/{machine}; assets: {available}")
+
+print(f"downloading {selected[0]}", file=sys.stderr)
+with urllib.request.urlopen(selected[1], timeout=120) as response:
+    with open(output, "wb") as fh:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            fh.write(chunk)
+PY
+
+tar -xzf "$tmp_dir/mold.tar.gz" -C "$tmp_dir"
+mold_bin="$(find "$tmp_dir" -type f -name mold -perm -111 | head -n 1)"
+
+if [ -z "$mold_bin" ]; then
+    echo "error=missing_mold_binary_in_archive" >&2
+    exit 1
+fi
+
+cp "$mold_bin" "$install_dir/mold"
+chmod 0755 "$install_dir/mold"
+
+echo "mold_installed=$install_dir/mold"

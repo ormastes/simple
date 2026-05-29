@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MNT="${VFAT_MNT:-/tmp/simple_vfat_bench_mnt}"
+IMG="${VFAT_IMG:-/tmp/simple_vfat_bench.img}"
+SIZE_MIB="${VFAT_SIZE_MIB:-64}"
+BYTES=$((64 * 4096))
+UID_ARG="$(id -u)"
+GID_ARG="$(id -g)"
+UDISKS_LOOP=""
+REQUESTED_MNT="$MNT"
+DIAGNOSE_ONLY=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --diagnose)
+            DIAGNOSE_ONLY=1
+            ;;
+        -h|--help)
+            echo "Usage: VFAT_MNT=/abs/mount VFAT_IMG=/abs/image $0 [--diagnose]"
+            echo "  --diagnose  Print mount/tool/seed readiness without creating or mounting artifacts."
+            exit 0
+            ;;
+        *)
+            echo "unknown option: $1" >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+case "$SIZE_MIB" in
+    ''|*[!0-9]*)
+        echo "VFAT_SIZE_MIB must be a positive integer: $SIZE_MIB" >&2
+        exit 1
+        ;;
+esac
+if [ "$SIZE_MIB" -lt 1 ]; then
+    echo "VFAT_SIZE_MIB must be a positive integer: $SIZE_MIB" >&2
+    exit 1
+fi
+
+case "$MNT" in
+    /*)
+        ;;
+    *)
+        echo "VFAT_MNT must be an absolute path without control characters: $MNT" >&2
+        exit 1
+        ;;
+esac
+case "$MNT" in
+    *[![:print:]]*)
+        echo "VFAT_MNT must be an absolute path without control characters: $MNT" >&2
+        exit 1
+        ;;
+esac
+if [ "$MNT" = "/" ]; then
+    echo "VFAT_MNT must not be the filesystem root" >&2
+    exit 1
+fi
+case "$IMG" in
+    /*)
+        ;;
+    *)
+        echo "VFAT_IMG must be an absolute path without control characters: $IMG" >&2
+        exit 1
+        ;;
+esac
+case "$IMG" in
+    *[![:print:]]*)
+        echo "VFAT_IMG must be an absolute path without control characters: $IMG" >&2
+        exit 1
+        ;;
+esac
+if [ "$IMG" = "/" ]; then
+    echo "VFAT_IMG must not be the filesystem root" >&2
+    exit 1
+fi
+if [ "$IMG" = "$MNT" ]; then
+    echo "VFAT_IMG must differ from VFAT_MNT: $IMG" >&2
+    exit 1
+fi
+case "$IMG" in
+    "$MNT"/*)
+        echo "VFAT_IMG must not be inside VFAT_MNT: $IMG" >&2
+        exit 1
+        ;;
+esac
+IMG_DIR="$(dirname -- "$IMG")"
+if [ ! -d "$IMG_DIR" ]; then
+    echo "VFAT_IMG parent directory must exist: $IMG_DIR" >&2
+    exit 1
+fi
+if [ ! -w "$IMG_DIR" ]; then
+    echo "VFAT_IMG parent directory must be writable: $IMG_DIR" >&2
+    exit 1
+fi
+
+mkfs_fat_bin() {
+    if command -v mkfs.fat >/dev/null 2>&1; then
+        command -v mkfs.fat
+        return
+    fi
+    if command -v mkfs.vfat >/dev/null 2>&1; then
+        command -v mkfs.vfat
+        return
+    fi
+    return 1
+}
+
+vfat_seeded_at() {
+    local mnt="$1"
+    local read_file="$mnt/simple_fat32_4k_vfat_read.bin"
+    local write_file="$mnt/simple_fat32_4k_vfat_write.bin"
+    [ -r "$read_file" ] &&
+        [ -w "$write_file" ] &&
+        [ "$(wc -c < "$read_file" 2>/dev/null || echo 0)" -ge 32768 ] &&
+        [ "$(wc -c < "$write_file" 2>/dev/null || echo 0)" -ge 32768 ]
+}
+
+print_diagnosis() {
+    local fstype
+    local mounted="false"
+    local writable="false"
+    local seeded="false"
+    local mkfs_available="false"
+    local sudo_available="false"
+    local udisks_available="false"
+    local losetup_available="false"
+    local ready="false"
+    local reason="mount is not vfat/msdos"
+
+    fstype="$(findmnt -T "$MNT" -n -o FSTYPE 2>/dev/null | head -1 || true)"
+    if mountpoint -q "$MNT" 2>/dev/null; then
+        mounted="true"
+    fi
+    if [ -w "$MNT" ]; then
+        writable="true"
+    fi
+    if vfat_seeded_at "$MNT"; then
+        seeded="true"
+    fi
+    if mkfs_fat_bin >/dev/null 2>&1; then
+        mkfs_available="true"
+    fi
+    if sudo -n true 2>/dev/null; then
+        sudo_available="true"
+    fi
+    if command -v udisksctl >/dev/null 2>&1; then
+        udisks_available="true"
+    fi
+    if command -v losetup >/dev/null 2>&1; then
+        losetup_available="true"
+    fi
+
+    if { [ "$fstype" = "vfat" ] || [ "$fstype" = "msdos" ]; } && [ "$writable" = "true" ] && [ "$seeded" = "true" ]; then
+        ready="true"
+        reason="seeded writable vfat/msdos mount is ready"
+    elif [ "$mounted" = "false" ] && [ "$mkfs_available" = "true" ] && { [ "$sudo_available" = "true" ] || { [ "$udisks_available" = "true" ] && [ "$losetup_available" = "true" ]; }; }; then
+        reason="mount can be prepared if sudo or polkit authorizes loop mounting"
+    elif [ "$mounted" = "false" ] && [ "$mkfs_available" != "true" ]; then
+        reason="mkfs.fat or mkfs.vfat is missing"
+    elif [ "$mounted" = "false" ]; then
+        reason="need passwordless sudo or a polkit-authorized udisks session to mount VFAT loop image"
+    elif [ "$writable" != "true" ]; then
+        reason="existing mount is not writable by this user"
+    elif [ "$seeded" != "true" ]; then
+        reason="existing vfat/msdos mount is missing writable benchmark seed files"
+    fi
+
+    if [ "$ready" = "true" ]; then
+        echo "vfat_prepare_diagnosis: ready"
+    else
+        echo "vfat_prepare_diagnosis: not-ready"
+    fi
+    echo "mount: $MNT"
+    echo "image: $IMG"
+    echo "size_mib: $SIZE_MIB"
+    echo "mountpoint: $mounted"
+    echo "fstype: ${fstype:-unknown}"
+    echo "writable: $writable"
+    echo "seeded: $seeded"
+    echo "mkfs_fat: $mkfs_available"
+    echo "sudo_noninteractive: $sudo_available"
+    echo "udisksctl: $udisks_available"
+    echo "losetup: $losetup_available"
+    echo "reason: $reason"
+}
+
+if [ "$DIAGNOSE_ONLY" = "1" ]; then
+    print_diagnosis
+    exit 0
+fi
+
+mkdir -p "$MNT"
+
+require_vfat_mount() {
+    fstype="$(findmnt -T "$MNT" -n -o FSTYPE 2>/dev/null | head -1 || true)"
+    if [ "$fstype" != "vfat" ] && [ "$fstype" != "msdos" ]; then
+        echo "VFAT baseline mount is not vfat/msdos: $MNT (fstype=${fstype:-unknown})" >&2
+        exit 1
+    fi
+}
+
+if mountpoint -q "$MNT"; then
+    if [ -w "$MNT" ]; then
+        require_vfat_mount
+    elif sudo -n true 2>/dev/null; then
+        sudo -n umount "$MNT"
+    else
+        echo "VFAT mount exists but is not writable: $MNT" >&2
+        echo "Run with passwordless sudo or remount it with uid=$UID_ARG,gid=$GID_ARG." >&2
+        exit 1
+    fi
+fi
+
+if ! mountpoint -q "$MNT"; then
+    if [ -e "$MNT" ] && [ ! -d "$MNT" ]; then
+        rm -f "$MNT"
+    fi
+    mkdir -p "$MNT"
+    rm -f "$IMG"
+    dd if=/dev/zero of="$IMG" bs=1M count="$SIZE_MIB" status=none
+    MKFS_FAT_BIN="$(mkfs_fat_bin)" || {
+        rm -f "$IMG"
+        echo "Need mkfs.fat or mkfs.vfat to create VFAT loop image at $IMG." >&2
+        exit 1
+    }
+    "$MKFS_FAT_BIN" -F 32 "$IMG" >/dev/null
+    if sudo -n true 2>/dev/null; then
+        sudo -n mount -o "loop,uid=$UID_ARG,gid=$GID_ARG,fmask=0022,dmask=0022" "$IMG" "$MNT"
+    elif command -v udisksctl >/dev/null 2>&1 && command -v losetup >/dev/null 2>&1; then
+        if ! UDISKS_SETUP_ERR="$(udisksctl loop-setup --file "$IMG" --no-user-interaction 2>&1 >/dev/null)"; then
+            rm -f "$IMG"
+            echo "Need sudo or a polkit-authorized udisks session to mount VFAT loop image at $MNT." >&2
+            echo "udisksctl loop-setup failed: $UDISKS_SETUP_ERR" >&2
+            exit 1
+        fi
+        UDISKS_LOOP="$(losetup -j "$IMG" 2>/dev/null | head -1 | cut -d: -f1)"
+        if [ -z "$UDISKS_LOOP" ]; then
+            rm -f "$IMG"
+            echo "udisksctl loop setup succeeded but loop device was not found for $IMG" >&2
+            exit 1
+        fi
+        if ! UDISKS_MOUNT_ERR="$(udisksctl mount -b "$UDISKS_LOOP" --no-user-interaction 2>&1 >/dev/null)"; then
+            udisksctl loop-delete -b "$UDISKS_LOOP" --no-user-interaction >/dev/null 2>&1 || true
+            rm -f "$IMG"
+            echo "Need sudo or a polkit-authorized udisks session to mount VFAT loop image at $MNT." >&2
+            echo "udisksctl mount failed: $UDISKS_MOUNT_ERR" >&2
+            exit 1
+        fi
+        UDISKS_MNT="$(findmnt -n -o TARGET "$UDISKS_LOOP" 2>/dev/null | head -1)"
+        if [ -z "$UDISKS_MNT" ]; then
+            udisksctl loop-delete -b "$UDISKS_LOOP" --no-user-interaction >/dev/null 2>&1 || true
+            rm -f "$IMG"
+            echo "udisksctl mounted $UDISKS_LOOP but no mount target was found" >&2
+            exit 1
+        fi
+        if [ "$UDISKS_MNT" != "$MNT" ]; then
+            rmdir "$MNT" 2>/dev/null || true
+            ln -sfn "$UDISKS_MNT" "$MNT"
+        fi
+    else
+        echo "Need sudo or udisksctl to mount VFAT loop image at $MNT." >&2
+        exit 1
+    fi
+fi
+
+require_vfat_mount
+
+python3 - "$MNT" "$BYTES" <<'PY'
+import pathlib
+import sys
+
+mnt = pathlib.Path(sys.argv[1])
+size = int(sys.argv[2])
+for name in ("read", "write"):
+    path = mnt / f"simple_fat32_4k_vfat_{name}.bin"
+    path.write_bytes(b"A" * size)
+print(f"seeded {size} bytes x2 under {mnt}")
+PY
+
+findmnt -T "$MNT" -o TARGET,SOURCE,FSTYPE,OPTIONS -n
+if [ "$REQUESTED_MNT" != "/tmp/simple_vfat_bench_mnt" ]; then
+    echo "Use VFAT_MNT=$REQUESTED_MNT when running scripts/perf/run-fat32-4k-cfat-baseline.shs"
+fi

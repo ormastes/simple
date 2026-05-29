@@ -1,0 +1,162 @@
+"""
+# HTTP Range Request Support (RFC 7233)
+
+Parses Range headers and builds 206 Partial Content responses.
+Note: static_file.spl has a simpler single-range path for StaticFileHandler.
+"""
+
+use std.http_server.types.{HttpRequestData, HttpResponseData}
+use std.nogc_sync_mut.io.file_ops.{file_read_text_at}
+
+fn find_header(headers: [(text, text)], name: text) -> text?:
+    """Find a header value by case-insensitive name."""
+    val lower = name.lower()
+    for h in headers:
+        if h.0.lower() == lower:
+            return h.1
+    nil
+
+fn parse_range_header(header_value: text, file_size: i64) -> Result<[(i64, i64)], text>:
+    """Parse Range header into validated (start, end) inclusive byte ranges.
+    Supports bytes=start-end, bytes=start-, bytes=-suffix, and comma-separated multi-range."""
+    if file_size <= 0:
+        return Err("empty file")
+    val prefix = "bytes="
+    if not header_value.starts_with(prefix):
+        return Err("unsupported range unit")
+    val spec = header_value.slice(prefix.len(), header_value.len())
+    if spec.len() == 0:
+        return Err("empty range spec")
+
+    val parts = _split_comma(spec)
+    var ranges: [(i64, i64)] = []
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed.len() == 0:
+            return Err("empty range part")
+        val parsed = _parse_single_range(trimmed, file_size)
+        if parsed.0 == -1 and parsed.1 == -1:
+            return Err("unsatisfiable range: {trimmed}")
+        ranges.push(parsed)
+    if ranges.len() == 0:
+        return Err("no valid ranges")
+    Ok(ranges)
+
+fn _split_comma(s: text) -> [text]:
+    var parts: [text] = []
+    var start = 0
+    var i = 0
+    while i < s.len():
+        if s.char_at(i) == ",":
+            parts.push(s.slice(start, i))
+            start = i + 1
+        i = i + 1
+    parts.push(s.slice(start, s.len()))
+    parts
+
+fn _parse_single_range(spec: text, file_size: i64) -> (i64, i64):
+    """Parse one range spec. Returns (-1, -1) on invalid."""
+    val dash_pos = spec.index_of("-")
+    if dash_pos < 0:
+        return (-1, -1)
+    val before = spec.slice(0, dash_pos)
+    val after = spec.slice(dash_pos + 1, spec.len())
+    var start: i64
+    var end: i64
+    if before.len() == 0:
+        if after.len() == 0:
+            return (-1, -1)
+        val suffix = _parse_i64(after)
+        if suffix <= 0:
+            return (-1, -1)
+        start = file_size - suffix
+        if start < 0:
+            start = 0
+        end = file_size - 1
+    elif after.len() == 0:
+        start = _parse_i64(before)
+        end = file_size - 1
+    else:
+        start = _parse_i64(before)
+        end = _parse_i64(after)
+    if start < 0 or end < 0 or start > end or start >= file_size:
+        return (-1, -1)
+    if end >= file_size:
+        end = file_size - 1
+    (start, end)
+
+fn _parse_i64(s: text) -> i64:
+    """Parse non-negative decimal integer. Returns -1 on error."""
+    if s.len() == 0:
+        return -1
+    var n: i64 = 0
+    var i = 0
+    while i < s.len():
+        val b = s.byte_at(i)
+        if b < 48 or b > 57:
+            return -1
+        n = n * 10 + (b - 48)
+        i = i + 1
+    n
+
+fn build_range_response(ranges: [(i64, i64)], file_size: i64, content_type: text, file_path: text, etag: text) -> HttpResponseData:
+    """Build 206 Partial Content for a single range. Uses sendfile via body_file."""
+    val start = ranges[0].0
+    val end = ranges[0].1
+    val length = end - start + 1
+    val cr = "bytes {start}-{end}/{file_size}"
+    HttpResponseData(
+        status: 206,
+        reason: "Partial Content",
+        headers: [
+            ("Content-Type", content_type),
+            ("Content-Range", cr),
+            ("Content-Length", "{length}"),
+            ("Accept-Ranges", "bytes"),
+            ("ETag", etag),
+            ("Server", "SimpleServer")
+        ],
+        body: "",
+        body_bytes: [],
+        body_file: file_path,
+        body_offset: start,
+        body_length: length,
+        chunked: false
+    )
+
+fn build_multipart_range_response(ranges: [(i64, i64)], file_size: i64, content_type: text, boundary: text, file_path: text, etag: text) -> HttpResponseData:
+    """Build 206 multipart/byteranges for multiple ranges. Reads slices into memory."""
+    var body = ""
+    for r in ranges:
+        val start = r.0
+        val end = r.1
+        val length = end - start + 1
+        val cr = "bytes {start}-{end}/{file_size}"
+        val chunk = file_read_text_at(file_path, start, length)
+        body = body + "--{boundary}\r\n"
+        body = body + "Content-Type: {content_type}\r\n"
+        body = body + "Content-Range: {cr}\r\n"
+        body = body + "\r\n"
+        body = body + chunk
+        body = body + "\r\n"
+    body = body + "--{boundary}--\r\n"
+    HttpResponseData(
+        status: 206,
+        reason: "Partial Content",
+        headers: [
+            ("Content-Type", "multipart/byteranges; boundary={boundary}"),
+            ("Accept-Ranges", "bytes"),
+            ("ETag", etag),
+            ("Server", "SimpleServer")
+        ],
+        body: body,
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn generate_boundary() -> text:
+    """Generate a boundary string for multipart responses."""
+    "SimpleServerBoundary00rangedelim"

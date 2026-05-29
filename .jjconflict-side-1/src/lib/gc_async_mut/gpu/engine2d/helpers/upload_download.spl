@@ -1,0 +1,107 @@
+"""2D Engine — Buffer Upload / Download and Backend Availability Helpers
+
+BufferTransfer tracks byte counts for host↔device transfers.
+AvailabilityHelper records whether a named backend passed its probe check.
+
+No SFFI or backend state: both classes are pure bookkeeping helpers shared
+across CPU, GPU, and emulated backends.
+
+Usage:
+    use std.gpu.engine2d.helpers.upload_download.{
+        BufferTransfer, AvailabilityHelper
+    }
+
+@tag:stdlib
+@tag:gpu
+"""
+
+# ============================================================================
+# BufferTransfer
+# ============================================================================
+
+class BufferTransfer:
+    """Tracks host↔device buffer transfers with byte and call counts."""
+    direction: text
+    bytes_transferred: i64
+    transfer_count: i64
+    last_error: text
+
+    static fn create() -> BufferTransfer:
+        """Create a new BufferTransfer accumulator (direction set per call)."""
+        BufferTransfer(
+            direction: "none",
+            bytes_transferred: 0,
+            transfer_count: 0,
+            last_error: ""
+        )
+
+    me upload(src_offset: i64, dst_offset: i64, size_bytes: i64) -> text:
+        """Record an upload transfer and return a descriptor string.
+
+        Returns an error descriptor if size_bytes is negative.
+        """
+        if size_bytes < 0:
+            self.last_error = "upload: negative size " + size_bytes.to_text()
+            return "error: " + self.last_error
+        self.direction = "upload"
+        self.bytes_transferred = self.bytes_transferred + size_bytes
+        self.transfer_count = self.transfer_count + 1
+        "upload(src=" + src_offset.to_text() + " dst=" + dst_offset.to_text() + " bytes=" + size_bytes.to_text() + ")"
+
+    me download(src_offset: i64, dst_offset: i64, size_bytes: i64) -> text:
+        """Record a download transfer and return a descriptor string.
+
+        Returns an error descriptor if size_bytes is negative.
+        """
+        if size_bytes < 0:
+            self.last_error = "download: negative size " + size_bytes.to_text()
+            return "error: " + self.last_error
+        self.direction = "download"
+        self.bytes_transferred = self.bytes_transferred + size_bytes
+        self.transfer_count = self.transfer_count + 1
+        "download(src=" + src_offset.to_text() + " dst=" + dst_offset.to_text() + " bytes=" + size_bytes.to_text() + ")"
+
+    me stats() -> text:
+        """Return a one-line summary of transfer activity."""
+        "BufferTransfer(dir=" + self.direction + " bytes=" + self.bytes_transferred.to_text() + " count=" + self.transfer_count.to_text() + " last_error=" + self.last_error + ")"
+
+# ============================================================================
+# AvailabilityHelper
+# ============================================================================
+
+class AvailabilityHelper:
+    """Records whether a named backend probe succeeded or failed."""
+    backend_name: text
+    checked: bool
+    available: bool
+    reason: text
+
+    static fn check(backend: text) -> AvailabilityHelper:
+        """Create an AvailabilityHelper for the given backend name.
+
+        Starts in the unchecked state; call is_available() to read the result
+        after the probe has been performed and stored in the available field.
+        """
+        AvailabilityHelper(
+            backend_name: backend,
+            checked: false,
+            available: false,
+            reason: "not yet checked"
+        )
+
+    me is_available() -> bool:
+        """Return true if the backend was probed and found available."""
+        self.checked and self.available
+
+    me unavailable_reason() -> text:
+        """Return the human-readable reason the backend is unavailable.
+
+        Returns an empty string when the backend is available.
+        """
+        if self.available:
+            return ""
+        self.reason
+
+    me summary() -> text:
+        """Return a one-line summary of availability state."""
+        "AvailabilityHelper(backend=" + self.backend_name + " checked=" + self.checked.to_text() + " available=" + self.available.to_text() + " reason=" + self.reason + ")"

@@ -1,0 +1,69 @@
+#!/bin/sh
+set -eu
+
+REQUIRE_SIMD="${SCILIB_REQUIRE_SIMD:-0}"
+REQUIRE_CUDA="${SCILIB_REQUIRE_CUDA:-0}"
+REQUIRE_PYTORCH="${SCILIB_REQUIRE_PYTORCH:-0}"
+
+simd_available=false
+simd_profile=unknown
+if [ -r /proc/cpuinfo ]; then
+    if rg -q 'avx2|sse2|neon|asimd|rvv' /proc/cpuinfo 2>/dev/null; then
+        simd_available=true
+        simd_profile="$(rg -o 'avx2|sse2|neon|asimd|rvv' /proc/cpuinfo 2>/dev/null | sort -u | paste -sd, -)"
+    fi
+fi
+
+cuda_libs="$(ldconfig -p 2>/dev/null | rg 'libcuda\.so|libcublas\.so|libcusolver\.so' || true)"
+cuda_available=false
+cuda_reason="runtime libraries not found"
+if printf '%s\n' "$cuda_libs" | rg -q 'libcuda\.so|libcublas\.so'; then
+    cuda_available=true
+    cuda_reason="runtime libraries present"
+fi
+if command -v nvidia-smi >/dev/null 2>&1; then
+    if nvidia-smi >/dev/null 2>&1; then
+        cuda_available=true
+        cuda_reason="nvidia-smi device probe passed"
+    else
+        cuda_reason="CUDA libraries present but nvidia-smi device probe failed"
+    fi
+fi
+
+pytorch_report="$(python3 - <<'PY' 2>/dev/null || true
+try:
+    import torch
+    print("pytorch_available=true")
+    print("pytorch_version=" + str(torch.__version__))
+    print("pytorch_cuda_available=" + str(torch.cuda.is_available()).lower())
+except Exception as exc:
+    print("pytorch_available=false")
+    print("pytorch_error=" + exc.__class__.__name__)
+PY
+)"
+pytorch_available=false
+if printf '%s\n' "$pytorch_report" | rg -q '^pytorch_available=true$'; then
+    pytorch_available=true
+fi
+
+echo "simd_available=$simd_available"
+echo "simd_profile=$simd_profile"
+echo "cuda_available=$cuda_available"
+echo "cuda_reason=$cuda_reason"
+printf '%s\n' "$pytorch_report"
+
+failed=0
+if [ "$REQUIRE_SIMD" = "1" ] && [ "$simd_available" != "true" ]; then
+    echo "error: SCILIB_REQUIRE_SIMD=1 but no supported SIMD profile was detected" >&2
+    failed=1
+fi
+if [ "$REQUIRE_CUDA" = "1" ] && [ "$cuda_available" != "true" ]; then
+    echo "error: SCILIB_REQUIRE_CUDA=1 but CUDA availability gate did not pass" >&2
+    failed=1
+fi
+if [ "$REQUIRE_PYTORCH" = "1" ] && [ "$pytorch_available" != "true" ]; then
+    echo "error: SCILIB_REQUIRE_PYTORCH=1 but PyTorch/libtorch availability gate did not pass" >&2
+    failed=1
+fi
+
+exit "$failed"

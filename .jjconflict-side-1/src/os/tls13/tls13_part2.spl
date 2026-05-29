@@ -1,0 +1,326 @@
+# Part 2 of src/os/tls13/tls13.spl
+use os.tls13.tls13.*
+# TLS 1.3 Client State Machine — RFC 8446
+#
+# Orchestrates the full TLS 1.3 client handshake:
+#   ClientHello → ServerHello → EncryptedExtensions → Certificate →
+#   CertificateVerify → server Finished → client Finished → App data
+#
+# Uses AES-128-GCM cipher suite (TLS_AES_128_GCM_SHA256, 0x1301).
+# Ed25519-only certificates (Phase 1).
+
+use os.tls13.transcript.*
+use os.tls13.key_schedule.*
+use os.tls13.hkdf.*
+use os.tls13.record13.*
+use os.tls13.handshake13.*
+use os.tls13.psk.*
+use os.tls13.cert_verify.*
+use os.crypto.curve25519.*
+use os.crypto.ecdh_p256.*
+use os.crypto.random.*
+use std.nogc_sync_mut.io.signature_sffi.*
+use std.nogc_sync_mut.io.tcp.*
+
+# ============================================================================
+# TCP I/O externs
+# ============================================================================
+
+fn _put_u16_be_at(buf: [u8], off: u64, v: u32) -> [u8]:
+    """Return a new buffer with u16 big-endian patched at `off`."""
+    var out: [u8] = _byte_buf(buf.len())
+    var i: u64 = 0
+    while i < buf.len():
+        if i == off:
+            out = _push_byte(out, ((v >> 8) & 0xFF).to_i64())
+        else:
+            if i == (off + 1u64):
+                out = _push_byte(out, (v & 0xFF).to_i64())
+            else:
+                out = _push_byte(out, _u8_at_i64(buf, i))
+        i = i + 1
+    out
+
+fn _put_u24_be_at(buf: [u8], off: u64, v: u64) -> [u8]:
+    """Return a new buffer with u24 big-endian patched at `off` (3 bytes)."""
+    var out: [u8] = _byte_buf(buf.len())
+    var i: u64 = 0
+    while i < buf.len():
+        if i == off:
+            out = _push_byte(out, ((v >> 16) & 0xFF).to_i64())
+        else:
+            if i == (off + 1u64):
+                out = _push_byte(out, ((v >> 8) & 0xFF).to_i64())
+            else:
+                if i == (off + 2u64):
+                    out = _push_byte(out, (v & 0xFF).to_i64())
+                else:
+                    out = _push_byte(out, _u8_at_i64(buf, i))
+        i = i + 1
+    out
+
+fn _make_psk_identities(config: Tls13ClientConfig) -> [PskIdentity]:
+    """Build PskIdentity list from Tls13ClientConfig (single-entry today)."""
+    val obfuscated = (config.offered_psk_age_ms + config.offered_psk_age_add)
+    var ids: [PskIdentity] = []
+    ids.push(PskIdentity(
+        identity: config.offered_psk_identity,
+        obfuscated_ticket_age: obfuscated,
+    ))
+    ids
+
+fn _binder_len_for_hash(hash_id: u8) -> u32:
+    if hash_id == 2u8:
+        return 48u32
+    32u32
+
+# Local builder for psk_key_exchange_modes(psk_dhe_ke) extension.
+# Wire: 0x00 0x2d (type) + 0x00 0x03 (data_len=3) + 0x01 (modes_len=1) + 0x01 (psk_dhe_ke).
+fn _build_ext_psk_kex_modes_dhe() -> [u8]:
+    var out: [u8] = []
+    out = _push_byte(out, 0x00)
+    out = _push_byte(out, 0x2d)
+    out = _push_byte(out, 0x00)
+    out = _push_byte(out, 0x03)
+    out = _push_byte(out, 0x01)   # modes_len = 1
+    out = _push_byte(out, 0x01)   # psk_dhe_ke
+    out
+
+# Build the full pre_shared_key extension bytes (type + len + payload) with
+# zeroed binders. Returns the extension bytes + the offset (within the bytes)
+# of the binders_len u16 field.
+fn _build_ext_pre_shared_key_partial(identities: [PskIdentity], binder_lens: [u32]) -> PskCh:
+    val payload = encode_offered_psk_partial(identities, binder_lens)
+    # ext_type(2) + ext_data_len(2) + payload
+    # NOTE: route every byte through _push_byte(i64) per interpreter bug
+    # (doc/08_tracking/bug/interpreter_array_push_u8_literal_lost_2026-05-02.md)
+    var out: [u8] = []
+    out = _push_byte(out, 0x00)
+    out = _push_byte(out, 0x29)
+    val plen = payload.len().to_u32()
+    out = _push_byte(out, ((plen >> 8) & 0xFF).to_i64())
+    out = _push_byte(out, (plen & 0xFF).to_i64())
+    var i: u64 = 0
+    while i < payload.len():
+        out = _push_byte(out, _u8_at_i64(payload, i))
+        i = i + 1
+    # Offset of binders_len within payload:
+    #   identities_len(2) + identities_buf
+    val ids_buf_len = _u16_be_at(payload, 0u64).to_u64()
+    val binders_field_in_payload = 2u64 + ids_buf_len
+    # Plus 4 bytes for ext header (type+len)
+    val binders_field_in_ext = 4u64 + binders_field_in_payload
+    PskCh(
+        bytes: out,
+        binders_field_offset: binders_field_in_ext,
+        binders_data_offset: binders_field_in_ext + 2u64,
+    )
+
+# Append the psk_key_exchange_modes + pre_shared_key extensions to a CH built
+# by build_client_hello_bytes(_with_p256). Patches the body u24 length and
+# the extensions_len u16. Returns absolute offsets (within the returned wire
+# bytes) of the binders_len field and binders data start.
+fn _splice_psk_extensions_into_ch(
+    ch_bytes: [u8],
+    config: Tls13ClientConfig,
+) -> PskCh:
+    # Walk the body to find the extensions_len u16 offset.
+    # Layout: [0] type, [1..3] u24 body_len,
+    # body: legacy_version(2) + random(32) + session_id_len(1) + session_id +
+    #       cipher_suites_len(2) + cipher_suites + comp_len(1) + comp +
+    #       extensions_len(2) + extensions
+    var off: u64 = 4u64                       # past type+u24
+    off = off + 2u64                          # legacy_version
+    off = off + 32u64                         # random
+    val sid_len = _u8_at(ch_bytes, off).to_u64()
+    off = off + 1u64 + sid_len
+    val cs_len = _u16_be_at(ch_bytes, off).to_u64()
+    off = off + 2u64 + cs_len
+    val cm_len = _u8_at(ch_bytes, off).to_u64()
+    off = off + 1u64 + cm_len
+    val ext_len_field_off = off
+    val old_ext_len = _u16_be_at(ch_bytes, ext_len_field_off).to_u64()
+    val ext_block_off = ext_len_field_off + 2u64
+    val ext_block_end = ext_block_off + old_ext_len
+    # Sanity: ext_block_end == ch_bytes.len()
+    # Build psk_key_exchange_modes extension with [psk_dhe_ke=1] (default).
+    # NOTE: open-coded here (not via handshake13.build_ext_psk_key_exchange_modes)
+    # because that function uses the broken `out.push(0x..u8)` pattern under
+    # the interpreter bug (see doc/08_tracking/bug/interpreter_array_push_u8_literal_lost_2026-05-02.md).
+    val ext_pkem = _build_ext_psk_kex_modes_dhe()
+    # Build identities + binder_lens for SHA-256 default (hash_id=1).
+    val identities = _make_psk_identities(config)
+    var binder_lens: [u32] = []
+    binder_lens.push(_binder_len_for_hash(config.offered_psk_hash_id))
+    val psk_ext = _build_ext_pre_shared_key_partial(identities, binder_lens)
+    # Compose new wire bytes.
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < ext_block_end:
+        out = _push_byte(out, _u8_at_i64(ch_bytes, i))
+        i = i + 1
+    # Append psk_key_exchange_modes
+    var j: u64 = 0
+    while j < ext_pkem.len():
+        out = _push_byte(out, _u8_at_i64(ext_pkem, j))
+        j = j + 1
+    # Append pre_shared_key (MUST be last)
+    val psk_ext_off = out.len()
+    var k: u64 = 0
+    while k < psk_ext.bytes.len():
+        out = _push_byte(out, _u8_at_i64(psk_ext.bytes, k))
+        k = k + 1
+    # Patch extensions_len (u16) and body length (u24).
+    val new_ext_len = old_ext_len + ext_pkem.len() + psk_ext.bytes.len()
+    out = _put_u16_be_at(out, ext_len_field_off, new_ext_len.to_u32())
+    val new_body_len = (out.len() - 4u64)
+    out = _put_u24_be_at(out, 1u64, new_body_len)
+    PskCh(
+        bytes: out,
+        binders_field_offset: psk_ext_off + psk_ext.binders_field_offset,
+        binders_data_offset: psk_ext_off + psk_ext.binders_data_offset,
+    )
+
+# Splice computed binder bytes into the wire CH at binders_data_offset.
+# Each binder is preceded by its 1-byte length prefix from the partial encode.
+# This walks the wire bytes and substitutes the binder slots with computed MACs,
+# preserving the length-prefix bytes.
+fn _splice_binder_bytes(wire: [u8], psk_ch: PskCh, binders: [[u8]]) -> [u8]:
+    # Pre-compute substitution range: binders_data_offset..binders_block_end
+    # binders block: for each binder: u8 plen + plen bytes (already zero-filled).
+    # We substitute every byte that is a binder body (skip plen bytes).
+    val n_binders = binders.len().to_u64()
+    var bin_starts: [u64] = []
+    var bin_ends: [u64] = []
+    var bin_payloads: [[u8]] = []
+    var cursor: u64 = psk_ch.binders_data_offset
+    var idx: u64 = 0
+    while idx < n_binders:
+        val b = binders[idx.to_i64()]
+        val body_start = cursor + 1u64
+        val body_end = body_start + b.len()
+        bin_starts.push(body_start)
+        bin_ends.push(body_end)
+        bin_payloads.push(b)
+        cursor = body_end
+        idx = idx + 1
+    # Build new wire bytes: copy old, substitute binder body ranges.
+    var out: [u8] = _byte_buf(wire.len())
+    var i: u64 = 0
+    while i < wire.len():
+        # Find which binder (if any) covers offset i.
+        var copied = false
+        var k: u64 = 0
+        while k < n_binders and not copied:
+            val s = bin_starts[k.to_i64()]
+            val e = bin_ends[k.to_i64()]
+            if i >= s and i < e:
+                val rel = i - s
+                val payload = bin_payloads[k.to_i64()]
+                out = _push_byte(out, _u8_at_i64(payload, rel))
+                copied = true
+            k = k + 1
+        if not copied:
+            out = _push_byte(out, _u8_at_i64(wire, i))
+        i = i + 1
+    out
+
+# End-to-end PSK-CH wire build: takes a base CH (no PSK) + config, splices
+# the PSK extensions, computes the binder MAC over the partial-CH transcript
+# (RFC 8446 §4.1.4), and writes the binder back into the wire bytes.
+# Returns the final ClientHello wire bytes ready to send.
+fn _build_psk_client_hello(ch_base: [u8], config: Tls13ClientConfig) -> [u8]:
+    val psk_ch = _splice_psk_extensions_into_ch(ch_base, config)
+    val partial_th = _partial_ch_transcript_hash(psk_ch.bytes, psk_ch, config.offered_psk_hash_id)
+    val es_psk = tls13_early_secret_from_psk(config.offered_psk_secret, config.offered_psk_hash_id)
+    val bk = tls13_binder_key(es_psk, config.offered_psk_hash_id, config.offered_psk_is_resumption)
+    val binder_mac = tls13_compute_psk_binder(bk, partial_th, config.offered_psk_hash_id)
+    var binders_list: [[u8]] = []
+    binders_list.push(binder_mac)
+    _splice_binder_bytes(psk_ch.bytes, psk_ch, binders_list)
+
+# Compute the partial-CH transcript hash per RFC 8446 §4.1.4: SHA-256 over
+# wire bytes [0 .. binders_field_offset). Note: the hash STOPS at end of
+# identities, BEFORE the binders_len u16 field — not at the end of the
+# zeroed binders block.
+fn _partial_ch_transcript_hash(wire: [u8], psk_ch: PskCh, hash_id: u8) -> [u8]:
+    var prefix: [u8] = []
+    var i: u64 = 0
+    val end = psk_ch.binders_field_offset
+    while i < end:
+        prefix = _push_byte(prefix, _u8_at_i64(wire, i))
+        i = i + 1
+    if hash_id == 2u8:
+        # SHA-384 path not yet supported by rt_tls13_sha256; future ticket.
+        return rt_tls13_sha256(prefix)
+    rt_tls13_sha256(prefix)
+
+# Scan a ServerHello body (after the 4-byte handshake header) for the
+# pre_shared_key extension (type 0x0029, RFC 8446 §4.2.11) and return the
+# u16 selected_identity index. Returns -1 if absent. The SH body layout is:
+#   legacy_version(2) + random(32) + session_id_len(1) + session_id +
+#   cipher_suite(2) + compression(1) + extensions_len(2) + extensions
+fn _parse_sh_selected_identity(sh_body: [u8]) -> i64:
+    if sh_body.len() < 38u64:
+        return -1
+    var off: u64 = 2u64                       # legacy_version
+    off = off + 32u64                         # random
+    val sid_len = _u8_at(sh_body, off).to_u64()
+    off = off + 1u64 + sid_len
+    if off + 5u64 > sh_body.len().to_u64():
+        return -1
+    off = off + 2u64                          # cipher_suite
+    off = off + 1u64                          # compression
+    if off + 2u64 > sh_body.len().to_u64():
+        return -1
+    val ext_len = _u16_be_at(sh_body, off).to_u64()
+    off = off + 2u64
+    val ext_end = off + ext_len
+    if ext_end > sh_body.len().to_u64():
+        return -1
+    while off + 4u64 <= ext_end:
+        val ext_type = _u16_be_at(sh_body, off)
+        val ext_dlen = _u16_be_at(sh_body, off + 2u64).to_u64()
+        val ext_data = off + 4u64
+        if ext_data + ext_dlen > ext_end:
+            return -1
+        if ext_type == 0x0029u32:
+            if ext_dlen < 2u64:
+                return -1
+            return _u16_be_at(sh_body, ext_data).to_i64()
+        off = ext_data + ext_dlen
+    -1
+
+fn tls13_default_client_config() -> Tls13ClientConfig:
+    Tls13ClientConfig(
+        client_cert_chain: [],
+        client_pkcs8: [],
+        client_sig_scheme: 0x0807,
+        root_store: [],
+        offered_psk_count: 0u32,
+        offered_psk_identity: [],
+        offered_psk_secret: [],
+        offered_psk_age_ms: 0u32,
+        offered_psk_age_add: 0u32,
+        offered_psk_hash_id: 1u8,
+        offered_psk_is_resumption: false,
+        offer_early_data: false,
+        early_data_payload: [],
+    )
+
+# ============================================================================
+# Main: tls13_connect
+# ============================================================================
+
+fn tls13_connect(tcp_fd: i64, hostname: text) -> Tls13ConnectResult:
+    tls13_connect_with_config(tcp_fd, hostname, tls13_default_client_config())
+
+fn tls13_connect_with_config(tcp_fd: i64, hostname: text, config: Tls13ClientConfig) -> Tls13ConnectResult:
+    tls13_connect_io_with_config(_fd_io(tcp_fd), hostname, config)
+
+fn tls13_connect_host_stream(stream: TcpStream, hostname: text) -> Tls13ConnectResult:
+    tls13_connect_host_stream_with_config(stream, hostname, tls13_default_client_config())
+
+fn tls13_connect_host_stream_with_config(stream: TcpStream, hostname: text, config: Tls13ClientConfig) -> Tls13ConnectResult:
+    tls13_connect_io_with_config(_host_stream_io(stream), hostname, config)
+

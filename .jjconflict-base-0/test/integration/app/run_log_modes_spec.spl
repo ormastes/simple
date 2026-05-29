@@ -1,0 +1,45 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _run_run(args: [text]) -> (text, text, i64):
+    val joined = args.join(" ")
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/run/main.spl\" " + joined
+    ])
+
+fn _run_run_temp_script() -> (text, text, i64):
+    rt_process_run("/bin/sh", [
+        "-c",
+        "TMP=/tmp/simple_run_delegate_$$.spl; printf 'print \"run-delegate-ok\"\\n' > \"$TMP\"; REPO=$(pwd); SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/run/main.spl\" \"$TMP\"; CODE=$?; rm -f \"$TMP\"; exit $CODE"
+    ])
+
+describe "run log mode CLI options":
+    it "shows shared log options in help":
+        val (out, err, code) = _run_run(["--help"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("Usage: simple run")
+        expect(out).to_contain("--log-mode")
+        expect(out).to_contain("--progress")
+
+    it "supports log-mode json for missing file output":
+        val (out, err, code) = _run_run(["--log-mode=json"])
+        expect(code).to_equal(1)
+        expect(out).to_contain("\"command\":\"run\"")
+        expect(out).to_contain("\"error\":\"no file specified\"")
+
+    it "supports dot progress for help output":
+        val (out, err, code) = _run_run(["--progress=dot", "--help"])
+        expect(code).to_equal(0)
+        expect(out).to_start_with(".")
+        expect(out).to_contain("Usage: simple run")
+
+    it "rejects invalid log mode":
+        val (out, err, code) = _run_run(["--log-mode=noisy"])
+        expect(code).to_equal(1)
+
+    it "delegates real file execution to the rust CLI":
+        val (out, err, code) = _run_run_temp_script()
+        expect(code).to_equal(0)
+        expect(out).to_contain("run-delegate-ok")

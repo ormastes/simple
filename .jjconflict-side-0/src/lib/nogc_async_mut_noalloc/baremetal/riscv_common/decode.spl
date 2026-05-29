@@ -1,0 +1,236 @@
+# ============================================================================
+# RISC-V Instruction Decode (RV32I / RV64I Base Integer)
+# ============================================================================
+#
+# Decodes a 32-bit RISC-V instruction word into its constituent fields.
+# Supports all RV32I/RV64I base integer instruction formats:
+#   R-type, I-type, S-type, B-type, U-type, J-type
+#
+# The decoder is XLEN-agnostic — it operates on the raw 32-bit encoding.
+# XLEN-dependent behaviour (e.g. ADDW vs ADD) is handled by the ALU and
+# execution stages that consume DecodedInsn.
+# ============================================================================
+
+use std.nogc_async_mut_noalloc.baremetal.riscv_common.xlen.XlenConfig
+
+# ============================================================================
+# Opcode constants (bits [6:0])
+# ============================================================================
+
+val OP_LUI: i64       = 0x37    # Load Upper Immediate
+val OP_AUIPC: i64     = 0x17    # Add Upper Immediate to PC
+val OP_JAL: i64       = 0x6F    # Jump And Link
+val OP_JALR: i64      = 0x67    # Jump And Link Register
+val OP_BRANCH: i64    = 0x63    # Conditional branch (BEQ, BNE, BLT, ...)
+val OP_LOAD: i64      = 0x03    # Load (LB, LH, LW, LD, LBU, LHU, LWU)
+val OP_STORE: i64     = 0x23    # Store (SB, SH, SW, SD)
+val OP_OP_IMM: i64    = 0x13    # Integer register-immediate (ADDI, SLTI, ...)
+val OP_OP: i64        = 0x33    # Integer register-register (ADD, SUB, ...)
+val OP_MISC_MEM: i64  = 0x0F    # FENCE
+val OP_SYSTEM: i64    = 0x73    # ECALL, EBREAK, CSR ops
+
+# RV64I additional opcodes
+val OP_OP_IMM_32: i64 = 0x1B    # ADDIW, SLLIW, SRLIW, SRAIW
+val OP_OP_32: i64     = 0x3B    # ADDW, SUBW, SLLW, SRLW, SRAW
+
+# ============================================================================
+# Branch funct3 codes
+# ============================================================================
+
+val FUNCT3_BEQ: i64  = 0
+val FUNCT3_BNE: i64  = 1
+val FUNCT3_BLT: i64  = 4
+val FUNCT3_BGE: i64  = 5
+val FUNCT3_BLTU: i64 = 6
+val FUNCT3_BGEU: i64 = 7
+
+# ============================================================================
+# Load/Store funct3 codes
+# ============================================================================
+
+val FUNCT3_BYTE: i64  = 0   # LB / SB
+val FUNCT3_HALF: i64  = 1   # LH / SH
+val FUNCT3_WORD: i64  = 2   # LW / SW
+val FUNCT3_DWORD: i64 = 3   # LD / SD  (RV64I only)
+val FUNCT3_BYTEU: i64 = 4   # LBU
+val FUNCT3_HALFU: i64 = 5   # LHU
+val FUNCT3_WORDU: i64 = 6   # LWU (RV64I only)
+
+# ============================================================================
+# ALU funct3 codes (OP / OP_IMM)
+# ============================================================================
+
+val FUNCT3_ADD_SUB: i64  = 0   # ADD/SUB (funct7 disambiguates)
+val FUNCT3_SLL: i64      = 1
+val FUNCT3_SLT: i64      = 2
+val FUNCT3_SLTU: i64     = 3
+val FUNCT3_XOR: i64      = 4
+val FUNCT3_SRL_SRA: i64  = 5   # SRL/SRA (funct7 disambiguates)
+val FUNCT3_OR: i64       = 6
+val FUNCT3_AND: i64      = 7
+
+# ============================================================================
+# System funct3 codes
+# ============================================================================
+
+val FUNCT3_PRIV: i64   = 0   # ECALL / EBREAK
+val FUNCT3_CSRRW: i64  = 1
+val FUNCT3_CSRRS: i64  = 2
+val FUNCT3_CSRRC: i64  = 3
+val FUNCT3_CSRRWI: i64 = 5
+val FUNCT3_CSRRSI: i64 = 6
+val FUNCT3_CSRRCI: i64 = 7
+
+# ============================================================================
+# DecodedInsn — decoded instruction fields
+# ============================================================================
+
+struct DecodedInsn:
+    """Decoded fields from a 32-bit RISC-V instruction."""
+    raw: i64          # Original 32-bit instruction word
+    opcode: i64       # bits [6:0]
+    rd: i64           # bits [11:7]  — destination register
+    funct3: i64       # bits [14:12]
+    rs1: i64          # bits [19:15] — source register 1
+    rs2: i64          # bits [24:20] — source register 2
+    funct7: i64       # bits [31:25]
+    imm: i64          # Sign-extended immediate (format-dependent)
+
+impl DecodedInsn:
+    fn is_branch() -> bool:
+        """Return true if this is a conditional branch."""
+        self.opcode == OP_BRANCH
+
+    fn is_jump() -> bool:
+        """Return true if this is JAL or JALR."""
+        self.opcode == OP_JAL or self.opcode == OP_JALR
+
+    fn is_load() -> bool:
+        """Return true if this is a load instruction."""
+        self.opcode == OP_LOAD
+
+    fn is_store() -> bool:
+        """Return true if this is a store instruction."""
+        self.opcode == OP_STORE
+
+    fn is_system() -> bool:
+        """Return true if this is a SYSTEM instruction."""
+        self.opcode == OP_SYSTEM
+
+    fn is_ecall() -> bool:
+        """Return true if this is ECALL."""
+        self.opcode == OP_SYSTEM and self.funct3 == FUNCT3_PRIV and self.imm == 0
+
+    fn is_ebreak() -> bool:
+        """Return true if this is EBREAK."""
+        self.opcode == OP_SYSTEM and self.funct3 == FUNCT3_PRIV and self.imm == 1
+
+    fn summary() -> text:
+        """Return a one-line summary string for debug logging."""
+        val op_hex = self.opcode
+        "op={op_hex} rd=x{self.rd} rs1=x{self.rs1} rs2=x{self.rs2} f3={self.funct3} f7={self.funct7} imm={self.imm}"
+
+# ============================================================================
+# Bitfield extraction helpers
+# ============================================================================
+
+fn bits(insn: i64, hi: i64, lo: i64) -> i64:
+    """Extract bits [hi:lo] (inclusive) from a 32-bit instruction word."""
+    val width = hi - lo + 1
+    val mask = (1 << width) - 1
+    (insn >> lo) & mask
+
+fn sign_extend(value: i64, width: i64) -> i64:
+    """Sign-extend a value of the given bit width to 64-bit."""
+    val sign_bit = 1 << (width - 1)
+    if value & sign_bit:
+        val fill = -1 << width
+        value | fill
+    else:
+        value
+
+# ============================================================================
+# Immediate extraction by format
+# ============================================================================
+
+fn extract_i_imm(insn: i64) -> i64:
+    """Extract I-type immediate (bits [31:20], sign-extended)."""
+    val raw = bits(insn, 31, 20)
+    sign_extend(raw, 12)
+
+fn extract_s_imm(insn: i64) -> i64:
+    """Extract S-type immediate ([31:25] | [11:7], sign-extended)."""
+    val hi = bits(insn, 31, 25)
+    val lo = bits(insn, 11, 7)
+    val raw = (hi << 5) | lo
+    sign_extend(raw, 12)
+
+fn extract_b_imm(insn: i64) -> i64:
+    """Extract B-type immediate (13-bit, sign-extended, bit[0]=0)."""
+    val bit12  = bits(insn, 31, 31)
+    val bit10_5 = bits(insn, 30, 25)
+    val bit4_1  = bits(insn, 11, 8)
+    val bit11   = bits(insn, 7, 7)
+    val raw = (bit12 << 12) | (bit11 << 11) | (bit10_5 << 5) | (bit4_1 << 1)
+    sign_extend(raw, 13)
+
+fn extract_u_imm(insn: i64) -> i64:
+    """Extract U-type immediate (bits [31:12] << 12, sign-extended)."""
+    val raw = bits(insn, 31, 12) << 12
+    sign_extend(raw, 32)
+
+fn extract_j_imm(insn: i64) -> i64:
+    """Extract J-type immediate (21-bit, sign-extended, bit[0]=0)."""
+    val bit20    = bits(insn, 31, 31)
+    val bit10_1  = bits(insn, 30, 21)
+    val bit11    = bits(insn, 20, 20)
+    val bit19_12 = bits(insn, 19, 12)
+    val raw = (bit20 << 20) | (bit19_12 << 12) | (bit11 << 11) | (bit10_1 << 1)
+    sign_extend(raw, 21)
+
+# ============================================================================
+# Main decode function
+# ============================================================================
+
+fn decode(insn: i64) -> DecodedInsn:
+    """Decode a 32-bit RISC-V instruction into its constituent fields.
+    The immediate is extracted and sign-extended according to the opcode format."""
+
+    val opcode = insn & 0x7F
+    val rd     = bits(insn, 11, 7)
+    val funct3 = bits(insn, 14, 12)
+    val rs1    = bits(insn, 19, 15)
+    val rs2    = bits(insn, 24, 20)
+    val funct7 = bits(insn, 31, 25)
+
+    # Extract immediate based on instruction format
+    var imm: i64 = 0
+
+    if opcode == OP_LUI or opcode == OP_AUIPC:
+        imm = extract_u_imm(insn)
+    else if opcode == OP_JAL:
+        imm = extract_j_imm(insn)
+    else if opcode == OP_JALR or opcode == OP_LOAD or opcode == OP_OP_IMM or opcode == OP_OP_IMM_32:
+        imm = extract_i_imm(insn)
+    else if opcode == OP_BRANCH:
+        imm = extract_b_imm(insn)
+    else if opcode == OP_STORE:
+        imm = extract_s_imm(insn)
+    else if opcode == OP_SYSTEM:
+        # CSR instructions: imm = CSR address (bits [31:20]), NOT sign-extended
+        if funct3 != FUNCT3_PRIV:
+            imm = bits(insn, 31, 20)
+        else:
+            # ECALL/EBREAK: imm encodes which (0=ECALL, 1=EBREAK)
+            imm = bits(insn, 20, 20)
+
+    DecodedInsn(
+        raw: insn,
+        opcode: opcode,
+        rd: rd,
+        funct3: funct3,
+        rs1: rs1,
+        rs2: rs2,
+        funct7: funct7,
+        imm: imm
+    )

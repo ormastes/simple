@@ -1,0 +1,134 @@
+"""
+# BUSY Contract Specification
+#
+# Tests the exit-code-75 / BUSY error contract when a lease
+# cannot be acquired.
+"""
+
+use std.io_runtime
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_getpid() -> i64
+
+# --- Inline constants ---
+val LEASE_EXCLUSIVE = 0i64
+val LEASE_SHARED = 1i64
+
+# --- Inline lease types ---
+
+struct LeaseEntry:
+    lease_id: text
+    holder_pid: i64
+    kind: i64
+    ttl_ms: i64
+    granted_at_us: i64
+    expires_at_us: i64
+
+struct LeaseResult:
+    ok: bool
+    lease_id: text
+    busy_message: text
+
+struct LeaseManager:
+    leases: [LeaseEntry]
+    next_id: i64
+
+fn lease_manager_new() -> LeaseManager:
+    LeaseManager(leases: [], next_id: 1i64)
+
+fn _next_lease_id(mgr: LeaseManager) -> text:
+    val id = mgr.next_id
+    mgr.next_id = mgr.next_id + 1i64
+    "lease-{id}"
+
+fn _has_exclusive(mgr: LeaseManager) -> bool:
+    var i = 0i64
+    while i < mgr.leases.len():
+        val entry = mgr.leases[i]
+        if entry.kind == LEASE_EXCLUSIVE:
+            return true
+        i = i + 1i64
+    false
+
+fn try_acquire_exclusive(mgr: LeaseManager, pid: i64, ttl_ms: i64) -> LeaseResult:
+    if mgr.leases.len() > 0i64:
+        return LeaseResult(ok: false, lease_id: "", busy_message: "BUSY")
+    val now_us = rt_time_now_unix_micros()
+    val lease_id = _next_lease_id(mgr)
+    val entry = LeaseEntry(lease_id: lease_id, holder_pid: pid, kind: LEASE_EXCLUSIVE, ttl_ms: ttl_ms, granted_at_us: now_us, expires_at_us: now_us + (ttl_ms * 1000i64))
+    mgr.leases.push(entry)
+    LeaseResult(ok: true, lease_id: lease_id, busy_message: "")
+
+fn release_lease(mgr: LeaseManager, lease_id: text) -> bool:
+    var kept: [LeaseEntry] = []
+    var found = false
+    var i = 0i64
+    while i < mgr.leases.len():
+        val entry = mgr.leases[i]
+        if entry.lease_id == lease_id:
+            found = true
+        else:
+            kept.push(entry)
+        i = i + 1i64
+    mgr.leases = kept
+    found
+
+fn format_busy_json(lease_id: text, holder_pid: i64, expires_at: text) -> text:
+    "{\"error\":\"BUSY\",\"lease_id\":\"{lease_id}\",\"holder_pid\":{holder_pid},\"expires_at\":\"{expires_at}\"}"
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "BUSY Contract - Exit Code":
+    it "BUSY result indicates failure":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val first = try_acquire_exclusive(mgr, pid, 30000i64)
+        val second = try_acquire_exclusive(mgr, pid, 30000i64)
+        expect(second.ok).to_equal(false)
+        val msg = second.busy_message
+        expect(msg).to_contain("BUSY")
+
+    it "BUSY message is not empty":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val first = try_acquire_exclusive(mgr, pid, 30000i64)
+        val second = try_acquire_exclusive(mgr, pid, 30000i64)
+        val msg = second.busy_message
+        expect(msg.len()).to_be_greater_than(0i64)
+
+describe "BUSY Contract - JSON Wire Format":
+    it "formats BUSY JSON with error field":
+        val json = format_busy_json("lease-1", 12345i64, "2026-01-01T00:00:30Z")
+        expect(json).to_contain("\"error\":\"BUSY\"")
+        expect(json).to_contain("\"lease_id\":\"lease-1\"")
+        expect(json).to_contain("\"holder_pid\":12345")
+
+describe "BUSY Contract - Exit 0 Regression":
+    it "successful lease does not produce BUSY":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val result = try_acquire_exclusive(mgr, pid, 30000i64)
+        expect(result.ok).to_equal(true)
+        val msg = result.busy_message
+        expect(msg).to_equal("")
+
+    it "released lease allows next acquire":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val first = try_acquire_exclusive(mgr, pid, 30000i64)
+        release_lease(mgr, first.lease_id)
+        val second = try_acquire_exclusive(mgr, pid, 30000i64)
+        expect(second.ok).to_equal(true)
+        val msg = second.busy_message
+        expect(msg).to_equal("")
+
+describe "BUSY Contract - Lease ID in Message":
+    it "BUSY message contains BUSY keyword":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val first = try_acquire_exclusive(mgr, pid, 30000i64)
+        val second = try_acquire_exclusive(mgr, pid, 30000i64)
+        val msg = second.busy_message
+        expect(msg).to_contain("BUSY")

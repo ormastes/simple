@@ -1,0 +1,209 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/qt_gui_size_baseline}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/qt_gui_size_baseline_$(date -u +%F).md}"
+SIMPLE_WEB_REPORT="${SIMPLE_WEB_REPORT:-doc/09_report/web_baremetal_size_audit_2026-05-28.md}"
+
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+bytes_of() {
+    if [ -f "$1" ]; then
+        wc -c <"$1" | tr -d ' '
+    else
+        echo "n/a"
+    fi
+}
+
+section_dec() {
+    if [ -f "$1" ] && have size; then
+        size "$1" | awk 'NR == 2 {print $4}'
+    else
+        echo "n/a"
+    fi
+}
+
+loaded_libs() {
+    if [ -f "$1" ] && have ldd; then
+        ldd "$1" | awk '{print "- " $0}'
+    else
+        echo "- unavailable"
+    fi
+}
+
+simple_web_min_field() {
+    field="$1"
+    if [ -f "$SIMPLE_WEB_REPORT" ]; then
+        awk -F '|' -v field="$field" '
+            BEGIN { best = ""; best_name = "" }
+            /Simple web/ {
+                name = $2
+                bytes = $5
+                dec = $6
+                gsub(/^[ \t]+|[ \t]+$/, "", name)
+                gsub(/^[ \t]+|[ \t]+$/, "", bytes)
+                gsub(/^[ \t]+|[ \t]+$/, "", dec)
+                if (bytes ~ /^[0-9]+$/ && (best == "" || bytes + 0 < best + 0)) {
+                    best = bytes
+                    best_dec = dec
+                    best_name = name
+                }
+            }
+            END {
+                if (field == "name") print (best_name == "" ? "unavailable" : best_name)
+                else if (field == "dec") print (best_dec == "" ? "n/a" : best_dec)
+                else print (best == "" ? "n/a" : best)
+            }
+        ' "$SIMPLE_WEB_REPORT"
+    else
+        if [ "$field" = "name" ]; then
+            echo "unavailable"
+        else
+            echo "n/a"
+        fi
+    fi
+}
+
+qt_pkg=""
+qt_qmake="unavailable"
+qt_cmake="unavailable"
+cxx_tool="unavailable"
+if have pkg-config && pkg-config --exists Qt6Widgets; then
+    qt_pkg="Qt6Widgets"
+elif have pkg-config && pkg-config --exists Qt5Widgets; then
+    qt_pkg="Qt5Widgets"
+fi
+if have qmake6; then
+    qt_qmake="qmake6"
+elif have qmake-qt6; then
+    qt_qmake="qmake-qt6"
+elif have qmake; then
+    qt_qmake="qmake"
+fi
+if have cmake; then
+    qt_cmake="cmake"
+fi
+if have c++; then
+    cxx_tool="c++"
+fi
+
+qt_status="unavailable"
+qt_reason="missing_qt_tooling"
+qt_bin="$BUILD_DIR/qt_minimal_gui"
+qt_bytes="n/a"
+qt_dec="n/a"
+
+if [ -n "$qt_pkg" ] && have c++; then
+    cat >"$BUILD_DIR/qt_minimal_gui.cpp" <<'EOF'
+#include <QApplication>
+#include <QLabel>
+#include <QWidget>
+#include <QVBoxLayout>
+
+int main(int argc, char **argv) {
+    QApplication app(argc, argv);
+    QWidget window;
+    window.setWindowTitle("Simple GUI Baseline");
+    QVBoxLayout layout(&window);
+    QLabel label("Simple GUI");
+    layout.addWidget(&label);
+    window.resize(320, 200);
+    window.show();
+    return 0;
+}
+EOF
+    if c++ -Os -s "$BUILD_DIR/qt_minimal_gui.cpp" -o "$qt_bin" $(pkg-config --cflags --libs "$qt_pkg") >/tmp/qt_gui_size_baseline.$$ 2>&1; then
+        qt_status="ok"
+        qt_reason=""
+        qt_bytes="$(bytes_of "$qt_bin")"
+        qt_dec="$(section_dec "$qt_bin")"
+    else
+        qt_status="failed"
+        qt_reason="qt_compile_failed"
+    fi
+fi
+
+simple_summary="unavailable"
+if [ -f "$SIMPLE_WEB_REPORT" ]; then
+    simple_summary="$SIMPLE_WEB_REPORT"
+fi
+simple_artifact="$(simple_web_min_field name)"
+simple_bytes="$(simple_web_min_field bytes)"
+simple_dec="$(simple_web_min_field dec)"
+comparison_status="unavailable"
+comparison_reason="qt_baseline_unavailable"
+if [ "$qt_status" = "ok" ] && [ "$simple_bytes" != "n/a" ]; then
+    if [ "$simple_bytes" -le "$qt_bytes" ]; then
+        comparison_status="pass"
+        comparison_reason="simple_web_artifact_not_larger_than_qt"
+    else
+        comparison_status="fail"
+        comparison_reason="simple_web_artifact_larger_than_qt"
+    fi
+elif [ "$simple_bytes" = "n/a" ]; then
+    comparison_reason="simple_web_artifact_unavailable"
+fi
+
+{
+    echo "# Qt GUI Size Baseline"
+    echo
+    echo "Date: $(date -u +%F)"
+    echo
+    echo "## Status"
+    echo
+    echo "- qt_build=$qt_status"
+    echo "- reason=$qt_reason"
+    echo "- qt_pkg=${qt_pkg:-unavailable}"
+    echo "- qt_qmake=$qt_qmake"
+    echo "- qt_cmake=$qt_cmake"
+    echo "- cxx_tool=$cxx_tool"
+    echo "- simple_web_report=$simple_summary"
+    echo "- simple_artifact=$simple_artifact"
+    echo "- simple_bytes=$simple_bytes"
+    echo "- comparison_status=$comparison_status"
+    echo "- comparison_reason=$comparison_reason"
+    echo
+    echo "## Qt Artifact"
+    echo
+    echo "| Artifact | Bytes | ELF dec |"
+    echo "|---|---:|---:|"
+    echo "| qt_minimal_gui | $qt_bytes | $qt_dec |"
+    echo
+    echo "## Simple Web Artifact"
+    echo
+    echo "| Artifact | Bytes | ELF dec |"
+    echo "|---|---:|---:|"
+    echo "| $simple_artifact | $simple_bytes | $simple_dec |"
+    echo
+    echo "## Loaded Libraries"
+    echo
+    if [ "$qt_status" = "ok" ]; then
+        loaded_libs "$qt_bin"
+    else
+        echo "- unavailable"
+    fi
+    echo
+    echo "## Notes"
+    echo
+    echo "- This script does not install Qt or network dependencies."
+    echo "- Missing Qt records an unavailable baseline instead of failing the Simple verification path."
+    echo "- The comparison passes only when a Qt artifact and a Simple Web artifact are both measured."
+    echo "- Use \`scripts/check-web-baremetal-size-audit.shs\` to refresh the Simple web-render artifact side of the comparison."
+} >"$REPORT_PATH"
+
+echo "qt_baseline_ready=true"
+echo "qt_build=$qt_status"
+echo "reason=$qt_reason"
+echo "report_path=$REPORT_PATH"
+echo "qt_bytes=$qt_bytes"
+echo "qt_dec=$qt_dec"
+echo "simple_artifact=$simple_artifact"
+echo "simple_bytes=$simple_bytes"
+echo "comparison_status=$comparison_status"

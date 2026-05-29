@@ -1,0 +1,404 @@
+# Shared web render API for GUI backends and pure Simple web rendering.
+
+use common.ui.capability.{Capability}
+use common.ui.widget.{UIEvent}
+use common.text_advanced.{escape_json}
+
+val WEB_RENDER_TARGET_SIMPLE_WEB: text = "simple_web"
+val WEB_RENDER_TARGET_ELECTRON: text = "electron"
+val WEB_RENDER_TARGET_TAURI: text = "tauri"
+val WEB_RENDER_TARGET_PURE_SIMPLE: text = "pure_simple"
+val WEB_RENDER_CACHE_SCHEMA_VERSION: text = "simple-web-cache-v1"
+
+class WebRenderRequest:
+    target: text
+    surface_id: text
+    title: text
+    body_html: text
+    css: text
+    js: text
+    viewport_w: i32
+    viewport_h: i32
+    wants_pixels: bool
+
+    static fn html(target: text, title: text, body_html: text, css: text, js: text, viewport_w: i32, viewport_h: i32) -> WebRenderRequest:
+        WebRenderRequest(
+            target: target,
+            surface_id: "",
+            title: title,
+            body_html: body_html,
+            css: css,
+            js: js,
+            viewport_w: viewport_w,
+            viewport_h: viewport_h,
+            wants_pixels: false
+        )
+
+    fn with_surface(surface_id: text) -> WebRenderRequest:
+        WebRenderRequest(
+            target: self.target,
+            surface_id: surface_id,
+            title: self.title,
+            body_html: self.body_html,
+            css: self.css,
+            js: self.js,
+            viewport_w: self.viewport_w,
+            viewport_h: self.viewport_h,
+            wants_pixels: self.wants_pixels
+        )
+
+    fn with_pixel_output() -> WebRenderRequest:
+        WebRenderRequest(
+            target: self.target,
+            surface_id: self.surface_id,
+            title: self.title,
+            body_html: self.body_html,
+            css: self.css,
+            js: self.js,
+            viewport_w: self.viewport_w,
+            viewport_h: self.viewport_h,
+            wants_pixels: true
+        )
+
+class WebRenderArtifact:
+    target: text
+    html: text
+    ipc_json: text
+    pixels: [u32]
+    viewport_w: i32
+    viewport_h: i32
+    capability_summary: text
+    binary_schema: text
+    binary_cache_key: text
+    binary_cache_path: text
+    binary_bytes: i32
+    binary_layout_bytes: i32
+    binary_command_count: i32
+
+    static fn empty(target: text, viewport_w: i32, viewport_h: i32) -> WebRenderArtifact:
+        WebRenderArtifact(
+            target: target,
+            html: "",
+            ipc_json: "",
+            pixels: [],
+            viewport_w: viewport_w,
+            viewport_h: viewport_h,
+            capability_summary: "",
+            binary_schema: "",
+            binary_cache_key: "",
+            binary_cache_path: "",
+            binary_bytes: 0,
+            binary_layout_bytes: 0,
+            binary_command_count: 0
+        )
+
+class WebRenderBinaryArtifactMetadata:
+    schema: text
+    cache_key: text
+    cache_path: text
+    encoded_bytes: i32
+    layout_bytes: i32
+    command_count: i32
+
+    static fn none() -> WebRenderBinaryArtifactMetadata:
+        WebRenderBinaryArtifactMetadata(
+            schema: "",
+            cache_key: "",
+            cache_path: "",
+            encoded_bytes: 0,
+            layout_bytes: 0,
+            command_count: 0
+        )
+
+fn web_render_artifact_with_binary_metadata(artifact: WebRenderArtifact, meta: WebRenderBinaryArtifactMetadata) -> WebRenderArtifact:
+    WebRenderArtifact(
+        target: artifact.target,
+        html: artifact.html,
+        ipc_json: artifact.ipc_json,
+        pixels: artifact.pixels,
+        viewport_w: artifact.viewport_w,
+        viewport_h: artifact.viewport_h,
+        capability_summary: artifact.capability_summary,
+        binary_schema: meta.schema,
+        binary_cache_key: meta.cache_key,
+        binary_cache_path: meta.cache_path,
+        binary_bytes: meta.encoded_bytes,
+        binary_layout_bytes: meta.layout_bytes,
+        binary_command_count: meta.command_count
+    )
+
+class WebRenderOptimizationProfile:
+    cache_schema: text
+    cache_key: text
+    cacheable_static_shell: bool
+    static_shell_bytes: i32
+    dynamic_region_count: i32
+    render_plan: text
+
+class WebRenderHostWindowCommand:
+    action: text
+    window_id: text
+    surface_id: text
+    app_id: text
+    title: text
+    url: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+
+class WebRenderSnapshotEnvelope:
+    target: text
+    surface_id: text
+    revision: u64
+    snapshot_json: text
+
+class WebRenderPatchEnvelope:
+    target: text
+    surface_id: text
+    from_sequence: u64
+    to_sequence: u64
+    patches_json: text
+    snapshot_json: text
+
+class WebRenderInputEnvelope:
+    target: text
+    surface_id: text
+    event_type: text
+    target_id: text
+    key: text
+    value: text
+    x: f64
+    y: f64
+    dx: f64
+    dy: f64
+    button: text
+
+class WebRenderTransportBundle:
+    render_json: text
+    input_json: text
+    snapshot_json: text
+    patch_json: text
+    host_window_json: text
+
+fn web_render_capabilities_for_target(target: text) -> [Capability]:
+    if target == WEB_RENDER_TARGET_ELECTRON:
+        return [Capability.Mouse, Capability.Color, Capability.Images, Capability.NativeDialogs, Capability.Notification]
+    if target == WEB_RENDER_TARGET_TAURI:
+        return [Capability.Mouse, Capability.Color, Capability.Images, Capability.NativeDialogs, Capability.Notification]
+    [Capability.Mouse, Capability.Color, Capability.Images, Capability.Touch]
+
+fn web_render_capability_summary(target: text) -> text:
+    if target == WEB_RENDER_TARGET_ELECTRON:
+        return "mouse,color,images,native_dialogs,notification"
+    if target == WEB_RENDER_TARGET_TAURI:
+        return "mouse,color,images,native_dialogs,notification"
+    "mouse,color,images,touch"
+
+fn web_render_full_html(req: WebRenderRequest) -> text:
+    val title = if req.title != "": "<title>" + escape_json(req.title) + "</title>" else: ""
+    val css = if req.css != "": "<style>" + req.css + "</style>" else: ""
+    val js = if req.js != "": "<script>" + req.js + "</script>" else: ""
+    "<html><head>" + title + css + "</head><body><div id=\"app\">" + req.body_html + "</div>" + js + "</body></html>"
+
+fn web_render_body_html(req: WebRenderRequest) -> text:
+    req.body_html
+
+fn web_render_ipc_json(req: WebRenderRequest) -> text:
+    web_render_ipc_json_with_html(req, web_render_full_html(req))
+
+fn web_render_ipc_json_with_html(req: WebRenderRequest, full_html: text) -> text:
+    "{\"type\":\"render\",\"target\":\"" + escape_json(req.target) + "\",\"surface_id\":\"" + escape_json(req.surface_id) + "\",\"width\":" + str(req.viewport_w) + ",\"height\":" + str(req.viewport_h) + ",\"html\":\"" + escape_json(full_html) + "\"}"
+
+fn _web_render_index_of_from(haystack: text, marker: text, start: i64) -> i64:
+    if marker == "":
+        return start
+    var offset = start
+    while offset < haystack.len():
+        val tail = haystack.substring(offset, haystack.len())
+        val found = tail.index_of(marker)
+        if found < 0:
+            return -1
+        return offset + found
+    -1
+
+fn _web_render_count_marker(haystack: text, marker: text) -> i32:
+    if marker == "":
+        return 0
+    var count = 0
+    var offset = 0i64
+    while offset < haystack.len():
+        val found = _web_render_index_of_from(haystack, marker, offset)
+        if found < 0:
+            return count
+        count = count + 1
+        offset = found + marker.len()
+    count
+
+fn _web_render_text_fingerprint(value: text) -> text:
+    val len = value.len()
+    val head_end = if len < 24: len else: 24
+    val tail_start = if len < 24: 0 else: len - 24
+    val head = value.substring(0, head_end)
+    val tail = value.substring(tail_start, len)
+    "len={len};head={escape_json(head)};tail={escape_json(tail)}"
+
+fn web_render_dynamic_region_count(req: WebRenderRequest) -> i32:
+    _web_render_count_marker(req.body_html, "data-simple-dynamic") +
+    _web_render_count_marker(req.body_html, "data-live") +
+    _web_render_count_marker(req.body_html, "data-ui-patch") +
+    _web_render_count_marker(req.js, "WebSocket")
+
+fn web_render_cache_key(req: WebRenderRequest) -> text:
+    WEB_RENDER_CACHE_SCHEMA_VERSION +
+    "|target=" + req.target +
+    "|surface=" + req.surface_id +
+    "|viewport=" + str(req.viewport_w) + "x" + str(req.viewport_h) +
+    "|pixels=" + str(req.wants_pixels) +
+    "|cap=" + web_render_capability_summary(req.target) +
+    "|title=" + _web_render_text_fingerprint(req.title) +
+    "|body=" + _web_render_text_fingerprint(req.body_html) +
+    "|css=" + _web_render_text_fingerprint(req.css) +
+    "|js=" + _web_render_text_fingerprint(req.js)
+
+fn web_render_optimization_profile(req: WebRenderRequest) -> WebRenderOptimizationProfile:
+    val dynamic_regions = web_render_dynamic_region_count(req)
+    val cacheable = dynamic_regions == 0
+    val plan = if cacheable:
+        "binary_static_shell"
+    else:
+        "static_shell_with_dynamic_islands"
+    WebRenderOptimizationProfile(
+        cache_schema: WEB_RENDER_CACHE_SCHEMA_VERSION,
+        cache_key: web_render_cache_key(req),
+        cacheable_static_shell: cacheable,
+        static_shell_bytes: req.body_html.len() + req.css.len(),
+        dynamic_region_count: dynamic_regions,
+        render_plan: plan
+    )
+
+fn web_render_host_window_command_to_json(cmd: WebRenderHostWindowCommand) -> text:
+    "{" +
+    "\"action\":\"{escape_json(cmd.action)}\"," +
+    "\"window_id\":\"{escape_json(cmd.window_id)}\"," +
+    "\"surface_id\":\"{escape_json(cmd.surface_id)}\"," +
+    "\"app_id\":\"{escape_json(cmd.app_id)}\"," +
+    "\"title\":\"{escape_json(cmd.title)}\"," +
+    "\"url\":\"{escape_json(cmd.url)}\"," +
+    "\"x\":{cmd.x}," +
+    "\"y\":{cmd.y}," +
+    "\"width\":{cmd.width}," +
+    "\"height\":{cmd.height}" +
+    "}"
+
+fn web_render_snapshot_envelope_to_json(env: WebRenderSnapshotEnvelope) -> text:
+    "{\"type\":\"snapshot\",\"target\":\"" + escape_json(env.target) + "\",\"surface_id\":\"" + escape_json(env.surface_id) + "\",\"revision\":" + str(env.revision) + ",\"snapshot\":" + env.snapshot_json + "}"
+
+fn web_render_patch_envelope_to_json(env: WebRenderPatchEnvelope) -> text:
+    val snapshot_part = if env.snapshot_json != "": ",\"snapshot\":" + env.snapshot_json else: ""
+    "{\"type\":\"patch\",\"target\":\"" + escape_json(env.target) + "\",\"surface_id\":\"" + escape_json(env.surface_id) + "\",\"from_sequence\":" + str(env.from_sequence) + ",\"to_sequence\":" + str(env.to_sequence) + ",\"patches\":" + env.patches_json + snapshot_part + "}"
+
+fn web_render_input_envelope_to_json(env: WebRenderInputEnvelope) -> text:
+    "{" +
+    "\"type\":\"input\"," +
+    "\"target\":\"{escape_json(env.target)}\"," +
+    "\"surface_id\":\"{escape_json(env.surface_id)}\"," +
+    "\"event_type\":\"{escape_json(env.event_type)}\"," +
+    "\"target_id\":\"{escape_json(env.target_id)}\"," +
+    "\"key\":\"{escape_json(env.key)}\"," +
+    "\"value\":\"{escape_json(env.value)}\"," +
+    "\"x\":{env.x}," +
+    "\"y\":{env.y}," +
+    "\"dx\":{env.dx}," +
+    "\"dy\":{env.dy}," +
+    "\"button\":\"{escape_json(env.button)}\"" +
+    "}"
+
+fn web_render_transport_bundle(req: WebRenderRequest, surface_id: text, event: UIEvent, revision: u64, from_sequence: u64, to_sequence: u64, patches_json: text, snapshot_json: text, cmd: WebRenderHostWindowCommand) -> WebRenderTransportBundle:
+    val input = web_render_input_envelope_from_event(req.target, surface_id, event)
+    WebRenderTransportBundle(
+        render_json: web_render_to_artifact(req.with_surface(surface_id)).ipc_json,
+        input_json: web_render_input_envelope_to_json(input),
+        snapshot_json: web_render_snapshot_envelope_to_json(WebRenderSnapshotEnvelope(target: req.target, surface_id: surface_id, revision: revision, snapshot_json: snapshot_json)),
+        patch_json: web_render_patch_envelope_to_json(WebRenderPatchEnvelope(target: req.target, surface_id: surface_id, from_sequence: from_sequence, to_sequence: to_sequence, patches_json: patches_json, snapshot_json: snapshot_json)),
+        host_window_json: web_render_host_window_command_to_json(cmd)
+    )
+
+fn web_render_input_envelope_from_event(target: text, surface_id: text, event: UIEvent) -> WebRenderInputEnvelope:
+    match event:
+        UIEvent.KeyPress(key):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "key", target_id: "", key: key, value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.Resize(width, height):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "resize", target_id: "", key: "", value: "", x: width.to_f64(), y: height.to_f64(), dx: 0.0, dy: 0.0, button: "")
+        UIEvent.Action(name):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "action", target_id: "", key: "", value: name, x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.TouchPress(x, y):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "touch_press", target_id: "", key: "", value: "", x: x.to_f64(), y: y.to_f64(), dx: 0.0, dy: 0.0, button: "")
+        UIEvent.TouchMove(x, y):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "touch_move", target_id: "", key: "", value: "", x: x.to_f64(), y: y.to_f64(), dx: 0.0, dy: 0.0, button: "")
+        UIEvent.TouchRelease(x, y):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "touch_release", target_id: "", key: "", value: "", x: x.to_f64(), y: y.to_f64(), dx: 0.0, dy: 0.0, button: "")
+        UIEvent.MouseEvent(x, y, button, kind):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "mouse_" + kind, target_id: "", key: "", value: "", x: x, y: y, dx: 0.0, dy: 0.0, button: button)
+        UIEvent.ScrollEvent(x, y, dx, dy):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "scroll", target_id: "", key: "", value: "", x: x, y: y, dx: dx, dy: dy, button: "")
+        UIEvent.FocusEvent(target_id, kind):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: kind, target_id: target_id, key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.InputChange(target_id, value):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "input", target_id: target_id, key: "", value: value, x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.FetchResult(request_id, url, status, headers, body, error):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "fetch_result", target_id: request_id, key: "", value: url, x: status.to_f64(), y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.FocusNext:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "focus_next", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.FocusPrev:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "focus_prev", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.CommandMode:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "command_mode", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.NormalMode:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "normal_mode", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.InsertMode:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "insert_mode", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.FileChanged:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "file_changed", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.Quit:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "quit", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+
+fn web_render_to_artifact(req: WebRenderRequest) -> WebRenderArtifact:
+    val html = web_render_full_html(req)
+    val ipc = if req.target == WEB_RENDER_TARGET_ELECTRON or req.target == WEB_RENDER_TARGET_TAURI:
+        web_render_ipc_json_with_html(req, html)
+    else:
+        ""
+    WebRenderArtifact(
+        target: req.target,
+        html: html,
+        ipc_json: ipc,
+        pixels: [],
+        viewport_w: req.viewport_w,
+        viewport_h: req.viewport_h,
+        capability_summary: web_render_capability_summary(req.target),
+        binary_schema: "",
+        binary_cache_key: "",
+        binary_cache_path: "",
+        binary_bytes: 0,
+        binary_layout_bytes: 0,
+        binary_command_count: 0
+    )
+
+fn web_render_pixel_artifact(req: WebRenderRequest, pixels: [u32]) -> WebRenderArtifact:
+    val base = web_render_to_artifact(req.with_pixel_output())
+    WebRenderArtifact(
+        target: base.target,
+        html: base.html,
+        ipc_json: base.ipc_json,
+        pixels: pixels,
+        viewport_w: base.viewport_w,
+        viewport_h: base.viewport_h,
+        capability_summary: base.capability_summary,
+        binary_schema: base.binary_schema,
+        binary_cache_key: base.binary_cache_key,
+        binary_cache_path: base.binary_cache_path,
+        binary_bytes: base.binary_bytes,
+        binary_layout_bytes: base.binary_layout_bytes,
+        binary_command_count: base.binary_command_count
+    )

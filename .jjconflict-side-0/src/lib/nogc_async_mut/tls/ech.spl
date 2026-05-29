@@ -1,0 +1,303 @@
+# TLS Encrypted Client Hello (ECH) — Outer Layer + Provider Stub
+#
+# Implements ECH config parsing, extension recognition, and server-side
+# ClientHello ECH extension detection per RFC 9460. HPKE decrypt is
+# deferred behind a provider boundary — the same pattern QUIC/H3 uses
+# for quiche/SFFI runtime calls.
+
+use std.tls.types.{
+    EXTENSION_TYPE_ENCRYPTED_CLIENT_HELLO,
+    EXTENSION_TYPE_ECH_OUTER_EXTENSIONS
+}
+use std.tls.utilities.{byte_at, slice}
+
+# ============================================================================
+# ECH Configuration Types (RFC 9460 Section 4)
+# ============================================================================
+
+enum EchConfigVersion:
+    Draft13
+    Rfc9460
+    Unknown
+
+struct HpkeSymmetricCipherSuite:
+    kdf_id: i64
+    aead_id: i64
+
+struct EchConfigContents:
+    kem_id: i64
+    public_key: [i64]
+    maximum_name_length: i64
+    public_name: text
+    cipher_suites: [HpkeSymmetricCipherSuite]
+
+struct EchConfig:
+    version: i64
+    length: i64
+    contents: EchConfigContents
+
+struct EchConfigList:
+    configs: [EchConfig]
+
+# ============================================================================
+# ECH Extension in ClientHello
+# ============================================================================
+
+enum EchClientHelloType:
+    Outer
+    Inner
+
+struct EchClientHelloPayload:
+    ech_type: EchClientHelloType
+    cipher_suite: HpkeSymmetricCipherSuite
+    config_id: i64
+    enc: [i64]
+    payload: [i64]
+
+# ============================================================================
+# ECH Server Configuration
+# ============================================================================
+
+struct EchServerConfig:
+    enabled: bool
+    config_list: EchConfigList
+    retry_config_list: [i64]
+
+fn ech_server_config_disabled() -> EchServerConfig:
+    EchServerConfig(
+        enabled: false,
+        config_list: EchConfigList(configs: []),
+        retry_config_list: []
+    )
+
+# ============================================================================
+# ECH Extension Parsing
+# ============================================================================
+
+fn parse_ech_config_contents(data: [i64], offset: i64) -> (EchConfigContents, i64)?:
+    val data_len = data.len()
+    if offset + 4 > data_len:
+        return nil
+
+    val kem_id = (byte_at(data, offset) * 256) + byte_at(data, offset + 1)
+    var pos = offset + 2
+
+    val pk_len = (byte_at(data, pos) * 256) + byte_at(data, pos + 1)
+    pos = pos + 2
+    if pos + pk_len > data_len:
+        return nil
+    val public_key = slice(data, pos, pos + pk_len)
+    pos = pos + pk_len
+
+    if pos + 3 > data_len:
+        return nil
+    val max_name_len = (byte_at(data, pos) * 256) + byte_at(data, pos + 1)
+    pos = pos + 2
+
+    val name_len = byte_at(data, pos)
+    pos = pos + 1
+    if pos + name_len > data_len:
+        return nil
+    var public_name = ""
+    var ni = 0
+    while ni < name_len:
+        val ch = byte_at(data, pos + ni)
+        public_name = public_name + chr(ch)
+        ni = ni + 1
+    pos = pos + name_len
+
+    if pos + 2 > data_len:
+        return nil
+    val suites_len = (byte_at(data, pos) * 256) + byte_at(data, pos + 1)
+    pos = pos + 2
+    if pos + suites_len > data_len:
+        return nil
+
+    var suites: [HpkeSymmetricCipherSuite] = []
+    var si = 0
+    while si < suites_len:
+        if pos + si + 4 > data_len:
+            return nil
+        val kdf = (byte_at(data, pos + si) * 256) + byte_at(data, pos + si + 1)
+        val aead = (byte_at(data, pos + si + 2) * 256) + byte_at(data, pos + si + 3)
+        suites = suites.push(HpkeSymmetricCipherSuite(kdf_id: kdf, aead_id: aead))
+        si = si + 4
+    pos = pos + suites_len
+
+    val contents = EchConfigContents(
+        kem_id: kem_id,
+        public_key: public_key,
+        maximum_name_length: max_name_len,
+        public_name: public_name,
+        cipher_suites: suites
+    )
+    Some((contents, pos))
+
+fn parse_ech_config(data: [i64], offset: i64) -> (EchConfig, i64)?:
+    val data_len = data.len()
+    if offset + 4 > data_len:
+        return nil
+
+    val version = (byte_at(data, offset) * 256) + byte_at(data, offset + 1)
+    val length = (byte_at(data, offset + 2) * 256) + byte_at(data, offset + 3)
+    if offset + 4 + length > data_len:
+        return nil
+
+    val contents_result = parse_ech_config_contents(data, offset + 4)
+    if contents_result == nil:
+        return nil
+
+    val contents = contents_result.unwrap()[0]
+    val config = EchConfig(version: version, length: length, contents: contents)
+    Some((config, offset + 4 + length))
+
+fn parse_ech_config_list(data: [i64]) -> EchConfigList?:
+    val data_len = data.len()
+    if data_len < 2:
+        return nil
+
+    val total_len = (byte_at(data, 0) * 256) + byte_at(data, 1)
+    if 2 + total_len > data_len:
+        return nil
+
+    var configs: [EchConfig] = []
+    var pos = 2
+    val end = 2 + total_len
+    while pos < end:
+        val result = parse_ech_config(data, pos)
+        if result == nil:
+            return nil
+        configs = configs.push(result.unwrap()[0])
+        pos = result.unwrap()[1]
+
+    Some(EchConfigList(configs: configs))
+
+# ============================================================================
+# ECH Extension Detection in ClientHello
+# ============================================================================
+
+fn detect_ech_extension(extensions: [i64]) -> EchClientHelloPayload?:
+    val ext_len = extensions.len()
+    if ext_len < 4:
+        return nil
+
+    val total = (byte_at(extensions, 0) * 256) + byte_at(extensions, 1)
+    var pos = 2
+    val end = 2 + total
+    if end > ext_len:
+        return nil
+
+    while pos + 4 <= end:
+        val ext_type = (byte_at(extensions, pos) * 256) + byte_at(extensions, pos + 1)
+        val ext_data_len = (byte_at(extensions, pos + 2) * 256) + byte_at(extensions, pos + 3)
+        pos = pos + 4
+        if pos + ext_data_len > end:
+            return nil
+
+        if ext_type == EXTENSION_TYPE_ENCRYPTED_CLIENT_HELLO:
+            if ext_data_len < 1:
+                return nil
+            val ech_type_byte = byte_at(extensions, pos)
+            val ech_type = if ech_type_byte == 0: EchClientHelloType.Outer else: EchClientHelloType.Inner
+            if ech_type_byte == 1:
+                return Some(EchClientHelloPayload(
+                    ech_type: EchClientHelloType.Inner,
+                    cipher_suite: HpkeSymmetricCipherSuite(kdf_id: 0, aead_id: 0),
+                    config_id: 0,
+                    enc: [],
+                    payload: []
+                ))
+            if ext_data_len < 10:
+                return nil
+            val kdf = (byte_at(extensions, pos + 1) * 256) + byte_at(extensions, pos + 2)
+            val aead = (byte_at(extensions, pos + 3) * 256) + byte_at(extensions, pos + 4)
+            val config_id = byte_at(extensions, pos + 5)
+            val enc_len = (byte_at(extensions, pos + 6) * 256) + byte_at(extensions, pos + 7)
+            if pos + 8 + enc_len > end:
+                return nil
+            val enc = slice(extensions, pos + 8, pos + 8 + enc_len)
+            val payload_start = pos + 8 + enc_len
+            val payload = slice(extensions, payload_start, pos + ext_data_len)
+            return Some(EchClientHelloPayload(
+                ech_type: EchClientHelloType.Outer,
+                cipher_suite: HpkeSymmetricCipherSuite(kdf_id: kdf, aead_id: aead),
+                config_id: config_id,
+                enc: enc,
+                payload: payload
+            ))
+
+        pos = pos + ext_data_len
+    nil
+
+# ============================================================================
+# ECH Server-Side Decision (Provider Boundary)
+# ============================================================================
+
+enum EchDecision:
+    NotPresent
+    AcceptInner
+    RejectWithRetryConfig
+    ProviderUnavailable
+
+fn ech_server_decide(
+    ech_payload: EchClientHelloPayload?,
+    server_config: EchServerConfig
+) -> EchDecision:
+    if ech_payload == nil:
+        return EchDecision.NotPresent
+    if not server_config.enabled:
+        return EchDecision.ProviderUnavailable
+    val payload = ech_payload.unwrap()
+    match payload.ech_type:
+        case EchClientHelloType.Inner:
+            EchDecision.AcceptInner
+        case EchClientHelloType.Outer:
+            EchDecision.RejectWithRetryConfig
+
+fn ech_build_retry_config_extension(server_config: EchServerConfig) -> [i64]:
+    if server_config.retry_config_list.len() == 0:
+        return []
+    server_config.retry_config_list
+
+# ============================================================================
+# GREASE ECH (RFC 9460 Section 6.2)
+# ============================================================================
+
+fn ech_grease_extension_data(random_bytes: [i64]) -> [i64]:
+    if random_bytes.len() < 10:
+        return []
+    var result: [i64] = [0]
+    result = result + [0x00, 0x01]
+    result = result + [0x00, 0x01]
+    result = result + [random_bytes[0]]
+    val enc_len = 32
+    result = result + [0x00, enc_len]
+    var i = 0
+    while i < enc_len and i < random_bytes.len():
+        result = result.push(random_bytes[i])
+        i = i + 1
+    while i < enc_len:
+        result = result.push(0)
+        i = i + 1
+    result = result + [0x00, 0x20]
+    var j = 0
+    while j < 32:
+        if j < random_bytes.len():
+            result = result.push(random_bytes[j])
+        else:
+            result = result.push(0)
+        j = j + 1
+    result
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export EchConfigVersion, HpkeSymmetricCipherSuite, EchConfigContents
+export EchConfig, EchConfigList
+export EchClientHelloType, EchClientHelloPayload
+export EchServerConfig, ech_server_config_disabled
+export parse_ech_config_contents, parse_ech_config, parse_ech_config_list
+export detect_ech_extension
+export EchDecision, ech_server_decide, ech_build_retry_config_extension
+export ech_grease_extension_data
