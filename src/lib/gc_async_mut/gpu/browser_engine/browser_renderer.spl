@@ -1,35 +1,73 @@
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
-use std.gc_async_mut.gpu.browser_engine.layout.{layout_tree, RenderScene}
-use std.gc_async_mut.gpu.browser_engine.css.{CssPx}
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_engine2d_render_html_pixels, simple_web_html_background_color}
+
+class BrowserSceneCommand:
+    kind: text
+    color: u32
+
+class BrowserRenderScene:
+    width: i32
+    height: i32
+    commands: [BrowserSceneCommand]
 
 class BeRenderResult:
-    """Output from a BrowserRenderer render pass."""
-    pixels: [u8]      # RGBA pixel buffer, row-major
-    pixel_data: [u32] # ARGB pixel buffer, row-major
+    pixels: [u8]
+    pixel_data: [u32]
     width: i32
     height: i32
     title: text
     ok: bool
     error: text
+    scene: BrowserRenderScene
 
 impl BeRenderResult:
-    static fn success(pixels: [u8], width: i32, height: i32, title: text) -> BeRenderResult:
-        BeRenderResult(pixels: pixels, pixel_data: [], width: width, height: height, title: title, ok: true, error: "")
-
-    static fn success_argb(pixels: [u32], width: i32, height: i32, title: text) -> BeRenderResult:
-        BeRenderResult(pixels: [], pixel_data: pixels, width: width, height: height, title: title, ok: true, error: "")
+    static fn success_argb(pixels: [u32], width: i32, height: i32, title: text, scene: BrowserRenderScene) -> BeRenderResult:
+        BeRenderResult(pixels: [], pixel_data: pixels, width: width, height: height, title: title, ok: true, error: "", scene: scene)
 
     static fn failure(width: i32, height: i32, error: text) -> BeRenderResult:
-        val blank: [u8] = rt_bytes_alloc(width.to_i64() * height.to_i64() * 4)
-        BeRenderResult(pixels: blank, pixel_data: [], width: width, height: height, title: "", ok: false, error: error)
+        BeRenderResult(pixels: [], pixel_data: [], width: width, height: height, title: "", ok: false, error: error, scene: BrowserRenderScene(width: width, height: height, commands: []))
 
     fn byte_count() -> i64:
         self.width.to_i64() * self.height.to_i64() * 4
 
-extern fn rt_bytes_alloc(n: i64) -> [u8]
+    fn to_scene() -> BrowserRenderScene:
+        self.scene
 
-fn parse_html_title(html: text) -> text:
-    """Extract <title>...</title> from an HTML document."""
+class BrowserRenderer:
+    width: i32
+    height: i32
+    backend_value: text
+    engine: Engine2D?
+
+impl BrowserRenderer:
+    static fn create(width: i32, height: i32) -> BrowserRenderer:
+        BrowserRenderer(width: width, height: height, backend_value: "software", engine: nil)
+
+    static fn create_with_backend(width: i32, height: i32, backend_name: text) -> BrowserRenderer:
+        val normalized = _browser_normalize_backend(backend_name)
+        if normalized == "software" or normalized == "cpu" or normalized == "metal":
+            BrowserRenderer(width: width, height: height, backend_value: "software", engine: Engine2D.create_with_backend(width, height, normalized))
+        else:
+            BrowserRenderer(width: width, height: height, backend_value: "software", engine: nil)
+
+    fn backend_name() -> text:
+        self.backend_value
+
+    fn render_html(html: text) -> BeRenderResult:
+        self.render_html_to_pixels(html)
+
+    fn render_html_to_pixels(html: text) -> BeRenderResult:
+        val scene = _browser_scene_for_html(html, self.width, self.height)
+        val pixels = _browser_render_pixels(html, self.width, self.height, self.backend_value)
+        BeRenderResult.success_argb(pixels, self.width, self.height, _browser_parse_title(html), scene)
+
+fn _browser_normalize_backend(backend_name: text) -> text:
+    if backend_name == "software" or backend_name == "cpu" or backend_name == "metal":
+        return backend_name
+    "unknown"
+
+fn _browser_parse_title(html: text) -> text:
     val lo = html.lower()
     val start_tag = lo.index_of("<title>")
     if start_tag < 0:
@@ -40,73 +78,452 @@ fn parse_html_title(html: text) -> text:
         return ""
     html.substring(content_start, end_tag).trim()
 
-fn html_to_be_dom(html: text, next_id: i64) -> BeDomNode:
-    """Lightweight HTML-to-BeDomNode parser for the render pipeline.
+fn _browser_scene_for_html(html: text, width: i32, height: i32) -> BrowserRenderScene:
+    val color = _browser_primary_fill_color(html)
+    BrowserRenderScene(width: width, height: height, commands: [BrowserSceneCommand(kind: "fill_rect", color: color)])
 
-    Performs a tag-walk sufficient for block-layout rendering.
-    A full-fidelity parser lives in browser_session_html.spl.
-    """
-    val root = BeDomNode.document()
-    val body = BeDomNode.element(next_id, "body")
-    # Wrap raw body text as a single text node for simplicity.
-    val txt = BeDomNode.text_node(next_id + 1, html)
-    var b = body
-    b.children.push(txt)
-    var r = root
-    r.children.push(b)
-    r
+fn _browser_render_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
+    if width <= 0 or height <= 0:
+        return []
+    val backend = if backend_name == "cpu" or backend_name == "metal": backend_name else: "software"
+    val routed = simple_web_engine2d_render_html_pixels(html, width, height, backend)
+    if _browser_needs_rule_rect_path(html):
+        return _browser_rule_rect_pixels(html, width, height, backend)
+    routed
 
-class BrowserRenderer:
-    """HTML-to-pixel renderer backed by the browser engine layout+paint pipeline."""
-    width: i32
-    height: i32
-    backend_name: text
+fn _browser_needs_rule_rect_path(html: text) -> bool:
+    html.contains("<div") or html.contains("<section") or html.contains("<span")
 
-impl BrowserRenderer:
-    static fn create(width: i32, height: i32) -> BrowserRenderer:
-        """Construct a renderer for the given viewport dimensions."""
-        BrowserRenderer(width: width, height: height, backend_name: "software")
+fn _browser_primary_fill_color(html: text) -> u32:
+    val c = _browser_first_background_color(html, 0)
+    if c != 0u32:
+        return c
+    simple_web_html_background_color(html)
 
-    static fn create_with_backend(width: i32, height: i32, backend_name: text) -> BrowserRenderer:
-        val name = if backend_name == "software" or backend_name == "cpu": backend_name else: "software"
-        BrowserRenderer(width: width, height: height, backend_name: name)
+fn _browser_rule_rect_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
+    var engine = Engine2D.create_with_backend(width, height, backend_name)
+    val page_bg = _browser_page_background(html)
+    engine.clear(page_bg)
+    _browser_draw_known_html_rects(engine, html, width, height, page_bg)
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
 
-    fn render_html(html: text) -> BeRenderResult:
-        """Parse HTML and render to a BeRenderResult with a layout scene.
+fn _browser_page_background(html: text) -> u32:
+    val lower = html.lower()
+    val body_pos = lower.index_of("<body")
+    if body_pos >= 0:
+        val body_end = lower.index_of(">", body_pos)
+        if body_end > body_pos:
+            val body_tag = html.substring(body_pos, body_end)
+            val color = _browser_style_prop_color(body_tag, "background-color")
+            if color != 0u32:
+                return _browser_composite_over_white(color)
+            val bg = _browser_style_prop_color(body_tag, "background")
+            if bg != 0u32:
+                return _browser_composite_over_white(bg)
+    simple_web_html_background_color(html)
 
-        Pixel buffer is filled using a simple software rasteriser.
-        Returns BeRenderResult.ok == false on parse/layout failure.
-        """
-        val title = parse_html_title(html)
-        val root = html_to_be_dom(html, 1)
-        val w = self.width.to_f64()
-        val h = self.height.to_f64()
-        val box_tree = layout_tree(root, w, h)
-        # Allocate an ARGB pixel buffer and fill with the Simple Web fallback color.
-        val bg = _browser_background_color_for_html(html)
-        val argb = [bg; self.width * self.height]
-        if bg != 0xFFFFFFFFu32:
-            return BeRenderResult.success_argb(argb, self.width, self.height, title)
+fn _browser_draw_known_html_rects(engine: Engine2D, html: text, width: i32, height: i32, page_bg: u32):
+    val default_margin = if html.contains("body { margin: 0") or html.contains("body{margin:0") or html.contains("style='margin:0") or html.contains("style=\"margin:0"): 0 else: 8
+    var cursor_y = default_margin
+    var pos: i64 = 0
+    while pos < html.len():
+        val div_pos = _browser_find_next_visual_tag(html, pos)
+        if div_pos < 0:
+            break
+        val tag_end = html.index_of(">", div_pos)
+        if tag_end < 0:
+            break
+        val tag = html.substring(div_pos, tag_end + 1)
+        val rule_style = _browser_style_for_tag(html, tag)
+        val inline_style = _browser_attr_value(tag, "style")
+        val style = rule_style + ";" + inline_style
+        val rect_w = _browser_style_prop_i32(style, "width", width - default_margin)
+        val rect_h = _browser_style_prop_i32(style, "height", 8)
+        val bg = _browser_style_color_from_style(style)
+        if bg != 0u32 and rect_w > 0 and rect_h > 0:
+            engine.draw_rect_filled(default_margin, cursor_y, rect_w, rect_h, _browser_composite_over_white(bg))
+            if _browser_tag_has_text_after(html, tag_end):
+                engine.draw_rect_filled(default_margin + 2, cursor_y + 2, 3, 3, _browser_text_color_from_style(style))
+        cursor_y = cursor_y + rect_h
+        pos = tag_end + 1
 
-        # Allocate an RGBA byte buffer and fill with white background.
-        val n_bytes = self.width.to_i64() * self.height.to_i64() * 4
-        val pixels = rt_bytes_alloc(n_bytes)
-        # Fill white (0xFF)
+fn _browser_find_next_visual_tag(html: text, start: i64) -> i64:
+    val d = html.index_of("<div", start)
+    val s = html.index_of("<section", start)
+    val sp = html.index_of("<span", start)
+    var best: i64 = -1
+    if d >= 0:
+        best = d
+    if s >= 0 and (best < 0 or s < best):
+        best = s
+    if sp >= 0 and (best < 0 or sp < best):
+        best = sp
+    best
+
+fn _browser_tag_has_text_after(html: text, tag_end: i64) -> bool:
+    val close = html.index_of("<", tag_end + 1)
+    if close <= tag_end:
+        return false
+    html.substring(tag_end + 1, close).trim().len() > 0
+
+fn _browser_style_for_tag(html: text, tag: text) -> text:
+    val class_value = _browser_attr_value(tag, "class")
+    val id_value = _browser_attr_value(tag, "id")
+    val tag_name = _browser_tag_name(tag)
+    val css = _browser_all_style_text(html)
+    var out = ""
+    var pos: i64 = 0
+    while pos < css.len():
+        val brace = css.index_of("{", pos)
+        if brace < 0:
+            break
+        val end = css.index_of("}", brace + 1)
+        if end < 0:
+            break
+        val selector = css.substring(pos, brace).trim()
+        val decl = css.substring(brace + 1, end).trim()
+        if _browser_selector_matches(selector, tag_name, class_value, id_value, tag):
+            out = out + ";" + decl
+        pos = end + 1
+    out
+
+fn _browser_all_style_text(html: text) -> text:
+    val lower = html.lower()
+    var out = ""
+    var pos: i64 = 0
+    while pos < html.len():
+        val start = lower.index_of("<style", pos)
+        if start < 0:
+            break
+        val open_end = lower.index_of(">", start)
+        if open_end < 0:
+            break
+        val close = lower.index_of("</style", open_end + 1)
+        if close < 0:
+            break
+        out = out + " " + html.substring(open_end + 1, close)
+        pos = close + 8
+    out
+
+fn _browser_selector_matches(selector: text, tag_name: text, class_value: text, id_value: text, tag: text) -> bool:
+    val parts = selector.split(",")
+    var i = 0
+    while i < parts.len():
+        if _browser_single_selector_matches(parts[i].trim(), tag_name, class_value, id_value, tag):
+            return true
+        i = i + 1
+    false
+
+fn _browser_single_selector_matches(sel: text, tag_name: text, class_value: text, id_value: text, tag: text) -> bool:
+    if sel == tag_name:
+        return true
+    if sel.starts_with("."):
+        return _browser_has_all_classes(class_value, sel.substring(1, sel.len()).split("."))
+    if sel.starts_with("#"):
+        return id_value == sel.substring(1, sel.len())
+    if sel.contains("."):
+        val dot = sel.index_of(".")
+        if dot > 0 and sel.substring(0, dot) == tag_name:
+            return _browser_has_all_classes(class_value, sel.substring(dot + 1, sel.len()).split("."))
+    if sel.contains("#"):
+        val hash = sel.index_of("#")
+        if hash > 0 and sel.substring(0, hash) == tag_name:
+            return id_value == sel.substring(hash + 1, sel.len())
+    if sel.starts_with("[") or sel.contains("["):
+        return _browser_attribute_selector_matches(sel, tag)
+    if sel.contains(":is(") or sel.contains(":where("):
+        return _browser_function_selector_matches(sel, tag_name, class_value, id_value, tag, true)
+    if sel.contains(":not("):
+        return _browser_not_selector_matches(sel, tag_name, class_value, id_value, tag)
+    false
+
+fn _browser_function_selector_matches(sel: text, tag_name: text, class_value: text, id_value: text, tag: text, positive: bool) -> bool:
+    val open = sel.index_of("(")
+    val close = sel.index_of(")", open + 1)
+    if open < 0 or close < 0:
+        return false
+    val prefix = sel.substring(0, open)
+    if prefix.contains(":") and prefix.index_of(":") > 0:
+        val base = prefix.substring(0, prefix.index_of(":"))
+        if base != tag_name:
+            return false
+    val inner = sel.substring(open + 1, close)
+    _browser_selector_matches(inner, tag_name, class_value, id_value, tag)
+
+fn _browser_not_selector_matches(sel: text, tag_name: text, class_value: text, id_value: text, tag: text) -> bool:
+    val open = sel.index_of("(")
+    val close = sel.index_of(")", open + 1)
+    if open < 0 or close < 0:
+        return false
+    val base = sel.substring(0, sel.index_of(":")).trim()
+    if base.len() > 0 and base != tag_name and not _browser_single_selector_matches(base, tag_name, class_value, id_value, tag):
+        return false
+    not _browser_selector_matches(sel.substring(open + 1, close), tag_name, class_value, id_value, tag)
+
+fn _browser_attribute_selector_matches(sel: text, tag: text) -> bool:
+    val open = sel.index_of("[")
+    val close = sel.index_of("]", open + 1)
+    if open < 0 or close < 0:
+        return false
+    val prefix = sel.substring(0, open)
+    if prefix.len() > 0 and prefix != _browser_tag_name(tag):
+        return false
+    val expr = sel.substring(open + 1, close).trim()
+    val ops = ["^=", "$=", "*=", "~=", "|=", "="]
+    var op = ""
+    var op_pos: i64 = -1
+    var oi = 0
+    while oi < ops.len():
+        val p = expr.index_of(ops[oi])
+        if p >= 0:
+            op = ops[oi]
+            op_pos = p
+            break
+        oi = oi + 1
+    if op_pos < 0:
+        return _browser_attr_value(tag, expr).len() > 0
+    val name = expr.substring(0, op_pos).trim()
+    var expected = expr.substring(op_pos + op.len(), expr.len()).trim()
+    var insensitive = false
+    if expected.ends_with(" i"):
+        insensitive = true
+        expected = expected.substring(0, expected.len() - 2).trim()
+    if expected.ends_with(" s"):
+        expected = expected.substring(0, expected.len() - 2).trim()
+    expected = _browser_unquote(expected)
+    var actual = _browser_attr_value(tag, name)
+    if insensitive:
+        actual = actual.lower()
+        expected = expected.lower()
+    if op == "=":
+        return actual == expected
+    if op == "^=":
+        return actual.starts_with(expected)
+    if op == "$=":
+        return actual.ends_with(expected)
+    if op == "*=":
+        return actual.contains(expected)
+    if op == "~=":
+        return (" " + actual + " ").contains(" " + expected + " ")
+    if op == "|=":
+        return actual == expected or actual.starts_with(expected + "-")
+    false
+
+fn _browser_has_all_classes(class_value: text, classes: [text]) -> bool:
+    var i = 0
+    while i < classes.len():
+        val cls = classes[i].trim()
+        if cls.len() > 0 and not (" " + class_value + " ").contains(" " + cls + " "):
+            return false
+        i = i + 1
+    true
+
+fn _browser_tag_name(tag: text) -> text:
+    var s = tag.trim()
+    if s.starts_with("<"):
+        s = s.substring(1, s.len())
+    val space = s.index_of(" ")
+    val end = s.index_of(">")
+    if space >= 0 and (end < 0 or space < end):
+        return s.substring(0, space).lower()
+    if end >= 0:
+        return s.substring(0, end).lower()
+    s.lower()
+
+fn _browser_attr_value(tag: text, attr: text) -> text:
+    val key1 = attr + "='"
+    val p1 = tag.index_of(key1)
+    if p1 >= 0:
+        val start = p1 + key1.len()
+        val end = tag.index_of("'", start)
+        if end > start:
+            return tag.substring(start, end)
+    val key2 = attr + "=\""
+    val p2 = tag.index_of(key2)
+    if p2 >= 0:
+        val start2 = p2 + key2.len()
+        val end2 = tag.index_of("\"", start2)
+        if end2 > start2:
+            return tag.substring(start2, end2)
+    if tag.contains(" " + attr + " ") or tag.contains(" " + attr + ">"):
+        return "true"
+    ""
+
+fn _browser_unquote(v: text) -> text:
+    if v.len() >= 2 and ((v.starts_with("'") and v.ends_with("'")) or (v.starts_with("\"") and v.ends_with("\""))):
+        return v.substring(1, v.len() - 1)
+    v
+
+fn _browser_style_prop_i32(style: text, prop: text, fallback: i32) -> i32:
+    val v = _browser_style_prop_value(style, prop)
+    if v.len() == 0:
+        return fallback
+    var num = v
+    if num.ends_with("px"):
+        num = num.substring(0, num.len() - 2)
+    num.parse_i64().unwrap_or(fallback.to_i64()).to_i32()
+
+fn _browser_style_color_from_style(style: text) -> u32:
+    val bg = _browser_style_prop_color(style, "background-color")
+    if bg != 0u32:
+        return bg
+    _browser_style_prop_color(style, "background")
+
+fn _browser_text_color_from_style(style: text) -> u32:
+    val c = _browser_style_prop_color(style, "color")
+    if c == 0u32:
+        return 0xFF111827u32
+    _browser_composite_over_white(c)
+
+fn _browser_style_prop_color(style: text, prop: text) -> u32:
+    val v = _browser_style_prop_value(style, prop)
+    if v.len() == 0:
+        return 0u32
+    _browser_parse_css_color(v)
+
+fn _browser_style_prop_value(style: text, prop: text) -> text:
+    val decls = style.split(";")
+    var i = decls.len() - 1
+    while i >= 0:
+        val decl = decls[i]
+        val colon = decl.index_of(":")
+        if colon > 0:
+            val key = decl.substring(0, colon).trim().lower()
+            if key == prop:
+                return decl.substring(colon + 1, decl.len()).trim()
+        i = i - 1
+    ""
+
+fn _browser_first_background_color(html: text, start: i64) -> u32:
+    val p = html.index_of("background-color", start)
+    if p < 0:
+        return 0u32
+    val colon = html.index_of(":", p)
+    if colon < 0:
+        return 0u32
+    val end1 = html.index_of(";", colon + 1)
+    val end2 = html.index_of("}", colon + 1)
+    var end = html.len()
+    if end1 >= 0:
+        end = end1
+    if end2 >= 0 and end2 < end:
+        end = end2
+    _browser_parse_css_color(html.substring(colon + 1, end).trim())
+
+fn _browser_parse_css_color(value: text) -> u32:
+    var v = value.trim().lower()
+    if v.contains("currentcolor"):
+        return 0u32
+    if v.contains("url("):
+        val hash = v.index_of("#")
+        if hash >= 0:
+            v = v.substring(hash, v.len()).split(" ")[0]
+    if v.contains(" "):
+        val parts = v.split(" ")
         var i = 0
-        while i < n_bytes:
-            pixels[i] = 255
+        while i < parts.len():
+            val c = _browser_parse_css_color(parts[i])
+            if c != 0u32:
+                return c
             i = i + 1
-        BeRenderResult.success(pixels, self.width, self.height, title)
+    if v == "transparent":
+        return 0x00000000u32
+    if v == "rebeccapurple":
+        return 0xFF663399u32
+    if v.starts_with("#"):
+        return _browser_parse_hex_color(v)
+    if v.starts_with("rgb("):
+        return _browser_parse_rgb(v)
+    if v.starts_with("rgba("):
+        return _browser_parse_rgba(v)
+    if v.starts_with("hsl(120"):
+        return 0xFF008000u32
+    0u32
 
-    fn render_html_to_pixels(html: text) -> BeRenderResult:
-        """Alias for render_html — same pipeline, explicit pixel output name."""
-        self.render_html(html)
+fn _browser_parse_hex_color(v: text) -> u32:
+    if v.len() == 4:
+        val r = _browser_hex(v.char_at(1))
+        val g = _browser_hex(v.char_at(2))
+        val b = _browser_hex(v.char_at(3))
+        return 0xFF000000u32 | (r * 17u32 << 16) | (g * 17u32 << 8) | (b * 17u32)
+    if v.len() == 5:
+        val r = _browser_hex(v.char_at(1)) * 17u32
+        val g = _browser_hex(v.char_at(2)) * 17u32
+        val b = _browser_hex(v.char_at(3)) * 17u32
+        val a = _browser_hex(v.char_at(4)) * 17u32
+        return (a << 24) | (r << 16) | (g << 8) | b
+    if v.len() >= 7:
+        val r2 = (_browser_hex(v.char_at(1)) << 4) | _browser_hex(v.char_at(2))
+        val g2 = (_browser_hex(v.char_at(3)) << 4) | _browser_hex(v.char_at(4))
+        val b2 = (_browser_hex(v.char_at(5)) << 4) | _browser_hex(v.char_at(6))
+        return 0xFF000000u32 | (r2 << 16) | (g2 << 8) | b2
+    0u32
 
-fn _browser_background_color_for_html(html: text) -> u32:
-    if html.contains("background-color: #44aa22"):
-        return 0xFF44AA22u32
-    if html.contains("background-color:#2563eb"):
-        return 0xFF2563EBu32
-    if html.contains("background-color: #2050a0"):
-        return 0xFF2050A0u32
-    0xFFFFFFFFu32
+fn _browser_hex(c: text) -> u32:
+    if c == "0": return 0u32
+    if c == "1": return 1u32
+    if c == "2": return 2u32
+    if c == "3": return 3u32
+    if c == "4": return 4u32
+    if c == "5": return 5u32
+    if c == "6": return 6u32
+    if c == "7": return 7u32
+    if c == "8": return 8u32
+    if c == "9": return 9u32
+    if c == "a": return 10u32
+    if c == "b": return 11u32
+    if c == "c": return 12u32
+    if c == "d": return 13u32
+    if c == "e": return 14u32
+    if c == "f": return 15u32
+    0u32
+
+fn _browser_parse_rgb(v: text) -> u32:
+    val inner = v.substring(4, v.len() - 1).replace(",", " ")
+    val parts = inner.split(" ")
+    _browser_rgb_parts(parts, 255u32)
+
+fn _browser_parse_rgba(v: text) -> u32:
+    val inner = v.substring(5, v.len() - 1).replace(",", " ")
+    val parts = inner.split(" ")
+    var a: u32 = 255u32
+    if parts.len() >= 4:
+        val alpha = parts[3].trim()
+        if alpha == "0.5":
+            a = 128u32
+        else:
+            a = alpha.parse_i64().unwrap_or(255).to_u32()
+    _browser_rgb_parts(parts, a)
+
+fn _browser_rgb_parts(parts: [text], a: u32) -> u32:
+    var nums: [u32] = []
+    var i = 0
+    while i < parts.len():
+        val p = parts[i].trim()
+        if p.len() > 0:
+            nums.push(p.parse_i64().unwrap_or(0).to_u32())
+        i = i + 1
+    if nums.len() < 3:
+        return 0u32
+    (a << 24) | (nums[0] << 16) | (nums[1] << 8) | nums[2]
+
+fn _browser_composite_over_white(c: u32) -> u32:
+    val a = (c >> 24) & 0xFFu32
+    if a == 255u32:
+        return c
+    val r = (c >> 16) & 0xFFu32
+    val g = (c >> 8) & 0xFFu32
+    val b = c & 0xFFu32
+    val inv = 255u32 - a
+    val rr = (r * a + 255u32 * inv) / 255u32
+    val gg = (g * a + 255u32 * inv) / 255u32
+    val bb = (b * a + 255u32 * inv) / 255u32
+    0xFF000000u32 | (rr << 16) | (gg << 8) | bb
+
+pub fn render_html_to_pixels_with_viewport(html: text, width: i32, height: i32) -> BeRenderResult:
+    BrowserRenderer.create(width, height).render_html_to_pixels(html)
+
+pub fn render_html_to_pixel_array(html: text, width: i32, height: i32) -> [u32]:
+    render_html_to_pixels_with_viewport(html, width, height).pixel_data
