@@ -1,0 +1,32 @@
+"""Metal Backend Mirror/GPU Synchronization Specification
+
+@tag: gpu, engine2d, metal, rendering
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl 20%
+
+The Metal backend dispatches a subset of operations natively and routes the
+rest through the software mirror. Once a mirror-only operation occurs, GPU
+readback must not be considered authoritative until a full-surface GPU clear
+resynchronizes it.
+"""
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn source() -> text:
+    rt_file_read_text("src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl")
+
+describe "MetalBackend mirror/GPU synchronization":
+    it "only reads back GPU pixels while the GPU stream is in sync":
+        val src = source()
+        expect(src.contains("gpu_in_sync: bool")).to_equal(true)
+        expect(src.contains("self.gpu_in_sync = true")).to_equal(true)
+        expect(src.contains("self.initialized and self.dirty and self.gpu_in_sync")).to_equal(true)
+        expect(src.contains("me _metal_use_mirror()")).to_equal(true)
+
+    it "invalidates GPU readback for mirror-only drawing paths":
+        val src = source()
+        expect(src.contains("me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):\n        self.mirror.draw_line(x1, y1, x2, y2, color, thickness)\n        self._metal_use_mirror()")).to_equal(true)
+        expect(src.contains("me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):\n        self.mirror.draw_text(x, y, text_val, color, font_size)\n        self._metal_use_mirror()")).to_equal(true)
+        expect(src.contains("me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):\n        self.mirror.draw_image(x, y, w, h, pixels)\n        self._metal_use_mirror()")).to_equal(true)
+        expect(src.contains("me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):\n        self.mirror.draw_ellipse(cx, cy, rx, ry, color)\n        self._metal_use_mirror()")).to_equal(true)
