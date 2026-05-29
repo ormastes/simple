@@ -75,8 +75,6 @@ pub(crate) fn apply_lambda_to_vec(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Vec<Value>, CompileError> {
-<<<<<<< Conflict 1 of 1
-+++++++ Contents of side #1
     match lambda_val {
         Value::Lambda {
             params,
@@ -120,66 +118,5 @@ pub(crate) fn apply_lambda_to_vec(
                 ctx,
             ))
         }
-%%%%%%% Changes from base to side #2
--    if let Value::Lambda {
--        params,
--        body,
--        env: captured,
--    } = lambda_val
--    {
--        let mut results = Vec::new();
--        for item in arr {
--            let mut local_env = Env::clone(captured);
--            if let Some(param) = params.first() {
--                local_env.insert(param.clone(), item.clone());
--            }
--            let result = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
--            results.push(result);
--        }
--        Ok(results)
--    } else {
--        let ctx = ErrorContext::new()
--            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
--            .with_help("provide a lambda expression as argument");
--        Err(CompileError::semantic_with_context(
--            "expected lambda argument".to_string(),
--            ctx,
--        ))
-+    match lambda_val {
-+        Value::Lambda {
-+            params,
-+            body,
-+            env: captured,
-+        } => {
-+            let mut results = Vec::new();
-+            for item in arr {
-+                let mut local_env = Env::clone(captured);
-+                if let Some(param) = params.first() {
-+                    local_env.insert(param.clone(), item.clone());
-+                }
-+                let result = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
-+                results.push(result);
-+            }
-+            Ok(results)
-+        }
-+        Value::Function { def, captured_env, .. } => {
-+            let mut results = Vec::new();
-+            let mut outer_env = Env::clone(captured_env);
-+            for item in arr {
-+                let result = exec_function_with_values(def, &[item.clone()], &mut outer_env, functions, classes, enums, impl_methods)?;
-+                results.push(result);
-+            }
-+            Ok(results)
-+        }
-+        _ => {
-+            let ctx = ErrorContext::new()
-+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
-+                .with_help("provide a lambda or named function as argument");
-+            Err(CompileError::semantic_with_context(
-+                "expected lambda or function argument".to_string(),
-+                ctx,
-+            ))
-+        }
->>>>>>> Conflict 1 of 1 ends
     }
 }

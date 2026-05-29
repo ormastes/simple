@@ -8,7 +8,7 @@
 #   App -> BrowserBackend -> BrowserRenderer (browser_engine)
 #                         -> Engine2D (engine2d)
 
-use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect}
+use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect, widget_store_revision}
 use common.ui.widget.{UIMode}
 use common.layout.box_model.{LayoutBox, BoxKind, BoxModel}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_body_html, web_render_full_html, web_render_input_envelope_from_event, web_render_input_envelope_to_json, web_render_optimization_profile, web_render_pixel_artifact}
@@ -100,6 +100,9 @@ class DomNode:
             style_width: self.style_width, style_height: self.style_height
         )
 
+fn browser_frame_state_key(tree: UITree, state: UIState, width: i32, height: i32, revision: i64) -> text:
+    "{tree.root_id}|{state.mode_name()}|{state.focused_id}|{state.command_buffer}|{width}x{height}|rev={revision}"
+
 # =========================================================================
 # BrowserBackend
 # =========================================================================
@@ -121,6 +124,9 @@ class BrowserBackend:
     static_shell_full_html: text
     static_shell_html_hits: i32
     static_shell_html_stores: i32
+    static_frame_state_key: text
+    static_frame_fast_hits: i32
+    static_frame_fast_stores: i32
     static_frame_hits: i32
     static_frame_stores: i32
     present_pixels_cache: [i64]
@@ -153,6 +159,9 @@ class BrowserBackend:
             static_shell_full_html: "",
             static_shell_html_hits: 0,
             static_shell_html_stores: 0,
+            static_frame_state_key: "",
+            static_frame_fast_hits: 0,
+            static_frame_fast_stores: 0,
             static_frame_hits: 0,
             static_frame_stores: 0,
             present_pixels_cache: [],
@@ -175,6 +184,11 @@ class BrowserBackend:
 
     me render_frame(tree: UITree, state: UIState):
         """Convert widget tree to DOM, layout, and paint to framebuffer."""
+        val frame_state_key = browser_frame_state_key(tree, state, self.width, self.height, widget_store_revision())
+        if self.static_frame_state_key == frame_state_key and self.render_cached_static_frame():
+            self.static_frame_fast_hits = self.static_frame_fast_hits + 1
+            return
+
         val body = render_html_tree(tree.root_node(), state)
         val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "", body, generate_css(state.tree.theme_name()), "", self.width, self.height)
         val profile = web_render_optimization_profile(req)
@@ -218,6 +232,8 @@ class BrowserBackend:
         self.last_artifact_capabilities = artifact.capability_summary
         self.last_artifact_pixels = artifact.pixels.len()
         if profile.cacheable_static_shell:
+            self.static_frame_state_key = frame_state_key
+            self.static_frame_fast_stores = self.static_frame_fast_stores + 1
             self.static_frame_stores = self.static_frame_stores + 1
 
     me poll_events() -> [UIEvent]:
@@ -237,6 +253,7 @@ class BrowserBackend:
         self.width = w
         self.height = h
         self.framebuffer = Framebuffer.create(w, h)
+        self.static_frame_state_key = ""
         self.present_pixels_cache = []
         self.present_pixels_cache_valid = false
 

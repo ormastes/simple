@@ -90,7 +90,25 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
                 if loop_info_opt.?:
                     val li = loop_info_opt.unwrap()
                     if li.end_value > 0:
-                        r = VectorRecipe(..r, trip_count: li.end_value)
+                        # VectorRecipe is cross-module — spread operator silently drops fields.
+                        # Construct explicitly with updated trip_count only.
+                        r = VectorRecipe(
+                            kind:             r.kind,
+                            header_block:     r.header_block,
+                            induction_var:    r.induction_var,
+                            trip_count:       li.end_value,
+                            element_type:     r.element_type,
+                            vector_width:     r.vector_width,
+                            op_name:          r.op_name,
+                            note:             r.note,
+                            input_bases:      r.input_bases,
+                            output_base:      r.output_base,
+                            accumulator:      r.accumulator,
+                            chunk_width:      r.chunk_width,
+                            index_locals:     r.index_locals,
+                            store_value:      r.store_value,
+                            induction_update: r.induction_update
+                        )
                 _log_recipe(cur_func.name, r)
                 val rewritten = rewrite_elementwise_add(r, cur_func)
                 # If block count changed, rewrite was applied
@@ -112,7 +130,15 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
         if module_modified:
             var new_functions = new_module.functions
             new_functions[sym] = cur_func
-            new_module = MirModule(..new_module, functions: new_functions)
+            # MirModule is cross-module — spread operator silently drops fields.
+            # Construct explicitly to ensure functions field is updated.
+            new_module = MirModule(
+                name:      new_module.name,
+                functions: new_functions,
+                statics:   new_module.statics,
+                constants: new_module.constants,
+                types:     new_module.types
+            )
 
     new_module
 
@@ -289,7 +315,7 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
         if block.id.id > orig_header_id:
             new_blocks.push(block)
 
-    MirFunction(..func, blocks: new_blocks)
+    MirFunction.with_blocks(func, new_blocks)
 
 fn _patch_block_id(id: BlockId, old_id: i64, new_id: i64) -> BlockId:
     """Return new_id as BlockId if id.id == old_id, otherwise return id unchanged."""
@@ -446,7 +472,7 @@ fn splice_vectorized_block(
         if block.id.id > orig_id:
             new_blocks.push(block)
 
-    MirFunction(..func, blocks: new_blocks)
+    MirFunction.with_blocks(func, new_blocks)
 
 # ============================================================================
 # Gap 4 (W-fastmath) — has_fast_math attribute checker

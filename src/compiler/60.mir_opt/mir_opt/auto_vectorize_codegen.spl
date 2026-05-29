@@ -183,19 +183,21 @@ fn create_peeling_block(ctx: VectorizeContext, loop: LoopInfo, body_blocks: [Mir
     # Compute static mismatch: how many scalar iterations remain after vector loop.
     # mismatch > 0 only when loop.end_value > 0 and end_value % vector_width != 0.
     val mismatch = if loop.end_value > 0: loop.end_value % ctx.vector_width else: 0
+
     val has_body = body_blocks.len() > 0
 
     if (mismatch > 0) and has_body:
         # Clone the scalar body instructions from the first body block.
-        # Collect instructions from the first body block using a separate var.
+        # Conservative approximation: emit one pass of the scalar body
+        # (handles 1 remainder iteration).  Full SCEV-based unrolling of
+        # mismatch iterations is deferred to a follow-up wave.
         val first_block = body_blocks[0]
         val source_insts = first_block.instructions
         var peel_insts: [MirInst] = []
         for inst in source_insts:
             peel_insts.push(inst)
 
-        # Terminate: jump past the vector loop to the continuation/exit block.
-        # exit_block is the block after the three new blocks (continuation starts at +3).
+        # Terminate: jump to continuation (the block after the three new blocks).
         val exit_id = BlockId.new(ctx.next_local + 3)
         val terminator = MirTerminator.Goto(exit_id)
 

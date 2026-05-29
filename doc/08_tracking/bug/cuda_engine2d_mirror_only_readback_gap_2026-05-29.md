@@ -2,7 +2,8 @@
 
 ## Status
 
-Open.
+Partially resolved. `draw_line` now has a CUDA PTX kernel and strict readback
+coverage. Other mirror-only primitives remain open.
 
 ## Problem
 
@@ -12,9 +13,8 @@ initialized, `read_pixels()` prefers device framebuffer readback, so a sequence
 such as `clear()` followed by a mirror-only primitive can return stale device
 pixels instead of the mirror result.
 
-Confirmed mirror-only core primitives:
+Confirmed remaining mirror-only core primitives:
 
-- `draw_line`
 - `draw_circle`
 - `draw_circle_filled`
 - `draw_rounded_rect`
@@ -33,10 +33,20 @@ after `draw_line` was rejected during verification. It destabilized
 15 passed / 1 failed on this host even after the added `draw_line` assertion was
 removed.
 
-## Required Fix
+## Completed Fix
 
-Add real CUDA primitive coverage, starting with `kernel_draw_line`, instead of
-silently relying on mirror-only state while device readback remains preferred.
+Added real CUDA primitive coverage for `kernel_draw_line` instead of silently
+relying on mirror-only state while device readback remains preferred.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl test/integration/rendering/cuda_strict_spec.spl test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl`
+- `SIMPLE_LIB=src bin/simple test test/integration/rendering/cuda_strict_spec.spl --mode=interpreter --clean`
+  - Result: 17 passed, 0 failed.
+- `SIMPLE_LIB=src bin/simple test test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl --mode=interpreter --clean`
+  - Result: 8 passed, 0 failed.
+
+## Remaining Fixes
 
 Target files:
 
@@ -44,5 +54,6 @@ Target files:
 - `test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl`
 - `test/integration/rendering/cuda_strict_spec.spl`
 
-The strict hardware test should compare CUDA `draw_line` pixels against the CPU
-reference after `clear()`.
+The next strict hardware tests should compare CUDA circle, rounded-rect,
+triangle, text, clip, and mask behavior against the CPU reference after
+`clear()`.

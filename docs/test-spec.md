@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-29 07:23:05*
+*Generated: 2026-05-29 08:24:16*
 
-## test/integration/rendering
+## test/unit/compiler/mir_opt
 
-❌ **cuda_strict_spec.spl** (13473ms)
-  - Source: `test/integration/rendering/cuda_strict_spec.spl`
-  - Generated doc: `spec/cuda_strict_spec.md`
+❌ **auto_vectorize_spec.spl** (651ms)
+  - Source: `test/unit/compiler/mir_opt/auto_vectorize_spec.spl`
+  - Generated doc: `spec/auto_vectorize_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 15 ✅
+- **Passed:** 59 ✅
 - **Failed:** 1 ❌
-- **Duration:** 13477ms
+- **Duration:** 659ms

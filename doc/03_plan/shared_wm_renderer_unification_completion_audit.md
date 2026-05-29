@@ -30,7 +30,7 @@ This audit maps the active objective to current evidence. It is intentionally st
    - host/SimpleOS WM logic parity spec
 3. Implementation evidence:
    - keep shared web render API imported by Web/Electron/Tauri/pure Simple renderer
-   - broaden CUDA 2D hardware coverage beyond the current clear, filled-rect, outline, image, and vertical-gradient readback self-test; `draw_line` is the next required CUDA kernel because mirror-only fallback can leave device readback stale
+   - broaden CUDA 2D hardware coverage beyond the current clear, filled-rect, outline, line, image, and vertical-gradient readback self-test; circle, rounded-rect, triangle, text, clip, and mask behavior remain mirror-only and can leave device readback stale
    - host WM imports the real `WmService`; remaining work is to route more host-native surface/input behavior through shared WM core paths
    - SimpleOS direct overlay is now routed through the shared `CompositorBackend` API; remaining work is deciding whether shell-owned immediate-mode chrome can safely become compositor surfaces in baremetal, or documenting it as an explicit non-WM boundary
    - Qt toolchain provisioned, or a CI environment that can build the Qt baseline and compare it against the measured Simple Web artifact

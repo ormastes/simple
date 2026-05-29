@@ -9,7 +9,7 @@ BUILD_DIR="${BUILD_DIR:-build/gtk_gui_size_speed_baseline}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/gtk_gui_size_speed_baseline_$(date -u +%F).md}"
 SIMPLE_ITERATIONS="${SIMPLE_ITERATIONS:-4}"
 GTK_ITERATIONS="${GTK_ITERATIONS:-200}"
-SKIP_SIMPLE_NATIVE="${SKIP_SIMPLE_NATIVE:-1}"
+SKIP_SIMPLE_NATIVE="${SKIP_SIMPLE_NATIVE:-0}"
 SIMPLE_RUN_TIMEOUT_SECS="${SIMPLE_RUN_TIMEOUT_SECS:-20}"
 
 mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
@@ -68,9 +68,36 @@ field_of() {
     fi
 }
 
+ratio_of() {
+    numerator="$1"
+    denominator="$2"
+    awk -v n="$numerator" -v d="$denominator" 'BEGIN {
+        if (n ~ /^[0-9]+$/ && d ~ /^[0-9]+$/ && d > 0) {
+            printf "%.2f", n / d
+        } else {
+            printf "n/a"
+        }
+    }'
+}
+
+cross_ratio_of() {
+    numerator_a="$1"
+    numerator_b="$2"
+    denominator_a="$3"
+    denominator_b="$4"
+    awk -v na="$numerator_a" -v nb="$numerator_b" -v da="$denominator_a" -v db="$denominator_b" 'BEGIN {
+        if (na ~ /^[0-9]+$/ && nb ~ /^[0-9]+$/ && da ~ /^[0-9]+$/ && db ~ /^[0-9]+$/ && da > 0 && db > 0) {
+            printf "%.2f", (na * nb) / (da * db)
+        } else {
+            printf "n/a"
+        }
+    }'
+}
+
 SIMPLE_ENTRY="$BUILD_DIR/simple_gui_render_bench.spl"
 SIMPLE_OUT="$BUILD_DIR/simple_gui_render_bench.out"
 SIMPLE_NATIVE="$BUILD_DIR/simple_gui_render_bench"
+SIMPLE_DEPS="$BUILD_DIR/simple_gui_render_bench.deps"
 GTK_SRC="$BUILD_DIR/gtk_gui_baseline.c"
 GTK_BIN="$BUILD_DIR/gtk_gui_baseline"
 GTK_OUT="$BUILD_DIR/gtk_gui_baseline.out"
@@ -187,6 +214,15 @@ fn main() -> i64:
             browser_noop_hits = browser_noop_hits + 1
         bni = bni + 1
     val browser_noop_elapsed = rt_time_now_unix_micros() - browser_noop_start
+    val present_warm = browser_backend.pixels_rgba_i64()
+    val browser_present_start = rt_time_now_unix_micros()
+    var bpi = 0
+    var browser_present_pixels = 0
+    while bpi < $SIMPLE_ITERATIONS:
+        val present_pixels = browser_backend.pixels_rgba_i64()
+        browser_present_pixels = browser_present_pixels + present_pixels.len()
+        bpi = bpi + 1
+    val browser_present_elapsed = rt_time_now_unix_micros() - browser_present_start
     val warm = simple_web_render_html_to_pixels(html, 320, 200)
     if warm.len() != 320 * 200:
         print "simple_render_status=fail"
@@ -232,10 +268,18 @@ fn main() -> i64:
     print "simple_browser_static_shell_stores={browser_backend.static_shell_html_stores}"
     print "simple_browser_static_frame_hits={browser_backend.static_frame_hits}"
     print "simple_browser_static_frame_stores={browser_backend.static_frame_stores}"
+    print "simple_browser_static_frame_fast_hits={browser_backend.static_frame_fast_hits}"
+    print "simple_browser_static_frame_fast_stores={browser_backend.static_frame_fast_stores}"
     print "simple_browser_cached_frame_pixels={browser_backend.last_artifact_pixels}"
     print "simple_browser_noop_cached_frame_iterations=$SIMPLE_ITERATIONS"
     print "simple_browser_noop_cached_frame_hits={browser_noop_hits}"
     print "simple_browser_noop_cached_frame_total_us={browser_noop_elapsed}"
+    print "simple_browser_present_cache_iterations=$SIMPLE_ITERATIONS"
+    print "simple_browser_present_cache_total_us={browser_present_elapsed}"
+    print "simple_browser_present_cache_pixels={browser_present_pixels}"
+    print "simple_browser_present_cache_hits={browser_backend.present_pixels_cache_hits}"
+    print "simple_browser_present_cache_stores={browser_backend.present_pixels_cache_stores}"
+    print "simple_browser_present_cache_warm_pixels={present_warm.len()}"
     print "simple_static_html_bytes={binary.html_bytes}"
     print "simple_static_binary_plan_bytes={binary.encoded_bytes}"
     print "simple_static_binary_commands={binary.command_count}"
@@ -266,11 +310,13 @@ simple_plan_cache_total_us="n/a"
 simple_command_cache_total_us="n/a"
 simple_browser_cached_frame_total_us="n/a"
 simple_browser_noop_cached_frame_total_us="n/a"
+simple_browser_present_cache_total_us="n/a"
 simple_static_html_bytes="n/a"
 simple_static_binary_plan_bytes="n/a"
 simple_static_layout_payload_bytes="n/a"
 simple_static_command_payload_bytes="n/a"
 simple_bytes="n/a"
+simple_closure_bytes="n/a"
 
 if [ -x "$SIMPLE_BINARY" ]; then
     if SIMPLE_LIB="$ROOT_DIR/src" with_timeout "$SIMPLE_BINARY" run "$SIMPLE_ENTRY" >"$SIMPLE_OUT" 2>&1; then
@@ -284,6 +330,7 @@ if [ -x "$SIMPLE_BINARY" ]; then
         simple_command_cache_total_us="$(field_of simple_static_command_cache_total_us "$SIMPLE_OUT")"
         simple_browser_cached_frame_total_us="$(field_of simple_browser_cached_frame_total_us "$SIMPLE_OUT")"
         simple_browser_noop_cached_frame_total_us="$(field_of simple_browser_noop_cached_frame_total_us "$SIMPLE_OUT")"
+        simple_browser_present_cache_total_us="$(field_of simple_browser_present_cache_total_us "$SIMPLE_OUT")"
         simple_static_html_bytes="$(field_of simple_static_html_bytes "$SIMPLE_OUT")"
         simple_static_binary_plan_bytes="$(field_of simple_static_binary_plan_bytes "$SIMPLE_OUT")"
         simple_static_layout_payload_bytes="$(field_of simple_static_layout_payload_bytes "$SIMPLE_OUT")"
@@ -302,6 +349,7 @@ if [ -x "$SIMPLE_BINARY" ]; then
             --opt-level=aggressive \
             -o "$SIMPLE_NATIVE" >"$BUILD_DIR/simple_native_build.log" 2>&1; then
             simple_bytes="$(bytes_of "$SIMPLE_NATIVE")"
+            simple_closure_bytes="$(linked_closure_bytes_of "$SIMPLE_NATIVE" "$SIMPLE_DEPS")"
         fi
     fi
 else
@@ -395,6 +443,12 @@ EOF
     fi
 fi
 
+simple_cached_frame_per_iter_us="$(ratio_of "$simple_browser_cached_frame_total_us" "$SIMPLE_ITERATIONS")"
+gtk_widget_per_iter_us="$(ratio_of "$gtk_total_us" "$GTK_ITERATIONS")"
+gtk_to_simple_cached_frame_speedup="$(cross_ratio_of "$gtk_total_us" "$SIMPLE_ITERATIONS" "$simple_browser_cached_frame_total_us" "$GTK_ITERATIONS")"
+gtk_to_simple_closure_size_ratio="$(ratio_of "$gtk_closure_bytes" "$simple_closure_bytes")"
+simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
+
 {
     echo "# GTK GUI Size And Speed Baseline"
     echo
@@ -411,9 +465,26 @@ fi
     echo "| Simple retained command hot cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_command_cache_total_us | in-memory retained command list after persistent warmup |"
     echo "| Simple BrowserBackend cached frame | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_browser_cached_frame_total_us | integrated browser backend unchanged-static-frame cache |"
     echo "| Simple BrowserBackend no-op frame | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_browser_noop_cached_frame_total_us | explicit event-loop no-change static frame reuse |"
+    echo "| Simple BrowserBackend present cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_browser_present_cache_total_us | cached host-present pixel buffer when framebuffer is unchanged |"
     echo "| Simple SWBC prepared reuse | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_swbc_total_us | decoded compact static-shell plan reuse loop |"
     echo "| Simple SWBC command plan | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_command_plan_total_us | decoded command-only static-shell plan, no HTML artifact |"
     echo "| GTK | $gtk_status | $gtk_bytes | $GTK_ITERATIONS | $gtk_total_us | ${gtk_reason:-widget construction loop; uses xvfb-run when available} |"
+    echo
+    echo "## Comparison Ratios"
+    echo
+    echo "| Metric | Value |"
+    echo "|---|---:|"
+    echo "| Simple cached BrowserBackend frame per iteration | ${simple_cached_frame_per_iter_us} us |"
+    echo "| GTK widget loop per iteration | ${gtk_widget_per_iter_us} us |"
+    echo "| GTK per-iteration cost / Simple cached-frame cost | ${gtk_to_simple_cached_frame_speedup}x |"
+    echo "| GTK linked closure / Simple linked closure | ${gtk_to_simple_closure_size_ratio}x |"
+    echo "| Simple native executable / GTK minimal executable | ${simple_to_gtk_executable_size_ratio}x |"
+    echo
+    echo "## Interpretation"
+    echo
+    echo "- GTK's minimal executable can be smaller than the generated Simple executable, but its linked shared-library closure is the relevant deployed-size comparison for a standalone GUI runtime."
+    echo "- The cached Simple BrowserBackend frame path measures unchanged-frame work after the static UI revision key hits; it avoids HTML generation, DOM conversion, layout, raster, and host-present pixel conversion."
+    echo "- The GTK speed row measures widget construction on this host under xvfb-run when available, so compare it as a small GUI baseline rather than a full application benchmark."
     echo
     echo "## Static Shell Size"
     echo
@@ -423,6 +494,8 @@ fi
     echo "| Simple compact static-shell plan | $simple_static_binary_plan_bytes |"
     echo "| Simple decoded layout payload estimate | $simple_static_layout_payload_bytes |"
     echo "| Simple retained command payload | $simple_static_command_payload_bytes |"
+    echo "| Simple native executable | $simple_bytes |"
+    echo "| Simple executable plus linked shared-library closure | $simple_closure_bytes |"
     echo "| GTK minimal executable | $gtk_bytes |"
     echo "| GTK executable plus linked shared-library closure | $gtk_closure_bytes |"
     echo
@@ -446,6 +519,12 @@ fi
     else
         echo "- unavailable"
     fi
+    if [ -f "$SIMPLE_DEPS" ]; then
+        echo
+        echo "## Simple Linked Dependencies"
+        echo
+        sed 's/^/- /' "$SIMPLE_DEPS"
+    fi
     if [ -f "$GTK_DEPS" ]; then
         echo
         echo "## GTK Linked Dependencies"
@@ -455,7 +534,7 @@ fi
     echo
     echo "## Notes"
     echo
-    echo "- Set SKIP_SIMPLE_NATIVE=0 to add Simple native binary bytes; default skips the slow native build."
+    echo "- Set SKIP_SIMPLE_NATIVE=1 to skip Simple native binary size measurement for faster smoke runs."
     echo "- GTK executable size is reported separately from the linked shared-library closure."
     echo "- GTK speed uses xvfb-run when available; otherwise it is unavailable on headless hosts without a display."
     echo "- Simple speed measures the pure software HTML-to-pixel path and records the shared render optimization profile."
@@ -473,11 +552,13 @@ echo "simple_plan_cache_total_us=$simple_plan_cache_total_us"
 echo "simple_command_cache_total_us=$simple_command_cache_total_us"
 echo "simple_browser_cached_frame_total_us=$simple_browser_cached_frame_total_us"
 echo "simple_browser_noop_cached_frame_total_us=$simple_browser_noop_cached_frame_total_us"
+echo "simple_browser_present_cache_total_us=$simple_browser_present_cache_total_us"
 echo "simple_static_html_bytes=$simple_static_html_bytes"
 echo "simple_static_binary_plan_bytes=$simple_static_binary_plan_bytes"
 echo "simple_static_layout_payload_bytes=$simple_static_layout_payload_bytes"
 echo "simple_static_command_payload_bytes=$simple_static_command_payload_bytes"
 echo "simple_bytes=$simple_bytes"
+echo "simple_closure_bytes=$simple_closure_bytes"
 echo "gtk_status=$gtk_status"
 echo "gtk_bytes=$gtk_bytes"
 echo "gtk_closure_bytes=$gtk_closure_bytes"

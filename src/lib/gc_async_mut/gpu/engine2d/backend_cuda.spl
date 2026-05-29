@@ -153,6 +153,26 @@ fn _write_gradient_launch_args(val_ptr: i64, args_ptr: i64, d_framebuffer: i64, 
     rt_ptr_write_i64(args_ptr, 56, val_ptr + 56)
     rt_ptr_write_i64(args_ptr, 64, val_ptr + 64)
 
+fn _write_line_launch_args(val_ptr: i64, args_ptr: i64, d_framebuffer: i64, x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32, stride: i32, surface_h: i32):
+    rt_ptr_write_i64(val_ptr, 0, d_framebuffer)
+    rt_ptr_write_i64(val_ptr, 8, _i64(x1))
+    rt_ptr_write_i64(val_ptr, 16, _i64(y1))
+    rt_ptr_write_i64(val_ptr, 24, _i64(x2))
+    rt_ptr_write_i64(val_ptr, 32, _i64(y2))
+    rt_ptr_write_i64(val_ptr, 40, _i64_from_u32(color))
+    rt_ptr_write_i64(val_ptr, 48, _i64(thickness))
+    rt_ptr_write_i64(val_ptr, 56, _i64(stride))
+    rt_ptr_write_i64(val_ptr, 64, _i64(surface_h))
+    rt_ptr_write_i64(args_ptr, 0, val_ptr)
+    rt_ptr_write_i64(args_ptr, 8, val_ptr + 8)
+    rt_ptr_write_i64(args_ptr, 16, val_ptr + 16)
+    rt_ptr_write_i64(args_ptr, 24, val_ptr + 24)
+    rt_ptr_write_i64(args_ptr, 32, val_ptr + 32)
+    rt_ptr_write_i64(args_ptr, 40, val_ptr + 40)
+    rt_ptr_write_i64(args_ptr, 48, val_ptr + 48)
+    rt_ptr_write_i64(args_ptr, 56, val_ptr + 56)
+    rt_ptr_write_i64(args_ptr, 64, val_ptr + 64)
+
 fn _write_u32_pixels_to_host(ptr: i64, pixels: [u32], count: i32):
     var idx = 0
     while idx < count:
@@ -613,6 +633,21 @@ impl RenderBackend for CudaBackend:
                 return
         self.mirror.draw_rect_filled(x, y, w, h, color)
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        if self.initialized and thickness > 0:
+            _write_line_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, x1, y1, x2, y2, color, thickness, self.width(), self.height())
+            var dx = x2 - x1
+            if dx < 0:
+                dx = -dx
+            var dy = y2 - y1
+            if dy < 0:
+                dy = -dy
+            val steps = if dx > dy: dx else: dy
+            val total = _i64(steps + 1) * _i64(thickness) * _i64(thickness)
+            val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+            val rc = cuda_launch_kernel(self.session.module_cache, "kernel_draw_line", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
+            if rc == CUDA_SUCCESS:
+                self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
+                return
         self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
         if self.initialized:
             if not self._copy_mirror_to_device():

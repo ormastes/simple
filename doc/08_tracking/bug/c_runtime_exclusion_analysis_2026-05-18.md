@@ -60,13 +60,7 @@ Verified blocker categories (2026-05-29, confirmed unchanged in follow-up pass):
 | `runtime_config.c` | `rt_set_macro_trace`, `rt_is_macro_trace_enabled`, `rt_set_debug_mode`, `rt_is_debug_mode_enabled` | `value/sffi/config.rs` (AtomicBool) | 0 direct | Core-C tiny-native lane gap (not confirmed in SFFI dispatch or calls.rs). |
 | `runtime_env.c` | `__c_rt_env_get_i64`, `__c_rt_env_set/exists/remove/get_str/cwd/home/temp`, `__c_rt_exit`, `__c_rt_stdout/stderr_flush`, `__c_rt_platform_name`, `__c_rt_term_get_size` | `value/sffi/env_process.rs`, `value/sffi/io_print.rs` | 0 direct | `rt_env_get/set/exists/remove/cwd/home/temp/get_i64` confirmed in SFFI dispatch table. `calls.rs` also references `rt_env_get*`. |
 | `runtime_regex_stub.c` | `sffi_regex_is_match/find/find_all/captures/replace/replace_all/split/split_n` | `value/sffi/regex_stub.rs` | `nogc_sync_mut/io/regex_simple.spl` | `sffi_regex_*` confirmed in `calls.rs` codegen dispatch. |
-<<<<<<< Conflict 1 of 3
-+++++++ Contents of side #1
 | `runtime_pty.c` | `rt_pty_open`, `rt_pty_spawn` | `value/pty.rs` (runtime `#[no_mangle]`), `interpreter_extern/pty.rs` (interp) | `sys/pty.spl`, `smux/smux_remote.spl` | **Blocker cleared** (follow-up 2026-05-29). Zero build refs confirmed. `value/pty.rs` line 121/135: `#[no_mangle] pub extern "C" fn rt_pty_open/rt_pty_spawn` — both symbols exported from Rust. `runtime/build.rs` `-lutil` linkage is for the Rust `openpty` call, not the C file. Not in SFFI dispatch or calls.rs. Move to "Safe to delete" candidates. Also: `pty.spl` line 5 comment and `interpreter_extern/pty.rs` doc-comment are stale — both still claim compiled mode uses `runtime_pty.c`. |
-%%%%%%% Changes from base to side #2
--| `runtime_pty.c` | `rt_pty_open`, `rt_pty_spawn` | `value/pty.rs` (runtime), `interpreter_extern/pty.rs` (interp) | `sys/pty.spl`, `smux/smux_remote.spl` | Zero build.rs/tools.rs refs (confirmed 2026-05-29). Not in SFFI dispatch table. Core-C tiny-native lane gap — `build_core_c_runtime_library` does not include pty.c but tiny-native programs that use PTY would need the C symbols unless the Rust export is visible. |
-+| `runtime_pty.c` | `rt_pty_open`, `rt_pty_spawn` | `value/pty.rs` (runtime), `interpreter_extern/pty.rs` (interp) | `sys/pty.spl`, `smux/smux_remote.spl` | **Blocker cleared (2026-05-29).** Zero refs in `build.rs` c_sources and `tools.rs` runtime_inputs. Not in SFFI dispatch table. Rust `value/pty.rs` exports both symbols via `#[no_mangle]`. Safe to delete — see "New Removal Candidates" section. |
->>>>>>> Conflict 1 of 3 ends
 
 ### Group B — SPL FFI surface (blocked by no Simple replacement yet)
 
@@ -107,13 +101,7 @@ Discovered on-disk 2026-05-29. These files were not in any previous audit pass.
 
 | C File | Symbols | Status | Blocker |
 |--------|---------|--------|---------|
-<<<<<<< Conflict 2 of 3
-+++++++ Contents of side #1
 | `runtime_pty.c` | `rt_pty_open`, `rt_pty_spawn` | **Safe to delete** — zero refs in all `build.rs`/`tools.rs` confirmed. `value/pty.rs` exports both symbols via `#[no_mangle]`; `runtime/build.rs` links `-lutil` for the *Rust* `openpty` call, not the C file. No native build path compiles this C file. `interpreter_extern/pty.rs` provides the interpreter path independently. Stale comments in `pty.spl` (line 5: "implemented in runtime_pty.c") and `interpreter_extern/pty.rs` (doc comment claims compiled mode uses C) need updating after deletion. | — (blocker cleared 2026-05-29 follow-up) |
-%%%%%%% Changes from base to side #2
--| `runtime_pty.c` | `rt_pty_open`, `rt_pty_spawn` | **Removable (pending verification)** — zero refs in all `build.rs`/`tools.rs` as of 2026-05-29; Rust replacements export the same symbols. | Confirm no native binary links the C object before deleting. |
-+| `runtime_pty.c` | `rt_pty_open`, `rt_pty_spawn` | **Safe to delete** — zero refs in `build.rs` c_sources and `tools.rs` runtime_inputs (confirmed 2026-05-29). Not in SFFI dispatch table. Rust `value/pty.rs` exports both `rt_pty_open` and `rt_pty_spawn` via `#[no_mangle]`; interpreter path is `interpreter_extern/pty.rs`. No remaining build path pulls the C object. | None — blocker cleared. |
->>>>>>> Conflict 2 of 3 ends
 | `runtime_base64.c` | `__c_rt_base64_encode`, `__c_rt_base64_decode` | **Already deleted** — confirmed GONE from disk 2026-05-29. Moved to Removed table. | — |
 
 Verification for the 2026-05-27 runtime hash/crypto removal:
@@ -196,13 +184,7 @@ For **contracts/regex_stub** (Group A2 — calls.rs codegen dispatch):
 `simple_contract_check*` and `sffi_regex_*` confirmed in `codegen/instr/calls.rs`. Removal requires confirming the Rust `#[export_name]` implementations satisfy the codegen link step.
 
 For **runtime_pty.c**:
-<<<<<<< Conflict 3 of 3
-+++++++ Contents of side #1
 **Safe to delete** (confirmed follow-up 2026-05-29). Zero build references — not in `runtime/build.rs` c_sources, not in `native_project/tools.rs` runtime_inputs, no other build.rs references it. `value/pty.rs` exports `rt_pty_open` and `rt_pty_spawn` via `#[no_mangle]`; the `-lutil` link in `runtime/build.rs` is for the Rust `openpty(3)` call inside `value/pty.rs`. The `interpreter_extern/pty.rs` handles interpreter mode independently. After deletion: update stale comment in `src/compiler_rust/lib/std/src/sys/pty.spl` (line 5) and doc-comment in `src/compiler_rust/compiler/src/interpreter_extern/pty.rs` (says "compiled/native path uses the C symbols").
-%%%%%%% Changes from base to side #2
--Zero build references confirmed 2026-05-29. Rust replacements (`value/pty.rs`, `interpreter_extern/pty.rs`) export the same C symbols. Pending: confirm no native binary link step pulls the C object. Likely safe to delete.
-+**Blocker cleared (2026-05-29).** Zero build references in `build.rs` c_sources and `tools.rs` runtime_inputs. Not in SFFI dispatch table. Rust `value/pty.rs` provides both `rt_pty_open` and `rt_pty_spawn` via `#[no_mangle]`; interpreter path is `interpreter_extern/pty.rs`. Safe to delete.
->>>>>>> Conflict 3 of 3 ends
 
 For **memory/time** (`runtime/build.rs` c_sources):
 Compiled directly into `libruntime_sffi_c.a`. `runtime_memory.c` is core ABI (codegen emits `rt_alloc` for every alloc). `runtime_time.c` wraps `clock_gettime`/`gettimeofday` — must stay native. Pure Simple `time_utils.spl` provides civil-date arithmetic on top.
