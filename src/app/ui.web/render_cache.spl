@@ -149,6 +149,19 @@ class WebRenderPreparedStaticShellPlan:
             command_hits: 0
         )
 
+    static fn from_decoded(profile: WebRenderOptimizationProfile, decoded: WebRenderStaticShellBinaryDecoded, valid: bool) -> WebRenderPreparedStaticShellPlan:
+        val commands = if valid:
+            web_render_static_shell_commands(decoded)
+        else:
+            []
+        WebRenderPreparedStaticShellPlan(
+            profile: profile,
+            decoded: decoded,
+            commands: commands,
+            valid: valid,
+            command_hits: 0
+        )
+
     me command_list() -> [WebRenderStaticShellCommand]:
         if not self.valid:
             return []
@@ -560,6 +573,14 @@ fn web_render_static_shell_binary_decoded_matches_request(decoded: WebRenderStat
     decoded.viewport_h == req.viewport_h and
     decoded.dynamic_region_count == 0
 
+fn _web_render_static_shell_binary_decoded_matches_profile(decoded: WebRenderStaticShellBinaryDecoded, profile: WebRenderOptimizationProfile, viewport_w: i32, viewport_h: i32) -> bool:
+    if not decoded.valid:
+        return false
+    decoded.cache_key_digest == sha256_text(profile.cache_key) and
+    decoded.viewport_w == viewport_w and
+    decoded.viewport_h == viewport_h and
+    decoded.dynamic_region_count == 0
+
 fn web_render_static_shell_binary_to_artifact(req: WebRenderRequest, encoded: text) -> WebRenderCacheResult:
     val profile = web_render_optimization_profile(req)
     val decoded = web_render_static_shell_binary_decode(encoded)
@@ -614,8 +635,6 @@ fn web_render_static_cache_lookup_html(cache_dir: text, req: WebRenderRequest) -
     if not profile.cacheable_static_shell:
         return ""
     val path = _web_render_cache_file(cache_dir, req)
-    if not rt_file_exists(path):
-        return ""
     rt_file_read_text(path) ?? ""
 
 fn web_render_static_cache_lookup_binary(cache_dir: text, req: WebRenderRequest) -> text:
@@ -623,8 +642,9 @@ fn web_render_static_cache_lookup_binary(cache_dir: text, req: WebRenderRequest)
     if not profile.cacheable_static_shell:
         return ""
     val path = _web_render_binary_cache_file(cache_dir, req)
-    if not rt_file_exists(path):
-        return ""
+    _web_render_static_cache_lookup_binary_path(path)
+
+fn _web_render_static_cache_lookup_binary_path(path: text) -> text:
     rt_file_read_text(path) ?? ""
 
 fn web_render_static_cache_store_html(cache_dir: text, req: WebRenderRequest, html: text) -> bool:
@@ -650,9 +670,11 @@ fn web_render_cached_static_plan(cache_dir: text, req: WebRenderRequest) -> WebR
             cache_path: path
         )
 
-    val cached = web_render_static_cache_lookup_binary(cache_dir, req)
+    val cached = _web_render_static_cache_lookup_binary_path(path)
     if cached != "":
-        val plan = WebRenderPreparedStaticShellPlan.prepare(req, cached)
+        val decoded = web_render_static_shell_binary_decode(cached)
+        val valid = _web_render_static_shell_binary_decoded_matches_profile(decoded, profile, req.viewport_w, req.viewport_h)
+        val plan = WebRenderPreparedStaticShellPlan.from_decoded(profile, decoded, valid)
         if plan.valid:
             return WebRenderStaticPlanCacheResult(
                 plan: plan,
@@ -663,7 +685,7 @@ fn web_render_cached_static_plan(cache_dir: text, req: WebRenderRequest) -> WebR
 
     val html = web_render_full_html(req)
     val stored = web_render_static_cache_store_html(cache_dir, req, html)
-    val encoded = web_render_static_cache_lookup_binary(cache_dir, req)
+    val encoded = _web_render_static_cache_lookup_binary_path(path)
     WebRenderStaticPlanCacheResult(
         plan: WebRenderPreparedStaticShellPlan.prepare(req, encoded),
         cache_hit: false,
