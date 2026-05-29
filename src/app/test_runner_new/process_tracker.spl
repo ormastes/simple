@@ -20,6 +20,7 @@ use std.io.{process_kill, process_is_running, shell_bool, shell_lines, shell_out
 # singleton pattern with getter functions for now.
 
 var _tracked_pids: [i64] = []
+var _protected_pids: [i64] = []
 var _tracked_containers: [text] = []
 var _heartbeat_enabled = false
 var _last_heartbeat_ms = 0
@@ -55,6 +56,25 @@ fn tracker_unregister_pid(pid: i64):
         if p != pid:
             filtered.push(p)
     _tracked_pids = filtered
+
+fn tracker_protect_pid(pid: i64):
+    """Mark a PID as protected — tracker_kill_all_children will skip it."""
+    if pid > 0:
+        _protected_pids.push(pid)
+
+fn tracker_unprotect_pid(pid: i64):
+    """Remove protection from a PID."""
+    var filtered: [i64] = []
+    for p in _protected_pids:
+        if p != pid:
+            filtered.push(p)
+    _protected_pids = filtered
+
+fn _is_protected(pid: i64) -> bool:
+    for p in _protected_pids:
+        if p == pid:
+            return true
+    false
 
 fn tracker_clear():
     """Clear all tracked PIDs (for testing)"""
@@ -95,28 +115,24 @@ fn tracker_unregister_container(container_id: text):
 
 fn tracker_kill_all_children() -> i64:
     """
-    Kill all tracked child processes.
+    Kill all tracked child processes, skipping protected PIDs.
 
     Uses SIGTERM first, then SIGKILL after 2s grace period.
 
     Returns: Number of processes successfully killed
     """
     var killed = 0
+    var surviving: [i64] = []
 
-    # First pass: SIGTERM (graceful)
     for pid in _tracked_pids:
+        if _is_protected(pid):
+            surviving.push(pid)
+            continue
         if process_is_running(pid):
             if process_kill(pid):
                 killed = killed + 1
 
-    # Give processes 2 seconds to exit gracefully
-    # (In real implementation, would use rt_time_now_unix_micros + sleep)
-
-    # Second pass: SIGKILL (force) - only if still running
-    # NOTE: process_kill() already handles SIGKILL escalation internally
-
-    # Clear tracking list after cleanup
-    _tracked_pids = []
+    _tracked_pids = surviving
 
     killed
 
