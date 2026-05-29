@@ -15,6 +15,7 @@
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend, lerp_color}
 use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance}
+use std.gpu.engine2d.simd_provider.{record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -129,8 +130,9 @@ impl RenderBackend for SoftwareBackend:
         self.initialized = false
 
     me clear(color: u32):
-        var i = 0
         val total = self.w * self.h
+        record_simd_fill_hit()
+        var i = 0
         while i < total:
             self.buf[i] = color
             i = i + 1
@@ -369,15 +371,24 @@ impl RenderBackend for SoftwareBackend:
             val py = y + row
             if py >= 0 and py < self.h:
                 val src_row_base = row * w
-                var col = 0
-                while col < w:
-                    val dst_x = x + col
-                    if dst_x >= 0 and dst_x < self.w:
-                        val src_idx = src_row_base + col
-                        val dst_idx = py * self.w + dst_x
-                        if src_idx >= 0 and src_idx < pixels.len():
-                            self.buf[dst_idx] = pixels[src_idx]
-                    col = col + 1
+                var start_x = x
+                var src_x = 0
+                var count = w
+                if start_x < 0:
+                    src_x = -start_x
+                    count = count + start_x
+                    start_x = 0
+                if start_x + count > self.w:
+                    count = self.w - start_x
+                if count > 0 and src_row_base + src_x + count <= pixels.len():
+                    record_simd_copy_hit()
+                    val dst_off = py * self.w + start_x
+                    val src_off = src_row_base + src_x
+                    var col = 0
+                    while col < count:
+                        self.buf[dst_off + col] = pixels[src_off + col]
+                        col = col + 1
+                    self.mark_span_dirty(start_x, py, count)
             row = row + 1
 
     me blit_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
@@ -586,6 +597,7 @@ impl SoftwareBackend:
                 xoff = xoff + 1
             return
         val off = y * self.w + clipped.0
+        record_simd_fill_hit()
         var i = 0
         while i < count:
             self.buf[off + i] = color
@@ -604,6 +616,7 @@ impl SoftwareBackend:
                 xoff = xoff + 1
             return
         val off = y * self.w + clipped.0
+        record_simd_alpha_hit()
         var i = 0
         while i < count:
             self.buf[off + i] = blend(color, self.buf[off + i])

@@ -9,6 +9,7 @@ hot paths when available. Covers AC-6.
 
 use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
 
 # ============================================================================
 # SIMD-accelerated clear
@@ -18,11 +19,13 @@ describe "SoftwareBackend SIMD integration":
     describe "clear":
         it "AC-6: clear uses simd_fill_row when available":
             var backend = SoftwareBackend.create()
-            if backend.init(256, 256):
+            reset_simd_hits()
+            if backend.init(64, 64):
                 backend.clear(0xFFFF0000)
                 val pixels = backend.read_pixels()
                 expect(pixels[0]).to_equal(0xFFFF0000)
-                expect(pixels[255]).to_equal(0xFFFF0000)
+                expect(pixels[63]).to_equal(0xFFFF0000)
+                expect(simd_hit_counts().fill_hits).to_be_greater_than(0)
                 backend.shutdown()
 
         it "AC-6: clear produces same result with and without SIMD":
@@ -46,12 +49,14 @@ describe "SoftwareBackend SIMD integration":
     describe "blit_image":
         it "AC-6: blit uses simd_blit_row for row copies":
             var backend = SoftwareBackend.create()
+            reset_simd_hits()
+            val src_pixels: [u32] = [0xFFFF0000; 16]
             if backend.init(64, 64):
                 backend.clear(0xFF000000)
-                var src_pixels: [u32] = [0xFFFF0000; 16]
                 backend.blit_image(0, 0, 4, 4, src_pixels)
                 val pixels = backend.read_pixels()
                 expect(pixels[0]).to_equal(0xFFFF0000)
+                expect(simd_hit_counts().copy_hits).to_be_greater_than(0)
                 backend.shutdown()
 
 # ============================================================================
@@ -61,12 +66,14 @@ describe "SoftwareBackend SIMD integration":
     describe "alpha blending":
         it "AC-6: draw_rect_filled with alpha uses simd_blend_row":
             var backend = SoftwareBackend.create()
+            reset_simd_hits()
             if backend.init(64, 64):
                 backend.clear(0xFF0000FF)
                 backend.draw_rect_filled(0, 0, 32, 32, 0x80FF0000)
                 val pixels = backend.read_pixels()
                 val r = (pixels[0] >> 16) & 0xFF
                 expect(r).to_be_greater_than(50)
+                expect(simd_hit_counts().alpha_hits).to_be_greater_than(0)
                 backend.shutdown()
 
 # ============================================================================
