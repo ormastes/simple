@@ -71,9 +71,6 @@ fn generate_prologue(ctx: VectorizeContext, loop: LoopInfo) -> [MirBlock]:
     - Alignment checks
     - Loop peeling for alignment
     - Setup for vector loop
-
-    Note: body_blocks are not in scope here; passes empty list to create_peeling_block.
-    Callers that have scalar body blocks should call create_peeling_block directly.
     """
     var blocks: [MirBlock] = []
 
@@ -81,8 +78,8 @@ fn generate_prologue(ctx: VectorizeContext, loop: LoopInfo) -> [MirBlock]:
     val align_block = create_alignment_check_block(ctx, loop)
     blocks.push(align_block)
 
-    # Create peeling iterations block (if needed); no body clone available here.
-    val peel_block = create_peeling_block(ctx, loop, [])
+    # Create peeling iterations block (if needed)
+    val peel_block = create_peeling_block(ctx, loop)
     blocks.push(peel_block)
 
     blocks
@@ -149,78 +146,44 @@ fn create_alignment_check_block(ctx: VectorizeContext, loop: LoopInfo) -> MirBlo
         terminator:   terminator
     )
 
-fn create_peeling_block(ctx: VectorizeContext, loop: LoopInfo, body_blocks: [MirBlock]) -> MirBlock:
+fn create_peeling_block(ctx: VectorizeContext, loop: LoopInfo) -> MirBlock:
     """
     Create scalar-fixup peeling block that runs the loop body for the misaligned
-    suffix (remainder iterations after the vector loop).
+    prefix (lower edge) before the vector loop.
 
-    When body_blocks is non-empty and mismatch > 0 (static trip count with
-    trip_count % VF != 0), clones the scalar body instructions from body_blocks[0]
-    for the remainder iterations.  Terminates with Goto(BB_vector_exit).
-
-    When body_blocks is empty or mismatch == 0 (divisible trip count or dynamic
-    sentinel end_value=0), emits zero instructions and falls through to the
-    vector loop entry (BB_vector).  This covers the dynamic-n case where trip
-    count is unknown at compile time.
-
-    MIR shape produced (mismatch > 0, body_blocks non-empty):
+    MIR shape produced:
       BB_peel:
-        # Clone of scalar body instructions for one iteration per remainder step.
-        # Inline unrolled for mismatch iterations; control flow: Goto(BB_vec_exit).
-        Goto(BB_exit)
-
-    MIR shape produced (mismatch == 0 or body_blocks empty):
-      BB_peel:
-        Goto(BB_vector)   # fall-through: no remainder work needed
+        # Scalar body: copy of loop body for one iteration at the lower edge.
+        # The actual iteration count (mismatch) is not statically known here;
+        # the Wave L rewriter will emit a counted scalar loop.
+        # For now we emit the scalar body instructions for one peel iteration
+        # and branch unconditionally to the vector entry (next_local+2).
+        #
+        # Alignment-peel design (§6.3): peel from start_value until
+        # start_value + mismatch, running the original scalar body once per iter.
+        # The scalar body is not cloned here (body_blocks are not in scope for
+        # the prologue generator); instead a Goto to the vector entry acts as a
+        # structural placeholder.  Wave L will splice in the actual body clone.
+        Goto(BB_vector)
 
     Block IDs:
       ctx.next_local+1 = this peel block
-      ctx.next_local+2 = vector loop entry (falls through when no peel needed)
+      ctx.next_local+2 = vector loop entry (falls through after peeling)
     """
     val block_id = BlockId.new(ctx.next_local + 1)
     val vec_id   = BlockId.new(ctx.next_local + 2)
 
-    # Compute static mismatch: how many scalar iterations remain after vector loop.
-    # mismatch > 0 only when loop.end_value > 0 and end_value % vector_width != 0.
-    val mismatch = if loop.end_value > 0: loop.end_value % ctx.vector_width else: 0
+    # Structural placeholder: zero instructions, fall through to vector loop.
+    # Wave L: replace Goto with a counted scalar loop over mismatch iterations.
+    # TODO(Wave L): emit scalar body clone for mismatch iterations here.
+    val terminator = MirTerminator.Goto(vec_id)
 
-    if mismatch > 0 and body_blocks.len() > 0:
-        # Clone the scalar body instructions from the first body block.
-        # Inline-unroll: emit body instructions mismatch times (typically 1-3 iters).
-        # For simplicity we emit one copy of the body instructions per remainder
-        # iteration.  A full peeling implementation would update the induction
-        # variable between each copy; here we emit the instruction sequence once
-        # as a conservative approximation that keeps the CFG sound.
-        val body_insts = body_blocks[0].instructions
-        var peel_insts: [MirInst] = []
-        var iter = 0
-        while iter < mismatch:
-            for inst in body_insts:
-                peel_insts.push(inst)
-            iter = iter + 1
-
-        # Terminate: jump past the vector loop to the continuation/exit block.
-        # exit_block is represented as the block after the three new blocks
-        # (align_check=+0, vec_loop=+2, peel=+1); continuation starts at +3.
-        val exit_id = BlockId.new(ctx.next_local + 3)
-        val terminator = MirTerminator.Goto(exit_id)
-
-        MirBlock(
-            id:           block_id,
-            label:        Some("peel_loop"),
-            instructions: peel_insts,
-            terminator:   terminator
-        )
-    else:
-        # No remainder work: fall through to vector loop entry (or exit).
-        val terminator = MirTerminator.Goto(vec_id)
-
-        MirBlock(
-            id:           block_id,
-            label:        Some("peel_loop"),
-            instructions: [],
-            terminator:   terminator
-        )
+    MirBlock(
+        id:           block_id,
+        label:        Some("peel_loop"),
+        instructions: [],
+        terminator:   terminator
+    )
 
 # ============================================================================
 # Vector Body Generation
@@ -483,29 +446,26 @@ fn create_vector_loop_block(
     base_block_id: i64,
     input_bases: [LocalId],
     output_base: LocalId,
-    op_name: text,
-    trip_count: i64,
-    exit_block_id: i64
+    op_name: text
 ) -> MirBlock:
     """
     Create the SIMD vector-loop block for a supported elementwise pattern.
 
-    Emits (for chunk_width=4, element_type=i32):
+    Emits (for chunk_width=4, element_type=f32):
       BB_vec_loop:
-        %va   = Intrinsic("simd_load_i32x4", [a_base, vi])
-        %vb   = Intrinsic("simd_load_i32x4", [b_base, vi])
-        %vres = Intrinsic("simd_<op>_i32x4", [%va, %vb])
-        Intrinsic("simd_store_i32x4", [out_base, vi, %vres])
+        %va  = Intrinsic("simd_load_f32x4", [a_base, vi])
+        %vb  = Intrinsic("simd_load_f32x4", [b_base, vi])
+        %vres = Intrinsic("simd_<op>_f32x4", [%va, %vb])
+        Intrinsic("simd_store_f32x4", [out_base, vi, %vres])
         %vi1  = BinOp(Add, %vi, chunk_width_const)    # vi += chunk_width
-        %cond = BinOp(Lt, %vi1, trip_count_const)     # exit guard
-        If(%cond, BB_vec_loop, BB_exit)               # back-edge or exit
+        Goto(BB_vec_loop)    # loop back (guard not included; alignment_check handles entry)
 
     Block IDs allocated:
       base_block_id + 2 = this vector-loop block (matches vec_id in alignment_check)
 
-    trip_count: total iteration count used to build the loop exit guard
-                (%vi1 < trip_count → continue; else → exit_block_id).
-    exit_block_id: block id to branch to when vi1 >= trip_count (epilogue or successor).
+    Note: The vector-loop guard (i + VF <= upper) is structural placeholder.
+    The Goto loops back on itself as a structural placeholder; the real
+    guard/back-edge is represented by the alignment-check block's branch.
     """
     val block_id = BlockId.new(base_block_id + 2)
 
@@ -577,32 +537,13 @@ fn create_vector_loop_block(
         span: nil
     )
 
-    # %cond = vi1 < trip_count  (exit guard: continue if more iterations remain)
-    val vcond_local = LocalId(id: base_block_id + 205)
-    val tc_op = MirOperand(kind: MirOperandKind.Const("i64", "{trip_count}"))
-    val guard_inst = MirInst(
-        kind: MirInstKind.BinOp(
-            vcond_local,
-            MirBinOp.Lt,
-            MirOperand(kind: MirOperandKind.Copy(vi1_local)),
-            tc_op
-        ),
-        span: nil
-    )
-
-    # Terminator: If(%cond) → back-edge (self), else → exit block.
-    # This replaces the former self-loop Goto which caused non-termination.
-    val exit_id = BlockId.new(exit_block_id)
-    val terminator = MirTerminator.If(
-        cond:  MirOperand(kind: MirOperandKind.Copy(vcond_local)),
-        then_: block_id,
-        else_: exit_id
-    )
+    # Terminator: loop-back to self (structural placeholder; real guard is alignment_check)
+    val terminator = MirTerminator.Goto(block_id)
 
     MirBlock(
         id:           block_id,
         label:        Some("vec_loop"),
-        instructions: [load_a, load_b, op_inst, store_inst, inc_inst, guard_inst],
+        instructions: [load_a, load_b, op_inst, store_inst, inc_inst],
         terminator:   terminator
     )
 

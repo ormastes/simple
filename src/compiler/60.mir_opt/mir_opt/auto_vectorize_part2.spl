@@ -176,10 +176,11 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
       R1: recipe.kind != Elementwise
       R2: recipe.op_name is not one of {add,sub,mul,xor}_elementwise
       R3: trip_count >= 0 && trip_count < recipe.chunk_width  (too short to vectorize)
-      R4: trip_count == -1 (dynamic/unknown) — runtime trip count unknown; static
-          peel body clone and If exit guard require a known bound. Dynamic trip
-          counts need a SCEV/runtime-guard path (follow-up wave).
-          (Wave L3b: misaligned static trip counts are now handled by Defect C fix.)
+      R4: trip_count == -1 (dynamic/unknown) OR trip_count % chunk_width != 0
+          — both produce dangling-predecessor / non-terminating-vec-loop CFG until
+          Wave L3b lands real terminator rewiring and peel body cloning.
+          Wave L3b: lift this guard once splice_vectorized_block rewires predecessors
+          and create_vector_loop_block emits an If guard instead of Goto(self).
       R5: recipe.output_base is nil  (no output — not an elementwise loop)
       R6: recipe.input_bases has fewer than 2 entries (need a and b)
 
@@ -209,14 +210,17 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
     if recipe.trip_count >= 0 and recipe.trip_count < recipe.chunk_width:
         return func
 
-    # R4: dynamic trip count (-1) — runtime trip count unknown, cannot build static
-    # exit guard in create_vector_loop_block or static peel body clone.
-    # Refuse until a SCEV/runtime-guard path is added in a follow-up wave.
+    # R4: dynamic trip count (-1) or misaligned trip count produce broken CFG:
+    #   - vec_loop emits Goto(self) — non-terminating without Wave L3b If-guard
+    #   - splice_vectorized_block does not patch predecessors of the original header
+    #   - create_peeling_block is an empty structural placeholder
+    # Refuse until Wave L3b lands real terminator rewiring and peel body cloning.
+    # Wave L3b: lift this guard when create_vector_loop_block emits If(guard, exit, back)
+    # and predecessor edges to the original header block are patched.
     if recipe.trip_count < 0:
         return func
-    # Misaligned static trip counts (trip_count % chunk_width != 0) are now handled
-    # by create_peeling_block emitting a scalar body clone for the remainder.
-    # No longer refused here — Defect C (Wave L3b) is resolved.
+    if recipe.trip_count % recipe.chunk_width != 0:
+        return func
 
     # R5: need an output base
     if not recipe.output_base.?:
@@ -248,36 +252,17 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
         step:          1
     )
 
-    # exit_block_id: the continuation block that follows the three new blocks.
-    # It is the first block with id > recipe.header_block.id (the original successor),
-    # or header_block.id + 3 as a conservative default.
-    val exit_block_id = recipe.header_block.id + 3
-
-    # Collect scalar body blocks for peel clone (blocks with id == header_block.id
-    # are the loop body in this simplified CFG representation).
-    var body_blocks_for_peel: [MirBlock] = []
-    for block in func.blocks:
-        if block.id.id == recipe.header_block.id:
-            body_blocks_for_peel.push(block)
-
-    # Create the three new BBs (Wave L3b: all with sound terminators)
+    # Create the four new BBs
     val align_block  = create_alignment_check_block(ctx, loop_info)
-    val vec_block    = create_vector_loop_block(ctx, recipe.header_block.id, recipe.input_bases, out_base, recipe.op_name, recipe.trip_count, exit_block_id)
-    val peel_block   = create_peeling_block(ctx, loop_info, body_blocks_for_peel)
+    val vec_block    = create_vector_loop_block(ctx, recipe.header_block.id, recipe.input_bases, out_base, recipe.op_name)
+    val peel_block   = create_peeling_block(ctx, loop_info)
 
-    # Splice: replace header block; keep blocks before it and all blocks after it.
-    # Defect B fix: patch any predecessor block whose terminator targets the
-    # original header_block.id to point to the new alignment-check block instead.
-    val orig_header_id = recipe.header_block.id
-    val new_header_id  = align_block.id.id
-
+    # Splice: replace header block; keep blocks before it and all blocks after it
     var new_blocks: [MirBlock] = []
 
     for block in func.blocks:
-        if block.id.id < orig_header_id:
-            # Patch terminators that target the old header to point to align_check.
-            val patched = _patch_terminator_target(block, orig_header_id, new_header_id)
-            new_blocks.push(patched)
+        if block.id.id < recipe.header_block.id:
+            new_blocks.push(block)
 
     # Insert alignment-check at the header's position, then vec and peel
     new_blocks.push(align_block)
@@ -286,40 +271,10 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
 
     # Blocks after the original header (continuation / exit)
     for block in func.blocks:
-        if block.id.id > orig_header_id:
+        if block.id.id > recipe.header_block.id:
             new_blocks.push(block)
 
     MirFunction(..func, blocks: new_blocks)
-
-fn _patch_block_id(id: BlockId, old_id: i64, new_id: i64) -> BlockId:
-    """Return new_id as BlockId if id.id == old_id, otherwise return id unchanged."""
-    if id.id == old_id:
-        BlockId.new(new_id)
-    else:
-        id
-
-fn _patch_terminator_target(block: MirBlock, old_id: i64, new_id: i64) -> MirBlock:
-    """
-    Defect B fix — predecessor patching.
-
-    Rewrites any branch target in block.terminator that equals old_id to new_id.
-    Used after splicing to redirect predecessors of the original loop header to
-    the new alignment-check block.
-
-    Handles Goto and If terminators; leaves all other terminators unchanged.
-    """
-    val new_terminator = match block.terminator:
-        case Goto(target):
-            MirTerminator.Goto(_patch_block_id(target, old_id, new_id))
-        case If(cond, then_, else_):
-            MirTerminator.If(
-                cond:  cond,
-                then_: _patch_block_id(then_, old_id, new_id),
-                else_: _patch_block_id(else_, old_id, new_id)
-            )
-        case _:
-            block.terminator
-    MirBlock(..block, terminator: new_terminator)
 
 fn supports_elementwise_rewrite(op_name: text) -> bool:
     """
@@ -418,32 +373,25 @@ fn splice_vectorized_block(
     Replace the block at `original` with `vectorized` + `remainder`.
 
     Block ordering in result:
-      [blocks with id < original.id]  (with predecessor terminators patched)
+      [blocks with id < original.id]
       vectorized
       remainder
       [blocks with id > original.id]
-
-    Defect B fix: rewrites any terminator in pre-original blocks that targets
-    `original.id` to point to `vectorized.id` instead, so predecessor edges are
-    not left dangling after the splice.
 
     The caller is responsible for setting correct terminators on
     `vectorized` and `remainder` before passing them in.
     """
     var new_blocks: [MirBlock] = []
-    val orig_id = original.id
-    val new_id  = vectorized.id.id
 
     for block in func.blocks:
-        if block.id.id < orig_id:
-            val patched = _patch_terminator_target(block, orig_id, new_id)
-            new_blocks.push(patched)
+        if block.id.id < original.id:
+            new_blocks.push(block)
 
     new_blocks.push(vectorized)
     new_blocks.push(remainder)
 
     for block in func.blocks:
-        if block.id.id > orig_id:
+        if block.id.id > original.id:
             new_blocks.push(block)
 
     MirFunction(..func, blocks: new_blocks)
