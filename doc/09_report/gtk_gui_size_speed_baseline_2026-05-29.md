@@ -6,25 +6,25 @@ Date: 2026-05-29
 
 | Runtime | Status | Binary bytes | Iterations | Total us | Notes |
 |---|---|---:|---:|---:|---|
-| Simple web renderer | ok | 34840 | 4 | 6296 | render loop via Simple software renderer |
-| Simple static cache | ok | n/a | 4 | 1517 | persistent HTML artifact cache hit loop |
-| Simple persistent SWBC command plan | ok | n/a | 4 | 521962 | disk-backed compact static-shell plan to retained commands |
-| Simple hot SWBC command plan cache | ok | n/a | 4 | 187955 | in-memory encoded SWBC sidecar cache after persistent warmup |
-| Simple retained command hot cache | ok | n/a | 4 | 496 | in-memory retained command list after persistent warmup |
-| Simple BrowserBackend cached frame | ok | n/a | 4 | 214 | integrated browser backend unchanged-static-frame cache |
-| Simple BrowserBackend no-op frame | ok | n/a | 4 | 51 | explicit event-loop no-change static frame reuse |
-| Simple BrowserBackend present cache | ok | n/a | 4 | 48 | cached host-present pixel buffer when framebuffer is unchanged |
-| Simple SWBC prepared reuse | ok | n/a | 4 | 95 | decoded compact static-shell plan reuse loop |
-| Simple SWBC command plan | ok | n/a | 4 | 60 | decoded command-only static-shell plan, no HTML artifact |
-| GTK | ok | 14472 | 200 | 29217 | widget construction loop; uses xvfb-run when available |
+| Simple web renderer | ok | 34840 | 4 | 6954 | render loop via Simple software renderer |
+| Simple static cache | ok | n/a | 4 | 1514 | persistent HTML artifact cache hit loop |
+| Simple persistent SWBC command plan | ok | n/a | 4 | 450367 | disk-backed compact static-shell plan to retained commands |
+| Simple hot SWBC command plan cache | ok | n/a | 4 | 152267 | in-memory encoded SWBC sidecar cache after persistent warmup |
+| Simple retained command hot cache | ok | n/a | 4 | 506 | in-memory retained command list after persistent warmup |
+| Simple BrowserBackend cached frame | ok | n/a | 4 | 233 | integrated browser backend unchanged-static-frame cache |
+| Simple BrowserBackend no-op frame | ok | n/a | 4 | 53 | explicit event-loop no-change static frame reuse |
+| Simple BrowserBackend present cache | ok | n/a | 4 | 68 | cached host-present pixel buffer when framebuffer is unchanged |
+| Simple SWBC prepared reuse | ok | n/a | 4 | 100 | decoded compact static-shell plan reuse loop |
+| Simple SWBC command plan | ok | n/a | 4 | 63 | decoded command-only static-shell plan, no HTML artifact |
+| GTK | ok | 14472 | 200 | 27289 | widget construction loop; uses xvfb-run when available |
 
 ## Comparison Ratios
 
 | Metric | Value |
 |---|---:|
-| Simple cached BrowserBackend frame per iteration | 53.50 us |
-| GTK widget loop per iteration | 146.09 us |
-| GTK per-iteration cost / Simple cached-frame cost | 2.73x |
+| Simple cached BrowserBackend frame per iteration | 58.25 us |
+| GTK widget loop per iteration | 136.44 us |
+| GTK per-iteration cost / Simple cached-frame cost | 2.34x |
 | GTK linked closure / Simple linked closure | 13.57x |
 | Simple native executable / GTK minimal executable | 2.41x |
 
@@ -32,6 +32,7 @@ Date: 2026-05-29
 
 - GTK's minimal executable can be smaller than the generated Simple executable, but its linked shared-library closure is the relevant deployed-size comparison for a standalone GUI runtime.
 - The cached Simple BrowserBackend frame path measures unchanged-frame work after the static UI revision key hits; it avoids HTML generation, DOM conversion, layout, raster, and host-present pixel conversion.
+- The Simple benchmark runs with a narrowed SIMPLE_LIB scope of `/home/ormastes/dev/pub/simple/src/lib:/home/ormastes/dev/pub/simple/src/app`, so the interpreter does not need the full repository source tree for this GUI path.
 - The GTK speed row measures widget construction on this host under xvfb-run when available, so compare it as a small GUI baseline rather than a full application benchmark.
 
 ## Static Shell Size
@@ -47,10 +48,16 @@ Date: 2026-05-29
 | GTK minimal executable | 14472 |
 | GTK executable plus linked shared-library closure | 32534656 |
 
+## Dependency Scope
+
+| Scope | SPL files |
+|---|---:|
+| Simple run SIMPLE_LIB | 6857 |
+| Full src tree | 10361 |
+
 ## Simple Output
 
 - [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: UITheme
-- [memory-guard] SIMPLE_LIB=/home/ormastes/dev/pub/simple/src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
@@ -58,7 +65,7 @@ Date: 2026-05-29
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - simple_render_status=ok
 - simple_render_iterations=4
-- simple_render_total_us=6296
+- simple_render_total_us=6954
 - simple_render_pixels=256000
 - simple_cache_schema=simple-web-cache-v1
 - simple_render_plan=static_shell_with_dynamic_islands
@@ -67,23 +74,23 @@ Date: 2026-05-29
 - simple_static_cache_hit_iterations=4
 - simple_static_cache_memory_hits=4
 - simple_static_cache_disk_hits=0
-- simple_static_cache_total_us=1517
+- simple_static_cache_total_us=1514
 - simple_static_disk_plan_warm_stored=true
 - simple_static_disk_plan_hit_iterations=4
 - simple_static_disk_plan_command_count=20
-- simple_static_disk_plan_total_us=521962
+- simple_static_disk_plan_total_us=450367
 - simple_static_plan_cache_warm_stored=true
 - simple_static_plan_cache_hit_iterations=4
 - simple_static_plan_cache_memory_hits=4
 - simple_static_plan_cache_command_count=20
-- simple_static_plan_cache_total_us=187955
+- simple_static_plan_cache_total_us=152267
 - simple_static_command_cache_warm_stored=true
 - simple_static_command_cache_hit_iterations=4
 - simple_static_command_cache_memory_hits=4
 - simple_static_command_cache_command_count=20
-- simple_static_command_cache_total_us=496
+- simple_static_command_cache_total_us=506
 - simple_browser_cached_frame_iterations=4
-- simple_browser_cached_frame_total_us=214
+- simple_browser_cached_frame_total_us=233
 - simple_browser_static_shell_hits=0
 - simple_browser_static_shell_stores=1
 - simple_browser_static_frame_hits=8
@@ -93,9 +100,9 @@ Date: 2026-05-29
 - simple_browser_cached_frame_pixels=3072
 - simple_browser_noop_cached_frame_iterations=4
 - simple_browser_noop_cached_frame_hits=4
-- simple_browser_noop_cached_frame_total_us=51
+- simple_browser_noop_cached_frame_total_us=53
 - simple_browser_present_cache_iterations=4
-- simple_browser_present_cache_total_us=48
+- simple_browser_present_cache_total_us=68
 - simple_browser_present_cache_pixels=12288
 - simple_browser_present_cache_hits=4
 - simple_browser_present_cache_stores=1
@@ -111,17 +118,17 @@ Date: 2026-05-29
 - simple_static_swbc_prepared_hits=4
 - simple_static_command_reuse_count=20
 - simple_static_command_reuse_hits=4
-- simple_static_swbc_total_us=95
+- simple_static_swbc_total_us=100
 - simple_static_command_plan_valid=true
 - simple_static_command_plan_count=20
 - simple_static_command_plan_hits=4
-- simple_static_command_plan_total_us=60
+- simple_static_command_plan_total_us=63
 
 ## GTK Output
 
 - gtk_render_status=ok
 - gtk_render_iterations=200
-- gtk_widget_total_us=29217
+- gtk_widget_total_us=27289
 
 ## Simple Linked Dependencies
 
@@ -204,4 +211,5 @@ Date: 2026-05-29
 - Set SKIP_SIMPLE_NATIVE=1 to skip Simple native binary size measurement for faster smoke runs.
 - GTK executable size is reported separately from the linked shared-library closure.
 - GTK speed uses xvfb-run when available; otherwise it is unavailable on headless hosts without a display.
+- Override SIMPLE_RUN_LIB or SIMPLE_NATIVE_LIB to audit broader or narrower source roots.
 - Simple speed measures the pure software HTML-to-pixel path and records the shared render optimization profile.

@@ -305,3 +305,83 @@ refusal for trip_count=-1 and trip_count=6 (misaligned with VF=4).
 - `src/compiler/50.mir/mir_instructions.spl` — MirInstKind enum (SIMD ops present)
 - `doc/05_design/simd_auto_vectorize_design.md` — §10 phased rollout
 - `test/unit/compiler/mir_opt/auto_vectorize_spec.spl` — induction_update added; 2 new tests
+
+---
+
+## §7 — Wave L3b closure: Defects A+B+C fixed 2026-05-29
+
+All three CFG defects from §6 are now resolved. The root cause of the hidden
+defects was an undocumented interpreter limitation: **the Simple spread
+operator (`..struct`) silently drops all fields when used cross-module** (the
+`MirFunction` struct doc already noted this at `impl MirFunction.with_blocks`,
+but `run_auto_vectorize` and `rewrite_elementwise_add` both used `..` spreads
+that silently no-op'd the update, returning the original struct unchanged).
+
+### Root cause
+
+`MirFunction(..func, blocks: new_blocks)` and
+`MirModule(..new_module, functions: new_functions)` in
+`auto_vectorize_part2.spl` are cross-module spreads. In interpreter mode they
+return the original struct unchanged. This made the rewriter a silent no-op for
+all trip counts — the Goto(self) and empty-peel defects were masked because the
+splice never fired at all.
+
+### Defect A — FIXED
+
+`create_vector_loop_block` (`auto_vectorize_codegen.spl`) now emits:
+- A `BinOp(Lt, %vi1, trip_count_const)` guard instruction.
+- `MirTerminator.If(cond: %guard, then_: block_id, else_: exit_block_id)` —
+  back-edge when condition is true, exit to continuation otherwise.
+- Two new parameters added to `create_vector_loop_block`: `trip_count: i64`
+  and `exit_block_id: i64`.
+
+### Defect B — FIXED (no-op for single-block test fixtures; sound for multi-block)
+
+`_patch_terminator_target` and `_patch_block_id` helpers added to
+`auto_vectorize_part2.spl`. They rewrite `Goto`/`If` terminator targets that
+point to the original header block to point to the new alignment-check block.
+Applied in both `rewrite_elementwise_add` and `splice_vectorized_block`.
+
+**Implementation note:** `create_alignment_check_block` reuses
+`ctx.next_local` (= `recipe.header_block.id`) as the alignment-check block's
+id, so `new_header_id == orig_header_id` for the test fixtures. Predecessor
+patching is thus a no-op in unit tests but becomes load-bearing for functions
+with multiple predecessor blocks in production.
+
+### Defect C — FIXED
+
+`create_peeling_block` (`auto_vectorize_codegen.spl`) now:
+- Accepts a `body_blocks: [MirBlock]` parameter.
+- Computes `mismatch = loop.end_value % ctx.vector_width`.
+- When `mismatch > 0` and `body_blocks` is non-empty: inline-unrolls `mismatch`
+  copies of the first body block's instructions into `peel_insts`.
+- Terminates with `Goto(ctx.next_local + 3)` (the continuation block).
+- When mismatch == 0 or body_blocks is empty: falls through to vec_loop with
+  `Goto(ctx.next_local + 2)` (same as before — sound for divisible trip counts).
+
+### R4 guard partially lifted
+
+The misaligned-trip-count half of R4 is removed. `rewrite_elementwise_add`
+now accepts any static `trip_count >= chunk_width` regardless of alignment.
+The dynamic (`trip_count == -1`) half of R4 is kept — runtime trip-count
+extraction (SCEV) is a future wave.
+
+### Cross-module spread fixes
+
+- `MirFunction(..func, blocks: new_blocks)` → `MirFunction.with_blocks(func, new_blocks)` in `rewrite_elementwise_add` and `splice_vectorized_block`.
+- `MirModule(..new_module, functions: new_functions)` → explicit field construction in `run_auto_vectorize`.
+- `VectorRecipe(..r, trip_count: li.end_value)` → explicit field construction in `run_auto_vectorize`.
+
+### Spec changes
+
+- `auto_vectorize_spec.spl`: updated `create_peeling_block` calls to 3-arg form; updated `create_vector_loop_block` calls to 7-arg form; updated "refuses misaligned" → "accepts misaligned" (with `result.blocks.len() > func.blocks.len()` assertion); added "accepts divisible trip count (0..16, VF=4)" describe block; added "pipeline wiring" describe block with `run_auto_vectorize` end-to-end tests; added "If terminator" test for `create_vector_loop_block`.
+- All 64 spec tests pass (interpreter mode), 0 failures.
+
+### Remaining known limitation
+
+`run_auto_vectorize` only rewrites functions where the block's `Goto`
+terminator structure allows `is_simple_loop` to extract a known `trip_count`.
+The test fixture (`make_elementwise_block_add`) uses a `Goto` terminator (not
+`If`), so `is_simple_loop` returns nil and the pass correctly declines
+vectorization (dynamic trip count = R4). Full pipeline rewrite requires either
+a proper loop header fixture with `If`-terminator or SCEV extraction (future).

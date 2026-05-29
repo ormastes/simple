@@ -11,6 +11,8 @@ SIMPLE_ITERATIONS="${SIMPLE_ITERATIONS:-4}"
 GTK_ITERATIONS="${GTK_ITERATIONS:-200}"
 SKIP_SIMPLE_NATIVE="${SKIP_SIMPLE_NATIVE:-0}"
 SIMPLE_RUN_TIMEOUT_SECS="${SIMPLE_RUN_TIMEOUT_SECS:-20}"
+SIMPLE_RUN_LIB="${SIMPLE_RUN_LIB:-$ROOT_DIR/src/lib:$ROOT_DIR/src/app}"
+SIMPLE_NATIVE_LIB="${SIMPLE_NATIVE_LIB:-$SIMPLE_RUN_LIB}"
 
 mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
 rm -rf \
@@ -57,6 +59,25 @@ linked_closure_bytes_of() {
             total=$((total + dep_bytes))
         fi
     done <"$deps"
+    echo "$total"
+}
+
+spl_file_count_of_path_list() {
+    path_list="$1"
+    old_ifs="$IFS"
+    IFS=:
+    total=0
+    for path in $path_list; do
+        if [ -d "$path" ]; then
+            count="$(find "$path" -name '*.spl' | wc -l | tr -d ' ')"
+            total=$((total + count))
+        elif [ -f "$path" ]; then
+            case "$path" in
+                *.spl) total=$((total + 1)) ;;
+            esac
+        fi
+    done
+    IFS="$old_ifs"
     echo "$total"
 }
 
@@ -317,9 +338,11 @@ simple_static_layout_payload_bytes="n/a"
 simple_static_command_payload_bytes="n/a"
 simple_bytes="n/a"
 simple_closure_bytes="n/a"
+simple_run_lib_spl_files="$(spl_file_count_of_path_list "$SIMPLE_RUN_LIB")"
+simple_full_src_spl_files="$(spl_file_count_of_path_list "$ROOT_DIR/src")"
 
 if [ -x "$SIMPLE_BINARY" ]; then
-    if SIMPLE_LIB="$ROOT_DIR/src" with_timeout "$SIMPLE_BINARY" run "$SIMPLE_ENTRY" >"$SIMPLE_OUT" 2>&1; then
+    if SIMPLE_LIB="$SIMPLE_RUN_LIB" with_timeout "$SIMPLE_BINARY" run "$SIMPLE_ENTRY" >"$SIMPLE_OUT" 2>&1; then
         simple_status="$(field_of simple_render_status "$SIMPLE_OUT")"
         simple_total_us="$(field_of simple_render_total_us "$SIMPLE_OUT")"
         simple_cache_total_us="$(field_of simple_static_cache_total_us "$SIMPLE_OUT")"
@@ -340,7 +363,7 @@ if [ -x "$SIMPLE_BINARY" ]; then
         simple_reason="simple_run_failed"
     fi
     if [ "$SKIP_SIMPLE_NATIVE" != "1" ]; then
-        if SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BINARY" native-build \
+        if SIMPLE_LIB="$SIMPLE_NATIVE_LIB" "$SIMPLE_BINARY" native-build \
             --runtime-bundle core-c-bootstrap \
             --source src/lib \
             --entry-closure \
@@ -484,6 +507,7 @@ simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
     echo
     echo "- GTK's minimal executable can be smaller than the generated Simple executable, but its linked shared-library closure is the relevant deployed-size comparison for a standalone GUI runtime."
     echo "- The cached Simple BrowserBackend frame path measures unchanged-frame work after the static UI revision key hits; it avoids HTML generation, DOM conversion, layout, raster, and host-present pixel conversion."
+    echo "- The Simple benchmark runs with a narrowed SIMPLE_LIB scope of \`$SIMPLE_RUN_LIB\`, so the interpreter does not need the full repository source tree for this GUI path."
     echo "- The GTK speed row measures widget construction on this host under xvfb-run when available, so compare it as a small GUI baseline rather than a full application benchmark."
     echo
     echo "## Static Shell Size"
@@ -498,6 +522,13 @@ simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
     echo "| Simple executable plus linked shared-library closure | $simple_closure_bytes |"
     echo "| GTK minimal executable | $gtk_bytes |"
     echo "| GTK executable plus linked shared-library closure | $gtk_closure_bytes |"
+    echo
+    echo "## Dependency Scope"
+    echo
+    echo "| Scope | SPL files |"
+    echo "|---|---:|"
+    echo "| Simple run SIMPLE_LIB | $simple_run_lib_spl_files |"
+    echo "| Full src tree | $simple_full_src_spl_files |"
     echo
     echo "## Simple Output"
     echo
@@ -537,6 +568,7 @@ simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
     echo "- Set SKIP_SIMPLE_NATIVE=1 to skip Simple native binary size measurement for faster smoke runs."
     echo "- GTK executable size is reported separately from the linked shared-library closure."
     echo "- GTK speed uses xvfb-run when available; otherwise it is unavailable on headless hosts without a display."
+    echo "- Override SIMPLE_RUN_LIB or SIMPLE_NATIVE_LIB to audit broader or narrower source roots."
     echo "- Simple speed measures the pure software HTML-to-pixel path and records the shared render optimization profile."
 } >"$REPORT_PATH"
 
