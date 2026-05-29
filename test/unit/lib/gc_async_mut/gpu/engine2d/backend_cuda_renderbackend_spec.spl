@@ -1,8 +1,9 @@
 # @cover src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl 80%
 # @tag: unit, engine2d, cuda
 
-use std.gpu.engine2d.backend_cuda.{CudaBackend, probe_cuda_2d}
+use std.gpu.engine2d.backend_cuda.{CudaBackend, probe_cuda, probe_cuda_2d}
 use std.gpu.engine2d.backend_probe.{BackendStatus}
+use std.gpu.engine2d.engine.{Engine2D}
 
 describe "CudaBackend RenderBackend facade":
 
@@ -18,6 +19,14 @@ describe "CudaBackend RenderBackend facade":
         expect(probe.shader_format).to_equal("ptx")
         expect(valid_status).to_equal(true)
 
+    it "exports probe_cuda with the same typed result":
+        val probe = probe_cuda()
+        val valid_status = probe.status == BackendStatus.Initialized or probe.status == BackendStatus.Unavailable or probe.status == BackendStatus.Failed
+        expect(probe.requested_name).to_equal("cuda")
+        expect(probe.api_name).to_equal("cuda")
+        expect(probe.shader_format).to_equal("ptx")
+        expect(valid_status).to_equal(true)
+
     it "does not claim initialized when init fails":
         var backend = CudaBackend.create()
         val ok = backend.init(4, 4)
@@ -27,3 +36,15 @@ describe "CudaBackend RenderBackend facade":
             backend.shutdown()
         else:
             expect(backend.initialized).to_equal(false)
+
+    it "strict Engine2D cuda creation returns typed cuda failure instead of fallback":
+        val probe = probe_cuda_2d()
+        if probe.status != BackendStatus.Initialized:
+            val result = Engine2D.create_with_backend_strict(4, 4, "cuda")
+            expect(result.is_ok()).to_equal(false)
+            val diag = result.unwrap_err()
+            expect(diag.requested_name).to_equal("cuda")
+            expect(diag.selected_name).to_equal("cuda")
+            expect(diag.backend_name).to_equal("cuda")
+            expect(diag.status == BackendStatus.Unavailable or diag.status == BackendStatus.Failed).to_equal(true)
+            expect(diag.status == BackendStatus.Fallback).to_equal(false)
