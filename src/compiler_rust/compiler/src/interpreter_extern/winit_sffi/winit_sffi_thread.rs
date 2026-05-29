@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::thread;
-use winit::dpi::PhysicalSize;
+use winit::dpi::LogicalSize;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{EventLoop, EventLoopProxy};
 use winit::keyboard::PhysicalKey;
@@ -96,7 +96,7 @@ pub(super) fn handle_command(
         RuntimeCommand::CreateWindow { config, response } => {
             let mut attrs = Window::default_attributes()
                 .with_title(config.title.clone())
-                .with_inner_size(PhysicalSize::new(config.width, config.height))
+                .with_inner_size(LogicalSize::new(config.width as f64, config.height as f64))
                 .with_resizable(config.resizable)
                 .with_decorations(config.decorations)
                 .with_transparent(config.transparent)
@@ -119,18 +119,19 @@ pub(super) fn handle_command(
                     window.set_visible(true);
                     window.focus_window();
                     if let (Some(w), Some(h)) = (config.min_width, config.min_height) {
-                        window.set_min_inner_size(Some(PhysicalSize::new(w, h)));
+                        window.set_min_inner_size(Some(LogicalSize::new(w as f64, h as f64)));
                     }
                     if let (Some(w), Some(h)) = (config.max_width, config.max_height) {
-                        window.set_max_inner_size(Some(PhysicalSize::new(w, h)));
+                        window.set_max_inner_size(Some(LogicalSize::new(w as f64, h as f64)));
                     }
 
                     let context = Context::new(window.clone())
                         .map_err(|err| format!("failed to create surface context: {err:?}"))?;
                     let mut surface = Surface::new(&context, window.clone())
                         .map_err(|err| format!("failed to create surface: {err:?}"))?;
-                    let nz_width = NonZeroU32::new(config.width.max(1)).unwrap();
-                    let nz_height = NonZeroU32::new(config.height.max(1)).unwrap();
+                    let initial_size = window.inner_size();
+                    let nz_width = NonZeroU32::new(initial_size.width.max(1)).unwrap();
+                    let nz_height = NonZeroU32::new(initial_size.height.max(1)).unwrap();
                     surface
                         .resize(nz_width, nz_height)
                         .map_err(|err| format!("failed to resize surface: {err:?}"))?;

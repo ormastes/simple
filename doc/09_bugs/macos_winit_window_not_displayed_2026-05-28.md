@@ -88,3 +88,37 @@ Open. Discovered 2026-05-28 while verifying the pure-Simple web renderer + Engin
 (`examples/ui/web_engine2d_gui.spl`); this bug is purely the macOS on-screen host
 display. Three single-call objc2 patches are exhausted — do not retry them; the fix is
 architectural.
+
+## Update 2026-05-29 — diagnosis split into two independent sub-problems
+
+Further work isolated the failure into TWO separate blockers, and SOLVED the first:
+
+1. **Handler timing — SOLVED (partial fix exists, not yet landed).** The `pump_events`
+   model installed winit's handler only for each 1ms pump, so during the program's
+   `rt_thread_sleep` frame gaps AppKit had no handler (`"no handler was set"`). Fix:
+   make `rt_thread_sleep` pump the current thread's event loop *continuously* for the
+   sleep duration on macOS (new `winit_sffi::pump_current_event_loop()` /
+   `macos_pump_current()`, called from `concurrency.rs::rt_thread_sleep`). After this
+   the `"no handler was set"` error count drops to 0 on a direct run. This is correct
+   groundwork but does NOT by itself show a window (see #2), so it was left in the
+   worktree, not committed (it adds continuous-pump CPU cost with no standalone payoff).
+
+2. **Window-server registration — STILL OPEN (the real remaining blocker).** Even with
+   #1 fixed, no window appears, and `lsappinfo list` shows the `simple` process is NOT
+   registered as a GUI application. So the process never gets a window-server (CoreGraphics)
+   connection; its NSWindow exists only in-process. `NSApplication` activation policy is
+   set to Regular by winit's builder yet the process still does not register. Attempted
+   `.app` bundle workaround did NOT fix it: a bundle whose executable is a `bash` wrapper
+   that `exec`s the out-of-bundle `simple` binary does not keep LaunchServices
+   registration (running executable no longer matches the bundle).
+
+### Remaining fix options for #2 (registration)
+- **Proper `.app` bundle:** copy the `simple` binary (and its dylibs, e.g.
+  `libsimple_runtime.dylib`) INTO `Contents/MacOS/`, set `CFBundleExecutable` to it, pass
+  the `run <file>` args via `open --args` and env via `Info.plist` `LSEnvironment`. Needs
+  dylib bundling / `@rpath` handling.
+- **Runtime registration:** call `TransformProcessType(kProcessTransformToForegroundApplication)`
+  (Carbon ProcessManager, still functional) or ensure `NSApplication.setActivationPolicy(.Regular)`
+  actually takes effect at runtime to transform the CLI process into a registered GUI app.
+- Combine the chosen registration fix with the #1 continuous-pump fix (both are required
+  together for a visible window).
