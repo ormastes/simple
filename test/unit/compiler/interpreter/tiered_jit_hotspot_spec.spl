@@ -19,6 +19,8 @@ use compiler.interp.execution.tiered_jit.{
     jit_hotspot_plan_invalidate,
     jit_hotspot_consume_plan,
     jit_hotspot_specialization_provider,
+    jit_hotspot_analysis_has_semantic_proof,
+    jit_hotspot_specialization_provider_from_analysis,
     jit_hotspot_consume_plan_with_provider,
     jit_hotspot_compile_decision_allows_compile
 }
@@ -53,7 +55,6 @@ fn hot_profile_with_var_facts(call_count: i64, facts) -> FunctionProfile:
         var_facts: facts
     )
 
-<<<<<<< HEAD
 fn hot_structured_loop_with_var_facts(call_count: i64, facts) -> FunctionProfile:
     FunctionProfile(
         name: "hot_structured_loop",
@@ -82,8 +83,6 @@ fn hot_fixed_trip_loop_profile(call_count: i64) -> FunctionProfile:
         var_facts: jit_var_optimization_facts_none()
     )
 
-=======
->>>>>>> 295fd586a2 (derive hotspot strength reduction facts)
 fn hot_strength_profile(call_count: i64) -> FunctionProfile:
     FunctionProfile(
         name: "hot_strength",
@@ -98,7 +97,6 @@ fn hot_strength_profile(call_count: i64) -> FunctionProfile:
         var_facts: jit_var_optimization_facts_none()
     )
 
-<<<<<<< HEAD
 fn hot_predicate_profile(call_count: i64) -> FunctionProfile:
     FunctionProfile(
         name: "hot_predicate",
@@ -183,8 +181,6 @@ fn hot_checksum_profile(call_count: i64) -> FunctionProfile:
         var_facts: jit_var_optimization_facts_none()
     )
 
-=======
->>>>>>> 295fd586a2 (derive hotspot strength reduction facts)
 fn hotspot_config() -> TieredJitConfig:
     TieredJitConfig(tier1_threshold: 8, tier2_threshold: 128, debug_mode: false)
 
@@ -696,6 +692,36 @@ describe "Tiered JIT hotspot facts":
         val specialized = "fn hot_loop(x: i64) -> i64: x + 1 # specialized"
         val plan = jit_hotspot_plan_from_profile(hot_profile(64), hotspot_config(), true, true)
         val provider = jit_hotspot_specialization_provider("test.hotspot", specialized, false)
+        val decision = jit_hotspot_consume_plan_with_provider(plan, source, provider)
+        expect(decision.provider_used).to_equal(false)
+        expect(decision.compile_source).to_equal(source)
+        expect(decision.reason).to_equal("missing semantic proof")
+
+    it "derives semantic proof for specialization providers from analysis facts":
+        val source = "fn hot_loop(x: i64) -> i64: x + 1"
+        val specialized = "fn hot_loop(x: i64) -> i64: x + 1 # specialized"
+        val facts = [
+            "typed_mir",
+            "safe_deopt",
+            "ssa.var_transform",
+            "escape.analyzed",
+            "escape.no_escape",
+            "borrow.reassign_safe"
+        ]
+        expect(jit_hotspot_analysis_has_semantic_proof(facts)).to_equal(true)
+        val plan = jit_hotspot_plan_from_profile(hot_profile(64), hotspot_config(), true, true)
+        val provider = jit_hotspot_specialization_provider_from_analysis("test.hotspot.analysis", specialized, facts)
+        val decision = jit_hotspot_consume_plan_with_provider(plan, source, provider)
+        expect(decision.provider_used).to_equal(true)
+        expect(decision.compile_source).to_equal(specialized)
+
+    it "rejects analysis-derived specialization when proof facts are incomplete":
+        val source = "fn hot_loop(x: i64) -> i64: x + 1"
+        val specialized = "fn hot_loop(x: i64) -> i64: x + 1 # specialized"
+        val facts = ["typed_mir", "safe_deopt", "ssa.var_transform", "escape.analyzed", "borrow.reassign_safe"]
+        expect(jit_hotspot_analysis_has_semantic_proof(facts)).to_equal(false)
+        val plan = jit_hotspot_plan_from_profile(hot_profile(64), hotspot_config(), true, true)
+        val provider = jit_hotspot_specialization_provider_from_analysis("test.hotspot.analysis", specialized, facts)
         val decision = jit_hotspot_consume_plan_with_provider(plan, source, provider)
         expect(decision.provider_used).to_equal(false)
         expect(decision.compile_source).to_equal(source)
