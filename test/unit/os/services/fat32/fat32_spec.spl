@@ -1,484 +1,53 @@
 """
-# FAT32 Filesystem Specification
+# Legacy FAT32 Compatibility Specification
 
-**Feature IDs:** #OS-FAT32
-**Category:** Infrastructure
-**Difficulty:** 3/5
-**Status:** In Progress
-
-## Overview
-
-Tests FAT32 BPB field parsing, cluster-to-sector math,
-end-of-chain detection, and attribute constants.
+The production FAT implementation is the shared stdlib Fat32Core surfaced
+through SharedFat32Driver/FsFat32Driver. This spec keeps the legacy constants
+and BPB data type stable without instantiating the retired Fat32Driver.
 """
 
 use std.spec
+use std.fs_driver.fat32_core.{FAT32_ATTR_DIRECTORY, FAT32_ATTR_LONG_NAME}
 use os.services.fat32.fat32.{
-    Fat32Bpb, Fat32DirEntry, Fat32Driver,
+    Fat32Bpb,
     FAT32_ATTR_READ_ONLY, FAT32_ATTR_HIDDEN, FAT32_ATTR_SYSTEM,
-    FAT32_ATTR_VOLUME_ID, FAT32_ATTR_DIRECTORY, FAT32_ATTR_ARCHIVE,
-    FAT32_ATTR_LFN, FAT32_FREE, FAT32_EOC, FAT32_BAD,
-    BlockDevice
+    FAT32_ATTR_VOLUME_ID, FAT32_ATTR_DIRECTORY as LEGACY_FAT32_ATTR_DIRECTORY,
+    FAT32_ATTR_ARCHIVE, FAT32_ATTR_LFN, FAT32_FREE, FAT32_EOC, FAT32_BAD
 }
 
 
-# ============================================================================
-# Mock Block Device
-# ============================================================================
+describe "Legacy FAT32 BPB compatibility":
+    it "keeps BPB construction fields available for compatibility coverage":
+        val bpb = Fat32Bpb(
+            bytes_per_sector: 512,
+            sectors_per_cluster: 8,
+            reserved_sectors: 32,
+            num_fats: 2,
+            total_sectors_32: 2097152,
+            fat_size_32: 2048,
+            root_cluster: 2
+        )
 
-struct SectorImage:
-    lba: u64
-    bytes: [u8]
-
-class MockBlockDevice:
-    """Mock block device returning a synthetic BPB sector."""
-    sector_data: [u8]
-    extra_sectors: [SectorImage]
-
-impl MockBlockDevice:
-    static fn new() -> MockBlockDevice:
-        var bytes: [u8] = []
-        var i = 0
-        while i < 512:
-            bytes.push(0)
-            i = i + 1
-        MockBlockDevice(sector_data: bytes, extra_sectors: [])
-
-    me fn with_valid_fat32_boot_sector() -> MockBlockDevice:
-        # Minimal FAT32 boot sector matching the mkfs.fat image used by the
-        # desktop-disk lane: 512-byte sectors, 1 sector/cluster, 32 reserved
-        # sectors, 2 FATs, FAT size 1008 sectors, root cluster 2.
-        self.sector_data[11] = 0x00
-        self.sector_data[12] = 0x02
-        self.sector_data[13] = 0x01
-        self.sector_data[14] = 0x20
-        self.sector_data[15] = 0x00
-        self.sector_data[16] = 0x02
-        self.sector_data[32] = 0x00
-        self.sector_data[33] = 0x00
-        self.sector_data[34] = 0x02
-        self.sector_data[35] = 0x00
-        self.sector_data[36] = 0xF0
-        self.sector_data[37] = 0x03
-        self.sector_data[38] = 0x00
-        self.sector_data[39] = 0x00
-        self.sector_data[44] = 0x02
-        self.sector_data[45] = 0x00
-        self.sector_data[46] = 0x00
-        self.sector_data[47] = 0x00
-        self
-
-    me fn with_sector(lba: u64, bytes: [u8]) -> MockBlockDevice:
-        self.extra_sectors.push(SectorImage(lba: lba, bytes: bytes))
-        self
-
-impl BlockDevice for MockBlockDevice:
-    fn read_sector(lba: u64) -> Result<[u8], text>:
-        for image in self.extra_sectors:
-            if image.lba == lba:
-                return Result.Ok(image.bytes)
-        Result.Ok(self.sector_data)
-
-    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
-        Result.Ok(true)
-
-    fn sector_size() -> u32: 512
+        expect(bpb.bytes_per_sector).to_equal(512)
+        expect(bpb.sectors_per_cluster).to_equal(8)
+        expect(bpb.reserved_sectors).to_equal(32)
+        expect(bpb.num_fats).to_equal(2)
+        expect(bpb.total_sectors_32).to_equal(2097152)
+        expect(bpb.fat_size_32).to_equal(2048)
+        expect(bpb.root_cluster).to_equal(2)
 
 
-# ============================================================================
-# Test Group 1: FAT32 BPB Field Parsing
-# ============================================================================
-
-describe "Fat32Bpb":
-    describe "field construction":
-        it "stores bytes_per_sector":
-            val bpb = Fat32Bpb(
-                bytes_per_sector: 512,
-                sectors_per_cluster: 8,
-                reserved_sectors: 32,
-                num_fats: 2,
-                total_sectors_32: 2097152,
-                fat_size_32: 2048,
-                root_cluster: 2
-            )
-            expect(bpb.bytes_per_sector).to_equal(512)
-
-        it "stores sectors_per_cluster":
-            val bpb = Fat32Bpb(
-                bytes_per_sector: 512,
-                sectors_per_cluster: 8,
-                reserved_sectors: 32,
-                num_fats: 2,
-                total_sectors_32: 2097152,
-                fat_size_32: 2048,
-                root_cluster: 2
-            )
-            expect(bpb.sectors_per_cluster).to_equal(8)
-
-        it "stores reserved_sectors":
-            val bpb = Fat32Bpb(
-                bytes_per_sector: 512,
-                sectors_per_cluster: 8,
-                reserved_sectors: 32,
-                num_fats: 2,
-                total_sectors_32: 2097152,
-                fat_size_32: 2048,
-                root_cluster: 2
-            )
-            expect(bpb.reserved_sectors).to_equal(32)
-
-        it "stores root_cluster as 2":
-            val bpb = Fat32Bpb(
-                bytes_per_sector: 512,
-                sectors_per_cluster: 8,
-                reserved_sectors: 32,
-                num_fats: 2,
-                total_sectors_32: 2097152,
-                fat_size_32: 2048,
-                root_cluster: 2
-            )
-            expect(bpb.root_cluster).to_equal(2)
-
-
-# ============================================================================
-# Test Group 2: Cluster to Sector Conversion
-# ============================================================================
-
-describe "Fat32Driver":
-    describe "mount":
-        it "parses BPB fields directly from sector 0":
-            var dev = MockBlockDevice.new().with_valid_fat32_boot_sector()
-            var driver = Fat32Driver.new(dev)
-            val mounted = driver.mount("", "")
-
-            expect(mounted.is_ok()).to_equal(true)
-            expect(driver.bytes_per_sector).to_equal(512)
-            expect(driver.sectors_per_cluster).to_equal(1)
-            expect(driver.reserved_sectors).to_equal(32)
-            expect(driver.num_fats).to_equal(2)
-            expect(driver.fat_size).to_equal(1008)
-            expect(driver.root_cluster).to_equal(2)
-            expect(driver.data_start_sector).to_equal(2048)
-            expect(driver.total_clusters).to_equal(129024)
-
-        it "rejects a BPB with zero sectors_per_cluster":
-            var dev = MockBlockDevice.new().with_valid_fat32_boot_sector()
-            var sector = dev.sector_data
-            sector[13] = 0
-            dev.sector_data = sector
-            var driver = Fat32Driver.new(dev)
-            val mounted = driver.mount("", "")
-
-            expect(mounted.is_err()).to_equal(true)
-            expect(mounted.unwrap_err()).to_equal("invalid BPB: sectors_per_cluster=0")
-
-        it "resolves long filenames from LFN entries":
-            var fat_sector: [u8] = []
-            var i = 0
-            while i < 512:
-                fat_sector.push(0)
-                i = i + 1
-            fat_sector[8] = 0xF8
-            fat_sector[9] = 0xFF
-            fat_sector[10] = 0xFF
-            fat_sector[11] = 0x0F
-
-            var root_sector: [u8] = []
-            i = 0
-            while i < 512:
-                root_sector.push(0)
-                i = i + 1
-
-            root_sector[0] = 0x41
-            root_sector[1] = 'b' as u8
-            root_sector[3] = 'r' as u8
-            root_sector[5] = 'o' as u8
-            root_sector[7] = 'w' as u8
-            root_sector[9] = 's' as u8
-            root_sector[11] = FAT32_ATTR_LFN
-            root_sector[14] = 'e' as u8
-            root_sector[16] = 'r' as u8
-            root_sector[18] = '_' as u8
-            root_sector[20] = 'd' as u8
-            root_sector[22] = 'e' as u8
-            root_sector[24] = 'm' as u8
-            root_sector[28] = 'o' as u8
-            root_sector[30] = 0x00
-            root_sector[31] = 0x00
-
-            root_sector[32] = 'B' as u8
-            root_sector[33] = 'R' as u8
-            root_sector[34] = 'O' as u8
-            root_sector[35] = 'W' as u8
-            root_sector[36] = 'S' as u8
-            root_sector[37] = 'E' as u8
-            root_sector[38] = '~' as u8
-            root_sector[39] = '1' as u8
-            root_sector[43] = FAT32_ATTR_ARCHIVE
-            root_sector[58] = 0x05
-            root_sector[60] = 0x39
-            root_sector[61] = 0x30
-
-            var dev = MockBlockDevice.new().with_valid_fat32_boot_sector()
-            dev = dev.with_sector(32, fat_sector)
-            dev = dev.with_sector(2048, root_sector)
-            var driver = Fat32Driver.new(dev)
-            val mounted = driver.mount("", "")
-
-            expect(mounted.is_ok()).to_equal(true)
-            val resolved = driver.resolve_path("/browser_demo")
-            expect(resolved.is_ok()).to_equal(true)
-            val resolved_entry = resolved.unwrap()
-            expect(resolved_entry.?).to_equal(true)
-            val entry = resolved_entry
-            expect(driver.entry_first_cluster(entry)).to_equal(5)
-            expect(entry.file_size).to_equal(12345)
-
-        it "resolves nested SYS/APPS 8.3 paths":
-            var fat_sector: [u8] = []
-            var i = 0
-            while i < 512:
-                fat_sector.push(0)
-                i = i + 1
-
-            fat_sector[8] = 0xF8
-            fat_sector[9] = 0xFF
-            fat_sector[10] = 0xFF
-            fat_sector[11] = 0x0F
-
-            fat_sector[12] = 0xFF
-            fat_sector[13] = 0xFF
-            fat_sector[14] = 0xFF
-            fat_sector[15] = 0x0F
-
-            fat_sector[16] = 0xFF
-            fat_sector[17] = 0xFF
-            fat_sector[18] = 0xFF
-            fat_sector[19] = 0x0F
-
-            fat_sector[20] = 0xFF
-            fat_sector[21] = 0xFF
-            fat_sector[22] = 0xFF
-            fat_sector[23] = 0x0F
-
-            var root_sector: [u8] = []
-            i = 0
-            while i < 512:
-                root_sector.push(0)
-                i = i + 1
-            root_sector[0] = 'S' as u8
-            root_sector[1] = 'Y' as u8
-            root_sector[2] = 'S' as u8
-            root_sector[11] = FAT32_ATTR_DIRECTORY
-            root_sector[26] = 0x03
-            root_sector[27] = 0x00
-
-            var sys_sector: [u8] = []
-            i = 0
-            while i < 512:
-                sys_sector.push(0)
-                i = i + 1
-            sys_sector[0] = 'A' as u8
-            sys_sector[1] = 'P' as u8
-            sys_sector[2] = 'P' as u8
-            sys_sector[3] = 'S' as u8
-            sys_sector[11] = FAT32_ATTR_DIRECTORY
-            sys_sector[26] = 0x04
-            sys_sector[27] = 0x00
-
-            var apps_sector: [u8] = []
-            i = 0
-            while i < 512:
-                apps_sector.push(0)
-                i = i + 1
-            apps_sector[0] = 'B' as u8
-            apps_sector[1] = 'R' as u8
-            apps_sector[2] = 'O' as u8
-            apps_sector[3] = 'W' as u8
-            apps_sector[4] = 'S' as u8
-            apps_sector[5] = 'E' as u8
-            apps_sector[6] = '~' as u8
-            apps_sector[7] = '1' as u8
-            apps_sector[11] = FAT32_ATTR_ARCHIVE
-            apps_sector[26] = 0x05
-            apps_sector[27] = 0x00
-            apps_sector[28] = 0x70
-            apps_sector[29] = 0x17
-            apps_sector[30] = 0x00
-            apps_sector[31] = 0x00
-
-            var dev = MockBlockDevice.new().with_valid_fat32_boot_sector()
-            dev = dev.with_sector(32, fat_sector)
-            dev = dev.with_sector(2048, root_sector)
-            dev = dev.with_sector(2049, sys_sector)
-            dev = dev.with_sector(2050, apps_sector)
-            var driver = Fat32Driver.new(dev)
-            val mounted = driver.mount("", "")
-
-            expect(mounted.is_ok()).to_equal(true)
-            val resolved = driver.resolve_path("/SYS/APPS/BROWSE~1")
-            expect(resolved.is_ok()).to_equal(true)
-            val resolved_entry = resolved.unwrap()
-            expect(resolved_entry.?).to_equal(true)
-            val entry = resolved_entry
-            expect(driver.entry_first_cluster(entry)).to_equal(5)
-            expect(entry.file_size).to_equal(6000)
-
-        it "lists long filename entries using their LFN text":
-            var fat_sector: [u8] = []
-            var i = 0
-            while i < 512:
-                fat_sector.push(0)
-                i = i + 1
-            fat_sector[8] = 0xF8
-            fat_sector[9] = 0xFF
-            fat_sector[10] = 0xFF
-            fat_sector[11] = 0x0F
-
-            var root_sector: [u8] = []
-            i = 0
-            while i < 512:
-                root_sector.push(0)
-                i = i + 1
-
-            root_sector[0] = 0x41
-            root_sector[1] = 'b' as u8
-            root_sector[3] = 'r' as u8
-            root_sector[5] = 'o' as u8
-            root_sector[7] = 'w' as u8
-            root_sector[9] = 's' as u8
-            root_sector[11] = FAT32_ATTR_LFN
-            root_sector[14] = 'e' as u8
-            root_sector[16] = 'r' as u8
-            root_sector[18] = '_' as u8
-            root_sector[20] = 'd' as u8
-            root_sector[22] = 'e' as u8
-            root_sector[24] = 'm' as u8
-            root_sector[28] = 'o' as u8
-            root_sector[30] = 0x00
-            root_sector[31] = 0x00
-
-            root_sector[32] = 'B' as u8
-            root_sector[33] = 'R' as u8
-            root_sector[34] = 'O' as u8
-            root_sector[35] = 'W' as u8
-            root_sector[36] = 'S' as u8
-            root_sector[37] = 'E' as u8
-            root_sector[38] = '~' as u8
-            root_sector[39] = '1' as u8
-            root_sector[43] = FAT32_ATTR_ARCHIVE
-            root_sector[58] = 0x05
-
-            var dev = MockBlockDevice.new().with_valid_fat32_boot_sector()
-            dev = dev.with_sector(32, fat_sector)
-            dev = dev.with_sector(2048, root_sector)
-            var driver = Fat32Driver.new(dev)
-            val mounted = driver.mount("", "")
-
-            expect(mounted.is_ok()).to_equal(true)
-            val entries = driver.readdir("/")
-            expect(entries.is_ok()).to_equal(true)
-            val listed = entries.unwrap()
-            expect(listed.len()).to_equal(1)
-            expect(listed[0].name).to_equal("browser_demo")
-
-    describe "cluster_to_sector":
-        it "converts cluster 2 to data_start_sector":
-            val dev = MockBlockDevice.new()
-            var driver = Fat32Driver.new(dev)
-            # Simulate post-mount state: data_start = reserved + (num_fats * fat_size) = 32 + 2*2048 = 4128
-            driver.sectors_per_cluster = 8
-            driver.data_start_sector = 4128
-            val sector = driver.cluster_to_sector(2)
-            # (2 - 2) * 8 + 4128 = 4128
-            expect(sector).to_equal(4128)
-
-        it "converts cluster 3 correctly":
-            val dev = MockBlockDevice.new()
-            var driver = Fat32Driver.new(dev)
-            driver.sectors_per_cluster = 8
-            driver.data_start_sector = 4128
-            val sector = driver.cluster_to_sector(3)
-            # (3 - 2) * 8 + 4128 = 4136
-            expect(sector).to_equal(4136)
-
-        it "converts cluster 100 correctly":
-            val dev = MockBlockDevice.new()
-            var driver = Fat32Driver.new(dev)
-            driver.sectors_per_cluster = 4
-            driver.data_start_sector = 1000
-            val sector = driver.cluster_to_sector(100)
-            # (100 - 2) * 4 + 1000 = 392 + 1000 = 1392
-            expect(sector).to_equal(1392)
-
-    # ========================================================================
-    # Test Group 3: End-of-Chain Detection
-    # ========================================================================
-
-    describe "is_eoc":
-        it "detects exact EOC boundary":
-            val dev = MockBlockDevice.new()
-            val driver = Fat32Driver.new(dev)
-            expect(driver.is_eoc(0x0FFFFFF8)).to_equal(true)
-
-        it "detects value above EOC":
-            val dev = MockBlockDevice.new()
-            val driver = Fat32Driver.new(dev)
-            expect(driver.is_eoc(0x0FFFFFFF)).to_equal(true)
-
-        it "rejects value below EOC":
-            val dev = MockBlockDevice.new()
-            val driver = Fat32Driver.new(dev)
-            expect(driver.is_eoc(0x0FFFFFF7)).to_equal(false)
-
-        it "rejects free cluster":
-            val dev = MockBlockDevice.new()
-            val driver = Fat32Driver.new(dev)
-            expect(driver.is_eoc(FAT32_FREE)).to_equal(false)
-
-        it "rejects normal cluster number":
-            val dev = MockBlockDevice.new()
-            val driver = Fat32Driver.new(dev)
-            expect(driver.is_eoc(42)).to_equal(false)
-
-
-# ============================================================================
-# Test Group 4: FAT32 Attribute Constants
-# ============================================================================
-
-describe "FAT32 Attributes":
-    it "DIRECTORY is 0x10":
-        expect(FAT32_ATTR_DIRECTORY).to_equal(0x10)
-
-    it "READ_ONLY is 0x01":
+describe "Legacy FAT32 constants":
+    it "keeps attribute constants aligned with the shared FAT core":
+        expect(LEGACY_FAT32_ATTR_DIRECTORY).to_equal(FAT32_ATTR_DIRECTORY)
+        expect(FAT32_ATTR_LFN).to_equal(FAT32_ATTR_LONG_NAME)
         expect(FAT32_ATTR_READ_ONLY).to_equal(0x01)
-
-    it "HIDDEN is 0x02":
         expect(FAT32_ATTR_HIDDEN).to_equal(0x02)
-
-    it "SYSTEM is 0x04":
         expect(FAT32_ATTR_SYSTEM).to_equal(0x04)
-
-    it "VOLUME_ID is 0x08":
         expect(FAT32_ATTR_VOLUME_ID).to_equal(0x08)
-
-    it "ARCHIVE is 0x20":
         expect(FAT32_ATTR_ARCHIVE).to_equal(0x20)
 
-    it "LFN is 0x0F":
-        expect(FAT32_ATTR_LFN).to_equal(0x0F)
-
-
-# ============================================================================
-# Test Group 5: FAT Special Values
-# ============================================================================
-
-describe "FAT32 Special Values":
-    it "FREE is zero":
+    it "keeps special FAT values stable":
         expect(FAT32_FREE).to_equal(0x00000000)
-
-    it "EOC is 0x0FFFFFF8":
         expect(FAT32_EOC).to_equal(0x0FFFFFF8)
-
-    it "BAD is 0x0FFFFFF7":
         expect(FAT32_BAD).to_equal(0x0FFFFFF7)

@@ -114,6 +114,10 @@
   temporary file and promotes it only after serial capture has produced a
   non-empty serial log. A missing serial port leaves no selected preflight,
   validation report, serial log, or temporary preflight residue.
+- 2026-05-29 legacy FAT retirement follow-up: shared `Fat32Core` now consumes
+  single-slot FAT32 LFN entries when reading directories and resolves them
+  case-insensitively through the shared core path. This moves another legacy
+  `Fat32Driver`-only behavior into the production/shared FAT implementation.
 
 ## Known Remaining Work
 
@@ -403,6 +407,10 @@ Manual fake-sysfs one-shot preflight checks
      image. It now passes as a focused shared `FsFat32Driver` mount-table
      registration and DBFS coexistence guard, and its path-migration conflict
      has been resolved toward the shared-driver surface.
+   - 2026-05-29 follow-up: shared `Fat32Core` now parses single-slot LFN
+     directory entries and resolves them case-insensitively, with
+     `test/unit/lib/fs_driver/fat32_core_lfn_spec.spl` covering the shared
+     behavior that used to be exercised only through the legacy driver.
 
 4. Finish performance proof for Simple FAT vs C/VFAT on 4K random read/write.
    - Keep `scripts/perf/run-fat32-4k-cfat-baseline.shs` as the focused gate.

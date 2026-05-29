@@ -263,3 +263,45 @@ RtVal rt_event_loop_poll(int64_t epfd, int64_t max_events, int64_t timeout_ms) {
     }
     return array_to_val(a);
 }
+
+int64_t rt_event_loop_poll_into(int64_t epfd, RtVal buf, int64_t max_events, int64_t timeout_ms) {
+    if (max_events > 1024) max_events = 1024;
+    int n = epoll_wait(epfd, poll_events, max_events, timeout_ms);
+    RuntimeArray* a = (RuntimeArray*)GET_HEAP(buf);
+    if (n > 0 && a) {
+        if ((uint64_t)n > a->capacity) {
+            a->capacity = n * 2;
+            a->data = (RtVal*)realloc(a->data, a->capacity * sizeof(RtVal));
+        }
+        a->len = n;
+        for (int i = 0; i < n; i++)
+            a->data[i] = MAKE_INT(poll_events[i].data.fd);
+    } else if (a) {
+        a->len = 0;
+    }
+    return n > 0 ? n : 0;
+}
+
+RtVal rt_array_new_cap(int64_t cap) {
+    return array_to_val(make_array(cap > 0 ? cap : 16, 0));
+}
+
+static char tcp_read_buf[8192];
+
+int64_t rt_io_tcp_read_into(int64_t fd, RtVal buf, int64_t size) {
+    if (size > 8192) size = 8192;
+    ssize_t n = read(fd, tcp_read_buf, size);
+    RuntimeArray* a = (RuntimeArray*)GET_HEAP(buf);
+    if (n > 0 && a) {
+        if ((uint64_t)n > a->capacity) {
+            a->capacity = n * 2;
+            a->data = (RtVal*)realloc(a->data, a->capacity * sizeof(RtVal));
+        }
+        for (ssize_t i = 0; i < n; i++)
+            a->data[i] = MAKE_INT((uint8_t)tcp_read_buf[i]);
+        a->len = n;
+    } else if (a) {
+        a->len = 0;
+    }
+    return n;
+}
