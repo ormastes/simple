@@ -1,0 +1,136 @@
+# engine2d_shapes_gui.spl — Engine2D primitives in an on-screen window (pure Simple).
+#
+# Draws square / circle / line / text / shade (gradient) / rounded-rect on the
+# CPU (software) backend — pure Simple, no Rust GPU backend — anti-aliases via
+# 2x supersampling (render at 2x, box-downsample), and presents the framebuffer
+# to a winit window.
+#
+# Launch on macOS (opens a real window via a .app bundle so it composites):
+#   scripts/macos-gui-run.shs examples/ui/engine2d_shapes_gui.spl
+#
+# Headless (render only, prints pixel count):
+#   SIMPLE_EXECUTION_MODE=interpret bin/simple run examples/ui/engine2d_shapes_gui.spl
+#
+# Note: the pure-Simple per-pixel raster is slow under the interpreter; the live
+# on-screen window is best driven from the compiled path. Headless render of the
+# anti-aliased frame is quick to verify.
+
+use std.gpu.engine2d.engine.{Engine2D}
+
+extern fn rt_winit_event_loop_new() -> i64
+extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_free(ev: i64)
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
+extern fn rt_env_get(key: text) -> text
+
+# Presented framebuffer; rendered at SS x this for anti-aliasing.
+val SCREEN_W: i32 = 80
+val SCREEN_H: i32 = 60
+val SS: i32 = 2
+val WINDOW_W: i32 = 720
+val WINDOW_H: i32 = 540
+val EVT_CLOSE: i64 = 3
+
+val BG: u32 = 0xFF101822u32
+val SQUARE_COL: u32 = 0xFFE53935u32
+val CIRCLE_COL: u32 = 0xFF43A047u32
+val LINE_COL: u32 = 0xFF1E88E5u32
+val TEXT_COL: u32 = 0xFFFFFFFFu32
+val GRAD_TOP: u32 = 0xFFFFB300u32
+val GRAD_BOT: u32 = 0xFF8E24AAu32
+val ROUND_COL: u32 = 0xFF00ACC1u32
+
+# Box-downsample an SSxSS-supersampled buffer to display size: this is the
+# anti-aliasing step (averaging edge coverage smooths the jaggies).
+fn downsample(hi: [u32], rw: i32, rh: i32) -> [u32]:
+    val ow = rw / SS
+    val oh = rh / SS
+    val n: u32 = (SS * SS).to_u32()
+    var out: [u32] = [0u32; ow * oh]
+    var y = 0
+    while y < oh:
+        var x = 0
+        while x < ow:
+            var r: u32 = 0u32
+            var g: u32 = 0u32
+            var b: u32 = 0u32
+            var dy = 0
+            while dy < SS:
+                var dx = 0
+                while dx < SS:
+                    val px = hi[(y * SS + dy) * rw + (x * SS + dx)]
+                    r = r + ((px >> 16) & 0xFFu32)
+                    g = g + ((px >> 8) & 0xFFu32)
+                    b = b + (px & 0xFFu32)
+                    dx = dx + 1
+                dy = dy + 1
+            out[y * ow + x] = 0xFF000000u32 | ((r / n) << 16) | ((g / n) << 8) | (b / n)
+            x = x + 1
+        y = y + 1
+    out
+
+fn render_shapes() -> [u32]:
+    val rw = SCREEN_W * SS
+    val rh = SCREEN_H * SS
+    var e = Engine2D.create_with_backend(rw, rh, "cpu")
+    e.clear(BG)
+    # Coordinates are at SS scale (2x of an 80x60 layout).
+    e.draw_text(8, 6, "Simple 2D", TEXT_COL, 12)
+    e.draw_rect_filled(10, 28, 36, 36, SQUARE_COL)
+    e.draw_circle_filled(112, 46, 24, CIRCLE_COL)
+    e.draw_line(10, 84, 150, 84, LINE_COL, 4)
+    e.draw_gradient_rect(10, 94, 66, 22, GRAD_TOP, GRAD_BOT)
+    e.draw_rounded_rect(86, 94, 62, 22, 10, ROUND_COL)
+    e.present()
+    downsample(e.read_pixels(), rw, rh)
+
+fn pack_pixels(src: [u32]) -> [i64]:
+    # softbuffer treats each u32 as 0x00RRGGBB; mask to 24-bit RGB.
+    var out: [i64] = []
+    var i = 0
+    while i < src.len():
+        out = out.push(src[i].to_i64() & 0xFFFFFF)
+        i = i + 1
+    out
+
+fn main() -> i64:
+    print "Engine2D shapes GUI {SCREEN_W}x{SCREEN_H} (SS={SS}) -> {WINDOW_W}x{WINDOW_H}"
+    val pixels = render_shapes()
+    print "Rendered + anti-aliased {pixels.len()} px on the cpu backend"
+
+    if rt_env_get("SIMPLE_GUI") != "1":
+        print "No GUI requested (use scripts/macos-gui-run.shs to open a window); headless only."
+        return 0
+
+    val el = rt_winit_event_loop_new()
+    if el == 0:
+        print "No GUI runtime available."
+        return 0
+    val win = rt_winit_window_new(el, WINDOW_W.to_i64(), WINDOW_H.to_i64(), "Simple Engine2D — shapes (AA)")
+    if win == 0:
+        print "Window creation failed."
+        rt_winit_event_loop_free(el)
+        return 0
+    val packed = pack_pixels(pixels)
+    rt_winit_window_present_rgba(win, SCREEN_W.to_i64(), SCREEN_H.to_i64(), packed)
+    # Poll continuously (never sleep): the interpreter owns the main thread, so
+    # AppKit needs a handler between frames or the window never composites.
+    var running = true
+    var iters = 0
+    while running and iters < 2000000:
+        var ev = rt_winit_event_loop_poll_events(el, 1)
+        while ev != 0:
+            if rt_winit_event_get_type(ev) == EVT_CLOSE:
+                running = false
+            rt_winit_event_free(ev)
+            ev = rt_winit_event_loop_poll_events(el, 1)
+        if iters % 200 == 0:
+            rt_winit_window_present_rgba(win, SCREEN_W.to_i64(), SCREEN_H.to_i64(), packed)
+        iters = iters + 1
+    rt_winit_window_free(win)
+    rt_winit_event_loop_free(el)
+    return 0
