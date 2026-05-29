@@ -164,68 +164,119 @@ pub(crate) fn call_method_on_value(
                 return Ok(Value::array(rev));
             }
             "map" => {
-                if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
-                    let mut result = Vec::new();
-                    for item in arr.iter() {
-                        let mut call_env = Env::clone(captured_env);
-                        let val = exec_function_with_values(
-                            def,
-                            std::slice::from_ref(item),
-                            &mut call_env,
-                            _functions,
-                            _classes,
-                            _enums,
-                            _impl_methods,
-                        )?;
-                        result.push(val);
+                match _args.first() {
+                    Some(Value::Function { def, captured_env, .. }) => {
+                        let mut result = Vec::new();
+                        for item in arr.iter() {
+                            let mut call_env = Env::clone(captured_env);
+                            let val = exec_function_with_values(
+                                def,
+                                std::slice::from_ref(item),
+                                &mut call_env,
+                                _functions,
+                                _classes,
+                                _enums,
+                                _impl_methods,
+                            )?;
+                            result.push(val);
+                        }
+                        return Ok(Value::array(result));
                     }
-                    return Ok(Value::array(result));
+                    Some(Value::Lambda { params, body, env: captured }) => {
+                        let mut result = Vec::new();
+                        for item in arr.iter() {
+                            let mut local_env = Env::clone(captured);
+                            if let Some(param) = params.first() {
+                                local_env.insert(param.clone(), item.clone());
+                            }
+                            let val = evaluate_expr(body, &mut local_env, _functions, _classes, _enums, _impl_methods)?;
+                            result.push(val);
+                        }
+                        return Ok(Value::array(result));
+                    }
+                    _ => {}
                 }
                 return Ok(Value::array(arr.to_vec()));
             }
             "filter" => {
-                if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
-                    let mut result = Vec::new();
-                    for item in arr.iter() {
-                        let mut call_env = Env::clone(captured_env);
-                        let val = exec_function_with_values(
-                            def,
-                            std::slice::from_ref(item),
-                            &mut call_env,
-                            _functions,
-                            _classes,
-                            _enums,
-                            _impl_methods,
-                        )?;
-                        if val.truthy() {
-                            result.push(item.clone());
+                match _args.first() {
+                    Some(Value::Function { def, captured_env, .. }) => {
+                        let mut result = Vec::new();
+                        for item in arr.iter() {
+                            let mut call_env = Env::clone(captured_env);
+                            let val = exec_function_with_values(
+                                def,
+                                std::slice::from_ref(item),
+                                &mut call_env,
+                                _functions,
+                                _classes,
+                                _enums,
+                                _impl_methods,
+                            )?;
+                            if val.truthy() {
+                                result.push(item.clone());
+                            }
                         }
+                        return Ok(Value::array(result));
                     }
-                    return Ok(Value::array(result));
+                    Some(Value::Lambda { params, body, env: captured }) => {
+                        let mut result = Vec::new();
+                        for item in arr.iter() {
+                            let mut local_env = Env::clone(captured);
+                            if let Some(param) = params.first() {
+                                local_env.insert(param.clone(), item.clone());
+                            }
+                            let val = evaluate_expr(body, &mut local_env, _functions, _classes, _enums, _impl_methods)?;
+                            if val.truthy() {
+                                result.push(item.clone());
+                            }
+                        }
+                        return Ok(Value::array(result));
+                    }
+                    _ => {}
                 }
                 return Ok(Value::array(arr.to_vec()));
             }
             "flat_map" | "flatmap" => {
-                if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
-                    let mut result = Vec::new();
-                    for item in arr.iter() {
-                        let mut call_env = Env::clone(captured_env);
-                        let val = exec_function_with_values(
-                            def,
-                            std::slice::from_ref(item),
-                            &mut call_env,
-                            _functions,
-                            _classes,
-                            _enums,
-                            _impl_methods,
-                        )?;
-                        if let Value::Array(inner) = val {
-                            result.extend(inner.iter().cloned());
-                        } else {
-                            result.push(val);
+                match _args.first() {
+                    Some(Value::Function { def, captured_env, .. }) => {
+                        let mut result = Vec::new();
+                        for item in arr.iter() {
+                            let mut call_env = Env::clone(captured_env);
+                            let val = exec_function_with_values(
+                                def,
+                                std::slice::from_ref(item),
+                                &mut call_env,
+                                _functions,
+                                _classes,
+                                _enums,
+                                _impl_methods,
+                            )?;
+                            if let Value::Array(inner) = val {
+                                result.extend(inner.iter().cloned());
+                            } else {
+                                result.push(val);
+                            }
                         }
+                        return Ok(Value::array(result));
                     }
-                    return Ok(Value::array(result));
+                    Some(Value::Lambda { params, body, env: captured }) => {
+                        let mut result = Vec::new();
+                        for item in arr.iter() {
+                            let mut local_env = Env::clone(captured);
+                            if let Some(param) = params.first() {
+                                local_env.insert(param.clone(), item.clone());
+                            }
+                            let val = evaluate_expr(body, &mut local_env, _functions, _classes, _enums, _impl_methods)?;
+                            if let Value::Array(inner) = val {
+                                result.extend(inner.iter().cloned());
+                            } else {
+                                result.push(val);
+                            }
+                        }
+                        return Ok(Value::array(result));
+                    }
+                    _ => {}
                 }
                 return Ok(Value::array(arr.to_vec()));
             }
@@ -270,44 +321,76 @@ pub(crate) fn call_method_on_value(
                 });
             }
             "any" => {
-                if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
-                    for item in arr.iter() {
-                        let mut call_env = Env::clone(captured_env);
-                        let val = exec_function_with_values(
-                            def,
-                            std::slice::from_ref(item),
-                            &mut call_env,
-                            _functions,
-                            _classes,
-                            _enums,
-                            _impl_methods,
-                        )?;
-                        if val.truthy() {
-                            return Ok(Value::Bool(true));
+                match _args.first() {
+                    Some(Value::Function { def, captured_env, .. }) => {
+                        for item in arr.iter() {
+                            let mut call_env = Env::clone(captured_env);
+                            let val = exec_function_with_values(
+                                def,
+                                std::slice::from_ref(item),
+                                &mut call_env,
+                                _functions,
+                                _classes,
+                                _enums,
+                                _impl_methods,
+                            )?;
+                            if val.truthy() {
+                                return Ok(Value::Bool(true));
+                            }
                         }
+                        return Ok(Value::Bool(false));
                     }
-                    return Ok(Value::Bool(false));
+                    Some(Value::Lambda { params, body, env: captured }) => {
+                        for item in arr.iter() {
+                            let mut local_env = Env::clone(captured);
+                            if let Some(param) = params.first() {
+                                local_env.insert(param.clone(), item.clone());
+                            }
+                            let val = evaluate_expr(body, &mut local_env, _functions, _classes, _enums, _impl_methods)?;
+                            if val.truthy() {
+                                return Ok(Value::Bool(true));
+                            }
+                        }
+                        return Ok(Value::Bool(false));
+                    }
+                    _ => {}
                 }
                 return Ok(Value::Bool(!arr.is_empty()));
             }
             "all" => {
-                if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
-                    for item in arr.iter() {
-                        let mut call_env = Env::clone(captured_env);
-                        let val = exec_function_with_values(
-                            def,
-                            std::slice::from_ref(item),
-                            &mut call_env,
-                            _functions,
-                            _classes,
-                            _enums,
-                            _impl_methods,
-                        )?;
-                        if !val.truthy() {
-                            return Ok(Value::Bool(false));
+                match _args.first() {
+                    Some(Value::Function { def, captured_env, .. }) => {
+                        for item in arr.iter() {
+                            let mut call_env = Env::clone(captured_env);
+                            let val = exec_function_with_values(
+                                def,
+                                std::slice::from_ref(item),
+                                &mut call_env,
+                                _functions,
+                                _classes,
+                                _enums,
+                                _impl_methods,
+                            )?;
+                            if !val.truthy() {
+                                return Ok(Value::Bool(false));
+                            }
                         }
+                        return Ok(Value::Bool(true));
                     }
-                    return Ok(Value::Bool(true));
+                    Some(Value::Lambda { params, body, env: captured }) => {
+                        for item in arr.iter() {
+                            let mut local_env = Env::clone(captured);
+                            if let Some(param) = params.first() {
+                                local_env.insert(param.clone(), item.clone());
+                            }
+                            let val = evaluate_expr(body, &mut local_env, _functions, _classes, _enums, _impl_methods)?;
+                            if !val.truthy() {
+                                return Ok(Value::Bool(false));
+                            }
+                        }
+                        return Ok(Value::Bool(true));
+                    }
+                    _ => {}
                 }
                 return Ok(Value::Bool(true));
             }

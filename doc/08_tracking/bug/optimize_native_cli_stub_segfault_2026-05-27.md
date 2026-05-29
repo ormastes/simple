@@ -2,7 +2,7 @@
 
 ## Status
 
-Fixed in follow-up.
+Fixed.
 
 ## Summary
 
@@ -39,7 +39,9 @@ Running the binary with no arguments also exits `139`.
 
 ## Resolution
 
-The crash had two native CLI startup causes:
+The crash had two native CLI startup causes and one analyze-path failure:
+
+**Phase 1 — CLI startup segfault (.spl fixes):**
 
 - `std.sffi.cli.cli_get_args()` used `?? []`, which lowered through `rt_unwrap_or_self`; the selected `simple-core` runtime did not provide that helper, so the linker weak-stubbed it to nil.
 - `std.cli.cli_util.get_cli_args()` assigned the boolean result of `args.push(...)` back into `args`, causing native callers to receive `1` instead of an array.
@@ -47,7 +49,13 @@ The crash had two native CLI startup causes:
 - `optimize.main` used a native-fragile optional binding for parsed arguments and assumed `args[0]` was always the `optimize` launcher subcommand.
 - The analyze path read files through `shell_output("cat ...")`, which depends on `rt_process_run`; the standalone native runtime did not provide that safely.
 
-The fix replaces the `?? []` calls with explicit nil checks, mutates CLI argument arrays with `args.push(...)` without assignment, skips `.spl` launcher paths only for the Simple launcher/runtime, parses optimizer args without optional binding, and uses `std.io.file_read` for optimizer analysis.
+These were fixed in the `.spl` layer: `?? []` replaced with explicit nil checks, `args.push(...)` without assignment, `.spl` launcher-path skip scoped to `is_simple_launcher()`, optimizer args parsed without optional binding, and `std.io.file_read` used for optimizer analysis.
+
+**Phase 2 — Analyze path returning exit 1 (runtime C fix):**
+
+After the `.spl` fixes, `--help` worked but `analyze` returned exit 1 with "could not read file". Root cause: `std.io.file_read` calls `rt_file_read_text`, which was absent from the core-c bootstrap runtime (`build/simple-core/libsimple_runtime.a`). The `CoreCBootstrap` lane compiles only `runtime_native.c`, `runtime_legacy_core.c`, and `runtime_mcp_core.c` — but `rt_file_read_text` (and `rt_file_exists`, `rt_file_delete`, `rt_env_get`) were defined only in `runtime.c`, which is not part of that set. The stale `build/simple-core/libsimple_runtime.a` passed the `runtime_archive_has_core_required_symbols` check (none of these symbols are in `CORE_REQUIRED_RUNTIME_SYMBOLS`), so it was selected without triggering a rebuild.
+
+The fix adds `rt_file_read_text`, `rt_file_exists`, `rt_file_delete`, and `rt_env_get` to `src/runtime/runtime_native.c` (all implemented via existing `spl_*` helpers that are already compiled into the core-c archive). The `build/simple-core/libsimple_runtime.a` archive was rebuilt to include the updated `runtime_native.o`.
 
 Verified:
 
@@ -76,6 +84,5 @@ The native build falls back to generated stubs for argument/runtime functions th
 
 ## Follow-up
 
-- Link the native optimize smoke with a runtime that provides `sys_get_args`/`rt_cli_get_args`, or
-- Make generated array-returning stubs safe enough for no-argument/help-path smoke tests, or
-- Add a native-build mode that rejects these stubs for CLI entrypoints instead of producing a crashing binary.
+- `sys_get_args`, `rt_getpid`, and the `rt_cli_*` dispatch symbols remain weak-stubbed to nil in the standalone optimize binary. These are only needed for the full Simple launcher environment and do not affect the optimize CLI paths exercised above.
+- The `build/simple-core/libsimple_runtime.a` rebuild above is a manual step. Future native builds that select the `SimpleCore` lane via `find_abi_complete_simple_core_runtime_library` should either include `rt_file_read_text` in `CORE_REQUIRED_RUNTIME_SYMBOLS` to force a rebuild when it is missing, or add a freshness check before returning the cached archive.

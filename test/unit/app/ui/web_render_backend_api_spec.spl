@@ -8,9 +8,10 @@ use common.ui.builder.{button, panel, text_widget, build_tree_with_title}
 use common.ui.state.{init_state}
 use common.ui.widget.{UIEvent}
 use app.ui.web.backend.{WebBackend}
-use app.ui.electron.backend.{ElectronBackend}
-use app.ui.tauri.backend.{TauriBackend}
+use app.ui.electron.backend.{ElectronBackend, electron_render_ipc_json}
+use app.ui.tauri.backend.{TauriBackend, tauri_render_ipc_json}
 use app.ui.browser.backend.{BrowserBackend}
+use app.ui.ipc.async_handler.{ipc_writer_message}
 
 fn sample_state():
     val root = panel("web_render_root", "Web Render", [
@@ -28,6 +29,9 @@ describe "web render backends use the shared common API":
         val web_html = web.render_html(state)
         expect(web_html).to_contain("widget-panel")
         expect(web_html).to_contain("widget-button")
+        expect(web.input_envelope_json("main", UIEvent.KeyPress(key: "enter"))).to_contain("\"target\":\"simple_web\"")
+        expect(web.snapshot_envelope_json("main", 3u64, "{\"mode\":\"NORMAL\"}")).to_contain("\"type\":\"snapshot\"")
+        expect(web.patch_envelope_json("main", 3u64, 4u64, "[]", "")).to_contain("\"type\":\"patch\"")
 
         val electron_result = ElectronBackend.new(4011)
         match electron_result:
@@ -36,6 +40,12 @@ describe "web render backends use the shared common API":
             Ok(electron):
                 val electron_html = electron.render_html(state)
                 expect(electron_html).to_equal(web_html)
+                expect(electron_render_ipc_json(state, 1280, 720)).to_contain("\"target\":\"electron\"")
+                expect(electron_render_ipc_json(state, 1280, 720)).to_contain("\"surface_id\":\"\"")
+                expect(ipc_writer_message(electron_render_ipc_json(state, 1280, 720))).to_contain("\"target\":\"electron\"")
+                expect(electron.input_envelope_json("main", UIEvent.KeyPress(key: "enter"))).to_contain("\"target\":\"electron\"")
+                expect(electron.snapshot_envelope_json("main", 3u64, "{\"mode\":\"NORMAL\"}")).to_contain("\"revision\":3")
+                expect(electron.patch_envelope_json("main", 3u64, 4u64, "[]", "")).to_contain("\"to_sequence\":4")
 
         val tauri_result = TauriBackend.new(4012)
         match tauri_result:
@@ -44,6 +54,12 @@ describe "web render backends use the shared common API":
             Ok(tauri):
                 val tauri_html = tauri.render_html(state)
                 expect(tauri_html).to_equal(web_html)
+                expect(tauri_render_ipc_json(state, 1280, 720)).to_contain("\"target\":\"tauri\"")
+                expect(tauri_render_ipc_json(state, 1280, 720)).to_contain("\"surface_id\":\"\"")
+                expect(ipc_writer_message(tauri_render_ipc_json(state, 1280, 720))).to_contain("\"target\":\"tauri\"")
+                expect(tauri.input_envelope_json("main", UIEvent.InputChange(target_id: "name", value: "Ada"))).to_contain("\"target\":\"tauri\"")
+                expect(tauri.snapshot_envelope_json("main", 3u64, "{\"mode\":\"NORMAL\"}")).to_contain("\"surface_id\":\"main\"")
+                expect(tauri.patch_envelope_json("main", 3u64, 4u64, "[]", "")).to_contain("\"patches\":[]")
 
     it "records pure simple browser output as a shared web render artifact":
         val state = sample_state()

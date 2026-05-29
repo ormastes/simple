@@ -1549,9 +1549,36 @@ int64_t rt_dict_len(SplDict* d) {
  * File I/O (wrappers around existing rt_/spl_ functions)
  * ================================================================ */
 
-/* rt_file_read_text, rt_file_exists, rt_file_write, rt_file_delete,
- * rt_file_copy, rt_file_size, rt_file_stat, rt_file_append
- * are already defined in runtime.c */
+/* rt_file_read_text, rt_file_exists, rt_file_delete, rt_env_get are
+ * defined in runtime.c when the full runtime is linked, but the
+ * core-c-bootstrap build only includes runtime_legacy_core.c and
+ * runtime_mcp_core.c (not runtime.c).  Provide them here so that
+ * native CLI binaries built against the core-c runtime can read files
+ * and query the environment without segfaulting on nil stubs. */
+
+const char* rt_file_read_text(const char* path) {
+    return spl_file_read(path);
+}
+
+int rt_file_exists(const char* path) {
+    if (!path) return 0;
+    FILE* f = fopen(path, "r");
+    if (f) { fclose(f); return 1; }
+    return 0;
+}
+
+int rt_file_delete(const char* path) {
+    if (!path) return 0;
+    return remove(path) == 0 ? 1 : 0;
+}
+
+__attribute__((weak))
+const char* rt_env_get(const char* key) {
+    return spl_env_get(key);
+}
+
+/* rt_file_write, rt_file_copy, rt_file_size, rt_file_stat, rt_file_append
+ * are still defined in runtime.c only — add them here when needed. */
 
 static char* rt_core_string_to_cpath(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);

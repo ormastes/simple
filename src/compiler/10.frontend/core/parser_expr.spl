@@ -25,7 +25,7 @@ use compiler.core.tokens.{TOK_STAR_ASSIGN, TOK_SLASH_ASSIGN}
 use compiler.core.tokens.{TOK_AND, TOK_OR, TOK_NOT}
 use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
 use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
-use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_DOT, TOK_DOTDOT}
+use compiler.core.tokens.{TOK_COLON, TOK_COLON_COLON, TOK_COMMA, TOK_DOT, TOK_DOTDOT}
 use compiler.core.tokens.{TOK_ARROW, TOK_PIPE}
 use compiler.core.tokens.{TOK_QUESTION, TOK_QUESTION_DOT, TOK_DOUBLE_QUESTION, TOK_DOT_QUESTION}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF, TOK_ERROR}
@@ -59,7 +59,9 @@ use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_a
 use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
 use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_args}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
+use compiler.frontend.core.lexer.{lex_pos_get, lex_pos_set, lex_line_get, lex_line_set, lex_col_get, lex_col_set}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
+use compiler.core.parser.{par_kind_set, par_text_set, par_line_set, par_col_set}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_skip_newlines}
 use compiler.core.parser.{parser_parse_type}
 use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_lambda}
@@ -645,6 +647,79 @@ fn parse_postfix_on(base_expr: i64) -> i64:
 
 fn parse_postfix() -> i64:
     var base = parse_primary_expr()
+    # Lookahead disambiguation: Foo<T>.bar() and Foo<T>::bar() and Foo<T>(args)
+    # After parsing a bare identifier, if the next token is `<` (TOK_LT or
+    # TOK_LT_GENERIC), speculatively try to consume a generic-arg list <TypeArgs>.
+    # Commit only if the token after the closing `>` is `.`, `::`, or `(`.
+    # On failure backtrack transparently; `<` is handled as BinOp::Lt by the
+    # binary-expression layer.
+    if expr_get_tag(base) == EXPR_IDENT:
+        val is_lt = par_kind_get() == 82
+        val is_lt_generic = par_kind_get() == 86
+        if is_lt or is_lt_generic:
+            # Save state for backtracking
+            val saved_kind = par_kind_get()
+            val saved_text = par_text_get()
+            val saved_line = par_line_get()
+            val saved_col = par_col_get()
+            val saved_lex_pos = lex_pos_get()
+            val saved_lex_line = lex_line_get()
+            val saved_lex_col = lex_col_get()
+            parser_advance()  # consume '<'
+            var depth = 1
+            var tga_ok = false
+            for tga_i in 0..200:
+                if par_kind_get() == 67:
+                    # >> (TOK_SHR) — treat as two closing >
+                    if depth >= 2:
+                        depth = depth - 2
+                        parser_advance()
+                        if depth == 0:
+                            val after = par_kind_get()
+                            tga_ok = after == 164 or after == 140 or after == 162
+                            break
+                        continue
+                    else:
+                        break  # stray >> — not a generic arg list
+                if par_kind_get() == 83:
+                    depth = depth - 1
+                    parser_advance()
+                    if depth == 0:
+                        val after = par_kind_get()
+                        tga_ok = after == 164 or after == 140 or after == 162
+                        break
+                    continue
+                if par_kind_get() == 82 or par_kind_get() == 86:
+                    depth = depth + 1
+                    parser_advance()
+                    continue
+                if par_kind_get() == 190:
+                    break  # EOF
+                # Skip type arg tokens: idents, commas, brackets, []
+                val k = par_kind_get()
+                val is_ident = k == 6
+                val is_comma = k == 160
+                val is_lbracket = k == 144
+                val is_rbracket = k == 145
+                val is_dot = k == 164
+                val is_star = k == 62
+                val is_amp = k == 120
+                val is_question = k == 130
+                val skip_tok = is_ident or is_comma or is_lbracket or is_rbracket or is_dot or is_star or is_amp or is_question
+                if skip_tok:
+                    parser_advance()
+                    continue
+                break  # unexpected token inside <...> — not a generic arg list
+            if not tga_ok:
+                # Backtrack: restore parser and lexer state
+                par_kind_set(saved_kind)
+                par_text_set(saved_text)
+                par_line_set(saved_line)
+                par_col_set(saved_col)
+                lex_pos_set(saved_lex_pos)
+                lex_line_set(saved_lex_line)
+                lex_col_set(saved_lex_col)
+            # If tga_ok: generic args consumed and discarded; continue postfix loop from Dot/LParen/DoubleColon
     for i in 0..1000:
         if par_kind_get() == 164:
             parser_advance()

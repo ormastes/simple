@@ -3,6 +3,8 @@
 # Host and SimpleOS adapters should translate platform/wire requests into
 # WmAction, then apply the common compositor mutations here.
 
+use common.ui.builder.{column, panel, statusbar, text_widget, build_tree_with_title}
+use common.ui.widget.{UITree}
 use os.compositor.compositor.{Compositor}
 use os.services.wm.wm_world.{WmAction, wm_action_none}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
@@ -31,6 +33,16 @@ class WmLifecycleApplyResult:
     next_window_id: i64
     window_id: i64
     applied: bool
+
+fn wm_action_remote_tree(window_id: u64, content: text) -> UITree:
+    val wid_str = "{window_id}"
+    val root = column("remote_{wid_str}", [
+        panel("remote_content_{wid_str}", "", [
+            text_widget("remote_text_{wid_str}", content)
+        ]),
+        statusbar("remote_status_{wid_str}", "Remote window {wid_str}", "Updated")
+    ])
+    build_tree_with_title(root, "Window {wid_str}", "dark")
 
 fn apply_wm_action_to_compositor(compositor: Compositor, action: WmAction) -> WmActionApplyResult:
     var next = compositor
@@ -68,13 +80,16 @@ fn apply_wm_action_to_compositor(compositor: Compositor, action: WmAction) -> Wm
             next.restore_window(action.window_id)
             return WmActionApplyResult(compositor: next, window_id: action.window_id, applied: true)
         "update_tree":
-            next.update_window_tree(action.window_id, action.content)
+            next.update_window_tree(action.window_id, wm_action_remote_tree(action.window_id, action.content))
             return WmActionApplyResult(compositor: next, window_id: action.window_id, applied: true)
         _:
             return WmActionApplyResult(compositor: next, window_id: 0, applied: false)
 
 fn wm_action_is_shared_lifecycle(kind: text) -> bool:
     kind == "create_window" or kind == "create_web_window" or kind == "destroy_window" or kind == "focus" or kind == "resize" or kind == "move" or kind == "set_title" or kind == "minimize" or kind == "maximize" or kind == "restore" or kind == "update_tree"
+
+fn wm_action_with_app_id(action: WmAction, app_id: text) -> WmAction:
+    WmAction(kind: action.kind, window_id: action.window_id, title: action.title, x: action.x, y: action.y, width: action.width, height: action.height, content: action.content, process_id: action.process_id, app_id: app_id, owner_port: action.owner_port, src_port: action.src_port)
 
 fn wm_lifecycle_find_window_index(windows: [WmLifecycleWindowState], window_id: i64) -> i32:
     var i = 0

@@ -428,36 +428,48 @@ impl MirLowering:
                 body
                 i = i + step
         """
-        # Lower start value (default to 0)
+        # Derive loop counter type from bound HirExpr types before emitting any code.
+        # This preserves u64 (and other non-i64 integer) counter types end-to-end.
+        val loop_ty = if end.? and end.unwrap().type_.?:
+            self.lower_type(end.unwrap().type_.unwrap())
+        elif start.? and start.unwrap().type_.?:
+            self.lower_type(start.unwrap().type_.unwrap())
+        else:
+            MirType.i64()
+
+        # Lower start value (default to typed 0)
         val start_local = if start.?:
             self.lower_expr(start.unwrap())
         else:
             var b = self.builder
-            val temp = b.emit_const_int(0)
+            val temp = b.new_temp(loop_ty)
+            b.emit_const(temp, MirConstValue.Int(0), loop_ty)
             self.builder = b
             temp
 
-        # Lower end value (default to 0; open-ended ranges need the iterator path)
+        # Lower end value (default to typed 0; open-ended ranges need the iterator path)
         val end_local = if end.?:
             self.lower_expr(end.unwrap())
         else:
             var b = self.builder
-            val temp = b.emit_const_int(0)
+            val temp = b.new_temp(loop_ty)
+            b.emit_const(temp, MirConstValue.Int(0), loop_ty)
             self.builder = b
             temp
 
-        # Lower step value (default to 1)
+        # Lower step value (default to typed 1)
         val step_local = if step.?:
             self.lower_expr(step.unwrap())
         else:
             var b = self.builder
-            val temp = b.emit_const_int(1)
+            val temp = b.new_temp(loop_ty)
+            b.emit_const(temp, MirConstValue.Int(1), loop_ty)
             self.builder = b
             temp
 
         # Create the loop counter variable (mutable)
         var b_init = self.builder
-        val counter = b_init.new_local(nil, MirType.i64(), LocalKind.Var)
+        val counter = b_init.new_local(nil, loop_ty, LocalKind.Var)
         b_init.emit_copy(counter, start_local)
         self.builder = b_init
 
@@ -501,7 +513,7 @@ impl MirLowering:
             MirBinOp.Add,
             mir_operand_copy(counter),
             mir_operand_copy(step_local),
-            MirType.i64()
+            loop_ty
         )
         b_inc.emit_copy(counter, incremented)
         self.builder = b_inc

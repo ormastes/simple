@@ -2,14 +2,29 @@
 
 ## Status
 
-Resolved for checksum correctness. Performance parity remains open.
+Resolved for checksum correctness in both the Rust seed and the self-hosted
+SPL compiler. Performance parity remains open.
 
-**Re-verified 2026-05-20:** Deliverables confirmed at HEAD. Note: the cargo
-test `for_range_preserves_u64_counter_type` cited in Evidence below was not
-found in `src/compiler_rust/src/` — it may have been renamed or removed after
-the fix. The behavioural fix (unsigned counter typing for `for 0..u64_bound`
-lowering) was confirmed in earlier rebuilds; the missing test name is a doc
-discrepancy only and does not affect the resolved status.
+**Re-verified 2026-05-29:** Rust seed fix confirmed passing at HEAD. Test is
+at `src/compiler_rust/compiler/src/mir/lower/tests/branch_coverage/control.rs`
+(full path: `mir::lower::tests::branch_coverage::control::for_range_preserves_u64_counter_type`).
+The earlier doc said "not found in `src/compiler_rust/src/`" — that path was
+stale; the correct path is under `src/compiler_rust/compiler/src/`.
+
+**Self-hosted SPL compiler fix (2026-05-29):** The same bug was present in
+`src/compiler/50.mir/mir_lowering_stmts.spl` — `lower_for_range` hardcoded
+`MirType.i64()` for the counter local and the Add result type, ignoring the
+bound expression's actual type. Fixed by:
+- Deriving `loop_ty` from the end/start `HirExpr.type_` field (via
+  `self.lower_type`) before emitting any code
+- Using `loop_ty` for the counter local, the increment BinOp result
+- Emitting typed integer constants (`MirConstValue.Int` + `loop_ty`) for
+  nil start/step defaults instead of the old i64-typed `emit_const_int`
+
+This ensures all loop temporaries are type-consistent (no i64/u64 width
+mismatch), matching the Rust seed's `range_counter_type` logic.
+
+**Note:** A full bootstrap rebuild is needed to verify the SPL fix end-to-end.
 
 ## Context
 

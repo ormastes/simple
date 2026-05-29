@@ -37,7 +37,9 @@ Any class storing function-typed fields (callbacks, handlers, strategies) cannot
 
 ## Status
 
-**RESOLVED** — `evaluate_method_call_with_self_update` now falls back to
+**RESOLVED** — Rust-side `evaluate_method_call_with_self_update` falls back to
 callable object fields (`Lambda` and `Function`) before reporting an unknown
-method. Added `test/unit/compiler/interpreter/fn_field_call_spec.spl` to cover
+method. Pure-Simple-side `eval_method_call` in `eval_ops_part1.spl` now also
+falls back to `val_struct_get_field` + `val_is_function` before the error path.
+Added `test/unit/compiler/interpreter/fn_field_call_spec.spl` to cover
 `route.handler(41)` on a function-typed field.

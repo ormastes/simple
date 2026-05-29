@@ -234,13 +234,13 @@ class SimpleWindowManager {
       case 'snapshot':
         if (!this.renderer) break;
         this.sessionId = frame.s ?? this.sessionId;
-        this.renderer.applySnapshot(frame.payload);
+        this.renderer.applySnapshot(this._unwrapSnapshotPayload(frame.payload));
         this._cancelGhost();
         break;
 
       case 'patch_batch':
         if (!this.renderer) break;
-        this.renderer.applyPatchBatch(frame.payload);
+        this.renderer.applyPatchBatch(this._unwrapPatchPayload(frame.payload));
         this._cancelGhost();
         break;
 
@@ -277,6 +277,28 @@ class SimpleWindowManager {
         // Unknown message type — ignore silently.
         break;
     }
+  }
+
+  _unwrapSnapshotPayload(payload) {
+    if (payload && payload.type === 'snapshot' && payload.snapshot) {
+      return payload.snapshot;
+    }
+    return payload;
+  }
+
+  _unwrapPatchPayload(payload) {
+    if (payload && payload.type === 'patch' && payload.patches) {
+      if (Array.isArray(payload.patches)) {
+        return {
+          snapshot_revision: payload.revision ?? this.renderer?.snapshotRevision ?? 0,
+          from_sequence: payload.from_sequence,
+          to_sequence: payload.to_sequence,
+          patches: payload.patches
+        };
+      }
+      return payload.patches;
+    }
+    return payload;
   }
 
   // -------------------------------------------------------------------------

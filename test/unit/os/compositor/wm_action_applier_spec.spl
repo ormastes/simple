@@ -3,7 +3,7 @@
 
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.compositor.{Compositor}
-use os.compositor.wm_action_applier.{WmLifecycleWindowState, apply_wm_action_to_compositor, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_action_is_shared_lifecycle, wm_move_action, wm_resize_action}
+use os.compositor.wm_action_applier.{WmLifecycleWindowState, apply_wm_action_to_compositor, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_action_is_shared_lifecycle, wm_action_remote_tree, wm_action_with_app_id, wm_move_action, wm_resize_action}
 use os.services.wm.wm_world.{WmAction}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_UPDATE_TREE, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_RESTORE}
 
@@ -64,6 +64,29 @@ describe "shared WM action applier":
     it "classifies shared lifecycle actions":
         expect(wm_action_is_shared_lifecycle("resize")).to_equal(true)
         expect(wm_action_is_shared_lifecycle("none")).to_equal(false)
+
+    it "normalizes action app identity without changing lifecycle fields":
+        val action = _action("create_window", 0)
+        val normalized = wm_action_with_app_id(action, "launcher.app")
+        expect(normalized.kind).to_equal("create_window")
+        expect(normalized.title).to_equal(action.title)
+        expect(normalized.width).to_equal(action.width)
+        expect(normalized.owner_port).to_equal(action.owner_port)
+        expect(normalized.src_port).to_equal(action.src_port)
+        expect(normalized.app_id).to_equal("launcher.app")
+
+    it "builds remote update trees through shared compositor logic":
+        var compositor = Compositor.with_backends(ApplierBackend(w: 200, h: 120), nil, 200, 120)
+        val created = apply_wm_action_to_compositor(compositor, _action("create_window", 0))
+        compositor = created.compositor
+        val updated = apply_wm_action_to_compositor(compositor, _action("update_tree", created.window_id))
+        compositor = updated.compositor
+        expect(updated.applied).to_equal(true)
+        expect(compositor.surfaces[0].session.root_id).to_equal("remote_{created.window_id}")
+
+        val tree = wm_action_remote_tree(44, "payload")
+        expect(tree.root_id).to_equal("remote_44")
+        expect(tree.title()).to_equal("Window 44")
 
     it "builds shared lifecycle actions from host bridge requests":
         val create = wm_action_from_bridge_request(42, COMP_CREATE_WINDOW.to_i64(), 0, "Host App", 12, 18, 240, 160, "initial", 700, "/host/app")

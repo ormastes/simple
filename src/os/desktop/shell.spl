@@ -14,7 +14,7 @@ use common.ui.builder.{
     build_tree, build_tree_with_title, with_height, with_width, with_flex
 }
 use os.compositor.compositor.{Compositor, WindowSurface}
-use os.compositor.wm_action_applier.{apply_wm_action_to_compositor}
+use os.compositor.wm_action_applier.{apply_wm_action_to_compositor, wm_action_with_app_id}
 use os.compositor.app_content.{app_state_new}
 use os.drivers.framebuffer.fb_driver.{Color}
 use os.desktop.app_manifest.{AppManifest, load_app_manifests, search_apps}
@@ -30,7 +30,7 @@ use os.services.launcher.launcher.{
 }
 
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
-use os.desktop.shell_ui_builders.{_build_taskbar_tree, _build_launcher_tree, _build_app_tree, _build_remote_tree}
+use os.desktop.shell_ui_builders.{_build_taskbar_tree, _build_launcher_tree, _build_app_tree}
 use os.desktop.shell_process.{
     _contains_text, _contains_u64,
     _process_rows, _process_panel_rows, _window_overlay_rows,
@@ -479,15 +479,14 @@ impl DesktopShell:
                     val launcher_app_id = launcher_get_process_app_id_for_pid(action.process_id)
                     if launcher_app_id != "":
                         app_id = launcher_app_id
+                val create_action = wm_action_with_app_id(action, app_id)
                 if action.title == "Simple Browser":
                     log_info("[desktop] " + "[shell] create_window:start pid={action.process_id} src_port={action.src_port} app_id={app_id}")
-                val wid = self.compositor.create_remote_window(
-                    action.title, action.x, action.y,
-                    action.width, action.height, action.owner_port)
+                val create_result = apply_wm_action_to_compositor(self.compositor, create_action)
+                self.compositor = create_result.compositor
+                val wid = WindowId(value: create_result.window_id)
                 if action.title == "Simple Browser":
                     log_info("[desktop] " + "[shell] create_window:created pid={action.process_id} wid={wid.value}")
-                # Preserve launcher/WM identity at the shell boundary.
-                self.compositor.set_window_identity(wid.value.to_i32(), action.process_id.to_i64(), app_id)
                 if action.title == "Simple Browser":
                     log_info("[desktop] " + "[shell] create_window:identity pid={action.process_id} wid={wid.value}")
                 self.wm.register_window_owner_with_identity(
@@ -516,10 +515,10 @@ impl DesktopShell:
                     val l_app_id = launcher_get_process_app_id_for_pid(action.process_id)
                     if l_app_id != "":
                         web_app_id = l_app_id
-                val web_wid = self.compositor.create_remote_window(
-                    action.title, action.x, action.y,
-                    action.width, action.height, action.owner_port)
-                self.compositor.set_window_identity(web_wid.value.to_i32(), action.process_id.to_i64(), web_app_id)
+                val create_web_action = wm_action_with_app_id(action, web_app_id)
+                val create_web_result = apply_wm_action_to_compositor(self.compositor, create_web_action)
+                self.compositor = create_web_result.compositor
+                val web_wid = WindowId(value: create_web_result.window_id)
                 self.wm.register_window_owner_with_identity(
                     web_wid,
                     action.owner_port,
@@ -533,7 +532,7 @@ impl DesktopShell:
                 log_info("[desktop] " + "[shell] Created web window {web_wid} for port {action.src_port}: url='{action.content}'")
             "destroy_window":
                 val process_id = self.wm.window_owner_process_id(action.window_id)
-                self.compositor.destroy_window(action.window_id)
+                self.compositor = apply_wm_action_to_compositor(self.compositor, action).compositor
                 self.wm.remove_owner(action.window_id)
                 if process_id > 0:
                     launcher_note_window_closed(process_id)
@@ -569,8 +568,7 @@ impl DesktopShell:
                 if action.src_port > 0 and self.wm.initialized:
                     self.wm.send_status_reply(action.src_port, 0)
             "update_tree":
-                val tree = _build_remote_tree(action.window_id, action.content)
-                self.compositor.update_window_tree(action.window_id, tree)
+                self.compositor = apply_wm_action_to_compositor(self.compositor, action).compositor
                 if action.src_port > 0 and self.wm.initialized:
                     self.wm.send_status_reply(action.src_port, 0)
                 log_info("[desktop] " + "[shell] Applied tree update for window {action.window_id}")

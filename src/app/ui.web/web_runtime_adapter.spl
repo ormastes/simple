@@ -8,6 +8,7 @@ use common.ui.session.{UISession}
 use common.ui.snapshot_wire.{encode_snapshot}
 use common.ui.patch_wire.{encode_envelope, PatchEnvelope}
 use common.ui.patch_stream.{PatchSinceResult}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderSnapshotEnvelope, WebRenderPatchEnvelope, web_render_snapshot_envelope_to_json, web_render_patch_envelope_to_json}
 use app.ui.web.bounded_channel.{BoundedChannel}
 use app.ui.web.wire.{make_wire_frame}
 use std.common.text_advanced.{escape_json}
@@ -44,7 +45,13 @@ impl WebRuntimeAdapter:
         val snap = self.session.access_snapshot()
         val rev = self.session.patch_stream.snapshot_revision
         val payload = encode_snapshot(snap, rev)
-        val frame = make_wire_frame("snapshot", self.session_id, "null", payload)
+        val render_payload = web_render_snapshot_envelope_to_json(WebRenderSnapshotEnvelope(
+            target: WEB_RENDER_TARGET_SIMPLE_WEB,
+            surface_id: _runtime_surface_id(snap.active_surface),
+            revision: rev,
+            snapshot_json: payload
+        ))
+        val frame = make_wire_frame("snapshot", self.session_id, "null", render_payload)
         self.last_snapshot_revision = rev
         self.out.send(frame)
         self._emit_taskbar_model()
@@ -78,8 +85,16 @@ impl WebRuntimeAdapter:
             patches: result.patches
         )
         val env_json = encode_envelope(envelope)
+        val render_payload = web_render_patch_envelope_to_json(WebRenderPatchEnvelope(
+            target: WEB_RENDER_TARGET_SIMPLE_WEB,
+            surface_id: _runtime_surface_id(snap.active_surface),
+            from_sequence: _sequence_to_u64(from_seq),
+            to_sequence: _sequence_to_u64(to_seq),
+            patches_json: env_json,
+            snapshot_json: ""
+        ))
         val seq_str = "{from_seq}"
-        val frame = make_wire_frame("patch_batch", self.session_id, seq_str, env_json)
+        val frame = make_wire_frame("patch_batch", self.session_id, seq_str, render_payload)
         self.out.send(frame)
         self._emit_taskbar_model()
 
@@ -117,8 +132,16 @@ impl WebRuntimeAdapter:
             patches: result.patches
         )
         val env_json = encode_envelope(envelope)
+        val render_payload = web_render_patch_envelope_to_json(WebRenderPatchEnvelope(
+            target: WEB_RENDER_TARGET_SIMPLE_WEB,
+            surface_id: _runtime_surface_id(snap.active_surface),
+            from_sequence: _sequence_to_u64(from_seq),
+            to_sequence: _sequence_to_u64(to_seq),
+            patches_json: env_json,
+            snapshot_json: ""
+        ))
         val seq_str = "{from_seq}"
-        val frame = make_wire_frame("patch_batch", self.session_id, seq_str, env_json)
+        val frame = make_wire_frame("patch_batch", self.session_id, seq_str, render_payload)
         self.out.send(frame)
         self.last_ack_sequence = last_sequence
         self._emit_taskbar_model()
@@ -143,3 +166,12 @@ impl WebRuntimeAdapter:
 # Private helpers
 # =========================================================================
 
+fn _runtime_surface_id(active_surface: text) -> text:
+    if active_surface != "":
+        return active_surface
+    "main"
+
+fn _sequence_to_u64(sequence: i64) -> u64:
+    if sequence <= 0:
+        return 0u64
+    sequence.to_u64()

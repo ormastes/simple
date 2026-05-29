@@ -597,6 +597,58 @@ write_report() {
     } >"$REPORT_PATH"
 }
 
+check_mmap_preload_gate() {
+    simple_bytes="$(bytes_of "$BUILD_DIR/simple_mmap_preload")"
+    c_bytes="$(bytes_of "$BUILD_DIR/mmap_preload_argparse_c")"
+    if [ "$simple_bytes" = "n/a" ] || [ "$c_bytes" = "n/a" ]; then
+        echo "mmap-preload-gate: skip (binaries not built)"
+        return 0
+    fi
+    if [ "$simple_bytes" -gt "$c_bytes" ]; then
+        echo "mmap-preload-gate: FAIL simple_mmap_preload ($simple_bytes bytes) > mmap_preload_argparse_c ($c_bytes bytes)" >&2
+        return 1
+    fi
+    echo "mmap-preload-gate: ok simple_mmap_preload ($simple_bytes bytes) <= mmap_preload_argparse_c ($c_bytes bytes)"
+}
+
+# Gate: Simple network rows must stay at or below the C socket counter size and must
+# load only libc + the ELF loader (no TLS/compression/regex stacks).
+check_network_libs_clean() {
+    name="$1"
+    path="$2"
+    if [ ! -f "$path" ]; then
+        echo "network-libs-gate($name): skip (binary not built)"
+        return 0
+    fi
+    if ! have ldd; then
+        echo "network-libs-gate($name): skip (ldd unavailable)"
+        return 0
+    fi
+    heavy="$(ldd "$path" 2>/dev/null | awk '{print $1}' | grep -v 'linux-vdso' | grep -v '^$' | grep -v 'libc\.so' | grep -v 'ld-linux' | grep -v 'ld-musl' || true)"
+    if [ -n "$heavy" ]; then
+        echo "network-libs-gate($name): FAIL unexpected shared libs: $heavy" >&2
+        return 1
+    fi
+    echo "network-libs-gate($name): ok (only libc + ELF loader)"
+}
+
+check_network_size_gate() {
+    label="$1"
+    simple_path="$2"
+    c_path="$3"
+    if [ ! -f "$simple_path" ] || [ ! -f "$c_path" ]; then
+        echo "network-size-gate($label): skip (binaries not built)"
+        return 0
+    fi
+    simple_bytes="$(bytes_of "$simple_path")"
+    c_bytes="$(bytes_of "$c_path")"
+    if [ "$simple_bytes" -gt "$c_bytes" ]; then
+        echo "network-size-gate($label): FAIL simple ($simple_bytes bytes) > C ($c_bytes bytes)" >&2
+        return 1
+    fi
+    echo "network-size-gate($label): ok simple ($simple_bytes bytes) <= C ($c_bytes bytes)"
+}
+
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
     build_all
 fi
@@ -604,3 +656,11 @@ write_report
 
 echo "startup_size_perf_audit_ready=true"
 echo "report_path=$REPORT_PATH"
+
+check_mmap_preload_gate
+check_network_size_gate "tcp" "$BUILD_DIR/simple_tcp_connect" "$BUILD_DIR/tcp_connect_c"
+check_network_size_gate "udp" "$BUILD_DIR/simple_udp_send" "$BUILD_DIR/udp_send_c"
+check_network_size_gate "http-plain" "$BUILD_DIR/simple_http_plain" "$BUILD_DIR/http_plain_c"
+check_network_libs_clean "tcp" "$BUILD_DIR/simple_tcp_connect"
+check_network_libs_clean "udp" "$BUILD_DIR/simple_udp_send"
+check_network_libs_clean "http-plain" "$BUILD_DIR/simple_http_plain"

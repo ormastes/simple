@@ -22,11 +22,23 @@ fn handle_cli_passthrough_direct(id: text, body: text, name: text, cli_command: 
 
     # Extract known parameters from body and append as CLI args
     cmd = _append_cli_args_for_name(cmd, body, name)
-    cmd = cmd + " 2>&1"
 
     var out = ""
     var exit_code: i64 = 0
-    (out, exit_code) = shell_cmd(cmd)
+
+    # simple_test spawns async child processes (test workers) that inherit the
+    # popen pipe as their stdout.  Even after `timeout` kills bin/simple, those
+    # workers keep the pipe write-end open, so popen's fgets never sees EOF and
+    # the MCP server hangs.  Fix: redirect the test command's output to a temp
+    # file so workers hold a file fd (not the popen pipe), then read the file
+    # back with `cat` after the command finishes.
+    if name == "simple_test":
+        # Use mktemp so concurrent test calls get distinct files.
+        val wrapped = "tmp=$(mktemp /tmp/simple_mcp_test_XXXXXX.txt); { " + cmd + "; } > \"$tmp\" 2>&1; EC=$?; cat \"$tmp\"; rm -f \"$tmp\"; exit $EC"
+        (out, exit_code) = shell_cmd(wrapped)
+    else:
+        cmd = cmd + " 2>&1"
+        (out, exit_code) = shell_cmd(cmd)
 
     var output = "-- " + name + " (exit: " + str(exit_code) + ") --\n" + out
     if exit_code == 124:

@@ -2,6 +2,8 @@
 
 **Date:** 2026-05-27
 **Severity:** Critical (blocks bootstrap)
+**Status (string-equality bugs):** RESOLVED — Bug A and Bug B verified fixed 2026-05-29.
+**Status (871-stub bootstrap blocker):** OPEN — separate issue, not addressed here. See "Deeper blocker" section.
 **Component:** Rust seed codegen (native-build)
 
 ## Summary
@@ -85,7 +87,7 @@ bin/release/simple /tmp/test_eq.spl        # interpreter: OK
 /tmp/simple_debug /tmp/test_eq.spl         # compiled: BUG
 ```
 
-## Deeper blocker: 871 stubbed symbols in stage2
+## Deeper blocker: 871 stubbed symbols in stage2 [STILL OPEN — NOT addressed by this fix]
 
 The string equality bug is real but secondary. The compiled stage2 binary has
 **871 symbols stubbed as weak functions** by `--entry-closure`, including the
@@ -116,7 +118,73 @@ session. Without it, the stage2 has no compilation capability.
    and link into stage2 without `--entry-closure` stubbing. Most ambitious;
    currently 27 modules fail to compile without `--entry-closure`.
 
-## Proposed fix (string equality only)
+## Verification (2026-05-29)
+
+Both bugs A and B no longer reproduce against the current working tree.
+
+### Test binary: Bug A (same-length different content)
+```
+$ /tmp/test_eq_binary
+OK1: human!=hello
+OK2: human==human
+OK3: human!=json
+exit: 0
+```
+
+### Test binary: Bug B (struct field string ==)
+```
+$ /tmp/test_struct_binary
+OK1: human!=json
+OK2: human==human
+OK3: struct field human!=json
+exit: 0
+```
+
+### Symbol check
+```
+$ nm /tmp/test_eq_binary | grep rt_string_eq
+0000000000401644 T rt_string_eq    ← T (strong), not W (weak)
+```
+
+### Fix trace
+- **Bug A (length-only compare):** Fixed in `src/compiler_rust/compiler/src/codegen/instr/core.rs`
+  in commits between 2026-05-15 and 2026-05-28 (git log shows `core.rs` mtime 2026-05-28 11:22).
+  `compile_binop` now routes `BinOp::Eq` with STRING type through
+  `compile_text_eq_with_identity_fast_path` → `call_runtime_2("rt_string_eq", ...)`.
+- **Bug B (struct field == always true):** Fixed by the same change. `build_vreg_types` in
+  `body.rs` correctly propagates `TypeId::STRING` from `MirInst::FieldGet { field_type }`,
+  so the text fast-path is taken for struct field string comparisons too.
+- **Runtime:** `rt_string_eq` added to `src/runtime/runtime_native.c` (mtime 2026-05-28 08:57)
+  and registered in `src/compiler_rust/compiler/src/codegen/runtime_sffi.rs` line 345.
+
+### Latent note: duplicate `rt_native_eq` in `runtime_equality.c`
+`runtime_equality.c` defines its own `rt_native_eq` (tag-heap approach), conflicting
+with the one in `runtime_native.c` (RtCoreString registry approach). However
+`runtime_equality.c` is NOT compiled into the core-c-bootstrap runtime archive
+(`build_core_c_runtime_library` in `tools.rs` only lists `runtime_native.c`,
+`runtime_legacy_core.c`, `runtime_mcp_core.c`, `runtime_simd_utf8.c`). So there is
+no ODR conflict in the actual build. Cleanup is a low-priority housekeeping item.
+
+## Latent: .spl textual MIR-to-LLVM backend (2026-05-29)
+
+The .spl `mir_to_llvm_part2_part1.spl` `Eq`/`Ne` cases use `icmp eq`/`icmp ne`
+on the raw LLVM value. In the MIR type system, strings are `Ptr(I8, false)` →
+LLVM `ptr`, so `icmp eq ptr` compares pointer addresses (identity), not string
+content. However, `rt_native_eq` cannot be used here because it operates on
+boxed `i64` RuntimeValues, not raw `ptr`. A correct fix for the textual backend
+requires either:
+1. Lowering string `==` to a `call @rt_string_eq(ptr, ptr)` (needs a ptr-based
+   string comparison runtime function), or
+2. Ensuring MIR lowering emits explicit string-equality calls before the backend
+   sees a pointer `Eq` instruction.
+
+**Production impact:** Verified that `native-build` uses the Rust seed's inkwell
+LLVM backend (which correctly calls `rt_native_eq`), NOT this textual path.
+Whether the textual `MirToLlvm` path (`driver_bootstrap.spl`) is exercised in
+actual bootstrap workflows is unconfirmed. Treat this as a latent correctness
+issue in the textual backend — it WILL miscompile `ptr` equality if reached.
+
+## Proposed fix (string equality only — HISTORICAL, no longer needed)
 
 The codegen (in the Rust seed) needs to emit calls to `rt_native_eq` for string
 operands instead of generating inline comparison. The function exists in

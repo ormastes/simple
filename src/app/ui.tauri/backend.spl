@@ -10,9 +10,15 @@ use common.ui.capability.{Capability, NotSupported}
 use common.ui.capability_policy.{CapabilityPolicy, require_capability}
 use common.ui.web_render_api.{
     WEB_RENDER_TARGET_TAURI,
+    WebRenderPatchEnvelope,
     WebRenderRequest,
+    WebRenderSnapshotEnvelope,
     web_render_body_html,
     web_render_capabilities_for_target,
+    web_render_input_envelope_from_event,
+    web_render_input_envelope_to_json,
+    web_render_patch_envelope_to_json,
+    web_render_snapshot_envelope_to_json,
     web_render_to_artifact
 }
 use app.ui.render.html_widgets.{render_html_tree}
@@ -20,6 +26,13 @@ use app.ui.web.html.{generate_css}
 use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_notification, build_ipc_dialog}
 
 extern fn rt_stdin_read_line() -> text?
+
+fn tauri_render_ipc_json(state: UIState, viewport_w: i32, viewport_h: i32) -> text:
+    val theme = state.tree.theme_name()
+    val css = generate_css(theme)
+    val body_html = render_html_tree(state.tree.root_node(), state)
+    val req = WebRenderRequest.html(WEB_RENDER_TARGET_TAURI, "", body_html, css, "", viewport_w, viewport_h)
+    web_render_to_artifact(req).ipc_json
 
 # =========================================================================
 # Tauri Backend
@@ -56,11 +69,7 @@ class TauriBackend:
     # --- Rendering ---
 
     fn render(state: UIState) -> Result<bool, text>:
-        val theme = state.tree.theme_name()
-        val css = generate_css(theme)
-        val body_html = render_html_tree(state.tree.root_node(), state)
-        val req = WebRenderRequest.html(WEB_RENDER_TARGET_TAURI, "", body_html, css, "", self.viewport_width(), self.viewport_height())
-        print web_render_to_artifact(req).ipc_json
+        print tauri_render_ipc_json(state, self.viewport_width(), self.viewport_height())
         return Ok(true)
 
     fn render_html(state: UIState) -> text:
@@ -77,6 +86,16 @@ class TauriBackend:
         if line == "":
             return nil
         return parse_ipc_message(line)
+
+    fn input_envelope_json(surface_id: text, event: UIEvent) -> text:
+        val env = web_render_input_envelope_from_event(WEB_RENDER_TARGET_TAURI, surface_id, event)
+        web_render_input_envelope_to_json(env)
+
+    fn snapshot_envelope_json(surface_id: text, revision: u64, snapshot_json: text) -> text:
+        web_render_snapshot_envelope_to_json(WebRenderSnapshotEnvelope(target: WEB_RENDER_TARGET_TAURI, surface_id: surface_id, revision: revision, snapshot_json: snapshot_json))
+
+    fn patch_envelope_json(surface_id: text, from_sequence: u64, to_sequence: u64, patches_json: text, snapshot_json: text) -> text:
+        web_render_patch_envelope_to_json(WebRenderPatchEnvelope(target: WEB_RENDER_TARGET_TAURI, surface_id: surface_id, from_sequence: from_sequence, to_sequence: to_sequence, patches_json: patches_json, snapshot_json: snapshot_json))
 
     # --- Capabilities ---
 
