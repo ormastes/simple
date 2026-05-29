@@ -11,6 +11,16 @@
 # Usage:
 #   use std.gpu.engine2d.metal_session.{MetalSession}
 
+use std.gpu.engine2d.backend_metal_msl.{_engine2d_msl}
+use std.nogc_sync_mut.io.metal_sffi.{
+    metal_sffi_init, metal_sffi_is_available, metal_sffi_device_count,
+    metal_sffi_create_device, metal_sffi_destroy_device,
+    metal_sffi_create_command_queue, metal_sffi_destroy_command_queue,
+    metal_sffi_compile_shader, metal_sffi_destroy_shader,
+    metal_sffi_create_compute_pipeline, metal_sffi_destroy_pipeline,
+    metal_last_error
+}
+
 # ============================================================================
 # MetalSession
 # ============================================================================
@@ -28,8 +38,9 @@ class MetalSession:
           ...
           s.release()   # each backend calls release() in shutdown()
 
-    init() returns false until the native runtime path is re-enabled after the
-    pure Simple renderer is complete. error_code() exposes the failure code.
+    init() is fully owned by Simple: it probes the seeded runtime functions,
+    creates the Metal device/queue, compiles the Engine2D MSL, and creates the
+    compute pipelines used by MetalBackend.
     """
 
     device: i64               # MTLDevice handle
@@ -73,16 +84,50 @@ class MetalSession:
         )
 
     me init() -> bool:
-        """Pure-Simple Metal probe facade.
-
-        Native Metal is intentionally not initialized from Simple yet. The
-        Engine2D Metal backend can still be probed and can fail cleanly, while
-        callers fall back to software/CPU until the Rust/native runtime path is
-        enabled after the pure Simple renderer is complete.
-        """
+        """Initialize the Simple-owned Metal session through seeded SFFI calls."""
         self._cleanup()
-        self.last_error = 1
-        false
+        if not metal_sffi_is_available():
+            self.last_error = 1
+            return false
+        if not metal_sffi_init():
+            self.last_error = 2
+            return false
+        if metal_sffi_device_count() <= 0:
+            self.last_error = 3
+            return false
+        self.device = metal_sffi_create_device(0)
+        if self.device == 0:
+            self.last_error = 4
+            return false
+        self.command_queue = metal_sffi_create_command_queue(self.device)
+        if self.command_queue == 0:
+            self.last_error = 5
+            self._cleanup()
+            return false
+        self.shader_lib = metal_sffi_compile_shader(self.device, _engine2d_msl())
+        if self.shader_lib == 0:
+            self.last_error = 6
+            self._cleanup()
+            return false
+        self.pipe_clear = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_clear")
+        self.pipe_rect_filled = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_filled")
+        self.pipe_rect_outline = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_outline")
+        self.pipe_line = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_line")
+        self.pipe_circle = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle")
+        self.pipe_circle_filled = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle_filled")
+        self.pipe_rounded_rect = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rounded_rect")
+        self.pipe_triangle = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_triangle_filled")
+        self.pipe_gradient = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_gradient_rect")
+        self.pipe_blit = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_blit_image")
+        if self.pipe_clear == 0 or self.pipe_rect_filled == 0 or self.pipe_rect_outline == 0 or self.pipe_line == 0 or self.pipe_circle == 0 or self.pipe_circle_filled == 0 or self.pipe_rounded_rect == 0 or self.pipe_triangle == 0 or self.pipe_gradient == 0 or self.pipe_blit == 0:
+            self.last_error = 7
+            self._cleanup()
+            return false
+        self.ref_count = 1
+        self.is_initialized = true
+        self.last_error = 0
+        self.generation = self.generation + 1
+        true
 
     me retain() -> MetalSession:
         """Increment the reference count and return self for convenient assignment."""
@@ -104,7 +149,33 @@ class MetalSession:
         self.last_error
 
     me _cleanup():
-        """Reset all tracked GPU handles."""
+        """Destroy and reset all tracked GPU handles."""
+        if self.pipe_clear != 0:
+            metal_sffi_destroy_pipeline(self.pipe_clear)
+        if self.pipe_rect_filled != 0:
+            metal_sffi_destroy_pipeline(self.pipe_rect_filled)
+        if self.pipe_rect_outline != 0:
+            metal_sffi_destroy_pipeline(self.pipe_rect_outline)
+        if self.pipe_line != 0:
+            metal_sffi_destroy_pipeline(self.pipe_line)
+        if self.pipe_circle != 0:
+            metal_sffi_destroy_pipeline(self.pipe_circle)
+        if self.pipe_circle_filled != 0:
+            metal_sffi_destroy_pipeline(self.pipe_circle_filled)
+        if self.pipe_rounded_rect != 0:
+            metal_sffi_destroy_pipeline(self.pipe_rounded_rect)
+        if self.pipe_triangle != 0:
+            metal_sffi_destroy_pipeline(self.pipe_triangle)
+        if self.pipe_gradient != 0:
+            metal_sffi_destroy_pipeline(self.pipe_gradient)
+        if self.pipe_blit != 0:
+            metal_sffi_destroy_pipeline(self.pipe_blit)
+        if self.shader_lib != 0:
+            metal_sffi_destroy_shader(self.shader_lib)
+        if self.command_queue != 0:
+            metal_sffi_destroy_command_queue(self.command_queue)
+        if self.device != 0:
+            metal_sffi_destroy_device(self.device)
         self.pipe_clear = 0
         self.pipe_rect_filled = 0
         self.pipe_rect_outline = 0

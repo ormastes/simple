@@ -202,6 +202,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_gpu_")
         || name.starts_with("rt_cuda_")
         || name.starts_with("rt_vk_")
+        || name.starts_with("rt_metal_")
         || name.starts_with("rt_cranelift_")
         || name.starts_with("rt_par_")
     {

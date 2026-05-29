@@ -140,6 +140,18 @@ use simple_runtime::cuda_runtime::{
     rt_cuda_module_get_function, rt_cuda_module_load, rt_cuda_module_load_data, rt_cuda_module_unload, rt_cuda_sync,
 };
 
+use simple_runtime::metal_graphics_runtime::{
+    rt_metal_alloc_buffer, rt_metal_buffer_download, rt_metal_buffer_upload,
+    rt_metal_commit_command_buffer, rt_metal_compile_shader, rt_metal_create_command_buffer,
+    rt_metal_create_command_queue, rt_metal_create_compute_encoder, rt_metal_create_compute_pipeline,
+    rt_metal_create_device, rt_metal_destroy_command_queue, rt_metal_destroy_device,
+    rt_metal_destroy_pipeline, rt_metal_destroy_shader, rt_metal_dispatch_compute,
+    rt_metal_end_compute_encoder, rt_metal_free_buffer, rt_metal_get_last_error,
+    rt_metal_init, rt_metal_is_available, rt_metal_run_blit_frame,
+    rt_metal_run_compute_frame, rt_metal_set_buffer, rt_metal_set_bytes,
+    rt_metal_wait_completed,
+};
+
 fn arg_i64(args: &[Value], index: usize, name: &str, expected: usize) -> Result<i64, CompileError> {
     args.get(index)
         .ok_or_else(|| {
@@ -180,6 +192,207 @@ fn c_ptr_to_string(ptr: *const std::os::raw::c_char) -> String {
     } else {
         unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
     }
+}
+
+fn arg_bytes_ptr(args: &[Value], index: usize, name: &str, expected: usize) -> Result<(Vec<u8>, i64), CompileError> {
+    let value = args.get(index).ok_or_else(|| {
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help(format!("{name} requires exactly {expected} argument(s)"));
+        CompileError::semantic_with_context(format!("{name} expects {expected} arguments"), ctx)
+    })?;
+    match value {
+        Value::Array(items) | Value::FrozenArray(items) => {
+            let mut bytes = Vec::with_capacity(items.len());
+            for item in items.iter() {
+                bytes.push(item.as_int()? as u8);
+            }
+            let ptr = bytes.as_ptr() as i64;
+            Ok((bytes, ptr))
+        }
+        Value::FixedSizeArray { data, .. } => {
+            let mut bytes = Vec::with_capacity(data.len());
+            for item in data.iter() {
+                bytes.push(item.as_int()? as u8);
+            }
+            let ptr = bytes.as_ptr() as i64;
+            Ok((bytes, ptr))
+        }
+        Value::Int(ptr) => Ok((Vec::new(), *ptr)),
+        other => Err(CompileError::semantic(format!(
+            "{name} argument {index} must be [u8] or raw pointer, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+pub fn rt_metal_is_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_is_available()))
+}
+
+pub fn rt_metal_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_init()))
+}
+
+pub fn rt_metal_create_device_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_create_device(arg_i64(args, 0, "rt_metal_create_device", 1)?)))
+}
+
+pub fn rt_metal_destroy_device_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_destroy_device(arg_i64(args, 0, "rt_metal_destroy_device", 1)?)))
+}
+
+pub fn rt_metal_create_command_queue_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_create_command_queue(arg_i64(args, 0, "rt_metal_create_command_queue", 1)?)))
+}
+
+pub fn rt_metal_destroy_command_queue_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_destroy_command_queue(arg_i64(args, 0, "rt_metal_destroy_command_queue", 1)?)))
+}
+
+pub fn rt_metal_alloc_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_alloc_buffer(
+        arg_i64(args, 0, "rt_metal_alloc_buffer", 2)?,
+        arg_i64(args, 1, "rt_metal_alloc_buffer", 2)?,
+    )))
+}
+
+pub fn rt_metal_free_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_free_buffer(arg_i64(args, 0, "rt_metal_free_buffer", 1)?)))
+}
+
+pub fn rt_metal_buffer_upload_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let (_bytes, ptr) = arg_bytes_ptr(args, 1, "rt_metal_buffer_upload", 3)?;
+    Ok(Value::Int(rt_metal_buffer_upload(
+        arg_i64(args, 0, "rt_metal_buffer_upload", 3)?,
+        ptr,
+        arg_i64(args, 2, "rt_metal_buffer_upload", 3)?,
+    )))
+}
+
+pub fn rt_metal_buffer_download_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let (_bytes, ptr) = arg_bytes_ptr(args, 0, "rt_metal_buffer_download", 3)?;
+    Ok(Value::Int(rt_metal_buffer_download(
+        ptr,
+        arg_i64(args, 1, "rt_metal_buffer_download", 3)?,
+        arg_i64(args, 2, "rt_metal_buffer_download", 3)?,
+    )))
+}
+
+pub fn rt_metal_compile_shader_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let source = c_string_or_error(arg_text(args, 1, "rt_metal_compile_shader", 2)?, "rt_metal_compile_shader")?;
+    Ok(Value::Int(rt_metal_compile_shader(
+        arg_i64(args, 0, "rt_metal_compile_shader", 2)?,
+        source.as_ptr() as i64,
+    )))
+}
+
+pub fn rt_metal_destroy_shader_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_destroy_shader(arg_i64(args, 0, "rt_metal_destroy_shader", 1)?)))
+}
+
+pub fn rt_metal_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let entry = c_string_or_error(arg_text(args, 2, "rt_metal_create_compute_pipeline", 3)?, "rt_metal_create_compute_pipeline")?;
+    Ok(Value::Int(rt_metal_create_compute_pipeline(
+        arg_i64(args, 0, "rt_metal_create_compute_pipeline", 3)?,
+        arg_i64(args, 1, "rt_metal_create_compute_pipeline", 3)?,
+        entry.as_ptr() as i64,
+    )))
+}
+
+pub fn rt_metal_destroy_pipeline_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_destroy_pipeline(arg_i64(args, 0, "rt_metal_destroy_pipeline", 1)?)))
+}
+
+pub fn rt_metal_create_command_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_create_command_buffer(arg_i64(args, 0, "rt_metal_create_command_buffer", 1)?)))
+}
+
+pub fn rt_metal_create_compute_encoder_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_create_compute_encoder(arg_i64(args, 0, "rt_metal_create_compute_encoder", 1)?)))
+}
+
+pub fn rt_metal_set_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_set_buffer(
+        arg_i64(args, 0, "rt_metal_set_buffer", 4)?,
+        arg_i64(args, 1, "rt_metal_set_buffer", 4)?,
+        arg_i64(args, 2, "rt_metal_set_buffer", 4)?,
+        arg_i64(args, 3, "rt_metal_set_buffer", 4)?,
+    )))
+}
+
+pub fn rt_metal_set_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let (_bytes, ptr) = arg_bytes_ptr(args, 1, "rt_metal_set_bytes", 4)?;
+    Ok(Value::Int(rt_metal_set_bytes(
+        arg_i64(args, 0, "rt_metal_set_bytes", 4)?,
+        ptr,
+        arg_i64(args, 2, "rt_metal_set_bytes", 4)?,
+        arg_i64(args, 3, "rt_metal_set_bytes", 4)?,
+    )))
+}
+
+pub fn rt_metal_dispatch_compute_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_dispatch_compute(
+        arg_i64(args, 0, "rt_metal_dispatch_compute", 8)?,
+        arg_i64(args, 1, "rt_metal_dispatch_compute", 8)?,
+        arg_i64(args, 2, "rt_metal_dispatch_compute", 8)?,
+        arg_i64(args, 3, "rt_metal_dispatch_compute", 8)?,
+        arg_i64(args, 4, "rt_metal_dispatch_compute", 8)?,
+        arg_i64(args, 5, "rt_metal_dispatch_compute", 8)?,
+        arg_i64(args, 6, "rt_metal_dispatch_compute", 8)?,
+        arg_i64(args, 7, "rt_metal_dispatch_compute", 8)?,
+    )))
+}
+
+pub fn rt_metal_end_compute_encoder_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_end_compute_encoder(arg_i64(args, 0, "rt_metal_end_compute_encoder", 1)?)))
+}
+
+pub fn rt_metal_commit_command_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_commit_command_buffer(arg_i64(args, 0, "rt_metal_commit_command_buffer", 1)?)))
+}
+
+pub fn rt_metal_wait_completed_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_wait_completed(arg_i64(args, 0, "rt_metal_wait_completed", 1)?)))
+}
+
+pub fn rt_metal_get_last_error_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Str(c_ptr_to_string(rt_metal_get_last_error())))
+}
+
+pub fn rt_metal_run_compute_frame_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_run_compute_frame(
+        arg_i64(args, 0, "rt_metal_run_compute_frame", 12)?,
+        arg_i64(args, 1, "rt_metal_run_compute_frame", 12)?,
+        arg_i64(args, 2, "rt_metal_run_compute_frame", 12)?,
+        arg_i64(args, 3, "rt_metal_run_compute_frame", 12)?,
+        arg_i64(args, 4, "rt_metal_run_compute_frame", 12)?,
+        arg_i64(args, 5, "rt_metal_run_compute_frame", 12)?,
+        arg_i64(args, 6, "rt_metal_run_compute_frame", 12)?,
+        arg_i64(args, 7, "rt_metal_run_compute_frame", 12)?,
+        arg_i64(args, 8, "rt_metal_run_compute_frame", 12)?,
+        arg_i64(args, 9, "rt_metal_run_compute_frame", 12)?,
+        arg_i64(args, 10, "rt_metal_run_compute_frame", 12)?,
+        arg_i64(args, 11, "rt_metal_run_compute_frame", 12)?,
+    )))
+}
+
+pub fn rt_metal_run_blit_frame_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_run_blit_frame(
+        arg_i64(args, 0, "rt_metal_run_blit_frame", 13)?,
+        arg_i64(args, 1, "rt_metal_run_blit_frame", 13)?,
+        arg_i64(args, 2, "rt_metal_run_blit_frame", 13)?,
+        arg_i64(args, 3, "rt_metal_run_blit_frame", 13)?,
+        arg_i64(args, 4, "rt_metal_run_blit_frame", 13)?,
+        arg_i64(args, 5, "rt_metal_run_blit_frame", 13)?,
+        arg_i64(args, 6, "rt_metal_run_blit_frame", 13)?,
+        arg_i64(args, 7, "rt_metal_run_blit_frame", 13)?,
+        arg_i64(args, 8, "rt_metal_run_blit_frame", 13)?,
+        arg_i64(args, 9, "rt_metal_run_blit_frame", 13)?,
+        arg_i64(args, 10, "rt_metal_run_blit_frame", 13)?,
+        arg_i64(args, 11, "rt_metal_run_blit_frame", 13)?,
+        arg_i64(args, 12, "rt_metal_run_blit_frame", 13)?,
+    )))
 }
 
 pub fn rt_cuda_available_fn(_args: &[Value]) -> Result<Value, CompileError> {

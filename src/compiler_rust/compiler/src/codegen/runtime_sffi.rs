@@ -37,6 +37,7 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("rt_neighbor_load")
         || name.starts_with("rt_gpu_")
         || name.starts_with("rt_vk_")
+        || name.starts_with("rt_metal_")
         || name.starts_with("rt_cranelift_")
         || name.starts_with("rt_par_")
         || name.starts_with("rt_simd_")
@@ -873,6 +874,60 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vk_cmd_draw_indexed", &[I64, I32, I32, I32, I32, I32], &[I32]), // cmd, idx, inst, first_idx, vert_off, first_inst -> status
     RuntimeFuncSpec::new("rt_vk_cmd_set_viewport", &[I64, F64, F64, F64, F64], &[I32]), // cmd, x, y, w, h -> status
     RuntimeFuncSpec::new("rt_vk_cmd_set_scissor", &[I64, I32, I32, I32, I32], &[I32]),  // cmd, x, y, w, h -> status
+    // Metal GPU backend operations
+    RuntimeFuncSpec::new("rt_metal_init", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_is_available", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_device_count", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_device_name", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_device_memory", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_create_device", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_destroy_device", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_alloc_buffer", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_free_buffer", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_buffer_upload", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_buffer_download", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_compile_shader", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_destroy_shader", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_create_compute_pipeline", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_destroy_pipeline", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_dispatch_compute", &[I64, I64, I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_create_render_pipeline", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_destroy_render_pipeline", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_create_texture", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_free_texture", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_begin_render_pass", &[I64, I64, F64, F64, F64, F64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_end_render_pass", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_draw_indexed", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_draw_primitives", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_create_command_queue", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_destroy_command_queue", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_create_command_buffer", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_commit_command_buffer", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_wait_completed", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_create_compute_encoder", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_end_compute_encoder", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_set_buffer", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_set_bytes", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_get_last_error", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_create_sampler", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_destroy_sampler", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_set_viewport", &[I64, F64, F64, F64, F64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_set_scissor", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_create_swapchain", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_destroy_swapchain", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_present", &[I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_metal_run_blit_frame",
+        &[
+            I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64,
+        ],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new(
+        "rt_metal_run_compute_frame",
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
     // =========================================================================
     // Parallel iterator operations (#415)
     // =========================================================================
@@ -1586,6 +1641,7 @@ mod tests {
         assert_eq!(tier_of("rt_vec_sum"), Ext);
         assert_eq!(tier_of("rt_gpu_barrier"), Ext);
         assert_eq!(tier_of("rt_vk_available"), Ext);
+        assert_eq!(tier_of("rt_metal_is_available"), Ext);
         assert_eq!(tier_of("rt_cranelift_module_new"), Ext);
         assert_eq!(tier_of("rt_par_map"), Ext);
         assert_eq!(tier_of("rt_simd_aes_round_u8x16"), Ext);
