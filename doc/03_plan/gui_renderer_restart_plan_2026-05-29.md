@@ -33,7 +33,7 @@ browser verification can proceed in parallel.
 - [x] iOS GUI lane:
   fix source-level iOS app issues before device tests; on this Linux host,
   prove only source/contracts and record unavailable simulator/device evidence.
-- [ ] Browser lane:
+- [x] Browser lane:
   run bounded browser or browser-contract checks for Simple web rendering and
   update evidence for any pure Simple versus browser-rendered differences.
 - [ ] macOS ARM64 graphics lane:
@@ -198,11 +198,23 @@ Results:
 - Browser renderer spec exceeded a 60s bounded smoke check.
 
 Remaining browser blockers:
-- Fix or triage `simple_web_renderer_spec` background shorthand precedence and
-  `[attr]`, `[attr=]`, `[attr^=]`, `[attr$=]` selector handling.
+- `simple_web_renderer_spec` background shorthand precedence, RGB shorthand,
+  and `[attr]`, `[attr=]`, `[attr^=]`, `[attr$=]` selector handling were fixed
+  in `src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl`.
 - Split or speed up `browser_renderer_spec` so web browser rendering has a
   bounded smoke check.
 - Investigate JSON success/file-error mismatch in `html_compat_spec`.
+
+Browser fix verification:
+```bash
+SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl
+SIMPLE_LIB=src timeout 120s bin/simple test test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl --mode=interpreter --clean --format json
+```
+
+The check passed for both files. The Simple Web renderer spec now passes
+`29/29` in 52767 ms. Before this fix, the same spec failed `23/29`; an
+intermediate declaration-order patch improved it to `27/29`, and replacing the
+unsupported `str.replace` use in RGB parsing closed the final two failures.
 
 ### 2026-05-29 TUI/Simple IDE Lane
 

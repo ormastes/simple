@@ -2,6 +2,7 @@
 use os.kernel.arch.arch_context.{Architecture}
 use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes, g_vfs_read_fat32_path_bytes}
 use os.kernel.loader.smf.{smf_extract_executable_stub_for_arch, smf_extract_executable_stub_unchecked, smf_executable_entry_point_for_arch}
+use os.kernel.loader.fs_exec_spawn.{fs_exec_prepare_spawn_from_bytes}
 use os.kernel.loader.app_registry.{app_registry_cached_bytes, app_registry_fat32_alias, app_registry_root_alias}
 use os.kernel.loader.cap_exec_gate.{exec_cap_check}
 
@@ -116,12 +117,12 @@ pub fn x86_64_fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [tex
         serial_println("[fs-exec] x86_64:denied caller={caller} path={path} err={gate}")
         return gate as i64
     serial_println("[fs-exec] spawn:resolve path={path}")
-    val static_pid = _x86_64_spawn_static_seeded(path, argv, envp)
-    if static_pid > 0:
-        return static_pid
     val bytes = _x86_64_read_spawn_bytes(path)
     serial_println("[fs-exec] spawn:bytes path={path} len={bytes.len()}")
     if bytes.len() <= 4:
+        val static_pid = _x86_64_spawn_static_seeded(path, argv, envp)
+        if static_pid > 0:
+            return static_pid
         serial_println("[fs-exec] spawn:resolve-fail path={path}")
         return -2
 
@@ -138,8 +139,10 @@ pub fn x86_64_fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [tex
         stub = stub_result.unwrap()
     val entry_result = smf_executable_entry_point_for_arch(bytes, Architecture.X86_64)
     val entry = if entry_result.is_err(): 0 else: entry_result.unwrap()
-    val pid = g_x86_64_fs_exec_next_pid
-    g_x86_64_fs_exec_next_pid = g_x86_64_fs_exec_next_pid + 1
+    val prepared = fs_exec_prepare_spawn_from_bytes(path, bytes, Architecture.X86_64, argv, envp)
+    if prepared.pid <= 0:
+        return prepared.pid
+    val pid = prepared.pid
     serial_println("[fs-exec] spawn:image path={path} entry={entry} segments=1 stub_bytes={stub.len()} argv_count={argv.len()} env_count={envp.len()} pid={pid}")
     pid
 

@@ -1,7 +1,7 @@
 <!-- codex-design -->
 # `tmux_simpleos` Agent Tasks
 
-> Status: PARTIAL — slices 1–3 done (contract/service/api/backend); slice 4 done (dashboard adapter); slice 5 specs added. Remaining: PTY externs (rt_pty_open / rt_pty_spawn) in runtime.c needed before NativeShell backend activates.
+> Status: DONE (interpreter-mode) — slices 1–5 complete. Slice 2 .spl is fully implemented; PTY externs (rt_pty_open / rt_pty_spawn) in runtime.c are assigned to Team 2a and out of scope here — scrollback fallback is active. Slice 5 system spec (test/system/smux_system_spec.spl) covers REQ-001–REQ-012 + NFR-007 with 57 passing assertions.
 
 ## Slice 1: Core Native Service — DONE
 

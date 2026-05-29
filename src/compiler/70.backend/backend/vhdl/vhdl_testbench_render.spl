@@ -57,7 +57,7 @@ class GhdlResult:
     phase: text
     passed: bool
     stderr_capture: text
-    exit_code: int
+    exit_code: i64
 
     me is_analyze() -> bool:
         return self.phase == "analyze"
@@ -74,7 +74,7 @@ class GhdlResult:
     me to_text() -> text:
         if self.passed:
             return "GHDL " + self.phase + ": OK"
-        return "GHDL " + self.phase + ": FAIL exit=" + self.exit_code.to_text()
+        return "GHDL " + self.phase + ": FAIL exit={self.exit_code}"
 
     static fn ok(p: text) -> GhdlResult:
         return GhdlResult(
@@ -84,7 +84,7 @@ class GhdlResult:
             exit_code: 0
         )
 
-    static fn fail(p: text, err: text, code: int) -> GhdlResult:
+    static fn fail(p: text, err: text, code: i64) -> GhdlResult:
         return GhdlResult(
             phase: p,
             passed: false,
@@ -129,37 +129,47 @@ fn _ghdl_available() -> bool:
 
 fn _ghdl_run_phase(phase: text, phase_args: [text]) -> GhdlResult:
     """Run one GHDL phase and return a GhdlResult."""
-    val (stdout, stderr, code_i64) = rt_process_run("ghdl", phase_args)
-    val code = code_i64.to_text().to_int()
+    val (stdout, stderr, code) = rt_process_run("ghdl", phase_args)
     if code == 0:
         return GhdlResult.ok(phase)
     return GhdlResult.fail(phase, stderr, code)
+
+fn _ghdl_workdir_from_path(vhdl_path: text) -> text:
+    """Extract the directory portion of vhdl_path for use as --workdir."""
+    val last_slash = vhdl_path.last_index_of("/")
+    if last_slash < 0:
+        return "."
+    return vhdl_path.substring(0, last_slash)
 
 fn run_vhdl_testbench_with_ghdl(vhdl_path: text, entity_name: text) -> GhdlResult:
     """
     Run a rendered VHDL testbench through GHDL analyze/elaborate/run phases.
 
     Phases:
-      analyze   — ghdl -a <vhdl_path>
-      elaborate — ghdl -e <entity_name>
-      run       — ghdl -r <entity_name>
+      analyze   — ghdl -a --workdir=<dir> <vhdl_path>
+      elaborate — ghdl -e --workdir=<dir> <entity_name>
+      run       — ghdl -r --workdir=<dir> <entity_name>
 
-    Returns a GhdlResult for the first failing phase, or the run-phase
-    GhdlResult on full success. If GHDL is not installed, returns a failure
-    result for the analyze phase without crashing.
+    --workdir scopes GHDL library files to the VHDL file's own directory so
+    CWD is never polluted. Returns the first failing phase result, or the
+    run-phase result on full success. Returns an analyze-phase failure
+    if GHDL is not installed.
     """
     if not _ghdl_available():
-        return GhdlResult.fail("analyze", "ghdl not found on PATH", 127)
+        return GhdlResult.fail("analyze", "ghdl not found on PATH", 127i64)
 
-    val analyze_result = _ghdl_run_phase("analyze", ["-a", vhdl_path])
+    val workdir = _ghdl_workdir_from_path(vhdl_path)
+    val workdir_flag = "--workdir=" + workdir
+
+    val analyze_result = _ghdl_run_phase("analyze", ["-a", workdir_flag, vhdl_path])
     if analyze_result.is_failure():
         return analyze_result
 
-    val elaborate_result = _ghdl_run_phase("elaborate", ["-e", entity_name])
+    val elaborate_result = _ghdl_run_phase("elaborate", ["-e", workdir_flag, entity_name])
     if elaborate_result.is_failure():
         return elaborate_result
 
-    return _ghdl_run_phase("run", ["-r", entity_name])
+    return _ghdl_run_phase("run", ["-r", workdir_flag, entity_name])
 
 
 fn run_vhdl_testbench_artifact_with_ghdl(artifact_entity: text, vhdl_text: text, work_dir: text) -> GhdlResult:
@@ -168,10 +178,11 @@ fn run_vhdl_testbench_artifact_with_ghdl(artifact_entity: text, vhdl_text: text,
 
     This helper is the primary entry point for the testbench pipeline:
     it takes a VhdlTestbenchArtifact's fields and handles the file write
-    before delegating to run_vhdl_testbench_with_ghdl.
+    before delegating to run_vhdl_testbench_with_ghdl. GHDL library files
+    are scoped to work_dir via --workdir so CWD is never polluted.
     """
     val vhdl_path = work_dir + "/" + artifact_entity + ".vhd"
     val wrote = rt_file_write_text(vhdl_path, vhdl_text)
     if not wrote:
-        return GhdlResult.fail("analyze", "failed to write VHDL to " + vhdl_path, 1)
+        return GhdlResult.fail("analyze", "failed to write VHDL to " + vhdl_path, 1i64)
     return run_vhdl_testbench_with_ghdl(vhdl_path, artifact_entity)

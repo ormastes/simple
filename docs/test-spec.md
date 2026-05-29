@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-29 11:13:03*
+*Generated: 2026-05-29 11:19:50*
 
-## test/unit/lib/gc_async_mut/gpu/browser_engine
+## test/unit/os/tls13
 
-❌ **simple_web_renderer_spec.spl** (55032ms)
-  - Source: `test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl`
-  - Generated doc: `spec/simple_web_renderer_spec.md`
+❌ **key_update_spec.spl** (335ms)
+  - Source: `test/unit/os/tls13/key_update_spec.spl`
+  - Generated doc: `spec/key_update_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 27 ✅
-- **Failed:** 2 ❌
-- **Duration:** 55036ms
+- **Passed:** 15 ✅
+- **Failed:** 1 ❌
+- **Duration:** 340ms

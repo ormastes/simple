@@ -1,7 +1,8 @@
 # SimpleOS In-Guest Toolchain Execution Gap
 
 Date: 2026-05-05
-Status: Open
+Status: Open — kernel task preparation improved 2026-05-29; real compiler
+payloads and live compiler-operation proof remain open.
 
 ## Problem
 
@@ -54,17 +55,19 @@ execution is possible. Neither is addressable in pure Simple today.
 
 ### Blocker 1 — Kernel exec control transfer not wired (x86_64)
 
-`src/os/kernel/loader/x86_64_fs_exec_spawn.spl` implements two spawn paths:
+Earlier on 2026-05-29, `src/os/kernel/loader/x86_64_fs_exec_spawn.spl`
+implemented two spawn paths:
 
 - **Static-seeded path** (`_x86_64_spawn_static_seeded`): reads a hardcoded
   stub size, prints `spawn:image` and `spawn:bytes` serial markers, bumps
   `g_x86_64_fs_exec_next_pid`, and returns the PID. No bytes are loaded from
   FAT32; no process image is built; no task is scheduled.
-- **Full VFS path** (`x86_64_fs_exec_spawn_as`): reads SMF bytes from FAT32,
-  validates the ELF stub via `smf_extract_executable_stub_for_arch`, prints
-  `spawn:image`, and returns the PID. A task struct is never constructed;
-  `build_user_process_image_unchecked` and `scheduler_create_bootstrap_user_task_pid`
-  are never called from the x86_64 path.
+- **Full VFS path** (`x86_64_fs_exec_spawn_as`): read SMF bytes from FAT32,
+  validated the ELF stub via `smf_extract_executable_stub_for_arch`, printed
+  `spawn:image`, and returned the PID. A task struct was never constructed;
+  `build_user_process_image_unchecked` and
+  `scheduler_create_bootstrap_user_task_pid` were never called from the
+  x86_64 path.
 
 The shared path in `src/os/kernel/loader/fs_exec_spawn.spl` does call
 `build_user_process_image_unchecked` + `scheduler_create_bootstrap_user_task_pid`
@@ -73,9 +76,28 @@ after receiving the PID — the "optional live handoff hook" described in the
 file header is not wired for x86_64 or any other architecture (ARM64 confirms
 this: `arm64_fs_exec_spawn` also returns `prepared.pid` with no handoff call).
 
-Fix required: wire the x86_64 spawn path to call `fs_exec_prepare_spawn` (the
-shared path) and add the arch-specific handoff that context-switches into the
-newly created task. This is kernel-level work.
+Progress 2026-05-29: `fs_exec_prepare_spawn_from_bytes(...)` now lets
+architecture-specific loaders reuse the shared process-image and scheduler-task
+registration path after they have resolved executable bytes through their own
+aliases/caches. The real-byte x86_64 path now calls that helper, so a VFS/FAT32
+SMF hit builds a user process image and bootstrap scheduler task before
+returning the PID. The synthetic seeded fallback remains only for host/unit
+cases where no mounted VFS bytes are available.
+
+Focused evidence:
+
+```
+SIMPLE_LIB=src bin/simple check src/os/kernel/loader/fs_exec_spawn.spl src/os/kernel/loader/x86_64_fs_exec_spawn.spl test/unit/os/kernel/loader/x86_64_fs_exec_spawn_spec.spl
+SIMPLE_LIB=src bin/simple test test/unit/os/kernel/loader/x86_64_fs_exec_spawn_spec.spl --mode=interpreter --clean --format json
+SIMPLE_LIB=src bin/simple test test/system/os/port/x86_64_elf_load_spec.spl --mode=interpreter --clean --format json
+```
+
+Results: check passed; `x86_64_fs_exec_spawn_spec.spl` passed `2/2`;
+`x86_64_elf_load_spec.spl` passed `1/1`.
+
+Remaining kernel-side gap: live context transfer is still not proven by an
+in-guest compiler-operation lane. The existing VFS probe intentionally returns
+after spawn markers so it can continue checking all payload fixtures.
 
 ### Blocker 2 — No real compiler payloads (clang_static, rustc_static)
 
@@ -104,9 +126,10 @@ for the same triple. These are C++/Rust toolchain builds, not pure Simple.
 
 Resolve both blockers in order:
 
-1. Wire `x86_64_fs_exec_spawn_as` to use `fs_exec_prepare_spawn` (shared path)
-   and add the x86_64 arch handoff that context-switches into the bootstrapped
-   task. This unblocks real in-guest ELF execution for any guest binary.
+1. Finish live x86_64 handoff evidence for the prepared task path. The
+   real-byte spawn path now constructs the process image and task; the missing
+   proof is a QEMU lane that transfers into the task and observes deterministic
+   guest behavior without confusing that with VFS-only spawn markers.
 
 2. Build `build/os/clang_static/bin/clang_static` and
    `build/os/rust_static/bin/rustc_static` via the LLVM/Rust cross-build

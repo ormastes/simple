@@ -1,13 +1,8 @@
 # SOSIX immutable dataset and queue sharing.
 
 use os.kernel.errno.{EAGAIN, EBADF, EINVAL, EIO, ENOMEM}
-use os.kernel.ipc.notification.{notification_signal}
+use os.kernel.ipc.notification.{notification_create, notification_signal}
 use os.kernel.ipc.notif_global.{g_notification_table}
-use os.sosix.queue_notify.{
-    _sosix_queue_notify_ensure,
-    _sosix_notif_recv_id,
-    _sosix_notif_send_id
-}
 
 val SOSIX_MAX_DATASETS: u64 = 64
 val SOSIX_DATASET_MAX_BYTES: u64 = 4096
@@ -56,6 +51,14 @@ var sosix_queue_slot_len: [u64; 1024]
 var sosix_queue_slot_dataset: [u64; 1024]
 var sosix_queue_bytes: [u8; 131072]
 
+# Per-queue notification object IDs for scheduler-aware blocking (0 = unallocated).
+# recv_notif_id[slot] is signalled when a message is enqueued (recv becomes ready).
+# send_notif_id[slot] is signalled when a message is dequeued (send slot becomes free).
+val SOSIX_NOTIFY_BIT_RECV: u64 = 1
+val SOSIX_NOTIFY_BIT_SEND: u64 = 2
+var sosix_queue_recv_notif_id: [u64; 32]
+var sosix_queue_send_notif_id: [u64; 32]
+
 fn sosix_share_init():
     """Initialize SOSIX dataset and queue tables."""
     var i: u64 = 0
@@ -92,6 +95,40 @@ fn sosix_share_init():
     while i < SOSIX_QUEUE_STORAGE_BYTES:
         sosix_queue_bytes[i] = 0
         i = i + 1
+    i = 0
+    while i < SOSIX_MAX_QUEUES:
+        sosix_queue_recv_notif_id[i] = 0
+        sosix_queue_send_notif_id[i] = 0
+        i = i + 1
+
+fn _sosix_queue_notify_ensure(slot: u64):
+    """Lazily allocate per-queue notification objects on first use."""
+    if slot >= SOSIX_MAX_QUEUES:
+        return
+    if sosix_queue_recv_notif_id[slot] == 0:
+        var tbl = g_notification_table
+        sosix_queue_recv_notif_id[slot] = notification_create(tbl)
+    if sosix_queue_send_notif_id[slot] == 0:
+        var tbl = g_notification_table
+        sosix_queue_send_notif_id[slot] = notification_create(tbl)
+
+fn _sosix_signal_recv_ready(slot: u64):
+    """Signal any waiter that the queue at slot has a message ready."""
+    _sosix_queue_notify_ensure(slot)
+    val notif_id = sosix_queue_recv_notif_id[slot]
+    if notif_id == 0:
+        return
+    var tbl = g_notification_table
+    val _w = notification_signal(tbl, notif_id, SOSIX_NOTIFY_BIT_RECV)
+
+fn _sosix_signal_send_ready(slot: u64):
+    """Signal any waiter that the queue at slot has a free send slot."""
+    _sosix_queue_notify_ensure(slot)
+    val notif_id = sosix_queue_send_notif_id[slot]
+    if notif_id == 0:
+        return
+    var tbl = g_notification_table
+    val _w = notification_signal(tbl, notif_id, SOSIX_NOTIFY_BIT_SEND)
 
 fn _sosix_dataset_valid(handle: u64) -> bool:
     if handle == SOSIX_NO_DATASET:
@@ -264,7 +301,7 @@ fn sosix_queue_send(queue: u64, bytes: [u8], attached_dataset: u64) -> i64:
     sosix_queue_tail[slot_queue] = (tail + 1) % sosix_queue_capacity[slot_queue]
     sosix_queue_count[slot_queue] = sosix_queue_count[slot_queue] + 1
     # Notify any thread blocked waiting for a message to become available.
-    sosix_queue_notify_recv(slot_queue)
+    _sosix_signal_recv_ready(slot_queue)
     bytes.len() as i64
 
 fn sosix_queue_recv(queue: u64) -> SosixQueueRecv:
@@ -292,7 +329,7 @@ fn sosix_queue_recv(queue: u64) -> SosixQueueRecv:
     sosix_queue_head[slot_queue] = (head + 1) % sosix_queue_capacity[slot_queue]
     sosix_queue_count[slot_queue] = sosix_queue_count[slot_queue] - 1
     # Notify any thread blocked waiting for a free send slot.
-    sosix_queue_notify_send(slot_queue)
+    _sosix_signal_send_ready(slot_queue)
     SosixQueueRecv(status: msg_len as i64, len: msg_len, attached_dataset: attached, data: out)
 
 fn sosix_queue_poll(queue: u64) -> u32:

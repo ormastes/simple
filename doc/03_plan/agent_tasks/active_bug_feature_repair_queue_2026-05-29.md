@@ -131,3 +131,15 @@ Spawned read-only explorers:
     - Localized stall to unbounded PIT channel-2 wait in APIC timer
       calibration; added a bounded wait and fallback calibration value in
       `src/os/kernel/interrupts/apic.spl`.
+14. SimpleOS in-guest toolchain execution pass started.
+    - Current `deploy_toolchains --status` confirms `sysroot`, `libc`, and
+      `rust-specs` are ready, but `llvm-cross`, `compiler-rt`,
+      `rust-examples`, `clang-static-guest`, `rustc-static-guest`, and
+      `toolchain-disk-bake` are not ready.
+    - Kernel-side spawn gap: `x86_64_fs_exec_spawn_as` returned synthetic PIDs
+      before constructing user tasks. Added
+      `fs_exec_prepare_spawn_from_bytes(...)` and routed the x86_64 real-byte
+      path through it while keeping synthetic seeded fallback for unit/host
+      cases with no mounted VFS bytes.
+    - Next step: run focused loader checks/tests and update
+      `simpleos_in_guest_toolchain_execution.md` with exact remaining blockers.

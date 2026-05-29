@@ -220,7 +220,7 @@ fn _lz4_build_descriptor(flg: u8, bd: u8, content_size: i64?) -> [u8]:
     desc = desc.push(flg)
     desc = desc.push(bd)
     if content_size != nil:
-        val cs = content_size.unwrap()
+        val cs = content_size ?? 0
         desc = _append_bytes(desc, _lz4_write_le64(cs))
     desc
 
@@ -244,18 +244,21 @@ pub fn lz4_compress_frame(data: [u8], opts: CompressionOptions) -> [u8]:
     val content_size = opts.content_size
     val block_mode = opts.block_mode
 
-    # Encode block data (compressed or raw)
-    val raw_block_data = _lz4_encode_block(data)
+    # Encode block data (compressed or raw).
+    # In LZ4 framing, an uncompressed block (high bit set in size word) contains
+    # the original bytes verbatim — NOT LZ4-tokenized data.
     val compressed_block_data = _lz4_encode_block_compress(data)
     var block_is_uncompressed = false
     var block_data: [u8] = compressed_block_data
     if compressed_block_data.len() >= data.len():
-        block_data = raw_block_data
+        # Fall back to uncompressed: embed raw bytes directly in frame
+        block_data = data
         block_is_uncompressed = true
 
     if block_mode == "block":
-        # Raw block mode — return compressed block bytes only, no frame
-        return block_data
+        # Raw LZ4 block mode (no frame) — return compressed block bytes only.
+        # Use LZ4-tokenized encoding so the caller can decompress with lz4_decompress_block.
+        return _lz4_encode_block_compress(data)
 
     # FLG byte: version=01(bits 7:6), B.Indep=1(bit 5), B.checksum(bit 4),
     #           C.Size(bit 3), C.checksum(bit 2)
