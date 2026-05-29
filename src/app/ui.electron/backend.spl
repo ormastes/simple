@@ -6,9 +6,16 @@
 use common.ui.backend.{RenderBackend}
 use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect}
 use common.ui.capability.{Capability, NotSupported}
+use common.ui.web_render_api.{
+    WEB_RENDER_TARGET_ELECTRON,
+    WebRenderRequest,
+    web_render_capabilities_for_target,
+    web_render_full_html,
+    web_render_to_artifact
+}
 use app.ui.render.html_widgets.{render_html_tree}
-use app.ui.web.html.{generate_html_page, generate_css, generate_js}
-use app.ui.electron.ipc.{parse_ipc_message, build_ipc_render}
+use app.ui.web.html.{generate_css}
+use app.ui.electron.ipc.{parse_ipc_message}
 
 extern fn rt_stdin_read_line() -> text?
 
@@ -41,13 +48,14 @@ class ElectronBackend:
         val theme = state.tree.theme_name()
         val css = generate_css(theme)
         val body_html = render_html_tree(state.tree.root_node(), state)
-        val html = "<html><head><style>{css}</style></head><body><div id=\"app\">{body_html}</div></body></html>"
-        val ipc_msg = build_ipc_render(html)
-        print ipc_msg
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", body_html, css, "", self.viewport_width(), self.viewport_height())
+        print web_render_to_artifact(req).ipc_json
         return Ok(true)
 
     fn render_html(state: UIState) -> text:
-        return render_html_tree(state.tree.root_node(), state)
+        val body = render_html_tree(state.tree.root_node(), state)
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", body, "", "", self.viewport_width(), self.viewport_height())
+        return req.body_html
 
     # --- Events ---
 
@@ -62,7 +70,7 @@ class ElectronBackend:
     # --- Capabilities ---
 
     fn capabilities() -> [Capability]:
-        return [Capability.Mouse, Capability.Color, Capability.Images, Capability.NativeDialogs, Capability.Notification]
+        return web_render_capabilities_for_target(WEB_RENDER_TARGET_ELECTRON)
 
     fn supports_mouse() -> bool:
         return true
@@ -106,7 +114,10 @@ class ElectronBackend:
 
     fn generate_full_page(state: UIState) -> text:
         """Generate a complete HTML page for Electron BrowserWindow."""
-        return generate_html_page(state, self.port)
+        val body = render_html_tree(state.tree.root_node(), state)
+        val css = generate_css(state.tree.theme_name())
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", body, css, "", self.viewport_width(), self.viewport_height())
+        return web_render_full_html(req)
 
     # --- Wave 5: unified window spawn over stdin JSON ---------------------
     #

@@ -11,6 +11,7 @@
 use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect}
 use common.ui.widget.{UIMode}
 use common.layout.box_model.{LayoutBox, BoxKind, BoxModel}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_pixel_artifact}
 use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.web.html.{generate_css}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
@@ -119,6 +120,8 @@ class BrowserBackend:
     event_queue: [UIEvent]
     layout_cache: [LayoutEntry]
     initialized: bool
+    web_render_target: text
+    last_artifact_pixels: i32
 
     static fn create(w: i32, h: i32, backend: text) -> Result<BrowserBackend, text>:
         """Create a BrowserBackend with the specified GPU backend.
@@ -135,11 +138,15 @@ class BrowserBackend:
             framebuffer: fb,
             event_queue: [],
             layout_cache: [],
-            initialized: true
+            initialized: true,
+            web_render_target: WEB_RENDER_TARGET_PURE_SIMPLE,
+            last_artifact_pixels: 0
         ))
 
     me render_frame(tree: UITree, state: UIState):
         """Convert widget tree to DOM, layout, and paint to framebuffer."""
+        val body = render_html_tree(tree.root_node(), state)
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "", body, generate_css(state.tree.theme_name()), "", self.width, self.height)
         # Step 1: Build DOM from widget tree
         val root_node = tree.root_node()
         val dom = widget_to_dom(root_node)
@@ -154,6 +161,9 @@ class BrowserBackend:
         self.framebuffer.clear(0x1E1E1E)
         self.framebuffer = paint_layout(self.framebuffer, layout)
         self.framebuffer = paint_widget_tree(self.framebuffer, root_node, 6, 6, self.width - 12, 0).0
+        val artifact = web_render_pixel_artifact(req, self.pixels_argb_u32())
+        self.web_render_target = artifact.target
+        self.last_artifact_pixels = artifact.pixels.len()
 
     me poll_events() -> [UIEvent]:
         """Return queued events and clear the queue."""
@@ -198,6 +208,13 @@ class BrowserBackend:
         var out: [i64] = []
         for pixel in self.framebuffer.pixels:
             out = out.push(pixel.to_i64())
+        return out
+
+    fn pixels_argb_u32() -> [u32]:
+        """Expose the framebuffer for the shared web render pixel artifact."""
+        var out: [u32] = []
+        for pixel in self.framebuffer.pixels:
+            out = out.push(pixel.to_u32())
         return out
 
     fn snapshot_ppm(path: text) -> bool:
