@@ -966,6 +966,7 @@ impl<M: Module> CodegenBackend<M> {
         local_globals: &std::collections::HashSet<String>,
     ) -> BackendResult<()> {
         use super::types_util::type_to_cranelift;
+        let is_jit_module = std::any::type_name::<M>().contains("JITModule");
 
         for (name, ty, is_mutable) in globals {
             let trace_global = std::env::var("SIMPLE_TRACE_DECLARE_GLOBALS").is_ok()
@@ -1043,7 +1044,7 @@ impl<M: Module> CodegenBackend<M> {
             // constant corruption Agent Z1 observed (mod=5940624 instead of 1).
             // Skip this branch when the resolved mangled name is known to be
             // data (tracked in `data_exports`, built at import-map time).
-            if !local_globals.contains(name) {
+            if !is_jit_module && !local_globals.contains(name) {
                 if let Some(resolved) = self
                     .use_map
                     .get(name.as_str())
@@ -1086,7 +1087,7 @@ impl<M: Module> CodegenBackend<M> {
             // coexist with local arena state/constants (for example core AST
             // DECL_* and decl_* globals); treating those as imports leaves only weak
             // stubs at link time and corrupts bootstrap state.
-            let is_local = local_globals.contains(name);
+            let is_local = is_jit_module || local_globals.contains(name);
 
             // Linkage strategy for globals in per-module compilation:
             // - Local globals: Preemptible + initialized data (if available)

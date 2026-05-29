@@ -73,6 +73,23 @@ unsafe fn lookup_torch_symbol(_name: &str) -> Option<usize> {
     None
 }
 
+#[cfg(feature = "pytorch")]
+fn torch_available_impl() -> bool {
+    simple_runtime::value::rt_torch_available() != 0
+}
+
+#[cfg(not(feature = "pytorch"))]
+fn torch_available_impl() -> bool {
+    unsafe {
+        let fptr = match lookup_torch_symbol("rt_torch_available") {
+            Some(fptr) => fptr,
+            None => return false,
+        };
+        let func: extern "C" fn() -> i32 = std::mem::transmute(fptr);
+        func() != 0
+    }
+}
+
 fn extract_f64_array(arg: &Value, func_name: &str) -> Result<Vec<f64>, CompileError> {
     match arg {
         Value::Array(items) => items.iter().map(|v| v.as_float()).collect(),
@@ -217,6 +234,14 @@ pub fn rt_torch_tensor(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(
         torch_tensor_impl(&data, &dims, dtype_code, device_code) as i64
     ))
+}
+
+pub fn rt_torch_available(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_torch_available requires 0 arguments"));
+    }
+
+    Ok(Value::Bool(torch_available_impl()))
 }
 
 pub fn rt_ps_torch_tensor(args: &[Value]) -> Result<Value, CompileError> {

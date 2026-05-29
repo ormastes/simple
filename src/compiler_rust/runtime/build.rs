@@ -19,6 +19,7 @@ fn main() {
     let source = manifest_dir.join("../common/src/runtime_symbols.rs");
     let content = fs::read_to_string(&source).expect("read runtime_symbols.rs");
     let runtime_src = manifest_dir.join("src");
+    let runtime_c_dir = manifest_dir.join("../../runtime");
     let runtime_symbol_table = env::var_os("CARGO_FEATURE_RUNTIME_SYMBOL_TABLE").is_some();
     let runtime_regex = env::var_os("CARGO_FEATURE_RUNTIME_REGEX").is_some();
 
@@ -65,30 +66,35 @@ fn main() {
         return;
     }
 
+    generated.push_str("#[allow(clashing_extern_declarations)]\n");
     generated.push_str("mod exported_symbols {\n");
+    generated.push_str("    #[allow(clashing_extern_declarations)]\n");
     generated.push_str("    unsafe extern \"C\" {\n");
     for symbol in &symbols {
-        if runtime_defines_symbol(&runtime_src, symbol, runtime_regex) {
+        if runtime_defines_symbol(&runtime_src, &runtime_c_dir, symbol, runtime_regex) {
             if driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()) {
                 // Under driver-hooks, native_all owns the real C symbol; skip the unconditional
                 // link-name reference here to avoid an unresolved-symbol error in simple-driver.
                 continue;
             }
-            generated.push_str(&format!("        pub fn {symbol}();\n"));
+            let alias = runtime_symbol_alias(symbol);
+            generated.push_str(&format!("        #[link_name = \"{symbol}\"]\n"));
+            generated.push_str(&format!("        pub fn {alias}();\n"));
         }
     }
     generated.push_str("    }\n");
     generated.push_str("}\n\n");
     generated.push_str("pub static RUNTIME_SYMBOL_ENTRIES: &[RuntimeSymbolEntry] = &[\n");
     for symbol in &symbols {
-        if runtime_defines_symbol(&runtime_src, symbol, runtime_regex) {
+        if runtime_defines_symbol(&runtime_src, &runtime_c_dir, symbol, runtime_regex) {
             if driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()) {
                 // Omit from the static table; native_all registers the real symbol separately
                 // when it links in (it owns the #[no_mangle] definition).
                 continue;
             }
+            let alias = runtime_symbol_alias(symbol);
             generated.push_str(&format!(
-                "    RuntimeSymbolEntry::new(\"{symbol}\", exported_symbols::{symbol} as *const u8),\n"
+                "    RuntimeSymbolEntry::new(\"{symbol}\", exported_symbols::{alias} as *const u8),\n"
             ));
         }
     }
@@ -151,7 +157,7 @@ fn compile_c_runtime_sources() {
     }
 }
 
-fn runtime_defines_symbol(root: &Path, symbol: &str, runtime_regex: bool) -> bool {
+fn runtime_defines_symbol(root: &Path, c_root: &Path, symbol: &str, runtime_regex: bool) -> bool {
     let needle = format!("fn {symbol}");
     let mut stack = vec![root.to_path_buf()];
 
@@ -179,6 +185,20 @@ fn runtime_defines_symbol(root: &Path, symbol: &str, runtime_regex: bool) -> boo
         }
     }
 
+    c_runtime_defines_symbol(c_root, symbol)
+}
+
+fn c_runtime_defines_symbol(root: &Path, symbol: &str) -> bool {
+    const LINKED_C_SOURCES: &[&str] = &["runtime_memory.c", "runtime_time.c", "runtime_db.c"];
+    for source in LINKED_C_SOURCES {
+        let path = root.join(source);
+        let Ok(file) = fs::read_to_string(path) else {
+            continue;
+        };
+        if c_file_exports_symbol(&file, symbol) {
+            return true;
+        }
+    }
     false
 }
 
@@ -197,4 +217,19 @@ fn rust_file_exports_symbol(file: &str, needle: &str, symbol: &str) -> bool {
         }
     }
     false
+}
+
+fn c_file_exports_symbol(file: &str, symbol: &str) -> bool {
+    let needle = format!("{symbol}(");
+    file.lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.starts_with("static ")
+            && !trimmed.starts_with("//")
+            && trimmed.contains(&needle)
+            && trimmed.ends_with('{')
+    })
+}
+
+fn runtime_symbol_alias(symbol: &str) -> String {
+    format!("__simple_runtime_symbol_{}", symbol.replace('.', "_dot_"))
 }

@@ -1,7 +1,7 @@
 // Helper functions for instruction compilation.
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
@@ -59,16 +59,11 @@ pub(crate) fn inline_runtime_len_value(
 
     builder.switch_to_block(type_block);
     let ptr_bits = builder.ins().band(value, ptr_mask);
-    // RtCoreString.kind is uint32_t = 0x53545231 ("STR1" magic), not a single byte.
-    // Load 4 bytes as i32 and compare to the string magic to detect strings.
-    let kind_u32 = builder.ins().load(types::I32, MemFlags::new(), ptr_bits, 0);
-    // RT_VALUE_HEAP_STRING = 0x53545231U
-    let is_string = builder.ins().icmp_imm(IntCC::Equal, kind_u32, 0x53545231i64);
-    // RtCoreArray.kind is uint8_t = 0x02; load first byte for array detection.
     let object_type = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 0);
-    // RT_VALUE_HEAP_ARRAY = 0x02
+    // HeapObjectType::String = 0x01, HeapObjectType::Array = 0x02.
+    let is_string = builder.ins().icmp_imm(IntCC::Equal, object_type, 1);
     let is_array = builder.ins().icmp_imm(IntCC::Equal, object_type, 2);
-    // Only string and array have known kind constants with a len field at offset 8.
+    // RuntimeString and RuntimeArray both store len at offset 8.
     let has_len = builder.ins().bor(is_string, is_array);
     builder.ins().brif(has_len, len_block, &[], done_block, &[invalid]);
     builder.seal_block(type_block);
@@ -96,15 +91,28 @@ pub(crate) fn inline_runtime_array_len_value(
 /// Helper to create a string constant in module data and return (ptr, len) values.
 /// Uses content-based naming for deterministic output and deduplication.
 pub(crate) fn create_string_constant<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
+    _ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     text: &str,
 ) -> InstrResult<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> {
     let bytes = text.as_bytes();
-    let data_id = declare_named_bytes(ctx, bytes)?;
+    if bytes.is_empty() {
+        let ptr = builder.ins().iconst(types::I64, 0);
+        let len = builder.ins().iconst(types::I64, 0);
+        return Ok((ptr, len));
+    }
 
-    let global_val = ctx.module.declare_data_in_func(data_id, builder.func);
-    let ptr = builder.ins().global_value(types::I64, global_val);
+    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        bytes.len() as u32,
+        0,
+    ));
+    for (offset, byte) in bytes.iter().enumerate() {
+        let byte_val = builder.ins().iconst(types::I8, i64::from(*byte));
+        builder.ins().stack_store(byte_val, slot, offset as i32);
+    }
+
+    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
     let len = builder.ins().iconst(types::I64, bytes.len() as i64);
 
     Ok((ptr, len))

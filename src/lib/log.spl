@@ -90,35 +90,83 @@ var _g_backends: [_BackendSlot] = [
     _BackendSlot.empty(), _BackendSlot.empty(),
     _BackendSlot.empty(), _BackendSlot.empty()
 ]
+var _g_backend_count: i64 = 0
 
 # ---------------------------------------------------------------------------
 # Global level + per-subsys level table (255 = fall through to global)
 # ---------------------------------------------------------------------------
 var _g_global_level: i64 = LOG_INFO
+var _g_level_kern: i64 = 255
+var _g_level_vmm: i64 = 255
+var _g_level_vfs: i64 = 255
+var _g_level_net: i64 = 255
+var _g_level_irq: i64 = 255
+var _g_level_driver_block: i64 = 255
+var _g_level_driver_net: i64 = 255
+var _g_level_driver_input: i64 = 255
+var _g_level_driver_gfx: i64 = 255
+var _g_level_pkg: i64 = 255
+var _g_level_cli: i64 = 255
+var _g_level_test: i64 = 255
 
-var _g_subsys_level: [i64] = [
-    255, 255, 255, 255, 255, 255, 255, 255,
-    255, 255, 255, 255, 255, 255, 255, 255,
-    255, 255, 255, 255, 255, 255, 255, 255,
-    255, 255, 255, 255, 255, 255, 255, 255,
-    255, 255, 255, 255, 255, 255, 255, 255,
-    255, 255, 255, 255, 255, 255, 255, 255,
-    255, 255, 255, 255, 255, 255, 255, 255,
-    255, 255, 255, 255, 255, 255, 255, 255
-]
+var _g_subsys_level: [i64] = []
+var _g_subsys_levels_ready: bool = false
+
+fn _ensure_subsys_levels():
+    if _g_subsys_levels_ready:
+        return
+    _g_subsys_level = [
+        255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255
+    ]
+    _g_subsys_levels_ready = true
 
 fn log_set_level(level: i64):
     _g_global_level = level
 
 fn log_set_subsys_level(subsys: i64, level: i64):
+    _ensure_subsys_levels()
+    if subsys == SUBSYS_KERN: _g_level_kern = level
+    if subsys == SUBSYS_VMM: _g_level_vmm = level
+    if subsys == SUBSYS_VFS: _g_level_vfs = level
+    if subsys == SUBSYS_NET: _g_level_net = level
+    if subsys == SUBSYS_IRQ: _g_level_irq = level
+    if subsys == SUBSYS_DRIVER_BLOCK: _g_level_driver_block = level
+    if subsys == SUBSYS_DRIVER_NET: _g_level_driver_net = level
+    if subsys == SUBSYS_DRIVER_INPUT: _g_level_driver_input = level
+    if subsys == SUBSYS_DRIVER_GFX: _g_level_driver_gfx = level
+    if subsys == SUBSYS_PKG: _g_level_pkg = level
+    if subsys == SUBSYS_CLI: _g_level_cli = level
+    if subsys == SUBSYS_TEST: _g_level_test = level
     if subsys >= 0 and subsys < MAX_SUBSYS:
         _g_subsys_level[subsys] = level
 
+fn _subsys_override_level(subsys: i64) -> i64:
+    if subsys == SUBSYS_KERN: return _g_level_kern
+    if subsys == SUBSYS_VMM: return _g_level_vmm
+    if subsys == SUBSYS_VFS: return _g_level_vfs
+    if subsys == SUBSYS_NET: return _g_level_net
+    if subsys == SUBSYS_IRQ: return _g_level_irq
+    if subsys == SUBSYS_DRIVER_BLOCK: return _g_level_driver_block
+    if subsys == SUBSYS_DRIVER_NET: return _g_level_driver_net
+    if subsys == SUBSYS_DRIVER_INPUT: return _g_level_driver_input
+    if subsys == SUBSYS_DRIVER_GFX: return _g_level_driver_gfx
+    if subsys == SUBSYS_PKG: return _g_level_pkg
+    if subsys == SUBSYS_CLI: return _g_level_cli
+    if subsys == SUBSYS_TEST: return _g_level_test
+    255
+
 fn effective_level(subsys: i64) -> i64:
-    if subsys >= 0 and subsys < MAX_SUBSYS:
-        val ovr = _g_subsys_level[subsys]
-        if ovr != 255:
-            return ovr
+    _ensure_subsys_levels()
+    val ovr = _subsys_override_level(subsys)
+    if ovr != 255:
+        return ovr
     _g_global_level
 
 fn _level_passes(level: i64, subsys: i64) -> bool:
@@ -153,7 +201,20 @@ fn _subsys_id_from_name(name: text) -> i64:
     -1
 
 fn log_init_from_config(cfg: text):
+    _ensure_subsys_levels()
     if cfg.len() == 0:
+        _g_level_kern = 255
+        _g_level_vmm = 255
+        _g_level_vfs = 255
+        _g_level_net = 255
+        _g_level_irq = 255
+        _g_level_driver_block = 255
+        _g_level_driver_net = 255
+        _g_level_driver_input = 255
+        _g_level_driver_gfx = 255
+        _g_level_pkg = 255
+        _g_level_cli = 255
+        _g_level_test = 255
         var i = 0
         while i < MAX_SUBSYS:
             _g_subsys_level[i] = 255
@@ -174,7 +235,7 @@ fn log_init_from_config(cfg: text):
                 else:
                     val sid = _subsys_id_from_name(key)
                     if sid >= 0:
-                        _g_subsys_level[sid] = _parse_level_name(v)
+                        log_set_subsys_level(sid, _parse_level_name(v))
             key = ""
             v = ""
             in_value = false
@@ -200,6 +261,7 @@ fn log_register_backend(ops: LogBackendOps) -> i64:
                 self_ptr: ops.self_ptr,
                 kind: ops.kind
             )
+            _g_backend_count = _g_backend_count + 1
             return i
         i = i + 1
     -1
@@ -210,6 +272,8 @@ fn log_remove_backend(id: i64) -> bool:
     if not _g_backends[id].active:
         return false
     _g_backends[id] = _BackendSlot.empty()
+    if _g_backend_count > 0:
+        _g_backend_count = _g_backend_count - 1
     true
 
 # ---------------------------------------------------------------------------
@@ -450,6 +514,8 @@ fn alloc_probe_count() -> i64:
 # Dispatch - the heart of the facade
 # ---------------------------------------------------------------------------
 fn _dispatch_to_backends(level: i64, subsys: i64, p0: i64):
+    if _g_backend_count <= 0:
+        return
     var i = 0
     while i < MAX_BACKENDS:
         if _g_backends[i].active:

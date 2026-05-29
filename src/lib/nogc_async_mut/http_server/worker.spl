@@ -811,7 +811,7 @@ class Worker:
             # Chunk into TLS records (max TLS_MAX_FRAGMENT_LENGTH bytes each)
             var encrypted_buf: [u8] = []
             var offset_s = 0
-            val plain_len = plain_text.len()
+            val plain_len = len(plain_text)
             while offset_s < plain_len:
                 val remaining_s = plain_len - offset_s
                 val chunk_len = if remaining_s > TLS_MAX_FRAGMENT_LENGTH: TLS_MAX_FRAGMENT_LENGTH else: remaining_s
@@ -1100,22 +1100,22 @@ fn tls_decrypt_record(raw_bytes: [u8], session: TlsSessionState) -> text?:
     if raw_bytes.len() < TLS_RECORD_HEADER_SIZE + record_len:
         return nil
 
-    # Extract payload bytes (after 5-byte header)
-    var payload: [u8] = []
+    # Extract payload wire text (after 5-byte header)
+    var payload_wire = ""
     var i = TLS_RECORD_HEADER_SIZE
     while i < TLS_RECORD_HEADER_SIZE + record_len:
-        payload.push(raw_bytes[i])
+        payload_wire = payload_wire + encode_u8(raw_bytes[i].to_i64())
         i = i + 1
 
     val key_hex = tls_wire_to_hex(session.keys.client_write_key, 16)
     val iv_hex = tls_wire_to_hex(session.keys.client_write_iv, 4)
-    val payload_hex = tls_wire_to_hex(payload, record_len)
+    val payload_hex = tls_wire_to_hex(payload_wire, record_len)
     val nonce_hex = build_gcm_nonce_hex(iv_hex, session.client_seq)
     val aad_hex = build_aead_aad_hex(session.client_seq, content_type, TLS_VERSION_1_2, record_len)
     val pt_hex = tls_aes_gcm_decrypt_hex(key_hex, nonce_hex, payload_hex, aad_hex)
     if pt_hex == nil:
         return nil
-    tls_hex_to_wire(pt_hex, pt_hex.len() / 2)
+    tls_hex_to_wire(pt_hex)
 
 fn tls_encrypt_record(plaintext: text, session: TlsSessionState) -> [u8]:
     """Encrypt plaintext into a TLS application data record.
@@ -1132,12 +1132,12 @@ fn tls_encrypt_record(plaintext: text, session: TlsSessionState) -> [u8]:
     Returns:
         Complete TLS record bytes (header + encrypted payload) ready for wire
     """
-    val data_len = plaintext.len()
+    val data_len = len(plaintext)
     val key_hex = tls_wire_to_hex(session.keys.server_write_key, 16)
     val iv_hex = tls_wire_to_hex(session.keys.server_write_iv, 4)
     val nonce_hex = build_gcm_nonce_hex(iv_hex, session.server_seq)
-    # GCM adds 8-byte explicit nonce + 16-byte tag = 24 extra bytes
-    val encrypted_len = data_len + 24
+    # The nonce is implicit from fixed IV + sequence; AES-GCM appends a 16-byte tag.
+    val encrypted_len = data_len + 16
     val aad_hex = build_aead_aad_hex(session.server_seq, CONTENT_TYPE_APPLICATION_DATA, TLS_VERSION_1_2, encrypted_len)
     val data_hex = tls_wire_to_hex(plaintext, data_len)
     val ct_hex = tls_aes_gcm_encrypt_hex(key_hex, nonce_hex, data_hex, aad_hex)
@@ -1151,7 +1151,7 @@ fn tls_encrypt_record(plaintext: text, session: TlsSessionState) -> [u8]:
     record.push((encrypted_len % 256).to_u8())
 
     # Append encrypted payload
-    val ct_wire = tls_hex_to_wire(ct_hex, encrypted_len)
+    val ct_wire = tls_hex_to_wire(ct_hex)
     var j = 0
     while j < encrypted_len:
         record.push(byte_at(ct_wire, j).to_u8())

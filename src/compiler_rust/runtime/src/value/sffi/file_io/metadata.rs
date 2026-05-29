@@ -152,6 +152,20 @@ mod tests {
     }
 
     #[test]
+    fn test_file_stat_existing_path_returns_mtime() {
+        let path = std::env::temp_dir().join("simple_runtime_file_stat_mtime_test");
+        std::fs::write(&path, b"mtime").unwrap();
+        let path_string = path.to_string_lossy();
+
+        unsafe {
+            let mtime = rt_file_stat(path_string.as_ptr(), path_string.len() as u64);
+            assert!(mtime > 0);
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn test_file_metadata_null_path() {
         unsafe {
             let mut exists = true;

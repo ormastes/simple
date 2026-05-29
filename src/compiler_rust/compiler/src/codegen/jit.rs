@@ -92,6 +92,9 @@ impl JitCompiler {
         for func in &functions {
             if let Some(&func_id) = self.backend.func_ids.get(&func.name) {
                 let ptr = self.backend.module.get_finalized_function(func_id);
+                if std::env::var("SIMPLE_JIT_TRACE_ADDR").is_ok() {
+                    eprintln!("[jit-addr] {} {:p}", func.name, ptr);
+                }
                 self.compiled_funcs.insert(func.name.clone(), ptr);
             }
         }

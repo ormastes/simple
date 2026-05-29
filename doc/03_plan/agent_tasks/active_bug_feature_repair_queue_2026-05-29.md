@@ -1070,3 +1070,72 @@ Spawned read-only explorers:
       implementations as typed diagnostics.
     - Added `doc/05_design/di_runtime_slots.md` and
       `test/unit/compiler/di/di_runtime_slots_spec.spl`.
+71. C-runtime string-index and async-driver exclusion completed.
+    - Deleted the obsolete hosted C sources
+      `src/runtime/runtime_string_index.c` and `src/runtime/async_driver.c`
+      after confirming active hosted symbols resolve through Rust seed exports
+      and interpreter extern dispatch.
+    - Removed both files from the legacy Simple C runtime source list in
+      `src/compiler/70.backend/backend/runtime_compiler.spl`.
+    - Updated `doc/08_tracking/bug/c_runtime_exclusion_analysis_2026-05-18.md`
+      to move both files out of active blocker status and reduce the top-level
+      C runtime file count.
+    - Verification passed:
+      `SIMPLE_LIB=src bin/simple check src/compiler/70.backend/backend/runtime_compiler.spl src/os/kernel/net/driver_shim.spl`
+      and
+      `cargo check -p simple-runtime --manifest-path src/compiler_rust/Cargo.toml`.
+    - Worker follow-up noted that
+      `SIMPLE_LIB=src bin/simple test test/integration/compiler/llvm_native_link_spec.spl --mode=interpreter --fail-fast`
+      still has one unrelated failing scenario with no runner detail exposed.
+72. Editor JIT startup crash narrowed and repaired.
+    - Fixed JIT string literals by materializing literal bytes in a stack slot
+      before `rt_string_new`; this avoids bad JIT data addresses and restores
+      text printing plus `len`/`starts_with`/`ends_with`/`contains` behavior.
+    - Updated the inline `len` fast path to use Rust seed heap object tags
+      (`HeapObjectType::String`/`Array`) instead of the obsolete core-C string
+      magic.
+    - Registered C-backed runtime symbols such as `rt_alloc` in the Rust seed
+      runtime symbol table so JIT struct allocation does not call an unresolved
+      import.
+    - Made JIT declare in-memory program globals locally rather than as external
+      data imports, and hardened pure Simple `std.log` hot paths against
+      cross-module global array initialization gaps.
+    - Verification passed:
+      `SIMPLE_LIB=$(pwd)/src src/compiler_rust/target/debug/simple -c <string literal/method probe>`,
+      `SIMPLE_LIB=$(pwd)/src src/compiler_rust/target/debug/simple -c <struct allocation probe>`,
+      `SIMPLE_LIB=src bin/simple check src/lib/log.spl`,
+      `cargo check -p simple-runtime --manifest-path src/compiler_rust/Cargo.toml`,
+      `cargo build -p simple-driver --manifest-path src/compiler_rust/Cargo.toml`,
+      and
+      `SIMPLE_LIB=$(pwd)/src SIMPLE_NO_STUB_FALLBACK=1 src/compiler_rust/target/debug/simple run src/app/editor/main.spl --tui`.
+    - Note: `run src/app/editor/main.spl -- --tui` no longer crashes, but the
+      editor treats the literal `--` as an unknown app option; the accepted form
+      is `run src/app/editor/main.spl --tui`.
+73. HTTPS/TLS record AES-GCM provenance switched to pure Simple.
+    - Replaced the TLS hook dependency on `rt_aes_gcm_encrypt_hex` /
+      `rt_aes_gcm_decrypt_hex` with a hex-to-`[u8]` bridge around
+      `src/os/crypto/aes128_gcm.spl`.
+    - Fixed the hook hex parser so `f`/`F` nibbles decode as `15`, preserving
+      NIST ciphertext/tag vectors.
+    - Changed decrypt hooks to return `nil` on authentication failure while
+      preserving `""` as valid empty plaintext.
+    - Fixed reserved worker record helpers to pass wire text to
+      `tls_wire_to_hex` and to use the implicit-nonce AES-GCM record length
+      (`plaintext_len + 16`).
+    - Added `test/unit/lib/io/tls_common_hooks_aes_gcm_spec.spl`.
+    - Verification passed:
+      `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/io/tls_common_hooks.spl src/lib/nogc_async_mut/io/tls_common.spl src/lib/nogc_async_mut/io/tls.spl src/lib/nogc_async_mut/http_server/worker.spl test/unit/lib/io/tls_common_hooks_aes_gcm_spec.spl`,
+      `SIMPLE_LIB=src bin/simple test test/unit/lib/io/tls_common_hooks_aes_gcm_spec.spl --mode=interpreter --clean --format json`,
+      and
+      `SIMPLE_LIB=src bin/simple test test/unit/lib/crypto/aes128_gcm_nist_vectors_spec.spl --mode=interpreter --clean --format json`.
+74. TLS live SHA/HMAC bisection refreshed; fix not complete.
+    - Added `test/unit/os/crypto/sha256_pure_simple_spec.spl` for OS
+      pure-Simple SHA-256/HMAC vectors (RFC 6234 empty/abc and RFC 4231 TC1).
+    - Host interpreter and native file-level runs pass, proving the API-level
+      vectors in hosted modes.
+    - Rejected and reverted a `sha256_with_len` list-route workaround because
+      the QEMU TLS lane regressed to failing A1 as well as A2/D cases.
+    - Current live serial output now shows A1, A2, D3, D4, D8, D9, and D10
+      failing in the dirty tree. Next repair should re-narrow
+      `rt_tls13_hkdf_extract_into` byte materialization/output writing before
+      touching SHA internals again.

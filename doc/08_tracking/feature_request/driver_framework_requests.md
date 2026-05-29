@@ -379,9 +379,9 @@ or `Rejected` (one-line reason).
   lifecycle forwarding state. File I/O operations remain unsupported.
   Update 2026-05-29: `fat32_stub.spl` now forwards much of the file-I/O
   surface (`open`, `read`, `write`, `readdir`, `ftruncate`) and checks clean.
-  `test/unit/lib/driver/fat32_file_io_spec.spl` still reports `9 passed / 5
-  failed`; that residual behavior is kept in the FAT32 queue, not this
-  completed driver-framework adapter/porting request.
+  Re-verification later on 2026-05-29 shows
+  `test/unit/lib/driver/fat32_file_io_spec.spl` passes `14/14`; the old
+  `9 passed / 5 failed` residual is no longer current.
 
 ---
 

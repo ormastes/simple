@@ -1,7 +1,7 @@
 # HTTPS Server — Pure Simple TLS Record-Layer
 
 **Date**: 2026-05-28
-**Updated**: 2026-05-29
+**Updated**: 2026-05-30
 **Status**: In Progress — TLS 1.2 server record-layer wired; ALPN/TLS 1.3 remain
 **Priority**: High — gates HTTPS benchmarking, HTTP/2 ALPN, HTTP/3
 
@@ -29,6 +29,27 @@ raw TCP `fd` path with `perform_server_handshake` — no server-accept externs n
 
 ## Remaining Work
 
+## Update (2026-05-30) — Pure Simple AES-GCM record hooks
+
+The record-layer AES-GCM policy decision is now implemented in
+`src/lib/nogc_sync_mut/io/tls_common_hooks.spl`: `rt_aes_gcm_encrypt_hex` and
+`rt_aes_gcm_decrypt_hex` are no longer used by the TLS hooks. The hook layer now
+bridges hex/text record data to `src/os/crypto/aes128_gcm.spl`.
+
+Additional fixes made while wiring the bridge:
+- Hex parsing no longer uses compact `or` comparisons for `a`-`f`, avoiding a
+  runtime corruption where `f` decoded as `e`.
+- AES-GCM auth failure returns `nil` from decrypt hooks, while valid empty
+  plaintext returns `""`, so callers can distinguish bad tags from empty data.
+- Worker reserved record helpers now pass wire text to `tls_wire_to_hex` and use
+  `plaintext_len + 16` for implicit-nonce AES-GCM records rather than reading
+  eight bytes past the returned ciphertext/tag.
+
+Verification passed:
+- `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/io/tls_common_hooks.spl src/lib/nogc_async_mut/io/tls_common.spl src/lib/nogc_async_mut/io/tls.spl src/lib/nogc_async_mut/http_server/worker.spl test/unit/lib/io/tls_common_hooks_aes_gcm_spec.spl`
+- `SIMPLE_LIB=src bin/simple test test/unit/lib/io/tls_common_hooks_aes_gcm_spec.spl --mode=interpreter --clean --format json` (`4/4`)
+- `SIMPLE_LIB=src bin/simple test test/unit/lib/crypto/aes128_gcm_nist_vectors_spec.spl --mode=interpreter --clean --format json` (`12/12`)
+
 1. **Verification** — need `openssl s_client` or `curl https://` against interpreter mode
    to confirm handshake + encrypted GET/response round-trip. Cannot verify in this session
    (no live server run). Mark confirmed only after successful end-to-end test.
@@ -45,23 +66,21 @@ raw TCP `fd` path with `perform_server_handshake` — no server-accept externs n
 4. **TLS stack bugs** — x509 `parse_certificate_der(collection)` type mismatch,
    `fn len(collection)` shadowing (noted in original filing, still open).
 
-## Open Decision: Crypto Provenance
+## Resolved Decision: Crypto Provenance
 
-The handshake and record-layer crypto uses `rt_rsa_decrypt`, `rt_aes_gcm_encrypt_hex`,
-`rt_aes_gcm_decrypt_hex` (registered Rust runtime externs, separate from the missing
-`rt_tls_server_create/accept/read/write` — those remain unregistered but are not needed
-by the fd-based path).
+The handshake still uses `rt_rsa_decrypt`, but record-layer AES-GCM no longer
+uses `rt_aes_gcm_encrypt_hex` / `rt_aes_gcm_decrypt_hex`. The missing
+`rt_tls_server_create/accept/read/write` externs remain unregistered but are not
+needed by the fd-based path.
 
-**Decision needed:** should the record layer use `src/os/crypto/aes128_gcm.spl` (pure
-Simple, `[u8]` API) instead of `rt_aes_gcm_*` externs?
+**Decision:** record-layer AES-GCM uses `src/os/crypto/aes128_gcm.spl` (pure
+Simple, `[u8]` API) instead of `rt_aes_gcm_*` externs.
 
 - `aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]`
 - `aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> Aes128GcmResult`
 
-Wiring these requires a new hex↔[u8] bridge in `tls_common_hooks.spl` (affects client
-path too). The `rt_aes_gcm_*` externs are already registered and working; switching is
-purely a policy call. If "no Rust externs" means all crypto must be pure Simple, this
-bridge is ~50 LOC. File as a follow-up if not required for this feature.
+The hex↔[u8] bridge now lives in `tls_common_hooks.spl` and affects both the
+client and server record helpers.
 
 ## Downstream Unblocks (when verification passes)
 

@@ -1,7 +1,7 @@
 # C Runtime Exclusion Analysis
 
 **Date:** 2026-05-18
-**Last audited:** 2026-05-29 (follow-up pass — pty, math/random/error/config, contracts, regex_stub, equality, format, value, and env removed)
+**Last audited:** 2026-05-29 (follow-up pass — pty, string_index, async_driver, math/random/error/config, contracts, regex_stub, equality, format, value, and env removed)
 **Status:** Open — audit still tracks removable C runtime candidates and blocked removals.
 **Context:** Pure Simple conversion project — which C files can be removed
 
@@ -25,6 +25,8 @@
 | `runtime_format.c` | `__c_rt_value_format_string`, `__c_rt_raw_u64_to_str`, `__c_rt_value_to_display_str` | Deleted 2026-05-29 after no callers for the legacy `__c_rt_*` helpers were reconfirmed; active formatting SFFI symbols are exported from `value/sffi/io_print.rs`. |
 | `runtime_value.c` | `rt_value_int/float/bool/nil`, `rt_value_as_*`, `rt_value_is_*`, `rt_value_truthy`, `rt_value_type_tag`, `rt_is_error`, `rt_ptr_to_value`, `rt_value_to_ptr` | Deleted 2026-05-29 after Rust value helpers and pointer conversion helpers were promoted to exported C ABI symbols in `value/sffi/value_ops.rs` and `value/sffi/memory.rs`; `runtime_value.h` remains as a C ABI header. |
 | `runtime_env.c` | `__c_rt_env_*`, `__c_rt_exit`, `__c_rt_stdout_flush`, `__c_rt_stderr_flush`, `__c_rt_platform_name`, `__c_rt_term_get_size` | Deleted 2026-05-29 after no callers for the legacy `__c_rt_*` helpers were reconfirmed; active env/process/platform/flush SFFI symbols are exported from `value/sffi/env_process.rs` and `value/sffi/io_print.rs`. |
+| `runtime_string_index.c` | `rt_swi_build/char_to_byte/byte_to_char/free`, `rt_rank_select_build`, `rt_rank_query`, `rt_select_query`, `rt_rank_select_free` | Deleted 2026-05-29 after a focused SFFI/link-surface audit confirmed zero active build input references. Removed from the legacy Simple `runtime_compiler.spl` C source list. Active symbols are exported from Rust in `value/utf8_kernels.rs`; interpreter mode is handled by `interpreter_extern/simd.rs`. |
+| `async_driver.c` | `rt_driver_create/destroy`, `rt_driver_submit_*`, `rt_driver_poll*`, `rt_driver_cancel`, backend capability helpers | Deleted 2026-05-29 after a focused SFFI/link-surface audit confirmed zero active build input references. Removed from the legacy Simple `runtime_compiler.spl` C source list. Active symbols are exported from Rust in `async_driver_sffi.rs`; interpreter mode is handled by `interpreter_extern/io_driver.rs`. `src/runtime/platform/async_driver.c` is a separate platform dispatch source and was not touched by this item. |
 
 ## Cannot Remove (active Rust/codegen callers)
 
@@ -45,8 +47,6 @@ No other build.rs compiles any `src/runtime/*.c` file. Neither `runtime.c` nor `
 | `runtime_memory.c` | `rt_alloc`, `rt_free`, `rt_ptr_read_i64/i32`, `rt_ptr_write_*`, `rt_memset`, `rt_memcpy` | `runtime/build.rs` c_sources | gpu/memory.spl, ptr/raw.spl, torch/sffi.spl, sffi/llvm_loader.spl | Codegen emits `rt_alloc` for every struct/array alloc; core ABI |
 | `runtime_time.c` | 18 (`rt_time_*`, `rt_timestamp_*`) | `runtime/build.rs` c_sources | **199 files** | Most used runtime module; syscall wrappers |
 | `runtime_native.c` | `rt_print`, `rt_println`, `rt_stdout_write`, `rt_stderr_write`, `rt_stdin_read_line`, `rt_string_new/len/data`, `rt_native_eq`, `rt_interp_call`, `rt_to_string`, etc. | `tools.rs` runtime_inputs | 0 direct (exposed via `use std.*`) | Foundation of the runtime ABI — strings, I/O, value boxing |
-| `runtime_string_index.c` | `rt_swi_build/char_to_byte/byte_to_char/free`, `rt_rank_select_build`, `rt_rank_query`, `rt_select_query`, `rt_rank_select_free` | `codegen/runtime_sffi.rs` (8 entries), `interpreter_extern/simd.rs` | 0 direct | Codegen SFFI table + interpreter extern; Unicode index structures. **Not in any build.rs c_sources or tools.rs runtime_inputs** — linked via SFFI dispatch only; removability pending SFFI audit. |
-| `async_driver.c` | `rt_driver_create/destroy`, `rt_driver_submit_*` (13 variants), `rt_driver_poll*`, `rt_driver_cancel` | `codegen/runtime_sffi.rs` (15 entries), `codegen/instr/calls.rs`, `llvm/functions/calls.rs` | 0 direct spl; driven via codegen SFFI | Async I/O driver; codegen emits all submit/poll calls |
 
 ### Group A2 — On-disk but NOT in any build input (removal candidates pending SFFI/codegen audit)
 
@@ -58,8 +58,9 @@ Verified blocker categories (2026-05-29 follow-up pass):
 - **SFFI dispatch table** (`codegen/runtime_sffi.rs`): former `rt_value_*` and `rt_env_*` blockers now resolve to exported Rust replacements.
 - **`calls.rs` codegen dispatch**: `simple_contract_check`, `simple_contract_check_msg`, and `sffi_regex_*` resolve to Rust exports now; the stale C files were deleted.
 - **Interpreter extern Rust FFI** (`interpreter_extern/math.rs`): `rt_math_*` symbols are resolved from the Rust `simple-runtime` crate directly — NOT from the deleted C file. Same for pty.
+- **String index and async driver SFFI** (`codegen/runtime_sffi.rs`, `interpreter_extern/simd.rs`, `interpreter_extern/io_driver.rs`): the SFFI and interpreter surfaces remain active, but the native symbols resolve from exported Rust implementations in `value/utf8_kernels.rs` and `async_driver_sffi.rs`. The deleted C sources were absent from Rust runtime/native build inputs and were removed from the legacy Simple `runtime_compiler.spl` source list.
 - **Core-C tiny-native lane** (`build_core_c_runtime_library` in `native_project/tools.rs`): confirmed runtime_inputs = `[runtime_native.c, runtime_legacy_core.c, runtime_mcp_core.c, runtime_simd_utf8.c]` plus optional `runtime_https_openssl_core.c`. This lane keeps its own `rt_function_not_found` implementation in `runtime_native.c`; it did not require the deleted `runtime_error.c`.
-- **C file count after removals:** 25 top-level `src/runtime/*.c` files remain.
+- **C file count after removals:** 23 top-level `src/runtime/*.c` files remain.
 
 | C File | Key Symbols | Rust Replacement | .spl Callers | Confirmed Blocker |
 |--------|-------------|-----------------|-------------|---------|
@@ -206,7 +207,16 @@ For **native/legacy_core/mcp_core/simd_utf8** (`tools.rs` runtime_inputs):
 Compiled into the core-C runtime library for native builds. `runtime_native.c` is the foundation of the runtime ABI. `runtime_legacy_core.c` is a minimal bridge shim. Cannot remove without restructuring the ABI layer.
 
 For **string_index/async_driver**:
-Referenced via the codegen SFFI dispatch table and interpreter extern. Removal requires the native-build linker to resolve them from Simple-compiled objects instead of the C archive. Blocked by the cross-module ABI bug. Note: `runtime_string_index.c` and `async_driver.c` do NOT appear in the confirmed build inputs — they may only be linked via SFFI table references. A focused linker audit is needed.
+Deleted 2026-05-29. The focused audit found no `runtime/build.rs`
+`c_sources[]`, no `native_project/tools.rs` `runtime_inputs[]`, no other
+non-vendor Rust `build.rs`, and no `.spl extern fn` declarations for the
+string-index symbols. The stale legacy Simple `runtime_compiler.spl` source
+list still named both C files and was updated to stop compiling them. The
+remaining `.spl` async-driver definitions are the Simple
+`src/os/kernel/net/driver_shim.spl`, not hosted C extern declarations. The
+active hosted ABI symbols are exported by Rust (`value/utf8_kernels.rs` and
+`async_driver_sffi.rs`), while interpreter mode dispatches through
+`interpreter_extern/simd.rs` and `interpreter_extern/io_driver.rs`.
 
 For **audio/font/fork/image/memtrack/process/sdl2/simd/thread/scv_wasm/regex**:
 SPL extern declarations still point at C symbols. Removal requires either a

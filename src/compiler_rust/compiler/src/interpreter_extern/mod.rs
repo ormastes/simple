@@ -1420,6 +1420,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_tls13_aes256_gcm_decrypt", simd::rt_tls13_aes256_gcm_decrypt);
     insert_simple!("rt_tls13_aes256_gcm_encrypt", simd::rt_tls13_aes256_gcm_encrypt);
     insert_simple!("rt_tls13_ed25519_verify", signatures::rt_ed25519_verify);
+    insert_simple!("rt_torch_available", torch::rt_torch_available);
     insert_simple!("rt_torch_clone", torch::rt_torch_clone);
     insert_simple!("rt_torch_copy_data_to_cpu", torch::rt_torch_copy_data_to_cpu);
     insert_simple!("rt_torch_free", torch::rt_torch_free);

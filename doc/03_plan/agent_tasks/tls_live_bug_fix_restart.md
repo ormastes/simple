@@ -13,6 +13,37 @@ Latest verified live result (after compiler `UnitNarrow` patch landed):
   - `D9`
   - `D10`
 
+## 2026-05-30 Update: host vectors added; live lane currently broader
+
+Added focused host coverage for the OS pure-Simple SHA/HMAC entrypoints:
+- `test/unit/os/crypto/sha256_pure_simple_spec.spl`
+- Covers RFC 6234 SHA-256 empty string, RFC 6234 SHA-256 `"abc"`, and RFC
+  4231 HMAC-SHA-256 TC1.
+
+Verification:
+- `SIMPLE_LIB=src bin/simple check src/os/crypto/sha256.spl test/unit/os/crypto/sha256_pure_simple_spec.spl` PASS
+- `SIMPLE_LIB=src bin/simple test test/unit/os/crypto/sha256_pure_simple_spec.spl --mode=interpreter --clean --format json` PASS (`3/3`)
+- `SIMPLE_LIB=src bin/simple test test/unit/os/crypto/sha256_pure_simple_spec.spl --mode=native --clean --format json` PASS at file level (`1/1` native runner file result)
+
+Rejected experiment:
+- Routing `sha256_with_len` through the existing list/i64 implementation made
+  the host vector tests pass, but the QEMU TLS lane got worse (`A1` failed).
+  That change was reverted. The live fix must target the baremetal/runtime
+  byte materialization or codegen path rather than bypassing `[u32]` arrays
+  through lists.
+
+Current live command:
+`SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLEOS_QEMU_TLS_LIVE=1 bin/simple test test/system/os_tls_spec.spl --system --sequential --fail-fast`
+
+Current direct serial result after reverting the rejected SHA route:
+- `A1` now fails: `prk_a: 81 245 248 101 ... 172 152 252 48`, expected
+  `7 119 9 54 ... 215 194 179 229`.
+- `A2` fails: `okm_a: 56 247 127 136`, expected first bytes `60 178`.
+- `D3`, `D4`, `D8`, `D9`, and `D10` fail.
+
+This means the latest dirty-tree live state is broader than the 2026-04-28
+baseline and should be re-narrowed before changing SHA internals again.
+
 ## 2026-04-28 Update: Compiler-side hypothesis disproven
 
 The original A2 root-cause hypothesis was **indexed `[u32]` reads lower as
