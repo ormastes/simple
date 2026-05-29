@@ -489,6 +489,18 @@ myapp/
 
 ---
 
+## HTTPS / TLS Record Layer
+
+**Added 2026-05-29.** TLS 1.2 record-layer decrypt and encrypt are now wired in `src/lib/nogc_async_mut/http_server/worker.spl`. The worker negotiates TLS on accepted sockets before handing the connection to the HTTP parser, so controllers and middleware see a plain `HttpRequestData` regardless of whether the transport is TLS or plaintext.
+
+Current status:
+- TLS 1.2 record-layer (decrypt/encrypt): **implemented**
+- TLS 1.3 and ALPN negotiation: **in progress**
+
+For low-level TLS details (record framing, cipher suites, handshake state machine) see [`doc/07_guide/library/tls_baremetal.md`](tls_baremetal.md).
+
+---
+
 ## Security Lint Rules
 
 The compiler includes 6 security lint rules (activated by `bin/simple build lint`):

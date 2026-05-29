@@ -1,6 +1,7 @@
 # Interpreter: named function passed to non-chained array map fails
 
 Date: 2026-05-29
+Status: FIXED 2026-05-29
 
 ## Symptom
 

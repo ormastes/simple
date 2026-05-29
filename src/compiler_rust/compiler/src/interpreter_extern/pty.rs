@@ -1,9 +1,19 @@
 //! PTY (Pseudo-Terminal) extern functions — interpreter mode.
 //!
 //! Provides Rust implementations of `rt_pty_open` and `rt_pty_spawn` for
+<<<<<<< Conflict 1 of 1
+%%%%%%% Changes from base to side #1
+-//! use in the interpreter.  The compiled/native path uses the C symbols in
+-//! `src/runtime/runtime_pty.c`; this module is the interpreter-only path.
++//! use in the interpreter.  The compiled/native path uses the Rust symbols in
++//! `src/compiler_rust/runtime/src/value/pty.rs` (`#[no_mangle]` exports);
++//! `src/runtime/runtime_pty.c` is no longer compiled by any build path.
++++++++ Contents of side #2
 //! use in the interpreter.  The compiled/native path uses the Rust symbols in
-//! `src/compiler_rust/runtime/src/value/pty.rs` (`#[no_mangle]` exports);
-//! `src/runtime/runtime_pty.c` is no longer compiled by any build path.
+//! `src/compiler_rust/compiler/src/value/pty.rs` (exported via `#[no_mangle]`);
+//! `src/runtime/runtime_pty.c` is NOT used — zero build.rs/tools.rs references.
+//! This module is the interpreter-only dispatch path.
+>>>>>>> Conflict 1 of 1 ends
 //!
 //! On Unix we call `openpty`/`fork`/`exec` via `libc`.
 //! On Windows both functions return -1 (not supported).

@@ -112,6 +112,8 @@ type Result<T> = Option<T>
 type Handler = fn(Event) -> ()
 ```
 
+<<<<<<< Conflict 1 of 3
++++++++ Contents of side #1
 **Generic type arg parsing** — calling static methods on a fully-instantiated
 generic type (`Map<text, i64>.new()`) now parses correctly in interpreter mode
 as of 2026-05-29. The `<…>` is recognised as type arguments, not comparison
@@ -123,6 +125,10 @@ val s = Set<text>.new()
 val v = Vec<Point>.with_capacity(16)
 ```
 
+%%%%%%% Changes from base to side #2
++**Note (fixed 2026-05-29):** Generic static calls on type aliases now parse correctly in interpreter mode. `Map<text, i64>.new()` and similar forms are valid; previously the parser rejected the `<` as a comparison operator in this position.
++
+>>>>>>> Conflict 1 of 3 ends
 ### Class Alias
 
 **Note:** `alias` creates an alternative **name** for an existing class. It is not inheritance. See [Not Part of Simple's Design](#not-part-of-simples-design) for the supported alternatives.
@@ -262,6 +268,8 @@ val d1 = {"a": 1}
 val d2 = {**d1, "b": 2}             # {"a": 1, "b": 2}
 ```
 
+<<<<<<< Conflict 2 of 3
++++++++ Contents of side #1
 ### Array Methods (Interpreter)
 
 `map`, `filter`, `flat_map`, `any`, `all`, and `enumerate` are available on
@@ -278,6 +286,23 @@ nums.flat_map(x => [x, x * 10])    # [1, 10, 2, 20, ...]
 nums.enumerate()                    # [(0, 1), (1, 2), ...]
 ```
 
+%%%%%%% Changes from base to side #2
++### Array Methods (Interpreter)
++
++The following array methods are available in interpreter mode (added 2026-05-29):
++
++```simple
++val nums = [1, 2, 3, 4, 5]
++
++nums.map(_ * 2)                     # [2, 4, 6, 8, 10]
++nums.filter(_ > 2)                  # [3, 4, 5]
++nums.flat_map(\x: [x, x * 10])     # [1, 10, 2, 20, 3, 30, 4, 40, 5, 50]
++nums.any(_ > 4)                     # true
++nums.all(_ > 0)                     # true
++nums.enumerate()                    # [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]
++```
++
+>>>>>>> Conflict 2 of 3 ends
 ---
 
 ## Slicing & Indexing
@@ -973,6 +998,8 @@ val output = data
     |> transform
 ```
 
+<<<<<<< Conflict 3 of 3
++++++++ Contents of side #1
 ### Placeholder Lambdas in Pipes
 
 Parenthesised placeholder expressions (`_1`, `_2`) are transformed into lambdas
@@ -985,6 +1012,10 @@ val clamped = values |> (_1.max(0))    # clamp negatives
 pairs |> (_1 + _2)                     # binary placeholder
 ```
 
+%%%%%%% Changes from base to side #2
++**Note (fixed 2026-05-29):** Placeholder-lambda forms in pipe position now work in interpreter mode. `5 |> (_1 * 3)` is valid and evaluates correctly (desugars to `(\__p0: __p0 * 3)(5)`).
++
+>>>>>>> Conflict 3 of 3 ends
 ### Function Composition (`>>`, `<<`)
 
 Create new functions by composition:
