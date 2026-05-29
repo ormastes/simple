@@ -132,11 +132,54 @@ Current result on this Linux host:
   `qemu-system.*<identity>` patterns so cleanup no longer kills the shell/test
   command that mentions the same log path.
 
+Additional non-x86 GUI source-contract coverage:
+
+```bash
+bin/simple check test/system/gui/arm64_wm_qemu_contract_spec.spl
+SIMPLE_LIB=src bin/simple test test/system/gui/arm64_wm_qemu_contract_spec.spl --mode=interpreter --clean --format json
+```
+
+The ARM64 contract spec ties `doc/07_guide/platform/simpleos_arm64_wm_qemu.md`
+to `examples/simple_os/arch/arm64/wm_entry.spl` and
+`examples/simple_os/arch/arm64/wm_entry_io.spl`. It checks that the documented
+`qemu-system-aarch64`/`ramfb` command, `aarch64-unknown-none` target, output
+ELF path, fw_cfg MMIO address, `etc/ramfb` selector path, and acceptance serial
+markers are present in the guide and source. This prevents drift in the non-x86
+WM lane while keeping the live proof status honest: it is source/guide contract
+coverage, not an ARM64 QEMU boot result.
+
+Additional ARM64 host-readiness and canonical target contract coverage:
+
+```bash
+sh -n scripts/check-simpleos-arm64-wm-qemu-readiness.shs
+sh scripts/check-simpleos-arm64-wm-qemu-readiness.shs
+src/compiler_rust/target/debug/simple check src/os/qemu_runner_part1.spl src/os/qemu_runner_part2.spl test/system/gui/arm64_wm_qemu_contract_spec.spl test/unit/os/qemu_runner_extended_spec.spl
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/gui/arm64_wm_qemu_contract_spec.spl --mode=interpreter --clean --format json
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/qemu_runner_extended_spec.spl --mode=interpreter --clean --format json
+```
+
+Current result on this Linux host:
+
+- The readiness probe reports `/usr/bin/qemu-system-aarch64`, `virt`, `ramfb`,
+  and the bounded headless dry-run parse as ready.
+- The ARM64 contract spec now passes `7/7` and asserts the guide/source
+  markers, the host-runnable `get_arm64_wm_qemu_target()` build/run contract,
+  the named `arm64-wm-ramfb` scenario command contract, runner CLI commands,
+  WM-specific serial acceptance markers, and a 120s scenario test timeout.
+- The extended QEMU runner spec now passes `25/25` and asserts the ARM64 WM
+  target uses `build/os/generated`, `src/os`, and `examples/simple_os`, plus
+  `SIMPLE_BOOTSTRAP=1`, `SIMPLE_LIB="$(pwd)/src"`, and
+  `SIMPLE_ALLOW_FREESTANDING_STUBS=1`; it also proves
+  `get_scenario("arm64-wm-ramfb")` resolves to the WM target and QEMU command.
+- This is still a contract/readiness slice, not a successful ARM64 WM boot,
+  ramfb configuration, or framebuffer capture.
+
 ## Remaining Work
 
 1. Add macOS validation for Cocoa-backed host WM when a macOS host is available.
-2. Promote the current x86_64 live QEMU WM input/framebuffer smoke into broader
-   SimpleOS GUI coverage for additional display backends or architectures.
+2. Promote the ARM64 target-contract/readiness lane into a live QEMU boot/capture
+   lane when the ARM64 kernel compile, ramfb configuration, and capture path are
+   production-ready.
 3. Update architecture docs if implementation reveals a different adapter boundary.
 
 ## Known Blockers
@@ -145,6 +188,11 @@ Current result on this Linux host:
 - The current live SimpleOS GUI proof is a bounded x86_64 WM input/framebuffer
   smoke. It proves the focused QEMU lane, shared compositor adapter path, and
   marker pixels, but not a full desktop session or multi-architecture GUI run.
+- ARM64 WM coverage is currently guide/source, host-readiness, and canonical
+  QEMU target/command contract coverage only. It proves this host has
+  `qemu-system-aarch64` with `virt` and `ramfb`, and that the runner can build
+  the expected ARM64 WM command, not that the ARM64 kernel has compiled, booted,
+  configured ramfb, or rendered a captured frame in this environment.
 - Real macOS Cocoa proof was not possible on this Linux host.
 
 ## Scoped Commit Discipline

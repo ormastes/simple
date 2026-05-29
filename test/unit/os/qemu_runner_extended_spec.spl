@@ -3,11 +3,12 @@ use os.qemu_runner.{
     get_all_targets, get_gui_target, get_qemu_target, get_target,
     get_scenario, scenario_arm64_virtio_fat32_smf, scenario_arm32_virtio_fat32_smf,
     scenario_riscv64_virtio_fat32_smf, scenario_riscv64_hosted, scenario_riscv32_virtio_fat32_smf,
-    scenario_x64_desktop_uefi, scenario_x64_wm_simple_web_check,
+    scenario_x64_desktop_uefi, scenario_x64_wm_simple_web_check, scenario_arm64_wm_ramfb,
     scenario_x64_net_user, scenario_x64_ssh,
     build_scenario_command, scenario_test_timeout_ms, arm_fs_exec_disk_image_path,
     riscv_fs_exec_disk_image_path, scenario_target, get_wm_simple_web_check_target,
     get_ssh_live_target, get_ssh_x25519_probe_target,
+    get_arm64_wm_qemu_target,
     default_os_build_backend_for_target,
     desktop_disk_image_candidates, desktop_disk_image_path_in, desktop_disk_make_script_args,
     desktop_installer_iso_candidates, desktop_release_disk_image_path_in,
@@ -248,6 +249,31 @@ describe "Qemu runner native-build prerequisites":
         val env_prefix = os_native_build_env_prefix(get_ssh_x25519_probe_target(), "")
         expect(env_prefix).to_contain("SIMPLE_BOOTSTRAP=1")
         expect(env_prefix).to_contain("SIMPLE_LIB=\"$(pwd)/src\"")
+
+    it "uses the ARM64 WM QEMU build contract for ramfb source and env setup":
+        val target = get_arm64_wm_qemu_target()
+        val sources = os_native_build_sources(target)
+        expect(sources).to_contain("build/os/generated")
+        expect(sources).to_contain("src/os")
+        expect(sources).to_contain("examples/simple_os")
+        expect(sources.contains("src/lib")).to_equal(false)
+        val env_prefix = os_native_build_env_prefix(target, "")
+        expect(env_prefix).to_contain("SIMPLE_BOOTSTRAP=1")
+        expect(env_prefix).to_contain("SIMPLE_LIB=\"$(pwd)/src\"")
+        expect(env_prefix).to_contain("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
+
+    it "resolves the named ARM64 WM ramfb scenario to the WM target":
+        val scenario = scenario_arm64_wm_ramfb()
+        val target = scenario_target(scenario)
+        val cmd = build_scenario_command(scenario, target.output)
+        expect(scenario_name_or_missing("arm64-wm-ramfb")).to_equal("arm64-wm-ramfb")
+        expect(target.entry).to_equal("examples/simple_os/arch/arm64/wm_entry.spl")
+        expect(target.output).to_equal("build/os/simpleos_arm64_wm.elf")
+        expect(cmd).to_contain("qemu-system-aarch64")
+        expect(cmd).to_contain("-kernel")
+        expect(cmd).to_contain("build/os/simpleos_arm64_wm.elf")
+        expect(cmd).to_contain("-device")
+        expect(cmd).to_contain("ramfb")
 
     it "keeps RV64 hosted builds on minimal boot sources without freestanding unresolved-symbol stubs":
         val hosted_target = scenario_target(scenario_riscv64_hosted())

@@ -44,6 +44,50 @@ qemu-system-aarch64 \
   -device ramfb
 ```
 
+## Host Readiness Probe
+
+Before attempting the full build and boot, check that the host QEMU binary
+supports the documented `virt` plus `ramfb` lane:
+
+```bash
+sh scripts/check-simpleos-arm64-wm-qemu-readiness.shs
+```
+
+The probe verifies that `qemu-system-aarch64` is on `PATH`, that the `virt`
+machine and `ramfb` device are available, and that QEMU accepts the documented
+headless `virt`/`ramfb` dry-run command. It is not a live boot proof; the serial
+markers below remain the acceptance signal for a completed ARM64 WM run.
+
+## Runner Scenario Contract
+
+The repo QEMU runner exposes the same lane as the named scenario
+`arm64-wm-ramfb`. The scenario resolves to `get_arm64_wm_qemu_target()` and
+builds/runs:
+
+```text
+examples/simple_os/arch/arm64/wm_entry.spl
+build/os/simpleos_arm64_wm.elf
+qemu-system-aarch64 -machine virt -cpu max -m 384M -kernel build/os/simpleos_arm64_wm.elf -device ramfb
+```
+
+This is a build/run command contract for the existing scenario machinery. It
+does not replace the serial-marker acceptance gate below and does not claim
+that the ARM64 WM kernel currently boots to a rendered frame.
+
+## Runner CLI Contract
+
+Use the named scenario when driving this lane through the SimpleOS runner:
+
+```bash
+bin/simple os build --scenario=arm64-wm-ramfb
+bin/simple os run --scenario=arm64-wm-ramfb
+bin/simple os test --scenario=arm64-wm-ramfb
+```
+
+The test command is a live acceptance attempt. It should be considered passing
+only when the serial output contains every acceptance marker listed below.
+Scenario wiring and command construction alone are not boot evidence.
+
 ## Acceptance Markers
 
 The serial log must include:

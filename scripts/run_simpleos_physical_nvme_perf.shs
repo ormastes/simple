@@ -6,6 +6,7 @@ set -eu
 # Usage:
 #   sh scripts/run_simpleos_physical_nvme_perf.shs --serial-log build/serial/physical-nvme.log --validate-log-only
 #   sh scripts/run_simpleos_physical_nvme_perf.shs --preflight
+#   sh scripts/run_simpleos_physical_nvme_perf.shs --preflight-scan --report-out build/serial/physical-nvme-scan.sdn --preflight-out build/serial/physical-nvme-preflight.sdn
 #   sh scripts/run_simpleos_physical_nvme_perf.shs --production --serial-log build/serial/physical-nvme.log --preflight-report build/serial/physical-nvme-preflight.sdn --report-out build/serial/physical-nvme-validation.sdn --validate-log-only
 #   SERIAL_PORT=/dev/ttyUSB0 SERIAL_BAUD=115200 sh scripts/run_simpleos_physical_nvme_perf.shs --production --serial-log build/serial/physical-nvme.log --serial-seconds=30 --preflight-out build/serial/physical-nvme-preflight.sdn --report-out build/serial/physical-nvme-validation.sdn
 #   SERIAL_PORT=/dev/ttyUSB0 sh scripts/run_simpleos_physical_nvme_perf.shs --serial-log build/serial/physical-nvme.log
@@ -20,6 +21,7 @@ set -eu
 #   SIMPLEOS_NVME_PREFLIGHT_REPORT Optional preflight identity report to compare
 #   SIMPLEOS_NVME_PREFLIGHT_OUT    Optional preflight identity report to create
 #   SIMPLEOS_NVME_SERIAL_SECONDS Capture duration in seconds (default: 30)
+#   SIMPLEOS_SIMPLE_BIN          Simple CLI used to run the checker app
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
@@ -32,19 +34,32 @@ REPORT_OUT="${SIMPLEOS_NVME_REPORT_OUT:-}"
 PREFLIGHT_REPORT="${SIMPLEOS_NVME_PREFLIGHT_REPORT:-}"
 PREFLIGHT_OUT="${SIMPLEOS_NVME_PREFLIGHT_OUT:-}"
 SERIAL_SECONDS="${SIMPLEOS_NVME_SERIAL_SECONDS:-30}"
+SIMPLE_BIN="${SIMPLEOS_SIMPLE_BIN:-${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple}"
 VALIDATE_LOG_ONLY=0
 PREFLIGHT=0
+PREFLIGHT_SCAN=0
 PRODUCTION=0
+LIVE_PREFLIGHT_TMP=""
 
-check_preflight_ready() {
-    if [ ! -x "${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" ]; then
-        echo "[physical-nvme] missing executable checker runtime: ${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" >&2
+cleanup_live_preflight_tmp() {
+    if [ -n "${LIVE_PREFLIGHT_TMP:-}" ]; then
+        rm -f "$LIVE_PREFLIGHT_TMP"
+    fi
+}
+
+check_preflight_tools() {
+    if [ ! -x "$SIMPLE_BIN" ]; then
+        echo "[physical-nvme] missing executable checker runtime: $SIMPLE_BIN" >&2
         exit 1
     fi
     if [ ! -f "${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl" ]; then
         echo "[physical-nvme] missing checker app: ${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl" >&2
         exit 1
     fi
+}
+
+check_preflight_ready() {
+    check_preflight_tools
     if ! ls $NVME_DEVICE_GLOB >/dev/null 2>&1; then
         echo "[physical-nvme] no NVMe namespace device matched: $NVME_DEVICE_GLOB" >&2
         exit 1
@@ -162,6 +177,177 @@ write_preflight_report() {
     } > "$report_path"
 }
 
+cleanup_preflight_scan_temps() {
+    if [ -n "${scan_report_tmp:-}" ]; then
+        rm -f "$scan_report_tmp"
+    fi
+    if [ -n "${scan_preflight_tmp:-}" ]; then
+        rm -f "$scan_preflight_tmp"
+    fi
+    if [ -n "${scan_candidate_tmp:-}" ]; then
+        rm -f "$scan_candidate_tmp"
+    fi
+}
+
+run_preflight_scan() {
+    check_preflight_tools
+    scan_report_tmp=""
+    scan_preflight_tmp=""
+    scan_candidate_tmp=""
+    trap 'cleanup_preflight_scan_temps' EXIT HUP INT TERM
+    if [ -n "$REPORT_OUT" ] && [ -n "$PREFLIGHT_OUT" ] && [ "$REPORT_OUT" = "$PREFLIGHT_OUT" ]; then
+        echo "[physical-nvme] --preflight-scan report outputs must differ" >&2
+        exit 2
+    fi
+    if [ -z "$REPORT_OUT" ] && [ -n "$PREFLIGHT_OUT" ]; then
+        echo "[physical-nvme] --preflight-scan --preflight-out requires --report-out" >&2
+        exit 2
+    fi
+    if [ -n "$REPORT_OUT" ]; then
+        check_output_absent "preflight scan report" "$REPORT_OUT"
+        scan_report_tmp="${REPORT_OUT}.tmp.$$"
+        check_output_absent "temporary preflight scan report" "$scan_report_tmp"
+        mkdir -p "$(dirname "$REPORT_OUT")"
+        {
+            echo "physical_nvme_preflight_scan:"
+            echo "  nvme_device_glob: $NVME_DEVICE_GLOB"
+            echo "  checker: ${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl"
+        } > "$scan_report_tmp"
+    else
+        scan_report_tmp=""
+    fi
+    if [ -n "$PREFLIGHT_OUT" ]; then
+        rm -f "$PREFLIGHT_OUT"
+        scan_preflight_tmp="${PREFLIGHT_OUT}.tmp.$$"
+        check_output_absent "temporary preflight output" "$scan_preflight_tmp"
+        mkdir -p "$(dirname "$PREFLIGHT_OUT")"
+    else
+        scan_preflight_tmp=""
+    fi
+    matched=0
+    ready=0
+    selected_device=""
+    ready_devices=""
+    if ! ls $NVME_DEVICE_GLOB >/dev/null 2>&1; then
+        if [ -n "$scan_report_tmp" ]; then
+            {
+                echo "  summary:"
+                echo "    accepted: false"
+                echo "    status: not-ready"
+                echo "    matched_devices: 0"
+                echo "    ready_devices: 0"
+            } >> "$scan_report_tmp"
+            mv "$scan_report_tmp" "$REPORT_OUT"
+            scan_report_tmp=""
+        fi
+        if [ -n "$scan_preflight_tmp" ]; then
+            rm -f "$scan_preflight_tmp"
+            scan_preflight_tmp=""
+        fi
+        echo "[physical-nvme] preflight-scan=not-ready matched_devices=0 ready_devices=0" >&2
+        exit 1
+    fi
+    for dev in $NVME_DEVICE_GLOB; do
+        matched=$((matched + 1))
+        scan_candidate_tmp="${TMPDIR:-/tmp}/simpleos_nvme_preflight_scan_${matched}_$$.sdn"
+        rm -f "$scan_candidate_tmp"
+        if scan_err="$( (
+            NVME_DEVICE_GLOB="$dev"
+            export NVME_DEVICE_GLOB
+            write_preflight_report "$scan_candidate_tmp"
+        ) 2>&1)"; then
+            ready=$((ready + 1))
+            selected_device="$dev"
+            ready_devices="${ready_devices} ${dev}"
+            echo "[physical-nvme] preflight-scan device=$dev status=ready"
+            if [ -n "$scan_report_tmp" ]; then
+                {
+                    echo "  device: $dev"
+                    echo "    status: ready"
+                    echo "    preflight_identity:"
+                } >> "$scan_report_tmp"
+                sed 's/^/      /' "$scan_candidate_tmp" >> "$scan_report_tmp"
+            fi
+            if [ -n "$scan_preflight_tmp" ]; then
+                cp "$scan_candidate_tmp" "$scan_preflight_tmp"
+            fi
+        else
+            first_reason="$(printf '%s\n' "$scan_err" | sed -n '1p')"
+            echo "[physical-nvme] preflight-scan device=$dev status=failed reason=${first_reason:-unknown}"
+            if [ -n "$scan_report_tmp" ]; then
+                {
+                    echo "  device: $dev"
+                    echo "    status: failed"
+                    echo "    reason: ${first_reason:-unknown}"
+                } >> "$scan_report_tmp"
+            fi
+        fi
+        rm -f "$scan_candidate_tmp"
+        scan_candidate_tmp=""
+    done
+    if [ "$ready" -eq 1 ]; then
+        if [ -n "$scan_report_tmp" ]; then
+            {
+                echo "  summary:"
+                echo "    accepted: true"
+                echo "    status: ready"
+                echo "    matched_devices: $matched"
+                echo "    ready_devices: $ready"
+                echo "    selected_device: $selected_device"
+                if [ -n "$PREFLIGHT_OUT" ]; then
+                    echo "    selected_preflight_report: $PREFLIGHT_OUT"
+                fi
+            } >> "$scan_report_tmp"
+            mv "$scan_report_tmp" "$REPORT_OUT"
+            scan_report_tmp=""
+        fi
+        if [ -n "$scan_preflight_tmp" ]; then
+            mv "$scan_preflight_tmp" "$PREFLIGHT_OUT"
+            scan_preflight_tmp=""
+        fi
+        echo "[physical-nvme] preflight-scan=ready matched_devices=$matched ready_devices=$ready selected_device=$selected_device"
+        exit 0
+    fi
+    if [ "$ready" -gt 1 ]; then
+        candidates="$(printf '%s' "$ready_devices" | xargs)"
+        if [ -n "$scan_report_tmp" ]; then
+            {
+                echo "  summary:"
+                echo "    accepted: false"
+                echo "    status: ambiguous"
+                echo "    matched_devices: $matched"
+                echo "    ready_devices: $ready"
+                echo "    candidates: $candidates"
+            } >> "$scan_report_tmp"
+            mv "$scan_report_tmp" "$REPORT_OUT"
+            scan_report_tmp=""
+        fi
+        if [ -n "$scan_preflight_tmp" ]; then
+            rm -f "$scan_preflight_tmp"
+            scan_preflight_tmp=""
+        fi
+        echo "[physical-nvme] preflight-scan=ambiguous matched_devices=$matched ready_devices=$ready candidates=$candidates" >&2
+        exit 1
+    fi
+    if [ -n "$scan_report_tmp" ]; then
+        {
+            echo "  summary:"
+            echo "    accepted: false"
+            echo "    status: not-ready"
+            echo "    matched_devices: $matched"
+            echo "    ready_devices: $ready"
+        } >> "$scan_report_tmp"
+        mv "$scan_report_tmp" "$REPORT_OUT"
+        scan_report_tmp=""
+    fi
+    if [ -n "$scan_preflight_tmp" ]; then
+        rm -f "$scan_preflight_tmp"
+        scan_preflight_tmp=""
+    fi
+    echo "[physical-nvme] preflight-scan=not-ready matched_devices=$matched ready_devices=$ready" >&2
+    exit 1
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --serial-log)
@@ -180,6 +366,9 @@ while [ "$#" -gt 0 ]; do
             ;;
         --preflight)
             PREFLIGHT=1
+            ;;
+        --preflight-scan)
+            PREFLIGHT_SCAN=1
             ;;
         --production)
             PRODUCTION=1
@@ -227,6 +416,10 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+
+if [ "$PREFLIGHT_SCAN" -eq 1 ]; then
+    run_preflight_scan
+fi
 
 if [ "$PREFLIGHT" -eq 1 ]; then
     check_preflight_ready
@@ -318,8 +511,16 @@ if [ "$PRODUCTION" -eq 1 ]; then
     if [ -z "$PREFLIGHT_REPORT" ]; then
         check_preflight_ready
         check_preflight_single_device
-        write_preflight_report "$PREFLIGHT_OUT"
-        PREFLIGHT_REPORT="$PREFLIGHT_OUT"
+        if [ "$VALIDATE_LOG_ONLY" -eq 0 ]; then
+            LIVE_PREFLIGHT_TMP="${PREFLIGHT_OUT}.tmp.$$"
+            check_output_absent "temporary preflight output" "$LIVE_PREFLIGHT_TMP"
+            trap 'cleanup_live_preflight_tmp' EXIT HUP INT TERM
+            write_preflight_report "$LIVE_PREFLIGHT_TMP"
+            PREFLIGHT_REPORT="$LIVE_PREFLIGHT_TMP"
+        else
+            write_preflight_report "$PREFLIGHT_OUT"
+            PREFLIGHT_REPORT="$PREFLIGHT_OUT"
+        fi
     fi
 fi
 
@@ -355,12 +556,18 @@ if [ ! -s "$SERIAL_LOG" ]; then
     exit 1
 fi
 
+if [ -n "$LIVE_PREFLIGHT_TMP" ]; then
+    mv "$LIVE_PREFLIGHT_TMP" "$PREFLIGHT_OUT"
+    LIVE_PREFLIGHT_TMP=""
+    PREFLIGHT_REPORT="$PREFLIGHT_OUT"
+fi
+
 if [ -n "$REPORT_OUT" ] && [ -n "$PREFLIGHT_REPORT" ]; then
     SIMPLEOS_NVME_SERIAL_LOG="$SERIAL_LOG" \
     SIMPLEOS_NVME_REPORT_OUT="$REPORT_OUT" \
     SIMPLEOS_NVME_PREFLIGHT_REPORT="$PREFLIGHT_REPORT" \
     SIMPLE_EXECUTION_MODE=interpret \
-        exec "${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" run \
+        exec "$SIMPLE_BIN" run \
             "${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl"
 fi
 
@@ -368,7 +575,7 @@ if [ -n "$REPORT_OUT" ]; then
     SIMPLEOS_NVME_SERIAL_LOG="$SERIAL_LOG" \
     SIMPLEOS_NVME_REPORT_OUT="$REPORT_OUT" \
     SIMPLE_EXECUTION_MODE=interpret \
-        exec "${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" run \
+        exec "$SIMPLE_BIN" run \
             "${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl"
 fi
 
@@ -376,11 +583,11 @@ if [ -n "$PREFLIGHT_REPORT" ]; then
     SIMPLEOS_NVME_SERIAL_LOG="$SERIAL_LOG" \
     SIMPLEOS_NVME_PREFLIGHT_REPORT="$PREFLIGHT_REPORT" \
     SIMPLE_EXECUTION_MODE=interpret \
-        exec "${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" run \
+        exec "$SIMPLE_BIN" run \
             "${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl"
 fi
 
 SIMPLEOS_NVME_SERIAL_LOG="$SERIAL_LOG" \
 SIMPLE_EXECUTION_MODE=interpret \
-    exec "${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" run \
+    exec "$SIMPLE_BIN" run \
         "${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl"

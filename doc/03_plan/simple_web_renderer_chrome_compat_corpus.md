@@ -68,6 +68,16 @@ Acceptance:
   fixture completion gate. The corpus spec also keeps bounded numeric evidence
   for this production miss: `different_pixels` must stay above `1000` and below
   `6000`, while exact and perceptual match percentages remain below `9900`.
+  `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`
+  is the readback gate for generated production artifacts: it requires
+  `renderer_mode: "production"`, recomputes the Chrome-vs-production PPM delta,
+  rejects stale reports, and currently reports `differentPixels: 2717`,
+  `computedDifferentPixels: 2717`, and `status: "PASS"` after the focused
+  production run.
+  The CLI summary now prints exact/accepted/divergent/failed-capture counts for
+  selected runs; the focused fixture probe reports `exact=1 accepted=1
+  divergent=0 failed_capture=0`, and the production probe reports `exact=0
+  accepted=0 divergent=1 failed_capture=0`.
 - Future Chrome oracle work should use WPT reftest data, Playwright visual
   comparisons, pixelmatch-compatible PNG comparison, or CDP
   `Page.captureScreenshot` rather than live scraping. The current PPM analyzer
@@ -284,6 +294,10 @@ Measured blocker:
   not yet production renderer Chrome compatibility. Its output uses
   production-specific artifact paths rather than the fixture `simple.ppm` and
   `report.sdn` files consumed by the completion verifier.
+  `tools/electron-shell/verify_famous_site_production_probe.js` verifies that a
+  generated production report is fresh and bounded; the system spec covers its
+  missing-report failure path and the checked-in focused `site_0_google`
+  production-artifact success path.
 - `tools/electron-shell/summarize_famous_site_corpus_coverage.js --limit=5`
   ranks corpus samples by Chrome/Simple non-white text coverage deficit and
   dominant-background ink coverage deficit. The current worst overflow target

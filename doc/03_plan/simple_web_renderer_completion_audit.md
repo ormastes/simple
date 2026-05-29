@@ -161,6 +161,24 @@ Current verification evidence:
   now quantifies the production miss with the shared `compare_exact` and
   `compare_perceptual` comparators instead of only asserting
   production-pixels-not-equal-Chrome.
+  `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`
+  is the generated-artifact freshness gate for this focused production probe:
+  after a production run it recomputes the Chrome/production PPM delta, requires
+  `renderer_mode: "production"`, requires `simple.production.ppm`, and currently
+  reports `differentPixels: 2717`, `computedDifferentPixels: 2717`, and
+  `maxDifferentPixels: 2717` with `status: "PASS"`. The corpus system spec
+  covers both the missing-report failure path and the checked-in
+  `site_0_google` production-artifact success path. `site_corpus_compat.spl` also prints
+  selected-run counts, so focused production probes expose `divergent=1` while
+  focused fixture probes expose `exact=1 accepted=1`. The focused JSON corpus
+  spec command exits at the shell level with `0` and reports `success: true`;
+  the per-file JSON `error: "Process exited with
+  code 2"` note is a runner/reporting artifact to investigate separately, not
+  evidence of a failing corpus spec.
+  A 2026-05-28 direct retry that routed corpus text through the shared
+  `FontRenderer` was rejected: it produced visible text pixels but worsened
+  `site_0_google` from `2717` to `3349` differing pixels. That patch was
+  reverted and the production artifact was regenerated back to `2717`.
 - A 2026-05-28 bounded renderer slice routes famous-site corpus fixture capture
   through the canonical Simple Web renderer and paints the Chrome-default 8px
   body margin plus 120x40 styled block in the Engine2D facade path. The
