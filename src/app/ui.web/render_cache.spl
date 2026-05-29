@@ -8,8 +8,10 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 use std.crypto.sha256.{sha256_text}
 use std.common.ui.web_render_api.{
     WebRenderArtifact,
+    WebRenderBinaryArtifactMetadata,
     WebRenderOptimizationProfile,
     WebRenderRequest,
+    web_render_artifact_with_binary_metadata,
     web_render_cache_key,
     web_render_full_html,
     web_render_ipc_json_with_html,
@@ -152,6 +154,19 @@ class WebRenderPreparedStaticShellPlan:
         self.command_hits = self.command_hits + 1
         self.commands
 
+class WebRenderStaticPlanCacheResult:
+    plan: WebRenderPreparedStaticShellPlan
+    cache_hit: bool
+    cache_stored: bool
+    cache_path: text
+
+class WebRenderStaticCommandCacheResult:
+    commands: [WebRenderStaticShellCommand]
+    valid: bool
+    cache_hit: bool
+    cache_stored: bool
+    cache_path: text
+
 class WebRenderStaticArtifactCache:
     cache_dir: text
     memory_key: text
@@ -203,6 +218,121 @@ class WebRenderStaticArtifactCache:
             self.memory_html = disk.artifact.html
             self.stores = self.stores + 1
         disk
+
+class WebRenderStaticPlanCache:
+    cache_dir: text
+    memory_key: text
+    memory_encoded: text
+    memory_hits: i32
+    disk_hits: i32
+    stores: i32
+
+    static fn create(cache_dir: text) -> WebRenderStaticPlanCache:
+        WebRenderStaticPlanCache(
+            cache_dir: cache_dir,
+            memory_key: "",
+            memory_encoded: "",
+            memory_hits: 0,
+            disk_hits: 0,
+            stores: 0
+        )
+
+    me plan(req: WebRenderRequest) -> WebRenderStaticPlanCacheResult:
+        val profile = web_render_optimization_profile(req)
+        val key = profile.cache_key
+
+        if not profile.cacheable_static_shell:
+            return WebRenderStaticPlanCacheResult(
+                plan: WebRenderPreparedStaticShellPlan.prepare(req, ""),
+                cache_hit: false,
+                cache_stored: false,
+                cache_path: ""
+            )
+
+        if self.memory_key == key and self.memory_encoded != "":
+            self.memory_hits = self.memory_hits + 1
+            return WebRenderStaticPlanCacheResult(
+                plan: WebRenderPreparedStaticShellPlan.prepare(req, self.memory_encoded),
+                cache_hit: true,
+                cache_stored: false,
+                cache_path: "memory"
+            )
+
+        val disk = web_render_cached_static_plan(self.cache_dir, req)
+        if disk.cache_hit:
+            self.memory_key = key
+            self.memory_encoded = web_render_static_cache_lookup_binary(self.cache_dir, req)
+            self.disk_hits = self.disk_hits + 1
+        elif disk.cache_stored:
+            self.memory_key = key
+            self.memory_encoded = web_render_static_cache_lookup_binary(self.cache_dir, req)
+            self.stores = self.stores + 1
+        disk
+
+class WebRenderStaticCommandCache:
+    cache_dir: text
+    memory_key: text
+    memory_commands: [WebRenderStaticShellCommand]
+    memory_hits: i32
+    disk_hits: i32
+    stores: i32
+
+    static fn create(cache_dir: text) -> WebRenderStaticCommandCache:
+        WebRenderStaticCommandCache(
+            cache_dir: cache_dir,
+            memory_key: "",
+            memory_commands: [],
+            memory_hits: 0,
+            disk_hits: 0,
+            stores: 0
+        )
+
+    me commands(req: WebRenderRequest) -> WebRenderStaticCommandCacheResult:
+        val profile = web_render_optimization_profile(req)
+        val key = profile.cache_key
+
+        if not profile.cacheable_static_shell:
+            return WebRenderStaticCommandCacheResult(
+                commands: [],
+                valid: false,
+                cache_hit: false,
+                cache_stored: false,
+                cache_path: ""
+            )
+
+        if self.memory_key == key and self.memory_commands.len() > 0:
+            self.memory_hits = self.memory_hits + 1
+            return WebRenderStaticCommandCacheResult(
+                commands: self.memory_commands,
+                valid: true,
+                cache_hit: true,
+                cache_stored: false,
+                cache_path: "memory"
+            )
+
+        val disk = web_render_cached_static_plan(self.cache_dir, req)
+        if disk.plan.valid:
+            self.memory_key = key
+            self.memory_commands = disk.plan.commands
+            if disk.cache_hit:
+                self.disk_hits = self.disk_hits + 1
+            elif disk.cache_stored:
+                self.stores = self.stores + 1
+            return WebRenderStaticCommandCacheResult(
+                commands: disk.plan.commands,
+                valid: true,
+                cache_hit: disk.cache_hit,
+                cache_stored: disk.cache_stored,
+                cache_path: disk.cache_path
+            )
+
+        WebRenderStaticCommandCacheResult(
+            commands: [],
+            valid: false,
+            cache_hit: false,
+            cache_stored: disk.cache_stored,
+            cache_path: disk.cache_path
+        )
 
 fn _web_render_cache_file(cache_dir: text, req: WebRenderRequest) -> text:
     val digest = sha256_text(web_render_cache_key(req))
@@ -414,8 +544,17 @@ fn web_render_static_shell_binary_to_artifact(req: WebRenderRequest, encoded: te
             cache_stored: false,
             cache_path: "swbc-miss"
         )
+    val artifact = _artifact_with_html(req, web_render_full_html(req))
+    val meta = WebRenderBinaryArtifactMetadata(
+        schema: decoded.schema,
+        cache_key: web_render_cache_key(req),
+        cache_path: "swbc:" + decoded.schema,
+        encoded_bytes: encoded.len(),
+        layout_bytes: decoded.layout_bytes,
+        command_count: decoded.command_count
+    )
     WebRenderCacheResult(
-        artifact: _artifact_with_html(req, web_render_full_html(req)),
+        artifact: web_render_artifact_with_binary_metadata(artifact, meta),
         profile: profile,
         cache_hit: true,
         cache_stored: false,
@@ -434,7 +573,13 @@ fn _artifact_with_html(req: WebRenderRequest, html: text) -> WebRenderArtifact:
         pixels: [],
         viewport_w: req.viewport_w,
         viewport_h: req.viewport_h,
-        capability_summary: ""
+        capability_summary: "",
+        binary_schema: "",
+        binary_cache_key: "",
+        binary_cache_path: "",
+        binary_bytes: 0,
+        binary_layout_bytes: 0,
+        binary_command_count: 0
     )
 
 fn web_render_static_cache_lookup_html(cache_dir: text, req: WebRenderRequest) -> text:
@@ -442,6 +587,15 @@ fn web_render_static_cache_lookup_html(cache_dir: text, req: WebRenderRequest) -
     if not profile.cacheable_static_shell:
         return ""
     val path = _web_render_cache_file(cache_dir, req)
+    if not rt_file_exists(path):
+        return ""
+    rt_file_read_text(path) ?? ""
+
+fn web_render_static_cache_lookup_binary(cache_dir: text, req: WebRenderRequest) -> text:
+    val profile = web_render_optimization_profile(req)
+    if not profile.cacheable_static_shell:
+        return ""
+    val path = _web_render_binary_cache_file(cache_dir, req)
     if not rt_file_exists(path):
         return ""
     rt_file_read_text(path) ?? ""
@@ -456,6 +610,39 @@ fn web_render_static_cache_store_html(cache_dir: text, req: WebRenderRequest, ht
     val binary = web_render_static_shell_binary_artifact_with_html(req, html)
     val binary_ok = rt_file_write_text(_web_render_binary_cache_file(cache_dir, req), binary.encoded)
     html_ok and binary_ok
+
+fn web_render_cached_static_plan(cache_dir: text, req: WebRenderRequest) -> WebRenderStaticPlanCacheResult:
+    val profile = web_render_optimization_profile(req)
+    val path = _web_render_binary_cache_file(cache_dir, req)
+
+    if not profile.cacheable_static_shell:
+        return WebRenderStaticPlanCacheResult(
+            plan: WebRenderPreparedStaticShellPlan.prepare(req, ""),
+            cache_hit: false,
+            cache_stored: false,
+            cache_path: path
+        )
+
+    val cached = web_render_static_cache_lookup_binary(cache_dir, req)
+    if cached != "":
+        val plan = WebRenderPreparedStaticShellPlan.prepare(req, cached)
+        if plan.valid:
+            return WebRenderStaticPlanCacheResult(
+                plan: plan,
+                cache_hit: true,
+                cache_stored: false,
+                cache_path: path
+            )
+
+    val html = web_render_full_html(req)
+    val stored = web_render_static_cache_store_html(cache_dir, req, html)
+    val encoded = web_render_static_cache_lookup_binary(cache_dir, req)
+    WebRenderStaticPlanCacheResult(
+        plan: WebRenderPreparedStaticShellPlan.prepare(req, encoded),
+        cache_hit: false,
+        cache_stored: stored,
+        cache_path: path
+    )
 
 fn web_render_cached_static_artifact(cache_dir: text, req: WebRenderRequest) -> WebRenderCacheResult:
     val profile = web_render_optimization_profile(req)
@@ -473,8 +660,22 @@ fn web_render_cached_static_artifact(cache_dir: text, req: WebRenderRequest) -> 
     if rt_file_exists(path):
         val cached_html = rt_file_read_text(path) ?? ""
         if cached_html != "":
+            val cached_binary = web_render_static_cache_lookup_binary(cache_dir, req)
+            val decoded = web_render_static_shell_binary_decode(cached_binary)
+            val base_artifact = _artifact_with_html(req, cached_html)
+            val artifact = if web_render_static_shell_binary_decoded_matches_request(decoded, req):
+                web_render_artifact_with_binary_metadata(base_artifact, WebRenderBinaryArtifactMetadata(
+                    schema: decoded.schema,
+                    cache_key: web_render_cache_key(req),
+                    cache_path: _web_render_binary_cache_file(cache_dir, req),
+                    encoded_bytes: cached_binary.len(),
+                    layout_bytes: decoded.layout_bytes,
+                    command_count: decoded.command_count
+                ))
+            else:
+                base_artifact
             return WebRenderCacheResult(
-                artifact: _artifact_with_html(req, cached_html),
+                artifact: artifact,
                 profile: profile,
                 cache_hit: true,
                 cache_stored: false,
@@ -483,8 +684,20 @@ fn web_render_cached_static_artifact(cache_dir: text, req: WebRenderRequest) -> 
 
     val html = web_render_full_html(req)
     val stored = web_render_static_cache_store_html(cache_dir, req, html)
+    val binary = web_render_static_shell_binary_artifact_with_html(req, html)
+    val meta = if stored:
+        WebRenderBinaryArtifactMetadata(
+            schema: binary.schema,
+            cache_key: binary.cache_key,
+            cache_path: _web_render_binary_cache_file(cache_dir, req),
+            encoded_bytes: binary.encoded_bytes,
+            layout_bytes: binary.layout_bytes,
+            command_count: binary.command_count
+        )
+    else:
+        WebRenderBinaryArtifactMetadata.none()
     WebRenderCacheResult(
-        artifact: _artifact_with_html(req, html),
+        artifact: web_render_artifact_with_binary_metadata(_artifact_with_html(req, html), meta),
         profile: profile,
         cache_hit: false,
         cache_stored: stored,

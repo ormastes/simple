@@ -4,7 +4,7 @@
 extern fn rt_file_exists(path: text) -> bool
 
 use std.common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest}
-use app.ui.web.render_cache.{WebRenderPreparedStaticShellArtifact, WebRenderPreparedStaticShellPlan, WebRenderStaticArtifactCache, web_render_binary_cache_path, web_render_cache_path, web_render_cached_static_artifact, web_render_static_cache_lookup_html, web_render_static_shell_binary_artifact, web_render_static_shell_binary_artifact_with_html, web_render_static_shell_binary_decode, web_render_static_shell_binary_matches_request, web_render_static_shell_binary_to_artifact, web_render_static_shell_command_payload_bytes, web_render_static_shell_commands}
+use app.ui.web.render_cache.{WebRenderPreparedStaticShellArtifact, WebRenderPreparedStaticShellPlan, WebRenderStaticArtifactCache, WebRenderStaticCommandCache, WebRenderStaticPlanCache, web_render_binary_cache_path, web_render_cache_path, web_render_cached_static_artifact, web_render_cached_static_plan, web_render_static_cache_lookup_binary, web_render_static_cache_lookup_html, web_render_static_shell_binary_artifact, web_render_static_shell_binary_artifact_with_html, web_render_static_shell_binary_decode, web_render_static_shell_binary_matches_request, web_render_static_shell_binary_to_artifact, web_render_static_shell_command_payload_bytes, web_render_static_shell_commands}
 
 describe "persistent web render static cache":
 
@@ -17,12 +17,17 @@ describe "persistent web render static cache":
         expect(first.cache_stored).to_equal(true)
         expect(rt_file_exists(first.cache_path)).to_equal(true)
         expect(rt_file_exists(web_render_binary_cache_path(cache_dir, req))).to_equal(true)
+        expect(first.artifact.binary_schema).to_equal("SWBC1")
+        expect(first.artifact.binary_cache_path).to_equal(web_render_binary_cache_path(cache_dir, req))
+        expect(first.artifact.binary_command_count).to_be_greater_than(0)
         expect(first.cache_path).to_equal(web_render_cache_path(cache_dir, req))
 
         val second = web_render_cached_static_artifact(cache_dir, req)
         expect(second.cache_hit).to_equal(true)
         expect(second.cache_stored).to_equal(false)
         expect(second.artifact.html).to_equal(first.artifact.html)
+        expect(second.artifact.binary_schema).to_equal("SWBC1")
+        expect(second.artifact.binary_cache_path).to_equal(web_render_binary_cache_path(cache_dir, req))
         expect(web_render_static_cache_lookup_html(cache_dir, req)).to_equal(first.artifact.html)
 
     it "does not persist dynamic island pages":
@@ -86,6 +91,8 @@ describe "persistent web render static cache":
         expect(artifact.cache_hit).to_equal(true)
         expect(artifact.cache_path).to_equal("swbc:SWBC1")
         expect(artifact.artifact.html).to_contain("<div id=\"app\">")
+        expect(artifact.artifact.binary_schema).to_equal("SWBC1")
+        expect(artifact.artifact.binary_command_count).to_equal(binary.command_count)
 
         val changed = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Decode", "<main><section>changed</section></main>", "main{contain:layout paint style}", "", 320, 200)
         val miss = web_render_static_shell_binary_to_artifact(changed, binary.encoded)
@@ -143,3 +150,63 @@ describe "persistent web render static cache":
         val miss = WebRenderPreparedStaticShellPlan.prepare(changed, binary.encoded)
         expect(miss.valid).to_equal(false)
         expect(miss.commands.len()).to_equal(0)
+
+    it "warms and reuses persistent static shell command plans":
+        val cache_dir = "build/test-artifacts/unit/app/ui/web_render_cache/plan"
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Disk Plan", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+        val first = web_render_cached_static_plan(cache_dir, req)
+        expect(first.cache_hit).to_equal(false)
+        expect(first.cache_stored).to_equal(true)
+        expect(first.plan.valid).to_equal(true)
+        expect(first.plan.commands.len()).to_be_greater_than(1)
+        expect(web_render_static_cache_lookup_binary(cache_dir, req)).to_start_with("SWBC1|")
+
+        val second = web_render_cached_static_plan(cache_dir, req)
+        expect(second.cache_hit).to_equal(true)
+        expect(second.cache_stored).to_equal(false)
+        expect(second.plan.valid).to_equal(true)
+        expect(second.plan.commands.len()).to_equal(first.plan.commands.len())
+
+    it "does not persist command plans for dynamic island pages":
+        val cache_dir = "build/test-artifacts/unit/app/ui/web_render_cache/dynamic_plan"
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Dynamic Plan", "<main data-simple-dynamic='pane'>live</main>", "", "", 320, 200)
+        val result = web_render_cached_static_plan(cache_dir, req)
+        expect(result.cache_hit).to_equal(false)
+        expect(result.cache_stored).to_equal(false)
+        expect(result.plan.valid).to_equal(false)
+        expect(web_render_static_cache_lookup_binary(cache_dir, req)).to_equal("")
+
+    it "serves repeated static shell command plans from the in-memory hot layer":
+        val cache_dir = "build/test-artifacts/unit/app/ui/web_render_cache/plan_memory"
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Plan Memory", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+        var cache = WebRenderStaticPlanCache.create(cache_dir)
+        val first = cache.plan(req)
+        expect(first.cache_hit).to_equal(false)
+        expect(first.cache_stored).to_equal(true)
+        expect(first.plan.valid).to_equal(true)
+        expect(cache.stores).to_equal(1)
+
+        val second = cache.plan(req)
+        expect(second.cache_hit).to_equal(true)
+        expect(second.cache_path).to_equal("memory")
+        expect(second.plan.valid).to_equal(true)
+        expect(second.plan.commands.len()).to_equal(first.plan.commands.len())
+        expect(cache.memory_hits).to_equal(1)
+
+    it "serves retained static shell commands from the in-memory hot layer":
+        val cache_dir = "build/test-artifacts/unit/app/ui/web_render_cache/command_memory"
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Command Memory", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+        var cache = WebRenderStaticCommandCache.create(cache_dir)
+        val first = cache.commands(req)
+        expect(first.valid).to_equal(true)
+        expect(first.cache_hit).to_equal(false)
+        expect(first.cache_stored).to_equal(true)
+        expect(first.commands.len()).to_be_greater_than(1)
+        expect(cache.stores).to_equal(1)
+
+        val second = cache.commands(req)
+        expect(second.valid).to_equal(true)
+        expect(second.cache_hit).to_equal(true)
+        expect(second.cache_path).to_equal("memory")
+        expect(second.commands.len()).to_equal(first.commands.len())
+        expect(cache.memory_hits).to_equal(1)

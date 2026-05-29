@@ -1,7 +1,7 @@
 # @tag: spec, ui, web_render_api
 
 use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_optimization_profile}
-use app.ui.web.render_cache.{WebRenderPreparedStaticShellArtifact, WebRenderPreparedStaticShellPlan, WebRenderStaticArtifactCache, web_render_static_shell_binary_artifact, web_render_static_shell_binary_decode, web_render_static_shell_binary_to_artifact, web_render_static_shell_command_payload_bytes}
+use app.ui.web.render_cache.{WebRenderPreparedStaticShellArtifact, WebRenderPreparedStaticShellPlan, WebRenderStaticArtifactCache, WebRenderStaticCommandCache, WebRenderStaticPlanCache, web_render_cached_static_plan, web_render_static_shell_binary_artifact, web_render_static_shell_binary_decode, web_render_static_shell_binary_to_artifact, web_render_static_shell_command_payload_bytes}
 
 describe "html css binary caching shared API":
 
@@ -71,3 +71,37 @@ describe "html css binary caching shared API":
         val commands = plan.command_list()
         expect(commands.len()).to_equal(binary.command_count)
         expect(plan.command_hits).to_equal(1)
+
+    it "loads command-only static shell plans from persistent swbc cache":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Persistent Command Plan", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+        val cache_dir = "build/test-artifacts/spec/app/ui/html_css_binary_caching_plan"
+        val warm = web_render_cached_static_plan(cache_dir, req)
+        expect(warm.cache_stored).to_equal(true)
+        expect(warm.plan.valid).to_equal(true)
+        val hot = web_render_cached_static_plan(cache_dir, req)
+        expect(hot.cache_hit).to_equal(true)
+        expect(hot.plan.valid).to_equal(true)
+        expect(hot.plan.commands.len()).to_equal(warm.plan.commands.len())
+
+    it "keeps hot command-only static shell plans in memory after persistent warmup":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Hot Command Plan", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+        var cache = WebRenderStaticPlanCache.create("build/test-artifacts/spec/app/ui/html_css_binary_caching_hot_plan")
+        val warm = cache.plan(req)
+        expect(warm.cache_stored).to_equal(true)
+        expect(warm.plan.valid).to_equal(true)
+        val hot = cache.plan(req)
+        expect(hot.cache_hit).to_equal(true)
+        expect(hot.cache_path).to_equal("memory")
+        expect(cache.memory_hits).to_equal(1)
+
+    it "keeps retained static shell commands in memory after persistent warmup":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Hot Commands", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+        var cache = WebRenderStaticCommandCache.create("build/test-artifacts/spec/app/ui/html_css_binary_caching_hot_commands")
+        val warm = cache.commands(req)
+        expect(warm.valid).to_equal(true)
+        expect(warm.cache_stored).to_equal(true)
+        val hot = cache.commands(req)
+        expect(hot.valid).to_equal(true)
+        expect(hot.cache_hit).to_equal(true)
+        expect(hot.cache_path).to_equal("memory")
+        expect(cache.memory_hits).to_equal(1)

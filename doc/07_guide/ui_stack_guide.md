@@ -139,9 +139,9 @@ non-JavaScript transport lands.
 Web-facing GUI backends share the renderer-neutral contract in
 `src/lib/common/ui/web_render_api.spl`. `WebRenderRequest` describes the HTML,
 CSS, JS, target, surface, viewport, and pixel-output mode; `WebRenderArtifact`
-records the resulting HTML or pixel payload; snapshot, patch, and input
-envelopes define the transport payloads used by Web, Electron, Tauri, and the
-pure Simple browser backend.
+records the resulting HTML, pixel payload, and optional binary artifact
+metadata; snapshot, patch, and input envelopes define the transport payloads
+used by Web, Electron, Tauri, and the pure Simple browser backend.
 
 Backend adapters may still own their host transport: WebSockets, stdin/stdout
 IPC, WebView messages, or framebuffer queues. They should not invent separate
@@ -169,7 +169,10 @@ For static shell binary planning, `web_render_static_shell_binary_artifact(req)`
 emits compact `SWBC1` plans with decoded layout payload estimates. Prepare them
 with `WebRenderPreparedStaticShellArtifact.prepare(req, encoded)` to validate
 once and reuse the generated artifact plus retained draw-command list on
-frame-hot paths.
+frame-hot paths. Cache hits annotate `WebRenderArtifact.binary_schema`,
+`binary_cache_key`, `binary_cache_path`, and size/count fields so host adapters
+can transport or inspect the same artifact identity without depending on
+`ui.web` internals.
 
 ### Practical consequences
 
