@@ -2,28 +2,36 @@
 #
 # Draws the core primitives — square, circle, line, text, shade (vertical
 # gradient) and a rounded-edge square — then reads the framebuffer back and
-# pixel-checks each shape. Runs the CPU, Metal and Vulkan backends, reports
+# pixel-checks each shape. Probes the CPU, Metal and Vulkan backends, reports
 # which are implemented/available on this host, and renders+checks every
 # backend that initializes. The CPU backend is always available.
 #
-# Run all three backends (default):
+# Run the CPU backend (default — the always-available lane, fast):
 #   bin/simple run examples/ui/engine2d_backend_test.spl
 #
+# Probe + render all three backends (cpu, metal, vulkan). On the interpreter
+# this can exceed the 10s example watchdog when a GPU backend probes slowly;
+# prefer the compiled path for the full sweep:
+#   bin/simple run examples/ui/engine2d_backend_test.spl --backend=all
+#
 # Switch to a single backend:
-#   bin/simple run examples/ui/engine2d_backend_test.spl --backend=cpu
 #   bin/simple run examples/ui/engine2d_backend_test.spl metal
 #   bin/simple run examples/ui/engine2d_backend_test.spl vulkan
 #
-# Exit code is 0 when at least one backend passes all checks (CPU always
-# should), 1 otherwise.
+# Exit code is 0 when at least one selected backend passes all checks (CPU
+# always should), 1 otherwise.
 
 use std.gpu.engine2d.engine.{Engine2D}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus, backend_status_text}
 
 extern fn rt_cli_get_args() -> [text]
 
-val W: i32 = 200
-val H: i32 = 200
+# Small canvas: the software/CPU renderer is per-pixel and very slow under the
+# interpreter, and examples run under a 10s wall-clock watchdog. 48x40 keeps the
+# run (probe + render + readback + checks) within budget while still fitting six
+# distinct shapes. Use a larger size only on the compiled path.
+val W: i32 = 48
+val H: i32 = 40
 
 # Packed 0xAARRGGBB colors, all distinct and != BG.
 val BG: u32 = 0xFF101018u32
@@ -58,16 +66,16 @@ fn _report(label: text, ok: bool) -> i32:
 # Verify the drawn scene from the read-back framebuffer. Returns passed count.
 fn _check_scene(pixels: [u32]) -> i32:
     var passed: i32 = 0
-    passed = passed + _report("square  (filled rect, solid center)", _px(pixels, 40, 35) == SQUARE_COL)
-    passed = passed + _report("circle  (filled, solid center)", _px(pixels, 140, 35) == CIRCLE_COL)
-    passed = passed + _report("line    (thick horizontal midpoint)", _px(pixels, 100, 75) == LINE_COL)
-    val g_top = _px(pixels, 40, 98)
-    val g_bot = _px(pixels, 40, 141)
+    passed = passed + _report("square  (filled rect, solid center)", _px(pixels, 8, 7) == SQUARE_COL)
+    passed = passed + _report("circle  (filled, solid center)", _px(pixels, 36, 8) == CIRCLE_COL)
+    passed = passed + _report("line    (thick horizontal midpoint)", _px(pixels, 24, 16) == LINE_COL)
+    val g_top = _px(pixels, 10, 22)
+    val g_bot = _px(pixels, 10, 30)
     passed = passed + _report("shade   (vertical gradient varies top->bottom)", g_top != BG and g_bot != BG and g_top != g_bot)
-    val edge_ok = _px(pixels, 150, 95) == ROUND_COL
-    val corner_rounded = _px(pixels, 115, 95) == BG
+    val edge_ok = _px(pixels, 33, 20) == ROUND_COL
+    val corner_rounded = _px(pixels, 24, 20) == BG
     passed = passed + _report("rounded (edge drawn, corner rounded away)", edge_ok and corner_rounded)
-    val text_px = _count_non_bg(pixels, 18, 150, 182, 192)
+    val text_px = _count_non_bg(pixels, 2, 31, 44, 40)
     passed = passed + _report("text    ({text_px} glyph pixels)", text_px > 0)
     passed
 
@@ -84,12 +92,12 @@ fn _run_backend(name: text) -> bool:
             var engine = eng
             print "    status: Initialized (active: {engine.backend_name()})"
             engine.clear(BG)
-            engine.draw_rect_filled(20, 15, 40, 40, SQUARE_COL)
-            engine.draw_circle_filled(140, 35, 22, CIRCLE_COL)
-            engine.draw_line(15, 75, 185, 75, LINE_COL, 5)
-            engine.draw_gradient_rect(20, 95, 70, 50, GRAD_TOP, GRAD_BOT)
-            engine.draw_rounded_rect(115, 95, 70, 50, 16, ROUND_COL)
-            engine.draw_text(20, 165, "Engine2D", TEXT_COL, 16)
+            engine.draw_rect_filled(3, 2, 10, 10, SQUARE_COL)
+            engine.draw_circle_filled(36, 8, 5, CIRCLE_COL)
+            engine.draw_line(2, 16, 45, 16, LINE_COL, 3)
+            engine.draw_gradient_rect(3, 20, 16, 12, GRAD_TOP, GRAD_BOT)
+            engine.draw_rounded_rect(24, 20, 18, 12, 4, ROUND_COL)
+            engine.draw_text(3, 33, "2D", TEXT_COL, 6)
             engine.present()
             val pixels = engine.read_pixels()
             if pixels.len() < W * H:
@@ -115,7 +123,9 @@ fn _join(items: [text], sep: text) -> text:
     out
 
 fn _selected_backends(args: [text]) -> [text]:
-    var sel = "all"
+    # Default to CPU: the always-available lane, fast enough for the watchdog.
+    # Pass --backend=all (or a single name) to override.
+    var sel = "cpu"
     for a in args:
         if a.index_of("--backend=") == 0:
             sel = a.substring(10, a.len())
