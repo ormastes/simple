@@ -1,32 +1,32 @@
-# HTTPS Server — Missing Interpreter Externs
+# HTTPS Server — Pure Simple TLS Server
 
 **Date**: 2026-05-28
-**Status**: Blocked
+**Status**: In Progress (2026-05-29) — pure Simple approach, no Rust externs needed
 **Priority**: High — gates HTTPS benchmarking, HTTP/2 ALPN, HTTP/3
 
-## Problem
+## Problem (revised 2026-05-29)
 
-Server-side TLS externs are declared in `src/lib/nogc_sync_mut/io/tls_sffi.spl` (35 total)
-but only 5 are registered in the Rust seed interpreter — all client-side.
-No server-side TLS externs are implemented, blocking HTTPS serving in interpreter mode.
+Original filing assumed Rust `rustls` externs were required. However, the codebase
+already has a comprehensive pure Simple crypto stack:
 
-## Missing Externs (6 core, in priority order)
+- AES-128/256-GCM: `src/os/crypto/aes128_gcm.spl`, `aes256_gcm.spl`
+- HKDF / SHA-256 / SHA-384: `src/os/crypto/hkdf.spl`, `sha256.spl`, `sha384.spl`
+- X25519 key exchange: `src/os/crypto/x25519.spl`
+- Ed25519 signatures: `src/os/crypto/ed25519.spl`
+- TLS 1.3 handshake (client): `src/lib/nogc_sync_mut/tls/tls_handshake.spl`
+- 19 `rt_tls13_*` crypto primitives already registered
 
-| Extern | Purpose | Signature |
-|--------|---------|-----------|
-| `rt_tls_server_create` | Create rustls server config + listener | `(port: i64, cert_path: text, key_path: text) -> i64` |
-| `rt_tls_server_accept` | Accept + TLS handshake, return conn handle | `(server: i64) -> i64` |
-| `rt_tls_server_read` | Decrypt + read from TLS connection | `(conn: i64, max_bytes: i64) -> text` |
-| `rt_tls_server_write` | Encrypt + write to TLS connection | `(conn: i64, data: text) -> i64` |
-| `rt_tls_server_shutdown` | Close TLS listener | `(server: i64) -> i64` |
-| `rt_tls_server_config_set_alpn` | Set ALPN protocols (h2, http/1.1) | `(config: i64, protocols: text) -> i64` |
+**Approach:** Implement server-side TLS 1.3 handshake as a pure Simple library
+using the existing crypto primitives, then wire into the HTTP server worker.
+No Rust externs needed.
 
-## Implementation Location
+## Implementation Plan (pure Simple)
 
-- Register in: `src/compiler_rust/compiler/src/interpreter_extern/mod.rs`
-- Implement in: `src/compiler_rust/compiler/src/interpreter_extern/native_net/` (new file or extend existing)
-- Dependency: `rustls` crate (check if already in Cargo.toml)
-- Reference: existing client externs in `interpreter_native_net::rt_tls_client_*`
+1. Add `tls_server_handshake()` to `src/lib/nogc_sync_mut/tls/tls_handshake.spl`
+   using existing X25519 key exchange + HKDF + AES-GCM
+2. Add ALPN extraction from ClientHello for HTTP/2 negotiation
+3. Wire into `src/lib/nogc_async_mut/http_server/worker.spl` for HTTPS serving
+4. Add certificate loading from PEM files (DER parsing exists in `src/os/crypto/`)
 
 ## Currently Registered (5/35)
 
