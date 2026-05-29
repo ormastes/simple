@@ -92,9 +92,9 @@ scenario wiring and command construction alone are not boot evidence.
 
 `test/system/gui/arm64_wm_ramfb_screendump_spec.spl` is the focused framebuffer
 proof target for this lane. It reuses the repo QMP harness, waits for
-`[WM] Glass desktop rendered!`, requests a QMP `screendump`, decodes the PPM,
-and asserts that a real framebuffer image was produced. If the ARM64 native
-build is blocked, this spec writes
+`[WM] Glass desktop rendered!`, requests a QMP `screendump`, validates the PPM
+header, and asserts that a real framebuffer image was produced. If the ARM64
+native build is blocked, this spec writes
 `build/os/arm64_wm_ramfb_screendump.blocker.txt` before any framebuffer claim
 can be made.
 

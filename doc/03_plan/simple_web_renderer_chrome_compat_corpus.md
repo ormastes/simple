@@ -211,8 +211,9 @@ Measured blocker:
   window state (28 examples), decorations (34), WM core resize/focus helpers
   (16), layout/snap/spring coverage (42), Cocoa and Win32 hosted aliases
   (6 each), and host compositor entry behavior (16). This improves local
-  emulation and host-BDD coverage, while Chrome corpus parity and real QEMU
-  framebuffer capture remain unresolved.
+  emulation and host-BDD coverage. Chrome corpus parity remains unresolved,
+  while live QEMU framebuffer evidence is now covered by the WM + Simple Web +
+  Engine2D system spec and the ARM64 ramfb screendump spec.
 - `capture_qemu_vm()` now has a real QMP screendump path for live sockets:
   it connects to QMP, requests `ppm`, reads the screendump file, and decodes
   it into ARGB pixels with `decode_ppm_to_argb`. `qemu_capture_ppm_spec.spl`
