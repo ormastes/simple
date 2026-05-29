@@ -67,6 +67,20 @@ fn hot_structured_loop_with_var_facts(call_count: i64, facts) -> FunctionProfile
         var_facts: facts
     )
 
+fn hot_fixed_trip_loop_profile(call_count: i64) -> FunctionProfile:
+    FunctionProfile(
+        name: "hot_fixed_trip_loop",
+        call_count: call_count,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: "fn hot_fixed_trip_loop() -> i64: var i = 0; var sum = 0; while i < 4: sum = sum + i; i += 1; return sum",
+        typed_mir: true,
+        safe_deopt: true,
+        hotspot_specialized_source: "",
+        hotspot_semantic_proof: false,
+        var_facts: jit_var_optimization_facts_none()
+    )
+
 fn hot_strength_profile(call_count: i64) -> FunctionProfile:
     FunctionProfile(
         name: "hot_strength",
@@ -366,6 +380,7 @@ describe "Tiered JIT hotspot facts":
         val cranelift = jit_hotspot_optimization_plan(hot_structured_loop_with_var_facts(256, facts), hotspot_config(), true, true, "medium")
         expect(cranelift.backend).to_equal("cranelift")
         expect(cranelift.plugin_recommendations.contains("cranelift-local-licm")).to_equal(true)
+        expect(cranelift.plugin_recommendations.contains("simple-loop-unroll")).to_equal(false)
 
         val llvm = jit_hotspot_optimization_plan(hot_structured_loop_with_var_facts(256, facts), hotspot_config(), true, true, "high")
         expect(llvm.backend).to_equal("llvm")
@@ -373,6 +388,20 @@ describe "Tiered JIT hotspot facts":
         var found_llvm_skip = false
         for decision in llvm.skipped_plugin_recommendations:
             if decision.stable_name == "cranelift-local-licm" and decision.reason == "llvm_default_pipeline_runs_loop_optimizations":
+                found_llvm_skip = true
+        expect(found_llvm_skip).to_equal(true)
+
+    it "adds loop-unroll recommendations only for small fixed-trip loops":
+        val cranelift = jit_hotspot_optimization_plan(hot_fixed_trip_loop_profile(256), hotspot_config(), true, true, "medium")
+        expect(cranelift.backend).to_equal("cranelift")
+        expect(cranelift.plugin_recommendations.contains("simple-loop-unroll")).to_equal(true)
+
+        val llvm = jit_hotspot_optimization_plan(hot_fixed_trip_loop_profile(256), hotspot_config(), true, true, "high")
+        expect(llvm.backend).to_equal("llvm")
+        expect(llvm.plugin_recommendations.contains("simple-loop-unroll")).to_equal(false)
+        var found_llvm_skip = false
+        for decision in llvm.skipped_plugin_recommendations:
+            if decision.stable_name == "simple-loop-unroll" and decision.reason == "llvm_runs_loop_unroll_pipeline":
                 found_llvm_skip = true
         expect(found_llvm_skip).to_equal(true)
 
