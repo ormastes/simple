@@ -6,10 +6,10 @@ Date: 2026-05-29
 
 | Runtime | Status | Binary bytes | Iterations | Total us | Notes |
 |---|---|---:|---:|---:|---|
-| Simple web renderer | ok | n/a | 4 | 6887 | render loop via Simple software renderer |
-| Simple static cache | ok | n/a | 4 | 1507 | persistent HTML artifact cache hit loop |
-| Simple SWBC prepared reuse | ok | n/a | 4 | 95 | decoded compact static-shell plan reuse loop |
-| Simple SWBC command plan | ok | n/a | 4 | 70 | decoded command-only static-shell plan, no HTML artifact |
+| Simple web renderer | ok | n/a | 4 | 5395 | render loop via Simple software renderer |
+| Simple static cache | ok | n/a | 4 | 1211 | persistent HTML artifact cache hit loop |
+| Simple SWBC prepared reuse | ok | n/a | 4 | 73 | decoded compact static-shell plan reuse loop |
+| Simple SWBC command plan | ok | n/a | 4 | 44 | decoded command-only static-shell plan, no HTML artifact |
 | GTK | unavailable | 14472 | 200 | n/a | no_display |
 
 ## Static Shell Size
@@ -28,7 +28,7 @@ Date: 2026-05-29
 - [memory-guard] SIMPLE_LIB=/home/ormastes/dev/pub/simple/src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
 - simple_render_status=ok
 - simple_render_iterations=4
-- simple_render_total_us=6887
+- simple_render_total_us=5395
 - simple_render_pixels=256000
 - simple_cache_schema=simple-web-cache-v1
 - simple_render_plan=static_shell_with_dynamic_islands
@@ -37,7 +37,7 @@ Date: 2026-05-29
 - simple_static_cache_hit_iterations=4
 - simple_static_cache_memory_hits=4
 - simple_static_cache_disk_hits=0
-- simple_static_cache_total_us=1507
+- simple_static_cache_total_us=1211
 - simple_static_html_bytes=248
 - simple_static_binary_plan_bytes=171
 - simple_static_binary_commands=5
@@ -49,11 +49,11 @@ Date: 2026-05-29
 - simple_static_swbc_prepared_hits=4
 - simple_static_command_reuse_count=20
 - simple_static_command_reuse_hits=4
-- simple_static_swbc_total_us=95
+- simple_static_swbc_total_us=73
 - simple_static_command_plan_valid=true
 - simple_static_command_plan_count=20
 - simple_static_command_plan_hits=4
-- simple_static_command_plan_total_us=70
+- simple_static_command_plan_total_us=44
 
 ## GTK Output
 
