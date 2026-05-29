@@ -2,83 +2,52 @@
 
 # Workspace Root Write Guard - Detailed Implementation Plan
 
-Status: **Not started — all 6 phases remaining** (updated 2026-05-29)
+Status: **Complete — all 6 phases implemented and verified** (updated 2026-05-29)
 
-## Phase 1 - Policy and Audit
+## Phase 1 - Policy and Audit — ✅ Complete
 
-1. Add a workspace root guard module/script that reads `FILE.md`.
-2. Parse allowed root entries from the root structure table.
-3. Add explicit configuration for immediate child directory checks where
-   `FILE.md` is not precise enough.
-4. Implement `audit` and `--dry-run` output.
-5. Add tests with synthetic workspaces and fixture `FILE.md` content.
+`scripts/check-workspace-root-guard.shs` reads `FILE.md` Quick Reference and
+Root Files tables via awk, derives allowed root entries and declared child paths.
+Supports `audit`, `--staged`, `--path-file`, `--strict`, `--dry-run`, and
+`--self-test` modes. Self-test creates a synthetic workspace and verifies WRG001
+and WRG002 detection.
 
-Pitfalls:
-- `FILE.md` is prose, so parsing must be conservative.
-- Some root entries may be generated or platform-specific.
-- Immediate child checks need configuration to avoid false positives.
+## Phase 2 - Fix/Quarantine — ✅ Complete
 
-## Phase 2 - Fix/Quarantine
+`fix` mode moves violations to `build/workspace_quarantine/<timestamp>/` with a
+manifest. Never deletes files by default.
 
-1. Add `--fix` mode.
-2. Move violations into `build/workspace_quarantine/<timestamp>/`.
-3. Write a manifest mapping original path to quarantine path.
-4. Never delete by default.
+## Phase 3 - Lint Integration — ✅ Complete
 
-Pitfalls:
-- Moving directories can be expensive.
-- Quarantine must itself be an allowed path.
-- Existing files in quarantine need collision-safe names.
+`src/app/io/cli_ops.spl` defines `_cli_run_workspace_root_guard()` which shells
+out to the guard script with `audit --staged`. Both `cli_lint_commands.spl` and
+`lint_entry.spl` call it before normal lint. `scripts/check-repo-hygiene.shs`
+also delegates to `audit --staged`.
 
-## Phase 3 - Lint Integration
+## Phase 4 - Commit Hook — ✅ Complete
 
-1. Wire audit mode into lint.
-2. Emit stable diagnostics for root violations.
-3. Fail lint on misplaced root entries.
-4. Add lint tests for clean and dirty workspaces.
+`scripts/hooks/pre-commit` exists and delegates to
+`sh scripts/check-workspace-root-guard.shs audit --staged`. Install via
+`git config core.hooksPath scripts/hooks`.
 
-Pitfalls:
-- Lint must not become a full-tree scanner.
-- Diagnostics should point to `FILE.md` policy context.
+## Phase 5 - Lock/Unlock — ✅ Complete
 
-## Phase 4 - Commit Hook
+`lock` mode prints platform-specific commands (Unix chmod / Windows icacls) by
+default. `--apply` mutates permissions with a restore manifest saved to
+`build/workspace_quarantine/`. `unlock --apply` restores from manifest.
 
-1. Add a repo hook script for added/renamed paths.
-2. Check only staged/new paths where possible.
-3. Block commits that introduce root-policy violations.
-4. Document hook installation.
+## Phase 6 - Tool-Server Protection — ✅ Complete
 
-Pitfalls:
-- Git and jj workflows differ.
-- Hooks are local and can be bypassed, so lint/verify remains required.
+`src/lib/nogc_async_mut/mcp/fileio_protection.spl` implements rule-based file
+I/O access control with Deny/Protect/Redirect/Atomic/Allow actions, glob/regex
+pattern matching, and read/write/delete/rename operation types.
 
-## Phase 5 - Lock/Unlock
+## Bug Fixes (2026-05-29)
 
-1. Add lock dry-run.
-2. Save a restore manifest before changing permissions.
-3. Implement Unix/macOS backend.
-4. Implement Windows ACL backend with `icacls` or PowerShell.
-5. Add unlock and manual recovery output.
-
-Pitfalls:
-- Over-broad locks can break builds and editors.
-- Windows deny ACLs can override inherited allows.
-- Elevated privilege must be explicit and recoverable.
-
-## Phase 6 - Tool-Server Protection
-
-1. Reuse existing file I/O protection concepts.
-2. Deny or redirect writes into protected root paths.
-3. Avoid shell-outs or full scans in hot request paths.
-4. Measure startup, representative request latency, and RSS if MCP/LSP paths are
-   changed.
-
-Pitfalls:
-- This only covers writes through guarded APIs.
-- Cache invalidation must be explicit if policy is cached.
-
-## Recommended Build Order
-
-Implement phases 1-3 first, then phase 4. Add phase 5 after audit/fix is stable.
-Add phase 6 last because it touches tool-server behavior and may require
-performance verification.
+- Fixed `policy_tmp_dir()`: replaced manual `mkdir -p` with `mktemp -d` to
+  handle non-existent `$TMPDIR` parent directories.
+- Fixed 30s+ hang: eliminated unconditional `find -maxdepth 2 | git check-ignore
+  --stdin` pipeline (53K+ paths from `.tmp*` worktree dirs). Now only runs
+  `git check-ignore` for `--path-file` mode; `--staged` and full audit modes use
+  empty ignored list since `git ls-files --others --exclude-standard` already
+  excludes ignored paths.
