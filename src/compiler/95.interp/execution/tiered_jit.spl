@@ -731,6 +731,16 @@ fn jit_hotspot_specialization_provider_from_analysis(
         jit_hotspot_analysis_has_semantic_proof(facts)
     )
 
+fn jit_hotspot_specialization_provider_from_profile_analysis(
+    name: text,
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    typed_mir: bool,
+    safe_deopt: bool
+) -> JitHotspotSpecializationProvider:
+    val plan = jit_hotspot_plan_from_profile_var_facts(profile, config, typed_mir, safe_deopt)
+    jit_hotspot_specialization_provider_from_analysis(name, profile.hotspot_specialized_source, plan.facts)
+
 fn jit_hotspot_provider_get_eligible_rules(provider: JitHotspotSpecializationProvider) -> [CLibParityRule]:
     provider.eligible_rules
 
@@ -831,7 +841,10 @@ class TieredJitManager:
             if p.tier == JitTier.Interpreted:
                 if new_count >= self.config.tier1_threshold:
                     val plan = jit_hotspot_plan_from_profile_var_facts(updated, self.config, p.typed_mir, p.safe_deopt)
-                    val provider = jit_hotspot_specialization_provider("tiered-jit-profile-specialization", p.hotspot_specialized_source, p.hotspot_semantic_proof)
+                    val provider = if p.hotspot_semantic_proof:
+                        jit_hotspot_specialization_provider("tiered-jit-profile-specialization", p.hotspot_specialized_source, true)
+                    else:
+                        jit_hotspot_specialization_provider_from_analysis("tiered-jit-profile-analysis-specialization", p.hotspot_specialized_source, plan.facts)
                     val decision = jit_hotspot_consume_plan_with_provider(plan, p.source, provider)
                     if decision.provider_used:
                         self.hotspot_plans = self.hotspot_plans + 1

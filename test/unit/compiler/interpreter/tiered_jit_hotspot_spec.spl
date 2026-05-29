@@ -21,6 +21,7 @@ use compiler.interp.execution.tiered_jit.{
     jit_hotspot_specialization_provider,
     jit_hotspot_analysis_has_semantic_proof,
     jit_hotspot_specialization_provider_from_analysis,
+    jit_hotspot_specialization_provider_from_profile_analysis,
     jit_hotspot_consume_plan_with_provider,
     jit_hotspot_compile_decision_allows_compile
 }
@@ -51,6 +52,20 @@ fn hot_profile_with_var_facts(call_count: i64, facts) -> FunctionProfile:
         typed_mir: true,
         safe_deopt: true,
         hotspot_specialized_source: "",
+        hotspot_semantic_proof: false,
+        var_facts: facts
+    )
+
+fn hot_profile_with_analysis_specialization(call_count: i64, specialized_source: text, facts) -> FunctionProfile:
+    FunctionProfile(
+        name: "hot_loop",
+        call_count: call_count,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: "fn hot_loop(x: i64) -> i64: x + 1",
+        typed_mir: true,
+        safe_deopt: true,
+        hotspot_specialized_source: specialized_source,
         hotspot_semantic_proof: false,
         var_facts: facts
     )
@@ -726,6 +741,43 @@ describe "Tiered JIT hotspot facts":
         expect(decision.provider_used).to_equal(false)
         expect(decision.compile_source).to_equal(source)
         expect(decision.reason).to_equal("missing semantic proof")
+
+    it "connects profile analysis facts to a specialization provider":
+        val source = "fn hot_loop(x: i64) -> i64: x + 1"
+        val specialized = "fn hot_loop(x: i64) -> i64: x + 1 # specialized"
+        val facts = jit_var_optimization_facts(true, 2, true, true, true, true)
+        val profile = hot_profile_with_analysis_specialization(64, specialized, facts)
+        val plan = jit_hotspot_plan_from_profile_var_facts(profile, hotspot_config(), true, true)
+        val provider = jit_hotspot_specialization_provider_from_profile_analysis(
+            "test.hotspot.profile.analysis",
+            profile,
+            hotspot_config(),
+            true,
+            true
+        )
+        val decision = jit_hotspot_consume_plan_with_provider(plan, source, provider)
+        expect(plan.eligible).to_equal(true)
+        expect(decision.provider_used).to_equal(true)
+        expect(decision.compile_source).to_equal(specialized)
+
+    it "keeps profile analysis specialization disabled when escape proof is missing":
+        val source = "fn hot_loop(x: i64) -> i64: x + 1"
+        val specialized = "fn hot_loop(x: i64) -> i64: x + 1 # specialized"
+        val facts = jit_var_optimization_facts(true, 2, true, true, false, true)
+        val profile = hot_profile_with_analysis_specialization(64, specialized, facts)
+        val plan = jit_hotspot_plan_from_profile_var_facts(profile, hotspot_config(), true, true)
+        val provider = jit_hotspot_specialization_provider_from_profile_analysis(
+            "test.hotspot.profile.analysis",
+            profile,
+            hotspot_config(),
+            true,
+            true
+        )
+        val decision = jit_hotspot_consume_plan_with_provider(plan, source, provider)
+        expect(plan.eligible).to_equal(false)
+        expect(plan.reason).to_equal("missing escape.no_escape")
+        expect(decision.provider_used).to_equal(false)
+        expect(decision.compile_source).to_equal(source)
 
     it "rejects missing specialized source":
         val source = "fn hot_loop(x: i64) -> i64: x + 1"

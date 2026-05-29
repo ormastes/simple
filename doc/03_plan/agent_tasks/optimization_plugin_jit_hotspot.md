@@ -54,6 +54,10 @@ Related bugs closed:
   `borrow.reassign_safe`.
 - Added focused spec coverage for accepting complete analysis proof facts and
   rejecting incomplete proof facts.
+- Connected profile-level analysis facts to specialization providers through
+  `jit_hotspot_specialization_provider_from_profile_analysis`.
+- Updated the tier-1 `record_call` consumer so stored specialized source can
+  use analysis-derived proof facts when no manual proof bit was supplied.
 
 Remaining Phase 2 work: connect this helper to a concrete MIR analysis provider
 that emits the specialized source, then run native backend specialization
