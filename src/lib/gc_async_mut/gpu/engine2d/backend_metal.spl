@@ -103,6 +103,7 @@ class MetalBackend:
     w: i32
     h: i32
     dirty: bool
+    gpu_in_sync: bool
     initialized: bool
     last_probe: BackendProbeResult
 
@@ -119,6 +120,7 @@ fn make_metal_backend():
         w: 0,
         h: 0,
         dirty: false,
+        gpu_in_sync: false,
         initialized: false,
         last_probe: BackendProbeResult.unavailable("metal", "not probed")
     )
@@ -166,6 +168,7 @@ impl RenderBackend for MetalBackend:
         self.h = height
         self.host_buf = [0u32; total]
         self.dirty = false
+        self.gpu_in_sync = false
         self.initialized = true
         self.last_probe = BackendProbeResult.success("metal", "Metal initialized")
         self.last_probe.api_name = "metal"
@@ -184,6 +187,7 @@ impl RenderBackend for MetalBackend:
         self.w = 0
         self.h = 0
         self.dirty = false
+        self.gpu_in_sync = false
         self.initialized = false
 
     me clear(color: u32):
@@ -191,29 +195,44 @@ impl RenderBackend for MetalBackend:
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_clear != 0:
             self._dispatch_metal_clear(color)
             self.dirty = true
+            self.gpu_in_sync = true
+        else:
+            self._metal_use_mirror()
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         self.mirror.draw_rect(x, y, w, h, color)
+        self._metal_use_mirror()
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         self.mirror.draw_rect_filled(x, y, w, h, color)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_filled != 0:
             self._dispatch_metal_rect_filled(x, y, w, h, color)
-            self.dirty = true
+            if self.gpu_in_sync:
+                self.dirty = true
+        else:
+            self._metal_use_mirror()
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
+        self._metal_use_mirror()
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
         self.mirror.draw_circle(cx, cy, r, color)
+        self._metal_use_mirror()
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
         self.mirror.draw_circle_filled(cx, cy, r, color)
+        self._metal_use_mirror()
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
         self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
+        self._metal_use_mirror()
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
         self.mirror.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+        self._metal_use_mirror()
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
         self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+        self._metal_use_mirror()
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         self.mirror.draw_text(x, y, text_val, color, font_size)
+        self._metal_use_mirror()
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         self.mirror.draw_image(x, y, w, h, pixels)
+        self._metal_use_mirror()
     me set_clip(x: i32, y: i32, w: i32, h: i32):
         self.mirror.set_clip(x, y, w, h)
     me clear_clip():
@@ -225,7 +244,7 @@ impl RenderBackend for MetalBackend:
     me present():
         self.mirror.present()
     fn read_pixels() -> [u32]:
-        if self.initialized and self.dirty and self.d_framebuffer != 0:
+        if self.initialized and self.dirty and self.gpu_in_sync and self.d_framebuffer != 0:
             self._download_metal_framebuffer()
             return self._copy_host_pixels()
         self.mirror.read_pixels()
@@ -239,6 +258,10 @@ impl RenderBackend for MetalBackend:
         self.mirror.height()
 
 impl MetalBackend:
+    me _metal_use_mirror():
+        self.dirty = false
+        self.gpu_in_sync = false
+
     me _dispatch_metal_clear(color: u32):
         val params = _metal_pack_clear_params(color, self.w, self.h)
         self._dispatch_metal_1d(self.session.pipe_clear, _metal_i64(self.w) * _metal_i64(self.h), 256, params)
@@ -308,60 +331,80 @@ impl MetalBackend:
 impl Engine2DExtended for MetalBackend:
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
         self.mirror.draw_text_bg(x, y, text_val, fg, bg, font_size)
+        self._metal_use_mirror()
 
     me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
         self.mirror.draw_ellipse(cx, cy, rx, ry, color)
+        self._metal_use_mirror()
 
     me draw_ellipse_filled(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
         self.mirror.draw_ellipse_filled(cx, cy, rx, ry, color)
+        self._metal_use_mirror()
 
     me draw_arc(cx: i32, cy: i32, r: i32, start_deg: i32, end_deg: i32, color: u32, thickness: i32):
         self.mirror.draw_arc(cx, cy, r, start_deg, end_deg, color, thickness)
+        self._metal_use_mirror()
 
     me draw_bezier(x1: i32, y1: i32, cx1: i32, cy1: i32, cx2: i32, cy2: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         self.mirror.draw_bezier(x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
+        self._metal_use_mirror()
 
     me draw_polygon_filled(xs: [i32], ys: [i32], count: i32, color: u32):
         self.mirror.draw_polygon_filled(xs, ys, count, color)
+        self._metal_use_mirror()
 
     me draw_polyline(xs: [i32], ys: [i32], count: i32, color: u32, thickness: i32):
         self.mirror.draw_polyline(xs, ys, count, color, thickness)
+        self._metal_use_mirror()
 
     me draw_rect_thick(x: i32, y: i32, w: i32, h: i32, color: u32, thickness: i32):
         self.mirror.draw_rect_thick(x, y, w, h, color, thickness)
+        self._metal_use_mirror()
 
     me draw_circle_thick(cx: i32, cy: i32, r: i32, color: u32, thickness: i32):
         self.mirror.draw_circle_thick(cx, cy, r, color, thickness)
+        self._metal_use_mirror()
 
     me draw_rounded_rect_outline(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, thickness: i32):
         self.mirror.draw_rounded_rect_outline(x, y, w, h, radius, color, thickness)
+        self._metal_use_mirror()
 
     me draw_gradient_rect_h(x: i32, y: i32, w: i32, h: i32, left_color: u32, right_color: u32):
         self.mirror.draw_gradient_rect_h(x, y, w, h, left_color, right_color)
+        self._metal_use_mirror()
 
     me draw_radial_gradient(cx: i32, cy: i32, r: i32, center_color: u32, edge_color: u32):
         self.mirror.draw_radial_gradient(cx, cy, r, center_color, edge_color)
+        self._metal_use_mirror()
 
     me draw_rect_blend(x: i32, y: i32, w: i32, h: i32, color: u32):
         self.mirror.draw_rect_blend(x, y, w, h, color)
+        self._metal_use_mirror()
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         self.mirror.draw_image_blend(x, y, w, h, pixels)
+        self._metal_use_mirror()
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         self.mirror.draw_image_scaled(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+        self._metal_use_mirror()
 
     me draw_triangle_outline(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, thickness: i32):
         self.mirror.draw_triangle_outline(x1, y1, x2, y2, x3, y3, color, thickness)
+        self._metal_use_mirror()
 
     me draw_blur_rect(x: i32, y: i32, w: i32, h: i32, radius: i32):
         self.mirror.draw_blur_rect(x, y, w, h, radius)
+        self._metal_use_mirror()
 
     me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
         self.mirror.draw_shadow_rect(x, y, w, h, offset_x, offset_y, blur_r, color)
+        self._metal_use_mirror()
 
     me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
         self.mirror.draw_image_transform(dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
+        self._metal_use_mirror()
 
     me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
         self.mirror.draw_rect_blend(x, y, w, h, color)
+        self._metal_use_mirror()
