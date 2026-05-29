@@ -10,6 +10,14 @@ use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult}
 use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
 use std.nogc_sync_mut.env.platform.{is_macos}
+use std.nogc_sync_mut.io.metal_sffi.{
+    metal_sffi_alloc_buffer, metal_sffi_free_buffer,
+    metal_sffi_create_command_buffer, metal_sffi_commit_command_buffer,
+    metal_sffi_wait_completed, metal_sffi_dispatch_compute,
+    metal_sffi_create_compute_encoder, metal_sffi_end_compute_encoder,
+    metal_sffi_set_buffer, metal_sffi_set_bytes,
+    metal_sffi_buffer_download
+}
 
 fn _metal_status_message(code: i64) -> text:
     if code == 1:
@@ -27,6 +35,42 @@ fn _metal_status_message(code: i64) -> text:
     if code == 7:
         return "Metal compute pipeline creation failed"
     "Metal initialization failed"
+
+fn _metal_i64(v: i32) -> i64:
+    v as i64
+
+fn _metal_i32_to_u8(v: i32) -> u8:
+    v as u8
+
+fn _metal_pack_i32_le(buf: [u8], offset: i32, v: i32) -> i32:
+    buf[offset] = _metal_i32_to_u8(v & 0xFF)
+    buf[offset + 1] = _metal_i32_to_u8((v >> 8) & 0xFF)
+    buf[offset + 2] = _metal_i32_to_u8((v >> 16) & 0xFF)
+    buf[offset + 3] = _metal_i32_to_u8((v >> 24) & 0xFF)
+    offset + 4
+
+fn _metal_pack_u32_le(buf: [u8], offset: i32, v: u32) -> i32:
+    _metal_pack_i32_le(buf, offset, v as i32)
+
+fn _metal_pack_clear_params(color: u32, fb_w: i32, fb_h: i32) -> [u8]:
+    var buf: [u8] = [0u8; 12]
+    var off = 0
+    off = _metal_pack_u32_le(buf, off, color)
+    off = _metal_pack_i32_le(buf, off, fb_w)
+    off = _metal_pack_i32_le(buf, off, fb_h)
+    buf
+
+fn _metal_pack_rect_params(x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i32) -> [u8]:
+    var buf: [u8] = [0u8; 28]
+    var off = 0
+    off = _metal_pack_i32_le(buf, off, x)
+    off = _metal_pack_i32_le(buf, off, y)
+    off = _metal_pack_i32_le(buf, off, w)
+    off = _metal_pack_i32_le(buf, off, h)
+    off = _metal_pack_u32_le(buf, off, color)
+    off = _metal_pack_i32_le(buf, off, fb_w)
+    off = _metal_pack_i32_le(buf, off, fb_h)
+    buf
 
 fn probe_metal() -> BackendProbeResult:
     if not is_macos():
@@ -53,6 +97,12 @@ fn probe_metal() -> BackendProbeResult:
 class MetalBackend:
     mirror: SoftwareBackend
     session: MetalSession
+    command_queue: i64
+    d_framebuffer: i64
+    host_buf: [u32]
+    w: i32
+    h: i32
+    dirty: bool
     initialized: bool
     last_probe: BackendProbeResult
 
@@ -63,6 +113,12 @@ fn make_metal_backend():
     MetalBackend(
         mirror: SoftwareBackend.create(),
         session: MetalSession.create("legacy_no_session"),
+        command_queue: 0,
+        d_framebuffer: 0,
+        host_buf: [],
+        w: 0,
+        h: 0,
+        dirty: false,
         initialized: false,
         last_probe: BackendProbeResult.unavailable("metal", "not probed")
     )
@@ -84,7 +140,20 @@ impl RenderBackend for MetalBackend:
             self.last_probe.shader_format = "msl"
             self.initialized = false
             return false
+        val total = width * height
+        val bytes = _metal_i64(total) * 4
+        self.d_framebuffer = metal_sffi_alloc_buffer(self.session.device, bytes)
+        if self.d_framebuffer == 0:
+            self.session.release()
+            self.last_probe = BackendProbeResult.failed("metal", "Metal framebuffer allocation failed")
+            self.last_probe.api_name = "metal"
+            self.last_probe.feature_gate = "metal_runtime"
+            self.last_probe.shader_format = "msl"
+            self.initialized = false
+            return false
         if not self.mirror.init(width, height):
+            metal_sffi_free_buffer(self.d_framebuffer)
+            self.d_framebuffer = 0
             self.session.release()
             self.last_probe = BackendProbeResult.failed("metal", "Metal mirror surface allocation failed")
             self.last_probe.api_name = "metal"
@@ -92,6 +161,11 @@ impl RenderBackend for MetalBackend:
             self.last_probe.shader_format = "msl"
             self.initialized = false
             return false
+        self.command_queue = self.session.command_queue
+        self.w = width
+        self.h = height
+        self.host_buf = [0u32; total]
+        self.dirty = false
         self.initialized = true
         self.last_probe = BackendProbeResult.success("metal", "Metal initialized")
         self.last_probe.api_name = "metal"
@@ -101,15 +175,29 @@ impl RenderBackend for MetalBackend:
 
     me shutdown():
         self.mirror.shutdown()
+        if self.d_framebuffer != 0:
+            metal_sffi_free_buffer(self.d_framebuffer)
+            self.d_framebuffer = 0
         self.session.release()
+        self.command_queue = 0
+        self.host_buf = []
+        self.w = 0
+        self.h = 0
+        self.dirty = false
         self.initialized = false
 
     me clear(color: u32):
         self.mirror.clear(color)
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_clear != 0:
+            self._dispatch_metal_clear(color)
+            self.dirty = true
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         self.mirror.draw_rect(x, y, w, h, color)
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         self.mirror.draw_rect_filled(x, y, w, h, color)
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_filled != 0:
+            self._dispatch_metal_rect_filled(x, y, w, h, color)
+            self.dirty = true
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
@@ -137,11 +225,85 @@ impl RenderBackend for MetalBackend:
     me present():
         self.mirror.present()
     fn read_pixels() -> [u32]:
+        if self.initialized and self.dirty and self.d_framebuffer != 0:
+            self._download_metal_framebuffer()
+            return self._copy_host_pixels()
         self.mirror.read_pixels()
     fn width() -> i32:
+        if self.w > 0:
+            return self.w
         self.mirror.width()
     fn height() -> i32:
+        if self.h > 0:
+            return self.h
         self.mirror.height()
+
+impl MetalBackend:
+    me _dispatch_metal_clear(color: u32):
+        val params = _metal_pack_clear_params(color, self.w, self.h)
+        self._dispatch_metal_1d(self.session.pipe_clear, _metal_i64(self.w) * _metal_i64(self.h), 256, params)
+
+    me _dispatch_metal_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if w <= 0 or h <= 0:
+            return
+        val params = _metal_pack_rect_params(x, y, w, h, color, self.w, self.h)
+        self._dispatch_metal_2d(self.session.pipe_rect_filled, w, h, params)
+
+    me _dispatch_metal_1d(pipeline: i64, threads: i64, block_x: i64, params: [u8]):
+        val cmd = metal_sffi_create_command_buffer(self.command_queue)
+        if cmd == 0:
+            return
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            return
+        metal_sffi_set_buffer(encoder, self.d_framebuffer, 0, 0)
+        metal_sffi_set_bytes(encoder, params, params.len(), 1)
+        metal_sffi_dispatch_compute(encoder, pipeline, threads, 1, 1, block_x, 1, 1)
+        metal_sffi_end_compute_encoder(encoder)
+        metal_sffi_commit_command_buffer(cmd)
+        metal_sffi_wait_completed(cmd)
+
+    me _dispatch_metal_2d(pipeline: i64, w: i32, h: i32, params: [u8]):
+        val cmd = metal_sffi_create_command_buffer(self.command_queue)
+        if cmd == 0:
+            return
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            return
+        metal_sffi_set_buffer(encoder, self.d_framebuffer, 0, 0)
+        metal_sffi_set_bytes(encoder, params, params.len(), 1)
+        val block_x = 16
+        val block_y = 16
+        val grid_x = ((_metal_i64(w) + block_x - 1) / block_x) * block_x
+        val grid_y = ((_metal_i64(h) + block_y - 1) / block_y) * block_y
+        metal_sffi_dispatch_compute(encoder, pipeline, grid_x, grid_y, 1, block_x, block_y, 1)
+        metal_sffi_end_compute_encoder(encoder)
+        metal_sffi_commit_command_buffer(cmd)
+        metal_sffi_wait_completed(cmd)
+
+    me _download_metal_framebuffer():
+        val byte_size = _metal_i64(self.w) * _metal_i64(self.h) * 4
+        val host_bytes: [u8] = [0u8; byte_size]
+        metal_sffi_buffer_download(host_bytes, self.d_framebuffer, byte_size)
+        var i = 0
+        val count = self.w * self.h
+        while i < count:
+            val base = i * 4
+            val b0 = host_bytes[base] as u32
+            val b1 = host_bytes[base + 1] as u32
+            val b2 = host_bytes[base + 2] as u32
+            val b3 = host_bytes[base + 3] as u32
+            self.host_buf[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+            i = i + 1
+        self.dirty = false
+
+    me _copy_host_pixels() -> [u32]:
+        var out: [u32] = []
+        var i = 0
+        while i < self.host_buf.len():
+            out.push(self.host_buf[i])
+            i = i + 1
+        out
 
 impl Engine2DExtended for MetalBackend:
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
