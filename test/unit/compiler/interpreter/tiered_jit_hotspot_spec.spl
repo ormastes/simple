@@ -81,6 +81,20 @@ fn hot_byte_scan_profile(call_count: i64) -> FunctionProfile:
         var_facts: jit_var_optimization_facts_none()
     )
 
+fn hot_checksum_profile(call_count: i64) -> FunctionProfile:
+    FunctionProfile(
+        name: "hot_checksum",
+        call_count: call_count,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: "fn hot_checksum(buf: [u8], n: i64) -> i64: var i = 0; var checksum = 0; while i < n: checksum = checksum ^ buf[i]; checksum = checksum << 1; i += 1; return checksum",
+        typed_mir: true,
+        safe_deopt: true,
+        hotspot_specialized_source: "",
+        hotspot_semantic_proof: false,
+        var_facts: jit_var_optimization_facts_none()
+    )
+
 fn hotspot_config() -> TieredJitConfig:
     TieredJitConfig(tier1_threshold: 8, tier2_threshold: 128, debug_mode: false)
 
@@ -352,6 +366,15 @@ describe "Tiered JIT hotspot facts":
         val llvm = jit_hotspot_optimization_plan(hot_byte_scan_profile(256), hotspot_config(), true, true, "high")
         expect(llvm.backend).to_equal("llvm")
         expect(llvm.plugin_recommendations.contains("byte-scan-to-delimiter")).to_equal(true)
+
+    it "adds checksum reducer recommendations for associative indexed reductions":
+        val cranelift = jit_hotspot_optimization_plan(hot_checksum_profile(256), hotspot_config(), true, true, "medium")
+        expect(cranelift.backend).to_equal("cranelift")
+        expect(cranelift.plugin_recommendations.contains("checksum-reducer")).to_equal(true)
+
+        val llvm = jit_hotspot_optimization_plan(hot_checksum_profile(256), hotspot_config(), true, true, "high")
+        expect(llvm.backend).to_equal("llvm")
+        expect(llvm.plugin_recommendations.contains("checksum-reducer")).to_equal(true)
 
     it "keeps hotspot optimization plans consistent with shared backend budget planners":
         val hotspot = jit_hotspot_optimization_plan(hot_profile(256), hotspot_config(), true, true, "medium")
