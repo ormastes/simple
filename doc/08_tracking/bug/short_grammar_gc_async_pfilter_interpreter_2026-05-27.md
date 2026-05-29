@@ -1,7 +1,7 @@
 # Short Grammar Placeholder Fails For gc_async_immut pfilter In Interpreter
 
 Date: 2026-05-27
-Status: open
+Status: STALE 2026-05-29 — native_combinators_spec passes with placeholder grammar as-is
 
 ## Summary
 

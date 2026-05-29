@@ -1,7 +1,7 @@
 # Short Grammar Placeholder Rejected In Parenthesized Pipe Callback
 
 Date: 2026-05-27
-Status: open
+Status: open — confirmed still failing 2026-05-29; symptom: `5 |> (_1 * 3)` evaluates to `<lambda>` instead of `15`; root cause in Rust pipe-parser, not the desugarer (left unfixed — needs pipe-parser change outside desugarer scope)
 
 ## Summary
 

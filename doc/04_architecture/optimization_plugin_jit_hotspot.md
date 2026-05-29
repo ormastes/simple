@@ -37,3 +37,11 @@ The tiered JIT exposes a data-only `JitHotspotPlan`. This keeps planning separat
 `TieredJitManager.record_call` consumes the plan at the tier-1 promotion boundary. The consumer currently selects the compile source and records whether a hotspot plan was accepted; original-source compilation remains the fallback when the provider is disabled or required facts are missing. Rust `ExecutionManager` stays unchanged until a backend needs specialization-specific plan fields.
 
 Specialized source replacement is opt-in through `JitHotspotSpecializationProvider`. A provider may replace the compile source only when the plan is eligible, the provider is enabled, a non-empty specialized source is present, and the provider declares a semantic proof. This makes the first concrete hotspot optimization path useful without letting arbitrary runtime profile data rewrite code by itself.
+
+MIR var-reassignment analysis is split across two modules. `var_reassign_analysis.spl`
+derives reassignment, escape, borrow-safety, and JIT fact data from MIR blocks.
+`var_reassign_ssa.spl` owns SSA var rewriting, pseudo-phi planning and
+materialization, backend pseudo-phi lowering policy, and the concrete
+MIR-analysis-backed hotspot specialization provider factory. Keeping these
+separate preserves a small analysis boundary while allowing the hotspot layer to
+consume only proof-bearing specialization providers.

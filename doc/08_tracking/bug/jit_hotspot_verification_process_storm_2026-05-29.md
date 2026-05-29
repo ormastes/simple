@@ -2,7 +2,7 @@
 
 ## Status
 
-Open.
+Fixed for refreshed local artifact.
 
 ## Context
 
@@ -58,3 +58,36 @@ scripts/check-web-baremetal-size-audit.shs
   on a clean host.
 - Update `doc/03_plan/agent_tasks/optimization_plugin_jit_hotspot.md` with the
   passing commands and evidence.
+
+## 2026-05-29 Update
+
+Source changes in `src/app/cli/test_entry.spl` and
+`src/app/cli/commands/test_batch.spl` add a `SIMPLE_TEST_DEPTH` guard and switch
+isolated spec execution from nested `test` to `run`.
+
+Verification with the Rust debug runtime is bounded:
+
+```bash
+src/compiler_rust/target/debug/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean --progress none
+# PASS: 51 tests; post-run matching process count: 0
+```
+
+Before that source-level evidence, the stale checked-in `bin/simple` native
+artifact reproduced the process storm for the same hotspot spec and required
+killing process group `2929639`. Do not use `bin/simple` for this verification
+until it is rebuilt from the guarded source.
+
+## 2026-05-29 Local Artifact Refresh
+
+The ignored local `bin/simple` artifact was refreshed from the verified guarded
+runtime and rerun:
+
+```bash
+bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean --progress none
+# PASS: 51 tests
+pgrep -af '/home/ormastes/dev/pub/simple/bin/simple test|src/compiler_rust/target/debug/simple test' | wc -l
+# 0
+```
+
+The process-storm reproduction no longer occurs on the refreshed local command
+path.

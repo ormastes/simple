@@ -1,7 +1,7 @@
 # Short Grammar Placeholder Interpolation Fails
 
 Date: 2026-05-27
-Status: Open
+Status: STALE 2026-05-29 — verified working: `["ready"].map("{_1}:migrated")` returns `["ready:migrated"]`
 
 ## Summary
 

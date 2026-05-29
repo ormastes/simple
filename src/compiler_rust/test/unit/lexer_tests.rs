@@ -240,6 +240,56 @@ fn test_string_escape_null() {
     );
 }
 
+// === Octal Escape Tests ===
+
+#[test]
+fn test_string_escape_octal_single_digit_zero() {
+    // \0 (single zero) should still be null byte
+    assert_eq!(
+        tokenize(r#""hello\0world""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("hello\0world".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_string_escape_octal_esc() {
+    // \033 = ESC (0x1b = 27 decimal)
+    assert_eq!(
+        tokenize(r#""\033""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("\x1b".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_string_escape_octal_max_byte() {
+    // \377 = 255 decimal = 0xFF
+    assert_eq!(
+        tokenize(r#""\377""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("\u{00FF}".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_string_escape_octal_in_sequence() {
+    // "\033[2J" should lex to ESC + "[2J" (4 bytes total)
+    assert_eq!(
+        tokenize(r#""\033[2J""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("\x1b[2J".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+}
+
 // === Raw String Tests ===
 
 #[test]

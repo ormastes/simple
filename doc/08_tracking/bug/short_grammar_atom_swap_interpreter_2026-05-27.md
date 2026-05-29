@@ -1,7 +1,7 @@
 # Short Grammar Placeholder Fails For Atom Swap In Interpreter
 
 Date: 2026-05-27
-Status: open
+Status: STALE 2026-05-29 — coordination_native_spec passes with placeholder grammar as-is
 
 ## Summary
 

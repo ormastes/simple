@@ -161,6 +161,9 @@ fn find_max_numbered(expr: &Expr) -> usize {
         Expr::Cast { expr, .. } => find_max_numbered(expr),
         Expr::Spread(inner) => find_max_numbered(inner),
         Expr::Lambda { .. } => 0,
+        // Match: scan the scrutinee (subject) only. Arms are a scoping boundary
+        // because `case _:` uses `_` as a wildcard pattern, not a placeholder.
+        Expr::Match { subject, .. } => find_max_numbered(subject),
         _ => 0,
     }
 }
@@ -266,6 +269,13 @@ fn replace_numbered_placeholders(expr: Expr) -> Expr {
         },
         Expr::Spread(inner) => Expr::Spread(Box::new(replace_numbered_placeholders(*inner))),
         Expr::Lambda { .. } => expr,
+        // Match: replace placeholders in the scrutinee (subject) only.
+        // Arms are a scoping boundary; their bodies and patterns are left
+        // unchanged so that `case _:` wildcards are not mis-replaced.
+        Expr::Match { subject, arms } => Expr::Match {
+            subject: Box::new(replace_numbered_placeholders(*subject)),
+            arms,
+        },
         _ => expr,
     }
 }
@@ -323,6 +333,8 @@ fn count_placeholders(expr: &Expr) -> usize {
         Expr::Spread(inner) => count_placeholders(inner),
         // Lambda bodies should not be traversed (they have their own scope)
         Expr::Lambda { .. } => 0,
+        // Match: count placeholders in the scrutinee only; arms are a scoping boundary.
+        Expr::Match { subject, .. } => count_placeholders(subject),
         // Terminal expressions with no sub-expressions
         Expr::Integer(_)
         | Expr::Float(_)
@@ -436,6 +448,13 @@ fn replace_placeholders(expr: Expr, counter: &mut usize) -> Expr {
         Expr::Spread(inner) => Expr::Spread(Box::new(replace_placeholders(*inner, counter))),
         // Don't descend into lambdas (they have their own scope)
         Expr::Lambda { .. } => expr,
+        // Match: replace placeholders in the scrutinee only.
+        // Arms are a scoping boundary; their bodies/patterns are left unchanged
+        // so that `case _:` wildcards are not mis-replaced.
+        Expr::Match { subject, arms } => Expr::Match {
+            subject: Box::new(replace_placeholders(*subject, counter)),
+            arms,
+        },
         // Terminal expressions with no sub-expressions - return unchanged
         _ => expr,
     }

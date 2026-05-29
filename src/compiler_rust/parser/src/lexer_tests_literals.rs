@@ -104,6 +104,58 @@ fn test_string_literals() {
 }
 
 #[test]
+fn test_string_escape_octal_null() {
+    use crate::token::FStringToken;
+    // \0 alone is null byte
+    assert_eq!(
+        tokenize(r#""hello\0world""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("hello\0world".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_string_escape_octal_esc() {
+    use crate::token::FStringToken;
+    // \033 = ESC (0x1b = 27 decimal)
+    assert_eq!(
+        tokenize(r#""\033""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("\x1b".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_string_escape_octal_in_sequence() {
+    use crate::token::FStringToken;
+    // "\033[2J" should lex to ESC + "[2J" (4 chars total)
+    assert_eq!(
+        tokenize(r#""\033[2J""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("\x1b[2J".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_string_escape_octal_max_byte() {
+    use crate::token::FStringToken;
+    // \377 = 255 decimal = 0xFF = U+00FF
+    assert_eq!(
+        tokenize(r#""\377""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("\u{00FF}".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
 fn test_raw_string_literals() {
     // Single-quoted strings are raw (no escape processing, no interpolation)
     assert_eq!(

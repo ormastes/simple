@@ -35,9 +35,32 @@ impl<'a> super::Lexer<'a> {
                 self.advance();
                 EscapeResult::Char('\'')
             }
-            Some('0') => {
+            Some(d) if matches!(d, '0'..='7') => {
+                // Octal escape: \N, \NN, or \NNN (up to 3 octal digits, value 0-255)
                 self.advance();
-                EscapeResult::Char('\0')
+                let mut val = d as u32 - '0' as u32;
+                if let Some(d2) = self.peek() {
+                    if matches!(d2, '0'..='7') {
+                        let next_val = val * 8 + (d2 as u32 - '0' as u32);
+                        if next_val <= 255 {
+                            val = next_val;
+                            self.advance();
+                            if let Some(d3) = self.peek() {
+                                if matches!(d3, '0'..='7') {
+                                    let next_val3 = val * 8 + (d3 as u32 - '0' as u32);
+                                    if next_val3 <= 255 {
+                                        val = next_val3;
+                                        self.advance();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                match char::from_u32(val) {
+                    Some(c) => EscapeResult::Char(c),
+                    None => EscapeResult::Error(format!("Invalid octal escape value: {}", val)),
+                }
             }
             Some('a') => {
                 self.advance();

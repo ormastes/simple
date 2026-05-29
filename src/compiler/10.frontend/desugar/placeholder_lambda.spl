@@ -23,11 +23,12 @@ use compiler.core.ast_expr.{
     EXPR_IDENT, EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_METHOD_CALL,
     EXPR_FIELD_ACCESS, EXPR_INDEX, EXPR_IF, EXPR_ARRAY_LIT, EXPR_DICT_LIT,
     EXPR_NULL_COALESCE, EXPR_CAST, EXPR_SPREAD, EXPR_LAMBDA, EXPR_TUPLE,
-    EXPR_SLICE,
+    EXPR_SLICE, EXPR_MATCH,
     expr_tag, expr_s_val, expr_left, expr_right, expr_extra, expr_args, expr_stmts, expr_i_val,
     expr_ident, expr_binary, expr_unary, expr_call, expr_method_call,
     expr_field_access, expr_index, expr_if_expr, expr_array_lit, expr_dict_lit,
-    expr_null_coalesce, expr_cast, expr_spread, expr_lambda, expr_tuple, expr_slice
+    expr_null_coalesce, expr_cast, expr_spread, expr_lambda, expr_tuple, expr_slice,
+    expr_match_expr
 }
 
 # ===== Placeholder Counter (module-level for mutation in recursive walk) =====
@@ -181,6 +182,14 @@ fn detect_placeholder_mode(eid: i64):
             i = i + 1
         return
 
+    if tag == EXPR_MATCH:
+        # Only scan the scrutinee for placeholders.
+        # Arms are a scoping boundary: case _: uses `_` as a wildcard
+        # pattern, not a placeholder — recursing into arm bodies would
+        # miscount them. The placeholder is in the scrutinee only.
+        detect_placeholder_mode(expr_left[eid])
+        return
+
 # ===== Main Transform Entry Point =====
 
 fn transform_placeholder_lambda(eid: i64) -> i64:
@@ -331,6 +340,10 @@ fn count_placeholders(eid: i64) -> i64:
             i = i + 1
         return total
 
+    if tag == EXPR_MATCH:
+        # Count placeholders in scrutinee only; arms are a scoping boundary.
+        return count_placeholders(expr_left[eid])
+
     0
 
 # ===== Replace Placeholders =====
@@ -465,6 +478,14 @@ fn replace_placeholders(eid: i64) -> i64:
             new_parts.push(replace_placeholders(old_parts[i]))
             i = i + 1
         return expr_interpolated_string(new_parts, 0)
+
+    if tag == EXPR_MATCH:
+        # Replace placeholders in the scrutinee only.
+        # Arms are a scoping boundary: arm bodies and patterns are left
+        # unchanged so that `case _:` wildcards are not mis-replaced.
+        val new_scrutinee = replace_placeholders(expr_left[eid])
+        val arms = expr_args[eid]
+        return expr_match_expr(new_scrutinee, arms, 0)
 
     # For any other expression type, return as-is
     eid

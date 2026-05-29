@@ -105,6 +105,25 @@ pub fn rt_cli_run_repl(_args: &[Value]) -> Result<Value, CompileError> {
 
 /// Run tests
 pub fn rt_cli_run_tests(args: &[Value]) -> Result<Value, CompileError> {
+    // Recursion guard: refuse nested `simple test` invocations.
+    // A depth of 1 means a top-level test run is already active; any call to
+    // cli_run_tests from within a spec or helper would push it to 2 and is rejected.
+    // This prevents runaway process storms (see bug: jit_hotspot_verification_process_storm).
+    const MAX_TEST_DEPTH: u32 = 1;
+    let current_depth: u32 = std::env::var("SIMPLE_TEST_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if current_depth >= MAX_TEST_DEPTH {
+        eprintln!(
+            "ERROR: simple test recursion guard triggered (SIMPLE_TEST_DEPTH={}).\n  \
+             Nested `bin/simple test` invocations are not allowed.\n  \
+             A spec or script is calling cli_run_tests() from inside a test run.",
+            current_depth
+        );
+        return Ok(Value::Int(1));
+    }
+
     // Extract arguments
     let mut cmd_args = Vec::new();
     if !args.is_empty() {
@@ -146,6 +165,8 @@ pub fn rt_cli_run_tests(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     cmd.env("SIMPLE_TEST_RUNNER_RUST", "1");
+    // Propagate incremented depth so nested spawns see a higher value and are refused.
+    cmd.env("SIMPLE_TEST_DEPTH", (current_depth + 1).to_string());
 
     match cmd.status() {
         Ok(status) => Ok(Value::Int(status.code().unwrap_or(1) as i64)),

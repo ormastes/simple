@@ -7,6 +7,10 @@ use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
 use compiler.mir_opt.mir_opt.var_reassign_analysis.{
     analyze_var_reassign_blocks,
     var_reassign_analysis_to_jit_facts,
+    var_reassign_analysis_hotspot_facts
+}
+use compiler.mir_opt.mir_opt.var_reassign_ssa.{
+    jit_hotspot_specialization_provider_from_var_reassign_analysis,
     ssa_var_transform_blocks,
     ssa_phi_plans_for_blocks,
     ssa_materialize_phi_plans_for_blocks,
@@ -17,6 +21,7 @@ use compiler.mir_opt.mir_opt.var_reassign_analysis.{
 use compiler.interp.execution.tiered_jit.{
     FunctionProfile, JitTier, TieredJitConfig,
     jit_var_optimization_facts_none,
+    jit_hotspot_consume_plan_with_provider,
     jit_hotspot_plan_with_var_facts
 }
 
@@ -149,6 +154,65 @@ describe "var reassignment analysis":
         expect(plan.eligible).to_equal(true)
         expect(plan.facts.contains("ssa.var_transform")).to_equal(true)
         expect(plan.facts.contains("borrow.reassign_safe")).to_equal(true)
+
+    it "builds hotspot proof facts from var reassignment analysis":
+        val blocks = one_block(
+            [
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))
+            ],
+            MirTerminator.Return(Some(copy_operand(1)))
+        )
+        val analysis = analyze_var_reassign_blocks(blocks)
+        val facts = var_reassign_analysis_hotspot_facts(["typed_mir", "safe_deopt"], analysis)
+        expect(facts.contains("typed_mir")).to_equal(true)
+        expect(facts.contains("safe_deopt")).to_equal(true)
+        expect(facts.contains("ssa.var_transform")).to_equal(true)
+        expect(facts.contains("escape.analyzed")).to_equal(true)
+        expect(facts.contains("escape.no_escape")).to_equal(true)
+        expect(facts.contains("borrow.reassign_safe")).to_equal(true)
+
+    it "creates MIR analysis-backed hotspot specialization providers only after SSA proof":
+        val blocks = one_block(
+            [
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64())),
+                inst(MirInstKind.BinOp(local(1), MirBinOp.Add, copy_operand(0), int_operand(1)))
+            ],
+            MirTerminator.Return(Some(copy_operand(1)))
+        )
+        val provider = jit_hotspot_specialization_provider_from_var_reassign_analysis(
+            "mir-var-specialization",
+            "fn hot_var() -> i64: 3",
+            blocks,
+            ["typed_mir", "safe_deopt"]
+        )
+        val analysis = analyze_var_reassign_blocks(blocks)
+        val facts = var_reassign_analysis_to_jit_facts(analysis)
+        val plan = jit_hotspot_plan_with_var_facts(hot_profile(), hotspot_config(), true, true, facts)
+        val decision = jit_hotspot_consume_plan_with_provider(plan, hot_profile().source, provider)
+        expect(provider.semantic_proof).to_equal(true)
+        expect(provider.specialized_source).to_equal("fn hot_var() -> i64: 3")
+        expect(decision.provider_used).to_equal(true)
+        expect(decision.compile_source).to_equal("fn hot_var() -> i64: 3")
+
+    it "rejects MIR analysis-backed providers when SSA transform is unsafe":
+        val blocks = one_block(
+            [
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
+                inst(MirInstKind.Ref(local(2), MirBorrowKind.Shared, MirPlace.local_place(local(0)))),
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))
+            ],
+            MirTerminator.Return(Some(copy_operand(2)))
+        )
+        val provider = jit_hotspot_specialization_provider_from_var_reassign_analysis(
+            "mir-var-specialization",
+            "fn hot_var() -> i64: 3",
+            blocks,
+            ["typed_mir", "safe_deopt"]
+        )
+        expect(provider.semantic_proof).to_equal(false)
+        expect(provider.specialized_source).to_equal("")
 
     it "rewrites straight-line reassignment into a fresh SSA local":
         val blocks = one_block(
@@ -427,7 +491,7 @@ describe "var reassignment analysis":
             case _:
                 expect(false).to_equal(true)
 
-    it "declares backend lowering policy for pseudo phi materialization":
+    it "declares backend lowering policy for pseudo phi materialization for REQ-OPJH-021":
         val cranelift = ssa_phi_lowering_policy_for_backend("cranelift")
         expect(cranelift.can_lower).to_equal(true)
         expect(ssa_phi_lowering_kind_name(cranelift.lowering_kind)).to_equal("cranelift_block_param")

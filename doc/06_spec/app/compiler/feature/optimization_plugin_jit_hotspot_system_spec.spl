@@ -9,6 +9,7 @@ use compiler.mir_opt.pattern.rule_engine.{
 }
 use compiler.interp.execution.tiered_jit.{
     FunctionProfile, JitTier, TieredJitConfig,
+    jit_var_optimization_facts_none,
     jit_hotspot_plan_from_profile,
     jit_hotspot_plan_with_var_facts,
     jit_hotspot_rebuild_choice,
@@ -23,7 +24,10 @@ use compiler.mir.mir_instructions.{
 use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
 use compiler.mir_opt.mir_opt.var_reassign_analysis.{
     analyze_var_reassign_blocks,
-    var_reassign_analysis_to_jit_facts,
+    var_reassign_analysis_to_jit_facts
+}
+use compiler.mir_opt.mir_opt.var_reassign_ssa.{
+    jit_hotspot_specialization_provider_from_var_reassign_analysis,
     ssa_var_transform_blocks,
     ssa_phi_plans_for_blocks,
     ssa_materialize_phi_plans_for_blocks
@@ -64,11 +68,12 @@ fn system_hotspot_profile(call_count: i64) -> FunctionProfile:
         typed_mir: true,
         safe_deopt: true,
         hotspot_specialized_source: "fn system_hot_loop(x: i64) -> i64: x + 1 # jit specialized",
-        hotspot_semantic_proof: true
+        hotspot_semantic_proof: true,
+        var_facts: jit_var_optimization_facts_none()
     )
 
 describe "Optimization Plugin JIT Hotspot System":
-    describe "REQ-OPJH-001 REQ-OPJH-002 REQ-OPJH-003":
+    describe "REQ-OPJH-001 REQ-OPJH-002 REQ-OPJH-003 REQ-OPJH-005 REQ-OPJH-006 REQ-OPJH-008":
         it "should expose JIT hotspot as a first-class built-in provider":
             val provider = optimization_rule_provider_builtin_jit_hotspot(
                 "simple.opt.jit.hotspot.system",
@@ -139,6 +144,27 @@ describe "Optimization Plugin JIT Hotspot System":
             expect(plan.facts).to_contain("ssa.var_transform")
             expect(plan.facts).to_contain("borrow.reassign_safe")
 
+        it "should create a MIR analysis-backed specialization provider with proof facts":
+            val blocks = system_one_block(
+                [
+                    system_inst(MirInstKind.Const(system_local(0), MirConstValue.Int(1), MirType.i64())),
+                    system_inst(MirInstKind.Const(system_local(0), MirConstValue.Int(2), MirType.i64())),
+                    system_inst(MirInstKind.BinOp(system_local(1), MirBinOp.Add, system_copy(0), system_int(1)))
+                ],
+                MirTerminator.Return(Some(system_copy(1)))
+            )
+            val provider = jit_hotspot_specialization_provider_from_var_reassign_analysis(
+                "system.mir.var.hotspot",
+                "fn system_hot_loop(x: i64) -> i64: x + 2",
+                blocks,
+                ["typed_mir", "safe_deopt"]
+            )
+            val plan = jit_hotspot_plan_from_profile(system_hotspot_profile(64), system_hotspot_config(), true, true)
+            val decision = jit_hotspot_consume_plan_with_provider(plan, system_hotspot_profile(64).source, provider)
+            expect(provider.semantic_proof).to_equal(true)
+            expect(decision.provider_used).to_equal(true)
+            expect(decision.compile_source).to_equal("fn system_hot_loop(x: i64) -> i64: x + 2")
+
     describe "REQ-OPJH-014":
         it "should select Cranelift within medium budget and LLVM only for tier2 high budget":
             val medium = jit_hotspot_rebuild_choice(system_hotspot_profile(256), system_hotspot_config(), true, true, "medium")
@@ -156,11 +182,11 @@ describe "Optimization Plugin JIT Hotspot System":
             val join = MirBlock(id: BlockId.new(3), label: "join", instructions: [system_inst(MirInstKind.BinOp(system_local(1), MirBinOp.Add, system_copy(0), system_int(1)))], terminator: MirTerminator.Return(Some(system_copy(1))))
             val blocks = [entry, then_block, else_block, join]
             val transform = ssa_var_transform_blocks(blocks)
-            expect(transform.applied).to_equal(false)
-            expect(transform.reason).to_equal("requires phi nodes")
-            expect(transform.phi_required_locals[0]).to_equal(0)
+            expect(transform.applied).to_equal(true)
+            expect(transform.reason).to_equal("ready")
             val plans = ssa_phi_plans_for_blocks(blocks)
             expect(plans.len()).to_equal(1)
+            expect(plans[0].original_local_id).to_equal(0)
             expect(plans[0].join_block_id).to_equal(3)
             val materialized = ssa_materialize_phi_plans_for_blocks(blocks)
             expect(materialized.applied).to_equal(true)

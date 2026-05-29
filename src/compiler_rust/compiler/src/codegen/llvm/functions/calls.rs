@@ -237,18 +237,29 @@ impl LlvmBackend {
         let object_ptr = builder
             .build_int_to_ptr(ptr_bits, ptr_type, "len_object_ptr")
             .map_err(|e| crate::error::factory::llvm_build_failed("len int_to_ptr", &e))?;
+        // RtCoreString.kind is uint32_t = 0x53545231 ("STR1" magic), not a single byte.
+        // Load 4 bytes as i32 and compare to the string magic to detect strings.
+        // RtCoreArray.kind is uint8_t = 0x02, so load i8 for non-string heap objects.
+        let i32_type = self.context_ref().i32_type();
+        let kind_u32 = builder
+            .build_load(i32_type, object_ptr, "len_kind_u32")
+            .map_err(|e| crate::error::factory::llvm_build_failed("len kind u32 load", &e))?
+            .into_int_value();
+        // RT_VALUE_HEAP_STRING = 0x53545231U
+        let is_string = builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                kind_u32,
+                i32_type.const_int(0x53545231u64, false),
+                "len_is_string",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("len string check", &e))?;
+        // For array/enum, use the first byte (uint8_t kind field).
         let object_type = builder
             .build_load(i8_type, object_ptr, "len_object_type")
             .map_err(|e| crate::error::factory::llvm_build_failed("len object type load", &e))?
             .into_int_value();
-        let is_string = builder
-            .build_int_compare(
-                IntPredicate::EQ,
-                object_type,
-                i8_type.const_int(1, false),
-                "len_is_string",
-            )
-            .map_err(|e| crate::error::factory::llvm_build_failed("len string check", &e))?;
+        // RT_VALUE_HEAP_ARRAY = 0x02
         let is_array = builder
             .build_int_compare(
                 IntPredicate::EQ,
@@ -257,31 +268,11 @@ impl LlvmBackend {
                 "len_is_array",
             )
             .map_err(|e| crate::error::factory::llvm_build_failed("len array check", &e))?;
-        let is_dict = builder
-            .build_int_compare(
-                IntPredicate::EQ,
-                object_type,
-                i8_type.const_int(3, false),
-                "len_is_dict",
-            )
-            .map_err(|e| crate::error::factory::llvm_build_failed("len dict check", &e))?;
-        let is_tuple = builder
-            .build_int_compare(
-                IntPredicate::EQ,
-                object_type,
-                i8_type.const_int(4, false),
-                "len_is_tuple",
-            )
-            .map_err(|e| crate::error::factory::llvm_build_failed("len tuple check", &e))?;
         let string_or_array = builder
             .build_or(is_string, is_array, "len_string_or_array")
             .map_err(|e| crate::error::factory::llvm_build_failed("len collection or", &e))?;
-        let dict_or_tuple = builder
-            .build_or(is_dict, is_tuple, "len_dict_or_tuple")
-            .map_err(|e| crate::error::factory::llvm_build_failed("len collection or", &e))?;
-        let is_collection = builder
-            .build_or(string_or_array, dict_or_tuple, "len_is_collection")
-            .map_err(|e| crate::error::factory::llvm_build_failed("len collection check", &e))?;
+        // Only string and array have known kind constants; dict/tuple lack rt_len inline support.
+        let is_collection = string_or_array;
         builder
             .build_conditional_branch(is_collection, len_block, done_block)
             .map_err(|e| crate::error::factory::llvm_build_failed("len type branch", &e))?;

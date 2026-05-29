@@ -307,6 +307,13 @@ for both backends.
 - Eligible plans are consumed into compile decisions.
 - Specialized source is selected only when semantic proof is present.
 - Missing semantic proof preserves original-source compilation.
+- MIR var-reassignment analysis can construct an analysis-backed hotspot
+  specialization provider only after SSA transform proof facts are complete.
+
+`src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl` owns SSA var
+transformation, pseudo-phi planning/materialization, backend lowering policy,
+and the MIR analysis-backed provider factory. `var_reassign_analysis.spl` owns
+raw reassignment, escape, borrow-safety, and JIT fact extraction.
 
 `test/perf/compiler/jit_hotspot_plan_bench.spl` adds benchmark coverage:
 

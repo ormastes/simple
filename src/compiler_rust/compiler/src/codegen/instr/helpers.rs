@@ -59,14 +59,17 @@ pub(crate) fn inline_runtime_len_value(
 
     builder.switch_to_block(type_block);
     let ptr_bits = builder.ins().band(value, ptr_mask);
+    // RtCoreString.kind is uint32_t = 0x53545231 ("STR1" magic), not a single byte.
+    // Load 4 bytes as i32 and compare to the string magic to detect strings.
+    let kind_u32 = builder.ins().load(types::I32, MemFlags::new(), ptr_bits, 0);
+    // RT_VALUE_HEAP_STRING = 0x53545231U
+    let is_string = builder.ins().icmp_imm(IntCC::Equal, kind_u32, 0x53545231i64);
+    // RtCoreArray.kind is uint8_t = 0x02; load first byte for array detection.
     let object_type = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 0);
-    let is_string = builder.ins().icmp_imm(IntCC::Equal, object_type, 1);
+    // RT_VALUE_HEAP_ARRAY = 0x02
     let is_array = builder.ins().icmp_imm(IntCC::Equal, object_type, 2);
-    let is_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 3);
-    let is_tuple = builder.ins().icmp_imm(IntCC::Equal, object_type, 4);
-    let string_or_array = builder.ins().bor(is_string, is_array);
-    let dict_or_tuple = builder.ins().bor(is_dict, is_tuple);
-    let has_len = builder.ins().bor(string_or_array, dict_or_tuple);
+    // Only string and array have known kind constants with a len field at offset 8.
+    let has_len = builder.ins().bor(is_string, is_array);
     builder.ins().brif(has_len, len_block, &[], done_block, &[invalid]);
     builder.seal_block(type_block);
 

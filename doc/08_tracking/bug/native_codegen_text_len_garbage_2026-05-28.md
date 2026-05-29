@@ -1,7 +1,7 @@
 # BUG: text.len() returns garbage value in native LLVM codegen
 
 **Date:** 2026-05-28
-**Status:** OPEN
+**Status:** FIXED (2026-05-29)
 **Severity:** High (all native-compiled code using text.len() affected)
 **Component:** LLVM backend codegen — method dispatch on text type
 
@@ -16,14 +16,27 @@ val body_len = body.len()   # returns 2305843009213693951, should be 13
 
 The same `.len()` call works correctly in interpreter mode.
 
-## Root cause (suspected)
+## Root cause (confirmed)
 
-The native codegen method dispatch for `.len()` on tagged text values likely:
-1. Does not untag the heap pointer before accessing the RtCoreString struct, OR
-2. Reads from wrong offset (e.g., reading the tag bits or capacity field instead of len), OR
-3. The method lookup resolves to the wrong implementation (array.len vs string.len)
+The LLVM backend's inline `compile_inline_len` function in
+`src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs` checks the first byte
+at offset 0 of the heap object and compares to `1` for string detection. But:
 
-Tagged text values use `ptr | 0x1` encoding. The `len` field is at `RtCoreString->len`. The `rt_string_len()` C extern correctly untags and reads `s->len`.
+- `RtCoreString.kind` is `uint32_t = 0x53545231U` ("STR1" magic). First byte on
+  little-endian = `0x31` = 49, not 1. So string detection always fails.
+- `RtCoreArray.kind` is `uint8_t = 0x02U`. First byte = 2. Array detection works. ✓
+
+When string detection fails, the phi node in the inline code returns `invalid = -1`
+(`0xFFFFFFFFFFFFFFFF`). When `print` calls `rt_print_value(-1)`, it decodes it as a
+`RT_VALUE_TAG_SPECIAL` value and extracts payload `(-1 >> 3) = 0x1FFFFFFFFFFFFFFF =
+2305843009213693951` — the garbage value observed.
+
+The same bug existed in the Cranelift `inline_runtime_len_value` in
+`src/compiler_rust/compiler/src/codegen/instr/helpers.rs`.
+
+The same logic bug exists in the pure-Simple LLVM backend
+(`src/compiler/50.mir/mir_lowering_expr_part3.spl`) but that path is not currently used
+by `native-build` (dispatches to Rust seed by default).
 
 ## Reproduction
 

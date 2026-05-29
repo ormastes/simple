@@ -1056,6 +1056,16 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
 
 /// Original Rust test runner implementation (fallback)
 fn handle_test_rust(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    // Recursion guard: mark this process as running a test so that any
+    // interpreter call to cli_run_tests() / rt_cli_run_tests() sees
+    // SIMPLE_TEST_DEPTH >= 1 and refuses to spawn another `simple test`.
+    // This prevents runaway process storms (bug: jit_hotspot_verification_process_storm).
+    let parent_depth: u32 = std::env::var("SIMPLE_TEST_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    std::env::set_var("SIMPLE_TEST_DEPTH", (parent_depth + 1).to_string());
+
     // Parse test options from remaining args
     let test_args: Vec<String> = args[1..].to_vec();
     if test_args.iter().any(|arg| arg == "--help" || arg == "-h") {

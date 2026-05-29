@@ -4,7 +4,7 @@
 - **Severity:** P2
 - **Date:** 2026-05-28
 - **Area:** compiler / lexer (string-literal escape decoding)
-- **Status:** open
+- **Status:** fix implemented 2026-05-29 — Rust seed tested+passing; .spl self-hosted fix pending bootstrap rebuild verification
 
 ## Summary
 
