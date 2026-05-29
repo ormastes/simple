@@ -55,6 +55,86 @@ function differentPixelsFromPpm(aPath, bPath) {
   return different;
 }
 
+function pixelAt(image, x, y) {
+  const offset = (y * image.width + x) * 3;
+  return [image.data[offset], image.data[offset + 1], image.data[offset + 2]];
+}
+
+function clampRegion(region, width, height) {
+  return {
+    left: Math.max(0, Math.min(width, region.left)),
+    top: Math.max(0, Math.min(height, region.top)),
+    right: Math.max(0, Math.min(width, region.right)),
+    bottom: Math.max(0, Math.min(height, region.bottom))
+  };
+}
+
+function regionDelta(expected, actual, region) {
+  const r = clampRegion(region, expected.width, expected.height);
+  let differentPixels = 0;
+  let sad = 0;
+  const channelAbsoluteDiff = { r: 0, g: 0, b: 0 };
+  const channelSignedDiff = { r: 0, g: 0, b: 0 };
+  for (let y = r.top; y < r.bottom; y += 1) {
+    for (let x = r.left; x < r.right; x += 1) {
+      const e = pixelAt(expected, x, y);
+      const a = pixelAt(actual, x, y);
+      const dr = Math.abs(e[0] - a[0]);
+      const dg = Math.abs(e[1] - a[1]);
+      const db = Math.abs(e[2] - a[2]);
+      if (dr !== 0 || dg !== 0 || db !== 0) differentPixels += 1;
+      sad += dr + dg + db;
+      channelAbsoluteDiff.r += dr;
+      channelAbsoluteDiff.g += dg;
+      channelAbsoluteDiff.b += db;
+      channelSignedDiff.r += e[0] - a[0];
+      channelSignedDiff.g += e[1] - a[1];
+      channelSignedDiff.b += e[2] - a[2];
+    }
+  }
+  return {
+    region: r,
+    differentPixels,
+    sad,
+    channelAbsoluteDiff,
+    channelSignedDiff
+  };
+}
+
+function textRegionDelta(chromePath, simplePath, metricsPath) {
+  if (!fs.existsSync(metricsPath)) return null;
+  const chrome = parsePpm(chromePath);
+  const simple = parsePpm(simplePath);
+  if (!chrome || !simple || chrome.width !== simple.width || chrome.height !== simple.height) return null;
+  const metricsRoot = JSON.parse(fs.readFileSync(metricsPath, "utf8"));
+  const metrics = metricsRoot.metrics || {};
+  const div = metrics.div && metrics.div.rect;
+  const rects = metrics.textClientRects || [];
+  if (!div || rects.length === 0) return null;
+  const divRegion = {
+    left: Math.floor(div.left),
+    top: Math.floor(div.top),
+    right: Math.ceil(div.right),
+    bottom: Math.ceil(div.bottom)
+  };
+  const overflowRegion = { left: chrome.width, top: chrome.height, right: 0, bottom: 0 };
+  for (const rect of rects) {
+    const top = Math.floor(Math.max(rect.top, div.bottom));
+    const bottom = Math.ceil(rect.bottom);
+    if (bottom <= top) continue;
+    overflowRegion.left = Math.min(overflowRegion.left, Math.floor(rect.left));
+    overflowRegion.top = Math.min(overflowRegion.top, top);
+    overflowRegion.right = Math.max(overflowRegion.right, Math.ceil(rect.right));
+    overflowRegion.bottom = Math.max(overflowRegion.bottom, bottom);
+  }
+  const hasOverflow = overflowRegion.right > overflowRegion.left && overflowRegion.bottom > overflowRegion.top;
+  return {
+    metricsPath: path.relative(root, metricsPath),
+    divBox: regionDelta(chrome, simple, divRegion),
+    overflowText: hasOverflow ? regionDelta(chrome, simple, overflowRegion) : null
+  };
+}
+
 const failures = [];
 let result = {
   status: "FAIL",
@@ -77,6 +157,7 @@ let result = {
   simpleGeometryLineCount: 0,
   textLineCountDelta: 0,
   layoutTextMatch: false,
+  textRegionDelta: null,
   failures
 };
 
@@ -93,6 +174,7 @@ if (!fs.existsSync(reportPath)) {
   result.accepted = parseBool(text, /accepted:\s*(true|false)/);
   result.differentPixels = parseIntField(text, /different_pixels:\s*([0-9]+)/);
   result.computedDifferentPixels = differentPixelsFromPpm(chromePath, simplePath);
+  result.textRegionDelta = textRegionDelta(chromePath, simplePath, path.join(dir, "chrome_metrics.json"));
   result.divergent = !result.exact && !result.accepted;
   result.reportFresh = result.computedDifferentPixels === result.differentPixels;
   result.hasSimpleLayoutLines = text.includes("simple_layout_lines:");
@@ -117,6 +199,9 @@ if (!fs.existsSync(reportPath)) {
   if (result.simpleGeometryLineCount <= 0) failures.push("text geometry delta did not report Simple text lines");
   if (result.differentPixels <= 1000 || result.differentPixels >= 6000) failures.push("production divergence is outside bounded evidence range");
   if (result.differentPixels > maxDifferentPixels) failures.push("production probe regressed above current focused baseline");
+  if (!result.textRegionDelta) failures.push("missing production text region delta diagnostics");
+  if (result.textRegionDelta && result.textRegionDelta.divBox.differentPixels <= 0) failures.push("production div-box text delta did not report differences");
+  if (result.textRegionDelta && (!result.textRegionDelta.overflowText || result.textRegionDelta.overflowText.differentPixels <= 0)) failures.push("production overflow text delta did not report differences");
 }
 
 result.status = failures.length === 0 ? "PASS" : "FAIL";
