@@ -2,8 +2,9 @@
 
 ## Status
 
-Partially resolved. `draw_line` now has a CUDA PTX kernel and strict readback
-coverage. Other mirror-only primitives remain open.
+Partially resolved. `draw_line`, `draw_circle`, and `draw_circle_filled` now
+have CUDA PTX kernels and strict readback coverage. Other mirror-only
+primitives remain open.
 
 ## Problem
 
@@ -15,8 +16,6 @@ pixels instead of the mirror result.
 
 Confirmed remaining mirror-only core primitives:
 
-- `draw_circle`
-- `draw_circle_filled`
 - `draw_rounded_rect`
 - `draw_triangle_filled`
 - `draw_text`
@@ -35,14 +34,15 @@ removed.
 
 ## Completed Fix
 
-Added real CUDA primitive coverage for `kernel_draw_line` instead of silently
-relying on mirror-only state while device readback remains preferred.
+Added real CUDA primitive coverage for `kernel_draw_line`, `kernel_draw_circle`,
+and `kernel_draw_circle_filled` instead of silently relying on mirror-only state
+while device readback remains preferred.
 
 Verification:
 
 - `bin/simple check src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl test/integration/rendering/cuda_strict_spec.spl test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl`
 - `SIMPLE_LIB=src bin/simple test test/integration/rendering/cuda_strict_spec.spl --mode=interpreter --clean`
-  - Result: 17 passed, 0 failed.
+  - Result: 19 passed, 0 failed.
 - `SIMPLE_LIB=src bin/simple test test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl --mode=interpreter --clean`
   - Result: 8 passed, 0 failed.
 
@@ -54,6 +54,5 @@ Target files:
 - `test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl`
 - `test/integration/rendering/cuda_strict_spec.spl`
 
-The next strict hardware tests should compare CUDA circle, rounded-rect,
-triangle, text, clip, and mask behavior against the CPU reference after
-`clear()`.
+The next strict hardware tests should compare CUDA rounded-rect, triangle,
+text, clip, and mask behavior against the CPU reference after `clear()`.
