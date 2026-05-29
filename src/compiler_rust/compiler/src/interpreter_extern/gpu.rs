@@ -142,14 +142,20 @@ use simple_runtime::cuda_runtime::{
 
 use simple_runtime::metal_graphics_runtime::{
     rt_metal_alloc_buffer, rt_metal_buffer_download, rt_metal_buffer_upload,
+    rt_metal_begin_render_pass,
     rt_metal_commit_command_buffer, rt_metal_compile_shader, rt_metal_create_command_buffer,
     rt_metal_create_command_queue, rt_metal_create_compute_encoder, rt_metal_create_compute_pipeline,
-    rt_metal_create_device, rt_metal_destroy_command_queue, rt_metal_destroy_device,
-    rt_metal_destroy_pipeline, rt_metal_destroy_shader, rt_metal_dispatch_compute,
-    rt_metal_end_compute_encoder, rt_metal_free_buffer, rt_metal_get_last_error,
+    rt_metal_create_device, rt_metal_create_render_pipeline, rt_metal_create_sampler,
+    rt_metal_create_swapchain, rt_metal_create_texture, rt_metal_destroy_command_queue,
+    rt_metal_destroy_device, rt_metal_destroy_pipeline, rt_metal_destroy_render_pipeline,
+    rt_metal_destroy_sampler, rt_metal_destroy_shader, rt_metal_destroy_swapchain,
+    rt_metal_device_count, rt_metal_device_memory, rt_metal_device_name,
+    rt_metal_dispatch_compute, rt_metal_draw_indexed, rt_metal_draw_primitives,
+    rt_metal_end_compute_encoder, rt_metal_end_render_pass, rt_metal_free_buffer,
+    rt_metal_free_texture, rt_metal_get_last_error,
     rt_metal_init, rt_metal_is_available, rt_metal_run_blit_frame,
-    rt_metal_run_compute_frame, rt_metal_set_buffer, rt_metal_set_bytes,
-    rt_metal_wait_completed,
+    rt_metal_run_compute_frame, rt_metal_set_buffer, rt_metal_set_bytes, rt_metal_set_scissor,
+    rt_metal_set_viewport, rt_metal_present, rt_metal_wait_completed,
 };
 
 fn arg_i64(args: &[Value], index: usize, name: &str, expected: usize) -> Result<i64, CompileError> {
@@ -232,6 +238,18 @@ pub fn rt_metal_is_available_fn(_args: &[Value]) -> Result<Value, CompileError> 
 
 pub fn rt_metal_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(rt_metal_init()))
+}
+
+pub fn rt_metal_device_count_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_device_count()))
+}
+
+pub fn rt_metal_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Str(c_ptr_to_string(rt_metal_device_name(arg_i64(args, 0, "rt_metal_device_name", 1)?))))
+}
+
+pub fn rt_metal_device_memory_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_device_memory(arg_i64(args, 0, "rt_metal_device_memory", 1)?)))
 }
 
 pub fn rt_metal_create_device_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -344,6 +362,62 @@ pub fn rt_metal_dispatch_compute_fn(args: &[Value]) -> Result<Value, CompileErro
     )))
 }
 
+pub fn rt_metal_create_render_pipeline_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_create_render_pipeline(
+        arg_i64(args, 0, "rt_metal_create_render_pipeline", 4)?,
+        arg_i64(args, 1, "rt_metal_create_render_pipeline", 4)?,
+        arg_i64(args, 2, "rt_metal_create_render_pipeline", 4)?,
+        arg_i64(args, 3, "rt_metal_create_render_pipeline", 4)?,
+    )))
+}
+
+pub fn rt_metal_destroy_render_pipeline_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_destroy_render_pipeline(arg_i64(args, 0, "rt_metal_destroy_render_pipeline", 1)?)))
+}
+
+pub fn rt_metal_create_texture_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_create_texture(
+        arg_i64(args, 0, "rt_metal_create_texture", 4)?,
+        arg_i64(args, 1, "rt_metal_create_texture", 4)?,
+        arg_i64(args, 2, "rt_metal_create_texture", 4)?,
+        arg_i64(args, 3, "rt_metal_create_texture", 4)?,
+    )))
+}
+
+pub fn rt_metal_free_texture_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_free_texture(arg_i64(args, 0, "rt_metal_free_texture", 1)?)))
+}
+
+pub fn rt_metal_begin_render_pass_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_begin_render_pass(
+        arg_i64(args, 0, "rt_metal_begin_render_pass", 6)?,
+        arg_i64(args, 1, "rt_metal_begin_render_pass", 6)?,
+        args.get(2).and_then(|v| v.as_float().ok()).unwrap_or(0.0),
+        args.get(3).and_then(|v| v.as_float().ok()).unwrap_or(0.0),
+        args.get(4).and_then(|v| v.as_float().ok()).unwrap_or(0.0),
+        args.get(5).and_then(|v| v.as_float().ok()).unwrap_or(1.0),
+    )))
+}
+
+pub fn rt_metal_end_render_pass_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_end_render_pass(arg_i64(args, 0, "rt_metal_end_render_pass", 1)?)))
+}
+
+pub fn rt_metal_draw_indexed_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_draw_indexed(
+        arg_i64(args, 0, "rt_metal_draw_indexed", 3)?,
+        arg_i64(args, 1, "rt_metal_draw_indexed", 3)?,
+        arg_i64(args, 2, "rt_metal_draw_indexed", 3)?,
+    )))
+}
+
+pub fn rt_metal_draw_primitives_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_draw_primitives(
+        arg_i64(args, 0, "rt_metal_draw_primitives", 2)?,
+        arg_i64(args, 1, "rt_metal_draw_primitives", 2)?,
+    )))
+}
+
 pub fn rt_metal_end_compute_encoder_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(rt_metal_end_compute_encoder(arg_i64(args, 0, "rt_metal_end_compute_encoder", 1)?)))
 }
@@ -358,6 +432,51 @@ pub fn rt_metal_wait_completed_fn(args: &[Value]) -> Result<Value, CompileError>
 
 pub fn rt_metal_get_last_error_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Str(c_ptr_to_string(rt_metal_get_last_error())))
+}
+
+pub fn rt_metal_create_sampler_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_create_sampler(arg_i64(args, 0, "rt_metal_create_sampler", 1)?)))
+}
+
+pub fn rt_metal_destroy_sampler_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_destroy_sampler(arg_i64(args, 0, "rt_metal_destroy_sampler", 1)?)))
+}
+
+pub fn rt_metal_set_viewport_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_set_viewport(
+        arg_i64(args, 0, "rt_metal_set_viewport", 5)?,
+        args.get(1).and_then(|v| v.as_float().ok()).unwrap_or(0.0),
+        args.get(2).and_then(|v| v.as_float().ok()).unwrap_or(0.0),
+        args.get(3).and_then(|v| v.as_float().ok()).unwrap_or(0.0),
+        args.get(4).and_then(|v| v.as_float().ok()).unwrap_or(0.0),
+    )))
+}
+
+pub fn rt_metal_set_scissor_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_set_scissor(
+        arg_i64(args, 0, "rt_metal_set_scissor", 5)?,
+        arg_i64(args, 1, "rt_metal_set_scissor", 5)?,
+        arg_i64(args, 2, "rt_metal_set_scissor", 5)?,
+        arg_i64(args, 3, "rt_metal_set_scissor", 5)?,
+        arg_i64(args, 4, "rt_metal_set_scissor", 5)?,
+    )))
+}
+
+pub fn rt_metal_create_swapchain_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_create_swapchain(
+        arg_i64(args, 0, "rt_metal_create_swapchain", 4)?,
+        arg_i64(args, 1, "rt_metal_create_swapchain", 4)?,
+        arg_i64(args, 2, "rt_metal_create_swapchain", 4)?,
+        arg_i64(args, 3, "rt_metal_create_swapchain", 4)?,
+    )))
+}
+
+pub fn rt_metal_destroy_swapchain_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_destroy_swapchain(arg_i64(args, 0, "rt_metal_destroy_swapchain", 1)?)))
+}
+
+pub fn rt_metal_present_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_present(arg_i64(args, 0, "rt_metal_present", 1)?)))
 }
 
 pub fn rt_metal_run_compute_frame_fn(args: &[Value]) -> Result<Value, CompileError> {
