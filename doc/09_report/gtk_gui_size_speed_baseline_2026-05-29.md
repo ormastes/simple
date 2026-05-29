@@ -6,13 +6,40 @@ Date: 2026-05-29
 
 | Runtime | Status | Binary bytes | Iterations | Total us | Notes |
 |---|---|---:|---:|---:|---|
-| Simple web renderer | failed | n/a | 4 | n/a | simple_run_failed |
+| Simple web renderer | ok | n/a | 4 | 5288 | render loop via Simple software renderer |
+| Simple static cache | ok | n/a | 4 | 1200 | persistent HTML artifact cache hit loop |
+| Simple SWBC decode | ok | n/a | 4 | 133972 | compact static-shell plan decode loop |
 | GTK | unavailable | 14472 | 200 | n/a | no_display |
+
+## Static Shell Size
+
+| Artifact | Bytes |
+|---|---:|
+| Simple generated full HTML | 248 |
+| Simple compact static-shell plan | 149 |
+| GTK minimal executable | 14472 |
 
 ## Simple Output
 
-- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Cannot infer type: TypedInteger(4294967295, U32)
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: let binding failed: Wildcard - complex patterns are not yet supported in let bindings
 - [memory-guard] SIMPLE_LIB=/home/ormastes/dev/pub/simple/src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- simple_render_status=ok
+- simple_render_iterations=4
+- simple_render_total_us=5288
+- simple_render_pixels=256000
+- simple_cache_schema=simple-web-cache-v1
+- simple_render_plan=static_shell_with_dynamic_islands
+- simple_dynamic_regions=1
+- simple_static_cache_miss_stored=true
+- simple_static_cache_hit_iterations=4
+- simple_static_cache_memory_hits=4
+- simple_static_cache_disk_hits=0
+- simple_static_cache_total_us=1200
+- simple_static_html_bytes=248
+- simple_static_binary_plan_bytes=149
+- simple_static_binary_commands=5
+- simple_static_swbc_hit_iterations=4
+- simple_static_swbc_total_us=133972
 
 ## GTK Output
 

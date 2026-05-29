@@ -47,25 +47,81 @@ process and produce a compile artifact from an input source file.
   `rust-examples NOT BUILT`, `clang-static-guest NOT BUILT`, `rustc-static-guest
   NOT BUILT`, and `toolchain-disk-bake DISABLED`.
 
+## Blocker Analysis (updated 2026-05-29)
+
+Two independent blockers must both be resolved before any real in-guest compiler
+execution is possible. Neither is addressable in pure Simple today.
+
+### Blocker 1 — Kernel exec control transfer not wired (x86_64)
+
+`src/os/kernel/loader/x86_64_fs_exec_spawn.spl` implements two spawn paths:
+
+- **Static-seeded path** (`_x86_64_spawn_static_seeded`): reads a hardcoded
+  stub size, prints `spawn:image` and `spawn:bytes` serial markers, bumps
+  `g_x86_64_fs_exec_next_pid`, and returns the PID. No bytes are loaded from
+  FAT32; no process image is built; no task is scheduled.
+- **Full VFS path** (`x86_64_fs_exec_spawn_as`): reads SMF bytes from FAT32,
+  validates the ELF stub via `smf_extract_executable_stub_for_arch`, prints
+  `spawn:image`, and returns the PID. A task struct is never constructed;
+  `build_user_process_image_unchecked` and `scheduler_create_bootstrap_user_task_pid`
+  are never called from the x86_64 path.
+
+The shared path in `src/os/kernel/loader/fs_exec_spawn.spl` does call
+`build_user_process_image_unchecked` + `scheduler_create_bootstrap_user_task_pid`
+and returns a `FsExecPrepareResult`, but `fs_exec_spawn_as` stops immediately
+after receiving the PID — the "optional live handoff hook" described in the
+file header is not wired for x86_64 or any other architecture (ARM64 confirms
+this: `arm64_fs_exec_spawn` also returns `prepared.pid` with no handoff call).
+
+Fix required: wire the x86_64 spawn path to call `fs_exec_prepare_spawn` (the
+shared path) and add the arch-specific handoff that context-switches into the
+newly created task. This is kernel-level work.
+
+### Blocker 2 — No real compiler payloads (clang_static, rustc_static)
+
+`bin/simple run src/os/port/deploy_toolchains.spl -- --status` reports:
+
+```
+llvm-cross       NOT BUILT
+compiler-rt      NOT BUILT
+rust-examples    NOT BUILT
+clang-static-guest NOT BUILT
+rustc-static-guest NOT BUILT
+toolchain-disk-bake DISABLED
+```
+
+Even with Blocker 1 fixed, spawning `/sys/apps/clang` or `/sys/apps/rust`
+would execute a stub ELF, not a real compiler. The real payloads require an
+LLVM cross-build targeting `x86_64-unknown-simpleos` and a Rust cross-build
+for the same triple. These are C++/Rust toolchain builds, not pure Simple.
+
+`disk_image_bake.spl` enforces strictness once
+`build/os/.bake_include_toolchain` is created: bake fails if either
+`build/os/clang_static/bin/clang_static` or
+`build/os/rust_static/bin/rustc_static` is missing.
+
 ## Required Fix
 
-Add a QEMU lane that launches filesystem-backed Clang and Rust compiler
-executables inside the guest, passes small source inputs from the FAT32 image,
-and verifies a real compile output or a well-defined compiler diagnostic
-produced by the in-guest process.
+Resolve both blockers in order:
 
-Before that lane can pass, build or provide:
+1. Wire `x86_64_fs_exec_spawn_as` to use `fs_exec_prepare_spawn` (shared path)
+   and add the x86_64 arch handoff that context-switches into the bootstrapped
+   task. This unblocks real in-guest ELF execution for any guest binary.
 
-- `build/os/clang_static/bin/clang_static`;
-- `build/os/rust_static/bin/rustc_static`;
-- `build/os/.bake_include_toolchain` so `disk_image_bake.spl` embeds those
-  payloads into the FAT32 image.
+2. Build `build/os/clang_static/bin/clang_static` and
+   `build/os/rust_static/bin/rustc_static` via the LLVM/Rust cross-build
+   pipeline in `src/os/port/llvm/` and `src/os/port/rust/`.
+   Touch `build/os/.bake_include_toolchain` and re-bake the FAT32 image.
 
-`disk_image_bake.spl` now treats that marker as strict: once
-`build/os/.bake_include_toolchain` exists, the bake fails if either
-`build/os/clang_static/bin/clang_static` or
-`build/os/rust_static/bin/rustc_static` is missing. This prevents a
-toolchain-enabled image from silently omitting the real compiler payloads.
+Once both are ready:
+
+3. Add a `x64-toolchain-exec-probe` QEMU lane (entry point analogous to
+   `examples/simple_os/arch/x86_64/toolchain_vfs_probe_entry.spl`) that:
+   - spawns `/sys/apps/clang` with `hello.c` as argv[0];
+   - verifies a real compile output or well-defined diagnostic via serial;
+   - emits `[toolchain-exec] compiler-ran app=clang status=ok` (or `fail`);
+   - uses a distinct serial marker from the VFS-only probe so the two lanes
+     are not confused.
 
 The lane should fail unless all of these are true:
 
@@ -79,5 +135,7 @@ The lane should fail unless all of these are true:
 
 ## Verification Target
 
-Add a scenario such as `x64-toolchain-exec-probe` and include it in the SimpleOS
-real-OS audit once it passes under QEMU.
+Add `x64-toolchain-exec-probe` and include it in the SimpleOS real-OS audit
+once it passes under QEMU. Do not add the lane until Blockers 1 and 2 are
+both resolved — a lane that always defers is dead code and contradicts the
+audit requirement that the scenario pass.

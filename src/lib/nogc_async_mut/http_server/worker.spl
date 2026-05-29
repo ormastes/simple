@@ -146,6 +146,7 @@ class Worker:
     static_file_fallback_count: i64
     tls_config: TlsConfig?
     tls_sessions: Dict<i64, TlsSessionState>
+    tls_rx_buf: Dict<i64, [u8]>
 
     static fn create(worker_id: i64, config: ServerConfig,
                      router: AsyncRouter, pipeline: MiddlewarePipeline,
@@ -219,7 +220,8 @@ class Worker:
             static_file_sendfile_count: 0,
             static_file_fallback_count: 0,
             tls_config: tls_cfg,
-            tls_sessions: {}
+            tls_sessions: {},
+            tls_rx_buf: {}
         ))
 
     me run():
@@ -333,11 +335,13 @@ class Worker:
                     return
                 # Store TLS session keys for this connection so recv/send
                 # paths can decrypt/encrypt TLS application data records.
+                # Use seq values from the handshake state: both Finished messages
+                # consume seq 0, so application data begins at client_seq=1, server_seq=1.
                 self.tls_sessions[client_fd] = TlsSessionState(
                     keys: keys.unwrap(),
                     cipher_suite: state.cipher_suite,
-                    client_seq: 0,
-                    server_seq: 0
+                    client_seq: state.client_seq,
+                    server_seq: state.server_seq
                 )
                 # TODO: [stdlib][P2] extract ALPN from handshake state when ALPN is implemented
                 self.dispatch_by_alpn("", client_fd, now)
@@ -430,17 +434,10 @@ class Worker:
     me handle_recv(fd: i64, data: text, raw_bytes: [u8], now: i64):
         """Handle data received on a connection.
 
-        TODO: [stdlib][P1] TLS application data decryption
-        Session keys are stored in self.tls_sessions after handshake but
-        recv/send interception is not yet wired. To complete HTTPS static:
-        1. Add tls_rx_buf: Dict<i64, [u8]> accumulator for partial records
-        2. Loop: parse 5-byte TLS header, accumulate until record_len bytes
-        3. Decrypt each complete record with tls_aes_gcm_decrypt_hex
-        4. Feed plaintext to connection parser
-        5. On send: chunk responses into <=16384-byte TLS records
-        6. Encrypt each chunk with tls_aes_gcm_encrypt_hex
-        The handshake completes and ALPN/cert validation works; application
-        data transport is the remaining gap.
+        When a TLS session exists for this fd, raw bytes are accumulated in
+        tls_rx_buf, complete TLS records are decrypted with tls_decrypt_record,
+        and the plaintext is fed to the connection parser. Partial records are
+        held in the accumulator until the next recv completes them.
         """
         # H2 connections are routed separately — feed raw bytes to avoid UTF-8 corruption
         val h2conn = self.h2_connections.get(fd)
@@ -473,6 +470,78 @@ class Worker:
             val recv_op = self.driver.submit_recv(fd, 8192)
             self.op_to_fd[recv_op] = fd
             self.op_type[recv_op] = OP_RECV
+            return
+
+        # TLS application data decryption path
+        val tls_session = self.tls_sessions.get(fd)
+        if tls_session.?:
+            var session = tls_session
+            # Append new bytes to per-connection accumulator
+            var acc = self.tls_rx_buf.get(fd) ?? []
+            for b in raw_bytes:
+                acc.push(b)
+            # Process all complete TLS records in the accumulator
+            var plaintext_all = ""
+            var consumed = 0
+            var tls_more = true
+            while tls_more and (acc.len() - consumed >= TLS_RECORD_HEADER_SIZE):
+                val rec_len = (acc[consumed + 3].to_i64() * 256) + acc[consumed + 4].to_i64()
+                val total_needed = TLS_RECORD_HEADER_SIZE + rec_len
+                if acc.len() - consumed < total_needed:
+                    # Partial record — stop and wait for more data
+                    tls_more = false
+                else:
+                    # Extract one complete record
+                    var rec: [u8] = []
+                    var ri = consumed
+                    while ri < consumed + total_needed:
+                        rec.push(acc[ri])
+                        ri = ri + 1
+                    val pt = tls_decrypt_record(rec, session)
+                    if pt.?:
+                        plaintext_all = plaintext_all + pt
+                        session.client_seq = session.client_seq + 1
+                    consumed = consumed + total_needed
+            # Keep un-consumed bytes in the accumulator
+            var remaining: [u8] = []
+            var ri2 = consumed
+            while ri2 < acc.len():
+                remaining.push(acc[ri2])
+                ri2 = ri2 + 1
+            self.tls_rx_buf[fd] = remaining
+            self.tls_sessions[fd] = session
+            if plaintext_all.len() == 0:
+                # No complete records yet — keep reading
+                val op = self.driver.submit_recv(fd, 8192)
+                self.op_to_fd[op] = fd
+                self.op_type[op] = OP_RECV
+                return
+            # Feed decrypted plaintext into the connection parser
+            val conn_tls = self.connections.get(fd)
+            if not conn_tls.?:
+                return
+            var c_tls = conn_tls
+            val action_tls = c_tls.on_data_received(plaintext_all, now)
+            self.connections[fd] = c_tls
+            match action_tls:
+                ConnectionAction.ContinueReading:
+                    val op = self.driver.submit_recv(fd, 8192)
+                    self.op_to_fd[op] = fd
+                    self.op_type[op] = OP_RECV
+                ConnectionAction.RequestReady:
+                    self.process_request(fd, now)
+                ConnectionAction.Close:
+                    self.close_connection(fd)
+                ConnectionAction.Error(status, msg):
+                    self.send_error(fd, status, msg, now)
+                ConnectionAction.WriteResponse(body):
+                    self.send_response(fd, default_response_data(200, "OK", body), now)
+                ConnectionAction.SendFile(path, offset, length):
+                    var resp_tls = default_response_data(200, "OK", "")
+                    resp_tls.body_file = path
+                    resp_tls.body_offset = offset
+                    resp_tls.body_length = length
+                    self.send_response(fd, resp_tls, now)
             return
 
         val conn = self.connections.get(fd)
@@ -704,29 +773,59 @@ class Worker:
     me send_response(fd: i64, resp: HttpResponseData, now: i64):
         """Send a response on a connection.
 
-        TODO: [stdlib][P1] TLS application data encryption
-        Session keys are stored in self.tls_sessions after handshake but
-        send-side encryption is not yet wired. To complete HTTPS static:
-        1. Chunk response into <=16384-byte TLS records
-        2. Encrypt each chunk with tls_aes_gcm_encrypt_hex (tls_encrypt_record)
-        3. Increment server_seq per record
-        4. Fall back sendfile to portable-read for TLS connections
-        The handshake completes and session keys are stored; application
-        data encryption is the remaining gap (mirrors handle_recv TODO).
+        When a TLS session exists for this fd, the response bytes are chunked
+        into TLS_MAX_FRAGMENT_LENGTH-byte segments, each encrypted with
+        tls_encrypt_record, and sent as a single contiguous byte buffer.
+        sendfile is transparently fallen back to portable-read for TLS
+        connections since kernel sendfile cannot encrypt in-flight.
         """
         val conn = self.connections.get(fd)
         if not conn.?:
             return
 
         var response = resp
-        if worker_static_file_route(self.net_capabilities, resp) == "portable-read":
-            response = worker_static_file_fallback_response(resp)
-            self.static_file_fallback_count = self.static_file_fallback_count + 1
-        elif worker_static_file_route(self.net_capabilities, resp) == "sendfile":
-            self.static_file_sendfile_count = self.static_file_sendfile_count + 1
+
+        # TLS connections must use portable-read for file bodies (sendfile bypasses encryption)
+        val tls_session_send = self.tls_sessions.get(fd)
+        if tls_session_send.?:
+            if (worker_static_file_route(self.net_capabilities, resp) == "sendfile" or
+                worker_static_file_route(self.net_capabilities, resp) == "portable-read"):
+                response = worker_static_file_fallback_response(resp)
+                self.static_file_fallback_count = self.static_file_fallback_count + 1
+        else:
+            if worker_static_file_route(self.net_capabilities, resp) == "portable-read":
+                response = worker_static_file_fallback_response(resp)
+                self.static_file_fallback_count = self.static_file_fallback_count + 1
+            elif worker_static_file_route(self.net_capabilities, resp) == "sendfile":
+                self.static_file_sendfile_count = self.static_file_sendfile_count + 1
 
         var c = conn
         val keepalive_s = self.config.keepalive_timeout_ms / 1000
+
+        # TLS encryption path: encrypt response bytes into TLS records
+        if tls_session_send.?:
+            var session_send = tls_session_send
+            c.set_response(response, keepalive_s)
+            self.connections[fd] = c
+            val plain_text = c.get_response_bytes()
+            # Chunk into TLS records (max TLS_MAX_FRAGMENT_LENGTH bytes each)
+            var encrypted_buf: [u8] = []
+            var offset_s = 0
+            val plain_len = plain_text.len()
+            while offset_s < plain_len:
+                val remaining_s = plain_len - offset_s
+                val chunk_len = if remaining_s > TLS_MAX_FRAGMENT_LENGTH: TLS_MAX_FRAGMENT_LENGTH else: remaining_s
+                val chunk = plain_text.slice(offset_s, offset_s + chunk_len)
+                val rec = tls_encrypt_record(chunk, session_send)
+                for b in rec:
+                    encrypted_buf.push(b)
+                session_send.server_seq = session_send.server_seq + 1
+                offset_s = offset_s + chunk_len
+            self.tls_sessions[fd] = session_send
+            val op = self.driver.submit_send_bytes(fd, encrypted_buf)
+            self.op_to_fd[op] = fd
+            self.op_type[op] = OP_SEND
+            return
 
         if worker_static_file_route(self.net_capabilities, response) == "sendfile":
             # Send headers first (text path), then chain sendfile on completion
@@ -773,6 +872,7 @@ class Worker:
         self.sendfile_pending.remove(fd)
         self.sendfile_open_files.remove(fd)
         self.tls_sessions.remove(fd)
+        self.tls_rx_buf.remove(fd)
         tcp_backend_close(fd)
         self.connections.remove(fd)
         self.active_count = self.active_count - 1

@@ -12,6 +12,7 @@
 | `runtime_audio_effects.c` | `rt_audio_set_pitch` + 6 stubs | Deleted. Not in tools.rs. Zero .rs/.spl callers. |
 | `runtime_hash.c` | `rt_fnv_hash` | Deleted 2026-05-27. `simple-runtime` now implements FNV-1a in Rust and the legacy Rust std hash shim computes FNV in Simple instead of declaring the C extern. Removed from the core-C native-project runtime input list. |
 | `runtime_crypto.c` | `rt_constant_time_compare` | Deleted 2026-05-27. `simple-runtime` and interpreter dispatch both implement constant-time comparison in Rust/Simple runtime code; no native-project runtime input remains. |
+| `runtime_base64.c` | `__c_rt_base64_encode`, `__c_rt_base64_decode` | Already deleted from disk (confirmed 2026-05-29). Was listed under Group B but the file is gone. `sffi/utils.rs` wraps both symbols; no C file callers remain. |
 
 ## Cannot Remove (active Rust/codegen callers)
 
@@ -20,22 +21,38 @@
 Symbols emitted directly by codegen or referenced in `elf_utils.rs`/`runtime_sffi.rs`.
 Cannot remove until native linker resolves them from Simple-compiled objects.
 
-| C File | Key Symbols | Codegen Callers | .spl Callers | Why It Stays |
-|--------|-------------|-----------------|-------------|-------------|
-| `runtime_math.c` | 27 (`rt_math_*`) | codegen/core-C native-project archive | 12 files | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native SFFI exports. |
-| `runtime_random.c` | 8 (`rt_random_*`) | codegen/core-C native-project archive | 10 files | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native SFFI exports. |
-| `runtime_contracts.c` | 2 (`simple_contract_check*`) | codegen/core-C native-project archive | 3 files | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native contract-check exports. |
-| `runtime_error.c` | `rt_function_not_found`, `rt_method_not_found` | codegen/core-C native-project archive | 2 files | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native unresolved-call fallbacks. |
-| `runtime_time.c` | 18 (`rt_time_*`, `rt_timestamp_*`) | 8+ files | **199 files** | Most used runtime module; syscall wrappers |
-| `runtime_equality.c` | `rt_native_eq`, `rt_native_neq`, `rt_value_eq`, `rt_value_compare` | codegen/core-C native-project archive | 0 direct | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native equality exports. |
-| `runtime_memory.c` | `rt_alloc`, `rt_free`, `rt_ptr_read_i64/i32`, `rt_ptr_write_*`, `rt_memset`, `rt_memcpy` | `codegen/instr/core.rs`, `memory.rs`, `closures_structs.rs`, `llvm/objects.rs` | gpu/memory.spl, ptr/raw.spl, torch/sffi.spl, sffi/llvm_loader.spl | Codegen emits `rt_alloc` for every struct/array alloc; core ABI |
-| `runtime_value.c` | `rt_value_int/float/bool/nil`, `rt_value_as_int`, `rt_value_truthy`, `rt_value_is_nil/int/float/bool/heap`, `rt_value_type_tag` | none in `simple-runtime` as of 2026-05-27 | 0 direct | Rust runtime crate now implements value operations and pointer conversions directly; core C/native runtime still keeps this source for native value helpers |
-| `runtime_format.c` | `__c_rt_value_format_string` (→ `rt_value_format_string`), `__c_rt_raw_u64_to_str`, `__c_rt_value_to_display_str` | codegen/core-C native-project archive | 0 direct | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native formatting exports. |
-| `runtime_native.c` | `rt_print`, `rt_println`, `rt_stdout_write`, `rt_stderr_write`, `rt_stdin_read_line`, `rt_string_new/len/data`, `rt_native_eq`, `rt_interp_call`, `rt_to_string`, etc. | `codegen/instr/calls.rs`, `linker/stubs.rs`, `elf_utils.rs`, interpreter dispatch | 0 direct (exposed via `use std.*`) | Foundation of the runtime ABI — strings, I/O, value boxing |
-| `runtime_string_index.c` | `rt_swi_build/char_to_byte/byte_to_char/free`, `rt_rank_select_build`, `rt_rank_query`, `rt_select_query`, `rt_rank_select_free` | `codegen/runtime_sffi.rs` (8 entries), `interpreter_extern/simd.rs` | 0 direct | Codegen SFFI table + interpreter extern; Unicode index structures |
+**Build inputs confirmed 2026-05-29** — three separate compile paths, none sweeps the whole runtime dir:
+- `runtime/build.rs` `c_sources[]`: `runtime_memory.c`, `runtime_time.c`, `runtime_db.c`
+- `tools.rs` `build_core_c_runtime_library` `runtime_inputs[]`: `runtime_native.c`, `runtime_legacy_core.c`, `runtime_mcp_core.c`, `runtime_simd_utf8.c` (+ conditional `runtime_https_openssl_core.c`)
+- `lib/build.rs`: only `src/io/term/nat/term_native.c` — unrelated
+
+No other build.rs compiles any `src/runtime/*.c` file. Neither `runtime.c` nor `runtime_native.c` includes other `runtime_*.c` files (no amalgamation).
+
+| C File | Key Symbols | Build Path | .spl Callers | Why It Stays |
+|--------|-------------|------------|-------------|-------------|
+| `runtime_memory.c` | `rt_alloc`, `rt_free`, `rt_ptr_read_i64/i32`, `rt_ptr_write_*`, `rt_memset`, `rt_memcpy` | `runtime/build.rs` c_sources | gpu/memory.spl, ptr/raw.spl, torch/sffi.spl, sffi/llvm_loader.spl | Codegen emits `rt_alloc` for every struct/array alloc; core ABI |
+| `runtime_time.c` | 18 (`rt_time_*`, `rt_timestamp_*`) | `runtime/build.rs` c_sources | **199 files** | Most used runtime module; syscall wrappers |
+| `runtime_native.c` | `rt_print`, `rt_println`, `rt_stdout_write`, `rt_stderr_write`, `rt_stdin_read_line`, `rt_string_new/len/data`, `rt_native_eq`, `rt_interp_call`, `rt_to_string`, etc. | `tools.rs` runtime_inputs | 0 direct (exposed via `use std.*`) | Foundation of the runtime ABI — strings, I/O, value boxing |
+| `runtime_string_index.c` | `rt_swi_build/char_to_byte/byte_to_char/free`, `rt_rank_select_build`, `rt_rank_query`, `rt_select_query`, `rt_rank_select_free` | `codegen/runtime_sffi.rs` (8 entries), `interpreter_extern/simd.rs` | 0 direct | Codegen SFFI table + interpreter extern; Unicode index structures. **Not in any build.rs c_sources or tools.rs runtime_inputs** — linked via SFFI dispatch only; removability pending SFFI audit. |
 | `async_driver.c` | `rt_driver_create/destroy`, `rt_driver_submit_*` (13 variants), `rt_driver_poll*`, `rt_driver_cancel` | `codegen/runtime_sffi.rs` (15 entries), `codegen/instr/calls.rs`, `llvm/functions/calls.rs` | 0 direct spl; driven via codegen SFFI | Async I/O driver; codegen emits all submit/poll calls |
-| `runtime_config.c` | `rt_set_macro_trace`, `rt_is_macro_trace_enabled`, `rt_set_debug_mode`, `rt_is_debug_mode_enabled` | codegen/core-C native-project archive | 0 direct | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native SFFI exports. |
-| `runtime_env.c` | `__c_rt_env_get_i64`, `__c_rt_env_set/exists/remove/get_str/cwd/home/temp`, `__c_rt_exit`, `__c_rt_stdout/stderr_flush`, `__c_rt_platform_name`, `__c_rt_term_get_size` | codegen/core-C native-project archive | 0 direct | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native env/platform exports. |
+
+### Group A2 — On-disk but NOT in any build input (removal candidates pending SFFI/codegen audit)
+
+These files exist on disk, `simple-runtime` no longer compiles them, and they do NOT appear in any `build.rs` `c_sources[]` or `tools.rs` `runtime_inputs[]` list (verified 2026-05-29). They remain only if codegen or the SFFI dispatch table still resolves their symbols at link time. A follow-up codegen/linker audit is needed before deletion.
+
+| C File | Key Symbols | Rust Replacement | .spl Callers | Blocker |
+|--------|-------------|-----------------|-------------|---------|
+| `runtime_math.c` | 27 (`rt_math_*`) | `value/sffi/math.rs` | 12 files | Codegen SFFI dispatch still references symbols; verify native link step doesn't pull from a stale archive. |
+| `runtime_random.c` | 8 (`rt_random_*`) | `value/sffi/random.rs` | 10 files | Same — codegen SFFI dispatch. |
+| `runtime_contracts.c` | 2 (`simple_contract_check*`) | `value/sffi/contracts.rs` | 3 files | Codegen emits contract-check calls; verify Rust export satisfies linker. |
+| `runtime_error.c` | `rt_function_not_found`, `rt_method_not_found` | `value/sffi/error_handling.rs` | 2 files | Codegen unresolved-call fallback path. |
+| `runtime_equality.c` | `rt_native_eq`, `rt_native_neq`, `rt_value_eq`, `rt_value_compare` | `value/sffi/equality.rs` | 0 direct | Codegen equality path. |
+| `runtime_value.c` | `rt_value_int/float/bool/nil`, `rt_value_as_int`, `rt_value_truthy`, `rt_value_is_nil/int/float/bool/heap`, `rt_value_type_tag` | `value/sffi/value_ops.rs`, `value/sffi/memory.rs` | 0 direct | Native value helpers; `runtime_value.h` header must stay even if `.c` is removed. |
+| `runtime_format.c` | `__c_rt_value_format_string`, `__c_rt_raw_u64_to_str`, `__c_rt_value_to_display_str` | `value/sffi/io_print.rs` | 0 direct | Native formatting exports. |
+| `runtime_config.c` | `rt_set_macro_trace`, `rt_is_macro_trace_enabled`, `rt_set_debug_mode`, `rt_is_debug_mode_enabled` | `value/sffi/config.rs` (AtomicBool) | 0 direct | Native SFFI exports; verify codegen dispatch resolves from Rust. |
+| `runtime_env.c` | `__c_rt_env_get_i64`, `__c_rt_env_set/exists/remove/get_str/cwd/home/temp`, `__c_rt_exit`, `__c_rt_stdout/stderr_flush`, `__c_rt_platform_name`, `__c_rt_term_get_size` | `value/sffi/env_process.rs`, `value/sffi/io_print.rs` | 0 direct | Native env/platform exports; verify codegen dispatch. |
+| `runtime_regex_stub.c` | `sffi_regex_is_match/find/find_all/captures/replace/replace_all/split/split_n` | `value/sffi/regex_stub.rs` | `nogc_sync_mut/io/regex_simple.spl` | Native codegen still links regex stub symbols when full regex runtime unavailable; verify stub symbols satisfied by Rust. |
+| `runtime_pty.c` | `rt_pty_open`, `rt_pty_spawn` | `value/pty.rs` (runtime), `interpreter_extern/pty.rs` (interp) | `sys/pty.spl`, `smux/smux_remote.spl` | Zero build.rs/tools.rs refs (confirmed 2026-05-29). Rust impls export the same C symbols. Pending: confirm no native binary links the C object directly. |
 
 ### Group B — SPL FFI surface (blocked by no Simple replacement yet)
 
@@ -45,7 +62,6 @@ or Rust-only replacement is wired through the same symbol name.
 | C File | Key Symbols | .rs Callers | .spl Callers | Why It Stays |
 |--------|-------------|-------------|-------------|-------------|
 | `runtime_audio.c` | `rt_audio_init/shutdown/load_sound/unload_sound/play/play_looped/stop/pause/resume/set_volume/set_master_volume/get_master_volume/is_playing` + spatial fns | 0 Rust codegen | `nogc_sync_mut/io/audio_sffi.spl` | miniaudio wrapper; spl audio layer |
-| `runtime_base64.c` | `__c_rt_base64_encode`, `__c_rt_base64_decode` | `runtime/src/value/sffi/utils.rs` wraps both | `nogc_sync_mut/oidc/id_token.spl` (via `rt_base64url_decode`) | Used in SHA1/websocket handshake and OIDC |
 | `runtime_font.c` | `rt_font_load/free/glyph_bitmap/bitmap_width/bitmap_height/bitmap_data/bitmap_free` | 0 Rust codegen | `nogc_sync_mut/io/font_sffi.spl` | stb_truetype wrapper |
 | `runtime_fork.c` | `rt_fork_child_setup`, `rt_fork_parent_wait/stdout/stderr`, `rt_fork_child_exit` | 0 Rust codegen | `nogc_sync_mut/test_runner/test_runner_fork.spl` | Test runner fork isolation |
 | `runtime_image.c` | `rt_image_load/free/width/height/channels/get_pixel` | 0 Rust codegen | `nogc_sync_mut/io/image_sffi.spl` | stb_image wrapper |
@@ -61,11 +77,25 @@ or Rust-only replacement is wired through the same symbol name.
 | `scv_wasm_shim.c` | `wasm_rt_load`, `wasm_rt_free`, `wasm_rt_parse_all` | 0 Rust codegen | `src/lib/scv/wasm_executor.spl` (3 callers) | SCV grammar parsing via WASM tree-sitter |
 | `runtime_regex_stub.c` | `sffi_regex_is_match/find/find_all/captures/replace/replace_all/split/split_n` | `codegen/instr/calls.rs` (dispatch table), `interpreter_extern/mod.rs` | `nogc_sync_mut/io/regex_simple.spl` | `simple-runtime` no longer calls the C file as of 2026-05-27; native codegen still links regex stub symbols when the full regex runtime is unavailable. |
 
+### Group C — Newly Tracked (first appeared since 2026-05-18 audit)
+
+Discovered on-disk 2026-05-29. These files were not in any previous audit pass.
+
+| C File | Key Symbols | Build Path | Callers | Notes |
+|--------|-------------|------------|---------|-------|
+| `runtime_db.c` | `rt_db_table_create/destroy`, `rt_db_put/get/delete/scan_range`, `rt_db_row_count/col_count`, `rt_sqlite_*` (SQLite wrapper) | `runtime/build.rs` c_sources | `app/io/sqlite_sffi.spl`, `lib/nogc_sync_mut/database/sql/statement.spl`, `fast_db.spl`, `interpreter_extern/sffi_db.rs` | Active — SQLite wrapper with many spl callers. Cannot remove. |
+| `runtime_legacy_core.c` | `spl_int`, `spl_str`, `spl_bool`, `spl_nil`, and minimal SplValue helpers for bridging `runtime_native.c` | `tools.rs` runtime_inputs | `runtime_native.c` (bridge only) | Minimal compatibility shim so `runtime_native.c` bridge fns link without pulling all of `runtime.c`. Cannot remove without restructuring `runtime_native.c`. |
+| `runtime_mcp_core.c` | `rt_stdin_read_mcp_message_text` | `tools.rs` runtime_inputs | `tools.rs` native project | MCP stdio framing; used by native MCP server build. Cannot remove. |
+| `runtime_https_openssl_core.c` | OpenSSL HTTPS helpers | `tools.rs` runtime_inputs (opt-in: `SIMPLE_CORE_C_INCLUDE_HTTPS_OPENSSL=1`) | Optional HTTPS support | Conditional; only linked when env var set. Cannot remove. |
+| `hosted_cocoa.c` | macOS Cocoa UI / window host | Referenced in `tools.rs` + `tests.rs` (platform-gated) | Platform-specific | macOS-only host layer. Cannot remove (platform dep). |
+| `hosted_win32.c` | Win32 UI / window host | Referenced in `tools.rs` + `tests.rs` (platform-gated) | Platform-specific | Windows-only host layer. Cannot remove (platform dep). |
+
 ## New Removal Candidates (zero native/codegen callers, interpreter duplicate exists)
 
 | C File | Symbols | Status | Blocker |
 |--------|---------|--------|---------|
-| _none currently verified_ | — | The 2026-05-27 pass removed the two previously listed candidates. | Continue auditing Group A/B modules above. |
+| `runtime_pty.c` | `rt_pty_open`, `rt_pty_spawn` | **Removable (pending verification)** — zero refs in all `build.rs`/`tools.rs` as of 2026-05-29; Rust replacements export the same symbols. | Confirm no native binary links the C object before deleting. |
+| `runtime_base64.c` | `__c_rt_base64_encode`, `__c_rt_base64_decode` | **Already deleted** — confirmed GONE from disk 2026-05-29. Moved to Removed table. | — |
 
 Verification for the 2026-05-27 runtime hash/crypto removal:
 
@@ -76,6 +106,8 @@ cargo test -p simple-runtime sffi::crypto_compare --manifest-path src/compiler_r
 bin/simple check src/compiler_rust/lib/std/src/infra/hash.spl src/lib/nogc_sync_mut/src/hash.spl
 cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml
 ```
+
+**2026-05-29 build-input audit correction:** Prior entries for runtime_math/random/contracts/error/equality/value/format/config/env/regex_stub claimed "the core-C runtime bundle still compiles it." This was **incorrect** — verified 2026-05-29 that none of these files appear in `runtime/build.rs` c_sources OR `tools.rs` runtime_inputs. The "cannot remove" blocker for these files is now specifically the codegen/SFFI dispatch link step, not the build.rs compile step. They are reclassified to Group A2 pending a SFFI/linker audit.
 
 Additional 2026-05-27 simple-runtime reductions:
 
@@ -133,17 +165,22 @@ cargo test -p simple-runtime sffi::env_process --manifest-path src/compiler_rust
 
 ## Path to C Removal for Remaining Modules
 
-For **math/random**: the Rust shim no longer calls these C files as of
-2026-05-27. Remaining removal requires migrating the core-C/native-project
-SFFI export path so native builds no longer need the archived C sources.
+**Verified build inputs (2026-05-29):** The core-C runtime bundle compiles exactly the files listed in `runtime/build.rs` c_sources and `tools.rs` runtime_inputs. No glob sweep; no amalgamation. Files absent from both lists are only kept if codegen/SFFI dispatch resolves their symbols at link time.
 
-For **memory/native/string_index/async_driver**:
-codegen-emitted or ABI-layer symbols. Removal requires the native-build linker to
-resolve them from Simple-compiled objects instead of the C archive. Blocked by the
-cross-module ABI bug.
+For **math/random/contracts/error/equality/value/format/config/env/regex_stub** (Group A2):
+The Rust shim no longer calls these C files as of 2026-05-27, and they are NOT in any `build.rs` c_sources or `tools.rs` runtime_inputs list. Remaining blocker: confirm the codegen/SFFI dispatch table resolves each symbol from the Rust export (`#[export_name]`) rather than a stale C object pulled from the native archive. Once confirmed, these files can be deleted.
 
-For **time**: syscall wrappers (`clock_gettime`, `gettimeofday`). Must stay native.
-The pure Simple `time_utils.spl` provides civil-date arithmetic on top.
+For **runtime_pty.c**:
+Zero build references confirmed 2026-05-29. Rust replacements (`value/pty.rs`, `interpreter_extern/pty.rs`) export the same C symbols. Pending: confirm no native binary link step pulls the C object. Likely safe to delete.
+
+For **memory/time** (`runtime/build.rs` c_sources):
+Compiled directly into `libruntime_sffi_c.a`. `runtime_memory.c` is core ABI (codegen emits `rt_alloc` for every alloc). `runtime_time.c` wraps `clock_gettime`/`gettimeofday` — must stay native. Pure Simple `time_utils.spl` provides civil-date arithmetic on top.
+
+For **native/legacy_core/mcp_core/simd_utf8** (`tools.rs` runtime_inputs):
+Compiled into the core-C runtime library for native builds. `runtime_native.c` is the foundation of the runtime ABI. `runtime_legacy_core.c` is a minimal bridge shim. Cannot remove without restructuring the ABI layer.
+
+For **string_index/async_driver**:
+Referenced via the codegen SFFI dispatch table and interpreter extern. Removal requires the native-build linker to resolve them from Simple-compiled objects instead of the C archive. Blocked by the cross-module ABI bug. Note: `runtime_string_index.c` and `async_driver.c` do NOT appear in the confirmed build inputs — they may only be linked via SFFI table references. A focused linker audit is needed.
 
 For **audio/font/fork/image/memtrack/process/sdl2/simd/thread/scv_wasm/regex**:
 SPL extern declarations still point at C symbols. Removal requires either a
@@ -153,6 +190,10 @@ declarations to point at a new Rust export.
 For **runtime.c** (bootstrap): needed for stage0/stage1 bootstrap only. Can be
 excluded from the self-hosted build once `--bootstrap-exclude-legacy-runtime` flag
 is wired into the build system.
+
+For **runtime_db.c**: Active SQLite wrapper; multiple spl callers. Compiled by `runtime/build.rs`. Cannot remove without a pure-Simple or Rust SQLite replacement wired through the same symbols.
+
+For **hosted_cocoa.c / hosted_win32.c**: Platform-specific host layers. Cannot remove; gated by `cfg(target_os)` in the build.
 
 ## Pure Simple Replacements (coexist with C)
 

@@ -676,6 +676,64 @@ fn lex_cur_col_get() -> i64:
 fn lex_cur_suffix_get() -> text:
     lex_cur_suffix_get_slot()
 
+# ===== Lexer + Parser Token Snapshot (for speculative parse / backtrack) =====
+#
+# Saves / restores the full tokenizer position AND the current parser token.
+# Used by try_skip_ident_generic_args to backtrack when <…> turns out to be
+# a binary less-than rather than a generic-argument list.
+#
+# The saved state is a flat [i64] with the layout:
+#   [0]  CoreLexer.pos          (source byte offset after current token)
+#   [1]  CoreLexer.line
+#   [2]  CoreLexer.col
+#   [3]  CoreLexer.pending_dedents
+#   [4]  CoreLexer.at_line_start  (1 = true)
+#   [5]  CoreLexer.paren_depth
+#   [6]  CoreLexer.cur_start      (start offset of current token in source)
+#   [7]  lex_cur_kind_direct[0]  (kind of the token that is "current")
+#   [8]  lex_cur_line_direct[0]
+#   [9]  lex_cur_col_direct[0]
+#
+# Text fields (par_text, lex_cur_text) are stored alongside as a [text].
+
+fn lex_snapshot_save() -> ([i64], [text]):
+    if current_core_lexer_slot == nil or current_core_lexer_slot.len() == 0:
+        current_core_lexer_slot = [current_core_lexer_load()]
+    val lx = current_core_lexer_slot[0]
+    var at_ls_i: i64 = 0
+    if lx.at_line_start:
+        at_ls_i = 1
+    var nums: [i64] = [lx.pos, lx.line, lx.col, lx.pending_dedents, at_ls_i, lx.paren_depth, lx.cur_start, lex_cur_kind_direct[0], lex_cur_line_direct[0], lex_cur_col_direct[0]]
+    var txts: [text] = [lex_cur_text_direct[0]]
+    (nums, txts)
+
+fn lex_snapshot_restore(nums: [i64], txts: [text]):
+    # Rebuild the CoreLexer from saved fields
+    if current_core_lexer_slot == nil or current_core_lexer_slot.len() == 0:
+        current_core_lexer_slot = [current_core_lexer_load()]
+    var lx = current_core_lexer_slot[0]
+    lx.pos = nums[0]
+    lx.line = nums[1]
+    lx.col = nums[2]
+    lx.pending_dedents = nums[3]
+    lx.at_line_start = nums[4] == 1
+    lx.paren_depth = nums[5]
+    lx.cur_start = nums[6]
+    current_core_lexer_slot[0] = lx
+    current_core_lexer_save(lx)
+    # Restore lex_cur_* direct slots and env vars
+    val saved_kind = nums[7]
+    val saved_line = nums[8]
+    val saved_col  = nums[9]
+    val saved_text = txts[0]
+    lex_cur_kind_set(saved_kind)
+    lex_cur_line_set(saved_line)
+    lex_cur_col_set(saved_col)
+    lex_cur_text_set(saved_text)
+    # Restore the token offset env vars so parser_token_text_from_offsets works
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_START", "{nums[6]}")
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_END", "{nums[0]}")
+
 # ===== Convenience: Tokenize All =====
 # Tokenizes entire source and returns arrays of token data.
 # Useful for testing and debugging.

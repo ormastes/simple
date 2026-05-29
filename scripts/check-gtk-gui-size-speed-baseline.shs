@@ -13,6 +13,7 @@ SKIP_SIMPLE_NATIVE="${SKIP_SIMPLE_NATIVE:-1}"
 SIMPLE_RUN_TIMEOUT_SECS="${SIMPLE_RUN_TIMEOUT_SECS:-20}"
 
 mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+rm -rf "$BUILD_DIR/simple_render_cache"
 
 have() {
     command -v "$1" >/dev/null 2>&1
@@ -52,13 +53,37 @@ GTK_OUT="$BUILD_DIR/gtk_gui_baseline.out"
 cat >"$SIMPLE_ENTRY" <<EOF
 extern fn rt_time_now_unix_micros() -> i64
 
-use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_renderer.{simple_web_render_html_to_pixels}
 use std.common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_optimization_profile}
+use app.ui.web.render_cache.{WebRenderStaticArtifactCache, web_render_static_shell_binary_artifact, web_render_static_shell_binary_to_artifact}
 
 fn main() -> i64:
     val html = "<html><body><main class='simple-web-accent'><section class='static-shell'><h1>Simple GUI</h1><p>static shell</p></section><section data-simple-dynamic='pane'>dynamic pane</section></main></body></html>"
     val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Simple GUI", html, ".static-shell{contain:layout paint style}", "", 320, 200)
     val profile = web_render_optimization_profile(req)
+    val static_req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Simple Static GUI", "<main><section class='static-shell'><h1>Simple GUI</h1><p>cacheable static shell</p></section></main>", ".static-shell{contain:layout paint style}", "", 320, 200)
+    val binary = web_render_static_shell_binary_artifact(static_req)
+    val swbc_start = rt_time_now_unix_micros()
+    var si = 0
+    var swbc_hits = 0
+    while si < $SIMPLE_ITERATIONS:
+        val swbc_artifact = web_render_static_shell_binary_to_artifact(static_req, binary.encoded)
+        if swbc_artifact.cache_hit:
+            swbc_hits = swbc_hits + 1
+        si = si + 1
+    val swbc_elapsed = rt_time_now_unix_micros() - swbc_start
+    val cache_dir = "build/gtk_gui_size_speed_baseline/simple_render_cache"
+    var cache = WebRenderStaticArtifactCache.create(cache_dir)
+    val cache_miss = cache.artifact(static_req)
+    val cache_start = rt_time_now_unix_micros()
+    var ci = 0
+    var cache_hits = 0
+    while ci < $SIMPLE_ITERATIONS:
+        val cached = cache.artifact(static_req)
+        if cached.cache_hit:
+            cache_hits = cache_hits + 1
+        ci = ci + 1
+    val cache_elapsed = rt_time_now_unix_micros() - cache_start
     val warm = simple_web_render_html_to_pixels(html, 320, 200)
     if warm.len() != 320 * 200:
         print "simple_render_status=fail"
@@ -79,18 +104,36 @@ fn main() -> i64:
     print "simple_cache_schema={profile.cache_schema}"
     print "simple_render_plan={profile.render_plan}"
     print "simple_dynamic_regions={profile.dynamic_region_count}"
+    print "simple_static_cache_miss_stored={cache_miss.cache_stored}"
+    print "simple_static_cache_hit_iterations={cache_hits}"
+    print "simple_static_cache_memory_hits={cache.memory_hits}"
+    print "simple_static_cache_disk_hits={cache.disk_hits}"
+    print "simple_static_cache_total_us={cache_elapsed}"
+    print "simple_static_html_bytes={binary.html_bytes}"
+    print "simple_static_binary_plan_bytes={binary.encoded_bytes}"
+    print "simple_static_binary_commands={binary.command_count}"
+    print "simple_static_swbc_hit_iterations={swbc_hits}"
+    print "simple_static_swbc_total_us={swbc_elapsed}"
     return 0
 EOF
 
 simple_status="unavailable"
 simple_reason=""
 simple_total_us="n/a"
+simple_cache_total_us="n/a"
+simple_swbc_total_us="n/a"
+simple_static_html_bytes="n/a"
+simple_static_binary_plan_bytes="n/a"
 simple_bytes="n/a"
 
 if [ -x "$SIMPLE_BINARY" ]; then
     if SIMPLE_LIB="$ROOT_DIR/src" with_timeout "$SIMPLE_BINARY" run "$SIMPLE_ENTRY" >"$SIMPLE_OUT" 2>&1; then
         simple_status="$(field_of simple_render_status "$SIMPLE_OUT")"
         simple_total_us="$(field_of simple_render_total_us "$SIMPLE_OUT")"
+        simple_cache_total_us="$(field_of simple_static_cache_total_us "$SIMPLE_OUT")"
+        simple_swbc_total_us="$(field_of simple_static_swbc_total_us "$SIMPLE_OUT")"
+        simple_static_html_bytes="$(field_of simple_static_html_bytes "$SIMPLE_OUT")"
+        simple_static_binary_plan_bytes="$(field_of simple_static_binary_plan_bytes "$SIMPLE_OUT")"
     else
         simple_status="failed"
         simple_reason="simple_run_failed"
@@ -201,7 +244,17 @@ fi
     echo "| Runtime | Status | Binary bytes | Iterations | Total us | Notes |"
     echo "|---|---|---:|---:|---:|---|"
     echo "| Simple web renderer | ${simple_status:-unavailable} | $simple_bytes | $SIMPLE_ITERATIONS | $simple_total_us | ${simple_reason:-render loop via Simple software renderer} |"
+    echo "| Simple static cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_cache_total_us | persistent HTML artifact cache hit loop |"
+    echo "| Simple SWBC decode | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_swbc_total_us | compact static-shell plan decode loop |"
     echo "| GTK | $gtk_status | $gtk_bytes | $GTK_ITERATIONS | $gtk_total_us | ${gtk_reason:-widget construction loop; requires display} |"
+    echo
+    echo "## Static Shell Size"
+    echo
+    echo "| Artifact | Bytes |"
+    echo "|---|---:|"
+    echo "| Simple generated full HTML | $simple_static_html_bytes |"
+    echo "| Simple compact static-shell plan | $simple_static_binary_plan_bytes |"
+    echo "| GTK minimal executable | $gtk_bytes |"
     echo
     echo "## Simple Output"
     echo
@@ -231,6 +284,10 @@ echo "gtk_gui_baseline_ready=true"
 echo "report_path=$REPORT_PATH"
 echo "simple_status=${simple_status:-unavailable}"
 echo "simple_total_us=$simple_total_us"
+echo "simple_cache_total_us=$simple_cache_total_us"
+echo "simple_swbc_total_us=$simple_swbc_total_us"
+echo "simple_static_html_bytes=$simple_static_html_bytes"
+echo "simple_static_binary_plan_bytes=$simple_static_binary_plan_bytes"
 echo "simple_bytes=$simple_bytes"
 echo "gtk_status=$gtk_status"
 echo "gtk_bytes=$gtk_bytes"

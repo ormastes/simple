@@ -18,8 +18,14 @@ extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 
 val CUDA_2D_BLOCK_SIZE: i64 = 256
 
-fn cuda_2d_ptx_source() -> text:
+fn cuda_2d_base_ptx_source() -> text:
     ".version 7.0\n.target sm_52\n.address_size 64\n\n.visible .entry kernel_clear(\n    .param .u64 param_fb,\n    .param .u32 param_color,\n    .param .u32 param_count\n) {\n    .reg .u64  %rd<3>;\n    .reg .u32  %r<6>;\n    .reg .pred %p0;\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n    ld.param.u32  %r4, [param_count];\n    setp.ge.u32   %p0, %r3, %r4;\n    @%p0 bra done_clear;\n    ld.param.u64  %rd0, [param_fb];\n    mul.wide.u32  %rd1, %r3, 4;\n    add.u64       %rd2, %rd0, %rd1;\n    ld.param.u32  %r5, [param_color];\n    st.global.u32 [%rd2], %r5;\ndone_clear:\n    ret;\n}\n\n.visible .entry kernel_draw_rect_filled(\n    .param .u64 param_fb,\n    .param .u32 param_x,\n    .param .u32 param_y,\n    .param .u32 param_w,\n    .param .u32 param_h,\n    .param .u32 param_color,\n    .param .u32 param_stride,\n    .param .u32 param_surface_h\n) {\n    .reg .u64  %rd<3>;\n    .reg .u32  %r<18>;\n    .reg .pred %p0;\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n    ld.param.u32  %r4, [param_w];\n    ld.param.u32  %r5, [param_h];\n    mul.lo.u32    %r6, %r4, %r5;\n    setp.ge.u32   %p0, %r3, %r6;\n    @%p0 bra done_rect;\n    div.u32  %r7, %r3, %r4;\n    rem.u32  %r8, %r3, %r4;\n    ld.param.u32  %r9,  [param_x];\n    ld.param.u32  %r10, [param_y];\n    add.u32  %r11, %r9,  %r8;\n    add.u32  %r12, %r10, %r7;\n    ld.param.u32  %r13, [param_stride];\n    ld.param.u32  %r14, [param_surface_h];\n    setp.ge.u32   %p0, %r11, %r13;\n    @%p0 bra done_rect;\n    setp.ge.u32   %p0, %r12, %r14;\n    @%p0 bra done_rect;\n    mad.lo.u32    %r15, %r12, %r13, %r11;\n    ld.param.u64  %rd0, [param_fb];\n    mul.wide.u32  %rd1, %r15, 4;\n    add.u64       %rd2, %rd0, %rd1;\n    ld.param.u32  %r16, [param_color];\n    st.global.u32 [%rd2], %r16;\ndone_rect:\n    ret;\n}\n\n.visible .entry kernel_draw_rect_outline(\n    .param .u64 param_fb,\n    .param .u32 param_x,\n    .param .u32 param_y,\n    .param .u32 param_w,\n    .param .u32 param_h,\n    .param .u32 param_color,\n    .param .u32 param_stride,\n    .param .u32 param_surface_h\n) {\n    .reg .u64  %rd<3>;\n    .reg .u32  %r<20>;\n    .reg .pred %p<7>;\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n    ld.param.u32  %r4, [param_w];\n    ld.param.u32  %r5, [param_h];\n    mul.lo.u32    %r6, %r4, %r5;\n    setp.ge.u32   %p0, %r3, %r6;\n    @%p0 bra done_outline;\n    div.u32  %r7, %r3, %r4;\n    rem.u32  %r8, %r3, %r4;\n    setp.eq.u32   %p1, %r8, 0;\n    setp.eq.u32   %p2, %r7, 0;\n    sub.u32       %r17, %r4, 1;\n    setp.eq.u32   %p3, %r8, %r17;\n    sub.u32       %r18, %r5, 1;\n    setp.eq.u32   %p4, %r7, %r18;\n    or.pred       %p5, %p1, %p2;\n    or.pred       %p5, %p5, %p3;\n    or.pred       %p5, %p5, %p4;\n    @!%p5 bra done_outline;\n    ld.param.u32  %r9,  [param_x];\n    ld.param.u32  %r10, [param_y];\n    add.u32  %r11, %r9,  %r8;\n    add.u32  %r12, %r10, %r7;\n    ld.param.u32  %r13, [param_stride];\n    ld.param.u32  %r14, [param_surface_h];\n    setp.ge.u32   %p0, %r11, %r13;\n    @%p0 bra done_outline;\n    setp.ge.u32   %p0, %r12, %r14;\n    @%p0 bra done_outline;\n    mad.lo.u32    %r15, %r12, %r13, %r11;\n    ld.param.u64  %rd0, [param_fb];\n    mul.wide.u32  %rd1, %r15, 4;\n    add.u64       %rd2, %rd0, %rd1;\n    ld.param.u32  %r16, [param_color];\n    st.global.u32 [%rd2], %r16;\ndone_outline:\n    ret;\n}\n\n.visible .entry kernel_draw_image(\n    .param .u64 param_fb,\n    .param .u64 param_src,\n    .param .u32 param_x,\n    .param .u32 param_y,\n    .param .u32 param_w,\n    .param .u32 param_h,\n    .param .u32 param_stride,\n    .param .u32 param_surface_h\n) {\n    .reg .u64  %rd<6>;\n    .reg .u32  %r<20>;\n    .reg .pred %p0;\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n    ld.param.u32  %r4, [param_w];\n    ld.param.u32  %r5, [param_h];\n    mul.lo.u32    %r6, %r4, %r5;\n    setp.ge.u32   %p0, %r3, %r6;\n    @%p0 bra done_image;\n    div.u32  %r7, %r3, %r4;\n    rem.u32  %r8, %r3, %r4;\n    ld.param.u32  %r9,  [param_x];\n    ld.param.u32  %r10, [param_y];\n    add.u32  %r11, %r9,  %r8;\n    add.u32  %r12, %r10, %r7;\n    ld.param.u32  %r13, [param_stride];\n    ld.param.u32  %r14, [param_surface_h];\n    setp.ge.u32   %p0, %r11, %r13;\n    @%p0 bra done_image;\n    setp.ge.u32   %p0, %r12, %r14;\n    @%p0 bra done_image;\n    ld.param.u64  %rd0, [param_src];\n    mul.wide.u32  %rd1, %r3, 4;\n    add.u64       %rd2, %rd0, %rd1;\n    ld.global.u32 %r15, [%rd2];\n    mad.lo.u32    %r16, %r12, %r13, %r11;\n    ld.param.u64  %rd3, [param_fb];\n    mul.wide.u32  %rd4, %r16, 4;\n    add.u64       %rd5, %rd3, %rd4;\n    st.global.u32 [%rd5], %r15;\ndone_image:\n    ret;\n}\n"
+
+fn cuda_2d_gradient_ptx_source() -> text:
+    "\n.visible .entry kernel_draw_gradient_rect(\n    .param .u64 param_fb,\n    .param .u32 param_x,\n    .param .u32 param_y,\n    .param .u32 param_w,\n    .param .u32 param_h,\n    .param .u32 param_top_color,\n    .param .u32 param_bottom_color,\n    .param .u32 param_stride,\n    .param .u32 param_surface_h\n) {\n    .reg .u64  %rd<3>;\n    .reg .u32  %r<40>;\n    .reg .s32  %s<16>;\n    .reg .pred %p<2>;\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n    ld.param.u32  %r4, [param_w];\n    ld.param.u32  %r5, [param_h];\n    mul.lo.u32    %r6, %r4, %r5;\n    setp.ge.u32   %p0, %r3, %r6;\n    @%p0 bra done_gradient;\n    div.u32  %r7, %r3, %r4;\n    rem.u32  %r8, %r3, %r4;\n    ld.param.u32  %r9,  [param_x];\n    ld.param.u32  %r10, [param_y];\n    add.u32  %r11, %r9,  %r8;\n    add.u32  %r12, %r10, %r7;\n    ld.param.u32  %r13, [param_stride];\n    ld.param.u32  %r14, [param_surface_h];\n    setp.ge.u32   %p0, %r11, %r13;\n    @%p0 bra done_gradient;\n    setp.ge.u32   %p0, %r12, %r14;\n    @%p0 bra done_gradient;\n    ld.param.u32  %r15, [param_top_color];\n    ld.param.u32  %r16, [param_bottom_color];\n    sub.u32       %r17, %r5, 1;\n    setp.eq.u32   %p1, %r17, 0;\n    @%p1 bra use_top_gradient;\n    shr.u32       %r18, %r15, 16;\n    and.b32       %r18, %r18, 255;\n    shr.u32       %r19, %r15, 8;\n    and.b32       %r19, %r19, 255;\n    and.b32       %r20, %r15, 255;\n    shr.u32       %r21, %r15, 24;\n    and.b32       %r21, %r21, 255;\n    shr.u32       %r22, %r16, 16;\n    and.b32       %r22, %r22, 255;\n    shr.u32       %r23, %r16, 8;\n    and.b32       %r23, %r23, 255;\n    and.b32       %r24, %r16, 255;\n    shr.u32       %r25, %r16, 24;\n    and.b32       %r25, %r25, 255;\n    cvt.s32.u32   %s0, %r18;\n    cvt.s32.u32   %s1, %r19;\n    cvt.s32.u32   %s2, %r20;\n    cvt.s32.u32   %s3, %r21;\n    cvt.s32.u32   %s4, %r22;\n    cvt.s32.u32   %s5, %r23;\n    cvt.s32.u32   %s6, %r24;\n    cvt.s32.u32   %s7, %r25;\n    cvt.s32.u32   %s8, %r7;\n    cvt.s32.u32   %s9, %r17;\n    sub.s32       %s10, %s4, %s0;\n    mul.lo.s32    %s10, %s10, %s8;\n    div.s32       %s10, %s10, %s9;\n    add.s32       %s10, %s10, %s0;\n    sub.s32       %s11, %s5, %s1;\n    mul.lo.s32    %s11, %s11, %s8;\n    div.s32       %s11, %s11, %s9;\n    add.s32       %s11, %s11, %s1;\n    sub.s32       %s12, %s6, %s2;\n    mul.lo.s32    %s12, %s12, %s8;\n    div.s32       %s12, %s12, %s9;\n    add.s32       %s12, %s12, %s2;\n    sub.s32       %s13, %s7, %s3;\n    mul.lo.s32    %s13, %s13, %s8;\n    div.s32       %s13, %s13, %s9;\n    add.s32       %s13, %s13, %s3;\n    cvt.u32.s32   %r26, %s10;\n    cvt.u32.s32   %r27, %s11;\n    cvt.u32.s32   %r28, %s12;\n    cvt.u32.s32   %r29, %s13;\n    shl.b32       %r29, %r29, 24;\n    shl.b32       %r26, %r26, 16;\n    shl.b32       %r27, %r27, 8;\n    or.b32        %r30, %r29, %r26;\n    or.b32        %r30, %r30, %r27;\n    or.b32        %r30, %r30, %r28;\n    bra store_gradient;\nuse_top_gradient:\n    mov.u32       %r30, %r15;\nstore_gradient:\n    mad.lo.u32    %r31, %r12, %r13, %r11;\n    ld.param.u64  %rd0, [param_fb];\n    mul.wide.u32  %rd1, %r31, 4;\n    add.u64       %rd2, %rd0, %rd1;\n    st.global.u32 [%rd2], %r30;\ndone_gradient:\n    ret;\n}\n"
+
+fn cuda_2d_ptx_source() -> text:
+    cuda_2d_base_ptx_source() + cuda_2d_gradient_ptx_source()
 
 fn _i64(v: i32) -> i64:
     v as i64
@@ -36,7 +42,7 @@ fn _read_u32_pixels_from_host(ptr: i64, count: i32) -> [u32]:
     out
 
 fn _cuda_2d_kernel_gap(device_name: text) -> BackendProbeResult:
-    var missing_render = BackendProbeResult.failed("cuda", "CUDA 2D render kernels unavailable: kernel_clear, kernel_draw_rect_filled, kernel_draw_rect_outline, kernel_draw_image")
+    var missing_render = BackendProbeResult.failed("cuda", "CUDA 2D render kernels unavailable: kernel_clear, kernel_draw_rect_filled, kernel_draw_rect_outline, kernel_draw_image, kernel_draw_gradient_rect")
     missing_render.api_name = "cuda"
     missing_render.feature_gate = "cuda_2d_render"
     missing_render.shader_format = "ptx"
@@ -119,6 +125,26 @@ fn _write_image_launch_args(val_ptr: i64, args_ptr: i64, d_framebuffer: i64, d_p
     rt_ptr_write_i64(args_ptr, 48, val_ptr + 48)
     rt_ptr_write_i64(args_ptr, 56, val_ptr + 56)
 
+fn _write_gradient_launch_args(val_ptr: i64, args_ptr: i64, d_framebuffer: i64, x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32, stride: i32, surface_h: i32):
+    rt_ptr_write_i64(val_ptr, 0, d_framebuffer)
+    rt_ptr_write_i64(val_ptr, 8, _i64(x))
+    rt_ptr_write_i64(val_ptr, 16, _i64(y))
+    rt_ptr_write_i64(val_ptr, 24, _i64(w))
+    rt_ptr_write_i64(val_ptr, 32, _i64(h))
+    rt_ptr_write_i64(val_ptr, 40, _i64_from_u32(top_color))
+    rt_ptr_write_i64(val_ptr, 48, _i64_from_u32(bottom_color))
+    rt_ptr_write_i64(val_ptr, 56, _i64(stride))
+    rt_ptr_write_i64(val_ptr, 64, _i64(surface_h))
+    rt_ptr_write_i64(args_ptr, 0, val_ptr)
+    rt_ptr_write_i64(args_ptr, 8, val_ptr + 8)
+    rt_ptr_write_i64(args_ptr, 16, val_ptr + 16)
+    rt_ptr_write_i64(args_ptr, 24, val_ptr + 24)
+    rt_ptr_write_i64(args_ptr, 32, val_ptr + 32)
+    rt_ptr_write_i64(args_ptr, 40, val_ptr + 40)
+    rt_ptr_write_i64(args_ptr, 48, val_ptr + 48)
+    rt_ptr_write_i64(args_ptr, 56, val_ptr + 56)
+    rt_ptr_write_i64(args_ptr, 64, val_ptr + 64)
+
 fn _write_u32_pixels_to_host(ptr: i64, pixels: [u32], count: i32):
     var idx = 0
     while idx < count:
@@ -136,6 +162,8 @@ fn _cuda_2d_verify_pixels(host_ptr: i64) -> text:
     val edge = 0x55667788 as u32
     val img_a = 0x01020304 as u32
     val img_b = 0x05060708 as u32
+    val grad_top = 0x10203040 as u32
+    val grad_bottom = 0x20304050 as u32
     var idx = 0
     while idx < 16:
         val x = idx % 4
@@ -146,6 +174,10 @@ fn _cuda_2d_verify_pixels(host_ptr: i64) -> text:
             expected = img_a
         if x == 2 and y == 1:
             expected = img_b
+        if (x == 1 or x == 2) and y == 2:
+            expected = grad_top
+        if (x == 1 or x == 2) and y == 3:
+            expected = grad_bottom
         val actual = rt_ptr_read_i32(host_ptr, _i64(idx) * 4) as u32
         if actual != expected:
             return "readback mismatch at pixel " + idx.to_text()
@@ -164,8 +196,8 @@ fn _cuda_2d_run_self_test(session: CudaSession, module: i64, device_name: text) 
         return _cuda_2d_self_test_failed(device_name, "image device allocation failed")
     val clear_val_ptr = rt_alloc(24)
     val clear_args_ptr = rt_alloc(24)
-    val rect_val_ptr = rt_alloc(64)
-    val rect_args_ptr = rt_alloc(64)
+    val rect_val_ptr = rt_alloc(72)
+    val rect_args_ptr = rt_alloc(72)
     val image_host_ptr = rt_alloc(image_bytes)
     val readback_ptr = rt_alloc(bytes)
     if clear_val_ptr == 0 or clear_args_ptr == 0 or rect_val_ptr == 0 or rect_args_ptr == 0 or image_host_ptr == 0 or readback_ptr == 0:
@@ -174,9 +206,9 @@ fn _cuda_2d_run_self_test(session: CudaSession, module: i64, device_name: text) 
         if clear_args_ptr != 0:
             rt_free(clear_args_ptr, 24)
         if rect_val_ptr != 0:
-            rt_free(rect_val_ptr, 64)
+            rt_free(rect_val_ptr, 72)
         if rect_args_ptr != 0:
-            rt_free(rect_args_ptr, 64)
+            rt_free(rect_args_ptr, 72)
         if image_host_ptr != 0:
             rt_free(image_host_ptr, image_bytes)
         if readback_ptr != 0:
@@ -187,13 +219,15 @@ fn _cuda_2d_run_self_test(session: CudaSession, module: i64, device_name: text) 
     val bg = 0x11223344 as u32
     val fg = 0xAABBCCDD as u32
     val edge = 0x55667788 as u32
+    val grad_top = 0x10203040 as u32
+    val grad_bottom = 0x20304050 as u32
     _write_clear_launch_args(clear_val_ptr, clear_args_ptr, d_framebuffer, bg, 16)
     val clear_rc = cuda_launch_kernel(module, "kernel_clear", 1, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, clear_args_ptr)
     if clear_rc != CUDA_SUCCESS:
         rt_free(clear_val_ptr, 24)
         rt_free(clear_args_ptr, 24)
-        rt_free(rect_val_ptr, 64)
-        rt_free(rect_args_ptr, 64)
+        rt_free(rect_val_ptr, 72)
+        rt_free(rect_args_ptr, 72)
         rt_free(image_host_ptr, image_bytes)
         rt_free(readback_ptr, bytes)
         session.free(d_image)
@@ -204,8 +238,8 @@ fn _cuda_2d_run_self_test(session: CudaSession, module: i64, device_name: text) 
     if rect_rc != CUDA_SUCCESS:
         rt_free(clear_val_ptr, 24)
         rt_free(clear_args_ptr, 24)
-        rt_free(rect_val_ptr, 64)
-        rt_free(rect_args_ptr, 64)
+        rt_free(rect_val_ptr, 72)
+        rt_free(rect_args_ptr, 72)
         rt_free(image_host_ptr, image_bytes)
         rt_free(readback_ptr, bytes)
         session.free(d_image)
@@ -216,8 +250,8 @@ fn _cuda_2d_run_self_test(session: CudaSession, module: i64, device_name: text) 
     if outline_rc != CUDA_SUCCESS:
         rt_free(clear_val_ptr, 24)
         rt_free(clear_args_ptr, 24)
-        rt_free(rect_val_ptr, 64)
-        rt_free(rect_args_ptr, 64)
+        rt_free(rect_val_ptr, 72)
+        rt_free(rect_args_ptr, 72)
         rt_free(image_host_ptr, image_bytes)
         rt_free(readback_ptr, bytes)
         session.free(d_image)
@@ -228,8 +262,8 @@ fn _cuda_2d_run_self_test(session: CudaSession, module: i64, device_name: text) 
     if upload_rc != CUDA_SUCCESS:
         rt_free(clear_val_ptr, 24)
         rt_free(clear_args_ptr, 24)
-        rt_free(rect_val_ptr, 64)
-        rt_free(rect_args_ptr, 64)
+        rt_free(rect_val_ptr, 72)
+        rt_free(rect_args_ptr, 72)
         rt_free(image_host_ptr, image_bytes)
         rt_free(readback_ptr, bytes)
         session.free(d_image)
@@ -240,19 +274,31 @@ fn _cuda_2d_run_self_test(session: CudaSession, module: i64, device_name: text) 
     if image_rc != CUDA_SUCCESS:
         rt_free(clear_val_ptr, 24)
         rt_free(clear_args_ptr, 24)
-        rt_free(rect_val_ptr, 64)
-        rt_free(rect_args_ptr, 64)
+        rt_free(rect_val_ptr, 72)
+        rt_free(rect_args_ptr, 72)
         rt_free(image_host_ptr, image_bytes)
         rt_free(readback_ptr, bytes)
         session.free(d_image)
         session.free(d_framebuffer)
         return _cuda_2d_self_test_failed(device_name, "kernel_draw_image launch failed with rc " + image_rc.to_text())
+    _write_gradient_launch_args(rect_val_ptr, rect_args_ptr, d_framebuffer, 1, 2, 2, 2, grad_top, grad_bottom, 4, 4)
+    val gradient_rc = cuda_launch_kernel(module, "kernel_draw_gradient_rect", 1, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, rect_args_ptr)
+    if gradient_rc != CUDA_SUCCESS:
+        rt_free(clear_val_ptr, 24)
+        rt_free(clear_args_ptr, 24)
+        rt_free(rect_val_ptr, 72)
+        rt_free(rect_args_ptr, 72)
+        rt_free(image_host_ptr, image_bytes)
+        rt_free(readback_ptr, bytes)
+        session.free(d_image)
+        session.free(d_framebuffer)
+        return _cuda_2d_self_test_failed(device_name, "kernel_draw_gradient_rect launch failed with rc " + gradient_rc.to_text())
     val sync_rc = session.sync()
     if sync_rc != CUDA_SUCCESS:
         rt_free(clear_val_ptr, 24)
         rt_free(clear_args_ptr, 24)
-        rt_free(rect_val_ptr, 64)
-        rt_free(rect_args_ptr, 64)
+        rt_free(rect_val_ptr, 72)
+        rt_free(rect_args_ptr, 72)
         rt_free(image_host_ptr, image_bytes)
         rt_free(readback_ptr, bytes)
         session.free(d_image)
@@ -262,8 +308,8 @@ fn _cuda_2d_run_self_test(session: CudaSession, module: i64, device_name: text) 
     if copy_rc != CUDA_SUCCESS:
         rt_free(clear_val_ptr, 24)
         rt_free(clear_args_ptr, 24)
-        rt_free(rect_val_ptr, 64)
-        rt_free(rect_args_ptr, 64)
+        rt_free(rect_val_ptr, 72)
+        rt_free(rect_args_ptr, 72)
         rt_free(image_host_ptr, image_bytes)
         rt_free(readback_ptr, bytes)
         session.free(d_image)
@@ -272,8 +318,8 @@ fn _cuda_2d_run_self_test(session: CudaSession, module: i64, device_name: text) 
     val mismatch = _cuda_2d_verify_pixels(readback_ptr)
     rt_free(clear_val_ptr, 24)
     rt_free(clear_args_ptr, 24)
-    rt_free(rect_val_ptr, 64)
-    rt_free(rect_args_ptr, 64)
+    rt_free(rect_val_ptr, 72)
+    rt_free(rect_args_ptr, 72)
     rt_free(image_host_ptr, image_bytes)
     rt_free(readback_ptr, bytes)
     session.free(d_image)
@@ -416,8 +462,8 @@ class CudaBackend:
     me _alloc_launch_buffers(bytes: i64) -> bool:
         self.clear_val_ptr = rt_alloc(24)
         self.clear_args_ptr = rt_alloc(24)
-        self.rect_val_ptr = rt_alloc(64)
-        self.rect_args_ptr = rt_alloc(64)
+        self.rect_val_ptr = rt_alloc(72)
+        self.rect_args_ptr = rt_alloc(72)
         self.readback_ptr = rt_alloc(bytes)
         if self.clear_val_ptr == 0 or self.clear_args_ptr == 0 or self.rect_val_ptr == 0 or self.rect_args_ptr == 0 or self.readback_ptr == 0:
             self._free_launch_buffers()
@@ -443,10 +489,10 @@ class CudaBackend:
             rt_free(self.clear_args_ptr, 24)
             self.clear_args_ptr = 0
         if self.rect_val_ptr != 0:
-            rt_free(self.rect_val_ptr, 64)
+            rt_free(self.rect_val_ptr, 72)
             self.rect_val_ptr = 0
         if self.rect_args_ptr != 0:
-            rt_free(self.rect_args_ptr, 64)
+            rt_free(self.rect_args_ptr, 72)
             self.rect_args_ptr = 0
         if self.readback_ptr != 0:
             rt_free(self.readback_ptr, self.framebuffer_bytes)
@@ -550,6 +596,16 @@ impl RenderBackend for CudaBackend:
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
         self.mirror.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        if self.initialized:
+            if w <= 0 or h <= 0:
+                return
+            _write_gradient_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, x, y, w, h, top_color, bottom_color, self.width(), self.height())
+            val total = _i64(w) * _i64(h)
+            val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+            val rc = cuda_launch_kernel(self.session.module_cache, "kernel_draw_gradient_rect", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
+            if rc == CUDA_SUCCESS:
+                self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+                return
         self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         self.mirror.draw_text(x, y, text_val, color, font_size)

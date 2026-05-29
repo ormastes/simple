@@ -1,6 +1,7 @@
 # @tag: spec, ui, web_render_api
 
 use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_optimization_profile}
+use app.ui.web.render_cache.{WebRenderStaticArtifactCache, web_render_static_shell_binary_artifact, web_render_static_shell_binary_decode, web_render_static_shell_binary_to_artifact}
 
 describe "html css binary caching shared API":
 
@@ -17,3 +18,31 @@ describe "html css binary caching shared API":
         expect(profile.cacheable_static_shell).to_equal(false)
         expect(profile.dynamic_region_count).to_equal(1)
         expect(profile.render_plan).to_equal("static_shell_with_dynamic_islands")
+
+    it "keeps hot static shells in memory after persistent warmup":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Hot", "<main><section>hot static shell</section></main>", "main{contain:layout paint style}", "", 320, 200)
+        var cache = WebRenderStaticArtifactCache.create("build/test-artifacts/spec/app/ui/html_css_binary_caching")
+        val first = cache.artifact(req)
+        expect(first.cache_stored).to_equal(true)
+        val second = cache.artifact(req)
+        expect(second.cache_hit).to_equal(true)
+        expect(second.cache_path).to_equal("memory")
+        expect(cache.memory_hits).to_equal(1)
+
+    it "emits compact static shell binary plan metadata":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Binary", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+        val binary = web_render_static_shell_binary_artifact(req)
+        expect(binary.schema).to_equal("SWBC1")
+        expect(binary.cacheable).to_equal(true)
+        expect(binary.encoded).to_start_with("SWBC1|")
+        expect(binary.encoded_bytes).to_be_less_than(binary.html_bytes)
+
+    it "decodes a compact static shell binary plan for artifact reuse":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Decode", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+        val binary = web_render_static_shell_binary_artifact(req)
+        val decoded = web_render_static_shell_binary_decode(binary.encoded)
+        expect(decoded.valid).to_equal(true)
+        expect(decoded.command_count).to_equal(binary.command_count)
+        val artifact = web_render_static_shell_binary_to_artifact(req, binary.encoded)
+        expect(artifact.cache_hit).to_equal(true)
+        expect(artifact.cache_path).to_equal("swbc:SWBC1")

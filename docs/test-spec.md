@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-28 11:02:13*
+*Generated: 2026-05-29 07:23:05*
 
-## test/dbfs
+## test/integration/rendering
 
-❌ **pure_db_spec.spl** (1160ms)
-  - Source: `test/dbfs/pure_db_spec.spl`
-  - Generated doc: `spec/pure_db_spec.md`
+❌ **cuda_strict_spec.spl** (13473ms)
+  - Source: `test/integration/rendering/cuda_strict_spec.spl`
+  - Generated doc: `spec/cuda_strict_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 44 ✅
-- **Failed:** 15 ❌
-- **Duration:** 1169ms
+- **Passed:** 15 ✅
+- **Failed:** 1 ❌
+- **Duration:** 13477ms

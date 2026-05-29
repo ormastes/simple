@@ -59,7 +59,9 @@ use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_a
 use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
 use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_args}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
+use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_restore}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
+use compiler.core.parser.{parser_tok_save, parser_tok_restore}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_skip_newlines}
 use compiler.core.parser.{parser_parse_type}
 use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_lambda}
@@ -516,8 +518,102 @@ fn extract_dotted_path(eid: i64) -> text:
             return ep_base_path + "." + expr_get_str(eid)
     ""
 
+# Lookahead disambiguation for Ident<TypeArgs>.method() and Ident<TypeArgs>(args).
+#
+# Called when the primary expression is a bare Identifier and the current token
+# is TOK_LT (82) or TOK_LT_GENERIC (86).  Speculatively advances past <TypeArgs>
+# using a bracket-depth counter.  Commits (leaves the parser positioned after >)
+# only if the token following the closing > is TOK_DOT (164) or TOK_LPAREN (140).
+# Backtracks transparently otherwise, so < is left for the binary-expression layer
+# to parse as less-than.
+#
+# Uses lex_snapshot_save / lex_snapshot_restore for full state save/restore.
+# Parity target: Rust src/compiler_rust/parser/src/expressions/postfix.rs
+#                try_skip_ident_generic_args()
+fn try_skip_ident_generic_args():
+    # Only trigger on < or <-in-generic-context
+    val cur = par_kind_get()
+    if cur != 82 and cur != 86:
+        return
+
+    # Save full lexer + current-token state
+    val (snap_nums, snap_txts) = lex_snapshot_save()
+    val (saved_tok_nums, saved_tok_text) = parser_tok_save()
+
+    parser_advance()  # consume '<'
+
+    # Walk through tokens counting bracket depth.
+    # depth starts at 1 because we just consumed one '<'.
+    # Accepted inner tokens: idents, keywords that are valid type names, comma,
+    # punctuation used in type expressions (*, &, [, ], ?, (, ), ., ::).
+    # Any other token (newline, {, :, =, operators) means this is NOT a generic
+    # arg list — break immediately.
+    var depth = 1
+    var ok = false
+    for _tsi in 0..200:
+        val k = par_kind_get()
+        if k == 83:
+            # TOK_GT '>' — depth decreases
+            depth = depth - 1
+            if depth == 0:
+                parser_advance()  # consume '>'
+                val after = par_kind_get()
+                if after == 164 or after == 140:
+                    # DOT or LPAREN — this really is generic args
+                    ok = true
+                break
+            parser_advance()
+        elif k == 67:
+            # TOK_SHR '>>' — two closing '>' in one token (nested generic)
+            depth = depth - 2
+            if depth <= 0:
+                parser_advance()  # consume '>>'
+                val after2 = par_kind_get()
+                if after2 == 164 or after2 == 140:
+                    ok = true
+                break
+            parser_advance()
+        elif k == 82 or k == 86:
+            # TOK_LT / TOK_LT_GENERIC — nested generic opens
+            depth = depth + 1
+            parser_advance()
+        elif k == 6:
+            # TOK_IDENT — type name
+            parser_advance()
+        elif k == 160:
+            # TOK_COMMA
+            parser_advance()
+        elif (k == 62 or k == 120 or k == 144 or k == 145 or
+              k == 130 or k == 140 or k == 141 or k == 164 or k == 162):
+            # TOK_STAR(62), TOK_AND(120), TOK_LBRACKET(144), TOK_RBRACKET(145),
+            # TOK_QUESTION(130), TOK_LPAREN(140), TOK_RPAREN(141),
+            # TOK_DOT(164), TOK_COLON_COLON(162)
+            parser_advance()
+        elif (k == 20 or k == 21 or k == 22 or k == 23 or k == 24 or
+              k == 25 or k == 26 or k == 27 or k == 28 or k == 29 or
+              k == 30 or k == 31 or k == 32 or k == 33 or k == 34 or
+              k == 35 or k == 36 or k == 37 or k == 38 or k == 39 or
+              k == 40 or k == 41 or k == 42 or k == 43 or k == 44 or
+              k == 45 or k == 46 or k == 47 or k == 48 or k == 49 or
+              k == 50 or k == 51 or k == 52 or k == 53 or k == 54 or
+              k == 55 or k == 56 or k == 57 or k == 58 or k == 59):
+            # Keyword tokens (20-59) that can appear as type names (e.g. built-in types)
+            parser_advance()
+        else:
+            # Not a valid type-argument token — this < is a comparison
+            break
+
+    if not ok:
+        # Backtrack: restore full lexer state and current parser token
+        lex_snapshot_restore(snap_nums, snap_txts)
+        parser_tok_restore(saved_tok_nums, saved_tok_text)
+
 fn parse_postfix_on(base_expr: i64) -> i64:
     # Continue postfix parsing from an already-parsed base expression
+    # Disambiguate Ident<TypeArgs>.method() vs Ident < expr (binary less-than).
+    if (expr_get_tag(base_expr) == EXPR_IDENT and
+        (par_kind_get() == 82 or par_kind_get() == 86)):
+        try_skip_ident_generic_args()
     var base = base_expr
     for i in 0..1000:
         if par_kind_get() == 164:
@@ -645,6 +741,10 @@ fn parse_postfix_on(base_expr: i64) -> i64:
 
 fn parse_postfix() -> i64:
     var base = parse_primary_expr()
+    # Disambiguate Ident<TypeArgs>.method() vs Ident < expr (binary less-than).
+    if (expr_get_tag(base) == EXPR_IDENT and
+        (par_kind_get() == 82 or par_kind_get() == 86)):
+        try_skip_ident_generic_args()
     for i in 0..1000:
         if par_kind_get() == 164:
             parser_advance()
