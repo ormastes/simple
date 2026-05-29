@@ -21,7 +21,7 @@ browser verification can proceed in parallel.
   compare pure Simple web rendering, browser-backed rendering, and Tauri v2
   backed rendering through `src/lib/common/ui/web_render_api.spl` and focused
   API specs; fix confirmed diffs in the shared web render API or pixel backend.
-- [ ] UI-layer lane:
+- [x] UI-layer lane:
   prove the 2D UI layer can consume the Simple web rendering layer and the
   Tauri web rendering layer through the same artifact/capability contract.
 - [x] TUI/Simple IDE lane:
@@ -53,6 +53,8 @@ browser verification can proceed in parallel.
 - Browser/web explorer:
   read-only evidence for browser app, pure Simple web renderer, and bounded
   browser comparison checks.
+- macOS ARM64 graphics tracker:
+  `doc/03_plan/agent_tasks/graphics_2d_macos_arm64_parallel_2026-05-29.md`.
 
 ## Completion Evidence Required
 
@@ -274,11 +276,54 @@ Additional worker evidence:
 - `vulkaninfo --summary` completed and saw NVIDIA TITAN RTX, NVIDIA RTX A6000,
   and llvmpipe.
 
+Vulkan import fix:
+- `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl` now imports
+  `std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}` explicitly.
+  This avoids resolving `VulkanSession.create()` to the nogc session
+  constructor that requires `mode` and `thread_policy`.
+- The focused parity spec now asserts `VulkanBackend.create()` can construct a
+  Vulkan backend object without the semantic `mode` failure.
+
+Verification:
+```bash
+SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl test/integration/rendering/engine2d_cpu_vulkan_parity_spec.spl
+SIMPLE_LIB=src bin/simple test test/integration/rendering/engine2d_cpu_vulkan_parity_spec.spl --mode=interpreter --clean --format json
+```
+
+The parity spec passed `3/3` in 1832 ms. The standalone backend check reports
+existing warnings for `std.gpu.engine2d.backend_emu` source-root resolution and
+the gc-to-nogc SFFI Vulkan import boundary.
+
 Remaining Engine2D blockers:
-- Direct CPU-vs-Vulkan pixel parity remains blocked because an Engine2D Vulkan
-  request probe fails with `function expects argument for parameter 'mode', but
-  none was provided`.
+- Direct CPU-vs-Vulkan pixel parity remains unavailable on this host/runtime
+  path because `VulkanBackend.init(8, 8)` returns `false` after the import fix.
 - `test/integration/rendering/engine2d_backend_spec.spl` timed out at 60s
   during backend discovery/probing.
 - `test/integration/rendering/engine2d_primitives_spec.spl` passes but is too
   slow for a quick restart smoke at about 90s.
+
+### 2026-05-29 UI-Layer Web/Tauri Contract Lane
+
+Files:
+- `test/unit/app/ui/ui_layer_web_tauri_contract_spec.spl`
+- `doc/03_plan/agent_tasks/ui_layer_web_tauri_contract_parallel_2026-05-29.md`
+
+Result:
+- A single 2D UI tree is rendered once through `render_html_tree`.
+- `WebBackend.render_html` and `TauriBackend.render_html` consume the same body
+  HTML.
+- Web full-page output matches `web_render_to_artifact` for
+  `WEB_RENDER_TARGET_SIMPLE_WEB`.
+- Tauri full-page output and IPC JSON match `web_render_to_artifact` for
+  `WEB_RENDER_TARGET_TAURI`.
+- Web/Tauri mouse and touch capability checks match
+  `web_render_capabilities_for_target`, and artifact summaries match
+  `web_render_capability_summary`.
+
+Verification:
+```bash
+SIMPLE_LIB=src bin/simple check test/unit/app/ui/ui_layer_web_tauri_contract_spec.spl
+SIMPLE_LIB=src bin/simple test test/unit/app/ui/ui_layer_web_tauri_contract_spec.spl --mode=interpreter --clean --format json
+```
+
+The check passed. The focused UI-layer contract spec passed `1/1` in 735 ms.

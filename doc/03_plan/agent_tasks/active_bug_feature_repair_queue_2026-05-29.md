@@ -143,3 +143,13 @@ Spawned read-only explorers:
       cases with no mounted VFS bytes.
     - Next step: run focused loader checks/tests and update
       `simpleos_in_guest_toolchain_execution.md` with exact remaining blockers.
+15. SimpleOS in-guest toolchain kernel-side spawn preparation improved.
+    - Focused checks passed:
+      `SIMPLE_LIB=src bin/simple check src/os/kernel/loader/fs_exec_spawn.spl src/os/kernel/loader/x86_64_fs_exec_spawn.spl test/unit/os/kernel/loader/x86_64_fs_exec_spawn_spec.spl`.
+    - Focused tests passed:
+      `test/unit/os/kernel/loader/x86_64_fs_exec_spawn_spec.spl` `2/2` and
+      `test/system/os/port/x86_64_elf_load_spec.spl` `1/1`.
+    - Updated `simpleos_in_guest_toolchain_execution.md`: x86_64 real-byte
+      spawn now builds a process image and scheduler task through the shared
+      path; remaining blockers are live handoff proof and real clang/rust
+      static guest payload builds.

@@ -133,7 +133,67 @@ hardware supports Metal). `rt_metal_init()` was not reached.
 
 ---
 
-## 5. Gaps Before Perf Parity is Measurable
+## 5. Evidence Classification for Renderer Restart
+
+Updated 2026-05-29 for the broad GUI/WM/rendering restart lane.
+
+### Completed CPU proof on macOS ARM64
+
+- The CPU reference measurement in Section 1 is a completed native macOS ARM64
+  proof for the C scalar reference after rebuilding the Linux-only committed
+  ELF with host `clang -O2`.
+- The proof covers CPU scalar throughput and deterministic scene hashes for
+  `fill_1080p`, `blit_tiles`, and `clipped_scroll` on Apple M4.
+- This proof does not establish GPU parity. It is only the CPU baseline needed
+  before a Metal comparison can be meaningful.
+
+### Completed Metal unavailable/stub proof on macOS ARM64
+
+- The probe in Section 4 is a completed macOS ARM64 runtime-availability proof:
+  `rt_metal_is_available()` returned `false` on Apple M4 hardware where Metal
+  should be available.
+- Because `rt_metal_is_available()` returned `false`, `rt_metal_init()` and any
+  Metal draw/readback path were not reached.
+- Treat this as evidence that the runtime path used by the Simple interpreter is
+  stubbed, not compiled with working Metal support, or otherwise not wired to a
+  usable Metal implementation. It is not evidence of Metal performance.
+
+### Vulkan/Linux host limits
+
+- Linux Vulkan evidence collected in the 2026-05-29 renderer restart work is
+  useful for the separate Engine2D CPU/Vulkan lane only.
+- A Linux host, even with Vulkan available, cannot prove macOS Cocoa behavior,
+  Apple Metal availability, Metal shader execution, Metal readback correctness,
+  or macOS ARM64 GPU performance.
+- Do not use Linux CPU/Vulkan parity, Vulkan probe status, browser-contract
+  checks, or headless Simple checks as a replacement for the macOS/Metal
+  evidence listed below.
+
+### Remaining macOS-required evidence
+
+These items still require a macOS ARM64 host with a Simple runtime that reports
+Metal available:
+
+1. `rt_metal_is_available()` returns `true` on Apple Silicon.
+2. `rt_metal_init()` succeeds and reports a concrete device/context status.
+3. A focused Metal smoke test clears/draws to a Metal target and validates
+   sync readback with expected pixel hashes.
+4. Metal-backed Engine2D output is compared against the CPU baseline for the
+   same scenes and dimensions.
+5. Metal performance is measured with p50/p95 frame time, pixels/sec, draw/sec,
+   and memory evidence where available on macOS.
+6. On-screen macOS window evidence is captured separately from headless
+   readback, with screenshot/window metadata if the GUI path is in scope.
+7. Any benchmark file used for the measurement parses under current Simple
+   syntax and calls Metal runtime entry points, not CUDA entry points.
+
+Until these are complete, the macOS ARM64 graphics lane remains open. The
+current status is: CPU baseline proven, Metal unavailable/stub status proven,
+Linux/Vulkan host limits recorded, Metal correctness/performance not proven.
+
+---
+
+## 6. Gaps Before Perf Parity is Measurable
 
 - **The pre-built C reference binary must be rebuilt for ARM64 macOS.** The
   committed ELF is x86-64 Linux-only; a macOS `Makefile` target or CI job is

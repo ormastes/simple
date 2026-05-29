@@ -2,20 +2,17 @@
 
 ## Status
 
-Open — two separate remaining blockers confirmed 2026-05-29.
-Exhaustive search of existing bulk-copy externs completed 2026-05-29: no
-suitable in-place `[u8]` bulk-copy extern exists. Required fix is a new
-`rt_byte_array_blit` extern (see Required Fix below).
+Open — direct-C write gap fixed in the pure-Simple benchmark mock on
+2026-05-29; VFAT same-device evidence remains blocked by mount permissions.
+Exhaustive search of existing bulk-copy externs completed 2026-05-29 found no
+suitable in-place `[u8]` bulk-copy extern, but the benchmark no longer needs
+one for this gate because it now stores sectors as `[u8]` arrays and replaces a
+sector with one array assignment.
 
-1. **Direct-C write gap (stable):** At N=1000 iters, simple_fat32 write p50 is
-   ~39us vs direct C ~27us (~44% slower). Read passes stably (13us vs 23us).
-   The write gap is structural in the interpreter: `_set_sec` in the bench
-   mock device (`test/perf/bench/fat32_4k_compare.spl`, lines 26-31) does
-   512 element-wise assignments to a global `[u8]` per sector (×8 sectors =
-   4096 element-wise writes per 4K overwrite). Compiled C does `memcpy`. No
-   existing extern provides in-place bulk byte copy at offset. N=8 runs are
-   too noisy to determine pass/fail — the gate would sometimes pass and
-   sometimes fail by luck.
+1. **Direct-C write gap:** Fixed for the benchmark gate. `_set_sec` in
+   `test/perf/bench/fat32_4k_compare.spl` no longer writes 512 individual bytes
+   into a flat global buffer; it stores per-sector `[u8]` arrays and replaces
+   the target sector with one assignment. The repeated direct-C gate now passes.
 
 2. **VFAT same-device evidence:** Blocked in this sandbox — all mount paths
    denied without root. See details below.
@@ -173,19 +170,34 @@ benchmark — it is a separate concern.
 ## Required Fix
 
 ### Write gap
-Add a new extern `rt_byte_array_blit` to the Simple runtime:
+Resolved for this benchmark by changing the pure-Simple mock block device from
+a flat byte buffer to per-sector array storage. Latest verification:
+
+```text
+SIMPLE_LIB=src bin/simple check test/perf/bench/fat32_4k_compare.spl
+SIMPLE_LIB=src bin/simple run test/perf/bench/fat32_4k_compare.spl
+FAT32_4K_RUNS=3 scripts/perf/run-fat32-4k-cfat-baseline.shs
+```
+
+Focused run after the fix:
+
+- Simple FAT32 read4k: p50=13us p99=13us
+- Simple FAT32 write4k: p50=15us p99=23us
+
+Repeated direct-C gate after the fix:
+
+- Simple FAT32 read/write median p50: 13us/19us
+- Direct C FAT32 read/write median p50: 23us/34us
+- Result: `PASS: simple_fat32 is faster than direct C FAT32 for 4K random read/write p50`
+
+The previous runtime-extern option is still valid for future production code
+that needs safe in-place `[u8]` blits:
 
 ```
 extern fn rt_byte_array_blit(dst: [u8], dst_off: i64, src: [u8], src_off: i64, count: i64) -> bool
 ```
 
-Backed by a single `memcpy` call in `runtime_native.c` (and the corresponding
-Rust interpreter dispatch in `sffi_array.rs` + `mod.rs`). Once wired, replace
-the element-wise loop in `_set_sec` (`test/perf/bench/fat32_4k_compare.spl`
-lines 26-31) and `_get_sec` (lines 33-40) with a single `rt_byte_array_blit`
-call, eliminating 512 interpreter dispatches per sector write.
-
-**Warning:** Adding a new `rt_*` extern requires a full bootstrap rebuild:
+Adding that new `rt_*` extern would require a full bootstrap rebuild:
 ```
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy
 ```
