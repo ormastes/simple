@@ -11,10 +11,11 @@
 use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect}
 use common.ui.widget.{UIMode}
 use common.layout.box_model.{LayoutBox, BoxKind, BoxModel}
-use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_body_html, web_render_input_envelope_from_event, web_render_input_envelope_to_json, web_render_pixel_artifact}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_body_html, web_render_full_html, web_render_input_envelope_from_event, web_render_input_envelope_to_json, web_render_pixel_artifact}
 use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.web.html.{generate_css}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend, simple_web_resolved_engine2d_backend_name}
 
 # Runtime SFFI for snapshot writing (P3 ASCII PPM)
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -159,10 +160,16 @@ class BrowserBackend:
         # Step 3: Cache layout for hit testing
         self.layout_cache = collect_layout_entries(layout, [])
 
-        # Step 4: Clear and paint
-        self.framebuffer.clear(0x1E1E1E)
-        self.framebuffer = paint_layout(self.framebuffer, layout)
-        self.framebuffer = paint_widget_tree(self.framebuffer, root_node, 6, 6, self.width - 12, 0).0
+        # Step 4: Render the generated UI HTML through the shared SimpleWeb
+        # Engine2D pixel path, then mirror those pixels into this backend's
+        # legacy framebuffer for host-window present and snapshots.
+        val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(
+            web_render_full_html(req),
+            self.width,
+            self.height,
+            self.gpu_backend_name
+        )
+        self.framebuffer = framebuffer_from_argb_pixels(self.width, self.height, pixels)
         val artifact = web_render_pixel_artifact(req, self.pixels_argb_u32())
         self.web_render_target = artifact.target
         self.last_artifact_html = artifact.html
@@ -272,6 +279,14 @@ class LayoutEntry:
     y: f64
     width: f64
     height: f64
+
+fn framebuffer_from_argb_pixels(width: i32, height: i32, pixels: [u32]) -> Framebuffer:
+    var fb = Framebuffer.create(width, height)
+    var i = 0
+    while i < pixels.len() and i < fb.pixels.len():
+        fb.pixels[i] = (pixels[i] & 0x00FFFFFFu32).to_i32()
+        i = i + 1
+    fb
 
 fn collect_layout_entries(box: LayoutBox, acc: [LayoutEntry]) -> [LayoutEntry]:
     """Flatten a LayoutBox tree into a list of entries for hit testing."""
@@ -540,12 +555,11 @@ fn paint_text_bars(fb: Framebuffer, x: i32, y: i32, text_value: text, color: i32
 fn resolve_gpu_backend(name: text) -> text:
     """Resolve a backend name string to a canonical GPU backend name.
 
-    Currently the framebuffer is always CPU-painted; the GPU name is
-    plumbed through for future use but never drives a real device path.
+    Returns the actual Engine2D backend that SimpleWeb will use. During the
+    pure-Simple Metal stage a requested Metal backend may resolve to CPU.
     """
     match name:
-        "cuda" => "cuda"
-        "vulkan" => "vulkan"
-        "metal" => "metal"
-        "rocm" => "rocm"
-        _ => "software"
+        "metal" => simple_web_resolved_engine2d_backend_name(1, 1, "metal")
+        "cpu" => simple_web_resolved_engine2d_backend_name(1, 1, "cpu")
+        "software" => simple_web_resolved_engine2d_backend_name(1, 1, "software")
+        _ => simple_web_resolved_engine2d_backend_name(1, 1, "software")
