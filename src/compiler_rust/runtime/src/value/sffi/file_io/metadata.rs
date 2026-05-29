@@ -4,6 +4,7 @@
 //! retrieving comprehensive file metadata (type, permissions, size).
 
 use std::path::Path;
+use std::time::UNIX_EPOCH;
 
 /// Check if a file or directory exists
 #[no_mangle]
@@ -19,10 +20,30 @@ pub unsafe extern "C" fn rt_file_exists(path_ptr: *const u8, path_len: u64) -> b
     }
 }
 
-/// Get file metadata as a struct
-/// Returns: [exists, is_file, is_dir, is_readable, is_writable, size]
+/// Get file modification time in seconds since epoch.
 #[no_mangle]
-pub unsafe extern "C" fn rt_file_stat(
+pub unsafe extern "C" fn rt_file_stat(path_ptr: *const u8, path_len: u64) -> i64 {
+    if path_ptr.is_null() {
+        return 0;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    std::fs::metadata(Path::new(path_str))
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Get file metadata as a struct.
+/// Returns: [exists, is_file, is_dir, is_readable, is_writable, size].
+pub unsafe extern "C" fn rt_file_metadata(
     path_ptr: *const u8,
     path_len: u64,
     out_exists: *mut bool,
@@ -126,8 +147,15 @@ mod tests {
     #[test]
     fn test_file_stat_null_path() {
         unsafe {
+            assert_eq!(rt_file_stat(std::ptr::null(), 0), 0);
+        }
+    }
+
+    #[test]
+    fn test_file_metadata_null_path() {
+        unsafe {
             let mut exists = true;
-            rt_file_stat(
+            rt_file_metadata(
                 std::ptr::null(),
                 0,
                 &mut exists,
