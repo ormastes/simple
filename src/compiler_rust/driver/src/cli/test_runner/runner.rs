@@ -20,6 +20,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
 use simple_compiler::{init_coverage, is_coverage_enabled};
@@ -41,6 +42,69 @@ use super::feature_db::update_feature_database;
 use super::test_db_update::{update_test_database, update_rust_test_database};
 use super::static_registry::StaticTestRegistry;
 use super::rust_tests;
+
+fn generate_spipe_docs_for_results(result: &TestRunResult, quiet: bool) {
+    if !result.success() {
+        return;
+    }
+
+    let simple_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("bin/simple"));
+    let mut spec_paths = Vec::new();
+
+    for file in &result.files {
+        if file.failed > 0 || file.error.is_some() {
+            continue;
+        }
+
+        let path_text = file.path.to_string_lossy();
+        if !path_text.ends_with("_spec.spl") {
+            continue;
+        }
+        if path_text.contains("/.spipe_matchers_") || path_text.contains("/.sspec_wrapped_entry_") {
+            continue;
+        }
+        spec_paths.push(file.path.clone());
+    }
+
+    if spec_paths.is_empty() {
+        return;
+    }
+
+    let mut command = Command::new(&simple_bin);
+    command.arg("spipe-docgen");
+    for path in &spec_paths {
+        command.arg(path);
+    }
+    command.arg("--output").arg("doc/06_spec").arg("--no-index");
+
+    match command.output() {
+        Ok(output) if output.status.success() => {
+            if !quiet {
+                debug_log!(
+                    DebugLevel::Basic,
+                    "Runner",
+                    "Generated SPipe manual docs for {} spec file(s)",
+                    spec_paths.len()
+                );
+            }
+        }
+        Ok(output) => {
+            if !quiet {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!(
+                    "Warning: spipe-docgen failed for {} spec file(s): {}",
+                    spec_paths.len(),
+                    stderr.trim()
+                );
+            }
+        }
+        Err(e) => {
+            if !quiet {
+                eprintln!("Warning: failed to launch spipe-docgen: {}", e);
+            }
+        }
+    }
+}
 
 /// Load resource throttle configuration from simple.test.toml
 fn load_resource_throttle_config(options: &mut TestOptions) {
@@ -341,6 +405,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
     // Post-processing (skip in list mode)
     if !list_mode {
+        generate_spipe_docs_for_results(&result, quiet);
         generate_diagrams_if_enabled(&options, &result, quiet);
         finalize_profiling(&options, quiet);
         save_coverage_data(quiet);

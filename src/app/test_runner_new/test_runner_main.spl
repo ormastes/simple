@@ -12,6 +12,7 @@ use std.io.{env_set, env_get}
 use std.io.{time_now_unix_micros}
 use std.io.{dir_create_all}
 use std.io.{file_write, file_read, file_exists}
+use std.io.{process_run}
 use std.io_runtime.{get_args}
 
 use std.test_runner.test_runner_types.{TestExecutionMode, TestFileResult, TestOptions, TestRunResult}
@@ -70,6 +71,36 @@ use app.test_daemon.session_types.{TestSessionMeta, meta_needs_session, meta_to_
 # =========================================================================
 # Runner
 # =========================================================================
+
+fn generate_spipe_docs_for_results(results: [TestFileResult], options: TestOptions):
+    if options.list or options.list_ignored:
+        return
+
+    var docgen_args: [text] = ["spipe-docgen"]
+    for result in results:
+        if result.cached or not result.is_ok():
+            continue
+        if not result.path.ends_with("_spec.spl"):
+            continue
+        if result.path.contains("/.spipe_matchers_") or result.path.contains("/.sspec_wrapped_entry_"):
+            continue
+        docgen_args.push(result.path)
+
+    if docgen_args.len() <= 1:
+        return
+
+    docgen_args.push("--output")
+    docgen_args.push("doc/06_spec")
+    docgen_args.push("--no-index")
+    val (stdout, stderr, code) = process_run("bin/simple", docgen_args)
+    val spec_count = docgen_args.len() - 4
+    if code == 0:
+        if options.verbose:
+            print "Generated SPipe manual docs for {spec_count} spec file(s)"
+    else:
+        print "Warning: spipe-docgen failed for {spec_count} spec file(s)"
+        if options.verbose:
+            print stderr
 
 fn run_tests(options: TestOptions) -> TestRunResult:
     # CI mode override (config already loaded by main(), use options.ci_mode)
@@ -354,6 +385,8 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     if total_cached > 0:
         print "Skipped {total_cached} unchanged test(s) (cached)"
 
+    generate_spipe_docs_for_results(results, updated_options)
+
     # MEMORY DEBUG: checkpoint cleanup disabled (GROUP 6)
     # if options.resume and checkpoint_exists():
     #     checkpoint_delete()
@@ -554,6 +587,8 @@ fn run_tests_parallel_mode(
 
     if total_cached > 0:
         print "Skipped {total_cached} unchanged test(s) (cached)"
+
+    generate_spipe_docs_for_results(all_results, options)
 
     TestRunResult(
         files: all_results,

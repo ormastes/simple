@@ -1,7 +1,7 @@
 # Plan: Scenario-Based SSpec Manuals and Typed Capture
 
 **Date:** 2026-05-30
-**Status:** In progress
+**Status:** Implemented
 **Owner:** SPipe / spipe-docgen
 **Related research:**
 - `doc/01_research/local/sspec_scenario_manual_capture.md`
@@ -279,6 +279,13 @@ Create a shared SSpec support library rather than scattering helper functions:
    - Implement `tui`, `text`, `exec`, `api/protocol`, and `log` first.
    - Implement `gui` selection/highlight helpers next.
    - Implement `binary` structured decoder last.
+   - Progress: `scenario_helpers` exposes provider-facing API/protocol,
+     execution, binary, TUI, and GUI capture helpers. The provider helpers
+     preserve scenario/step ids, redact sensitive API/protocol fields, retain
+     command input/stdout/stderr/exit evidence, retain binary raw-byte and
+     decoded-field summaries, and capture TUI/GUI selected rectangles,
+     highlight targets, inverted active menu state, visible-state summaries,
+     and artifact paths.
 7. **Repository uplift**
    - Improve MCP scenario manuals first as the exemplar. Use
      `doc/03_plan/sys_test/mcp_scenario_manual_quality.md` as the target shape
@@ -325,7 +332,8 @@ Create a shared SSpec support library rather than scattering helper functions:
 - MCP scenario manual is reviewed as a hand-written-quality exemplar.
 
 Current verification note: syntax checks pass. The scenario evidence unit test
-passes 9/9, and `test/unit/app/tooling/spipe_docgen_scenario_body_spec.spl`
+passes 21/21, `test/unit/lib/common/spec/scenario_helpers_spec.spl` passes
+44/44, and `test/unit/app/tooling/spipe_docgen_scenario_body_spec.spl`
 reports 50 examples / 0 failures after replacing unsupported negative matchers
 with built-in assertions, fixing the `spipe-docgen` runtime path issues found
 during the manual-generation check, adding metadata warning/cycle diagnostic

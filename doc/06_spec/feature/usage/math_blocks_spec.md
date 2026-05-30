@@ -11,54 +11,25 @@ The `m{}` math block supports torch-compatible tensor operations for numerical c
 | Difficulty | 4/5 |
 | Status | Implemented |
 | Source | `test/feature/usage/math_blocks_spec.spl` |
-| Updated | 2026-05-28 |
+| Updated | 2026-05-30 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 28 |
-| Active scenarios | 28 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
 
 ## Overview
 
 The `m{}` math block supports torch-compatible tensor operations for numerical computing.
 Each math block is a self-contained DSL expression that returns a Block value.
 
-## Evidence
-
-| Category | Count |
-|----------|------:|
-| Artifacts | 2 |
-| Logs | 5 |
-
-### Artifacts
-
-| Item | Kind | Path |
-|------|------|------|
-| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/math_blocks/result.json` |
-| `summary.txt` | Text artifact | `build/test-artifacts/feature/usage/math_blocks/summary.txt` |
-
-### Logs
-
-| Item | Kind | Path |
-|------|------|------|
-| `combined.log` | Log file | `build/test-artifacts/feature/usage/math_blocks/combined.log` |
-| `output.log` | Log file | `build/test-artifacts/feature/usage/math_blocks/output.log` |
-| `run.log` | Log file | `build/test-artifacts/feature/usage/math_blocks/run.log` |
-| `stderr.log` | Log file | `build/test-artifacts/feature/usage/math_blocks/stderr.log` |
-| `stdout.log` | Log file | `build/test-artifacts/feature/usage/math_blocks/stdout.log` |
-
 ## Scenarios
 
 ### Math Block Arithmetic
-_Basic arithmetic operations._
 
 #### evaluates addition
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ 2 + 3 }
@@ -73,7 +44,15 @@ expect(result).to_equal(5)
 
 </details>
 
+</details>
+
 #### evaluates subtraction
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ 10 - 3 }
@@ -88,7 +67,15 @@ expect(result).to_equal(7)
 
 </details>
 
+</details>
+
 #### evaluates multiplication
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ 4 * 5 }
@@ -103,7 +90,15 @@ expect(result).to_equal(20)
 
 </details>
 
+</details>
+
 #### evaluates division
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ 15 / 3 }
@@ -118,7 +113,15 @@ expect(result).to_equal(5)
 
 </details>
 
+</details>
+
 #### evaluates complex expression
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ (2 + 3) * 4 }
@@ -133,7 +136,15 @@ expect(result).to_equal(20)
 
 </details>
 
+</details>
+
 #### respects operator precedence
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ 2 + 3 * 4 }
@@ -148,7 +159,15 @@ expect(result).to_equal(14)
 
 </details>
 
+</details>
+
 #### evaluates power
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ 2^3 }
@@ -158,12 +177,20 @@ expect(result).to_equal(8.0)
 <details>
 <summary>Rendered scenario source</summary>
 
-> val result = $2^3$<br>
+> val result = $2^{3}$<br>
 > expect(result).to_equal(8.0)
 
 </details>
 
+</details>
+
 #### evaluates negative numbers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ -5 + 3 }
@@ -178,10 +205,17 @@ expect(result).to_equal(-2)
 
 </details>
 
+</details>
+
 ### Math Block Functions
-_Built-in math functions._
 
 #### evaluates sqrt of 16
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ sqrt(16) }
@@ -196,7 +230,15 @@ expect(result).to_equal(4.0)
 
 </details>
 
+</details>
+
 #### evaluates sqrt of 9
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ sqrt(9) }
@@ -211,7 +253,15 @@ expect(result).to_equal(3.0)
 
 </details>
 
+</details>
+
 #### evaluates abs of negative
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ abs(-5) }
@@ -221,12 +271,20 @@ expect(result).to_equal(5)
 <details>
 <summary>Rendered scenario source</summary>
 
-> val result = $abs(-5)$<br>
+> val result = $\operatorname{abs}(-5)$<br>
 > expect(result).to_equal(5)
 
 </details>
 
+</details>
+
 #### evaluates abs of positive
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ abs(7) }
@@ -236,12 +294,20 @@ expect(result).to_equal(7)
 <details>
 <summary>Rendered scenario source</summary>
 
-> val result = $abs(7)$<br>
+> val result = $\operatorname{abs}(7)$<br>
 > expect(result).to_equal(7)
 
 </details>
 
+</details>
+
 #### evaluates frac
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ frac(6, 2) }
@@ -256,7 +322,15 @@ expect(result).to_equal(3.0)
 
 </details>
 
+</details>
+
 #### evaluates nested functions
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ sqrt(abs(-16)) }
@@ -266,15 +340,22 @@ expect(result).to_equal(4.0)
 <details>
 <summary>Rendered scenario source</summary>
 
-> val result = $\sqrt{abs(-16)}$<br>
+> val result = $\sqrt{\operatorname{abs}(-16)}$<br>
 > expect(result).to_equal(4.0)
 
 </details>
 
+</details>
+
 ### Math Block Matrix Operations
-_Matrix operations that produce scalar results._
 
 #### computes dot product
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # dot([1,2,3], [4,5,6]) = 1*4 + 2*5 + 3*6 = 32
@@ -286,12 +367,20 @@ expect(result).to_equal(32.0)
 <summary>Rendered scenario source</summary>
 
 > # dot([1,2,3], [4,5,6]) = 1*4 + 2*5 + 3*6 = 32<br>
-> val result = $dot([1, 2, 3], [4, 5, 6])$<br>
+> val result = $\operatorname{dot}([, 2, 3, [, 5, 6)$<br>
 > expect(result).to_equal(32.0)
 
 </details>
 
+</details>
+
 #### computes dot product simple
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # dot([1,1], [2,2]) = 1*2 + 1*2 = 4
@@ -303,15 +392,22 @@ expect(result).to_equal(4.0)
 <summary>Rendered scenario source</summary>
 
 > # dot([1,1], [2,2]) = 1*2 + 1*2 = 4<br>
-> val result = $dot([1, 1], [2, 2])$<br>
+> val result = $\operatorname{dot}([, 1, [, 2)$<br>
 > expect(result).to_equal(4.0)
 
 </details>
 
+</details>
+
 ### Math Block Constants
-_Built-in math constants._
 
 #### evaluates pi greater than 3
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ pi }
@@ -326,7 +422,15 @@ expect(result).to_be_greater_than(3.0)
 
 </details>
 
+</details>
+
 #### evaluates pi less than 4
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ pi }
@@ -341,7 +445,15 @@ expect(result).to_be_less_than(4.0)
 
 </details>
 
+</details>
+
 #### evaluates e greater than 2
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ e }
@@ -356,7 +468,15 @@ expect(result).to_be_greater_than(2.0)
 
 </details>
 
+</details>
+
 #### evaluates e less than 3
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ e }
@@ -371,10 +491,17 @@ expect(result).to_be_less_than(3.0)
 
 </details>
 
+</details>
+
 ### Math Block Array Expressions
-_Array expressions that produce scalar results through reductions._
 
 #### evaluates array subscript
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Array access returns scalar
@@ -386,12 +513,20 @@ expect(result).to_equal(20.0)
 <summary>Rendered scenario source</summary>
 
 > # Array access returns scalar<br>
-> val result = $[10, 20, 30][1]$<br>
+> val result = $[$<br>
 > expect(result).to_equal(20.0)
 
 </details>
 
+</details>
+
 #### evaluates nested array subscript
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # 2D array access
@@ -403,15 +538,22 @@ expect(result).to_equal(2.0)
 <summary>Rendered scenario source</summary>
 
 > # 2D array access<br>
-> val result = $[[1, 2], [3, 4]][0][1]$<br>
+> val result = $[$<br>
 > expect(result).to_equal(2.0)
 
 </details>
 
+</details>
+
 ### Math Block LaTeX Compatibility
-_LaTeX-style syntax support (with deprecation warnings)._
 
 #### evaluates LaTeX frac
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ \frac{10}{2} }
@@ -421,12 +563,20 @@ expect(result).to_equal(5.0)
 <details>
 <summary>Rendered scenario source</summary>
 
-> val result = $\frac{10}{2}$<br>
+> val result = $\$<br>
 > expect(result).to_equal(5.0)
 
 </details>
 
+</details>
+
 #### evaluates LaTeX sqrt
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ \sqrt{25} }
@@ -436,12 +586,20 @@ expect(result).to_equal(5.0)
 <details>
 <summary>Rendered scenario source</summary>
 
-> val result = $\sqrt{25}$<br>
+> val result = $\$<br>
 > expect(result).to_equal(5.0)
 
 </details>
 
+</details>
+
 #### evaluates Greek letter pi
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = m{ \pi }
@@ -451,15 +609,22 @@ expect(result).to_be_greater_than(3.0)
 <details>
 <summary>Rendered scenario source</summary>
 
-> val result = $\pi$<br>
+> val result = $\$<br>
 > expect(result).to_be_greater_than(3.0)
 
 </details>
 
+</details>
+
 ### Math Block LaTeX Export
-_Math expressions can be exported to LaTeX format._
 
 #### exports simple arithmetic
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Note: This demonstrates the LaTeX export capability
@@ -480,7 +645,15 @@ expect(result).to_equal(5)
 
 </details>
 
+</details>
+
 #### exports fractions
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Simple: frac(1, 2) -> LaTeX: \frac{1}{2}
@@ -497,7 +670,15 @@ expect(result).to_equal(0.5)
 
 </details>
 
+</details>
+
 #### exports Greek letters
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Simple: pi -> LaTeX: \pi
@@ -513,3 +694,16 @@ expect(result).to_be_greater_than(3.0)
 > expect(result).to_be_greater_than(3.0)
 
 </details>
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 28 |
+| Active scenarios | 28 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+

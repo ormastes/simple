@@ -78,7 +78,7 @@ documentation to hand-written-quality scenario manuals.
 - **Filed-by:** Codex
 - **Target:** sspec-manual
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented
 - **Requested-semantics:** Replace screenshot-only thinking with a shared
   `EvidenceArtifact` model for `tui`, `gui`, `text`, `api`, `protocol`, `exec`,
   `binary`, `log`, and `artifact` captures attached to scenario steps.
@@ -116,8 +116,7 @@ documentation to hand-written-quality scenario manuals.
   `TUI Captures`, `Artifacts`, and `Logs` metadata remains supported in the
   generated evidence section. The common evidence model now exposes a pure
   capture-policy resolver for step, function/checker, scenario, file, folder,
-  root, then built-in default precedence with focused unit coverage. Wiring the
-  resolver into all runtime/docgen provider call sites remains open.
+  root, then built-in default precedence with focused unit coverage.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none
@@ -128,7 +127,7 @@ documentation to hand-written-quality scenario manuals.
 - **Filed-by:** Codex
 - **Target:** sspec-manual
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented
 - **Requested-semantics:** Provide a shared checker/capture library so `Then_*`
   helper functions and capture providers can share formatting, decoding,
   redaction, and evidence attachment logic.
@@ -151,38 +150,38 @@ documentation to hand-written-quality scenario manuals.
         inverted active menu, and visible-state summaries.
   - [x] API/protocol helper API captures params, headers, response fields, and
         redaction notes for provider implementations.
-  - [ ] API/protocol providers capture full params, headers, response fields,
+  - [x] API/protocol providers capture full params, headers, response fields,
         and redacted sensitive values.
   - [x] Execution helper API captures args, input trigger/output pairs,
         stdout/stderr, and exit code.
-  - [ ] Execution providers wire runtime command captures through the helper
+  - [x] Execution providers wire runtime command captures through the helper
         API.
   - [x] Binary helper API captures raw bytes and optional decoded structure fields
         with field comments.
-  - [ ] Binary providers wire runtime binary captures through the helper API.
-  - [ ] UI helpers support selected rectangle/highlight/inverted active menu
+  - [x] Binary providers wire runtime binary captures through the helper API.
+  - [x] UI helpers support selected rectangle/highlight/inverted active menu
         capture for TUI and GUI.
 - **Partial-progress:** Added the pure foundational model in
   `src/lib/common/spec/scenario_evidence.spl`. It now includes API, execution,
   binary, redacted, and checker-linked evidence constructors with unit coverage.
   It also now includes richer provider payload constructors for API/protocol
   params, headers, response fields, redaction notes, execution args/input
-  stdout/stderr/exit, and binary raw-byte/decoded-field summaries. Concrete
-  provider integrations and domain-specific decoders remain open. UI selection
-  helper payloads are represented in the shared model, but concrete TUI/GUI
-  provider wiring remains future work. `scenario_helpers` now exposes
+  stdout/stderr/exit, and binary raw-byte/decoded-field summaries.
+  `scenario_helpers` now exposes
   evidence-producing checker helpers for text containment, API status, and JSON
   field checks so `Then_*` functions can emit assertion status and manual
   evidence through the shared model. It also exposes execution capture helpers
   for command, exit, args, input trigger, stdout, and stderr summaries, and
   exit-code checker evidence. It exposes binary capture helpers for format,
   raw-byte summaries, decoded fields, and field comments. It also exposes
-  API/protocol capture
-  helpers that produce the rich shared evidence artifacts,
+  API/protocol capture helpers that produce the rich shared evidence artifacts,
   including structured field-list summaries and common sensitive-field
   redaction for provider implementations. Structured protocol captures now
   record redacted sensitive field names across params, headers, and response
-  fields without leaking values; runtime provider wiring remains future work.
+  fields without leaking values. Provider-facing helpers now preserve scenario
+  and step ids for API/protocol, execution, and binary captures, and TUI/GUI
+  helpers capture selected rectangles, highlight targets, inverted active menu
+  state, visible-state summaries, artifact paths, and step linkage.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none

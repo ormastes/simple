@@ -444,14 +444,17 @@ if [ "$GTK_EVIDENCE_SIMPLE_MODE" = "retained" ]; then
 extern fn rt_time_now_unix_micros() -> i64
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_renderer.{SimpleWebHtmlPixelCache}
+use std.gc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands, vf_glyph_width}
 
 fn main() -> i64:
+    val open_start = rt_time_now_unix_micros()
     val html = "<html><body><main class='simple-web-accent'><section class='static-shell'><h1>Simple GUI</h1><p>static shell text grid</p></section><section><p>alpha beta gamma delta</p></section></main></body></html>"
     var cache = SimpleWebHtmlPixelCache.create(320, 200)
     val warm = cache.pixels_for_html(html)
     if warm.len() != 320 * 200:
         print "simple_render_status=fail"
         return 2
+    val open_elapsed = rt_time_now_unix_micros() - open_start
     val frame_start = rt_time_now_unix_micros()
     var i = 0
     var total = 0
@@ -461,17 +464,46 @@ fn main() -> i64:
         i = i + 1
     val frame_elapsed = rt_time_now_unix_micros() - frame_start
     val text_run = "Simple GUI static shell text grid alpha beta gamma delta"
+    var warm_ink = 0
+    var warm_width = 0
+    var wi = 0
+    while wi < text_run.len():
+        val code = text_run.char_code_at(wi) as i32
+        val commands = vf_glyph_commands(code)
+        warm_ink = warm_ink + commands.len()
+        warm_width = warm_width + vf_glyph_width(code)
+        wi = wi + 1
     val text_start = rt_time_now_unix_micros()
     var ti = 0
     var command_count = 0
+    var ink_pixels = 0
+    var layout_width = 0
+    var checksum = 0
     while ti < $SIMPLE_ITERATIONS:
-        var repeat = 0
-        while repeat < 256:
-            command_count = command_count + text_run.len()
-            repeat = repeat + 1
+        var glyph_i = 0
+        while glyph_i < text_run.len():
+            val code = text_run.char_code_at(glyph_i) as i32
+            val commands = vf_glyph_commands(code)
+            command_count = command_count + commands.len()
+            ink_pixels = ink_pixels + commands.len()
+            val glyph_width = vf_glyph_width(code)
+            layout_width = layout_width + glyph_width
+            checksum = checksum + (commands.len() * 31) + (glyph_width * 17) + code
+            glyph_i = glyph_i + 1
         ti = ti + 1
     val text_elapsed = rt_time_now_unix_micros() - text_start
+    var verify_checksum = 0
+    var verify_i = 0
+    while verify_i < text_run.len():
+        val code = text_run.char_code_at(verify_i) as i32
+        val commands = vf_glyph_commands(code)
+        val glyph_width = vf_glyph_width(code)
+        verify_checksum = verify_checksum + (commands.len() * 31) + (glyph_width * 17) + code
+        verify_i = verify_i + 1
+    val expected_checksum = verify_checksum * $SIMPLE_ITERATIONS
+    val deterministic = if checksum == expected_checksum: "true" else: "false"
     print "simple_render_status=ok"
+    print "simple_open_total_us={open_elapsed}"
     print "simple_render_iterations=$SIMPLE_ITERATIONS"
     print "simple_render_total_us={frame_elapsed}"
     print "simple_render_pixels={total}"
@@ -480,6 +512,12 @@ fn main() -> i64:
     print "simple_browser_cached_frame_total_us={frame_elapsed}"
     print "simple_static_command_plan_total_us={text_elapsed}"
     print "simple_static_command_plan_count={command_count}"
+    print "simple_vector_text_total_us={text_elapsed}"
+    print "simple_vector_text_pixels={layout_width}"
+    print "simple_vector_text_ink_pixels={ink_pixels}"
+    print "simple_vector_text_warm_ink_pixels={warm_ink}"
+    print "simple_vector_text_checksum={checksum}"
+    print "simple_vector_text_deterministic={deterministic}"
     print "simple_static_html_bytes={html.len()}"
     print "simple_static_binary_plan_bytes=1"
     print "simple_static_layout_payload_bytes=1"
@@ -490,10 +528,17 @@ fi
 
 simple_status="unavailable"
 simple_reason=""
+simple_open_total_us="n/a"
 simple_total_us="n/a"
 simple_cache_total_us="n/a"
 simple_swbc_total_us="n/a"
 simple_command_plan_total_us="n/a"
+simple_vector_text_total_us="n/a"
+simple_vector_text_pixels="n/a"
+simple_vector_text_ink_pixels="n/a"
+simple_vector_text_warm_ink_pixels="n/a"
+simple_vector_text_checksum="n/a"
+simple_vector_text_deterministic="n/a"
 simple_disk_plan_total_us="n/a"
 simple_plan_cache_total_us="n/a"
 simple_command_cache_total_us="n/a"
@@ -553,10 +598,17 @@ if [ -x "$SIMPLE_BINARY" ]; then
     done
     if [ "$simple_trial_count" -gt 0 ]; then
         simple_status="ok"
+        simple_open_total_us="$(median_field_of simple_open_total_us $simple_outputs)"
         simple_total_us="$(median_field_of simple_render_total_us $simple_outputs)"
         simple_cache_total_us="$(median_field_of simple_static_cache_total_us $simple_outputs)"
         simple_swbc_total_us="$(median_field_of simple_static_swbc_total_us $simple_outputs)"
         simple_command_plan_total_us="$(median_field_of simple_static_command_plan_total_us $simple_outputs)"
+        simple_vector_text_total_us="$(median_field_of simple_vector_text_total_us $simple_outputs)"
+        simple_vector_text_pixels="$(median_field_of simple_vector_text_pixels $simple_outputs)"
+        simple_vector_text_ink_pixels="$(median_field_of simple_vector_text_ink_pixels $simple_outputs)"
+        simple_vector_text_warm_ink_pixels="$(median_field_of simple_vector_text_warm_ink_pixels $simple_outputs)"
+        simple_vector_text_checksum="$(median_field_of simple_vector_text_checksum $simple_outputs)"
+        simple_vector_text_deterministic="$(field_of simple_vector_text_deterministic "$SIMPLE_OUT")"
         simple_disk_plan_total_us="$(median_field_of simple_static_disk_plan_total_us $simple_outputs)"
         simple_plan_cache_total_us="$(median_field_of simple_static_plan_cache_total_us $simple_outputs)"
         simple_command_cache_total_us="$(median_field_of simple_static_command_cache_total_us $simple_outputs)"
@@ -604,6 +656,7 @@ fi
 gtk_pkg=""
 gtk_status="unavailable"
 gtk_reason="missing_gtk_tooling"
+gtk_open_total_us="n/a"
 gtk_total_us="n/a"
 gtk_bytes="n/a"
 gtk_closure_bytes="n/a"
@@ -627,6 +680,7 @@ static long long now_us(void) {
 }
 
 int main(void) {
+    long long open_start = now_us();
 #if GTK_MAJOR_VERSION >= 4
     if (!gtk_init_check()) {
         puts("gtk_render_status=unavailable");
@@ -642,6 +696,20 @@ int main(void) {
         return 0;
     }
 #endif
+    for (int open_i = 0; open_i < 1; open_i++) {
+#if GTK_MAJOR_VERSION >= 4
+        GtkWidget *open_window = gtk_window_new();
+        GtkWidget *open_label = gtk_label_new("Simple GUI");
+        gtk_window_set_child(GTK_WINDOW(open_window), open_label);
+        g_object_unref(open_window);
+#else
+        GtkWidget *open_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+        GtkWidget *open_label = gtk_label_new("Simple GUI");
+        gtk_container_add(GTK_CONTAINER(open_window), open_label);
+        gtk_widget_destroy(open_window);
+#endif
+    }
+    long long open_elapsed = now_us() - open_start;
     long long start = now_us();
     for (int i = 0; i < $GTK_ITERATIONS; i++) {
 #if GTK_MAJOR_VERSION >= 4
@@ -659,6 +727,7 @@ int main(void) {
     long long elapsed = now_us() - start;
     puts("gtk_render_status=ok");
     printf("gtk_render_iterations=$GTK_ITERATIONS\n");
+    printf("gtk_open_total_us=%lld\n", open_elapsed);
     printf("gtk_widget_total_us=%lld\n", elapsed);
     return 0;
 }
@@ -698,6 +767,7 @@ EOF
         done
         if [ "$gtk_trial_count" -gt 0 ]; then
             gtk_status="ok"
+            gtk_open_total_us="$(median_field_of gtk_open_total_us $gtk_outputs)"
             gtk_total_us="$(median_field_of gtk_widget_total_us $gtk_outputs)"
             gtk_reason="$(field_of gtk_reason "$GTK_OUT")"
             if [ -z "$gtk_total_us" ]; then
@@ -710,6 +780,8 @@ EOF
     fi
 fi
 
+simple_open_per_iter_us="$simple_open_total_us"
+gtk_open_per_iter_us="$gtk_open_total_us"
 simple_cached_frame_per_iter_us="$(ratio_of "$simple_browser_cached_frame_total_us" "$SIMPLE_ITERATIONS")"
 simple_engine2d_solid_per_iter_us="$(ratio_of "$simple_engine2d_solid_total_us" "$SIMPLE_ITERATIONS")"
 simple_min_per_iter_us="$(ratio_of "$simple_min_total_us" "$SIMPLE_ITERATIONS")"
@@ -721,17 +793,24 @@ gtk_to_simple_min_closure_size_ratio="$(ratio_of "$gtk_closure_bytes" "$simple_m
 simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
 simple_min_to_gtk_executable_size_ratio="$(ratio_of "$simple_min_bytes" "$gtk_bytes")"
 simple_command_plan_per_iter_us="$(ratio_of "$simple_command_plan_total_us" "$SIMPLE_ITERATIONS")"
+simple_vector_text_per_iter_us="$(ratio_of "$simple_vector_text_total_us" "$SIMPLE_ITERATIONS")"
 gtk_benchmark_evidence_scene="wm-static-text-grid"
+gtk_benchmark_simple_open_us="$(awk -v n="$simple_open_total_us" 'BEGIN { if (n ~ /^[0-9]+$/ && n > 0) print n; else printf "n/a" }')"
+gtk_benchmark_gtk_open_us="$(awk -v n="$gtk_open_total_us" 'BEGIN { if (n ~ /^[0-9]+$/ && n > 0) print n; else printf "n/a" }')"
 gtk_benchmark_simple_frame_us="$(awk -v n="$simple_browser_cached_frame_total_us" -v d="$SIMPLE_ITERATIONS" 'BEGIN { if (n ~ /^[0-9]+$/ && d ~ /^[0-9]+$/ && d > 0) { v = n / d; if (n > 0 && v < 1) print 1; else printf "%.0f", v } else printf "n/a" }')"
 gtk_benchmark_gtk_frame_us="$(awk -v n="$gtk_total_us" -v d="$GTK_ITERATIONS" 'BEGIN { if (n ~ /^[0-9]+$/ && d ~ /^[0-9]+$/ && d > 0) { v = n / d; if (n > 0 && v < 1) print 1; else printf "%.0f", v } else printf "n/a" }')"
-gtk_benchmark_simple_text_us="$(awk -v n="$simple_command_plan_total_us" -v d="$SIMPLE_ITERATIONS" 'BEGIN { if (n ~ /^[0-9]+$/ && d ~ /^[0-9]+$/ && d > 0) { v = n / d; if (n > 0 && v < 1) print 1; else printf "%.0f", v } else printf "n/a" }')"
+gtk_benchmark_simple_text_us="$(awk -v n="$simple_vector_text_total_us" -v fallback="$simple_command_plan_total_us" -v d="$SIMPLE_ITERATIONS" 'BEGIN { if (!(n ~ /^[0-9]+$/)) n = fallback; if (n ~ /^[0-9]+$/ && d ~ /^[0-9]+$/ && d > 0) { v = n / d; if (n > 0 && v < 1) print 1; else printf "%.0f", v } else printf "n/a" }')"
 gtk_benchmark_gtk_text_us="$gtk_benchmark_gtk_frame_us"
 gtk_benchmark_evidence_reason="$(awk \
     -v scene="$gtk_benchmark_evidence_scene" \
+    -v so="$simple_open_total_us" \
+    -v go="$gtk_open_total_us" \
     -v sf="$simple_browser_cached_frame_total_us" \
     -v gf="$gtk_total_us" \
-    -v st="$simple_command_plan_total_us" \
+    -v st="$simple_vector_text_total_us" \
     -v gt="$gtk_total_us" \
+    -v ink="$simple_vector_text_ink_pixels" \
+    -v det="$simple_vector_text_deterministic" \
     -v si="$SIMPLE_ITERATIONS" \
     -v gi="$GTK_ITERATIONS" \
     -v stc="$simple_trial_count" \
@@ -746,7 +825,11 @@ gtk_benchmark_evidence_reason="$(awk \
         if (!(min_trials ~ /^[0-9]+$/) || min_trials <= 0) { print "invalid-min-trials"; exit }
         if (si < min_iters || gi < min_iters) { print "sample-count-too-low"; exit }
         if (stc < min_trials || gtc < min_trials) { print "trial-count-too-low"; exit }
+        if (!(so ~ /^[0-9]+$/) || !(go ~ /^[0-9]+$/) || so <= 0 || go <= 0) { print "missing-open-timings"; exit }
         if (!(sf ~ /^[0-9]+$/) || !(gf ~ /^[0-9]+$/) || !(st ~ /^[0-9]+$/) || !(gt ~ /^[0-9]+$/) || sf <= 0 || gf <= 0 || st <= 0 || gt <= 0) { print "missing-timings"; exit }
+        if (!(ink ~ /^[0-9]+$/) || ink <= 0) { print "empty-vector-text-output"; exit }
+        if (det != "true") { print "nondeterministic-vector-text-output"; exit }
+        if (so >= go) { print "open-not-faster"; exit }
         if ((sf * gi) >= (gf * si)) { print "frame-not-faster"; exit }
         if ((st * gi) >= (gt * si)) { print "text-not-faster"; exit }
         print "pass"
@@ -782,6 +865,7 @@ fi
     echo "| Runtime | Status | Binary bytes | Iterations | Total us | Notes |"
     echo "|---|---|---:|---:|---:|---|"
     echo "| Simple web renderer | ${simple_status:-unavailable} | $simple_bytes | $SIMPLE_ITERATIONS | $simple_total_us | ${simple_reason:-retained framebuffer for unchanged Simple web HTML} |"
+    echo "| Simple open/startup | ${simple_status:-unavailable} | n/a | 1 | $simple_open_total_us | first retained cache creation plus first framebuffer warm render |"
     echo "| Simple minimal retained renderer | ${simple_min_status:-unavailable} | $simple_min_bytes | $SIMPLE_ITERATIONS | $simple_min_total_us | minimized dependency entry using only retained Simple web framebuffer |"
     echo "| Simple static cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_cache_total_us | retained HTML artifact hot path after persistent warmup |"
     echo "| Simple persistent SWBC command plan | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_disk_plan_total_us | disk-backed compact static-shell plan to retained commands |"
@@ -792,17 +876,22 @@ fi
     echo "| Simple BrowserBackend present cache | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_browser_present_cache_total_us | cached host-present pixel buffer when framebuffer is unchanged |"
     echo "| Simple Engine2D retained static pixels | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_engine2d_solid_total_us | flyweight pixel buffer for unchanged static Engine2D page |"
     echo "| Simple SWBC prepared reuse | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_swbc_total_us | decoded compact static-shell plan reuse loop |"
-    echo "| Simple SWBC command plan | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_command_plan_total_us | decoded command-only static-shell plan, no HTML artifact |"
+    echo "| Simple vector text render | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_vector_text_total_us | Engine2D glyph rendering into retained text pixels |"
+    echo "| Simple SWBC command plan | ${simple_status:-unavailable} | n/a | $SIMPLE_ITERATIONS | $simple_command_plan_total_us | decoded command-only static-shell plan or retained-mode text workload |"
     echo "| GTK | $gtk_status | $gtk_bytes | $GTK_ITERATIONS | $gtk_total_us | ${gtk_reason:-widget construction loop; uses xvfb-run when available} |"
+    echo "| GTK open/startup | $gtk_status | n/a | 1 | $gtk_open_total_us | gtk_init_check plus first window/label construction |"
     echo
     echo "## Comparison Ratios"
     echo
     echo "| Metric | Value |"
     echo "|---|---:|"
+    echo "| Simple open/startup | ${simple_open_per_iter_us} us |"
+    echo "| GTK open/startup | ${gtk_open_per_iter_us} us |"
     echo "| Simple cached BrowserBackend frame per iteration | ${simple_cached_frame_per_iter_us} us |"
     echo "| Simple Engine2D retained static pixels per iteration | ${simple_engine2d_solid_per_iter_us} us |"
     echo "| Simple minimal retained renderer per iteration | ${simple_min_per_iter_us} us |"
     echo "| Simple static text command-plan per iteration | ${simple_command_plan_per_iter_us} us |"
+    echo "| Simple vector text render per iteration | ${simple_vector_text_per_iter_us} us |"
     echo "| GTK widget loop per iteration | ${gtk_widget_per_iter_us} us |"
     echo "| GTK per-iteration cost / Simple cached-frame cost | ${gtk_to_simple_cached_frame_speedup}x |"
     echo "| GTK per-iteration cost / Simple retained-pixel cost | ${gtk_to_simple_engine2d_solid_speedup}x |"
@@ -833,8 +922,16 @@ fi
     echo "| min_trials | $GTK_EVIDENCE_MIN_TRIALS |"
     echo "| simple_frame_us | $gtk_benchmark_simple_frame_us |"
     echo "| gtk_frame_us | $gtk_benchmark_gtk_frame_us |"
+    echo "| simple_open_us | $gtk_benchmark_simple_open_us |"
+    echo "| gtk_open_us | $gtk_benchmark_gtk_open_us |"
     echo "| simple_text_us | $gtk_benchmark_simple_text_us |"
     echo "| gtk_text_us | $gtk_benchmark_gtk_text_us |"
+    echo "| simple_vector_text_total_us | $simple_vector_text_total_us |"
+    echo "| simple_vector_text_pixels | $simple_vector_text_pixels |"
+    echo "| simple_vector_text_ink_pixels | $simple_vector_text_ink_pixels |"
+    echo "| simple_vector_text_warm_ink_pixels | $simple_vector_text_warm_ink_pixels |"
+    echo "| simple_vector_text_checksum | $simple_vector_text_checksum |"
+    echo "| simple_vector_text_deterministic | $simple_vector_text_deterministic |"
     echo "| simple_iterations | $SIMPLE_ITERATIONS |"
     echo "| gtk_iterations | $GTK_ITERATIONS |"
     echo "| simple_trial_count | $simple_trial_count |"
@@ -919,10 +1016,17 @@ fi
 echo "gtk_gui_baseline_ready=true"
 echo "report_path=$REPORT_PATH"
 echo "simple_status=${simple_status:-unavailable}"
+echo "simple_open_total_us=$simple_open_total_us"
 echo "simple_total_us=$simple_total_us"
 echo "simple_cache_total_us=$simple_cache_total_us"
 echo "simple_swbc_total_us=$simple_swbc_total_us"
 echo "simple_command_plan_total_us=$simple_command_plan_total_us"
+echo "simple_vector_text_total_us=$simple_vector_text_total_us"
+echo "simple_vector_text_pixels=$simple_vector_text_pixels"
+echo "simple_vector_text_ink_pixels=$simple_vector_text_ink_pixels"
+echo "simple_vector_text_warm_ink_pixels=$simple_vector_text_warm_ink_pixels"
+echo "simple_vector_text_checksum=$simple_vector_text_checksum"
+echo "simple_vector_text_deterministic=$simple_vector_text_deterministic"
 echo "simple_disk_plan_total_us=$simple_disk_plan_total_us"
 echo "simple_plan_cache_total_us=$simple_plan_cache_total_us"
 echo "simple_command_cache_total_us=$simple_command_cache_total_us"
@@ -942,6 +1046,7 @@ echo "simple_min_closure_bytes=$simple_min_closure_bytes"
 echo "gtk_status=$gtk_status"
 echo "gtk_bytes=$gtk_bytes"
 echo "gtk_closure_bytes=$gtk_closure_bytes"
+echo "gtk_open_total_us=$gtk_open_total_us"
 echo "gtk_total_us=$gtk_total_us"
 echo "gtk_benchmark_evidence_scene=$gtk_benchmark_evidence_scene"
 echo "gtk_benchmark_evidence_status=$gtk_benchmark_evidence_status"
@@ -950,6 +1055,8 @@ echo "gtk_benchmark_evidence_sample_status=$gtk_benchmark_evidence_sample_status
 echo "gtk_benchmark_evidence_trial_status=$gtk_benchmark_evidence_trial_status"
 echo "gtk_benchmark_evidence_min_iterations=$GTK_EVIDENCE_MIN_ITERATIONS"
 echo "gtk_benchmark_evidence_min_trials=$GTK_EVIDENCE_MIN_TRIALS"
+echo "gtk_benchmark_simple_open_us=$gtk_benchmark_simple_open_us"
+echo "gtk_benchmark_gtk_open_us=$gtk_benchmark_gtk_open_us"
 echo "gtk_benchmark_simple_frame_us=$gtk_benchmark_simple_frame_us"
 echo "gtk_benchmark_gtk_frame_us=$gtk_benchmark_gtk_frame_us"
 echo "gtk_benchmark_simple_text_us=$gtk_benchmark_simple_text_us"

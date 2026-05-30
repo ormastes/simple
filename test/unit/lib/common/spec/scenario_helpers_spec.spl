@@ -14,11 +14,16 @@ use std.common.spec.scenario_helpers.{
     capture_log,
     capture_exec_response,
     capture_exec_detailed,
+    capture_exec_provider,
     capture_binary_response,
     capture_binary_detailed,
+    capture_binary_provider,
+    capture_tui_selection,
+    capture_gui_selection,
     capture_api_response,
     capture_api_protocol,
     capture_api_protocol_fields,
+    capture_api_protocol_provider,
     is_sensitive_api_field,
     api_field_summary,
     api_field_list_summary,
@@ -207,6 +212,24 @@ describe "scenario capture helpers":
         expect(artifact.body).to_contain("stderr: stderr: no panic")
         expect(artifact.body).to_contain("exit: 0")
 
+    it "captures execution provider evidence with scenario and step ids":
+        val artifact = capture_exec_provider(
+            "MCP stdio exchange",
+            "simple_mcp_server",
+            "--stdio",
+            "stdin: initialize",
+            "stdout: initialized",
+            "stderr: clean",
+            0,
+            "mcp-stdio",
+            "initialize"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.exec)
+        expect(artifact.scenario_id).to_equal("mcp-stdio")
+        expect(artifact.step_id).to_equal("initialize")
+        expect(artifact.body).to_contain("args: --stdio")
+        expect(artifact.body).to_contain("input: stdin: initialize")
+
     it "captures binary response evidence":
         val artifact = capture_binary_response(
             "ELF header",
@@ -231,6 +254,58 @@ describe "scenario capture helpers":
         expect(artifact.body).to_contain("raw bytes: 7f 45 4c 46 ...")
         expect(artifact.body).to_contain("decoded fields: e_machine=riscv64; e_type=executable")
         expect(artifact.body).to_contain("field comments: e_machine selects target architecture")
+
+    it "captures binary provider evidence with scenario and step ids":
+        val artifact = capture_binary_provider(
+            "ELF header",
+            "ELF64",
+            "7f 45 4c 46",
+            "e_machine=riscv64",
+            "e_machine selects target architecture",
+            "loader",
+            "parse-header"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.binary)
+        expect(artifact.scenario_id).to_equal("loader")
+        expect(artifact.step_id).to_equal("parse-header")
+        expect(artifact.body).to_contain("raw bytes: 7f 45 4c 46")
+
+    it "captures TUI selection provider evidence":
+        val artifact = capture_tui_selection(
+            "Settings menu",
+            "x=4 y=2 w=18 h=1",
+            "menu item: Save",
+            "File > Save",
+            "focus on Save, status Ready",
+            "artifacts/settings-menu.txt",
+            "settings",
+            "save-menu"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.tui)
+        expect(artifact.mime).to_equal("text/plain")
+        expect(artifact.path).to_equal("artifacts/settings-menu.txt")
+        expect(artifact.scenario_id).to_equal("settings")
+        expect(artifact.step_id).to_equal("save-menu")
+        expect(artifact.body).to_contain("selected rectangle: x=4 y=2 w=18 h=1")
+        expect(artifact.body).to_contain("highlight: menu item: Save")
+        expect(artifact.body).to_contain("inverted active menu: File > Save")
+        expect(artifact.body).to_contain("visible state: focus on Save, status Ready")
+
+    it "captures GUI selection provider evidence":
+        val artifact = capture_gui_selection(
+            "Toolbar hover",
+            "x=10 y=12 w=32 h=32",
+            "Save toolbar button",
+            "",
+            "button highlighted",
+            "artifacts/toolbar.png",
+            "toolbar",
+            "hover-save"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.gui)
+        expect(artifact.mime).to_equal("image/png")
+        expect(artifact.path).to_equal("artifacts/toolbar.png")
+        expect(artifact.body).to_contain("highlight: Save toolbar button")
 
     it "captures basic API response evidence":
         val artifact = capture_api_response(
@@ -332,6 +407,29 @@ describe "scenario capture helpers":
         expect(artifact.body).to_contain("headers: authorization=<redacted>; content-type=application/json")
         expect(artifact.body).to_contain("response fields: access_token=<redacted>; expires_in=3600")
         expect(artifact.body).to_contain("redacted: params.refresh_token; headers.authorization; response.access_token")
+
+    it "captures protocol provider fields with scenario and step ids":
+        val artifact = capture_api_protocol_provider(
+            "MCP tools call",
+            "JSON-RPC",
+            "stdio:tools/call",
+            ["method", "id", "access_token"],
+            ["tools/call", "7", "secret-token"],
+            ["authorization", "transport"],
+            ["Bearer secret", "stdio"],
+            ["result.content", "isError"],
+            ["present", "false"],
+            "mcp-stdio",
+            "tools-call"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.protocol)
+        expect(artifact.redacted).to_equal(true)
+        expect(artifact.scenario_id).to_equal("mcp-stdio")
+        expect(artifact.step_id).to_equal("tools-call")
+        expect(artifact.body).to_contain("params: method=tools/call; id=7; access_token=<redacted>")
+        expect(artifact.body).to_contain("headers: authorization=<redacted>; transport=stdio")
+        expect(artifact.body).to_contain("response fields: result.content=present; isError=false")
+        expect(artifact.body).to_contain("redacted: params.access_token; headers.authorization")
 
 describe "scenario step result":
     it "creates a passing step result":
