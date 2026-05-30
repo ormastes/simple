@@ -57,4 +57,3 @@ Useful source:
   choose when detailed scenarios are visible, folded, or omitted.
 - Environmental tests should use the same manual style. Their captures are often
   `exec`, `protocol`, `api`, `log`, or `binary`, not screenshots.
-

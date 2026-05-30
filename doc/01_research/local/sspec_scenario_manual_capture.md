@@ -78,4 +78,3 @@ typed capture evidence.
 - Render `@inline` scenarios only when included by `@prev` or `@include`.
 - Fold advanced/edge/noisy scenarios by default instead of deleting them from
   docs; allow folder/file/scenario/step policy to hide when appropriate.
-
