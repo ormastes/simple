@@ -1,0 +1,904 @@
+# Math expression string renderer.
+#
+# Public API:
+#   render_latex_raw(expr) -> LaTeX string
+#   to_pretty(expr)        -> Unicode pretty-print
+#   to_text(expr)          -> Normalised plain text
+#   to_debug(expr)         -> AST description string
+#   to_md(expr)            -> Markdown inline-math ($...$)
+
+# ============================================================================
+# Greek letter tables
+# ============================================================================
+
+fn _greek_latex(name: text) -> text:
+    if name == "alpha": return "\\alpha"
+    if name == "beta": return "\\beta"
+    if name == "gamma": return "\\beta"
+    if name == "Gamma": return "\\Gamma"
+    if name == "gamma": return "\\gamma"
+    if name == "delta": return "\\delta"
+    if name == "Delta": return "\\Delta"
+    if name == "epsilon": return "\\epsilon"
+    if name == "zeta": return "\\zeta"
+    if name == "eta": return "\\eta"
+    if name == "theta": return "\\theta"
+    if name == "Theta": return "\\Theta"
+    if name == "iota": return "\\iota"
+    if name == "kappa": return "\\kappa"
+    if name == "lambda": return "\\lambda"
+    if name == "Lambda": return "\\Lambda"
+    if name == "mu": return "\\mu"
+    if name == "nu": return "\\nu"
+    if name == "xi": return "\\xi"
+    if name == "pi": return "\\pi"
+    if name == "Pi": return "\\Pi"
+    if name == "rho": return "\\rho"
+    if name == "sigma": return "\\sigma"
+    if name == "Sigma": return "\\Sigma"
+    if name == "tau": return "\\tau"
+    if name == "upsilon": return "\\upsilon"
+    if name == "phi": return "\\phi"
+    if name == "Phi": return "\\Phi"
+    if name == "chi": return "\\chi"
+    if name == "psi": return "\\psi"
+    if name == "Psi": return "\\Psi"
+    if name == "omega": return "\\omega"
+    if name == "Omega": return "\\Omega"
+    if name == "nabla": return "\\nabla"
+    ""
+
+fn _greek_unicode(name: text) -> text:
+    if name == "alpha": return "α"
+    if name == "beta": return "β"
+    if name == "gamma": return "γ"
+    if name == "Gamma": return "Γ"
+    if name == "delta": return "δ"
+    if name == "Delta": return "Δ"
+    if name == "epsilon": return "ε"
+    if name == "zeta": return "ζ"
+    if name == "eta": return "η"
+    if name == "theta": return "θ"
+    if name == "Theta": return "Θ"
+    if name == "iota": return "ι"
+    if name == "kappa": return "κ"
+    if name == "lambda": return "λ"
+    if name == "Lambda": return "Λ"
+    if name == "mu": return "μ"
+    if name == "nu": return "ν"
+    if name == "xi": return "ξ"
+    if name == "pi": return "π"
+    if name == "Pi": return "Π"
+    if name == "rho": return "ρ"
+    if name == "sigma": return "σ"
+    if name == "Sigma": return "Σ"
+    if name == "tau": return "τ"
+    if name == "upsilon": return "υ"
+    if name == "phi": return "φ"
+    if name == "Phi": return "Φ"
+    if name == "chi": return "χ"
+    if name == "psi": return "ψ"
+    if name == "Psi": return "Ψ"
+    if name == "omega": return "ω"
+    if name == "Omega": return "Ω"
+    if name == "nabla": return "∇"
+    ""
+
+fn _known_fn_latex(name: text) -> text:
+    if name == "sin": return "\\sin"
+    if name == "cos": return "\\cos"
+    if name == "tan": return "\\tan"
+    if name == "sinh": return "\\sinh"
+    if name == "cosh": return "\\cosh"
+    if name == "tanh": return "\\tanh"
+    if name == "exp": return "\\exp"
+    if name == "log": return "\\log"
+    if name == "ln": return "\\ln"
+    if name == "det": return "\\det"
+    if name == "max": return "\\max"
+    if name == "min": return "\\min"
+    if name == "sup": return "\\sup"
+    if name == "inf": return "\\inf"
+    ""
+
+# ============================================================================
+# Character helpers
+# ============================================================================
+
+fn _is_digit(ch: text) -> bool:
+    ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or
+    ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9"
+
+fn _is_upper(ch: text) -> bool:
+    ch >= "A" and ch <= "Z"
+
+fn _is_lower(ch: text) -> bool:
+    ch >= "a" and ch <= "z"
+
+fn _is_alpha(ch: text) -> bool:
+    _is_upper(ch) or _is_lower(ch) or ch == "_"
+
+fn _is_alnum(ch: text) -> bool:
+    _is_alpha(ch) or _is_digit(ch)
+
+# ============================================================================
+# Tokeniser
+# ============================================================================
+
+fn _tokenise(expr: text) -> [text]:
+    var tokens: [text] = []
+    val n = expr.len()
+    var i = 0
+    while i < n:
+        val ch = expr[i]
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            i = i + 1
+        elif _is_digit(ch):
+            var num = ""
+            while i < n and (_is_digit(expr[i]) or expr[i] == "."):
+                num = num + expr[i]
+                i = i + 1
+            tokens.push(num)
+        elif _is_alpha(ch):
+            var word = ""
+            while i < n and _is_alnum(expr[i]):
+                word = word + expr[i]
+                i = i + 1
+            tokens.push(word)
+        else:
+            if ch == "." and i + 1 < n and expr[i + 1] == ".":
+                tokens.push("..")
+                i = i + 2
+            else:
+                tokens.push(ch)
+                i = i + 1
+    tokens
+
+# ============================================================================
+# Parser utilities
+# ============================================================================
+
+fn _peek(tokens: [text], pos: i64) -> text:
+    if pos < tokens.len():
+        tokens[pos]
+    else:
+        ""
+
+fn _to_int(s: text) -> i64:
+    var result = 0
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val ch = s[i]
+        if ch == "0": result = result * 10 + 0
+        elif ch == "1": result = result * 10 + 1
+        elif ch == "2": result = result * 10 + 2
+        elif ch == "3": result = result * 10 + 3
+        elif ch == "4": result = result * 10 + 4
+        elif ch == "5": result = result * 10 + 5
+        elif ch == "6": result = result * 10 + 6
+        elif ch == "7": result = result * 10 + 7
+        elif ch == "8": result = result * 10 + 8
+        elif ch == "9": result = result * 10 + 9
+        i = i + 1
+    result
+
+# Parse args inside (...). Returns [arg0, arg1, ..., new_pos_str].
+fn _parse_args(tokens: [text], pos: i64) -> [text]:
+    var result: [text] = []
+    var p = pos
+    if _peek(tokens, p) != "(":
+        result.push("")
+        result.push("" + p)
+        return result
+    p = p + 1
+    var depth = 1
+    var cur = ""
+    while p < tokens.len() and depth > 0:
+        val t = _peek(tokens, p)
+        if t == "(":
+            depth = depth + 1
+            cur = cur + t
+            p = p + 1
+        elif t == ")":
+            depth = depth - 1
+            if depth > 0:
+                cur = cur + t
+            p = p + 1
+        elif t == "," and depth == 1:
+            result.push(cur)
+            cur = ""
+            p = p + 1
+        else:
+            cur = cur + t
+            p = p + 1
+    result.push(cur)
+    result.push("" + p)
+    result
+
+# Collect bracket content starting just after '['. Returns [content, new_pos_str].
+fn _collect_bracket(tokens: [text], pos: i64) -> [text]:
+    var idx = ""
+    var depth = 1
+    var p = pos
+    while p < tokens.len() and depth > 0:
+        val ct = _peek(tokens, p)
+        if ct == "[":
+            depth = depth + 1
+            idx = idx + ct
+            p = p + 1
+        elif ct == "]":
+            depth = depth - 1
+            if depth > 0:
+                idx = idx + ct
+            p = p + 1
+        else:
+            idx = idx + ct
+            p = p + 1
+    [idx, "" + p]
+
+# Collect paren content starting just after '('. Returns [content, new_pos_str].
+fn _collect_paren(tokens: [text], pos: i64) -> [text]:
+    var content = ""
+    var depth = 1
+    var p = pos
+    while p < tokens.len() and depth > 0:
+        val ct = _peek(tokens, p)
+        if ct == "(":
+            depth = depth + 1
+            content = content + ct
+            p = p + 1
+        elif ct == ")":
+            depth = depth - 1
+            if depth > 0:
+                content = content + ct
+            p = p + 1
+        else:
+            content = content + ct
+            p = p + 1
+    [content, "" + p]
+
+# Join args with ", " separator.
+fn _join_args(args: [text], from_idx: i64, to_idx: i64) -> text:
+    var s = ""
+    var i = from_idx
+    while i < to_idx:
+        if s != "":
+            s = s + ", "
+        s = s + args[i]
+        i = i + 1
+    s
+
+# ============================================================================
+# AST node encoding
+# AST nodes are encoded as tagged text strings.
+# Format examples:
+#   Num:42        Number literal
+#   Id:x          Identifier
+#   Neg:Num:5     Unary negation
+#   Add:Num:2,Num:3   Binary add (WRONG: we need a better encoding)
+#
+# Actually we use a simpler approach: parse directly into the output format
+# for each of the 4 renderers using dedicated parse functions.
+# ============================================================================
+
+# ============================================================================
+# LaTeX renderer
+# ============================================================================
+
+fn _sub_latex(expr: text) -> text:
+    val ts = _tokenise(expr)
+    val r = _expr_latex(ts, 0)
+    r[0]
+
+fn _primary_latex(tokens: [text], pos: i64) -> [text]:
+    val t = _peek(tokens, pos)
+    if t == "":
+        return ["", "" + pos]
+
+    if t == "-":
+        val inner = _primary_latex(tokens, pos + 1)
+        return ["-" + inner[0], inner[1]]
+
+    if t == "(":
+        val pr = _collect_paren(tokens, pos + 1)
+        val inner = _sub_latex(pr[0])
+        return ["(" + inner + ")", pr[1]]
+
+    if t == "frac":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        if al >= 3:
+            val num = _sub_latex(ar[0])
+            val den = _sub_latex(ar[1])
+            return ["\\frac{" + num + "}{" + den + "}", np]
+        return ["\\frac{?}{?}", np]
+
+    if t == "sqrt":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        if al >= 2:
+            return ["\\sqrt{" + _sub_latex(ar[0]) + "}", np]
+        return ["\\sqrt{?}", np]
+
+    if t == "sum":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        val npi = _to_int(np)
+        var sub = ""
+        if al >= 3:
+            sub = "_{" + ar[0] + "=" + _sub_latex(ar[1]) + "}"
+        elif al >= 2:
+            sub = "_{" + ar[0] + "}"
+        val body_r = _primary_latex(tokens, npi)
+        if body_r[0] != "":
+            return ["\\sum" + sub + " " + body_r[0], body_r[1]]
+        return ["\\sum" + sub, np]
+
+    if t == "int":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        val npi = _to_int(np)
+        var sub = ""
+        if al >= 3:
+            sub = "_{" + _sub_latex(ar[1]) + "}"
+        val body_r = _primary_latex(tokens, npi)
+        if body_r[0] != "":
+            return ["\\int" + sub + " " + body_r[0], body_r[1]]
+        return ["\\int" + sub, np]
+
+    val kfn = _known_fn_latex(t)
+    if kfn != "":
+        if _peek(tokens, pos + 1) == "(":
+            val ar = _parse_args(tokens, pos + 1)
+            val al = ar.len()
+            val np = ar[al - 1]
+            val arg = if al >= 2: _sub_latex(ar[0]) else: ""
+            return [kfn + "(" + arg + ")", np]
+        return [kfn, "" + (pos + 1)]
+
+    if _is_alpha(t[0]):
+        val greek = _greek_latex(t)
+        var base = if greek != "": greek else: t
+        var p = pos + 1
+        while _peek(tokens, p) == "[":
+            val br = _collect_bracket(tokens, p + 1)
+            base = base + "_{" + _sub_latex(br[0]) + "}"
+            p = _to_int(br[1])
+        if _peek(tokens, p) == "(" and greek == "":
+            val ar = _parse_args(tokens, p)
+            val al = ar.len()
+            val np = ar[al - 1]
+            # Render first arg only for LaTeX operatorname (simplified)
+            val arg = if al >= 2: _sub_latex(ar[0]) else: ""
+            return ["\\operatorname{" + t + "}(" + arg + ")", np]
+        if _peek(tokens, p) == "'":
+            return [base + "^{T}", "" + (p + 1)]
+        return [base, "" + p]
+
+    return [t, "" + (pos + 1)]
+
+fn _power_latex(tokens: [text], pos: i64) -> [text]:
+    val left = _primary_latex(tokens, pos)
+    val lp = _to_int(left[1])
+    if _peek(tokens, lp) == "^":
+        val right = _primary_latex(tokens, lp + 1)
+        return [left[0] + "^{" + right[0] + "}", right[1]]
+    return left
+
+fn _mul_latex(tokens: [text], pos: i64) -> [text]:
+    var left = _power_latex(tokens, pos)
+    var ls = left[0]
+    var p = _to_int(left[1])
+    var cont = true
+    while cont:
+        val op = _peek(tokens, p)
+        if op == "*":
+            val right = _power_latex(tokens, p + 1)
+            ls = ls + " \\cdot " + right[0]
+            p = _to_int(right[1])
+        elif op == "/":
+            val right = _power_latex(tokens, p + 1)
+            ls = ls + " / " + right[0]
+            p = _to_int(right[1])
+        else:
+            cont = false
+    [ls, "" + p]
+
+fn _expr_latex(tokens: [text], pos: i64) -> [text]:
+    var left = _mul_latex(tokens, pos)
+    var ls = left[0]
+    var p = _to_int(left[1])
+    var cont = true
+    while cont:
+        val op = _peek(tokens, p)
+        if op == "+":
+            val right = _mul_latex(tokens, p + 1)
+            ls = ls + " + " + right[0]
+            p = _to_int(right[1])
+        elif op == "-":
+            val right = _mul_latex(tokens, p + 1)
+            ls = ls + " - " + right[0]
+            p = _to_int(right[1])
+        else:
+            cont = false
+    [ls, "" + p]
+
+# ============================================================================
+# Unicode pretty renderer
+# ============================================================================
+
+fn _sub_pretty(expr: text) -> text:
+    val ts = _tokenise(expr)
+    val r = _expr_pretty(ts, 0)
+    r[0]
+
+fn _primary_pretty(tokens: [text], pos: i64) -> [text]:
+    val t = _peek(tokens, pos)
+    if t == "":
+        return ["", "" + pos]
+
+    if t == "-":
+        val inner = _primary_pretty(tokens, pos + 1)
+        return ["-" + inner[0], inner[1]]
+
+    if t == "(":
+        val pr = _collect_paren(tokens, pos + 1)
+        return ["(" + _sub_pretty(pr[0]) + ")", pr[1]]
+
+    if t == "frac":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        if al >= 3:
+            return ["(" + _sub_pretty(ar[0]) + "/" + _sub_pretty(ar[1]) + ")", np]
+        return ["(?/?)", np]
+
+    if t == "sqrt":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        if al >= 2:
+            return ["√(" + _sub_pretty(ar[0]) + ")", np]
+        return ["√(?)", np]
+
+    if t == "sum":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        val npi = _to_int(np)
+        var sub = ""
+        if al >= 3:
+            sub = ar[0] + "=" + ar[1]
+        elif al >= 2:
+            sub = ar[0]
+        val body_r = _primary_pretty(tokens, npi)
+        if body_r[0] != "":
+            return ["Σ_{" + sub + "} " + body_r[0], body_r[1]]
+        return ["Σ_{" + sub + "}", np]
+
+    if t == "int":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        val npi = _to_int(np)
+        val body_r = _primary_pretty(tokens, npi)
+        if body_r[0] != "":
+            return ["∫ " + body_r[0], body_r[1]]
+        return ["∫", np]
+
+    val kfn = _known_fn_latex(t)
+    if kfn != "":
+        if _peek(tokens, pos + 1) == "(":
+            val ar = _parse_args(tokens, pos + 1)
+            val al = ar.len()
+            val np = ar[al - 1]
+            val arg = if al >= 2: _sub_pretty(ar[0]) else: ""
+            return [t + "(" + arg + ")", np]
+        return [t, "" + (pos + 1)]
+
+    if _is_alpha(t[0]):
+        val gu = _greek_unicode(t)
+        var base = if gu != "": gu else: t
+        var p = pos + 1
+        while _peek(tokens, p) == "[":
+            val br = _collect_bracket(tokens, p + 1)
+            base = base + "[" + _sub_pretty(br[0]) + "]"
+            p = _to_int(br[1])
+        if _peek(tokens, p) == "(" and gu == "":
+            val ar = _parse_args(tokens, p)
+            val al = ar.len()
+            val np = ar[al - 1]
+            val arg = if al >= 2: _sub_pretty(ar[0]) else: ""
+            return [t + "(" + arg + ")", np]
+        if _peek(tokens, p) == "'":
+            return [base + "ᵀ", "" + (p + 1)]
+        return [base, "" + p]
+
+    return [t, "" + (pos + 1)]
+
+fn _power_pretty(tokens: [text], pos: i64) -> [text]:
+    val left = _primary_pretty(tokens, pos)
+    val lp = _to_int(left[1])
+    if _peek(tokens, lp) == "^":
+        val right = _primary_pretty(tokens, lp + 1)
+        return [left[0] + "^" + right[0], right[1]]
+    return left
+
+fn _mul_pretty(tokens: [text], pos: i64) -> [text]:
+    var left = _power_pretty(tokens, pos)
+    var ls = left[0]
+    var p = _to_int(left[1])
+    var cont = true
+    while cont:
+        val op = _peek(tokens, p)
+        if op == "*":
+            val right = _power_pretty(tokens, p + 1)
+            ls = ls + " * " + right[0]
+            p = _to_int(right[1])
+        elif op == "/":
+            val right = _power_pretty(tokens, p + 1)
+            ls = ls + "/" + right[0]
+            p = _to_int(right[1])
+        else:
+            cont = false
+    [ls, "" + p]
+
+fn _expr_pretty(tokens: [text], pos: i64) -> [text]:
+    var left = _mul_pretty(tokens, pos)
+    var ls = left[0]
+    var p = _to_int(left[1])
+    var cont = true
+    while cont:
+        val op = _peek(tokens, p)
+        if op == "+":
+            val right = _mul_pretty(tokens, p + 1)
+            ls = ls + " + " + right[0]
+            p = _to_int(right[1])
+        elif op == "-":
+            val right = _mul_pretty(tokens, p + 1)
+            ls = ls + " - " + right[0]
+            p = _to_int(right[1])
+        else:
+            cont = false
+    [ls, "" + p]
+
+# ============================================================================
+# Plain text renderer
+# ============================================================================
+
+fn _sub_text(expr: text) -> text:
+    val ts = _tokenise(expr)
+    val r = _expr_text(ts, 0)
+    r[0]
+
+fn _primary_text(tokens: [text], pos: i64) -> [text]:
+    val t = _peek(tokens, pos)
+    if t == "":
+        return ["", "" + pos]
+
+    if t == "-":
+        val inner = _primary_text(tokens, pos + 1)
+        return ["-" + inner[0], inner[1]]
+
+    if t == "(":
+        val pr = _collect_paren(tokens, pos + 1)
+        return ["(" + _sub_text(pr[0]) + ")", pr[1]]
+
+    if t == "frac":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        if al >= 3:
+            return [_sub_text(ar[0]) + " / " + _sub_text(ar[1]), np]
+        return ["? / ?", np]
+
+    if t == "sqrt":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        if al >= 2:
+            return ["sqrt(" + _sub_text(ar[0]) + ")", np]
+        return ["sqrt(?)", np]
+
+    if t == "sum":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        val npi = _to_int(np)
+        var range_str = ""
+        if al >= 3:
+            range_str = ar[1]
+        val body_r = _primary_text(tokens, npi)
+        var out = "sum"
+        if range_str != "":
+            out = out + "(" + range_str + ")"
+        if body_r[0] != "":
+            out = out + " " + body_r[0]
+            return [out, body_r[1]]
+        return [out, np]
+
+    if t == "int":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        val npi = _to_int(np)
+        var range_str = ""
+        if al >= 3:
+            range_str = ar[1]
+        val body_r = _primary_text(tokens, npi)
+        var out = "int"
+        if range_str != "":
+            out = out + "(" + range_str + ")"
+        if body_r[0] != "":
+            out = out + " " + body_r[0]
+            return [out, body_r[1]]
+        return [out, np]
+
+    val kfn = _known_fn_latex(t)
+    if kfn != "":
+        if _peek(tokens, pos + 1) == "(":
+            val ar = _parse_args(tokens, pos + 1)
+            val al = ar.len()
+            val np = ar[al - 1]
+            val arg = if al >= 2: _sub_text(ar[0]) else: ""
+            return [t + "(" + arg + ")", np]
+        return [t, "" + (pos + 1)]
+
+    if _is_alpha(t[0]):
+        var base = t
+        var p = pos + 1
+        while _peek(tokens, p) == "[":
+            val br = _collect_bracket(tokens, p + 1)
+            base = base + "[" + _sub_text(br[0]) + "]"
+            p = _to_int(br[1])
+        if _peek(tokens, p) == "(":
+            val ar = _parse_args(tokens, p)
+            val al = ar.len()
+            val np = ar[al - 1]
+            # Render all args for to_text
+            var args_rendered: [text] = []
+            var ai = 0
+            while ai < al - 1:
+                args_rendered.push(_sub_text(ar[ai]))
+                ai = ai + 1
+            var args_str = ""
+            var aj = 0
+            while aj < args_rendered.len():
+                if args_str != "":
+                    args_str = args_str + ", "
+                args_str = args_str + args_rendered[aj]
+                aj = aj + 1
+            return [t + "(" + args_str + ")", np]
+        if _peek(tokens, p) == "'":
+            return [base + "'", "" + (p + 1)]
+        return [base, "" + p]
+
+    return [t, "" + (pos + 1)]
+
+fn _power_text(tokens: [text], pos: i64) -> [text]:
+    val left = _primary_text(tokens, pos)
+    val lp = _to_int(left[1])
+    if _peek(tokens, lp) == "^":
+        val right = _primary_text(tokens, lp + 1)
+        return [left[0] + "^" + right[0], right[1]]
+    return left
+
+fn _mul_text(tokens: [text], pos: i64) -> [text]:
+    var left = _power_text(tokens, pos)
+    var ls = left[0]
+    var p = _to_int(left[1])
+    var cont = true
+    while cont:
+        val op = _peek(tokens, p)
+        if op == "*":
+            val right = _power_text(tokens, p + 1)
+            ls = ls + " * " + right[0]
+            p = _to_int(right[1])
+        elif op == "/":
+            val right = _power_text(tokens, p + 1)
+            ls = ls + " / " + right[0]
+            p = _to_int(right[1])
+        else:
+            cont = false
+    [ls, "" + p]
+
+fn _expr_text(tokens: [text], pos: i64) -> [text]:
+    var left = _mul_text(tokens, pos)
+    var ls = left[0]
+    var p = _to_int(left[1])
+    var cont = true
+    while cont:
+        val op = _peek(tokens, p)
+        if op == "+":
+            val right = _mul_text(tokens, p + 1)
+            ls = ls + " + " + right[0]
+            p = _to_int(right[1])
+        elif op == "-":
+            val right = _mul_text(tokens, p + 1)
+            ls = ls + " - " + right[0]
+            p = _to_int(right[1])
+        else:
+            cont = false
+    [ls, "" + p]
+
+# ============================================================================
+# AST debug renderer
+# Produces canonical AST node strings like Add(Num(2), Num(3))
+# ============================================================================
+
+fn _sub_debug(expr: text) -> text:
+    val ts = _tokenise(expr)
+    val r = _expr_debug(ts, 0)
+    r[0]
+
+fn _primary_debug(tokens: [text], pos: i64) -> [text]:
+    val t = _peek(tokens, pos)
+    if t == "":
+        return ["", "" + pos]
+
+    if t == "-":
+        val inner = _primary_debug(tokens, pos + 1)
+        return ["Neg(" + inner[0] + ")", inner[1]]
+
+    if t == "(":
+        val pr = _collect_paren(tokens, pos + 1)
+        val inner = _sub_debug(pr[0])
+        return ["Group(" + inner + ")", pr[1]]
+
+    if t == "frac":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        if al >= 3:
+            val num = _sub_debug(ar[0])
+            val den = _sub_debug(ar[1])
+            return ["Frac(" + num + ", " + den + ")", np]
+        return ["Frac(?)", np]
+
+    if t == "sqrt":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        if al >= 2:
+            return ["Call(sqrt, " + _sub_debug(ar[0]) + ")", np]
+        return ["Call(sqrt, ?)", np]
+
+    if t == "sum":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        val npi = _to_int(np)
+        val body_r = _primary_debug(tokens, npi)
+        if body_r[0] != "":
+            return ["Sum(" + body_r[0] + ")", body_r[1]]
+        return ["Sum()", np]
+
+    if t == "int":
+        val ar = _parse_args(tokens, pos + 1)
+        val al = ar.len()
+        val np = ar[al - 1]
+        val npi = _to_int(np)
+        val body_r = _primary_debug(tokens, npi)
+        if body_r[0] != "":
+            return ["Int(" + body_r[0] + ")", body_r[1]]
+        return ["Int()", np]
+
+    val kfn = _known_fn_latex(t)
+    if kfn != "":
+        if _peek(tokens, pos + 1) == "(":
+            val ar = _parse_args(tokens, pos + 1)
+            val al = ar.len()
+            val np = ar[al - 1]
+            val arg = if al >= 2: _sub_debug(ar[0]) else: ""
+            return ["Call(" + t + ", " + arg + ")", np]
+        return ["Id(" + t + ")", "" + (pos + 1)]
+
+    if _is_alpha(t[0]):
+        var base = "Id(" + t + ")"
+        var p = pos + 1
+        while _peek(tokens, p) == "[":
+            val br = _collect_bracket(tokens, p + 1)
+            val idx_d = _sub_debug(br[0])
+            base = "Sub(" + base + ", " + idx_d + ")"
+            p = _to_int(br[1])
+        if _peek(tokens, p) == "(":
+            # Function call with all args
+            val ar = _parse_args(tokens, p)
+            val al = ar.len()
+            val np = ar[al - 1]
+            var args_d = t
+            var ai = 0
+            while ai < al - 1:
+                val ad = _sub_debug(ar[ai])
+                args_d = args_d + ", " + ad
+                ai = ai + 1
+            return ["Call(" + args_d + ")", np]
+        if _peek(tokens, p) == "'":
+            return ["Transpose(Id(" + t + "))", "" + (p + 1)]
+        return [base, "" + p]
+
+    # Number
+    return ["Num(" + t + ")", "" + (pos + 1)]
+
+fn _power_debug(tokens: [text], pos: i64) -> [text]:
+    val left = _primary_debug(tokens, pos)
+    val lp = _to_int(left[1])
+    if _peek(tokens, lp) == "^":
+        val right = _primary_debug(tokens, lp + 1)
+        return ["Pow(" + left[0] + ", " + right[0] + ")", right[1]]
+    return left
+
+fn _mul_debug(tokens: [text], pos: i64) -> [text]:
+    var left = _power_debug(tokens, pos)
+    var ls = left[0]
+    var p = _to_int(left[1])
+    var cont = true
+    while cont:
+        val op = _peek(tokens, p)
+        if op == "*":
+            val right = _power_debug(tokens, p + 1)
+            ls = "Mul(" + ls + ", " + right[0] + ")"
+            p = _to_int(right[1])
+        elif op == "/":
+            val right = _power_debug(tokens, p + 1)
+            ls = "Div(" + ls + ", " + right[0] + ")"
+            p = _to_int(right[1])
+        else:
+            cont = false
+    [ls, "" + p]
+
+fn _expr_debug(tokens: [text], pos: i64) -> [text]:
+    var left = _mul_debug(tokens, pos)
+    var ls = left[0]
+    var p = _to_int(left[1])
+    var cont = true
+    while cont:
+        val op = _peek(tokens, p)
+        if op == "+":
+            val right = _mul_debug(tokens, p + 1)
+            ls = "Add(" + ls + ", " + right[0] + ")"
+            p = _to_int(right[1])
+        elif op == "-":
+            val right = _mul_debug(tokens, p + 1)
+            ls = "Sub(" + ls + ", " + right[0] + ")"
+            p = _to_int(right[1])
+        else:
+            cont = false
+    [ls, "" + p]
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+# Render a math expression string to raw LaTeX.
+fn render_latex_raw(expr: text) -> text:
+    val tokens = _tokenise(expr)
+    val r = _expr_latex(tokens, 0)
+    r[0]
+
+# Render a math expression string to Unicode pretty print.
+fn to_pretty(expr: text) -> text:
+    val tokens = _tokenise(expr)
+    val r = _expr_pretty(tokens, 0)
+    r[0]
+
+# Render a math expression string to normalised plain text.
+fn to_text(expr: text) -> text:
+    val tokens = _tokenise(expr)
+    val r = _expr_text(tokens, 0)
+    r[0]
+
+# Render a math expression string to an AST debug description.
+fn to_debug(expr: text) -> text:
+    val tokens = _tokenise(expr)
+    val r = _expr_debug(tokens, 0)
+    r[0]
+
+# Render a math expression string wrapped in Markdown inline-math ($...$).
+fn to_md(expr: text) -> text:
+    "$" + render_latex_raw(expr) + "$"
