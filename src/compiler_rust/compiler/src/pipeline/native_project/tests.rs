@@ -394,14 +394,16 @@ fn test_object_cache_key_separates_configured_active_tiers_without_override() {
 #[test]
 fn test_incremental_cache_dir_default() {
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple"));
-    assert_eq!(builder.cache_dir(), PathBuf::from("/project/.simple/native_cache"));
+    let cache_dir = builder.cache_dir().to_string_lossy().replace('\\', "/");
+    assert!(cache_dir.ends_with("/project/.simple/native_cache"));
 }
 
 #[test]
 fn test_source_dir_preserves_logical_path() {
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple"))
         .source_dir(PathBuf::from("src/app/mcp_t32"));
-    assert_eq!(builder.source_dirs, vec![PathBuf::from("/project/src/app/mcp_t32")]);
+    let source_dir = builder.source_dirs[0].to_string_lossy().replace('\\', "/");
+    assert!(source_dir.ends_with("/project/src/app/mcp_t32"));
 }
 
 #[test]

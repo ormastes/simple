@@ -644,7 +644,7 @@ impl NativeProjectBuilder {
         let compile_time = compile_start.elapsed();
 
         // Collect results
-        let mut object_paths: Vec<PathBuf> = cached_objects.into_iter().map(|(_, p)| p).collect();
+        let mut object_paths_with_indices: Vec<(usize, PathBuf)> = cached_objects;
         let mut failures = Vec::new();
         let mut freshly_compiled: Vec<(usize, PathBuf)> = Vec::new();
 
@@ -652,11 +652,17 @@ impl NativeProjectBuilder {
             match result {
                 Ok((idx, path)) => {
                     freshly_compiled.push((idx, path.clone()));
-                    object_paths.push(path);
+                    object_paths_with_indices.push((idx, path));
                 }
                 Err((path, msg)) => failures.push((path, msg)),
             }
         }
+
+        object_paths_with_indices.sort_by_key(|(idx, _)| *idx);
+        let mut object_paths: Vec<PathBuf> = object_paths_with_indices
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect();
 
         let compiled = object_paths.len();
         let failed = failures.len();

@@ -189,6 +189,12 @@ On Windows, pass the `.exe` seed path:
 .\src\compiler_rust\target\debug\simple.exe build bootstrap --seed=src\compiler_rust\target\debug\simple.exe --output=build\bootstrap
 ```
 
+Windows stage outputs are executable paths (`simple_stage1.exe`,
+`simple_stage2.exe`, `simple_stage3.exe`). The Rust-driver bootstrap lane
+builds those stages with `native-build --strip --threads 1 --timeout 180` so the
+verification step compares release-like binaries and avoids uncontrolled worker
+fan-out during bootstrap.
+
 The older `scripts/bootstrap/bootstrap-from-scratch.sh` and
 `scripts/bootstrap/bootstrap-windows.sh` wrappers are not present in this tree.
 Use `simple build bootstrap` directly unless those wrappers are restored.

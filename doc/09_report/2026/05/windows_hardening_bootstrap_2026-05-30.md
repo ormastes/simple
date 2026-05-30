@@ -23,6 +23,10 @@ Bootstrap/native-build hardening on Windows after MCP, SPipe, and Vulkan fixes.
 - Added `test/smoke/windows_native_hello.spl` as a minimal native Windows executable smoke.
 - Native HIR hardening cleared the Windows full compiler native-build skip list by adding missing token metadata fields, replacing stale SIMD lane-field access with current `FixedVec` constructors/accessors, and adding explicit imported-type annotations where the native pass previously saw `ANY`.
 - Windows native-build stub filtering now treats additional WinAPI/COM/WSA imports as system symbols and gates `declare_globals` fallback diagnostics behind the existing trace flag.
+- `simple build bootstrap` now writes and hashes `simple_stageN.exe` on Windows instead of checking extensionless stage paths.
+- Bootstrap Rust-driver stages now pass `native-build --strip` so bootstrap compares release-like Windows executables without COFF symbol tables.
+- Native project linking now preserves discovered source order across cached and freshly compiled objects instead of grouping all cache hits before fresh outputs.
+- Added an explicit `GemmAddFusion` annotation in the Cranelift adapter so the Windows bootstrap native pass no longer sees the fusion plan as `ANY`.
 
 ## Verified
 
@@ -35,9 +39,19 @@ Bootstrap/native-build hardening on Windows after MCP, SPipe, and Vulkan fixes.
   - Command: `simple.exe native-build --source src\compiler --source src\lib --source src\app --entry src\app\cli\main.spl --entry-closure --threads 1 --timeout 45 -o build\windows-hardening\bootstrap\stage_probe_zero_skip.exe --verbose`
   - Result: `Compiled: 970/970 (893 cached, 77 fresh, 0 failed)` and linked `stage_probe_zero_skip.exe`.
   - Stub fallback remains enabled; generated stubs dropped from 1081 in the clean baseline to 957 after this pass.
+- After syncing to `c1d1cddd7119`, full bootstrap reaches all three Windows stages:
+  - Command: `src\compiler_rust\target\debug\simple.exe build bootstrap --seed=src\compiler_rust\target\debug\simple.exe --output=build\windows-hardening\bootstrap\simple-build-strip2`
+  - Stage 1: `77 compiled, 895 cached, 0 failed`, `77374976` bytes.
+  - Stage 2: `77 compiled, 895 cached, 0 failed`, `77374976` bytes.
+  - Stage 3: `77 compiled, 895 cached, 0 failed`, `77378048` bytes.
+  - Result: `Bootstrap MISMATCH: outputs differ between stages`.
+- Repeated direct stripped native-build still reproduces the mismatch:
+  - `native-strip-det1.exe`: `77374464` bytes, SHA256 `224231619fdb0c5481b17e3db53db3f7c4892469ff2db23c0eb5d11dc43a6557`.
+  - `native-strip-det2.exe`: `77378048` bytes, SHA256 `64edd5edb5fe1f95dcd8124e58e346869501b53fe04ccca82acf4bb609032e49`.
 
 ## Remaining Bootstrap Blockers
 
-- Full `simple build bootstrap` still does not complete on Windows.
-- Full compiler native-build now reaches link with zero skipped files, but still relies on hundreds of Simple stub symbols. The next bootstrap slice should reduce internal stubs and then retry the full bootstrap driver.
-- A clean full compiler native-build still needs a longer verification pass after the incremental zero-skip probe.
+- Full `simple build bootstrap` completes all stage compile/link work on Windows, but fails the final deterministic hash comparison.
+- The remaining blocker is native output nondeterminism in repeated stripped Windows native-build outputs. PE inspection shows the mismatch is not only timestamp/checksum metadata; `.text` size/content can differ by about 3 KB.
+- Full compiler native-build still relies on 957 generated stub symbols. The next bootstrap slice should reduce internal stubs and continue isolating nondeterministic codegen/link inputs.
+- A clean full compiler native-build still needs a longer verification pass after the incremental zero-skip and three-stage bootstrap probes.

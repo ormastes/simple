@@ -396,7 +396,7 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     // Stage 1: Compile compiler source with seed compiler
     println!();
     println!("=== Stage 1: Compile with seed compiler ===");
-    let stage1_path = format!("{}/simple_stage1", output_dir);
+    let stage1_path = bootstrap_stage_output_path(&output_dir, "simple_stage1");
     let stage1 = compile_stage(&compiler, &stage1_path, &backend);
     if !stage1.success {
         eprintln!("Stage 1 FAILED");
@@ -410,7 +410,7 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     // deterministic output.
     println!();
     println!("=== Stage 2: Compile with seed compiler (determinism check) ===");
-    let stage2_path = format!("{}/simple_stage2", output_dir);
+    let stage2_path = bootstrap_stage_output_path(&output_dir, "simple_stage2");
     let stage2 = compile_stage(&compiler, &stage2_path, &backend);
     if !stage2.success {
         eprintln!("Stage 2 FAILED");
@@ -421,7 +421,7 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     // Stage 3: Third compilation
     println!();
     println!("=== Stage 3: Compile with seed compiler (triple check) ===");
-    let stage3_path = format!("{}/simple_stage3", output_dir);
+    let stage3_path = bootstrap_stage_output_path(&output_dir, "simple_stage3");
     let stage3 = compile_stage(&compiler, &stage3_path, &backend);
     if !stage3.success {
         eprintln!("Stage 3 FAILED");
@@ -448,6 +448,14 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
         println!("  Stage 3: {} ({} bytes)", stage3.hash, stage3.size);
         1
     }
+}
+
+fn bootstrap_stage_output_path(output_dir: &str, name: &str) -> String {
+    let mut path = PathBuf::from(output_dir).join(name);
+    if cfg!(target_os = "windows") && path.extension().is_none() {
+        path.set_extension("exe");
+    }
+    path.to_string_lossy().to_string()
 }
 
 struct StageResult {
@@ -478,6 +486,7 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             .arg("--entry")
             .arg("src/app/cli/main.spl")
             .arg("--entry-closure")
+            .arg("--strip")
             .arg("--threads")
             .arg("1")
             .arg("--timeout")
@@ -489,7 +498,7 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             cmd.env("SIMPLE_RUNTIME_PATH", rtp);
         }
         println!(
-            "  Running: {} native-build --entry-closure --threads 1 --timeout 180 --entry src/app/cli/main.spl -o {}",
+            "  Running: {} native-build --entry-closure --strip --threads 1 --timeout 180 --entry src/app/cli/main.spl -o {}",
             compiler, output
         );
     } else {
