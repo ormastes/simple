@@ -1,0 +1,94 @@
+# web_render_file_gui.spl — render an HTML file through the pure-Simple web
+# renderer and present it to a window, for side-by-side comparison with a real
+# browser engine (Tauri/WebKit).
+#
+# The Simple web renderer (simple_web_render_html_to_pixels) is a corpus-driven
+# heuristic, NOT a layout engine: it maps a few recognized markers to colored
+# rects. Real pages with no recognized markers render as the page background
+# only — which is exactly the point of the comparison.
+#
+# Run (window):
+#   SIMPLE_WEB_HTML=examples/ui/sample_page.html SIMPLE_GUI=1 \
+#     SIMPLE_TIMEOUT_SECONDS=0 scripts/macos-gui-run.shs examples/ui/web_render_file_gui.spl
+# Headless: drop SIMPLE_GUI / use bin/simple run.
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+
+extern fn rt_winit_event_loop_new() -> i64
+extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_free(ev: i64)
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_cli_get_args() -> [text]
+
+# First argv entry that ends in .html, else the bundled sample page. Pass an
+# absolute path when launching via a .app bundle (its cwd is a temp directory).
+fn html_path() -> text:
+    val args = rt_cli_get_args()
+    var i = 0
+    while i < args.len():
+        if args[i].ends_with(".html"):
+            return args[i]
+        i = i + 1
+    "examples/ui/sample_page.html"
+
+val RW: i32 = 80
+val RH: i32 = 60
+val W: i32 = 800
+val H: i32 = 600
+val EVT_CLOSE: i64 = 3
+
+fn pack_pixels(src: [u32]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < src.len():
+        out = out.push(src[i].to_i64() & 0xFFFFFF)
+        i = i + 1
+    out
+
+fn main() -> i64:
+    val path = html_path()
+    if not rt_file_exists(path):
+        print "HTML file not found: {path}"
+        return 1
+    val html = rt_file_read_text(path)
+    print "Pure-Simple web render of {path} ({html.len()} bytes html) at {W}x{H}"
+    val pixels = simple_web_render_html_to_pixels(html, RW, RH)
+    print "Rendered {pixels.len()} px (software backend)"
+
+    if rt_env_get("SIMPLE_GUI") != "1":
+        print "No GUI requested; headless render only."
+        return 0
+
+    val el = rt_winit_event_loop_new()
+    if el == 0:
+        print "No GUI runtime available."
+        return 0
+    val win = rt_winit_window_new(el, W.to_i64(), H.to_i64(), "Pure-Simple web renderer — {path}")
+    if win == 0:
+        print "Window creation failed."
+        rt_winit_event_loop_free(el)
+        return 0
+    val packed = pack_pixels(pixels)
+    rt_winit_window_present_rgba(win, RW.to_i64(), RH.to_i64(), packed)
+    var running = true
+    var iters = 0
+    while running and iters < 2000000:
+        var ev = rt_winit_event_loop_poll_events(el, 1)
+        while ev != 0:
+            if rt_winit_event_get_type(ev) == EVT_CLOSE:
+                running = false
+            rt_winit_event_free(ev)
+            ev = rt_winit_event_loop_poll_events(el, 1)
+        if iters % 200 == 0:
+            rt_winit_window_present_rgba(win, RW.to_i64(), RH.to_i64(), packed)
+        iters = iters + 1
+    rt_winit_window_free(win)
+    rt_winit_event_loop_free(el)
+    return 0
