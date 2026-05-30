@@ -155,6 +155,66 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                 {
                     types_map.insert(*d, TypeId::STRING);
                 }
+                MirInst::MethodCallStatic {
+                    dest: Some(d),
+                    func_name,
+                    ..
+                } if func_name == "to_u8" || func_name.ends_with(".to_u8") => {
+                    types_map.insert(*d, TypeId::U8);
+                }
+                MirInst::MethodCallStatic {
+                    dest: Some(d),
+                    func_name,
+                    ..
+                } if func_name == "to_u16" || func_name.ends_with(".to_u16") => {
+                    types_map.insert(*d, TypeId::U16);
+                }
+                MirInst::MethodCallStatic {
+                    dest: Some(d),
+                    func_name,
+                    ..
+                } if func_name == "to_u32" || func_name.ends_with(".to_u32") => {
+                    types_map.insert(*d, TypeId::U32);
+                }
+                MirInst::MethodCallStatic {
+                    dest: Some(d),
+                    func_name,
+                    ..
+                } if func_name == "to_u64" || func_name.ends_with(".to_u64") => {
+                    types_map.insert(*d, TypeId::U64);
+                }
+                MirInst::MethodCallStatic {
+                    dest: Some(d),
+                    func_name,
+                    ..
+                } if func_name == "to_i8" || func_name.ends_with(".to_i8") => {
+                    types_map.insert(*d, TypeId::I8);
+                }
+                MirInst::MethodCallStatic {
+                    dest: Some(d),
+                    func_name,
+                    ..
+                } if func_name == "to_i16" || func_name.ends_with(".to_i16") => {
+                    types_map.insert(*d, TypeId::I16);
+                }
+                MirInst::MethodCallStatic {
+                    dest: Some(d),
+                    func_name,
+                    ..
+                } if func_name == "to_i32" || func_name.ends_with(".to_i32") => {
+                    types_map.insert(*d, TypeId::I32);
+                }
+                MirInst::MethodCallStatic {
+                    dest: Some(d),
+                    func_name,
+                    ..
+                } if func_name == "to_i64"
+                    || func_name == "to_int"
+                    || func_name.ends_with(".to_i64")
+                    || func_name.ends_with(".to_int") =>
+                {
+                    types_map.insert(*d, TypeId::I64);
+                }
                 MirInst::MethodCallStatic { .. } => {}
                 MirInst::Call {
                     dest: Some(d), target, ..

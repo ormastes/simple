@@ -3329,7 +3329,7 @@ RuntimeValue rt_byte_array_new(RuntimeValue capacity) { return rt_array_new(capa
 
 RuntimeValue rt_typed_bytes_u8_push(RuntimeValue array, RuntimeValue value)
 {
-    return rt_array_push(array, ENCODE_INT(DECODE_INT(value) & 0xFF)) ? TRUE_VALUE : FALSE_VALUE;
+    return rt_array_push(array, ENCODE_INT(((uint64_t)value) & 0xFF)) ? TRUE_VALUE : FALSE_VALUE;
 }
 
 RuntimeValue rt_typed_words_u32_push(RuntimeValue array, RuntimeValue value)

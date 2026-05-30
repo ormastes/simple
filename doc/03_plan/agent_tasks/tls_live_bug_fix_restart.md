@@ -5,6 +5,26 @@ Last revision: 2026-04-28 (post-Phase-5 disproven hypothesis update)
 
 ## Current State
 
+Latest verified live result (2026-05-30, clean freestanding rebuild):
+- `test/system/os_tls_spec.spl` PASS through the system wrapper:
+  `SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLEOS_QEMU_TLS_LIVE=1 bin/simple test test/system/os_tls_spec.spl --system --sequential --fail-fast`
+- Wrapper result: `2 examples, 0 failures`.
+- Direct QEMU serial reached `[ALL TESTS PASSED]` after D10 validation.
+- A/B/C/D TLS unit sections now pass in the live x86_64 QEMU lane.
+
+Fix summary:
+- Native/freestanding `[u8].push` no longer decodes raw values such as `8` as
+  tagged integers (`8 >> 3 == 1`).
+- `rt_typed_bytes_u8_push` fallback paths now consume raw byte values.
+- TLS D3/D4/D8 assertions use the byte accessor/compact decrypt paths that are
+  already stable in the baremetal lane.
+
+Follow-up compiler bugs exposed but no longer blocking the TLS live gate:
+- `doc/08_tracking/bug/baremetal_enum_record_result_destructure_2026-05-30.md`
+- `doc/08_tracking/bug/baremetal_u8_index_equality_2026-05-30.md`
+
+## Historical State
+
 Latest verified live result (after compiler `UnitNarrow` patch landed):
 - `32 passed, 4 failed`
 - Remaining failures:

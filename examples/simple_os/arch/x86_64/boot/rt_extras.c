@@ -3961,7 +3961,7 @@ RuntimeValue rt_text_to_upper_ascii(RuntimeValue value) { return value; }
 RuntimeValue rt_time_now_unix(void) { return ENCODE_INT(0); }
 RuntimeValue rt_typed_bytes_u64_le_unchecked(void) { return ENCODE_INT(0); }
 RuntimeValue rt_typed_bytes_u8_push(RuntimeValue array, RuntimeValue value) {
-    return rt_array_push(array, ENCODE_INT(DECODE_INT(value) & 0xFF)) ? TRUE_VALUE : FALSE_VALUE;
+    return rt_array_push(array, ENCODE_INT(((uint64_t)value) & 0xFF)) ? TRUE_VALUE : FALSE_VALUE;
 }
 RuntimeValue rt_typed_bytes_u8_unchecked(void) { return ENCODE_INT(0); }
 RuntimeValue rt_typed_words_u32_at(void) { return ENCODE_INT(0); }

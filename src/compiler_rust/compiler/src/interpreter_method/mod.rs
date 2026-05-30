@@ -511,9 +511,9 @@ pub(crate) fn evaluate_method_call(
                         width: 64,
                     })
                 }
-                "to_i8" => return Ok(Value::Int(*value as i8 as i64)),
-                "to_i16" => return Ok(Value::Int(*value as i16 as i64)),
-                "to_i32" => return Ok(Value::Int(*value as i32 as i64)),
+                "to_i8" => return Ok(Value::Int(*value as u8 as i8 as i64)),
+                "to_i16" => return Ok(Value::Int(*value as u16 as i16 as i64)),
+                "to_i32" => return Ok(Value::Int(*value as u32 as i32 as i64)),
                 "to_i64" => return Ok(Value::Int(*value as i64)),
                 "to_string" | "to_text" => return Ok(Value::Str(value.to_string())),
                 "bit_count" | "count_ones" => return Ok(Value::Int(value.count_ones() as i64)),

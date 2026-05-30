@@ -1293,7 +1293,7 @@ int8_t rt_bytes_u8_set(SplArray* a, int64_t idx, int64_t val) {
 int8_t rt_typed_bytes_u8_push(SplArray* a, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    val = rt_core_numeric_arg(val) & 0xff;
+    val = val & 0xff;
     if (!rt_core_array_reserve(a, array->len + 1)) return 0;
     if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
         ((uint8_t*)array->data)[array->len++] = (uint8_t)val;

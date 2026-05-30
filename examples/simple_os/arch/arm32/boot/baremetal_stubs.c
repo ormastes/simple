@@ -1768,7 +1768,7 @@ RuntimeValue rt_tuple_set(RuntimeValue tuple, RuntimeValue index, RuntimeValue v
 RuntimeValue rt_byte_array_new(RuntimeValue capacity) { return rt_array_new(capacity); }
 RuntimeValue rt_typed_bytes_u8_push(RuntimeValue array, RuntimeValue value)
 {
-    return rt_array_push(array, ENCODE_INT(arm32_raw_or_encoded_int(value) & 0xFF)) ? TRUE_VALUE : FALSE_VALUE;
+    return rt_array_push(array, ENCODE_INT(((uint32_t)value) & 0xFF)) ? TRUE_VALUE : FALSE_VALUE;
 }
 RuntimeValue rt_typed_words_u32_push(RuntimeValue array, RuntimeValue value)
 {

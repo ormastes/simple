@@ -1793,8 +1793,7 @@ fn compile_inline_typed_bytes_u8_push<M: Module>(
     };
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
-    let raw_value = coerce_vreg_to_i64(ctx, builder, args[1]);
-    let value = inline_numeric_arg(builder, raw_value);
+    let value = coerce_vreg_to_i64(ctx, builder, args[1]);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
     let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
