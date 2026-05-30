@@ -14,8 +14,6 @@
 # Renders HTML to pixels: parse -> CSS cascade -> block layout -> paint text+boxes.
 #   SIMPLE_EXECUTION_MODE=interpret bin/simple run examples/ui/mini_html_render.spl <file.html>
 
-use std.gpu.engine2d.engine.{Engine2D}
-
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_cli_get_args() -> [text]
@@ -467,17 +465,176 @@ fn compute_styles(nodes: [HNode], rules: Rules) -> [Style]:
     styles
 
 # ---------------------------------------------------------------------------
+# Tiny 5x7 bitmap font + plain [u32] framebuffer rasterizer
+# ---------------------------------------------------------------------------
+# Each glyph is 7 rows; each row's low 5 bits are pixels (bit 4 = leftmost).
+# Uppercase and lowercase share shapes to stay lean. Layout geometry is derived
+# from glyph_scale() so wrapping matches exactly what fb_text draws.
+
+val FONT_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,:;!?-_()[]/\\'\"+=#%&@*<>"
+
+# returns the 7 row bitmasks for a glyph index into FONT_CHARSET
+fn glyph_rows(gi: i32) -> [i32]:
+    if gi == 0:  return [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]  # A
+    if gi == 1:  return [0b11110, 0b10001, 0b11110, 0b10001, 0b10001, 0b10001, 0b11110]  # B
+    if gi == 2:  return [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110]  # C
+    if gi == 3:  return [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110]  # D
+    if gi == 4:  return [0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000, 0b11111]  # E
+    if gi == 5:  return [0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000, 0b10000]  # F
+    if gi == 6:  return [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110]  # G
+    if gi == 7:  return [0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001, 0b10001]  # H
+    if gi == 8:  return [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]  # I
+    if gi == 9:  return [0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100]  # J
+    if gi == 10: return [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001]  # K
+    if gi == 11: return [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111]  # L
+    if gi == 12: return [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001]  # M
+    if gi == 13: return [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001]  # N
+    if gi == 14: return [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]  # O
+    if gi == 15: return [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000]  # P
+    if gi == 16: return [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101]  # Q
+    if gi == 17: return [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001]  # R
+    if gi == 18: return [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110]  # S
+    if gi == 19: return [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100]  # T
+    if gi == 20: return [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]  # U
+    if gi == 21: return [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100]  # V
+    if gi == 22: return [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001]  # W
+    if gi == 23: return [0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b01010, 0b10001]  # X
+    if gi == 24: return [0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100]  # Y
+    if gi == 25: return [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111]  # Z
+    if gi == 26: return [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110]  # 0
+    if gi == 27: return [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]  # 1
+    if gi == 28: return [0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111]  # 2
+    if gi == 29: return [0b11111, 0b00010, 0b00100, 0b00110, 0b00001, 0b10001, 0b01110]  # 3
+    if gi == 30: return [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010]  # 4
+    if gi == 31: return [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110]  # 5
+    if gi == 32: return [0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110]  # 6
+    if gi == 33: return [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000]  # 7
+    if gi == 34: return [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110]  # 8
+    if gi == 35: return [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100]  # 9
+    if gi == 36: return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000]  # space
+    if gi == 37: return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100]  # .
+    if gi == 38: return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b01000]  # ,
+    if gi == 39: return [0b00000, 0b00100, 0b00000, 0b00000, 0b00000, 0b00100, 0b00000]  # :
+    if gi == 40: return [0b00000, 0b00100, 0b00000, 0b00000, 0b00000, 0b00100, 0b01000]  # ;
+    if gi == 41: return [0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00000, 0b00100]  # !
+    if gi == 42: return [0b01110, 0b10001, 0b00010, 0b00100, 0b00100, 0b00000, 0b00100]  # ?
+    if gi == 43: return [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000]  # -
+    if gi == 44: return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111]  # _
+    if gi == 45: return [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010]  # (
+    if gi == 46: return [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000]  # )
+    if gi == 47: return [0b01110, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01110]  # [
+    if gi == 48: return [0b01110, 0b00010, 0b00010, 0b00010, 0b00010, 0b00010, 0b01110]  # ]
+    if gi == 49: return [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000]  # /
+    if gi == 50: return [0b10000, 0b01000, 0b01000, 0b00100, 0b00010, 0b00010, 0b00001]  # \
+    if gi == 51: return [0b00100, 0b00100, 0b01000, 0b00000, 0b00000, 0b00000, 0b00000]  # '
+    if gi == 52: return [0b01010, 0b01010, 0b01010, 0b00000, 0b00000, 0b00000, 0b00000]  # "
+    if gi == 53: return [0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000]  # +
+    if gi == 54: return [0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000]  # =
+    if gi == 55: return [0b01010, 0b11111, 0b01010, 0b01010, 0b11111, 0b01010, 0b00000]  # #
+    if gi == 56: return [0b11001, 0b11010, 0b00100, 0b01000, 0b10011, 0b00011, 0b00000]  # %
+    if gi == 57: return [0b01100, 0b10010, 0b01100, 0b10101, 0b10010, 0b01101, 0b00000]  # &
+    if gi == 58: return [0b01110, 0b10001, 0b10101, 0b10110, 0b10000, 0b01110, 0b00000]  # @
+    if gi == 59: return [0b00100, 0b10101, 0b01110, 0b00100, 0b01110, 0b10101, 0b00100]  # *
+    if gi == 60: return [0b00010, 0b00100, 0b01000, 0b10000, 0b01000, 0b00100, 0b00010]  # <
+    if gi == 61: return [0b01000, 0b00100, 0b00010, 0b00001, 0b00010, 0b00100, 0b01000]  # >
+    [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111]  # unknown -> box
+
+# integer nearest scale based on font size; 16->2, 34->4
+fn glyph_scale(fs: i32) -> i32:
+    var s = fs / 8
+    if s < 1:
+        s = 1
+    s
+
+# write `color` to a single framebuffer pixel (clipped)
+fn fb_put(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, color: u32):
+    if x < 0 or y < 0 or x >= fbw or y >= fbh:
+        return
+    fb[y * fbw + x] = color
+
+fn fb_clear(fb: [u32], color: u32):
+    var i = 0
+    val n = fb.len()
+    while i < n:
+        fb[i] = color
+        i = i + 1
+
+# clipped filled rectangle
+fn fb_rect(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32):
+    var x0 = x
+    var y0 = y
+    var x1 = x + w
+    var y1 = y + h
+    if x0 < 0:
+        x0 = 0
+    if y0 < 0:
+        y0 = 0
+    if x1 > fbw:
+        x1 = fbw
+    if y1 > fbh:
+        y1 = fbh
+    var py = y0
+    while py < y1:
+        val row = py * fbw
+        var px = x0
+        while px < x1:
+            fb[row + px] = color
+            px = px + 1
+        py = py + 1
+
+# draw one glyph at (x,y) scaled by `scale`
+fn fb_glyph(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, scale: i32):
+    val rows = glyph_rows(gi)
+    var ry = 0
+    while ry < 7:
+        val bits = rows[ry]
+        var rx = 0
+        while rx < 5:
+            val mask = 1 << (4 - rx)
+            if (bits & mask) != 0:
+                # fill a scale x scale block
+                val bx0 = x + rx * scale
+                val by0 = y + ry * scale
+                var dy = 0
+                while dy < scale:
+                    val yy = by0 + dy
+                    if yy >= 0 and yy < fbh:
+                        val row = yy * fbw
+                        var dx = 0
+                        while dx < scale:
+                            val xx = bx0 + dx
+                            if xx >= 0 and xx < fbw:
+                                fb[row + xx] = color
+                            dx = dx + 1
+                    dy = dy + 1
+            rx = rx + 1
+        ry = ry + 1
+
+# draw a string; advances 6*scale px per char (5px glyph + 1px gap)
+fn fb_text(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color: u32, scale: i32):
+    var i = 0
+    val n = s.len()
+    var cx = x
+    val adv = 6 * scale
+    while i < n:
+        val ch = s.substring(i, i + 1).upper()
+        if cx < fbw:
+            val gi = FONT_CHARSET.index_of(ch)
+            if gi >= 0 and gi != 36:
+                fb_glyph(fb, fbw, fbh, cx, y, gi, color, scale)
+        cx = cx + adv
+        i = i + 1
+
+# ---------------------------------------------------------------------------
 # Block layout (parallel arrays; recursion returns box height)
 # ---------------------------------------------------------------------------
+# Geometry derived from glyph_scale so wrapping matches fb_text exactly.
 
 fn char_w(fs: i32) -> i32:
-    val w = fs * 6 / 10
-    if w < 1:
-        return 1
-    w
+    6 * glyph_scale(fs)
 
 fn line_h(fs: i32) -> i32:
-    fs + fs / 3 + 2
+    9 * glyph_scale(fs)
 
 fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32]) -> i32:
     bx[i] = x
@@ -516,16 +673,16 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, bx: [
     h
 
 # ---------------------------------------------------------------------------
-# Paint to Engine2D
+# Paint directly into a [u32] framebuffer (no Engine2D)
 # ---------------------------------------------------------------------------
 
-fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], eng: Engine2D, vh: i32):
+fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], fb: [u32], fbw: i32, fbh: i32):
     # backgrounds first (document order = back to front)
     var i = 0
     while i < nodes.len():
         val st = styles[i]
-        if nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < vh:
-            eng.draw_rect_filled(bx[i], by[i], bw[i], bh[i], st.bg)
+        if nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
+            fb_rect(fb, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg)
         i = i + 1
     # text on top
     i = 0
@@ -533,7 +690,8 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         if nodes[i].tag == "#text":
             val st = styles[i]
             val txt = nodes[i].text_data.trim()
-            if txt.len() > 0 and by[i] < vh:
+            if txt.len() > 0 and by[i] < fbh:
+                val scale = glyph_scale(st.font_size)
                 val cw = char_w(st.font_size)
                 var cpl = bw[i] / cw
                 if cpl < 1:
@@ -541,12 +699,12 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 var off = 0
                 var ly = by[i]
                 val lh = line_h(st.font_size)
-                while off < txt.len() and ly < vh:
+                while off < txt.len() and ly < fbh:
                     var endc = off + cpl
                     if endc > txt.len():
                         endc = txt.len()
                     val line = txt.substring(off, endc)
-                    eng.draw_text(bx[i], ly, line, st.fg, st.font_size)
+                    fb_text(fb, fbw, fbh, bx[i], ly, line, st.fg, scale)
                     off = endc
                     ly = ly + lh
         i = i + 1
@@ -591,20 +749,22 @@ fn ascii_preview(px: [u32], w: i32, h: i32):
 
 fn render_html_pixels(html: text, w: i32, h: i32) -> [u32]:
     val nodes = parse_html(html)
+    print "  phase: parsed {nodes.len()} nodes"
     val rules = extract_css(html)
     val styles = compute_styles(nodes, rules)
+    print "  phase: styled"
     var bx: [i32] = [0; nodes.len()]
     var by: [i32] = [0; nodes.len()]
     var bw: [i32] = [0; nodes.len()]
     var bh: [i32] = [0; nodes.len()]
     layout(nodes, styles, 0, 0, 0, w, bx, by, bw, bh)
-    var eng = Engine2D.create_with_backend(w, h, "cpu")
-    eng.clear(argb(255, 255, 255))
-    paint(nodes, styles, bx, by, bw, bh, eng, h)
-    eng.present()
-    val px = eng.read_pixels()
-    eng.shutdown()
-    px
+    print "  phase: laid out"
+    val white = argb(255, 255, 255)
+    var fb: [u32] = [white; w * h]
+    print "  phase: fb allocated"
+    paint(nodes, styles, bx, by, bw, bh, fb, w, h)
+    print "  phase: painted"
+    fb
 
 fn html_path() -> text:
     val args = rt_cli_get_args()
