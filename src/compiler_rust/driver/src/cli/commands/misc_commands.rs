@@ -466,6 +466,7 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
     let is_rust_driver = is_rust_driver_binary(compiler);
 
     let mut cmd = Command::new(compiler);
+    cmd.env_remove("_SIMPLE_STACK_SET");
     if is_rust_driver {
         cmd.arg("native-build")
             .arg("--source")
@@ -477,6 +478,10 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             .arg("--entry")
             .arg("src/app/cli/main.spl")
             .arg("--entry-closure")
+            .arg("--threads")
+            .arg("1")
+            .arg("--timeout")
+            .arg("180")
             .arg("-o")
             .arg(output);
         cmd.env("SIMPLE_BOOTSTRAP", "1");
@@ -484,7 +489,7 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             cmd.env("SIMPLE_RUNTIME_PATH", rtp);
         }
         println!(
-            "  Running: {} native-build --entry-closure --entry src/app/cli/main.spl -o {}",
+            "  Running: {} native-build --entry-closure --threads 1 --timeout 180 --entry src/app/cli/main.spl -o {}",
             compiler, output
         );
     } else {
@@ -529,17 +534,10 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             // Get file size
             let size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
 
-            // Compute SHA-256 hash
-            let hash = Command::new("sha256sum")
-                .arg(output)
-                .output()
-                .ok()
-                .and_then(|o| {
-                    String::from_utf8(o.stdout)
-                        .ok()
-                        .map(|s| s.split_whitespace().next().unwrap_or("").to_string())
-                })
-                .unwrap_or_default();
+            let hash = sha256_file(output).unwrap_or_else(|e| {
+                eprintln!("  Failed to hash output: {e}");
+                String::new()
+            });
 
             StageResult {
                 success: true,
@@ -556,6 +554,23 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             }
         }
     }
+}
+
+fn sha256_file(path: &str) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buffer).map_err(|e| format!("read {path}: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn resolve_preferred_simple_binary() -> Option<PathBuf> {
@@ -608,16 +623,26 @@ fn platform_release_binary_candidates() -> Vec<PathBuf> {
 fn is_rust_driver_binary(compiler: &str) -> bool {
     let normalized = compiler.replace('\\', "/");
     normalized == "src/compiler_rust/target/release/simple"
+        || normalized == "src/compiler_rust/target/release/simple.exe"
         || normalized.ends_with("/src/compiler_rust/target/release/simple")
+        || normalized.ends_with("/src/compiler_rust/target/release/simple.exe")
         || normalized == "src/compiler_rust/target/bootstrap/simple"
+        || normalized == "src/compiler_rust/target/bootstrap/simple.exe"
         || normalized.ends_with("/src/compiler_rust/target/bootstrap/simple")
+        || normalized.ends_with("/src/compiler_rust/target/bootstrap/simple.exe")
         || normalized == "bin/simple"
+        || normalized == "bin/simple.exe"
         || normalized.ends_with("/bin/simple")
+        || normalized.ends_with("/bin/simple.exe")
         || normalized.contains("/bin/release/")
         || normalized.ends_with("/target/bootstrap/simple")
+        || normalized.ends_with("/target/bootstrap/simple.exe")
         || normalized.ends_with("/target/release/simple")
+        || normalized.ends_with("/target/release/simple.exe")
         || normalized.ends_with("/target/debug/simple")
+        || normalized.ends_with("/target/debug/simple.exe")
         || normalized == "simple"
+        || normalized == "simple.exe"
 }
 
 /// Handle 'brief' command - LLM-friendly code overview

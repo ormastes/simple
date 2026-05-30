@@ -1295,7 +1295,7 @@ impl<M: Module> CodegenBackend<M> {
                 .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
             let mut data_desc = cranelift_module::DataDescription::new();
-            data_desc.define_zeroinit(n * 8);
+            data_desc.define(vec![0u8; n * 8].into_boxed_slice());
 
             // For each method slot, write a relocation pointing to the implementing function.
             for (slot, fn_name) in method_fns.iter().enumerate() {

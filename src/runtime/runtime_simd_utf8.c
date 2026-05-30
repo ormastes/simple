@@ -10,6 +10,7 @@
 #include "runtime_simd_dispatch.h"
 #include <stdlib.h>
 #include <ctype.h>
+#include <string.h>
 
 #if SIMD_HAS_X86
 #  include <immintrin.h>
@@ -481,12 +482,26 @@ static int64_t neon_utf8_find_invalid(const uint8_t* data, uint64_t len) {
 
 SimdTextDispatch g_simd_text = {0};
 
+static const void* scalar_memmem_portable(const void* haystack, size_t hlen,
+                                          const void* needle, size_t nlen) {
+    const uint8_t* h = (const uint8_t*)haystack;
+    const uint8_t* n = (const uint8_t*)needle;
+    if (nlen == 0) return haystack;
+    if (nlen > hlen) return NULL;
+    for (size_t i = 0; i <= hlen - nlen; i++) {
+        if (h[i] == n[0] && memcmp(h + i, n, nlen) == 0) {
+            return h + i;
+        }
+    }
+    return NULL;
+}
+
 /* Scalar fallbacks for search/case (used as initial defaults) */
 static int64_t scalar_str_search_default(const uint8_t* haystack, uint64_t hlen,
                                          const uint8_t* needle, uint64_t nlen) {
     if (nlen == 0) return 0;
     if (nlen > hlen) return -1;
-    const void* result = memmem(haystack, hlen, needle, nlen);
+    const void* result = scalar_memmem_portable(haystack, (size_t)hlen, needle, (size_t)nlen);
     if (!result) return -1;
     return (int64_t)((const uint8_t*)result - haystack);
 }

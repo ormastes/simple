@@ -173,18 +173,25 @@ Stage 4: Full CLI (compiled by verified stage)
 
 ### Quick Bootstrap
 
+The canonical entrypoint in the current tree is the Rust driver command:
+
 ```bash
-# Linux / macOS (same script, auto-detects platform)
-scripts/bootstrap/bootstrap-from-scratch.sh --deploy
+# Use the default seed compiler discovered by the driver
+bin/simple build bootstrap
 
-# Windows (Git Bash / MSYS2)
-scripts/bootstrap/bootstrap-windows.sh --deploy
-
-# Keep artifacts in a separate directory
-scripts/bootstrap/bootstrap-from-scratch.sh --output=build/bootstrap
+# Use an explicit seed and output directory
+bin/simple build bootstrap --seed=src/compiler_rust/target/debug/simple --output=build/bootstrap
 ```
 
-The `--deploy` flag copies the final binary to `bin/release/<triple>/simple` and runs `scripts/setup.sh` automatically to regenerate the `bin/simple` wrapper and related launchers.
+On Windows, pass the `.exe` seed path:
+
+```powershell
+.\src\compiler_rust\target\debug\simple.exe build bootstrap --seed=src\compiler_rust\target\debug\simple.exe --output=build\bootstrap
+```
+
+The older `scripts/bootstrap/bootstrap-from-scratch.sh` and
+`scripts/bootstrap/bootstrap-windows.sh` wrappers are not present in this tree.
+Use `simple build bootstrap` directly unless those wrappers are restored.
 
 Bootstrap output uses `<arch>-<vendor>-<os>-<abi>` target triples:
 
@@ -203,20 +210,17 @@ build/bootstrap/full/<triple>/simple
 
 | Flag | Description |
 |------|-------------|
-| `--deploy` | Copy result to `bin/release/<triple>/simple` and run `setup.sh` |
-| `--backend=X` | Override bootstrap backend (`llvm-lib` by default) |
+| `--backend=X` | Override bootstrap backend (`auto` by default) |
 | `--output=DIR` | Write stage outputs to a custom directory |
-| `--keep-artifacts` | Keep `build/` directory |
-| `--no-verify` | Compatibility flag; wrapper still verifies stage hashes |
+| `--seed=PATH` | Seed compiler binary. Use `.exe` on Windows. |
 
-### Bootstrap Scripts
+### Bootstrap Support Files
 
-| Script | Purpose |
-|--------|---------|
-| `scripts/setup.sh` | Post-bootstrap setup — creates `bin/simple` symlink |
-| `scripts/setup.cmd` | Windows CMD/PowerShell equivalent |
-| `scripts/bootstrap/bootstrap-from-scratch.sh` | Verified staged Linux/macOS/FreeBSD bootstrap |
-| `scripts/bootstrap/bootstrap-windows.sh` | Windows bootstrap (MSVC / MinGW auto-detect) |
+| Path | Purpose |
+|------|---------|
+| `src/compiler_rust/driver/src/cli/commands/misc_commands.rs` | Implements `simple build bootstrap` |
+| `src/compiler_rust/native_all/` | Rust static archive used when the Simple compiler links hosted compiler/runtime symbols |
+| `src/runtime/runtime_native.c` | C runtime lane used by native bootstrap builds |
 
 ---
 

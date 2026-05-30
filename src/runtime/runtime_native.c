@@ -27,6 +27,10 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#if defined(_WIN32)
+#include <io.h>
+#include <malloc.h>
+#endif
 #if !defined(_WIN32)
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -992,9 +996,29 @@ struct rt_dma_host_slot {
 
 static struct rt_dma_host_slot g_rt_dma_host_slots[RT_DMA_HOST_MAX_SLOTS];
 
+#if !defined(_WIN32)
 /* posix_memalign is in POSIX-2001; declare explicitly so this file
  * compiles under strict `-std=c11` without a feature-test macro. */
 extern int posix_memalign(void **memptr, size_t alignment, size_t size);
+#endif
+
+static void* rt_dma_aligned_alloc(size_t alignment, size_t size) {
+#if defined(_WIN32)
+    return _aligned_malloc(size, alignment);
+#else
+    void* p = NULL;
+    if (posix_memalign(&p, alignment, size) != 0) return NULL;
+    return p;
+#endif
+}
+
+static void rt_dma_aligned_free(void* p) {
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    free(p);
+#endif
+}
 
 int64_t rt_dma_alloc(int64_t size, int32_t dir_raw) {
     (void)dir_raw;
@@ -1006,8 +1030,8 @@ int64_t rt_dma_alloc(int64_t size, int32_t dir_raw) {
     }
     if (slot < 0) return -1;
 
-    void *p = NULL;
-    if (posix_memalign(&p, RT_DMA_HOST_PAGE_SIZE, (size_t)size) != 0 || !p) {
+    void *p = rt_dma_aligned_alloc(RT_DMA_HOST_PAGE_SIZE, (size_t)size);
+    if (!p) {
         return -1;
     }
     g_rt_dma_host_slots[slot].virt   = p;
@@ -1019,7 +1043,7 @@ int64_t rt_dma_alloc(int64_t size, int32_t dir_raw) {
 void rt_dma_free(int64_t handle) {
     if (handle < 0 || handle >= RT_DMA_HOST_MAX_SLOTS) return;
     if (g_rt_dma_host_slots[handle].in_use) {
-        free(g_rt_dma_host_slots[handle].virt);
+        rt_dma_aligned_free(g_rt_dma_host_slots[handle].virt);
     }
     g_rt_dma_host_slots[handle].virt   = NULL;
     g_rt_dma_host_slots[handle].size   = 0;
@@ -1600,6 +1624,24 @@ static const uint8_t* rt_core_string_bytes(int64_t value, uint64_t* len_out) {
     return (const uint8_t*)s->data;
 }
 
+static ssize_t rt_file_read_at_fd(int fd, void* buffer, size_t size, int64_t offset) {
+#if defined(_WIN32)
+    if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
+    return (ssize_t)read(fd, buffer, (unsigned int)size);
+#else
+    return pread(fd, buffer, size, (off_t)offset);
+#endif
+}
+
+static ssize_t rt_file_write_at_fd(int fd, const void* data, size_t size, int64_t offset) {
+#if defined(_WIN32)
+    if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
+    return (ssize_t)write(fd, data, (unsigned int)size);
+#else
+    return pwrite(fd, data, size, (off_t)offset);
+#endif
+}
+
 const char* rt_file_read_text_at(const char* path_value, int64_t offset, int64_t size) {
     char* path = rt_core_string_to_cpath((int64_t)(uintptr_t)path_value);
     if (!path || offset < 0) {
@@ -1621,7 +1663,7 @@ const char* rt_file_read_text_at(const char* path_value, int64_t offset, int64_t
         return "";
     }
 
-    ssize_t bytes_read = pread(fd, buffer, (size_t)size, (off_t)offset);
+    ssize_t bytes_read = rt_file_read_at_fd(fd, buffer, (size_t)size, offset);
     close(fd);
     if (bytes_read < 0) {
         free(buffer);
@@ -1650,7 +1692,7 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
     free(path);
     if (fd < 0) return -1;
 
-    ssize_t bytes_written = pwrite(fd, data, (size_t)data_len, (off_t)offset);
+    ssize_t bytes_written = rt_file_write_at_fd(fd, data, (size_t)data_len, offset);
     close(fd);
     return (int64_t)bytes_written;
 }
@@ -1701,7 +1743,11 @@ int rt_file_append_text(const char* path, const char* content) {
 
 static int rt_core_mkdir_one(const char* path) {
     if (!path || !*path) return 0;
+#if defined(_WIN32)
+    if (mkdir(path) == 0) return 1;
+#else
     if (mkdir(path, 0777) == 0) return 1;
+#endif
     return rt_is_dir(path) ? 1 : 0;
 }
 

@@ -360,6 +360,8 @@ pub(crate) fn find_native_all_library() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         candidates.extend_from_slice(&[
+            "src/compiler_rust/target/x86_64-pc-windows-gnu/debug/libsimple_native_all.a",
+            "src/compiler_rust/target/x86_64-pc-windows-gnu/release/libsimple_native_all.a",
             "src/compiler_rust/target/debug/simple_native_all.lib",
             "src/compiler_rust/target/release/simple_native_all.lib",
             "src/compiler_rust/target/bootstrap/simple_native_all.lib",
@@ -628,20 +630,22 @@ pub(crate) fn is_system_symbol(sym: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
         let name = sym.strip_prefix('_').unwrap_or(sym);
-        return is_windows_system_name(sym) || is_windows_system_name(name);
+        return is_windows_system_name(sym)
+            || is_windows_system_name(name)
+            || is_windows_system_prefix(sym)
+            || is_windows_system_prefix(name);
     }
-    let name = sym.strip_prefix('_').unwrap_or(sym);
-    if is_known_system_name(sym) || is_known_system_name(name) {
-        return true;
+    #[cfg(not(target_os = "windows"))]
+    {
+        let name = sym.strip_prefix('_').unwrap_or(sym);
+        if is_known_system_name(sym) || is_known_system_name(name) {
+            return true;
+        }
+        if cfg!(target_os = "macos") {
+            return is_macos_system_symbol(sym);
+        }
+        false
     }
-    if cfg!(target_os = "macos") {
-        return is_macos_system_symbol(sym);
-    }
-    #[cfg(target_os = "windows")]
-    if is_windows_system_name(sym) || is_windows_system_name(name) {
-        return true;
-    }
-    false
 }
 
 /// Return true for libgcc/compiler-rt low-level helper names.
@@ -704,6 +708,7 @@ fn is_windows_system_name(name: &str) -> bool {
             | "realloc"
             | "free"
             | "aligned_alloc"
+            | "posix_memalign"
             | "memcpy"
             | "memmove"
             | "memset"
@@ -735,8 +740,21 @@ fn is_windows_system_name(name: &str) -> bool {
             | "fopen"
             | "fclose"
             | "fflush"
+            | "fgetc"
+            | "fgets"
             | "fseek"
             | "ftell"
+            | "open"
+            | "read"
+            | "write"
+            | "close"
+            | "mkdir"
+            | "remove"
+            | "rename"
+            | "rewind"
+            | "stat"
+            | "strtoll"
+            | "_lseeki64"
             | "exit"
             | "_exit"
             | "abort"
@@ -746,16 +764,52 @@ fn is_windows_system_name(name: &str) -> bool {
             | "sqrt"
             | "sqrtf"
             | "sin"
+            | "sinf"
             | "cos"
+            | "cosf"
             | "tan"
+            | "tanf"
+            | "acos"
+            | "acosf"
+            | "asin"
+            | "asinf"
+            | "atan"
+            | "atan2"
+            | "atan2f"
+            | "atanf"
+            | "cbrt"
+            | "cbrtf"
+            | "cosh"
+            | "coshf"
             | "exp"
+            | "expf"
+            | "fma"
+            | "fmaf"
             | "log"
+            | "log10"
+            | "log10f"
+            | "log2"
+            | "log2f"
+            | "logf"
             | "pow"
+            | "powf"
             | "fabs"
+            | "fabsf"
             | "ceil"
+            | "ceilf"
             | "floor"
+            | "floorf"
             | "round"
+            | "roundf"
             | "fmod"
+            | "fmodf"
+            | "sinh"
+            | "sinhf"
+            | "tanh"
+            | "tanhf"
+            | "trunc"
+            | "truncf"
+            | "_hypot"
             | "qsort"
             | "bsearch"
             | "abs"
@@ -773,10 +827,68 @@ fn is_windows_system_name(name: &str) -> bool {
             | "__security_cookie"
             | "__security_check_cookie"
             | "__GSHandlerCheck"
+            | "___chkstk_ms"
+            | "__main"
+            | "__popcountdi2"
             | "__acrt_iob_func"
             | "__stdio_common_vfprintf"
             | "__stdio_common_vsprintf"
+            | "clock_gettime"
+            | "_CxxThrowException"
+            | "__CxxFrameHandler3"
+            | "_tls_index"
+            | "_tls_used"
+            | "CloseHandle"
+            | "CoTaskMemFree"
+            | "CreateFileMappingW"
+            | "DuplicateHandle"
+            | "FlushFileBuffers"
+            | "FlushViewOfFile"
+            | "GetConsoleMode"
+            | "GetCurrentProcess"
+            | "GetLogicalProcessorInformation"
+            | "GetSystemInfo"
+            | "MapViewOfFile"
+            | "SHGetKnownFolderPath"
+            | "SetConsoleMode"
+            | "UnmapViewOfFile"
+            | "VirtualProtect"
+            | "lstrlenW"
     )
+}
+
+#[cfg(target_os = "windows")]
+fn is_windows_system_prefix(name: &str) -> bool {
+    name.starts_with("__imp_")
+        || name.starts_with("__mingw_")
+        || name.starts_with("__p__")
+        || name.starts_with("__std_")
+        || name.starts_with("__acrt_")
+        || name.starts_with("__stdio_common_")
+        || name.starts_with("__security_")
+        || name.starts_with("__Cxx")
+        || name.starts_with("_Cxx")
+        || name.starts_with("_tls_")
+        || name.starts_with("_Z")
+        || name.starts_with("__Z")
+        || name.starts_with("Rtl")
+        || name.starts_with("Nt")
+        || name.starts_with("Get")
+        || name.starts_with("Set")
+        || name.starts_with("Create")
+        || name.starts_with("Close")
+        || name.starts_with("Delete")
+        || name.starts_with("Duplicate")
+        || name.starts_with("Flush")
+        || name.starts_with("Map")
+        || name.starts_with("Unmap")
+        || name.starts_with("Virtual")
+        || name.starts_with("Wait")
+        || name.starts_with("WideChar")
+        || name.starts_with("MultiByte")
+        || name.starts_with("Heap")
+        || name.starts_with("Local")
+        || name.starts_with("SH")
 }
 
 fn is_macos_system_symbol(sym: &str) -> bool {

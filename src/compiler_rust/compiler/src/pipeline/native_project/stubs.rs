@@ -602,7 +602,7 @@ pub(crate) fn generate_stub_object(
         let stub_c = temp_dir.join("_stubs.c");
         std::fs::write(&stub_c, "/* no stubs needed */\n").map_err(|e| format!("write stubs: {e}"))?;
         let stub_o = temp_dir.join("_stubs.o");
-        let empty_cc = std::env::var("CC").unwrap_or_else(|_| "clang".to_string());
+        let empty_cc = find_c_compiler();
         let status = std::process::Command::new(&empty_cc)
             .arg("-c")
             .arg("-ffunction-sections")

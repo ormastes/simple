@@ -883,7 +883,20 @@ int main(int argc, char** argv) {
         if !is_clang_cl && !is_msvc {
             cmd.arg("-Wl,--gc-sections");
         }
-        let link_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
+        let link_config = {
+            #[cfg(target_os = "windows")]
+            {
+                if !is_clang_cl && !is_msvc {
+                    simple_common::platform::link_config::PlatformLinkConfig::windows_mingw()
+                } else {
+                    simple_common::platform::link_config::PlatformLinkConfig::for_host()
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                simple_common::platform::link_config::PlatformLinkConfig::for_host()
+            }
+        };
         for path in &link_config.library_search_paths {
             cmd.arg(format!("-L{}", path));
         }
