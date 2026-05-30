@@ -334,7 +334,7 @@ fn translate_instruction(
         case BinOp(dest, op, left, right):
             val a = translate_operand(ctx, left, value_map, slot_map, func)
             val b = translate_operand(ctx, right, value_map, slot_map, func)
-            val result = translate_binop(ctx, op, a, b, left, func)
+            val result = translate_binop(ctx, cl_module, op, a, b, left, func)
             value_map[dest.id] = result
             if slot_map.has(dest.id):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
@@ -343,7 +343,7 @@ fn translate_instruction(
         case CheckedBinOp(dest, op, left, right):
             val a = translate_operand(ctx, left, value_map, slot_map, func)
             val b = translate_operand(ctx, right, value_map, slot_map, func)
-            val result = translate_binop(ctx, op, a, b, left, func)
+            val result = translate_binop(ctx, cl_module, op, a, b, left, func)
             value_map[dest.id] = result
 
         case UnaryOp(dest, op, operand):
@@ -627,7 +627,17 @@ fn translate_const_value(ctx: i64, value: MirConstValue, type_: MirType) -> i64:
 # Binary Operation Translation
 # ============================================================================
 
-fn translate_binop(ctx: i64, op: MirBinOp, a: i64, b: i64, left_operand: MirOperand, func: MirFunction) -> i64:
+fn translate_runtime_binop_call(ctx: i64, cl_module: i64, name: text, a: i64, b: i64) -> i64:
+    val sig = cranelift_new_signature(CL_CC_SYSTEM_V)
+    cranelift_sig_add_param(sig, CL_TYPE_I64)
+    cranelift_sig_add_param(sig, CL_TYPE_I64)
+    cranelift_sig_set_return(sig, CL_TYPE_I64)
+    val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT)
+    val func_ref = cranelift_import_function(ctx, handle)
+    var args: [i64] = [a, b]
+    cranelift_call(ctx, func_ref, args.ptr(), args.len())
+
+fn translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, a: i64, b: i64, left_operand: MirOperand, func: MirFunction) -> i64:
     val is_float = operand_is_float(left_operand, func)
     match op:
         case Add:
@@ -664,8 +674,20 @@ fn translate_binop(ctx: i64, op: MirBinOp, a: i64, b: i64, left_operand: MirOper
             if is_float: cranelift_fcmp(ctx, CL_FCMP_GE, a, b) else: cranelift_icmp(ctx, CL_CMP_SGE, a, b)
         case Offset:
             cranelift_iadd(ctx, a, b)
+        case MatMul:
+            translate_runtime_binop_call(ctx, cl_module, "__simple_runtime_matmul", a, b)
+        case BroadcastAdd:
+            translate_runtime_binop_call(ctx, cl_module, "__simple_runtime_broadcast_add", a, b)
+        case BroadcastSub:
+            translate_runtime_binop_call(ctx, cl_module, "__simple_runtime_broadcast_sub", a, b)
+        case BroadcastMul:
+            translate_runtime_binop_call(ctx, cl_module, "__simple_runtime_broadcast_mul", a, b)
+        case BroadcastDiv:
+            translate_runtime_binop_call(ctx, cl_module, "__simple_runtime_broadcast_div", a, b)
+        case BroadcastPow:
+            translate_runtime_binop_call(ctx, cl_module, "__simple_runtime_broadcast_pow", a, b)
         case _:
-            # Pow, MatMul, Broadcast ops: fall back to integer add
+            # Pow and unsupported future ops still use the scalar fallback.
             cranelift_iadd(ctx, a, b)
 
 # ============================================================================

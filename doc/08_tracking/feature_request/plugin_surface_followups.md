@@ -1,6 +1,6 @@
 # Plugin Surface — Follow-up Feature Requests
 
-**Status: PARTIAL** — FR-PLUG-0001 is implemented in source and verified with a rebuilt debug driver. FR-PLUG-0002 and FR-PLUG-0003 are structurally implemented (pure Simple, no Rust). FR-PLUG-0004 has pure-Simple static-marker verification and focused Cranelift fallback evidence, but remains backend-fusion blocked by missing codegen pattern context. FR-PLUG-0005 is implemented as an explicit DI runtime-slot index with plugin-backed binding validation and deterministic resolution. See per-item status below.
+**Status: PARTIAL** — FR-PLUG-0001 is implemented in source and verified with a rebuilt debug driver. FR-PLUG-0002 and FR-PLUG-0003 are structurally implemented (pure Simple, no Rust). FR-PLUG-0004 now has pure-Simple static-marker verification plus Cranelift single-op runtime-call emission for `MatMul` and broadcast ops; true `rt_gemm_add` fusion remains blocked on adjacent-pattern context and shape/dimension operands. FR-PLUG-0005 is implemented as an explicit DI runtime-slot index with plugin-backed binding validation and deterministic resolution. See per-item status below.
 
 **Verification pass: 2026-05-29** — All five items reviewed against source. No new code added (no live-`.so` fixture available; FR-PLUG-0005 is deep-work). See per-item notes below.
 
@@ -147,7 +147,7 @@ release before the surface is declared stable.
 - **Filed-by:** /dev runtime-api-block-sugar-plugins (sstack Phase 1 explicit defer)
 - **Target:** plugin / 70.backend.cranelift
 - **Priority:** P2
-- **Status:** Open — BACKEND-PATTERN-BLOCKED
+- **Status:** Open — FUSION-CONTEXT-BLOCKED
 - **Requested-semantics:**
   AC-3 v1 ships a *dynamic-load* sugar registry consulted by the interpreter.
   The `[STATIC-NEXT]` marker at `c_backend_translate_ops.spl:145` (the
@@ -188,12 +188,25 @@ release before the surface is declared stable.
   closed within plugin/sugar docs/tests alone: codegen needs a real static-rule
   table plus MIR/codegen pattern context for `MatMul` followed by
   `BroadcastAdd`, then a backend emission path for the fused GEMM-add call.
+- **Verification (2026-05-30, backend advance):** Cranelift no longer lowers
+  `MatMul` and broadcast binary ops through the generic integer-add fallback.
+  `cranelift_codegen_adapter.spl` now routes those single MIR ops through
+  imported runtime calls (`__simple_runtime_matmul`,
+  `__simple_runtime_broadcast_add`, and sibling broadcast helpers), matching the
+  C backend's runtime-call shape. Focused spec coverage now fails if the old
+  `Pow, MatMul, Broadcast ops: fall back to integer add` text returns. The
+  smallest remaining missing piece for true PERF-SUGAR-002 fusion is explicit:
+  codegen still visits one `MirInst` at a time and `translate_binop` sees only
+  the current op plus already-lowered operands. To emit
+  `rt_gemm_add(A, B, C, m, n, k)`, MIR/codegen needs adjacent-pattern context
+  for `MatMul` result consumed by `BroadcastAdd`, plus shape/dimension operands
+  (`m`, `n`, `k`) carried into the fused backend call.
 - **Notes:** Verification of this in interpreter mode is impossible by
   design — needs a Cranelift-mode test harness (see
   `feedback_compile_mode_false_greens.md` for current limitations).
   The `[STATIC-NEXT]` annotation at `collection_desugar.spl` (in the
   `desugar_collections` loop added by FR-PLUG-0003) marks the exact insertion
-  point for this future specialisation. No code changes in this work cycle.
+  point for this future specialisation.
 
 ### FR-PLUG-0005 — DI runtime-slot plugin loader integration
 

@@ -233,10 +233,20 @@ describe "Sugar Plugin AC-3b: PERF-SUGAR-002 gemm_add hook":
         expect(backend).to_contain("[STATIC-NEXT] sugar rule registry")
         expect(backend).to_contain("__simple_runtime_matmul")
 
-    it "FR-PLUG-0004 blocker: Cranelift matrix ops still use generic fallback":
+    it "FR-PLUG-0004 regression: Cranelift matrix ops emit runtime calls instead of generic iadd":
         val cranelift = rt_file_read_text("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
 
-        expect(cranelift).to_contain("fn translate_binop(ctx: i64, op: MirBinOp, a: i64, b: i64, left_operand: MirOperand, func: MirFunction) -> i64")
-        expect(cranelift).to_contain("# Pow, MatMul, Broadcast ops: fall back to integer add")
-        expect(cranelift).to_contain("case _:")
-        expect(cranelift).to_contain("cranelift_iadd(ctx, a, b)")
+        expect(cranelift).to_contain("fn translate_runtime_binop_call(ctx: i64, cl_module: i64, name: text, a: i64, b: i64) -> i64")
+        expect(cranelift).to_contain("case MatMul:")
+        expect(cranelift).to_contain("__simple_runtime_matmul")
+        expect(cranelift).to_contain("case BroadcastAdd:")
+        expect(cranelift).to_contain("__simple_runtime_broadcast_add")
+        expect(cranelift.contains("# Pow, MatMul, Broadcast ops: fall back to integer add")).to_equal(false)
+
+    it "FR-PLUG-0004 remaining fusion gap: adapter lowers one BinOp at a time":
+        val cranelift = rt_file_read_text("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+
+        expect(cranelift).to_contain("for inst in block.instructions:")
+        expect(cranelift).to_contain("translate_instruction(ctx, inst, value_map, slot_map, block_map, cl_module, func_handles, func)")
+        expect(cranelift).to_contain("translate_binop(ctx, cl_module, op, a, b, left, func)")
+        expect(cranelift.contains("rt_gemm_add")).to_equal(false)
