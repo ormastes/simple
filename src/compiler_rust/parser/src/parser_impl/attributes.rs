@@ -59,8 +59,6 @@ pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     "deprecated",
     "config",
     "extern",
-    "async",
-    "unsafe",
     "concurrency_mode",
     "no_auto_defer",
     // SimpleOS / codegen
@@ -98,7 +96,6 @@ impl<'a> Parser<'a> {
             TokenKind::Identifier { name, .. } => is_known_attribute_name(name),
             TokenKind::Allow => true,
             TokenKind::Default => true,
-            TokenKind::Async => true,
             TokenKind::Extern => true,
             TokenKind::Export => true,
             _ => false,
