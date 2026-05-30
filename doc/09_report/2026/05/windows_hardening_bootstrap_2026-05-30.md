@@ -30,6 +30,7 @@ Bootstrap/native-build hardening on Windows after MCP, SPipe, and Vulkan fixes.
 - Native project object-cache bypass now detects likely real inline-assembly sidecars instead of rejecting any source text that merely mentions `asm`.
 - Stripped Windows native links normalize PE `TimeDateStamp` and `CheckSum` fields after linking so repeated release-like builds hash reproducibly.
 - After rebasing onto the current Windows-valid tree, the Cranelift adapter imports and annotates `GemmAddFusion` explicitly at the `detect_gemm_add_pair(...).unwrap()` use site, clearing the current `ANY.dest` native HIR failure.
+- Windows safe-mode test child processes now clear `_SIMPLE_STACK_SET` before spawning `simple run <spec>`, so each child re-enters the 64 MB stack trampoline instead of inheriting the parent's marker and running on the default Windows stack.
 
 ## Verified
 
@@ -72,4 +73,17 @@ Bootstrap/native-build hardening on Windows after MCP, SPipe, and Vulkan fixes.
 
 - Full `simple build bootstrap` now passes the Windows three-stage deterministic hash comparison.
 - Full compiler native-build still relies on 959 generated stub symbols on the current rebased tree. The next bootstrap slice should reduce internal stubs before treating the native compiler lane as production-clean.
-- Whole-repository tests have not been re-run after this bootstrap slice; the focused native project tests and full bootstrap gate are the current evidence.
+
+## Whole-Test Gate
+
+- Initial broad command: `src\compiler_rust\target\debug\simple.exe test --fail-fast`
+  - Stopped manually after hundreds of failures because parallel execution did not stop on the first failure.
+  - Representative artifacts showed specs passing their examples and then child processes ending with `thread 'main' has overflowed its stack`.
+- Fixed the safe-mode child stack marker inheritance and rebuilt `simple-driver`.
+- Representative uncached reruns now pass:
+  - `simple.exe test test\unit\app\branch_coverage_8_spec.spl --fail-fast --no-cache`
+  - `simple.exe test test\feature\usage\di_lock_feature_spec.spl --fail-fast --no-cache`
+- Follow-up broad command: `src\compiler_rust\target\debug\simple.exe test --fail-fast --no-cache`
+  - Stopped manually after the failure profile changed to real test failures rather than stack overflows.
+  - Current first failure classes include code-quality CLI expectation failures, type-inference substitution behavior, AOP pointcut matching, Windows/Wine kernel32 expectations, WebGPU/DXVK availability, and several hardware/QEMU preflight specs.
+  - `--fail-fast` does not currently stop already scheduled parallel safe-mode tests, so isolated reruns are required for actionable triage.

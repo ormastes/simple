@@ -684,6 +684,9 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
     cmd.args(build_safe_mode_child_args(path, options))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Child specs are fresh Simple processes. Do not inherit the parent's
+    // stack-trampoline marker or they will skip the large-stack main thread.
+    cmd.env_remove("_SIMPLE_STACK_SET");
 
     #[cfg(unix)]
     {
