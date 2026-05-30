@@ -38,8 +38,8 @@ pure `EditorLaunchOptions` contract used by `src/app/editor/main.spl`,
 `src/app/editor/tui_main.spl`, `src/app/ide/main.spl`, and
 `examples/ide/simple_ide_launch.spl`.
 Reusable path/text helpers are shared through `src/lib/editor/core/path_text.spl`
-so editor controllers and MCP helpers do not keep separate dirname, basename,
-payload, CSV, integer, and markdown-path parsers.
+so editor controllers, GUI shell rendering, and MCP helpers do not keep separate
+dirname, basename, payload, CSV, integer, and markdown-path parsers.
 Extension-root policy is shared through `src/lib/editor/extensions/roots.spl`;
 the app adapter injects `SIMPLE_EDITOR_EXTENSION_PATH` and `HOME` so host
 environment access stays out of the reusable library policy.

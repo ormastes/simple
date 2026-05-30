@@ -1,10 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-30 02:30:12*
+*Generated: 2026-05-30 03:02:08*
 
-❌ **tmp_rsa_mont_probe_spec.spl** (63ms)
-  - Source: `tmp_rsa_mont_probe_spec.spl`
-  - Generated doc: `spec/tmp_rsa_mont_probe_spec.md`
+## test/system
+
+❌ **editor_markdown_spec.spl** (273ms)
+  - Source: `test/system/editor_markdown_spec.spl`
+  - Generated doc: `spec/editor_markdown_spec.md`
 
 
 ---
@@ -14,4 +16,4 @@
 - **Total:** 1 tests
 - **Passed:** 0 ✅
 - **Failed:** 1 ❌
-- **Duration:** 66ms
+- **Duration:** 276ms
