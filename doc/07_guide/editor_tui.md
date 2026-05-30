@@ -36,6 +36,14 @@ The editor library follows VS Code-like package names for reusable code:
 - `src/lib/editor/services/` — LSP, diagnostics, search, wiki, debug, watchers
 - `src/lib/editor/unified/` — shared adapters for TUI/VS Code/project surfaces
 
+The extension surface is VS Code-like in behavior, not only in naming:
+`src/lib/editor/extensions/host.spl` indexes `extension.sdn` manifests from
+configured roots, activates on `onLanguage:*` / `onCommand:*` events, and
+registers command, language, and debug-adapter contributions. Root policy stays
+in `src/lib/editor/extensions/roots.spl`; app code only injects environment
+values. `test/unit/lib/editor/extension_discovery_contract_spec.spl` covers a
+real temp-root manifest discovery and activation path.
+
 Do not add duplicate MDSOC-numbered aliases such as `30.view` or
 `60.services`. MDSOC+ layering is documented in architecture/design docs; code
 paths stay semantic so `src/app/editor`, `src/app/svim`, embedded editor apps,

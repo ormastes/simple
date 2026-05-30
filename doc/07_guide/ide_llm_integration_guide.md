@@ -43,6 +43,11 @@ dirname, basename, payload, CSV, integer, and markdown-path parsers.
 Extension-root policy is shared through `src/lib/editor/extensions/roots.spl`;
 the app adapter injects `SIMPLE_EDITOR_EXTENSION_PATH` and `HOME` so host
 environment access stays out of the reusable library policy.
+The concrete extension points live in `src/lib/editor/extensions/host.spl`:
+`extension.sdn` manifests are indexed from configured roots, activated by
+`onLanguage:*` / `onCommand:*` events, and contribute command, language, and
+debug-adapter registrations. `test/unit/lib/editor/extension_discovery_contract_spec.spl`
+now covers the real temp-root discovery and activation path.
 
 ### Host and SimpleOS runtime contract
 
