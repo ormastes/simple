@@ -68,6 +68,8 @@ All documentation lives under numbered top-level folders.
 | Graphics feature spec | [06_spec/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl](06_spec/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl) |
 | GPU API notes | [07_guide/api/gpu_api.md](07_guide/api/gpu_api.md) |
 | Optimization plugin integration | [07_guide/compiler_optimization_plugin.md](07_guide/compiler_optimization_plugin.md) |
+| IDE + LLM/agent-dashboard integration | [07_guide/ide_llm_integration_guide.md](07_guide/ide_llm_integration_guide.md) |
+| Editor TUI components & status | [07_guide/editor_tui.md](07_guide/editor_tui.md) |
 
 ## Maintenance
 

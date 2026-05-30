@@ -96,3 +96,26 @@ line-numbered content + reverse-video status bar; line count computed by
 When the seed/runtime bugs land cleanly on `main` (resolving the duplicate
 symbol and the interpreter↔JIT extern bridge), a clean bootstrap produces the
 full runnable editor — the editor-side code is ready.
+
+## MCP tool surface & LLM / agent-dashboard integration
+
+The editor also exposes a **55-tool `editor.*` MCP surface** so an agent can
+drive it: `editor_mcp_tools()` (registry) and
+`editor_mcp_dispatch(session, tool_name, args)` in
+`src/app/editor/mcp_tools.spl`. Tools include `editor.open_file`,
+`editor.read_buffer`, `editor.edit`, `editor.search`, `editor.diagnostics`,
+`editor.goto_definition`, the `editor.lsp_*` family (~21), and the
+`editor.wiki_*` family. They are exercised in-process over an `EditSession` in
+`test/system/editor_controller_spec.spl`, `editor_md_wiki_index_spec.spl`, and
+`editor_gui_spec.spl`.
+
+**Status caveat:** this surface is a *tested library API*, not a live `simple mcp`
+endpoint — `editor_mcp_tools()`/`editor_mcp_dispatch()` are **not yet registered
+in the MCP server** (`src/app/mcp/main_dispatch.spl` has no `editor.*` routing,
+unlike the `assistant_*` tools). Registering it is the missing wire to let agents
+drive the editor over MCP.
+
+For how the editor relates to the LLM agent dashboard and assistant session
+manager (the `.build/llm_dashboard/assistant/` store, KAIROS three-plane model,
+and what is wired vs. contract-only), see
+**`doc/07_guide/ide_llm_integration_guide.md`**.
