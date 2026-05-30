@@ -20,6 +20,10 @@ use std.gc_async_mut.cuda.{
     CUDA_SUCCESS
 }
 use std.gc_async_mut.gpu.engine2d.backend_session.{BackendSessionKind}
+use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{
+    GENERATED_2D_ALPHA, GENERATED_2D_COPY, GENERATED_2D_FILL, GENERATED_2D_SCROLL,
+    generated_2d_launch_plan
+}
 
 # ============================================================================
 # CudaSession
@@ -149,6 +153,45 @@ class CudaSession:
         if self.module_cache == 0:
             return 1
         cuda_launch_kernel(self.module_cache, name, gx, gy, 1, bx, by, 1, 0)
+
+    me launch_generated_2d(op: text, width: i64, height: i64, args_ptr: i64) -> i64:
+        """Launch a generated portable 2D kernel from the cached CUDA module.
+
+        The caller owns argument-buffer population because framebuffer and
+        staging pointers live in the concrete backend surface. This method
+        centralizes module availability, launch-plan validation, and the
+        CUDA launch call shape for the shared session.
+        """
+        if self.module_cache == 0:
+            return 1
+        if args_ptr == 0:
+            return 1
+        val plan = generated_2d_launch_plan("cuda", op, width, height)
+        if not plan.dispatch_ready:
+            return 1
+        cuda_launch_kernel(
+            self.module_cache,
+            plan.entry_name,
+            plan.grid_x,
+            plan.grid_y,
+            plan.grid_z,
+            plan.block_x,
+            plan.block_y,
+            plan.block_z,
+            args_ptr
+        )
+
+    me fill_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
+        self.launch_generated_2d(GENERATED_2D_FILL, width, height, args_ptr)
+
+    me copy_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
+        self.launch_generated_2d(GENERATED_2D_COPY, width, height, args_ptr)
+
+    me alpha_blend_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
+        self.launch_generated_2d(GENERATED_2D_ALPHA, width, height, args_ptr)
+
+    me scroll_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
+        self.launch_generated_2d(GENERATED_2D_SCROLL, width, height, args_ptr)
 
     me _cleanup():
         """Destroy all GPU objects. Called automatically by release() on zero refcount."""

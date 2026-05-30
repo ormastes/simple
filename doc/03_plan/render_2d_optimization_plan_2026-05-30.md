@@ -103,9 +103,12 @@ Progress 2026-05-30:
 - Added `CudaSession` contract helpers for backend kind, availability,
   shutdown/synchronize aliases, and fail-closed cached-module kernel launch,
   covered by `test/unit/lib/gpu/engine2d/cuda_session_contract_spec.spl`.
-- Remaining Phase 1 work: add populated pixel-operation argument wrappers and
-  replace the blocked CUDA-selectable placeholder with live evidence on a CUDA
-  host.
+- Added generated 2D CUDA launch wrappers for fill/copy/alpha/scroll that use
+  `generated_2d_launch_plan(...)` and fail closed when no cached module,
+  argument buffer, or valid plan exists.
+- Remaining Phase 1 work: wire concrete backend surfaces to populate the shared
+  session argument buffers and replace the blocked CUDA-selectable placeholder
+  with live evidence on a CUDA host.
 
 ### Phase 2: CPU-SIMD conformance + native acceleration
 
