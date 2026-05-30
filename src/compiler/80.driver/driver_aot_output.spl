@@ -421,6 +421,37 @@ impl CompilerDriver:
         driver_log_info(log, "VHDL source written to {output}")
         CompileResult.Success(output)
 
+    me compile_to_wasm(output: text) -> CompileResult:
+        """Compile all MIR modules to WAT (WebAssembly text) via the pure-Simple
+        WASM backend. No LLVM required — the WasmCodegenAdapter emits WAT text
+        that is written to `output` (use a .wat extension; assemble to .wasm with
+        an external assembler if a binary module is needed)."""
+        val ctx: CompileContext = _extract_driver_ctx(self)
+        val log = ctx.logger
+        val is_release = ctx.options.release
+        val driver_opt_level = driver_effective_mir_opt_level(ctx)
+        driver_log_debug(log, "AOT WASM: generating WAT to {output}")
+
+        var all_wat = ""
+        val keys = ctx.mir_modules.keys()
+        for name in keys:
+            driver_log_trace(log, "translating module to WAT: {name}")
+            val mir_module = ctx.mir_modules[name]
+            val compiled = compile_module_with_backend("wasm", mir_module, is_release, driver_opt_level)
+            if compiled.is_err():
+                val err = compiled.unwrap_err()
+                return CompileResult.CodegenError("WASM compile error in {name}: {err}")
+            val module_result: CompiledModule = compiled.unwrap()
+            val wat = module_result.assembly ?? ""
+            if all_wat != "" and wat != "":
+                all_wat = all_wat + "\n\n"
+            all_wat = all_wat + wat
+
+        if not rt_file_write_text(output, all_wat):
+            return CompileResult.CodegenError("Failed to write WAT to {output}")
+        driver_log_info(log, "WAT written to {output}")
+        CompileResult.Success(output)
+
     me compile_to_smf(output: text) -> CompileResult:
         val ctx: CompileContext = _extract_driver_ctx(self)
         val log = ctx.logger

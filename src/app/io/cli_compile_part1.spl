@@ -163,15 +163,22 @@ fn cli_compile_dynamic_driver_library(source_file: text, output_file: text, back
         _cli_eprint("[driver-mode] dynamic driver library written: {out}")
     return 0
 
+fn _cli_is_wasm_target(t: text) -> bool:
+    t == "wasm32" or t == "wasm32-wasi" or t == "wasm64" or t.starts_with("wasm32-") or t.starts_with("wasm64-")
+
 fn cli_compile_uses_simple_driver(args: [text]) -> bool:
     var i = 0
     while i < args.len():
         val arg = args[i]
         if arg == "--backend" and i + 1 < args.len():
-            if args[i + 1] == "vhdl":
+            if args[i + 1] == "vhdl" or args[i + 1] == "wasm":
                 return true
             i = i + 1
-        elif arg == "--backend=vhdl":
+        elif arg == "--backend=vhdl" or arg == "--backend=wasm":
+            return true
+        elif arg.starts_with("--target=") and _cli_is_wasm_target(arg.substring(9)):
+            return true
+        elif arg == "--target" and i + 1 < args.len() and _cli_is_wasm_target(args[i + 1]):
             return true
         i = i + 1
     false
@@ -480,6 +487,13 @@ fn cli_compile(args: [text]) -> i64:
             _cli_eprint("Error: Unknown format: {output_format}")
             _cli_eprint("Valid formats: native, smf, self-contained (sc), both")
             return 1
+
+    # WASM targets: emit WAT via the pure-Simple WASM backend (no LLVM needed).
+    if _cli_is_wasm_target(target) or backend == "wasm":
+        var wout = output_file
+        if wout == "":
+            wout = source_file.replace(".spl", ".wat")
+        return cli_compile_pure_simple(source_file, wout, output_format, "wasm", verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level)
 
     if target != "" and not target.starts_with("baremetal-"):
         # Route non-baremetal targets through the Rust frontend so wasm and
