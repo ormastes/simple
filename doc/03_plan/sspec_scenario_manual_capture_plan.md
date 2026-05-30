@@ -242,6 +242,9 @@ Create a shared SSpec support library rather than scattering helper functions:
      render as readable manual steps.
    - Starter progress: `# @step: Text` and `# @step("Text")` label the next
      call-like manual step and are stripped from the folded executable source.
+   - Starter progress: explicit `# @step` labels can also anchor to the next
+     executable non-assertion setup/action line, which supports protocol specs
+     where the manual action is request construction rather than a helper call.
    - Starter progress: empty `# @step` metadata renders a manual warning and
      falls back to the derived step label.
    - Starter progress: unused `# @step` metadata renders a manual warning when
@@ -284,6 +287,9 @@ Create a shared SSpec support library rather than scattering helper functions:
      `test/integration/app/mcp_stdio_integration_spec.spl` and rewrote
      `doc/06_spec/app/compiler/feature/mcp_stdio_integration_spec.md` as the
      first MCP manual-quality target.
+   - Starter progress: added operator `# @step` labels and step-local
+     protocol/API capture hints to `test/integration/app/mcp_stdio_integration_spec.spl`;
+     temp docgen now emits operator steps ahead of the folded executable source.
    - Add feature request to upgrade all generated SSpec docs to hand-written
      manual quality.
    - Iterate: write scenario, generate doc, evaluate like a manual, update
@@ -292,9 +298,19 @@ Create a shared SSpec support library rather than scattering helper functions:
 ## Verification Gates
 
 - Generated doc has a manual-first scenario section.
+- Auto-generated scenario docs place `## Scenarios` immediately after the
+  title, before At-a-Glance, Overview, and summary tables.
+- Scenario summary tables follow the scenario body instead of preceding the
+  operator flow.
 - Inline/previous scenarios expand without printing redundant `Previous:`.
 - Executable SPipe is folded by default.
 - Scenario captures appear under the step that caused them.
+- Step capture labels use typed wording such as `Protocol capture` and
+  `API capture`.
+- Captured steps with generated expected checks include compact `Evidence:`
+  previews under the step.
+- Boolean assertion summaries render as expected-result bullets under the
+  manual step that produced them.
 - Detailed edge/advanced scenarios are folded or skipped according to policy.
 - Environmental tests show meaningful `exec`, `protocol`, `api`, `binary`, or
   `log` evidence instead of empty screenshots.
@@ -302,7 +318,7 @@ Create a shared SSpec support library rather than scattering helper functions:
 
 Current verification note: syntax checks pass. The scenario evidence unit test
 passes 9/9, and `test/unit/app/tooling/spipe_docgen_scenario_body_spec.spl`
-reports 41 examples / 0 failures after replacing unsupported negative matchers
+reports 45 examples / 0 failures after replacing unsupported negative matchers
 with built-in assertions, fixing the `spipe-docgen` runtime path issues found
 during the manual-generation check, adding metadata warning/cycle diagnostic
 coverage, fixing blank folded executable output for expanded scenarios, adding
@@ -312,11 +328,23 @@ scenario-level `after_scenario` capture attaches only to the final derived
 manual step and step-local `# @capture(off)` suppresses inherited scenario
 capture, including fallback summary rendering, and multiple manual warnings
 render without blanking entries. It also covers step-local capture metadata,
-including `# @capture(off)`, between a `# @step` label and the labeled action.
-The direct spec run still exits nonzero after reporting 41 examples / 0
+including `# @capture(off)`, between a `# @step` label and the labeled action,
+explicit `# @step` labels on executable setup lines, and stable `# @prev`
+source expansion with step-local capture metadata. It also verifies generated
+expected-result bullets for boolean contains assertions, including normalized
+escaped JSON string fragments. The direct spec run still exits nonzero after
+reporting 45 examples / 0
 failures because of the existing
 repo-level `compiler_driver_create` semantic finalization issue also noted in
 `doc/03_plan/port_rust_c_to_pure_simple.md`.
+
+Temp MCP stdio docgen now emits `## Scenarios` immediately after the title,
+with At-a-Glance, Overview, and Scenario Summary following the operator
+scenario body. The generated MCP steps include expected-result bullets from
+protocol/API assertions, with escaped JSON fragments normalized for manual
+reading. Step captures render as typed labels such as `Protocol capture:
+after_step` and `API capture: after_step`. Captured protocol/API steps include
+compact evidence previews derived from expected checks.
 
 ## First Exemplar: MCP
 

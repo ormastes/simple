@@ -84,6 +84,9 @@ comment metadata:
   context and API capture.
 - The scoped-argument regression is `# @manual: folded` because it is useful
   diagnostic detail, not the primary manual path.
+- Starter operator `# @step` labels now mark the initialize, tools/list,
+  unknown-tool, safe editor, and scoped-argument actions so generated docs lead
+  with manual prose before the folded executable source.
 
 Future specs should follow the same pattern. When docgen supports executable
 annotations everywhere, update MCP specs as follows:
@@ -150,9 +153,19 @@ about an MCP-backed UI surface.
 
 ## Manual Review Checklist
 
-- [ ] The generated doc opens with the primary MCP scenario, not a matrix.
-- [ ] Setup flows are expanded into steps and do not print redundant
+- [x] The generated doc opens with the primary MCP scenario, not a matrix.
+- [x] The scenario summary matrix follows the generated scenario body instead
+      of appearing before the operator flow.
+- [x] Setup flows are expanded into steps and do not print redundant
       `Previous:` metadata.
+- [x] Boolean assertion summaries render as expected-result bullets under the
+      step that produced them.
+- [x] Escaped JSON assertion fragments are normalized in expected-result
+      bullets.
+- [x] Step capture labels are typed as Protocol/API/TUI/etc. instead of a
+      generic `Capture:` prefix.
+- [x] Captured protocol/API steps include compact evidence previews derived
+      from generated expected checks.
 - [ ] Protocol/API/exec captures appear under the step that produced them.
 - [ ] Long JSON payloads are summarized, with full payload folded or linked.
 - [ ] Intensive loops, matrix locks, schema inventories, and OOM-skip details

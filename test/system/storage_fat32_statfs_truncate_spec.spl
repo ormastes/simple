@@ -66,3 +66,25 @@ describe "FAT32 statfs and truncate primitives":
         val truncated = driver.truncate_chain(2, 0)
         expect(truncated.is_ok()).to_equal(true)
         expect(truncated.unwrap()).to_equal(0u32)
+
+    it "truncate_chain extends an empty chain by allocating a cluster":
+        """Extending from cluster 0 allocates a new cluster and returns it."""
+        var driver = statfs_driver()
+        # Start with no chain (first_cluster < 2), ask for 100 bytes
+        val extended = driver.truncate_chain(0, 100)
+        expect(extended.is_ok()).to_equal(true)
+        # Should have allocated one of the free clusters (3 or 4)
+        val new_cluster = extended.unwrap()
+        expect(new_cluster >= 2u32).to_equal(true)
+
+    it "ftruncate updates in-memory file size via handle":
+        """Handle-based truncate shrinks and correctly updates in-memory size."""
+        var driver = statfs_driver()
+        # Manually set up an open file on cluster 2 (which has EOC)
+        use std.fs_driver.types.{FileHandle}
+        val fh = driver.alloc_file_handle(2, 512, false)
+        val trunc_rc = driver.truncate(fh, 0)
+        expect(trunc_rc.is_ok()).to_equal(true)
+        val of = driver.get_open_file(fh)
+        expect(of.is_ok()).to_equal(true)
+        expect(of.unwrap().size).to_equal(0i64)

@@ -20,6 +20,9 @@ documentation to hand-written-quality scenario manuals.
         sections.
   - [x] Comment-form `# @step: Text` and `# @step("Text")` label the next
         call-like manual step and are omitted from folded executable source.
+  - [x] Comment-form `# @step: Text` and `# @step("Text")` can also label the
+        next executable non-assertion setup/action line for protocol-style
+        specs whose useful manual action spans request construction.
   - [x] Empty comment-form `# @step` renders a manual warning and falls back
         to the derived step label.
   - [x] Unused comment-form `# @step` renders a manual warning when no
@@ -46,7 +49,7 @@ documentation to hand-written-quality scenario manuals.
   metadata for manual visibility: `# @manual: folded`, `# @manual: detail`,
   `# @manual: skip`, `# @manual: show`, and `# @inline`. It supports
   comment-form `# @step: Text` and `# @step("Text")` labels for the next
-  call-like manual step,
+  call-like manual step or executable non-assertion setup/action line,
   warns for empty `# @step` metadata,
   warns for unused `# @step` metadata,
   allows step-local capture metadata between `# @step` and the labeled action,
@@ -61,8 +64,10 @@ documentation to hand-written-quality scenario manuals.
   Starter manual steps are derived from call-like source lines before the
   folded executable block, while assertion and control-flow mechanics stay in
   executable detail. Checker-style calls such as `Then_login_succeeds()` render
-  as readable manual steps. Full annotation syntax and richer `@step` prose
-  rendering remain open.
+  as readable manual steps. MCP stdio source scenarios now include starter
+  operator `# @step` labels and step-local capture hints for generated manual
+  review. Full annotation syntax and richer `@step` prose rendering remain
+  open.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none
@@ -159,7 +164,14 @@ documentation to hand-written-quality scenario manuals.
   generated `doc/06_spec/...` output reads like a hand-written scenario manual,
   starting with MCP scenarios as the exemplar.
 - **Acceptance-criteria:**
-  - [ ] MCP generated docs use scenario-first manual structure.
+  - [x] Generated docs render scenario bodies before scenario summary tables.
+  - [x] MCP generated docs use scenario-first manual structure.
+  - [x] Generated docs render expected-result bullets under manual steps for
+        boolean `expect(...).to_equal(true|false)` assertions.
+  - [x] Generated step capture labels use typed wording such as
+        `Protocol capture` and `API capture`.
+  - [x] Captured steps with generated expected results render compact
+        `Evidence:` previews under the step.
   - [ ] MCP docs satisfy the target shape in
         `doc/03_plan/sys_test/mcp_scenario_manual_quality.md`.
   - [ ] Primary user/operator/admin flows are visible by default.
@@ -167,6 +179,15 @@ documentation to hand-written-quality scenario manuals.
         skipped by policy.
   - [ ] Environmental tests render meaningful non-UI evidence when appropriate.
   - [ ] A review checklist exists and is used before accepting new SPipe specs.
+- **Partial-progress:** `spipe-docgen` now emits auto-generated scenario docs
+  with `## Scenarios` immediately after the title. The MCP stdio temp
+  generation shows operator steps before At-a-Glance, Overview, and the
+  scenario summary matrix. Boolean assertion summaries now render as expected
+  result bullets under the step that produced them, with escaped JSON fragments
+  normalized for manual reading. Step capture labels now use typed wording
+  such as `Protocol capture: after_step` and `API capture: after_step`.
+  Captured protocol/API steps now include compact evidence previews derived
+  from the expected checks.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none

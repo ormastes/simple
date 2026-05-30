@@ -49,8 +49,8 @@ as visible manual steps. Checker-style calls such as `Then_login_succeeds()`
 render as `Then login succeeds`. Prefer helper names that read cleanly when
 dots and underscores become words.
 
-Use comment-form `# @step: Text` or `# @step("Text")` before a call when the
-derived label is not good enough:
+Use comment-form `# @step: Text` or `# @step("Text")` before a call or
+executable setup line when the derived label is not good enough:
 
 ```simple
 it "user logs in":
@@ -73,9 +73,21 @@ user.submit_login()
 
 Empty `# @step` metadata renders a manual warning and falls back to the derived
 call-like step label.
-If a labeled `# @step` is not followed by a call-like manual step, generated
-docs render a manual warning and omit the unused metadata from executable
-source.
+If a labeled `# @step` is not followed by an executable non-assertion manual
+step, generated docs render a manual warning and omit the unused metadata from
+executable source.
+
+Boolean assertions after a rendered step become expected-result bullets. For
+example, `expect(output.contains("ready")).to_equal(true)` renders as an
+expected result under the previous step. String contains values are normalized
+for manual display, so escaped JSON fragments render without Simple string
+escape syntax. The original assertion remains in the folded executable source.
+Capture metadata attached to a rendered step uses typed labels such as
+`Protocol capture: after_step`, `API capture: after_step`, or
+`TUI capture: after_step`.
+When a captured step also has generated expected results, docgen adds a compact
+`Evidence:` line that names the captured surface and how many expected checks
+verify it.
 
 ## Inline and Previous Scenarios
 
@@ -295,6 +307,8 @@ After writing or changing a scenario:
 
 1. Generate the doc with `bin/simple spipe-docgen <spec> --output doc/06_spec`.
 2. Read the generated doc as if it were a hand-written manual.
-3. If it reads like code or test plumbing, improve `@step`, helper names,
+3. Check that auto-generated docs put `## Scenarios` immediately after the
+   title, then inspect the primary scenario steps first.
+4. If it reads like code or test plumbing, improve `@step`, helper names,
    visibility, capture kind, or checker/capture output.
-4. Repeat until the manual is useful without opening the source test.
+5. Repeat until the manual is useful without opening the source test.
