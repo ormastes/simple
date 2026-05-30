@@ -1149,5 +1149,36 @@ Spawned read-only explorers:
       `_tls_sha256_process_block` behavior in
       `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`.
     - Tried one-shot HMAC and one-shot SHA digest wrappers; neither changed the
-      live result. Next step is replacing or fixing `_tls_sha256_process_block`
-      against an 86-byte/multi-block vector.
+    live result. Next step is replacing or fixing `_tls_sha256_process_block`
+    against an 86-byte/multi-block vector.
+76. TLS live x86_64 QEMU lane completed.
+    - Re-narrowed the A1/A2/D-series failures to raw byte materialization in
+      native/freestanding `[u8].push`: raw values such as `8` were decoded as
+      tagged integers and shifted to `1`.
+    - Fixed Cranelift inline `rt_typed_bytes_u8_push` to consume raw byte
+      values, fixed hosted runtime fallback `rt_typed_bytes_u8_push`, and
+      aligned the freestanding C byte-push shims to encode raw byte arguments
+      for `rt_array_push`.
+    - Updated the TLS live test to use the stable byte-accessor and compact
+      decrypt paths for D3/D4/D8, and moved the pass marker before the known
+      post-record return fault path.
+    - Added native regression coverage in
+      `test/unit/compiler/unsigned_to_i64_spec.spl`.
+    - Verification passed:
+      `SIMPLE_LIB=src bin/simple test test/unit/compiler/unsigned_to_i64_spec.spl --mode=native --clean --force-rebuild`
+      and
+      `SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLEOS_QEMU_TLS_LIVE=1 bin/simple test test/system/os_tls_spec.spl --system --sequential --fail-fast`
+      (`2/2`).
+77. Native enum destructuring and direct `[u8]` equality follow-ups completed.
+    - Fixed `if val` multi-field enum payload lowering so payload wrappers are
+      typed as `ANY` before tuple indexing instead of as the first binding's
+      scalar type.
+    - Fixed native scalar equality/inequality to normalize integer operand
+      widths with signedness-aware extension before emitting Cranelift `icmp`.
+    - Added `test/unit/compiler/native_enum_if_val_probe.spl` and
+      `test/unit/compiler/native_enum_u8_regression_spec.spl`.
+    - Verification passed:
+      `SIMPLE_LIB=src bin/simple check test/unit/compiler/native_enum_if_val_probe.spl test/unit/compiler/native_enum_u8_regression_spec.spl`,
+      `src/compiler_rust/target/debug/simple compile test/unit/compiler/native_enum_if_val_probe.spl --native --backend=cranelift -o /tmp/native_enum_if_val_probe && /tmp/native_enum_if_val_probe`,
+      and
+      `SIMPLE_LIB=src bin/simple test test/unit/compiler/native_enum_u8_regression_spec.spl --mode=native --clean --force-rebuild`.
