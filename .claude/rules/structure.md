@@ -16,7 +16,7 @@ src/
   compiler/         # Unified compiler — numbered layers (00-99)
   i18n/             # Internationalization
 test/               # Test files
-doc/                # Documentation (01_research through 10_metrics)
+doc/                # Documentation (00_llm_process through 11_archive)
 bin/                # Binaries (bin/simple → release/<triple>/simple symlink)
 .claude/            # Agents, skills, templates, rules
 ```
@@ -28,7 +28,9 @@ bin/                # Binaries (bin/simple → release/<triple>/simple symlink)
 ## Auto-Generated Docs
 | What | Where | When |
 |------|-------|------|
-| Features | `doc/06_spec/generated/feature.md` | Every test run |
+| Features | `doc/02_requirements/feature/feature.md` | Every test run |
+| Pending features | `doc/02_requirements/feature/pending_feature.md` | Every test run |
 | Test results | `doc/08_tracking/test/test_result.md` | Every test run |
-| Build status | `doc/08_tracking/build/recent_build.md` | Every build |
+| Test DB | `doc/08_tracking/test/test_db.sdn` | Every test run |
 | TODOs | `doc/TODO.md` | `bin/simple todo-scan` |
+| Todo DB | `doc/08_tracking/todo/todo_db.sdn` | `bin/simple todo-scan` |

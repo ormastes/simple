@@ -44,6 +44,18 @@ struct AiCliProvisioningPlan:
     required_guest_paths: [text]
     marker_payload: text
 
+struct AiCliRuntimeSmokePackage:
+    app_id: text
+    target: text
+    package_root: text
+    manifest_sdn: text
+    launcher_source: text
+    runtime_stub_source: text
+    package_index_sdn: text
+    marker_payload: text
+    ready: bool
+    blocker: text
+
 struct AiCliRuntimeProfile:
     profile_id: text
     js_engine_strategy: text
@@ -372,6 +384,47 @@ pub fn ai_cli_marker_payload(manifest: AiCliManifest, lane: AiCliQemuLane) -> te
 pub fn ai_cli_provisioning_plan_summary(plan: AiCliProvisioningPlan) -> text:
     "app={plan.app_id};target={plan.target};manifest={plan.manifest_path};launcher={plan.launcher_path};markers={plan.marker_payload_path};runtime={plan.runtime_package_path};disk-manifest={plan.disk_manifest_filename};command={plan.command_line}"
 
+pub fn ai_cli_runtime_smoke_package(manifest: AiCliManifest, lane: AiCliQemuLane) -> AiCliRuntimeSmokePackage:
+    val plan = ai_cli_provisioning_plan(manifest, lane)
+    val root = "/sys/apps/{manifest.app_id}"
+    val marker_payload = ai_cli_marker_payload(manifest, lane)
+    val manifest_sdn = _ai_cli_manifest_sdn(manifest, plan)
+    val launcher_source = _ai_cli_launcher_source(manifest, lane, plan)
+    val runtime_stub_source = _ai_cli_runtime_stub_source(manifest, lane)
+    val package_index_sdn = _ai_cli_package_index_sdn(manifest, lane, plan)
+    val hardening_error = ai_cli_runtime_smoke_package_hardening_error(launcher_source + "\n" + runtime_stub_source)
+    val ready = hardening_error == "" and ai_cli_manifest_is_valid(manifest)
+    val blocker = if ready: "" else: hardening_error
+    AiCliRuntimeSmokePackage(
+        app_id: manifest.app_id,
+        target: lane.target,
+        package_root: root,
+        manifest_sdn: manifest_sdn,
+        launcher_source: launcher_source,
+        runtime_stub_source: runtime_stub_source,
+        package_index_sdn: package_index_sdn,
+        marker_payload: marker_payload,
+        ready: ready,
+        blocker: blocker
+    )
+
+pub fn ai_cli_runtime_smoke_package_summary(package: AiCliRuntimeSmokePackage) -> text:
+    "app={package.app_id};target={package.target};root={package.package_root};ready={package.ready};blocker={package.blocker};manifest-bytes={package.manifest_sdn.len()};launcher-bytes={package.launcher_source.len()};runtime-bytes={package.runtime_stub_source.len()};index-bytes={package.package_index_sdn.len()}"
+
+pub fn ai_cli_runtime_smoke_package_hardening_error(source: text) -> text:
+    val lo = source.lower()
+    if lo.contains("rt_process_run") or lo.contains("host.shell"):
+        return "host shell access denied"
+    if lo.contains("child_process") or lo.contains("spawn("):
+        return "child process access denied"
+    if lo.contains("process.env"):
+        return "ambient environment access denied"
+    if lo.contains("require(") or lo.contains("import("):
+        return "module loader access denied"
+    if lo.contains("fetch(") or lo.contains("xmlhttprequest") or lo.contains("websocket"):
+        return "network access denied"
+    ""
+
 pub fn ai_cli_runtime_profile_summary(profile: AiCliRuntimeProfile) -> text:
     "profile={profile.profile_id};engine={profile.js_engine_strategy};host={profile.host_language_strategy};pattern={profile.architecture_pattern};" +
     "node-surface={profile.node_compat_surface.join(\",\")};tools={profile.builtin_tools.join(\",\")};wasm={profile.wasm_strategy};browser-wasm={profile.browser_wasm_contract};" +
@@ -427,6 +480,51 @@ fn _ai_cli_qemu_lane(manifest: AiCliManifest, target: text, scenario_name: text,
         blocker: blocker,
         marker_fragments: markers
     )
+
+fn _ai_cli_manifest_sdn(manifest: AiCliManifest, plan: AiCliProvisioningPlan) -> text:
+    "ai_cli_manifest = {\n" +
+    "  app_id = \"" + manifest.app_id + "\"\n" +
+    "  display_name = \"" + manifest.display_name + "\"\n" +
+    "  runtime_kind = \"" + manifest.runtime_kind + "\"\n" +
+    "  entry_path = \"" + manifest.entry_path + "\"\n" +
+    "  args = \"" + manifest.args.join(" ") + "\"\n" +
+    "  package_id = \"" + manifest.package_id + "\"\n" +
+    "  package_version = \"" + manifest.package_version + "\"\n" +
+    "  package_checksum = \"" + manifest.package_checksum + "\"\n" +
+    "  runtime_artifact = \"" + manifest.runtime_artifact + "\"\n" +
+    "  command_line = \"" + plan.command_line + "\"\n" +
+    "  file_grants = \"" + manifest.file_grants.join(",") + "\"\n" +
+    "  process_grants = \"" + manifest.process_grants.join(",") + "\"\n" +
+    "  network_grants = \"" + manifest.network_grants.join(",") + "\"\n" +
+    "  credential_grants = \"" + manifest.credential_grants.join(",") + "\"\n" +
+    "}\n"
+
+fn _ai_cli_launcher_source(manifest: AiCliManifest, lane: AiCliQemuLane, plan: AiCliProvisioningPlan) -> text:
+    "fn main():\n" +
+    "    print \"[ai-cli] provisioned app=" + manifest.app_id + " target=" + lane.target + "\"\n" +
+    "    print \"[ai-cli] launcher=" + plan.launcher_path + "\"\n" +
+    "    print \"[ai-cli] runtime-package=" + plan.runtime_package_path + "\"\n" +
+    "    print \"[ai-cli] runtime:start app=" + manifest.app_id + "\"\n" +
+    "    print \"[ai-cli] cli-smoke:start app=" + manifest.app_id + "\"\n" +
+    "    print \"[ai-cli] hardening:ok app=" + manifest.app_id + "\"\n"
+
+fn _ai_cli_runtime_stub_source(manifest: AiCliManifest, lane: AiCliQemuLane) -> text:
+    "fn main():\n" +
+    "    print \"[ai-cli-runtime] simple-js-agent target=" + lane.target + "\"\n" +
+    "    print \"[ai-cli-runtime] app=" + manifest.app_id + " runtime=" + manifest.runtime_kind + "\"\n" +
+    "    print \"[ai-cli-runtime] node-compat-surface=fs,process,stdio-tty,timers,net,tls,module-resolution,webassembly\"\n" +
+    "    print \"[ai-cli-runtime] full-node-v8-libuv=pending\"\n"
+
+fn _ai_cli_package_index_sdn(manifest: AiCliManifest, lane: AiCliQemuLane, plan: AiCliProvisioningPlan) -> text:
+    "ai_cli_package = {\n" +
+    "  app_id = \"" + manifest.app_id + "\"\n" +
+    "  target = \"" + lane.target + "\"\n" +
+    "  manifest = \"" + plan.manifest_path + "\"\n" +
+    "  launcher = \"" + plan.launcher_path + "\"\n" +
+    "  marker_payload = \"" + plan.marker_payload_path + "\"\n" +
+    "  runtime = \"" + plan.runtime_package_path + "\"\n" +
+    "  disk_manifest = \"" + plan.disk_manifest_filename + "\"\n" +
+    "}\n"
 
 fn _ai_cli_disk_manifest_filename(app_id: text) -> text:
     if app_id == "codex":

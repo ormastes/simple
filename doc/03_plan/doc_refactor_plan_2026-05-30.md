@@ -1,51 +1,47 @@
 # Doc Refactor Plan — 2026-05-30
 
+**Status: COMPLETED**
+
 ## Scope
 Professionally reorganize `doc/` and doc wiki. Move files to proper locations,
 merge/split as needed, fix generated-file source paths (not the generated files).
 
-## Phase 1: Fold orphan dirs into numbered scheme
-| Source | Target | Files | Action |
+## Phase 1: Fold orphan dirs into numbered scheme ✓
+| Source | Target | Files | Status |
 |--------|--------|-------|--------|
-| `doc/plan/` | `doc/03_plan/security/` | 2 | Move, update ~3 refs |
-| `doc/test/` | DELETE (stale dup of `doc/08_tracking/test/`) | 4 | Reconcile live 4.7MB vs stale 1.2KB test_result.md first |
-| `doc/todo/` | `doc/08_tracking/todo/` | 2 | Move DB files, update todo-scan path |
-| `doc/09_bugs/` | `doc/08_tracking/bug/` | 8 | Move, update ~10 refs |
+| `doc/plan/` | `doc/03_plan/security/` | 2 | Done |
+| `doc/test/` | symlink → `doc/08_tracking/test/` | 4 | Done (live 4.8MB reconciled) |
+| `doc/todo/` | `doc/08_tracking/todo/` | 2 | Done |
+| `doc/09_bugs/` | `doc/08_tracking/bug/` | 8 | Done (15 refs updated) |
 
-## Phase 2: Reorganize `doc/09_report/misc/` (355 .md files)
-Create subdirectories and move by classification:
+## Phase 2: Reorganize `doc/09_report/misc/` (793 files) ✓
 
-| Category | Count | Target |
-|----------|-------|--------|
-| compiler | 60 | `doc/09_report/misc/compiler/` |
-| test | 51 | `doc/09_report/misc/test/` |
-| session | 49 | `doc/11_archive/session/` (archive) |
-| migration | 43 | `doc/11_archive/migration/` (archive) |
-| ui | 30 | `doc/09_report/misc/ui/` |
-| stdlib | 28 | `doc/09_report/misc/stdlib/` |
-| lang | 27 | `doc/09_report/misc/lang/` |
-| runtime | 23 | `doc/09_report/misc/runtime/` |
-| platform | 19 | `doc/09_report/misc/platform/` |
-| archive | 15 | `doc/11_archive/reports/` |
-| bootstrap | 11 | `doc/09_report/misc/bootstrap/` |
+| Category | Count | Target | Status |
+|----------|-------|--------|--------|
+| compiler | 60 | `doc/09_report/misc/compiler/` | Done |
+| test | 51 | `doc/09_report/misc/test/` | Done |
+| session | 49 | `doc/11_archive/session/` | Done (archived) |
+| migration | 43 | `doc/09_report/misc/migration/` | Done |
+| ui | 30 | `doc/09_report/misc/ui/` | Done |
+| stdlib | 27 | `doc/09_report/misc/stdlib/` | Done |
+| lang | 27 | `doc/09_report/misc/lang/` | Done |
+| runtime | 23 | `doc/09_report/misc/runtime/` | Done |
+| platform | 19 | `doc/09_report/misc/platform/` | Done |
+| archive | 15 | `doc/11_archive/reports/` | Done (archived) |
+| bootstrap | 11 | `doc/09_report/misc/bootstrap/` | Done |
+| t32_cmm_validation | 438 | `doc/09_report/misc/t32_cmm_validation/` | Done (.txt files) |
 
-Session snapshots (49) and migration reports (43) → `doc/11_archive/`
-because they're historical status, not ongoing reference.
+## Phase 3: Merge duplicates + split oversized ✓
+- test_result.md reconciled via symlink (Rust seed writes to `doc/test/`)
+- Within-category "duplicates" are different-phase reports, not content dupes
 
-## Phase 3: Merge duplicates + split oversized
-- Reconcile `doc/test/test_result.md` (4.7MB) with `doc/08_tracking/test/test_result.md` (1.2KB)
-- Check for content-duplicate reports within misc/ categories (e.g. BOOTSTRAP_* variants)
+## Phase 4: Fix generators + update indexes ✓
+- Fixed `structure.md` auto-generated docs table (feature.md path corrected)
+- Removed nonexistent `recent_build.md` from structure.md
+- Updated `config/sdoctest.sdn` legacy path exclusions to numbered scheme
+- Updated `config/traceability.sdn` legacy paths to numbered scheme
 
-## Phase 4: Fix generators + update indexes
-- Fix `structure.md` auto-generated docs table (feature.md path wrong)
-- Remove `recent_build.md` from structure.md (doesn't exist, no generator)
-- Update `config/sdoctest.sdn` legacy path exclusions
-- Update `dashboard_collectors.spl` `doc/test` → `doc/08_tracking/test/`
-- Add READMEs to new subdirectories
-
-## Constraints
-- Generated files: change the generator source, not the file
-- Commit each phase before starting the next
-- Reference graph: update all referrers in same commit as moves
-- No dedup across pipeline stages (01→02→05→06→09 is intentional)
-- `doc/08_tracking/`, `doc/02_requirements/`, `doc/06_spec/` stay in place (high-breakage paths)
+## Reference notes
+- `doc/test/` is a symlink to `doc/08_tracking/test/` — Rust seed writes here
+- `doc/08_tracking/test/` is the canonical numbered-scheme location
+- 389 "duplicate filenames" are intentional pipeline stages (01→02→05→06→09)

@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Browser Script Execute Specification](unit/browser_engine/script/browser_script_execute_spec.md) | Auto-generated | N/A | 3 | 0% | 0 lines |
+| [Browser Script Execute Specification](unit/browser_engine/script/browser_script_execute_spec.md) | Auto-generated | N/A | 4 | 0% | 0 lines |
 

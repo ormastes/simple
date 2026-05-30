@@ -12,14 +12,6 @@
 # drawing layer and the Simple Web rendering library in the same frame.
 
 use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
-use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
-use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
-use os.kernel.abi.syscall_shim.{shim_init}
-use os.kernel.scheduler.scheduler.{Scheduler}
-use os.kernel.ipc.ipc.{IpcManager}
-use os.kernel.log.klog.{KernelLog}
-use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
-use os.kernel.memory.vmm.{vmm_init}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
 use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
 use os.compositor.engine2d_baremetal_core.{create_fb_engine_core}
@@ -39,9 +31,6 @@ val FB_H: i32 = 768
 val TOP_COMMAND_H: i32 = 44
 val TASKBAR_H: i32 = 56
 val CAPTURE_WAIT_ITERS: u64 = 5000000
-val DIRECT_QEMU_TOTAL_MEMORY: u64 = 0x20000000
-val DIRECT_QEMU_KERNEL_START: u64 = 0x100000
-val DIRECT_QEMU_RESERVED_END: u64 = 0x04000000
 
 fn _pack(hi: i32, lo: i32) -> u64:
     (hi.to_u64() << 32) | lo.to_u64()
@@ -150,14 +139,7 @@ fn _fill_rect_fb(fb_addr: u64, stride: i32, x: i32, y: i32, w: i32, h: i32, colo
         y1 = FB_H
     if x1 <= x0 or y1 <= y0:
         return
-    var py = y0
-    while py < y1:
-        var px = x0
-        while px < x1:
-            val offset = ((py * stride + px) * 4).to_u64()
-            mmio_write32(fb_addr + offset, color)
-            px = px + 1
-        py = py + 1
+    val _ = rt_gui_fill4(_pack(x0, y0), _pack(x1 - x0, y1 - y0), color.to_u64(), 0u64)
 
 fn _new_framebuffer_pixels(fill: u32) -> [u32]:
     val pixel_count = FB_W * FB_H
@@ -348,16 +330,6 @@ fn spl_start():
     serial_init()
     serial_writeln("SimpleOS x86_64 GUI boot (Engine2D + WM + Simple Web)")
     serial_writeln("[BOOT] COM1 serial ready")
-
-    arch_x86_64_early_init()
-    if pmm_init_identity_range(DIRECT_QEMU_TOTAL_MEMORY, DIRECT_QEMU_KERNEL_START, DIRECT_QEMU_RESERVED_END):
-        vmm_init(g_pmm, 0)
-        serial_println("[GUI] memory-bootstrap:ok")
-    else:
-        serial_println("[GUI] memory-bootstrap:failed")
-    shim_init(Scheduler.new(), IpcManager.new(), KernelLog.new(256))
-    if not X86Interrupt.runtime_installed():
-        X86Interrupt.install_bootstrap_runtime(64)
 
     serial_writeln("[BOOT] Initializing BGA framebuffer (1024x768x32)...")
     val fb_info = bga_init_framebuffer(FB_W.to_u32(), FB_H.to_u32(), 32)
