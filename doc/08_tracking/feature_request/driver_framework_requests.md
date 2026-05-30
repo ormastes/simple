@@ -22,7 +22,7 @@ or `Rejected` (one-line reason).
 - **Filed-by:** driver-framework rollout (Phase B)
 - **Target:** driver / compiler frontend + HIR lowering
 - **Priority:** P1
-- **Status:** Partial (codegen scaffolding added 2026-05-10, unreached by live compiler). Manifest attr + HIR/MIR support (2026-04-22) + synthetic codegen pass in `src/compiler/50.mir/synthetic_driver_codegen.spl` injecting `register_static_driver(manifest, ops)` MIR call for `ReadyToSynthesize` functions. Wired into `lower_function` in `mir_lowering.spl`. **Note:** `bin/simple` is the Rust seed — self-hosted MIR lowering does not run, so this codegen is not yet exercised.
+- **Status:** Partial (function-level `@driver(..., ops=...)` live path wired 2026-05-30; module/impl-level sugar and `@native_lib(...)` synthesis still open). Manifest attr + HIR/MIR support (2026-04-22) + synthetic codegen pass in `src/compiler/50.mir/synthetic_driver_codegen.spl` injecting `register_static_driver(manifest, ops)` MIR call for `ReadyToSynthesize` functions. Wired into self-hosted `lower_function` in `mir_lowering.spl`; the Rust seed now mirrors the function-level synthesis in HIR lowering and in the AST interpreter fallback used by `bin/simple`.
 - **Requested-semantics:**
   Today every driver registers into the shared registry by calling
   `register_static_driver(manifest, ops)` from a hand-written
@@ -82,6 +82,20 @@ or `Rejected` (one-line reason).
   accepted as synthetic-registration-ready. Native-lib synthesis remains
   blocked until the attribute/design identifies adapter functions. Coverage:
   `test/unit/compiler/mir/synthetic_driver_registration_spec.spl`.
+  Codex update 2026-05-30: identified the current live compiler path as the
+  Rust seed (`src/compiler_rust`) rather than the self-hosted MIR pass. The
+  Rust HIR bridge already synthesized `DriverManifest.for_driver(...)` and
+  `register_static_driver(m, ops)` for stub-only function-level
+  `@driver(..., ops=...)`, but driver programs currently fall back to the AST
+  interpreter after JIT HIR lowering hits an unrelated immutable-method error.
+  Added the same synthesis to the AST interpreter function execution path and
+  a pure-Simple system proof that panics unless the static registry count
+  increments. Coverage:
+  `test/system/compiler/driver_synthetic_registration_live_spec.spl`,
+  mirrored at
+  `doc/06_spec/app/compiler/feature/driver_synthetic_registration_live_spec.spl`,
+  plus Rust seed regression
+  `src/compiler_rust/driver/tests/synthetic_driver_registration_live.rs`.
 
 ---
 

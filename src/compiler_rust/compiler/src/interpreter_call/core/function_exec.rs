@@ -7,13 +7,138 @@ use crate::error::CompileError;
 use crate::interpreter::{exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS};
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
-use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, SelfMode, Type};
+use simple_parser::ast::{
+    Argument, Block, ClassDef, EnumDef, Expr, FunctionDef, LetStmt, Mutability, Node, Pattern, ReturnStmt, SelfMode,
+    StorageClass, Type,
+};
 use simple_runtime::value::diagram_sffi;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
+
+fn is_driver_stub_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call { callee, .. } => {
+            if let Expr::Identifier(name) = callee.as_ref() {
+                matches!(name.as_str(), "pass_todo" | "pass_do_nothing" | "pass_dn" | "todo")
+            } else {
+                false
+            }
+        }
+        Expr::Identifier(name) => matches!(name.as_str(), "pass_todo" | "pass_do_nothing" | "pass_dn" | "todo"),
+        _ => false,
+    }
+}
+
+fn is_driver_stub_body(body: &Block) -> bool {
+    match body.statements.as_slice() {
+        [] => true,
+        [Node::Pass(_)] => true,
+        [Node::Expression(expr)] => is_driver_stub_expr(expr),
+        _ => false,
+    }
+}
+
+fn driver_attr_arg(func: &FunctionDef, key: &str, fallback_idx: usize) -> Option<Expr> {
+    let attr = func.attributes.iter().find(|attr| attr.name == "driver")?;
+    if let Some(named) = &attr.named_args {
+        for (name, value) in named {
+            if name == key {
+                return Some(value.clone());
+            }
+        }
+    }
+    attr.args.as_ref()?.get(fallback_idx).cloned()
+}
+
+fn driver_ops_arg(func: &FunctionDef) -> Option<Expr> {
+    let attr = func.attributes.iter().find(|attr| attr.name == "driver")?;
+    let named = attr.named_args.as_ref()?;
+    named
+        .iter()
+        .find_map(|(name, value)| if name == "ops" { Some(value.clone()) } else { None })
+}
+
+fn positional_arg(value: Expr, span: simple_parser::Span) -> Argument {
+    Argument {
+        name: None,
+        value,
+        span,
+        label: None,
+    }
+}
+
+fn synthetic_driver_registration_body(func: &FunctionDef, ops_expr: Expr) -> Block {
+    let span = func.span;
+    let class_expr = driver_attr_arg(func, "class", 0)
+        .or_else(|| driver_attr_arg(func, "dclass", 0))
+        .unwrap_or(Expr::Integer(0));
+    let vendor_expr = driver_attr_arg(func, "vendor", 1).unwrap_or(Expr::Integer(0));
+    let device_expr = driver_attr_arg(func, "device", 2)
+        .or_else(|| driver_attr_arg(func, "devices", 2))
+        .unwrap_or_else(|| Expr::Array(vec![]));
+    let version_expr = driver_attr_arg(func, "version", 3).unwrap_or_else(|| Expr::String("0.1".to_string()));
+
+    let manifest_call = Expr::MethodCall {
+        receiver: Box::new(Expr::Identifier("DriverManifest".to_string())),
+        method: "for_driver".to_string(),
+        args: vec![
+            positional_arg(Expr::String(func.name.clone()), span),
+            positional_arg(version_expr, span),
+            positional_arg(class_expr, span),
+            positional_arg(vendor_expr, span),
+            positional_arg(device_expr, span),
+        ],
+        generic_args: vec![],
+    };
+    let register_call = Expr::Call {
+        callee: Box::new(Expr::Identifier("register_static_driver".to_string())),
+        args: vec![
+            positional_arg(Expr::Identifier("m".to_string()), span),
+            positional_arg(Expr::Identifier("ops".to_string()), span),
+        ],
+    };
+
+    Block {
+        span,
+        statements: vec![
+            Node::Let(LetStmt {
+                span,
+                pattern: Pattern::Identifier("m".to_string()),
+                ty: None,
+                value: Some(manifest_call),
+                mutability: Mutability::Immutable,
+                storage_class: StorageClass::Auto,
+                is_ghost: false,
+                is_suspend: false,
+            }),
+            Node::Let(LetStmt {
+                span,
+                pattern: Pattern::Identifier("ops".to_string()),
+                ty: None,
+                value: Some(ops_expr),
+                mutability: Mutability::Immutable,
+                storage_class: StorageClass::Auto,
+                is_ghost: false,
+                is_suspend: false,
+            }),
+            Node::Return(ReturnStmt {
+                span,
+                value: Some(register_call),
+            }),
+        ],
+    }
+}
+
+fn effective_function_body(func: &FunctionDef) -> Option<Block> {
+    if is_driver_stub_body(&func.body) {
+        driver_ops_arg(func).map(|ops_expr| synthetic_driver_registration_body(func, ops_expr))
+    } else {
+        None
+    }
+}
 
 /// Execute a function body with bound arguments in a local environment.
 ///
@@ -62,8 +187,11 @@ fn execute_function_body(
         GENERATOR_YIELDS.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
     }
 
+    let synthetic_body = effective_function_body(func);
+    let body = synthetic_body.as_ref().unwrap_or(&func.body);
+
     // Execute function body - handle result manually to ensure flag restoration
-    let exec_result = exec_block_fn(&func.body, local_env, functions, classes, enums, impl_methods);
+    let exec_result = exec_block_fn(body, local_env, functions, classes, enums, impl_methods);
 
     // ALWAYS restore flags before handling the result to avoid flag leaking on error
     IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = saved_in_immutable_fn);

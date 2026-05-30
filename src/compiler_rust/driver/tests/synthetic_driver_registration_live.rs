@@ -1,0 +1,75 @@
+#![cfg(target_arch = "x86_64")]
+
+use simple_driver::runner::Runner;
+use std::fs;
+use tempfile::tempdir;
+
+const SYNTHETIC_DRIVER_SOURCE: &str = r#"
+use std.driver.error.{DriverError}
+use std.driver.manifest.{DriverManifest, DRVS_ABI_REV}
+use std.driver.registry.{DriverOps}
+use std.driver.static_table.{register_static_driver, static_driver_count}
+use std.driver.types.{DriverClass, DriverHandle, DriverContext, DeviceId, IoctlCmd, PowerState, ProbeResult}
+
+fn synth_abi_rev() -> i32:
+    DRVS_ABI_REV
+
+fn synth_init(ctx: DriverContext) -> Result<(), DriverError>:
+    Ok(())
+
+fn synth_probe(dev: DeviceId) -> Result<ProbeResult, DriverError>:
+    Ok(ProbeResult.Accept)
+
+fn synth_attach(dev: DeviceId) -> Result<DriverHandle, DriverError>:
+    Ok(DriverHandle(value: 1))
+
+fn synth_detach(h: DriverHandle) -> Result<(), DriverError>:
+    Ok(())
+
+fn synth_suspend(h: DriverHandle, s: PowerState) -> Result<(), DriverError>:
+    Ok(())
+
+fn synth_resume(h: DriverHandle) -> Result<(), DriverError>:
+    Ok(())
+
+fn synth_ioctl(h: DriverHandle, cmd: IoctlCmd) -> Result<i64, DriverError>:
+    Ok(0)
+
+fn synth_ops() -> DriverOps:
+    DriverOps(
+        self_ptr: 0,
+        manifest_abi: synth_abi_rev,
+        init_fn: synth_init,
+        probe_fn: synth_probe,
+        attach_fn: synth_attach,
+        detach_fn: synth_detach,
+        suspend_fn: synth_suspend,
+        resume_fn: synth_resume,
+        ioctl_fn: synth_ioctl,
+    )
+
+@driver(class=DriverClass.Block, vendor=0x1234, device=[0x5678], version="9.9", ops=synth_ops())
+fn register_synth_driver() -> Result<i32, DriverError>:
+    todo("FR-DRIVER-0001 synthetic registration body", "compiler replaces this stub before HIR execution")
+
+fn main() -> i32:
+    val before = static_driver_count()
+    match register_synth_driver():
+        Ok(_) -> return static_driver_count() - before
+        Err(_) -> return -7
+"#;
+
+#[test]
+fn driver_attr_ops_stub_executes_synthesized_static_registration() {
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("synthetic_driver_registration.spl");
+    fs::write(&source, SYNTHETIC_DRIVER_SOURCE).expect("write source");
+
+    let runner = Runner::new();
+    let exit = runner.run_file(&source).expect("run synthetic driver registration");
+
+    assert_eq!(
+        exit, 1,
+        "stub-only @driver(..., ops=...) function should synthesize and execute register_static_driver"
+    );
+}

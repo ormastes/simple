@@ -1,0 +1,72 @@
+use std.spec
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+fn delete_if_exists(path: text):
+    if rt_file_exists(path):
+        rt_file_delete(path)
+
+fn simple_cmd() -> text:
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    "src/compiler_rust/target/debug/simple"
+
+fn synthetic_driver_source() -> text:
+    "use std.driver.error.DriverError\n" +
+    "use std.driver.manifest.DriverManifest\n" +
+    "use std.driver.manifest.DRVS_ABI_REV\n" +
+    "use std.driver.registry.DriverOps\n" +
+    "use std.driver.static_table.register_static_driver\n" +
+    "use std.driver.static_table.static_driver_count\n" +
+    "use std.driver.types.DriverClass\n" +
+    "use std.driver.types.DriverHandle\n" +
+    "use std.driver.types.DriverContext\n" +
+    "use std.driver.types.DeviceId\n" +
+    "use std.driver.types.IoctlCmd\n" +
+    "use std.driver.types.PowerState\n" +
+    "use std.driver.types.ProbeResult\n" +
+    "\n" +
+    "fn synth_abi_rev() -> i32:\n" +
+    "    DRVS_ABI_REV\n" +
+    "fn synth_init(ctx: DriverContext) -> Result<(), DriverError>:\n" +
+    "    Ok(())\n" +
+    "fn synth_probe(dev: DeviceId) -> Result<ProbeResult, DriverError>:\n" +
+    "    Ok(ProbeResult.Accept)\n" +
+    "fn synth_attach(dev: DeviceId) -> Result<DriverHandle, DriverError>:\n" +
+    "    Ok(DriverHandle(value: 1))\n" +
+    "fn synth_detach(h: DriverHandle) -> Result<(), DriverError>:\n" +
+    "    Ok(())\n" +
+    "fn synth_suspend(h: DriverHandle, s: PowerState) -> Result<(), DriverError>:\n" +
+    "    Ok(())\n" +
+    "fn synth_resume(h: DriverHandle) -> Result<(), DriverError>:\n" +
+    "    Ok(())\n" +
+    "fn synth_ioctl(h: DriverHandle, cmd: IoctlCmd) -> Result<i64, DriverError>:\n" +
+    "    Ok(0)\n" +
+    "fn synth_ops() -> DriverOps:\n" +
+    "    DriverOps(self_ptr: 0, manifest_abi: synth_abi_rev, init_fn: synth_init, probe_fn: synth_probe, attach_fn: synth_attach, detach_fn: synth_detach, suspend_fn: synth_suspend, resume_fn: synth_resume, ioctl_fn: synth_ioctl)\n" +
+    "@driver(class=DriverClass.Block, vendor=0x1234, device=[0x5678], version=\"9.9\", ops=synth_ops())\n" +
+    "fn register_synth_driver() -> Result<i32, DriverError>:\n" +
+    "    todo(\"FR-DRIVER-0001 synthetic registration body\", \"compiler replaces this stub before HIR execution\")\n" +
+    "fn main() -> i32:\n" +
+    "    val before = static_driver_count()\n" +
+    "    match register_synth_driver():\n" +
+    "        Ok(_) -> 0\n" +
+    "        Err(_) -> panic(\"driver registration returned Err\")\n" +
+    "    if static_driver_count() != before + 1:\n" +
+    "        panic(\"driver registration did not increment static registry\")\n" +
+    "    return 0\n"
+
+describe "FR-DRIVER-0001 live synthetic registration":
+    it "executes register_static_driver for a stub-only @driver ops function":
+        val src = "/tmp/simple_driver_synthetic_registration_live.spl"
+        delete_if_exists(src)
+        expect(rt_file_write_text(src, synthetic_driver_source())).to_equal(true)
+
+        val (stdout, stderr, code) = rt_process_run(simple_cmd(), [src])
+        expect(code).to_equal(0)
+        expect(stderr.contains("driver registration did not increment static registry")).to_equal(false)
+
+        delete_if_exists(src)
