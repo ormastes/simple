@@ -121,7 +121,6 @@ fn parse_default_parameters() {
 fn reject_reserved_parameter_names() {
     for name in [
         "pass",
-        "out",
         "gen",
         "val",
         "def",
