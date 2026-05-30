@@ -19,7 +19,10 @@ Improve or conclusively re-evaluate SimpleOS guest toolchain execution evidence 
 Unrelated dirty worktree files, broad toolchain cross-build implementation in Rust/C++ unless already present and needed, and release work.
 
 ## Phase
-dev-done
+ship-done
 
 ## Log
 - dev: Created state file with 4 acceptance criteria (type: bug)
+- impl: Added fs-exec prepared-task serial evidence after scheduler registration.
+- impl: Tightened toolchain VFS probe completion contract to require prepared-task markers.
+- verify: Focused check and smoke tests passed; real compiler payloads remain unbuilt.

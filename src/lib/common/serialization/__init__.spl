@@ -1,0 +1,407 @@
+# Pure Simple source for std.common.serialization.
+
+pub fn type_nil(): 0
+pub fn type_bool(): 1
+pub fn type_int(): 2
+pub fn type_float(): 3
+pub fn type_text(): 4
+pub fn type_list(): 5
+pub fn type_tuple(): 6
+pub fn type_dict(): 7
+pub fn type_custom(): 8
+
+fn _join(items, open, close):
+    var result = open
+    var i = 0
+    while i < items.len():
+        if i > 0:
+            result = result + ", "
+        result = result + items[i].to_text()
+        i = i + 1
+    result + close
+
+fn _join_pairs(items, open, close):
+    var result = open
+    var i = 0
+    while i < items.len():
+        if i > 0:
+            result = result + ", "
+        result = result + items[i].0.to_text() + ": " + items[i].1.to_text()
+        i = i + 1
+    result + close
+
+pub fn serialize_list(items): _join(items, "[", "]")
+pub fn serialize_tuple_text(items): _join(items, "(", ")")
+pub fn serialize_dict(items): _join_pairs(items, "{", "}")
+pub fn serialize_int_list(items): serialize_list(items)
+pub fn serialize_text_list(items): serialize_list(items)
+pub fn serialize_bool_list(items): serialize_list(items)
+pub fn serialize_bool(value): if value: "true" else: "false"
+pub fn serialize_nil(): "nil"
+
+pub fn to_sdn_int(value): value.to_text()
+pub fn to_sdn_bool(value): serialize_bool(value)
+pub fn to_sdn_nil(): "nil"
+pub fn to_sdn_text(value): quote_string(value)
+pub fn to_sdn_list(items): serialize_list(items)
+pub fn to_sdn_tuple(items): serialize_tuple_text(items)
+pub fn to_sdn_dict(items): serialize_dict(items)
+
+pub fn pretty_print_indent(value, indent):
+    var result = ""
+    var i = 0
+    while i < indent:
+        result = result + "  "
+        i = i + 1
+    result + value
+
+fn _pretty_items(items, open, close, indent):
+    if items.len() == 0:
+        return open + close
+    var result = open + "\n"
+    var i = 0
+    while i < items.len():
+        result = result + pretty_print_indent(items[i].to_text(), indent + 1)
+        if i + 1 < items.len():
+            result = result + ","
+        result = result + "\n"
+        i = i + 1
+    result + pretty_print_indent(close, indent)
+
+pub fn pretty_list(items, indent): _pretty_items(items, "[", "]", indent)
+pub fn pretty_tuple(items, indent): _pretty_items(items, "(", ")", indent)
+
+pub fn pretty_dict(items, indent):
+    if items.len() == 0:
+        return "{}"
+    var lines = []
+    var i = 0
+    while i < items.len():
+        lines.push(items[i].0.to_text() + ": " + items[i].1.to_text())
+        i = i + 1
+    _pretty_items(lines, "{", "}", indent)
+
+pub fn char_code_safe(ch):
+    if ch == "\t": return 9
+    if ch == "\n": return 10
+    if ch == "\r": return 13
+    val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var i = 0
+    while i < chars.len():
+        if chars[i:i + 1] == ch:
+            return i + 32
+        i = i + 1
+    0
+
+pub fn char_to_digit_safe(ch):
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    0
+
+pub fn is_numeric_text(value):
+    if value.len() == 0:
+        return false
+    var i = 0
+    if value[0:1] == "-":
+        if value.len() == 1:
+            return false
+        i = 1
+    while i < value.len():
+        val ch = value[i:i + 1]
+        if char_code_safe(ch) < 48 or char_code_safe(ch) > 57:
+            return false
+        i = i + 1
+    true
+
+pub fn parse_int_safe(value):
+    if not is_numeric_text(value):
+        return 0
+    value.parse_int() ?? 0
+
+pub fn detect_format(value):
+    if value.len() == 0:
+        return "unknown"
+    val first = value[0:1]
+    if first == "@":
+        return "tagged"
+    if first == "{" or first == "[" or first == "\"":
+        return "sdn"
+    if value == "true" or value == "false" or value == "nil":
+        return "sdn"
+    if is_numeric_text(value):
+        return "sdn"
+    "unknown"
+
+pub fn is_valid_sdn(value): detect_format(value) != "unknown"
+
+pub fn tag_type(content, type_name): "@" + type_name + "{" + content + "}"
+
+pub fn get_type_tag(value) -> text?:
+    if value.len() < 3:
+        return nil
+    if value[0:1] != "@":
+        return nil
+    var i = 1
+    while i < value.len():
+        if value[i:i + 1] == "{":
+            if i == 1:
+                return nil
+            return value.substring(1, i)
+        i = i + 1
+    nil
+
+pub fn strip_type_tag(value):
+    val tag = get_type_tag(value)
+    if tag == nil:
+        return value
+    val start = tag.len() + 2
+    if start >= value.len():
+        return value
+    if value[value.len() - 1:value.len()] == "}":
+        return value.substring(start, value.len() - 1)
+    value.substring(start)
+
+pub fn add_version(content, version): "{v: " + version.to_text() + ", data: " + content + "}"
+
+pub fn get_version(value) -> i64?:
+    if not value.starts_with("{v: "):
+        return nil
+    val rest = value.substring(4)
+    var i = 0
+    while i < rest.len():
+        if rest[i:i + 1] == ",":
+            return parse_int_safe(rest.substring(0, i))
+        i = i + 1
+    nil
+
+pub fn strip_version(value):
+    if not value.starts_with("{v: "):
+        return value
+    var i = 0
+    while i < value.len():
+        if value[i:i + 1] == ",":
+            val rest = value.substring(i + 1, value.len() - 1).trim()
+            if rest.starts_with("data: "):
+                return rest.substring(6)
+            return rest
+        i = i + 1
+    value
+
+pub fn is_compressed(value): get_type_tag(value) == "compressed"
+pub fn is_encrypted(value): get_type_tag(value) == "encrypted"
+
+pub fn define_schema(fields): serialize_dict(fields)
+
+pub fn validate_field_type(value, kind):
+    if kind == "int": return is_numeric_text(value)
+    if kind == "bool": return value == "true" or value == "false"
+    if kind == "nil": return value == "nil"
+    if kind == "text": return value.len() >= 2 and value[0:1] == "\"" and value[value.len() - 1:value.len()] == "\""
+    if kind == "list": return value.len() >= 2 and value[0:1] == "[" and value[value.len() - 1:value.len()] == "]"
+    if kind == "tuple": return value.len() >= 2 and value[0:1] == "(" and value[value.len() - 1:value.len()] == ")"
+    if kind == "dict": return value.len() >= 2 and value[0:1] == "{" and value[value.len() - 1:value.len()] == "}"
+    true
+
+pub fn write_varint(value):
+    var out = []
+    var n = value
+    if n < 0:
+        out.push(255)
+        n = 0 - n
+    while n >= 128:
+        out.push((n % 128) + 128)
+        n = n / 128
+    out.push(n)
+    out
+
+pub fn read_varint(data, offset):
+    var i = offset
+    var sign = 1
+    if i < data.len() and data[i] == 255:
+        sign = -1
+        i = i + 1
+    var multiplier = 1
+    var value = 0
+    while i < data.len():
+        val byte = data[i]
+        if byte >= 128:
+            value = value + ((byte - 128) * multiplier)
+            multiplier = multiplier * 128
+            i = i + 1
+        else:
+            value = value + (byte * multiplier)
+            i = i + 1
+            return (value * sign, i - offset)
+    (value * sign, i - offset)
+
+pub fn read_bytes(data, offset, count):
+    var out = []
+    var i = 0
+    while i < count and offset + i < data.len():
+        out.push(data[offset + i])
+        i = i + 1
+    (out, count)
+
+pub fn read_bytes_with_length(data, offset):
+    if offset >= data.len():
+        return ([], 1)
+    read_bytes(data, offset + 1, data[offset])
+
+pub fn serialize_int_bytes(value):
+    var out = [type_int()]
+    val encoded = write_varint(value)
+    var i = 0
+    while i < encoded.len():
+        out.push(encoded[i])
+        i = i + 1
+    out
+
+pub fn serialize_bool_bytes(value): if value: [type_bool(), 1] else: [type_bool(), 0]
+
+pub fn serialize_text_bytes(value):
+    var out = [type_text(), value.len()]
+    var i = 0
+    while i < value.len():
+        out.push(char_code_safe(value[i:i + 1]))
+        i = i + 1
+    out
+
+pub fn serialize_int_list_bytes(items):
+    var out = [type_list(), items.len()]
+    var i = 0
+    while i < items.len():
+        val encoded = write_varint(items[i])
+        var j = 0
+        while j < encoded.len():
+            out.push(encoded[j])
+            j = j + 1
+        i = i + 1
+    out
+
+pub fn serialize_text_list_bytes(items):
+    var out = [type_list(), items.len()]
+    var i = 0
+    while i < items.len():
+        val encoded = serialize_text_bytes(items[i])
+        var j = 1
+        while j < encoded.len():
+            out.push(encoded[j])
+            j = j + 1
+        i = i + 1
+    out
+
+pub fn escape_string(value):
+    var result = ""
+    var i = 0
+    while i < value.len():
+        val ch = value[i:i + 1]
+        if ch == "\n":
+            result = result + "\\n"
+        elif ch == "\t":
+            result = result + "\\t"
+        elif ch == "\r":
+            result = result + "\\r"
+        elif ch == "\\":
+            result = result + "\\\\"
+        elif ch == "\"":
+            result = result + "\\\""
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+pub fn unescape_string(value):
+    var result = ""
+    var i = 0
+    while i < value.len():
+        val ch = value[i:i + 1]
+        if ch == "\\" and i + 1 < value.len():
+            val next = value[i + 1:i + 2]
+            if next == "n":
+                result = result + "\n"
+            elif next == "t":
+                result = result + "\t"
+            elif next == "r":
+                result = result + "\r"
+            else:
+                result = result + next
+            i = i + 2
+        else:
+            result = result + ch
+            i = i + 1
+    result
+
+pub fn quote_string(value): "\"" + escape_string(value) + "\""
+
+pub fn unquote_string(value):
+    if value.len() >= 2 and value[0:1] == "\"" and value[value.len() - 1:value.len()] == "\"":
+        return unescape_string(value.substring(1, value.len() - 1))
+    value
+
+pub fn deep_clone_int(value): value
+pub fn deep_clone_bool(value): value
+pub fn deep_clone_text(value): value
+pub fn deep_clone_list_int(items): items
+pub fn deep_clone_list_text(items): items
+pub fn shallow_clone_list_int(items): items
+pub fn shallow_clone_list_text(items): items
+
+pub fn deep_equal_int(left, right): left == right
+pub fn deep_equal_bool(left, right): left == right
+pub fn deep_equal_text(left, right): left == right
+
+pub fn deep_equal_list_int(left, right):
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+pub fn deep_equal_list_text(left, right):
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+pub fn digit_to_hex(value):
+    if value == 0: return "0"
+    if value == 1: return "1"
+    if value == 2: return "2"
+    if value == 3: return "3"
+    if value == 4: return "4"
+    if value == 5: return "5"
+    if value == 6: return "6"
+    if value == 7: return "7"
+    if value == 8: return "8"
+    if value == 9: return "9"
+    if value == 10: return "a"
+    if value == 11: return "b"
+    if value == 12: return "c"
+    if value == 13: return "d"
+    if value == 14: return "e"
+    if value == 15: return "f"
+    "0"
+
+pub fn hex_to_digit(ch):
+    if ch == "a" or ch == "A": return 10
+    if ch == "b" or ch == "B": return 11
+    if ch == "c" or ch == "C": return 12
+    if ch == "d" or ch == "D": return 13
+    if ch == "e" or ch == "E": return 14
+    if ch == "f" or ch == "F": return 15
+    char_to_digit_safe(ch)

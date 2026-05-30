@@ -1,8 +1,8 @@
 # SimpleOS In-Guest Toolchain Execution Gap
 
 Date: 2026-05-05
-Status: Open — kernel task preparation improved 2026-05-29; real compiler
-payloads and live compiler-operation proof remain open.
+Status: Open — kernel task preparation evidence improved 2026-05-30; real
+compiler payloads and live compiler-operation proof remain open.
 
 ## Problem
 
@@ -31,10 +31,11 @@ process and produce a compile artifact from an input source file.
   `/sys/apps/clang` with `/usr/share/simpleos/toolchain/clang/hello.c` and for
   `/sys/apps/rust` with `/usr/share/simpleos/toolchain/rust/Cargo.toml`. The
   serial log shows `spawn:resolve`, `spawn:bytes`, SMF stub validation through
-  `spawn:image ... stub_bytes=... argv_count=2 env_count=0`, and
+  `spawn:image ... stub_bytes=... argv_count=2 env_count=0`,
+  `spawn:prepared path=... pid=... entry=... segments=...`, and
   `[toolchain-vfs] ok spawn ...` for both apps. The dedicated probe requires
-  distinct monotonic guest PIDs (`pid=1` for Clang and `pid=2` for Rust) rather
-  than a fixed placeholder PID.
+  distinct monotonic guest PIDs (`pid=1` for Clang and `pid=2` for Rust) and
+  prepared scheduler-task markers rather than fixed placeholder PID evidence.
 - The same probe emits
   `[toolchain-vfs] compiler-operation-deferred status=standalone-required
   reason=frontend-runtime-not-yet-ported` so this evidence is not mistaken for
@@ -42,13 +43,13 @@ process and produce a compile artifact from an input source file.
 - The freestanding SMF parser now uses direct byte-array indexing internally;
   this fixed a baremetal-only failure where ELF-backed SMF packages were read
   from FAT32 but the parser could not find the EOF trailer.
-- `bin/simple run src/os/port/deploy_toolchains.spl -- --status` now reports
+- `bin/simple run src/os/port/deploy_toolchains.spl -- --status` reports
   the exact readiness of the real guest compiler payload path. Current status
-  on 2026-05-29: `llvm-cross NOT BUILT`, `compiler-rt NOT BUILT`,
+  on 2026-05-30: `llvm-cross NOT BUILT`, `compiler-rt NOT BUILT`,
   `rust-examples NOT BUILT`, `clang-static-guest NOT BUILT`, `rustc-static-guest
   NOT BUILT`, and `toolchain-disk-bake DISABLED`.
 
-## Blocker Analysis (updated 2026-05-29)
+## Blocker Analysis (updated 2026-05-30)
 
 Two independent blockers must both be resolved before any real in-guest compiler
 execution is possible. Neither is addressable in pure Simple today.
@@ -84,16 +85,26 @@ SMF hit builds a user process image and bootstrap scheduler task before
 returning the PID. The synthetic seeded fallback remains only for host/unit
 cases where no mounted VFS bytes are available.
 
+Progress 2026-05-30: `fs_exec_prepare_spawn_from_bytes(...)` now emits an
+explicit `[fs-exec] spawn:prepared path=... pid=... entry=... segments=...`
+marker after `scheduler_create_bootstrap_user_task_pid` succeeds. The
+`x64-toolchain-vfs-probe` completion contract now requires that marker for
+Clang, Rust, and the Steam 2048 fixture, so the VFS probe cannot pass with only
+SMF parse/image markers.
+
 Focused evidence:
 
 ```
-SIMPLE_LIB=src bin/simple check src/os/kernel/loader/fs_exec_spawn.spl src/os/kernel/loader/x86_64_fs_exec_spawn.spl test/unit/os/kernel/loader/x86_64_fs_exec_spawn_spec.spl
+SIMPLE_LIB=src bin/simple check src/os/kernel/loader/fs_exec_spawn.spl src/os/kernel/loader/x86_64_fs_exec_spawn.spl src/os/toolchain_vfs_probe_contract.spl test/unit/os/toolchain_vfs_probe_contract_spec.spl test/unit/os/kernel/loader/x86_64_fs_exec_spawn_spec.spl
+SIMPLE_LIB=src bin/simple test test/unit/os/toolchain_vfs_probe_contract_spec.spl --mode=interpreter --clean --format json
 SIMPLE_LIB=src bin/simple test test/unit/os/kernel/loader/x86_64_fs_exec_spawn_spec.spl --mode=interpreter --clean --format json
 SIMPLE_LIB=src bin/simple test test/system/os/port/x86_64_elf_load_spec.spl --mode=interpreter --clean --format json
+SIMPLE_LIB=src bin/simple run src/os/port/deploy_toolchains.spl -- --status
 ```
 
-Results: check passed; `x86_64_fs_exec_spawn_spec.spl` passed `2/2`;
-`x86_64_elf_load_spec.spl` passed `1/1`.
+Results: check passed; `toolchain_vfs_probe_contract_spec.spl` passed `2/2`;
+`x86_64_fs_exec_spawn_spec.spl` passed `2/2`; `x86_64_elf_load_spec.spl`
+passed `1/1`; toolchain status still reports missing guest compiler payloads.
 
 Remaining kernel-side gap: the real-byte path now constructs a process image
 and scheduler task, but live context transfer into a deterministic x86_64 guest

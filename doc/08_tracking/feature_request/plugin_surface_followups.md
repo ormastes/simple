@@ -1,6 +1,6 @@
 # Plugin Surface — Follow-up Feature Requests
 
-**Status: PARTIAL** — FR-PLUG-0001 is implemented in source and verified with a rebuilt debug driver. FR-PLUG-0002 and FR-PLUG-0003 are structurally implemented (pure Simple, no Rust). FR-PLUG-0004 is blocked by interpreter-mode Cranelift verification constraint. FR-PLUG-0005 is implemented as an explicit DI runtime-slot index with plugin-backed binding validation and deterministic resolution. See per-item status below.
+**Status: PARTIAL** — FR-PLUG-0001 is implemented in source and verified with a rebuilt debug driver. FR-PLUG-0002 and FR-PLUG-0003 are structurally implemented (pure Simple, no Rust). FR-PLUG-0004 has pure-Simple static-marker verification but remains backend-fusion blocked by the compile-mode/Cranelift verification constraint. FR-PLUG-0005 is implemented as an explicit DI runtime-slot index with plugin-backed binding validation and deterministic resolution. See per-item status below.
 
 **Verification pass: 2026-05-29** — All five items reviewed against source. No new code added (no live-`.so` fixture available; FR-PLUG-0005 is deep-work). See per-item notes below.
 
@@ -172,6 +172,13 @@ release before the surface is declared stable.
   and `sugar_registry.spl:24`. No Cranelift directory exists in the backend tree;
   the backend C codegen path is the target. Status unchanged — interpreter-mode
   verification impossible by design.
+- **Verification (2026-05-30):** Added pure-Simple source-marker assertions to
+  `test/feature/plugin/sugar_plugin_spec.spl` for the static insertion points in
+  `sugar_registry.spl`, `collection_desugar.spl`, and
+  `c_backend_translate_ops.spl`. Focused run passed:
+  `SIMPLE_LIB=src bin/simple test test/feature/plugin/sugar_plugin_spec.spl --mode=interpreter --clean`
+  (`12/12`). This verifies the handoff markers only; fused backend emission,
+  performance delta, and dynamic fallback ACs remain open.
 - **Notes:** Verification of this in interpreter mode is impossible by
   design — needs a Cranelift-mode test harness (see
   `feedback_compile_mode_false_greens.md` for current limitations).
@@ -242,6 +249,12 @@ Implemented in pure Simple:
 
 Live AST-rewrite demo (PERF-SUGAR-002 firing and runtime-behavior spec) remain
 unticked pending a test `.so` fixture.
+
+### FR-PLUG-0004 (verification only) — Static lowering markers
+
+Pure-Simple verification added to `test/feature/plugin/sugar_plugin_spec.spl`
+for the `[STATIC-NEXT]` handoff markers in the sugar registry, collection
+desugar loop, and backend matmul lowering site. Backend fusion remains open.
 
 ## Rejected
 

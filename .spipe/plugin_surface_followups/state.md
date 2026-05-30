@@ -20,7 +20,11 @@ Implement or verify the next concrete open plugin-surface follow-up from `plugin
 Rust runtime or native backend implementation is out of scope unless needed only for seed/tooling verification.
 
 ## Phase
-dev-done
+ship-done
 
 ## Log
 - dev: Created state file with 5 acceptance criteria (type: todo)
+- implement: Added pure-Simple FR-PLUG-0004 source-marker assertions to `test/feature/plugin/sugar_plugin_spec.spl`.
+- verify: `SIMPLE_LIB=src bin/simple test test/feature/plugin/sugar_plugin_spec.spl --mode=interpreter --clean` passed (`12/12`).
+- refactor-doc-wiki: Updated `doc/08_tracking/feature_request/plugin_surface_followups.md`; no broader process/wiki references needed changes.
+- ship: FR-PLUG-0004 remains backend-fusion blocked; marker verification is complete.

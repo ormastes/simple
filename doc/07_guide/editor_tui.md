@@ -161,21 +161,21 @@ global editor-runtime blocker.
 
 ## MCP tool surface & LLM / agent-dashboard integration
 
-The editor also exposes a **55-tool `editor.*` MCP surface** so an agent can
-drive it: `editor_mcp_tools()` (registry) and
-`editor_mcp_dispatch(session, tool_name, args)` in
-`src/app/editor/mcp_tools.spl`. Tools include `editor.open_file`,
-`editor.read_buffer`, `editor.edit`, `editor.search`, `editor.diagnostics`,
-`editor.goto_definition`, the `editor.lsp_*` family (~21), and the
-`editor.wiki_*` family. They are exercised in-process over an `EditSession` in
-`test/system/editor_controller_spec.spl`, `editor_md_wiki_index_spec.spl`, and
-`editor_gui_spec.spl`.
+The live `simple mcp` server exposes a small stateful `editor.*` subset backed
+by the shared `EditSession`: `editor.open_file`, `editor.read_buffer`, and
+`editor.list_open_files`. Reusable session logic lives in
+`src/lib/editor/mcp/session_tools.spl`; JSON-RPC argument decoding and the
+process-scoped session live in `src/app/mcp/main_editor_tools.spl`.
 
-**Status caveat:** this surface is a *tested library API*, not a live `simple mcp`
-endpoint — `editor_mcp_tools()`/`editor_mcp_dispatch()` are **not yet registered
-in the MCP server** (`src/app/mcp/main_dispatch.spl` has no `editor.*` routing,
-unlike the `assistant_*` tools). Registering it is the missing wire to let agents
-drive the editor over MCP.
+The broader in-process editor command catalog remains in
+`src/app/editor/mcp_tools.spl`: `editor_mcp_tools()` (registry) and
+`editor_mcp_dispatch(session, tool_name, args)`. It includes
+`editor.goto_definition`, the `editor.lsp_*` family, and the `editor.wiki_*`
+family for embedded apps/tests over an explicit `EditSession`.
+
+Do not advertise unwired commands such as `editor.edit`, `editor.search`, or
+`editor.diagnostics` from the MCP server until they have stateful dispatch,
+JSON argument mapping, and stdio integration coverage.
 
 For how the editor relates to the LLM agent dashboard and assistant session
 manager (the `.build/llm_dashboard/assistant/` store, KAIROS three-plane model,

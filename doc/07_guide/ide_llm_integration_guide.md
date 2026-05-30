@@ -153,13 +153,18 @@ plane (MCP assistant) and the operator plane (dashboard).
   it reads `.build/llm_dashboard/assistant/`.
 - **Control a session programmatically:** call the `assistant_*` MCP tools via the
   `simple mcp` server.
-- **Drive the editor from code/tests today:** call
-  `editor_mcp_dispatch(session, "editor.open_file", [path])` etc. directly (in-process).
+- **Drive the editor over live MCP today:** use `editor.open_file`,
+  `editor.read_buffer`, and `editor.list_open_files`; the server keeps one
+  process-scoped shared `EditSession`.
+- **Drive the broader editor catalog from code/tests:** call
+  `editor_mcp_dispatch(session, "editor.open_file", [path])` etc. directly
+  in-process with an explicit session.
 
 ## To finish the integration (roadmap)
 
-1. Register `editor_mcp_tools()` in the MCP server dispatch so `editor.*` is a
-   live endpoint (mirror the `assistant_*` wiring in `main_dispatch.spl`).
+1. Expand the live MCP editor subset only command-by-command. Each new
+   `editor.*` command needs stateful dispatch, JSON argument mapping, and stdio
+   integration coverage before it is advertised.
 2. Add an editor→dashboard event stream + watcher for live activity.
 3. Add a dashboard "open in editor" action and an assistant/agent panel in the
    editor shell (`src/lib/editor/view/`).
