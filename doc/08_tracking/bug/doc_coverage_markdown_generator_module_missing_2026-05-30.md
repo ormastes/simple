@@ -1,7 +1,7 @@
 # doc_coverage markdown_generator and types modules missing
 
 Date: 2026-05-30
-Status: Open
+Status: Resolved 2026-05-30
 Severity: High
 
 ## Symptom
@@ -45,3 +45,24 @@ The test file uses bare `doc_coverage.reporting.markdown_generator` (no `app.` o
 
 1. Implement the missing modules.
 2. Fix import paths in `test/unit/app/doc_coverage/markdown_report_spec.spl` to use `app.` prefix.
+
+## Resolution
+
+Implemented the missing pure Simple modules under `src/app/doc_coverage/`
+and corrected `test/unit/app/doc_coverage/markdown_report_spec.spl` imports
+to use the `app.` namespace.
+
+Verification:
+
+```bash
+SIMPLE_LIB=/tmp/simple-macro-intro-sync/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple check \
+  src/app/doc_coverage/types/doc_item.spl \
+  src/app/doc_coverage/types/coverage_result.spl \
+  src/app/doc_coverage/analysis/sdoctest_coverage.spl \
+  src/app/doc_coverage/reporting/markdown_generator.spl \
+  test/unit/app/doc_coverage/sdoctest_coverage_spec.spl \
+  test/unit/app/doc_coverage/markdown_report_spec.spl
+
+SIMPLE_LIB=/tmp/simple-macro-intro-sync/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple run \
+  test/unit/app/doc_coverage/markdown_report_spec.spl
+```

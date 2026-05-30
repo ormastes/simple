@@ -1,7 +1,7 @@
 # doc_coverage sdoctest analysis and types modules missing
 
 Date: 2026-05-30
-Status: Open
+Status: Resolved 2026-05-30
 Severity: High
 
 ## Symptom
@@ -43,3 +43,23 @@ The test expects:
 ## Next Probe
 
 Implement the missing modules under `src/app/doc_coverage/analysis/` and `src/app/doc_coverage/types/` per the test contract above. Categories accepted by `validate_tag_format`: `stdlib`, `core`, `feature`. Tag format: `<category>:<snake_case_name>`.
+
+## Resolution
+
+Implemented `src/app/doc_coverage/analysis/sdoctest_coverage.spl` and shared
+doc coverage types in pure Simple under `src/app/doc_coverage/types/`.
+
+Verification:
+
+```bash
+SIMPLE_LIB=/tmp/simple-macro-intro-sync/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple check \
+  src/app/doc_coverage/types/doc_item.spl \
+  src/app/doc_coverage/types/coverage_result.spl \
+  src/app/doc_coverage/analysis/sdoctest_coverage.spl \
+  src/app/doc_coverage/reporting/markdown_generator.spl \
+  test/unit/app/doc_coverage/sdoctest_coverage_spec.spl \
+  test/unit/app/doc_coverage/markdown_report_spec.spl
+
+SIMPLE_LIB=/tmp/simple-macro-intro-sync/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple run \
+  test/unit/app/doc_coverage/sdoctest_coverage_spec.spl
+```
