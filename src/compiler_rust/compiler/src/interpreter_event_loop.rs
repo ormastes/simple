@@ -216,7 +216,7 @@ mod platform {
             filter,
             flags,
             fflags,
-            data,
+            data: data as libc::intptr_t,
             udata,
         }
     }
