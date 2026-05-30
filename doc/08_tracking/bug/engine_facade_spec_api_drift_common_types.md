@@ -1,6 +1,6 @@
 # Engine Facade Specs: API Drift in std.common.engine Types
 
-**Status:** OPEN — 5 gc_async_mut + 5 nogc_async_mut engine facade specs fail with pre-existing source mismatches
+**Status:** PARTIAL FIX — Bug 1 (Vec3.forward) and Bug 3 (KeyCode.code, MouseButtonId.code) fixed 2026-05-30; Bug 2 (RawHandle refactor) remains OPEN
 **Severity:** Moderate — import resolution fixed; spec logic fails due to API drift in common types
 **Affected specs:**
 - `test/unit/lib/gc_async_mut/engine/audio/engine_audio_facade_spec.spl`
@@ -13,11 +13,11 @@
 
 ## Symptoms
 
-### Bug 1: Vec3.forward() missing — audio spec
+### Bug 1: Vec3.forward() missing — audio spec — FIXED 2026-05-30
 `semantic: unknown static method forward on class Vec3`
 Specs call `Vec3.forward()` but `src/lib/common/engine/math3d.spl` only defines `Vec3.zero()` and `Vec3.one()`.
-**Fix:** Add `static fn forward() -> Vec3: Vec3(x: 0.0, y: 0.0, z: 1.0)` to `Vec3` in `math3d.spl`.
-Note: adding `Vec3.forward()` alone is safe (no callers to break), but it requires deciding the convention (z=1 forward vs z=-1).
+**Fixed:** Added `static fn forward() -> Vec3: Vec3(x: 0.0, y: 0.0, z: 1.0)` to `Vec3` in `math3d.spl`.
+Convention: +Z forward (standard OpenGL/game engine convention).
 
 ### Bug 2: RawHandle(index:, generation:) constructor mismatch — component, scene, sprite specs
 `semantic: class RawHandle has no field named index`
@@ -27,10 +27,11 @@ Specs also pass `RawHandle(...)` to `NodeId(raw:)` and `TextureId(raw:)`, but th
 **Fix required:** Either (a) add `index: i64` and `generation: Generation` fields to `RawHandle` AND change `NodeId.raw`/`TextureId.raw` to `raw: RawHandle`, updating all call sites in `nogc_sync_mut/engine/scene/`, `nogc_sync_mut/engine/sprite/`, etc.; or (b) rewrite spec to use `RawHandle(value: n)` and `NodeId(raw: n)` with plain integers.
 This is a significant API refactor — scope it separately.
 
-### Bug 3: KeyCode(code:) field missing — input spec
+### Bug 3: KeyCode(code:) field missing — input spec — FIXED 2026-05-30
 `semantic: class KeyCode has no field named code`
-Specs call `KeyCode(code: 32)` but `KeyCode` in `units.spl` only has `value: i64`.
-**Fix:** Add `code: i64` field to `KeyCode` OR rename `value` to `code` and update all callers.
+Specs call `KeyCode(code: 32)` but `KeyCode` in `units.spl` only had `value: i64`.
+**Fixed:** Renamed `KeyCode.value` to `KeyCode.code` and `MouseButtonId.value` to `MouseButtonId.code` in `units.spl` to match all real callers (default_bindings.spl, keys.spl, specs).
+Both gc_async_mut and nogc_async_mut input specs now pass.
 
 ## Context
 These failures pre-date the gc_async_mut facade scaffolding (2026-05-30). The gc_async_mut facades

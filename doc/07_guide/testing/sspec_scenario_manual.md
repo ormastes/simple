@@ -40,6 +40,43 @@ it "user logs in":
 Generated docs should render the step prose and captures first. Runnable code
 belongs in a folded `Executable SPipe` block.
 
+Current docgen derives starter manual steps from call-like scenario lines and
+keeps assertion mechanics in the folded executable block. For example,
+`user.open_app()` renders as a visible `User open app` step, while
+`expect(...)` and control-flow lines such as `if user.needs_login():` remain
+executable detail. Nested call-like actions inside control flow can still render
+as visible manual steps. Checker-style calls such as `Then_login_succeeds()`
+render as `Then login succeeds`. Prefer helper names that read cleanly when
+dots and underscores become words.
+
+Use comment-form `# @step: Text` or `# @step("Text")` before a call when the
+derived label is not good enough:
+
+```simple
+it "user logs in":
+    user.open_app()
+    # @step: Submit login form
+    user.submit_login()
+    # @step("Open the dashboard")
+    user.open_dashboard()
+```
+
+Generated docs render `Submit login form` as the visible step and omit the
+`# @step` metadata from the folded executable source.
+Step-local capture metadata may sit between a step label and the action:
+
+```simple
+# @step: Submit login form
+# @capture(api)
+user.submit_login()
+```
+
+Empty `# @step` metadata renders a manual warning and falls back to the derived
+call-like step label.
+If a labeled `# @step` is not followed by a call-like manual step, generated
+docs render a manual warning and omit the unused metadata from executable
+source.
+
 ## Inline and Previous Scenarios
 
 Current docgen supports comment metadata for manual visibility and previous
@@ -124,6 +161,15 @@ Implemented docgen behavior supports comment metadata today:
 - `# @capture` renders `tui after_step`.
 - `# @capture(api)` renders `api after_step` for the next step.
 - `# @capture(after_scenario, gui)` renders `gui after_scenario`.
+- `# @capture(off)` before a step suppresses inherited scenario capture for
+  that step.
+- Scenario and step-local capture policies appear under derived manual steps
+  when the next source line can be rendered as a manual step.
+- Scenario-level `after_scenario` capture attaches to the final derived manual
+  step instead of every step.
+- If no manual step can be derived, capture metadata falls back to a compact
+  scenario/step capture summary.
+- `# @capture(off)` is silent in fallback summaries.
 - Capture metadata comments are omitted from the rendered source block.
 
 Supported capture modes:

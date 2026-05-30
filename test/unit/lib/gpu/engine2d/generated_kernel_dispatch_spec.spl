@@ -1,7 +1,7 @@
 # @cover src/lib/gc_async_mut/gpu/engine2d/generated_kernel_dispatch.spl 90%
 # @tag: unit, gpu, engine2d, compute, generated-kernels
 
-use std.gpu.engine2d.generated_kernel_dispatch.{generated_2d_dispatch_for_backend, generated_2d_launch_plan, generated_2d_execution_request, generated_2d_submit_result, generated_2d_dispatch_provider, GENERATED_2D_FILL, GENERATED_2D_COPY, GENERATED_2D_ALPHA, GENERATED_2D_SCROLL}
+use std.gpu.engine2d.generated_kernel_dispatch.{generated_2d_dispatch_for_backend, generated_2d_launch_plan, generated_2d_execution_request, generated_2d_artifact_load_evidence, generated_2d_execution_request_from_load, generated_2d_submit_result, generated_2d_execution_evidence, generated_2d_dispatch_provider, GENERATED_2D_FILL, GENERATED_2D_COPY, GENERATED_2D_ALPHA, GENERATED_2D_SCROLL}
 
 describe "Engine2D generated 2D kernel dispatch metadata":
 
@@ -124,6 +124,38 @@ describe "Engine2D generated 2D kernel dispatch metadata":
         expect(bad_plan.can_submit).to_equal(false)
         expect(bad_plan.reason).to_equal("backend-inactive")
 
+    it "requires generated artifacts to load before building runtime execution requests":
+        val cuda_load = generated_2d_artifact_load_evidence("cuda", GENERATED_2D_FILL, 16, 16, true, true, 0, 77)
+        val metal_load = generated_2d_artifact_load_evidence("metal", GENERATED_2D_SCROLL, 16, 16, true, true, 33, 44)
+        val cuda_request = generated_2d_execution_request_from_load(cuda_load, 2048)
+        val metal_request = generated_2d_execution_request_from_load(metal_load, 0)
+
+        expect(cuda_load.loaded).to_equal(true)
+        expect(cuda_load.reason).to_equal("loaded")
+        expect(cuda_request.can_submit).to_equal(true)
+        expect(cuda_request.call_shape()).to_contain("rt_cuda_launch_kernel")
+        expect(metal_load.loaded).to_equal(true)
+        expect(metal_request.can_submit).to_equal(true)
+        expect(metal_request.call_shape()).to_contain("metal_sffi_dispatch_compute")
+
+    it "fails generated artifact loads closed for bad artifacts runtime or handles":
+        val bad_artifact = generated_2d_artifact_load_evidence("cuda", GENERATED_2D_FILL, 16, 16, false, true, 0, 77)
+        val no_runtime = generated_2d_artifact_load_evidence("cuda", GENERATED_2D_FILL, 16, 16, true, false, 0, 77)
+        val missing_kernel = generated_2d_artifact_load_evidence("cuda", GENERATED_2D_FILL, 16, 16, true, true, 0, 0)
+        val missing_queue = generated_2d_artifact_load_evidence("opencl", GENERATED_2D_COPY, 16, 16, true, true, 0, 22)
+        val request = generated_2d_execution_request_from_load(bad_artifact, 2048)
+
+        expect(bad_artifact.loaded).to_equal(false)
+        expect(bad_artifact.reason).to_equal("artifact-not-verified")
+        expect(no_runtime.loaded).to_equal(false)
+        expect(no_runtime.reason).to_equal("runtime-unavailable")
+        expect(missing_kernel.loaded).to_equal(false)
+        expect(missing_kernel.reason).to_equal("missing-kernel-or-pipeline-handle")
+        expect(missing_queue.loaded).to_equal(false)
+        expect(missing_queue.reason).to_equal("missing-queue-or-encoder-handle")
+        expect(request.can_submit).to_equal(false)
+        expect(request.reason).to_equal("artifact-not-verified")
+
     it "records generated kernel submit status without pretending runtime availability":
         val ready = generated_2d_execution_request("cuda", GENERATED_2D_FILL, 16, 16, 0, 77, 2048)
         val missing = generated_2d_execution_request("cuda", GENERATED_2D_FILL, 16, 16, 0, 77, 0)
@@ -144,3 +176,30 @@ describe "Engine2D generated 2D kernel dispatch metadata":
         expect(not_ready.attempted).to_equal(false)
         expect(not_ready.status_code).to_equal("not-ready")
         expect(not_ready.reason).to_equal("missing-args-pointer")
+
+    it "requires readback checksum evidence before claiming device execution":
+        val ready = generated_2d_execution_request("cuda", GENERATED_2D_FILL, 16, 16, 0, 77, 2048)
+        val submitted = generated_2d_submit_result(ready, true, true)
+        val no_readback = generated_2d_execution_evidence(submitted, false, 1234, 1234)
+        val mismatch = generated_2d_execution_evidence(submitted, true, 1234, 999)
+        val verified = generated_2d_execution_evidence(submitted, true, 1234, 1234)
+
+        expect(no_readback.device_executed).to_equal(false)
+        expect(no_readback.status_code).to_equal("readback-unavailable")
+        expect(mismatch.device_executed).to_equal(false)
+        expect(mismatch.status_code).to_equal("readback-mismatch")
+        expect(verified.device_executed).to_equal(true)
+        expect(verified.status_code).to_equal("device-executed")
+        expect(verified.summary()).to_contain("executed=true")
+
+    it "does not claim execution when submit failed or expected checksum is invalid":
+        val ready = generated_2d_execution_request("metal", GENERATED_2D_SCROLL, 16, 16, 33, 44, 0)
+        val failed = generated_2d_submit_result(ready, true, false)
+        val submitted = generated_2d_submit_result(ready, true, true)
+        val failed_evidence = generated_2d_execution_evidence(failed, true, 1234, 1234)
+        val invalid_checksum = generated_2d_execution_evidence(submitted, true, 0, 0)
+
+        expect(failed_evidence.device_executed).to_equal(false)
+        expect(failed_evidence.status_code).to_equal("not-submitted")
+        expect(invalid_checksum.device_executed).to_equal(false)
+        expect(invalid_checksum.status_code).to_equal("invalid-expected-checksum")

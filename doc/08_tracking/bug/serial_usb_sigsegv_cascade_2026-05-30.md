@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-30
 **Severity:** Critical
-**Status:** Open
+**Status:** Open (Phase 2 landed: runtime crash handler)
 **Component:** runtime (runtime.c), serial FFI, signal handling
 
 ## Summary

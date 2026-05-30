@@ -330,11 +330,26 @@ pub fn spl_wffi_call_f64(args: &[Value]) -> Result<Value, CompileError> {
             }
             6 => {
                 let f: extern "C" fn(f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(fptr);
-                f(call_args[0], call_args[1], call_args[2], call_args[3], call_args[4], call_args[5])
+                f(
+                    call_args[0],
+                    call_args[1],
+                    call_args[2],
+                    call_args[3],
+                    call_args[4],
+                    call_args[5],
+                )
             }
             7 => {
                 let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(fptr);
-                f(call_args[0], call_args[1], call_args[2], call_args[3], call_args[4], call_args[5], call_args[6])
+                f(
+                    call_args[0],
+                    call_args[1],
+                    call_args[2],
+                    call_args[3],
+                    call_args[4],
+                    call_args[5],
+                    call_args[6],
+                )
             }
             8 => {
                 let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(fptr);

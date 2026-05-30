@@ -566,11 +566,7 @@ fn substitute_pattern_templates(
             )),
             ty: ty.clone(),
         },
-        Pattern::Range {
-            start,
-            end,
-            inclusive,
-        } => Pattern::Range {
+        Pattern::Range { start, end, inclusive } => Pattern::Range {
             start: Box::new(substitute_expr_templates(start, const_bindings)),
             end: Box::new(substitute_expr_templates(end, const_bindings)),
             inclusive: *inclusive,

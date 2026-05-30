@@ -48,6 +48,34 @@ struct WasmHelloGuiCompileResult:
     diagnostic: text
     command_line: text
 
+struct WasmHelloGuiTargetPackage:
+    target: text
+    name: text
+    platform: text
+    module_path: text
+    launcher_entry: text
+    shell_runtime: text
+    no_javascript: bool
+    event_contract: text
+    render_contract: text
+    ready: bool
+    blocker: text
+
+struct WasmHelloGuiCompiledArtifactEvidence:
+    target: text
+    output_path: text
+    size_bytes: i64
+    magic_hex: text
+    version: i32
+    has_smf_marker: bool
+    has_spl_main: bool
+    has_ui_exports: bool
+    has_ui_strings: bool
+    has_event_strings: bool
+    status: text
+    ready: bool
+    diagnostic: text
+
 fn _wasm_hello_target_name(target: text) -> text:
     if target == WEB_RENDER_TARGET_ANDROID_WASM:
         return "android"
@@ -72,6 +100,45 @@ fn _wasm_hello_viewport_h(target: text) -> i32:
     if target == WEB_RENDER_TARGET_IOS_WASM:
         return 844
     600
+
+fn _wasm_hello_platform(target: text) -> text:
+    if target == WEB_RENDER_TARGET_ANDROID_WASM:
+        return "android"
+    if target == WEB_RENDER_TARGET_IOS_WASM:
+        return "ios"
+    if target == WEB_RENDER_TARGET_HOST_WM_WASM:
+        return "host-wm"
+    if target == WEB_RENDER_TARGET_SIMPLEOS_WM_WASM:
+        return "simpleos-wm"
+    "unknown"
+
+fn _wasm_hello_launcher_entry(target: text) -> text:
+    if target == WEB_RENDER_TARGET_ANDROID_WASM:
+        return "android-native-wasm-surface"
+    if target == WEB_RENDER_TARGET_IOS_WASM:
+        return "ios-native-wasm-surface"
+    if target == WEB_RENDER_TARGET_HOST_WM_WASM:
+        return "host-wm-native-wasm-window"
+    if target == WEB_RENDER_TARGET_SIMPLEOS_WM_WASM:
+        return "simpleos-wm-native-wasm-window"
+    "unknown"
+
+fn _wasm_hello_shell_runtime(target: text) -> text:
+    if target == WEB_RENDER_TARGET_ANDROID_WASM:
+        return "android:no-js:wasm32-simple-ui"
+    if target == WEB_RENDER_TARGET_IOS_WASM:
+        return "ios:no-js:wasm32-simple-ui"
+    if target == WEB_RENDER_TARGET_HOST_WM_WASM:
+        return "host-wm:no-js:wasm32-simple-ui"
+    if target == WEB_RENDER_TARGET_SIMPLEOS_WM_WASM:
+        return "simpleos-wm:no-js:wasm32-simple-ui"
+    "unknown"
+
+fn _wasm_hello_event_contract() -> text:
+    "button:hello_button:click->hello_button:clicked;scroll:viewport->hello_scroll:accepted;text:hello_text->hello_text:accepted"
+
+fn _wasm_hello_render_contract(target: text) -> text:
+    "viewport={_wasm_hello_viewport_w(target)}x{_wasm_hello_viewport_h(target)};layout=column-gap-8-padding-16;button-min-height=44;dpi=target-native"
 
 fn wasm_hello_gui_artifact_for_target(target: text) -> WasmHelloGuiArtifact:
     val name = _wasm_hello_target_name(target)
@@ -188,6 +255,106 @@ fn wasm_hello_gui_compile_result_for_request(request: WasmHelloGuiCompileRequest
 
 fn wasm_hello_gui_compile_result_summary(result: WasmHelloGuiCompileResult) -> text:
     "target={result.target};output={result.output_path};status={result.status};ready={result.ready};diagnostic={result.diagnostic};command={result.command_line}"
+
+fn wasm_hello_gui_target_package_for_target(target: text) -> WasmHelloGuiTargetPackage:
+    val hello = wasm_hello_gui_artifact_for_target(target)
+    val no_js = hello.request.js == "" and hello.artifact.ipc_json == "" and !hello.artifact.html.contains("<script")
+    val ready = hello.validation_error == "" and no_js and hello.metadata.module_path != "" and hello.metadata.abi != ""
+    var blocker = ""
+    if hello.validation_error != "":
+        blocker = hello.validation_error
+    else:
+        if !no_js:
+            blocker = "javascript or host IPC bridge is present"
+        else:
+            if hello.metadata.module_path == "":
+                blocker = "compiled module path is missing"
+            else:
+                if hello.metadata.abi == "":
+                    blocker = "WASM ABI is missing"
+    WasmHelloGuiTargetPackage(
+        target: target,
+        name: hello.name,
+        platform: _wasm_hello_platform(target),
+        module_path: hello.metadata.module_path,
+        launcher_entry: _wasm_hello_launcher_entry(target),
+        shell_runtime: _wasm_hello_shell_runtime(target),
+        no_javascript: no_js,
+        event_contract: _wasm_hello_event_contract(),
+        render_contract: _wasm_hello_render_contract(target),
+        ready: ready,
+        blocker: blocker
+    )
+
+fn wasm_hello_gui_target_packages() -> [WasmHelloGuiTargetPackage]:
+    [
+        wasm_hello_gui_target_package_for_target(WEB_RENDER_TARGET_ANDROID_WASM),
+        wasm_hello_gui_target_package_for_target(WEB_RENDER_TARGET_IOS_WASM),
+        wasm_hello_gui_target_package_for_target(WEB_RENDER_TARGET_HOST_WM_WASM),
+        wasm_hello_gui_target_package_for_target(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM)
+    ]
+
+fn wasm_hello_gui_target_package_summary(package: WasmHelloGuiTargetPackage) -> text:
+    "target={package.target};platform={package.platform};module={package.module_path};launcher={package.launcher_entry};runtime={package.shell_runtime};no_js={package.no_javascript};events={package.event_contract};render={package.render_contract};ready={package.ready};blocker={package.blocker}"
+
+fn wasm_hello_gui_compiled_artifact_evidence(target: text, output_path: text, size_bytes: i64, magic_hex: text, version: i32, has_smf_marker: bool, has_spl_main: bool, has_ui_exports: bool, has_ui_strings: bool, has_event_strings: bool) -> WasmHelloGuiCompiledArtifactEvidence:
+    var status = "compiled_wasm_verified"
+    var diagnostic = ""
+    var ready = true
+    if size_bytes <= 0:
+        status = "missing_or_empty_artifact"
+        diagnostic = "compiled WASM artifact is missing or empty"
+        ready = false
+    else:
+        if magic_hex != "0061736d":
+            status = "invalid_wasm_magic"
+            diagnostic = "compiled artifact does not start with WASM magic"
+            ready = false
+        else:
+            if version != 1:
+                status = "invalid_wasm_version"
+                diagnostic = "compiled artifact is not WASM version 1"
+                ready = false
+            else:
+                if has_smf_marker:
+                    status = "smf_artifact_not_wasm"
+                    diagnostic = "compiled artifact still contains the SMF marker"
+                    ready = false
+                else:
+                    if !has_spl_main:
+                        status = "missing_spl_main"
+                        diagnostic = "compiled WASM artifact does not export or contain spl_main"
+                        ready = false
+                    else:
+                        if !has_ui_exports:
+                            status = "missing_ui_exports"
+                            diagnostic = "compiled WASM artifact is missing hello GUI exports"
+                            ready = false
+                        else:
+                            if !has_ui_strings:
+                                status = "missing_ui_strings"
+                                diagnostic = "compiled WASM artifact is missing hello GUI markup strings"
+                                ready = false
+                            else:
+                                if !has_event_strings:
+                                    status = "missing_event_strings"
+                                    diagnostic = "compiled WASM artifact is missing button scroll text event strings"
+                                    ready = false
+    WasmHelloGuiCompiledArtifactEvidence(
+        target: target,
+        output_path: output_path,
+        size_bytes: size_bytes,
+        magic_hex: magic_hex,
+        version: version,
+        has_smf_marker: has_smf_marker,
+        has_spl_main: has_spl_main,
+        has_ui_exports: has_ui_exports,
+        has_ui_strings: has_ui_strings,
+        has_event_strings: has_event_strings,
+        status: status,
+        ready: ready,
+        diagnostic: diagnostic
+    )
 
 fn wasm_hello_gui_compile_plans() -> [WasmHelloGuiCompilePlan]:
     [

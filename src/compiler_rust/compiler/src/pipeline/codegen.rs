@@ -2494,6 +2494,13 @@ fn select_backend(
     target: &Target,
     backend_preference: Option<NativeCodegenBackend>,
 ) -> Result<BackendKind, CompileError> {
+    if target.arch.is_wasm() && !cfg!(feature = "llvm") {
+        return Err(CompileError::Codegen(
+            "WebAssembly targets require the LLVM/WASM backend; rebuild `simple-driver` with `--features wasm` or `--features wasm-wasi`"
+                .to_string(),
+        ));
+    }
+
     let mut backend = BackendKind::for_target(target);
 
     if let Some(requested) = backend_preference {
@@ -2633,6 +2640,19 @@ mod tests {
         let result = select_backend(&target, None);
         assert!(result.is_err());
         env::remove_var("SIMPLE_BACKEND");
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    #[test]
+    fn wasm_target_without_llvm_feature_errors_before_cranelift() {
+        let target = Target::new_wasm(
+            simple_common::target::TargetArch::Wasm32,
+            simple_common::target::WasmRuntime::Browser,
+        );
+        let err = select_backend(&target, None).unwrap_err();
+        let message = format!("{err}");
+        assert!(message.contains("WebAssembly targets require the LLVM/WASM backend"));
+        assert!(message.contains("--features wasm"));
     }
 
     #[test]

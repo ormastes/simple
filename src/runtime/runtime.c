@@ -1219,12 +1219,16 @@ void rt_bdd_expect_eq_rv(int64_t actual, int64_t expected) {
  * Command-Line Arguments
  * ================================================================ */
 
+/* Forward declaration — defined in crash handler section below */
+int64_t rt_install_crash_handler(void);
+
 static int    g_argc = 0;
 static char** g_argv = NULL;
 
 void spl_init_args(int argc, char** argv) {
     g_argc = argc;
     g_argv = argv;
+    rt_install_crash_handler();
 }
 
 int64_t spl_arg_count(void) {
@@ -1790,6 +1794,49 @@ static void _spl_signal_handler(int signum) {
 static void _spl_atexit_handler(void) {
     _atexit_flag = 1;
 }
+
+/* ----------------------------------------------------------------
+ * Crash Signal Handler (SIGSEGV / SIGBUS)
+ * ---------------------------------------------------------------- */
+#ifndef _WIN32
+static void _spl_crash_handler(int signum, siginfo_t *info, void *ucontext) {
+    (void)ucontext;
+    const char *signame = (signum == SIGSEGV) ? "SIGSEGV" : "SIGBUS";
+
+    /* Use write() not fprintf — async-signal-safe */
+    char buf[256];
+    int len = snprintf(buf, sizeof(buf),
+        "\n[simple-runtime] Fatal: %s at address %p\n",
+        signame, info->si_addr);
+    if (len > 0) write(STDERR_FILENO, buf, (size_t)len);
+
+    /* Backtrace */
+    void *frames[32];
+    int nframes = backtrace(frames, 32);
+    if (nframes > 0) {
+        write(STDERR_FILENO, "Backtrace:\n", 11);
+        backtrace_symbols_fd(frames, nframes, STDERR_FILENO);
+    }
+
+    /* Exit with signal-appropriate code */
+    _exit(128 + signum);
+}
+
+int64_t rt_install_crash_handler(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = _spl_crash_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+
+    int ok = 1;
+    if (sigaction(SIGSEGV, &sa, NULL) == -1) ok = 0;
+    if (sigaction(SIGBUS, &sa, NULL) == -1) ok = 0;
+    return ok;
+}
+#else
+int64_t rt_install_crash_handler(void) { return 0; }
+#endif
 
 int64_t rt_signal_install(int64_t signal_num) {
     if (signal_num < 0 || signal_num >= 32) return 0;

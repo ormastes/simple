@@ -770,10 +770,12 @@ impl ChannelProvider for NativeChannelProvider {
     }
 
     fn channel_send(&self, handle: Handle, value: Value) -> Result<(), CompileError> {
-        let tx = self
-            .senders
-            .get(&handle)
-            .ok_or_else(|| CompileError::runtime(format!("Channel {} not found", handle)))?;
+        let Some(tx) = self.senders.get(&handle) else {
+            if self.receivers.contains_key(&handle) {
+                return Ok(());
+            }
+            return Err(CompileError::runtime(format!("Channel {} not found", handle)));
+        };
         tx.send(value)
             .map_err(|_| CompileError::runtime("Failed to send to channel"))?;
         Ok(())
@@ -807,7 +809,6 @@ impl ChannelProvider for NativeChannelProvider {
 
     fn channel_close(&self, handle: Handle) -> Result<(), CompileError> {
         self.senders.remove(&handle);
-        self.receivers.remove(&handle);
         Ok(())
     }
 

@@ -11,9 +11,9 @@
 
 ## Phase 2: Runtime SIGSEGV Handler
 
-- [ ] Add `sigaction(SIGSEGV, ...)` in `runtime.c` `_spl_runtime_init()`
-- [ ] Handler prints: faulting address, backtrace (via `backtrace()`), then `_exit(139)`
-- [ ] Add `sigaction(SIGBUS, ...)` for similar null-deref on bus errors
+- [x] Add `sigaction(SIGSEGV, ...)` in `runtime.c` `_spl_runtime_init()`
+- [x] Handler prints: faulting address, backtrace (via `backtrace()`), then `_exit(139)`
+- [x] Add `sigaction(SIGBUS, ...)` for similar null-deref on bus errors
 - [ ] Test: deliberate null deref in compiled mode produces backtrace, not bare crash
 
 ## Phase 3: Fork Child Signal Isolation

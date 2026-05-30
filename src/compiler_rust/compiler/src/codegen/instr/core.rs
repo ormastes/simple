@@ -351,8 +351,8 @@ pub(crate) fn compile_binop<M: Module>(
                 compile_text_eq_with_identity_fast_path(ctx, builder, lhs, rhs)
             } else if vreg_is_native_equality_scalar(ctx, left_vreg) && vreg_is_native_equality_scalar(ctx, right_vreg)
             {
-                let use_unsigned = vreg_is_signed(ctx, left_vreg) == Some(false)
-                    || vreg_is_signed(ctx, right_vreg) == Some(false);
+                let use_unsigned =
+                    vreg_is_signed(ctx, left_vreg) == Some(false) || vreg_is_signed(ctx, right_vreg) == Some(false);
                 let lhs = ensure_i64_typed(builder, lhs, Some(!use_unsigned));
                 let rhs = ensure_i64_typed(builder, rhs, Some(!use_unsigned));
                 let cmp_i8 = builder.ins().icmp(IntCC::Equal, lhs, rhs);
@@ -376,8 +376,8 @@ pub(crate) fn compile_binop<M: Module>(
                 ensure_i64(builder, neq)
             } else if vreg_is_native_equality_scalar(ctx, left_vreg) && vreg_is_native_equality_scalar(ctx, right_vreg)
             {
-                let use_unsigned = vreg_is_signed(ctx, left_vreg) == Some(false)
-                    || vreg_is_signed(ctx, right_vreg) == Some(false);
+                let use_unsigned =
+                    vreg_is_signed(ctx, left_vreg) == Some(false) || vreg_is_signed(ctx, right_vreg) == Some(false);
                 let lhs = ensure_i64_typed(builder, lhs, Some(!use_unsigned));
                 let rhs = ensure_i64_typed(builder, rhs, Some(!use_unsigned));
                 let cmp_i8 = builder.ins().icmp(IntCC::NotEqual, lhs, rhs);

@@ -233,7 +233,30 @@ Create a shared SSpec support library rather than scattering helper functions:
      cycles now render manual warnings and keep the current scenario body
      usable instead of silently stripping recursive metadata.
 4. **Manual renderer**
-   - Render manual steps first.
+   - Starter progress: render derived manual steps first for call-like
+     scenario lines, leaving assertion mechanics in the folded executable
+     block.
+   - Starter progress: derived manual steps skip control-flow mechanics while
+     still rendering nested call-like actions.
+   - Starter progress: checker-style calls such as `Then_login_succeeds()`
+     render as readable manual steps.
+   - Starter progress: `# @step: Text` and `# @step("Text")` label the next
+     call-like manual step and are stripped from the folded executable source.
+   - Starter progress: empty `# @step` metadata renders a manual warning and
+     falls back to the derived step label.
+   - Starter progress: unused `# @step` metadata renders a manual warning when
+     no following call-like step exists.
+   - Starter progress: step-local `# @capture(...)` may appear between
+     `# @step` and the labeled call-like step.
+   - Starter progress: capture summaries are fallback-only when no visible
+     manual step can be derived; otherwise scenario and step-local capture
+     policies render under the visible step.
+   - Starter progress: scenario-level `after_scenario` capture attaches only
+     to the final derived manual step.
+   - Starter progress: step-local `# @capture(off)` suppresses inherited
+     scenario capture for that step.
+   - Starter progress: `# @capture(off)` stays silent in fallback capture
+     summaries.
    - Starter progress: executable SPipe source now renders inside a folded
      `Executable SPipe` details block by default when a scenario has runnable
      body content.
@@ -279,13 +302,21 @@ Create a shared SSpec support library rather than scattering helper functions:
 
 Current verification note: syntax checks pass. The scenario evidence unit test
 passes 9/9, and `test/unit/app/tooling/spipe_docgen_scenario_body_spec.spl`
-passes 29/29 after replacing unsupported negative matchers with built-in
-assertions, fixing the `spipe-docgen` runtime path issues found during the
-manual-generation check, adding metadata warning/cycle diagnostic coverage, and
-fixing blank folded executable output for expanded scenarios. The direct spec
-run still exits nonzero after reporting 29 examples / 0 failures because of the
-existing repo-level `compiler_driver_create` semantic finalization issue also
-noted in `doc/03_plan/port_rust_c_to_pure_simple.md`.
+reports 41 examples / 0 failures after replacing unsupported negative matchers
+with built-in assertions, fixing the `spipe-docgen` runtime path issues found
+during the manual-generation check, adding metadata warning/cycle diagnostic
+coverage, fixing blank folded executable output for expanded scenarios, adding
+derived manual steps and `# @step` labels, and making detached capture summaries
+fallback-only when no visible manual step can be derived. It also verifies
+scenario-level `after_scenario` capture attaches only to the final derived
+manual step and step-local `# @capture(off)` suppresses inherited scenario
+capture, including fallback summary rendering, and multiple manual warnings
+render without blanking entries. It also covers step-local capture metadata,
+including `# @capture(off)`, between a `# @step` label and the labeled action.
+The direct spec run still exits nonzero after reporting 41 examples / 0
+failures because of the existing
+repo-level `compiler_driver_create` semantic finalization issue also noted in
+`doc/03_plan/port_rust_c_to_pure_simple.md`.
 
 ## First Exemplar: MCP
 

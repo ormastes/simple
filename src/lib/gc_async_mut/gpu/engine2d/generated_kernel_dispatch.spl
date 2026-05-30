@@ -94,6 +94,37 @@ class Generated2DKernelExecutionRequest:
     fn summary() -> text:
         "Generated2DKernelExecutionRequest[backend={self.plan.backend_name} op={self.plan.operation} handle={self.handle_kind} call={self.call_shape()} submit={self.can_submit.to_text()} reason={self.reason}]"
 
+class Generated2DKernelArtifactLoadEvidence:
+    plan: Generated2DKernelLaunchPlan
+    artifact_valid: bool
+    runtime_available: bool
+    module_or_queue_handle: i64
+    kernel_or_pipeline_handle: i64
+    loaded: bool
+    status_code: text
+    reason: text
+
+    static fn create(plan: Generated2DKernelLaunchPlan, artifact_valid: bool, runtime_available: bool, module_or_queue_handle: i64, kernel_or_pipeline_handle: i64) -> Generated2DKernelArtifactLoadEvidence:
+        val reason = _artifact_load_reason(plan, artifact_valid, runtime_available, module_or_queue_handle, kernel_or_pipeline_handle)
+        Generated2DKernelArtifactLoadEvidence(
+            plan: plan,
+            artifact_valid: artifact_valid,
+            runtime_available: runtime_available,
+            module_or_queue_handle: module_or_queue_handle,
+            kernel_or_pipeline_handle: kernel_or_pipeline_handle,
+            loaded: reason == "loaded",
+            status_code: if reason == "loaded": "loaded" else: "not-loaded",
+            reason: reason
+        )
+
+    fn execution_request(args_ptr: i64) -> Generated2DKernelExecutionRequest:
+        if not self.loaded:
+            return Generated2DKernelExecutionRequest.create(Generated2DKernelLaunchPlan.unavailable(self.plan.backend_name, self.plan.operation, self.reason), self.module_or_queue_handle, self.kernel_or_pipeline_handle, args_ptr, 0)
+        Generated2DKernelExecutionRequest.create(self.plan, self.module_or_queue_handle, self.kernel_or_pipeline_handle, args_ptr, 0)
+
+    fn summary() -> text:
+        "Generated2DKernelArtifactLoadEvidence[backend={self.plan.backend_name} op={self.plan.operation} artifact={self.artifact_valid.to_text()} runtime={self.runtime_available.to_text()} loaded={self.loaded.to_text()} module_or_queue={self.module_or_queue_handle} kernel_or_pipeline={self.kernel_or_pipeline_handle} reason={self.reason}]"
+
 class Generated2DKernelSubmitResult:
     request: Generated2DKernelExecutionRequest
     attempted: bool
@@ -141,6 +172,69 @@ class Generated2DKernelSubmitResult:
 
     fn summary() -> text:
         "Generated2DKernelSubmitResult[backend={self.request.plan.backend_name} op={self.request.plan.operation} attempted={self.attempted.to_text()} submitted={self.submitted.to_text()} runtime={self.runtime_available.to_text()} status={self.status_code} reason={self.reason}]"
+
+class Generated2DKernelExecutionEvidence:
+    submit: Generated2DKernelSubmitResult
+    readback_available: bool
+    expected_checksum: i64
+    actual_checksum: i64
+    device_executed: bool
+    status_code: text
+    reason: text
+
+    static fn create(submit: Generated2DKernelSubmitResult, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> Generated2DKernelExecutionEvidence:
+        if not submit.submitted:
+            return Generated2DKernelExecutionEvidence(
+                submit: submit,
+                readback_available: readback_available,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                device_executed: false,
+                status_code: "not-submitted",
+                reason: submit.reason
+            )
+        if not readback_available:
+            return Generated2DKernelExecutionEvidence(
+                submit: submit,
+                readback_available: false,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                device_executed: false,
+                status_code: "readback-unavailable",
+                reason: "device-readback-required"
+            )
+        if expected_checksum <= 0:
+            return Generated2DKernelExecutionEvidence(
+                submit: submit,
+                readback_available: true,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                device_executed: false,
+                status_code: "invalid-expected-checksum",
+                reason: "expected-checksum-required"
+            )
+        if actual_checksum != expected_checksum:
+            return Generated2DKernelExecutionEvidence(
+                submit: submit,
+                readback_available: true,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                device_executed: false,
+                status_code: "readback-mismatch",
+                reason: "device-readback-checksum-mismatch"
+            )
+        Generated2DKernelExecutionEvidence(
+            submit: submit,
+            readback_available: true,
+            expected_checksum: expected_checksum,
+            actual_checksum: actual_checksum,
+            device_executed: true,
+            status_code: "device-executed",
+            reason: "readback-checksum-matched"
+        )
+
+    fn summary() -> text:
+        "Generated2DKernelExecutionEvidence[backend={self.submit.request.plan.backend_name} op={self.submit.request.plan.operation} submitted={self.submit.submitted.to_text()} readback={self.readback_available.to_text()} executed={self.device_executed.to_text()} expected={self.expected_checksum} actual={self.actual_checksum} status={self.status_code} reason={self.reason}]"
 
 class Generated2DKernelDispatch:
     backend_name: text
@@ -290,6 +384,20 @@ fn _execution_request_reason(plan: Generated2DKernelLaunchPlan, module_or_queue_
             return "missing-args-pointer"
     "ready"
 
+fn _artifact_load_reason(plan: Generated2DKernelLaunchPlan, artifact_valid: bool, runtime_available: bool, module_or_queue_handle: i64, kernel_or_pipeline_handle: i64) -> text:
+    if not plan.dispatch_ready:
+        return plan.reason
+    if not artifact_valid:
+        return "artifact-not-verified"
+    if not runtime_available:
+        return "runtime-unavailable"
+    if kernel_or_pipeline_handle <= 0:
+        return "missing-kernel-or-pipeline-handle"
+    if plan.compute_target == "opencl" or plan.compute_target == "metal":
+        if module_or_queue_handle <= 0:
+            return "missing-queue-or-encoder-handle"
+    "loaded"
+
 fn generated_2d_dispatch_for_backend(backend: text) -> Generated2DKernelDispatch:
     Generated2DKernelDispatch.for_backend(backend)
 
@@ -300,8 +408,18 @@ fn generated_2d_execution_request(backend: text, op: text, width: i64, height: i
     val plan = generated_2d_launch_plan(backend, op, width, height)
     Generated2DKernelExecutionRequest.create(plan, module_or_queue_handle, kernel_or_pipeline_handle, args_ptr, 0)
 
+fn generated_2d_artifact_load_evidence(backend: text, op: text, width: i64, height: i64, artifact_valid: bool, runtime_available: bool, module_or_queue_handle: i64, kernel_or_pipeline_handle: i64) -> Generated2DKernelArtifactLoadEvidence:
+    val plan = generated_2d_launch_plan(backend, op, width, height)
+    Generated2DKernelArtifactLoadEvidence.create(plan, artifact_valid, runtime_available, module_or_queue_handle, kernel_or_pipeline_handle)
+
+fn generated_2d_execution_request_from_load(load: Generated2DKernelArtifactLoadEvidence, args_ptr: i64) -> Generated2DKernelExecutionRequest:
+    load.execution_request(args_ptr)
+
 fn generated_2d_submit_result(request: Generated2DKernelExecutionRequest, runtime_available: bool, backend_submit_ok: bool) -> Generated2DKernelSubmitResult:
     Generated2DKernelSubmitResult.create(request, runtime_available, backend_submit_ok)
+
+fn generated_2d_execution_evidence(submit: Generated2DKernelSubmitResult, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> Generated2DKernelExecutionEvidence:
+    Generated2DKernelExecutionEvidence.create(submit, readback_available, expected_checksum, actual_checksum)
 
 fn generated_2d_dispatch_provider(dispatch: Generated2DKernelDispatch) -> RenderingOptProvider:
     val p = RenderingOptProvider.create("generated_2d_kernel_dispatch", dispatch.backend_name, dispatch.binary_format)

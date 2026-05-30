@@ -102,11 +102,7 @@ pub(crate) fn create_string_constant<M: Module>(
         return Ok((ptr, len));
     }
 
-    let slot = builder.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        bytes.len() as u32,
-        0,
-    ));
+    let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, bytes.len() as u32, 0));
     for (offset, byte) in bytes.iter().enumerate() {
         let byte_val = builder.ins().iconst(types::I8, i64::from(*byte));
         builder.ins().stack_store(byte_val, slot, offset as i32);

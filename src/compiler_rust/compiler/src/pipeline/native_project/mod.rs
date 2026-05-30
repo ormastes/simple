@@ -659,10 +659,7 @@ impl NativeProjectBuilder {
         }
 
         object_paths_with_indices.sort_by_key(|(idx, _)| *idx);
-        let mut object_paths: Vec<PathBuf> = object_paths_with_indices
-            .into_iter()
-            .map(|(_, path)| path)
-            .collect();
+        let mut object_paths: Vec<PathBuf> = object_paths_with_indices.into_iter().map(|(_, path)| path).collect();
 
         let compiled = object_paths.len();
         let failed = failures.len();

@@ -110,6 +110,80 @@ fn active_target_features() -> [text]:
     val feat = detect_simd_level().feature_text()
     [feat]
 
+class CpuSimdRuntimeEvidence:
+    arch: text
+    feature: text
+    level: text
+    x86_available: bool
+    arm_available: bool
+    riscv_available: bool
+    executed_fill: bool
+    executed_copy: bool
+    executed_alpha: bool
+    executed_scroll: bool
+    checksum: i64
+    hit_summary: text
+    reason: text
+
+impl CpuSimdRuntimeEvidence:
+    fn executed_all() -> bool:
+        self.executed_fill and self.executed_copy and self.executed_alpha and self.executed_scroll
+
+    fn diagnostic_text() -> text:
+        "arch={self.arch};feature={self.feature};level={self.level};x86={self.x86_available.to_text()};arm={self.arm_available.to_text()};riscv={self.riscv_available.to_text()};executed={self.executed_all().to_text()};checksum={self.checksum};hits={self.hit_summary};reason={self.reason}"
+
+fn _cpu_simd_checksum(buf: [u32]) -> i64:
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < buf.len():
+        val pixel = buf[i.to_i32()]
+        val low = (pixel & 0xFFu32) as i64
+        val mid = ((pixel >> 8) & 0xFFu32) as i64
+        val high = ((pixel >> 16) & 0xFFu32) as i64
+        sum = sum + low + (mid * 3) + (high * 5)
+        i = i + 1
+    sum
+
+fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
+    val level = detect_simd_level()
+    val arch = level.arch_text()
+    val feature = level.feature_text()
+    val before = simd_hit_counts()
+
+    var pixels: [u32] = [0u32; 16]
+    var copy_src: [u32] = [0xFF112233; 16]
+    var alpha_src: [u32] = [0x804488CC; 16]
+    fill_span(pixels, 0, 16, 0xFF102030)
+    copy_span(pixels, 4, copy_src, 0, 4)
+    alpha_blend_span(pixels, alpha_src, 8, 4)
+    scroll_region(pixels, 4, 0, 0, 4, 4, 1)
+
+    val after = simd_hit_counts()
+    val fill_delta = after.fill_hits - before.fill_hits
+    val copy_delta = after.copy_hits - before.copy_hits
+    val alpha_delta = after.alpha_hits - before.alpha_hits
+    val scroll_delta = after.scroll_hits - before.scroll_hits
+    val executed_fill = fill_delta > 0 and pixels[12] == 0xFF102030
+    val executed_copy = copy_delta > 0 and pixels[4] == 0xFF112233
+    val executed_alpha = alpha_delta > 0
+    val executed_scroll = scroll_delta > 0
+    val reason = if feature == "scalar": "runtime reported scalar fallback; SIMD feature unavailable" else: "runtime reported SIMD feature and kernels executed"
+    CpuSimdRuntimeEvidence(
+        arch: arch,
+        feature: feature,
+        level: level.to_text(),
+        x86_available: arch == "x86_64" and (feature == "sse42" or feature == "avx2"),
+        arm_available: arch == "aarch64" and feature == "neon",
+        riscv_available: arch == "riscv64" and feature == "rvv",
+        executed_fill: executed_fill,
+        executed_copy: executed_copy,
+        executed_alpha: executed_alpha,
+        executed_scroll: executed_scroll,
+        checksum: _cpu_simd_checksum(pixels),
+        hit_summary: "fill_delta={fill_delta},copy_delta={copy_delta},alpha_delta={alpha_delta},scroll_delta={scroll_delta}",
+        reason: reason
+    )
+
 # ============================================================================
 # Fill Row — write solid color across a pixel row
 # ============================================================================

@@ -799,6 +799,78 @@ fn include_title_from_metadata_line(trimmed: text) -> text:
         return extract_quoted_name(trimmed)
     ""
 
+fn is_step_metadata_line(trimmed: text) -> bool:
+    val lower = trimmed.lower().trim()
+    lower.starts_with("# @step") or lower.starts_with("@step")
+
+fn step_label_from_metadata_line(trimmed: text) -> text:
+    if not is_step_metadata_line(trimmed):
+        return ""
+    if trimmed.contains("\""):
+        return extract_quoted_name(trimmed)
+    if trimmed.contains(":"):
+        val parts = trimmed.split(":")
+        if parts.len() >= 2:
+            return parts[1].trim()
+    if trimmed.contains("("):
+        val open_parts = trimmed.split("(")
+        if open_parts.len() >= 2:
+            val close_parts = open_parts[1].split(")")
+            if close_parts.len() >= 1:
+                return close_parts[0].trim()
+    ""
+
+fn step_warning_from_metadata_line(trimmed: text) -> text:
+    if not is_step_metadata_line(trimmed):
+        return ""
+    if step_label_from_metadata_line(trimmed) == "":
+        return "invalid step metadata value: empty (expected # @step: Text or # @step(\"Text\"))"
+    ""
+
+fn is_explicit_step_anchor_source_line(trimmed: text) -> bool:
+    if trimmed == "":
+        return false
+    if trimmed.starts_with("#") or trimmed.starts_with("@"):
+        return false
+    if trimmed.starts_with("expect("):
+        return false
+    if (trimmed.starts_with("if ") or trimmed.starts_with("elif ") or
+        trimmed.starts_with("else") or trimmed.starts_with("while ") or
+        trimmed.starts_with("for ") or trimmed.starts_with("match ") or
+        trimmed.starts_with("case ") or trimmed.starts_with("return ")):
+        return false
+    true
+
+fn next_manual_step_source_exists(lines: [text], start_index: i64) -> bool:
+    var i = start_index
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed == "":
+            i = i + 1
+            continue
+        if is_capture_metadata_line(trimmed):
+            i = i + 1
+            continue
+        if is_step_metadata_line(trimmed):
+            return false
+        if is_explicit_step_anchor_source_line(trimmed):
+            return true
+        return false
+    false
+
+fn unused_step_warning_from_metadata_line(lines: [text], index: i64) -> text:
+    if index < 0 or index >= lines.len():
+        return ""
+    val trimmed = lines[index].trim()
+    if step_warning_from_metadata_line(trimmed) != "":
+        return ""
+    val label = step_label_from_metadata_line(trimmed)
+    if label == "":
+        return ""
+    if next_manual_step_source_exists(lines, index + 1):
+        return ""
+    "unused step metadata: " + label + " (expected a following executable manual step)"
+
 fn scenario_prev_title(lines: [text], scenario_index: i64) -> text:
     var j = scenario_index - 1
     while j >= 0:
@@ -866,10 +938,13 @@ fn scenario_references_title(lines: [text], scenario_index: i64, title: text) ->
     if prev_title == "__previous__" and previous_scenario_title(lines, scenario_index) == title:
         return true
     val body = scenario_body_by_index(lines, scenario_index)
-    for line in body:
+    var i = 0
+    while i < body.len():
+        val line = body[i]
         val include_title = include_title_from_metadata_line(line.trim())
         if include_title == title:
             return true
+        i = i + 1
     false
 
 fn scenario_cycle_warning(kind: text, from_title: text, to_title: text) -> text:
@@ -909,16 +984,20 @@ fn expand_prev_scenario_body(lines: [text], scenario_index: i64, body: [text]) -
     if target_title == current_title or scenario_references_title(lines, target_index, current_title):
         var cycle_body: [text] = []
         cycle_body.push(scenario_cycle_warning("prev", current_title, target_title))
-        for line in body:
-            cycle_body.push(line)
+        var i = 0
+        while i < body.len():
+            cycle_body.push(body[i])
+            i = i + 1
         return cycle_body
     val prev_body = find_scenario_body_by_title(lines, prev_title, scenario_index)
     if prev_body.len() == 0:
         var missing_prev: [text] = []
         val label = if prev_title == "__previous__": "previous scenario" else: prev_title
         missing_prev.push("# @manual-warning: missing prev scenario: " + label)
-        for line in body:
-            missing_prev.push(line)
+        var i = 0
+        while i < body.len():
+            missing_prev.push(body[i])
+            i = i + 1
         return missing_prev
     var expanded: [text] = []
     var i = 0
@@ -987,6 +1066,9 @@ fn scenario_metadata_warnings(lines: [text], scenario_index: i64) -> [text]:
         val capture_warning = capture_warning_from_metadata_line(trimmed)
         if capture_warning != "":
             warnings.push(capture_warning)
+        val step_warning = step_warning_from_metadata_line(trimmed)
+        if step_warning != "":
+            warnings.push(step_warning)
         if trimmed.starts_with("#") or trimmed.starts_with("@"):
             j = j - 1
             continue
@@ -998,10 +1080,14 @@ fn add_scenario_metadata_warnings(lines: [text], scenario_index: i64, body: [tex
     if warnings.len() == 0:
         return body
     var result: [text] = []
-    for warning in warnings:
-        result.push("# @manual-warning: " + warning)
-    for line in body:
-        result.push(line)
+    var i = 0
+    while i < warnings.len():
+        result.push("# @manual-warning: " + warnings[i])
+        i = i + 1
+    i = 0
+    while i < body.len():
+        result.push(body[i])
+        i = i + 1
     result
 
 fn next_manual_step_label(lines: [text], start_index: i64) -> text:
@@ -1026,41 +1112,167 @@ fn manual_warning_from_metadata_line(trimmed: text) -> text:
 
 fn render_manual_warnings(lines: [text]) -> text:
     var warnings: [text] = []
-    for line in lines:
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
         val warning = manual_warning_from_metadata_line(line.trim())
         if warning != "":
             warnings.push("- " + warning)
         val capture_warning = capture_warning_from_metadata_line(line.trim())
         if capture_warning != "":
             warnings.push("- " + capture_warning)
+        val step_warning = step_warning_from_metadata_line(line.trim())
+        if step_warning != "":
+            warnings.push("- " + step_warning)
+        val unused_step_warning = unused_step_warning_from_metadata_line(lines, i)
+        if unused_step_warning != "":
+            warnings.push("- " + unused_step_warning)
+        i = i + 1
     if warnings.len() == 0:
         return ""
     "\n**Manual warnings:**\n" + warnings.join("\n") + "\n\n"
 
 fn strip_manual_metadata_lines(lines: [text]) -> [text]:
     var result: [text] = []
-    for line in lines:
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
         val trimmed = line.trim()
         val is_capture = is_capture_metadata_line(trimmed)
         val is_include = include_title_from_metadata_line(trimmed) != ""
         val is_warning = manual_warning_from_metadata_line(trimmed) != ""
-        if not is_capture and not is_include and not is_warning:
+        val is_step = is_step_metadata_line(trimmed)
+        if not is_capture and not is_include and not is_warning and not is_step:
             result.push(line)
+        i = i + 1
     result
+
+fn is_manual_step_source_line(trimmed: text) -> bool:
+    if trimmed == "":
+        return false
+    if trimmed.starts_with("#") or trimmed.starts_with("@"):
+        return false
+    if trimmed.starts_with("expect(") or trimmed.starts_with("val "):
+        return false
+    if (trimmed.starts_with("if ") or trimmed.starts_with("elif ") or
+        trimmed.starts_with("else") or trimmed.starts_with("while ") or
+        trimmed.starts_with("for ") or trimmed.starts_with("match ") or
+        trimmed.starts_with("case ") or trimmed.starts_with("return ")):
+        return false
+    trimmed.contains("(") and trimmed.contains(")")
+
+fn manual_step_label_from_source(trimmed: text) -> text:
+    var call_name = trimmed
+    if trimmed.contains("("):
+        val parts = trimmed.split("(")
+        if parts.len() > 0:
+            call_name = parts[0].trim()
+    var label = call_name.replace(".", " ")
+    label = label.replace("_", " ")
+    if label.starts_with("Then "):
+        return "Then " + label.substring("Then ".len(), label.len())
+    if label.starts_with("user "):
+        return "User " + label.substring("user ".len(), label.len())
+    if label.starts_with("admin "):
+        return "Admin " + label.substring("admin ".len(), label.len())
+    if label.starts_with("operator "):
+        return "Operator " + label.substring("operator ".len(), label.len())
+    label
+
+fn count_manual_step_source_lines(lines: [text]) -> i64:
+    var count = 0
+    var pending_label = false
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        val explicit_label = step_label_from_metadata_line(trimmed)
+        if explicit_label != "":
+            pending_label = true
+            i = i + 1
+            continue
+        if is_step_metadata_line(trimmed):
+            i = i + 1
+            continue
+        if is_capture_metadata_line(trimmed):
+            i = i + 1
+            continue
+        if pending_label and is_explicit_step_anchor_source_line(trimmed):
+            count = count + 1
+            pending_label = false
+        elif is_manual_step_source_line(trimmed):
+            count = count + 1
+        elif trimmed != "":
+            pending_label = false
+        i = i + 1
+    count
+
+fn scenario_capture_for_step(scenario_capture: text, step_index: i64, step_count: i64) -> text:
+    if scenario_capture == "" or scenario_capture == "off":
+        return ""
+    if scenario_capture.contains("after_scenario"):
+        if step_index == step_count:
+            return scenario_capture
+        return ""
+    scenario_capture
+
+fn render_manual_steps(lines: [text], scenario_capture: text) -> text:
+    val without_docstring = strip_leading_docstring(lines)
+    val trimmed = trim_trailing_blank_lines(without_docstring)
+    if trimmed.len() == 0:
+        return ""
+    val dedented = dedent_lines(trimmed)
+    val total_steps = count_manual_step_source_lines(dedented)
+    var steps: [text] = []
+    var pending_capture = ""
+    var pending_label = ""
+    var step_count = 0
+    var i = 0
+    while i < dedented.len():
+        val line = dedented[i]
+        val line_trimmed = line.trim()
+        val explicit_label = step_label_from_metadata_line(line_trimmed)
+        if explicit_label != "":
+            pending_label = explicit_label
+            i = i + 1
+            continue
+        if is_step_metadata_line(line_trimmed):
+            i = i + 1
+            continue
+        val step_capture = capture_policy_from_metadata_line(line_trimmed)
+        if step_capture != "":
+            pending_capture = step_capture
+            i = i + 1
+            continue
+        if ((pending_label != "" and is_explicit_step_anchor_source_line(line_trimmed)) or
+            is_manual_step_source_line(line_trimmed)):
+            step_count = step_count + 1
+            val label = if pending_label != "": pending_label else: manual_step_label_from_source(line_trimmed)
+            var rendered = step_count.to_string() + ". " + label
+            if pending_capture != "":
+                if pending_capture != "off":
+                    rendered = rendered + "\n   - Capture: " + pending_capture
+            else:
+                val scenario_step_capture = scenario_capture_for_step(scenario_capture, step_count, total_steps)
+                if scenario_step_capture != "":
+                    rendered = rendered + "\n   - Capture: " + scenario_step_capture
+            steps.push(rendered)
+            pending_capture = ""
+            pending_label = ""
+        i = i + 1
+    if steps.len() == 0:
+        return ""
+    "\n" + steps.join("\n\n") + "\n\n"
 
 fn render_capture_evidence_summary(scenario_capture: text, lines: [text]) -> text:
     var parts: [text] = []
-    if scenario_capture != "":
-        if scenario_capture == "off":
-            parts.push("**Scenario capture:** off")
-        else:
-            parts.push("**Scenario capture:** " + scenario_capture)
+    if scenario_capture != "" and scenario_capture != "off":
+        parts.push("**Scenario capture:** " + scenario_capture)
     var step_parts: [text] = []
     var i = 0
     while i < lines.len():
         val trimmed = lines[i].trim()
         val capture = capture_policy_from_metadata_line(trimmed)
-        if capture != "":
+        if capture != "" and capture != "off":
             val step_label = next_manual_step_label(lines, i + 1)
             if step_label != "":
                 step_parts.push("- " + capture + " before `" + step_label + "`")
@@ -1074,10 +1286,11 @@ fn render_capture_evidence_summary(scenario_capture: text, lines: [text]) -> tex
     "\n" + parts.join("\n\n") + "\n\n"
 
 fn render_scenario_body_with_capture(lines: [text], scenario_capture: text) -> text:
-    val evidence = render_capture_evidence_summary(scenario_capture, lines)
     val warnings = render_manual_warnings(lines)
     val without_metadata = strip_manual_metadata_lines(lines)
-    warnings + evidence + render_executable_spipe(without_metadata)
+    val steps = render_manual_steps(lines, scenario_capture)
+    val evidence = if steps != "": "" else: render_capture_evidence_summary(scenario_capture, lines)
+    warnings + steps + evidence + render_executable_spipe(without_metadata)
 
 fn render_manual_scenario(name: text, suffix: text, body: [text], visibility: text, capture_policy: text) -> text:
     if visibility == "skip":

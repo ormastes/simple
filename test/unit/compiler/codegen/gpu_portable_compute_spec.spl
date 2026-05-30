@@ -1,7 +1,7 @@
 # @cover src/compiler/70.backend/backend/gpu_portable_compute.spl 90%
 # @tag: unit, compiler, gpu, codegen, cuda, hip, opencl, metal
 
-use compiler.backend.gpu_portable_compute.{PortableComputeTarget, emit_portable_u32_fill_kernel, emit_portable_u32_add_kernel, portable_compute_compile_plan, emit_portable_2d_copy_u32_kernel, emit_portable_2d_alpha_u32_kernel, emit_portable_2d_scroll_u32_kernel, emit_portable_2d_optimization_kernels, emit_portable_compute_smoke_matrix}
+use compiler.backend.gpu_portable_compute.{PortableComputeTarget, emit_portable_u32_fill_kernel, emit_portable_u32_add_kernel, portable_compute_compile_plan, portable_compute_compiled_artifact_evidence, portable_compute_toolchain_invocation, portable_compute_compile_result, emit_portable_2d_copy_u32_kernel, emit_portable_2d_alpha_u32_kernel, emit_portable_2d_scroll_u32_kernel, emit_portable_2d_optimization_kernels, emit_portable_compute_smoke_matrix}
 
 describe "portable GPU compute emitter":
 
@@ -63,6 +63,86 @@ describe "portable GPU compute emitter":
         expect(opencl_plan.tool_hint).to_equal("opencl-c-to-spirv")
         expect(metal_plan.binary_format).to_equal("metallib")
         expect(metal_plan.source_format).to_equal("metal-shading-language")
+
+    it "validates generated binary artifacts by target magic and exported entry":
+        val cuda_plan = portable_compute_compile_plan(emit_portable_u32_fill_kernel(PortableComputeTarget.Cuda, "fill_u32"), "fill_u32")
+        val hip_plan = portable_compute_compile_plan(emit_portable_u32_fill_kernel(PortableComputeTarget.Hip, "fill_u32"), "fill_u32")
+        val opencl_plan = portable_compute_compile_plan(emit_portable_u32_fill_kernel(PortableComputeTarget.OpenCl, "fill_u32"), "fill_u32")
+        val metal_plan = portable_compute_compile_plan(emit_portable_u32_fill_kernel(PortableComputeTarget.Metal, "fill_u32"), "fill_u32")
+
+        val cuda = portable_compute_compiled_artifact_evidence(cuda_plan, ".version 8.0", ".entry fill_u32", 256)
+        val hip = portable_compute_compiled_artifact_evidence(hip_plan, "ELF AMDGCN HSACO", "fill_u32", 512)
+        val opencl = portable_compute_compiled_artifact_evidence(opencl_plan, "SPIR-V 1.5", "OpEntryPoint GLCompute %fill_u32 \"fill_u32\"", 384)
+        val metal = portable_compute_compiled_artifact_evidence(metal_plan, "MTLB metallib", "fill_u32", 448)
+
+        expect(cuda.artifact_valid).to_equal(true)
+        expect(hip.artifact_valid).to_equal(true)
+        expect(opencl.artifact_valid).to_equal(true)
+        expect(metal.artifact_valid).to_equal(true)
+        expect(metal.summary()).to_contain("valid=true")
+
+    it "fails generated binary evidence closed for missing bytes magic or symbol":
+        val plan = portable_compute_compile_plan(emit_portable_u32_fill_kernel(PortableComputeTarget.OpenCl, "fill_u32"), "fill_u32")
+        val missing_bytes = portable_compute_compiled_artifact_evidence(plan, "SPIR-V 1.5", "fill_u32", 0)
+        val bad_magic = portable_compute_compiled_artifact_evidence(plan, "ELF", "fill_u32", 128)
+        val missing_symbol = portable_compute_compiled_artifact_evidence(plan, "SPIR-V 1.5", "other_kernel", 128)
+
+        expect(missing_bytes.artifact_valid).to_equal(false)
+        expect(missing_bytes.reason).to_equal("missing-artifact-bytes")
+        expect(bad_magic.artifact_valid).to_equal(false)
+        expect(bad_magic.reason).to_equal("artifact-magic-mismatch")
+        expect(missing_symbol.artifact_valid).to_equal(false)
+        expect(missing_symbol.reason).to_equal("missing-entry-symbol")
+
+    it "builds deterministic toolchain invocations for target binary generation":
+        val cuda_plan = portable_compute_compile_plan(emit_portable_u32_fill_kernel(PortableComputeTarget.Cuda, "fill_u32"), "fill_u32")
+        val hip_plan = portable_compute_compile_plan(emit_portable_u32_fill_kernel(PortableComputeTarget.Hip, "fill_u32"), "fill_u32")
+        val opencl_plan = portable_compute_compile_plan(emit_portable_u32_fill_kernel(PortableComputeTarget.OpenCl, "fill_u32"), "fill_u32")
+        val metal_plan = portable_compute_compile_plan(emit_portable_u32_fill_kernel(PortableComputeTarget.Metal, "fill_u32"), "fill_u32")
+
+        val cuda = portable_compute_toolchain_invocation(cuda_plan, "build/gpu/fill_u32.cu", "build/gpu/fill_u32.ptx", "nvcc", "")
+        val hip = portable_compute_toolchain_invocation(hip_plan, "build/gpu/fill_u32.hip.cpp", "build/gpu/fill_u32.hsaco", "hipcc", "")
+        val opencl = portable_compute_toolchain_invocation(opencl_plan, "build/gpu/fill_u32.cl", "build/gpu/fill_u32.spirv", "opencl-c-to-spirv", "")
+        val metal = portable_compute_toolchain_invocation(metal_plan, "build/gpu/fill_u32.metal", "build/gpu/fill_u32.metallib", "xcrun metal", "xcrun metallib")
+
+        expect(cuda.ready).to_equal(true)
+        expect(cuda.command_line).to_contain("nvcc --ptx")
+        expect(cuda.command_line).to_contain("--entry fill_u32")
+        expect(hip.command_line).to_contain("hipcc --genco")
+        expect(opencl.command_line).to_contain("-emit-spirv")
+        expect(metal.command_line).to_contain("xcrun metallib")
+        expect(metal.summary()).to_contain("ready=true")
+
+    it "fails toolchain invocations closed when required tools or paths are missing":
+        val plan = portable_compute_compile_plan(emit_portable_u32_fill_kernel(PortableComputeTarget.Metal, "fill_u32"), "fill_u32")
+        val missing_primary = portable_compute_toolchain_invocation(plan, "build/gpu/fill_u32.metal", "build/gpu/fill_u32.metallib", "", "xcrun metallib")
+        val missing_metallib = portable_compute_toolchain_invocation(plan, "build/gpu/fill_u32.metal", "build/gpu/fill_u32.metallib", "xcrun metal", "")
+        val missing_output = portable_compute_toolchain_invocation(plan, "build/gpu/fill_u32.metal", "", "xcrun metal", "xcrun metallib")
+
+        expect(missing_primary.ready).to_equal(false)
+        expect(missing_primary.reason).to_equal("missing-primary-tool")
+        expect(missing_metallib.ready).to_equal(false)
+        expect(missing_metallib.reason).to_equal("missing-metallib-tool")
+        expect(missing_output.ready).to_equal(false)
+        expect(missing_output.reason).to_equal("missing-output-path")
+
+    it "records toolchain compile results without accepting failed or invalid artifacts":
+        val plan = portable_compute_compile_plan(emit_portable_u32_fill_kernel(PortableComputeTarget.Cuda, "fill_u32"), "fill_u32")
+        val request = portable_compute_toolchain_invocation(plan, "build/gpu/fill_u32.cu", "build/gpu/fill_u32.ptx", "nvcc", "")
+        val valid = portable_compute_compiled_artifact_evidence(plan, ".version 8.0", ".entry fill_u32", 256)
+        val invalid = portable_compute_compiled_artifact_evidence(plan, "ELF", ".entry fill_u32", 256)
+        val ok = portable_compute_compile_result(request, 0, valid)
+        val failed_tool = portable_compute_compile_result(request, 1, valid)
+        val failed_artifact = portable_compute_compile_result(request, 0, invalid)
+
+        expect(ok.ready).to_equal(true)
+        expect(ok.status).to_equal("compiled_artifact_verified")
+        expect(ok.diagnostic).to_equal("")
+        expect(failed_tool.ready).to_equal(false)
+        expect(failed_tool.status).to_equal("toolchain_failed")
+        expect(failed_tool.diagnostic).to_contain("toolchain exited with code 1")
+        expect(failed_artifact.ready).to_equal(false)
+        expect(failed_artifact.status).to_equal("artifact-magic-mismatch")
 
     it "emits portable 2D optimization kernels for copy alpha and scroll":
         val copy = emit_portable_2d_copy_u32_kernel(PortableComputeTarget.OpenCl)

@@ -1328,6 +1328,100 @@ pub(super) fn eval_bdd_builtin(
                 epsilon: epsilon_f,
             })))
         }
+        // Standalone assertion functions
+        "assert_true" => {
+            let val = eval_arg(args, 0, Value::Bool(false), env, functions, classes, enums, impl_methods)?;
+            if !val.truthy() {
+                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                BDD_FAILURE_MSG.with(|cell| {
+                    *cell.borrow_mut() = Some(format!("assert_true failed: got {}", val.to_display_string()));
+                });
+            }
+            Ok(Some(Value::Nil))
+        }
+        "assert_false" => {
+            let val = eval_arg(args, 0, Value::Bool(true), env, functions, classes, enums, impl_methods)?;
+            if val.truthy() {
+                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                BDD_FAILURE_MSG.with(|cell| {
+                    *cell.borrow_mut() = Some(format!("assert_false failed: got {}", val.to_display_string()));
+                });
+            }
+            Ok(Some(Value::Nil))
+        }
+        "assert_nil" => {
+            let val = eval_arg(args, 0, Value::Bool(true), env, functions, classes, enums, impl_methods)?;
+            if val != Value::Nil {
+                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                BDD_FAILURE_MSG.with(|cell| {
+                    *cell.borrow_mut() = Some(format!("assert_nil failed: got {}", val.to_display_string()));
+                });
+            }
+            Ok(Some(Value::Nil))
+        }
+        "assert_not_nil" => {
+            let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            if val == Value::Nil {
+                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                BDD_FAILURE_MSG.with(|cell| {
+                    *cell.borrow_mut() = Some("assert_not_nil failed: got nil".to_string());
+                });
+            }
+            Ok(Some(Value::Nil))
+        }
+        "assert_equal" | "assert_eq" => {
+            let actual = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let expected = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            if actual != expected {
+                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                BDD_FAILURE_MSG.with(|cell| {
+                    *cell.borrow_mut() = Some(format!(
+                        "assert_equal failed: expected {}, got {}",
+                        expected.to_display_string(),
+                        actual.to_display_string(),
+                    ));
+                });
+            }
+            Ok(Some(Value::Nil))
+        }
+        "assert_not_equal" | "assert_ne" => {
+            let actual = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let expected = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            if actual == expected {
+                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                BDD_FAILURE_MSG.with(|cell| {
+                    *cell.borrow_mut() = Some(format!(
+                        "assert_not_equal failed: both sides equal {}",
+                        expected.to_display_string(),
+                    ));
+                });
+            }
+            Ok(Some(Value::Nil))
+        }
+        "assert_contains" => {
+            let haystack = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?;
+            let needle = eval_arg(args, 1, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?;
+            let haystack_s = haystack.to_display_string();
+            let needle_s = needle.to_display_string();
+            if !haystack_s.contains(&needle_s) {
+                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                BDD_FAILURE_MSG.with(|cell| {
+                    *cell.borrow_mut() = Some(format!(
+                        "assert_contains failed: '{}' does not contain '{}'",
+                        haystack_s, needle_s,
+                    ));
+                });
+            }
+            Ok(Some(Value::Nil))
+        }
+        "fail_assertion" => {
+            let msg = eval_arg(args, 0, Value::Str("assertion failed".to_string()), env, functions, classes, enums, impl_methods)?;
+            BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+            BDD_FAILURE_MSG.with(|cell| {
+                *cell.borrow_mut() = Some(msg.to_display_string());
+            });
+            Ok(Some(Value::Nil))
+        }
         // BDD Registry SFFI functions - shared across all modules
         "__bdd_register_group" => {
             let group = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;

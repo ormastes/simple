@@ -379,8 +379,7 @@ fn default_browser_wasm_target() -> Target {
 }
 
 fn should_compile_as_wasm(backend: Option<&str>, target: Option<&Target>) -> bool {
-    matches!(backend, Some("wasm" | "wasm32"))
-        || target.map(|target| target.arch.is_wasm()).unwrap_or(false)
+    matches!(backend, Some("wasm" | "wasm32")) || target.map(|target| target.arch.is_wasm()).unwrap_or(false)
 }
 
 fn load_project_native_policy(source: &std::path::Path) -> Result<NativePolicyConfig, String> {
@@ -469,7 +468,9 @@ fn print_compile_help(show_error: bool) {
     eprintln!("  --native            Compile to standalone native binary (ELF/PE)");
     eprintln!("  --list-optimizations  Print implemented optimization groups and levels");
     eprintln!("  --driver-mode=dynamic  Package the compiled driver SMF as a loadable .lsm archive");
-    eprintln!("  --backend=<name>    Native backend: llvm|cranelift; or cuda/ptx, vhdl, wasm for source/artifact emitters");
+    eprintln!(
+        "  --backend=<name>    Native backend: llvm|cranelift; or cuda/ptx, vhdl, wasm for source/artifact emitters"
+    );
     eprintln!("  --target <target>   Target triple or arch (x86_64, aarch64, wasm32-wasi, etc.)");
     eprintln!("  --target=<target>   Same as above");
     eprintln!("  --cpu <policy>      Native CPU policy: default, native, x86-64-v1..v4, or backend CPU string");

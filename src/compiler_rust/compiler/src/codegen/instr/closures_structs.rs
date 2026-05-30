@@ -228,14 +228,10 @@ pub(crate) fn compile_method_call_static<M: Module>(
         None
     };
     let lookup_name = lookup_name_storage.as_deref().unwrap_or(func_name);
-    let ctype_method_imported = ctx
-        .use_map
-        .iter()
-        .chain(ctx.import_map.iter())
-        .any(|(raw, mangled)| {
-            (raw.contains("ctype") || mangled.contains("ctype"))
-                && (raw.ends_with(lookup_name) || mangled.ends_with(lookup_name))
-        });
+    let ctype_method_imported = ctx.use_map.iter().chain(ctx.import_map.iter()).any(|(raw, mangled)| {
+        (raw.contains("ctype") || mangled.contains("ctype"))
+            && (raw.ends_with(lookup_name) || mangled.ends_with(lookup_name))
+    });
     if ctype_method_imported {
         if super::calls::compile_inline_ctype_call(
             ctx,

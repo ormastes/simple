@@ -367,10 +367,7 @@ pub(crate) fn evaluate_expr(
 
                 // Register introduced variables
                 for (name, _ty, _is_const) in introduced.introduced_vars {
-                    let value = introduced
-                        .introduced_var_values
-                        .remove(&name)
-                        .unwrap_or(Value::Nil);
+                    let value = introduced.introduced_var_values.remove(&name).unwrap_or(Value::Nil);
                     env.insert(name, value);
                 }
 

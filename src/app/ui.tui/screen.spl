@@ -155,6 +155,24 @@ fn _split_visible(s: text) -> [text]:
         result = result + [pending_esc]
     return result
 
+fn _take_visible(s: text, max_cols: i32) -> text:
+    """Return at most max_cols visible columns from s, preserving ANSI escapes."""
+    if max_cols <= 0:
+        return ""
+    val tokens = _split_visible(s)
+    var result = ""
+    var used = 0
+    for tok in tokens:
+        val tok_w = _visible_width(tok)
+        if tok_w == 0:
+            result = "{result}{tok}"
+        elif used < max_cols:
+            result = "{result}{tok}"
+            used = used + tok_w
+        else:
+            break
+    return result
+
 # =========================================================================
 # Screen Buffer
 # =========================================================================
@@ -194,8 +212,10 @@ class Screen:
         var new_buffer = self.buffer
         # Split existing line into visible-column tokens
         val line_tokens = _split_visible(new_buffer[row])
+        val available_width = self.width - col
+        val clipped_text = _take_visible(text_content, available_width)
         # Measure visual width of text being inserted
-        val text_vis_width = _visible_width(text_content)
+        val text_vis_width = _visible_width(clipped_text)
 
         # Build prefix: first `col` visible columns from old line
         var prefix = ""
@@ -256,7 +276,7 @@ class Screen:
             if not first_suffix.contains("\u{001b}["):
                 suffix_restore = style_entering_suffix
 
-        new_buffer[row] = "{prefix}{gap}{text_content}{suffix_restore}{suffix}{RESET}"
+        new_buffer[row] = "{prefix}{gap}{clipped_text}{suffix_restore}{suffix}{RESET}"
         return Screen(width: self.width, height: self.height, buffer: new_buffer)
 
     fn put_styled(row: i32, col: i32, text_content: text, style: text) -> Screen:

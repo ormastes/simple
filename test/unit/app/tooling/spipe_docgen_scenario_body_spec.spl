@@ -241,17 +241,21 @@ describe "spipe docgen scenario body extraction":
             "        expect(\"open\").to_equal(\"open\")\n"
         val structure = extract_test_structure(source)
         expect(structure).to_contain("#### captures app after every step")
-        expect(structure).to_contain("**Scenario capture:** tui after_step")
+        expect(structure).to_contain("1. User open app\n   - Capture: tui after_step")
+        expect(structure.contains("**Scenario capture:** tui after_step")).to_equal(false)
         expect(structure).to_contain("```simple\nuser.open_app()\nexpect(\"open\").to_equal(\"open\")\n```")
 
     it "renders explicit capture kind and mode from enum-like metadata":
         val source = "describe \"Capture policy\":\n" +
             "    # @capture(after_scenario, gui)\n" +
             "    it \"captures the final rendered window\":\n" +
+            "        user.open_app()\n" +
             "        user.finish_flow()\n" +
             "        expect(\"done\").to_equal(\"done\")\n"
         val structure = extract_test_structure(source)
-        expect(structure).to_contain("**Scenario capture:** gui after_scenario")
+        expect(structure).to_contain("1. User open app\n\n2. User finish flow\n   - Capture: gui after_scenario")
+        expect(structure.contains("1. User open app\n   - Capture: gui after_scenario")).to_equal(false)
+        expect(structure.contains("**Scenario capture:** gui after_scenario")).to_equal(false)
 
     it "renders step capture metadata without keeping metadata in source code":
         val source = "describe \"Capture policy\":\n" +
@@ -261,9 +265,168 @@ describe "spipe docgen scenario body extraction":
             "        user.submit_login()\n" +
             "        expect(\"ok\").to_equal(\"ok\")\n"
         val structure = extract_test_structure(source)
-        expect(structure).to_contain("**Step captures:**\n- api after_step before `user.submit_login()`")
+        expect(structure).to_contain("1. User open app")
+        expect(structure).to_contain("2. User submit login\n   - Capture: api after_step")
+        expect(structure.contains("**Step captures:**")).to_equal(false)
         expect(structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\").to_equal(\"ok\")\n```")
         expect(structure.contains("# @capture(api)")).to_equal(false)
+
+    it "lets step capture off suppress inherited scenario capture":
+        val source = "describe \"Capture policy\":\n" +
+            "    # @capture\n" +
+            "    it \"skips capture for a sensitive step\":\n" +
+            "        user.open_app()\n" +
+            "        # @capture(off)\n" +
+            "        user.enter_password()\n" +
+            "        user.submit_login()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. User open app\n   - Capture: tui after_step")
+        expect(structure).to_contain("2. User enter password\n\n3. User submit login\n   - Capture: tui after_step")
+        expect(structure.contains("Capture: off")).to_equal(false)
+        expect(structure.contains("# @capture(off)")).to_equal(false)
+
+    it "falls back to capture summary when no manual step can be derived":
+        val source = "describe \"Capture policy\":\n" +
+            "    # @capture(api)\n" +
+            "    it \"captures assertion-only evidence\":\n" +
+            "        expect(\"ok\").to_equal(\"ok\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("**Scenario capture:** api after_step")
+        expect(structure.contains("1. ")).to_equal(false)
+
+    it "does not render fallback capture summaries for capture off":
+        val source = "describe \"Capture policy\":\n" +
+            "    # @capture(off)\n" +
+            "    it \"keeps assertion-only capture off silent\":\n" +
+            "        # @capture(off)\n" +
+            "        expect(\"ok\").to_equal(\"ok\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure.contains("Scenario capture")).to_equal(false)
+        expect(structure.contains("Step captures")).to_equal(false)
+        expect(structure.contains("off before")).to_equal(false)
+        expect(structure.contains("# @capture(off)")).to_equal(false)
+
+    it "renders explicit step metadata before folded executable source":
+        val source = "describe \"Manual steps\":\n" +
+            "    it \"uses readable manual step text\":\n" +
+            "        user.open_app()\n" +
+            "        # @step: Submit login form\n" +
+            "        user.submit_login()\n" +
+            "        expect(\"ok\").to_equal(\"ok\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. User open app")
+        expect(structure).to_contain("2. Submit login form")
+        expect(structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\").to_equal(\"ok\")\n```")
+        expect(structure.contains("# @step: Submit login form")).to_equal(false)
+
+    it "renders quoted step metadata before folded executable source":
+        val source = "describe \"Manual steps\":\n" +
+            "    it \"uses quoted manual step text\":\n" +
+            "        # @step(\"Open the dashboard\")\n" +
+            "        user.open_dashboard()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Open the dashboard")
+        expect(structure).to_contain("```simple\nuser.open_dashboard()\n```")
+        expect(structure.contains("# @step(\"Open the dashboard\")")).to_equal(false)
+
+    it "allows capture metadata between step label and action":
+        val source = "describe \"Manual steps\":\n" +
+            "    it \"captures a labeled action\":\n" +
+            "        # @step: Submit login form\n" +
+            "        # @capture(api)\n" +
+            "        user.submit_login()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Submit login form\n   - Capture: api after_step")
+        expect(structure.contains("unused step metadata")).to_equal(false)
+        expect(structure).to_contain("```simple\nuser.submit_login()\n```")
+        expect(structure.contains("# @step: Submit login form")).to_equal(false)
+        expect(structure.contains("# @capture(api)")).to_equal(false)
+
+    it "allows step metadata before executable setup lines":
+        val source = "describe \"Manual steps\":\n" +
+            "    # @capture(after_scenario, protocol)\n" +
+            "    it \"labels protocol setup prose\":\n" +
+            "        # @step: Operator sends an initialize request\n" +
+            "        val input = init_request(\"1\")\n" +
+            "        val output = send_mcp(input)\n" +
+            "        # @step: Operator verifies the initialize response\n" +
+            "        val ok = output.contains(\"protocolVersion\")\n" +
+            "        expect(ok).to_equal(true)\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator sends an initialize request")
+        expect(structure).to_contain("2. Operator verifies the initialize response\n   - Capture: protocol after_scenario")
+        expect(structure).to_contain("```simple\nval input = init_request(\"1\")\nval output = send_mcp(input)\nval ok = output.contains(\"protocolVersion\")\nexpect(ok).to_equal(true)\n```")
+        expect(structure.contains("unused step metadata")).to_equal(false)
+        expect(structure.contains("# @step: Operator")).to_equal(false)
+
+    it "allows capture off between step label and action":
+        val source = "describe \"Manual steps\":\n" +
+            "    # @capture\n" +
+            "    it \"labels a sensitive action without capture\":\n" +
+            "        # @step: Enter password\n" +
+            "        # @capture(off)\n" +
+            "        user.enter_password()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Enter password")
+        expect(structure.contains("Capture: tui after_step")).to_equal(false)
+        expect(structure.contains("Capture: off")).to_equal(false)
+        expect(structure.contains("unused step metadata")).to_equal(false)
+        expect(structure).to_contain("```simple\nuser.enter_password()\n```")
+        expect(structure.contains("# @step: Enter password")).to_equal(false)
+        expect(structure.contains("# @capture(off)")).to_equal(false)
+
+    it "does not derive manual steps from control flow lines":
+        val source = "describe \"Manual steps\":\n" +
+            "    it \"keeps control flow as executable detail\":\n" +
+            "        if user.needs_login():\n" +
+            "            user.open_login()\n" +
+            "        expect(\"ready\").to_equal(\"ready\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure.contains("1. if user needs login")).to_equal(false)
+        expect(structure).to_contain("1. User open login")
+        expect(structure).to_contain("```simple\nif user.needs_login():\n    user.open_login()\nexpect(\"ready\").to_equal(\"ready\")\n```")
+
+    it "renders checker-style calls as readable manual steps":
+        val source = "describe \"Manual steps\":\n" +
+            "    it \"shows checker helper prose\":\n" +
+            "        Then_login_succeeds()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Then login succeeds")
+        expect(structure).to_contain("```simple\nThen_login_succeeds()\n```")
+
+    it "warns about empty step metadata without leaking it into source":
+        val source = "describe \"Manual steps\":\n" +
+            "    it \"keeps empty step metadata actionable\":\n" +
+            "        # @step\n" +
+            "        user.open_app()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("**Manual warnings:**\n- invalid step metadata value: empty (expected # @step: Text or # @step(\"Text\"))")
+        expect(structure).to_contain("1. User open app")
+        expect(structure).to_contain("```simple\nuser.open_app()\n```")
+        expect(structure.contains("```simple\n# @step")).to_equal(false)
+
+    it "warns about unused step metadata without leaking it into source":
+        val source = "describe \"Manual steps\":\n" +
+            "    it \"keeps unused step metadata actionable\":\n" +
+            "        # @step: Review final status\n" +
+            "        expect(\"ok\").to_equal(\"ok\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("**Manual warnings:**\n- unused step metadata: Review final status (expected a following executable manual step)")
+        expect(structure).to_contain("```simple\nexpect(\"ok\").to_equal(\"ok\")\n```")
+        expect(structure.contains("```simple\n# @step")).to_equal(false)
+
+    it "renders multiple manual warnings without blanking entries":
+        val source = "describe \"Manual warnings\":\n" +
+            "    # @manual: spotlight\n" +
+            "    # @capture(video)\n" +
+            "    it \"keeps all warnings visible\":\n" +
+            "        # @step\n" +
+            "        user.open_app()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("- invalid manual visibility metadata: # @manual: spotlight (expected show, folded, detail, or skip)")
+        expect(structure).to_contain("- invalid capture metadata value: video (expected kind tui|gui|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)")
+        expect(structure).to_contain("- invalid step metadata value: empty (expected # @step: Text or # @step(\"Text\"))")
+        expect(structure).to_contain("1. User open app")
 
     it "warns about invalid scenario manual metadata":
         val source = "describe \"Manual metadata diagnostics\":\n" +

@@ -420,7 +420,9 @@ fn lower_inline_asm_name() -> text:
 fn test_inline_asm_cache_guard_detects_real_inline_asm_syntax() {
     assert!(source_may_emit_inline_asm_sidecar("fn f():\n    asm { nop }\n"));
     assert!(source_may_emit_inline_asm_sidecar("fn f():\n    asm(\"nop\")\n"));
-    assert!(source_may_emit_inline_asm_sidecar("fn f():\n    asm volatile { nop }\n"));
+    assert!(source_may_emit_inline_asm_sidecar(
+        "fn f():\n    asm volatile { nop }\n"
+    ));
 }
 
 #[test]

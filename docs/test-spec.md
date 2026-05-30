@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-30 08:37:41*
+*Generated: 2026-05-30 10:42:10*
 
 ## test/unit/app/ui
 
-❌ **widget_scroll_textarea_spec.spl** (592ms)
-  - Source: `test/unit/app/ui/widget_scroll_textarea_spec.spl`
-  - Generated doc: `spec/widget_scroll_textarea_spec.md`
+❌ **async_tui_spec.spl** (440ms)
+  - Source: `test/unit/app/ui/async_tui_spec.spl`
+  - Generated doc: `spec/async_tui_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 37 ✅
-- **Failed:** 4 ❌
-- **Duration:** 602ms
+- **Passed:** 16 ✅
+- **Failed:** 2 ❌
+- **Duration:** 444ms

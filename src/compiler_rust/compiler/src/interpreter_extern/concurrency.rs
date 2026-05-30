@@ -9,7 +9,7 @@ use crate::error::CompileError;
 use crate::interpreter::interpreter_state::{get_concurrent_registry, set_concurrent_registry};
 use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
-use std::sync::mpsc::{channel, Sender, Receiver};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -22,7 +22,7 @@ use super::super::{evaluate_expr, exec_block_value};
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
-type ChannelRegistry = Arc<Mutex<HashMap<i64, (Sender<Value>, Arc<Mutex<Receiver<Value>>>)>>>;
+type ChannelRegistry = Arc<Mutex<HashMap<i64, (Option<Sender<Value>>, Arc<Mutex<Receiver<Value>>>)>>>;
 
 // Global storage for thread handles, channels, and results
 lazy_static::lazy_static! {
@@ -366,7 +366,7 @@ pub fn rt_channel_new(_args: &[Value]) -> Result<Value, CompileError> {
     let channel_id = *next_id;
     *next_id += 1;
 
-    channels.insert(channel_id, (tx, Arc::new(Mutex::new(rx))));
+    channels.insert(channel_id, (Some(tx), Arc::new(Mutex::new(rx))));
 
     Ok(Value::Int(channel_id))
 }
@@ -405,8 +405,11 @@ pub fn rt_channel_send(args: &[Value]) -> Result<Value, CompileError> {
     let channels = CHANNELS.lock().unwrap();
     if let Some((tx, _)) = channels.get(&channel_id) {
         let value = args[1].clone();
-        tx.send(value)
-            .map_err(|_| CompileError::Runtime("Failed to send to channel".to_string()))?;
+        if let Some(sender) = tx {
+            sender
+                .send(value)
+                .map_err(|_| CompileError::Runtime("Failed to send to channel".to_string()))?;
+        }
         Ok(Value::Nil)
     } else {
         Err(CompileError::Runtime(format!("Channel {} not found", channel_id)))
@@ -538,7 +541,9 @@ pub fn rt_channel_close(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     let mut channels = CHANNELS.lock().unwrap();
-    channels.remove(&channel_id);
+    if let Some((tx, _)) = channels.get_mut(&channel_id) {
+        *tx = None;
+    }
 
     Ok(Value::Nil)
 }
@@ -577,7 +582,10 @@ pub fn rt_channel_is_closed(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     let channels = CHANNELS.lock().unwrap();
-    let is_closed = !channels.contains_key(&channel_id);
+    let is_closed = match channels.get(&channel_id) {
+        Some((tx, _)) => tx.is_none(),
+        None => true,
+    };
 
     Ok(Value::Int(if is_closed { 1 } else { 0 }))
 }
@@ -619,6 +627,47 @@ pub fn rt_get_concurrent_backend(_args: &[Value]) -> Result<Value, CompileError>
         ConcurrentBackend::Native => "native",
     };
     Ok(Value::Str(name.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_pure_std_channel() -> i64 {
+        set_concurrent_registry(ConcurrentProviderRegistry::new(ConcurrentBackend::PureStd));
+        clear_concurrency_registries();
+        match rt_channel_new(&[]).expect("channel new") {
+            Value::Int(id) => id,
+            other => panic!("expected channel id, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channel_close_preserves_buffered_messages() {
+        let id = new_pure_std_channel();
+        rt_channel_send(&[Value::Int(id), Value::Str("queued".to_string())]).expect("send");
+        rt_channel_close(&[Value::Int(id)]).expect("close");
+
+        let received = rt_channel_try_recv(&[Value::Int(id)]).expect("try recv");
+        assert!(matches!(received, Value::Str(ref value) if value == "queued"));
+        let empty = rt_channel_try_recv(&[Value::Int(id)]).expect("try recv empty");
+        assert!(matches!(empty, Value::Nil));
+    }
+
+    #[test]
+    fn channel_close_is_idempotent_and_send_after_close_is_noop() {
+        let id = new_pure_std_channel();
+        rt_channel_close(&[Value::Int(id)]).expect("close");
+        rt_channel_close(&[Value::Int(id)]).expect("second close");
+        assert!(matches!(
+            rt_channel_is_closed(&[Value::Int(id)]).expect("is closed"),
+            Value::Int(1)
+        ));
+
+        rt_channel_send(&[Value::Int(id), Value::Str("ignored".to_string())]).expect("send after close is ignored");
+        let received = rt_channel_try_recv(&[Value::Int(id)]).expect("try recv");
+        assert!(matches!(received, Value::Nil));
+    }
 }
 
 // ============================================================================

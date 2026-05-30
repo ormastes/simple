@@ -18,6 +18,14 @@ documentation to hand-written-quality scenario manuals.
 - **Acceptance-criteria:**
   - [x] Comment-form `# @inline` scenarios are hidden as top-level manual
         sections.
+  - [x] Comment-form `# @step: Text` and `# @step("Text")` label the next
+        call-like manual step and are omitted from folded executable source.
+  - [x] Empty comment-form `# @step` renders a manual warning and falls back
+        to the derived step label.
+  - [x] Unused comment-form `# @step` renders a manual warning when no
+        following call-like step exists.
+  - [x] Step-local `# @capture(...)` may appear between `# @step` and the
+        labeled call-like step.
   - [x] Comment-form `# @prev` expands scenario steps without printing
         `Previous:`.
   - [x] Comment-form `# @manual-file` sets whole-file show/folded/detail/skip
@@ -28,9 +36,20 @@ documentation to hand-written-quality scenario manuals.
   - [x] Missing inline targets produce clear generated-doc diagnostics.
   - [x] Scenario cycles produce clear diagnostics.
   - [x] Executable SPipe source is folded by default.
+  - [x] Generated docs derive starter manual steps from call-like scenario
+        lines before the folded executable source.
+  - [x] Derived manual steps skip assertion and control-flow mechanics while
+        still rendering nested call-like actions.
+  - [x] Checker-style calls such as `Then_login_succeeds()` render as readable
+        manual steps.
 - **Partial-progress:** `spipe-docgen` now supports scenario-level comment
   metadata for manual visibility: `# @manual: folded`, `# @manual: detail`,
   `# @manual: skip`, `# @manual: show`, and `# @inline`. It supports
+  comment-form `# @step: Text` and `# @step("Text")` labels for the next
+  call-like manual step,
+  warns for empty `# @step` metadata,
+  warns for unused `# @step` metadata,
+  allows step-local capture metadata between `# @step` and the labeled action,
   file-level `# @manual-file: folded|skip|detail|show`, and expands
   `# @prev("title")`, bare `# @prev`, and `# @include("title")` into the
   rendered scenario body. Generator path-aware rendering now resolves nearest
@@ -39,7 +58,11 @@ documentation to hand-written-quality scenario manuals.
   `Manual warnings` block. Direct `# @prev` and `# @include` cycles render
   clear manual warnings and keep the current scenario body usable. Runnable
   scenario source now renders inside a folded `Executable SPipe` details block.
-  Full annotation syntax and richer manual step rendering remain open.
+  Starter manual steps are derived from call-like source lines before the
+  folded executable block, while assertion and control-flow mechanics stay in
+  executable detail. Checker-style calls such as `Then_login_succeeds()` render
+  as readable manual steps. Full annotation syntax and richer `@step` prose
+  rendering remain open.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none
@@ -61,7 +84,14 @@ documentation to hand-written-quality scenario manuals.
   - [ ] Capture policy resolves by step, function/checker, scenario, file,
         folder, root, then built-in default.
   - [x] Generated docs render starter scenario and step capture summaries from
-        comment metadata.
+        comment metadata when no manual step can be derived.
+  - [x] Generated docs attach starter capture summaries under derived manual
+        steps when a call-like step follows the metadata.
+  - [x] Scenario-level `after_scenario` capture attaches only to the final
+        derived manual step.
+  - [x] Step-local `# @capture(off)` suppresses inherited scenario capture for
+        that step.
+  - [x] `# @capture(off)` remains silent in fallback capture summaries.
   - [ ] Generated docs render concrete provider artifacts under the step that
         caused them.
   - [ ] Existing `Screenshots`, `TUI Captures`, `Artifacts`, and `Logs`
@@ -71,7 +101,13 @@ documentation to hand-written-quality scenario manuals.
   construction, redaction, and manual summary rendering. `spipe-docgen` now
   parses `# @capture`, `# @capture(api)`, and
   `# @capture(after_scenario, gui)` comments into generated manual summaries.
-  Full config resolution and provider artifact attachment remain open.
+  Starter derived manual steps now show scenario and step-local capture policy
+  under the visible step when possible; scenario-level `after_scenario` capture
+  attaches to the final derived manual step, and step-local `# @capture(off)`
+  suppresses inherited scenario capture for one step. Detached summaries remain
+  as a fallback for assertion-only scenarios, but `# @capture(off)` is silent
+  there too. Full config resolution and provider artifact attachment remain
+  open.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none

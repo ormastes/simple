@@ -227,9 +227,7 @@ pub(crate) fn compile_inline_ctype_call<M: Module>(
         "upper" => upper,
         "lower" => lower,
         "alpha" => alpha_folded,
-        "alnum" => {
-            builder.ins().bor(alpha_folded, digit)
-        }
+        "alnum" => builder.ins().bor(alpha_folded, digit),
         "xdigit" => {
             let hex_alpha = inline_char_range(builder, folded, 97, 102);
             builder.ins().bor(digit, hex_alpha)

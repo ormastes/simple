@@ -183,11 +183,7 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
             };
             let prefix = &name[..dot];
             let suffix = &name[dot + 1..];
-            if suffix == part
-                && !prefix.is_empty()
-                && prefix.len() <= 3
-                && prefix.chars().all(|c| c.is_ascii_digit())
-            {
+            if suffix == part && !prefix.is_empty() && prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) {
                 matched = Some(path);
                 break;
             }

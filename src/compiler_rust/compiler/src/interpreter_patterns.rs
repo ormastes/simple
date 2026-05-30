@@ -246,8 +246,8 @@ pub(crate) fn pattern_matches(
                 // Pattern::Enum{name:"Result"}, so user-defined enums with variants named
                 // Some/None/Ok/Err would otherwise fail to match. The variant name check
                 // on line 245 prevents cross-variant leakage.
-                let enum_matches = enum_name == "_" || enum_name == ve
-                    || matches!(enum_name.as_str(), "Option" | "Result");
+                let enum_matches =
+                    enum_name == "_" || enum_name == ve || matches!(enum_name.as_str(), "Option" | "Result");
                 if enum_matches && variant == vv {
                     // Both have no payload
                     if payload.is_none() && value_payload.is_none() {

@@ -1,5 +1,7 @@
 # 2D Engine — Backend Probe Contract
 
+use std.gpu.engine2d.simd_kernels.{CpuSimdRuntimeEvidence, cpu_simd_runtime_evidence}
+
 val BACKEND_CPU: text = "cpu"
 val BACKEND_SOFTWARE: text = "software"
 val BACKEND_VULKAN: text = "vulkan"
@@ -174,7 +176,8 @@ class BackendProber:
         r
 
     fn probe_cpu_simd(self) -> BackendProbeResult:
-        var r = BackendProbeResult.success(BACKEND_CPU_SIMD, "CPU SIMD provider is capability-gated")
+        val evidence = cpu_simd_runtime_evidence()
+        var r = BackendProbeResult.success(BACKEND_CPU_SIMD, "CPU SIMD runtime evidence: {evidence.diagnostic_text()}")
         r.api_name = "cpu-simd"
         r.feature_gate = "runtime_cpu_features"
         r.shader_format = "none"
@@ -183,35 +186,33 @@ class BackendProber:
         r.has_present = true
         r
 
-    fn probe_cpu_simd_x86(self) -> BackendProbeResult:
-        var r = BackendProbeResult.unavailable(BACKEND_CPU_SIMD_X86, "x86 SIMD requires runtime CPU feature evidence for SSE4.2/AVX2/AVX512 before strict selection")
-        r.api_name = "cpu-simd-x86"
-        r.feature_gate = "x86_sse42_avx2_avx512"
+    fn _cpu_simd_arch_result(self, backend_name: text, api_name: text, gate: text, available: bool, evidence: CpuSimdRuntimeEvidence) -> BackendProbeResult:
+        var r = if available:
+            BackendProbeResult.success(backend_name, "CPU SIMD runtime evidence: {evidence.diagnostic_text()}")
+        else:
+            BackendProbeResult.unavailable(backend_name, "CPU SIMD runtime evidence unavailable for {backend_name}: {evidence.diagnostic_text()}")
+        r.api_name = api_name
+        r.feature_gate = gate
         r.shader_format = "none"
+        r.device_name = evidence.arch
+        r.driver_version = evidence.feature
         r.has_compute = true
         r.has_graphics = true
         r.has_present = true
+        r.memory_mb = evidence.checksum
         r
+
+    fn probe_cpu_simd_x86(self) -> BackendProbeResult:
+        val evidence = cpu_simd_runtime_evidence()
+        self._cpu_simd_arch_result(BACKEND_CPU_SIMD_X86, "cpu-simd-x86", "x86_sse42_avx2_avx512", evidence.x86_available and evidence.executed_all(), evidence)
 
     fn probe_cpu_simd_arm(self) -> BackendProbeResult:
-        var r = BackendProbeResult.unavailable(BACKEND_CPU_SIMD_ARM, "ARM SIMD requires runtime CPU feature evidence for NEON/SVE before strict selection")
-        r.api_name = "cpu-simd-arm"
-        r.feature_gate = "arm_neon_sve"
-        r.shader_format = "none"
-        r.has_compute = true
-        r.has_graphics = true
-        r.has_present = true
-        r
+        val evidence = cpu_simd_runtime_evidence()
+        self._cpu_simd_arch_result(BACKEND_CPU_SIMD_ARM, "cpu-simd-arm", "arm_neon_sve", evidence.arm_available and evidence.executed_all(), evidence)
 
     fn probe_cpu_simd_riscv(self) -> BackendProbeResult:
-        var r = BackendProbeResult.unavailable(BACKEND_CPU_SIMD_RISCV, "RISC-V SIMD requires runtime CPU feature evidence for vector extension before strict selection")
-        r.api_name = "cpu-simd-riscv"
-        r.feature_gate = "riscv_vector_extension"
-        r.shader_format = "none"
-        r.has_compute = true
-        r.has_graphics = true
-        r.has_present = true
-        r
+        val evidence = cpu_simd_runtime_evidence()
+        self._cpu_simd_arch_result(BACKEND_CPU_SIMD_RISCV, "cpu-simd-riscv", "riscv_vector_extension", evidence.riscv_available and evidence.executed_all(), evidence)
 
     fn probe_cpu_simd_arch_summary(self) -> text:
         self.probe_cpu_simd_x86().summary() + " | " + self.probe_cpu_simd_arm().summary() + " | " + self.probe_cpu_simd_riscv().summary()

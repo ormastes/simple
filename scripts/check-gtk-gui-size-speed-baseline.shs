@@ -9,6 +9,7 @@ BUILD_DIR="${BUILD_DIR:-build/gtk_gui_size_speed_baseline}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/gtk_gui_size_speed_baseline_$(date -u +%F).md}"
 SIMPLE_ITERATIONS="${SIMPLE_ITERATIONS:-4}"
 GTK_ITERATIONS="${GTK_ITERATIONS:-200}"
+GTK_EVIDENCE_MIN_ITERATIONS="${GTK_EVIDENCE_MIN_ITERATIONS:-3}"
 SKIP_SIMPLE_NATIVE="${SKIP_SIMPLE_NATIVE:-0}"
 SIMPLE_RUN_TIMEOUT_SECS="${SIMPLE_RUN_TIMEOUT_SECS:-120}"
 SIMPLE_RUN_LIB="${SIMPLE_RUN_LIB:-$ROOT_DIR/src/lib:$ROOT_DIR/src/app}"
@@ -589,14 +590,30 @@ gtk_benchmark_evidence_reason="$(awk \
     -v gt="$gtk_total_us" \
     -v si="$SIMPLE_ITERATIONS" \
     -v gi="$GTK_ITERATIONS" \
+    -v min_iters="$GTK_EVIDENCE_MIN_ITERATIONS" \
     'BEGIN {
         if (scene == "") { print "missing-scene"; exit }
         if (!(si ~ /^[0-9]+$/) || !(gi ~ /^[0-9]+$/) || si <= 0 || gi <= 0) { print "missing-iterations"; exit }
+        if (!(min_iters ~ /^[0-9]+$/) || min_iters <= 0) { print "invalid-min-iterations"; exit }
+        if (si < min_iters || gi < min_iters) { print "sample-count-too-low"; exit }
         if (!(sf ~ /^[0-9]+$/) || !(gf ~ /^[0-9]+$/) || !(st ~ /^[0-9]+$/) || !(gt ~ /^[0-9]+$/) || sf <= 0 || gf <= 0 || st <= 0 || gt <= 0) { print "missing-timings"; exit }
         if ((sf * gi) >= (gf * si)) { print "frame-not-faster"; exit }
         if ((st * gi) >= (gt * si)) { print "text-not-faster"; exit }
         print "pass"
     }')"
+gtk_benchmark_evidence_sample_status="low"
+case "$gtk_benchmark_evidence_reason" in
+    pass|missing-timings|frame-not-faster|text-not-faster)
+        gtk_benchmark_evidence_sample_status="$(awk \
+            -v si="$SIMPLE_ITERATIONS" \
+            -v gi="$GTK_ITERATIONS" \
+            -v min_iters="$GTK_EVIDENCE_MIN_ITERATIONS" \
+            'BEGIN {
+                if (si ~ /^[0-9]+$/ && gi ~ /^[0-9]+$/ && min_iters ~ /^[0-9]+$/ && si >= min_iters && gi >= min_iters) print "ok";
+                else print "low"
+            }')"
+        ;;
+esac
 gtk_benchmark_evidence_status="fail"
 if [ "$gtk_benchmark_evidence_reason" = "pass" ]; then
     gtk_benchmark_evidence_status="pass"
@@ -657,6 +674,8 @@ fi
     echo "| scene_id | $gtk_benchmark_evidence_scene |"
     echo "| status | $gtk_benchmark_evidence_status |"
     echo "| reason | $gtk_benchmark_evidence_reason |"
+    echo "| sample_status | $gtk_benchmark_evidence_sample_status |"
+    echo "| min_iterations | $GTK_EVIDENCE_MIN_ITERATIONS |"
     echo "| simple_frame_us | $gtk_benchmark_simple_frame_us |"
     echo "| gtk_frame_us | $gtk_benchmark_gtk_frame_us |"
     echo "| simple_text_us | $gtk_benchmark_simple_text_us |"
@@ -766,6 +785,8 @@ echo "gtk_total_us=$gtk_total_us"
 echo "gtk_benchmark_evidence_scene=$gtk_benchmark_evidence_scene"
 echo "gtk_benchmark_evidence_status=$gtk_benchmark_evidence_status"
 echo "gtk_benchmark_evidence_reason=$gtk_benchmark_evidence_reason"
+echo "gtk_benchmark_evidence_sample_status=$gtk_benchmark_evidence_sample_status"
+echo "gtk_benchmark_evidence_min_iterations=$GTK_EVIDENCE_MIN_ITERATIONS"
 echo "gtk_benchmark_simple_frame_us=$gtk_benchmark_simple_frame_us"
 echo "gtk_benchmark_gtk_frame_us=$gtk_benchmark_gtk_frame_us"
 echo "gtk_benchmark_simple_text_us=$gtk_benchmark_simple_text_us"

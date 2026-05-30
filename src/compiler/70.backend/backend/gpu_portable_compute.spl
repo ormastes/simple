@@ -40,6 +40,78 @@ class PortableComputeCompilePlan:
     fn produces_binary() -> bool:
         self.binary_format != "source"
 
+class PortableComputeCompiledArtifactEvidence:
+    plan: PortableComputeCompilePlan
+    artifact_magic: text
+    exported_symbols: text
+    byte_count: i64
+    artifact_valid: bool
+    status_code: text
+    reason: text
+
+    static fn create(plan: PortableComputeCompilePlan, artifact_magic: text, exported_symbols: text, byte_count: i64) -> PortableComputeCompiledArtifactEvidence:
+        val reason = portable_compute_compiled_artifact_reason(plan, artifact_magic, exported_symbols, byte_count)
+        PortableComputeCompiledArtifactEvidence(
+            plan: plan,
+            artifact_magic: artifact_magic,
+            exported_symbols: exported_symbols,
+            byte_count: byte_count,
+            artifact_valid: reason == "pass",
+            status_code: if reason == "pass": "valid" else: "invalid",
+            reason: reason
+        )
+
+    fn summary() -> text:
+        "PortableComputeCompiledArtifactEvidence[target={self.plan.target_name()} entry={self.plan.entry_name} format={self.plan.binary_format} bytes={self.byte_count} valid={self.artifact_valid.to_text()} reason={self.reason}]"
+
+class PortableComputeToolchainInvocation:
+    plan: PortableComputeCompilePlan
+    source_path: text
+    output_path: text
+    primary_tool_path: text
+    secondary_tool_path: text
+    command_line: text
+    ready: bool
+    reason: text
+
+    static fn create(plan: PortableComputeCompilePlan, source_path: text, output_path: text, primary_tool_path: text, secondary_tool_path: text) -> PortableComputeToolchainInvocation:
+        val reason = portable_compute_toolchain_invocation_reason(plan, source_path, output_path, primary_tool_path, secondary_tool_path)
+        PortableComputeToolchainInvocation(
+            plan: plan,
+            source_path: source_path,
+            output_path: output_path,
+            primary_tool_path: primary_tool_path,
+            secondary_tool_path: secondary_tool_path,
+            command_line: portable_compute_toolchain_command_line(plan, source_path, output_path, primary_tool_path, secondary_tool_path),
+            ready: reason == "ready_to_invoke",
+            reason: reason
+        )
+
+    fn summary() -> text:
+        "PortableComputeToolchainInvocation[target={self.plan.target_name()} entry={self.plan.entry_name} output={self.output_path} ready={self.ready.to_text()} reason={self.reason} command={self.command_line}]"
+
+class PortableComputeCompileResult:
+    invocation: PortableComputeToolchainInvocation
+    exit_code: i64
+    evidence: PortableComputeCompiledArtifactEvidence
+    ready: bool
+    status: text
+    diagnostic: text
+
+    static fn create(invocation: PortableComputeToolchainInvocation, exit_code: i64, evidence: PortableComputeCompiledArtifactEvidence) -> PortableComputeCompileResult:
+        val status = portable_compute_compile_result_status(invocation, exit_code, evidence)
+        PortableComputeCompileResult(
+            invocation: invocation,
+            exit_code: exit_code,
+            evidence: evidence,
+            ready: status == "compiled_artifact_verified",
+            status: status,
+            diagnostic: portable_compute_compile_result_diagnostic(invocation, exit_code, evidence, status)
+        )
+
+    fn summary() -> text:
+        "PortableComputeCompileResult[target={self.invocation.plan.target_name()} entry={self.invocation.plan.entry_name} status={self.status} ready={self.ready.to_text()} diagnostic={self.diagnostic}]"
+
 fn portable_compute_target_name(target: PortableComputeTarget) -> text:
     match target:
         case Cuda: "cuda"
@@ -67,6 +139,13 @@ fn portable_compute_tool_hint(target: PortableComputeTarget) -> text:
         case Hip: "hiprtc-or-hipcc"
         case OpenCl: "opencl-c-to-spirv"
         case Metal: "metal-and-metallib"
+
+fn portable_compute_expected_artifact_magic(target: PortableComputeTarget) -> text:
+    match target:
+        case Cuda: ".version"
+        case Hip: "ELF"
+        case OpenCl: "SPIR-V"
+        case Metal: "MTLB"
 
 fn portable_compute_u32_type(target: PortableComputeTarget) -> text:
     match target:
@@ -150,6 +229,81 @@ fn portable_compute_compile_plan(artifact: PortableComputeArtifact, output_stem:
         tool_hint: portable_compute_tool_hint(artifact.target),
         artifact_path_suffix: "{output_stem}.{artifact.binary_format}"
     )
+
+fn portable_compute_compiled_artifact_reason(plan: PortableComputeCompilePlan, artifact_magic: text, exported_symbols: text, byte_count: i64) -> text:
+    if plan.entry_name == "":
+        return "missing-entry-name"
+    if not plan.produces_binary():
+        return "source-only-plan"
+    if byte_count <= 0:
+        return "missing-artifact-bytes"
+    if artifact_magic == "":
+        return "missing-artifact-magic"
+    if not artifact_magic.contains(portable_compute_expected_artifact_magic(plan.target)):
+        return "artifact-magic-mismatch"
+    if exported_symbols == "":
+        return "missing-exported-symbols"
+    if not exported_symbols.contains(plan.entry_name):
+        return "missing-entry-symbol"
+    "pass"
+
+fn portable_compute_compiled_artifact_evidence(plan: PortableComputeCompilePlan, artifact_magic: text, exported_symbols: text, byte_count: i64) -> PortableComputeCompiledArtifactEvidence:
+    PortableComputeCompiledArtifactEvidence.create(plan, artifact_magic, exported_symbols, byte_count)
+
+fn portable_compute_default_source_suffix(target: PortableComputeTarget) -> text:
+    match target:
+        case Cuda: ".cu"
+        case Hip: ".hip.cpp"
+        case OpenCl: ".cl"
+        case Metal: ".metal"
+
+fn portable_compute_toolchain_invocation_reason(plan: PortableComputeCompilePlan, source_path: text, output_path: text, primary_tool_path: text, secondary_tool_path: text) -> text:
+    if plan.entry_name == "":
+        return "missing-entry-name"
+    if source_path == "":
+        return "missing-source-path"
+    if output_path == "":
+        return "missing-output-path"
+    if primary_tool_path == "":
+        return "missing-primary-tool"
+    if plan.target == PortableComputeTarget.Metal and secondary_tool_path == "":
+        return "missing-metallib-tool"
+    "ready_to_invoke"
+
+fn portable_compute_toolchain_command_line(plan: PortableComputeCompilePlan, source_path: text, output_path: text, primary_tool_path: text, secondary_tool_path: text) -> text:
+    if plan.target == PortableComputeTarget.Cuda:
+        return "{primary_tool_path} --ptx --device-c --entry {plan.entry_name} -o {output_path} {source_path}"
+    if plan.target == PortableComputeTarget.Hip:
+        return "{primary_tool_path} --genco --offload-arch=gfx1100 -o {output_path} {source_path}"
+    if plan.target == PortableComputeTarget.OpenCl:
+        return "{primary_tool_path} -cl-std=CL2.0 -emit-spirv -o {output_path} {source_path}"
+    if plan.target == PortableComputeTarget.Metal:
+        return "{primary_tool_path} -c {source_path} -o {output_path}.air && {secondary_tool_path} {output_path}.air -o {output_path}"
+    ""
+
+fn portable_compute_toolchain_invocation(plan: PortableComputeCompilePlan, source_path: text, output_path: text, primary_tool_path: text, secondary_tool_path: text) -> PortableComputeToolchainInvocation:
+    PortableComputeToolchainInvocation.create(plan, source_path, output_path, primary_tool_path, secondary_tool_path)
+
+fn portable_compute_compile_result_status(invocation: PortableComputeToolchainInvocation, exit_code: i64, evidence: PortableComputeCompiledArtifactEvidence) -> text:
+    if not invocation.ready:
+        return invocation.reason
+    if exit_code != 0:
+        return "toolchain_failed"
+    if not evidence.artifact_valid:
+        return evidence.reason
+    "compiled_artifact_verified"
+
+fn portable_compute_compile_result_diagnostic(invocation: PortableComputeToolchainInvocation, exit_code: i64, evidence: PortableComputeCompiledArtifactEvidence, status: text) -> text:
+    if status == "compiled_artifact_verified":
+        return ""
+    if status == "toolchain_failed":
+        return "toolchain exited with code {exit_code}: {invocation.command_line}"
+    if not invocation.ready:
+        return "cannot invoke {invocation.plan.target_name()} compiler: {invocation.reason}"
+    "compiled artifact rejected: {evidence.reason}"
+
+fn portable_compute_compile_result(invocation: PortableComputeToolchainInvocation, exit_code: i64, evidence: PortableComputeCompiledArtifactEvidence) -> PortableComputeCompileResult:
+    PortableComputeCompileResult.create(invocation, exit_code, evidence)
 
 fn emit_portable_2d_fill_u32_kernel(target: PortableComputeTarget) -> PortableComputeArtifact:
     emit_portable_u32_fill_kernel(target, "simple_2d_fill_u32")

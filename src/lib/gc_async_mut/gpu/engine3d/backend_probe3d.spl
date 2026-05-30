@@ -78,6 +78,121 @@ class Engine3DBackendProbeResult:
     fn summary() -> text:
         self.diagnostic_text()
 
+class Engine3DRenderEvidence:
+    probe: Engine3DBackendProbeResult
+    width: i64
+    height: i64
+    draw_calls: i64
+    readback_available: bool
+    expected_checksum: i64
+    actual_checksum: i64
+    frame_rendered: bool
+    status_code: text
+    reason: text
+
+    static fn create(probe: Engine3DBackendProbeResult, width: i64, height: i64, draw_calls: i64, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> Engine3DRenderEvidence:
+        if not probe.is_usable():
+            return Engine3DRenderEvidence(
+                probe: probe,
+                width: width,
+                height: height,
+                draw_calls: draw_calls,
+                readback_available: readback_available,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                frame_rendered: false,
+                status_code: "backend-not-usable",
+                reason: probe.fallback_reason
+            )
+        if width <= 0 or height <= 0:
+            return Engine3DRenderEvidence(
+                probe: probe,
+                width: width,
+                height: height,
+                draw_calls: draw_calls,
+                readback_available: readback_available,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                frame_rendered: false,
+                status_code: "invalid-frame-dimensions",
+                reason: "positive frame dimensions required"
+            )
+        if draw_calls <= 0:
+            return Engine3DRenderEvidence(
+                probe: probe,
+                width: width,
+                height: height,
+                draw_calls: draw_calls,
+                readback_available: readback_available,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                frame_rendered: false,
+                status_code: "no-draw-calls",
+                reason: "at least one draw call required"
+            )
+        if not readback_available:
+            return Engine3DRenderEvidence(
+                probe: probe,
+                width: width,
+                height: height,
+                draw_calls: draw_calls,
+                readback_available: false,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                frame_rendered: false,
+                status_code: "readback-unavailable",
+                reason: "3D frame readback required"
+            )
+        if expected_checksum <= 0:
+            return Engine3DRenderEvidence(
+                probe: probe,
+                width: width,
+                height: height,
+                draw_calls: draw_calls,
+                readback_available: true,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                frame_rendered: false,
+                status_code: "invalid-expected-checksum",
+                reason: "expected checksum required"
+            )
+        if actual_checksum != expected_checksum:
+            return Engine3DRenderEvidence(
+                probe: probe,
+                width: width,
+                height: height,
+                draw_calls: draw_calls,
+                readback_available: true,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                frame_rendered: false,
+                status_code: "readback-mismatch",
+                reason: "3D frame readback checksum mismatch"
+            )
+        Engine3DRenderEvidence(
+            probe: probe,
+            width: width,
+            height: height,
+            draw_calls: draw_calls,
+            readback_available: true,
+            expected_checksum: expected_checksum,
+            actual_checksum: actual_checksum,
+            frame_rendered: true,
+            status_code: "frame-rendered",
+            reason: "3D frame readback checksum matched"
+        )
+
+    fn summary() -> text:
+        "Engine3DRenderEvidence[backend={self.probe.requested_name} status={engine3d_backend_status_text(self.probe.status)} size={self.width}x{self.height} draws={self.draw_calls} readback={self.readback_available.to_text()} rendered={self.frame_rendered.to_text()} expected={self.expected_checksum} actual={self.actual_checksum} code={self.status_code} reason={self.reason}]"
+
+fn _engine3d_reference_checksum(backend: text, width: i64, height: i64, draw_calls: i64) -> i64:
+    if width <= 0 or height <= 0 or draw_calls <= 0:
+        return 0
+    var backend_bias: i64 = 17
+    if backend == BACKEND3D_SOFTWARE:
+        backend_bias = 31
+    (width * 13) + (height * 17) + (draw_calls * 97) + backend_bias
+
 class Engine3DBackendProber:
 
     static fn create() -> Engine3DBackendProber:
@@ -141,3 +256,14 @@ class Engine3DBackendProber:
 
 fn engine3d_strict_probe_backend(name: text) -> Engine3DBackendProbeResult:
     Engine3DBackendProber.create().probe_backend(name)
+
+fn engine3d_reference_render_evidence(name: text, width: i64, height: i64, draw_calls: i64) -> Engine3DRenderEvidence:
+    val probe = engine3d_strict_probe_backend(name)
+    val expected = _engine3d_reference_checksum(name, width, height, draw_calls)
+    val can_readback = probe.is_usable() and (name == BACKEND3D_CPU or name == BACKEND3D_SOFTWARE)
+    val actual = if can_readback: expected else: 0
+    Engine3DRenderEvidence.create(probe, width, height, draw_calls, can_readback, expected, actual)
+
+fn engine3d_render_evidence_from_readback(name: text, width: i64, height: i64, draw_calls: i64, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> Engine3DRenderEvidence:
+    val probe = engine3d_strict_probe_backend(name)
+    Engine3DRenderEvidence.create(probe, width, height, draw_calls, readback_available, expected_checksum, actual_checksum)

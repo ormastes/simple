@@ -1,0 +1,277 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/cuda_generated_2d_readback}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/cuda_generated_2d_readback_$(date -u +%F).md}"
+TOOLCHAIN_BUILD_DIR="${TOOLCHAIN_BUILD_DIR:-$BUILD_DIR/toolchains}"
+PTX_PATH="${PTX_PATH:-$TOOLCHAIN_BUILD_DIR/simple_2d_fill_u32.ptx}"
+CC_TOOL="${CC_TOOL:-cc}"
+CUDA_ELEMENT_COUNT="${CUDA_ELEMENT_COUNT:-64}"
+CUDA_FILL_VALUE="${CUDA_FILL_VALUE:-16909060}"
+
+mkdir -p "$BUILD_DIR" "$TOOLCHAIN_BUILD_DIR" "$(dirname "$REPORT_PATH")"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "cuda_generated_2d_readback_status=unavailable"
+        echo "cuda_generated_2d_readback_reason=$reason"
+        echo "cuda_generated_2d_readback_ptx=$PTX_PATH"
+        echo "cuda_generated_2d_readback_expected_checksum=0"
+        echo "cuda_generated_2d_readback_actual_checksum=0"
+    } >"$BUILD_DIR/evidence.env"
+}
+
+if [ ! -f "$PTX_PATH" ] || ! grep -a -F "simple_2d_copy_u32" "$PTX_PATH" >/dev/null 2>&1 || ! grep -a -F "simple_2d_alpha_u32" "$PTX_PATH" >/dev/null 2>&1 || ! grep -a -F "simple_2d_scroll_u32" "$PTX_PATH" >/dev/null 2>&1; then
+    REPORT_PATH="$BUILD_DIR/toolchains.md" BUILD_DIR="$TOOLCHAIN_BUILD_DIR" sh scripts/check-portable-compute-toolchains.shs >/dev/null
+fi
+
+if [ ! -f "$PTX_PATH" ]; then
+    emit_unavailable "missing-verified-ptx"
+else
+    cat >"$BUILD_DIR/cuda_generated_2d_readback.c" <<'C_EOF'
+#include <cuda.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+static char *read_file(const char *path, size_t *size_out) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long n = ftell(f);
+    if (n <= 0) { fclose(f); return NULL; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    char *buf = (char *)malloc((size_t)n + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    if (got != (size_t)n) { free(buf); return NULL; }
+    buf[n] = 0;
+    *size_out = (size_t)n;
+    return buf;
+}
+
+static void fail(const char *reason, int code, uint64_t expected, uint64_t actual) {
+    printf("cuda_generated_2d_readback_status=fail\n");
+    printf("cuda_generated_2d_readback_reason=%s\n", reason);
+    printf("cuda_generated_2d_readback_cuda_code=%d\n", code);
+    printf("cuda_generated_2d_readback_expected_checksum=%llu\n", (unsigned long long)expected);
+    printf("cuda_generated_2d_readback_actual_checksum=%llu\n", (unsigned long long)actual);
+}
+
+static uint64_t checksum_u32(const uint32_t *data, unsigned int count) {
+    uint64_t sum = 0;
+    for (unsigned int i = 0; i < count; i++) sum += data[i];
+    return sum;
+}
+
+static uint32_t alpha_pixel(uint32_t s, uint32_t d, uint32_t alpha) {
+    uint32_t inv = 255u - alpha;
+    uint32_t rb = (((s & 0x00ff00ffu) * alpha) + ((d & 0x00ff00ffu) * inv)) >> 8;
+    uint32_t g = (((s & 0x0000ff00u) * alpha) + ((d & 0x0000ff00u) * inv)) >> 8;
+    return 0xff000000u | (rb & 0x00ff00ffu) | (g & 0x0000ff00u);
+}
+
+int main(int argc, char **argv) {
+    if (argc != 4) {
+        fail("invalid-argv", -1, 0, 0);
+        return 2;
+    }
+    const char *ptx_path = argv[1];
+    unsigned int count = (unsigned int)strtoul(argv[2], NULL, 10);
+    unsigned int value = (unsigned int)strtoul(argv[3], NULL, 10);
+    if (count == 0) {
+        fail("invalid-count", -1, 0, 0);
+        return 2;
+    }
+
+    size_t ptx_size = 0;
+    char *ptx = read_file(ptx_path, &ptx_size);
+    if (!ptx) {
+        fail("missing-ptx", -1, 0, 0);
+        return 2;
+    }
+
+    CUresult rc = cuInit(0);
+    if (rc != CUDA_SUCCESS) { fail("cuInit-failed", (int)rc, 0, 0); free(ptx); return 3; }
+
+    CUdevice dev;
+    rc = cuDeviceGet(&dev, 0);
+    if (rc != CUDA_SUCCESS) { fail("cuDeviceGet-failed", (int)rc, 0, 0); free(ptx); return 3; }
+
+    CUcontext ctx;
+    rc = cuDevicePrimaryCtxRetain(&ctx, dev);
+    if (rc != CUDA_SUCCESS) { fail("cuDevicePrimaryCtxRetain-failed", (int)rc, 0, 0); free(ptx); return 3; }
+    rc = cuCtxSetCurrent(ctx);
+    if (rc != CUDA_SUCCESS) { fail("cuCtxSetCurrent-failed", (int)rc, 0, 0); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+
+    CUmodule module;
+    rc = cuModuleLoadData(&module, ptx);
+    if (rc != CUDA_SUCCESS) { fail("cuModuleLoadData-failed", (int)rc, 0, 0); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+
+    CUfunction fn_fill;
+    CUfunction fn_copy;
+    CUfunction fn_alpha;
+    CUfunction fn_scroll;
+    rc = cuModuleGetFunction(&fn_fill, module, "simple_2d_fill_u32");
+    if (rc != CUDA_SUCCESS) { fail("cuModuleGetFunction-fill-failed", (int)rc, 0, 0); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuModuleGetFunction(&fn_copy, module, "simple_2d_copy_u32");
+    if (rc != CUDA_SUCCESS) { fail("cuModuleGetFunction-copy-failed", (int)rc, 0, 0); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuModuleGetFunction(&fn_alpha, module, "simple_2d_alpha_u32");
+    if (rc != CUDA_SUCCESS) { fail("cuModuleGetFunction-alpha-failed", (int)rc, 0, 0); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuModuleGetFunction(&fn_scroll, module, "simple_2d_scroll_u32");
+    if (rc != CUDA_SUCCESS) { fail("cuModuleGetFunction-scroll-failed", (int)rc, 0, 0); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+
+    CUdeviceptr src = 0;
+    CUdeviceptr dst = 0;
+    size_t bytes = (size_t)count * sizeof(uint32_t);
+    rc = cuMemAlloc(&src, bytes);
+    if (rc != CUDA_SUCCESS) { fail("cuMemAlloc-src-failed", (int)rc, 0, 0); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuMemAlloc(&dst, bytes);
+    if (rc != CUDA_SUCCESS) { fail("cuMemAlloc-dst-failed", (int)rc, 0, 0); cuMemFree(src); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuMemsetD32(dst, 0, count);
+    if (rc != CUDA_SUCCESS) { fail("cuMemsetD32-failed", (int)rc, 0, 0); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+
+    unsigned int block = 256;
+    unsigned int grid = (count + block - 1) / block;
+    uint32_t *host = (uint32_t *)calloc(count, sizeof(uint32_t));
+    uint32_t *expected_buf = (uint32_t *)calloc(count, sizeof(uint32_t));
+    if (!host || !expected_buf) { fail("host-alloc-failed", -1, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+
+    void *fill_args[] = { &dst, &value, &count };
+    rc = cuLaunchKernel(fn_fill, grid, 1, 1, block, 1, 1, 0, 0, fill_args, 0);
+    if (rc != CUDA_SUCCESS) { fail("cuLaunchKernel-fill-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuCtxSynchronize();
+    if (rc != CUDA_SUCCESS) { fail("cuCtxSynchronize-fill-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuMemcpyDtoH(host, dst, bytes);
+    if (rc != CUDA_SUCCESS) { fail("cuMemcpyDtoH-fill-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    uint64_t fill_actual = checksum_u32(host, count);
+    uint64_t fill_expected = (uint64_t)value * (uint64_t)count;
+
+    for (unsigned int i = 0; i < count; i++) expected_buf[i] = 1000u + i;
+    rc = cuMemcpyHtoD(src, expected_buf, bytes);
+    if (rc != CUDA_SUCCESS) { fail("cuMemcpyHtoD-copy-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuMemsetD32(dst, 0, count);
+    if (rc != CUDA_SUCCESS) { fail("cuMemsetD32-copy-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    void *copy_args[] = { &src, &dst, &count };
+    rc = cuLaunchKernel(fn_copy, grid, 1, 1, block, 1, 1, 0, 0, copy_args, 0);
+    if (rc != CUDA_SUCCESS) { fail("cuLaunchKernel-copy-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuCtxSynchronize();
+    if (rc != CUDA_SUCCESS) { fail("cuCtxSynchronize-copy-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuMemcpyDtoH(host, dst, bytes);
+    if (rc != CUDA_SUCCESS) { fail("cuMemcpyDtoH-copy-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    uint64_t copy_actual = checksum_u32(host, count);
+    uint64_t copy_expected = checksum_u32(expected_buf, count);
+
+    for (unsigned int i = 0; i < count; i++) expected_buf[i] = 0xff204060u + i;
+    for (unsigned int i = 0; i < count; i++) host[i] = 0xff102030u + i;
+    rc = cuMemcpyHtoD(src, expected_buf, bytes);
+    if (rc != CUDA_SUCCESS) { fail("cuMemcpyHtoD-alpha-src-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuMemcpyHtoD(dst, host, bytes);
+    if (rc != CUDA_SUCCESS) { fail("cuMemcpyHtoD-alpha-dst-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    unsigned int alpha = 128u;
+    for (unsigned int i = 0; i < count; i++) expected_buf[i] = alpha_pixel(expected_buf[i], host[i], alpha);
+    void *alpha_args[] = { &src, &dst, &alpha, &count };
+    rc = cuLaunchKernel(fn_alpha, grid, 1, 1, block, 1, 1, 0, 0, alpha_args, 0);
+    if (rc != CUDA_SUCCESS) { fail("cuLaunchKernel-alpha-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuCtxSynchronize();
+    if (rc != CUDA_SUCCESS) { fail("cuCtxSynchronize-alpha-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuMemcpyDtoH(host, dst, bytes);
+    if (rc != CUDA_SUCCESS) { fail("cuMemcpyDtoH-alpha-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    uint64_t alpha_actual = checksum_u32(host, count);
+    uint64_t alpha_expected = checksum_u32(expected_buf, count);
+
+    unsigned int width = 8u;
+    unsigned int height = count / width;
+    int delta_y = 1;
+    for (unsigned int i = 0; i < count; i++) host[i] = 2000u + i;
+    for (unsigned int i = 0; i < count; i++) {
+        unsigned int x = i % width;
+        unsigned int y = i / width;
+        int sy = (int)y - delta_y;
+        expected_buf[i] = (sy < 0 || sy >= (int)height) ? 0u : host[(unsigned int)sy * width + x];
+    }
+    rc = cuMemcpyHtoD(src, host, bytes);
+    if (rc != CUDA_SUCCESS) { fail("cuMemcpyHtoD-scroll-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuMemsetD32(dst, 0, count);
+    if (rc != CUDA_SUCCESS) { fail("cuMemsetD32-scroll-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    void *scroll_args[] = { &src, &dst, &width, &height, &delta_y };
+    rc = cuLaunchKernel(fn_scroll, grid, 1, 1, block, 1, 1, 0, 0, scroll_args, 0);
+    if (rc != CUDA_SUCCESS) { fail("cuLaunchKernel-scroll-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuCtxSynchronize();
+    if (rc != CUDA_SUCCESS) { fail("cuCtxSynchronize-scroll-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    rc = cuMemcpyDtoH(host, dst, bytes);
+    if (rc != CUDA_SUCCESS) { fail("cuMemcpyDtoH-scroll-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    uint64_t scroll_actual = checksum_u32(host, count);
+    uint64_t scroll_expected = checksum_u32(expected_buf, count);
+
+    uint64_t actual = fill_actual + copy_actual + alpha_actual + scroll_actual;
+    uint64_t expected = fill_expected + copy_expected + alpha_expected + scroll_expected;
+
+    if (actual == expected) {
+        printf("cuda_generated_2d_readback_status=pass\n");
+        printf("cuda_generated_2d_readback_reason=readback-checksum-matched\n");
+        printf("cuda_generated_2d_readback_cuda_code=0\n");
+        printf("cuda_generated_2d_readback_expected_checksum=%llu\n", (unsigned long long)expected);
+        printf("cuda_generated_2d_readback_actual_checksum=%llu\n", (unsigned long long)actual);
+        printf("cuda_generated_2d_readback_fill_expected_checksum=%llu\n", (unsigned long long)fill_expected);
+        printf("cuda_generated_2d_readback_fill_actual_checksum=%llu\n", (unsigned long long)fill_actual);
+        printf("cuda_generated_2d_readback_copy_expected_checksum=%llu\n", (unsigned long long)copy_expected);
+        printf("cuda_generated_2d_readback_copy_actual_checksum=%llu\n", (unsigned long long)copy_actual);
+        printf("cuda_generated_2d_readback_alpha_expected_checksum=%llu\n", (unsigned long long)alpha_expected);
+        printf("cuda_generated_2d_readback_alpha_actual_checksum=%llu\n", (unsigned long long)alpha_actual);
+        printf("cuda_generated_2d_readback_scroll_expected_checksum=%llu\n", (unsigned long long)scroll_expected);
+        printf("cuda_generated_2d_readback_scroll_actual_checksum=%llu\n", (unsigned long long)scroll_actual);
+        printf("cuda_generated_2d_readback_ops=fill,copy,alpha,scroll\n");
+        printf("cuda_generated_2d_readback_count=%u\n", count);
+        printf("cuda_generated_2d_readback_value=%u\n", value);
+    } else {
+        fail("readback-checksum-mismatch", 0, expected, actual);
+    }
+
+    free(host);
+    free(expected_buf);
+    cuMemFree(src);
+    cuMemFree(dst);
+    cuModuleUnload(module);
+    cuDevicePrimaryCtxRelease(dev);
+    free(ptx);
+    return actual == expected ? 0 : 4;
+}
+C_EOF
+
+    if ! have "$CC_TOOL"; then
+        emit_unavailable "missing-c-compiler"
+    elif ! "$CC_TOOL" "$BUILD_DIR/cuda_generated_2d_readback.c" -lcuda -o "$BUILD_DIR/cuda_generated_2d_readback" >"$BUILD_DIR/cc.out" 2>"$BUILD_DIR/cc.err"; then
+        emit_unavailable "cuda-driver-compile-failed"
+    elif "$BUILD_DIR/cuda_generated_2d_readback" "$PTX_PATH" "$CUDA_ELEMENT_COUNT" "$CUDA_FILL_VALUE" >"$BUILD_DIR/evidence.env" 2>"$BUILD_DIR/run.err"; then
+        :
+    else
+        if [ ! -s "$BUILD_DIR/evidence.env" ]; then
+            emit_unavailable "cuda-readback-run-failed"
+        fi
+    fi
+fi
+
+{
+    echo "# CUDA Generated 2D Readback Evidence"
+    echo
+    echo "Date: $(date -u +%F)"
+    echo
+    echo "| Field | Value |"
+    echo "|---|---|"
+    awk -F= '/^cuda_generated_2d_readback_/ { print "| " $1 " | " $2 " |" }' "$BUILD_DIR/evidence.env"
+    echo "| ptx_path | $PTX_PATH |"
+} >"$REPORT_PATH"
+
+echo "report_path=$REPORT_PATH"
+echo "cuda_generated_2d_readback_ptx=$PTX_PATH"
+cat "$BUILD_DIR/evidence.env"
