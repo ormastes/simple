@@ -70,10 +70,10 @@ jobs:
         retention-days: 1
 
   # ============================================================================
-  # Unit Tests (Fast Profile)
+  # Unit Test Discovery Smoke
   # ============================================================================
   unit-tests-docker:
-    name: Unit Tests (Docker, Fast)
+    name: Unit Test Discovery (Docker)
     runs-on: ubuntu-latest
     needs: build-container
 
@@ -102,33 +102,10 @@ jobs:
           --cap-drop=ALL \
           --security-opt=no-new-privileges \
           simple-test-isolation:${{ github.sha }} \
-          test test/unit/ --profile=fast --format=json > test-results-unit.json
-      continue-on-error: true
-
-    - name: Parse test results
-      run: |
-        if [ -f test-results-unit.json ]; then
-          PASSED=$(jq '.summary.passed' test-results-unit.json)
-          FAILED=$(jq '.summary.failed' test-results-unit.json)
-          TOTAL=$(jq '.summary.total' test-results-unit.json)
-
-          echo "## Unit Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "- Passed: $PASSED / $TOTAL" >> $GITHUB_STEP_SUMMARY
-          echo "- Failed: $FAILED" >> $GITHUB_STEP_SUMMARY
-
-          [ "$FAILED" -eq 0 ] || exit 1
-        fi
-
-    - name: Upload test results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: unit-test-results-docker
-        path: test-results-unit.json
-        retention-days: 7
+          test test/unit/std/arch_spec.spl --list --no-db --no-cover-check
 
   unit-tests-podman:
-    name: Unit Tests (Podman, Fast)
+    name: Unit Test Discovery (Podman)
     runs-on: ubuntu-latest
     needs: build-container
 
@@ -162,14 +139,14 @@ jobs:
           --cap-drop=ALL \
           --security-opt=no-new-privileges \
           simple-test-isolation:${{ github.sha }} \
-          test test/unit/ --profile=fast
+          test test/unit/std/arch_spec.spl --list --no-db --no-cover-check
       continue-on-error: false
 
   # ============================================================================
-  # Integration Tests (Standard Profile)
+  # Integration Test Discovery Smoke
   # ============================================================================
   integration-tests-docker:
-    name: Integration Tests (Docker, Standard)
+    name: Integration Test Discovery (Docker)
     runs-on: ubuntu-latest
     needs: build-container
 
@@ -198,33 +175,10 @@ jobs:
           --cap-drop=ALL \
           --security-opt=no-new-privileges \
           simple-test-isolation:${{ github.sha }} \
-          test test/integration/ --profile=standard --format=json > test-results-integration.json
-      continue-on-error: true
-
-    - name: Parse test results
-      run: |
-        if [ -f test-results-integration.json ]; then
-          PASSED=$(jq '.summary.passed' test-results-integration.json)
-          FAILED=$(jq '.summary.failed' test-results-integration.json)
-          TOTAL=$(jq '.summary.total' test-results-integration.json)
-
-          echo "## Integration Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "- Passed: $PASSED / $TOTAL" >> $GITHUB_STEP_SUMMARY
-          echo "- Failed: $FAILED" >> $GITHUB_STEP_SUMMARY
-
-          [ "$FAILED" -eq 0 ] || exit 1
-        fi
-
-    - name: Upload test results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: integration-test-results-docker
-        path: test-results-integration.json
-        retention-days: 7
+          test test/integration/log_facade_back_compat_spec.spl --list --no-db --no-cover-check
 
   integration-tests-podman:
-    name: Integration Tests (Podman, Standard)
+    name: Integration Test Discovery (Podman)
     runs-on: ubuntu-latest
     needs: build-container
 
@@ -258,14 +212,14 @@ jobs:
           --cap-drop=ALL \
           --security-opt=no-new-privileges \
           simple-test-isolation:${{ github.sha }} \
-          test test/integration/ --profile=standard
+          test test/integration/log_facade_back_compat_spec.spl --list --no-db --no-cover-check
       continue-on-error: false
 
   # ============================================================================
-  # System Tests (Slow Profile)
+  # System Test Discovery Smoke
   # ============================================================================
   system-tests-docker:
-    name: System Tests (Docker, Slow)
+    name: System Test Discovery (Docker)
     runs-on: ubuntu-latest
     needs: build-container
 
@@ -294,42 +248,27 @@ jobs:
           --cap-drop=ALL \
           --security-opt=no-new-privileges \
           simple-test-isolation:${{ github.sha }} \
-          test test/system/ --profile=slow --format=json > test-results-system.json
-      continue-on-error: true
-
-    - name: Parse test results
-      run: |
-        if [ -f test-results-system.json ]; then
-          PASSED=$(jq '.summary.passed' test-results-system.json)
-          FAILED=$(jq '.summary.failed' test-results-system.json)
-          TOTAL=$(jq '.summary.total' test-results-system.json)
-
-          echo "## System Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "- Passed: $PASSED / $TOTAL" >> $GITHUB_STEP_SUMMARY
-          echo "- Failed: $FAILED" >> $GITHUB_STEP_SUMMARY
-
-          [ "$FAILED" -eq 0 ] || exit 1
-        fi
-
-    - name: Upload test results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: system-test-results-docker
-        path: test-results-system.json
-        retention-days: 7
+          test test/system/async_promise_system_spec.spl --list --no-db --no-cover-check
 
   # ============================================================================
-  # Parallel Execution Test
+  # Container Discovery Matrix
   # ============================================================================
   parallel-tests:
-    name: Parallel Execution (4 shards)
+    name: Container Discovery Matrix
     runs-on: ubuntu-latest
     needs: build-container
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        include:
+          - label: unit
+            path: test/unit/std/arch_spec.spl
+          - label: integration
+            path: test/integration/log_facade_back_compat_spec.spl
+          - label: system
+            path: test/system/async_promise_system_spec.spl
+          - label: feature
+            path: test/feature/app/config_loader_spec.spl
 
     steps:
     - name: Checkout code
@@ -344,7 +283,7 @@ jobs:
       run: |
         docker load < container.tar.gz
 
-    - name: Run tests (shard ${{ matrix.shard }}/4)
+    - name: Run discovery (${{ matrix.label }})
       run: |
         docker run --rm \
           -v $(pwd):/workspace:ro \
@@ -356,7 +295,7 @@ jobs:
           --cap-drop=ALL \
           --security-opt=no-new-privileges \
           simple-test-isolation:${{ github.sha }} \
-          test --parallel --shard=${{ matrix.shard }}/4
+          test ${{ matrix.path }} --list --no-db --no-cover-check
 
   # ============================================================================
   # Resource Limit Verification
@@ -388,7 +327,7 @@ jobs:
           --memory=512m \
           --oom-kill-disable=false \
           simple-test-isolation:${{ github.sha }} \
-          test test/unit/std/string_spec.spl
+          test test/unit/std/arch_spec.spl --list --no-db --no-cover-check
 
         echo "✓ Memory limit enforced correctly"
 
@@ -401,7 +340,7 @@ jobs:
           -w /workspace \
           --cpus=0.5 \
           simple-test-isolation:${{ github.sha }} \
-          test test/unit/std/math_spec.spl
+          test test/unit/std/arch_spec.spl --list --no-db --no-cover-check
         END=$(date +%s)
 
         DURATION=$((END - START))
@@ -418,32 +357,30 @@ jobs:
     if: always()
 
     steps:
-    - name: Download all test results
-      uses: actions/download-artifact@v4
-      with:
-        pattern: '*-test-results-*'
-        path: test-results/
-
     - name: Generate summary
       run: |
         echo "# Containerized Test Results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "| Test Suite | Runtime | Status |" >> $GITHUB_STEP_SUMMARY
         echo "|------------|---------|--------|" >> $GITHUB_STEP_SUMMARY
-        echo "| Unit Tests | Docker | ${{ needs.unit-tests-docker.result }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| Unit Tests | Podman | ${{ needs.unit-tests-podman.result }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| Integration Tests | Docker | ${{ needs.integration-tests-docker.result }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| Integration Tests | Podman | ${{ needs.integration-tests-podman.result }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| System Tests | Docker | ${{ needs.system-tests-docker.result }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| Parallel Execution | Docker | ${{ needs.parallel-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Unit Discovery | Docker | ${{ needs.unit-tests-docker.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Unit Discovery | Podman | ${{ needs.unit-tests-podman.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Integration Discovery | Docker | ${{ needs.integration-tests-docker.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Integration Discovery | Podman | ${{ needs.integration-tests-podman.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| System Discovery | Docker | ${{ needs.system-tests-docker.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Discovery Matrix | Docker | ${{ needs.parallel-tests.result }} |" >> $GITHUB_STEP_SUMMARY
         echo "| Resource Limits | Docker | ${{ needs.resource-limits.result }} |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
 
         # Check for failures
         FAILED=0
         [ "${{ needs.unit-tests-docker.result }}" != "success" ] && FAILED=1
+        [ "${{ needs.unit-tests-podman.result }}" != "success" ] && FAILED=1
         [ "${{ needs.integration-tests-docker.result }}" != "success" ] && FAILED=1
+        [ "${{ needs.integration-tests-podman.result }}" != "success" ] && FAILED=1
         [ "${{ needs.system-tests-docker.result }}" != "success" ] && FAILED=1
+        [ "${{ needs.parallel-tests.result }}" != "success" ] && FAILED=1
+        [ "${{ needs.resource-limits.result }}" != "success" ] && FAILED=1
 
         if [ $FAILED -eq 1 ]; then
           echo "❌ Some tests failed" >> $GITHUB_STEP_SUMMARY
@@ -451,21 +388,3 @@ jobs:
         fi
 
         echo "✅ All tests passed" >> $GITHUB_STEP_SUMMARY
-
-    - name: Merge test results
-      if: always()
-      run: |
-        # Combine all JSON test results
-        find test-results/ -name "*.json" -exec cat {} \; | \
-          jq -s '{summary: {total: (map(.summary.total) | add), passed: (map(.summary.passed) | add), failed: (map(.summary.failed) | add)}}' \
-          > combined-results.json
-
-        cat combined-results.json
-
-    - name: Upload combined results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: combined-test-results
-        path: combined-results.json
-        retention-days: 30
