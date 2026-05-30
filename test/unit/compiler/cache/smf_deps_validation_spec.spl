@@ -10,6 +10,8 @@
 # Mock types (self-contained for interpreter mode)
 # ============================================================================
 
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
 struct MockDep:
     module_path: text
     interface_hash: i64
@@ -60,7 +62,7 @@ fn mock_serialize(deps: [MockDep]) -> [u8]:
     var buf: [u8] = []
     buf = buf + mock_u32_to_bytes(deps.len())
     for dep in deps:
-        val path_bytes = dep.module_path.to_bytes()
+        val path_bytes = rt_text_to_bytes(dep.module_path)
         buf = buf + mock_u32_to_bytes(path_bytes.len())
         buf = buf + path_bytes
         buf = buf + mock_u64_to_bytes(dep.interface_hash)
@@ -106,12 +108,17 @@ fn mock_deserialize(data: [u8]) -> [MockDep]:
 val MOCK_CACHE_FRESH: i64 = 0
 val MOCK_CACHE_STALE: i64 = 2
 
-fn mock_validate_deps(deps: [MockDep], get_hash: any) -> i64:
+fn mock_validate_deps(deps: [MockDep], known_paths: [text], known_hashes: [i64]) -> i64:
     """Returns FRESH (0) or STALE (2)."""
     var i = 0
     while i < deps.len():
         val dep = deps[i]
-        val actual_hash = get_hash(dep.module_path)
+        var actual_hash: i64 = 0
+        var k = 0
+        while k < known_paths.len():
+            if known_paths[k] == dep.module_path:
+                actual_hash = known_hashes[k]
+            k = k + 1
         if actual_hash == 0:
             return MOCK_CACHE_STALE
         if actual_hash != dep.interface_hash:
@@ -170,30 +177,22 @@ describe "SMF dependency validation":
             MockDep(module_path: "src/a.spl", interface_hash: 100),
             MockDep(module_path: "src/b.spl", interface_hash: 200)
         ]
-        val result = mock_validate_deps(deps, fn(path: text) -> i64:
-            if path == "src/a.spl": return 100
-            if path == "src/b.spl": return 200
-            0
-        )
+        val result = mock_validate_deps(deps, ["src/a.spl", "src/b.spl"], [100, 200])
         expect(result).to_equal(MOCK_CACHE_FRESH)
 
     it "returns STALE when dependency interface changed":
         val deps = [MockDep(module_path: "src/a.spl", interface_hash: 100)]
-        val result = mock_validate_deps(deps, fn(path: text) -> i64:
-            999  # Different hash
-        )
+        val result = mock_validate_deps(deps, ["src/a.spl"], [999])
         expect(result).to_equal(MOCK_CACHE_STALE)
 
     it "returns STALE when dependency is missing":
         val deps = [MockDep(module_path: "src/missing.spl", interface_hash: 100)]
-        val result = mock_validate_deps(deps, fn(path: text) -> i64:
-            0  # Hash = 0 means missing
-        )
+        val result = mock_validate_deps(deps, [], [])
         expect(result).to_equal(MOCK_CACHE_STALE)
 
     it "returns FRESH for empty dependency list":
         val deps: [MockDep] = []
-        val result = mock_validate_deps(deps, fn(path: text) -> i64: 0)
+        val result = mock_validate_deps(deps, [], [])
         expect(result).to_equal(MOCK_CACHE_FRESH)
 
     it "detects single stale dep among many fresh":
@@ -202,10 +201,5 @@ describe "SMF dependency validation":
             MockDep(module_path: "src/b.spl", interface_hash: 200),
             MockDep(module_path: "src/c.spl", interface_hash: 300)
         ]
-        val result = mock_validate_deps(deps, fn(path: text) -> i64:
-            if path == "src/a.spl": return 100
-            if path == "src/b.spl": return 999  # Changed!
-            if path == "src/c.spl": return 300
-            0
-        )
+        val result = mock_validate_deps(deps, ["src/a.spl", "src/b.spl", "src/c.spl"], [100, 999, 300])
         expect(result).to_equal(MOCK_CACHE_STALE)

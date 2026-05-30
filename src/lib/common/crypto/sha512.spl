@@ -1,8 +1,40 @@
 # SHA-512 hash implementation per FIPS 180-4.
 # Provides sha512_bytes (bytes -> bytes) and sha512_text (text -> hex).
-# Also provides sha512_256_bytes for the SHA-512/256 truncated variant.
+# Also provides sha512_256_bytes and sha384_bytes variants.
+#
+# NOTE: The interpreter's >> on i64 is arithmetic (sign-extending).
+# All right-shifts of 64-bit words use _lshr64 (logical) to avoid
+# corrupting negative (high-bit-set) values. See bug doc:
+#   doc/08_tracking/bug/u64_right_shift_fn_param_arithmetic_2026-05-02.md
 
-use std.common.crypto.types.{rotr64}
+# Logical right-shift of a 64-bit signed i64 by n bits (1..63).
+# The interpreter's >> on i64 is arithmetic (sign-extending for negative values).
+# This helper strips the sign bit, shifts the lower 63 bits, then adds back
+# the contribution of the original bit-63.
+fn _lshr64(x: i64, n: i64) -> i64:
+    if n <= 0:
+        return x
+    if n >= 64:
+        return 0
+    # Shift the lower 63 bits (always logical for non-negative values).
+    val low63 = (x & 9223372036854775807) >> n
+    if x < 0:
+        # Bit 63 was set; after logical right-shift by n it contributes bit (63-n).
+        low63 | (1 << (63 - n))
+    else:
+        low63
+
+# Rotate-right 64-bit value by n bits using logical shift for the right half.
+fn _rotr64(x: i64, n: i64) -> i64:
+    val s = n & 63
+    if s == 0:
+        return x
+    _lshr64(x, s) | (x << (64 - s))
+
+# i64 addition wraps naturally in the interpreter (two's-complement).
+# _mask64 is a no-op kept for documentation clarity.
+fn _mask64(x: i64) -> i64:
+    x
 
 fn _sha512_k() -> [i64]:
     # FIPS 180-4 §4.2.3 — 80 round constants (fractional cube roots of primes 2..409)
@@ -50,30 +82,30 @@ fn _sha512_k() -> [i64]:
            6902733635092675308,     7801388544844847127
     ]
 
-# SHA-512 initial hash values (square roots of primes 1-8).
+# SHA-512 initial hash values (FIPS 180-4 §5.3.5 — fractional sqrt of primes 2..19).
 fn _sha512_init() -> [i64]:
     [
-        -7642067888397714487,  # h0
-         7105036623409557960,  # h1
-         4385272521111709739,  # h2
-         6876975876408769150,  # h3
-         5326159188479475174,  # h4
-        -3741748158063851760,  # h5
-         4771910459557716661,  # h6
-         3104278802374573697   # h7
+         7640891576956012808,  # h0 — 0x6a09e667f3bcc908
+        -4942790177534073029,  # h1 — 0xbb67ae8584caa73b
+         4354685564936845355,  # h2 — 0x3c6ef372fe94f82b
+        -6534734903238641935,  # h3 — 0xa54ff53a5f1d36f1
+         5840696475078001361,  # h4 — 0x510e527fade682d1
+        -7276294671716946913,  # h5 — 0x9b05688c2b3e6c1f
+         2270897969802886507,  # h6 — 0x1f83d9abfb41bd6b
+         6620516959819538809   # h7 — 0x5be0cd19137e2179
     ]
 
 # SHA-512/256 initial hash values (distinct IV per FIPS 180-4 §5.3.6.2).
 fn _sha512_256_init() -> [i64]:
     [
-        2463787394917988140,   # h0
-         -1119749091999781742,  # h1
-         3490208391782332773,   # h2
-         -3933217789782255174,  # h3
-         1088416944426796042,   # h4
-        -7999606841994335396,   # h5
-        -3618866483543523889,   # h6
-        -4110127895562938713    # h7
+         2463787394917988140,  # h0 — 0x22312194fc2bf72c
+        -6965556091613846334,  # h1 — 0x9f555fa3c84c64c2
+         2563595384472711505,  # h2 — 0x2393b86b6f53b151
+        -7622211418569250115,  # h3 — 0x963877195940eabd
+        -7626776825740460061,  # h4 — 0x96283ee2a88effe3
+        -4729309413028513390,  # h5 — 0xbe5e1e2553863992
+         3098927326965381290,  # h6 — 0x2b0199fc2c85b8aa
+         1060366662362279074   # h7 — 0x0eb72ddc81c52ca2
     ]
 
 fn _sha512_core(data: [i64], init: [i64]) -> [i64]:
@@ -92,7 +124,7 @@ fn _sha512_core(data: [i64], init: [i64]) -> [i64]:
     var padded: [i64] = []
     var pi = 0
     while pi < data_len:
-        padded.push(data[pi])
+        padded.push(data[pi] & 255)
         pi = pi + 1
 
     # Append 0x80 byte.
@@ -113,14 +145,14 @@ fn _sha512_core(data: [i64], init: [i64]) -> [i64]:
     padded.push(0)
     padded.push(0)
     val bit_len = data_len * 8
-    padded.push((bit_len >> 56) & 255)
-    padded.push((bit_len >> 48) & 255)
-    padded.push((bit_len >> 40) & 255)
-    padded.push((bit_len >> 32) & 255)
-    padded.push((bit_len >> 24) & 255)
-    padded.push((bit_len >> 16) & 255)
-    padded.push((bit_len >>  8) & 255)
-    padded.push( bit_len        & 255)
+    padded.push(_lshr64(bit_len, 56) & 255)
+    padded.push(_lshr64(bit_len, 48) & 255)
+    padded.push(_lshr64(bit_len, 40) & 255)
+    padded.push(_lshr64(bit_len, 32) & 255)
+    padded.push(_lshr64(bit_len, 24) & 255)
+    padded.push(_lshr64(bit_len, 16) & 255)
+    padded.push(_lshr64(bit_len,  8) & 255)
+    padded.push( bit_len              & 255)
 
     # Process each 128-byte block.
     val total_len = padded.len()
@@ -134,7 +166,7 @@ fn _sha512_core(data: [i64], init: [i64]) -> [i64]:
             var word = 0
             var bi = 0
             while bi < 8:
-                word = (word << 8) | (padded[base + bi] & 255)
+                word = _mask64((word << 8) | (padded[base + bi] & 255))
                 bi = bi + 1
             w.push(word)
             wi = wi + 1
@@ -143,9 +175,9 @@ fn _sha512_core(data: [i64], init: [i64]) -> [i64]:
         while wi < 80:
             val w15 = w[wi - 15]
             val w2  = w[wi - 2]
-            val s0  = rotr64(w15, 1) ^ rotr64(w15,  8) ^ (w15 >> 7)
-            val s1  = rotr64(w2,  19) ^ rotr64(w2,  61) ^ (w2  >> 6)
-            w.push(w[wi - 16] + s0 + w[wi - 7] + s1)
+            val s0  = _rotr64(w15, 1) ^ _rotr64(w15,  8) ^ _lshr64(w15, 7)
+            val s1  = _rotr64(w2,  19) ^ _rotr64(w2,  61) ^ _lshr64(w2,  6)
+            w.push(_mask64(w[wi - 16] + s0 + w[wi - 7] + s1))
             wi = wi + 1
 
         var a  = h0
@@ -159,47 +191,47 @@ fn _sha512_core(data: [i64], init: [i64]) -> [i64]:
 
         var ri = 0
         while ri < 80:
-            val big_s1 = rotr64(e, 14) ^ rotr64(e, 18) ^ rotr64(e, 41)
+            val big_s1 = _rotr64(e, 14) ^ _rotr64(e, 18) ^ _rotr64(e, 41)
             val ch     = (e & f) ^ ((e ^ -1) & g)
-            val temp1  = hh + big_s1 + ch + k[ri] + w[ri]
-            val big_s0 = rotr64(a, 28) ^ rotr64(a, 34) ^ rotr64(a, 39)
+            val temp1  = _mask64(hh + big_s1 + ch + k[ri] + w[ri])
+            val big_s0 = _rotr64(a, 28) ^ _rotr64(a, 34) ^ _rotr64(a, 39)
             val maj    = (a & b) ^ (a & c) ^ (b & c)
-            val temp2  = big_s0 + maj
+            val temp2  = _mask64(big_s0 + maj)
 
             hh = g
             g  = f
             f  = e
-            e  = d + temp1
+            e  = _mask64(d + temp1)
             d  = c
             c  = b
             b  = a
-            a  = temp1 + temp2
+            a  = _mask64(temp1 + temp2)
             ri = ri + 1
 
-        h0 = h0 + a
-        h1 = h1 + b
-        h2 = h2 + c
-        h3 = h3 + d
-        h4 = h4 + e
-        h5 = h5 + f
-        h6 = h6 + g
-        h7 = h7 + hh
+        h0 = _mask64(h0 + a)
+        h1 = _mask64(h1 + b)
+        h2 = _mask64(h2 + c)
+        h3 = _mask64(h3 + d)
+        h4 = _mask64(h4 + e)
+        h5 = _mask64(h5 + f)
+        h6 = _mask64(h6 + g)
+        h7 = _mask64(h7 + hh)
         block_offset = block_offset + 128
 
-    # Produce 64-byte (or 32-byte for truncated) hash.
+    # Produce 64-byte result — caller slices as needed.
     var result: [i64] = []
     val words = [h0, h1, h2, h3, h4, h5, h6, h7]
     var wi2 = 0
     while wi2 < 8:
         val wd = words[wi2]
-        result.push((wd >> 56) & 255)
-        result.push((wd >> 48) & 255)
-        result.push((wd >> 40) & 255)
-        result.push((wd >> 32) & 255)
-        result.push((wd >> 24) & 255)
-        result.push((wd >> 16) & 255)
-        result.push((wd >>  8) & 255)
-        result.push( wd        & 255)
+        result.push(_lshr64(wd, 56) & 255)
+        result.push(_lshr64(wd, 48) & 255)
+        result.push(_lshr64(wd, 40) & 255)
+        result.push(_lshr64(wd, 32) & 255)
+        result.push(_lshr64(wd, 24) & 255)
+        result.push(_lshr64(wd, 16) & 255)
+        result.push(_lshr64(wd,  8) & 255)
+        result.push( wd              & 255)
         wi2 = wi2 + 1
     result
 
@@ -260,18 +292,18 @@ fn sha384_text(data: text) -> text:
 
 # SHA-512 round function — used by the MIR optimizer pattern recogniser.
 fn sha512_round(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, hh: i64, k: i64, w: i64) -> (i64, i64):
-    val big_s1 = rotr64(e, 14) ^ rotr64(e, 18) ^ rotr64(e, 41)
+    val big_s1 = _rotr64(e, 14) ^ _rotr64(e, 18) ^ _rotr64(e, 41)
     val ch     = (e & f) ^ ((e ^ -1) & g)
-    val temp1  = hh + big_s1 + ch + k + w
-    val big_s0 = rotr64(a, 28) ^ rotr64(a, 34) ^ rotr64(a, 39)
+    val temp1  = _mask64(hh + big_s1 + ch + k + w)
+    val big_s0 = _rotr64(a, 28) ^ _rotr64(a, 34) ^ _rotr64(a, 39)
     val maj    = (a & b) ^ (a & c) ^ (b & c)
-    val temp2  = big_s0 + maj
-    (temp1 + temp2, d + temp1)
+    val temp2  = _mask64(big_s0 + maj)
+    (_mask64(temp1 + temp2), _mask64(d + temp1))
 
 # Message schedule sigma_0 — used by MIR optimizer.
 fn sha512_msg_schedule_1(w: i64) -> i64:
-    rotr64(w, 1) ^ rotr64(w, 8) ^ (w >> 7)
+    _rotr64(w, 1) ^ _rotr64(w, 8) ^ _lshr64(w, 7)
 
 # Message schedule sigma_1 — used by MIR optimizer.
 fn sha512_msg_schedule_2(w: i64) -> i64:
-    rotr64(w, 19) ^ rotr64(w, 61) ^ (w >> 6)
+    _rotr64(w, 19) ^ _rotr64(w, 61) ^ _lshr64(w, 6)

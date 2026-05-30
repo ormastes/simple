@@ -175,12 +175,12 @@ fn synth_ops() -> DriverOps:
 
 @driver(class=DriverClass.Block, vendor=0x1234, device=[0x5678], version="9.9", ops=synth_ops())
 impl ImplSynthDriver:
-    fn register_synth_driver() -> Result<i32, DriverError>:
+    static fn register_synth_driver() -> Result<i32, DriverError>:
         todo("FR-DRIVER-0001 impl synthetic registration body", "compiler inherits impl manifest attrs")
 
 fn main() -> i32:
     val before = static_driver_count()
-    match ImplSynthDriver__register_synth_driver():
+    match ImplSynthDriver.register_synth_driver():
         Ok(_) -> return static_driver_count() - before
         Err(_) -> return -7
 "#;
@@ -231,12 +231,12 @@ fn synth_ops() -> DriverOps:
 
 @native_lib("simple", "7.7", ops=synth_ops())
 impl ImplSynthNative:
-    fn register_synth_native_lib() -> Result<i32, DriverError>:
+    static fn register_synth_native_lib() -> Result<i32, DriverError>:
         todo("FR-DRIVER-0001 impl native-lib synthetic registration body", "compiler inherits impl manifest attrs")
 
 fn main() -> i32:
     val before = static_driver_count()
-    match ImplSynthNative__register_synth_native_lib():
+    match ImplSynthNative.register_synth_native_lib():
         Ok(_) -> return static_driver_count() - before
         Err(_) -> return -7
 "#;
