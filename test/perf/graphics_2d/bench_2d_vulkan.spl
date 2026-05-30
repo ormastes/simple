@@ -1,10 +1,10 @@
 # ---------------------------------------------------------------------------
 # GPU Framebuffer Rendering Benchmark — Simple + Vulkan Compute
 #
-# Allocates a 1920x1080 RGBA framebuffer on device, runs two GLSL compute
+# Allocates a 1920x1080 RGBA framebuffer on device, runs two SPIR-V compute
 # shaders per frame:
-#   glsl_clear      — fill entire FB with a solid color (1D dispatch)
-#   glsl_rect_fill  — fill a rectangle (2D dispatch, 16x16 workgroups)
+#   spirv_clear       — fill entire FB with a solid color (1D dispatch)
+#   spirv_rect_filled — fill a rectangle (2D dispatch, 16x16 workgroups)
 #
 # Scene: clear + 100 deterministic rects (mirrors vulkan_bench.c fill_1080p
 # and bench_3d_render.spl CUDA benchmark).
@@ -20,9 +20,12 @@
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Raw Vulkan FFI — re-declared here to keep the benchmark self-contained
-# (same externs defined in src/lib/nogc_sync_mut/io/vulkan_ffi.spl)
+# Raw Vulkan FFI plus the validated Engine2D SPIR-V blobs. The benchmark uses
+# the same shader-loading path as VulkanBackend so Windows does not depend on
+# runtime GLSL compiler availability.
 # ---------------------------------------------------------------------------
+
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_spirv.{spirv_clear, spirv_rect_filled}
 
 extern fn rt_vulkan_init() -> bool
 extern fn rt_vulkan_shutdown() -> bool
@@ -33,7 +36,7 @@ extern fn rt_vulkan_get_device() -> i64
 extern fn rt_vulkan_device_name(id: i64) -> text
 extern fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64
 extern fn rt_vulkan_free_buffer(handle: i64) -> bool
-extern fn rt_vulkan_compile_glsl(glsl_source: text) -> i64
+extern fn rt_vulkan_compile_spirv(spirv_bytes: [u8]) -> i64
 extern fn rt_vulkan_destroy_shader(module: i64) -> bool
 extern fn rt_vulkan_create_compute_pipeline(shader_module: i64, entry_point: text, push_constant_size: i64) -> i64
 extern fn rt_vulkan_destroy_pipeline(pipe: i64) -> bool
@@ -77,10 +80,8 @@ val NUM_RECTS:     i64 = 100
 # obtained per-dispatch via rt_vulkan_begin_compute().
 
 # ---------------------------------------------------------------------------
-# GLSL Compute Shader Sources
-#
-# These mirror the shaders in backend_vulkan_glsl.spl but are inlined here
-# so the benchmark has no dependency on the high-level engine library.
+# Historical GLSL shader source is retained for reference only. main() compiles
+# the validated SPIR-V blobs imported from backend_vulkan_spirv.spl.
 # ---------------------------------------------------------------------------
 
 fn glsl_clear_src() -> text:
@@ -307,16 +308,16 @@ fn main():
     print("Device FB: " + FB_BYTES.to_string() + " bytes, handle=" + d_fb.to_string())
     print("")
 
-    # --- Compile GLSL compute shaders ---
+    # --- Compile SPIR-V compute shaders ---
     print("Compiling shaders...")
-    val shader_clear = rt_vulkan_compile_glsl(glsl_clear_src())
+    val shader_clear = rt_vulkan_compile_spirv(spirv_clear())
     if shader_clear == 0:
         print("FAIL: compile clear shader: " + rt_vulkan_get_last_error())
         rt_vulkan_free_buffer(d_fb)
         rt_vulkan_shutdown()
         return
 
-    val shader_rect = rt_vulkan_compile_glsl(glsl_rect_fill_src())
+    val shader_rect = rt_vulkan_compile_spirv(spirv_rect_filled())
     if shader_rect == 0:
         print("FAIL: compile rect shader: " + rt_vulkan_get_last_error())
         rt_vulkan_destroy_shader(shader_clear)
