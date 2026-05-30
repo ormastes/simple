@@ -1274,19 +1274,45 @@ Spawned read-only explorers:
     - Verification passed with rebuilt release compiler for both specs.
     - Remaining driver scope: module/impl-level `@driver(...)` sugar and
       `@native_lib(...)` synthesis remain open.
+85. Ctype native module static/global array correctness completed.
+    - Native module initialization now carries module-level integer array
+      globals, including cross-module `[u8]` lookup tables.
+    - Focused native smoke passed with `[ctype-static-array] ok`; the static
+      LUT diagnostic now reports the expected checksums. The broader ctype
+      performance floor remains a backend/codegen benchmark question.
+86. FR-PLUG-0004 bounded Cranelift GEMM-add fusion gate landed.
+    - Added adjacent-pattern detection for `tmp = A @ B` immediately consumed
+      by `BroadcastAdd`, guarded by temp/single-use checks.
+    - Focused plugin and backend unit specs passed. Remaining plugin scope is
+      a linkable runtime/plugin `__simple_runtime_gemm_add` implementation,
+      shape/dimension ABI, and measured performance proof.
+87. SimpleOS in-guest toolchain gate tightened.
+    - `clang-static-guest` and `rustc-static-guest` now require real static
+      ELF64 x86_64 payloads and reject host-dynamic binaries via `PT_INTERP`.
+    - `deploy_toolchains_status_spec.spl` passed with valid/static,
+      dynamic-ELF, wrong-machine, placeholder, and aggregate-blocker coverage.
+      Remaining scope is still building real payloads and proving live QEMU
+      compiler execution.
+88. NDArray push disposition closed as not ndarray work.
+    - Focused search found no concrete ndarray-push implementation request.
+      `/tmp/simple-ndarray-push` is an unrelated detached assert-ran commit
+      and must be preserved until its owner protects or discards it.
 
 ## Remaining Open Work After 2026-05-30 Salvage
 
-- Ctype perf: native static/global `[u8]` LUT checksum corruption and broader
-  native loop/branch performance remain open; the ctype backend agent is still
-  investigating.
-- FR-PLUG-0004: single-op runtime-call emission is landed, but true GEMM-add
-  fusion and performance proof remain open.
+- Ctype perf: native static/global `[u8]` LUT correctness is fixed and the
+  static LUT diagnostic passes. Broader native loop/branch performance and the
+  decision whether to promote the LUT into `src/lib/common/ctype.spl` remain
+  open until the ratio benchmark beats the tracked floor.
+- FR-PLUG-0004: bounded adjacent-pattern GEMM-add codegen fusion is landed,
+  but a linkable runtime/plugin GEMM-add implementation, shape/dimension ABI,
+  and performance proof remain open.
 - FR-DRIVER-0001: function-level live bridge is landed, but module/impl-level
   sugar and `@native_lib(...)` synthesis remain open.
-- SimpleOS in-guest toolchain execution: status gate is landed, but real
-  `clang_static`/`rustc_static` payloads and live QEMU compiler execution
-  evidence remain open.
+- SimpleOS in-guest toolchain execution: the status gate now validates real
+  static ELF64 x86_64 compiler payloads and rejects dynamic/placeholder/wrong
+  machine inputs. Real `clang_static`/`rustc_static` payload builds and live
+  QEMU compiler execution evidence remain open.
 - NDArray push: disposition clarified 2026-05-30. A focused repo/tracking/test
   search found no concrete ndarray-push implementation request beyond this
   queue note, and `/tmp/simple-ndarray-push` remains clean at detached commit
