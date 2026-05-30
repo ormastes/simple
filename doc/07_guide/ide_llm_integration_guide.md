@@ -47,7 +47,8 @@ The concrete extension points live in `src/lib/editor/extensions/host.spl`:
 `extension.sdn` manifests are indexed from configured roots, activated by
 `onLanguage:*` / `onCommand:*` events, and contribute command, language, and
 debug-adapter registrations. `test/unit/lib/editor/extension_discovery_contract_spec.spl`
-now covers the real temp-root discovery and activation path.
+now covers the real temp-root discovery and activation path plus the embedded
+IDE example extension at `examples/ide/extensions/markdown-notes/extension.sdn`.
 
 ### Host and SimpleOS runtime contract
 
