@@ -1,0 +1,28 @@
+# Feature: simpleos-ai-cli-js-node-port
+
+## Raw Request
+$sp_dev  harden javascript, porting nodejs, port codex, claude, gemini cli on simple os on qemu(riscv/x85/arm)
+
+## Task Type
+feature
+
+## Refined Goal
+Enable hardened JavaScript/Node.js-compatible execution for Codex, Claude, and Gemini CLI workflows inside SimpleOS QEMU lanes for RISC-V, x86, and ARM targets.
+
+## Acceptance Criteria
+- AC-1: The supported JavaScript/Node.js subset for AI CLI execution is documented, including filesystem, process, terminal, network/TLS, timers, module loading, and npm/package assumptions.
+- AC-2: SimpleOS exposes or emulates the OS services required by the selected Node.js-compatible CLI runtime with fail-closed capability checks for file, process, network, and credential access.
+- AC-3: Codex, Claude, and Gemini CLI launch plans are represented as concrete SimpleOS package/command manifests with declared dependencies and unsupported features called out.
+- AC-4: QEMU validation lanes exist for RISC-V, x86, and ARM that can boot SimpleOS, provision the selected JS/Node runtime and one AI CLI smoke command, and capture guest-side serial/log evidence.
+- AC-5: The JavaScript runtime hardening path rejects unsafe host escapes, ambient credential reads, unbounded process spawning, and undeclared network access; focused tests cover each denial.
+- AC-6: Focused SPipe specs and generated scenario manuals cover the happy path and hardening denial paths without placeholder passes.
+- AC-7: If full CLI execution remains blocked, the blockers are documented with evidence, owner files, and the next smallest implementation step.
+
+## Scope Exclusions
+Full upstream Node.js parity, real AI service authentication, release tagging, and physical hardware validation are out of scope until the QEMU lanes prove the guest runtime contract.
+
+## Phase
+dev-done
+
+## Log
+- dev: Created state file with 7 acceptance criteria (type: feature). Interpreted `x85` as x86 unless corrected by the user.

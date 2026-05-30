@@ -43,10 +43,12 @@ fn tool_awk(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal, input
     val rules     = _extract_rules(program)
 
     var nr = 0
+    var awk_vars: [(text, text)] = []
 
     # --- BEGIN block ---
     if begin_src.len() > 0:
-        _exec_action(begin_src, "", [], nr, 0, field_sep, terminal)
+        val begin_result = _exec_action(begin_src, "", [], nr, 0, field_sep, terminal, awk_vars)
+        awk_vars = begin_result.1
 
     # --- Process files ---
     if file_args.len() == 0:
@@ -66,10 +68,11 @@ fn tool_awk(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal, input
                         val rule = rules[ri]
                         val pattern = rule.0
                         val action  = rule.1
-                        val matches = if pattern == "": true else: line.contains(pattern)
+                        val matches = _pattern_matches(pattern, line, nr)
                         if matches:
-                            val ctrl = _exec_action(action, line, fields, nr, nf, field_sep, terminal)
-                            if ctrl == 1:
+                            val ctrl_pair = _exec_action(action, line, fields, nr, nf, field_sep, terminal, awk_vars)
+                            awk_vars = ctrl_pair.1
+                            if ctrl_pair.0 == 1:
                                 matched_next = true
                         ri = ri + 1
         else:
@@ -94,10 +97,11 @@ fn tool_awk(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal, input
                             val rule = rules[ri]
                             val pattern = rule.0
                             val action  = rule.1
-                            val matches = if pattern == "": true else: line.contains(pattern)
+                            val matches = _pattern_matches(pattern, line, nr)
                             if matches:
-                                val ctrl = _exec_action(action, line, fields, nr, nf, field_sep, terminal)
-                                if ctrl == 1:
+                                val ctrl_pair2 = _exec_action(action, line, fields, nr, nf, field_sep, terminal, awk_vars)
+                                awk_vars = ctrl_pair2.1
+                                if ctrl_pair2.0 == 1:
                                     matched_next = true
                             ri = ri + 1
             else:
@@ -126,19 +130,41 @@ fn tool_awk(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal, input
                                 val rule = rules[ri]
                                 val pattern = rule.0
                                 val action  = rule.1
-                                val matches = if pattern == "": true else: line.contains(pattern)
+                                val matches = _pattern_matches(pattern, line, nr)
                                 if matches:
-                                    val ctrl = _exec_action(action, line, fields, nr, nf, field_sep, terminal)
-                                    if ctrl == 1:
+                                    val ctrl_pair3 = _exec_action(action, line, fields, nr, nf, field_sep, terminal, awk_vars)
+                                    awk_vars = ctrl_pair3.1
+                                    if ctrl_pair3.0 == 1:
                                         matched_next = true
                                 ri = ri + 1
             fi = fi + 1
 
     # --- END block ---
     if end_src.len() > 0:
-        _exec_action(end_src, "", [], nr, 0, field_sep, terminal)
+        _exec_action(end_src, "", [], nr, 0, field_sep, terminal, awk_vars)
 
     return 0
+
+fn _pattern_matches(pattern: text, line: text, nr: i32) -> bool:
+    """Check if a pattern matches a line. Handles empty (always), /regex/, !/regex/, NR_EXPR:."""
+    if pattern == "":
+        return true
+    if pattern.starts_with("!"):
+        # Negation: !/pattern/ stored as !pattern
+        val inner = pattern.slice(1, pattern.len())
+        return not line.contains(inner)
+    if pattern.starts_with("NR_EXPR:"):
+        # NR==N style: NR_EXPR:NR==2
+        val expr = pattern.slice(8, pattern.len()).trim()
+        if expr.contains("=="):
+            val eq_pos = _find_str(expr, "==")
+            val lhs = expr.slice(0, eq_pos).trim()
+            val rhs_s = expr.slice(eq_pos + 2, expr.len()).trim()
+            if lhs == "NR":
+                val rhs_n = rhs_s.to_i32()
+                return nr == rhs_n
+        return false
+    return line.contains(pattern)
 
 # ---------------------------------------------------------------------------
 # Program parsing helpers
@@ -399,8 +425,8 @@ fn _exec_action(action: text, line: text, fields: [text], nr: i32, nf: i32, sep:
             cur_vars = _exec_assign(s, line, fields, nr, nf, cur_vars)
     return (0, cur_vars)
 
-fn _resolve_expr(expr: text, line: text, fields: [text], nr: i32, nf: i32) -> text:
-    """Resolve a simple expression: $N, NR, NF, or literal text."""
+fn _resolve_expr(expr: text, line: text, fields: [text], nr: i32, nf: i32, vars: [(text, text)]) -> text:
+    """Resolve a simple expression: $N, $NF, NR, NF, var, or literal text."""
     val trimmed = expr.trim()
     if trimmed == "$0":
         return line
@@ -408,14 +434,140 @@ fn _resolve_expr(expr: text, line: text, fields: [text], nr: i32, nf: i32) -> te
         return "{nr}"
     elif trimmed == "NF":
         return "{nf}"
+    elif trimmed == "$NF":
+        if nf > 0:
+            return fields[nf - 1]
+        return ""
     elif trimmed.starts_with("$"):
         val idx_str = trimmed.slice(1, trimmed.len())
         val idx = idx_str.to_i32()
-        if idx > 0 and idx <= fields.len():
+        if idx > 0 and idx <= nf:
             return fields[idx - 1]
         return ""
+    elif (trimmed.starts_with("\"") and trimmed.ends_with("\"")) and trimmed.len() >= 2:
+        return trimmed.slice(1, trimmed.len() - 1)
     else:
-        # Strip surrounding quotes if present
-        if (trimmed.starts_with("\"") and trimmed.ends_with("\"")) and trimmed.len() >= 2:
-            return trimmed.slice(1, trimmed.len() - 1)
+        # Check user variables
+        for pair in vars:
+            if pair.0 == trimmed:
+                return pair.1
         return trimmed
+
+fn _resolve_multi_expr(expr: text, line: text, fields: [text], nr: i32, nf: i32, vars: [(text, text)]) -> text:
+    """Resolve a comma-separated list of expressions, joining with space."""
+    val parts = expr.split(",")
+    var result = ""
+    var first = true
+    for part in parts:
+        val resolved = _resolve_expr(part.trim(), line, fields, nr, nf, vars)
+        if first:
+            result = resolved
+            first = false
+        else:
+            result = "{result} {resolved}"
+    return result
+
+fn _var_get(vars: [(text, text)], name: text) -> text:
+    """Get variable value or empty string."""
+    for pair in vars:
+        if pair.0 == name:
+            return pair.1
+    return ""
+
+fn _var_set(vars: [(text, text)], name: text, value: text) -> [(text, text)]:
+    """Set or update a variable in the vars list."""
+    var found = false
+    var result: [(text, text)] = []
+    for pair in vars:
+        if pair.0 == name:
+            result = result.push((name, value))
+            found = true
+        else:
+            result = result.push(pair)
+    if not found:
+        result = result.push((name, value))
+    return result
+
+fn _exec_assign(stmt: text, line: text, fields: [text], nr: i32, nf: i32, vars: [(text, text)]) -> [(text, text)]:
+    """Execute a variable assignment statement: var = expr, var += expr, var++."""
+    val s = stmt.trim()
+    # var++
+    if s.ends_with("++"):
+        val vname = s.slice(0, s.len() - 2).trim()
+        val cur_val = _var_get(vars, vname)
+        val cur_num = if cur_val == "": 0 else: cur_val.to_i32()
+        return _var_set(vars, vname, "{cur_num + 1}")
+    # var += expr
+    if s.contains("+="):
+        val eq_pos = _find_str(s, "+=")
+        val vname2 = s.slice(0, eq_pos).trim()
+        val rhs = s.slice(eq_pos + 2, s.len()).trim()
+        val rhs_val = _resolve_expr(rhs, line, fields, nr, nf, vars)
+        val cur_val2 = _var_get(vars, vname2)
+        val cur_num2 = if cur_val2 == "": 0 else: cur_val2.to_i32()
+        val rhs_num = if rhs_val == "": 0 else: rhs_val.to_i32()
+        return _var_set(vars, vname2, "{cur_num2 + rhs_num}")
+    # var = expr
+    if s.contains("="):
+        val eq_pos2 = _find_str(s, "=")
+        val vname3 = s.slice(0, eq_pos2).trim()
+        val rhs2 = s.slice(eq_pos2 + 1, s.len()).trim()
+        val rhs_val2 = _resolve_expr(rhs2, line, fields, nr, nf, vars)
+        return _var_set(vars, vname3, rhs_val2)
+    return vars
+
+fn _exec_printf(fmt_and_args: text, line: text, fields: [text], nr: i32, nf: i32, vars: [(text, text)]) -> text:
+    """Execute printf: parse format string and arguments."""
+    # Split on comma outside quotes: first part is format, rest are args
+    var parts: [text] = []
+    var cur = ""
+    var in_quote = false
+    var pi = 0
+    while pi < fmt_and_args.len():
+        val pc = fmt_and_args.char_at(pi)
+        if pc == "\"":
+            in_quote = not in_quote
+            cur = "{cur}{pc}"
+        elif pc == "," and not in_quote:
+            parts = parts.push(cur.trim())
+            cur = ""
+        else:
+            cur = "{cur}{pc}"
+        pi = pi + 1
+    parts = parts.push(cur.trim())
+
+    if parts.len() == 0:
+        return ""
+
+    # Get format string (strip surrounding quotes)
+    var fmt = parts[0]
+    if (fmt.starts_with("\"") and fmt.ends_with("\"")) and fmt.len() >= 2:
+        fmt = fmt.slice(1, fmt.len() - 1)
+
+    # Resolve arg values
+    var arg_vals: [text] = []
+    var ai2 = 1
+    while ai2 < parts.len():
+        val resolved_arg = _resolve_expr(parts[ai2], line, fields, nr, nf, vars)
+        arg_vals = arg_vals.push(resolved_arg)
+        ai2 = ai2 + 1
+
+    # Simple format substitution: replace %s and %d in order
+    var result = ""
+    var arg_idx = 0
+    var fi = 0
+    while fi < fmt.len():
+        val fc = fmt.char_at(fi)
+        if fc == "%" and fi + 1 < fmt.len():
+            val next_c = fmt.char_at(fi + 1)
+            if (next_c == "s" or next_c == "d") and arg_idx < arg_vals.len():
+                result = "{result}{arg_vals[arg_idx]}"
+                arg_idx = arg_idx + 1
+                fi = fi + 2
+            else:
+                result = "{result}{fc}"
+                fi = fi + 1
+        else:
+            result = "{result}{fc}"
+            fi = fi + 1
+    return result
