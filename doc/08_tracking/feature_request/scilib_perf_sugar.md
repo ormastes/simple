@@ -157,7 +157,7 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
 - **Filed-on:** 2026-04-27
 - **Filed-by:** scilib-port research agent
 - **Priority:** P1
-- **Status:** anticipated
+- **Status:** fixed 2026-05-30
 - **Expected-repro:**
   ```
   let row = A[i, ..]        // expected: O(1) view, not O(cols) copy
@@ -179,9 +179,10 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
   `slice`, stepped and negative-step `slice`, `slice_2d`, `row`, and `column`
   return metadata views that reuse the same typed data arrays and resolve
   elements through `resolve_offset`; `to_contiguous` remains available when a
-  dense copy is needed. Focused coverage includes backing-array length
-  invariants and chained-view composition. Verification:
-  `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/lib/nogc_async_mut/ndarray/mod.spl test/feature/scilib/ndarray_slice_spec.spl`
+  dense copy is needed, including for strided I64 and Bool views. Focused
+  coverage includes backing-array length invariants, chained-view composition,
+  and dense materialization for I64/Bool. Verification:
+  `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/lib/common/science_math/ndarray.spl src/lib/nogc_async_mut/ndarray/mod.spl src/lib/nogc_async_mut/ndarray/ndarray_impl_ops.spl test/feature/scilib/ndarray_slice_spec.spl`
   and
   `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/feature/scilib/ndarray_slice_spec.spl --mode=interpreter --clean --fail-fast`.
 
