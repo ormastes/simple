@@ -14,9 +14,8 @@
 fn _greek_latex(name: text) -> text:
     if name == "alpha": return "\\alpha"
     if name == "beta": return "\\beta"
-    if name == "gamma": return "\\beta"
-    if name == "Gamma": return "\\Gamma"
     if name == "gamma": return "\\gamma"
+    if name == "Gamma": return "\\Gamma"
     if name == "delta": return "\\delta"
     if name == "Delta": return "\\Delta"
     if name == "epsilon": return "\\epsilon"
@@ -46,6 +45,7 @@ fn _greek_latex(name: text) -> text:
     if name == "omega": return "\\omega"
     if name == "Omega": return "\\Omega"
     if name == "nabla": return "\\nabla"
+    if name == "partial": return "\\partial"
     ""
 
 fn _greek_unicode(name: text) -> text:
@@ -120,6 +120,41 @@ fn _is_alpha(ch: text) -> bool:
 
 fn _is_alnum(ch: text) -> bool:
     _is_alpha(ch) or _is_digit(ch)
+
+# Convert a digit character to Unicode superscript.
+fn _superscript_digit(ch: text) -> text:
+    if ch == "0": return "⁰"
+    if ch == "1": return "¹"
+    if ch == "2": return "²"
+    if ch == "3": return "³"
+    if ch == "4": return "⁴"
+    if ch == "5": return "⁵"
+    if ch == "6": return "⁶"
+    if ch == "7": return "⁷"
+    if ch == "8": return "⁸"
+    if ch == "9": return "⁹"
+    ch
+
+# Convert a digit string to Unicode superscript.
+fn _to_superscript(s: text) -> text:
+    var result = ""
+    var i = 0
+    val n = s.len()
+    while i < n:
+        result = result + _superscript_digit(s[i])
+        i = i + 1
+    result
+
+# Return true if every character of s is a digit.
+fn _all_digits(s: text) -> bool:
+    var ok = true
+    var i = 0
+    val n = s.len()
+    while i < n:
+        if not _is_digit(s[i]):
+            ok = false
+        i = i + 1
+    ok
 
 # ============================================================================
 # Tokeniser
@@ -477,7 +512,7 @@ fn _primary_pretty(tokens: [text], pos: i64) -> [text]:
         val al = ar.len()
         val np = ar[al - 1]
         if al >= 3:
-            return ["(" + _sub_pretty(ar[0]) + "/" + _sub_pretty(ar[1]) + ")", np]
+            return ["(" + _sub_pretty(ar[0]) + ")/(" + _sub_pretty(ar[1]) + ")", np]
         return ["(?/?)", np]
 
     if t == "sqrt":
@@ -495,23 +530,26 @@ fn _primary_pretty(tokens: [text], pos: i64) -> [text]:
         val npi = _to_int(np)
         var sub = ""
         if al >= 3:
-            sub = ar[0] + "=" + ar[1]
+            sub = "(" + ar[0] + "=" + ar[1] + ")"
         elif al >= 2:
-            sub = ar[0]
+            sub = "(" + ar[0] + ")"
         val body_r = _primary_pretty(tokens, npi)
         if body_r[0] != "":
-            return ["Σ_{" + sub + "} " + body_r[0], body_r[1]]
-        return ["Σ_{" + sub + "}", np]
+            return ["∑" + sub + " " + body_r[0], body_r[1]]
+        return ["∑" + sub, np]
 
     if t == "int":
         val ar = _parse_args(tokens, pos + 1)
         val al = ar.len()
         val np = ar[al - 1]
         val npi = _to_int(np)
+        var sub = ""
+        if al >= 3:
+            sub = "(" + ar[0] + "=" + ar[1] + ")"
         val body_r = _primary_pretty(tokens, npi)
         if body_r[0] != "":
-            return ["∫ " + body_r[0], body_r[1]]
-        return ["∫", np]
+            return ["∫" + sub + " " + body_r[0], body_r[1]]
+        return ["∫" + sub, np]
 
     val kfn = _known_fn_latex(t)
     if kfn != "":
@@ -547,7 +585,10 @@ fn _power_pretty(tokens: [text], pos: i64) -> [text]:
     val left = _primary_pretty(tokens, pos)
     val lp = _to_int(left[1])
     if _peek(tokens, lp) == "^":
+        val exp_tok = _peek(tokens, lp + 1)
         val right = _primary_pretty(tokens, lp + 1)
+        if _all_digits(exp_tok):
+            return [left[0] + _to_superscript(exp_tok), right[1]]
         return [left[0] + "^" + right[0], right[1]]
     return left
 
@@ -724,6 +765,11 @@ fn _mul_text(tokens: [text], pos: i64) -> [text]:
         elif op == "/":
             val right = _power_text(tokens, p + 1)
             ls = ls + " / " + right[0]
+            p = _to_int(right[1])
+        elif op != "" and op != "+" and op != "-" and op != ")" and op != "," and op != "]" and (_is_alpha(op[0]) or op == "("):
+            # Implicit multiplication: number or close followed by identifier/paren
+            val right = _power_text(tokens, p)
+            ls = ls + right[0]
             p = _to_int(right[1])
         else:
             cont = false
