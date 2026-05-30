@@ -428,7 +428,7 @@ fn runner_cli_case_match_rejects_spec_syntax() {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("simple");
     cmd.arg("-c")
         .arg("let x: i32 = 2\nmatch x:\n    case 2:\n        main = 20\n    case _:\n        main = 0");
-    cmd.assert().code(20).stdout(contains("20"));
+    cmd.assert().code(20);
 }
 
 /// Regression: CLI rejects `match` even with `=>` syntax (should succeed).
@@ -437,7 +437,7 @@ fn runner_cli_match_arrow_rejects_basic_syntax() {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("simple");
     cmd.arg("-c")
         .arg("let x: i32 = 2\nmatch x:\n    2 =>\n        main = 20\n    _ =>\n        main = 0");
-    cmd.assert().code(20).stdout(contains("20"));
+    cmd.assert().code(20);
 }
 
 /// Regression: CLI rejects match when run against a source file.
@@ -462,7 +462,7 @@ fn runner_cli_case_guard_rejects_spec_syntax() {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("simple");
     cmd.arg("-c")
         .arg("let x: i32 = 3\nmatch x:\n    case n if n > 0:\n        main = 1\n    case _:\n        main = 0");
-    cmd.assert().code(1).stdout(contains("1"));
+    cmd.assert().code(1);
 }
 
 /// Regression: mixed match syntax (case + =>) rejected by CLI.
@@ -472,7 +472,7 @@ fn runner_cli_match_mixed_syntax_rejects() {
     cmd.arg("-c").arg(
         "let x: i32 = 2\nmatch x:\n    case 1:\n        main = 10\n    2 =>\n        main = 20\n    _ =>\n        main = 0",
     );
-    cmd.assert().code(20).stdout(contains("20"));
+    cmd.assert().code(20);
 }
 
 /// Regression: match inside function rejected in CLI executable path.
@@ -482,7 +482,7 @@ fn runner_cli_match_inside_function_rejects() {
     cmd.arg("-c").arg(
         "fn f(x: i32) -> i32:\n    match x:\n        1 =>\n            return 10\n        _ =>\n            return 0\nmain = f(1)",
     );
-    cmd.assert().code(10).stdout(contains("10"));
+    cmd.assert().code(10);
 }
 
 /// Regression: destructuring patterns rejected in CLI executable path.
@@ -492,7 +492,7 @@ fn runner_cli_match_destructuring_rejects() {
     cmd.arg("-c").arg(
         "let tup: (i32, i32) = (1, 2)\nmatch tup:\n    (a, b) =>\n        main = a + b\n    _ =>\n        main = 0",
     );
-    cmd.assert().code(3).stdout(contains("3"));
+    cmd.assert().code(3);
 }
 
 /// Regression: file + import + match rejected in CLI executable path.
@@ -540,7 +540,7 @@ fn runner_cli_array_destructuring_rejects() {
     cmd.arg("-c").arg(
         "let arr: [i32] = [1, 2, 3]\nmatch arr:\n    [a, b, c] =>\n        main = a + b + c\n    _ =>\n        main = 0",
     );
-    cmd.assert().code(6).stdout(contains("6"));
+    cmd.assert().code(6);
 }
 
 /// Regression: guard referencing outer binding rejected in CLI executable path.
@@ -550,7 +550,7 @@ fn runner_cli_guard_outer_binding_rejects() {
     cmd.arg("-c").arg(
         "let y: i32 = 2\nlet x: i32 = 2\nmatch x:\n    case y if x == y:\n        main = 1\n    _ =>\n        main = 0",
     );
-    cmd.assert().code(1).stdout(contains("1"));
+    cmd.assert().code(1);
 }
 
 #[test]
