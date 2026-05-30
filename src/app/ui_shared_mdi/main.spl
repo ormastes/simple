@@ -1,0 +1,85 @@
+# Shared MDI Demo
+#
+# Emits one desktop render frame followed by backend-neutral openWindow IPC
+# messages. Host shells (Electron/Tauri) and pure Simple WM tests consume the
+# same shared window descriptors.
+
+use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_render, build_ipc_open_window}
+use common.ui.widget.{UIEvent}
+use common.ui.html_window.{html_embedded_image_data_uri, html_picture, html_pre_block, html_window_info}
+use common.ui.window.{WindowInfo, new_window_manager_for_backend, normalize_window_backend}
+
+extern fn rt_stdin_read_line() -> text?
+extern fn rt_thread_sleep(ms: i64)
+extern fn rt_env_get(key: text) -> text
+extern fn rt_stdout_flush() -> i32
+
+fn _emit_ipc(message: text):
+    print message
+    rt_stdout_flush()
+
+fn _build_desktop_html(css: text, backend: text) -> text:
+    val bar_html = "<div class=\"widget-menubar\" id=\"sysbar\" style=\"position:absolute;top:0;left:0;right:0;z-index:5;pointer-events:auto;\"><span class=\"menu-item\">File</span><span class=\"menu-item\">Edit</span><span class=\"menu-item\">View</span><span class=\"menu-item\">Go</span><span class=\"menu-item\">Window</span><span class=\"menu-item\">Help</span><span class=\"menu-item\" id=\"wm-backend\" data-backend=\"" + backend + "\" style=\"float:right;margin-left:24px;\">Backend: " + backend + "</span></div>"
+    val dock_html = "<div class=\"widget-tab-bar\" id=\"dock\" style=\"position:absolute;bottom:64px;left:50%;transform:translateX(-50%);z-index:5;pointer-events:auto;\"><div class=\"tab-bar-item tab-bar-item-active\" data-action=\"app_terminal\"><span class=\"tab-bar-icon\">&gt;</span><span class=\"tab-bar-label\">Terminal</span></div><div class=\"tab-bar-item\" data-action=\"app_editor\"><span class=\"tab-bar-icon\">E</span><span class=\"tab-bar-label\">Editor</span></div><div class=\"tab-bar-item\" data-action=\"app_browser\"><span class=\"tab-bar-icon\">W</span><span class=\"tab-bar-label\">Browser</span></div><div class=\"tab-bar-item\" data-action=\"app_files\"><span class=\"tab-bar-icon\">D</span><span class=\"tab-bar-label\">Files</span></div><div class=\"tab-bar-item\" data-action=\"app_calc\"><span class=\"tab-bar-icon\">#</span><span class=\"tab-bar-label\">Calc</span></div><div class=\"tab-bar-item\" data-action=\"app_settings\"><span class=\"tab-bar-icon\">*</span><span class=\"tab-bar-label\">Settings</span></div></div>"
+    return "<html><head><style>" + css + "</style></head><body>" + bar_html + dock_html + "</body></html>"
+
+fn _open_mdi_window(info: WindowInfo):
+    _emit_ipc(build_ipc_open_window(info.id, info.title, info.html, info.x, info.y, info.width, info.height))
+
+fn _proof_sleep(ms: i64):
+    if rt_env_get("SIMPLE_MDI_FAST_PROOF") == "1":
+        return
+    rt_thread_sleep(ms)
+
+fn run_shared_mdi_demo() -> i64:
+    val css = ""
+    val backend = normalize_window_backend(rt_env_get("SIMPLE_UI_BACKEND") ?? "simple")
+    _emit_ipc(build_ipc_render(_build_desktop_html(css, backend)))
+
+    _proof_sleep(300)
+
+    var wm = new_window_manager_for_backend(backend)
+    val term = html_window_info("terminal", "Terminal", html_pre_block("$ simple --version\nSimple Language v0.9.5\n\n$ _"), "", 50, 60, 600, 400)
+    wm.open_info(term)
+    _open_mdi_window(term)
+
+    _proof_sleep(100)
+
+    val editor = html_window_info("editor", "Editor", html_pre_block("# hello.spl\n\nfn main() -> i64:\n    print \"Hello, World!\"\n    return 0"), "", 40, 500, 700, 400)
+    wm.open_info(editor)
+    _open_mdi_window(editor)
+
+    _proof_sleep(100)
+
+    val browser_url = rt_env_get("SIMPLE_BROWSER_URL") ?? "http://localhost:3333"
+    val browser_body = "<iframe src=\"" + browser_url + "\" style=\"flex:1;width:100%;height:100%;border:none;background:transparent;\" sandbox=\"allow-scripts allow-same-origin allow-forms allow-popups\"></iframe>"
+    val browser = html_window_info("browser", "Browser", browser_body, "", 670, 60, 650, 450)
+    wm.open_info(browser)
+    _open_mdi_window(browser)
+
+    _proof_sleep(100)
+
+    val folder_icon = html_embedded_image_data_uri("image/svg+xml", "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNjAiIGhlaWdodD0iOTAiIHZpZXdCb3g9IjAgMCAxNjAgOTAiPjxyZWN0IHg9IjgiIHk9IjI0IiB3aWR0aD0iMTQ0IiBoZWlnaHQ9IjU4IiByeD0iOCIiIGZpbGw9IiMzOGJkZjgiLz48cGF0aCBkPSJNOCAzMmgxNDR2NDJhOCA4IDAgMCAxLTggOEgxNmE4IDggMCAwIDEtOC04VjMyWiIgZmlsbD0iIzIyYzU1ZSIvPjxwYXRoIGQ9Ik04IDI0aDU0bDEwIDEyaDgwdjE0SDhWMjRaIiBmaWxsPSIjZmJiZjI0Ii8+PC9zdmc+")
+    val files_body = html_picture(folder_icon, "Embedded folder picture") + html_pre_block("src/\n  compiler/\n  lib/\n  app/\nexamples/\n  ui/\n  simple_os/")
+    val files = html_window_info("files", "File Manager", files_body, "", 700, 520, 550, 350)
+    wm.open_info(files)
+    _open_mdi_window(files)
+
+    if rt_env_get("SIMPLE_MDI_STAY_OPEN") != "1":
+        return 0
+
+    var running = true
+    while running:
+        val line = rt_stdin_read_line()
+        if line != nil and line != "":
+            val event = parse_ipc_message(line)
+            if event != nil:
+                match event:
+                    UIEvent.Quit:
+                        running = false
+                    _:
+                        pass_dn
+    return 0
+
+fn main() -> i64:
+    run_shared_mdi_demo()

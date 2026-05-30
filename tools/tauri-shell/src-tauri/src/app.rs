@@ -397,7 +397,7 @@ pub fn run() {
             let mut cmd = Command::new(simple_bin);
             if let Some(ref entry) = entry_file {
                 if entry.ends_with(".ui.sdn") {
-                    cmd.arg("tauri-entry").arg(entry);
+                    cmd.args(["run", "src/app/ui.tauri/tauri_entry.spl", entry]);
                 } else {
                     // Pass file directly (compatible with all Simple versions)
                     cmd.arg(entry);
@@ -458,7 +458,7 @@ pub fn run() {
             );
             #[cfg(desktop)]
             {
-                builder = builder.title("Simple UI").inner_size(1280.0, 720.0);
+                builder = builder.title("Simple Window Manager").inner_size(1280.0, 720.0);
             }
             let _win = builder.build()?;
 

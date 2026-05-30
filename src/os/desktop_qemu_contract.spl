@@ -26,7 +26,20 @@ pub fn run_x64_desktop_disk_probe(cmd_parts: [text], serial_path: text, timeout_
     rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], timeout_ms as i64)
 
 pub fn run_x64_wm_simple_web_probe(cmd_parts: [text], serial_path: text, timeout_ms: u64) -> (text, text, i32):
-    val shell_cmd = cmd_parts.join(" ") + " 2>&1 | tee \"" + serial_path + "\"; exit 0"
+    val shell_cmd =
+        "rm -f \"" + serial_path + "\"; " +
+        "(" + cmd_parts.join(" ") + ") > \"" + serial_path + "\" 2>&1 & qpid=$!; " +
+        "deadline=$(( $(date +%s) + 118 )); code=124; " +
+        "while kill -0 \"$qpid\" 2>/dev/null; do " +
+        "if grep -a -q 'TEST PASSED' \"" + serial_path + "\" 2>/dev/null; then code=0; kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; break; fi; " +
+        "if grep -a -q 'TEST FAILED' \"" + serial_path + "\" 2>/dev/null; then code=2; kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; break; fi; " +
+        "if [ \"$(date +%s)\" -ge \"$deadline\" ]; then kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; break; fi; " +
+        "sleep 0.1; " +
+        "done; " +
+        "if kill -0 \"$qpid\" 2>/dev/null; then kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; fi; " +
+        "if [ \"$code\" = 124 ]; then if grep -a -q 'TEST PASSED' \"" + serial_path + "\" 2>/dev/null; then code=0; elif grep -a -q 'TEST FAILED' \"" + serial_path + "\" 2>/dev/null; then code=2; fi; fi; " +
+        "cat \"" + serial_path + "\" 2>/dev/null | tr -cd '\\11\\12\\15\\40-\\176' || true; " +
+        "exit \"$code\""
     rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], timeout_ms as i64)
 
 pub fn desktop_uefi_serial_log_path() -> text:

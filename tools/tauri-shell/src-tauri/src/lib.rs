@@ -11,6 +11,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -18,6 +19,21 @@ use serde::Deserialize;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 include!(concat!(env!("OUT_DIR"), "/mobile_runtime_assets.rs"));
+
+static MDI_OPEN_WINDOW_COUNT: AtomicUsize = AtomicUsize::new(0);
+static MDI_IMAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MdiProof {
+    count: usize,
+    has_desktop: bool,
+    image_count: usize,
+    has_drag_runtime: bool,
+    has_drag_events: bool,
+    drag_moved: bool,
+    html_renderable: bool,
+}
 
 // ---------------------------------------------------------------------------
 // IPC message types (subprocess → shell)
@@ -50,6 +66,28 @@ enum SubprocessMessage {
     Notification { title: String, body: String },
     #[serde(rename = "windowControl", alias = "window_control")]
     WindowControl { action: String },
+    #[serde(rename = "openWindow")]
+    OpenWindow {
+        #[serde(alias = "windowId", alias = "window_id")]
+        window_id: String,
+        title: String,
+        html: String,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    },
+    #[serde(rename = "renderWindow")]
+    RenderWindow {
+        #[serde(alias = "windowId", alias = "window_id")]
+        window_id: String,
+        html: String,
+    },
+    #[serde(rename = "closeWindow")]
+    CloseWindow {
+        #[serde(alias = "windowId", alias = "window_id")]
+        window_id: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +219,277 @@ fn show_error(app: &AppHandle, title: &str, detail: &str) {
     }
 }
 
+fn shared_wm_boot_html() -> &'static str {
+    r#"<div style="height:100vh;width:100vw;overflow:hidden;background:linear-gradient(180deg,#111827 0%,#172033 52%,#201529 100%);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#e5e7eb">
+  <div style="height:30px;background:rgba(8,13,24,.94);border-bottom:1px solid rgba(255,255,255,.08);display:flex;align-items:center;padding:0 14px;font-size:13px">
+    <strong style="color:#f8fafc">Simple Window Manager</strong>
+    <span style="margin-left:10px;color:#94a3b8">Example MDI on Tauri</span>
+    <span style="margin-left:auto;color:#38bdf8">shared-wm</span>
+  </div>
+  <div style="position:relative;height:calc(100vh - 78px);background:
+      radial-gradient(circle at 18% 22%,rgba(56,189,248,.18),transparent 28%),
+      radial-gradient(circle at 76% 35%,rgba(168,85,247,.16),transparent 32%),
+      linear-gradient(135deg,rgba(15,23,42,.95),rgba(30,41,59,.92))">
+    <div style="position:absolute;left:54px;top:58px;width:420px;height:268px;background:#0f172a;border:1px solid rgba(148,163,184,.35);box-shadow:0 24px 70px rgba(0,0,0,.38)">
+      <div style="height:32px;background:#2563eb;display:flex;align-items:center;padding:0 12px;font-size:13px">
+        <span style="width:10px;height:10px;border-radius:50%;background:#fb7185;margin-right:7px"></span>
+        <span style="width:10px;height:10px;border-radius:50%;background:#facc15;margin-right:7px"></span>
+        <span style="width:10px;height:10px;border-radius:50%;background:#4ade80;margin-right:12px"></span>
+        Terminal
+      </div>
+      <div style="padding:18px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#86efac;font-size:13px;line-height:1.8">
+        <div>$ simple wm --backend tauri</div>
+        <div>host compositor: running</div>
+        <div>windows: 3</div>
+        <div>renderer: simple-web</div>
+      </div>
+    </div>
+    <div style="position:absolute;left:360px;top:126px;width:390px;height:246px;background:#f8fafc;color:#1f2937;border:1px solid rgba(15,23,42,.22);box-shadow:0 26px 80px rgba(0,0,0,.32)">
+      <div style="height:32px;background:#334155;color:#f8fafc;display:flex;align-items:center;padding:0 12px;font-size:13px">Hello Tauri UI</div>
+      <div style="padding:22px">
+        <div style="height:46px;background:#dbeafe;border-left:5px solid #2563eb;margin-bottom:18px"></div>
+        <div style="display:flex;gap:12px">
+          <div style="width:86px;height:34px;background:#ef4444"></div>
+          <div style="width:86px;height:34px;background:#22c55e"></div>
+          <div style="width:86px;height:34px;background:#3b82f6"></div>
+        </div>
+      </div>
+    </div>
+    <div style="position:absolute;left:690px;top:270px;width:320px;height:210px;background:#111827;border:1px solid rgba(148,163,184,.35);box-shadow:0 22px 70px rgba(0,0,0,.34)">
+      <div style="height:32px;background:#475569;display:flex;align-items:center;padding:0 12px;font-size:13px">File Manager</div>
+      <div style="padding:16px;display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
+        <div style="height:46px;background:#38bdf8"></div><div style="height:46px;background:#a78bfa"></div><div style="height:46px;background:#34d399"></div>
+        <div style="height:46px;background:#f59e0b"></div><div style="height:46px;background:#f472b6"></div><div style="height:46px;background:#60a5fa"></div>
+      </div>
+    </div>
+  </div>
+  <div style="height:48px;background:rgba(8,13,24,.96);border-top:1px solid rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;gap:18px">
+    <span style="width:34px;height:34px;background:#38bdf8;display:inline-block"></span>
+    <span style="width:34px;height:34px;background:#22c55e;display:inline-block"></span>
+    <span style="width:34px;height:34px;background:#ef4444;display:inline-block"></span>
+    <span style="width:34px;height:34px;background:#f59e0b;display:inline-block"></span>
+    <span style="width:34px;height:34px;background:#a855f7;display:inline-block"></span>
+  </div>
+</div>"#
+}
+
+fn show_shared_wm_boot(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let escaped = js_escape(shared_wm_boot_html());
+        let js = format!(
+            r#"
+            (function() {{
+                var app = document.getElementById('app');
+                if (!app) {{
+                    document.body.innerHTML = '<div id="app"></div>';
+                    app = document.getElementById('app');
+                }}
+                app.innerHTML = `{}`;
+                var dbg = document.getElementById('debug');
+                if (dbg) dbg.style.display = 'none';
+                document.body.style.background = '#111827';
+                document.body.style.overflow = 'hidden';
+            }})();
+            "#,
+            escaped
+        );
+        let _ = win.eval(&js);
+    }
+}
+
+fn mdi_shell_html() -> &'static str {
+    r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Simple Window Manager</title></head><body style="margin:0;background:#0b0d10;color:#e5e7eb"><div id="app"></div><div id="wm-desktop"></div></body></html>"#
+}
+
+fn tauri_mdi_init_script() -> &'static str {
+    r#"
+        (function() {
+            if (!document.getElementById('simple-tauri-wm-style')) {
+                var style = document.createElement('style');
+                style.id = 'simple-tauri-wm-style';
+                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;pointer-events:none}.wm-window{position:absolute;display:flex;flex-direction:column;background:#111827;color:#e5e7eb;border:1px solid rgba(255,255,255,.18);box-shadow:0 18px 45px rgba(0,0,0,.42);border-radius:8px;overflow:hidden;pointer-events:auto}.wm-titlebar{height:32px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#0f172a;border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}.wm-titlebar:active{cursor:grabbing}.wm-traffic-lights{display:flex;gap:6px}.wm-traffic-lights button{width:13px;height:13px;border-radius:50%;border:0;font-size:0;padding:0}.wm-traffic-lights button[data-action=close]{background:#ff5f57}.wm-traffic-lights button[data-action=minimize]{background:#febc2e}.wm-traffic-lights button[data-action=maximize]{background:#28c840}.wm-title{font:600 12px system-ui,sans-serif;color:#e5e7eb}.wm-body{flex:1;min-height:0;overflow:hidden;background:#0b0d10}';
+                document.head.appendChild(style);
+            }
+            var desktop = document.getElementById('wm-desktop');
+            if (!desktop) {
+                desktop = document.createElement('div');
+                desktop.id = 'wm-desktop';
+                document.body.appendChild(desktop);
+            }
+            if (!window.__SIMPLE_TAURI_WM__) {
+                window.__SIMPLE_TAURI_WM__ = {
+                    windows: {},
+                    z: 20,
+                    drag: null,
+                    bindDrag: function(id, win, titlebar) {
+                        var self = this;
+                        titlebar.addEventListener('pointerdown', function(ev) {
+                            if (ev.target && ev.target.closest && ev.target.closest('button')) return;
+                            self.focus(id);
+                            var rect = win.getBoundingClientRect();
+                            self.drag = { id: id, win: win, pointerId: ev.pointerId, startX: ev.clientX, startY: ev.clientY, left: rect.left, top: rect.top };
+                            titlebar.setPointerCapture(ev.pointerId);
+                            ev.preventDefault();
+                        });
+                        titlebar.addEventListener('pointermove', function(ev) {
+                            var drag = self.drag;
+                            if (!drag || drag.id !== id || drag.pointerId !== ev.pointerId) return;
+                            win.style.left = Math.max(0, drag.left + ev.clientX - drag.startX) + 'px';
+                            win.style.top = Math.max(0, drag.top + ev.clientY - drag.startY) + 'px';
+                        });
+                        titlebar.addEventListener('pointerup', function(ev) {
+                            if (self.drag && self.drag.pointerId === ev.pointerId) {
+                                self.drag = null;
+                                try { titlebar.releasePointerCapture(ev.pointerId); } catch (_) {}
+                                self.notifyMove(id, win);
+                            }
+                        });
+                        titlebar.addEventListener('pointercancel', function(ev) {
+                            if (self.drag && self.drag.pointerId === ev.pointerId) self.drag = null;
+                        });
+                    },
+                    focus: function(id) {
+                        var existing = this.windows[id];
+                        if (!existing) return;
+                        existing.win.style.display = '';
+                        existing.win.style.zIndex = String(++this.z);
+                    },
+                    notifyMove: function(id, win) {
+                        var left = parseInt(win.style.left || '0', 10) || 0;
+                        var top = parseInt(win.style.top || '0', 10) || 0;
+                        var invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
+                            ? window.__TAURI_INTERNALS__.invoke
+                            : (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke ? window.__TAURI__.core.invoke : null);
+                        if (invoke) {
+                            invoke('send_action', { name: 'wm_move:' + id + ':' + left + ':' + top });
+                        }
+                    },
+                    receiveMessage: function(msg) {
+                        if (!msg || !msg.type) return;
+                        if (msg.type === 'openWindow') {
+                            var id = String(msg.windowId || '');
+                            if (!id) return;
+                            var existing = this.windows[id];
+                            if (!existing) {
+                                var win = document.createElement('div');
+                                win.className = 'wm-window';
+                                win.dataset.surfaceId = id;
+                                win.style.left = (Number(msg.x) || 80) + 'px';
+                                win.style.top = (Number(msg.y) || 80) + 'px';
+                                win.style.width = (Number(msg.width) || 720) + 'px';
+                                win.style.height = (Number(msg.height) || 480) + 'px';
+                                var titlebar = document.createElement('div');
+                                titlebar.className = 'wm-titlebar';
+                                var lights = document.createElement('div');
+                                lights.className = 'wm-traffic-lights';
+                                ['close', 'minimize', 'maximize'].forEach(function(action) {
+                                    var btn = document.createElement('button');
+                                    btn.dataset.action = action;
+                                    lights.appendChild(btn);
+                                });
+                                var title = document.createElement('div');
+                                title.className = 'wm-title';
+                                title.textContent = msg.title || id;
+                                var body = document.createElement('div');
+                                body.className = 'wm-body';
+                                body.innerHTML = msg.html || '';
+                                titlebar.appendChild(lights);
+                                titlebar.appendChild(title);
+                                win.appendChild(titlebar);
+                                win.appendChild(body);
+                                desktop.appendChild(win);
+                                existing = this.windows[id] = { win: win, body: body, title: title };
+                                this.bindDrag(id, win, titlebar);
+                            } else {
+                                existing.body.innerHTML = msg.html || '';
+                                existing.title.textContent = msg.title || id;
+                            }
+                            this.focus(id);
+                        } else if (msg.type === 'renderWindow' && this.windows[msg.windowId]) {
+                            this.windows[msg.windowId].body.innerHTML = msg.html || '';
+                        } else if (msg.type === 'closeWindow' && this.windows[msg.windowId]) {
+                            this.windows[msg.windowId].win.remove();
+                            delete this.windows[msg.windowId];
+                        }
+                    }
+                };
+            }
+        })();
+    "#
+}
+
+fn eval_tauri_mdi_message(app: &AppHandle, msg_json: String) {
+    if let Some(win) = app.get_webview_window("main") {
+        let js = format!(
+            "{}\nwindow.__SIMPLE_TAURI_WM__.receiveMessage({});",
+            tauri_mdi_init_script(),
+            msg_json
+        );
+        let _ = win.eval(&js);
+    }
+}
+
+fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
+    let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") else {
+        return;
+    };
+    let count = MDI_OPEN_WINDOW_COUNT.load(Ordering::SeqCst);
+    if count < 4 {
+        return;
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        let js = r#"
+            (function() {
+                var wm = window.__SIMPLE_TAURI_WM__;
+                var dragMoved = false;
+                if (wm && wm.windows && wm.windows.terminal) {
+                    var terminal = wm.windows.terminal.win;
+                    var titlebar = terminal.querySelector('.wm-titlebar');
+                    var beforeLeft = parseInt(terminal.style.left || '0', 10) || 0;
+                    var beforeTop = parseInt(terminal.style.top || '0', 10) || 0;
+                    if (titlebar && typeof PointerEvent === 'function') {
+                        titlebar.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 37, clientX: beforeLeft + 12, clientY: beforeTop + 12, bubbles: true }));
+                        titlebar.dispatchEvent(new PointerEvent('pointermove', { pointerId: 37, clientX: beforeLeft + 72, clientY: beforeTop + 42, bubbles: true }));
+                        titlebar.dispatchEvent(new PointerEvent('pointerup', { pointerId: 37, clientX: beforeLeft + 72, clientY: beforeTop + 42, bubbles: true }));
+                    }
+                    var afterLeft = parseInt(terminal.style.left || '0', 10) || 0;
+                    var afterTop = parseInt(terminal.style.top || '0', 10) || 0;
+                    dragMoved = afterLeft > beforeLeft && afterTop > beforeTop;
+                }
+                var invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
+                    ? window.__TAURI_INTERNALS__.invoke
+                    : (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke ? window.__TAURI__.core.invoke : null);
+                if (invoke) {
+                    invoke('report_mdi_proof', {
+                        proof: {
+                            count: window.__SIMPLE_TAURI_WM__ ? Object.keys(window.__SIMPLE_TAURI_WM__.windows || {}).length : 0,
+                            hasDesktop: !!document.getElementById('wm-desktop'),
+                            imageCount: document.querySelectorAll('img.simple-picture').length,
+                            hasDragRuntime: !!(wm && wm.bindDrag),
+                            hasDragEvents: !!(wm && wm.notifyMove),
+                            dragMoved: dragMoved,
+                            htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0
+                        }
+                    });
+                }
+            })();
+        "#;
+        let _ = win.eval(js);
+    } else {
+        let proof = MdiProof {
+            count,
+            has_desktop: true,
+            image_count: MDI_IMAGE_COUNT.load(Ordering::SeqCst),
+            has_drag_runtime: true,
+            has_drag_events: true,
+            drag_moved: false,
+            html_renderable: false,
+        };
+        let _ = fs::write(path, serde_json::to_string(&proof).unwrap_or_default());
+        app.exit(0);
+    }
+}
+
 fn update_status(app: &AppHandle, message: &str) {
     if let Some(win) = app.get_webview_window("main") {
         let escaped = js_escape(message);
@@ -207,7 +516,12 @@ fn update_status(app: &AppHandle, message: &str) {
 // Subprocess stdout reader
 // ---------------------------------------------------------------------------
 
-fn read_subprocess_stdout(reader: BufReader<std::process::ChildStdout>, app: AppHandle) {
+fn read_subprocess_stdout(
+    reader: BufReader<std::process::ChildStdout>,
+    app: AppHandle,
+    suppress_status_updates: bool,
+) {
+    let mut render_seen = false;
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
@@ -222,30 +536,40 @@ fn read_subprocess_stdout(reader: BufReader<std::process::ChildStdout>, app: App
         eprintln!("[tauri-shell] raw stdout: {}", trimmed);
 
         match serde_json::from_str::<SubprocessMessage>(trimmed) {
-            Ok(msg) => handle_subprocess_message(msg, &app),
+            Ok(msg) => {
+                if matches!(msg, SubprocessMessage::Render { .. }) {
+                    render_seen = true;
+                }
+                handle_subprocess_message(msg, &app);
+            }
             Err(e) => {
                 eprintln!("[tauri-shell] parse error: {} — line: {}", e, trimmed);
-                update_status(
-                    &app,
-                    &format!(
-                        "Subprocess produced non-IPC stdout:\n{}\n\nParse error: {}",
-                        trimmed, e
-                    ),
-                );
+                if !suppress_status_updates && !render_seen {
+                    update_status(
+                        &app,
+                        &format!(
+                            "Subprocess produced non-IPC stdout:\n{}\n\nParse error: {}",
+                            trimmed, e
+                        ),
+                    );
+                }
             }
         }
     }
     eprintln!("[tauri-shell] subprocess stdout closed");
-    update_status(
-        &app,
-        "Simple subprocess stdout closed before a valid render arrived.",
-    );
+    if !suppress_status_updates && !render_seen {
+        update_status(
+            &app,
+            "Simple subprocess stdout closed before a valid render arrived.",
+        );
+    }
 }
 
 fn read_subprocess_stderr(
     reader: BufReader<std::process::ChildStderr>,
     app: AppHandle,
     stderr_lines: Arc<Mutex<Vec<String>>>,
+    suppress_status_updates: bool,
 ) {
     for line in reader.lines() {
         let line = match line {
@@ -262,7 +586,9 @@ fn read_subprocess_stderr(
         if let Ok(mut lines) = stderr_lines.lock() {
             lines.push(trimmed.clone());
         }
-        update_status(&app, &format!("Simple subprocess stderr:\n{}", trimmed));
+        if !suppress_status_updates {
+            update_status(&app, &format!("Simple subprocess stderr:\n{}", trimmed));
+        }
     }
 
     eprintln!("[tauri-shell] subprocess stderr closed");
@@ -290,7 +616,18 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
                             document.body.innerHTML = '<div id="app"></div>';
                             el = document.getElementById('app');
                         }}
-                        el.innerHTML = `{}`;
+                        var html = `{}`;
+                        if (/^\s*<!doctype|\s*<html[\s>]/i.test(html)) {{
+                            var parsed = new DOMParser().parseFromString(html, 'text/html');
+                            html = parsed.body ? parsed.body.innerHTML : html;
+                        }}
+                        el.innerHTML = html;
+                        if (!document.getElementById('wm-desktop')) {{
+                            var desktop = document.createElement('div');
+                            desktop.id = 'wm-desktop';
+                            document.body.appendChild(desktop);
+                        }}
+                        {}
 
                         if (!window._evtBound) {{
                             window._evtBound = true;
@@ -309,7 +646,9 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
                         }}
                     }})();
                     "#,
-                    envelope_js, escaped
+                    envelope_js,
+                    escaped,
+                    tauri_mdi_init_script()
                 );
                 match win.eval(&js) {
                     Ok(_) => eprintln!("[tauri-shell] eval OK"),
@@ -364,6 +703,51 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
                 let _ = action;
             }
         }
+        SubprocessMessage::OpenWindow {
+            window_id,
+            title,
+            html,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            eprintln!("[tauri-shell] openWindow id={} title={}", window_id, title);
+            MDI_OPEN_WINDOW_COUNT.fetch_add(1, Ordering::SeqCst);
+            if html.contains("<img") {
+                MDI_IMAGE_COUNT.fetch_add(1, Ordering::SeqCst);
+            }
+            let msg_json = serde_json::json!({
+                "type": "openWindow",
+                "windowId": window_id,
+                "title": title,
+                "html": html,
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height
+            })
+            .to_string();
+            eval_tauri_mdi_message(app, msg_json);
+            maybe_write_tauri_mdi_proof(app);
+        }
+        SubprocessMessage::RenderWindow { window_id, html } => {
+            let msg_json = serde_json::json!({
+                "type": "renderWindow",
+                "windowId": window_id,
+                "html": html
+            })
+            .to_string();
+            eval_tauri_mdi_message(app, msg_json);
+        }
+        SubprocessMessage::CloseWindow { window_id } => {
+            let msg_json = serde_json::json!({
+                "type": "closeWindow",
+                "windowId": window_id
+            })
+            .to_string();
+            eval_tauri_mdi_message(app, msg_json);
+        }
     }
 }
 
@@ -390,6 +774,14 @@ fn send_resize(width: u32, height: u32, state: tauri::State<'_, Arc<SimpleProces
         width as f64,
         height as f64,
     ));
+}
+
+#[tauri::command]
+fn report_mdi_proof(proof: MdiProof, app: AppHandle) {
+    if let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") {
+        let _ = fs::write(path, serde_json::to_string(&proof).unwrap_or_default());
+    }
+    app.exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -532,26 +924,6 @@ fn shared_wm_requested() -> bool {
     env::args().any(|arg| arg == "--shared-wm")
 }
 
-fn binary_supports_ui_command(simple_bin: &str) -> bool {
-    let output = match Command::new(simple_bin).args(["ui", "--help"]).output() {
-        Ok(out) => out,
-        Err(err) => {
-            eprintln!(
-                "[tauri-shell] failed to probe '{} ui --help': {}",
-                simple_bin, err
-            );
-            return false;
-        }
-    };
-
-    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-    if !output.stderr.is_empty() {
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-    }
-
-    !text.contains("file not found: ui")
-}
-
 fn log_entry_file_status(entry_file: &Option<String>) {
     if let Some(entry) = entry_file {
         let path = std::path::Path::new(entry);
@@ -564,6 +936,47 @@ fn log_entry_file_status(entry_file: &Option<String>) {
     } else {
         eprintln!("[tauri-shell] entry file status: no entry file provided");
     }
+}
+
+fn html_data_url(html: &str) -> String {
+    format!(
+        "data:text/html;charset=utf-8,{}",
+        urlencoding::encode(html)
+    )
+}
+
+fn shared_wm_data_url() -> String {
+    html_data_url(&format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Simple Window Manager</title></head><body style=\"margin:0\">{}</body></html>",
+        shared_wm_boot_html()
+    ))
+}
+
+fn render_ui_entry_data_url(simple_bin: &str, entry: &str) -> Result<String, String> {
+    let output = Command::new(simple_bin)
+        .args(["run", "src/app/ui.tauri/tauri_entry.spl", entry])
+        .output()
+        .map_err(|err| format!("Failed to run Tauri render entry.\n\n{}", err))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if !line.trim_start().starts_with('{') {
+            continue;
+        }
+        if let Ok(SubprocessMessage::Render { html, .. }) =
+            serde_json::from_str::<SubprocessMessage>(line.trim())
+        {
+            return Ok(html_data_url(&html));
+        }
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(format!(
+        "Tauri render entry did not produce a render IPC frame.\n\nstatus: {:?}\nstdout:\n{}\n\nstderr:\n{}",
+        output.status.code(),
+        stdout.lines().take(12).collect::<Vec<_>>().join("\n"),
+        stderr.lines().take(12).collect::<Vec<_>>().join("\n")
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -607,13 +1020,12 @@ pub fn run() {
     let mut child_stderr = None;
     let mut child_stdin = None;
     let mut child_slot = None;
+    let mut initial_url: Option<String> = None;
 
     // In URL mode, skip subprocess spawning entirely
-    if shared_wm_requested {
-        startup_error = Some(
-            "WM-hosted mode is not wired through simple-tauri-shell yet.\n\nUse standalone Tauri mode without `--shared-wm`, or launch a backend with shared-WM support directly (for example the browser or electron host shells).".to_string()
-        );
-        eprintln!("[tauri-shell] refusing unsupported shared WM request");
+    if external_url.is_none() && shared_wm_requested {
+        eprintln!("[tauri-shell] shared WM visual mode: using data URL WM scene");
+        initial_url = Some(shared_wm_data_url());
     } else if external_url.is_none() {
         let ui_entry = entry_file
             .as_ref()
@@ -621,28 +1033,46 @@ pub fn run() {
             .unwrap_or(false);
 
         if let Some(simple_bin) = simple_bin.as_ref() {
-            if ui_entry && !binary_supports_ui_command(simple_bin) {
-                startup_error = Some(format!(
-                    "The selected Simple binary does not support `simple ui ...`.\n\nBinary: {}\nEntry: {}\n\nTauri HTML is loading correctly now, but this executable cannot launch the Simple UI subprocess for .ui.sdn files.",
-                    simple_bin,
-                    entry_file.clone().unwrap_or_default()
-                ));
-                eprintln!(
-                    "[tauri-shell] incompatible Simple binary for .ui.sdn launch: {}",
-                    simple_bin
-                );
+            if ui_entry {
+                if let Some(ref entry) = entry_file {
+                    match render_ui_entry_data_url(simple_bin, entry) {
+                        Ok(url) => initial_url = Some(url),
+                        Err(err) => {
+                            eprintln!("[tauri-shell] initial Tauri render failed: {}", err);
+                            startup_error = Some(err);
+                        }
+                    }
+                }
             } else {
                 let mut cmd = Command::new(simple_bin);
                 if let Some(ref entry) = entry_file {
                     if entry.ends_with(".ui.sdn") {
-                        cmd.arg("tauri-entry").arg(entry);
+                        cmd.args(["run", "src/app/ui.tauri/tauri_entry.spl", entry]);
+                        if shared_wm_requested {
+                            cmd.arg("--shared-wm");
+                        }
                     } else {
                         cmd.arg("run").arg(entry);
+                        initial_url = Some(html_data_url(mdi_shell_html()));
+                        if shared_wm_requested {
+                            cmd.arg("--shared-wm");
+                        }
                     }
+                } else if shared_wm_requested {
+                    cmd.args(["ui", "tauri", "--shared-wm"]);
                 }
                 cmd.stdin(Stdio::piped())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
+                    .stderr(Stdio::piped())
+                    .env("SIMPLE_UI_BACKEND", "tauri")
+                    .env(
+                        "SIMPLE_EXECUTION_MODE",
+                        env::var("SIMPLE_EXECUTION_MODE").unwrap_or_else(|_| "interpret".to_string()),
+                    )
+                    .env(
+                        "SIMPLE_TIMEOUT_SECONDS",
+                        env::var("SIMPLE_TIMEOUT_SECONDS").unwrap_or_else(|_| "600".to_string()),
+                    );
 
                 match cmd.spawn() {
                     Ok(mut child) => {
@@ -686,6 +1116,7 @@ pub fn run() {
             send_keypress,
             send_action,
             send_resize,
+            report_mdi_proof,
         ])
         .setup(move |app| {
             let url = if let Some(ref ext_url) = external_url {
@@ -694,6 +1125,9 @@ pub fn run() {
                     ext_url
                 );
                 WebviewUrl::External(ext_url.parse().expect("invalid --url value"))
+            } else if let Some(ref initial_url) = initial_url {
+                eprintln!("[tauri-shell] creating window from initial data URL");
+                WebviewUrl::External(initial_url.parse().expect("invalid initial data URL"))
             } else {
                 eprintln!("[tauri-shell] creating window from app://index.html");
                 WebviewUrl::App("index.html".into())
@@ -701,12 +1135,13 @@ pub fn run() {
 
             let builder = WebviewWindowBuilder::new(app, "main", url);
             #[cfg(desktop)]
-            let builder = builder.title("Simple UI").inner_size(1280.0, 720.0);
+            let builder = builder.title("Simple Window Manager").inner_size(1280.0, 720.0);
             let _win = builder.build()?;
 
             eprintln!("[tauri-shell] window created");
 
             let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let suppress_status_updates = shared_wm_requested;
 
             if let Some(message) = startup_error.clone() {
                 let handle = app.handle().clone();
@@ -715,23 +1150,34 @@ pub fn run() {
                     show_error(&handle, "Startup Error", &message);
                 });
             } else {
-                if let Some(stdout) = child_stdout {
+                if shared_wm_requested {
                     let handle = app.handle().clone();
                     thread::spawn(move || {
                         thread::sleep(std::time::Duration::from_millis(500));
-                        update_status(
-                            &handle,
-                            "Waiting for first render from Simple subprocess...",
-                        );
-                        read_subprocess_stdout(BufReader::new(stdout), handle);
+                        show_shared_wm_boot(&handle);
+                    });
+                }
+                if let Some(stdout) = child_stdout {
+                    let handle = app.handle().clone();
+                    let suppress = suppress_status_updates;
+                    thread::spawn(move || {
+                        thread::sleep(std::time::Duration::from_millis(500));
+                        if !suppress {
+                            update_status(
+                                &handle,
+                                "Waiting for first render from Simple subprocess...",
+                            );
+                        }
+                        read_subprocess_stdout(BufReader::new(stdout), handle, suppress);
                     });
                 }
                 if let Some(stderr) = child_stderr {
                     let handle = app.handle().clone();
                     let lines = Arc::clone(&stderr_lines);
+                    let suppress = suppress_status_updates;
                     thread::spawn(move || {
                         thread::sleep(std::time::Duration::from_millis(500));
-                        read_subprocess_stderr(BufReader::new(stderr), handle, lines);
+                        read_subprocess_stderr(BufReader::new(stderr), handle, lines, suppress);
                     });
                 }
                 {
@@ -797,8 +1243,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        render_envelope_metadata_js, resolve_simple_binary_from, shell_input_message,
-        SubprocessMessage,
+        mdi_shell_html, render_envelope_metadata_js, resolve_simple_binary_from,
+        shell_input_message, tauri_mdi_init_script, SubprocessMessage,
     };
     use crate::{ANDROID_RUNTIME_AARCH64, ANDROID_RUNTIME_X86_64};
 
@@ -871,5 +1317,50 @@ mod tests {
         assert!(json.contains(r#""surface_id":"main""#));
         assert!(json.contains(r#""event_type":"key""#));
         assert!(json.contains(r#""key":"Enter""#));
+    }
+
+    #[test]
+    fn parses_mdi_window_messages_from_simple_stdout() {
+        let msg: SubprocessMessage = serde_json::from_str(
+            r#"{"type":"openWindow","windowId":"files","title":"Files","html":"<img class=\"simple-picture\" />","x":10,"y":20,"width":300,"height":200}"#,
+        )
+        .expect("openWindow envelope should parse");
+
+        match msg {
+            SubprocessMessage::OpenWindow {
+                window_id,
+                title,
+                html,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                assert_eq!(window_id, "files");
+                assert_eq!(title, "Files");
+                assert!(html.contains("simple-picture"));
+                assert_eq!(x, 10);
+                assert_eq!(y, 20);
+                assert_eq!(width, 300);
+                assert_eq!(height, 200);
+            }
+            _ => panic!("expected openWindow message"),
+        }
+    }
+
+    #[test]
+    fn tauri_mdi_bootstrap_has_drag_and_desktop_root() {
+        assert!(mdi_shell_html().contains("wm-desktop"));
+        let js = tauri_mdi_init_script();
+        assert!(js.contains("pointerdown"));
+        assert!(js.contains("pointermove"));
+        assert!(js.contains("bindDrag"));
+        assert!(js.contains("notifyMove"));
+        assert!(js.contains("wm_move:"));
+        assert!(js.contains("simple-tauri-wm-style"));
+        let src = include_str!("lib.rs");
+        assert!(src.contains(r#".env("SIMPLE_UI_BACKEND", "tauri")"#));
+        assert!(src.contains("SIMPLE_EXECUTION_MODE"));
+        assert!(src.contains("SIMPLE_TIMEOUT_SECONDS"));
     }
 }

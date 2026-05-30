@@ -6,6 +6,10 @@ use os.compositor.compositor.{Compositor}
 use os.compositor.wm_action_applier.{WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_compositor, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_action_is_shared_lifecycle, wm_action_remote_tree, wm_action_web_window_request, wm_action_with_app_id, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_pointer_move, wm_move_action, wm_resize_action, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 use os.services.wm.wm_world.{WmAction}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_UPDATE_TREE, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_RESTORE}
+use common.ui.builder.{column, label, build_tree_with_title}
+use common.ui.window.{WindowManager}
+use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_SIMPLE_WEB}
+use common.ui.window_scene.{shared_wm_scene_from_window_manager}
 
 class ApplierBackend:
     w: i32
@@ -36,6 +40,9 @@ impl CompositorBackend for ApplierBackend:
 fn _action(kind: text, window_id: u64) -> WmAction:
     WmAction(kind: kind, window_id: window_id, title: "Window", x: 10, y: 20, width: 80, height: 60, content: "tree", process_id: 7, app_id: "app.test", owner_port: 9, src_port: 0)
 
+fn _shared_tree(title: text):
+    build_tree_with_title(column("{title}_root", [label("{title}_label", title)]), title, "glass_dark")
+
 describe "shared WM action applier":
 
     it "creates windows through shared compositor logic":
@@ -46,6 +53,23 @@ describe "shared WM action applier":
         expect(wid > 0).to_equal(true)
         expect(compositor.surfaces.len()).to_equal(1)
         expect(compositor.surfaces[0].app_id).to_equal("app.test")
+
+    it "materializes shared GUI WindowManager state into SimpleOS compositor surfaces":
+        var manager = WindowManager.new()
+        val _opened = manager.open_window("surf1", "Simple App", 12, 18, 160, 120, _shared_tree("app"))
+        var registry = UiWindowSurfaceRegistry.new()
+        registry.bind_with_kind("win1", "surf1", 55u64, "simple.app", "Simple App", UI_SURFACE_KIND_SIMPLE_WEB)
+        val scene = shared_wm_scene_from_window_manager(manager, registry, 320, 240)
+        var compositor = Compositor.with_backends(ApplierBackend(w: 320, h: 240), nil, 320, 240)
+
+        val ids = compositor.create_windows_from_shared_scene(scene)
+
+        expect(ids.len()).to_equal(1)
+        expect(compositor.surfaces.len()).to_equal(1)
+        expect(compositor.surfaces[0].title).to_equal("Simple App")
+        expect(compositor.surfaces[0].session.root_id).to_equal("app_root")
+        expect(compositor.surfaces[0].process_id).to_equal(55)
+        expect(compositor.surfaces[0].app_id).to_equal("simple.app")
 
     it "creates web windows with a Simple Web render request surface":
         var compositor = Compositor.with_backends(ApplierBackend(w: 200, h: 120), nil, 200, 120)

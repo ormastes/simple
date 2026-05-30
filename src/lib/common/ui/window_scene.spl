@@ -1,0 +1,92 @@
+# Shared WM Scene Projection
+#
+# Converts WindowManager state plus host window bindings into a scene shape
+# that Tauri, Electron, Simple Web, and SimpleOS compositor code can inspect.
+
+use common.ui.widget.{UITree}
+use common.ui.window.{WindowManager, ManagedWindow}
+use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_LEGACY}
+
+struct SharedWmWindow:
+    surface_id: text
+    window_id: text
+    surface_kind: text
+    process_id: u64
+    app_id: text
+    title: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    tree: UITree?
+    html: text
+    minimized: bool
+    focused: bool
+    z_index: i32
+
+struct SharedWmScene:
+    width: i32
+    height: i32
+    backend: text
+    windows: [SharedWmWindow]
+
+fn _project_window(window: ManagedWindow, registry: UiWindowSurfaceRegistry) -> SharedWmWindow:
+    val binding = registry.for_surface(window.surface_id)
+    if binding != nil:
+        return SharedWmWindow(
+            surface_id: window.surface_id,
+            window_id: binding.window_id,
+            surface_kind: binding.surface_kind,
+            process_id: binding.process_id,
+            app_id: binding.app_id,
+            title: binding.title,
+            x: window.x,
+            y: window.y,
+            width: window.width,
+            height: window.height,
+            tree: window.tree,
+            html: window.html,
+            minimized: window.minimized,
+            focused: window.focused,
+            z_index: window.z_index
+        )
+    return SharedWmWindow(
+        surface_id: window.surface_id,
+        window_id: window.surface_id,
+        surface_kind: UI_SURFACE_KIND_LEGACY,
+        process_id: 0u64,
+        app_id: "",
+        title: window.title,
+        x: window.x,
+        y: window.y,
+        width: window.width,
+        height: window.height,
+        tree: window.tree,
+        html: window.html,
+        minimized: window.minimized,
+        focused: window.focused,
+        z_index: window.z_index
+    )
+
+fn shared_wm_scene_from_window_manager(manager: WindowManager, registry: UiWindowSurfaceRegistry, width: i32, height: i32) -> SharedWmScene:
+    var windows: [SharedWmWindow] = []
+    for window in manager.windows:
+        windows = windows.push(_project_window(window, registry))
+    SharedWmScene(width: width, height: height, backend: manager.current_backend(), windows: windows)
+
+fn shared_wm_visible_windows(scene: SharedWmScene) -> [SharedWmWindow]:
+    var visible: [SharedWmWindow] = []
+    for window in scene.windows:
+        if not window.minimized:
+            visible = visible.push(window)
+    return visible
+
+fn shared_wm_focused_window_id(scene: SharedWmScene) -> text:
+    var best_id = ""
+    var best_z = -1
+    for window in scene.windows:
+        if window.focused and not window.minimized:
+            if window.z_index > best_z:
+                best_id = window.window_id
+                best_z = window.z_index
+    return best_id
