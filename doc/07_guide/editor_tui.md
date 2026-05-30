@@ -30,7 +30,8 @@ The editor library follows VS Code-like package names for reusable code:
 - `src/lib/editor/core/` — document/session/keybinding/plugin state
 - `src/lib/editor/view/` — dock zones, split tree, panels, tabs, breadcrumbs
 - `src/lib/editor/render/` — markdown/block/terminal render models
-- `src/lib/editor/extensions/` — extension host, manifests, built-ins
+- `src/lib/editor/extensions/` — extension host, manifests, built-ins, and
+  reusable extension-root policy (`roots.spl`)
 - `src/lib/editor/services/` — LSP, diagnostics, search, wiki, debug, watchers
 - `src/lib/editor/unified/` — shared adapters for TUI/VS Code/project surfaces
 
