@@ -5,8 +5,10 @@
 benchmark harness repaired, ctype call nesting flattened, MIR inlining handles
 non-tail calls, and Cranelift now has a ctype-specific inline lowering for
 `ctype.is_*`/`to_*` static calls. Native still remains below the 0.50x C floor
-for composite predicates and conversions; remaining work is broader Rust-side
-loop/branch codegen quality, not a `ctype.spl` library fix.
+for most predicates and conversions. The 2026-05-30 static-data LUT probe also
+compiled but produced wrong native checksums, so the remaining work is backend
+static-data/global-array correctness plus broader loop/branch codegen quality,
+not a `ctype.spl` library fix.
 **Severity:** Medium — ctype is not hot-path, but pattern applies to all pure Simple stdlib
 **Component:** Cranelift AOT codegen / function inlining
 **Related:** `native_cross_module_call_abi_broken_2026-05-18.md`
@@ -445,3 +447,53 @@ Conclusion for pure-Simple scope: no concrete shippable library mitigation is
 available without changing backend/static-data/value-copy behavior. The bug
 should remain open for native backend/codegen work; further `ctype.spl` churn is
 not justified by the current evidence.
+
+## 2026-05-30 Native Static-Data LUT Probe
+
+Scoped pass worked in `/tmp/simple-ctype-perf` and owned only ctype/perf
+benchmark evidence, `.spipe/pure_simple_ctype_perf_gap/**`, and this tracker.
+No push was performed.
+
+Hypothesis tested: move the 256-entry LUT into a separate module-level `val`
+array so a guarded lookup-table ctype implementation can avoid the per-call
+table construction/copy blocker from `bench_ctype_lut.spl`.
+
+Added benchmark evidence:
+
+- `test/perf/ctype/ctype_lut_tables.spl` — benchmark-local module-level
+  `CTYPE_FLAG_TABLE`.
+- `test/perf/ctype/bench_ctype_static_lut.spl` — guarded cross-module static
+  LUT probe for composite predicates only. It exits nonzero when checksum
+  validation fails, so the native static-data correctness blocker is visible to
+  automation.
+
+Focused checks:
+
+```bash
+SIMPLE_LIB=/tmp/simple-ctype-perf/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple check test/perf/ctype/ctype_lut_tables.spl test/perf/ctype/bench_ctype_static_lut.spl
+SIMPLE_LIB=/tmp/simple-ctype-perf/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple check src/lib/common/ctype.spl test/perf/ctype/bench_ctype.spl test/perf/ctype/bench_ctype_inline.spl test/perf/ctype/bench_ctype_lut.spl
+SIMPLE_LIB=/tmp/simple-ctype-perf/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple native-build --entry test/perf/ctype/bench_ctype_static_lut.spl --source src/lib --source test/perf/ctype --entry-closure --backend cranelift --runtime-bundle core-c-bootstrap -o build/perf/ctype/bench_ctype_static_lut
+build/perf/ctype/bench_ctype_static_lut
+SIMPLE_CTYPE_BENCH_SAMPLES=1 SIMPLE_CTYPE_BENCH_ENFORCE=0 SIMPLE_CTYPE_BENCH_CLEAN=1 SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple SIMPLE_LIB=/tmp/simple-ctype-perf/src bash test/perf/ctype/run_ctype_benchmarks.shs
+git diff --check
+```
+
+Results:
+
+- Static LUT check passed and native build succeeded.
+- Native static LUT execution produced invalid checksums:
+  `is_alpha expected=52000000 actual=128000000`,
+  `is_alnum expected=62000000 actual=128000000`,
+  `is_xdigit expected=22000000 actual=128000000`,
+  `is_space expected=6000000 actual=0`; after the benchmark cleanup, this run
+  returns `exit_code=1`.
+- Current cross-module benchmark still misses the 0.50x native/C floor on eight
+  entries: `is_digit 0.37x`, `is_upper 0.54x`, `is_lower 0.36x`,
+  `is_alpha 0.25x`, `is_alnum 0.20x`, `is_xdigit 0.45x`,
+  `is_space 0.16x`, `to_lower 0.21x`, `to_upper 0.25x`.
+- `git diff --check` passed.
+
+Conclusion: the static-data route is blocked by native correctness for
+cross-module module-level array lookup before it can be considered as a ctype
+performance fix. Do not apply the LUT to `src/lib/common/ctype.spl`; the next
+action belongs in backend/global-array correctness and branch/loop codegen.

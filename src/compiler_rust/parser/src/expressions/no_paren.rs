@@ -1,4 +1,4 @@
-use crate::ast::{Argument, AssignOp, AssignmentStmt, Expr, Node};
+use crate::ast::{Argument, AssignOp, AssignmentStmt, BinOp, Expr, Node};
 use crate::error::ParseError;
 use crate::parser_impl::core::{Parser, ParserMode};
 use crate::token::TokenKind;
@@ -6,6 +6,7 @@ use crate::token::TokenKind;
 impl<'a> Parser<'a> {
     pub(crate) fn parse_expression_or_assignment(&mut self) -> Result<Node, ParseError> {
         let expr = self.parse_expression()?;
+        let expr = self.normalize_bare_expect_comparison(expr);
 
         // Check for assignment
         let assign_op = match &self.current.kind {
@@ -102,6 +103,45 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn normalize_bare_expect_comparison(&self, expr: Expr) -> Expr {
+        if let Expr::Binary { op, left, right } = expr {
+            if matches!(
+                op,
+                BinOp::Eq
+                    | BinOp::NotEq
+                    | BinOp::Is
+                    | BinOp::In
+                    | BinOp::NotIn
+                    | BinOp::Lt
+                    | BinOp::Gt
+                    | BinOp::LtEq
+                    | BinOp::GtEq
+            ) {
+                if let Expr::Call { callee, mut args } = *left {
+                    if matches!(callee.as_ref(), Expr::Identifier(name) if name == "expect")
+                        && args.len() == 1
+                        && args[0].name.is_none()
+                    {
+                        let lhs = args[0].value.clone();
+                        args[0].value = Expr::Binary {
+                            op,
+                            left: Box::new(lhs),
+                            right,
+                        };
+                        return Expr::Call { callee, args };
+                    }
+                    return Expr::Binary {
+                        op,
+                        left: Box::new(Expr::Call { callee, args }),
+                        right,
+                    };
+                }
+            }
+            return Expr::Binary { op, left, right };
+        }
+        expr
+    }
+
     /// Parse no-paren calls on an expression
     pub(crate) fn parse_with_no_paren_calls(&mut self, expr: Expr) -> Result<Expr, ParseError> {
         // Handle trailing colon-block on an already-parenthesized call:
@@ -158,6 +198,7 @@ impl<'a> Parser<'a> {
             // Track depth for strict mode
             self.no_paren_depth += 1;
             let mut args = self.parse_no_paren_arguments()?;
+            self.extend_bare_expect_argument(&expr, &mut args)?;
             self.no_paren_depth -= 1;
 
             // Check for trailing lambda: func arg \x: body
@@ -206,6 +247,44 @@ impl<'a> Parser<'a> {
             };
         }
         Ok(expr)
+    }
+
+    /// `expect` is statement-like in specs: `expect (a and b) == c` should mean
+    /// `expect((a and b) == c)`, not `(expect(a and b)) == c`.
+    fn extend_bare_expect_argument(&mut self, callee: &Expr, args: &mut Vec<Argument>) -> Result<(), ParseError> {
+        if !matches!(callee, Expr::Identifier(name) if name == "expect") || args.len() != 1 {
+            return Ok(());
+        }
+
+        let current_kind = self.current.kind.clone();
+        let op = match current_kind {
+            TokenKind::Eq => Some(BinOp::Eq),
+            TokenKind::NotEq => Some(BinOp::NotEq),
+            TokenKind::Is => Some(BinOp::Is),
+            TokenKind::In => Some(BinOp::In),
+            TokenKind::Lt => Some(BinOp::Lt),
+            TokenKind::Gt => Some(BinOp::Gt),
+            TokenKind::LtEq => Some(BinOp::LtEq),
+            TokenKind::GtEq => Some(BinOp::GtEq),
+            TokenKind::Not if self.peek_is(&TokenKind::In) => {
+                self.advance();
+                Some(BinOp::NotIn)
+            }
+            _ => None,
+        };
+
+        if let Some(op) = op {
+            self.advance();
+            let left = args[0].value.clone();
+            let right = self.parse_expression()?;
+            args[0].value = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+
+        Ok(())
     }
 
     /// Check if an expression can be a callee for no-parens calls

@@ -1,4 +1,4 @@
-use simple_parser::ast::Node;
+use simple_parser::ast::{BinOp, Expr, Node};
 use simple_parser::Parser;
 
 fn parse(src: &str) -> Vec<Node> {
@@ -56,6 +56,19 @@ fn parse_pass_todo_two_rationale_strings() {
 fn parse_todo_two_rationale_strings_as_pass() {
     let items = parse("todo(\"implement retry backoff\", \"tracked by SIMPLE-123\")");
     assert!(matches!(&items[0], Node::Pass(_)));
+}
+
+#[test]
+fn parse_bare_expect_parenthesized_comparison_as_single_argument() {
+    let items = parse("expect (true and false) == false");
+    match &items[0] {
+        Node::Expression(Expr::Call { callee, args }) => {
+            assert!(matches!(callee.as_ref(), Expr::Identifier(name) if name == "expect"));
+            assert_eq!(args.len(), 1);
+            assert!(matches!(args[0].value, Expr::Binary { op: BinOp::Eq, .. }));
+        }
+        other => panic!("expected bare expect call expression, got {other:?}"),
+    }
 }
 
 // Main binding

@@ -1,9 +1,9 @@
-use compiler.common.attributes.{parse_driver_manifest_attrs, DriverManifestAttrKind}
+use compiler.common.attributes.{parse_driver_manifest_attrs, DriverManifestAttr, DriverManifestAttrKind}
 use compiler.frontend.parser_types.{Attribute, Expr, ExprKind}
-from lexer import {Span}
+use compiler.common.diagnostics.span.{Span}
 
 fn empty_span() -> Span:
-    Span(start: 0, end_pos: 0, line: 1, col: 1)
+    Span.default()
 
 fn int_expr(value: i64) -> Expr:
     Expr(kind: ExprKind.IntLit(value), span: empty_span())
@@ -23,11 +23,24 @@ fn assign_expr(name: text, value: Expr) -> Expr:
 fn attr(name: text, args: [Expr]) -> Attribute:
     Attribute(name: name, args: args, span: empty_span())
 
+fn missing_attr() -> Attribute:
+    attr("repr", [string_expr("C")])
+
+fn default_driver_attr() -> DriverManifestAttr:
+    parse_driver_manifest_attrs([missing_attr()]) ?? DriverManifestAttr(
+        kind: DriverManifestAttrKind.Driver,
+        driver_class: -1,
+        vendor: -1,
+        device_ids: [],
+        version: "",
+        abi: ""
+    )
+
 describe "driver manifest attributes":
     it "parses positional @driver manifest fields":
         val parsed = parse_driver_manifest_attrs([
             attr("driver", [int_expr(0), int_expr(0x8086), array_expr([int_expr(0x2922), int_expr(0x2829)]), string_expr("1.0")])
-        ]).unwrap()
+        ]) ?? default_driver_attr()
         expect(parsed.kind).to_equal(DriverManifestAttrKind.Driver)
         expect(parsed.driver_class).to_equal(0)
         expect(parsed.vendor).to_equal(0x8086)
@@ -43,7 +56,7 @@ describe "driver manifest attributes":
                 assign_expr("device", array_expr([int_expr(1), int_expr(2)])),
                 assign_expr("version", string_expr("2.0"))
             ])
-        ]).unwrap()
+        ]) ?? default_driver_attr()
         expect(parsed.kind).to_equal(DriverManifestAttrKind.Driver)
         expect(parsed.driver_class).to_equal(8)
         expect(parsed.vendor).to_equal(0x1234)
@@ -56,7 +69,7 @@ describe "driver manifest attributes":
                 assign_expr("abi", string_expr("simple")),
                 assign_expr("version", string_expr("12.3"))
             ])
-        ]).unwrap()
+        ]) ?? default_driver_attr()
         expect(parsed.kind).to_equal(DriverManifestAttrKind.NativeLib)
         expect(parsed.driver_class).to_equal(15)
         expect(parsed.abi).to_equal("simple")

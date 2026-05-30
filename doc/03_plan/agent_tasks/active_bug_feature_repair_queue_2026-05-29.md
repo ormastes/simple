@@ -1218,3 +1218,21 @@ Spawned read-only explorers:
       `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/perf/typed_array_alloc_spec.spl --mode=interpreter --clean --fail-fast`,
       and
       `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/feature/scilib/perf_sugar_spec.spl --mode=interpreter --clean --fail-fast`.
+80. Crash-left worktree salvage integrated as scoped evidence.
+    - Recovered the dirty worktrees for ctype perf, FR-COMPILER-012 final sync,
+      FR-DRIVER-0001, FR-PLUG-0004, SimpleOS in-guest toolchain execution, and
+      the supposed ndarray-push worktree.
+    - The ndarray-push worktree contained only CRLF/LF churn in a generated
+      Android Gradle wrapper plus an unrelated detached commit; no ndarray
+      implementation was integrated.
+    - FR-COMPILER-012 parser precedence cleanup is implemented, but the
+      duplicate JIT-rendering tracker item remains open.
+    - Focused parser verification passed for Rust parser statements and
+      `parser_keywords_spec.spl`; `parser_operators_spec.spl` still has five
+      assignment-operator failures in an unrelated section and remains a
+      separate follow-up gate.
+    - Ctype perf, FR-PLUG-0004, FR-DRIVER-0001, and in-guest toolchain entries
+      remain open with stronger blocker evidence and focused diagnostics rather
+      than false completion claims.
+    - Integration was done from a clean `origin/main` worktree because the
+      default checkout had concurrent live edits and `jj` conflict state.

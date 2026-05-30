@@ -37,9 +37,9 @@ use compiler.semantics.lint.sffi_lint.{
     check_sffi005_platform_dependent,
     check_sffi008_platform_attr_diagnostics
 }
-from hir_definitions import {HirClass, HirField, HirExpr, HirExprKind}
-from hir_types import {HirType, HirTypeKind, SymbolId}
-from lexer import {Span}
+use compiler.hir.hir_definitions.{HirClass, HirField, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.common.diagnostics.span.{Span}
 use compiler.types.type_layout.{
     LayoutAttr, LayoutKind,
     PlatformAbi, PlatformBit, PlatformPredicate, PlatformVariant, PlatformParseResult,
@@ -53,7 +53,7 @@ use compiler.core.types.{TYPE_I64, custom_primitive_register, custom_primitive_b
 # ============================================================================
 
 fn empty_span() -> Span:
-    Span(start: 0, end_pos: 0, line: 1, col: 1)
+    Span.default()
 
 fn make_hir_type(kind: HirTypeKind) -> HirType:
     HirType(kind: kind, span: empty_span())
@@ -91,10 +91,13 @@ fn make_array_type() -> HirType:
 fn make_function_type() -> HirType:
     make_hir_type(HirTypeKind.Function([make_i32_type()], make_i32_type(), []))
 
+fn make_capturing_function_type() -> HirType:
+    make_hir_type(HirTypeKind.Function([make_i32_type()], make_i32_type(), ["captures"]))
+
 fn make_custom_primitive_i64_type(name: text, symbol_id: i64) -> HirType:
     custom_primitive_register(name, TYPE_I64)
     custom_primitive_bind_symbol(name, symbol_id)
-    make_hir_type(HirTypeKind.Named(SymbolId(id: symbol_id), []))
+    make_hir_type(HirTypeKind.Named(SymbolId.new(symbol_id), []))
 
 fn dummy_expr() -> HirExpr:
     """Create a dummy HirExpr (UnitLit) for fields without defaults."""
@@ -108,7 +111,7 @@ fn dummy_expr() -> HirExpr:
 fn make_field(name: text, type_: HirType) -> HirField:
     """Create a minimal HirField for testing."""
     HirField(
-        symbol: SymbolId(id: 0),
+        symbol: SymbolId.new(0),
         name: name,
         type_: type_,
         has_default: false,
@@ -136,7 +139,7 @@ fn make_exported_class(name: text, fields: [HirField], has_repr_c: bool) -> HirC
         LayoutAttr(layout_kind: LayoutKind.Simple, is_packed: false)
 
     HirClass(
-        symbol: SymbolId(id: 1),
+        symbol: SymbolId.new(1),
         name: name,
         type_params: [],
         fields: fields,
@@ -181,7 +184,7 @@ fn make_exported_platform_class(name: text, fields: [HirField], has_repr_c: bool
 fn make_non_exported_class(name: text, fields: [HirField]) -> HirClass:
     """Create a HirClass without @export("C")."""
     HirClass(
-        symbol: SymbolId(id: 2),
+        symbol: SymbolId.new(2),
         name: name,
         type_params: [],
         fields: fields,
@@ -306,15 +309,15 @@ describe "SFFI Lint Rules":
             expect(warnings[0].severity).to_equal("ERROR")
             expect(warnings[0].message).to_contain("Optional")
 
-        it "errors for Function field":
+        it "errors for captured Function field":
             val fields = [
-                make_field("callback", make_function_type())
+                make_field("callback", make_capturing_function_type())
             ]
             val cls = make_exported_class("BadClass", fields, true)
             val warnings = check_sffi001_c_compatible_types(cls, "test.spl")
             expect(warnings.len()).to_equal(1)
             expect(warnings[0].code).to_equal("SFFI001")
-            expect(warnings[0].message).to_contain("Function")
+            expect(warnings[0].message).to_contain("closure")
 
         it "reports multiple errors for multiple non-C fields":
             val fields = [

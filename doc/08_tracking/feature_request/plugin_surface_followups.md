@@ -1,6 +1,6 @@
 # Plugin Surface — Follow-up Feature Requests
 
-**Status: PARTIAL** — FR-PLUG-0001 is implemented in source and verified with a rebuilt debug driver. FR-PLUG-0002 and FR-PLUG-0003 are structurally implemented (pure Simple, no Rust). FR-PLUG-0004 has pure-Simple static-marker verification but remains backend-fusion blocked by the compile-mode/Cranelift verification constraint. FR-PLUG-0005 is implemented as an explicit DI runtime-slot index with plugin-backed binding validation and deterministic resolution. See per-item status below.
+**Status: PARTIAL** — FR-PLUG-0001 is implemented in source and verified with a rebuilt debug driver. FR-PLUG-0002 and FR-PLUG-0003 are structurally implemented (pure Simple, no Rust). FR-PLUG-0004 has pure-Simple static-marker verification and focused Cranelift fallback evidence, but remains backend-fusion blocked by missing codegen pattern context. FR-PLUG-0005 is implemented as an explicit DI runtime-slot index with plugin-backed binding validation and deterministic resolution. See per-item status below.
 
 **Verification pass: 2026-05-29** — All five items reviewed against source. No new code added (no live-`.so` fixture available; FR-PLUG-0005 is deep-work). See per-item notes below.
 
@@ -147,7 +147,7 @@ release before the surface is declared stable.
 - **Filed-by:** /dev runtime-api-block-sugar-plugins (sstack Phase 1 explicit defer)
 - **Target:** plugin / 70.backend.cranelift
 - **Priority:** P2
-- **Status:** Open — VERIFICATION-BLOCKED (interpreter cannot verify Cranelift path)
+- **Status:** Open — BACKEND-PATTERN-BLOCKED
 - **Requested-semantics:**
   AC-3 v1 ships a *dynamic-load* sugar registry consulted by the interpreter.
   The `[STATIC-NEXT]` marker at `c_backend_translate_ops.spl:145` (the
@@ -179,6 +179,15 @@ release before the surface is declared stable.
   `SIMPLE_LIB=src bin/simple test test/feature/plugin/sugar_plugin_spec.spl --mode=interpreter --clean`
   (`12/12`). This verifies the handoff markers only; fused backend emission,
   performance delta, and dynamic fallback ACs remain open.
+- **Verification (2026-05-30, focused blocker evidence):** Added a
+  `sugar_plugin_spec.spl` assertion for the live Cranelift adapter. The adapter
+  `translate_binop(ctx, op, a, b, left_operand, func)` receives the already
+  lowered operands for one binary op and its fallback arm still documents
+  `Pow, MatMul, Broadcast ops: fall back to integer add` before returning
+  `cranelift_iadd(ctx, a, b)`. This proves FR-PLUG-0004 cannot be honestly
+  closed within plugin/sugar docs/tests alone: codegen needs a real static-rule
+  table plus MIR/codegen pattern context for `MatMul` followed by
+  `BroadcastAdd`, then a backend emission path for the fused GEMM-add call.
 - **Notes:** Verification of this in interpreter mode is impossible by
   design — needs a Cranelift-mode test harness (see
   `feedback_compile_mode_false_greens.md` for current limitations).

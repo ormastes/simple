@@ -27,3 +27,6 @@ ship-done
 - impl: Tightened toolchain VFS probe completion contract to require prepared-task markers.
 - verify: Focused check and smoke tests passed; real compiler payloads remain unbuilt.
 - ship: Refreshed tracker and real-OS audit references for the prepared-task evidence and corrected tracker path.
+- impl: Added a pure Simple guest-toolchain execution status gate so deploy status reports BLOCKED until real clang/rust payloads and bake enablement are present.
+- verify: Focused gate check passed, deploy_toolchains_status_spec passed 2/2, and deploy_toolchains --status runs via interpreter fallback and reports guest-toolchain-exec-gate BLOCKED with missing payload blockers.
+- ship: Updated tracker with the fresh blocker evidence; full in-guest compiler execution remains open.

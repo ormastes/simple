@@ -199,6 +199,21 @@ If multiple LLMs participate in research:
 - Stub Prevention: no `pass_todo` in final code (STUB001 = hard fail)
 - `Result<T, E>` + `?` for error handling (no try/catch)
 
+### Crash / Worktree Recovery
+
+When a crash leaves parallel Codex or Claude worktrees behind, recover them as
+bounded implementation slices before deleting anything:
+
+- Inspect each dirty worktree and preserve its tracker, SPipe state, source,
+  and test deltas with the original write scope.
+- Integrate from a clean workspace based on current `origin/main` when the
+  default checkout is still being edited by another session.
+- Record evidence-only salvage as blocker documentation, not as feature
+  completion, unless focused verification proves the requested behavior.
+- Keep detached worktree commits protected with a branch, tag, or integrated
+  commit before removing the worktree.
+- Use `jj git fetch` plus `jj rebase -d main@origin`; do not merge-pull.
+
 ---
 
 ## Phase 4: Verify

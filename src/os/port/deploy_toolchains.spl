@@ -19,6 +19,7 @@
 use std.fs
 use std.process
 use std.text
+use os.port.guest_toolchain_execution_gate.{guest_toolchain_execution_gate_detail}
 
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_dir_exists(path: text) -> bool
@@ -193,24 +194,37 @@ fn check_status() -> List<StageStatus>:
     # 7. In-guest static compiler payloads used by disk_image_bake.spl.
     var clang_static_status = "NOT BUILT"
     var clang_static_detail = "missing build/os/clang_static/bin/clang_static"
+    var clang_static_ready = false
     if rt_file_exists("build/os/clang_static/bin/clang_static"):
         clang_static_status = "READY"
         clang_static_detail = ""
+        clang_static_ready = true
     stages = stages + [StageStatus(name: "clang-static-guest", status: clang_static_status, detail: clang_static_detail)]
 
     var rustc_static_status = "NOT BUILT"
     var rustc_static_detail = "missing build/os/rust_static/bin/rustc_static"
+    var rustc_static_ready = false
     if rt_file_exists("build/os/rust_static/bin/rustc_static"):
         rustc_static_status = "READY"
         rustc_static_detail = ""
+        rustc_static_ready = true
     stages = stages + [StageStatus(name: "rustc-static-guest", status: rustc_static_status, detail: rustc_static_detail)]
 
     var bake_status = "DISABLED"
     var bake_detail = "touch build/os/.bake_include_toolchain to embed guest compiler payloads"
+    var bake_enabled = false
     if rt_file_exists("build/os/.bake_include_toolchain"):
         bake_status = "ENABLED"
         bake_detail = ""
+        bake_enabled = true
     stages = stages + [StageStatus(name: "toolchain-disk-bake", status: bake_status, detail: bake_detail)]
+
+    val exec_gate_detail = guest_toolchain_execution_gate_detail(clang_static_ready, rustc_static_ready, bake_enabled)
+    stages = stages + [StageStatus(
+        name: "guest-toolchain-exec-gate",
+        status: if exec_gate_detail == "READY": "READY" else: "BLOCKED",
+        detail: if exec_gate_detail == "READY": "" else: exec_gate_detail,
+    )]
 
     stages
 
@@ -222,8 +236,8 @@ fn print_status():
     val stages = check_status()
     for stage in stages:
         var line = "  {stage.name}"
-        # Pad to 20 characters
-        while line.len() < 22:
+        # Keep long gate names readable in aligned status output.
+        while line.len() < 30:
             line = line + " "
         line = line + stage.status
         if stage.detail != "":

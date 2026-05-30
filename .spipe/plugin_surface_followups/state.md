@@ -28,3 +28,8 @@ ship-done
 - verify: `SIMPLE_LIB=src bin/simple test test/feature/plugin/sugar_plugin_spec.spl --mode=interpreter --clean` passed (`12/12`).
 - refactor-doc-wiki: Updated `doc/08_tracking/feature_request/plugin_surface_followups.md`; no broader process/wiki references needed changes.
 - ship: FR-PLUG-0004 remains backend-fusion blocked; marker verification is complete.
+- dev: Re-opened FR-PLUG-0004 from current tracker state; prior evidence was static-marker only.
+- implement: Added focused blocker assertion that the live Cranelift adapter still sends MatMul/Broadcast ops through the generic integer-add fallback and lacks multi-op fusion context.
+- verify: `SIMPLE_LIB=/tmp/simple-fr-plug-0004/src /home/ormastes/dev/pub/simple/bin/simple check test/feature/plugin/sugar_plugin_spec.spl` passed.
+- verify: `SIMPLE_LIB=/tmp/simple-fr-plug-0004/src /home/ormastes/dev/pub/simple/bin/simple test test/feature/plugin/sugar_plugin_spec.spl --mode=interpreter --clean` passed (`13/13`).
+- ship: FR-PLUG-0004 status updated to BACKEND-PATTERN-BLOCKED; no Rust/runtime/native implementation attempted in this scoped pass.

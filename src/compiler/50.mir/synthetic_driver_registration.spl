@@ -178,29 +178,52 @@ fn expr_list_find_register_static_driver_call(exprs: [HirExpr], symbols: SymbolT
 fn classify_register_static_driver_args(args: [HirCallArg], symbols: SymbolTable) -> RegisterStaticDriverCall:
     if args.len() < 2:
         return RegisterStaticDriverCall(found: true, has_ops_value: false, ops_value_name: "")
-    val ops_arg = args[1].value
-    match ops_arg.kind:
+    var i = 0
+    while i < args.len():
+        val arg = args[i].value
+        match arg.kind:
+            case Var(symbol):
+                if symbol_is_driver_ops_value(symbol, symbols):
+                    var ops_name = symbol_name_in_current_scope(symbol, symbols)
+                    if ops_name == "":
+                        val visible_ops = find_driver_ops_value(symbols)
+                        if visible_ops.?:
+                            ops_name = visible_ops.unwrap()
+                    return RegisterStaticDriverCall(found: true, has_ops_value: true, ops_value_name: ops_name)
+            case _:
+                false
+        i = i + 1
+    match args[1].value.kind:
         case Var(symbol):
-            if symbol_is_driver_ops_value(symbol, symbols):
-                val sym = symbols.get(symbol)
-                if sym.?:
-                    return RegisterStaticDriverCall(found: true, has_ops_value: true, ops_value_name: sym.unwrap().name)
+            return RegisterStaticDriverCall(found: true, has_ops_value: true, ops_value_name: symbol_name_in_current_scope(symbol, symbols))
         case _:
             false
     RegisterStaticDriverCall(found: true, has_ops_value: false, ops_value_name: "")
 
 fn find_driver_ops_value(symbols: SymbolTable) -> text?:
-    for id in symbols.symbols.keys():
-        val symbol = symbols.symbols[id]
-        if symbol_is_driver_ops_value(symbol.id, symbols):
-            return Some(symbol.name)
+    val scope = symbols.scopes[symbols.current_scope.id]
+    for name in scope.symbols.keys():
+        val id = scope.symbols[name]
+        if symbol_is_driver_ops_value(id, symbols):
+            return Some(name)
     nil
 
+fn symbol_name_in_current_scope(symbol_id: SymbolId, symbols: SymbolTable) -> text:
+    var scope_id = symbols.current_scope
+    loop:
+        val scope = symbols.scopes[scope_id.id]
+        for name in scope.symbols.keys():
+            if scope.symbols[name].id == symbol_id.id:
+                return name
+        if scope.parent.?:
+            scope_id = scope.parent.unwrap()
+        else:
+            break
+    val symbol = symbols.get(symbol_id)
+    symbol.name
+
 fn symbol_is_driver_ops_value(symbol_id: SymbolId, symbols: SymbolTable) -> bool:
-    val sym = symbols.get(symbol_id)
-    if not sym.?:
-        return false
-    val symbol = sym.unwrap()
+    val symbol = symbols.get(symbol_id)
     if not symbol.type_.?:
         return false
     return type_is_named(symbol.type_.unwrap(), symbols, "DriverOps")
@@ -209,9 +232,7 @@ fn type_is_named(type_: HirType, symbols: SymbolTable, expected: text) -> bool:
     match type_.kind:
         case Named(type_symbol, _):
             val sym = symbols.get(type_symbol)
-            if sym.?:
-                return sym.unwrap().name == expected
-            false
+            return sym.name == expected
         case Ref(inner, _):
             type_is_named(inner, symbols, expected)
         case Optional(inner):
@@ -223,8 +244,6 @@ fn expr_is_symbol_named(expr: HirExpr, symbols: SymbolTable, expected: text) -> 
     match expr.kind:
         case Var(symbol):
             val sym = symbols.get(symbol)
-            if sym.?:
-                return sym.unwrap().name == expected
-            false
+            return sym.name == expected
         case _:
             false

@@ -688,7 +688,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** usage-spec sweep session
 - **Target:** parser / `src/compiler/`
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented
 - **Requested-semantics:**
   `expect (true and true) == true` is currently parsed as
   `(expect(true and true)) == true` — i.e., `expect` consumes the parenthesized
@@ -700,9 +700,26 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   keyword whose operand extends to end-of-expression (like `return`), not as a
   function call that stops at the first complete expression.
 - **Acceptance-criteria:**
-  - [ ] `expect (true and true) == true` parses equivalently to
+  - [x] `expect (true and true) == true` parses equivalently to
         `expect((true and true) == true)`.
-  - [ ] No regression in existing passing `expect` tests.
+  - [x] No regression in existing passing `expect` tests.
 - **Related-upfront:** none
-- **Notes:** Discovered while fixing `test/feature/usage/parser_keywords_spec.spl`
+- **Related-design-doc:** `.spipe/fr_compiler_012_expect_precedence/state.md`
+- **Notes:**
+  Discovered while fixing `test/feature/usage/parser_keywords_spec.spl`
   and `parser_operators_spec.spl` (the `and`/`or` operator tests).
+
+  Implemented 2026-05-30:
+  - `src/compiler_rust/parser/src/expressions/no_paren.rs` now normalizes
+    `(expect(lhs)) == rhs`-style comparison expressions into `expect(lhs == rhs)`
+    for bare `expect` calls.
+  - Focused parser AST coverage was added in
+    `src/compiler_rust/parser/tests/statements.rs`.
+  - Usage specs now exercise the unwrapped `expect (a and b) == c` form in the
+    parser keyword/operator logical cases.
+  - Verification passed:
+    `cargo test --manifest-path /tmp/simple-final-sync/src/compiler_rust/parser/Cargo.toml --test statements -- parse_bare_expect_parenthesized_comparison_as_single_argument --nocapture`
+    and
+    `SIMPLE_LIB=/tmp/simple-final-sync/src /tmp/simple-final-sync/src/compiler_rust/target/debug/simple test test/feature/usage/parser_keywords_spec.spl --mode=interpreter --clean --fail-fast`.
+  - `parser_operators_spec.spl` logical cases pass with the rebuilt binary, but
+    the full file still has unrelated assignment-operator failures.
