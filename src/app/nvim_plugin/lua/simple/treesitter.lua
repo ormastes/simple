@@ -1,16 +1,8 @@
 -- lua/simple/treesitter.lua
 -- Tree-sitter parser registration and query path management
 --
--- The Simple project includes 6 tree-sitter query files at:
---   src/compiler/parser/treesitter/queries/
---
--- Query files:
---   highlights.scm   (538 lines) - Syntax highlighting: 100+ keywords, 50+ scope types
---   locals.scm       (411 lines) - Scope tracking and variable resolution
---   folds.scm        (404 lines) - Code folding regions
---   textobjects.scm  (587 lines) - Semantic text objects for selection/navigation
---   injections.scm   (373 lines) - Embedded language support (15+ injected languages)
---   indents.scm      (454 lines) - Auto-indentation rules
+-- The Simple project keeps Neovim-compatible tree-sitter queries at:
+--   src/compiler/10.frontend/parser/treesitter/queries/
 
 local M = {}
 
@@ -57,9 +49,10 @@ function M.setup(cfg)
 end
 
 --- Configure query paths so Neovim finds the existing .scm files
---- Looks for queries at src/compiler/parser/treesitter/queries/ in the project tree.
+--- Looks for queries in the project tree or relative to this plugin checkout.
 ---@param cfg SimpleTreesitterConfig
 function M._setup_query_paths(cfg)
+  cfg = cfg or {}
   local query_path = cfg.query_path
 
   -- Auto-detect: look for the queries in the project tree
@@ -78,7 +71,7 @@ function M._setup_query_paths(cfg)
 end
 
 --- Find the project's tree-sitter query directory
---- Expected path: src/compiler/parser/treesitter/queries/
+--- Expected path: src/compiler/10.frontend/parser/treesitter/queries/
 ---@return string|nil
 function M._find_project_queries()
   -- Search upward from cwd for the queries directory
@@ -97,12 +90,37 @@ function M._find_project_queries()
     return vim.fs.dirname(found[1])
   end
 
+  -- When the plugin is loaded from this repository, derive the query path from
+  -- this module location instead of relying on the editor cwd.
+  local source = debug.getinfo(1, "S").source
+  if source and vim.startswith(source, "@") then
+    local plugin_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(source:sub(2))))
+    local repo_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(plugin_root)))
+    local repo_queries = repo_root .. "/src/compiler/10.frontend/parser/treesitter/queries"
+    if vim.fn.filereadable(repo_queries .. "/highlights.scm") == 1 then
+      return repo_queries
+    end
+
+    local legacy_queries = repo_root .. "/src/compiler/parser/treesitter/queries"
+    if vim.fn.filereadable(legacy_queries .. "/highlights.scm") == 1 then
+      return legacy_queries
+    end
+  end
+
   return nil
 end
 
 --- Register query files from a directory path
 ---@param query_dir string Path to directory containing .scm files
 function M._register_queries(query_dir)
+  if type(query_dir) ~= "string" or query_dir == "" or vim.fn.isdirectory(query_dir) ~= 1 then
+    return
+  end
+
+  if not (vim.treesitter and vim.treesitter.query and vim.treesitter.query.set) then
+    return
+  end
+
   -- Read and register each query type
   local query_types = {
     { file = "highlights.scm", name = "highlights" },
@@ -119,8 +137,13 @@ function M._register_queries(query_dir)
       local content = vim.fn.readfile(filepath)
       if content and #content > 0 then
         local query_text = table.concat(content, "\n")
-        -- Use pcall because the parser might not be installed yet
-        pcall(vim.treesitter.query.set, "simple", qt.name, query_text)
+        local ok, err = pcall(vim.treesitter.query.set, "simple", qt.name, query_text)
+        if not ok then
+          vim.notify(
+            string.format("simple.nvim: failed to load %s tree-sitter query: %s", qt.name, tostring(err)),
+            vim.log.levels.WARN
+          )
+        end
       end
     end
   end
@@ -129,6 +152,9 @@ end
 --- Check if the Simple tree-sitter parser is available
 ---@return boolean
 function M.is_parser_available()
+  if not (vim.treesitter and vim.treesitter.language and vim.treesitter.language.inspect) then
+    return false
+  end
   local ok = pcall(vim.treesitter.language.inspect, "simple")
   return ok
 end

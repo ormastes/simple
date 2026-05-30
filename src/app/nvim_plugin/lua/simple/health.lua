@@ -1,7 +1,7 @@
 -- lua/simple/health.lua
 -- :checkhealth simple integration
 --
--- Checks for the Simple LSP server (src/app/lsp/), tree-sitter queries
+-- Checks for the Simple LSP server, tree-sitter queries
 -- (src/compiler/parser/treesitter/queries/), and project structure.
 
 local M = {}
@@ -48,7 +48,7 @@ function M.check()
 end
 
 function M._check_lsp()
-  vim.health.start("LSP Server (src/app/lsp/)")
+  vim.health.start("LSP Server")
 
   local cfg = require("simple").config
   if not cfg then
@@ -61,64 +61,44 @@ function M._check_lsp()
     return
   end
 
-  -- Check if `simple lsp` binary exists
-  local cmd = cfg.lsp.cmd
-  if cmd and #cmd > 0 then
-    local bin = cmd[1]
+  local lsp = require("simple.lsp")
+  local cmd, err = lsp._find_server_cmd(vim.fn.getcwd(), cfg.lsp)
 
-    -- Try absolute/relative path
-    if vim.fn.executable(bin) == 1 then
-      vim.health.ok("LSP server binary found: " .. bin)
+  if cmd then
+    vim.health.ok("LSP server command found: " .. table.concat(cmd, " "))
+
+    -- Verify the configured LSP command accepts --help without invoking a shell.
+    local help_cmd = vim.deepcopy(cmd)
+    table.insert(help_cmd, "--help")
+    local result = vim.fn.system(help_cmd)
+    if vim.v.shell_error == 0 then
+      vim.health.ok("LSP command help is available")
     else
-      -- Try in project root
-      local project_bin = vim.fn.getcwd() .. "/" .. bin
-      if vim.fn.executable(project_bin) == 1 then
-        vim.health.ok("LSP server binary found at: " .. project_bin)
-      else
-        vim.health.warn(
-          string.format("LSP server binary not found: %s (will search PATH on startup)", bin)
-        )
-      end
-    end
-  end
-
-  -- Verify `simple lsp` subcommand works
-  local lsp_bin = nil
-  if cmd and #cmd > 0 then
-    lsp_bin = cmd[1]
-    if not vim.startswith(lsp_bin, "/") then
-      local abs = vim.fn.getcwd() .. "/" .. lsp_bin
-      if vim.fn.executable(abs) == 1 then
-        lsp_bin = abs
-      end
+      vim.health.warn("LSP command did not accept --help: " .. vim.trim(result))
     end
   else
-    local project_bin = vim.fn.getcwd() .. "/bin/simple"
-    if vim.fn.executable(project_bin) == 1 then
-      lsp_bin = project_bin
-    elseif vim.fn.executable("simple") == 1 then
-      lsp_bin = "simple"
-    end
+    vim.health.warn(err)
   end
 
-  if lsp_bin and vim.fn.executable(lsp_bin) == 1 then
-    local result = vim.fn.system({ lsp_bin, "lsp", "--help" })
-    if vim.v.shell_error == 0 then
-      vim.health.ok("`" .. lsp_bin .. " lsp` subcommand is available")
-    else
-      vim.health.warn("`" .. lsp_bin .. " lsp` subcommand not found. Update your Simple binary.")
-    end
-  end
-
-  -- Check for src/app/lsp/ directory (the LSP implementation)
+  -- Check for LSP source directories in the current repository
   local cwd = vim.fn.getcwd()
-  local lsp_dir = cwd .. "/src/app/lsp"
-  if vim.fn.isdirectory(lsp_dir) == 1 then
-    vim.health.ok("LSP implementation found at: src/app/lsp/")
-
-    -- Check for key handler files
+  local lsp_dirs = {
+    "src/lib/gc_sync_mut/lsp",
+    "src/lib/gc_async_mut/lsp",
+    "src/lib/nogc_sync_mut/lsp",
+    "src/lib/nogc_async_mut/lsp",
+    "src/app/simple_lsp_mcp",
+  }
+  local found_source = false
+  for _, dir in ipairs(lsp_dirs) do
+    if vim.fn.isdirectory(cwd .. "/" .. dir) == 1 then
+      vim.health.ok("LSP source directory found: " .. dir)
+      found_source = true
+    end
+  end
+  if found_source then
     local handlers = { "hover.spl", "completion.spl", "definition.spl", "references.spl", "semantic_tokens.spl", "diagnostics.spl" }
-    local handler_dir = lsp_dir .. "/handlers"
+    local handler_dir = cwd .. "/src/lib/gc_sync_mut/lsp/handlers"
     if vim.fn.isdirectory(handler_dir) == 1 then
       for _, h in ipairs(handlers) do
         local hpath = handler_dir .. "/" .. h
@@ -130,7 +110,7 @@ function M._check_lsp()
       end
     end
   else
-    vim.health.info("LSP source directory (src/app/lsp/) not found in cwd")
+    vim.health.info("LSP source directories not found in cwd")
   end
 
   -- Check if LSP is currently running

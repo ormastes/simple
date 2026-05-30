@@ -12,7 +12,7 @@ local M = {}
 
 ---@class SimpleLspConfig
 ---@field enabled boolean
----@field cmd string[]
+---@field cmd? string[]
 ---@field root_markers string[]
 ---@field settings table
 ---@field on_attach? fun(client: vim.lsp.Client, bufnr: integer)
@@ -40,7 +40,7 @@ local M = {}
 M.defaults = {
   lsp = {
     enabled = true,
-    cmd = { "simple", "lsp" },
+    cmd = nil,
     root_markers = { "simple.sdn", ".git" },
     settings = {},
     on_attach = nil,

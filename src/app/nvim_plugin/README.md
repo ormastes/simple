@@ -232,7 +232,7 @@ The default `<localleader>s` mappings include:
 ## Tree-sitter Queries
 
 The plugin automatically locates tree-sitter queries from the Simple project at
-`src/compiler/parser/treesitter/queries/`. These include:
+`src/compiler/10.frontend/parser/treesitter/queries/`. These include:
 
 - `highlights.scm` (538 lines) - Syntax highlighting (100+ keywords, 50+ scope types, operators, literals)
 - `locals.scm` (411 lines) - Scope tracking and variable resolution
@@ -250,6 +250,19 @@ Run `:checkhealth simple` to verify:
 - Tree-sitter parser installation
 - Math rendering status
 - Project structure detection
+
+## Worktree Smoke Test
+
+From the repository root, run:
+
+```bash
+python3 scripts/nvim_plugin_smoke.py
+```
+
+The smoke test starts isolated `nvim --headless` processes with this worktree's
+`src/app/nvim_plugin` on `runtimepath`. It verifies filetype loading, setup,
+LSP command discovery, Tree-sitter query discovery, ftplugin options, terminal
+command escaping, and Simple LSP client startup.
 
 ## License
 

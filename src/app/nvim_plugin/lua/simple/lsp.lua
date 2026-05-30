@@ -1,10 +1,9 @@
 -- lua/simple/lsp.lua
 -- LSP server configuration for the Simple language
 --
--- The LSP server is implemented in Simple itself at src/app/lsp/server.spl
--- and is started via `simple lsp` or `bin/simple lsp`.
+-- The LSP server is started via `simple lsp` or `bin/simple lsp`.
 --
--- Server capabilities (handled by src/app/lsp/handlers/):
+-- Server capabilities (handled by src/lib/*/lsp/handlers/):
 --   hover.spl          - Hover with math block detection (LaTeX + Unicode pretty text via src/lib/math_repr.spl)
 --   completion.spl     - Code completion
 --   definition.spl     - Go to definition
@@ -26,12 +25,25 @@ M._config = nil
 ---@param root_dir string
 ---@return string[]|nil cmd, string|nil reason
 local function find_server_cmd(root_dir, cfg)
+  cfg = cfg or {}
+  root_dir = root_dir or vim.fn.getcwd()
+
   -- If user provided an explicit command, use it
   if cfg.cmd and #cfg.cmd > 0 then
     local bin = cfg.cmd[1]
+    if type(bin) ~= "string" or bin == "" then
+      return nil, "lsp.cmd[1] must be a non-empty executable path"
+    end
+
+    for i, arg in ipairs(cfg.cmd) do
+      if type(arg) ~= "string" or arg == "" then
+        return nil, string.format("lsp.cmd[%d] must be a non-empty string", i)
+      end
+    end
+
     -- Resolve relative path against root_dir
     if not vim.startswith(bin, "/") then
-      local abs = root_dir .. "/" .. bin
+      local abs = vim.fn.fnamemodify(root_dir .. "/" .. bin, ":p")
       if vim.fn.executable(abs) == 1 then
         local resolved = vim.deepcopy(cfg.cmd)
         resolved[1] = abs
@@ -58,11 +70,14 @@ local function find_server_cmd(root_dir, cfg)
   return nil, "No Simple LSP server found. Install simple or set lsp.cmd in config."
 end
 
+M._find_server_cmd = find_server_cmd
+
 --- Find project root directory from a buffer
 ---@param bufnr integer
 ---@param markers string[]
 ---@return string
 local function find_root(bufnr, markers)
+  markers = markers or { "simple.sdn", ".git" }
   local buf_path = vim.api.nvim_buf_get_name(bufnr)
   if buf_path == "" then
     return vim.fn.getcwd()
@@ -142,51 +157,58 @@ local function default_on_attach(client, bufnr)
   end, opts)
 end
 
---- Setup LSP for Simple language files
+--- Start or attach the Simple LSP for one buffer.
+---@param bufnr integer
 ---@param cfg SimpleLspConfig
+local function start_for_buffer(bufnr, cfg)
+  if not vim.api.nvim_buf_is_valid(bufnr) or vim.bo[bufnr].filetype ~= "simple" then
+    return
+  end
+
+  local ok, clients = pcall(vim.lsp.get_clients, { bufnr = bufnr, name = "simple_ls" })
+  if ok and clients and #clients > 0 then
+    return
+  end
+
+  local root_dir = find_root(bufnr, cfg.root_markers)
+  local cmd, err = find_server_cmd(root_dir, cfg)
+
+  if not cmd then
+    vim.notify(err, vim.log.levels.WARN)
+    return
+  end
+
+  return vim.lsp.start({
+    name = "simple_ls",
+    cmd = cmd,
+    root_dir = root_dir,
+    settings = cfg.settings or {},
+    capabilities = M._make_capabilities(),
+    on_attach = function(client, buf)
+      default_on_attach(client, buf)
+      if cfg.on_attach then
+        cfg.on_attach(client, buf)
+      end
+    end,
+  }, { bufnr = bufnr })
+end
+
+M._start_for_buffer = start_for_buffer
+
 function M.setup(cfg)
+  cfg = cfg or {}
   M._config = cfg
 
-  -- Use Neovim 0.11+ vim.lsp.config if available, otherwise use autocommand approach
-  if vim.lsp.config and vim.lsp.enable then
-    -- Neovim 0.11+ native LSP configuration
-    vim.lsp.config("simple_ls", {
-      cmd = cfg.cmd,
-      filetypes = { "simple" },
-      root_markers = cfg.root_markers,
-      settings = cfg.settings or {},
-    })
-    vim.lsp.enable("simple_ls")
-  else
-    -- Neovim 0.9/0.10 fallback: use vim.lsp.start in an autocommand
-    vim.api.nvim_create_autocmd("FileType", {
-      group = vim.api.nvim_create_augroup("simple_lsp", { clear = true }),
-      pattern = "simple",
-      callback = function(ev)
-        local bufnr = ev.buf
-        local root_dir = find_root(bufnr, cfg.root_markers)
-        local cmd, err = find_server_cmd(root_dir, cfg)
+  vim.api.nvim_create_autocmd("FileType", {
+    group = vim.api.nvim_create_augroup("simple_lsp", { clear = true }),
+    pattern = "simple",
+    callback = function(ev)
+      start_for_buffer(ev.buf, cfg)
+    end,
+  })
 
-        if not cmd then
-          -- Silently skip -- :checkhealth will report this
-          return
-        end
-
-        vim.lsp.start({
-          name = "simple_ls",
-          cmd = cmd,
-          root_dir = root_dir,
-          settings = cfg.settings or {},
-          capabilities = M._make_capabilities(),
-          on_attach = function(client, buf)
-            default_on_attach(client, buf)
-            if cfg.on_attach then
-              cfg.on_attach(client, buf)
-            end
-          end,
-        })
-      end,
-    })
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    start_for_buffer(bufnr, cfg)
   end
 end
 

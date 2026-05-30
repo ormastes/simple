@@ -6,6 +6,31 @@ local M = {}
 ---@type SimpleConfig
 M._config = nil
 
+--- Shell-escape argv for use with :terminal.
+---@param argv string[]
+---@return string
+function M._shell_join(argv)
+  local escaped = {}
+  for _, arg in ipairs(argv or {}) do
+    if type(arg) == "string" and arg ~= "" then
+      table.insert(escaped, vim.fn.shellescape(arg))
+    end
+  end
+  return table.concat(escaped, " ")
+end
+
+--- Open a terminal split using an argv-style command.
+---@param argv string[]
+function M._open_terminal(argv)
+  local cmd_str = M._shell_join(argv)
+  if cmd_str == "" then
+    vim.notify("No command configured", vim.log.levels.WARN)
+    return
+  end
+  vim.cmd("botright split | terminal " .. cmd_str)
+  vim.cmd("startinsert")
+end
+
 --- Setup user commands
 ---@param cfg SimpleConfig
 function M.setup(cfg)
@@ -89,9 +114,10 @@ function M.setup(cfg)
   -- :SimpleSdoctest [file] - run sdoctest
   vim.api.nvim_create_user_command("SimpleSdoctest", function(cmd_opts)
     if cmd_opts.args and cmd_opts.args ~= "" then
-      local cmd_str = table.concat(M._config.commands.test_cmd, " ") .. " --sdoctest " .. cmd_opts.args
-      vim.cmd("botright split | terminal " .. cmd_str)
-      vim.cmd("startinsert")
+      local cmd = vim.deepcopy(M._config.commands.test_cmd)
+      table.insert(cmd, "--sdoctest")
+      table.insert(cmd, cmd_opts.args)
+      M._open_terminal(cmd)
     else
       require("simple.test_lens").run_sdoctest()
     end
@@ -178,11 +204,8 @@ function M.run_test(file)
     end
   end
 
-  local cmd_str = table.concat(cmd, " ")
-
   -- Use terminal for interactive output
-  vim.cmd("botright split | terminal " .. cmd_str)
-  vim.cmd("startinsert")
+  M._open_terminal(cmd)
 end
 
 --- Run Simple build command
@@ -194,13 +217,14 @@ function M.run_build(args)
     bin = "simple"
   end
 
-  local cmd_str = bin .. " build"
+  local cmd = { bin, "build" }
   if args and args ~= "" then
-    cmd_str = cmd_str .. " " .. args
+    for _, arg in ipairs(vim.fn.split(args)) do
+      table.insert(cmd, arg)
+    end
   end
 
-  vim.cmd("botright split | terminal " .. cmd_str)
-  vim.cmd("startinsert")
+  M._open_terminal(cmd)
 end
 
 --- Activate brief view: fold all definitions to show only signatures
@@ -326,7 +350,7 @@ function M.show_info()
     "",
     "Configuration:",
     "  LSP enabled:        " .. tostring(simple.config.lsp.enabled),
-    "  LSP cmd:            " .. table.concat(simple.config.lsp.cmd, " "),
+    "  LSP cmd:            " .. (simple.config.lsp.cmd and table.concat(simple.config.lsp.cmd, " ") or "auto"),
     "  Math enabled:       " .. tostring(simple.config.math.enabled),
     "  Math conceal:       " .. tostring(simple.config.math.conceal),
     "  Tree-sitter parser: " .. (ts.is_parser_available() and "installed" or "not installed"),

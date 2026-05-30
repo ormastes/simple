@@ -25,8 +25,8 @@ else
 end
 vim.wo.foldlevel = 99 -- start with all folds open
 
--- Keyword characters: allow ? and ! in identifiers for optional/mutable patterns
-vim.bo.iskeyword = vim.bo.iskeyword .. ",?,!"
+-- Keyword characters: allow ! suffixes, but keep ? as an operator.
+vim.bo.iskeyword = vim.bo.iskeyword .. ",!"
 
 -- File format
 vim.bo.fileformat = "unix"
