@@ -27,3 +27,5 @@ research-options-ready
 ## Log
 - dev: Created state file with 7 acceptance criteria (type: feature). Interpreted `x85` as x86 unless corrected by the user.
 - research: Added local research, domain research, feature requirement options, and NFR options. Final requirements are pending user option selection.
+- design-draft: Added a pre-requirements runtime contract matrix and draft system-test plan without selecting final requirements.
+- research: Recorded the explicit user-selection gate in `doc/02_requirements/feature/simpleos_ai_cli_js_node_port_selection_needed.md`; interactive selection prompt was unavailable in the current mode.

@@ -48,6 +48,9 @@ fn tool_awk(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal, input
     # --- BEGIN block ---
     if begin_src.len() > 0:
         val begin_result = _exec_action(begin_src, "", [], nr, 0, field_sep, terminal, awk_vars)
+        if begin_result.0 == -1:
+            write_error(terminal, "awk: syntax error in program")
+            return 1
         awk_vars = begin_result.1
 
     # --- Process files ---
@@ -71,6 +74,9 @@ fn tool_awk(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal, input
                         val matches = _pattern_matches(pattern, line, nr)
                         if matches:
                             val ctrl_pair = _exec_action(action, line, fields, nr, nf, field_sep, terminal, awk_vars)
+                            if ctrl_pair.0 == -1:
+                                write_error(terminal, "awk: syntax error in program")
+                                return 1
                             awk_vars = ctrl_pair.1
                             if ctrl_pair.0 == 1:
                                 matched_next = true
@@ -100,6 +106,9 @@ fn tool_awk(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal, input
                             val matches = _pattern_matches(pattern, line, nr)
                             if matches:
                                 val ctrl_pair2 = _exec_action(action, line, fields, nr, nf, field_sep, terminal, awk_vars)
+                                if ctrl_pair2.0 == -1:
+                                    write_error(terminal, "awk: syntax error in program")
+                                    return 1
                                 awk_vars = ctrl_pair2.1
                                 if ctrl_pair2.0 == 1:
                                     matched_next = true
@@ -133,6 +142,9 @@ fn tool_awk(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal, input
                                 val matches = _pattern_matches(pattern, line, nr)
                                 if matches:
                                     val ctrl_pair3 = _exec_action(action, line, fields, nr, nf, field_sep, terminal, awk_vars)
+                                    if ctrl_pair3.0 == -1:
+                                        write_error(terminal, "awk: syntax error in program")
+                                        return 1
                                     awk_vars = ctrl_pair3.1
                                     if ctrl_pair3.0 == 1:
                                         matched_next = true
@@ -439,11 +451,13 @@ fn _exec_action(action: text, line: text, fields: [text], nr: i32, nf: i32, sep:
     var cur_vars = vars
     for stmt in stmts:
         val s = stmt.trim()
+        val s_len = s.len()
+        val is_bare_print = s_len == 5 and s.starts_with("print")
         if s.len() == 0:
             pass_dn
         elif s == "next":
             return (1, cur_vars)
-        elif (s.starts_with("print") and s.len() == 5) or s == "print $0":
+        elif is_bare_print or s == "print $0":
             write_line(terminal, line)
         elif s.starts_with("print "):
             val rest = s.slice(6, s.len()).trim()
@@ -455,6 +469,8 @@ fn _exec_action(action: text, line: text, fields: [text], nr: i32, nf: i32, sep:
             terminal.write_string(formatted)
         else:
             # Variable assignment / accumulation: sum += $1, n++, var = expr
+            if not _is_valid_stmt(s):
+                return (-1, cur_vars)
             cur_vars = _exec_assign(s, line, fields, nr, nf, cur_vars)
     return (0, cur_vars)
 
@@ -520,6 +536,40 @@ fn _var_set(vars: [(text, text)], name: text, value: text) -> [(text, text)]:
     if not found:
         result = result.push((name, value))
     return result
+
+fn _is_valid_stmt(s: text) -> bool:
+    """Return true if s looks like a valid awk statement (not garbage syntax)."""
+    if s.len() == 0:
+        return true
+    if s == "next":
+        return true
+    if s.starts_with("print"):
+        return true
+    if s.starts_with("printf"):
+        return true
+    if s.ends_with("++") or s.ends_with("--"):
+        return true
+    if s.contains("+=") or s.contains("-=") or s.contains("*=") or s.contains("/="):
+        return true
+    if s.contains("="):
+        # Simple assignment: lhs must be a plain identifier
+        val eq_pos = _find_str(s, "=")
+        val lhs = s.slice(0, eq_pos).trim()
+        var all_alnum = true
+        var ci = 0
+        while ci < lhs.len():
+            val c = lhs.char_at(ci)
+            if not (c == "_" or (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9")):
+                all_alnum = false
+            ci = ci + 1
+        return all_alnum and lhs.len() > 0
+    # Unrecognized — contains special chars like ! at start (after pattern matching handled)
+    if s.contains("!"):
+        return false
+    # Unknown bare word — treat as invalid if it contains spaces (multi-word garbage)
+    if s.contains(" "):
+        return false
+    return true
 
 fn _exec_assign(stmt: text, line: text, fields: [text], nr: i32, nf: i32, vars: [(text, text)]) -> [(text, text)]:
     """Execute a variable assignment statement: var = expr, var += expr, var++."""
