@@ -14,6 +14,8 @@ use std.common.spec.scenario_helpers.{
     api_field_summary,
     api_field_list_summary,
     redacted_api_field_names,
+    redacted_api_field_group_names,
+    redacted_api_protocol_field_names,
     step_result,
     step_result_summary
 }
@@ -124,6 +126,16 @@ describe "scenario capture helpers":
         val names = ["content-type", "authorization", "cookie"]
         expect(redacted_api_field_names(names)).to_equal("authorization; cookie")
 
+    it "lists redacted api field names with group prefixes":
+        val names = ["content-type", "authorization", "cookie"]
+        expect(redacted_api_field_group_names("headers", names)).to_equal("headers.authorization; headers.cookie")
+
+    it "lists redacted protocol fields across params headers and response":
+        val params = ["method", "access_token"]
+        val headers = ["authorization", "content-type"]
+        val response_fields = ["result", "refresh_token"]
+        expect(redacted_api_protocol_field_names(params, headers, response_fields)).to_equal("params.access_token; headers.authorization; response.refresh_token")
+
     it "captures protocol provider details from structured fields":
         val artifact = capture_api_protocol_fields(
             "MCP tools call",
@@ -141,7 +153,25 @@ describe "scenario capture helpers":
         expect(artifact.body).to_contain("params: method=tools/call; id=7")
         expect(artifact.body).to_contain("headers: authorization=<redacted>; content-type=application/json")
         expect(artifact.body).to_contain("response fields: result.content[0].text=ok; isError=false")
-        expect(artifact.body).to_contain("redacted: authorization")
+        expect(artifact.body).to_contain("redacted: headers.authorization")
+
+    it "captures redaction notes for params headers and response fields":
+        val artifact = capture_api_protocol_fields(
+            "Token refresh",
+            "POST",
+            "/oauth/token",
+            ["grant_type", "refresh_token"],
+            ["refresh_token", "old-token"],
+            ["authorization", "content-type"],
+            ["Bearer client-secret", "application/json"],
+            ["access_token", "expires_in"],
+            ["new-token", "3600"]
+        )
+        expect(artifact.redacted).to_equal(true)
+        expect(artifact.body).to_contain("params: grant_type=refresh_token; refresh_token=<redacted>")
+        expect(artifact.body).to_contain("headers: authorization=<redacted>; content-type=application/json")
+        expect(artifact.body).to_contain("response fields: access_token=<redacted>; expires_in=3600")
+        expect(artifact.body).to_contain("redacted: params.refresh_token; headers.authorization; response.access_token")
 
 describe "scenario step result":
     it "creates a passing step result":

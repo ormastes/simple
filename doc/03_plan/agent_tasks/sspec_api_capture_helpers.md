@@ -15,6 +15,8 @@ owned by other agents and should not block this API slice.
 - Provide redaction-aware API/protocol field summaries.
 - Provide structured `capture_api_protocol_fields(...)` for provider code that
   already has parsed request, header, and response fields.
+- Record sensitive field names redacted from params, headers, and response
+  fields without recording their values.
 - Provide common capture-policy resolution for step, function/checker,
   scenario, file, folder, root, then built-in defaults.
 - Keep helpers pure except for the existing file-exists extern used by checker

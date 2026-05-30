@@ -170,8 +170,9 @@ documentation to hand-written-quality scenario manuals.
   provider wiring remains future work. `scenario_helpers` now exposes
   API/protocol capture helpers that produce the rich shared evidence artifacts,
   including structured field-list summaries and common sensitive-field
-  redaction for provider implementations; runtime provider wiring remains
-  future work.
+  redaction for provider implementations. Structured protocol captures now
+  record redacted sensitive field names across params, headers, and response
+  fields without leaking values; runtime provider wiring remains future work.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none
