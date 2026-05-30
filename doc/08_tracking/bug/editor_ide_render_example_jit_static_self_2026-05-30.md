@@ -61,3 +61,23 @@ target=pure_simple
 has_editor_source=true
 has_markdown_language=true
 ```
+
+## 2026-05-30 Recovery Recheck
+
+The recovered editor/IDE crash-session audit still proves the shared
+GUI/WebRender path through interpreter fallback:
+
+```bash
+SIMPLE_LIB=src bin/simple run examples/ide/simple_ide_render.spl
+bin/simple test test/unit/lib/editor/editor_launch_contract_spec.spl --mode=interpreter --clean
+```
+
+Current fallback text is:
+
+```text
+[INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: RenderBlock
+```
+
+Functional status remains PASS for the embedded example render contract, but the
+JIT/native proof remains open under this bug until the imported render block
+type is available to HIR lowering.

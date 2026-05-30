@@ -21,7 +21,7 @@ model). Editor surface details: `doc/07_guide/editor_tui.md`.
 | **Editor TUI** | `src/app/editor/tui_main.spl` | `bin/simple run src/app/editor/tui_main.spl <files>` | Split-pane, file-tree, diagnostics, command palette (`EditorController`) |
 | **Editor GUI** | `src/app/editor/gui_shell_core.spl` | GUI shell (SDL/Winit) | Same backend, desktop shell |
 | **Simple IDE** | `src/app/ide/main.spl` | `bin/simple run src/app/ide/main.spl [--tui|--gui|--gui-sdl] <files>` | Thin VS Code-like product entrypoint over the shared editor launch contract; currently a readiness/option-parsing entrypoint, not a rendering shell |
-| **Example IDE** | `examples/ide/simple_ide_launch.spl`, `examples/ide/simple_ide_render.spl` | `bin/simple run examples/ide/simple_ide_launch.spl`; `bin/simple run examples/ide/simple_ide_render.spl` | Minimal embedded/sample integrations: launch-contract parsing plus shared GUI/WebRender rendering of editor HTML |
+| **Example IDE** | `examples/ide/simple_ide_launch.spl`, `examples/ide/simple_ide_render.spl` | `bin/simple run examples/ide/simple_ide_launch.spl`; `SIMPLE_LIB=src bin/simple run examples/ide/simple_ide_render.spl` | Minimal embedded/sample integrations: launch-contract parsing plus shared GUI/WebRender rendering of editor HTML; the render example currently proves the pure Simple/interpreter fallback path |
 | **Shared backend** | `src/lib/editor/` (~129 files) | — | Piece-table buffers, multi-buffer, split panes, LSP/diagnostics/markdown/wiki services |
 
 Both svim and the Editor consume the same `src/lib/editor/` backend (epic
@@ -135,6 +135,13 @@ plane (MCP assistant) and the operator plane (dashboard).
 - The 11 `assistant_*` tools are routed in `main_dispatch.spl` (`_is_in_process_tool` → `_dispatch_in_process`) and persist to the store.
 - Dashboard views (`dashboard.views/assistant_*.spl`) + `assistant_bridge.spl` read the store and render session state (LIVE/ACTIVE/COMPLETED/FAILED/STALE/DEGRADED).
 - The editor's 55 `editor.*` tools work in-process: exercised directly over an `EditSession` in `test/system/editor_controller_spec.spl`, `editor_md_wiki_index_spec.spl`, `editor_gui_spec.spl`.
+- The recovered 2026-05-30 editor/IDE audit passes the broad
+  `test/system/editor_*_spec.spl` plus `test/system/dap_protocol_live_spec.spl`
+  loop. The source-backed Simple DAP adapter covers initialize, launch,
+  conditional breakpoints, hit conditions, stack/scopes/variables/evaluate,
+  exception stop, restart, terminate, and disconnect.
+- Ctrl+W-style pane commands are backed by `src/lib/editor/view/wincmd.spl` and
+  recursive split-tree behavior in `src/lib/editor/view/split_tree.spl`.
 - The live `simple mcp` server wires the safe stateful subset
   `editor.open_file`, `editor.read_buffer`, and `editor.list_open_files` in
   `src/app/mcp/main.spl`, backed by reusable session logic in
