@@ -1,6 +1,12 @@
 <!-- codex-design -->
 # VS Code Rich Editor UI Sketch
 
+> Status note (2026-05-30): this is a legacy UI sketch for the removed
+> standalone VS Code rich-editor package. The current editor/IDE UI source of
+> truth is `doc/07_guide/editor_tui.md`, with reusable code in
+> `src/lib/editor/`, the product entrypoint in `src/app/ide/main.spl`, and the
+> sample embedded integration in `examples/ide/simple_ide_launch.spl`.
+
 **Feature:** `vscode_rich_editor`  
 **Date:** 2026-04-12
 
@@ -43,8 +49,8 @@
 **Render path: working.** The TUI render code is complete and a real editor
 frame has been rendered through the editor's `EditorBuffer` (tab bar +
 line-number gutter + content + status bar). Implemented to reach this:
-`FileTreeState` / `FileTreeVisibleNode` (`30.view/file_tree.spl`),
-`SettingsViewState` (`30.view/settings_view.spl`), plus single-pane no-ops for
+`FileTreeState` / `FileTreeVisibleNode` (`src/lib/editor/view/file_tree.spl`),
+`SettingsViewState` (`src/lib/editor/view/settings_view.spl`), plus single-pane no-ops for
 the split-border and command-palette renderers (both were written against
 undefined APIs — flat-array `SplitNode`, `PaletteState`/`palette_new`).
 

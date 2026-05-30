@@ -33,10 +33,10 @@ Owns:
 - command registration
 - packaging/build layout
 
-Primary files:
-
-- [`src/app/vscode_rich_editor/package.json`](../../src/app/vscode_rich_editor/package.json)
-- [`src/app/vscode_rich_editor/src/extension.ts`](../../src/app/vscode_rich_editor/src/extension.ts)
+Legacy primary files were under `src/app/vscode_rich_editor/`; that package has
+been removed. The current product entrypoint is `src/app/ide/main.spl`, with the
+reusable editor backend under `src/lib/editor/` and the sample embedded
+integration in `examples/ide/simple_ide_launch.spl`.
 
 ### 2. Host Editor Provider
 
@@ -48,9 +48,9 @@ Owns:
 - message routing
 - application of text edits to the backing `TextDocument`
 
-Primary file:
-
-- [`src/app/vscode_rich_editor/src/richCustomEditor.ts`](../../src/app/vscode_rich_editor/src/richCustomEditor.ts)
+Current corresponding surfaces are `src/app/editor/gui_shell_core.spl`,
+`src/app/editor/gui_shell_render.spl`, and the shared editor session model in
+`src/lib/editor/core/session.spl`.
 
 ### 3. Block Analysis Capsule
 
@@ -61,9 +61,9 @@ Owns:
 - content range extraction
 - block metadata contract shared by host and webview
 
-Primary baseline file:
-
-- [`src/app/vscode_rich_editor/src/blockDetector.ts`](../../src/app/vscode_rich_editor/src/blockDetector.ts)
+Current block analysis lives in `src/lib/editor/render/block_model.spl` and the
+markdown-first render/services modules under `src/lib/editor/render/` and
+`src/lib/editor/services/`.
 
 ### 4. Webview Editor Capsule
 
@@ -75,10 +75,9 @@ Owns:
 - local selection behavior
 - posting edits and selection changes back to the host
 
-Primary files:
-
-- [`src/app/vscode_rich_editor/src/webview/richEditorWebview.ts`](../../src/app/vscode_rich_editor/src/webview/richEditorWebview.ts)
-- [`src/app/vscode_rich_editor/src/webview/decorationPlugin.ts`](../../src/app/vscode_rich_editor/src/webview/decorationPlugin.ts)
+Current GUI composition is `src/app/editor/gui_shell_render.spl`; host web,
+browser, SDL, and Tauri presentation stays in adapter packages such as
+`src/app/ui.web/`, `src/app/ui.browser/`, and `src/app/ui.tauri/`.
 
 ### 5. Renderers
 
@@ -88,12 +87,9 @@ Owns:
 - image resolution
 - placeholder/error visuals
 
-Primary files:
-
-- widget files under
-  [`src/app/vscode_rich_editor/src/webview/widgets/`](../../src/app/vscode_rich_editor/src/webview/widgets)
-- host-side image resolution in
-  [`src/app/vscode_rich_editor/src/imageResolver.ts`](../../src/app/vscode_rich_editor/src/imageResolver.ts)
+Current renderer files are `src/lib/editor/70.backend/gui_backend.spl` for
+portable editor HTML and `src/lib/editor/render/md_renderer.spl` for markdown
+preview/TUI rendering.
 
 ## Required Architectural Corrections
 

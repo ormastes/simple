@@ -13,9 +13,12 @@
 
 ## Overview
 
-The rich editor is a standalone VS Code extension that reopens `.spl` files in
-a `CustomTextEditorProvider` and renders natural-height math and image widgets
-inside a CodeMirror 6 webview.
+The original rich editor design targeted a standalone VS Code extension that
+reopened `.spl` files in a `CustomTextEditorProvider` and rendered
+natural-height math and image widgets inside a CodeMirror 6 webview. That
+standalone implementation tree has been removed; current work routes through
+the shared Simple editor/IDE surfaces in `src/lib/editor/`, `src/app/editor/`,
+`src/app/ide/main.spl`, and `examples/ide/simple_ide_launch.spl`.
 
 The backing `TextDocument` remains canonical.
 
