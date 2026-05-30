@@ -1,7 +1,7 @@
 # std.common.markdown.utilities resolves to smf-only, no spl source
 
 Date: 2026-05-30
-Status: Open
+Status: Resolved 2026-05-30
 Severity: Medium
 
 ## Symptom
@@ -40,3 +40,26 @@ Either:
 ## Affected tests
 
 - `test/system/editor_markdown_document_decor_spec.spl`
+
+## Resolution
+
+Restored the `std.common.markdown` compatibility surface as `.spl` source under
+`src/lib/common/markdown/`, including `utilities`, `block`, `inline`, `parse`,
+`render`, `types`, and `__init__`. The affected editor document decoration test
+now resolves these imports in interpreter/test mode.
+
+Verification:
+
+```bash
+SIMPLE_LIB=/tmp/simple-macro-intro-sync/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple check \
+  src/lib/common/markdown/utilities.spl \
+  src/lib/common/markdown/inline.spl \
+  src/lib/common/markdown/block.spl \
+  src/lib/common/markdown/parse.spl \
+  src/lib/common/markdown/types.spl \
+  src/lib/common/markdown/render.spl \
+  test/system/editor_markdown_document_decor_spec.spl
+
+SIMPLE_LIB=/tmp/simple-macro-intro-sync/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple run \
+  test/system/editor_markdown_document_decor_spec.spl
+```
