@@ -81,6 +81,7 @@ pub mod cargo;
 pub mod sdn;
 pub mod coverage;
 pub mod cranelift;
+#[cfg(not(doctest))]
 pub mod jit_native;
 // pub mod perf; // TODO: file not yet created
 pub mod sandbox;
@@ -1100,15 +1101,18 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_is_debug_mode_enabled", system::rt_is_debug_mode_enabled);
     insert_simple!("rt_is_error", sffi_value::rt_is_error_fn);
     insert_simple!("rt_is_macro_trace_enabled", system::rt_is_macro_trace_enabled);
-    insert_simple!("rt_jit_backend_name", jit_native::rt_jit_backend_name);
-    insert_simple!("rt_jit_call_i64_i64", jit_native::rt_jit_call_i64_i64);
-    insert_simple!("rt_jit_call_i64", jit_native::rt_jit_call_i64);
-    insert_simple!("rt_jit_call_void", jit_native::rt_jit_call_void);
-    insert_simple!("rt_jit_cleanup", jit_native::rt_jit_cleanup);
-    insert_simple!("rt_jit_compile_source", jit_native::rt_jit_compile_source);
-    insert_simple!("rt_jit_create", jit_native::rt_jit_create);
-    insert_simple!("rt_jit_create_for_target", jit_native::rt_jit_create_for_target);
-    insert_simple!("rt_jit_has_function", jit_native::rt_jit_has_function);
+    #[cfg(not(doctest))]
+    {
+        insert_simple!("rt_jit_backend_name", jit_native::rt_jit_backend_name);
+        insert_simple!("rt_jit_call_i64_i64", jit_native::rt_jit_call_i64_i64);
+        insert_simple!("rt_jit_call_i64", jit_native::rt_jit_call_i64);
+        insert_simple!("rt_jit_call_void", jit_native::rt_jit_call_void);
+        insert_simple!("rt_jit_cleanup", jit_native::rt_jit_cleanup);
+        insert_simple!("rt_jit_compile_source", jit_native::rt_jit_compile_source);
+        insert_simple!("rt_jit_create", jit_native::rt_jit_create);
+        insert_simple!("rt_jit_create_for_target", jit_native::rt_jit_create_for_target);
+        insert_simple!("rt_jit_has_function", jit_native::rt_jit_has_function);
+    }
     insert_simple!("rt_math_acos", math::rt_math_acos_fn);
     insert_simple!("rt_math_asin", math::rt_math_asin_fn);
     insert_simple!("rt_math_atan2", math::rt_math_atan2_fn);
