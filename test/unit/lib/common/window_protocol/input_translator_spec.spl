@@ -1,33 +1,67 @@
-# Tests for common.window_protocol.input_translator
-# Covers: key_char_to_wm_key_event — nil key, lowercase, uppercase, window_id passthrough
+# Tests for common.window_protocol.input_translator.
 
-use common.window_protocol.input_translator.{key_char_to_wm_key_event}
-use common.window_protocol.window_protocol.{WM_EVENT_KEY_PRESS}
+use common.window_protocol.geometry.{WindowId, Modifiers, WmEventType}
+use common.window_protocol.input_translator.{ascii_code_for_key, key_char_to_wm_key_event,
+    pointer_to_wm_mouse_event, wheel_to_wm_scroll_event}
 
 describe "key_char_to_wm_key_event":
     context "when key_char is nil":
-        it "produces key_code 0 and WM_EVENT_KEY_PRESS with correct window_id":
-            var evt = key_char_to_wm_key_event(42, nil)
-            expect(evt.key_code).to_equal(0)
-            expect(evt.event_type).to_equal(WM_EVENT_KEY_PRESS)
-            expect(evt.window_id).to_equal(42)
+        it "produces key_code 0 and KeyDown with correct window_id":
+            val evt = key_char_to_wm_key_event(WindowId(value: 42), nil)
+            expect(evt.key_code.code).to_equal(0 as u32)
+            expect(evt.event_type).to_equal(WmEventType.KeyDown)
+            expect(evt.window_id.value).to_equal(42)
 
     context "when key_char is a lowercase letter":
         it "maps 'a' to key_code 97 and passes window_id through":
-            var evt = key_char_to_wm_key_event(7, "a")
-            expect(evt.key_code).to_equal(97)
-            expect(evt.window_id).to_equal(7)
-            expect(evt.event_type).to_equal(WM_EVENT_KEY_PRESS)
+            val evt = key_char_to_wm_key_event(WindowId(value: 7), "a")
+            expect(evt.key_code.code).to_equal(97 as u32)
+            expect(evt.key_code.name).to_equal("a")
+            expect(evt.window_id.value).to_equal(7)
+            expect(evt.event_type).to_equal(WmEventType.KeyDown)
 
     context "when key_char is an uppercase letter":
         it "maps 'A' to key_code 65":
-            var evt = key_char_to_wm_key_event(0, "A")
-            expect(evt.key_code).to_equal(65)
-            expect(evt.event_type).to_equal(WM_EVENT_KEY_PRESS)
-            expect(evt.window_id).to_equal(0)
+            val evt = key_char_to_wm_key_event(WindowId(value: 0), "A")
+            expect(evt.key_code.code).to_equal(65 as u32)
+            expect(evt.event_type).to_equal(WmEventType.KeyDown)
+            expect(evt.window_id.value).to_equal(0)
 
     context "mouse_pos defaults":
         it "mouse_x and mouse_y are 0 for key events":
-            var evt = key_char_to_wm_key_event(1, "z")
-            expect(evt.mouse_x).to_equal(0)
-            expect(evt.mouse_y).to_equal(0)
+            val evt = key_char_to_wm_key_event(WindowId(value: 1), "z")
+            expect(evt.point.x).to_equal(0)
+            expect(evt.point.y).to_equal(0)
+
+describe "pointer_to_wm_mouse_event":
+    it "maps pointer down, up, and move into typed WM input events":
+        val mods = Modifiers(shift: true, ctrl: false, alt: false, meta: false)
+        val down = pointer_to_wm_mouse_event(WindowId(value: 9), "pointer_down", 10, 20, mods)
+        val up = pointer_to_wm_mouse_event(WindowId(value: 9), "pointer_up", 11, 21, mods)
+        val move = pointer_to_wm_mouse_event(WindowId(value: 9), "move", 12, 22, mods)
+
+        expect(down.event_type).to_equal(WmEventType.MouseDown)
+        expect(up.event_type).to_equal(WmEventType.MouseUp)
+        expect(move.event_type).to_equal(WmEventType.MouseMove)
+        expect(down.point.x).to_equal(10)
+        expect(down.point.y).to_equal(20)
+        expect(down.modifiers.shift).to_equal(true)
+
+describe "wheel_to_wm_scroll_event":
+    it "preserves scroll delta, coordinates, window_id, and modifiers":
+        val mods = Modifiers(shift: false, ctrl: true, alt: false, meta: false)
+        val evt = wheel_to_wm_scroll_event(WindowId(value: 5), 30, 40, 1.5, -8.0, mods)
+
+        expect(evt.event_type).to_equal(WmEventType.Scroll)
+        expect(evt.window_id.value).to_equal(5)
+        expect(evt.point.x).to_equal(30)
+        expect(evt.point.y).to_equal(40)
+        expect(evt.scroll_dx).to_equal(1.5)
+        expect(evt.scroll_dy).to_equal(-8.0)
+        expect(evt.modifiers.ctrl).to_equal(true)
+
+describe "ascii_code_for_key":
+    it "uses the first character and returns 0 for unsupported or empty keys":
+        expect(ascii_code_for_key("ab")).to_equal(97 as u32)
+        expect(ascii_code_for_key("")).to_equal(0 as u32)
+        expect(ascii_code_for_key(nil)).to_equal(0 as u32)
