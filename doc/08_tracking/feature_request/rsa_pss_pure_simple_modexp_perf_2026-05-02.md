@@ -6,6 +6,27 @@
 - **Filed-by:** W14-E (RSA-PSS sign/verify wave)
 - **Target:** crypto / interpreter perf
 - **Priority:** P1
+- **Update 2026-05-30:** evaluated and rejected the next small pure-Simple
+  PSS bigint micro-optimization. Current `HEAD` already contains the prior
+  safe hot-path speedups in `src/os/crypto/rsa_pss.spl` (`_pss_bi_normalize`
+  avoids copying already-normalized limb lists, `_pss_bi_get_bit` uses the
+  same direct limb-mask extraction shape as `rsa_fallback.spl`,
+  `_pss_bi_shift_left_one` returns zero without allocation, and
+  `_pss_bi_mod_exp` avoids an unused reduced base). An attempted additional
+  `_pss_bi_mul` zero/one short-circuit was correct but regressed the focused
+  KAT to 10390ms reported spec time, so it was reverted and no source diff was
+  kept. Focused evidence:
+  `SIMPLE_LIB=src bin/simple check src/os/crypto/rsa_pss.spl src/os/crypto/rsa_fallback.spl test/unit/lib/crypto/rsa_pss_sha256_kat_spec.spl test/unit/lib/crypto/rsa_pss_sha256_roundtrip_slow_spec.spl test/unit/lib/crypto/rsa_pkcs1_v15_spec.spl`
+  passed; `SIMPLE_LIB=src bin/simple test test/unit/lib/crypto/rsa_pss_sha256_kat_spec.spl --mode=interpreter --clean --fail-fast`
+  passed at 2302ms reported spec time after reverting the rejected slice;
+  `SIMPLE_LIB=src bin/simple test test/unit/lib/crypto/rsa_pss_smoke_spec.spl --mode=interpreter --clean --fail-fast`
+  passed; `SIMPLE_LIB=src bin/simple test test/unit/os/crypto/rsa_contract_parity_spec.spl --mode=interpreter --clean --fail-fast`
+  passed. This does not close FR-CRYPTO-0001: the explicit RSA-2048 command
+  `timeout 60s env SIMPLE_LIB=src bin/simple test --only-slow test/unit/lib/crypto/rsa_pss_sha256_roundtrip_slow_spec.spl --mode=interpreter --clean --fail-fast`
+  still timed out, and `test/unit/lib/crypto/rsa_pkcs1_v15_spec.spl` still
+  reports 9 passed / 1 failed under the focused interpreter command with no
+  assertion detail in runner output. Remaining work is still a correct
+  Montgomery/Barrett reducer or shared runtime-independent bigint modexp.
 - **Status:** PARTIAL 2026-05-30 — safe pure-Simple speedups landed, but the
   RSA-2048 interpreter acceptance budget is still not met. `rsa_pss.spl` now
   parses CRT private-key fields and signs via two half-size CRT modexps when
