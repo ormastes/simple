@@ -168,7 +168,10 @@ documentation to hand-written-quality scenario manuals.
   provider integrations and domain-specific decoders remain open. UI selection
   helper payloads are represented in the shared model, but concrete TUI/GUI
   provider wiring remains future work. `scenario_helpers` now exposes
-  API/protocol capture helpers that produce the rich shared evidence artifacts,
+  evidence-producing checker helpers for text containment, API status, and JSON
+  field checks so `Then_*` functions can emit assertion status and manual
+  evidence through the shared model. It also exposes API/protocol capture
+  helpers that produce the rich shared evidence artifacts,
   including structured field-list summaries and common sensitive-field
   redaction for provider implementations. Structured protocol captures now
   record redacted sensitive field names across params, headers, and response

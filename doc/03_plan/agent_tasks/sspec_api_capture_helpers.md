@@ -12,6 +12,8 @@ owned by other agents and should not block this API slice.
 ## Current API Slice
 
 - Restore and keep `std.common.spec.scenario_helpers` as the common helper entrypoint.
+- Provide evidence-producing checker helpers for common `Then_*` text, status,
+  and JSON-field assertions.
 - Provide redaction-aware API/protocol field summaries.
 - Provide structured `capture_api_protocol_fields(...)` for provider code that
   already has parsed request, header, and response fields.
