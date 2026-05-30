@@ -22,7 +22,10 @@ Restore Pure Simple source for `std.common.serialization` so interpreter-mode im
 - Do not revert unrelated edits from other contributors.
 
 ## Phase
-dev-done
+verify-done
 
 ## Log
 - dev: Created state file with 5 acceptance criteria (type: bug).
+- implement: `src/lib/common/serialization/__init__.spl` now provides pure Simple source for the focused serialization API.
+- verify: `SIMPLE_LIB=/tmp/simple-macro-intro-sync/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple test test/unit/lib/common/serialization_extended_spec.spl --mode=interpreter --clean --fail-fast` passed 153/153 examples on 2026-05-30.
+- ship: Tracker closed; placeholder `.smf` source gap no longer blocks interpreter imports.

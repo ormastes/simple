@@ -1,7 +1,7 @@
 # BUG: std.common.serialization module has no .spl source — interpreter cannot load it
 
 **Date:** 2026-05-30
-**Status:** OPEN
+**Status:** Resolved 2026-05-30
 **Severity:** Medium (blocks all interpreter-mode tests that import `std.common.serialization`)
 **Affected test:** `test/unit/lib/common/serialization_extended_spec.spl`
 
@@ -60,3 +60,19 @@ or B lands. Do NOT convert the skip to a NOTE — implement or remove.
 ## Workaround
 
 None available for interpreter mode. The import fails before any test body executes.
+
+## Resolution
+
+Pure Simple source now exists at `src/lib/common/serialization/__init__.spl`.
+The module entrypoint exports the functions exercised by
+`test/unit/lib/common/serialization_extended_spec.spl`, so
+`use std.common.serialization` resolves in interpreter mode without relying on
+the placeholder `.smf` stubs.
+
+Verification:
+
+```bash
+SIMPLE_LIB=/tmp/simple-macro-intro-sync/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple test test/unit/lib/common/serialization_extended_spec.spl --mode=interpreter --clean --fail-fast
+```
+
+Result: pass, 153/153 examples.
