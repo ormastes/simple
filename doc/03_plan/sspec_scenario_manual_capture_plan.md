@@ -259,11 +259,11 @@ Create a shared SSpec support library rather than scattering helper functions:
   `log` evidence instead of empty screenshots.
 - MCP scenario manual is reviewed as a hand-written-quality exemplar.
 
-Current verification note: syntax checks and the new scenario-evidence unit
-tests pass. `test/unit/app/tooling/spipe_docgen_scenario_body_spec.spl` still
-fails through the current test runner with `error: null`; keep it as an open
-docgen verification gap until the runner exposes the underlying assertion or
-module-loading failure.
+Current verification note: syntax checks pass. The scenario evidence unit test
+passes 9/9, and `test/unit/app/tooling/spipe_docgen_scenario_body_spec.spl`
+passes 24/24 after replacing unsupported negative matchers with built-in
+assertions and fixing the `spipe-docgen` runtime path issues found during the
+manual-generation check.
 
 ## First Exemplar: MCP
 
