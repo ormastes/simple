@@ -40,6 +40,13 @@ Skip if exist. See `design` skill for details.
 - Keep generated/manual SPipe docs under `doc/06_spec/` mirrored from the
   executable `test/...` path after stripping the leading `test/` segment
 - Built-in matchers only (see `design` skill for list)
+- For scenario-oriented specs, run the scenario manual update loop before
+  implementation is considered ready: generate the doc, read it as a manual,
+  improve steps/captures/visibility/helper names, and regenerate until the
+  primary flow is manual-quality.
+- Do not leave primary manual output dominated by raw test code. Executable
+  SPipe should be folded detail; visible content should be scenario steps and
+  typed evidence.
 
 ### Phase 8: Implementation
 - Implement in `src/**/<feature>.spl`

@@ -32,15 +32,24 @@
    - Search impl files for `pass_todo` -- must be zero
    - Search impl files for `pass_do_nothing` -- must be intentional
 9. Verify documentation exists for public API surfaces
-10. Compile verification report:
+10. Verify generated scenario manual quality for scenario-oriented specs:
+   - mirrored `doc/06_spec/...` exists
+   - primary scenario flow is visible as manual steps
+   - inline/previous setup is expanded without redundant `Previous:` text
+   - executable SPipe is folded by default
+   - advanced/edge/matrix/stress/helper-only scenarios are folded or skipped by policy
+   - captures are attached to relevant steps and use meaningful kinds for UI,
+     API, protocol, execution, binary, text, log, or artifact evidence
+11. Compile verification report:
    - Test results (pass/fail counts)
    - Coverage percentage (target: 80%+)
    - Doc coverage for new code
+   - Scenario manual quality result for generated docs
    - Any remaining issues
-11. If critical issues found (max 3 fix-recheck cycles; escalate after 3):
+12. If critical issues found (max 3 fix-recheck cycles; escalate after 3):
    a. Fix ONLY test/doc issues (not feature code)
    b. Re-run affected checks with `set -o pipefail; ... 2>&1 | tail -40` output cap
-12. Update state file with verification report
+13. Update state file with verification report
 
 ## Rules
 
@@ -49,6 +58,8 @@
 - **No pass_todo allowed:** Every stub must be implemented or removed
 - **Full suite must pass:** Not just feature specs -- the entire test suite
 - **Document public APIs:** Every public function needs doc comments
+- **Generated scenario manuals:** Scenario-oriented specs must produce
+  hand-written-quality manual output, not raw test dumps
 - **Critical fix only:** If implementation has a bug, send back to Phase 5
 - **No numbered artifacts:** New or renamed files with copy/version names like
   `foo_1`, `foo_2`, `part1`, `ver1`, or `v1` fail verification
@@ -65,6 +76,7 @@ If a fix requires significant code changes, flag it for Phase 5 re-entry.
 - [ ] Build checks pass: `bin/simple build check` clean
 - [ ] Coverage at 80%+ for new code
 - [ ] Doc coverage exists for public APIs
+- [ ] Scenario-oriented generated docs pass manual quality review
 - [ ] No `pass_todo` stubs remain
 - [ ] Numbered artifact guard passes
 - [ ] Verification report written in state file

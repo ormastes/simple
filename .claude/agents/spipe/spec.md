@@ -15,8 +15,12 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
 2. For every AC-N, write at least one SPipe `it` block that would verify it
 3. Create spec files at `test/` paths mirroring the architecture's module paths
 4. Use ONLY built-in SPipe matchers (see below)
-5. Every spec MUST fail right now — the code does not exist yet
-6. Append the spec file list and coverage matrix to the state file
+5. For scenario-oriented specs, design the generated manual while writing the
+   executable spec: use step/checker helpers, `@step`, `@capture`, `@inline`,
+   `@prev`, and manual visibility policy as needed
+6. Every spec MUST fail right now — the code does not exist yet
+7. Append the spec file list, coverage matrix, and manual rendering policy to
+   the state file
 
 ## SPipe Matchers (ONLY these)
 
@@ -50,6 +54,22 @@ describe "<ModuleName>":
             expect(result).to_equal(expected_value)
 ```
 
+## Scenario Manual Rules
+
+- Generated `doc/06_spec/...` output must read like a scenario manual for
+  user-facing, operator-facing, MCP/tooling, UI, protocol, hardware, system, and
+  environmental behavior.
+- Use `@inline` for reusable setup scenarios; expand them with `@prev("...")`
+  or `@include("...")`.
+- Do not show redundant `Previous:` metadata when previous steps are expanded.
+- Capture is off by default. Bare `@capture` means after-step capture with
+  default kind `tui`.
+- Use typed capture kinds for non-UI evidence: `api`, `protocol`, `exec`,
+  `binary`, `text`, `log`, or `artifact`.
+- Fold or skip very detailed edge, generated, stress, matrix, and helper-only
+  scenarios instead of forcing them into the main manual.
+- Reference `doc/07_guide/testing/sspec_scenario_manual.md`.
+
 ## Entry Criteria
 
 - `.spipe/<feature>/state.md` exists with `Phase: arch-done`
@@ -61,6 +81,8 @@ describe "<ModuleName>":
 - Spec files exist at `test/` paths for every module in the architecture
 - Every AC-N has at least one `it` block
 - All specs use only built-in matchers
+- Scenario-oriented specs have a planned generated manual shape, including
+  visible/folded/skipped policy and capture kinds
 - All specs WOULD FAIL (no implementation exists yet)
 - State file contains `## Specs` with file list and AC coverage matrix
 - `## Phase` updated to `spec-done`

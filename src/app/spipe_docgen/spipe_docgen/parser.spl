@@ -547,6 +547,53 @@ fn render_scenario_body(lines: [text]) -> text:
     else:
         "\n```simple\n" + dedented.join("\n") + "\n```\n\n"
 
+fn normalize_manual_visibility(value: text) -> text:
+    val lower = value.lower().trim()
+    if lower.contains("skip") or lower.contains("hidden"):
+        "skip"
+    elif lower.contains("fold") or lower.contains("advanced") or lower.contains("edge"):
+        "folded"
+    elif lower.contains("detail"):
+        "detail"
+    elif lower.contains("show") or lower.contains("visible"):
+        "show"
+    else:
+        ""
+
+fn manual_visibility_from_metadata_line(trimmed: text) -> text:
+    if trimmed == "# @inline" or trimmed == "@inline":
+        return "skip"
+    if trimmed.starts_with("# @manual") or trimmed.starts_with("@manual"):
+        return normalize_manual_visibility(trimmed)
+    ""
+
+fn scenario_manual_visibility(lines: [text], scenario_index: i64, default_visibility: text) -> text:
+    var j = scenario_index - 1
+    while j >= 0:
+        val trimmed = lines[j].trim()
+        if trimmed == "":
+            j = j - 1
+            continue
+        val visibility = manual_visibility_from_metadata_line(trimmed)
+        if visibility != "":
+            return visibility
+        if trimmed.starts_with("#") or trimmed.starts_with("@"):
+            j = j - 1
+            continue
+        break
+    default_visibility
+
+fn render_manual_scenario(name: text, suffix: text, body: [text], visibility: text) -> text:
+    if visibility == "skip":
+        return ""
+    val heading = "#### " + name + suffix + "\n"
+    val rendered_body = render_scenario_body(body)
+    if visibility == "folded" or visibility == "detail":
+        val label = if visibility == "detail": "Details: " else: "Advanced: "
+        "<details>\n<summary>" + label + name + "</summary>\n\n" + heading + rendered_body + "\n</details>\n\n"
+    else:
+        heading + rendered_body
+
 fn render_rendered_scenario_toggle(lines: [text]) -> text:
     var quoted: [text] = []
     var i = 0
@@ -735,37 +782,37 @@ fn extract_test_structure(content: text) -> text:
         # skip it / skip_it -> skipped scenario
         elif (trimmed.starts_with("skip it ") or trimmed.starts_with("skip_it ")) and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
-            result_parts.push("#### {name} _(skipped)_\n")
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
-            result_parts.push(render_scenario_body(body))
+            val visibility = scenario_manual_visibility(lines, i, "show")
+            result_parts.push(render_manual_scenario(name, " _(skipped)_", body, visibility))
             i = next_index - 1
 
         # pending -> pending bullet
         elif trimmed.starts_with("pending ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
-            result_parts.push("#### {name} _(pending)_\n")
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
-            result_parts.push(render_scenario_body(body))
+            val visibility = scenario_manual_visibility(lines, i, "show")
+            result_parts.push(render_manual_scenario(name, " _(pending)_", body, visibility))
             i = next_index - 1
 
         # slow it -> slow bullet
         elif trimmed.starts_with("slow_it ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
-            result_parts.push("#### {name} _(slow)_\n")
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
-            result_parts.push(render_scenario_body(body))
+            val visibility = scenario_manual_visibility(lines, i, "folded")
+            result_parts.push(render_manual_scenario(name, " _(slow)_", body, visibility))
             i = next_index - 1
 
         # regular it -> check bullet
         elif trimmed.starts_with("it ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
-            result_parts.push("#### {name}\n")
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
-            result_parts.push(render_scenario_body(body))
+            val visibility = scenario_manual_visibility(lines, i, "show")
+            result_parts.push(render_manual_scenario(name, "", body, visibility))
             i = next_index - 1
 
         i = i + 1

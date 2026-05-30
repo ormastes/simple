@@ -83,11 +83,22 @@ describe "<Feature Name>":
 - Test descriptions start with "should" and describe behavior, not implementation
 - No test depends on external state or other tests
 - Error paths use `Result<T, E>` pattern, not exceptions
+- Scenario-oriented specs must produce manual-quality generated docs:
+  primary scenarios visible, reusable setup hidden with `@inline` and expanded
+  by `@prev`/`@include`, advanced/edge/matrix/stress details folded or skipped
+  by policy, and executable SPipe folded below the manual flow.
+- Use `@step` helper/checker prose when function names alone would not read like
+  manual steps.
+- Capture is off by default. Bare `@capture` enables after-step `tui` capture.
+  Use typed capture kinds for the evidence the reader needs: `tui`, `gui`,
+  `text`, `api`, `protocol`, `exec`, `binary`, `log`, or `artifact`.
 - UI-facing specs include visible-state capture evidence when practical:
   - TUI specs capture text or ANSI output under `build/test-artifacts/<spec-relative-path>/`.
   - GUI specs capture screenshots/goldens/diffs under `doc/06_spec/image/<spec-relative-path>/`.
   - Evidence paths appear in `**Screenshots:**` or `**TUI Captures:**` metadata so generated `doc/06_spec/...` docs embed them.
   - Raster evidence (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.ppm`) is tracked by Git LFS.
+- Environmental tests should capture command/API/protocol/binary/log evidence
+  when that is more meaningful than a screenshot.
 - Short grammar features must have runtime-specific coverage:
   - Interpreter specs may cover pipe-forward, composition, placeholder lambdas, method references, optional access, and compact DSL forms.
   - Native specs must cover only compact forms intended to work in native mode.
@@ -130,6 +141,9 @@ Create test plan with:
 - Execution order and dependencies
 - Pass/fail criteria
 - Risk areas needing extra coverage
+- Manual rendering policy: which scenarios are visible, folded, skipped, or
+  detail-only in generated `doc/06_spec/...`
+- Capture plan by evidence kind and scope
 
 Output: `doc/03_plan/sys_test/<feature>.md`
 

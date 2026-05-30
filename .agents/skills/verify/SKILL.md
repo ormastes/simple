@@ -23,10 +23,16 @@ not create, rewrite, or weaken SPipe after verification.
 - Edge cases and error paths tested
 - Every REQ-NNN has test coverage
 - Required SPipe specs exist under `doc/06_spec/app/<app_name>/feature/`
+- Scenario-oriented generated docs read as manuals: primary steps visible,
+  inline/previous setup expanded, executable SPipe folded by default, detailed
+  edge/matrix/stress/helper cases folded or skipped by policy.
 - UI-facing specs include visible-state evidence when practical: TUI captures
   under `build/test-artifacts/<spec-relative-path>/`, GUI screenshots/goldens
   under `doc/06_spec/image/<spec-relative-path>/`, and embedded generated-doc
   metadata via `**Screenshots:**` or `**TUI Captures:**`
+- Non-UI environmental specs include meaningful typed evidence when practical:
+  API/protocol frames, command execution output, binary decode, text/logs, or
+  artifacts attached to the relevant scenario step.
 - Every BDD scenario has an executable or intentionally skipped SPipe `it` block with a concrete reason
 - Stale, missing, placeholder, or requirement-disconnected SPipe is a FAIL
 
@@ -56,6 +62,7 @@ not create, rewrite, or weaken SPipe after verification.
 ### 5. Architecture & Design Docs
 - `doc/04_architecture/` updated for new modules
 - `doc/05_design/` updated for new features
+- `doc/06_spec/` manual output reviewed for scenario quality when applicable
 - Cross-references intact
 
 ## Report Format

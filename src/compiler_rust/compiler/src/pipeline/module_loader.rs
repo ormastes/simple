@@ -122,6 +122,81 @@ fn resolve_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) ->
     None
 }
 
+fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
+    if parts.is_empty() {
+        return None;
+    }
+    let mut current = root.to_path_buf();
+    for (idx, part) in parts.iter().enumerate() {
+        let is_last = idx + 1 == parts.len();
+        if is_last {
+            let mut file = current.join(part);
+            file.set_extension("spl");
+            if file.is_file() {
+                return Some(prefer_package_init_for_member_import(file, use_stmt));
+            }
+            for entry in fs::read_dir(&current).ok()?.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Some(dot) = name.find('.') else {
+                    continue;
+                };
+                let prefix = &name[..dot];
+                let suffix = &name[dot + 1..];
+                if suffix == part
+                    && !prefix.is_empty()
+                    && prefix.len() <= 3
+                    && prefix.chars().all(|c| c.is_ascii_digit())
+                {
+                    let init = path.join("__init__.spl");
+                    if init.is_file() {
+                        return Some(init);
+                    }
+                    let mut nested_file = path.join(part);
+                    nested_file.set_extension("spl");
+                    if nested_file.is_file() {
+                        return Some(prefer_package_init_for_member_import(nested_file, use_stmt));
+                    }
+                }
+            }
+            return None;
+        }
+
+        let direct = current.join(part);
+        if direct.is_dir() {
+            current = direct;
+            continue;
+        }
+
+        let mut matched = None;
+        for entry in fs::read_dir(&current).ok()?.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(dot) = name.find('.') else {
+                continue;
+            };
+            let prefix = &name[..dot];
+            let suffix = &name[dot + 1..];
+            if suffix == part
+                && !prefix.is_empty()
+                && prefix.len() <= 3
+                && prefix.chars().all(|c| c.is_ascii_digit())
+            {
+                matched = Some(path);
+                break;
+            }
+        }
+        current = matched?;
+    }
+    None
+}
+
 fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
     if let Some(resolved) = resolve_parts_from_root(base, parts, use_stmt) {
         return Some(resolved);
@@ -262,6 +337,10 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
                 return Some(stdlib_mod_path);
             }
 
+            if let Some(numbered) = resolve_numbered_parts_from_root(&stdlib_root, &stdlib_parts, use_stmt) {
+                return Some(numbered);
+            }
+
             for subdir in &[
                 "nogc_async_mut",
                 "nogc_sync_mut",
@@ -287,6 +366,12 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
                 sub_path.set_extension("spl");
                 if sub_path.exists() && sub_path.is_file() {
                     return Some(prefer_package_init_for_member_import(sub_path, use_stmt));
+                }
+
+                if let Some(numbered) =
+                    resolve_numbered_parts_from_root(&stdlib_root.join(subdir), &stdlib_parts, use_stmt)
+                {
+                    return Some(numbered);
                 }
             }
         }
@@ -1744,6 +1829,31 @@ mod tests {
             .any(|item| matches!(item, Node::Function(func) if func.name == "run_web"));
 
         assert!(has_run_web);
+    }
+
+    #[test]
+    fn resolves_numbered_stdlib_imports_from_examples_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let examples = temp.path().join("examples").join("ide");
+        let backend = temp.path().join("src").join("lib").join("editor").join("70.backend");
+        fs::create_dir_all(&examples).unwrap();
+        fs::create_dir_all(&backend).unwrap();
+
+        let entry = examples.join("main.spl");
+        fs::write(
+            &entry,
+            "use std.editor.backend.helper.*\nfn main() -> text:\n    probe_text()\n",
+        )
+        .unwrap();
+        fs::write(backend.join("helper.spl"), "fn probe_text() -> text:\n    \"ok\"\n").unwrap();
+
+        let loaded = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+        let has_probe_text = loaded
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(func) if func.name == "probe_text"));
+
+        assert!(has_probe_text);
     }
 
     #[test]

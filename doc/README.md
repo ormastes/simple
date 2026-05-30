@@ -45,6 +45,10 @@ All documentation lives under numbered top-level folders.
 
 - `spipe_docgen` default output: `doc/06_spec`
 - `traceability` generated spec root: `doc/06_spec`
+- Scenario manual guide: `doc/07_guide/testing/sspec_scenario_manual.md`
+- Scenario manual plan: `doc/03_plan/sspec_scenario_manual_capture_plan.md`
+- Scenario manual feature requests:
+  `doc/08_tracking/feature_request/sspec_scenario_manual_requests.md`
 
 ## Recent Major Changes (2026-05)
 

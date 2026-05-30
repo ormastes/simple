@@ -50,6 +50,14 @@ must mirror the same path below `doc/06_spec/`. Example:
 `test/feature/usage/math_blocks_spec.spl` generates
 `doc/06_spec/feature/usage/math_blocks_spec.md`.
 
+Generated docs should read as scenario-based manuals, not as raw test dumps.
+For feature, system, app, MCP, UI, protocol, hardware, and environmental tests,
+write helper/checker functions so the generated manual can show ordered user or
+operator steps, typed capture evidence, and folded executable SPipe details.
+Use `doc/07_guide/testing/sspec_scenario_manual.md` when deciding whether a
+scenario should be visible, folded as advanced/edge detail, or skipped from the
+manual while remaining executable.
+
 `bin/simple test` now prefers fresh local driver builds from
 `src/compiler_rust/target/bootstrap`, `target/release`, and `target/debug`
 before older packaged binaries in `bin/release/`. That keeps focused test runs
@@ -72,6 +80,28 @@ describe "std.my_module":
         it "handles edge case":
             expect(my_function(0)).to_equal(0)
 ```
+
+### Scenario Manual Quality
+
+When a spec describes user-visible, operator-visible, system, protocol, MCP, or
+environmental behavior, author it as an executable scenario manual:
+
+- Put primary flows in normal `it` scenarios with readable step helper names.
+- Use `@step` metadata on helper/checker functions when the fallback function
+  name would not read like a manual sentence.
+- Use `@inline` for reusable setup scenarios and `@prev("...")` or
+  `@include("...")` to expand them into the visible scenario.
+- Use `@capture` only where manual evidence is useful. Capture is off by
+  default; bare `@capture` means after-step capture with default kind `tui`.
+- Use typed capture kinds for non-UI evidence: `api`, `protocol`, `exec`,
+  `binary`, `text`, `log`, or `artifact`.
+- Fold or skip very detailed edge, matrix, stress, generated, and helper-only
+  scenarios with manual visibility policy instead of forcing them into the main
+  manual.
+
+After writing or changing such a spec, generate the doc and read it like a
+hand-written manual. If it still reads like test plumbing, improve the steps,
+captures, visibility, or helper/checker names before calling the spec done.
 
 ### Available Matchers
 
@@ -160,6 +190,10 @@ baseline and reports improvements or regressions:
 - Put user-visible feature BDD tests under `test/feature/<domain>/...`.
 - Put end-to-end workflows under `test/system/<domain>/...`.
 - Generated manual/spec docs live at the matching `doc/06_spec/<same path>.md`.
+- Generated manual/spec docs for scenario-oriented files must be reviewed as
+  scenario manuals: primary scenarios visible, advanced/edge details folded or
+  skipped by policy, captures attached to the step that caused them, and
+  executable code available as folded detail.
 - Requirement, research, design, plan, implementation, guide, and generated spec
   links should use the same feature slug so traceability scans can match them.
 - Treat older executable top-level suites outside `unit/`, `shared/`,
@@ -170,6 +204,8 @@ baseline and reports improvements or regressions:
   modules separate from executable scenario placement decisions.
 - See `doc/07_guide/testing/test_layout_traceability.md` for the move
   checklist and current canonical-root policy.
+- See `doc/07_guide/testing/sspec_scenario_manual.md` for scenario manual,
+  inline/previous scenario, capture, and environmental-test guidance.
 
 ## Known Limitations
 

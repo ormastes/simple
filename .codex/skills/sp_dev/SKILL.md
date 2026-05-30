@@ -28,6 +28,13 @@ skill at `.claude/skills/spipe_doc_wiki_refactor.md` so stale docs, command
 references, wiki-style process knowledge, and feature/layer expert links are
 cleaned before completion.
 
+For scenario-oriented work, the SPipe loop also includes generated manual
+review. After specs are written or changed, generate the mirrored
+`doc/06_spec/...` document and read it as a scenario manual. Update step
+helpers, capture policy, inline/previous scenario expansion, and manual
+visibility until the generated manual is good enough to use without opening the
+source test. See `doc/07_guide/testing/sspec_scenario_manual.md`.
+
 Run `sh scripts/install-spipe-dev-command.shs --check` on Unix-like hosts, or
 `powershell -ExecutionPolicy Bypass -File scripts\install-spipe-dev-command.ps1 --check`
 on Windows, to verify that this repository still routes Codex development

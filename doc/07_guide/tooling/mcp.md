@@ -4,6 +4,16 @@ The Simple MCP (Model Context Protocol) server currently provides 108 tools, 3
 resources, and 2 prompts for code intelligence, debugging, build, VCS,
 analysis, and UI access -- accessible from Claude Code and Claude Desktop.
 
+MCP scenarios are the exemplar for scenario-based generated manuals. New or
+changed MCP SPipe tests should generate `doc/06_spec/...` pages that read like
+operator manuals: initialize server, list tools, call a tool, inspect response,
+and diagnose failure, with protocol/API/exec/log captures attached to the step
+that produced them. Follow `doc/07_guide/testing/sspec_scenario_manual.md` and
+fold matrix, schema-detail, and edge-case rows by default.
+
+The concrete target shape and review checklist live in
+`doc/03_plan/sys_test/mcp_scenario_manual_quality.md`.
+
 ---
 
 ## Setup
@@ -71,6 +81,17 @@ echo '{"jsonrpc":"2.0","id":"2","method":"tools/list"}' | bin/simple_mcp_server
 # Run integration tests
 SIMPLE_LIB=src bin/simple test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
 ```
+
+When updating MCP specs, also regenerate and review their scenario manuals:
+
+```bash
+bin/simple spipe-docgen test/feature/app/mcp_protocol_runtime_spec.spl --output doc/06_spec
+bin/simple spipe-docgen test/integration/app/mcp_stdio_integration_spec.spl --output doc/06_spec
+```
+
+The generated manual should be useful without opening the test source. If it
+shows raw test mechanics as the primary content, revise step helpers,
+`@step` text, `@capture` evidence, and folded visibility policy.
 
 ### Repair Broken Tool Discovery
 

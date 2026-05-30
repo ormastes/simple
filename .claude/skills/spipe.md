@@ -27,6 +27,23 @@ sh scripts/install-spipe-dev-command.shs --apply
 - [`.claude/agents/spipe/implement.md`](../agents/spipe/implement.md) — SPipe implementation phase
 - [`.claude/agents/spipe/verify.md`](../agents/spipe/verify.md) — SPipe verification phase
 - [`.claude/skills/lib/spipe_phases.md`](lib/spipe_phases.md) — phase map
+- [`doc/07_guide/testing/sspec_scenario_manual.md`](../../doc/07_guide/testing/sspec_scenario_manual.md) — scenario manual, capture, inline/previous scenario, and environmental-test guidance
+
+## Scenario Manual Quality
+
+SPipe specs are executable tests and generated manuals. For user-facing,
+operator-facing, MCP/tooling, UI, protocol, hardware, system, and environmental
+tests, generated `doc/06_spec/...` must read like a scenario manual:
+
+- primary flows visible as ordered steps;
+- `@inline` setup hidden as standalone content and expanded through `@prev` or
+  `@include`;
+- capture evidence attached under the step that caused it;
+- advanced/edge/matrix/stress details folded or skipped by policy;
+- executable SPipe folded below the manual.
+
+Run `bin/simple spipe-docgen <spec> --output doc/06_spec` and revise the spec
+until the generated manual is usable without opening the source.
 
 ## Template
 

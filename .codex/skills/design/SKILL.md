@@ -55,8 +55,17 @@ Output: `doc/04_architecture/<feature>.md`
 - SPipe BDD tests with **built-in matchers only**
 - Every REQ-NNN must have at least one test
 - Include edge cases and error paths
+- For scenario-oriented specs, design the generated `doc/06_spec/...` output as
+  a hand-written-quality manual: primary user/operator/system flows visible,
+  setup scenarios expanded silently through `@prev`, reusable setup hidden via
+  `@inline`, detailed edge/matrix/stress cases folded or skipped by policy, and
+  executable SPipe folded by default.
 - For TUI/GUI behavior, include visible-state capture assertions or capture
   artifact generation so the generated SSPEC doc shows the interface state.
+- Capture is typed evidence, not just screenshots. Use or plan the appropriate
+  kind: `tui`, `gui`, `text`, `api`, `protocol`, `exec`, `binary`, `log`, or
+  `artifact`. Built-in/root capture default is off; bare `@capture` means
+  after-step capture with default kind `tui`.
 
 Output:
 - Test specs: `doc/06_spec/<mirrored-test-path>/<feature>_spec.spl`
@@ -102,6 +111,20 @@ describe "<Feature>":
             expect(result.error?).to_equal(true)
 ```
 
+### Scenario Manual Review Loop
+
+For user-facing, MCP/tooling, system, protocol, UI, hardware, and environmental
+specs:
+
+1. Write executable scenarios and step/checker helpers.
+2. Generate the mirrored doc with `bin/simple spipe-docgen <spec> --output doc/06_spec`.
+3. Read the result as a manual, not as a test report.
+4. Update `@step`, `@capture`, `@inline`, `@prev`, helper/checker names, and
+   manual visibility until the primary flow is understandable without opening
+   the source test.
+
+Reference: `doc/07_guide/testing/sspec_scenario_manual.md`.
+
 ## Phase 4: Detail Design
 
 - Data structures, algorithms, module interactions, error handling
@@ -112,6 +135,9 @@ describe "<Feature>":
 
 - Verify every REQ-NNN has test coverage
 - Check SPipe quality: real assertions, edge cases, error paths
+- Check generated manual quality for scenario-oriented specs before accepting
+  the design. A doc that exposes raw test mechanics as the primary flow is not
+  design-complete.
 - Verify architecture alignment with MDSOC rules
 - Ask user if architecture/design needs changes
 

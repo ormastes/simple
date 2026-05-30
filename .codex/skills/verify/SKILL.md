@@ -43,10 +43,17 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
 - Every REQ-NNN has at least one test
 - Every required SPipe generated/manual spec exists under `doc/06_spec/` at the
   path mirrored from the executable `test/...` spec
+- Scenario-oriented generated docs read as manuals: primary scenario steps are
+  visible first, `@inline`/`@prev` setup expands without redundant metadata,
+  executable SPipe is folded by default, and advanced/edge/matrix/stress
+  scenarios are folded or skipped according to policy.
 - UI-facing specs include visible-state evidence when practical: TUI text/ANSI
   captures under `build/test-artifacts/<spec-relative-path>/`, GUI screenshots
   or goldens under `doc/06_spec/image/<spec-relative-path>/`, and embedded
   `**Screenshots:**` / `**TUI Captures:**` entries in generated docs
+- Non-UI environmental specs include meaningful typed evidence when practical:
+  `api`, `protocol`, `exec`, `binary`, `text`, `log`, or `artifact` captures
+  attached to the relevant scenario step.
 - Every BDD scenario has an executable or intentionally skipped SPipe `it` block with a concrete reason
 - SPipe files are current with the final requirements/design; stale specs are a FAIL, not a release task
 - Built-in matchers only: `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
@@ -104,6 +111,8 @@ Scan for stub patterns — any match is a **FAIL**:
 - `doc/04_architecture/` updated for new modules
 - `doc/05_design/` updated for new features
 - `doc/06_spec/` generated/manual docs follow the mirrored `test/` layout
+- Scenario manual guidance is followed for scenario-oriented specs; if not,
+  return to design/implementation to improve the SPipe source and regenerate.
 - Cross-references between docs intact
 - CHANGELOG updated for user-facing changes
 

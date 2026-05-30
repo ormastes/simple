@@ -3,6 +3,11 @@
 Use this guide when adding, moving, or reviewing executable SPipe tests and
 their generated docs.
 
+For scenario authoring and generated manual quality, also use
+`doc/07_guide/testing/sspec_scenario_manual.md`. Layout correctness is not
+enough: scenario-oriented generated docs must read like manuals, with detailed
+edge/internal cases folded or skipped by policy.
+
 ## Canonical Test Roots
 
 All executable tests should live under one of these top-level buckets:
@@ -49,6 +54,11 @@ doc/06_spec/system/qemu/qmp_screendump_spec.md
 Root `doc/06_spec/` is reserved for navigation and catalog/data files. Generated
 feature, unit, integration, system, and shared docs should not be added at the
 root.
+
+Scenario-oriented generated docs should render the manual view first and fold
+the executable SPipe source by default. Environmental tests may use protocol,
+API, command execution, binary, log, or artifact evidence rather than UI
+screenshots.
 
 ## Placement Rules
 

@@ -1,10 +1,19 @@
 # Regression test for the bug-resolve CLI against the tracked split-schema bug DB.
 
 use std.spec (describe, it, expect)
-use app.io.mod (dir_create_all, file_read, file_write)
-use app.io.process_ops (shell)
+use std.nogc_sync_mut.io.process_ops.{shell}
 
 extern fn rt_getpid() -> i64
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
+extern fn rt_file_delete(path: text) -> bool
+
+fn _spec_file_write(path: text, content: text) -> bool:
+    rt_file_delete(path)
+    rt_file_write_text_at(path, 0, content) >= 0
+
+fn _spec_file_read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
 
 fn bug_resolve_cli_fixture_root() -> text:
     "/tmp/bug_resolve_cli_spec_{rt_getpid()}"
@@ -21,10 +30,10 @@ describe "bug-resolve CLI":
         val bug_add_main = "/home/ormastes/dev/pub/simple/src/app/bug_add/main.spl"
         val bug_resolve_main = "/home/ormastes/dev/pub/simple/src/app/bug_resolve/main.spl"
 
-        dir_create_all("{root}/doc/08_tracking/bug")
+        shell("mkdir -p '{root}/doc/08_tracking/bug'")
         # Write a minimal valid empty bug database so bug_add can load it
         val empty_db_content = "bugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n\n\nbug_descriptions |bug_id, line_num, content|\n\n\nbug_fix_strategies |bug_id, line_num, content|\n\n\nbug_investigation_logs |bug_id, line_num, content|\n\n\nbugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n\n"
-        val created = file_write(db_path, empty_db_content)
+        val created = _spec_file_write(db_path, empty_db_content)
         expect(created).to_equal(true)
 
         val added = shell("cd {root} && SIMPLE_LIB={simple_src} {simple_bin} run {bug_add_main} --id=bug_resolve_cli_fix_001 --severity=p2 --title='CLI bug resolve fix' --file=src/app/dashboard/assistant_collectors.spl --repro='bin/simple dashboard assistant'")
@@ -33,7 +42,7 @@ describe "bug-resolve CLI":
         val resolved = shell("cd {root} && SIMPLE_LIB={simple_src} {simple_bin} run {bug_resolve_main} --id=bug_resolve_cli_fix_001 --date=2026-04-15")
         expect(resolved.exit_code).to_equal(0)
 
-        val content = file_read(db_path)
+        val content = _spec_file_read(db_path)
         expect(content.contains("bug_resolve_cli_fix_001, P2, closed")).to_equal(true)
         expect(content.contains("2026-04-15")).to_equal(true)
 
