@@ -1,7 +1,7 @@
 # TODO List
 
-**Generated:** 2026-05-10
-**Total:** 0 items | **Open:** 0 | **Blocked:** 0 | **Stale:** 0
+**Generated:** 2026-05-30
+**Total:** 4 items | **Open:** 4 | **Blocked:** 0 | **Stale:** 0
 **Database:** `doc/todo/todo_db.sdn`
 
 ## Statistics
@@ -10,47 +10,48 @@
 
 | Area | Count | P0 | P1 | P2 | P3 | Blocked |
 |------|-------|----|----|----|----|---------|
+| runtime | 2 | 0 | 1 | 1 | 0 | 0 |
+| stdlib | 1 | 0 | 0 | 1 | 0 | 0 |
+| ui | 1 | 0 | 0 | 1 | 0 | 0 |
 
 ### By Priority
 
 | Priority | Count | Open | Blocked | Stale |
 |----------|-------|------|---------|-------|
 | P0 (critical) | 0 | 0 | 0 | 0 |
-| P1 (high) | 0 | 0 | 0 | 0 |
-| P2 (medium) | 0 | 0 | 0 | 0 |
+| P1 (high) | 1 | 1 | 0 | 0 |
+| P2 (medium) | 3 | 3 | 0 | 0 |
 | P3 (low) | 0 | 0 | 0 | 0 |
 
-## Feature Requests
+## P1 High Priority TODOs
 
-### FR-INTERP-001: `me fn` nested mutation loss
+### runtime
 
-**ID:** FR-INTERP-001
-**Area:** compiler (interpreter)
-**Priority:** P1 (high)
-**Status:** Open
+- **#1** [runtime][P1] A real GPU framebuffer readback is not available under
+  - File: `./src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl:229`
+  - Status: open
 
-When a method on `self` calls another method on `self` (nested `me fn` calls), the outer method's mutations to `self` fields are lost. The inner call snapshots and restores `self`, overwriting the caller's in-progress mutations. This blocks full RamFS/NVFS API benchmarking — inode push operations inside driver methods are silently discarded.
 
-**Workaround:** Extract mutations to module-level helper functions that take the struct by value and return the updated copy.
+## P2 Medium Priority TODOs (3)
 
-**Blocks:** Full FS driver API benchmarking (AC-1 of fs-opt-general).
+### runtime
 
----
+- **#2** [runtime][P2] Interpreter loses the `self` binding when a struct
+  - File: `./src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl:262`
+  - Status: open
 
-### FR-INTERP-002: Deeply nested field assignment (3+ levels)
+### stdlib
 
-**ID:** FR-INTERP-002
-**Area:** compiler (interpreter)
-**Priority:** P1 (high)
-**Status:** Open
+- **#3** [stdlib][P2] extract ALPN from handshake state when ALPN is implemented
+  - File: `./src/lib/nogc_async_mut/http_server/worker.spl:346`
+  - Status: open
 
-Assignment to deeply nested fields (`self.arr[i].field.subfield = x`) is rejected or silently discarded by the interpreter. The pattern appears in inode and extent-map struct updates across NVFS, DBFS, and RamFS. The interpreter handles 1-level field assignment (`self.field = x`) but fails on 2+ levels through an indexed element.
+### ui
 
-**Workaround:** Use intermediate variables: `var tmp = self.arr[i]; tmp.field.subfield = x; self.arr[i] = tmp` — but this pattern itself may also trigger the me-fn mutation loss (FR-INTERP-001).
+- **#0** [ui][P2] This is a substring-heuristic rasterizer, not a real HTML
+  - File: `./src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl:469`
+  - Status: open
 
-**Blocks:** Full FS driver struct-of-struct mutation in interpreter mode.
-
----
 
 ## Appendix
 
