@@ -174,10 +174,11 @@ SIMPLE_LIB=src bin/simple run src/os/port/deploy_toolchains.spl -- --stage guest
 SIMPLE_LIB=src bin/simple run src/os/port/deploy_toolchains.spl -- --status
 ```
 
-Results: check passed; `deploy_toolchains_status_spec.spl` passed `7/7`;
-the missing-env `guest-payloads` smoke returned non-zero after reporting both
-missing payload sources; status still reports `guest-toolchain-exec-gate
-BLOCKED`.
+Results: check passed; `deploy_toolchains_status_spec.spl` passed `8/8`,
+including deploy help coverage for `guest-payloads` and
+`--enable-toolchain-bake`; the missing-env `guest-payloads` smoke returned
+non-zero after reporting both missing payload sources; status still reports
+`guest-toolchain-exec-gate BLOCKED`.
 
 Even with Blocker 1 fixed, spawning `/sys/apps/clang` or `/sys/apps/rust`
 would execute a stub ELF, not a real compiler. The real payloads require an

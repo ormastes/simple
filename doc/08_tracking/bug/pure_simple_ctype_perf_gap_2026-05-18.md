@@ -643,3 +643,7 @@ LUT route is currently correctness-blocked in native codegen/linking. Keep this
 tracker open for backend global-array initialization/linking plus broader
 branch/loop codegen work; do not promote LUT code into `src/lib/common/ctype.spl`
 from the current evidence.
+
+Integration disposition: documentation closure only; no ctype library or
+benchmark promotion is ready until the static-array smoke and static LUT
+checksum probe pass in a clean native build.

@@ -168,7 +168,8 @@ Spawned read-only explorers:
     - Focused verification passed:
       `SIMPLE_LIB=src bin/simple check src/os/port/guest_toolchain_execution_gate.spl src/os/port/deploy_toolchains.spl test/unit/os/port/deploy_toolchains_status_spec.spl`,
       `SIMPLE_LIB=src bin/simple test test/unit/os/port/deploy_toolchains_status_spec.spl --mode=interpreter --clean`
-      (`7/7`), missing-env `--stage guest-payloads` smoke failed closed, and
+      (`8/8`, including deploy help coverage), missing-env
+      `--stage guest-payloads` smoke failed closed, and
       `--status` still reports `guest-toolchain-exec-gate BLOCKED`.
 16. FAT32 file I/O residual fixed.
     - Removed stale `Result.Ok` / `Result.Err` sugar from the FAT32 file I/O
