@@ -349,7 +349,7 @@ pub(crate) fn evaluate_expr(
             let result = evaluate_macro_invocation(name, macro_args, env, functions, classes, enums, impl_methods)?;
 
             // Register symbols introduced by macro contracts (#1303)
-            if let Some(introduced) = take_macro_introduced_symbols() {
+            if let Some(mut introduced) = take_macro_introduced_symbols() {
                 // Register introduced functions
                 for (func_name, func_def) in introduced.introduced_functions {
                     functions.insert(func_name, func_def);
@@ -367,9 +367,11 @@ pub(crate) fn evaluate_expr(
 
                 // Register introduced variables
                 for (name, _ty, _is_const) in introduced.introduced_vars {
-                    // Initialize with Nil placeholder
-                    // The macro's emit block should assign the actual value
-                    env.insert(name, Value::Nil);
+                    let value = introduced
+                        .introduced_var_values
+                        .remove(&name)
+                        .unwrap_or(Value::Nil);
+                    env.insert(name, value);
                 }
 
                 // NOTE: Inject code execution is FULLY IMPLEMENTED in macro/expansion.rs

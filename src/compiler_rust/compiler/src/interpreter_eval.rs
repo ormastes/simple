@@ -1035,7 +1035,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
 
                 // Register macro-introduced symbols (#1303)
                 // After macro invocation, check if any symbols were introduced
-                if let Some(contract_result) = take_macro_introduced_symbols() {
+                if let Some(mut contract_result) = take_macro_introduced_symbols() {
                     // Register introduced functions
                     for (name, func_def) in contract_result.introduced_functions {
                         functions.insert(name.clone(), func_def);
@@ -1064,9 +1064,11 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
 
                     // Register introduced variables
                     for (name, _ty, _is_const) in contract_result.introduced_vars {
-                        // Initialize with Nil placeholder
-                        // The macro's emit block should assign the actual value
-                        env.insert(name, Value::Nil);
+                        let value = contract_result
+                            .introduced_var_values
+                            .remove(&name)
+                            .unwrap_or(Value::Nil);
+                        env.insert(name, value);
                     }
                 }
             }

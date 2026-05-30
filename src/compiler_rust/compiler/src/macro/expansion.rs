@@ -246,6 +246,7 @@ fn expand_user_macro_inner(
     // Extract functions from local_env and update contract_result
     // Functions defined in emit blocks are now in local_env as Value::Function
     extract_introduced_functions(&local_env, &mut contract_result);
+    extract_introduced_vars(&local_env, &mut contract_result);
 
     // Trace introduced functions
     if is_macro_trace_enabled() && !contract_result.introduced_functions.is_empty() {
@@ -286,6 +287,26 @@ fn extract_introduced_functions(local_env: &Env, contract_result: &mut MacroCont
                         .introduced_functions
                         .insert(original_key, Arc::new(real_func));
                 }
+            }
+        }
+    }
+}
+
+fn extract_introduced_vars(local_env: &Env, contract_result: &mut MacroContractResult) {
+    for (public_name, _ty, _is_const) in &contract_result.introduced_vars {
+        if let Some(value) = local_env.get(public_name) {
+            contract_result
+                .introduced_var_values
+                .insert(public_name.clone(), value.clone());
+            continue;
+        }
+
+        for (local_name, value) in local_env.iter() {
+            if strip_gensym_suffix(local_name) == *public_name {
+                contract_result
+                    .introduced_var_values
+                    .insert(public_name.clone(), value.clone());
+                break;
             }
         }
     }

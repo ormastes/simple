@@ -39,6 +39,9 @@ pub struct MacroContractResult {
     /// Variables introduced at callsite block
     pub introduced_vars: Vec<(String, Type, bool)>, // (name, type, is_const)
 
+    /// Runtime values emitted for introduced variables
+    pub introduced_var_values: HashMap<String, Value>,
+
     /// Code to inject at callsite (anchor -> blocks)
     pub injections: HashMap<MacroAnchor, Vec<Block>>,
 
