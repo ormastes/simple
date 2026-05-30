@@ -208,6 +208,13 @@ in app code:
   viewport change. Apps usually don't interact with this — the builder
   DSL bakes profiles into style tokens (`common.ui.design_tokens`,
   `common.ui.glass.tokens`, `common.ui.ios.theme`, …).
+  For the **web/Tauri/mobile** backends the same `profile.spl` breakpoints
+  (compact `<= 600`, regular `<= 1200`, expanded `> 1200`) are emitted as
+  responsive `@media` CSS by `generate_css`, so the webview applies the size
+  class client-side from its real device width (single column, 16px base font
+  and 44px touch targets on phones). See
+  [mobile/tauri_mobile_guide.md](mobile/tauri_mobile_guide.md) for building the
+  GUI as an iOS / Android app.
 
 ## 6. Testing across backends
 
