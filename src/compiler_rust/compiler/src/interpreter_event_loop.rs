@@ -216,6 +216,7 @@ mod platform {
                     fflags: 0,
                     data: 0,
                     udata: token as *mut libc::c_void,
+                    ext: [0; 4],
                 });
             }
             if interest == 1 || interest == 2 {
@@ -226,6 +227,7 @@ mod platform {
                     fflags: 0,
                     data: 0,
                     udata: token as *mut libc::c_void,
+                    ext: [0; 4],
                 });
             }
 
@@ -263,6 +265,7 @@ mod platform {
                     fflags: 0,
                     data: 0,
                     udata: std::ptr::null_mut(),
+                    ext: [0; 4],
                 },
                 libc::kevent {
                     ident: fd as libc::uintptr_t,
@@ -271,6 +274,7 @@ mod platform {
                     fflags: 0,
                     data: 0,
                     udata: std::ptr::null_mut(),
+                    ext: [0; 4],
                 },
             ];
 
@@ -298,6 +302,7 @@ mod platform {
                     fflags: 0,
                     data: 0,
                     udata: std::ptr::null_mut(),
+                    ext: [0; 4],
                 };
                 max
             ];
