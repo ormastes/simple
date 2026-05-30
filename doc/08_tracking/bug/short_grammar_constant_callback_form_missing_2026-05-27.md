@@ -45,6 +45,12 @@ arguments. Remaining `\_:` hits in short-grammar migration scans are intentional
 
 ## Related open issue
 
-`[].map(\f: ...)` and `[].map(\_: 0)` crash (segfault) in the interpreter
-regardless of lambda form — this is a pre-existing `Array.map` runtime bug
-unrelated to `\_:`. Track separately.
+Resolved 2026-05-30: `[].map(\f: ...)` and `[].map(\_: 0)` no longer crash in
+the interpreter or native runner. Added
+`test/unit/compiler/empty_array_map_lambda_spec.spl` to lock the empty literal
+array callback path for both wildcard and named lambdas.
+
+Verification:
+
+- `SIMPLE_LIB=src bin/simple test test/unit/compiler/empty_array_map_lambda_spec.spl --mode=interpreter --clean --fail-fast`
+- `SIMPLE_LIB=src bin/simple test test/unit/compiler/empty_array_map_lambda_spec.spl --mode=native --clean --force-rebuild --fail-fast`
