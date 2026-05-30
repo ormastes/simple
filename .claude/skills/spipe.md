@@ -5,19 +5,28 @@ description: SPipe Skill — Simple Pipe (spec → test → report). BDD test wr
 
 # SPipe — Simple Pipe (spec → test → report)
 
-The canonical skill content lives at:
+The SPipe dev entrypoint lives at:
 
-**[doc/00_llm_process/spipe/skill.md](../../doc/00_llm_process/spipe/skill.md)**
+**[.claude/agents/spipe/dev.md](../agents/spipe/dev.md)**
 
-Read that file for full BDD syntax, matchers, file structure, hooks, fixtures,
-shared contexts, test types, doc generation, and critical rules.
+Codex routes SPipe development work through `$sp_dev`:
+
+**[.codex/skills/sp_dev/SKILL.md](../../.codex/skills/sp_dev/SKILL.md)**
+
+Check or install that wiring with:
+
+```bash
+sh scripts/install-spipe-dev-command.shs --check
+sh scripts/install-spipe-dev-command.shs --apply
+```
 
 ## Quick references in the same directory
 
-- [`doc/00_llm_process/spipe/INDEX.md`](../../doc/00_llm_process/spipe/INDEX.md) — full migration manifest
-- [`doc/00_llm_process/spipe/loop.md`](../../doc/00_llm_process/spipe/loop.md) — `/spipe_loop` continuous-check workflow
-- [`doc/00_llm_process/spipe/lint_rules.md`](../../doc/00_llm_process/spipe/lint_rules.md) — lint design
-- [`doc/00_llm_process/spipe/guide.md`](../../doc/00_llm_process/spipe/guide.md) — pointer to canonical testing guide
+- [`.claude/agents/spipe/research.md`](../agents/spipe/research.md) — SPipe research phase
+- [`.claude/agents/spipe/spec.md`](../agents/spipe/spec.md) — SPipe spec phase
+- [`.claude/agents/spipe/implement.md`](../agents/spipe/implement.md) — SPipe implementation phase
+- [`.claude/agents/spipe/verify.md`](../agents/spipe/verify.md) — SPipe verification phase
+- [`.claude/skills/lib/spipe_phases.md`](lib/spipe_phases.md) — phase map
 
 ## Template
 

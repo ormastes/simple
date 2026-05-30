@@ -1,16 +1,17 @@
 ---
 name: sp_dev
-description: "SPipe-prefixed full feature development alias for /dev."
+description: "SPipe dev entrypoint: refine a feature/bug/TODO into acceptance criteria, then continue through the SPipe pipeline."
 ---
 
-# SP Dev -- Full Feature Development Alias
+# SP Dev -- SPipe Development Entrypoint
 
-`/sp_dev` is the SPipe-prefixed alias for `/dev`. It runs the full
-feature-development pipeline.
+`/sp_dev` is the Codex entrypoint for the SPipe development workflow. The
+standalone `/dev` Codex skill has been removed so development work routes
+through the explicit SPipe namespace.
 
-Use it when an explicit SPipe namespace is clearer for a feature, bug fix,
-refactor, or TODO that should move through intake, research, design, SPipe
-specs, implementation, refactor, verification, and ship handoff:
+Use it for a feature, bug fix, refactor, or TODO that should start with SPipe
+goal refinement and acceptance criteria, then continue through research, design,
+SPipe specs, implementation, refactor, verification, and ship handoff:
 
 ```
 /sp_dev <description of what to build or fix>
@@ -18,6 +19,10 @@ specs, implementation, refactor, verification, and ship handoff:
 
 ## Dispatch
 
-Use the canonical SPipe skill and process in `.claude/skills/spipe.md` and
-`doc/00_llm_process/spipe/skill.md`. There are no behavioral differences
-between `/sp_dev` and `/dev`.
+Start with the SPipe dev agent instructions in `.claude/agents/spipe/dev.md`.
+Use `.claude/skills/spipe.md` for SPipe test/spec conventions when the workflow
+reaches specification and verification phases.
+
+Run `sh scripts/install-spipe-dev-command.shs --check` to verify that this
+repository still routes Codex development through `/sp_dev` and does not carry a
+separate `/dev` skill.
