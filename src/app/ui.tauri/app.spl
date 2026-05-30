@@ -8,6 +8,7 @@ use common.ui.parse.sdn_tree.{parse_ui_to_tree}
 use common.ui.state.{init_state, update_state, update_tree, is_quit_event}
 use app.ui.tauri.backend.{TauriBackend, tauri_render_ipc_json}
 use app.ui.tauri.ipc.{parse_ipc_message}
+use app.ui.tauri.async_app.{run_shared_wm_tauri}
 use app.io.env_ops.{env_get}
 
 extern fn rt_file_read_text(path: text) -> text?
@@ -28,13 +29,20 @@ class TauriApp:
     last_file_content: text
 
     static fn new(file_path: text, port: i32) -> Result<TauriApp, text>:
+        return TauriApp.new_from_backend(file_path, TauriBackend.new(port))
+
+    static fn new_mobile(file_path: text, port: i32) -> Result<TauriApp, text>:
+        """Mobile (iOS / Android) Tauri app — touch-enabled backend, same
+        render path as desktop."""
+        return TauriApp.new_from_backend(file_path, TauriBackend.new_mobile(port))
+
+    static fn new_from_backend(file_path: text, backend_result: Result<TauriBackend, text>) -> Result<TauriApp, text>:
         val tree_result = parse_ui_to_tree(file_path)
         match tree_result:
             Err(e):
                 return Err(e)
             Ok(tree):
                 val state = init_state(tree)
-                val backend_result = TauriBackend.new(port)
                 match backend_result:
                     Err(e):
                         return Err(e)
@@ -124,7 +132,7 @@ fn tauri_shared_wm_requested(args: [text], env_val: text) -> bool:
     env_val == "1"
 
 fn tauri_shared_wm_error() -> text:
-    return "Error: shared WM mode is not supported by the standalone Tauri shell yet. Run without --shared-wm, or use a shared-WM-capable host backend such as browser or electron."
+    return "Tauri shared WM mode routes through the shared host compositor entrypoint."
 
 # =========================================================================
 # Entry Point
@@ -135,13 +143,34 @@ fn run_tauri(file_path: text, port: i32) -> i64:
     val args = rt_cli_get_args()
     val shared_wm_env = env_get("SIMPLE_UI_TAURI_SHARED_WM")
     if tauri_shared_wm_requested(args, shared_wm_env):
-        print tauri_shared_wm_error()
-        return 1
+        return run_shared_wm_tauri("simple tauri")
     if not rt_file_exists(file_path):
         print "Error: File not found: {file_path}"
         return 1
 
     val app_result = TauriApp.new(file_path, port)
+    match app_result:
+        Err(e):
+            print "Error: {e}"
+            return 1
+        Ok(app):
+            app.run()
+            return 0
+
+fn run_tauri_mobile(file_path: text, port: i32) -> i64:
+    """Start Tauri mode for a .ui.sdn file with a mobile (touch) backend.
+
+    The render path is identical to desktop; the same bundle runs inside the
+    Tauri iOS / Android webview shell (tools/tauri-shell)."""
+    val args = rt_cli_get_args()
+    val shared_wm_env = env_get("SIMPLE_UI_TAURI_SHARED_WM")
+    if tauri_shared_wm_requested(args, shared_wm_env):
+        return run_shared_wm_tauri("simple tauri mobile")
+    if not rt_file_exists(file_path):
+        print "Error: File not found: {file_path}"
+        return 1
+
+    val app_result = TauriApp.new_mobile(file_path, port)
     match app_result:
         Err(e):
             print "Error: {e}"
