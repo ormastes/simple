@@ -213,6 +213,25 @@ fn fallback_counts_from_output(
     }
 }
 
+fn enforce_assert_ran(
+    mut result: TestFileResult,
+    options: &super::types::TestOptions,
+    observed_bdd_groups: usize,
+) -> TestFileResult {
+    if !options.assert_ran || result.failed > 0 || result.error.is_some() {
+        return result;
+    }
+
+    if !result.individual_results.is_empty() || observed_bdd_groups > 0 || (result.skipped > 0 && result.passed == 0) {
+        return result;
+    }
+
+    result.passed = 0;
+    result.failed = 1;
+    result.error = Some("--assert-ran: no executed BDD examples were observed; refusing synthetic pass".to_string());
+    result
+}
+
 /// Derive (passed, failed, skipped) counts for in-process compile-mode runs
 /// (SMF, native-in-process). Prefers the authoritative BDD snapshot
 /// (`rt_bdd_snapshot_results`) when present, since `rt_bdd_describe_end` writes
@@ -597,7 +616,7 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
                 (0, 1, 0)
             };
 
-            TestFileResult {
+            let result = TestFileResult {
                 path: path.to_path_buf(),
                 passed,
                 failed,
@@ -606,7 +625,8 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
                 duration_ms,
                 error: None,
                 individual_results,
-            }
+            };
+            enforce_assert_ran(result, options, 0)
         }
         Err(e) => {
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -741,6 +761,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                 },
                 individual_results,
             };
+            let result = enforce_assert_ran(result, options, 0);
             emit_scenario_artifacts(path, &result);
             emit_test_artifacts(
                 path,
@@ -1774,6 +1795,7 @@ pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache, options: &super::
                 },
                 individual_results,
             };
+            let result = enforce_assert_ran(result, options, bdd_snapshot.len());
             emit_scenario_artifacts(path, &result);
             emit_test_artifacts(
                 path,
@@ -1904,6 +1926,7 @@ pub fn run_test_file_native_mode(
                 },
                 individual_results,
             };
+            let result = enforce_assert_ran(result, options, 0);
             emit_scenario_artifacts(path, &result);
             emit_test_artifacts(
                 path,
@@ -2032,6 +2055,54 @@ mod tests {
         let output = "\x1b[32m✓ All tests passed!\x1b[0m";
         let results = parse_individual_results(output);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_assert_ran_rejects_synthetic_success() {
+        let options = super::super::types::TestOptions {
+            assert_ran: true,
+            ..Default::default()
+        };
+        let result = TestFileResult {
+            path: PathBuf::from("test/feature/scilib/false_green_spec.spl"),
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            ignored: 0,
+            duration_ms: 0,
+            error: None,
+            individual_results: vec![],
+        };
+
+        let result = enforce_assert_ran(result, &options, 0);
+
+        assert_eq!(result.passed, 0);
+        assert_eq!(result.failed, 1);
+        assert!(result.error.as_deref().unwrap_or("").contains("--assert-ran"));
+    }
+
+    #[test]
+    fn test_assert_ran_accepts_bdd_snapshot() {
+        let options = super::super::types::TestOptions {
+            assert_ran: true,
+            ..Default::default()
+        };
+        let result = TestFileResult {
+            path: PathBuf::from("test/feature/scilib/real_spec.spl"),
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            ignored: 0,
+            duration_ms: 0,
+            error: None,
+            individual_results: vec![],
+        };
+
+        let result = enforce_assert_ran(result, &options, 1);
+
+        assert_eq!(result.passed, 1);
+        assert_eq!(result.failed, 0);
+        assert!(result.error.is_none());
     }
 
     #[test]

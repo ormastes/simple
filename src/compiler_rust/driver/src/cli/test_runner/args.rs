@@ -317,6 +317,7 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                 options.rust_tests = true;
                 options.rust_ignored_only = true;
             }
+            "--assert-ran" => options.assert_ran = true,
             // Run management options
             "--list-runs" => options.list_runs = true,
             "--cleanup-runs" => options.cleanup_runs = true,
@@ -612,6 +613,13 @@ mod tests {
         let opts = parse_test_args(&args);
         assert!(opts.no_cache);
         assert!(opts.no_db);
+    }
+
+    #[test]
+    fn test_parse_assert_ran() {
+        let args = vec!["--assert-ran".to_string()];
+        let opts = parse_test_args(&args);
+        assert!(opts.assert_ran);
     }
 
     #[test]

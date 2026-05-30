@@ -833,7 +833,12 @@ fn execute_test_files(
                 // would silently report them as PASSED (0ms) without running
                 // anything, hiding real regressions. Route system specs through
                 // the real interpreter path instead.
-                if !options.coverage && !options.safe_mode && !is_system_spec && !spec_has_assertions(path) {
+                if !options.assert_ran
+                    && !options.coverage
+                    && !options.safe_mode
+                    && !is_system_spec
+                    && !spec_has_assertions(path)
+                {
                     // Static fast-path: only safe for specs that contain *no*
                     // assertion calls (`expect`, `check`, `check_msg`,
                     // `assert_*`). Without this guard the runner would

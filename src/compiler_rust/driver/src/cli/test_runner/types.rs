@@ -240,6 +240,8 @@ pub struct TestOptions {
     pub rust_tests: bool,
     /// Only track ignored Rust tests (skip running all)
     pub rust_ignored_only: bool,
+    /// Fail when a test file reports success without observed test execution.
+    pub assert_ran: bool,
 
     // Run management options
     /// List test runs
@@ -311,6 +313,7 @@ impl Default for TestOptions {
             coverage: false,
             rust_tests: false,
             rust_ignored_only: false,
+            assert_ran: false,
 
             // Run management
             list_runs: false,

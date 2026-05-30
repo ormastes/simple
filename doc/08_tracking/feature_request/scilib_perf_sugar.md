@@ -102,7 +102,7 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
 - **Filed-on:** 2026-04-27
 - **Filed-by:** scilib-port research agent
 - **Priority:** P0
-- **Status:** anticipated
+- **Status:** fixed 2026-05-30
 - **Expected-repro:**
   ```
   fn dot<T>(a: NDArray<T>, b: NDArray<T>) -> T { ... }
@@ -389,6 +389,8 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
   any `it` block body was stub-skipped.
 - **Notes:** Tracked here as a process wedge, not a perf wedge, because it
   will recur whenever a sibling agent tries to speed up CI by switching modes.
+  Fixed by adding `--assert-ran`, which disables the static interpreter fast
+  path and converts synthetic zero-observation successes into failures.
 
 ---
 
