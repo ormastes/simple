@@ -75,7 +75,7 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
 - **Filed-on:** 2026-04-27
 - **Filed-by:** scilib-port research agent
 - **Priority:** P0
-- **Status:** anticipated
+- **Status:** fixed 2026-05-30
 - **Expected-repro:**
   ```
   let c = math { A @ B + v }
@@ -174,9 +174,16 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
   `ptr[i * stride]`. Compiler: allow `NDArray[i, ..]` to return `StridedView`
   without copying. Alternatively, a `rt_strided_view_alloc` extern that creates
   a view struct C-side.
-- **Notes:** NumPy slicing is always O(1) via strides; without this, all
-  ndarray column operations become O(n), blocking any pandas-style column-
-  oriented DataFrame implementation.
+- **Notes:** Fixed 2026-05-30. `NDArray` now carries `shape`, `strides`,
+  `offset`, and `Layout.Strided` metadata for view-producing operations.
+  `slice`, stepped and negative-step `slice`, `slice_2d`, `row`, and `column`
+  return metadata views that reuse the same typed data arrays and resolve
+  elements through `resolve_offset`; `to_contiguous` remains available when a
+  dense copy is needed. Focused coverage includes backing-array length
+  invariants and chained-view composition. Verification:
+  `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/lib/nogc_async_mut/ndarray/mod.spl test/feature/scilib/ndarray_slice_spec.spl`
+  and
+  `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/feature/scilib/ndarray_slice_spec.spl --mode=interpreter --clean --fail-fast`.
 
 ---
 
