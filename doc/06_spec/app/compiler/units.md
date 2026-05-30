@@ -4,8 +4,8 @@ This specification is split into multiple parts for readability. Use this file a
 
 ## Parts
 
-- [Part 1: Core Concepts](units_part1.md)
-- [Part 2: Advanced Features](units_part2.md)
+- [Part 1: Core Concepts](units_core_concepts.md)
+- [Part 2: Advanced Features](units_advanced_features.md)
 
 ## Scope
 

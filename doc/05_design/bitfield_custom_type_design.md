@@ -2,7 +2,7 @@
 
 **Date**: 2026-02-05
 **Status**: Draft
-**Related**: `doc/06_spec/units_part2.md`, `doc/05_design/baremetal_features_examples.md`
+**Related**: `doc/06_spec/units_advanced_features.md`, `doc/05_design/baremetal_features_examples.md`
 
 ---
 
@@ -15,7 +15,7 @@ How do bitfields work with custom types when:
 
 ---
 
-## Current Design (from units_part2.md)
+## Current Design (from units_advanced_features.md)
 
 ### Types Designed for Bitfields
 

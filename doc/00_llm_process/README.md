@@ -22,6 +22,11 @@ For the next implementation step, use [pipeline_next_step_plan.md](pipeline_next
 
 When a new feature or layer expert is needed, copy the matching template from `template/`, create the expert directory, and update the new `skill.md` with links to the relevant project docs and source paths. When product knowledge changes during research, design, implementation, verification, or release, update the affected feature and layer expert skills.
 
+SPipe also has an explicit doc/wiki refactor checkpoint in Refactor and Ship.
+Use `.claude/skills/spipe_doc_wiki_refactor.md` to fix stale docs, command
+names, process links, and feature/layer expert cross-links, then record the
+updated paths in `.spipe/<feature>/state.md`.
+
 This expert tree plus the self-healing update step is Simple's realization of the LLM Wiki and Auto-Research patterns — see [llm_wiki_and_auto_research.md](llm_wiki_and_auto_research.md) for the concept mapping.
 
 ## SPipe submodule
@@ -99,6 +104,7 @@ Stage support skill grouping:
 - Research: `research/skill.md`, `research/research_codex/`
 - Design: `design/skill.md`, `design/arch/`, `design/gemini_ui_design/`, `design/theme_sync/`, `design/ui/`
 - Implementation: `impl/skill.md`, `impl/dev/`, `impl/refactor/`, `impl/spipe_loop/`, `impl/stitch/`, `impl/sync/`
+- Documentation/wiki refactor checkpoint: `.claude/skills/spipe_doc_wiki_refactor.md` during SPipe Refactor and Ship
 - Verification: `verify/skill.md`, `verify/bug_review/`
 - Release: `release/skill.md`, `release/mail/`, `release/repo_and_pull_req/`
 

@@ -646,7 +646,7 @@ append under this heading.
   Incompressible blocks (compressed ≥ 90% of raw) fall back to algo=None automatically.
   Supported algorithms: LZ4 (tag=1), Zstd-3 (tag=2), Zstd-19 (tag=3, archival only).
   The ARC cache stores decompressed blocks. Superblock magic becomes `b"NVFS0003"`.
-  Full spec: `doc/05_design/nvfs_design_v3.md §V3-2`.
+  Full spec: `doc/05_design/nvfs_design.md §V3-2`.
 - **Acceptance-criteria:**
   - [x] `CompressAlgo` enum defined (None=0, LZ4=1, Zstd3=2, Zstd19=3)
   - [x] `arena_append_compressed` compresses data when class policy selects algo≠None,
@@ -663,7 +663,7 @@ append under this heading.
   - [x] v2 pmap entries (80 bytes) decoded with compress_algo=0 / compressed_len=0 (migration path)
   - [x] `nvfs upgrade` tool (offline batch upgrade)
 - **Related-upfront:** none
-- **Related-design-doc:** `doc/05_design/nvfs_design_v3.md §V3-2, §V3-5, §V3-6, §V3-7`
+- **Related-design-doc:** `doc/05_design/nvfs_design.md §V3-2, §V3-5, §V3-6, §V3-7`
 - **Related-issue:** none
 - **Files-changed:**
   - `examples/nvfs/src/core/compression.spl` (new) — CompressAlgo enum, compress_extent,
@@ -702,7 +702,7 @@ append under this heading.
   option. When encryption is active, the DHK (per-dataset, derived from master key) is
   used as the HMAC key for DDT keys so the DDT does not leak plaintext identity across
   dataset boundaries. Refcount GC is synchronous (decremented in the write transaction
-  on unlink/CoW; entry freed at refcount=0). Full spec: `doc/05_design/nvfs_design_v3.md
+  on unlink/CoW; entry freed at refcount=0). Full spec: `doc/05_design/nvfs_design.md
   §V3-3, §V3-4`.
 - **Implementation-notes:**
   N7b DDT implemented in `examples/nvfs/src/core/dedup.spl` (DedupTable,
@@ -725,7 +725,7 @@ append under this heading.
   - [x] When encryption enabled: DHK-keyed HMAC used instead of raw Blake3 (verified by
         inspecting DDT tree on-disk)
 - **Related-upfront:** `from_simple_db.md §S4` (arena_clone_range, used for reflink on DDT hit)
-- **Related-design-doc:** `doc/05_design/nvfs_design_v3.md §V3-3, §V3-4, §V3-6, §V3-7`
+- **Related-design-doc:** `doc/05_design/nvfs_design.md §V3-3, §V3-4, §V3-6, §V3-7`
 - **Related-issue:** none
 - **Notes:** DDT reference counting is error-prone (comparable to delayed-ref queue,
   v2 §5 OQ-1). Comprehensive crash-consistency tests are required before N7b ships.
@@ -762,7 +762,7 @@ append under this heading.
   - [x] Step vocabulary consistent with existing wave 0–6 feature files
   - [x] No .spl step implementations (spec-only; wire-up is a separate track)
 - **Related-upfront:** none
-- **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §14`, `doc/05_design/nvfs_design_v3.md`
+- **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §14`, `doc/05_design/nvfs_design.md`
 - **Related-issue:** none
 
 ---

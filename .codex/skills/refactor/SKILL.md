@@ -6,9 +6,11 @@ description: "Code quality refactoring workflow — 5 phases: file size, duplica
 # Refactor Skill — Code Quality Workflow
 
 ## Phase 1: File Size & Structure
-- **800 lines max** per source file. Split oversized files with meaningful names (NOT `xx_1.spl`)
+- **800 lines max** per source file. Split oversized files with meaningful names (NOT `xx_1.spl`, `xx_2.spl`, `part1.spl`, `ver1.spl`, `v1.spl`, or other numbered copy/version names)
 - Update all imports after splitting. Confirm each deletion/move with user.
 - Intentional exceptions: `#![allow(large_file)]  # Intentional: <reason>`
+- Run `sh scripts/audit/numbered-artifact-guard.shs --working` and
+  `sh scripts/audit/numbered-artifact-guard.shs --staged` before finishing.
 
 ## Phase 2: Duplication Removal
 

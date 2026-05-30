@@ -22,13 +22,20 @@ self-healing update step. The Simple equivalents are:
 
 ## does spipe have a wiki-update step?
 
-Yes. It is not a standalone skill — it is the knowledge-update obligation built into
-every pipeline stage. After each stage the lead agent must:
+Yes. It is the knowledge-update obligation built into every pipeline stage.
+After each stage the lead agent must:
 
 - append or refresh links in the affected `feature_expert/<feature>/skill.md`
 - append or refresh links in the affected `layer_expert/<layer>/skill.md`
 - update the next-step plan status and handoff notes
 - update `skill_command/` only when reusable, project-neutral process knowledge changed
+
+There is also an explicit doc/wiki refactor checkpoint during SPipe Refactor and
+Ship. The checkpoint uses `.claude/skills/spipe_doc_wiki_refactor.md` as the
+operational checklist for stale docs, command names, process links, and
+feature/layer expert cross-links. It does not replace the per-stage knowledge
+update obligation; it catches accumulated drift after implementation has
+stabilized and again before completion.
 
 This is specified in [`pipeline_next_step_plan.md`](pipeline_next_step_plan.md)
 (§"Runtime Process" step 5 and §"Design And Implementation Emphasis") and enforced

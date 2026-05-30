@@ -64,7 +64,7 @@ bin/simple test test/perf/scilib_simd_ops_perf_spec.spl --mode=interpreter --cle
 When the change touches optimizer recipe selection, also run the feature-specific sys-test plan listed in:
 
 - `doc/03_plan/sys_test/simd_auto_application.md`
-- `doc/05_design/simd_rollout_plan_v2.md`
+- `doc/05_design/simd_rollout_plan.md`
 
 ## Review Checklist
 

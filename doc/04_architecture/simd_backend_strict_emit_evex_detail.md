@@ -6,7 +6,7 @@ enum extensions, per-target helper signatures, and full byte-level encoder pseud
 EVEX (AVX-512), AArch64 SVE2, and RVV 1.0, plus NEON synthesis recipes and the AVX2
 scatter-fallback loop. Register-allocation contracts, verification harnesses, capability
 detection, and errata guards (§8–14) are covered in
-`simd_backend_strict_emit_detail_part2.md` (C3b). All byte/bit claims cite C1
+`simd_backend_strict_emit_goldens_detail.md` (C3b). All byte/bit claims cite C1
 (`doc/01_research/simd_isa_deep_2026-05-02.md`) and carry `[UNVERIFIED]` where the
 original research flagged primary-spec cross-check as pending.
 
@@ -1247,4 +1247,4 @@ fn lower_scatter(base: Reg, idx: Reg, src: Reg, scale: i32, target: TargetCaps) 
 
 *End of Part 1 (§1–7). Sections §8–14 (regalloc contracts, verification harnesses,
 capability detection, errata guards, and test tables) are in
-`simd_backend_strict_emit_detail_part2.md` (C3b).*
+`simd_backend_strict_emit_goldens_detail.md` (C3b).*

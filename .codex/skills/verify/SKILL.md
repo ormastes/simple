@@ -26,6 +26,11 @@ description: "Codex verification skill (primary verifier in cooperative mode). 6
 - Identify all files changed/added for the feature
 - Map changes to requirements (REQ-NNN)
 - Verify no unrelated changes sneaked in
+- Run `sh scripts/audit/numbered-artifact-guard.shs --working` and
+  `sh scripts/audit/numbered-artifact-guard.shs --staged`, then fail any
+  newly added or renamed `*_1`, `*_2`, `part1`, `ver1`, `v1`, or equivalent
+  numbered copy/version artifact. Existing files must be updated or split into
+  meaningful domain/module names instead.
 
 ### Phase 2: SPipe Quality and Coverage
 
@@ -83,6 +88,7 @@ Scan for stub patterns — any match is a **FAIL**:
 - **Security:** input validation present, no hardcoded secrets
 - **Reliability:** error handling complete, `Result<T, E>` + `?` used consistently
 - **Maintainability:** files under 800 lines, no duplication
+- **Artifact naming:** no newly added/renamed numbered copy/version/part files
 - **Core/MCP regression gate:** when compiler/core/lib or MCP/LSP files changed, require passing:
   - `<runtime> check src/compiler`
   - `<runtime> check src/lib`

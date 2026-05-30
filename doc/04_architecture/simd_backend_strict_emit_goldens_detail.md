@@ -5,7 +5,7 @@
 runtime CPU/GPU capability detection probes (§9), byte-level golden-test fixtures (§10),
 encoder unit-test contract (§11), synthesis-recipe verification table (§12),
 errata-driven safeguard rules in the emit path (§13), and open verification items (§14).
-It is a direct continuation of Part 1 (`simd_backend_strict_emit_detail_part1.md`, owned
+It is a direct continuation of Part 1 (`simd_backend_strict_emit_evex_detail.md`, owned
 by C3a), which covers ENCODERS + BYTES (§§1-7). Round-1 baseline is
 `simd_backend_strict_emit.md` (B2). Round-2 type-system context is
 `simd_unified_architecture_detail.md` (C2). All §-citations beginning with "C1" refer to
@@ -1194,7 +1194,7 @@ provisional until primary-spec lookup is complete.
   - C1 = doc/01_research/simd_isa_deep_2026-05-02.md (Round-2 ISA depth)
   - B2 = doc/04_architecture/simd_backend_strict_emit.md (Round-1 strict-emit)
   - C2 = doc/04_architecture/simd_unified_architecture_detail.md (Round-2 architecture)
-  - Part1 = doc/04_architecture/simd_backend_strict_emit_detail_part1.md (C3a sibling)
+  - Part1 = doc/04_architecture/simd_backend_strict_emit_evex_detail.md (C3a sibling)
   - Intel SDM Vol 2A/2B: not fetched this round; all AVX-512 bytes UNVERIFIED (V-01+)
   - ARMv9 ARM (JS portal): not fetched; SVE bytes UNVERIFIED (V-08+)
   - RVV 1.0 spec (github.com/riscv/riscv-v-spec): partially fetched by C1 author

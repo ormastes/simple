@@ -1,6 +1,6 @@
 # Unit Types Specification - Part 2: Advanced Features
 
-**Part of:** [Unit Types](./units_part1.md)
+**Part of:** [Unit Types](./units_core_concepts.md)
 
 ---
 

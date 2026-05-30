@@ -56,6 +56,12 @@ References:
    - append or refresh links in affected `layer_expert/<layer>/skill.md`
    - update next-step plan status and handoff notes
    - update `skill_command/` only when reusable project-neutral process knowledge changed.
+6. During implementation cleanup and final closeout, run the doc/wiki refactor
+   checkpoint:
+   - use `.claude/skills/spipe_doc_wiki_refactor.md` as the checklist
+   - fix stale guide, command, skill, phase, and file-path references
+   - record changed doc/wiki paths, or "no doc/wiki updates needed", in
+     `.spipe/<feature>/state.md`.
 
 ## Research And Design Pairing
 
@@ -87,6 +93,29 @@ Design flow:
 5. Feature and layer expert agents update their own `skill.md` files with new design links, changed contracts, affected modules, test obligations, and handoff notes for implementation.
 
 Research and design outputs are drafts until the lead agent reconciles conflicts between experts and records the final merged plan.
+
+## Refactor And Ship Knowledge Checkpoint
+
+Implementation can invalidate docs and wiki-style process knowledge after the
+normal per-stage expert updates have already run. SPipe therefore includes an
+explicit doc/wiki refactor checkpoint in the Refactor and Ship phases.
+
+Refactor checkpoint:
+
+1. Read `.spipe/<feature>/state.md` for changed implementation/spec files.
+2. Search `doc/`, `.claude/skills/`, `.claude/agents/`, `.codex/skills/`, and
+   `doc/00_llm_process/` for stale references to changed commands, APIs,
+   paths, phase names, or process rules.
+3. Fix stale links and duplicate process explanations, preferring a single
+   canonical reference.
+4. Record changed doc/wiki paths in the state file.
+
+Ship checkpoint:
+
+1. Repeat the same check before the completion report.
+2. Ensure the completion report reflects the final doc/wiki state.
+3. Record either the updated paths or "no doc/wiki updates needed" before
+   marking the pipeline complete.
 
 ## Generator Tool Plan
 

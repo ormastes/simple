@@ -32,13 +32,17 @@
    # See "CLI Flags (3-Level Review wiring)" below for $TARGET / $REVIEW_LEVEL detection.
    /repo_and_pull_req push --target=$TARGET --level=$REVIEW_LEVEL
    ```
-6. Generate completion report at `doc/09_report/<feature>_complete_<date>.md`:
+6. Run `.claude/skills/spipe_doc_wiki_refactor.md` one final time to update stale guide, skill, command, and process links before closing the feature
+7. Run numbered artifact guard:
+   `sh scripts/audit/numbered-artifact-guard.shs --working`
+   `sh scripts/audit/numbered-artifact-guard.shs --staged`
+8. Generate completion report at `doc/09_report/<feature>_complete_<date>.md`:
    - Feature summary (from Phase 1 intake)
    - Architecture decisions (from Phase 3)
    - Files created/modified (from Phases 4-6)
    - Test results (from Phase 7)
    - Timeline (phase timestamps from state)
-7. Update state file: mark `phase: ship` complete
+9. Update state file: mark `phase: ship` complete
 
 ## Report Template
 
@@ -75,6 +79,8 @@
 ## Rules
 
 - **No code changes:** If something is broken, send back to appropriate phase
+- **Doc/wiki hygiene allowed:** Only stale docs, wiki-style process knowledge,
+  skill links, command references, and completion-report content may change
 - **Commit message format:** `feat(<scope>): <description>` for features, `fix(<scope>):` for fixes
 - **Report must exist:** Do not skip the completion report
 - **Push must succeed:** Verify push completes without errors
@@ -90,6 +96,8 @@ Four steps, in order, no shortcuts. Each must succeed before the next.
 - [ ] Code committed: `jj log` shows new commit
 - [ ] Code pushed: `jj git push` succeeded
 - [ ] Completion report exists: `doc/09_report/<feature>_complete_<date>.md`
+- [ ] Doc/wiki refactor pass recorded in state file
+- [ ] Numbered artifact guard passes
 - [ ] State file updated: `phase: ship` marked complete, `status: done`
 
 ## Output

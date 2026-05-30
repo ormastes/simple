@@ -8,7 +8,7 @@ kernels × 8 targets × 3 modes), T3 cross-target equivalence (10 kernels × 7 C
 targets), T4 byte-level golden tests (40, 5 kernels × 8 targets), T5 fuzz tests (25
 named errata seeds + 100K random iterations), and T6 perf gates (5 CPU targets +
 CUDA). Phase gating and rollout milestones live in the companion doc
-`simd_rollout_plan_v2.md` (C4a). All tests run in compiled mode; interpreter-mode
+`simd_rollout_plan.md` (C4a). All tests run in compiled mode; interpreter-mode
 false-greens are a known project hazard (see project memory
 `feedback_compile_mode_false_greens.md`).
 

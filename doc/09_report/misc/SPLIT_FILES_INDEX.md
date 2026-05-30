@@ -31,8 +31,8 @@ This document tracks large markdown files that have been split into multiple par
 ### Specification Documents
 
 6. **Unit Types Specification** (1429 → 2 parts)
-   - [Part 1: Core Concepts](spec/units_part1.md) (804 lines)
-   - [Part 2: Advanced Features](spec/units_part2.md) (635 lines)
+   - [Part 1: Core Concepts](spec/units_core_concepts.md) (804 lines)
+   - [Part 2: Advanced Features](spec/units_advanced_features.md) (635 lines)
 
 ### Feature Documentation
 

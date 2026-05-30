@@ -23,13 +23,19 @@
 4. For each issue found (max 10 refactor-test cycles total; stop after 10 even if issues remain):
    a. **Duplication:** Extract shared logic into helper functions
    b. **Large files (>800 lines):** Split into focused modules
-   c. **Naming:** Ensure consistency with project conventions
+   c. **Naming:** Ensure consistency with project conventions. Split files must
+      get meaningful domain/module names, never `*_1`, `*_2`, `part1`, `ver1`,
+      `v1`, or similar numbered copy/version names.
    d. **Dead code:** Remove unused functions, imports, variables
 5. After EVERY change, run specs to verify no behavior change:
    `set -o pipefail; bin/simple test <spec_file> 2>&1 | tail -40` for each spec from Phase 4
    If a refactor breaks specs, revert that change and note it in state file — do NOT loop trying to fix it
-6. Run final lint pass: `set -o pipefail; bin/simple build lint 2>&1 | tail -30`
-7. Update state file with refactor status
+6. Run `.claude/skills/spipe_doc_wiki_refactor.md` for any docs, wiki-style process knowledge, feature/layer expert links, stale command names, or stale file paths affected by the implementation
+7. Run numbered artifact guard:
+   `sh scripts/audit/numbered-artifact-guard.shs --working`
+   `sh scripts/audit/numbered-artifact-guard.shs --staged`
+8. Run final lint pass: `set -o pipefail; bin/simple build lint 2>&1 | tail -30`
+9. Update state file with refactor status and doc/wiki refactor status
 
 ## Rules
 
@@ -39,6 +45,9 @@
 - **Duplication threshold:** Extract any logic duplicated 3+ times
 - **Naming conventions:** Follow existing project patterns (snake_case functions, PascalCase types)
 - **No new features:** Do not add functionality, only restructure
+- **Docs are hygiene only:** Doc/wiki refactoring may fix stale links and process references, but must not introduce new product scope
+- **No numbered split names:** Do not create `foo_1`, `foo_2`, `part1`,
+  `ver1`, `v1`, or equivalent files when updating or splitting existing code
 
 ## Boil a Small Lake
 
@@ -52,6 +61,8 @@ If a refactoring risks breaking behavior, skip it and note in state file.
 - [ ] Lint clean: `bin/simple build lint` passes with no warnings
 - [ ] No file exceeds 800 lines
 - [ ] All specs still pass: `bin/simple test <spec_file>` green for each
+- [ ] Doc/wiki refactor pass recorded in state file
+- [ ] Numbered artifact guard passes
 - [ ] State file updated: `phase: refactor` marked complete
 
 ## Output

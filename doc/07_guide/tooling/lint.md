@@ -16,6 +16,11 @@ bin/simple build lint
 # Run all quality checks (includes lint)
 bin/simple build check
 
+# Guard against new LLM-style numbered duplicate artifacts
+sh scripts/audit/numbered-artifact-guard.shs --working
+sh scripts/audit/numbered-artifact-guard.shs --staged
+sh scripts/audit/numbered-artifact-guard.shs --changed-from origin/main
+
 # Check repo script/bin layout policy
 sh scripts/check_script_layout.shs
 ```
@@ -23,6 +28,13 @@ sh scripts/check_script_layout.shs
 Related guide:
 
 - [script_layout_policy.md](script_layout_policy.md) — naming and placement rules for `scripts/` and `bin/`
+
+`bin/simple build check` also runs the repository hygiene gate, which includes
+`scripts/audit/numbered-artifact-guard.shs --staged`. This blocks newly added or
+renamed files such as `foo_1.spl`, `foo_2.spl`, `foo_part1.md`, `foo_v2.md`,
+and `foo_ver1.md`; update the existing file or choose a meaningful module name
+instead. Existing source implementation shards and imported report files are
+not treated as duplicate artifacts.
 
 ---
 

@@ -23,6 +23,11 @@ Start with the SPipe dev agent instructions in `.claude/agents/spipe/dev.md`.
 Use `.claude/skills/spipe.md` for SPipe test/spec conventions when the workflow
 reaches specification and verification phases.
 
+During the SPipe Refactor and Ship phases, run the doc/wiki refactor support
+skill at `.claude/skills/spipe_doc_wiki_refactor.md` so stale docs, command
+references, wiki-style process knowledge, and feature/layer expert links are
+cleaned before completion.
+
 Run `sh scripts/install-spipe-dev-command.shs --check` to verify that this
 repository still routes Codex development through `/sp_dev` and does not carry a
 separate `/dev` skill.

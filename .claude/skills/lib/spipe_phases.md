@@ -164,10 +164,14 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 1. Read implementation file list from state file
 2. Check for duplication (within new code and against existing codebase)
 3. Check for files exceeding 800 lines -- split if needed
-4. Verify naming conventions and code style
+4. Verify naming conventions and code style; file splits must use meaningful
+   domain/module names, never `*_1`, `*_2`, `part1`, `ver1`, `v1`, or similar
+   numbered copy/version names
 5. Remove any dead code, unused imports, or placeholder stubs
 6. Ensure TODOs are either implemented or left as TODO (never converted to NOTE)
-7. Run linter if available: `bin/simple build lint`
+7. Run the SPipe doc/wiki refactor support skill (`.claude/skills/spipe_doc_wiki_refactor.md`) for docs, wiki-style process knowledge, feature/layer expert links, stale command names, and stale file paths affected by the implementation
+8. Run numbered artifact guard: `sh scripts/audit/numbered-artifact-guard.shs --working` and `sh scripts/audit/numbered-artifact-guard.shs --staged`
+9. Run linter if available: `bin/simple build lint`
 
 **Exit Criteria:**
 - No file exceeds 800 lines
@@ -175,6 +179,9 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - No dead code or unused imports
 - All TODOs are genuine (not disguised NOTEs)
 - Code style consistent with project conventions
+- No newly added/renamed file uses numbered copy/version/part naming
+- A doc/wiki refactor pass is recorded in the state file, including either
+  updated doc paths or "no doc/wiki updates needed"
 
 ---
 
@@ -222,13 +229,17 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 1. Review the full state file for completeness
 2. Commit changes using jj (per CLAUDE.md VCS rules): `jj commit -m "<message>"`
 3. Update any tracking docs if applicable (TODO scan, bug reports)
-4. Write final summary in state file
-5. Mark Phase 8 complete in checklist
+4. Run the SPipe doc/wiki refactor support skill (`.claude/skills/spipe_doc_wiki_refactor.md`) one final time to catch stale guide, skill, command, and process links before closing the feature
+5. Run numbered artifact guard: `sh scripts/audit/numbered-artifact-guard.shs --working` and `sh scripts/audit/numbered-artifact-guard.shs --staged`
+6. Write final summary in state file
+7. Mark Phase 8 complete in checklist
 
 **Exit Criteria:**
 - All changes committed (jj, not git branch)
 - Commit message references the feature
 - State file phase checklist is fully checked
+- Doc/wiki refactor pass is recorded in the state file
+- Numbered artifact guard passes for staged added/renamed paths
 - Final summary written under `### 8-ship`
 - No uncommitted changes remain
 

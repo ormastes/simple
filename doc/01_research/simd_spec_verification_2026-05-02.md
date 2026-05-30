@@ -404,12 +404,12 @@ Items where primary spec was inaccessible or insufficient:
 
 | Document | Section | Action recommended | Why |
 |----------|---------|-------------------|-----|
-| simd_backend_strict_emit_detail_part1.md | §3.2 `evex_encode_3op_zmm` | Fix P0/P1 label swap AND W-bit placement; `p0` must contain R/X/B/R'/mm (Byte1 per Intel SDM), `p1` must contain W/vvvv/1/pp (Byte2) | V-01 verified Intel SDM Byte1≠Byte2; C1 has them swapped; W=1 will silently produce wrong opcode-map encoding |
-| simd_backend_strict_emit_detail_part2.md | §10.3 Fixture A-1 | Mark byte sequence VERIFIED, remove [UNVERIFIED — V-06] tag | V-06 byte decode confirmed all 6 bytes correct |
-| simd_backend_strict_emit_detail_part2.md | §10.5 Fixture R-1 | Mark VERIFIED, remove [UNVERIFIED — V-13, V-14] | V-13 confirmed vtypei=0x58 for e32/m1/ta/ma |
-| simd_backend_strict_emit_detail_part2.md | §10.5 Fixture R-2 | Mark VERIFIED, remove [UNVERIFIED — V-15] | V-15 confirmed funct6=000000 for vfadd.vv; bytes 0x57 0x04 0x04 0x00 canonical |
-| simd_backend_strict_emit_detail_part2.md | §10.5 Fixture R-4 | Add new Fixture R-4 as VERIFIED: vfmacc.vv v8, v0, v4, v0.t = 0x57 0x14 0x40 0xB0 | V-16 confirmed; masked variant bytes computed from verified funct6 |
-| simd_backend_strict_emit_detail_part2.md | §10.4 NEON / §10.6 SVE2 | Retain [UNVERIFIED] tags; add OQ-bug references for V-25 and V-08 | Primary specs inaccessible; cannot confirm |
+| simd_backend_strict_emit_evex_detail.md | §3.2 `evex_encode_3op_zmm` | Fix P0/P1 label swap AND W-bit placement; `p0` must contain R/X/B/R'/mm (Byte1 per Intel SDM), `p1` must contain W/vvvv/1/pp (Byte2) | V-01 verified Intel SDM Byte1≠Byte2; C1 has them swapped; W=1 will silently produce wrong opcode-map encoding |
+| simd_backend_strict_emit_goldens_detail.md | §10.3 Fixture A-1 | Mark byte sequence VERIFIED, remove [UNVERIFIED — V-06] tag | V-06 byte decode confirmed all 6 bytes correct |
+| simd_backend_strict_emit_goldens_detail.md | §10.5 Fixture R-1 | Mark VERIFIED, remove [UNVERIFIED — V-13, V-14] | V-13 confirmed vtypei=0x58 for e32/m1/ta/ma |
+| simd_backend_strict_emit_goldens_detail.md | §10.5 Fixture R-2 | Mark VERIFIED, remove [UNVERIFIED — V-15] | V-15 confirmed funct6=000000 for vfadd.vv; bytes 0x57 0x04 0x04 0x00 canonical |
+| simd_backend_strict_emit_goldens_detail.md | §10.5 Fixture R-4 | Add new Fixture R-4 as VERIFIED: vfmacc.vv v8, v0, v4, v0.t = 0x57 0x14 0x40 0xB0 | V-16 confirmed; masked variant bytes computed from verified funct6 |
+| simd_backend_strict_emit_goldens_detail.md | §10.4 NEON / §10.6 SVE2 | Retain [UNVERIFIED] tags; add OQ-bug references for V-25 and V-08 | Primary specs inaccessible; cannot confirm |
 | simd_isa_deep_2026-05-02.md | §10 V-series table V-13, V-15, V-16 | Update status to VERIFIED with primary source citations | Verified in this document |
 | simd_isa_deep_2026-05-02.md | §10 V-series table V-25, V-08 | Update status to "OQ-BUG: primary spec inaccessible" | ARM portal blocked |
 
@@ -521,7 +521,7 @@ Hex:    0x6E A2 E4 20
 
 Note: In ARM little-endian memory representation this encodes as bytes `20 E4 A2 6E`.
 
-**Implication for C3a/C3b:** Fixture N-3 (`simd_backend_strict_emit_detail_part2.md §10.4`) is now
+**Implication for C3a/C3b:** Fixture N-3 (`simd_backend_strict_emit_goldens_detail.md §10.4`) is now
 unblocked. Any golden using `FCMGT` to implement `cmp_lt(a,b)` must have Rn=b, Rm=a
 (the operand after the dest in assembly syntax is the first/greater operand). Goldens
 generated with Rn=a, Rm=b would produce an inverted mask.
@@ -614,7 +614,7 @@ are Z0); the `/M` flag means inactive lanes retain Zdn's original value
 (merge predication).
 
 **Implication for C3a/C3b:** Fixture SVE-FADD-1 in the strict-emit detail
-(`simd_backend_strict_emit_detail_part1.md §4.4 Example 1`) can now be marked
+(`simd_backend_strict_emit_evex_detail.md §4.4 Example 1`) can now be marked
 CANONICAL. The encoding `0x65 0x80 0x80 0x20` (LE bytes) is confirmed for
 `FADD Z0.S, P0/M, Z0.S, Z1.S`. Any emission that produces bytes not matching
 this encoding has a bug in the sz, opc, Pg, Zm, or Zdn field assignment.

@@ -2,7 +2,7 @@
 # Architecture: SIMD Strict-Emit Errata
 
 **TL;DR:** This document records confirmed bugs in the `evex_encode_3op_zmm` pseudocode in
-`simd_backend_strict_emit_detail_part1.md` (C3a) §3.2. Two distinct bit-placement errors make
+`simd_backend_strict_emit_evex_detail.md` (C3a) §3.2. Two distinct bit-placement errors make
 the function produce incorrect EVEX byte streams for **all** AVX-512 instructions — not merely
 W=1 (f64) encodings as D1 V-06 initially characterized. The golden fixtures in C3b §10.3
 (Fixture A-1) that D1's V-06 marked "byte sequence confirmed correct" must be treated as
@@ -19,8 +19,8 @@ corrected construction shown in ERR-001 §"Corrected byte-construction sequence"
 
 | ID | Source doc + section | Severity | Status | Affected goldens |
 |---|---|---|---|---|
-| ERR-001a | `simd_backend_strict_emit_detail_part1.md` §3.2 line 510 | CRITICAL (all EVEX goldens wrong) | RESOLVED | All AVX-512 EVEX goldens in C3b §10.3 |
-| ERR-001b | `simd_backend_strict_emit_detail_part1.md` §3.2 lines 512, 516 | HIGH (W=1 f64 instructions decode as wrong map) | RESOLVED | All AVX-512 W=1 (f64/i64) EVEX goldens |
+| ERR-001a | `simd_backend_strict_emit_evex_detail.md` §3.2 line 510 | CRITICAL (all EVEX goldens wrong) | RESOLVED | All AVX-512 EVEX goldens in C3b §10.3 |
+| ERR-001b | `simd_backend_strict_emit_evex_detail.md` §3.2 lines 512, 516 | HIGH (W=1 f64 instructions decode as wrong map) | RESOLVED | All AVX-512 W=1 (f64/i64) EVEX goldens |
 | ERR-001c | `simd_spec_verification_2026-05-02.md` §V-06 | LOW (doc error, not code) | OPEN | D1 V-06 "byte sequence confirmed correct" claim is wrong |
 
 ## Resolution log
@@ -306,7 +306,7 @@ encoders are independent of `evex_encode_3op_zmm`.
 
 | ID | Source doc + section | Severity | Status | Affected goldens |
 |---|---|---|---|---|
-| ERR-002 | `simd_backend_strict_emit_detail_part2.md` §10.1 Fixture N-3 | HIGH (wrong BSL bytes) | RESOLVED | N-3 BSL bytes in C3b §10.1 |
+| ERR-002 | `simd_backend_strict_emit_goldens_detail.md` §10.1 Fixture N-3 | HIGH (wrong BSL bytes) | RESOLVED | N-3 BSL bytes in C3b §10.1 |
 
 ### Symptom
 
