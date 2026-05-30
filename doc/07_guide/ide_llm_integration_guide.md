@@ -69,8 +69,9 @@ The IDE must run on both host platforms and SimpleOS:
   presentation and IPC, but the editor/IDE renderer itself stays runnable
   without host-only APIs.
 - **Verification:** `test/unit/lib/editor/host_simpleos_surface_contract_spec.spl`
-  guards the boundary by scanning the shared/TUI entrypoints for host-only API
-  names and by rendering editor GUI HTML through the shared GUI backend.
+  guards the boundary by scanning the shared editor services, TUI path, Simple
+  IDE entrypoint, and embedded example IDE for host-only API names, and by
+  rendering editor GUI HTML through the shared GUI backend.
 
 ### LLM session management
 

@@ -67,7 +67,9 @@ The editor must remain runnable on both host platforms and SimpleOS:
   make Tauri, browser/webview, SDL, or desktop APIs dependencies of the shared
   renderer.
 - `test/unit/lib/editor/host_simpleos_surface_contract_spec.spl` enforces this
-  boundary with source-level checks and a small runtime render proof.
+  boundary with source-level checks for shared editor services, TUI code,
+  `src/app/ide/main.spl`, and `examples/ide/simple_ide_launch.spl`, plus a
+  small runtime render proof.
 
 ## Rendering a frame (today)
 
