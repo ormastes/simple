@@ -16,9 +16,10 @@ use std.gc_async_mut.cuda.{
     cuda_ctx_create, cuda_ctx_destroy,
     cuda_mem_alloc, cuda_mem_free,
     cuda_module_load_data, cuda_module_unload,
-    cuda_sync,
+    cuda_launch_kernel, cuda_sync,
     CUDA_SUCCESS
 }
+use std.gc_async_mut.gpu.engine2d.backend_session.{BackendSessionKind}
 
 # ============================================================================
 # CudaSession
@@ -57,6 +58,12 @@ class CudaSession:
             is_initialized: false,
             generation: 0
         )
+
+    fn kind() -> BackendSessionKind:
+        BackendSessionKind.Cuda
+
+    fn is_available() -> bool:
+        cuda_available()
 
     me init() -> i64:
         """Create CUDA device and context.
@@ -114,6 +121,15 @@ class CudaSession:
         """Synchronize the default CUDA stream. Returns CUDA error code (0 = success)."""
         cuda_sync()
 
+    me synchronize() -> i64:
+        """ComputeSession-compatible alias for sync()."""
+        self.sync()
+
+    me shutdown():
+        """ComputeSession-compatible explicit cleanup."""
+        self.ref_count = 0
+        self._cleanup()
+
     me alloc(size: i64) -> i64:
         """Allocate device memory of `size` bytes. Returns device pointer or 0 on failure."""
         cuda_mem_alloc(size)
@@ -122,6 +138,17 @@ class CudaSession:
         """Free device memory previously allocated with alloc()."""
         if ptr != 0:
             cuda_mem_free(ptr)
+
+    me launch_kernel(name: text, gx: i64, gy: i64, bx: i64, by: i64) -> i64:
+        """Launch a kernel from the cached module with an empty argument block.
+
+        Pixel-operation wrappers provide populated argument buffers at the
+        backend layer; this shared-session method intentionally fails closed
+        until a module has been loaded.
+        """
+        if self.module_cache == 0:
+            return 1
+        cuda_launch_kernel(self.module_cache, name, gx, gy, 1, bx, by, 1, 0)
 
     me _cleanup():
         """Destroy all GPU objects. Called automatically by release() on zero refcount."""

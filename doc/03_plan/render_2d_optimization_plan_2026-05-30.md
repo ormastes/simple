@@ -100,9 +100,12 @@ Progress 2026-05-30:
   resolver.
 - Added focused coverage in
   `test/unit/lib/gpu/engine2d/backend_session_contract_spec.spl`.
-- Remaining Phase 1 work: retrofit `CudaSession` with the full kernel-dispatch
-  wrapper methods and replace the blocked CUDA-selectable placeholder with live
-  evidence.
+- Added `CudaSession` contract helpers for backend kind, availability,
+  shutdown/synchronize aliases, and fail-closed cached-module kernel launch,
+  covered by `test/unit/lib/gpu/engine2d/cuda_session_contract_spec.spl`.
+- Remaining Phase 1 work: add populated pixel-operation argument wrappers and
+  replace the blocked CUDA-selectable placeholder with live evidence on a CUDA
+  host.
 
 ### Phase 2: CPU-SIMD conformance + native acceleration
 
