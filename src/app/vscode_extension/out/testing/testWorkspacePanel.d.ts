@@ -12,6 +12,10 @@ export interface TestWorkspaceEntry {
     updatedAt: number;
     label: string;
 }
+export declare function isPathInside(candidate: string, root: string): boolean;
+export declare function collectArtifactRoots(workspaceFolders: readonly vscode.WorkspaceFolder[] | undefined): string[];
+export declare function discoverTestWorkspaceEntries(workspaceFolders: readonly vscode.WorkspaceFolder[] | undefined): TestWorkspaceEntry[];
+export declare function buildTestWorkspaceHtml(entries: TestWorkspaceEntry[]): string;
 export declare class TestWorkspacePanel implements vscode.Disposable {
     static currentPanel: TestWorkspacePanel | undefined;
     private readonly panel;
@@ -23,6 +27,7 @@ export declare class TestWorkspacePanel implements vscode.Disposable {
     openLatestArtifacts(): void;
     dispose(): void;
     private handleMessage;
+    private entryForIndex;
     private openSource;
     private openArtifacts;
     private rerun;

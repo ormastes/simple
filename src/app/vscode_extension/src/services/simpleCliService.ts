@@ -4,6 +4,9 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { ExtensionHostServices } from './extensionHostServices';
 
+export const CLI_OUTPUT_LIMIT_BYTES = 64 * 1024;
+const CLI_OUTPUT_TRUNCATION_NOTICE = '\n[output truncated]';
+
 export interface CliRunResult {
     exitCode: number;
     stdout: string;
@@ -33,6 +36,17 @@ function collectSearchRoots(fileOrDir?: string): string[] {
     return roots;
 }
 
+function appendLimited(current: string, chunk: string): string {
+    if (current.includes(CLI_OUTPUT_TRUNCATION_NOTICE)) {
+        return current;
+    }
+    if (current.length + chunk.length < CLI_OUTPUT_LIMIT_BYTES) {
+        return current + chunk;
+    }
+    const available = Math.max(0, CLI_OUTPUT_LIMIT_BYTES - current.length);
+    return `${current}${chunk.slice(0, available)}${CLI_OUTPUT_TRUNCATION_NOTICE}`;
+}
+
 export class SimpleCliService {
     public constructor(private readonly services: ExtensionHostServices) {}
 
@@ -44,7 +58,7 @@ export class SimpleCliService {
         }
 
         const legacyPath = vscode.workspace.getConfiguration('simple').get<string>('lsp.serverPath', '').trim();
-        if (legacyPath) {
+        if (legacyPath && isSimpleCliCommand(legacyPath)) {
             return legacyPath;
         }
 
@@ -90,10 +104,10 @@ export class SimpleCliService {
             let stderr = '';
 
             child.stdout.on('data', (chunk: Buffer | string) => {
-                stdout += chunk.toString();
+                stdout = appendLimited(stdout, chunk.toString());
             });
             child.stderr.on('data', (chunk: Buffer | string) => {
-                stderr += chunk.toString();
+                stderr = appendLimited(stderr, chunk.toString());
             });
 
             child.on('error', (error) => {
@@ -127,4 +141,9 @@ export class SimpleCliService {
             });
         });
     }
+}
+
+function isSimpleCliCommand(command: string): boolean {
+    const base = path.basename(command).toLowerCase();
+    return base === 'simple' || base === 'simple.exe';
 }

@@ -4,6 +4,8 @@ import { buildMathPreview } from '../../mathPreview';
 import { detectBlocks } from '../../blockDetector';
 import { resolveMathRenderPolicy } from '../../mathRenderPolicy';
 import { NativeMathProvider } from '../../nativeMathProvider';
+import { buildMathPreviewPanelHtml, buildMathSyncPanelHtml } from '../../math/mathPanelHtml';
+import { buildEmptyPreviewState, buildEmptySyncState } from '../../math/mathPanelShared';
 import { TestUtils } from '../helpers/testUtils';
 
 suite('native math preview', () => {
@@ -104,5 +106,15 @@ suite('native math preview', () => {
                 { kind: 'nograd', content: 'alpha^2' },
             ],
         );
+    });
+
+    test('math webviews use fresh script nonces per render', () => {
+        const firstPreview = buildMathPreviewPanelHtml(buildEmptyPreviewState(''));
+        const secondPreview = buildMathPreviewPanelHtml(buildEmptyPreviewState(''));
+        const firstSync = buildMathSyncPanelHtml(buildEmptySyncState(''));
+        const secondSync = buildMathSyncPanelHtml(buildEmptySyncState(''));
+
+        assert.notStrictEqual(firstPreview.match(/script-src 'nonce-([^']+)'/)?.[1], secondPreview.match(/script-src 'nonce-([^']+)'/)?.[1]);
+        assert.notStrictEqual(firstSync.match(/script-src 'nonce-([^']+)'/)?.[1], secondSync.match(/script-src 'nonce-([^']+)'/)?.[1]);
     });
 });

@@ -119,6 +119,8 @@ async function activate(context) {
         if (!result.ok) {
             void vscode.window.showWarningMessage(`Simple LSP: ${result.message}`);
         }
+    }), vscode.commands.registerCommand('simple.outline.revealSymbol', () => {
+        showUnsupported('Simple outline reveal is not available in browser hosts yet.');
     }), vscode.commands.registerCommand('simple.richEditor.open', () => {
         showUnsupported('Simple Rich Source Editor is not available in browser hosts yet.');
     }), vscode.commands.registerCommand('simple.math.openCustomEditor', () => {
@@ -236,8 +238,8 @@ async function activate(context) {
         services.markDegraded('lsp', result.message, 'fallback', result.detail);
     }
 }
-function deactivate() {
-    void activeBrowserLsp?.dispose();
+async function deactivate() {
+    await activeBrowserLsp?.dispose();
     activeBrowserLsp = undefined;
 }
 //# sourceMappingURL=extension.js.map

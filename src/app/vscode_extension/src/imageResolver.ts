@@ -23,6 +23,20 @@ export function parseImageContent(content: string): { path: string; width?: numb
     return { path: imgPath };
 }
 
+function isPathInside(candidate: string, root: string): boolean {
+    const relative = path.relative(root, candidate);
+    return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function resolveContainedFile(root: string, imagePath: string): vscode.Uri | undefined {
+    const rootPath = path.resolve(root);
+    const candidate = path.resolve(rootPath, imagePath);
+    if (!isPathInside(candidate, rootPath) || !fs.existsSync(candidate)) {
+        return undefined;
+    }
+    return vscode.Uri.file(candidate);
+}
+
 /**
  * Resolve an image path relative to the document, and convert to a webview URI.
  */
@@ -31,20 +45,22 @@ export function resolveImageUri(
     documentUri: vscode.Uri,
     webview: vscode.Webview,
 ): string | null {
-    const docDir = vscode.Uri.joinPath(documentUri, '..');
+    if (documentUri.scheme !== 'file' || !imagePath.trim()) {
+        return null;
+    }
 
-    // Try relative to document directory
-    const resolved = vscode.Uri.joinPath(docDir, imagePath);
-    const fsPath = resolved.fsPath;
-
-    if (fs.existsSync(fsPath)) {
+    const docDir = path.dirname(documentUri.fsPath);
+    const resolved = resolveContainedFile(docDir, imagePath);
+    if (resolved) {
         return webview.asWebviewUri(resolved).toString();
     }
 
-    // Try workspace folders
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
-        const wsResolved = vscode.Uri.joinPath(folder.uri, imagePath);
-        if (fs.existsSync(wsResolved.fsPath)) {
+        if (folder.uri.scheme !== 'file') {
+            continue;
+        }
+        const wsResolved = resolveContainedFile(folder.uri.fsPath, imagePath);
+        if (wsResolved) {
             return webview.asWebviewUri(wsResolved).toString();
         }
     }

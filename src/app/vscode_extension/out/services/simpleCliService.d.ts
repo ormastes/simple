@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ExtensionHostServices } from './extensionHostServices';
+export declare const CLI_OUTPUT_LIMIT_BYTES: number;
 export interface CliRunResult {
     exitCode: number;
     stdout: string;

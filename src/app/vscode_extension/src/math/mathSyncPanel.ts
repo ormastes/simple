@@ -23,6 +23,17 @@ type MathSyncPanelHostMessage =
     | { type: 'empty'; state: ReturnType<typeof buildEmptySyncState>; message: string }
     | { type: 'error'; message: string };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null;
+}
+
+function clampOffset(value: unknown, documentLength: number): number | undefined {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return undefined;
+    }
+    return Math.max(0, Math.min(documentLength, Math.trunc(value)));
+}
+
 export class MathSyncPanel implements vscode.Disposable {
     public static currentPanel: MathSyncPanel | undefined;
 
@@ -40,7 +51,7 @@ export class MathSyncPanel implements vscode.Disposable {
         this.panel.webview.html = buildMathSyncPanelHtml(buildEmptySyncState(''));
 
         this.disposables.push(
-            this.panel.webview.onDidReceiveMessage((message: MathSyncPanelMessage) => {
+            this.panel.webview.onDidReceiveMessage((message: unknown) => {
                 void this.handleMessage(message);
             }),
         );
@@ -99,7 +110,11 @@ export class MathSyncPanel implements vscode.Disposable {
         MathSyncPanel.currentPanel?.panel.dispose();
     }
 
-    private async handleMessage(message: MathSyncPanelMessage): Promise<void> {
+    private async handleMessage(rawMessage: unknown): Promise<void> {
+        if (!isRecord(rawMessage) || typeof rawMessage.type !== 'string') {
+            return;
+        }
+        const message = rawMessage as Partial<MathSyncPanelMessage> & { type: string };
         if (message.type === 'ready' || message.type === 'requestSync') {
             const editor = vscode.window.activeTextEditor;
             if (editor) {
@@ -110,30 +125,43 @@ export class MathSyncPanel implements vscode.Disposable {
             return;
         }
 
+        const editor = this.getEditorForCurrentDocument();
+        const documentLength = editor?.document.getText().length ?? 0;
         if (message.type === 'selectionChanged') {
-            this.selectionStart = message.selectionStart;
-            this.selectionEnd = message.selectionEnd;
-            const editor = this.getEditorForCurrentDocument();
+            const selectionStart = clampOffset(message.selectionStart, documentLength);
+            const selectionEnd = clampOffset(message.selectionEnd, documentLength);
+            if (selectionStart === undefined || selectionEnd === undefined) {
+                return;
+            }
+            this.selectionStart = selectionStart;
+            this.selectionEnd = selectionEnd;
             if (editor) {
                 this.syncFromEditor(editor);
             }
             return;
         }
 
-        const editor = this.getEditorForCurrentDocument();
+        if (message.type !== 'editAll' || typeof message.source !== 'string') {
+            return;
+        }
         if (!editor || !this.currentDocumentUri) {
+            return;
+        }
+        const selectionStart = clampOffset(message.selectionStart, editor.document.getText().length);
+        const selectionEnd = clampOffset(message.selectionEnd, editor.document.getText().length);
+        if (selectionStart === undefined || selectionEnd === undefined) {
             return;
         }
 
         if (message.source === editor.document.getText()) {
-            this.selectionStart = message.selectionStart;
-            this.selectionEnd = message.selectionEnd;
+            this.selectionStart = selectionStart;
+            this.selectionEnd = selectionEnd;
             this.syncFromEditor(editor);
             return;
         }
 
-        this.selectionStart = message.selectionStart;
-        this.selectionEnd = message.selectionEnd;
+        this.selectionStart = selectionStart;
+        this.selectionEnd = selectionEnd;
         this.isApplyingEdit = true;
         try {
             const edit = new vscode.WorkspaceEdit();

@@ -372,7 +372,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     });
 }
 
-export function deactivate(): void {
-    void activeLspSurface?.dispose();
+export async function deactivate(): Promise<void> {
+    await activeLspSurface?.dispose();
     activeLspSurface = undefined;
 }

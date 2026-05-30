@@ -33,11 +33,13 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SimpleCliService = void 0;
+exports.SimpleCliService = exports.CLI_OUTPUT_LIMIT_BYTES = void 0;
 const child_process_1 = require("child_process");
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
+exports.CLI_OUTPUT_LIMIT_BYTES = 64 * 1024;
+const CLI_OUTPUT_TRUNCATION_NOTICE = '\n[output truncated]';
 function collectSearchRoots(fileOrDir) {
     if (!fileOrDir) {
         return [];
@@ -56,6 +58,16 @@ function collectSearchRoots(fileOrDir) {
     }
     return roots;
 }
+function appendLimited(current, chunk) {
+    if (current.includes(CLI_OUTPUT_TRUNCATION_NOTICE)) {
+        return current;
+    }
+    if (current.length + chunk.length < exports.CLI_OUTPUT_LIMIT_BYTES) {
+        return current + chunk;
+    }
+    const available = Math.max(0, exports.CLI_OUTPUT_LIMIT_BYTES - current.length);
+    return `${current}${chunk.slice(0, available)}${CLI_OUTPUT_TRUNCATION_NOTICE}`;
+}
 class SimpleCliService {
     constructor(services) {
         this.services = services;
@@ -67,7 +79,7 @@ class SimpleCliService {
             return explicitPath;
         }
         const legacyPath = vscode.workspace.getConfiguration('simple').get('lsp.serverPath', '').trim();
-        if (legacyPath) {
+        if (legacyPath && isSimpleCliCommand(legacyPath)) {
             return legacyPath;
         }
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -106,10 +118,10 @@ class SimpleCliService {
             let stdout = '';
             let stderr = '';
             child.stdout.on('data', (chunk) => {
-                stdout += chunk.toString();
+                stdout = appendLimited(stdout, chunk.toString());
             });
             child.stderr.on('data', (chunk) => {
-                stderr += chunk.toString();
+                stderr = appendLimited(stderr, chunk.toString());
             });
             child.on('error', (error) => {
                 const detail = error instanceof Error ? error.message : String(error);
@@ -138,4 +150,8 @@ class SimpleCliService {
     }
 }
 exports.SimpleCliService = SimpleCliService;
+function isSimpleCliCommand(command) {
+    const base = path.basename(command).toLowerCase();
+    return base === 'simple' || base === 'simple.exe';
+}
 //# sourceMappingURL=simpleCliService.js.map

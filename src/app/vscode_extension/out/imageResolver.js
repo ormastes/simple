@@ -38,6 +38,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.parseImageContent = parseImageContent;
 exports.resolveImageUri = resolveImageUri;
+const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
 const vscode = __importStar(require("vscode"));
 /**
@@ -55,21 +56,36 @@ function parseImageContent(content) {
         return null;
     return { path: imgPath };
 }
+function isPathInside(candidate, root) {
+    const relative = path.relative(root, candidate);
+    return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+function resolveContainedFile(root, imagePath) {
+    const rootPath = path.resolve(root);
+    const candidate = path.resolve(rootPath, imagePath);
+    if (!isPathInside(candidate, rootPath) || !fs.existsSync(candidate)) {
+        return undefined;
+    }
+    return vscode.Uri.file(candidate);
+}
 /**
  * Resolve an image path relative to the document, and convert to a webview URI.
  */
 function resolveImageUri(imagePath, documentUri, webview) {
-    const docDir = vscode.Uri.joinPath(documentUri, '..');
-    // Try relative to document directory
-    const resolved = vscode.Uri.joinPath(docDir, imagePath);
-    const fsPath = resolved.fsPath;
-    if (fs.existsSync(fsPath)) {
+    if (documentUri.scheme !== 'file' || !imagePath.trim()) {
+        return null;
+    }
+    const docDir = path.dirname(documentUri.fsPath);
+    const resolved = resolveContainedFile(docDir, imagePath);
+    if (resolved) {
         return webview.asWebviewUri(resolved).toString();
     }
-    // Try workspace folders
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
-        const wsResolved = vscode.Uri.joinPath(folder.uri, imagePath);
-        if (fs.existsSync(wsResolved.fsPath)) {
+        if (folder.uri.scheme !== 'file') {
+            continue;
+        }
+        const wsResolved = resolveContainedFile(folder.uri.fsPath, imagePath);
+        if (wsResolved) {
             return webview.asWebviewUri(wsResolved).toString();
         }
     }

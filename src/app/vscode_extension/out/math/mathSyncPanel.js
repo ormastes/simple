@@ -38,6 +38,15 @@ const vscode = __importStar(require("vscode"));
 const mathPanelHtml_1 = require("./mathPanelHtml");
 const mathPanelShared_1 = require("./mathPanelShared");
 const timerApi = globalThis;
+function isRecord(value) {
+    return typeof value === 'object' && value !== null;
+}
+function clampOffset(value, documentLength) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return undefined;
+    }
+    return Math.max(0, Math.min(documentLength, Math.trunc(value)));
+}
 class MathSyncPanel {
     constructor(panel) {
         this.disposables = [];
@@ -88,7 +97,11 @@ class MathSyncPanel {
     static close() {
         MathSyncPanel.currentPanel?.panel.dispose();
     }
-    async handleMessage(message) {
+    async handleMessage(rawMessage) {
+        if (!isRecord(rawMessage) || typeof rawMessage.type !== 'string') {
+            return;
+        }
+        const message = rawMessage;
         if (message.type === 'ready' || message.type === 'requestSync') {
             const editor = vscode.window.activeTextEditor;
             if (editor) {
@@ -98,27 +111,40 @@ class MathSyncPanel {
             }
             return;
         }
+        const editor = this.getEditorForCurrentDocument();
+        const documentLength = editor?.document.getText().length ?? 0;
         if (message.type === 'selectionChanged') {
-            this.selectionStart = message.selectionStart;
-            this.selectionEnd = message.selectionEnd;
-            const editor = this.getEditorForCurrentDocument();
+            const selectionStart = clampOffset(message.selectionStart, documentLength);
+            const selectionEnd = clampOffset(message.selectionEnd, documentLength);
+            if (selectionStart === undefined || selectionEnd === undefined) {
+                return;
+            }
+            this.selectionStart = selectionStart;
+            this.selectionEnd = selectionEnd;
             if (editor) {
                 this.syncFromEditor(editor);
             }
             return;
         }
-        const editor = this.getEditorForCurrentDocument();
+        if (message.type !== 'editAll' || typeof message.source !== 'string') {
+            return;
+        }
         if (!editor || !this.currentDocumentUri) {
             return;
         }
+        const selectionStart = clampOffset(message.selectionStart, editor.document.getText().length);
+        const selectionEnd = clampOffset(message.selectionEnd, editor.document.getText().length);
+        if (selectionStart === undefined || selectionEnd === undefined) {
+            return;
+        }
         if (message.source === editor.document.getText()) {
-            this.selectionStart = message.selectionStart;
-            this.selectionEnd = message.selectionEnd;
+            this.selectionStart = selectionStart;
+            this.selectionEnd = selectionEnd;
             this.syncFromEditor(editor);
             return;
         }
-        this.selectionStart = message.selectionStart;
-        this.selectionEnd = message.selectionEnd;
+        this.selectionStart = selectionStart;
+        this.selectionEnd = selectionEnd;
         this.isApplyingEdit = true;
         try {
             const edit = new vscode.WorkspaceEdit();

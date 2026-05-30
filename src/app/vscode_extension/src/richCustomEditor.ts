@@ -10,6 +10,7 @@
 
 import * as crypto from 'crypto';
 import * as fs from 'fs';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { analyzeDocument } from './analysis/simpleAnalysisIndex';
 import { detectBlocks } from './blockDetector';
@@ -213,6 +214,92 @@ function buildRichEditorTests(document: vscode.TextDocument): RichEditorTestBloc
     }));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null;
+}
+
+function clampNumber(value: unknown, min: number, max: number): number | undefined {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return undefined;
+    }
+    return Math.max(min, Math.min(max, Math.trunc(value)));
+}
+
+function normalizeWebviewMessage(message: unknown, document: vscode.TextDocument): WebviewMessage | undefined {
+    if (!isRecord(message) || typeof message.type !== 'string') {
+        return undefined;
+    }
+
+    const documentLength = document.getText().length;
+    const lineMax = Math.max(0, document.lineCount - 1);
+    if (message.type === 'ready' || message.type === 'requestSync') {
+        return { type: message.type };
+    }
+
+    if (message.type === 'editAll') {
+        if (typeof message.source !== 'string') {
+            return undefined;
+        }
+        return {
+            type: 'editAll',
+            source: message.source,
+            selectionStart: clampNumber(message.selectionStart, 0, documentLength) ?? 0,
+            selectionEnd: clampNumber(message.selectionEnd, 0, documentLength) ?? 0,
+        };
+    }
+
+    if (message.type === 'selectionChanged') {
+        return {
+            type: 'selectionChanged',
+            selectionStart: clampNumber(message.selectionStart, 0, documentLength) ?? 0,
+            selectionEnd: clampNumber(message.selectionEnd, 0, documentLength) ?? 0,
+        };
+    }
+
+    if (
+        message.type === 'toggleBreakpointFromLine'
+        || message.type === 'toggleBookmarkFromLine'
+        || message.type === 'togglePointerFromLine'
+    ) {
+        const line = clampNumber(message.line, 0, lineMax);
+        return line === undefined ? undefined : { type: message.type, line };
+    }
+
+    if (message.type === 'runTestFromLine') {
+        const line = clampNumber(message.line, 0, lineMax);
+        if (line === undefined || typeof message.kind !== 'string' || typeof message.label !== 'string') {
+            return undefined;
+        }
+        return {
+            type: 'runTestFromLine',
+            line,
+            kind: message.kind,
+            label: message.label,
+        };
+    }
+
+    if (message.type === 'revealDefinition' || message.type === 'showReferences') {
+        const offset = clampNumber(message.offset, 0, documentLength);
+        return offset === undefined ? undefined : { type: message.type, offset };
+    }
+
+    return undefined;
+}
+
+function buildLocalResourceRoots(extensionUri: vscode.Uri, document: vscode.TextDocument): vscode.Uri[] {
+    const roots = [
+        vscode.Uri.joinPath(extensionUri, 'node_modules', 'katex', 'dist'),
+        vscode.Uri.joinPath(extensionUri, 'out', 'webview'),
+        ...(vscode.workspace.workspaceFolders ?? [])
+            .filter((folder) => folder.uri.scheme === 'file')
+            .map((folder) => folder.uri),
+    ];
+    if (document.uri.scheme === 'file') {
+        roots.push(vscode.Uri.file(path.dirname(document.uri.fsPath)));
+    }
+    return roots;
+}
+
 // ── Provider ─────────────────────────────────────────────────────────
 
 export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider {
@@ -252,12 +339,7 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
 
         webviewPanel.webview.options = {
             enableScripts: true,
-            localResourceRoots: [
-                katexDistUri,
-                webviewOutUri,
-                ...(vscode.workspace.workspaceFolders?.map(wf => wf.uri) ?? []),
-                vscode.Uri.joinPath(document.uri, '..'),
-            ],
+            localResourceRoots: buildLocalResourceRoots(this.extensionUri, document),
         };
 
         const katexCssUri = webviewPanel.webview.asWebviewUri(
@@ -331,7 +413,11 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
             }
         });
 
-        const messageSubscription = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
+        const messageSubscription = webviewPanel.webview.onDidReceiveMessage(async (rawMessage: unknown) => {
+            const message = normalizeWebviewMessage(rawMessage, document);
+            if (!message) {
+                return;
+            }
             if (message.type === 'ready' || message.type === 'requestSync') {
                 await postSync();
                 return;
@@ -371,7 +457,11 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
             return;
         });
 
-        const runTestSubscription = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
+        const runTestSubscription = webviewPanel.webview.onDidReceiveMessage(async (rawMessage: unknown) => {
+            const message = normalizeWebviewMessage(rawMessage, document);
+            if (!message) {
+                return;
+            }
             if (message.type !== 'runTestFromLine') {
                 return;
             }
@@ -380,7 +470,11 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
             await vscode.commands.executeCommand(command, document.uri);
         });
 
-        const markerSubscription = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
+        const markerSubscription = webviewPanel.webview.onDidReceiveMessage(async (rawMessage: unknown) => {
+            const message = normalizeWebviewMessage(rawMessage, document);
+            if (!message) {
+                return;
+            }
             if (message.type === 'toggleBreakpointFromLine') {
                 await vscode.commands.executeCommand('simple.editor.toggleBreakpoint', document.uri, message.line);
                 await postSync();
@@ -397,7 +491,11 @@ export class RichCustomEditorProvider implements vscode.CustomTextEditorProvider
             }
         });
 
-        const navigationSubscription = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
+        const navigationSubscription = webviewPanel.webview.onDidReceiveMessage(async (rawMessage: unknown) => {
+            const message = normalizeWebviewMessage(rawMessage, document);
+            if (!message) {
+                return;
+            }
             if (
                 message.type !== 'revealDefinition'
                 && message.type !== 'showReferences'

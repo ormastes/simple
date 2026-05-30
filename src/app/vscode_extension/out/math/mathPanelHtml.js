@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.buildMathPreviewPanelHtml = buildMathPreviewPanelHtml;
 exports.buildMathSyncPanelHtml = buildMathSyncPanelHtml;
+const webviewNonce_1 = require("../webviewNonce");
 const mathPanelShared_1 = require("./mathPanelShared");
 function buildBaseStyles() {
     return `
@@ -164,13 +165,14 @@ function buildBaseStyles() {
     `;
 }
 function panelShell(title, subtitle, body) {
+    const nonce = (0, webviewNonce_1.createWebviewNonce)();
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonceSeed()}';">
+          content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
     <title>${(0, mathPanelShared_1.escapeForHtml)(title)}</title>
     <style>${buildBaseStyles()}</style>
 </head>
@@ -186,9 +188,6 @@ function panelShell(title, subtitle, body) {
     </div>
 </body>
 </html>`;
-}
-function nonceSeed() {
-    return 'simple-math-panel';
 }
 function buildMathPreviewPanelHtml(state) {
     const block = state.block;
@@ -221,13 +220,14 @@ function buildMathPreviewPanelHtml(state) {
 }
 function buildMathSyncPanelHtml(state) {
     const initialState = (0, mathPanelShared_1.serializeForScript)(state);
+    const nonce = (0, webviewNonce_1.createWebviewNonce)();
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonceSeed()}';">
+          content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
     <title>Math Sync Panel</title>
     <style>${buildBaseStyles()}</style>
 </head>
@@ -269,7 +269,7 @@ function buildMathSyncPanelHtml(state) {
         </div>
     </div>
 
-    <script nonce="${nonceSeed()}">
+    <script nonce="${nonce}">
     (function () {
         const vscode = acquireVsCodeApi();
         const source = document.getElementById('math-source');

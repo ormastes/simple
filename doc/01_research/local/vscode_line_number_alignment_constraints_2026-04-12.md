@@ -11,8 +11,8 @@ Date: 2026-04-12
 - Rendered widget blocks already exist:
   - [mathWidget.ts](../../../src/app/vscode_extension/src/webview/widgets/mathWidget.ts)
   - [imageWidget.ts](../../../src/app/vscode_extension/src/webview/widgets/imageWidget.ts)
-- Prior repo research already noted the key platform limit:
-  - [src/app/vscode_extension_old/doc/research_domain_math_editor_panel.md](../../../src/app/vscode_extension_old/doc/research_domain_math_editor_panel.md)
+- Prior repo research and old-extension cleanup already noted the key platform limit:
+  - [doc/02_requirements/feature/vscode_extension_old_feature_requests.md](../../02_requirements/feature/vscode_extension_old_feature_requests.md)
   - [doc/01_research/local/vscode_rich_editor.md](../local/vscode_rich_editor.md)
 
 ## Local Conclusion

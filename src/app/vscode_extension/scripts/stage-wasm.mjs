@@ -5,7 +5,6 @@ import { fileURLToPath } from 'node:url';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const extensionRoot = path.resolve(scriptDir, '..');
-const repoRoot = path.resolve(extensionRoot, '..', '..', '..');
 const wasmDir = path.join(extensionRoot, 'wasm');
 
 mkdirSync(wasmDir, { recursive: true });
@@ -13,8 +12,7 @@ mkdirSync(wasmDir, { recursive: true });
 const explicitSource = process.env.SIMPLE_VSCODE_LSP_WASM_SOURCE?.trim() || '';
 const buildDir = process.env.SIMPLE_VSCODE_WASM_BUILD_DIR?.trim() || '';
 const inferredSource = buildDir ? path.join(buildDir, 'simple-lsp.wasm') : '';
-const legacySource = path.join(repoRoot, 'src', 'app', 'vscode_extension_old', 'wasm', 'simple-lsp.wasm');
-const sourcePath = [explicitSource, inferredSource, legacySource].find((candidate) => candidate && existsSync(candidate));
+const sourcePath = [explicitSource, inferredSource].find((candidate) => candidate && existsSync(candidate));
 
 if (!sourcePath) {
     console.log('[stage:wasm] simple-lsp.wasm: skipped (no source found)');

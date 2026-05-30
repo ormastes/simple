@@ -34,9 +34,20 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TestWorkspacePanel = void 0;
+exports.isPathInside = isPathInside;
+exports.collectArtifactRoots = collectArtifactRoots;
+exports.discoverTestWorkspaceEntries = discoverTestWorkspaceEntries;
+exports.buildTestWorkspaceHtml = buildTestWorkspaceHtml;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
+const webviewNonce_1 = require("../webviewNonce");
+const MAX_ARTIFACT_SCAN_DIRECTORIES = 1000;
+const MAX_ARTIFACT_RESULTS = 100;
+function isPathInside(candidate, root) {
+    const relative = path.relative(path.resolve(root), path.resolve(candidate));
+    return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
 function escapeHtml(value) {
     return value
         .replace(/&/g, '&amp;')
@@ -47,16 +58,28 @@ function escapeHtml(value) {
 function collectArtifactRoots(workspaceFolders) {
     const roots = new Set();
     for (const folder of workspaceFolders ?? []) {
+        if (folder.uri.scheme !== 'file') {
+            continue;
+        }
         roots.add(path.join(folder.uri.fsPath, 'build', 'test-artifacts'));
     }
     return Array.from(roots).filter((root) => fs.existsSync(root));
 }
-function walkResultJsonFiles(root) {
+function walkResultJsonFiles(root, maxDirectories = MAX_ARTIFACT_SCAN_DIRECTORIES) {
     const results = [];
     const pending = [root];
-    while (pending.length > 0) {
+    let scannedDirectories = 0;
+    while (pending.length > 0 && scannedDirectories < maxDirectories && results.length < MAX_ARTIFACT_RESULTS) {
         const current = pending.pop();
-        for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+        scannedDirectories += 1;
+        let directoryEntries;
+        try {
+            directoryEntries = fs.readdirSync(current, { withFileTypes: true });
+        }
+        catch {
+            continue;
+        }
+        for (const entry of directoryEntries) {
             const next = path.join(current, entry.name);
             if (entry.isDirectory()) {
                 pending.push(next);
@@ -64,17 +87,33 @@ function walkResultJsonFiles(root) {
             }
             if (entry.isFile() && entry.name === 'result.json') {
                 results.push(next);
+                if (results.length >= MAX_ARTIFACT_RESULTS) {
+                    break;
+                }
             }
         }
     }
     return results;
 }
-function parseResultJson(resultJsonPath) {
+function resolveContainedPath(rawPath, relativeRoot, allowedRoots) {
+    if (!rawPath) {
+        return '';
+    }
+    const candidate = path.isAbsolute(rawPath)
+        ? path.resolve(rawPath)
+        : path.resolve(relativeRoot, rawPath);
+    return allowedRoots.some((root) => isPathInside(candidate, root)) ? candidate : '';
+}
+function parseResultJson(resultJsonPath, artifactRoot, workspaceRoots) {
     try {
         const raw = fs.readFileSync(resultJsonPath, 'utf8');
         const parsed = JSON.parse(raw);
-        const artifactDirectory = parsed.artifact_directory ?? path.dirname(resultJsonPath);
-        const sourcePath = parsed.source_path ?? '';
+        const resultDirectory = path.dirname(resultJsonPath);
+        const artifactDirectory = resolveContainedPath(parsed.artifact_directory, resultDirectory, [artifactRoot]) || resultDirectory;
+        if (!isPathInside(artifactDirectory, artifactRoot)) {
+            return undefined;
+        }
+        const sourcePath = resolveContainedPath(parsed.source_path, resultDirectory, workspaceRoots);
         const stats = fs.statSync(resultJsonPath);
         return {
             sourcePath,
@@ -94,11 +133,14 @@ function parseResultJson(resultJsonPath) {
         return undefined;
     }
 }
-function discoverEntries(workspaceFolders) {
+function discoverTestWorkspaceEntries(workspaceFolders) {
     const entries = [];
+    const workspaceRoots = (workspaceFolders ?? [])
+        .filter((folder) => folder.uri.scheme === 'file')
+        .map((folder) => folder.uri.fsPath);
     for (const root of collectArtifactRoots(workspaceFolders)) {
         for (const resultJsonPath of walkResultJsonFiles(root)) {
-            const entry = parseResultJson(resultJsonPath);
+            const entry = parseResultJson(resultJsonPath, root, workspaceRoots);
             if (entry) {
                 entries.push(entry);
             }
@@ -107,7 +149,8 @@ function discoverEntries(workspaceFolders) {
     entries.sort((left, right) => right.updatedAt - left.updatedAt);
     return entries.slice(0, 50);
 }
-function buildHtml(entries) {
+function buildTestWorkspaceHtml(entries) {
+    const nonce = (0, webviewNonce_1.createWebviewNonce)();
     const summary = {
         total: entries.length,
         passed: entries.reduce((sum, entry) => sum + entry.passed, 0),
@@ -141,7 +184,7 @@ function buildHtml(entries) {
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-simple';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
     <style>
         body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); margin: 0; padding: 16px; }
         h1 { font-size: 18px; margin: 0 0 8px; }
@@ -177,7 +220,7 @@ function buildHtml(entries) {
         <button data-action="open-last-artifacts">Open Latest Artifacts</button>
     </div>
     ${items || '<div class="card">No test results found yet.</div>'}
-    <script nonce="simple">
+    <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         document.querySelectorAll('button[data-action]').forEach((button) => {
             button.addEventListener('click', () => {
@@ -196,7 +239,7 @@ class TestWorkspacePanel {
         this.disposables = [];
         this.entries = [];
         this.panel = panel;
-        this.panel.webview.html = buildHtml([]);
+        this.panel.webview.html = buildTestWorkspaceHtml([]);
         this.panel.webview.onDidReceiveMessage((message) => void this.handleMessage(message), null, this.disposables);
         this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
         this.refresh();
@@ -217,8 +260,8 @@ class TestWorkspacePanel {
         return TestWorkspacePanel.currentPanel;
     }
     refresh() {
-        this.entries = discoverEntries(vscode.workspace.workspaceFolders);
-        this.panel.webview.html = buildHtml(this.entries);
+        this.entries = discoverTestWorkspaceEntries(vscode.workspace.workspaceFolders);
+        this.panel.webview.html = buildTestWorkspaceHtml(this.entries);
     }
     openLatestArtifacts() {
         this.openArtifacts(this.entries[0]);
@@ -230,6 +273,10 @@ class TestWorkspacePanel {
         }
     }
     async handleMessage(message) {
+        if (!message || typeof message.type !== 'string') {
+            return;
+        }
+        const entry = this.entryForIndex(message.index);
         switch (message.type) {
             case 'refresh':
                 this.refresh();
@@ -241,15 +288,21 @@ class TestWorkspacePanel {
                 this.openArtifacts(this.entries[0]);
                 break;
             case 'open':
-                this.openSource(this.entries[message.index ?? -1]);
+                this.openSource(entry);
                 break;
             case 'rerun':
-                await this.rerun(this.entries[message.index ?? -1]);
+                await this.rerun(entry);
                 break;
             case 'artifacts':
-                this.openArtifacts(this.entries[message.index ?? -1]);
+                this.openArtifacts(entry);
                 break;
         }
+    }
+    entryForIndex(index) {
+        if (typeof index !== 'number' || !Number.isInteger(index) || index < 0 || index >= this.entries.length) {
+            return undefined;
+        }
+        return this.entries[index];
     }
     openSource(entry) {
         if (!entry?.sourcePath) {

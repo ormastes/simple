@@ -102,6 +102,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 void vscode.window.showWarningMessage(`Simple LSP: ${result.message}`);
             }
         }),
+        vscode.commands.registerCommand('simple.outline.revealSymbol', () => {
+            showUnsupported('Simple outline reveal is not available in browser hosts yet.');
+        }),
         vscode.commands.registerCommand('simple.richEditor.open', () => {
             showUnsupported('Simple Rich Source Editor is not available in browser hosts yet.');
         }),
@@ -258,7 +261,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
 }
 
-export function deactivate(): void {
-    void activeBrowserLsp?.dispose();
+export async function deactivate(): Promise<void> {
+    await activeBrowserLsp?.dispose();
     activeBrowserLsp = undefined;
 }

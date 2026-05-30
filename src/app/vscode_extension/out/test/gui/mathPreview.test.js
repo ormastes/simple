@@ -39,6 +39,8 @@ const mathPreview_1 = require("../../mathPreview");
 const blockDetector_1 = require("../../blockDetector");
 const mathRenderPolicy_1 = require("../../mathRenderPolicy");
 const nativeMathProvider_1 = require("../../nativeMathProvider");
+const mathPanelHtml_1 = require("../../math/mathPanelHtml");
+const mathPanelShared_1 = require("../../math/mathPanelShared");
 const testUtils_1 = require("../helpers/testUtils");
 suite('native math preview', () => {
     let provider;
@@ -109,6 +111,14 @@ suite('native math preview', () => {
             { kind: 'loss', content: 'sqrt(x)' },
             { kind: 'nograd', content: 'alpha^2' },
         ]);
+    });
+    test('math webviews use fresh script nonces per render', () => {
+        const firstPreview = (0, mathPanelHtml_1.buildMathPreviewPanelHtml)((0, mathPanelShared_1.buildEmptyPreviewState)(''));
+        const secondPreview = (0, mathPanelHtml_1.buildMathPreviewPanelHtml)((0, mathPanelShared_1.buildEmptyPreviewState)(''));
+        const firstSync = (0, mathPanelHtml_1.buildMathSyncPanelHtml)((0, mathPanelShared_1.buildEmptySyncState)(''));
+        const secondSync = (0, mathPanelHtml_1.buildMathSyncPanelHtml)((0, mathPanelShared_1.buildEmptySyncState)(''));
+        assert.notStrictEqual(firstPreview.match(/script-src 'nonce-([^']+)'/)?.[1], secondPreview.match(/script-src 'nonce-([^']+)'/)?.[1]);
+        assert.notStrictEqual(firstSync.match(/script-src 'nonce-([^']+)'/)?.[1], secondSync.match(/script-src 'nonce-([^']+)'/)?.[1]);
     });
 });
 //# sourceMappingURL=mathPreview.test.js.map

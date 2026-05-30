@@ -360,8 +360,8 @@ async function activate(context) {
         }
     });
 }
-function deactivate() {
-    void activeLspSurface?.dispose();
+async function deactivate() {
+    await activeLspSurface?.dispose();
     activeLspSurface = undefined;
 }
 //# sourceMappingURL=extension.js.map
