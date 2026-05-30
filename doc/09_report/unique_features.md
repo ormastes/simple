@@ -201,7 +201,7 @@ Implemented:
 - borrow graph: `src/compiler/55.borrow/borrow_check/borrow_graph.spl`
 - lifetime support: `src/compiler/55.borrow/borrow_check/lifetime.spl`
 - semantic wrapper / unit-type guidance: `doc/07_guide/language/type_system.md`
-- semantic wrapper rollout evidence: `doc/09_report/misc/primitive_api_project_closure.md`
+- semantic wrapper rollout evidence: `doc/09_report/misc/lang/primitive_api_project_closure.md`
 - cross-module wrapper proof: `test/integration/app/unit_wrapper_module_boundary_spec.spl`
 
 Qualification:

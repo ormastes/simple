@@ -12,9 +12,9 @@
 
 ---
 
-## Other (1 features)
+## Hardware & OS (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Browser Script Execute Specification](unit/browser_engine/script/browser_script_execute_spec.md) | Auto-generated | N/A | 4 | 0% | 0 lines |
+| [Simpleos Ai Cli Js Node Port Specification](system/os/simpleos_ai_cli_js_node_port_spec.md) | Auto-generated | N/A | 16 | 0% | 0 lines |
 

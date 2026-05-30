@@ -56,6 +56,16 @@ struct AiCliRuntimeSmokePackage:
     ready: bool
     blocker: text
 
+struct AiCliRuntimeSmokeMatrixEvidence:
+    package_count: i64
+    ready_count: i64
+    serial_accept_count: i64
+    targets: [text]
+    app_ids: [text]
+    ready: bool
+    status: text
+    diagnostic: text
+
 struct AiCliRuntimeProfile:
     profile_id: text
     js_engine_strategy: text
@@ -411,6 +421,55 @@ pub fn ai_cli_runtime_smoke_package(manifest: AiCliManifest, lane: AiCliQemuLane
 pub fn ai_cli_runtime_smoke_package_summary(package: AiCliRuntimeSmokePackage) -> text:
     "app={package.app_id};target={package.target};root={package.package_root};ready={package.ready};blocker={package.blocker};manifest-bytes={package.manifest_sdn.len()};launcher-bytes={package.launcher_source.len()};runtime-bytes={package.runtime_stub_source.len()};index-bytes={package.package_index_sdn.len()}"
 
+pub fn ai_cli_runtime_smoke_packages() -> [AiCliRuntimeSmokePackage]:
+    var packages: [AiCliRuntimeSmokePackage] = []
+    val manifests = [
+        codex_cli_smoke_manifest(),
+        claude_cli_smoke_manifest(),
+        gemini_cli_smoke_manifest()
+    ]
+    for manifest in manifests:
+        for lane in ai_cli_qemu_lanes(manifest):
+            packages.push(ai_cli_runtime_smoke_package(manifest, lane))
+    packages
+
+pub fn ai_cli_runtime_smoke_package_serial_output(package: AiCliRuntimeSmokePackage) -> text:
+    package.marker_payload + "\n" + package.launcher_source + "\n" + package.runtime_stub_source
+
+pub fn ai_cli_runtime_smoke_package_serial_accepted(package: AiCliRuntimeSmokePackage) -> bool:
+    val lane = ai_cli_qemu_lane(_ai_cli_manifest_for_app_id(package.app_id), package.target)
+    ai_cli_qemu_serial_accepts_lane(lane, ai_cli_runtime_smoke_package_serial_output(package))
+
+pub fn ai_cli_runtime_smoke_matrix_evidence() -> AiCliRuntimeSmokeMatrixEvidence:
+    val packages = ai_cli_runtime_smoke_packages()
+    var ready_count: i64 = 0
+    var serial_accept_count: i64 = 0
+    var targets: [text] = []
+    var app_ids: [text] = []
+    for package in packages:
+        if package.ready:
+            ready_count = ready_count + 1
+        if ai_cli_runtime_smoke_package_serial_accepted(package):
+            serial_accept_count = serial_accept_count + 1
+        if not _text_list_allows(targets, package.target):
+            targets.push(package.target)
+        if not _text_list_allows(app_ids, package.app_id):
+            app_ids.push(package.app_id)
+    val ready = packages.len() == 9 and ready_count == 9 and serial_accept_count == 9 and targets.len() == 3 and app_ids.len() == 3
+    AiCliRuntimeSmokeMatrixEvidence(
+        package_count: packages.len(),
+        ready_count: ready_count,
+        serial_accept_count: serial_accept_count,
+        targets: targets,
+        app_ids: app_ids,
+        ready: ready,
+        status: if ready: "ai_cli_runtime_smoke_matrix_ready" else: "ai_cli_runtime_smoke_matrix_incomplete",
+        diagnostic: if ready: "" else: "expected 9 ready packages across codex claude gemini and riscv x86 arm with serial marker acceptance"
+    )
+
+pub fn ai_cli_runtime_smoke_matrix_summary(evidence: AiCliRuntimeSmokeMatrixEvidence) -> text:
+    "status={evidence.status};ready={evidence.ready};packages={evidence.package_count};ready-count={evidence.ready_count};serial-accepted={evidence.serial_accept_count};apps={evidence.app_ids.join(\",\")};targets={evidence.targets.join(\",\")};diagnostic={evidence.diagnostic}"
+
 pub fn ai_cli_runtime_smoke_package_hardening_error(source: text) -> text:
     val lo = source.lower()
     if lo.contains("rt_process_run") or lo.contains("host.shell"):
@@ -480,6 +539,13 @@ fn _ai_cli_qemu_lane(manifest: AiCliManifest, target: text, scenario_name: text,
         blocker: blocker,
         marker_fragments: markers
     )
+
+fn _ai_cli_manifest_for_app_id(app_id: text) -> AiCliManifest:
+    if app_id == "claude":
+        return claude_cli_smoke_manifest()
+    if app_id == "gemini":
+        return gemini_cli_smoke_manifest()
+    codex_cli_smoke_manifest()
 
 fn _ai_cli_manifest_sdn(manifest: AiCliManifest, plan: AiCliProvisioningPlan) -> text:
     "ai_cli_manifest = {\n" +

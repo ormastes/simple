@@ -19,7 +19,9 @@ The same module now defines:
 
 - `AiCliRuntimeProfile` for the Bun-informed Simple JS runtime shape;
 - `AiCliWasmBrowserContract` for generated GUI WASM import/export and browser
-  evidence gates.
+  evidence gates;
+- `AiCliRuntimeSmokePackage` for deterministic SimpleOS staged package contents
+  that can be copied into QEMU disks once runtime artifacts exist.
 
 ## Algorithms
 
@@ -37,6 +39,12 @@ The same module now defines:
 - WASM browser import checks deny unlisted imports and explicit host escapes.
 - WASM browser export checks require init, render, and event entrypoints before
   execution can be claimed.
+- Runtime smoke package generation materializes manifest SDN, launcher source,
+  runtime stub source, package index SDN, and marker payload from the same
+  manifest/lane data used by provisioning plans.
+- Runtime smoke package hardening rejects host shell, child-process, ambient
+  environment, module loader, and network escape strings before the package can
+  be marked ready.
 
 ## Built-In Manifests
 
@@ -76,6 +84,14 @@ and unsupported script types fail closed. The result object reports collected,
 executed, and denied script counts plus diagnostics so future browser rendering
 and QEMU evidence can prove that no host subprocess fallback was used.
 
+## Runtime Smoke Packages
+
+`ai_cli_runtime_smoke_package` is the first concrete packaging bridge from the
+contract to SimpleOS disk staging. It does not claim full Codex, Claude, or
+Gemini execution yet. It creates deterministic package text for the manifest,
+launcher, runtime stub, package index, and QEMU marker payload so the next QEMU
+slice has exact files and markers to install and verify.
+
 ## Error Handling
 
 The first slice avoids `Result` plumbing in callers by returning deterministic
@@ -96,4 +112,6 @@ validation text. Empty text means success; any non-empty text is a hard denial.
 - generated-WASM hello GUI import/export evidence in
   `test/unit/lib/common/ui/wasm_hello_gui_spec.spl`;
 - hardened browser script execution and denial coverage in
-  `test/unit/browser_engine/script/browser_script_execute_spec.spl`.
+  `test/unit/browser_engine/script/browser_script_execute_spec.spl`;
+- SimpleOS AI CLI staged runtime smoke package content and hardening checks in
+  `test/system/os/simpleos_ai_cli_js_node_port_spec.spl`.

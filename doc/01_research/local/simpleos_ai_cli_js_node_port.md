@@ -117,3 +117,22 @@ executes collected script text by writing a temporary `.spl` file and spawning
 This is not a full JS engine yet, but it removes the unsafe host subprocess
 boundary and creates a clear fail-closed contract for expanding the Simple JS
 engine toward the Node/Bun-like runtime profile.
+
+## 2026-05-30 Staged Runtime Smoke Package
+
+`src/os/ai_cli_js_node_contract.spl` now turns the manifest/lane provisioning
+contract into deterministic staged package contents:
+
+- `AI_MANIFEST.SDN` text with app id, runtime kind, entry path, package pins,
+  grants, and command line;
+- launcher source that emits the QEMU runtime, CLI smoke, and hardening markers;
+- runtime stub source that advertises the Simple JS agent Node-compatible
+  surface while preserving the full Node/V8/libuv blocker;
+- package index SDN with manifest, launcher, marker payload, runtime, and disk
+  manifest paths;
+- hardening checks that reject host shell, child process, ambient environment,
+  module-loader, and network escapes in staged source text.
+
+This still does not run full Codex, Claude, or Gemini, but it gives the QEMU
+packaging lane concrete files and markers to install instead of only abstract
+paths.

@@ -15,6 +15,10 @@ use os.ai_cli_js_node_contract.{
     ai_cli_provisioning_plan_summary,
     ai_cli_runtime_smoke_package,
     ai_cli_runtime_smoke_package_hardening_error,
+    ai_cli_runtime_smoke_package_serial_accepted,
+    ai_cli_runtime_smoke_packages,
+    ai_cli_runtime_smoke_matrix_evidence,
+    ai_cli_runtime_smoke_matrix_summary,
     ai_cli_runtime_smoke_package_summary,
     ai_cli_runtime_profile_summary,
     ai_cli_runtime_profile_supports_manifest,
@@ -196,6 +200,55 @@ describe "SimpleOS AI CLI JS/Node port manifest contract":
             expect(payload).to_contain("[ai-cli] runtime:start app=claude")
             expect(payload).to_contain("[ai-cli] runtime-status=blocked-runtime-artifact")
             expect(ai_cli_provisioning_plan_summary(plan)).to_contain("disk-manifest=CLAUDE.APP")
+
+        it "materializes staged SimpleOS runtime smoke package contents":
+            val manifest = codex_cli_smoke_manifest()
+            val lane = ai_cli_qemu_lane(manifest, "x86")
+            val package = ai_cli_runtime_smoke_package(manifest, lane)
+            val summary = ai_cli_runtime_smoke_package_summary(package)
+
+            expect(package.package_root).to_equal("/sys/apps/codex")
+            expect(package.ready).to_equal(true)
+            expect(package.blocker).to_equal("")
+            expect(package.manifest_sdn).to_contain("app_id = \"codex\"")
+            expect(package.manifest_sdn).to_contain("runtime_kind = \"node-compatible\"")
+            expect(package.launcher_source).to_contain("[ai-cli] runtime:start app=codex")
+            expect(package.launcher_source).to_contain("[ai-cli] cli-smoke:start app=codex")
+            expect(package.runtime_stub_source).to_contain("simple-js-agent target=x86")
+            expect(package.runtime_stub_source).to_contain("node-compat-surface=fs,process,stdio-tty,timers,net,tls,module-resolution,webassembly")
+            expect(package.package_index_sdn).to_contain("disk_manifest = \"CODEX.APP\"")
+            expect(summary).to_contain("ready=true")
+
+        it "rejects smoke package sources that try host or ambient runtime escapes":
+            expect(ai_cli_runtime_smoke_package_hardening_error("host.shell('id')")).to_equal("host shell access denied")
+            expect(ai_cli_runtime_smoke_package_hardening_error("process.env.OPENAI_API_KEY")).to_equal("ambient environment access denied")
+            expect(ai_cli_runtime_smoke_package_hardening_error("require('fs')")).to_equal("module loader access denied")
+            expect(ai_cli_runtime_smoke_package_hardening_error("fetch('https://example.com')")).to_equal("network access denied")
+
+        it "builds a full Codex Claude Gemini by RISC-V x86 ARM smoke package matrix":
+            val packages = ai_cli_runtime_smoke_packages()
+            val evidence = ai_cli_runtime_smoke_matrix_evidence()
+            val summary = ai_cli_runtime_smoke_matrix_summary(evidence)
+
+            expect(packages.len()).to_equal(9)
+            expect(evidence.package_count).to_equal(9)
+            expect(evidence.ready_count).to_equal(9)
+            expect(evidence.serial_accept_count).to_equal(9)
+            expect(evidence.app_ids).to_contain("codex")
+            expect(evidence.app_ids).to_contain("claude")
+            expect(evidence.app_ids).to_contain("gemini")
+            expect(evidence.targets).to_contain("riscv")
+            expect(evidence.targets).to_contain("x86")
+            expect(evidence.targets).to_contain("arm")
+            expect(evidence.status).to_equal("ai_cli_runtime_smoke_matrix_ready")
+            expect(summary).to_contain("packages=9")
+
+        it "accepts each staged package marker payload as QEMU serial evidence":
+            val packages = ai_cli_runtime_smoke_packages()
+
+            expect(ai_cli_runtime_smoke_package_serial_accepted(packages[0])).to_equal(true)
+            expect(ai_cli_runtime_smoke_package_serial_accepted(packages[4])).to_equal(true)
+            expect(ai_cli_runtime_smoke_package_serial_accepted(packages[8])).to_equal(true)
 
     describe "AC-1 AC-2: Bun-informed Simple JS runtime profile":
         it "keeps Bun-like single-tool lessons while preserving the Simple MDSOC boundary":

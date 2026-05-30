@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/portable_compute_toolchains}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/portable_compute_toolchains_$(date -u +%F).md}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 NVCC_TOOL="${NVCC_TOOL:-nvcc}"
 HIPCC_TOOL="${HIPCC_TOOL:-hipcc}"
 OPENCL_SPIRV_TOOL="${OPENCL_SPIRV_TOOL:-opencl-c-to-spirv}"
@@ -13,11 +14,21 @@ METAL_TOOL="${METAL_TOOL:-metal}"
 METALLIB_TOOL="${METALLIB_TOOL:-metallib}"
 CUDA_ARCH="${CUDA_ARCH:-}"
 HIP_ARCH="${HIP_ARCH:-gfx1100}"
+TIMEOUT_SECS="${PORTABLE_COMPUTE_TOOLCHAIN_TIMEOUT_SECS:-180}"
+KILL_SECS="${PORTABLE_COMPUTE_TOOLCHAIN_TIMEOUT_KILL_SECS:-10}"
 
 mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
 
 have() {
     command -v "$1" >/dev/null 2>&1
+}
+
+run_with_timeout() {
+    if have timeout; then
+        timeout -k "$KILL_SECS" "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
 }
 
 bytes_of() {
@@ -39,6 +50,28 @@ contains_symbol() {
     else
         grep -a -F "$symbol" "$path" >/dev/null 2>&1
     fi
+}
+
+write_generated_source() {
+    target="$1"
+    path="$2"
+    program="$BUILD_DIR/emit_${target}_portable_2d_source.spl"
+    case "$target" in
+        cuda) target_ctor=Cuda ;;
+        hip) target_ctor=Hip ;;
+        opencl) target_ctor=OpenCl ;;
+        metal) target_ctor=Metal ;;
+        *) return 1 ;;
+    esac
+    cat >"$program" <<SIMPLE
+use compiler.backend.gpu_portable_compute.{PortableComputeTarget, emit_portable_2d_optimization_module}
+
+fn main() -> i64:
+    val artifact = emit_portable_2d_optimization_module(PortableComputeTarget.${target_ctor})
+    print(artifact.source)
+    return 0
+SIMPLE
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" run "$program" --mode=interpreter --clean >"$path" 2>"$BUILD_DIR/${target}_source.err"
 }
 
 write_cuda_source() {
@@ -212,7 +245,11 @@ emit_result() {
 run_cuda() {
     src="$BUILD_DIR/simple_2d_optimization.cu"
     out="$BUILD_DIR/simple_2d_optimization.ptx"
-    write_cuda_source "$src"
+    if ! write_generated_source cuda "$src"; then
+        cmd="$SIMPLE_BIN run <cuda portable emitter> > $src"
+        emit_result cuda generated_source_failed generated-source-failed 0 "$cmd" "$out"
+        return
+    fi
     if ! have "$NVCC_TOOL"; then
         cmd="$NVCC_TOOL --ptx -arch=<auto> -o $out $src"
         emit_result cuda unavailable missing-primary-tool 0 "$cmd" "$out"
@@ -245,7 +282,11 @@ EOF
 run_hip() {
     src="$BUILD_DIR/simple_2d_optimization.hip.cpp"
     out="$BUILD_DIR/simple_2d_optimization.hsaco"
-    write_cuda_source "$src"
+    if ! write_generated_source hip "$src"; then
+        cmd="$SIMPLE_BIN run <hip portable emitter> > $src"
+        emit_result hip generated_source_failed generated-source-failed 0 "$cmd" "$out"
+        return
+    fi
     cmd="$HIPCC_TOOL --genco --offload-arch=$HIP_ARCH -o $out $src"
     if ! have "$HIPCC_TOOL"; then
         emit_result hip unavailable missing-primary-tool 0 "$cmd" "$out"
