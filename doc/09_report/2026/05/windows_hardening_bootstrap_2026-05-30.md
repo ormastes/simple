@@ -27,6 +27,9 @@ Bootstrap/native-build hardening on Windows after MCP, SPipe, and Vulkan fixes.
 - Bootstrap Rust-driver stages now pass `native-build --strip` so bootstrap compares release-like Windows executables without COFF symbol tables.
 - Native project linking now preserves discovered source order across cached and freshly compiled objects instead of grouping all cache hits before fresh outputs.
 - Added an explicit `GemmAddFusion` annotation in the Cranelift adapter so the Windows bootstrap native pass no longer sees the fusion plan as `ANY`.
+- Native project object-cache bypass now detects likely real inline-assembly sidecars instead of rejecting any source text that merely mentions `asm`.
+- Stripped Windows native links normalize PE `TimeDateStamp` and `CheckSum` fields after linking so repeated release-like builds hash reproducibly.
+- After rebasing onto the current Windows-valid tree, the Cranelift adapter imports and annotates `GemmAddFusion` explicitly at the `detect_gemm_add_pair(...).unwrap()` use site, clearing the current `ANY.dest` native HIR failure.
 
 ## Verified
 
@@ -39,19 +42,34 @@ Bootstrap/native-build hardening on Windows after MCP, SPipe, and Vulkan fixes.
   - Command: `simple.exe native-build --source src\compiler --source src\lib --source src\app --entry src\app\cli\main.spl --entry-closure --threads 1 --timeout 45 -o build\windows-hardening\bootstrap\stage_probe_zero_skip.exe --verbose`
   - Result: `Compiled: 970/970 (893 cached, 77 fresh, 0 failed)` and linked `stage_probe_zero_skip.exe`.
   - Stub fallback remains enabled; generated stubs dropped from 1081 in the clean baseline to 957 after this pass.
-- After syncing to `c1d1cddd7119`, full bootstrap reaches all three Windows stages:
+- After syncing to `c1d1cddd7119`, full bootstrap reached all three Windows stages but still exposed a deterministic hash mismatch:
   - Command: `src\compiler_rust\target\debug\simple.exe build bootstrap --seed=src\compiler_rust\target\debug\simple.exe --output=build\windows-hardening\bootstrap\simple-build-strip2`
   - Stage 1: `77 compiled, 895 cached, 0 failed`, `77374976` bytes.
   - Stage 2: `77 compiled, 895 cached, 0 failed`, `77374976` bytes.
   - Stage 3: `77 compiled, 895 cached, 0 failed`, `77378048` bytes.
   - Result: `Bootstrap MISMATCH: outputs differ between stages`.
-- Repeated direct stripped native-build still reproduces the mismatch:
+- Repeated direct stripped native-build reproduced that pre-fix mismatch:
   - `native-strip-det1.exe`: `77374464` bytes, SHA256 `224231619fdb0c5481b17e3db53db3f7c4892469ff2db23c0eb5d11dc43a6557`.
   - `native-strip-det2.exe`: `77378048` bytes, SHA256 `64edd5edb5fe1f95dcd8124e58e346869501b53fe04ccca82acf4bb609032e49`.
+- After the inline-assembly cache guard fix and stripped PE metadata normalization, repeated direct stripped native-build is reproducible:
+  - Command: `src\compiler_rust\target\debug\simple.exe native-build --source src\compiler --source src\lib --source src\app --entry src\app\cli\main.spl --entry-closure --strip --threads 1 --timeout 180`
+  - `native-pe-normal1.exe`: `77390336` bytes, SHA256 `07048667d367af87d55710bcdf092392541d9d95bd8592960612879bb7bc6f7a`.
+  - `native-pe-normal2.exe`: `77390336` bytes, SHA256 `07048667d367af87d55710bcdf092392541d9d95bd8592960612879bb7bc6f7a`.
+- Full Windows bootstrap now verifies all three stages:
+  - Command: `src\compiler_rust\target\debug\simple.exe build bootstrap --seed=src\compiler_rust\target\debug\simple.exe --output=build\windows-hardening\bootstrap\simple-build-normalized`
+  - Stage 1: `2 compiled, 971 cached, 0 failed`, `77390336` bytes, SHA256 `07048667d367af87d55710bcdf092392541d9d95bd8592960612879bb7bc6f7a`.
+  - Stage 2: `2 compiled, 971 cached, 0 failed`, `77390336` bytes, SHA256 `07048667d367af87d55710bcdf092392541d9d95bd8592960612879bb7bc6f7a`.
+  - Stage 3: `2 compiled, 971 cached, 0 failed`, `77390336` bytes, SHA256 `07048667d367af87d55710bcdf092392541d9d95bd8592960612879bb7bc6f7a`.
+  - Result: `Bootstrap VERIFIED: All 3 stages produce identical output`.
+- After removing the Windows-invalid `:memory:` path from the remote tree and rebasing this slice onto `0985afca`, the current full bootstrap also verifies:
+  - Command: `src\compiler_rust\target\debug\simple.exe build bootstrap --seed=src\compiler_rust\target\debug\simple.exe --output=build\windows-hardening\bootstrap\simple-build-current3`
+  - Stage 1: `3 compiled, 970 cached, 0 failed`, `77392384` bytes, SHA256 `d2ce615c216818df0eafa5438b7891d8aa82fafa425d7f9343cf9082785186ca`.
+  - Stage 2: `2 compiled, 971 cached, 0 failed`, `77392384` bytes, SHA256 `d2ce615c216818df0eafa5438b7891d8aa82fafa425d7f9343cf9082785186ca`.
+  - Stage 3: `2 compiled, 971 cached, 0 failed`, `77392384` bytes, SHA256 `d2ce615c216818df0eafa5438b7891d8aa82fafa425d7f9343cf9082785186ca`.
+  - Result: `Bootstrap VERIFIED: All 3 stages produce identical output`.
 
 ## Remaining Bootstrap Blockers
 
-- Full `simple build bootstrap` completes all stage compile/link work on Windows, but fails the final deterministic hash comparison.
-- The remaining blocker is native output nondeterminism in repeated stripped Windows native-build outputs. PE inspection shows the mismatch is not only timestamp/checksum metadata; `.text` size/content can differ by about 3 KB.
-- Full compiler native-build still relies on 957 generated stub symbols. The next bootstrap slice should reduce internal stubs and continue isolating nondeterministic codegen/link inputs.
-- A clean full compiler native-build still needs a longer verification pass after the incremental zero-skip and three-stage bootstrap probes.
+- Full `simple build bootstrap` now passes the Windows three-stage deterministic hash comparison.
+- Full compiler native-build still relies on 959 generated stub symbols on the current rebased tree. The next bootstrap slice should reduce internal stubs before treating the native compiler lane as production-clean.
+- Whole-repository tests have not been re-run after this bootstrap slice; the focused native project tests and full bootstrap gate are the current evidence.

@@ -539,7 +539,7 @@ impl NativeProjectBuilder {
                 }
                 // Always recompile the entry file (its main->spl_main renaming depends on is_entry)
                 let is_entry = is_entry_file(path, &canon_entry_for_cache);
-                if !is_entry && !source.contains("asm") {
+                if !is_entry && !source_may_emit_inline_asm_sidecar(source) {
                     let per_file_root = self.effective_source_root_for(path);
                     let module_prefix = crate::codegen::common_backend::module_prefix_from_path(path, &per_file_root);
                     let hash = object_cache_key(
@@ -1061,6 +1061,21 @@ fn security_registry_sdn_from_sources(file_sources: &[(PathBuf, String)]) -> Res
     } else {
         Ok(Some(registry_sdn))
     }
+}
+
+fn source_may_emit_inline_asm_sidecar(source: &str) -> bool {
+    source.lines().any(|line| {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return false;
+        }
+        trimmed == "asm"
+            || trimmed.starts_with("asm ")
+            || trimmed.starts_with("asm{")
+            || trimmed.starts_with("asm {")
+            || trimmed.starts_with("asm(")
+            || trimmed.starts_with("asm:")
+    })
 }
 
 fn source_may_declare_security(source: &str) -> bool {

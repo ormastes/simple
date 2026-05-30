@@ -407,6 +407,23 @@ fn test_source_dir_preserves_logical_path() {
 }
 
 #[test]
+fn test_inline_asm_cache_guard_ignores_compiler_metadata_mentions() {
+    let source = r#"
+# inline asm in comments is not an emitted sidecar
+fn lower_inline_asm_name() -> text:
+    "InlineAsm"
+"#;
+    assert!(!source_may_emit_inline_asm_sidecar(source));
+}
+
+#[test]
+fn test_inline_asm_cache_guard_detects_real_inline_asm_syntax() {
+    assert!(source_may_emit_inline_asm_sidecar("fn f():\n    asm { nop }\n"));
+    assert!(source_may_emit_inline_asm_sidecar("fn f():\n    asm(\"nop\")\n"));
+    assert!(source_may_emit_inline_asm_sidecar("fn f():\n    asm volatile { nop }\n"));
+}
+
+#[test]
 fn test_native_hir_resolver_roots_include_project_src_for_narrow_sources() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("project");

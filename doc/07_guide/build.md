@@ -195,6 +195,11 @@ builds those stages with `native-build --strip --threads 1 --timeout 180` so the
 verification step compares release-like binaries and avoids uncontrolled worker
 fan-out during bootstrap.
 
+On Windows, stripped native links normalize volatile PE metadata after the
+hosted linker returns. The normalizer zeroes the COFF `TimeDateStamp` and PE
+optional-header `CheckSum` fields so repeated stripped native-build and
+bootstrap outputs can be compared by SHA256.
+
 The older `scripts/bootstrap/bootstrap-from-scratch.sh` and
 `scripts/bootstrap/bootstrap-windows.sh` wrappers are not present in this tree.
 Use `simple build bootstrap` directly unless those wrappers are restored.
