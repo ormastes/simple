@@ -145,9 +145,10 @@ line-numbered content + reverse-video status bar; line count computed by
   `src/lib/editor/core/launch.spl` is used by `src/app/editor/main.spl`,
   `src/app/editor/tui_main.spl`, `src/app/ide/main.spl`, and
   `examples/ide/simple_ide_launch.spl`. `test/unit/lib/editor/editor_launch_contract_spec.spl`
-  runs the IDE and example entrypoints through `bin/simple`; frame-render
-  evidence above applies to `src/app/editor/tui_main.spl`, not to the
-  readiness-only IDE/example entrypoints.
+  runs the IDE and example entrypoints through `bin/simple`. The embedded
+  example render entrypoint, `examples/ide/simple_ide_render.spl`, also runs
+  through `bin/simple` and proves shared GUI/WebRender editor HTML generation;
+  full interactive frame-render evidence above applies to `src/app/editor/tui_main.spl`.
 - **Markdown-first checks:** `test/system/editor_markdown_spec.spl` covers the
   shared markdown block model, renderer, preview pane, table/task/callout
   editing, controller wiring, TUI/GUI preview/status wiring, and property

@@ -21,7 +21,7 @@ model). Editor surface details: `doc/07_guide/editor_tui.md`.
 | **Editor TUI** | `src/app/editor/tui_main.spl` | `bin/simple run src/app/editor/tui_main.spl <files>` | Split-pane, file-tree, diagnostics, command palette (`EditorController`) |
 | **Editor GUI** | `src/app/editor/gui_shell_core.spl` | GUI shell (SDL/Winit) | Same backend, desktop shell |
 | **Simple IDE** | `src/app/ide/main.spl` | `bin/simple run src/app/ide/main.spl [--tui|--gui|--gui-sdl] <files>` | Thin VS Code-like product entrypoint over the shared editor launch contract; currently a readiness/option-parsing entrypoint, not a rendering shell |
-| **Example IDE** | `examples/ide/simple_ide_launch.spl` | `bin/simple run examples/ide/simple_ide_launch.spl` | Minimal embedded/sample launch-contract integration; it prints parsed mode/files and does not render an editor shell |
+| **Example IDE** | `examples/ide/simple_ide_launch.spl`, `examples/ide/simple_ide_render.spl` | `bin/simple run examples/ide/simple_ide_launch.spl`; `bin/simple run examples/ide/simple_ide_render.spl` | Minimal embedded/sample integrations: launch-contract parsing plus shared GUI/WebRender rendering of editor HTML |
 | **Shared backend** | `src/lib/editor/` (~129 files) | — | Piece-table buffers, multi-buffer, split panes, LSP/diagnostics/markdown/wiki services |
 
 Both svim and the Editor consume the same `src/lib/editor/` backend (epic
