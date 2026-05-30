@@ -53,8 +53,13 @@ The editor must remain runnable on both host platforms and SimpleOS:
 - Host-only presentation and integration belong in adapters:
   `src/app/editor/gui_shell_*`, `src/app/editor/desktop_commands.spl`,
   `src/app/ui.tauri/`, `src/app/ui.browser/`, and related host UI packages.
+- Shared GUI rendering is still runtime-neutral: `src/lib/editor/70.backend/gui_backend.spl`
+  renders editor and markdown content to pure HTML strings. Web, browser, SDL,
+  and Tauri surfaces present those strings through host adapters; they do not
+  make Tauri, browser/webview, SDL, or desktop APIs dependencies of the shared
+  renderer.
 - `test/unit/lib/editor/host_simpleos_surface_contract_spec.spl` enforces this
-  boundary with source-level checks.
+  boundary with source-level checks and a small runtime render proof.
 
 ## Rendering a frame (today)
 

@@ -59,9 +59,13 @@ The IDE must run on both host platforms and SimpleOS:
   host adapters such as `src/app/editor/gui_shell_*`,
   `src/app/editor/desktop_commands.spl`, `src/app/ui.tauri/`, and
   `src/app/ui.browser/`.
+- **Portable GUI render:** `src/lib/editor/70.backend/gui_backend.spl` renders
+  editor and markdown surfaces to pure HTML strings. Host web/Tauri shells own
+  presentation and IPC, but the editor/IDE renderer itself stays runnable
+  without host-only APIs.
 - **Verification:** `test/unit/lib/editor/host_simpleos_surface_contract_spec.spl`
   guards the boundary by scanning the shared/TUI entrypoints for host-only API
-  names.
+  names and by rendering editor GUI HTML through the shared GUI backend.
 
 ### LLM session management
 
