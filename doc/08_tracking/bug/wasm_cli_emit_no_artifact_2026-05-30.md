@@ -50,3 +50,23 @@ Also blocks any standalone `wasm32` deliverable from the deployed toolchain.
    `src/compiler_rust/compiler/src/codegen/wasm_bindgen_gen.rs` /
    `web_compiler.rs` but no working sample, and string/event marshalling is
    undocumented.
+
+## Update 2026-05-30 (afternoon): fix implemented, deploy blocked
+
+The CLI routing fix is implemented and committed (route `--target wasm32` to the
+pure-Simple driver → new `compile_to_wasm` → WAT via `WasmCodegenAdapter`).
+`wat2wasm` (wabt 1.0.41) is installed so the WAT backend auto-assembles binaries.
+
+**Deploy blocker:** the fix lives in `src/compiler` + `src/app/io`, so it only
+takes effect in a rebuilt `bin/simple`. A targeted `native-build` from the
+deployed seed (`src/compiler_rust/target/bootstrap/simple`) fails with **128
+distinct `hir: Cannot infer field type` errors** (seed vs current-source drift),
+producing no binary. The fix therefore needs a **full bootstrap-from-scratch**
+(`scripts/bootstrap/bootstrap-from-scratch.sh --deploy`) to go live.
+
+**Browser-DOM layer is a separate, larger feature:** the frontend has NO
+`@extern("browser")` parsing (no example exists in owned source); the WAT
+backend's `BrowserBinding`/`JsGlueGenerator`/import infra is unused, the
+`WasmCodegenAdapter` returns only WAT (not the wasm+js_glue bundle), and DOM
+glue bodies beyond `console_log`/`alert` are unimplemented. Authoring Simple
+event handlers that drive the DOM via WASM requires building this end-to-end.
