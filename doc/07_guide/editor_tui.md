@@ -43,7 +43,8 @@ registers command, language, and debug-adapter contributions. Root policy stays
 in `src/lib/editor/extensions/roots.spl`; app code only injects environment
 values. `test/unit/lib/editor/extension_discovery_contract_spec.spl` covers a
 real temp-root manifest discovery and activation path, plus the embedded IDE
-example extension at `examples/ide/extensions/markdown-notes/extension.sdn`.
+example extension at `examples/ide/extensions/markdown-notes/extension.sdn` and
+its sandbox-gated `main.spl` runtime entrypoint.
 
 Do not add duplicate MDSOC-numbered aliases such as `30.view` or
 `60.services`. MDSOC+ layering is documented in architecture/design docs; code
