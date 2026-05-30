@@ -22,7 +22,8 @@ Enable hardened JavaScript/Node.js-compatible execution for Codex, Claude, and G
 Full upstream Node.js parity, real AI service authentication, release tagging, and physical hardware validation are out of scope until the QEMU lanes prove the guest runtime contract.
 
 ## Phase
-dev-done
+research-options-ready
 
 ## Log
 - dev: Created state file with 7 acceptance criteria (type: feature). Interpreted `x85` as x86 unless corrected by the user.
+- research: Added local research, domain research, feature requirement options, and NFR options. Final requirements are pending user option selection.

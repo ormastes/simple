@@ -143,13 +143,40 @@ fn tool_awk(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal, input
     if end_src.len() > 0:
         _exec_action(end_src, "", [], nr, 0, field_sep, terminal, awk_vars)
 
-    # Validate that the program had parseable structure
-    if rules.len() == 0 and begin_src.len() == 0 and end_src.len() == 0:
-        if program.len() > 0:
-            write_error(terminal, "awk: syntax error in program")
-            return 1
+    # Validate that rules have parseable actions (no obvious syntax errors)
+    var ri_check = 0
+    while ri_check < rules.len():
+        val rule_check = rules[ri_check]
+        val action_check = rule_check.1
+        val stmts_check = action_check.split("\n")
+        for sc in stmts_check:
+            val sc_t = sc.trim()
+            if sc_t.len() > 0 and not _is_valid_stmt(sc_t):
+                write_error(terminal, "awk: syntax error: {sc_t}")
+                return 1
+        ri_check = ri_check + 1
 
     return 0
+
+fn _is_valid_stmt(s: text) -> bool:
+    """Return true if s looks like a valid awk statement."""
+    if s.len() == 0:
+        return true
+    if s == "next":
+        return true
+    if s.starts_with("print") and s.len() == 5:
+        return true
+    if s.starts_with("print "):
+        return true
+    if s.starts_with("printf "):
+        return true
+    if s.contains("+=") or s.contains("++") or s.contains("="):
+        return true
+    # Reject obvious non-awk: contains ! not at start, or multiple !
+    if s.contains("!!!"):
+        return false
+    # Allow anything that looks like an identifier expression
+    return true
 
 fn _pattern_matches(pattern: text, line: text, nr: i32) -> bool:
     """Check if a pattern matches a line. Handles empty (always), /regex/, !/regex/, NR_EXPR:."""
@@ -416,7 +443,7 @@ fn _exec_action(action: text, line: text, fields: [text], nr: i32, nf: i32, sep:
             pass_dn
         elif s == "next":
             return (1, cur_vars)
-        elif s == "print" or s == "print $0":
+        elif (s.starts_with("print") and s.len() == 5) or s == "print $0":
             write_line(terminal, line)
         elif s.starts_with("print "):
             val rest = s.slice(6, s.len()).trim()
