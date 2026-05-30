@@ -3,13 +3,17 @@ use std.common.spec.scenario_helpers.{
     ScenarioStepResult,
     check_text_contains,
     check_status_code,
+    check_exit_code,
     check_file_exists,
     check_json_field,
     check_text_contains_evidence,
     check_status_code_evidence,
+    check_exit_code_evidence,
     check_json_field_evidence,
     capture_text,
     capture_log,
+    capture_exec_response,
+    capture_exec_detailed,
     capture_api_response,
     capture_api_protocol,
     capture_api_protocol_fields,
@@ -39,6 +43,12 @@ describe "scenario checker helpers":
 
     it "checks status code inequality when codes differ":
         expect(check_status_code(404, 200)).to_equal(false)
+
+    it "checks exit code equality when codes match":
+        expect(check_exit_code(0, 0)).to_equal(true)
+
+    it "checks exit code inequality when codes differ":
+        expect(check_exit_code(1, 0)).to_equal(false)
 
     it "checks json field present in json text":
         val json = "{\"name\": \"test\", \"value\": 42}"
@@ -105,6 +115,33 @@ describe "scenario checker evidence helpers":
         expect(evidence.assertion).to_equal("status 500 equals 200")
         expect(evidence.artifact.body).to_contain("expected status: 200")
 
+    it "creates passing execution exit evidence":
+        val evidence = check_exit_code_evidence(
+            "MCP stdio command",
+            "simple_mcp_server --stdio",
+            0,
+            0,
+            "stdout: initialize result"
+        )
+        expect(evidence.passed).to_equal(true)
+        expect(evidence.assertion).to_equal("exit 0 equals 0")
+        expect(evidence.artifact.kind).to_equal(ScenarioCaptureKind.exec)
+        expect(evidence.artifact.body).to_contain("$ simple_mcp_server --stdio")
+        expect(evidence.artifact.body).to_contain("exit: 0")
+        expect(evidence.artifact.body).to_contain("expected exit: 0")
+
+    it "creates failing execution exit evidence":
+        val evidence = check_exit_code_evidence(
+            "MCP stdio command",
+            "simple_mcp_server --stdio",
+            2,
+            0,
+            "stderr: invalid option"
+        )
+        expect(evidence.passed).to_equal(false)
+        expect(evidence.assertion).to_equal("exit 2 equals 0")
+        expect(evidence.artifact.body).to_contain("expected exit: 0")
+
     it "creates JSON field evidence":
         val evidence = check_json_field_evidence(
             "Tool result JSON",
@@ -137,6 +174,36 @@ describe "scenario capture helpers":
         val lines: [text] = []
         val artifact = capture_log("Empty log", lines)
         expect(artifact.body).to_equal("")
+
+    it "captures execution response evidence":
+        val artifact = capture_exec_response(
+            "MCP stdio command",
+            "simple_mcp_server --stdio",
+            0,
+            "stdout: initialize result"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.exec)
+        expect(artifact.body).to_contain("$ simple_mcp_server --stdio")
+        expect(artifact.body).to_contain("exit: 0")
+        expect(artifact.body).to_contain("stdout: initialize result")
+
+    it "captures detailed execution provider evidence":
+        val artifact = capture_exec_detailed(
+            "MCP stdio exchange",
+            "simple_mcp_server",
+            "--stdio --log-level warn",
+            "stdin: initialize then tools/list",
+            "stdout: initialize result and tools",
+            "stderr: no panic",
+            0
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.exec)
+        expect(artifact.body).to_contain("$ simple_mcp_server")
+        expect(artifact.body).to_contain("args: --stdio --log-level warn")
+        expect(artifact.body).to_contain("input: stdin: initialize then tools/list")
+        expect(artifact.body).to_contain("stdout: stdout: initialize result and tools")
+        expect(artifact.body).to_contain("stderr: stderr: no panic")
+        expect(artifact.body).to_contain("exit: 0")
 
     it "captures basic API response evidence":
         val artifact = capture_api_response(

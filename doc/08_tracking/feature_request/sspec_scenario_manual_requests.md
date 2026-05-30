@@ -153,8 +153,10 @@ documentation to hand-written-quality scenario manuals.
         redaction notes for provider implementations.
   - [ ] API/protocol providers capture full params, headers, response fields,
         and redacted sensitive values.
-  - [ ] Execution providers capture args, input trigger/output pairs,
+  - [x] Execution helper API captures args, input trigger/output pairs,
         stdout/stderr, and exit code.
+  - [ ] Execution providers wire runtime command captures through the helper
+        API.
   - [ ] Binary providers capture raw bytes and optional decoded structure fields
         with field comments.
   - [ ] UI helpers support selected rectangle/highlight/inverted active menu
@@ -170,7 +172,9 @@ documentation to hand-written-quality scenario manuals.
   provider wiring remains future work. `scenario_helpers` now exposes
   evidence-producing checker helpers for text containment, API status, and JSON
   field checks so `Then_*` functions can emit assertion status and manual
-  evidence through the shared model. It also exposes API/protocol capture
+  evidence through the shared model. It also exposes execution capture helpers
+  for command, exit, args, input trigger, stdout, and stderr summaries, and
+  exit-code checker evidence. It also exposes API/protocol capture
   helpers that produce the rich shared evidence artifacts,
   including structured field-list summaries and common sensitive-field
   redaction for provider implementations. Structured protocol captures now
