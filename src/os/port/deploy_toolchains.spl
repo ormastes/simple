@@ -19,11 +19,15 @@
 use std.fs
 use std.process
 use std.text
-use os.port.guest_toolchain_execution_gate.{guest_toolchain_execution_gate_detail}
+use os.port.guest_toolchain_execution_gate.{
+    guest_toolchain_execution_gate_payload_detail,
+    guest_toolchain_static_payload_detail,
+}
 
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_dir_exists(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
 
 val VERSION = "1.0.0"
 
@@ -196,18 +200,32 @@ fn check_status() -> List<StageStatus>:
     var clang_static_detail = "missing build/os/clang_static/bin/clang_static"
     var clang_static_ready = false
     if rt_file_exists("build/os/clang_static/bin/clang_static"):
-        clang_static_status = "READY"
-        clang_static_detail = ""
-        clang_static_ready = true
+        clang_static_detail = guest_toolchain_static_payload_detail(
+            "build/os/clang_static/bin/clang_static",
+            rt_file_read_bytes("build/os/clang_static/bin/clang_static") ?? [],
+        )
+        if clang_static_detail == "READY":
+            clang_static_status = "READY"
+            clang_static_detail = ""
+            clang_static_ready = true
+        else:
+            clang_static_status = "INVALID"
     stages = stages + [StageStatus(name: "clang-static-guest", status: clang_static_status, detail: clang_static_detail)]
 
     var rustc_static_status = "NOT BUILT"
     var rustc_static_detail = "missing build/os/rust_static/bin/rustc_static"
     var rustc_static_ready = false
     if rt_file_exists("build/os/rust_static/bin/rustc_static"):
-        rustc_static_status = "READY"
-        rustc_static_detail = ""
-        rustc_static_ready = true
+        rustc_static_detail = guest_toolchain_static_payload_detail(
+            "build/os/rust_static/bin/rustc_static",
+            rt_file_read_bytes("build/os/rust_static/bin/rustc_static") ?? [],
+        )
+        if rustc_static_detail == "READY":
+            rustc_static_status = "READY"
+            rustc_static_detail = ""
+            rustc_static_ready = true
+        else:
+            rustc_static_status = "INVALID"
     stages = stages + [StageStatus(name: "rustc-static-guest", status: rustc_static_status, detail: rustc_static_detail)]
 
     var bake_status = "DISABLED"
@@ -219,7 +237,11 @@ fn check_status() -> List<StageStatus>:
         bake_enabled = true
     stages = stages + [StageStatus(name: "toolchain-disk-bake", status: bake_status, detail: bake_detail)]
 
-    val exec_gate_detail = guest_toolchain_execution_gate_detail(clang_static_ready, rustc_static_ready, bake_enabled)
+    val exec_gate_detail = guest_toolchain_execution_gate_payload_detail(
+        if clang_static_ready: "READY" else: clang_static_detail,
+        if rustc_static_ready: "READY" else: rustc_static_detail,
+        bake_enabled,
+    )
     stages = stages + [StageStatus(
         name: "guest-toolchain-exec-gate",
         status: if exec_gate_detail == "READY": "READY" else: "BLOCKED",
