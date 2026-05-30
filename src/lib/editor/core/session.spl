@@ -5,6 +5,7 @@
 use std.editor.buffer.buffer.*
 use std.editor.buffer.piece_table.*
 use std.editor.core.document.*
+use std.editor.core.session_db.*
 use std.editor.view.layout.*
 use std.editor.view.split_tree.*
 use std.editor.view.dock_zone.*
@@ -43,6 +44,10 @@ class EditSession:
         )
 
     me open_file(path: text) -> EditorDocumentId:
+        for existing_doc in me.documents:
+            if existing_doc.path() == path:
+                me.switch_to_index(existing_doc.doc_id().value)
+                return existing_doc.doc_id()
         val doc = EditorDocument.from_path(path)
         val doc_id = EditorDocumentId(value: me.documents.len())
         doc.id = doc_id
@@ -60,7 +65,11 @@ class EditSession:
             selection_range: SelectionRangeState(active: false, start_row: 0, start_col: 0, end_row: 0, end_col: 0),
             selection_ranges: [],
             fold_ranges: [],
-            folded_ranges: []
+            folded_ranges: [],
+            undo_text: "",
+            undo_cursor_row: 0,
+            undo_cursor_col: 0,
+            undo_available: false
         )
         me.documents.push(doc)
         me.buffers.push(buf)
@@ -68,13 +77,16 @@ class EditSession:
         me.panes = editor_session_bind_panes(me.panes, me.split.active_pane_id, me.active_index)
         doc_id
 
-    me open_empty():
+    me open_empty() -> EditorDocumentId:
         val doc = EditorDocument.empty()
         val buf = EditorBuffer.new()
+        val doc_id = EditorDocumentId(value: me.documents.len())
+        doc.id = doc_id
         me.documents.push(doc)
         me.buffers.push(buf)
         me.active_index = me.documents.len() - 1
         me.panes = editor_session_bind_panes(me.panes, me.split.active_pane_id, me.active_index)
+        doc_id
 
     me switch_tab(delta: i64):
         if me.documents.len() == 0:
@@ -225,7 +237,11 @@ class EditSession:
             selection_range: raw.selection_range,
             selection_ranges: raw.selection_ranges,
             fold_ranges: raw.fold_ranges,
-            folded_ranges: raw.folded_ranges
+            folded_ranges: raw.folded_ranges,
+            undo_text: raw.undo_text,
+            undo_cursor_row: raw.undo_cursor_row,
+            undo_cursor_col: raw.undo_cursor_col,
+            undo_available: raw.undo_available
         )
 
     fn active_document() -> EditorDocument:
@@ -262,6 +278,20 @@ class EditSession:
 
     fn split_tree() -> SplitTree:
         me.split
+
+    me save_to_db(session_db: SessionDb):
+        for doc in me.documents:
+            val buffer = doc.buffer
+            session_db.save_open_tab_with_folds(doc.doc_id().value, doc.path(), buffer.cursor_row, buffer.cursor_col, buffer.fold_state())
+        session_db.save_editor_state(me.active_doc_id().value, "normal", me.panes.len())
+
+    me restore_from_db(session_db: SessionDb):
+        val tabs = session_db.load_tabs()
+        for tab in tabs:
+            me.open_file(tab.path)
+            var doc = me.active_document()
+            doc.buffer.restore_fold_state(session_tab_folds(tab))
+            me.update_active_document(doc)
 
     # --- private helpers ---
 

@@ -1,7 +1,7 @@
 # MCP Scenario Manual Quality Plan
 
 **Date:** 2026-05-30
-**Status:** Planned
+**Status:** In progress
 **Parent plan:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 
 ## Purpose
@@ -73,8 +73,20 @@ input string construction. Those belong in folded executable/detail sections.
 
 ## Required Authoring Changes
 
-When docgen supports the scenario metadata from the parent plan, update MCP
-specs as follows:
+The first authoring pass is applied to
+`test/integration/app/mcp_stdio_integration_spec.spl` with executable-safe
+comment metadata:
+
+- The initialize request scenario is `# @inline` and `# @capture(protocol)`.
+- Tool listing and unknown-tool scenarios use `# @prev(...)` and protocol
+  capture.
+- The safe editor subset scenario uses the tool-list scenario as previous
+  context and API capture.
+- The scoped-argument regression is `# @manual: folded` because it is useful
+  diagnostic detail, not the primary manual path.
+
+Future specs should follow the same pattern. When docgen supports executable
+annotations everywhere, update MCP specs as follows:
 
 ```simple
 @inline

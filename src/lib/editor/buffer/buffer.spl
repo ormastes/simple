@@ -72,6 +72,10 @@ class EditorBuffer:
     selection_ranges: [SelectionRangeDeco]
     fold_ranges: [FoldRangeDeco]
     folded_ranges: [FoldRangeDeco]
+    undo_text: text
+    undo_cursor_row: i64
+    undo_cursor_col: i64
+    undo_available: bool
 
     static fn from_text(id: EditorBufferId, content: text) -> EditorBuffer:
         EditorBuffer(
@@ -88,7 +92,11 @@ class EditorBuffer:
             selection_range: SelectionRangeState(active: false, start_row: 0, start_col: 0, end_row: 0, end_col: 0),
             selection_ranges: [],
             fold_ranges: [],
-            folded_ranges: []
+            folded_ranges: [],
+            undo_text: "",
+            undo_cursor_row: 0,
+            undo_cursor_col: 0,
+            undo_available: false
         )
 
     static fn new() -> EditorBuffer:
@@ -127,6 +135,11 @@ class EditorBuffer:
         me.cursor_col = me.table.line_at(me.cursor_row).len()
 
     me insert_at_cursor(text_to_insert: text):
+        if me.has_active_selection_range():
+            me.push_undo_snapshot()
+            me.replace_selection_ranges(text_to_insert)
+            me.dirty = true
+            return
         me.table.insert(me.cursor_row, me.cursor_col, text_to_insert)
         var newlines = 0
         var last_len = 0
@@ -146,12 +159,22 @@ class EditorBuffer:
         me.dirty = true
 
     me delete_before_cursor():
+        if me.has_active_selection_range():
+            me.push_undo_snapshot()
+            me.replace_selection_ranges("")
+            me.dirty = true
+            return
         if me.cursor_col > 0:
             me.table.delete(me.cursor_row, me.cursor_col - 1, 1)
             me.cursor_col = me.cursor_col - 1
             me.dirty = true
 
     me delete_at_cursor():
+        if me.has_active_selection_range():
+            me.push_undo_snapshot()
+            me.replace_selection_ranges("")
+            me.dirty = true
+            return
         val line = me.table.line_at(me.cursor_row)
         if me.cursor_col < line.len():
             me.table.delete(me.cursor_row, me.cursor_col, 1)
@@ -208,10 +231,20 @@ class EditorBuffer:
 
     # --- undo/redo (snapshot stack lives elsewhere; safe no-op stubs) ---
     me push_undo_snapshot():
-        return
+        me.undo_text = me.to_text()
+        me.undo_cursor_row = me.cursor_row
+        me.undo_cursor_col = me.cursor_col
+        me.undo_available = true
 
     me undo():
-        return
+        if not me.undo_available:
+            return
+        me.table = PieceTable.new(me.undo_text)
+        me.cursor_row = me.undo_cursor_row
+        me.cursor_col = me.undo_cursor_col
+        me.undo_available = false
+        me.clear_selection_range()
+        me.dirty = true
 
     me redo():
         return
@@ -276,6 +309,33 @@ class EditorBuffer:
             if f.start_row == start_row:
                 return f.end_row
         -1
+
+    fn fold_state() -> text:
+        var parts: [text] = []
+        for f in me.fold_ranges:
+            parts.push(f.start_row.to_text() + "-" + f.end_row.to_text())
+        parts.join(",")
+
+    me restore_fold_state(state: text):
+        me.clear_folds()
+        if state == "":
+            return
+        val parts = state.split(",")
+        for part in parts:
+            val trimmed = part.trim()
+            if trimmed == "":
+                continue
+            val pair = trimmed.split("-")
+            if pair.len() != 2:
+                continue
+            val start_row = pair[0].to_int() ?? -1
+            val end_row = pair[1].to_int() ?? -1
+            if start_row >= 0 and end_row >= start_row:
+                me.fold_range(start_row, end_row)
+        for f in me.fold_ranges:
+            if me.cursor_row > f.start_row and me.cursor_row <= f.end_row:
+                me.cursor_row = f.start_row
+                me.cursor_col = 0
 
     me unfold_range(start_row: i64, end_row: i64):
         var kept: [FoldRangeDeco] = []
@@ -377,5 +437,36 @@ class EditorBuffer:
             if after_start and before_end:
                 return true
         false
+
+    me replace_selection_ranges(replacement: text):
+        if me.selection_ranges.len() == 0:
+            return
+        val current_text = me.to_text()
+        var lines = current_text.split("\n")
+        var first_row = me.selection_ranges[0].start_row
+        var first_col = me.selection_ranges[0].start_col
+        var i = me.selection_ranges.len() - 1
+        while i >= 0:
+            val sel = me.selection_ranges[i]
+            if sel.start_row == sel.end_row and sel.start_row >= 0 and sel.start_row < lines.len():
+                val line = lines[sel.start_row]
+                var start_col = sel.start_col
+                var end_col = sel.end_col
+                if start_col < 0:
+                    start_col = 0
+                if end_col < start_col:
+                    end_col = start_col
+                if start_col > line.len():
+                    start_col = line.len()
+                if end_col > line.len():
+                    end_col = line.len()
+                lines[sel.start_row] = line.slice(0, start_col) + replacement + line.slice(end_col, line.len())
+                first_row = sel.start_row
+                first_col = start_col
+            i = i - 1
+        me.table = PieceTable.new(lines.join("\n"))
+        me.cursor_row = first_row
+        me.cursor_col = first_col + replacement.len()
+        me.clear_selection_range()
 
 extern fn rt_file_write_text(path: text, content: text) -> bool

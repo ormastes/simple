@@ -92,6 +92,9 @@ describe "<Feature Name>":
 - Capture is off by default. Bare `@capture` enables after-step `tui` capture.
   Use typed capture kinds for the evidence the reader needs: `tui`, `gui`,
   `text`, `api`, `protocol`, `exec`, `binary`, `log`, or `artifact`.
+- Capture and manual visibility policy may be set at root, folder, file,
+  scenario, or step scope; the nearest explicit scope wins, and root default
+  remains capture off.
 - UI-facing specs include visible-state capture evidence when practical:
   - TUI specs capture text or ANSI output under `build/test-artifacts/<spec-relative-path>/`.
   - GUI specs capture screenshots/goldens/diffs under `doc/06_spec/image/<spec-relative-path>/`.

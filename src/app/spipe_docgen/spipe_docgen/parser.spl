@@ -567,6 +567,250 @@ fn manual_visibility_from_metadata_line(trimmed: text) -> text:
         return normalize_manual_visibility(trimmed)
     ""
 
+fn file_manual_visibility_from_metadata_line(trimmed: text) -> text:
+    val lower = trimmed.lower().trim()
+    if lower.starts_with("# @manual-file") or lower.starts_with("# @manual_file"):
+        return normalize_manual_visibility(lower)
+    if lower.starts_with("# @manual-default") or lower.starts_with("# @manual_default"):
+        return normalize_manual_visibility(lower)
+    if lower.starts_with("@manual-file") or lower.starts_with("@manual_file"):
+        return normalize_manual_visibility(lower)
+    if lower.starts_with("@manual-default") or lower.starts_with("@manual_default"):
+        return normalize_manual_visibility(lower)
+    ""
+
+fn file_manual_visibility(lines: [text]) -> text:
+    for line in lines:
+        val trimmed = line.trim()
+        val visibility = file_manual_visibility_from_metadata_line(trimmed)
+        if visibility != "":
+            return visibility
+    ""
+
+fn config_manual_visibility_from_line(trimmed: text) -> text:
+    val lower = trimmed.lower().trim()
+    val from_annotation = file_manual_visibility_from_metadata_line(lower)
+    if from_annotation != "":
+        return from_annotation
+    if lower.starts_with("manual:"):
+        return normalize_manual_visibility(lower)
+    if lower.starts_with("visibility:"):
+        return normalize_manual_visibility(lower)
+    ""
+
+fn config_manual_visibility(path: text) -> text:
+    if path == "":
+        return ""
+    if not native_fs_exists(path):
+        return ""
+    val content = native_fs_read_string(path)
+    val lines = content.split("\n")
+    for line in lines:
+        val visibility = config_manual_visibility_from_line(line.trim())
+        if visibility != "":
+            return visibility
+    ""
+
+fn local_path_dirname(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() <= 1:
+        return ""
+    var dirs: [text] = []
+    var i = 0
+    while i + 1 < parts.len():
+        if parts[i] != "":
+            dirs.push(parts[i])
+        i = i + 1
+    dirs.join("/")
+
+fn parent_dirname(path: text) -> text:
+    local_path_dirname(path)
+
+fn folder_manual_visibility_for_dir(dir: text) -> text:
+    var current = dir
+    var searching = true
+    while searching:
+        var config_path = if current == "": ".sspec-manual" else: current + "/.sspec-manual"
+        var visibility = config_manual_visibility(config_path)
+        if visibility != "":
+            return visibility
+        config_path = if current == "": "sspec-manual.sdn" else: current + "/sspec-manual.sdn"
+        visibility = config_manual_visibility(config_path)
+        if visibility != "":
+            return visibility
+        if current == "":
+            break
+        val parent = parent_dirname(current)
+        if parent == current:
+            break
+        current = parent
+    ""
+
+fn path_manual_visibility(path: text) -> text:
+    if path == "":
+        return ""
+    folder_manual_visibility_for_dir(local_path_dirname(path))
+
+fn manual_default(file_visibility: text, fallback: text) -> text:
+    if file_visibility != "":
+        return file_visibility
+    fallback
+
+fn capture_kind_from_metadata_line(trimmed: text) -> text:
+    val lower = trimmed.lower().trim()
+    if not (lower.starts_with("# @capture") or lower.starts_with("@capture")):
+        return ""
+    if lower.contains("gui"):
+        return "gui"
+    if lower.contains("api"):
+        return "api"
+    if lower.contains("protocol"):
+        return "protocol"
+    if lower.contains("text"):
+        return "text"
+    if lower.contains("exec"):
+        return "exec"
+    if lower.contains("binary"):
+        return "binary"
+    if lower.contains("log"):
+        return "log"
+    if lower.contains("artifact"):
+        return "artifact"
+    "tui"
+
+fn capture_mode_from_metadata_line(trimmed: text) -> text:
+    val lower = trimmed.lower().trim()
+    if not (lower.starts_with("# @capture") or lower.starts_with("@capture")):
+        return ""
+    if lower.contains("off"):
+        return "off"
+    if lower.contains("after_scenario"):
+        return "after_scenario"
+    if lower.contains("on_failure") or lower.contains("on_fail"):
+        return "on_failure"
+    "after_step"
+
+fn capture_policy_from_metadata_line(trimmed: text) -> text:
+    val kind = capture_kind_from_metadata_line(trimmed)
+    if kind == "":
+        return ""
+    val mode = capture_mode_from_metadata_line(trimmed)
+    if mode == "off":
+        return "off"
+    kind + " " + mode
+
+fn scenario_capture_policy(lines: [text], scenario_index: i64) -> text:
+    var j = scenario_index - 1
+    while j >= 0:
+        val trimmed = lines[j].trim()
+        if trimmed == "":
+            j = j - 1
+            continue
+        val capture = capture_policy_from_metadata_line(trimmed)
+        if capture != "":
+            return capture
+        if trimmed.starts_with("#") or trimmed.starts_with("@"):
+            j = j - 1
+            continue
+        break
+    ""
+
+fn prev_title_from_metadata_line(trimmed: text) -> text:
+    if not (trimmed.starts_with("# @prev") or trimmed.starts_with("@prev")):
+        return ""
+    if trimmed.contains("\""):
+        return extract_quoted_name(trimmed)
+    "__previous__"
+
+fn include_title_from_metadata_line(trimmed: text) -> text:
+    if not (trimmed.starts_with("# @include") or trimmed.starts_with("@include")):
+        return ""
+    if trimmed.contains("\""):
+        return extract_quoted_name(trimmed)
+    ""
+
+fn scenario_prev_title(lines: [text], scenario_index: i64) -> text:
+    var j = scenario_index - 1
+    while j >= 0:
+        val trimmed = lines[j].trim()
+        if trimmed == "":
+            j = j - 1
+            continue
+        val prev_title = prev_title_from_metadata_line(trimmed)
+        if prev_title != "":
+            return prev_title
+        if trimmed.starts_with("#") or trimmed.starts_with("@"):
+            j = j - 1
+            continue
+        break
+    ""
+
+fn is_scenario_line(trimmed: text) -> bool:
+    if not trimmed.contains("\""):
+        return false
+    trimmed.starts_with("it ") or trimmed.starts_with("slow_it ") or
+        trimmed.starts_with("pending ") or trimmed.starts_with("skip_it ") or
+        trimmed.starts_with("skip it ")
+
+fn find_previous_scenario_body(lines: [text], scenario_index: i64) -> [text]:
+    var j = scenario_index - 1
+    while j >= 0:
+        val trimmed = lines[j].trim()
+        if is_scenario_line(trimmed):
+            val end_index = find_scenario_body_end(lines, j + 1, count_leading_indent(lines[j]))
+            return collect_scenario_body(lines, j + 1, end_index)
+        j = j - 1
+    []
+
+fn find_scenario_body_by_title(lines: [text], title: text, scenario_index: i64) -> [text]:
+    if title == "__previous__":
+        return find_previous_scenario_body(lines, scenario_index)
+    var j = 0
+    while j < lines.len():
+        val trimmed = lines[j].trim()
+        if j != scenario_index and is_scenario_line(trimmed):
+            val name = extract_quoted_name(trimmed)
+            if name == title:
+                val end_index = find_scenario_body_end(lines, j + 1, count_leading_indent(lines[j]))
+                return collect_scenario_body(lines, j + 1, end_index)
+        j = j + 1
+    []
+
+fn expand_prev_scenario_body(lines: [text], scenario_index: i64, body: [text]) -> [text]:
+    val prev_title = scenario_prev_title(lines, scenario_index)
+    if prev_title == "":
+        return body
+    val prev_body = find_scenario_body_by_title(lines, prev_title, scenario_index)
+    if prev_body.len() == 0:
+        var missing_prev: [text] = []
+        val label = if prev_title == "__previous__": "previous scenario" else: prev_title
+        missing_prev.push("# @manual-warning: missing prev scenario: " + label)
+        for line in body:
+            missing_prev.push(line)
+        return missing_prev
+    var expanded: [text] = []
+    for line in prev_body:
+        expanded.push(line)
+    for line in body:
+        expanded.push(line)
+    expanded
+
+fn expand_include_scenario_body(lines: [text], scenario_index: i64, body: [text]) -> [text]:
+    var expanded: [text] = []
+    for line in body:
+        val trimmed = line.trim()
+        val include_title = include_title_from_metadata_line(trimmed)
+        if include_title != "":
+            val include_body = find_scenario_body_by_title(lines, include_title, scenario_index)
+            if include_body.len() > 0:
+                for include_line in include_body:
+                    expanded.push(include_line)
+            else:
+                expanded.push("# @manual-warning: missing include scenario: " + include_title)
+        else:
+            expanded.push(line)
+    expanded
+
 fn scenario_manual_visibility(lines: [text], scenario_index: i64, default_visibility: text) -> text:
     var j = scenario_index - 1
     while j >= 0:
@@ -583,11 +827,83 @@ fn scenario_manual_visibility(lines: [text], scenario_index: i64, default_visibi
         break
     default_visibility
 
-fn render_manual_scenario(name: text, suffix: text, body: [text], visibility: text) -> text:
+fn next_manual_step_label(lines: [text], start_index: i64) -> text:
+    var i = start_index
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed == "":
+            i = i + 1
+            continue
+        if trimmed.starts_with("# @") or trimmed.starts_with("@"):
+            i = i + 1
+            continue
+        return trimmed
+    ""
+
+fn manual_warning_from_metadata_line(trimmed: text) -> text:
+    if trimmed.starts_with("# @manual-warning:"):
+        return trimmed["# @manual-warning:".len():].trim()
+    if trimmed.starts_with("@manual-warning:"):
+        return trimmed["@manual-warning:".len():].trim()
+    ""
+
+fn render_manual_warnings(lines: [text]) -> text:
+    var warnings: [text] = []
+    for line in lines:
+        val warning = manual_warning_from_metadata_line(line.trim())
+        if warning != "":
+            warnings.push("- " + warning)
+    if warnings.len() == 0:
+        return ""
+    "\n**Manual warnings:**\n" + warnings.join("\n") + "\n\n"
+
+fn strip_manual_metadata_lines(lines: [text]) -> [text]:
+    var result: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        val is_capture = capture_policy_from_metadata_line(trimmed) != ""
+        val is_include = include_title_from_metadata_line(trimmed) != ""
+        val is_warning = manual_warning_from_metadata_line(trimmed) != ""
+        if not is_capture and not is_include and not is_warning:
+            result.push(line)
+    result
+
+fn render_capture_evidence_summary(scenario_capture: text, lines: [text]) -> text:
+    var parts: [text] = []
+    if scenario_capture != "":
+        if scenario_capture == "off":
+            parts.push("**Scenario capture:** off")
+        else:
+            parts.push("**Scenario capture:** " + scenario_capture)
+    var step_parts: [text] = []
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        val capture = capture_policy_from_metadata_line(trimmed)
+        if capture != "":
+            val step_label = next_manual_step_label(lines, i + 1)
+            if step_label != "":
+                step_parts.push("- " + capture + " before `" + step_label + "`")
+            else:
+                step_parts.push("- " + capture)
+        i = i + 1
+    if step_parts.len() > 0:
+        parts.push("**Step captures:**\n" + step_parts.join("\n"))
+    if parts.len() == 0:
+        return ""
+    "\n" + parts.join("\n\n") + "\n\n"
+
+fn render_scenario_body_with_capture(lines: [text], scenario_capture: text) -> text:
+    val evidence = render_capture_evidence_summary(scenario_capture, lines)
+    val warnings = render_manual_warnings(lines)
+    val without_metadata = strip_manual_metadata_lines(lines)
+    evidence + warnings + render_scenario_body(without_metadata)
+
+fn render_manual_scenario(name: text, suffix: text, body: [text], visibility: text, capture_policy: text) -> text:
     if visibility == "skip":
         return ""
     val heading = "#### " + name + suffix + "\n"
-    val rendered_body = render_scenario_body(body)
+    val rendered_body = render_scenario_body_with_capture(body, capture_policy)
     if visibility == "folded" or visibility == "detail":
         val label = if visibility == "detail": "Details: " else: "Advanced: "
         "<details>\n<summary>" + label + name + "</summary>\n\n" + heading + rendered_body + "\n</details>\n\n"
@@ -715,8 +1031,10 @@ fn collect_scenario_body(lines: [text], start: i64, end_index: i64) -> [text]:
         k = k + 1
     body
 
-fn extract_test_structure(content: text) -> text:
+fn extract_test_structure_with_default(content: text, default_visibility: text) -> text:
     val lines = content.split("\n")
+    val file_visibility = file_manual_visibility(lines)
+    val resolved_file_visibility = manual_default(file_visibility, default_visibility)
     var result_parts: [text] = []
     var i = 0
     var in_docstring = false
@@ -784,8 +1102,11 @@ fn extract_test_structure(content: text) -> text:
             val name = extract_quoted_name(trimmed)
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
-            val visibility = scenario_manual_visibility(lines, i, "show")
-            result_parts.push(render_manual_scenario(name, " _(skipped)_", body, visibility))
+            val expanded_body = expand_prev_scenario_body(lines, i, body)
+            val included_body = expand_include_scenario_body(lines, i, expanded_body)
+            val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "show"))
+            val capture = scenario_capture_policy(lines, i)
+            result_parts.push(render_manual_scenario(name, " _(skipped)_", included_body, visibility, capture))
             i = next_index - 1
 
         # pending -> pending bullet
@@ -793,8 +1114,11 @@ fn extract_test_structure(content: text) -> text:
             val name = extract_quoted_name(trimmed)
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
-            val visibility = scenario_manual_visibility(lines, i, "show")
-            result_parts.push(render_manual_scenario(name, " _(pending)_", body, visibility))
+            val expanded_body = expand_prev_scenario_body(lines, i, body)
+            val included_body = expand_include_scenario_body(lines, i, expanded_body)
+            val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "show"))
+            val capture = scenario_capture_policy(lines, i)
+            result_parts.push(render_manual_scenario(name, " _(pending)_", included_body, visibility, capture))
             i = next_index - 1
 
         # slow it -> slow bullet
@@ -802,8 +1126,11 @@ fn extract_test_structure(content: text) -> text:
             val name = extract_quoted_name(trimmed)
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
-            val visibility = scenario_manual_visibility(lines, i, "folded")
-            result_parts.push(render_manual_scenario(name, " _(slow)_", body, visibility))
+            val expanded_body = expand_prev_scenario_body(lines, i, body)
+            val included_body = expand_include_scenario_body(lines, i, expanded_body)
+            val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "folded"))
+            val capture = scenario_capture_policy(lines, i)
+            result_parts.push(render_manual_scenario(name, " _(slow)_", included_body, visibility, capture))
             i = next_index - 1
 
         # regular it -> check bullet
@@ -811,10 +1138,19 @@ fn extract_test_structure(content: text) -> text:
             val name = extract_quoted_name(trimmed)
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
-            val visibility = scenario_manual_visibility(lines, i, "show")
-            result_parts.push(render_manual_scenario(name, "", body, visibility))
+            val expanded_body = expand_prev_scenario_body(lines, i, body)
+            val included_body = expand_include_scenario_body(lines, i, expanded_body)
+            val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "show"))
+            val capture = scenario_capture_policy(lines, i)
+            result_parts.push(render_manual_scenario(name, "", included_body, visibility, capture))
             i = next_index - 1
 
         i = i + 1
 
     result_parts.join("").trim()
+
+fn extract_test_structure_with_path(content: text, path: text) -> text:
+    extract_test_structure_with_default(content, path_manual_visibility(path))
+
+fn extract_test_structure(content: text) -> text:
+    extract_test_structure_with_default(content, "")

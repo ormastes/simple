@@ -1,0 +1,212 @@
+# Scenario manual evidence and capture policy helpers.
+#
+# This module is intentionally pure. Concrete TUI, GUI, API, execution, and
+# binary capture providers can depend on it without pulling in runner code.
+
+pub enum ScenarioCaptureMode:
+    off
+    after_step
+    after_scenario
+    on_failure
+
+pub enum ScenarioCaptureKind:
+    tui
+    gui
+    api
+    protocol
+    text
+    exec
+    binary
+    log
+    artifact
+
+pub struct ScenarioCapturePolicy:
+    enabled: bool
+    mode: ScenarioCaptureMode
+    kind: ScenarioCaptureKind
+
+pub struct ScenarioEvidenceArtifact:
+    kind: ScenarioCaptureKind
+    title: text
+    mime: text
+    path: text
+    body: text
+    scenario_id: text
+    step_id: text
+    redacted: bool
+
+pub struct ScenarioCheckerEvidence:
+    assertion: text
+    passed: bool
+    artifact: ScenarioEvidenceArtifact
+
+pub fn scenario_capture_kind_name(kind: ScenarioCaptureKind) -> text:
+    match kind:
+        case ScenarioCaptureKind.tui: "tui"
+        case ScenarioCaptureKind.gui: "gui"
+        case ScenarioCaptureKind.api: "api"
+        case ScenarioCaptureKind.protocol: "protocol"
+        case ScenarioCaptureKind.text: "text"
+        case ScenarioCaptureKind.exec: "exec"
+        case ScenarioCaptureKind.binary: "binary"
+        case ScenarioCaptureKind.log: "log"
+        case ScenarioCaptureKind.artifact: "artifact"
+
+pub fn scenario_capture_mode_name(mode: ScenarioCaptureMode) -> text:
+    match mode:
+        case ScenarioCaptureMode.off: "off"
+        case ScenarioCaptureMode.after_step: "after_step"
+        case ScenarioCaptureMode.after_scenario: "after_scenario"
+        case ScenarioCaptureMode.on_failure: "on_failure"
+
+pub fn scenario_capture_off() -> ScenarioCapturePolicy:
+    ScenarioCapturePolicy(
+        enabled: false,
+        mode: ScenarioCaptureMode.off,
+        kind: ScenarioCaptureKind.tui
+    )
+
+pub fn scenario_capture_bare() -> ScenarioCapturePolicy:
+    ScenarioCapturePolicy(
+        enabled: true,
+        mode: ScenarioCaptureMode.after_step,
+        kind: ScenarioCaptureKind.tui
+    )
+
+pub fn scenario_capture_policy(
+    mode: ScenarioCaptureMode,
+    kind: ScenarioCaptureKind
+) -> ScenarioCapturePolicy:
+    ScenarioCapturePolicy(
+        enabled: mode != ScenarioCaptureMode.off,
+        mode: mode,
+        kind: kind
+    )
+
+pub fn scenario_evidence_artifact(
+    kind: ScenarioCaptureKind,
+    title: text,
+    mime: text,
+    path: text,
+    body: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    ScenarioEvidenceArtifact(
+        kind: kind,
+        title: title,
+        mime: mime,
+        path: path,
+        body: body,
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: false
+    )
+
+pub fn scenario_redacted_evidence_artifact(
+    kind: ScenarioCaptureKind,
+    title: text,
+    mime: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    ScenarioEvidenceArtifact(
+        kind: kind,
+        title: title,
+        mime: mime,
+        path: "",
+        body: "",
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: true
+    )
+
+pub fn scenario_api_evidence(
+    title: text,
+    method: text,
+    path: text,
+    status: i64,
+    response_summary: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    val body = method + " " + path + "\nstatus: " + "{status}" + "\n" + response_summary
+    ScenarioEvidenceArtifact(
+        kind: ScenarioCaptureKind.api,
+        title: title,
+        mime: "text/plain",
+        path: "",
+        body: body,
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: false
+    )
+
+pub fn scenario_exec_evidence(
+    title: text,
+    command: text,
+    exit_code: i64,
+    output_summary: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    val body = "$ " + command + "\nexit: " + "{exit_code}" + "\n" + output_summary
+    ScenarioEvidenceArtifact(
+        kind: ScenarioCaptureKind.exec,
+        title: title,
+        mime: "text/plain",
+        path: "",
+        body: body,
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: false
+    )
+
+pub fn scenario_binary_evidence(
+    title: text,
+    format_name: text,
+    field_summary: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    val body = "format: " + format_name + "\n" + field_summary
+    ScenarioEvidenceArtifact(
+        kind: ScenarioCaptureKind.binary,
+        title: title,
+        mime: "application/octet-stream",
+        path: "",
+        body: body,
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: false
+    )
+
+pub fn scenario_checker_evidence(
+    assertion: text,
+    passed: bool,
+    artifact: ScenarioEvidenceArtifact
+) -> ScenarioCheckerEvidence:
+    ScenarioCheckerEvidence(
+        assertion: assertion,
+        passed: passed,
+        artifact: artifact
+    )
+
+pub fn scenario_policy_manual_summary(policy: ScenarioCapturePolicy) -> text:
+    if not policy.enabled:
+        return "capture off"
+    val mode = scenario_capture_mode_name(policy.mode)
+    val kind = scenario_capture_kind_name(policy.kind)
+    "capture {kind} {mode}"
+
+pub fn scenario_evidence_manual_summary(artifact: ScenarioEvidenceArtifact) -> text:
+    val kind = scenario_capture_kind_name(artifact.kind)
+    if artifact.redacted:
+        return "{artifact.title} ({kind}, redacted)"
+    if artifact.path.len() > 0:
+        return "{artifact.title} ({kind}, {artifact.mime}) -> {artifact.path}"
+    "{artifact.title} ({kind}, {artifact.mime})"
+
+pub fn scenario_checker_manual_summary(evidence: ScenarioCheckerEvidence) -> text:
+    val status = if evidence.passed: "passed" else: "failed"
+    evidence.assertion + " (" + status + ") — " + scenario_evidence_manual_summary(evidence.artifact)

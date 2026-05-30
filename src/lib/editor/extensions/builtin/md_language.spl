@@ -26,3 +26,113 @@ fn md_language_manifest() -> ExtensionManifest:
         contributes_themes: [],
         contributes_keybindings: []
     )
+
+struct MdDiagnostic:
+    line: i64
+    col: i64
+    message: text
+    severity: text
+
+struct MdCompletion:
+    label: text
+    kind: text
+    detail: text
+
+fn md_language_diagnose(content: text) -> [MdDiagnostic]:
+    var diagnostics: [MdDiagnostic] = []
+    val lines = content.split("\n")
+    var fence_count = 0
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed.starts_with("```"):
+            fence_count = fence_count + 1
+        if trimmed.starts_with("#") and trimmed.len() > 1:
+            var hashes = 0
+            while hashes < trimmed.len() and trimmed.char_at(hashes) == "#":
+                hashes = hashes + 1
+            if hashes < trimmed.len() and trimmed.char_at(hashes) != " ":
+                diagnostics.push(MdDiagnostic(line: i, col: hashes, message: "Heading requires a space after '#'", severity: "warning"))
+        if line.contains("]()"):
+            diagnostics.push(MdDiagnostic(line: i, col: 0, message: "Empty link target", severity: "warning"))
+        if line.len() > 0:
+            val last = line.char_at(line.len() - 1)
+            if last == " " or last == "\t":
+                diagnostics.push(MdDiagnostic(line: i, col: line.len() - 1, message: "Trailing whitespace", severity: "info"))
+        i = i + 1
+    if fence_count % 2 != 0:
+        diagnostics.push(MdDiagnostic(line: lines.len() - 1, col: 0, message: "Unclosed code fence", severity: "error"))
+    diagnostics
+
+fn md_language_complete(content: text, line: i64, col: i64) -> [MdCompletion]:
+    val current = _md_language_line(content, line)
+    val prefix = if col <= current.len() then current.slice(0, col) else: current
+    var completions: [MdCompletion] = []
+    if prefix.ends_with("#"):
+        completions.push(MdCompletion(label: "## ", kind: "snippet", detail: "Heading level 2"))
+        completions.push(MdCompletion(label: "### ", kind: "snippet", detail: "Heading level 3"))
+    if prefix.ends_with("["):
+        completions.push(MdCompletion(label: "[text](url)", kind: "snippet", detail: "Markdown link"))
+    if prefix.ends_with("```"):
+        completions.push(MdCompletion(label: "simple", kind: "language", detail: "Simple"))
+        completions.push(MdCompletion(label: "bash", kind: "language", detail: "Bash"))
+        completions.push(MdCompletion(label: "json", kind: "language", detail: "JSON"))
+        completions.push(MdCompletion(label: "python", kind: "language", detail: "Python"))
+    completions
+
+fn md_language_hover(content: text, line: i64, col: i64) -> text:
+    val current = _md_language_line(content, line)
+    val trimmed = current.trim()
+    val heading_level = _md_heading_level(trimmed)
+    if heading_level > 0:
+        return "Heading level " + heading_level.to_text()
+    if trimmed.starts_with("```") and trimmed.len() > 3:
+        return trimmed.slice(3, trimmed.len()).trim()
+    val url = _md_find_link_url(current, col)
+    if url != "":
+        return url
+    ""
+
+fn _md_language_line(content: text, line: i64) -> text:
+    val lines = content.split("\n")
+    if line < 0 or line >= lines.len():
+        return ""
+    lines[line]
+
+fn _md_heading_level(line: text) -> i64:
+    var level = 0
+    while level < line.len() and line.char_at(level) == "#":
+        level = level + 1
+    if level > 0 and level < line.len() and line.char_at(level) == " ":
+        return level
+    0
+
+fn _md_find_link_url(line: text, col: i64) -> text:
+    val marker = "]("
+    var i = 0
+    while i < line.len():
+        if line.slice(i, line.len()).starts_with(marker):
+            val close = _md_language_find_char(line, ")", i + marker.len())
+            if close > i:
+                val open = _md_language_find_prev_char(line, "[", i)
+                if open >= 0 and col >= open and col <= close:
+                    return line.slice(i + marker.len(), close)
+        i = i + 1
+    ""
+
+fn _md_language_find_char(line: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i < line.len():
+        if line.char_at(i) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _md_language_find_prev_char(line: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i >= 0:
+        if line.char_at(i) == needle:
+            return i
+        i = i - 1
+    -1

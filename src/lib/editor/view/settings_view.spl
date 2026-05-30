@@ -1,6 +1,8 @@
 # Editor Settings View — UI model for the settings/preferences panel.
 #
-# Provides: SettingsEntry, SettingsView, settings_view_new.
+# Provides: SettingsEntry, SettingsView, SettingsViewState, settings_view_new.
+
+use std.editor.common.settings_schema.*
 
 enum SettingKind:
     Toggle
@@ -22,17 +24,110 @@ struct SettingsView:
     scroll_offset: i64
     filter: text
 
-struct SettingsViewState:
+class SettingsViewState:
     title: text
+    schema: [SettingDescriptor]
     categories: [text]
     category_index: i64
-    filtered: [SettingsEntry]
+    filtered: [SettingDescriptor]
     selected_index: i64
+    search_query: text
     editing: bool
     edit_value: text
+
+    static fn new(schema: [SettingDescriptor]) -> SettingsViewState:
+        val categories = _settings_view_categories(schema)
+        SettingsViewState(
+            title: "Settings",
+            schema: schema,
+            categories: categories,
+            category_index: 0,
+            filtered: _settings_view_filtered(schema, categories, 0, ""),
+            selected_index: 0,
+            search_query: "",
+            editing: false,
+            edit_value: ""
+        )
+
+    me select_next():
+        if me.filtered.len() == 0:
+            me.selected_index = 0
+            return
+        me.selected_index = (me.selected_index + 1) % me.filtered.len()
+
+    me select_prev():
+        if me.filtered.len() == 0:
+            me.selected_index = 0
+            return
+        me.selected_index = (me.selected_index - 1 + me.filtered.len()) % me.filtered.len()
+
+    me next_category():
+        if me.categories.len() == 0:
+            return
+        me.category_index = (me.category_index + 1) % me.categories.len()
+        me.apply_filter()
+
+    me prev_category():
+        if me.categories.len() == 0:
+            return
+        me.category_index = (me.category_index - 1 + me.categories.len()) % me.categories.len()
+        me.apply_filter()
+
+    me apply_filter():
+        me.filtered = _settings_view_filtered(me.schema, me.categories, me.category_index, me.search_query)
+        me.selected_index = 0
+
+    me start_edit(value: text):
+        me.editing = true
+        me.edit_value = value
+
+    me cancel_edit():
+        me.editing = false
+        me.edit_value = ""
+
+    fn is_editing() -> bool:
+        me.editing
+
+    me clear_search():
+        me.search_query = ""
+        me.apply_filter()
+
+    fn current_setting() -> SettingDescriptor:
+        if me.filtered.len() == 0:
+            return SettingDescriptor(key: "", label: "", description: "", category: "", setting_type: "", default_value: "", enum_options: [], platform: "")
+        if me.selected_index < 0 or me.selected_index >= me.filtered.len():
+            return me.filtered[0]
+        me.filtered[me.selected_index]
+
+    fn current_setting_key() -> text:
+        me.current_setting().key
+
+    fn current_setting_type() -> text:
+        me.current_setting().setting_type
 
 fn settings_view_new() -> SettingsView:
     SettingsView(title: "Settings", entries: [], selected: 0, scroll_offset: 0, filter: "")
 
 fn settings_view_filter(view: SettingsView, query: text) -> SettingsView:
     SettingsView(title: view.title, entries: view.entries, selected: 0, scroll_offset: 0, filter: query)
+
+fn _settings_view_categories(schema: [SettingDescriptor]) -> [text]:
+    var result: [text] = []
+    for setting in schema:
+        if not _settings_view_contains(result, setting.category):
+            result.push(setting.category)
+    result
+
+fn _settings_view_contains(values: [text], needle: text) -> bool:
+    for value in values:
+        if value == needle:
+            return true
+    false
+
+fn _settings_view_filtered(schema: [SettingDescriptor], categories: [text], category_index: i64, query: text) -> [SettingDescriptor]:
+    var base = schema
+    if category_index >= 0 and category_index < categories.len():
+        base = settings_filter_by_category(schema, categories[category_index])
+    if query.trim() != "":
+        return settings_search(base, query)
+    base

@@ -38,26 +38,26 @@ the helper to avoid the unsupported form.
 
 ## 2026-05-30 Update
 
-The example has been narrowed to a deterministic embedded IDE HTML smoke so it
-no longer imports the unstable shared editor/WebRender class closure that
-triggered the strict JIT fallback.
+The hardcoded HTML smoke has been replaced with the shared editor GUI backend
+and WebRender envelope path again. The source-side resolver used by the current
+compiler resolves `std.editor.backend.*` through numbered layer directories such
+as `src/lib/editor/70.backend`.
 
-Verification:
+Verification after refreshing `bin/simple` from the rebuilt bootstrap binary:
 
 ```bash
-SIMPLE_LIB=src bin/simple check examples/ide/simple_ide_render.spl
+cd src/compiler_rust && cargo test -p simple-compiler resolves_numbered_stdlib_imports_from_examples_tree -- --nocapture
+cd ../.. && SIMPLE_LIB=src bin/simple check examples/ide/simple_ide_render.spl
 SIMPLE_LIB=src bin/simple run examples/ide/simple_ide_render.spl
 bin/simple run examples/ide/simple_ide_render.spl
+bin/simple test test/unit/lib/editor/editor_launch_contract_spec.spl --mode=interpreter --clean
+bin/simple run examples/ide/simple_ide_launch.spl
 ```
 
-All three commands pass, and both run modes print:
+The example prints:
 
 ```text
 target=pure_simple
 has_editor_source=true
 has_markdown_language=true
 ```
-
-Remaining broader follow-up: the full shared editor GUI/WebRender class closure
-still needs separate JIT hardening before this example should be expanded back to
-that integration path.

@@ -42,9 +42,9 @@ belongs in a folded `Executable SPipe` block.
 
 ## Inline and Previous Scenarios
 
-Current docgen supports comment metadata for manual visibility. Use
-`# @inline` for reusable setup flows that should not appear as standalone
-manual sections until scenario expansion is implemented:
+Current docgen supports comment metadata for manual visibility and previous
+scenario expansion. Use `# @inline` for reusable setup flows that should not
+appear as standalone manual sections:
 
 ```simple
 # @inline
@@ -52,47 +52,80 @@ it "app opens":
     user.open_app()
 ```
 
-Planned scenario expansion uses `@inline` plus `@prev`:
+Scenario expansion uses `# @inline` plus `# @prev`:
 
 ```simple
-@inline
+# @inline
 it "app opens":
     user.open_app()
 
-@prev("app opens")
+# @prev("app opens")
 it "user logs in":
     user.enter_login("demo", "pass")
 ```
 
-When `@prev` expands successfully, generated docs do not print `Previous:`.
+Bare `# @prev` expands the nearest previous scenario. When `# @prev` expands
+successfully, generated docs do not print `Previous:`.
 They show the expanded setup steps as part of the scenario.
 
-Use `@include("scenario title")` only when an inline scenario must appear in
-the middle of another scenario. Do not use `it "title"` without `:` as a call;
-that makes the grammar and docs ambiguous.
+Use `# @include("scenario title")` only when an inline scenario must appear in
+the middle of another scenario:
+
+```simple
+# @inline
+it "user confirms dialog":
+    user.confirm_dialog()
+
+it "user completes checkout":
+    user.add_item()
+    # @include("user confirms dialog")
+    user.finish_checkout()
+```
+
+Do not use `it "title"` without `:` as a call; that makes the grammar and docs
+ambiguous.
+
+If `# @prev` or `# @include` references a scenario that cannot be found,
+generated docs render a `Manual warnings` block and omit the metadata line from
+the rendered source block.
 
 ## Capture
 
 Capture is off by default. A bare `@capture` enables `after_step` capture with
 default kind `tui`.
 
+Shared capture/evidence helpers live in
+`src/lib/common/spec/scenario_evidence.spl`. New providers and checker helpers
+should use `ScenarioCaptureMode`, `ScenarioCaptureKind`,
+`ScenarioCapturePolicy`, `ScenarioEvidenceArtifact`, and
+`ScenarioCheckerEvidence` instead of inventing local string constants. The
+module includes pure constructors for API, execution, binary, redacted, and
+checker-linked evidence.
+
 Examples:
 
 ```simple
-@capture
+# @capture
 it "user logs in":
     user.open_app()
 
-    @capture(api)
+    # @capture(api)
     user.submit_login()
 ```
+
+Implemented docgen behavior supports comment metadata today:
+
+- `# @capture` renders `tui after_step`.
+- `# @capture(api)` renders `api after_step` for the next step.
+- `# @capture(after_scenario, gui)` renders `gui after_scenario`.
+- Capture metadata comments are omitted from the rendered source block.
 
 Supported capture modes:
 
 - `off`
 - `after_step`
 - `after_scenario`
-- `on_fail`
+- `on_failure`
 
 Supported capture kinds:
 
@@ -151,7 +184,21 @@ policy by folder/file/scenario/step:
 Use folded mode for edge cases, stress cases, protocol matrix rows, and internal
 helper checks unless they are part of the primary user/admin/operator flow.
 
-Implemented scenario-level comment metadata:
+Implemented file-level comment metadata:
+
+```simple
+# @manual-file: folded
+describe "Protocol matrix":
+    it "covers a detailed row":
+        ...
+
+# @manual-file: skip
+describe "Generated helper checks":
+    it "checks helper plumbing":
+        ...
+```
+
+Scenario-level metadata overrides the file default:
 
 ```simple
 # @manual: folded
@@ -173,6 +220,16 @@ slow_it "important slow operator flow":
 
 `slow_it` scenarios fold by default in generated docs. Use `# @manual: show`
 only when the slow scenario is part of the primary manual.
+
+Folder and root defaults use the nearest config file named `.sspec-manual` or
+`sspec-manual.sdn`:
+
+```text
+manual: folded
+```
+
+Valid values are `show`, `folded`, `detail`, and `skip`. Precedence is:
+scenario comment, file comment, nearest folder/root config, built-in default.
 
 ## Quality Loop
 

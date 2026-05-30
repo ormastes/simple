@@ -1,0 +1,112 @@
+use std.spec.{describe, it, expect}
+use std.common.spec.scenario_evidence.{
+    ScenarioCaptureKind,
+    ScenarioCaptureMode,
+    scenario_capture_bare,
+    scenario_capture_off,
+    scenario_capture_policy,
+    scenario_api_evidence,
+    scenario_binary_evidence,
+    scenario_checker_evidence,
+    scenario_checker_manual_summary,
+    scenario_exec_evidence,
+    scenario_evidence_artifact,
+    scenario_evidence_manual_summary,
+    scenario_policy_manual_summary,
+    scenario_redacted_evidence_artifact
+}
+
+describe "scenario evidence capture policy":
+    it "keeps root capture off by default":
+        val policy = scenario_capture_off()
+        expect(policy.enabled).to_equal(false)
+        expect(scenario_policy_manual_summary(policy)).to_equal("capture off")
+
+    it "treats bare capture as after step tui capture":
+        val policy = scenario_capture_bare()
+        expect(policy.enabled).to_equal(true)
+        expect(scenario_policy_manual_summary(policy)).to_equal("capture tui after_step")
+
+    it "allows explicit enum based api capture":
+        val policy = scenario_capture_policy(
+            ScenarioCaptureMode.after_scenario,
+            ScenarioCaptureKind.api
+        )
+        expect(policy.enabled).to_equal(true)
+        expect(scenario_policy_manual_summary(policy)).to_equal("capture api after_scenario")
+
+describe "scenario evidence artifact":
+    it "renders path backed evidence for manual output":
+        val artifact = scenario_evidence_artifact(
+            ScenarioCaptureKind.gui,
+            "App screen after login",
+            "image/png",
+            "artifacts/login.png",
+            "",
+            "login",
+            "submit"
+        )
+        expect(scenario_evidence_manual_summary(artifact)).to_equal("App screen after login (gui, image/png) -> artifacts/login.png")
+
+    it "renders redacted evidence without leaking body or path":
+        val artifact = scenario_redacted_evidence_artifact(
+            ScenarioCaptureKind.protocol,
+            "HTTP authorization header",
+            "message/http",
+            "api-login",
+            "request"
+        )
+        expect(scenario_evidence_manual_summary(artifact)).to_equal("HTTP authorization header (protocol, redacted)")
+
+    it "creates api evidence with request and status details":
+        val artifact = scenario_api_evidence(
+            "Login API response",
+            "POST",
+            "/login",
+            200,
+            "body: token issued",
+            "login",
+            "submit"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.api)
+        expect(artifact.body).to_contain("POST /login")
+        expect(artifact.body).to_contain("status: 200")
+        expect(artifact.body).to_contain("body: token issued")
+
+    it "creates execution evidence with command and exit code":
+        val artifact = scenario_exec_evidence(
+            "Bootstrap command",
+            "simple test test/system/bootstrap_mcp_spec.spl",
+            0,
+            "stdout: all passed",
+            "bootstrap",
+            "run"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.exec)
+        expect(artifact.body).to_contain("$ simple test test/system/bootstrap_mcp_spec.spl")
+        expect(artifact.body).to_contain("exit: 0")
+
+    it "creates binary evidence with format and field summary":
+        val artifact = scenario_binary_evidence(
+            "ELF header",
+            "ELF64",
+            "e_machine: riscv64",
+            "loader",
+            "parse"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.binary)
+        expect(artifact.body).to_contain("format: ELF64")
+        expect(artifact.body).to_contain("e_machine: riscv64")
+
+    it "links checker assertion status to captured evidence":
+        val artifact = scenario_api_evidence(
+            "Tool response",
+            "POST",
+            "/mcp",
+            200,
+            "result: ok",
+            "mcp",
+            "call"
+        )
+        val evidence = scenario_checker_evidence("Then tool call succeeds", true, artifact)
+        expect(scenario_checker_manual_summary(evidence)).to_equal("Then tool call succeeds (passed) — Tool response (api, text/plain)")
