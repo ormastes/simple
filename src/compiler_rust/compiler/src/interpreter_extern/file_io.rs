@@ -9,10 +9,11 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 // Global lock handle counter and active locks
 static LOCK_HANDLES: Mutex<Option<LockState>> = Mutex::new(None);
+static SYMBOL_INTERNER: LazyLock<Mutex<SymbolInterner>> = LazyLock::new(|| Mutex::new(SymbolInterner::new()));
 
 struct LockState {
     next_id: i64,
@@ -25,6 +26,30 @@ impl LockState {
             next_id: 1,
             active: HashMap::new(),
         }
+    }
+}
+
+struct SymbolInterner {
+    next_id: i64,
+    ids: HashMap<String, i64>,
+}
+
+impl SymbolInterner {
+    fn new() -> Self {
+        SymbolInterner {
+            next_id: 1,
+            ids: HashMap::new(),
+        }
+    }
+
+    fn intern(&mut self, value: &str) -> i64 {
+        if let Some(id) = self.ids.get(value) {
+            return *id;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.ids.insert(value.to_string(), id);
+        id
     }
 }
 
@@ -465,6 +490,21 @@ pub fn rt_i32_array_alloc(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::array(vec![]));
     };
     Ok(Value::array(vec![Value::Int(0); len]))
+}
+
+/// Intern a text value and return a stable process-local numeric symbol id.
+pub fn rt_intern_symbol(args: &[Value]) -> Result<Value, CompileError> {
+    let value = match args.first() {
+        Some(Value::Str(value)) => value.as_str(),
+        _ => "",
+    };
+    let mut interner = SYMBOL_INTERNER.lock().map_err(|_| {
+        CompileError::semantic_with_context(
+            "rt_intern_symbol: interner lock poisoned".to_string(),
+            ErrorContext::new().with_code(codes::INVALID_OPERATION),
+        )
+    })?;
+    Ok(Value::Int(interner.intern(value)))
 }
 
 /// Allocate a `[u32]` of `len` elements all set to `fill` in O(len) C-side.

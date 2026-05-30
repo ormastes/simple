@@ -185,7 +185,7 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
 - **Filed-on:** 2026-04-27
 - **Filed-by:** scilib-port research agent
 - **Priority:** P1
-- **Status:** observed
+- **Status:** fixed 2026-05-30
 - **Expected-repro:**
   ```
   df.select(["revenue", "cost", "profit"])
@@ -201,12 +201,17 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
   extern that returns a stable `u64` id. Column names, schema keys, and
   groupby keys should use `Symbol`. A lighter alternative: a
   `SymbolTable` struct local to each DataFrame schema, avoiding global state.
-- **Notes:** The lighter alternative (local `Symbol` struct wrapping `text`) is
-  already implemented: `struct Symbol { text: text }` is defined in
-  `src/lib/nogc_sync_mut/df/mod.spl` and used pervasively for all column names,
-  `select`, `groupby`, `Series.name`, `RowEntry.key`, and `DataFrame.labels`
-  (2026-05-29). Equality is still O(len) text compare — the `rt_intern_symbol`
-  extern for O(1) pointer comparison is the remaining open work.
+- **Notes:** Fixed 2026-05-30. `rt_intern_symbol(text) -> i64` is registered in
+  the Rust seed interpreter extern table and backed by a process-local
+  `LazyLock<Mutex<SymbolInterner>>`. `Symbol.from(text)` now stores both the
+  original label and an intern id in the sync-mut and async-mut DataFrame
+  surfaces, with public `label()` and `intern_id()` accessors. DataFrame column
+  lookup, schema comparison, concat duplicate checks, merge join-key skipping,
+  and melt/pivot duplicate validation now compare `Symbol` values by intern id.
+  Verification:
+  `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/lib/nogc_sync_mut/df/mod.spl src/lib/nogc_sync_mut/df/df_transform.spl src/lib/nogc_async_mut/df/mod.spl src/lib/nogc_async_mut/df/df_transform.spl test/feature/scilib/df_symbol_intern_spec.spl`
+  and
+  `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/feature/scilib/df_symbol_intern_spec.spl --mode=interpreter --clean --fail-fast`.
 
 ---
 
