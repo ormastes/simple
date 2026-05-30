@@ -26,3 +26,4 @@ ship-done
 - impl: Added fs-exec prepared-task serial evidence after scheduler registration.
 - impl: Tightened toolchain VFS probe completion contract to require prepared-task markers.
 - verify: Focused check and smoke tests passed; real compiler payloads remain unbuilt.
+- ship: Refreshed tracker and real-OS audit references for the prepared-task evidence and corrected tracker path.
