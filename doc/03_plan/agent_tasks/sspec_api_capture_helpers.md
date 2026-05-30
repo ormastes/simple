@@ -16,6 +16,8 @@ owned by other agents and should not block this API slice.
   and JSON-field assertions.
 - Provide execution capture helpers for command, args, input trigger, stdout,
   stderr, exit code, and exit-code checker evidence.
+- Provide binary capture helpers for format, raw-byte summaries, decoded fields,
+  and field comments.
 - Provide redaction-aware API/protocol field summaries.
 - Provide structured `capture_api_protocol_fields(...)` for provider code that
   already has parsed request, header, and response fields.

@@ -157,8 +157,9 @@ documentation to hand-written-quality scenario manuals.
         stdout/stderr, and exit code.
   - [ ] Execution providers wire runtime command captures through the helper
         API.
-  - [ ] Binary providers capture raw bytes and optional decoded structure fields
+  - [x] Binary helper API captures raw bytes and optional decoded structure fields
         with field comments.
+  - [ ] Binary providers wire runtime binary captures through the helper API.
   - [ ] UI helpers support selected rectangle/highlight/inverted active menu
         capture for TUI and GUI.
 - **Partial-progress:** Added the pure foundational model in
@@ -174,7 +175,9 @@ documentation to hand-written-quality scenario manuals.
   field checks so `Then_*` functions can emit assertion status and manual
   evidence through the shared model. It also exposes execution capture helpers
   for command, exit, args, input trigger, stdout, and stderr summaries, and
-  exit-code checker evidence. It also exposes API/protocol capture
+  exit-code checker evidence. It exposes binary capture helpers for format,
+  raw-byte summaries, decoded fields, and field comments. It also exposes
+  API/protocol capture
   helpers that produce the rich shared evidence artifacts,
   including structured field-list summaries and common sensitive-field
   redaction for provider implementations. Structured protocol captures now
