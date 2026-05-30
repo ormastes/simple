@@ -90,7 +90,7 @@ pub(crate) use coverage_helpers::{
 
 // Node execution
 mod node_exec;
-pub(crate) use node_exec::exec_node;
+pub(crate) use node_exec::{exec_augmented_assignment, exec_node};
 
 // Block execution
 mod block_exec;

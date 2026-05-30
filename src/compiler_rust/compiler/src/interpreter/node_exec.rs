@@ -1329,7 +1329,7 @@ fn try_string_append_in_place(
 }
 
 // Helper function for augmented assignment
-fn exec_augmented_assignment(
+pub(crate) fn exec_augmented_assignment(
     assign: &simple_parser::ast::AssignmentStmt,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,

@@ -4,9 +4,9 @@ use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_w
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    evaluate_expr, exec_with, get_type_name, pattern_matches, BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT,
-    CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS,
-    TRAIT_IMPLS, TRAITS, USER_MACROS,
+    evaluate_expr, exec_augmented_assignment, exec_with, get_type_name, pattern_matches, BLOCK_SCOPED_ENUMS,
+    CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS,
+    MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS, TRAIT_IMPLS, TRAITS, USER_MACROS,
 };
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
@@ -203,6 +203,29 @@ pub(super) fn exec_block_closure(
                 last_value = Value::Nil;
             }
             Node::Assignment(assign_stmt) => {
+                if assign_stmt.op != simple_parser::ast::AssignOp::Assign {
+                    match exec_augmented_assignment(
+                        assign_stmt,
+                        &mut local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )? {
+                        crate::interpreter::Control::Next => {
+                            last_value = Value::Nil;
+                        }
+                        crate::interpreter::Control::Return(value) => return Ok(value),
+                        crate::interpreter::Control::Break(value, _) => {
+                            return Err(CompileError::LoopBreak(value));
+                        }
+                        crate::interpreter::Control::Continue(_) => {
+                            return Err(CompileError::LoopContinue);
+                        }
+                    }
+                    continue;
+                }
+
                 let val = evaluate_expr(
                     &assign_stmt.value,
                     &mut local_env,
@@ -955,6 +978,22 @@ fn exec_block_closure_mut(
                 last_value = Value::Nil;
             }
             Node::Assignment(assign_stmt) => {
+                if assign_stmt.op != simple_parser::ast::AssignOp::Assign {
+                    match exec_augmented_assignment(assign_stmt, local_env, functions, classes, enums, impl_methods)? {
+                        crate::interpreter::Control::Next => {
+                            last_value = Value::Nil;
+                        }
+                        crate::interpreter::Control::Return(value) => return Ok(value),
+                        crate::interpreter::Control::Break(value, _) => {
+                            return Err(CompileError::LoopBreak(value));
+                        }
+                        crate::interpreter::Control::Continue(_) => {
+                            return Err(CompileError::LoopContinue);
+                        }
+                    }
+                    continue;
+                }
+
                 // Handle method calls with self-update for assignment RHS
                 let (val, update) = handle_method_call_with_self_update(
                     &assign_stmt.value,
