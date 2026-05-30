@@ -10,10 +10,16 @@ SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 TIMEOUT_SECS="${WM_CAPTURE_EVIDENCE_TIMEOUT_SECS:-180}"
 KILL_SECS="${WM_CAPTURE_EVIDENCE_TIMEOUT_KILL_SECS:-10}"
 STRICT_LIVE_CAPTURE="${STRICT_LIVE_CAPTURE:-0}"
+STRICT_QEMU_CAPTURE="${STRICT_QEMU_CAPTURE:-0}"
+RUN_QEMU_LIVE_CAPTURE="${RUN_QEMU_LIVE_CAPTURE:-1}"
+QEMU_QMP_SOCKET="${QEMU_QMP_SOCKET:-}"
+QEMU_SCREENDUMP_PATH="${QEMU_SCREENDUMP_PATH:-$BUILD_DIR/qemu_screendump.ppm}"
 CONTRACT_SRC="$BUILD_DIR/wm_launch_capture_contract.spl"
 CONTRACT_LOG="$BUILD_DIR/contract.log"
 SPEC_LOG="$BUILD_DIR/spec.log"
 ELECTRON_LOG="$BUILD_DIR/electron-live.log"
+QEMU_LOG="$BUILD_DIR/qemu-live.log"
+QEMU_SRC="$BUILD_DIR/qemu_live_capture_contract.spl"
 
 have() {
     command -v "$1" >/dev/null 2>&1
@@ -33,10 +39,11 @@ field_of() {
 }
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$CONTRACT_LOG" "$SPEC_LOG" "$ELECTRON_LOG" "$REPORT_PATH"
+rm -f "$CONTRACT_LOG" "$SPEC_LOG" "$ELECTRON_LOG" "$QEMU_LOG" "$REPORT_PATH"
 
 echo "check=wm_launch_capture_evidence"
 echo "strict_live_capture=$STRICT_LIVE_CAPTURE"
+echo "strict_qemu_capture=$STRICT_QEMU_CAPTURE"
 
 if [ ! -x "$SIMPLE_BIN" ]; then
     echo "wm_launch_capture_evidence_status=fail"
@@ -204,6 +211,62 @@ else
     electron_live_reason=RUN_ELECTRON_LIVE_SMOKE=0
 fi
 
+qemu_live_status=unavailable
+qemu_live_reason=missing-qmp-socket
+qemu_live_pixels=0
+if [ "$RUN_QEMU_LIVE_CAPTURE" = "0" ]; then
+    qemu_live_status=skipped
+    qemu_live_reason=RUN_QEMU_LIVE_CAPTURE=0
+elif [ "$QEMU_QMP_SOCKET" = "" ]; then
+    qemu_live_status=unavailable
+    qemu_live_reason=missing-qmp-socket
+elif [ ! -S "$QEMU_QMP_SOCKET" ]; then
+    qemu_live_status=unavailable
+    qemu_live_reason=missing-qmp-socket-file
+else
+    case "$QEMU_QMP_SOCKET:$QEMU_SCREENDUMP_PATH" in
+        *\"*|*"
+"*)
+            qemu_live_status=fail
+            qemu_live_reason=unsupported-path-characters
+            ;;
+        *)
+            cat >"$QEMU_SRC" <<SIMPLE
+use os.compositor.qemu_capture.{capture_qemu_vm}
+
+fn main() -> i64:
+    val cap = capture_qemu_vm("$QEMU_QMP_SOCKET", "$QEMU_SCREENDUMP_PATH")
+    print("qemu_live_success=" + cap.success.to_text())
+    print("qemu_live_backend=" + cap.backend_name)
+    print("qemu_live_width=" + cap.width.to_text())
+    print("qemu_live_height=" + cap.height.to_text())
+    print("qemu_live_pixels=" + cap.pixels.len().to_text())
+    print("qemu_live_error=" + cap.error)
+    return 0
+SIMPLE
+            set +e
+            SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" run "$QEMU_SRC" --mode=interpreter --clean >"$QEMU_LOG" 2>&1
+            qemu_code=$?
+            set -e
+            cat "$QEMU_LOG"
+            qemu_success="$(sed -n 's/^qemu_live_success=//p' "$QEMU_LOG" | tail -n 1)"
+            qemu_backend="$(sed -n 's/^qemu_live_backend=//p' "$QEMU_LOG" | tail -n 1)"
+            qemu_live_pixels="$(sed -n 's/^qemu_live_pixels=//p' "$QEMU_LOG" | tail -n 1)"
+            qemu_error="$(sed -n 's/^qemu_live_error=//p' "$QEMU_LOG" | tail -n 1)"
+            if [ "$qemu_code" -eq 0 ] && [ "$qemu_success" = "true" ] && [ "$qemu_backend" = "qemu_vm" ] && [ "${qemu_live_pixels:-0}" -gt 0 ]; then
+                qemu_live_status=pass
+                qemu_live_reason=live-qmp-screendump-pass
+            else
+                qemu_live_status=fail
+                qemu_live_reason="${qemu_error:-qmp-screendump-failed}"
+                if [ "$qemu_live_reason" = "" ]; then
+                    qemu_live_reason=qmp-screendump-failed
+                fi
+            fi
+            ;;
+    esac
+fi
+
 status=pass
 reason=wm-launch-capture-contract-verified
 if [ "$contract_status" != "pass" ]; then
@@ -215,6 +278,9 @@ elif [ "$spec_status" != "pass" ]; then
 elif [ "$STRICT_LIVE_CAPTURE" = "1" ] && [ "$electron_live_status" != "pass" ]; then
     status=fail
     reason=electron-live-capture-unavailable
+elif [ "$STRICT_QEMU_CAPTURE" = "1" ] && [ "$qemu_live_status" != "pass" ]; then
+    status=fail
+    reason=qemu-live-capture-unavailable
 fi
 
 {
@@ -228,7 +294,11 @@ fi
     echo "- spec_reason: $spec_reason"
     echo "- electron_live_status: $electron_live_status"
     echo "- electron_live_reason: $electron_live_reason"
+    echo "- qemu_live_status: $qemu_live_status"
+    echo "- qemu_live_reason: $qemu_live_reason"
+    echo "- qemu_live_pixels: ${qemu_live_pixels:-0}"
     echo "- strict_live_capture: $STRICT_LIVE_CAPTURE"
+    echo "- strict_qemu_capture: $STRICT_QEMU_CAPTURE"
     echo "- host_wm_focused_window: $(field_of host_wm_focused_window)"
     echo "- simpleos_wm_drag_surface: $(field_of simpleos_wm_drag_surface)"
     echo "- qemu_inprocess_pixels: $(field_of qemu_inprocess_pixels)"
@@ -241,6 +311,9 @@ echo "wm_launch_capture_contract_status=$contract_status"
 echo "wm_launch_capture_spec_status=$spec_status"
 echo "wm_launch_capture_electron_live_status=$electron_live_status"
 echo "wm_launch_capture_electron_live_reason=$electron_live_reason"
+echo "wm_launch_capture_qemu_live_status=$qemu_live_status"
+echo "wm_launch_capture_qemu_live_reason=$qemu_live_reason"
+echo "wm_launch_capture_qemu_live_pixels=${qemu_live_pixels:-0}"
 echo "wm_launch_capture_report_path=$REPORT_PATH"
 
 if [ "$status" != "pass" ]; then
