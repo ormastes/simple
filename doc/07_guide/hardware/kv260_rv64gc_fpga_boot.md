@@ -217,6 +217,19 @@ The required physical verification should produce all of these artifacts:
 - A single nonzero-exit script for failures such as missing network bridge,
   deferred HTTP, sshd timeout, or QEMU-only evidence.
 
+Use the physical evidence gate once those artifacts exist:
+
+```bash
+sh scripts/fpga/check_kv260_simple_rv64_network.shs --artifacts build/kv260-network-physical
+```
+
+The artifact directory must contain `program.log`, `pl_uart.log`,
+`network.sdn`, `http_health.log`, `http_root.log`, and `ssh.log`. The gate
+requires `End of startup status: HIGH`, SimpleOS RV64 PL UART boot and
+`Network service ready` markers, a physical transport mapping, HTTP 200
+transcripts for `/health` and `/`, and SSH banner/login proof. It exits
+nonzero when only QEMU or RTL-sim evidence is available.
+
 ## 6. UART Console
 
 The carrier's merged USB exposes the Xilinx FT4232H JTAG/UART device. On the verified host the board appears as:

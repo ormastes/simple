@@ -8,7 +8,9 @@
 - **Filed-by:** Codex KV260 verification follow-up
 - **Target:** kv260-simple-rv64-network
 - **Priority:** P0
-- **Status:** Open
+- **Status:** Partial 2026-05-30 — added a physical evidence gate that
+  refuses QEMU-only proof and fails when required PL UART, network transport,
+  HTTP, or SSH artifacts are missing. Physical hardware capture remains open.
 - **Requested-semantics:**
   Add a real network-dependent verification lane for the KV260 Simple RV64
   FPGA target. The lane must distinguish physical FPGA proof from QEMU proof:
@@ -44,4 +46,6 @@
   show SimpleOS boot and HTTP bind/listen behavior when virtio networking is
   available, but that is not physical FPGA proof. Existing SSH evidence is not
   sufficient for RV64/KV260; the observed RV64 SSH parity artifact timed out
-  during banner exchange.
+  during banner exchange. As of 2026-05-30,
+  `scripts/fpga/check_kv260_simple_rv64_network.shs` defines the required
+  physical evidence bundle and exits nonzero for missing physical proof.
