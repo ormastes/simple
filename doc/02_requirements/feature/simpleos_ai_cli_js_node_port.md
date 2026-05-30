@@ -36,6 +36,12 @@ and provides QEMU marker expectations before a full Node/V8/libuv port lands.
 - REQ-010: Materialize deterministic SimpleOS staged smoke package contents for
   each AI CLI manifest, including manifest SDN, launcher source, runtime stub
   source, package index, marker payload, and fail-closed source hardening checks.
+- REQ-011: Replace generic pending package/runtime placeholders with concrete
+  staged smoke package identifiers and an exact blocker id when the full
+  Node.js/V8/libuv runtime artifact is unavailable.
+- REQ-012: Declare guest serial fragments for runtime start, CLI smoke start,
+  hardening denial, and runtime blocker reporting from the same manifest/lane
+  data consumed by package staging.
 
 ## Acceptance Mapping
 
@@ -44,5 +50,5 @@ and provides QEMU marker expectations before a full Node/V8/libuv port lands.
 - AC-3: REQ-001, REQ-002.
 - AC-4: REQ-001, REQ-003, REQ-010.
 - AC-5: REQ-005, REQ-010.
-- AC-6: REQ-001 through REQ-005, REQ-008, REQ-009, REQ-010.
+- AC-6: REQ-001 through REQ-005, REQ-008, REQ-009, REQ-010, REQ-011, REQ-012.
 - AC-7: REQ-007.

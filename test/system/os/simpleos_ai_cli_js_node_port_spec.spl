@@ -2,6 +2,9 @@ use std.spec.{describe, it, expect}
 use os.ai_cli_js_node_contract.{
     AiCliManifest,
     AI_CLI_RUNTIME_NODE_COMPATIBLE,
+    AI_CLI_RUNTIME_ARTIFACT_BLOCKER_ID,
+    AI_CLI_STAGED_SMOKE_PACKAGE_VERSION,
+    AI_CLI_STAGED_SMOKE_RUNTIME_ARTIFACT,
     ai_cli_allows_credential,
     ai_cli_allows_file,
     ai_cli_allows_network,
@@ -53,11 +56,11 @@ fn deny_all_manifest() -> AiCliManifest:
         network_grants: [],
         credential_grants: [],
         qemu_marker_fragments: ["[ai-cli] runtime:start app=deny-all"],
-        unsupported_features: ["full-node-v8-libuv-pending"],
+        unsupported_features: [AI_CLI_RUNTIME_ARTIFACT_BLOCKER_ID],
         package_id: "simpleos-ai-cli-deny-all",
-        package_version: "pending",
-        package_checksum: "pending",
-        runtime_artifact: "node-runtime-pending"
+        package_version: AI_CLI_STAGED_SMOKE_PACKAGE_VERSION,
+        package_checksum: "manifest-package-smoke:deny-all:20260530",
+        runtime_artifact: AI_CLI_STAGED_SMOKE_RUNTIME_ARTIFACT
     )
 
 describe "SimpleOS AI CLI JS/Node port manifest contract":
@@ -71,8 +74,12 @@ describe "SimpleOS AI CLI JS/Node port manifest contract":
             expect(claude.app_id).to_equal("claude")
             expect(gemini.app_id).to_equal("gemini")
             expect(codex.runtime_kind).to_equal(AI_CLI_RUNTIME_NODE_COMPATIBLE)
+            expect(codex.package_version).to_equal(AI_CLI_STAGED_SMOKE_PACKAGE_VERSION)
+            expect(codex.package_checksum).to_equal("manifest-package-smoke:codex:20260530")
+            expect(codex.runtime_artifact).to_equal(AI_CLI_STAGED_SMOKE_RUNTIME_ARTIFACT)
+            expect(codex.unsupported_features).to_contain(AI_CLI_RUNTIME_ARTIFACT_BLOCKER_ID)
             expect(ai_cli_manifest_is_valid(codex)).to_equal(true)
-            expect(ai_cli_capability_summary(codex)).to_contain("package=simpleos-ai-cli-codex@pending")
+            expect(ai_cli_capability_summary(codex)).to_contain("package=simpleos-ai-cli-codex@0.1.0-smoke.20260530")
             expect(ai_cli_capability_summary(claude)).to_contain("api.anthropic.com:443")
             expect(ai_cli_capability_summary(gemini)).to_contain("generativelanguage.googleapis.com:443")
 
@@ -92,9 +99,9 @@ describe "SimpleOS AI CLI JS/Node port manifest contract":
                 qemu_marker_fragments: [],
                 unsupported_features: [],
                 package_id: "pkg",
-                package_version: "pending",
-                package_checksum: "pending",
-                runtime_artifact: "node-runtime-pending"
+                package_version: AI_CLI_STAGED_SMOKE_PACKAGE_VERSION,
+                package_checksum: "manifest-package-smoke:bad:20260530",
+                runtime_artifact: AI_CLI_STAGED_SMOKE_RUNTIME_ARTIFACT
             )
             expect(ai_cli_manifest_validation_error(missing_entry)).to_equal("missing entry path")
 
@@ -112,9 +119,9 @@ describe "SimpleOS AI CLI JS/Node port manifest contract":
                 qemu_marker_fragments: [],
                 unsupported_features: [],
                 package_id: "pkg",
-                package_version: "pending",
-                package_checksum: "pending",
-                runtime_artifact: "node-runtime-pending"
+                package_version: AI_CLI_STAGED_SMOKE_PACKAGE_VERSION,
+                package_checksum: "manifest-package-smoke:bad:20260530",
+                runtime_artifact: AI_CLI_STAGED_SMOKE_RUNTIME_ARTIFACT
             )
             expect(ai_cli_manifest_validation_error(unsupported)).to_equal("unsupported runtime kind: host-node-shell")
 
@@ -173,7 +180,9 @@ describe "SimpleOS AI CLI JS/Node port manifest contract":
             val lane = ai_cli_qemu_lane(gemini_cli_smoke_manifest(), "arm")
             expect(lane.runtime_status).to_equal("blocked-runtime-artifact")
             expect(lane.blocker).to_contain("Node.js/V8/libuv")
+            expect(lane.blocker).to_contain(AI_CLI_RUNTIME_ARTIFACT_BLOCKER_ID)
             expect(lane.marker_fragments).to_contain("[ai-cli] runtime-status=blocked-runtime-artifact")
+            expect(lane.marker_fragments).to_contain("[ai-cli] blocker-report app=gemini id=blocked:no-full-node-v8-libuv-artifact-20260530")
 
     describe "AC-3 AC-4: guest provisioning plan":
         it "builds deterministic guest paths and disk manifest names for staged CLI packages":
@@ -199,6 +208,8 @@ describe "SimpleOS AI CLI JS/Node port manifest contract":
             expect(payload).to_contain("[ai-cli] provisioned app=claude target=riscv")
             expect(payload).to_contain("[ai-cli] runtime:start app=claude")
             expect(payload).to_contain("[ai-cli] runtime-status=blocked-runtime-artifact")
+            expect(payload).to_contain("[ai-cli] hardening:deny app=claude reason=undeclared-capability")
+            expect(payload).to_contain("[ai-cli] blocker-report app=claude id=blocked:no-full-node-v8-libuv-artifact-20260530")
             expect(ai_cli_provisioning_plan_summary(plan)).to_contain("disk-manifest=CLAUDE.APP")
 
         it "materializes staged SimpleOS runtime smoke package contents":
@@ -212,10 +223,15 @@ describe "SimpleOS AI CLI JS/Node port manifest contract":
             expect(package.blocker).to_equal("")
             expect(package.manifest_sdn).to_contain("app_id = \"codex\"")
             expect(package.manifest_sdn).to_contain("runtime_kind = \"node-compatible\"")
+            expect(package.manifest_sdn).to_contain("package_version = \"0.1.0-smoke.20260530\"")
+            expect(package.manifest_sdn).to_contain("runtime_artifact = \"simple-js-agent-smoke-stub@20260530\"")
             expect(package.launcher_source).to_contain("[ai-cli] runtime:start app=codex")
             expect(package.launcher_source).to_contain("[ai-cli] cli-smoke:start app=codex")
+            expect(package.launcher_source).to_contain("[ai-cli] hardening:deny app=codex reason=undeclared-capability")
             expect(package.runtime_stub_source).to_contain("simple-js-agent target=x86")
             expect(package.runtime_stub_source).to_contain("node-compat-surface=fs,process,stdio-tty,timers,net,tls,module-resolution,webassembly")
+            expect(package.runtime_stub_source).to_contain("runtime-artifact=simple-js-agent-smoke-stub@20260530")
+            expect(package.runtime_stub_source).to_contain("blocker-report app=codex id=blocked:no-full-node-v8-libuv-artifact-20260530")
             expect(package.package_index_sdn).to_contain("disk_manifest = \"CODEX.APP\"")
             expect(summary).to_contain("ready=true")
 

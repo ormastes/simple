@@ -108,3 +108,71 @@ Evidence:
   changes.
 - Agents should return changed files, focused commands run, and any blockers.
 - Integration happens only after the default worktree is clean.
+
+## Spawned Agent Integration - 2026-05-30
+
+### Slice A - SSpec Provider Wiring
+
+Agent: `019e7976-7c88-7fb3-a2b8-cbac7642088b`
+
+Status: completed and integrated.
+
+Result:
+- `test/integration/app/mcp_stdio_integration_spec.spl` now records MCP
+  `tools/list` execution and protocol provider evidence through
+  `capture_exec_detailed(...)` and `capture_api_protocol_fields(...)`.
+- `test/unit/app/tooling/spipe_docgen_scenario_body_spec.spl` covers
+  helper-backed protocol provider evidence in generated manual text.
+
+Evidence:
+- `bin/simple test test/unit/lib/common/spec/scenario_helpers_spec.spl --mode=interpreter --clean`
+  passed.
+- `bin/simple test test/unit/app/tooling/spipe_docgen_scenario_body_spec.spl --mode=interpreter --clean --format json`
+  reported `success: true`, `total_passed: 51`, `total_failed: 0`.
+- `SIMPLE_LIB=src bin/simple test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --clean --format json`
+  reported `success: true`, `total_passed: 5`, `total_failed: 0`.
+
+### Slice B - SimpleOS AI CLI Guest Runtime Lane
+
+Agent: `019e7976-9d80-7210-a6e9-e7252ae594e1`
+
+Status: completed and integrated.
+
+Result:
+- Generic pending runtime/package placeholders were replaced with concrete
+  staged smoke identifiers:
+  `0.1.0-smoke.20260530`,
+  `manifest-package-smoke:<app>:20260530`, and
+  `simple-js-agent-smoke-stub@20260530`.
+- The full Node.js/V8/libuv gap is now an exact blocker id:
+  `blocked:no-full-node-v8-libuv-artifact-20260530`.
+- Guest serial fragments now include runtime start, CLI smoke start, hardening
+  denial, and blocker reporting.
+
+Evidence:
+- `bin/simple test test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter`
+  passed `18/18`.
+
+Blocker:
+- A full Node.js/V8/libuv runtime artifact is still unavailable; this is now
+  recorded explicitly rather than hidden behind generic pending fields.
+
+### Slice C - Render/Compute Live Evidence
+
+Agent: `019e7976-c6be-7171-ae52-99ef8db5f62b`
+
+Status: completed and integrated.
+
+Result:
+- `src/os/compositor/qemu_capture.spl` now propagates QEMU screendump helper
+  exit code, stdout, and stderr into actionable `CaptureResult.error` text.
+- `test/unit/os/compositor/qemu_capture_spec.spl` covers empty QMP socket and
+  output path preflights.
+
+Evidence:
+- `bin/simple test test/unit/os/compositor/qemu_capture_spec.spl --mode=interpreter --clean`
+  passed `11/11`.
+- `bin/simple test test/unit/os/compositor/electron_capture_spec.spl --mode=interpreter`
+  passed `7/7`.
+- `RUN_QEMU_LIVE_CAPTURE=0 RUN_ELECTRON_LIVE_SMOKE=0 STRICT_LIVE_CAPTURE=0 STRICT_QEMU_CAPTURE=0 WM_CAPTURE_EVIDENCE_TIMEOUT_SECS=60 scripts/check-wm-launch-capture-evidence.shs`
+  reported `wm_launch_capture_evidence_status=pass`.

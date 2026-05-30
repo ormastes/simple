@@ -50,8 +50,14 @@ The same module now defines:
 
 Codex, Claude, and Gemini smoke manifests use non-authenticated help/version
 style commands and declare credential handles rather than ambient secret reads.
-They include package pin fields as `pending` so real bundle identifiers can be
-added without changing the contract.
+They include concrete staged smoke package pins:
+
+- `package_version = "0.1.0-smoke.20260530"`;
+- `package_checksum = "manifest-package-smoke:<app>:20260530"`;
+- `runtime_artifact = "simple-js-agent-smoke-stub@20260530"`.
+
+The full Node.js/V8/libuv artifact remains unavailable in this slice and is
+reported with blocker id `blocked:no-full-node-v8-libuv-artifact-20260530`.
 
 ## Bun-Informed Runtime Profile
 
@@ -92,6 +98,11 @@ Gemini execution yet. It creates deterministic package text for the manifest,
 launcher, runtime stub, package index, and QEMU marker payload so the next QEMU
 slice has exact files and markers to install and verify.
 
+The marker payload includes guest serial fragments for runtime start,
+CLI smoke start, hardening denial, hardening success, runtime status, and the
+exact full-runtime blocker report. This lets a future QEMU runner fail closed
+when any expected marker is missing.
+
 ## Error Handling
 
 The first slice avoids `Result` plumbing in callers by returning deterministic
@@ -114,4 +125,6 @@ validation text. Empty text means success; any non-empty text is a hard denial.
 - hardened browser script execution and denial coverage in
   `test/unit/browser_engine/script/browser_script_execute_spec.spl`;
 - SimpleOS AI CLI staged runtime smoke package content and hardening checks in
+  `test/system/os/simpleos_ai_cli_js_node_port_spec.spl`.
+- concrete staged package pins and the exact runtime blocker id in
   `test/system/os/simpleos_ai_cli_js_node_port_spec.spl`.

@@ -4,6 +4,7 @@
 
 use std.spec
 use app.io.mod.{shell}
+use std.common.spec.scenario_helpers.{capture_api_protocol_fields, capture_exec_detailed}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 
@@ -54,6 +55,29 @@ describe "MCP Protocol Runtime":
         val req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/list\",\"params\":{}}"
         val input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(req)
         val output = send_mcp(input)
+        val exec_evidence = capture_exec_detailed(
+            "MCP stdio tools/list execution",
+            "bin/simple_mcp_server",
+            "stdio JSON-RPC over stdin",
+            "initialize, initialized, tools/list",
+            "initialize result and tools/list result",
+            "stderr redirected during protocol smoke",
+            0
+        )
+        val protocol_evidence = capture_api_protocol_fields(
+            "MCP tools/list protocol exchange",
+            "JSON-RPC",
+            "stdio:tools/list",
+            ["jsonrpc", "method", "id"],
+            ["2.0", "tools/list", "2"],
+            ["transport"],
+            ["stdio"],
+            ["protocolVersion", "result.tools", "error"],
+            ["2025-06-18", "present", "absent"]
+        )
+        expect(exec_evidence.body.contains("input: initialize, initialized, tools/list")).to_equal(true)
+        expect(protocol_evidence.body.contains("params: jsonrpc=2.0; method=tools/list; id=2")).to_equal(true)
+        expect(protocol_evidence.body.contains("response fields: protocolVersion=2025-06-18; result.tools=present; error=absent")).to_equal(true)
         expect(output.contains("\"protocolVersion\":\"2025-06-18\"")).to_equal(true)
         expect(output.contains("\"result\":{\"tools\":[")).to_equal(true)
         expect(output.contains("\"name\":\"debug_create_session\"")).to_equal(true)

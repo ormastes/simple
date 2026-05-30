@@ -16,6 +16,11 @@ descriptions and existing SimpleOS capability/QEMU lanes:
   file/process/network/credential/terminal grants, and QEMU marker fragments.
 - Built-in constructors define deterministic Codex, Claude, and Gemini smoke
   manifests without live credentials.
+- Staged smoke package constructors now use concrete package/runtime identifiers
+  for the contract artifact:
+  `0.1.0-smoke.20260530`,
+  `manifest-package-smoke:<app>:20260530`, and
+  `simple-js-agent-smoke-stub@20260530`.
 - Summary and denial helpers provide a stable compatibility contract that later
   provisioning code can consume before a real Node runtime is bundled.
 
@@ -38,6 +43,9 @@ The module owns:
 - a generated-WASM/browser GUI contract with allowed imports, denied host
   escapes, required exports, and browser/QEMU evidence markers;
 - blocker text for the later full Node/V8/libuv implementation layer.
+- guest serial fragments for runtime start, CLI smoke start, hardening denial,
+  and blocker reporting with
+  `blocked:no-full-node-v8-libuv-artifact-20260530`.
 
 The module does not own:
 
@@ -64,6 +72,6 @@ package id/version/checksum, with invalidation on package artifact changes.
 
 ## Evidence Strategy
 
-Focused SPipe tests prove REQ-001..REQ-006, REQ-008, REQ-009, and NFR-001..NFR-005
+Focused SPipe tests prove REQ-001..REQ-006, REQ-008..REQ-012, and NFR-001..NFR-007
 through pure contract behavior. REQ-007 and AC-7 are proven by explicit blocker
 fields and docs until QEMU runtime provisioning exists.
