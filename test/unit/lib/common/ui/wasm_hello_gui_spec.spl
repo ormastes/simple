@@ -6,7 +6,7 @@ use common.ui.web_render_api.{
     WEB_RENDER_TARGET_SIMPLEOS_WM_WASM,
     WEB_RENDER_WASM_SCHEMA_VERSION
 }
-use common.ui.wasm_hello_gui.{wasm_hello_gui_artifact_for_target, wasm_hello_gui_artifacts, wasm_hello_gui_compile_plan_for_target, wasm_hello_gui_compile_plan_summary, wasm_hello_gui_compile_plans}
+use common.ui.wasm_hello_gui.{wasm_hello_gui_artifact_for_target, wasm_hello_gui_artifacts, wasm_hello_gui_compile_plan_for_target, wasm_hello_gui_compile_plan_summary, wasm_hello_gui_compile_plans, wasm_hello_gui_compile_request, wasm_hello_gui_compile_result_for_request, wasm_hello_gui_compile_result_summary}
 
 describe "generated-WASM hello GUI artifacts":
 
@@ -75,3 +75,46 @@ describe "generated-WASM hello GUI artifacts":
         expect(plans[3].target).to_equal(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM)
         expect(plans[3].output_path).to_equal("build/gui/simpleos-wm/hello.wasm")
         expect(plans[3].ready).to_equal(true)
+
+    it "fails closed when the WASM linker is missing":
+        val plan = wasm_hello_gui_compile_plan_for_target(WEB_RENDER_TARGET_ANDROID_WASM)
+        val request = wasm_hello_gui_compile_request(plan, "", "/opt/wasi", true)
+        val result = wasm_hello_gui_compile_result_for_request(request, false)
+
+        expect(result.status).to_equal("missing_wasm_linker")
+        expect(result.ready).to_equal(false)
+        expect(result.diagnostic).to_contain("wasm linker path")
+        expect(result.command_line).to_contain("--output build/gui/android/hello.wasm")
+
+    it "reports ready-to-invoke compile requests before artifact creation":
+        val plan = wasm_hello_gui_compile_plan_for_target(WEB_RENDER_TARGET_IOS_WASM)
+        val request = wasm_hello_gui_compile_request(plan, "/usr/bin/wasm-ld", "/opt/wasi", true)
+        val result = wasm_hello_gui_compile_result_for_request(request, false)
+        val summary = wasm_hello_gui_compile_result_summary(result)
+
+        expect(result.status).to_equal("ready_to_invoke")
+        expect(result.ready).to_equal(true)
+        expect(result.output_path).to_equal("build/gui/ios/hello.wasm")
+        expect(result.command_line).to_contain("simple build --target=wasm")
+        expect(result.command_line).to_contain("--linker /usr/bin/wasm-ld")
+        expect(summary).to_contain("status=ready_to_invoke")
+
+    it "reports compiled artifacts when the target WASM module exists":
+        val plan = wasm_hello_gui_compile_plan_for_target(WEB_RENDER_TARGET_HOST_WM_WASM)
+        val request = wasm_hello_gui_compile_request(plan, "/usr/bin/wasm-ld", "/opt/wasi", true)
+        val result = wasm_hello_gui_compile_result_for_request(request, true)
+
+        expect(result.status).to_equal("compiled_artifact_available")
+        expect(result.ready).to_equal(true)
+        expect(result.diagnostic).to_equal("")
+        expect(result.output_path).to_equal("build/gui/host-wm/hello.wasm")
+
+    it "fails closed when WASI sysroot or source entry is missing":
+        val plan = wasm_hello_gui_compile_plan_for_target(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM)
+        val no_sysroot = wasm_hello_gui_compile_result_for_request(wasm_hello_gui_compile_request(plan, "/usr/bin/wasm-ld", "", true), false)
+        val no_source = wasm_hello_gui_compile_result_for_request(wasm_hello_gui_compile_request(plan, "/usr/bin/wasm-ld", "/opt/wasi", false), false)
+
+        expect(no_sysroot.status).to_equal("missing_wasi_sysroot")
+        expect(no_sysroot.ready).to_equal(false)
+        expect(no_source.status).to_equal("missing_source_entry")
+        expect(no_source.diagnostic).to_contain("examples/ui/hello_wasm_gui.spl")

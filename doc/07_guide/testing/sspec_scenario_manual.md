@@ -89,6 +89,12 @@ If `# @prev` or `# @include` references a scenario that cannot be found,
 generated docs render a `Manual warnings` block and omit the metadata line from
 the rendered source block.
 
+If `# @prev` or `# @include` would create a direct scenario expansion cycle,
+generated docs render a `Manual warnings` block and keep the current scenario
+body usable instead of recursively expanding setup. Break the cycle by moving
+shared setup into one `# @inline` scenario and including it from the visible
+flows.
+
 ## Capture
 
 Capture is off by default. A bare `@capture` enables `after_step` capture with
@@ -141,6 +147,10 @@ Supported capture kinds:
 
 Capture can be configured at root, folder, file, scenario, function/checker, or
 single-step scope. Closest scope wins.
+
+Invalid capture metadata such as `# @capture(video)` renders a manual warning
+instead of silently falling back to a misleading default capture. Use only the
+supported modes and kinds above.
 
 ## Environmental Tests
 
@@ -230,6 +240,8 @@ manual: folded
 
 Valid values are `show`, `folded`, `detail`, and `skip`. Precedence is:
 scenario comment, file comment, nearest folder/root config, built-in default.
+Invalid manual visibility metadata renders a manual warning and leaves the
+scenario visible by default so the generated doc is still reviewable.
 
 ## Quality Loop
 

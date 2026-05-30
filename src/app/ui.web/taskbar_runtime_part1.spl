@@ -12,7 +12,7 @@ use app.ui.web.taskbar_runtime.*
 
 use common.ui.session.{UISession}
 use common.ui.window_surface_registry.{UiWindowSurfaceBinding, UI_SURFACE_KIND_SIMPLE_WEB, UI_SURFACE_KIND_ELECTRON, UI_SURFACE_KIND_HEADLESS, ui_surface_kind_is_native_host}
-use common.ui.taskbar_model.{AppRef, TrayItem, TaskbarLaunchError}
+use common.ui.taskbar_model.{TaskbarModel, AppRef, TrayItem, TaskbarLaunchError}
 use common.ui.builder.{column, label, button, build_tree_with_title, with_width, with_height, with_visible}
 use app.ui.web.taskbar_shell.{build_taskbar_model_with_minimized, taskbar_model_to_json_with_launch_errors}
 use app.ui.web.host_adapter_contract.{HostWindowCommand, host_window_command_to_json}
@@ -110,6 +110,7 @@ fn host_taskbar_runtime_enable(mode_name: text, electron_available: bool):
     rt.minimized_surface_ids = []
     rt.launch_errors = []
     rt.pending_commands = []
+    _save_host_taskbar_runtime(rt)
 
 fn host_taskbar_runtime_is_enabled() -> bool:
     val rt = _get_host_taskbar_runtime()
@@ -133,14 +134,18 @@ fn host_taskbar_runtime_adapter_capabilities() -> HostTaskbarAdapterCapabilities
 
 fn host_taskbar_runtime_taskbar_frame(session_id: text, session: UISession) -> text:
     val rt = _get_host_taskbar_runtime()
-    val model = build_taskbar_model_with_minimized(
+    val model = host_taskbar_runtime_taskbar_model(session)
+    val payload = taskbar_model_to_json_with_launch_errors(model, rt.launch_errors)
+    make_wire_frame("taskbar_model", session_id, "null", payload)
+
+fn host_taskbar_runtime_taskbar_model(session: UISession) -> TaskbarModel:
+    val rt = _get_host_taskbar_runtime()
+    build_taskbar_model_with_minimized(
         session.window_surfaces,
         rt.pinned,
         rt.tray,
         rt.minimized_surface_ids
     )
-    val payload = taskbar_model_to_json_with_launch_errors(model, rt.launch_errors)
-    make_wire_frame("taskbar_model", session_id, "null", payload)
 
 fn host_taskbar_runtime_take_client_frames(session_id: text) -> [text]:
     val rt = _get_host_taskbar_runtime()
@@ -149,6 +154,7 @@ fn host_taskbar_runtime_take_client_frames(session_id: text) -> [text]:
         val payload = host_window_command_to_json(cmd)
         frames = frames.push(make_wire_frame("host_window_command", session_id, "null", payload))
     rt.pending_commands = []
+    _save_host_taskbar_runtime(rt)
     frames
 
 fn host_taskbar_runtime_native_window_html(app_id: text) -> text?:
@@ -185,6 +191,7 @@ fn host_taskbar_runtime_launch(session: UISession, app_id: text) -> Result<Unit,
     if rt.adapter_capabilities.supports_headless_session:
         _clear_launch_errors(rt)
         session.bind_window_surface_with_kind(window_id, surface_id, process_id, app_id, title, UI_SURFACE_KIND_HEADLESS)
+        _save_host_taskbar_runtime(rt)
         return Ok(())
 
     val resolved_backend = _resolve_app_backend(app_id, rt.electron_available)
@@ -213,12 +220,14 @@ fn host_taskbar_runtime_launch(session: UISession, app_id: text) -> Result<Unit,
             width: width,
             height: height
         ))
+        _save_host_taskbar_runtime(rt)
         return Ok(())
 
     _clear_launch_errors(rt)
     val _ = session.open_surface(surface_id, _build_app_tree(surface_id, title, width, height, true))
     session.bind_window_surface_with_kind(window_id, surface_id, process_id, app_id, title, UI_SURFACE_KIND_SIMPLE_WEB)
     session.set_active_surface(surface_id)
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_focus(session: UISession, surface_id: text) -> Result<Unit, text>:
@@ -243,6 +252,7 @@ fn host_taskbar_runtime_focus(session: UISession, surface_id: text) -> Result<Un
     else:
         _set_surface_visible(session, surface_id, true)
         session.set_active_surface(surface_id)
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_sync_focus(session: UISession, surface_id: text) -> Result<Unit, text>:
@@ -252,6 +262,7 @@ fn host_taskbar_runtime_sync_focus(session: UISession, surface_id: text) -> Resu
         return Err("unknown surface")
     rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
     session.set_active_surface(surface_id)
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_minimize(session: UISession, surface_id: text) -> Result<Unit, text>:
@@ -276,6 +287,7 @@ fn host_taskbar_runtime_minimize(session: UISession, surface_id: text) -> Result
         ))
     else:
         _set_surface_visible(session, surface_id, false)
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_sync_minimize(session: UISession, surface_id: text) -> Result<Unit, text>:
@@ -285,6 +297,7 @@ fn host_taskbar_runtime_sync_minimize(session: UISession, surface_id: text) -> R
         return Err("unknown surface")
     if not _contains_text(rt.minimized_surface_ids, surface_id):
         rt.minimized_surface_ids = rt.minimized_surface_ids.push(surface_id)
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_restore(session: UISession, surface_id: text) -> Result<Unit, text>:
@@ -309,6 +322,7 @@ fn host_taskbar_runtime_restore(session: UISession, surface_id: text) -> Result<
     else:
         _set_surface_visible(session, surface_id, true)
         session.set_active_surface(surface_id)
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_sync_restore(session: UISession, surface_id: text) -> Result<Unit, text>:
@@ -318,6 +332,7 @@ fn host_taskbar_runtime_sync_restore(session: UISession, surface_id: text) -> Re
         return Err("unknown surface")
     rt.minimized_surface_ids = _remove_text(rt.minimized_surface_ids, surface_id)
     session.set_active_surface(surface_id)
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_close(session: UISession, surface_id: text) -> Result<Unit, text>:
@@ -340,12 +355,14 @@ fn host_taskbar_runtime_close(session: UISession, surface_id: text) -> Result<Un
             height: 0
         ))
         session.clear_window_surface_binding(surface_id)
+        _save_host_taskbar_runtime(rt)
         return Ok(())
     val handle = session.surface_handle(surface_id)
     if handle != nil:
         val _ = session.close_surface(handle)
     else:
         session.clear_window_surface_binding(surface_id)
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_sync_close(session: UISession, surface_id: text) -> Result<Unit, text>:
@@ -359,6 +376,7 @@ fn host_taskbar_runtime_sync_close(session: UISession, surface_id: text) -> Resu
         val _ = session.close_surface(handle)
     else:
         session.clear_window_surface_binding(surface_id)
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_move(session: UISession, surface_id: text, x: i32, y: i32) -> Result<Unit, text>:
@@ -380,6 +398,7 @@ fn host_taskbar_runtime_move(session: UISession, surface_id: text, x: i32, y: i3
         width: 0,
         height: 0
     ))
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_sync_move(session: UISession, surface_id: text, x: i32, y: i32) -> Result<Unit, text>:
@@ -412,6 +431,7 @@ fn host_taskbar_runtime_resize(session: UISession, surface_id: text, width: i32,
         width: width,
         height: height
     ))
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_sync_resize(session: UISession, surface_id: text, width: i32, height: i32) -> Result<Unit, text>:
@@ -445,6 +465,7 @@ fn host_taskbar_runtime_maximize(session: UISession, surface_id: text) -> Result
         width: 0,
         height: 0
     ))
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_sync_maximize(session: UISession, surface_id: text) -> Result<Unit, text>:
@@ -457,6 +478,7 @@ fn host_taskbar_runtime_sync_maximize(session: UISession, surface_id: text) -> R
     if tree != nil:
         val root_id = tree.root_node().id
         val _ = session.set_surface_widget_prop(surface_id, root_id, "maximized", "true")
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_unmaximize(session: UISession, surface_id: text) -> Result<Unit, text>:
@@ -478,6 +500,7 @@ fn host_taskbar_runtime_unmaximize(session: UISession, surface_id: text) -> Resu
         width: 0,
         height: 0
     ))
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_sync_unmaximize(session: UISession, surface_id: text) -> Result<Unit, text>:
@@ -510,6 +533,7 @@ fn host_taskbar_runtime_set_title(session: UISession, surface_id: text, title: t
         width: 0,
         height: 0
     ))
+    _save_host_taskbar_runtime(rt)
     return Ok(())
 
 fn host_taskbar_runtime_sync_set_title(session: UISession, surface_id: text, title: text) -> Result<Unit, text>:
@@ -523,6 +547,9 @@ fn _get_host_taskbar_runtime() -> HostTaskbarRuntime:
     if not _host_taskbar_runtime.?:
         _host_taskbar_runtime = Some(HostTaskbarRuntime.new())
     _host_taskbar_runtime.unwrap()
+
+fn _save_host_taskbar_runtime(rt: HostTaskbarRuntime):
+    _host_taskbar_runtime = Some(rt)
 
 fn _default_pinned() -> [AppRef]:
     val persisted = _load_persisted_pinned()
@@ -608,6 +635,7 @@ fn _adapter_capabilities_for(mode: HostShellMode, electron_available: bool) -> H
 
 fn _record_launch_error(rt: HostTaskbarRuntime, app_id: text, message: text) -> Result<Unit, text>:
     rt.launch_errors = [TaskbarLaunchError(app_id: app_id, message: message)]
+    _save_host_taskbar_runtime(rt)
     Err(message)
 
 fn _clear_launch_errors(rt: HostTaskbarRuntime):

@@ -198,7 +198,8 @@ Create a shared SSpec support library rather than scattering helper functions:
      tests.
    - Starter progress: `doc/07_guide/testing/sspec_scenario_manual.md`
      documents inline/previous/include metadata, capture kinds, environmental
-     evidence, MCP manual shape, and visibility policy for generated manuals.
+     evidence, MCP manual shape, visibility policy, and implemented manual
+     warning diagnostics for generated manuals.
    - Update `test/README.md`, testing guide, SPipe skills, and verification
      skills to require manual-quality generated docs.
 2. **Docgen metadata parser**
@@ -233,7 +234,12 @@ Create a shared SSpec support library rather than scattering helper functions:
      usable instead of silently stripping recursive metadata.
 4. **Manual renderer**
    - Render manual steps first.
-   - Fold executable code by default.
+   - Starter progress: executable SPipe source now renders inside a folded
+     `Executable SPipe` details block by default when a scenario has runnable
+     body content.
+   - Starter progress: fixed blank executable source after expanded `# @prev`
+     and `# @include` bodies by avoiding interpreter array iteration paths that
+     blanked copied text during expansion and dedent.
    - Render advanced/edge/detail scenarios according to visibility policy.
 5. **Typed evidence model**
    - Starter progress: added pure shared evidence/capture model in
@@ -273,9 +279,13 @@ Create a shared SSpec support library rather than scattering helper functions:
 
 Current verification note: syntax checks pass. The scenario evidence unit test
 passes 9/9, and `test/unit/app/tooling/spipe_docgen_scenario_body_spec.spl`
-passes 24/24 after replacing unsupported negative matchers with built-in
-assertions and fixing the `spipe-docgen` runtime path issues found during the
-manual-generation check.
+passes 29/29 after replacing unsupported negative matchers with built-in
+assertions, fixing the `spipe-docgen` runtime path issues found during the
+manual-generation check, adding metadata warning/cycle diagnostic coverage, and
+fixing blank folded executable output for expanded scenarios. The direct spec
+run still exits nonzero after reporting 29 examples / 0 failures because of the
+existing repo-level `compiler_driver_create` semantic finalization issue also
+noted in `doc/03_plan/port_rust_c_to_pure_simple.md`.
 
 ## First Exemplar: MCP
 

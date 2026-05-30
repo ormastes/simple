@@ -9,6 +9,9 @@
 
 use common.ui.widget.{WidgetNode, UITree, UIState, UIEvent}
 use common.ui.session.{UISession, new_session}
+use common.ui.taskbar_model.{TaskbarModel, AppRef, WindowRef, TrayItem}
+use common.ui.window_scene.{SharedWmScene, SharedWmWindow}
+use common.ui.wm_runtime_dispatch.{WmRuntimeDispatchCommand, WmRuntimeShellState, wm_runtime_shell_state_empty}
 use common.ui.builder.{
     column, row, panel, text_widget, button, label, statusbar,
     build_tree, build_tree_with_title, with_height, with_width, with_flex
@@ -37,6 +40,7 @@ use os.desktop.shell_process.{
     _selected_process_row, _normalized_process_selection, _process_is_live
 }
 use os.desktop.shell_baremetal.{_draw_baremetal_overlay, baremetal_engine2d_overlay_backend}
+use os.desktop.wm_runtime_bridge.{simpleos_wm_pointer_runtime_command, simpleos_wm_apply_pointer}
 use os.desktop.shell_types.{
     EditorResidentLaunch, _build_editor_resident_launch,
     _fallback_app_id_for_name,
@@ -177,6 +181,8 @@ class DesktopShell:
     launcher_initialized: bool
     selected_process_idx: i64
     task_reaper_enabled: bool
+    wm_runtime_state: WmRuntimeShellState
+    last_wm_loop_marker: text
 
 impl DesktopShell:
 
@@ -211,7 +217,9 @@ impl DesktopShell:
             baremetal_apps: [],
             launcher_initialized: false,
             selected_process_idx: 0,
-            task_reaper_enabled: true
+            task_reaper_enabled: true,
+            wm_runtime_state: wm_runtime_shell_state_empty(),
+            last_wm_loop_marker: ""
         )
 
     me set_task_reaper_enabled(enabled: bool):
@@ -586,6 +594,7 @@ impl DesktopShell:
         while self.compositor.running:
             self.drain_wm_actions()
             self.compositor.handle_input()
+            self.handle_pending_wm_pointer_step()
             self.handle_pending_shell_input(false)
             self.reconcile_dead_process_windows()
             self.compositor.render_all()
@@ -625,6 +634,7 @@ impl DesktopShell:
         while self.compositor.running:
             self.drain_wm_actions()
             self.compositor.handle_input()
+            self.handle_pending_wm_pointer_step()
             self.handle_pending_shell_input(true)
             self.reconcile_dead_process_windows()
             val visible_apps = _window_overlay_rows()
@@ -644,6 +654,92 @@ impl DesktopShell:
                 self.clock_text
             )
             overlay_backend.present()
+
+    fn runtime_scene_snapshot() -> SharedWmScene:
+        var windows: [SharedWmWindow] = []
+        var z = 0
+        for surface in self.compositor.surfaces:
+            val process_id = if surface.process_id > 0:
+                surface.process_id.to_u64()
+            else:
+                0u64
+            windows = windows.push(SharedWmWindow(
+                surface_id: "{surface.id}",
+                window_id: "{surface.id}",
+                surface_kind: "simpleos-compositor",
+                process_id: process_id,
+                app_id: surface.app_id,
+                title: surface.title,
+                x: surface.x,
+                y: surface.y,
+                width: surface.width,
+                height: surface.height,
+                tree: nil,
+                html: "",
+                minimized: not surface.visible,
+                focused: z == self.compositor.focused_idx,
+                z_index: z
+            ))
+            z = z + 1
+        SharedWmScene(width: self.compositor.screen_width, height: self.compositor.screen_height, backend: "simpleos-compositor", windows: windows)
+
+    fn runtime_taskbar_model() -> TaskbarModel:
+        var pinned: [AppRef] = []
+        for shortcut in self.shortcuts:
+            if shortcut.action.starts_with("launch_"):
+                val app_name = shortcut.action.slice(7, shortcut.action.len())
+                pinned = pinned.push(AppRef(app_id: app_name, display_name: app_name, icon: "app"))
+        var running: [WindowRef] = []
+        for surface in self.compositor.surfaces:
+            running = running.push(WindowRef(
+                window_id: "{surface.id}",
+                app_id: surface.app_id,
+                title: surface.title,
+                minimized: not surface.visible
+            ))
+        TaskbarModel(
+            pinned: pinned,
+            running: running,
+            tray: [TrayItem(item_id: "clock", label: self.clock_text, icon: "clock")]
+        )
+
+    me apply_wm_runtime_command_to_live_shell(command: WmRuntimeDispatchCommand):
+        if command.kind == "launcher_launch":
+            self.launch_app(command.app_id)
+            return
+        if command.kind == "window_focus":
+            val window_id = command.window_id.to_i64()
+            if window_id > 0:
+                self.compositor.focus_window(window_id.to_i32())
+            return
+        if command.kind == "window_drag_begin":
+            val window_id = command.window_id.to_i64()
+            if window_id > 0:
+                self.compositor.focus_window(window_id.to_i32())
+                self.compositor.dragging = true
+                self.compositor.drag_window_id = window_id.to_i32()
+            return
+        if command.kind == "desktop_background":
+            self.compositor.focused_idx = -1
+
+    me handle_wm_pointer_event_loop_step(x: i32, y: i32, button: text, kind: text) -> text:
+        val scene = self.runtime_scene_snapshot()
+        val taskbar = self.runtime_taskbar_model()
+        val command = simpleos_wm_pointer_runtime_command(scene, taskbar, x, y, button, kind, 1000, self.clock_text, 2)
+        self.wm_runtime_state = simpleos_wm_apply_pointer(self.wm_runtime_state, scene, taskbar, x, y, button, kind, 1000, self.clock_text, 2)
+        self.apply_wm_runtime_command_to_live_shell(command)
+        self.last_wm_loop_marker = "[simpleos-wm] loop-step command={command.kind} target={command.target_id} app={command.app_id} window={command.window_id} handled={command.handled}"
+        self.last_wm_loop_marker
+
+    me handle_pending_wm_pointer_step():
+        if not self.compositor.has_pending_wm_pointer_step():
+            return
+        val x = self.compositor.pending_wm_pointer_x_value()
+        val y = self.compositor.pending_wm_pointer_y_value()
+        val button = self.compositor.pending_wm_pointer_button_value()
+        val kind = self.compositor.pending_wm_pointer_kind_value()
+        self.compositor.clear_pending_wm_pointer_step()
+        self.handle_wm_pointer_event_loop_step(x, y, button, kind)
 
     me drain_wm_actions():
         """Drain pending WM IPC requests into the compositor-owned shell state."""

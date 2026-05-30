@@ -26,8 +26,8 @@ documentation to hand-written-quality scenario manuals.
         site.
   - [x] Folder/root manual visibility config sets defaults below file scope.
   - [x] Missing inline targets produce clear generated-doc diagnostics.
-  - [ ] Scenario cycles produce clear diagnostics.
-  - [ ] Executable SPipe source is folded by default.
+  - [x] Scenario cycles produce clear diagnostics.
+  - [x] Executable SPipe source is folded by default.
 - **Partial-progress:** `spipe-docgen` now supports scenario-level comment
   metadata for manual visibility: `# @manual: folded`, `# @manual: detail`,
   `# @manual: skip`, `# @manual: show`, and `# @inline`. It supports
@@ -36,8 +36,10 @@ documentation to hand-written-quality scenario manuals.
   rendered scenario body. Generator path-aware rendering now resolves nearest
   `.sspec-manual` or `sspec-manual.sdn` with `manual:
   folded|skip|detail|show`. Missing `# @prev`/`# @include` targets render a
-  `Manual warnings` block. Full annotation syntax and cycle diagnostics remain
-  open.
+  `Manual warnings` block. Direct `# @prev` and `# @include` cycles render
+  clear manual warnings and keep the current scenario body usable. Runnable
+  scenario source now renders inside a folded `Executable SPipe` details block.
+  Full annotation syntax and richer manual step rendering remain open.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none

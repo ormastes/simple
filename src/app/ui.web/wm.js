@@ -331,6 +331,22 @@ class SimpleWindowManager {
     });
   }
 
+  _sendHostWmPointer(e, kind = 'down') {
+    const r = this.desktop ? this.desktop.getBoundingClientRect() : { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+    const button = e.button === 2 ? 'right' : (e.button === 1 ? 'middle' : 'left');
+    this._send({
+      t: 'host_wm_pointer', v: PROTOCOL_VERSION, s: this.sessionId, seq: null,
+      payload: {
+        x: Math.round(e.clientX - r.left),
+        y: Math.round(e.clientY - r.top),
+        width: Math.round(r.width || window.innerWidth || 1280),
+        height: Math.round(r.height || window.innerHeight || 720),
+        button,
+        kind
+      }
+    });
+  }
+
   _sendLaunch(appId) {
     this._sendWindowCmd('launch', { app_id: appId });
   }
@@ -346,16 +362,13 @@ class SimpleWindowManager {
       if (!el || !this.taskbar.contains(el)) return;
       const action = el.dataset.action;
       if (action === 'launch' && el.dataset.appId) {
-        this._sendLaunch(el.dataset.appId);
+        this._sendHostWmPointer(ev, 'down');
       } else if (action === 'focus' && el.dataset.windowIdHint) {
         const isElectronWindow = this.transport === 'electron-ipc' && this._electronWindows.has(el.dataset.windowIdHint);
         if (this.transport === 'electron-ipc' && this._electronWindows.has(el.dataset.windowIdHint)) {
           this._electronFocusWindow(el.dataset.windowIdHint);
         }
-        this._sendWindowCmd('focus', {
-          window_id_hint: el.dataset.windowIdHint,
-          ...(isElectronWindow ? { source: HOST_NATIVE_EVENT_SOURCE } : {})
-        });
+        this._sendHostWmPointer(ev, 'down');
       }
     });
   }
@@ -993,6 +1006,8 @@ class SimpleWindowManager {
     document.addEventListener('mouseup',   (e) => this._onMouseup(e));
 
     document.addEventListener('mousedown', (e) => {
+      if (this.taskbar && this.taskbar.contains(e.target)) return;
+      this._sendHostWmPointer(e, 'down');
       const titlebar = e.target.closest('.wm-titlebar');
       if (titlebar) {
         const winEl = titlebar.closest('.wm-window');

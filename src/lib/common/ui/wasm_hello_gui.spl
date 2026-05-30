@@ -33,6 +33,21 @@ struct WasmHelloGuiCompilePlan:
     ready: bool
     blocker: text
 
+struct WasmHelloGuiCompileRequest:
+    plan: WasmHelloGuiCompilePlan
+    wasm_linker_path: text
+    wasi_sysroot: text
+    source_available: bool
+    command_line: text
+
+struct WasmHelloGuiCompileResult:
+    target: text
+    output_path: text
+    status: text
+    ready: bool
+    diagnostic: text
+    command_line: text
+
 fn _wasm_hello_target_name(target: text) -> text:
     if target == WEB_RENDER_TARGET_ANDROID_WASM:
         return "android"
@@ -101,6 +116,78 @@ fn wasm_hello_gui_compile_plan_for_target(target: text) -> WasmHelloGuiCompilePl
 
 fn wasm_hello_gui_compile_plan_summary(plan: WasmHelloGuiCompilePlan) -> text:
     "target={plan.target};entry={plan.source_entry};triple={plan.target_triple};linker={plan.linker};output={plan.output_path};abi={plan.abi};ready={plan.ready};blocker={plan.blocker}"
+
+fn wasm_hello_gui_compile_request(plan: WasmHelloGuiCompilePlan, wasm_linker_path: text, wasi_sysroot: text, source_available: bool) -> WasmHelloGuiCompileRequest:
+    val linker = if wasm_linker_path == "":
+        plan.linker
+    else:
+        wasm_linker_path
+    val command_line = "simple build --target=wasm --entry " + plan.source_entry + " --triple " + plan.target_triple + " --linker " + linker + " --sysroot " + wasi_sysroot + " --output " + plan.output_path
+    WasmHelloGuiCompileRequest(
+        plan: plan,
+        wasm_linker_path: wasm_linker_path,
+        wasi_sysroot: wasi_sysroot,
+        source_available: source_available,
+        command_line: command_line
+    )
+
+fn wasm_hello_gui_compile_result_for_request(request: WasmHelloGuiCompileRequest, artifact_exists: bool) -> WasmHelloGuiCompileResult:
+    if !request.plan.ready:
+        return WasmHelloGuiCompileResult(
+            target: request.plan.target,
+            output_path: request.plan.output_path,
+            status: "compile_plan_blocked",
+            ready: false,
+            diagnostic: request.plan.blocker,
+            command_line: request.command_line
+        )
+    if request.wasm_linker_path == "":
+        return WasmHelloGuiCompileResult(
+            target: request.plan.target,
+            output_path: request.plan.output_path,
+            status: "missing_wasm_linker",
+            ready: false,
+            diagnostic: "wasm linker path is required before invoking " + request.plan.linker,
+            command_line: request.command_line
+        )
+    if request.wasi_sysroot == "":
+        return WasmHelloGuiCompileResult(
+            target: request.plan.target,
+            output_path: request.plan.output_path,
+            status: "missing_wasi_sysroot",
+            ready: false,
+            diagnostic: "WASI sysroot is required for no-JavaScript GUI WASM linking",
+            command_line: request.command_line
+        )
+    if !request.source_available:
+        return WasmHelloGuiCompileResult(
+            target: request.plan.target,
+            output_path: request.plan.output_path,
+            status: "missing_source_entry",
+            ready: false,
+            diagnostic: "source entry is not available: " + request.plan.source_entry,
+            command_line: request.command_line
+        )
+    if artifact_exists:
+        return WasmHelloGuiCompileResult(
+            target: request.plan.target,
+            output_path: request.plan.output_path,
+            status: "compiled_artifact_available",
+            ready: true,
+            diagnostic: "",
+            command_line: request.command_line
+        )
+    WasmHelloGuiCompileResult(
+        target: request.plan.target,
+        output_path: request.plan.output_path,
+        status: "ready_to_invoke",
+        ready: true,
+        diagnostic: "",
+        command_line: request.command_line
+    )
+
+fn wasm_hello_gui_compile_result_summary(result: WasmHelloGuiCompileResult) -> text:
+    "target={result.target};output={result.output_path};status={result.status};ready={result.ready};diagnostic={result.diagnostic};command={result.command_line}"
 
 fn wasm_hello_gui_compile_plans() -> [WasmHelloGuiCompilePlan]:
     [

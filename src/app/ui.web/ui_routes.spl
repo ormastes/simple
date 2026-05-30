@@ -120,6 +120,8 @@ fn _handle_ws_route(stream: ConnStream, path: text, headers: text, session: UISe
                 adapter.on_ack(seq)
             "input_event":
                 _handle_input_event(frame, session, session_id, out_channel)
+            "host_wm_pointer":
+                _handle_host_wm_pointer(frame, session, session_id, out_channel)
             "window_cmd":
                 _handle_window_cmd(frame, session, session_id, out_channel)
             "ping":
@@ -177,6 +179,32 @@ fn _handle_window_cmd(frame: text, session: UISession, session_id: text, out_ch:
         Err(_):
             _send_error(out_ch, session_id, "CAP_DENIED", "window command capability denied")
         Ok(_):
+            if host_taskbar_runtime_is_enabled():
+                for client_frame in host_taskbar_runtime_take_client_frames(session_id):
+                    out_ch.send(client_frame)
+
+fn _handle_host_wm_pointer(frame: text, session: UISession, session_id: text, out_ch: BoundedChannel<text>):
+    val payload = _extract_object(frame, "payload")
+    val x = _json_field(payload, "x")
+    val y = _json_field(payload, "y")
+    val width = _json_field(payload, "width")
+    val height = _json_field(payload, "height")
+    val button = _json_field(payload, "button")
+    val kind = _json_field(payload, "kind")
+    val bridge = WmBridge.new(session)
+    val result = bridge.handle_host_wm_pointer_loop_step(
+        if x == "": 0 else: x.parse_i32(),
+        if y == "": 0 else: y.parse_i32(),
+        if button == "": "left" else: button,
+        if kind == "": "down" else: kind,
+        if width == "": 1280 else: width.parse_i32(),
+        if height == "": 720 else: height.parse_i32()
+    )
+    match result:
+        Err(_):
+            _send_error(out_ch, session_id, "CAP_DENIED", "host WM pointer command denied")
+        Ok(marker):
+            out_ch.send(make_wire_frame("host_wm_loop_step", session_id, "null", "{\"marker\":\"{marker}\"}"))
             if host_taskbar_runtime_is_enabled():
                 for client_frame in host_taskbar_runtime_take_client_frames(session_id):
                     out_ch.send(client_frame)

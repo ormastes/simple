@@ -11,7 +11,16 @@ pub fn compile_to_wasm(source: &Path, output: &Path, optimize: bool) -> Result<u
 
     // Compile to WASM using existing compiler infrastructure
     let target = Target::new_wasm(TargetArch::Wasm32, WasmRuntime::Browser);
+    compile_to_wasm_for_target(source, output, optimize, target)
+}
 
+/// Compile a Simple source file to WASM bytes for a specific WASM target.
+pub fn compile_to_wasm_for_target(
+    source: &Path,
+    output: &Path,
+    optimize: bool,
+    target: simple_common::target::Target,
+) -> Result<usize, String> {
     let wasm_bytes = compile_file_to_wasm(source, target)?;
 
     fs::write(output, &wasm_bytes).map_err(|e| format!("Failed to write WASM: {}", e))?;

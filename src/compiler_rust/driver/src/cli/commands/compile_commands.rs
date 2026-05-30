@@ -1,7 +1,7 @@
 //! Compilation command handlers
 
 use std::path::PathBuf;
-use simple_common::target::{NativeCodegenBackend, Target, TargetCpu};
+use simple_common::target::{NativeCodegenBackend, Target, TargetArch, TargetCpu};
 use simple_compiler::linker::NativeLinker;
 use simple_compiler::ProjectContext;
 use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizationLevel};
@@ -10,6 +10,7 @@ use crate::cli::compile::{
     compile_dynamic_driver_library, compile_file, compile_file_native, compile_file_to_ptx, compile_file_to_vhdl,
     list_linkers, list_targets, NativeStripMode,
 };
+use crate::cli::wasm_helpers::compile_to_wasm_for_target;
 use crate::CompileOptions;
 
 /// Handle 'compile' command - compile source to SMF or native binary
@@ -92,6 +93,21 @@ pub fn handle_compile(args: &[String]) -> i32 {
             return 1;
         }
     };
+
+    if should_compile_as_wasm(backend.as_deref(), target.as_ref()) {
+        let wasm_target = target.unwrap_or_else(default_browser_wasm_target);
+        let out_path = output.unwrap_or_else(|| source.with_extension("wasm"));
+        return match compile_to_wasm_for_target(&source, &out_path, false, wasm_target) {
+            Ok(_) => {
+                println!("Compiled {} -> {}", source.display(), out_path.display());
+                0
+            }
+            Err(err) => {
+                eprintln!("error: WASM compilation failed: {}", err);
+                1
+            }
+        };
+    }
 
     // Print linker info if specified
     if let Some(l) = linker {
@@ -358,6 +374,15 @@ fn parse_native_backend_name(value: &str) -> Result<NativeCodegenBackend, String
     }
 }
 
+fn default_browser_wasm_target() -> Target {
+    Target::new_wasm(TargetArch::Wasm32, simple_common::target::WasmRuntime::Browser)
+}
+
+fn should_compile_as_wasm(backend: Option<&str>, target: Option<&Target>) -> bool {
+    matches!(backend, Some("wasm" | "wasm32"))
+        || target.map(|target| target.arch.is_wasm()).unwrap_or(false)
+}
+
 fn load_project_native_policy(source: &std::path::Path) -> Result<NativePolicyConfig, String> {
     let project = ProjectContext::detect(source).map_err(|e| format!("failed to detect project config: {}", e))?;
     let manifest = project.root.join("simple.toml");
@@ -444,7 +469,7 @@ fn print_compile_help(show_error: bool) {
     eprintln!("  --native            Compile to standalone native binary (ELF/PE)");
     eprintln!("  --list-optimizations  Print implemented optimization groups and levels");
     eprintln!("  --driver-mode=dynamic  Package the compiled driver SMF as a loadable .lsm archive");
-    eprintln!("  --backend=<name>    Native backend: llvm|cranelift; or cuda/ptx, vhdl for source emitters");
+    eprintln!("  --backend=<name>    Native backend: llvm|cranelift; or cuda/ptx, vhdl, wasm for source/artifact emitters");
     eprintln!("  --target <target>   Target triple or arch (x86_64, aarch64, wasm32-wasi, etc.)");
     eprintln!("  --target=<target>   Same as above");
     eprintln!("  --cpu <policy>      Native CPU policy: default, native, x86-64-v1..v4, or backend CPU string");
@@ -662,6 +687,20 @@ backend = "llvm"
     fn test_parse_native_backend_name_rejects_unknown() {
         let err = parse_native_backend_name("wat").unwrap_err();
         assert!(err.contains("unsupported native backend"));
+    }
+
+    #[test]
+    fn test_backend_wasm_routes_to_wasm_artifact_emitter() {
+        assert!(should_compile_as_wasm(Some("wasm"), None));
+        assert!(should_compile_as_wasm(Some("wasm32"), None));
+        assert!(!should_compile_as_wasm(Some("vhdl"), None));
+    }
+
+    #[test]
+    fn test_wasm_target_routes_to_wasm_artifact_emitter() {
+        let target = Target::parse("wasm32-wasi").unwrap();
+        assert!(should_compile_as_wasm(None, Some(&target)));
+        assert!(default_browser_wasm_target().arch.is_wasm());
     }
 
     #[test]

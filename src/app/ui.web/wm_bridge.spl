@@ -10,14 +10,19 @@ use common.ui.widget.{UITree, UIEvent}
 use common.ui.capability.{Capability}
 use common.ui.capability_policy.{require_for_window}
 use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_SIMPLE_WEB, ui_surface_kind_is_native_host}
+use common.ui.window.{WindowManager}
+use common.ui.window_scene.{SharedWmScene, shared_wm_scene_from_window_manager}
+use common.ui.wm_runtime_dispatch.{WmRuntimeDispatchCommand, WmRuntimeShellState, wm_runtime_shell_state_empty}
 use common.ui.access.{ui_access_canonical_id, ui_access_resolve_action_name}
 use common.ui.builder.{column, label, button, build_tree_with_title, with_width, with_height}
 use app.ui.web.origin_guard.{AuthError}
 use common.window_protocol.window_protocol.{WmInputEvent, WmCreateRequest, WmCloseRequest, WmResizeRequest, WmMoveRequest}
 use common.window_protocol.geometry.{WindowId, Point, Size}
 use app.ui.web.host_adapter_contract.{HOST_NATIVE_EVENT_SOURCE}
+use app.ui.web.wm_runtime_bridge.{host_wm_pointer_runtime_command, host_wm_apply_pointer}
 use app.ui.web.taskbar_runtime.{
     host_taskbar_runtime_is_enabled,
+    host_taskbar_runtime_taskbar_model,
     host_taskbar_runtime_launch,
     host_taskbar_runtime_focus,
     host_taskbar_runtime_sync_focus,
@@ -45,9 +50,11 @@ use app.ui.web.taskbar_runtime.{
 
 class WmBridge:
     session: UISession
+    runtime_state: WmRuntimeShellState
+    last_loop_marker: text
 
     static fn new(session: UISession) -> WmBridge:
-        return WmBridge(session: session)
+        return WmBridge(session: session, runtime_state: wm_runtime_shell_state_empty(), last_loop_marker: "")
 
 impl WmBridge:
 
@@ -334,9 +341,79 @@ impl WmBridge:
             _:
                 return Err(AuthError.Forbidden)
 
+    fn handle_host_wm_pointer_loop_step(self, x: i32, y: i32, button: text, kind: text, width: i32, height: i32) -> Result<text, AuthError>:
+        if not host_taskbar_runtime_is_enabled():
+            return Err(AuthError.Forbidden)
+        val scene = _host_wm_scene_from_session(self.session, width, height)
+        val taskbar = host_taskbar_runtime_taskbar_model(self.session)
+        val normalized_kind = if kind == "pointer_down": "down" else: kind
+        val normalized_button = if button == "0": "left" else: button
+        val command = host_wm_pointer_runtime_command(scene, taskbar, x, y, normalized_button, normalized_kind, 1000, "host", 2)
+        self.runtime_state = host_wm_apply_pointer(self.runtime_state, scene, taskbar, x, y, normalized_button, normalized_kind, 1000, "host", 2)
+        match self.apply_host_wm_runtime_command(command):
+            Err(e):
+                return Err(e)
+            Ok(_):
+                pass_do_nothing
+        self.last_loop_marker = "[host-wm] loop-step command={command.kind} target={command.target_id} app={command.app_id} window={command.window_id} handled={command.handled}"
+        Ok(self.last_loop_marker)
+
+    fn last_host_wm_loop_marker(self) -> text:
+        self.last_loop_marker
+
+    fn apply_host_wm_runtime_command(self, command: WmRuntimeDispatchCommand) -> Result<Unit, AuthError>:
+        if not command.handled:
+            return Ok(())
+        if command.kind == "launcher_launch":
+            match host_taskbar_runtime_launch(self.session, command.app_id):
+                Err(_): return Err(AuthError.Forbidden)
+                Ok(_): return Ok(())
+        if command.kind == "window_focus" or command.kind == "window_drag_begin":
+            val binding = self.session.window_surfaces.for_window(command.window_id)
+            if binding == nil:
+                return Err(AuthError.Forbidden)
+            self.session.set_active_surface(binding.surface_id)
+            match host_taskbar_runtime_focus(self.session, binding.surface_id):
+                Err(_): return Err(AuthError.Forbidden)
+                Ok(_): return Ok(())
+        if command.kind == "desktop_background" or command.kind == "command_lane" or command.kind == "command_lane_clock" or command.kind == "command_lane_icon":
+            return Ok(())
+        Ok(())
+
 # =========================================================================
 # Helpers
 # =========================================================================
+
+fn _host_wm_scene_from_session(session: UISession, width: i32, height: i32) -> SharedWmScene:
+    var manager = WindowManager.new()
+    for binding in session.window_surfaces.bindings:
+        val tree = session.get_surface(binding.surface_id)
+        val root = if tree == nil: "" else: tree.root_id
+        val x = _surface_i32_prop(session, binding.surface_id, root, "x", 80)
+        val y = _surface_i32_prop(session, binding.surface_id, root, "y", 64)
+        val w = _surface_i32_prop(session, binding.surface_id, root, "width", 640)
+        val h = _surface_i32_prop(session, binding.surface_id, root, "height", 420)
+        if tree != nil:
+            val _ = manager.open_window(binding.surface_id, binding.title, x, y, w, h, tree)
+    shared_wm_scene_from_window_manager(manager, session.window_surfaces, width, height)
+
+fn _surface_text_prop(session: UISession, surface_id: text, root_id: text, key: text) -> text:
+    if root_id == "":
+        return ""
+    val tree = session.get_surface(surface_id)
+    if tree == nil:
+        return ""
+    val node = tree.find_widget(root_id)
+    if node == nil:
+        return ""
+    node.get_prop(key)
+
+fn _surface_i32_prop(session: UISession, surface_id: text, root_id: text, key: text, fallback: i32) -> i32:
+    val raw = _surface_text_prop(session, surface_id, root_id, key)
+    if raw == "":
+        return fallback
+    val parsed = raw.to_i64() ?? fallback.to_i64()
+    parsed.to_i32()
 
 fn _parse_window_id(s: text) -> u64:
     if s == "":
