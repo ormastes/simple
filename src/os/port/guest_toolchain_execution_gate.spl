@@ -1,68 +1,10 @@
-use os.kernel.loader.byte_utils.{byte_at, read_u16_le, read_u32_le, read_u64_le, in_range}
-
-val ELF_MAGIC_0: u8 = 0x7F
-val ELF_MAGIC_1: u8 = 0x45
-val ELF_MAGIC_2: u8 = 0x4C
-val ELF_MAGIC_3: u8 = 0x46
-val ELFCLASS64: u8 = 2
-val ELFDATA2LSB: u8 = 1
-val EM_X86_64: i64 = 62
-val ELF64_PHDR_SIZE: i64 = 56
-val PT_LOAD: i64 = 1
-val PT_INTERP: i64 = 3
-
-pub fn guest_toolchain_static_payload_detail(path: text, data: [u8]) -> text:
-    """Validate a claimed in-guest compiler payload before status can become READY."""
-    if data.len() == 0:
-        return "missing or empty " + path
-    if data.len() < 64:
-        return "not ELF64 x86_64 static executable: truncated header in " + path
-    if byte_at(data, 0) != ELF_MAGIC_0 or byte_at(data, 1) != ELF_MAGIC_1 or byte_at(data, 2) != ELF_MAGIC_2 or byte_at(data, 3) != ELF_MAGIC_3:
-        return "not ELF64 x86_64 static executable: missing ELF magic in " + path
-    if byte_at(data, 4) != ELFCLASS64:
-        return "not ELF64 x86_64 static executable: not ELF64 in " + path
-    if byte_at(data, 5) != ELFDATA2LSB:
-        return "not ELF64 x86_64 static executable: not little-endian in " + path
-    val e_machine = read_u16_le(data, 18)
-    if e_machine != EM_X86_64:
-        return "not ELF64 x86_64 static executable: e_machine=" + e_machine.to_text() + " in " + path
-    val e_phoff = read_u64_le(data, 32)
-    val e_phentsize = read_u16_le(data, 54)
-    val e_phnum = read_u16_le(data, 56)
-    if e_phentsize != ELF64_PHDR_SIZE:
-        return "not ELF64 x86_64 static executable: unexpected program header size in " + path
-    if e_phnum <= 0:
-        return "not ELF64 x86_64 static executable: no program headers in " + path
-    if not in_range(data, e_phoff, e_phentsize * e_phnum):
-        return "not ELF64 x86_64 static executable: program header table truncated in " + path
-
-    var saw_load = false
-    var i = 0
-    while i < e_phnum:
-        val off = e_phoff + i * e_phentsize
-        val p_type = read_u32_le(data, off)
-        if p_type == PT_INTERP:
-            return "not static ELF payload: PT_INTERP dynamic loader present in " + path
-        if p_type == PT_LOAD:
-            saw_load = true
-        i = i + 1
-    if not saw_load:
-        return "not ELF64 x86_64 static executable: no PT_LOAD segment in " + path
-    "READY"
-
 pub fn guest_toolchain_execution_gate_detail(clang_static_ready: bool, rustc_static_ready: bool, bake_enabled: bool) -> text:
     """Return READY or a concrete blocker list for real in-guest compiler execution."""
-    val clang_detail = if clang_static_ready: "READY" else: "missing build/os/clang_static/bin/clang_static"
-    val rustc_detail = if rustc_static_ready: "READY" else: "missing build/os/rust_static/bin/rustc_static"
-    guest_toolchain_execution_gate_payload_detail(clang_detail, rustc_detail, bake_enabled)
-
-pub fn guest_toolchain_execution_gate_payload_detail(clang_static_detail: text, rustc_static_detail: text, bake_enabled: bool) -> text:
-    """Return READY or blocker details from validated payload status strings."""
     var blockers: List<text> = []
-    if clang_static_detail != "READY":
-        blockers = blockers + [clang_static_detail]
-    if rustc_static_detail != "READY":
-        blockers = blockers + [rustc_static_detail]
+    if not clang_static_ready:
+        blockers = blockers + ["missing build/os/clang_static/bin/clang_static"]
+    if not rustc_static_ready:
+        blockers = blockers + ["missing build/os/rust_static/bin/rustc_static"]
     if not bake_enabled:
         blockers = blockers + ["build/os/.bake_include_toolchain not enabled"]
     if blockers.len() == 0:

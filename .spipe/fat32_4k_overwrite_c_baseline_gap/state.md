@@ -26,7 +26,6 @@ ship-done
 - dev: Created state file with 5 acceptance criteria (type: bug).
 - verify: `SIMPLE_LIB=src bin/simple check test/perf/bench/fat32_4k_compare.spl` passed.
 - verify: `FAT32_4K_RUNS=3 scripts/perf/run-fat32-4k-cfat-baseline.shs` passed with Simple median p50 25us/31us vs direct C 32us/39us.
-- verify: follow-up salvage integration rerun passed with Simple median p50 13us/14us vs direct C 33us/29us.
 - verify: `scripts/perf/prepare-fat32-4k-vfat.shs --diagnose` reported existing `/tmp/simple_vfat_bench_mnt` as vfat but not writable and unseeded; noninteractive sudo unavailable.
 - verify: `FAT32_4K_RUNS=1 REQUIRE_VFAT_BASELINE=1 scripts/perf/run-fat32-4k-cfat-baseline.shs` failed cleanly before benchmarking because VFAT is missing/unseeded/unwritable.
 - ship: Closed tracker with direct-C evidence and an external VFAT mount blocker.

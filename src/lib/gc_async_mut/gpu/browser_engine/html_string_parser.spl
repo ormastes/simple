@@ -8,14 +8,7 @@ pub fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
     root
 
 pub fn browser_renderer_normalize_style_rules(css_text: text) -> text:
-    _simplify_pseudo_selectors(_normalize_css_nesting(_flatten_at_blocks(css_text)))
-
-fn _simplify_pseudo_selectors(css: text) -> text:
-    # Simplify compound selectors with unsupported pseudo-classes to their base element selector.
-    # e.g., "div:has(.badge)" becomes "div" so the heuristic renderer can match it.
-    var out = css
-    out = out.replace("div:has(.badge)", "div")
-    out
+    _normalize_css_nesting(_flatten_at_blocks(css_text))
 
 pub fn browser_renderer_normalize_style_blocks(html: text) -> text:
     val lower = html.lower()
@@ -40,39 +33,62 @@ fn _flatten_at_blocks(css: text) -> text:
     var out = css
     out = out.replace("@layer components {", "")
     out = out.replace("@layer utilities {", "")
-    # Known-valid @supports conditions: strip the wrapper and its closing brace, keep the inner rules.
-    out = _replace_supports_keep_inner(out, "@supports (display: grid) {")
-    out = _replace_supports_keep_inner(out, "@supports (display: flex) {")
-    out = _replace_supports_keep_inner(out, "@supports (text-overflow: ellipsis) {")
-    out = _replace_supports_keep_inner(out, "@supports (text-transform: uppercase) {")
-    out = _replace_supports_keep_inner(out, "@supports selector(:has()) {")
-    out = _replace_supports_keep_inner(out, "@supports selector(div:has(.badge)) {")
-    # Strip unsupported @supports selector() blocks.
-    out = out.replace("@supports selector(div:popover-open) { div { width: 12px; height: 8px; background-color: #dc2626; } }", "")
-    # Handle @supports not (...) — unwrap: keep inner (applies when condition false).
-    out = _replace_supports_keep_inner(out, "@supports not (nonexistent: value) {")
-    out = _replace_supports_keep_inner(out, "@supports not (display: grid) {")
-    out = _replace_supports_keep_inner(out, "@supports not (display: flex) {")
-    # Strip unknown/invalid @supports blocks entirely (known-invalid → strip inner too).
-    out = out.replace("@supports (display: definitely-not-css) { div { width: 12px; height: 8px; background-color: #dc2626; } }", "")
-    out = out.replace("@supports (nonexistent: value) { div { width: 12px; height: 8px; background-color: #dc2626; } }", "")
-    out = out.replace("@supports selector() { div { width: 12px; height: 8px; background-color: #dc2626; } }", "")
+    # Known-valid @supports conditions: strip the wrapper, keep the inner rules.
+    out = out.replace("@supports (display: grid) {", "")
+    out = out.replace("@supports (display: flex) {", "")
+    out = out.replace("@supports (text-overflow: ellipsis) {", "")
+    out = out.replace("@supports (text-transform: uppercase) {", "")
+    out = out.replace("@supports selector(:has()) {", "")
+    # Handle @supports not (...) — strip the wrapper, keep inner rules (condition is false → rules apply via not).
+    out = _strip_supports_not_blocks(out)
+    # Strip unknown/invalid @supports blocks entirely (including their inner rules).
+    out = _strip_unknown_supports_blocks(out)
     out
 
-fn _replace_supports_keep_inner(css: text, header: text) -> text:
-    # Replace "@supports ... { ... }" by keeping the inner content only.
-    # Finds the header, then strips from header start to the matching closing brace.
-    val hdr_pos = css.index_of(header)
-    if hdr_pos < 0:
-        return css
-    val open = hdr_pos + header.len()
-    val close = css.index_of("}", open)
-    if close < 0:
-        return css.replace(header, "")
-    val before = css.substring(0, hdr_pos)
-    val inner = css.substring(open, close)
-    val after = css.substring(close + 1, css.len())
-    before + inner + after
+fn _strip_supports_not_blocks(css: text) -> text:
+    # Replace "@supports not (...) { ... }" by keeping the inner rules (not-false = apply).
+    var out = ""
+    var pos: i64 = 0
+    while pos < css.len():
+        val at_pos = css.index_of("@supports not", pos)
+        if at_pos < 0:
+            out = out + css.substring(pos, css.len())
+            break
+        out = out + css.substring(pos, at_pos)
+        val open = css.index_of("{", at_pos)
+        if open < 0:
+            out = out + css.substring(at_pos, css.len())
+            break
+        val close = css.index_of("}", open)
+        if close < 0:
+            out = out + css.substring(at_pos, css.len())
+            break
+        # Keep the inner content (without the wrapper braces)
+        out = out + css.substring(open + 1, close)
+        pos = close + 1
+    out
+
+fn _strip_unknown_supports_blocks(css: text) -> text:
+    # Strip any remaining "@supports (...) { ... }" blocks entirely.
+    var out = ""
+    var pos: i64 = 0
+    while pos < css.len():
+        val at_pos = css.index_of("@supports", pos)
+        if at_pos < 0:
+            out = out + css.substring(pos, css.len())
+            break
+        out = out + css.substring(pos, at_pos)
+        val open = css.index_of("{", at_pos)
+        if open < 0:
+            out = out + css.substring(at_pos, css.len())
+            break
+        val close = css.index_of("}", open)
+        if close < 0:
+            out = out + css.substring(at_pos, css.len())
+            break
+        # Skip the entire block (condition not recognized = strip)
+        pos = close + 1
+    out
 
 fn _normalize_css_nesting(css: text) -> text:
     val amp = css.index_of("&")

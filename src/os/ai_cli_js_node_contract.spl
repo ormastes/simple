@@ -1,0 +1,260 @@
+# Hardened AI CLI JavaScript/Node-compatible manifest contract for SimpleOS.
+
+pub val AI_CLI_RUNTIME_NODE_COMPATIBLE: text = "node-compatible"
+pub val AI_CLI_RUNTIME_BUNDLED_NODE: text = "bundled-node"
+pub val AI_CLI_RUNTIME_SIMPLE_JS_AGENT: text = "simple-js-agent"
+
+struct AiCliManifest:
+    app_id: text
+    display_name: text
+    runtime_kind: text
+    entry_path: text
+    args: [text]
+    needs_terminal: bool
+    file_grants: [text]
+    process_grants: [text]
+    network_grants: [text]
+    credential_grants: [text]
+    qemu_marker_fragments: [text]
+    unsupported_features: [text]
+    package_id: text
+    package_version: text
+    package_checksum: text
+    runtime_artifact: text
+
+struct AiCliQemuLane:
+    target: text
+    scenario_name: text
+    machine: text
+    qemu_system: text
+    serial_log_path: text
+    runtime_status: text
+    blocker: text
+    marker_fragments: [text]
+
+pub fn codex_cli_smoke_manifest() -> AiCliManifest:
+    _ai_cli_manifest(
+        "codex",
+        "Codex CLI",
+        "/sys/apps/codex/codex.js",
+        ["--version"],
+        ["workspace:/home/user/work", "config:/home/user/.codex", "cache:/var/cache/codex", "temp:/tmp"],
+        ["simple", "git"],
+        ["api.openai.com:443"],
+        ["openai-api-key"],
+        ["[ai-cli] runtime:start app=codex", "[ai-cli] cli-smoke:start app=codex", "[ai-cli] hardening:ok app=codex"],
+        ["full-node-v8-libuv-pending", "live-auth-not-required"]
+    )
+
+pub fn claude_cli_smoke_manifest() -> AiCliManifest:
+    _ai_cli_manifest(
+        "claude",
+        "Claude CLI",
+        "/sys/apps/claude/claude.js",
+        ["--version"],
+        ["workspace:/home/user/work", "config:/home/user/.claude", "cache:/var/cache/claude", "temp:/tmp"],
+        ["simple", "git"],
+        ["api.anthropic.com:443"],
+        ["anthropic-api-key"],
+        ["[ai-cli] runtime:start app=claude", "[ai-cli] cli-smoke:start app=claude", "[ai-cli] hardening:ok app=claude"],
+        ["full-node-v8-libuv-pending", "live-auth-not-required"]
+    )
+
+pub fn gemini_cli_smoke_manifest() -> AiCliManifest:
+    _ai_cli_manifest(
+        "gemini",
+        "Gemini CLI",
+        "/sys/apps/gemini/gemini.js",
+        ["--version"],
+        ["workspace:/home/user/work", "config:/home/user/.gemini", "cache:/var/cache/gemini", "temp:/tmp"],
+        ["simple", "git"],
+        ["generativelanguage.googleapis.com:443"],
+        ["google-ai-api-key"],
+        ["[ai-cli] runtime:start app=gemini", "[ai-cli] cli-smoke:start app=gemini", "[ai-cli] hardening:ok app=gemini"],
+        ["full-node-v8-libuv-pending", "live-auth-not-required"]
+    )
+
+fn _ai_cli_manifest(app_id: text, display_name: text, entry_path: text, args: [text], file_grants: [text], process_grants: [text], network_grants: [text], credential_grants: [text], qemu_marker_fragments: [text], unsupported_features: [text]) -> AiCliManifest:
+    AiCliManifest(
+        app_id: app_id,
+        display_name: display_name,
+        runtime_kind: AI_CLI_RUNTIME_NODE_COMPATIBLE,
+        entry_path: entry_path,
+        args: args,
+        needs_terminal: true,
+        file_grants: file_grants,
+        process_grants: process_grants,
+        network_grants: network_grants,
+        credential_grants: credential_grants,
+        qemu_marker_fragments: qemu_marker_fragments,
+        unsupported_features: unsupported_features,
+        package_id: "simpleos-ai-cli-{app_id}",
+        package_version: "pending",
+        package_checksum: "pending",
+        runtime_artifact: "node-runtime-pending"
+    )
+
+pub fn ai_cli_manifest_validation_error(manifest: AiCliManifest) -> text:
+    if manifest.app_id == "":
+        return "missing app id"
+    if manifest.runtime_kind == "":
+        return "missing runtime kind"
+    if not ai_cli_runtime_supported(manifest.runtime_kind):
+        return "unsupported runtime kind: {manifest.runtime_kind}"
+    if manifest.entry_path == "":
+        return "missing entry path"
+    if manifest.package_id == "":
+        return "missing package id"
+    if manifest.runtime_artifact == "":
+        return "missing runtime artifact"
+    ""
+
+pub fn ai_cli_runtime_supported(runtime_kind: text) -> bool:
+    runtime_kind == AI_CLI_RUNTIME_NODE_COMPATIBLE or
+    runtime_kind == AI_CLI_RUNTIME_BUNDLED_NODE or
+    runtime_kind == AI_CLI_RUNTIME_SIMPLE_JS_AGENT
+
+pub fn ai_cli_manifest_is_valid(manifest: AiCliManifest) -> bool:
+    ai_cli_manifest_validation_error(manifest) == ""
+
+pub fn ai_cli_allows_file(manifest: AiCliManifest, path: text) -> bool:
+    for grant in manifest.file_grants:
+        val prefix = _grant_value(grant)
+        if _path_prefix_allows(prefix, path):
+            return true
+    false
+
+pub fn ai_cli_allows_process(manifest: AiCliManifest, command: text) -> bool:
+    _text_list_allows(manifest.process_grants, command)
+
+pub fn ai_cli_allows_network(manifest: AiCliManifest, endpoint: text) -> bool:
+    _text_list_allows(manifest.network_grants, endpoint)
+
+pub fn ai_cli_allows_credential(manifest: AiCliManifest, handle: text) -> bool:
+    _text_list_allows(manifest.credential_grants, handle)
+
+pub fn ai_cli_normalize_target(target: text) -> text:
+    if target == "x85" or target == "x86" or target == "x86_64":
+        return "x86"
+    if target == "riscv" or target == "riscv64":
+        return "riscv"
+    if target == "arm" or target == "arm64":
+        return "arm"
+    target
+
+pub fn ai_cli_qemu_marker_fragments(manifest: AiCliManifest, target: text) -> [text]:
+    val normalized = ai_cli_normalize_target(target)
+    var markers: [text] = [
+        "[ai-cli] qemu-target={normalized}",
+        "[ai-cli] manifest app={manifest.app_id} runtime={manifest.runtime_kind}",
+        "[ai-cli] guest-evidence-required"
+    ]
+    for marker in manifest.qemu_marker_fragments:
+        markers.push(marker)
+    markers
+
+pub fn ai_cli_qemu_lane(manifest: AiCliManifest, target: text) -> AiCliQemuLane:
+    val normalized = ai_cli_normalize_target(target)
+    val blocker = ai_cli_full_node_blocker()
+    if normalized == "riscv":
+        return _ai_cli_qemu_lane(
+            manifest,
+            "riscv",
+            "riscv64-hosted",
+            "virt",
+            "qemu-system-riscv64",
+            "build/os/ai-cli-riscv64.serial.log",
+            "blocked-runtime-artifact",
+            blocker
+        )
+    if normalized == "arm":
+        return _ai_cli_qemu_lane(
+            manifest,
+            "arm",
+            "arm64-virtio-fat32-smf",
+            "virt",
+            "qemu-system-aarch64",
+            "build/os/ai-cli-arm64.serial.log",
+            "blocked-runtime-artifact",
+            blocker
+        )
+    _ai_cli_qemu_lane(
+        manifest,
+        "x86",
+        "x64-desktop-disk",
+        "q35",
+        "qemu-system-x86_64",
+        "build/os/ai-cli-x86_64.serial.log",
+        "blocked-runtime-artifact",
+        blocker
+    )
+
+pub fn ai_cli_qemu_lanes(manifest: AiCliManifest) -> [AiCliQemuLane]:
+    [
+        ai_cli_qemu_lane(manifest, "riscv"),
+        ai_cli_qemu_lane(manifest, "x86"),
+        ai_cli_qemu_lane(manifest, "arm")
+    ]
+
+pub fn ai_cli_qemu_lane_summary(lane: AiCliQemuLane) -> text:
+    "target={lane.target};scenario={lane.scenario_name};machine={lane.machine};qemu={lane.qemu_system};serial={lane.serial_log_path};status={lane.runtime_status};blocker={lane.blocker};markers={lane.marker_fragments.join(\",\")}"
+
+pub fn ai_cli_qemu_serial_accepts_lane(lane: AiCliQemuLane, serial_output: text) -> bool:
+    for marker in lane.marker_fragments:
+        if not serial_output.contains(marker):
+            return false
+    true
+
+pub fn ai_cli_qemu_missing_markers(lane: AiCliQemuLane, serial_output: text) -> [text]:
+    var missing: [text] = []
+    for marker in lane.marker_fragments:
+        if not serial_output.contains(marker):
+            missing.push(marker)
+    missing
+
+pub fn ai_cli_full_node_blocker() -> text:
+    "full Node.js/V8/libuv port remains a later layer; this slice proves the SimpleOS manifest, capability, and QEMU marker contract"
+
+pub fn ai_cli_capability_summary(manifest: AiCliManifest) -> text:
+    "app={manifest.app_id};display={manifest.display_name};runtime={manifest.runtime_kind};entry={manifest.entry_path};terminal={manifest.needs_terminal};" +
+    "package={manifest.package_id}@{manifest.package_version};checksum={manifest.package_checksum};artifact={manifest.runtime_artifact};" +
+    "files={manifest.file_grants.join(\",\")};process={manifest.process_grants.join(\",\")};network={manifest.network_grants.join(\",\")};credentials={manifest.credential_grants.join(\",\")};" +
+    "markers={manifest.qemu_marker_fragments.join(\",\")};unsupported={manifest.unsupported_features.join(\",\")}"
+
+fn _ai_cli_qemu_lane(manifest: AiCliManifest, target: text, scenario_name: text, machine: text, qemu_system: text, serial_log_path: text, runtime_status: text, blocker: text) -> AiCliQemuLane:
+    var markers = ai_cli_qemu_marker_fragments(manifest, target)
+    markers.push("[ai-cli] scenario={scenario_name}")
+    markers.push("[ai-cli] runtime-status={runtime_status}")
+    markers.push("[ai-cli] blocker={blocker}")
+    AiCliQemuLane(
+        target: target,
+        scenario_name: scenario_name,
+        machine: machine,
+        qemu_system: qemu_system,
+        serial_log_path: serial_log_path,
+        runtime_status: runtime_status,
+        blocker: blocker,
+        marker_fragments: markers
+    )
+
+fn _grant_value(grant: text) -> text:
+    if grant.contains(":"):
+        val parts = grant.split(":")
+        if parts.len() > 1:
+            return parts[1]
+    grant
+
+fn _text_list_allows(grants: [text], requested: text) -> bool:
+    for grant in grants:
+        if grant == "*" or grant == requested:
+            return true
+    false
+
+fn _path_prefix_allows(prefix: text, path: text) -> bool:
+    if prefix == "*":
+        return true
+    if prefix == "" or path == "":
+        return false
+    if path.len() < prefix.len():
+        return false
+    path[0:prefix.len()] == prefix

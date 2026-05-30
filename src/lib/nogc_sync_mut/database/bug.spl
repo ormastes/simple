@@ -81,10 +81,8 @@ struct BugStats:
 # Helper functions for creating Bug Databases
 
 fn load_bug_database(path: text) -> BugDatabase?:
-    val db_opt = SdnDatabase.load(path)
-    if not db_opt.?:
-        return nil
-    Some(BugDatabase(db: db_opt.unwrap()))
+    val db = SdnDatabase.load(path)?
+    Some(BugDatabase(db: db))
 
 fn create_bug_database(path: text) -> BugDatabase:
     val db = SdnDatabase.new(path)
@@ -316,13 +314,9 @@ class BugDatabase:
                 continue
             val bugs_table = table_opt.unwrap()
             for row in bugs_table.valid_rows():
-                val id_opt = row.get("id")
-                if not id_opt.?:
-                    continue
-                val bug_opt = self.get_bug(id_opt.unwrap())
-                if not bug_opt.?:
-                    continue
-                result.push(bug_opt.unwrap())
+                val id = row.get("id")?
+                val bug = self.get_bug(id)?
+                result.push(bug)
 
         result
 
@@ -355,10 +349,7 @@ class BugDatabase:
             return false
 
         val target_table_name = self.target_table_name(bug.status)
-        val current_table_opt = self.db.get_table_mut(current_table_name)
-        if not current_table_opt.?:
-            return false
-        var current_table = current_table_opt.unwrap()
+        var current_table = self.db.get_table_mut(current_table_name)?
 
         if current_table_name == target_table_name:
             val updated = current_table.update_row(id, self.bug_to_row_for_table(bug, current_table))
@@ -449,7 +440,7 @@ class BugDatabase:
         val bugs = self.all_bugs()
 
         for bug in bugs:
-            if bug.reproducible_by == "" or bug.reproducible_by == "N/A":
+            if not bug.reproducible_by.?:
                 errors.push("Bug {bug.id}: missing test case link")
 
         errors
@@ -460,7 +451,7 @@ class BugDatabase:
 
         for bug in bugs:
             val is_critical = bug.severity == BugSeverity.P0 or bug.severity == BugSeverity.P1
-            if is_critical and (bug.fix_strategy.len() == 0 or bug.fix_strategy[0] == ""):
+            if is_critical and not bug.fix_strategy.?:
                 errors.push("Bug {bug.id}: critical bug missing fix strategy")
 
         errors
@@ -570,7 +561,7 @@ class BugDatabase:
         # Test links (from legacy validation)
         val bugs = self.all_bugs()
         for bug in bugs:
-            if not bug.reproducible_by.?:
+            if bug.reproducible_by == "" or bug.reproducible_by == "N/A":
                 issues.push(DbIssue(
                     db_name: db_name,
                     severity: "warning",
@@ -582,7 +573,7 @@ class BugDatabase:
         # Fix strategy for critical bugs
         for bug in bugs:
             val is_critical = bug.severity == BugSeverity.P0 or bug.severity == BugSeverity.P1
-            if is_critical and not bug.fix_strategy.?:
+            if is_critical and (bug.fix_strategy.len() == 0 or bug.fix_strategy[0] == ""):
                 issues.push(DbIssue(
                     db_name: db_name,
                     severity: "warning",

@@ -2,8 +2,8 @@
 
 Date: 2026-05-05
 Status: Open — kernel task preparation evidence improved 2026-05-30 and
-status/deploy gate added/tightened 2026-05-30; real compiler payload builds and
-live compiler-operation proof remain open.
+status gate added 2026-05-30; real compiler payloads and live
+compiler-operation proof remain open.
 
 ## Problem
 
@@ -132,53 +132,22 @@ Progress 2026-05-30: `src/os/port/deploy_toolchains.spl -- --status` now
 prints `guest-toolchain-exec-gate` as one explicit gate for real in-guest
 compiler execution. The gate remains `BLOCKED` until both
 `build/os/clang_static/bin/clang_static` and
-`build/os/rust_static/bin/rustc_static` exist as real static ELF64 x86_64
-payloads and `build/os/.bake_include_toolchain` is enabled. Dynamic host
-binaries are rejected by `PT_INTERP` detection, wrong-machine ELF payloads are
-rejected, and placeholders remain invalid. This prevents prepared-spawn
-evidence or host-dynamic binaries from being mistaken for compiler-operation
-evidence.
+`build/os/rust_static/bin/rustc_static` exist and
+`build/os/.bake_include_toolchain` is enabled. This prevents prepared-spawn
+evidence from being mistaken for compiler-operation evidence.
 
 Focused evidence:
 
 ```
-SIMPLE_LIB=src bin/simple check src/os/port/guest_toolchain_execution_gate.spl src/os/port/deploy_toolchains.spl test/unit/os/port/deploy_toolchains_status_spec.spl
-SIMPLE_LIB=src bin/simple test test/unit/os/port/deploy_toolchains_status_spec.spl --mode=interpreter --clean
-SIMPLE_LIB=src bin/simple run src/os/port/deploy_toolchains.spl -- --status
+SIMPLE_LIB=/tmp/simple-in-guest-toolchain/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple check src/os/port/guest_toolchain_execution_gate.spl src/os/port/deploy_toolchains.spl test/unit/os/port/deploy_toolchains_status_spec.spl
+SIMPLE_LIB=/tmp/simple-in-guest-toolchain/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple test test/unit/os/port/deploy_toolchains_status_spec.spl --mode=interpreter --clean --fail-fast
+SIMPLE_LIB=/tmp/simple-in-guest-toolchain/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple run src/os/port/deploy_toolchains.spl -- --status
 ```
 
-Results: check passed; `deploy_toolchains_status_spec.spl` passed `7/7`,
-covering valid static ELF, dynamic ELF rejection, wrong-machine rejection,
-placeholder rejection, and aggregate blocker reporting. Status ran
-successfully after the runner fell back from JIT to interpreter on an existing
-`process` lowering issue, and reported `guest-toolchain-exec-gate BLOCKED`
-with the concrete missing payloads and disabled bake marker.
-
-Progress 2026-05-30, deploy import lane: `deploy_toolchains.spl` now has a
-strict `--stage guest-payloads` import step. It reads externally produced
-payload paths from `SIMPLEOS_CLANG_STATIC_GUEST` and
-`SIMPLEOS_RUSTC_STATIC_GUEST`, validates each input through the same static
-ELF64 x86_64 gate, copies only validated inputs into the canonical
-`build/os/clang_static/bin/clang_static` and
-`build/os/rust_static/bin/rustc_static` bake paths, and enables
-`build/os/.bake_include_toolchain` only when
-`--enable-toolchain-bake` is supplied. Missing env vars fail closed and leave
-the bake marker unchanged.
-
-Focused evidence:
-
-```
-SIMPLE_LIB=src bin/simple check src/os/port/guest_toolchain_execution_gate.spl src/os/port/deploy_toolchains.spl test/unit/os/port/deploy_toolchains_status_spec.spl
-SIMPLE_LIB=src bin/simple test test/unit/os/port/deploy_toolchains_status_spec.spl --mode=interpreter --clean
-SIMPLE_LIB=src bin/simple run src/os/port/deploy_toolchains.spl -- --stage guest-payloads
-SIMPLE_LIB=src bin/simple run src/os/port/deploy_toolchains.spl -- --status
-```
-
-Results: check passed; `deploy_toolchains_status_spec.spl` passed `8/8`,
-including deploy help coverage for `guest-payloads` and
-`--enable-toolchain-bake`; the missing-env `guest-payloads` smoke returned
-non-zero after reporting both missing payload sources; status still reports
-`guest-toolchain-exec-gate BLOCKED`.
+Results: check passed; `deploy_toolchains_status_spec.spl` passed `2/2`;
+status ran successfully after the runner fell back from JIT to interpreter on
+an existing `process` lowering issue, and reported `guest-toolchain-exec-gate
+BLOCKED` with the concrete missing payloads and disabled bake marker.
 
 Even with Blocker 1 fixed, spawning `/sys/apps/clang` or `/sys/apps/rust`
 would execute a stub ELF, not a real compiler. The real payloads require an

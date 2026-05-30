@@ -163,12 +163,9 @@ describe "null_block":
   device, version, abi — now parses and attaches to the owning
   declaration. Function-level `@driver(..., ops=...)` and
   `@native_lib(..., ops=...)` synthesize the stub body in the live Rust
-  seed path. Impl-level `@driver(..., ops=...)` and
-  `@native_lib(..., ops=...)` now apply to contained stub-only registration
-  methods that do not carry their own manifest attribute. Bare module-level
-  sugar is still open; until it lands, keep the hand-written
-  `register_static_driver(m, ops)` call or use the function/impl `ops=`
-  form.
+  seed path. Module-level and impl-level sugar are still open; until those
+  land, keep the hand-written `register_static_driver(m, ops)` call or use
+  the function-level `ops=` form.
 - Loader (Phase B) is in; static-mode registration via
   `register_static_driver(...)` works today. Dynamic `.lsm` loading
   depends on FR-DRIVER-0004 (SMF section writer).

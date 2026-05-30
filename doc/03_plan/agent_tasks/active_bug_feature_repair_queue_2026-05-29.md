@@ -153,24 +153,6 @@ Spawned read-only explorers:
       spawn now builds a process image and scheduler task through the shared
       path; remaining blockers are live handoff proof and real clang/rust
       static guest payload builds.
-15a. SimpleOS in-guest toolchain deploy import lane advanced.
-    - Added `deploy_toolchains --stage guest-payloads` for the remaining static
-      compiler payload lane. The stage imports externally built payloads from
-      `SIMPLEOS_CLANG_STATIC_GUEST` and `SIMPLEOS_RUSTC_STATIC_GUEST`, validates
-      them with the static ELF64 x86_64 gate, copies only validated payloads to
-      `build/os/clang_static/bin/clang_static` and
-      `build/os/rust_static/bin/rustc_static`, and only enables
-      `build/os/.bake_include_toolchain` when `--enable-toolchain-bake` is
-      passed.
-    - Fixed this deploy path to use `rt_env_get(...) ?? ""` instead of
-      `process.env(...)`; the latter type-checked but failed at interpreter
-      runtime.
-    - Focused verification passed:
-      `SIMPLE_LIB=src bin/simple check src/os/port/guest_toolchain_execution_gate.spl src/os/port/deploy_toolchains.spl test/unit/os/port/deploy_toolchains_status_spec.spl`,
-      `SIMPLE_LIB=src bin/simple test test/unit/os/port/deploy_toolchains_status_spec.spl --mode=interpreter --clean`
-      (`8/8`, including deploy help coverage), missing-env
-      `--stage guest-payloads` smoke failed closed, and
-      `--status` still reports `guest-toolchain-exec-gate BLOCKED`.
 16. FAT32 file I/O residual fixed.
     - Removed stale `Result.Ok` / `Result.Err` sugar from the FAT32 file I/O
       spec mock so the current runner does not fall back on that obsolete form.
@@ -1292,87 +1274,19 @@ Spawned read-only explorers:
     - Verification passed with rebuilt release compiler for both specs.
     - Remaining driver scope: module/impl-level `@driver(...)` sugar and
       `@native_lib(...)` synthesis remain open.
-85. Ctype native module static/global array correctness completed.
-    - Native module initialization now carries module-level integer array
-      globals, including cross-module `[u8]` lookup tables.
-    - Focused native smoke passed with `[ctype-static-array] ok`; the static
-      LUT diagnostic now reports the expected checksums. The broader ctype
-      performance floor remains a backend/codegen benchmark question.
-86. FR-PLUG-0004 bounded Cranelift GEMM-add fusion gate landed.
-    - Added adjacent-pattern detection for `tmp = A @ B` immediately consumed
-      by `BroadcastAdd`, guarded by temp/single-use checks.
-    - Follow-up advance: added a hosted Rust `SimpleRuntimeMatrixF64` handle
-      ABI and linkable `__simple_runtime_gemm_add(A, B, C)` implementation.
-      Runtime unit coverage proves rectangular row-major `A * B + C` and shape
-      mismatch rejection. Remaining scope is the backend bridge that lowers
-      Simple NDArray operands into those matrix handles plus measured fused
-      Cranelift performance proof.
-87. SimpleOS in-guest toolchain gate tightened.
-    - `clang-static-guest` and `rustc-static-guest` now require real static
-      ELF64 x86_64 payloads and reject host-dynamic binaries via `PT_INTERP`.
-    - `deploy_toolchains_status_spec.spl` passed with valid/static,
-      dynamic-ELF, wrong-machine, placeholder, and aggregate-blocker coverage.
-      Remaining scope is still building real payloads and proving live QEMU
-      compiler execution.
-88. NDArray push disposition closed as not ndarray work.
-    - Focused search found no concrete ndarray-push implementation request.
-      `/tmp/simple-ndarray-push` is an unrelated detached assert-ran commit
-      and must be preserved until its owner protects or discards it.
-89. Ctype post-fix ratio rerun completed.
-    - Current pushed `origin/main` checks passed for `ctype.spl`, the direct
-      benchmark, static LUT tables, static LUT benchmark, and static-array
-      smoke.
-    - The current shipped direct-range implementation still misses the native/C
-      floor for `is_alpha`, `is_alnum`, `is_space`, `to_lower`, and `to_upper`,
-      so the LUT must not be promoted or the tracker closed without a better
-      benchmark result.
-90. FR-DRIVER-0001 function-level `@native_lib(..., ops=...)` live path bridged.
-    - Function-level `@native_lib(..., ops=...)` stubs now synthesize
-      `DriverManifest.for_native_lib(name, version)` followed by
-      `register_static_driver(m, ops)` in both Rust HIR lowering and the AST
-      interpreter fallback, matching the function-level `@driver` bridge.
-    - Verification passed: Rust `synthetic_driver_registration_live` test
-      (`2/2`), system spec (`2/2`), and SPipe mirror (`2/2`).
-    - Remaining driver scope: module/impl-level `@driver(...)` sugar remains
-      open, along with any module/impl-level `@native_lib(...)` extension.
-91. Ctype perf remaining lane rechecked; documentation closure only.
-    - Current `origin/main` baseline is
-      `400212747d9dc1e93699c6ebca56f066bd25c074`. No bounded ctype library
-      implementation is appropriate from this pass.
-    - Focused ctype/perf check passed for `ctype.spl`, direct benchmarks,
-      inline/LUT benchmarks, static LUT tables, and the static-array smoke.
-    - Clean native `global_static_array_smoke` still fails at runtime with
-      `[ctype-static-array-error] i64 table tab entry actual=3`; clean static
-      LUT benchmark still produces corrupted checksums
-      (`is_alpha/is_alnum/is_xdigit=128000000`, `is_space=0`).
-    - Direct-range warn-only benchmark succeeds with checksum parity but still
-      warns below the 0.50x floor for eight entries:
-      `is_upper 0.50x`, `is_lower 0.46x`, `is_alpha 0.35x`,
-      `is_alnum 0.33x`, `is_xdigit 0.41x`, `is_space 0.24x`,
-      `to_lower 0.31x`, `to_upper 0.37x`.
-    - Trace/nm evidence shows imported table globals are declared but the
-      linked binary has no `__module_init_ctype_lut_tables` symbol, so static
-      LUT promotion remains correctness-blocked by native module-init/linking,
-      not by `src/lib/common/ctype.spl`.
 
 ## Remaining Open Work After 2026-05-30 Salvage
 
-- Ctype perf: clean native static/global LUT execution is not currently
-  reproducible from this workspace; `global_static_array_smoke` fails with a
-  nil table value and the static LUT benchmark corrupts checksums. Direct
-  `ctype.spl` still has eight entries below the 0.50x native/C floor, so
-  backend module-init/linking plus broader loop/branch performance remain open.
-- FR-PLUG-0004: bounded adjacent-pattern GEMM-add codegen fusion is landed, and
-  the hosted runtime now has a concrete matrix-handle GEMM-add ABI. Backend
-  lowering still must materialize Simple NDArray operands as those handles
-  before live fused Cranelift execution and performance proof can close.
-- FR-DRIVER-0001: function-level `@driver(..., ops=...)` and
-  `@native_lib(..., ops=...)` live bridges are landed. Module/impl-level
-  driver/native-lib sugar remains open.
-- SimpleOS in-guest toolchain execution: the status gate now validates real
-  static ELF64 x86_64 compiler payloads and rejects dynamic/placeholder/wrong
-  machine inputs. Real `clang_static`/`rustc_static` payload builds and live
-  QEMU compiler execution evidence remain open.
+- Ctype perf: native static/global `[u8]` LUT checksum corruption and broader
+  native loop/branch performance remain open; the ctype backend agent is still
+  investigating.
+- FR-PLUG-0004: single-op runtime-call emission is landed, but true GEMM-add
+  fusion and performance proof remain open.
+- FR-DRIVER-0001: function-level live bridge is landed, but module/impl-level
+  sugar and `@native_lib(...)` synthesis remain open.
+- SimpleOS in-guest toolchain execution: status gate is landed, but real
+  `clang_static`/`rustc_static` payloads and live QEMU compiler execution
+  evidence remain open.
 - NDArray push: disposition clarified 2026-05-30. A focused repo/tracking/test
   search found no concrete ndarray-push implementation request beyond this
   queue note, and `/tmp/simple-ndarray-push` remains clean at detached commit

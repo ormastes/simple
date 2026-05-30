@@ -1,0 +1,158 @@
+use std.spec.{describe, it, expect}
+use os.ai_cli_js_node_contract.{
+    AiCliManifest,
+    AI_CLI_RUNTIME_NODE_COMPATIBLE,
+    ai_cli_allows_credential,
+    ai_cli_allows_file,
+    ai_cli_allows_network,
+    ai_cli_allows_process,
+    ai_cli_capability_summary,
+    ai_cli_full_node_blocker,
+    ai_cli_manifest_is_valid,
+    ai_cli_manifest_validation_error,
+    ai_cli_qemu_lane,
+    ai_cli_qemu_lane_summary,
+    ai_cli_qemu_lanes,
+    ai_cli_qemu_missing_markers,
+    ai_cli_normalize_target,
+    ai_cli_qemu_marker_fragments,
+    ai_cli_qemu_serial_accepts_lane,
+    claude_cli_smoke_manifest,
+    codex_cli_smoke_manifest,
+    gemini_cli_smoke_manifest
+}
+
+fn deny_all_manifest() -> AiCliManifest:
+    AiCliManifest(
+        app_id: "deny-all",
+        display_name: "Deny All",
+        runtime_kind: AI_CLI_RUNTIME_NODE_COMPATIBLE,
+        entry_path: "/sys/apps/deny-all/main.js",
+        args: ["--version"],
+        needs_terminal: true,
+        file_grants: [],
+        process_grants: [],
+        network_grants: [],
+        credential_grants: [],
+        qemu_marker_fragments: ["[ai-cli] runtime:start app=deny-all"],
+        unsupported_features: ["full-node-v8-libuv-pending"],
+        package_id: "simpleos-ai-cli-deny-all",
+        package_version: "pending",
+        package_checksum: "pending",
+        runtime_artifact: "node-runtime-pending"
+    )
+
+describe "SimpleOS AI CLI JS/Node port manifest contract":
+    describe "REQ-001 REQ-002 REQ-003: built-in manifests":
+        it "builds deterministic Codex, Claude, and Gemini smoke manifests":
+            val codex = codex_cli_smoke_manifest()
+            val claude = claude_cli_smoke_manifest()
+            val gemini = gemini_cli_smoke_manifest()
+
+            expect(codex.app_id).to_equal("codex")
+            expect(claude.app_id).to_equal("claude")
+            expect(gemini.app_id).to_equal("gemini")
+            expect(codex.runtime_kind).to_equal(AI_CLI_RUNTIME_NODE_COMPATIBLE)
+            expect(ai_cli_manifest_is_valid(codex)).to_equal(true)
+            expect(ai_cli_capability_summary(codex)).to_contain("package=simpleos-ai-cli-codex@pending")
+            expect(ai_cli_capability_summary(claude)).to_contain("api.anthropic.com:443")
+            expect(ai_cli_capability_summary(gemini)).to_contain("generativelanguage.googleapis.com:443")
+
+    describe "REQ-004 NFR-001: validation is fail-closed":
+        it "rejects missing identity, entry, and unsupported runtimes":
+            val missing_entry = AiCliManifest(
+                app_id: "bad",
+                display_name: "Bad",
+                runtime_kind: AI_CLI_RUNTIME_NODE_COMPATIBLE,
+                entry_path: "",
+                args: [],
+                needs_terminal: true,
+                file_grants: [],
+                process_grants: [],
+                network_grants: [],
+                credential_grants: [],
+                qemu_marker_fragments: [],
+                unsupported_features: [],
+                package_id: "pkg",
+                package_version: "pending",
+                package_checksum: "pending",
+                runtime_artifact: "node-runtime-pending"
+            )
+            expect(ai_cli_manifest_validation_error(missing_entry)).to_equal("missing entry path")
+
+            val unsupported = AiCliManifest(
+                app_id: "bad",
+                display_name: "Bad",
+                runtime_kind: "host-node-shell",
+                entry_path: "/sys/apps/bad/main.js",
+                args: [],
+                needs_terminal: true,
+                file_grants: [],
+                process_grants: [],
+                network_grants: [],
+                credential_grants: [],
+                qemu_marker_fragments: [],
+                unsupported_features: [],
+                package_id: "pkg",
+                package_version: "pending",
+                package_checksum: "pending",
+                runtime_artifact: "node-runtime-pending"
+            )
+            expect(ai_cli_manifest_validation_error(unsupported)).to_equal("unsupported runtime kind: host-node-shell")
+
+    describe "REQ-005 NFR-005: hardening denials":
+        it "denies undeclared file, process, network, and credential access":
+            val manifest = deny_all_manifest()
+            expect(ai_cli_allows_file(manifest, "/home/user/work/main.spl")).to_equal(false)
+            expect(ai_cli_allows_process(manifest, "git")).to_equal(false)
+            expect(ai_cli_allows_network(manifest, "api.openai.com:443")).to_equal(false)
+            expect(ai_cli_allows_credential(manifest, "openai-api-key")).to_equal(false)
+
+        it "allows only declared grants":
+            val manifest = codex_cli_smoke_manifest()
+            expect(ai_cli_allows_file(manifest, "/home/user/work/main.spl")).to_equal(true)
+            expect(ai_cli_allows_process(manifest, "git")).to_equal(true)
+            expect(ai_cli_allows_network(manifest, "api.openai.com:443")).to_equal(true)
+            expect(ai_cli_allows_credential(manifest, "openai-api-key")).to_equal(true)
+            expect(ai_cli_allows_network(manifest, "example.com:443")).to_equal(false)
+
+    describe "REQ-006 NFR-003: QEMU target and marker data":
+        it "normalizes x85 to x86 and declares guest-side marker fragments":
+            val manifest = codex_cli_smoke_manifest()
+            val markers = ai_cli_qemu_marker_fragments(manifest, "x85")
+            expect(ai_cli_normalize_target("x85")).to_equal("x86")
+            expect(markers[0]).to_equal("[ai-cli] qemu-target=x86")
+            expect(markers).to_contain("[ai-cli] guest-evidence-required")
+            expect(markers).to_contain("[ai-cli] runtime:start app=codex")
+
+        it "declares RISC-V, x86, and ARM QEMU lanes with serial evidence paths":
+            val lanes = ai_cli_qemu_lanes(codex_cli_smoke_manifest())
+            expect(lanes.len()).to_equal(3)
+            expect(lanes[0].target).to_equal("riscv")
+            expect(lanes[0].qemu_system).to_equal("qemu-system-riscv64")
+            expect(lanes[1].target).to_equal("x86")
+            expect(lanes[1].qemu_system).to_equal("qemu-system-x86_64")
+            expect(lanes[2].target).to_equal("arm")
+            expect(lanes[2].qemu_system).to_equal("qemu-system-aarch64")
+            expect(ai_cli_qemu_lane_summary(lanes[1])).to_contain("serial=build/os/ai-cli-x86_64.serial.log")
+
+        it "accepts only guest serial output that contains every lane marker":
+            val lane = ai_cli_qemu_lane(codex_cli_smoke_manifest(), "x85")
+            val full_serial = lane.marker_fragments.join("\n")
+            val partial_serial = "[ai-cli] qemu-target=x86\n[ai-cli] manifest app=codex runtime=node-compatible"
+
+            expect(ai_cli_qemu_serial_accepts_lane(lane, full_serial)).to_equal(true)
+            expect(ai_cli_qemu_serial_accepts_lane(lane, partial_serial)).to_equal(false)
+            expect(ai_cli_qemu_missing_markers(lane, partial_serial)).to_contain("[ai-cli] guest-evidence-required")
+
+    describe "REQ-007 AC-7: full Node port blocker":
+        it "records the later full Node/V8/libuv implementation layer":
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker).to_contain("Node.js/V8/libuv")
+            expect(blocker).to_contain("later layer")
+
+        it "attaches the runtime artifact blocker to each QEMU lane":
+            val lane = ai_cli_qemu_lane(gemini_cli_smoke_manifest(), "arm")
+            expect(lane.runtime_status).to_equal("blocked-runtime-artifact")
+            expect(lane.blocker).to_contain("Node.js/V8/libuv")
+            expect(lane.marker_fragments).to_contain("[ai-cli] runtime-status=blocked-runtime-artifact")

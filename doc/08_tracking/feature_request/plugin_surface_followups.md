@@ -1,6 +1,6 @@
 # Plugin Surface — Follow-up Feature Requests
 
-**Status: PARTIAL** — FR-PLUG-0001 is implemented in source and verified with a rebuilt debug driver. FR-PLUG-0002 and FR-PLUG-0003 are structurally implemented (pure Simple, no Rust). FR-PLUG-0004 now has pure-Simple static-marker verification, Cranelift single-op runtime-call emission for `MatMul` and broadcast ops, a bounded Cranelift adjacent-pattern fusion gate that emits one GEMM-add runtime import for `MatMul` immediately consumed by `BroadcastAdd`, and a hosted Rust runtime matrix-handle ABI behind `__simple_runtime_gemm_add`. Live backend integration and measured perf delta remain blocked until Cranelift lowering materializes Simple NDArray values as those matrix handles. FR-PLUG-0005 is implemented as an explicit DI runtime-slot index with plugin-backed binding validation and deterministic resolution. See per-item status below.
+**Status: PARTIAL** — FR-PLUG-0001 is implemented in source and verified with a rebuilt debug driver. FR-PLUG-0002 and FR-PLUG-0003 are structurally implemented (pure Simple, no Rust). FR-PLUG-0004 has pure-Simple static-marker verification and focused Cranelift fallback evidence, but remains backend-fusion blocked by missing codegen pattern context. FR-PLUG-0005 is implemented as an explicit DI runtime-slot index with plugin-backed binding validation and deterministic resolution. See per-item status below.
 
 **Verification pass: 2026-05-29** — All five items reviewed against source. No new code added (no live-`.so` fixture available; FR-PLUG-0005 is deep-work). See per-item notes below.
 
@@ -147,19 +147,7 @@ release before the surface is declared stable.
 - **Filed-by:** /dev runtime-api-block-sugar-plugins (sstack Phase 1 explicit defer)
 - **Target:** plugin / 70.backend.cranelift
 - **Priority:** P2
-- **Status:** Open — BACKEND-ABI-BRIDGE-BLOCKED
-- **Status note (2026-05-30):** Cranelift adjacent-pattern context is no longer
-  fully blocked for the simplest `tmp = A @ B; out = tmp broadcast_add C` MIR
-  shape. The adapter now scans adjacent instructions, requires the MatMul
-  destination to be a temp used exactly once, skips the standalone MatMul, and
-  emits a single `__simple_runtime_gemm_add(A, B, C)` import. The hosted Rust
-  runtime now exports that symbol with a concrete `SimpleRuntimeMatrixF64`
-  handle ABI: each i64 argument points at a row-major f64 matrix header carrying
-  rows, cols, len, and data. The helper validates dimensions and returns a new
-  matrix handle for `A * B + C`. FR-PLUG-0004 remains open because current
-  Cranelift lowering still passes existing MIR operands directly; it does not
-  yet lower Simple NDArray values into `SimpleRuntimeMatrixF64` handles, so live
-  fused backend execution and perf proof are not ready.
+- **Status:** Open — BACKEND-PATTERN-BLOCKED
 - **Requested-semantics:**
   AC-3 v1 ships a *dynamic-load* sugar registry consulted by the interpreter.
   The `[STATIC-NEXT]` marker at `c_backend_translate_ops.spl:145` (the
@@ -200,41 +188,12 @@ release before the surface is declared stable.
   closed within plugin/sugar docs/tests alone: codegen needs a real static-rule
   table plus MIR/codegen pattern context for `MatMul` followed by
   `BroadcastAdd`, then a backend emission path for the fused GEMM-add call.
-- **Verification (2026-05-30, backend advance):** Cranelift no longer lowers
-  `MatMul` and broadcast binary ops through the generic integer-add fallback.
-  `cranelift_codegen_adapter.spl` now routes those single MIR ops through
-  imported runtime calls (`__simple_runtime_matmul`,
-  `__simple_runtime_broadcast_add`, and sibling broadcast helpers), matching the
-  C backend's runtime-call shape. Focused spec coverage now fails if the old
-  `Pow, MatMul, Broadcast ops: fall back to integer add` text returns. The
-  smallest remaining missing piece for true PERF-SUGAR-002 fusion is explicit:
-  codegen still visits one `MirInst` at a time and `translate_binop` sees only
-  the current op plus already-lowered operands. To emit
-  `rt_gemm_add(A, B, C, m, n, k)`, MIR/codegen needs adjacent-pattern context
-  for `MatMul` result consumed by `BroadcastAdd`, plus shape/dimension operands
-  (`m`, `n`, `k`) carried into the fused backend call.
-- **Verification (2026-05-30, bounded fusion repair):** Cranelift now scans
-  each block with a one-instruction lookahead before normal instruction
-  translation. `cranelift_gemm_fusion.spl` recognizes adjacent
-  `BinOp(..., MatMul, A, B)` followed by `BinOp(..., BroadcastAdd, tmp, C)` or
-  the commuted addend form, requires `tmp` to be a temporary with exactly one
-  use across the function, and the adapter emits one
-  `__simple_runtime_gemm_add(A, B, C)` import while advancing the instruction
-  cursor by two. `cranelift_runtime_imports.spl` centralizes the i64-handle
-  runtime import declaration/call path used by both fused and unfused matrix
-  operations. Unmatched matrix ops continue through the existing
-  `__simple_runtime_matmul` and `__simple_runtime_broadcast_add` fallbacks.
-  Focused unit coverage in
-  `test/unit/compiler/backend/cranelift_gemm_fusion_spec.spl` exercises the
-  actual detector for fuse/extra-use/non-add cases. Source-level plugin coverage
-  in `test/feature/plugin/sugar_plugin_spec.spl` asserts the adapter wiring, the
-  single fused import, and fallback preservation.
 - **Notes:** Verification of this in interpreter mode is impossible by
   design — needs a Cranelift-mode test harness (see
   `feedback_compile_mode_false_greens.md` for current limitations).
   The `[STATIC-NEXT]` annotation at `collection_desugar.spl` (in the
   `desugar_collections` loop added by FR-PLUG-0003) marks the exact insertion
-  point for this future specialisation.
+  point for this future specialisation. No code changes in this work cycle.
 
 ### FR-PLUG-0005 — DI runtime-slot plugin loader integration
 

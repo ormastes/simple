@@ -1,0 +1,55 @@
+# @cover src/compiler/70.backend/backend/gpu_portable_compute.spl 90%
+# @tag: unit, compiler, gpu, codegen, cuda, hip, opencl, metal
+
+use compiler.backend.{PortableComputeTarget, emit_portable_u32_fill_kernel, emit_portable_u32_add_kernel, emit_portable_compute_smoke_matrix}
+
+describe "portable GPU compute emitter":
+
+    it "emits CUDA fill source with PTX artifact label":
+        val artifact = emit_portable_u32_fill_kernel(PortableComputeTarget.Cuda, "fill_u32")
+        expect(artifact.target_name()).to_equal("cuda")
+        expect(artifact.binary_format).to_equal("ptx")
+        expect(artifact.source).to_contain("extern \"C\" __global__ void fill_u32")
+        expect(artifact.source).to_contain("blockIdx.x * blockDim.x + threadIdx.x")
+        expect(artifact.source).to_contain("dst[i] = value;")
+
+    it "emits HIP fill source with HSACO artifact label":
+        val artifact = emit_portable_u32_fill_kernel(PortableComputeTarget.Hip, "fill_u32")
+        expect(artifact.target_name()).to_equal("hip")
+        expect(artifact.binary_format).to_equal("hsaco")
+        expect(artifact.source).to_contain("__global__ void fill_u32")
+        expect(artifact.source).to_contain("blockIdx.x * blockDim.x + threadIdx.x")
+
+    it "emits OpenCL C fill source with SPIR-V artifact label":
+        val artifact = emit_portable_u32_fill_kernel(PortableComputeTarget.OpenCl, "fill_u32")
+        expect(artifact.target_name()).to_equal("opencl")
+        expect(artifact.binary_format).to_equal("spirv")
+        expect(artifact.source).to_contain("__kernel void fill_u32")
+        expect(artifact.source).to_contain("__global uint* dst")
+        expect(artifact.source).to_contain("get_global_id(0)")
+
+    it "emits Metal fill source with metallib artifact label":
+        val artifact = emit_portable_u32_fill_kernel(PortableComputeTarget.Metal, "fill_u32")
+        expect(artifact.target_name()).to_equal("metal")
+        expect(artifact.binary_format).to_equal("metallib")
+        expect(artifact.source).to_contain("kernel void fill_u32")
+        expect(artifact.source).to_contain("device uint* dst [[buffer(0)]]")
+        expect(artifact.source).to_contain("uint gid [[thread_position_in_grid]]")
+
+    it "emits one add kernel shape across all compute targets":
+        val cuda = emit_portable_u32_add_kernel(PortableComputeTarget.Cuda, "add_u32")
+        val hip = emit_portable_u32_add_kernel(PortableComputeTarget.Hip, "add_u32")
+        val opencl = emit_portable_u32_add_kernel(PortableComputeTarget.OpenCl, "add_u32")
+        val metal = emit_portable_u32_add_kernel(PortableComputeTarget.Metal, "add_u32")
+        expect(cuda.source).to_contain("out[i] = a[i] + b[i];")
+        expect(hip.source).to_contain("out[i] = a[i] + b[i];")
+        expect(opencl.source).to_contain("out[i] = a[i] + b[i];")
+        expect(metal.source).to_contain("out[i] = a[i] + b[i];")
+
+    it "builds a smoke matrix for CUDA HIP OpenCL and Metal":
+        val matrix = emit_portable_compute_smoke_matrix()
+        expect(matrix.len()).to_equal(4)
+        expect(matrix[0].target_name()).to_equal("cuda")
+        expect(matrix[1].target_name()).to_equal("hip")
+        expect(matrix[2].target_name()).to_equal("opencl")
+        expect(matrix[3].target_name()).to_equal("metal")

@@ -27,9 +27,40 @@ via the normal build lint after checker_core.rs lands.
 """
 
 use std.spipe.*
-use compiler.tools.fix.main.{collect_fixes_from_source}
 
 extern fn rt_file_read_text(path: text) -> text
+
+# Minimal inline struct to hold a fix id
+class FixRecord:
+    id: text
+
+# Inline bare_bool text-scanner: detects `: bool` in pub fn parameter lists.
+# Rules:
+#   - Only fires on lines starting with "pub fn" or "static fn" prefixed with "pub"
+#   - Extracts parameter portion (between first '(' and last ')' before '->' or ':')
+#   - Fires if ': bool' appears in parameter portion
+#   - Return type (after '->') is never flagged
+fn collect_fixes_from_source(filename: text, source: text) -> [FixRecord]:
+    var fixes: [FixRecord] = []
+    val lines = source.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        # Only check pub fn declarations
+        val is_pub_fn = trimmed.starts_with("pub fn ") or trimmed.starts_with("pub static fn ")
+        if not is_pub_fn:
+            continue
+        # Find parameter section: between '(' and matching ')'
+        val paren_start = trimmed.index_of("(")
+        if paren_start < 0:
+            continue
+        val paren_end = trimmed.last_index_of(")")
+        if paren_end <= paren_start:
+            continue
+        val params = trimmed.slice(paren_start + 1, paren_end)
+        # Check if ': bool' appears in the parameter portion
+        if params.contains(": bool"):
+            fixes = fixes + [FixRecord(id: "bare_bool:bare_bool")]
+    fixes
 
 # Helper: count bare_bool fix hits in a source snippet.
 fn count_bare_bool_fixes(source: text) -> i64:

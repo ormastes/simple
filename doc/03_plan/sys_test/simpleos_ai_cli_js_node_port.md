@@ -1,7 +1,8 @@
-<!-- codex-plan-draft -->
-# System Test Plan Draft: SimpleOS AI CLI JS/Node Port
+<!-- codex-plan -->
+# System Test Plan: SimpleOS AI CLI JS/Node Port
 
-Status: draft only. Final SPipe specs wait for selected requirements.
+Status: selected contract-first slice implemented for manifest hardening. Full
+QEMU runtime smoke remains pending Node-compatible runtime provisioning.
 
 ## Scenario Families
 
@@ -41,6 +42,8 @@ Use only built-in matchers: `to_equal`, `to_be`, `to_be_nil`, `to_contain`,
 
 `test/system/os/simpleos_ai_cli_js_node_port_spec.spl`
 
+Mirrored manual: `doc/06_spec/system/os/simpleos_ai_cli_js_node_port_spec.md`
+
 ## Evidence To Capture
 
 - Manifest id, runtime kind, and declared grants.
@@ -49,3 +52,11 @@ Use only built-in matchers: `to_equal`, `to_be`, `to_be_nil`, `to_contain`,
 - Guest-side marker for CLI command start.
 - Guest-side marker for each hardening denial.
 - Explicit blocker marker if a target cannot run the selected runtime yet.
+
+## Current Coverage
+
+- REQ-001 through REQ-003: built-in manifest fields, package pins,
+  deterministic summary, and marker data.
+- REQ-004 and REQ-005: invalid manifests and undeclared grant denials.
+- REQ-006: `x85` target normalization to x86.
+- REQ-007: explicit full Node/V8/libuv later-layer blocker.

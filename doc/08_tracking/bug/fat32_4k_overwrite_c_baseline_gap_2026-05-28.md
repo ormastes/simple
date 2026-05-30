@@ -90,19 +90,6 @@ Results:
 - Direct C FAT32 read/write median p50: 32us/39us.
 - Result: `PASS: simple_fat32 is faster than direct C FAT32 for 4K random read/write p50`.
 
-Follow-up recheck on 2026-05-30 after salvage integration:
-
-```text
-SIMPLE_LIB=src bin/simple check test/perf/bench/fat32_4k_compare.spl
-FAT32_4K_RUNS=3 scripts/perf/run-fat32-4k-cfat-baseline.shs
-```
-
-Results:
-
-- Simple FAT32 read/write median p50: 13us/14us.
-- Direct C FAT32 read/write median p50: 33us/29us.
-- Result: `PASS: simple_fat32 is faster than direct C FAT32 for 4K random read/write p50`.
-
 VFAT readiness on 2026-05-30:
 
 ```text

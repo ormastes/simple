@@ -1,0 +1,120 @@
+# Portable GPU compute source emission.
+#
+# This is the first shared surface for CUDA/HIP-like Simple kernels that can be
+# emitted as CUDA, HIP, OpenCL C, or Metal Shading Language without duplicating
+# each kernel body in backend-specific modules.
+
+enum PortableComputeTarget:
+    Cuda
+    Hip
+    OpenCl
+    Metal
+
+enum PortableComputeValueType:
+    U32
+    F32
+
+class PortableComputeArtifact:
+    target: PortableComputeTarget
+    entry_name: text
+    source: text
+    binary_format: text
+
+    fn target_name() -> text:
+        portable_compute_target_name(self.target)
+
+    fn is_source_only() -> bool:
+        self.binary_format == "source"
+
+fn portable_compute_target_name(target: PortableComputeTarget) -> text:
+    match target:
+        case Cuda: "cuda"
+        case Hip: "hip"
+        case OpenCl: "opencl"
+        case Metal: "metal"
+
+fn portable_compute_binary_format(target: PortableComputeTarget) -> text:
+    match target:
+        case Cuda: "ptx"
+        case Hip: "hsaco"
+        case OpenCl: "spirv"
+        case Metal: "metallib"
+
+fn portable_compute_u32_type(target: PortableComputeTarget) -> text:
+    match target:
+        case Cuda: "unsigned int"
+        case Hip: "unsigned int"
+        case OpenCl: "uint"
+        case Metal: "uint"
+
+fn portable_compute_global_ptr(target: PortableComputeTarget, ty: text, name: text) -> text:
+    match target:
+        case Cuda: "{ty}* {name}"
+        case Hip: "{ty}* {name}"
+        case OpenCl: "__global {ty}* {name}"
+        case Metal: "device {ty}* {name} [[buffer(0)]]"
+
+fn portable_compute_const_ptr(target: PortableComputeTarget, ty: text, name: text, binding: i64) -> text:
+    match target:
+        case Cuda: "const {ty}* {name}"
+        case Hip: "const {ty}* {name}"
+        case OpenCl: "__global const {ty}* {name}"
+        case Metal: "device const {ty}* {name} [[buffer({binding})]]"
+
+fn portable_compute_index_expr(target: PortableComputeTarget) -> text:
+    match target:
+        case Cuda: "blockIdx.x * blockDim.x + threadIdx.x"
+        case Hip: "blockIdx.x * blockDim.x + threadIdx.x"
+        case OpenCl: "get_global_id(0)"
+        case Metal: "gid"
+
+fn portable_compute_kernel_prefix(target: PortableComputeTarget, name: text, params: text) -> text:
+    match target:
+        case Cuda: "extern \"C\" __global__ void {name}({params})"
+        case Hip: "extern \"C\" __global__ void {name}({params})"
+        case OpenCl: "__kernel void {name}({params})"
+        case Metal: "kernel void {name}({params}, uint gid [[thread_position_in_grid]])"
+
+fn emit_portable_u32_fill_kernel(target: PortableComputeTarget, name: text) -> PortableComputeArtifact:
+    val ty = portable_compute_u32_type(target)
+    val dst = portable_compute_global_ptr(target, ty, "dst")
+    val params = "{dst}, {ty} value, uint count"
+    val prefix = portable_compute_kernel_prefix(target, name, params)
+    val idx = portable_compute_index_expr(target)
+    val source = "{prefix} {\n    uint i = {idx};\n    if (i >= count) {\n        return;\n    }\n    dst[i] = value;\n}\n"
+    PortableComputeArtifact(
+        target: target,
+        entry_name: name,
+        source: source,
+        binary_format: portable_compute_binary_format(target)
+    )
+
+fn emit_portable_u32_add_kernel(target: PortableComputeTarget, name: text) -> PortableComputeArtifact:
+    val ty = portable_compute_u32_type(target)
+    val a = portable_compute_const_ptr(target, ty, "a", 0)
+    val b = portable_compute_const_ptr(target, ty, "b", 1)
+    val out_binding = if target == PortableComputeTarget.Metal: 2 else: 0
+    val out = portable_compute_global_ptr(target, ty, "out")
+    val params = match target:
+        case Metal: "{a}, {b}, device {ty}* out [[buffer({out_binding})]], uint count"
+        case _: "{a}, {b}, {out}, uint count"
+    val prefix = portable_compute_kernel_prefix(target, name, params)
+    val idx = portable_compute_index_expr(target)
+    val source = "{prefix} {\n    uint i = {idx};\n    if (i >= count) {\n        return;\n    }\n    out[i] = a[i] + b[i];\n}\n"
+    PortableComputeArtifact(
+        target: target,
+        entry_name: name,
+        source: source,
+        binary_format: portable_compute_binary_format(target)
+    )
+
+fn emit_portable_2d_fill_u32_kernel(target: PortableComputeTarget) -> PortableComputeArtifact:
+    emit_portable_u32_fill_kernel(target, "simple_2d_fill_u32")
+
+fn emit_portable_compute_smoke_matrix() -> [PortableComputeArtifact]:
+    [
+        emit_portable_2d_fill_u32_kernel(PortableComputeTarget.Cuda),
+        emit_portable_2d_fill_u32_kernel(PortableComputeTarget.Hip),
+        emit_portable_2d_fill_u32_kernel(PortableComputeTarget.OpenCl),
+        emit_portable_2d_fill_u32_kernel(PortableComputeTarget.Metal)
+    ]
