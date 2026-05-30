@@ -55,6 +55,26 @@ fn try_const_eval(expr: &Expr) -> Option<i64> {
     }
 }
 
+fn has_driver_manifest_attr(attrs: &[ast::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attr| attr.name == "driver" || attr.name == "native_lib")
+}
+
+fn method_with_impl_driver_attrs(
+    method: &ast::FunctionDef,
+    impl_attrs: &[ast::Attribute],
+) -> ast::FunctionDef {
+    if !has_driver_manifest_attr(impl_attrs) || has_driver_manifest_attr(&method.attributes) {
+        return method.clone();
+    }
+    let mut method = method.clone();
+    let mut attrs = impl_attrs.to_vec();
+    attrs.extend(method.attributes);
+    method.attributes = attrs;
+    method
+}
+
 fn try_const_array_eval(expr: &Expr) -> Option<Vec<i64>> {
     match expr {
         Expr::Array(elements) => elements.iter().map(try_const_eval).collect(),
@@ -955,7 +975,8 @@ impl Lowerer {
 
                     if let Some(ref type_name) = type_name {
                         for method in &impl_block.methods {
-                            let hir_func = self.lower_function(method, Some(type_name))?;
+                            let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
+                            let hir_func = self.lower_function(&method, Some(type_name))?;
                             self.module.functions.push(hir_func);
                         }
 
@@ -1208,7 +1229,8 @@ impl Lowerer {
 
                     if let Some(type_name) = type_name {
                         for method in &impl_block.methods {
-                            let hir_func = self.lower_function(method, Some(&type_name))?;
+                            let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
+                            let hir_func = self.lower_function(&method, Some(&type_name))?;
                             self.module.functions.push(hir_func);
                         }
                     }

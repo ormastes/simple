@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use simple_native_loader::RUNTIME_SYMBOL_NAMES;
-use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node, Type, UnitDef};
+use simple_parser::ast::{Attribute, ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node, Type, UnitDef};
 
 use crate::aop_config::AopConfig;
 use crate::di::DiConfig;
@@ -37,6 +37,23 @@ use super::{
 };
 
 type Enums = HashMap<String, Arc<EnumDef>>;
+
+fn has_driver_manifest_attr(attrs: &[Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attr| attr.name == "driver" || attr.name == "native_lib")
+}
+
+fn method_with_impl_driver_attrs(method: &FunctionDef, impl_attrs: &[Attribute]) -> FunctionDef {
+    if !has_driver_manifest_attr(impl_attrs) || has_driver_manifest_attr(&method.attributes) {
+        return method.clone();
+    }
+    let mut method = method.clone();
+    let mut attrs = impl_attrs.to_vec();
+    attrs.extend(method.attributes);
+    method.attributes = attrs;
+    method
+}
 
 /// Call a value (function or lambda) with evaluated arguments.
 /// Used for decorator application where we have Value arguments, not AST Arguments.
@@ -663,27 +680,38 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     let type_name = get_type_name(&impl_block.target_type);
                     let methods = impl_methods.entry(type_name.clone()).or_default();
                     for method in &impl_block.methods {
-                        methods.push(Arc::new(method.clone()));
+                        methods.push(Arc::new(method_with_impl_driver_attrs(method, &impl_block.attributes)));
                     }
 
                     // Populate GLOBAL_IMPL_METHODS for cross-module fallback
                     GLOBAL_IMPL_METHODS.with(|cell| {
                         let mut global_impls = cell.borrow_mut();
                         let global_methods = global_impls.entry(type_name.clone()).or_default();
-                        global_methods.extend(impl_block.methods.iter().map(|m| Arc::new(m.clone())));
+                        global_methods.extend(
+                            impl_block
+                                .methods
+                                .iter()
+                                .map(|m| Arc::new(method_with_impl_driver_attrs(m, &impl_block.attributes))),
+                        );
                     });
 
                     // Also add impl methods to class/struct definition for Constructor method dispatch
                     if let Some(class_def) = classes.get_mut(&type_name) {
-                        Arc::make_mut(class_def).methods.extend(impl_block.methods.clone());
+                        Arc::make_mut(class_def).methods.extend(
+                            impl_block
+                                .methods
+                                .iter()
+                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
+                        );
                     }
 
                     // Register static methods from impl blocks as mangled free functions
                     for method in &impl_block.methods {
+                        let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
                         let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                         if is_static {
                             let mangled = format!("{}__{}", type_name, method.name);
-                            let arc_method = Arc::new(method.clone());
+                            let arc_method = Arc::new(method);
                             functions.insert(mangled.clone(), Arc::clone(&arc_method));
                             FUNCTION_OVERLOADS.with(|cell| {
                                 cell.borrow_mut()

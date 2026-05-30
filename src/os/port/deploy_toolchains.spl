@@ -13,6 +13,8 @@
 ##   bin/simple run src/os/port/deploy_toolchains.spl -- --stage llvm
 ##   bin/simple run src/os/port/deploy_toolchains.spl -- --stage rust
 ##   bin/simple run src/os/port/deploy_toolchains.spl -- --stage test
+##   SIMPLEOS_CLANG_STATIC_GUEST=... SIMPLEOS_RUSTC_STATIC_GUEST=... \
+##     bin/simple run src/os/port/deploy_toolchains.spl -- --stage guest-payloads --enable-toolchain-bake
 ##   bin/simple run src/os/port/deploy_toolchains.spl -- --cross
 ##   bin/simple run src/os/port/deploy_toolchains.spl -- --status
 
@@ -26,6 +28,7 @@ use os.port.guest_toolchain_execution_gate.{
 
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_dir_exists(path: text) -> bool
+extern fn rt_env_get(key: text) -> text?
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
 
@@ -47,6 +50,7 @@ class DeployConfig:
     llvm_jobs: i64        # Parallel jobs for LLVM build (0 = auto)
     skip_tests: bool      # Skip smoke tests after build
     verbose: bool         # Verbose output
+    enable_toolchain_bake: bool # Touch bake marker after validated guest payload import
 
 fn parse_args(args: List<text>) -> DeployConfig:
     var stage = ""
@@ -56,6 +60,7 @@ fn parse_args(args: List<text>) -> DeployConfig:
     var llvm_jobs = 0
     var skip_tests = false
     var verbose = false
+    var enable_toolchain_bake = false
 
     var i = 0
     while i < args.len():
@@ -77,6 +82,8 @@ fn parse_args(args: List<text>) -> DeployConfig:
             skip_tests = true
         else if arg == "--verbose":
             verbose = true
+        else if arg == "--enable-toolchain-bake":
+            enable_toolchain_bake = true
         else if arg == "--help":
             print_help()
             process.exit(0)
@@ -90,6 +97,7 @@ fn parse_args(args: List<text>) -> DeployConfig:
         llvm_jobs: llvm_jobs,
         skip_tests: skip_tests,
         verbose: verbose,
+        enable_toolchain_bake: enable_toolchain_bake,
     )
 
 fn print_help():
@@ -104,12 +112,15 @@ fn print_help():
     print "                      llvm     - Build LLVM/Clang for host"
     print "                      rust     - Build Rust core/alloc"
     print "                      test     - Run smoke tests"
+    print "                      guest-payloads - Import validated static guest compiler payloads"
     print "  --cross           Also build LLVM for self-hosting on SimpleOS"
     print "  --status          Show current build status and exit"
     print "  --target <triple> Target triple (default: x86_64-simpleos)"
     print "  --jobs <N>        Parallel build jobs (default: auto)"
     print "  --skip-tests      Skip smoke tests after build"
     print "  --verbose         Verbose output"
+    print "  --enable-toolchain-bake"
+    print "                    Enable strict disk bake marker after guest payload import"
     print "  --help            Show this help"
 
 # ===========================================================================
@@ -430,6 +441,83 @@ fn stage_cross_build(config: DeployConfig) -> bool:
     true
 
 # ===========================================================================
+# Stage 6: Import validated in-guest static compiler payloads
+# ===========================================================================
+
+fn _validated_payload_copy(label: text, source_path: text, dest_path: text) -> bool:
+    if source_path == "":
+        print "[deploy] ERROR: missing source for {label}"
+        print "[deploy]   Set SIMPLEOS_{label}_STATIC_GUEST to a static ELF64 x86_64 payload."
+        return false
+    if not rt_file_exists(source_path):
+        print "[deploy] ERROR: {label} source does not exist: {source_path}"
+        return false
+
+    val source_detail = guest_toolchain_static_payload_detail(
+        source_path,
+        rt_file_read_bytes(source_path) ?? [],
+    )
+    if source_detail != "READY":
+        print "[deploy] ERROR: invalid {label} source: {source_detail}"
+        return false
+
+    val mkdir_result = process.run("mkdir", ["-p", if label == "CLANG": "build/os/clang_static/bin" else: "build/os/rust_static/bin"])
+    if mkdir_result.exit_code != 0:
+        print "[deploy] ERROR: failed to create payload directory for {label}"
+        print mkdir_result.stderr
+        return false
+
+    val copy_result = process.run("cp", [source_path, dest_path])
+    if copy_result.exit_code != 0:
+        print "[deploy] ERROR: failed to copy {label} payload to {dest_path}"
+        print copy_result.stderr
+        return false
+
+    val dest_detail = guest_toolchain_static_payload_detail(
+        dest_path,
+        rt_file_read_bytes(dest_path) ?? [],
+    )
+    if dest_detail != "READY":
+        print "[deploy] ERROR: copied {label} payload failed validation: {dest_detail}"
+        return false
+
+    print "[deploy] {label} static guest payload ready: {dest_path}"
+    true
+
+fn stage_import_guest_payloads(config: DeployConfig) -> bool:
+    """Import externally built static clang/rustc payloads into canonical bake paths."""
+    print ""
+    print "=== Stage 6: Import Static Guest Compiler Payloads ==="
+    print ""
+    print "[deploy] This stage never builds placeholder compilers; inputs must already be real static ELF64 x86_64 binaries."
+
+    val clang_source = rt_env_get("SIMPLEOS_CLANG_STATIC_GUEST") ?? ""
+    val rustc_source = rt_env_get("SIMPLEOS_RUSTC_STATIC_GUEST") ?? ""
+
+    val clang_ok = _validated_payload_copy("CLANG", clang_source, "build/os/clang_static/bin/clang_static")
+    val rustc_ok = _validated_payload_copy("RUSTC", rustc_source, "build/os/rust_static/bin/rustc_static")
+    if not (clang_ok and rustc_ok):
+        print "[deploy] guest payload import blocked; disk bake marker left unchanged."
+        return false
+
+    if config.enable_toolchain_bake:
+        val mkdir_result = process.run("mkdir", ["-p", "build/os"])
+        if mkdir_result.exit_code != 0:
+            print "[deploy] ERROR: failed to create build/os for bake marker"
+            print mkdir_result.stderr
+            return false
+        val touch_result = process.run("touch", ["build/os/.bake_include_toolchain"])
+        if touch_result.exit_code != 0:
+            print "[deploy] ERROR: failed to enable toolchain disk bake marker"
+            print touch_result.stderr
+            return false
+        print "[deploy] toolchain disk bake marker enabled: build/os/.bake_include_toolchain"
+    else:
+        print "[deploy] toolchain disk bake marker not enabled; pass --enable-toolchain-bake after validating payload provenance."
+
+    true
+
+# ===========================================================================
 # Main entry point
 # ===========================================================================
 
@@ -460,9 +548,11 @@ fn main():
             stage_run_tests()
         else if config.stage == "cross":
             stage_cross_build(config)
+        else if config.stage == "guest-payloads":
+            stage_import_guest_payloads(config)
         else:
             print "Unknown stage: {config.stage}"
-            print "Valid stages: sysroot, llvm, rust, test, cross"
+            print "Valid stages: sysroot, llvm, rust, test, cross, guest-payloads"
             false
 
         if not ok:
@@ -487,7 +577,7 @@ fn main():
 
     # Stage 2: LLVM (optional -- may not have LLVM source)
     var llvm_ok = true
-    val llvm_src_dir = process.env("LLVM_SRC")
+    val llvm_src_dir = rt_env_get("LLVM_SRC") ?? ""
     if llvm_src_dir != "" or rt_dir_exists("llvm-project"):
         llvm_ok = stage_build_llvm(config)
     else:
@@ -529,6 +619,14 @@ fn main():
         results = results + [StageStatus(
             name: "cross-build",
             status: if cross_ok: "OK" else: "FAILED",
+            detail: "",
+        )]
+
+    if config.enable_toolchain_bake:
+        var payload_ok = stage_import_guest_payloads(config)
+        results = results + [StageStatus(
+            name: "guest-payloads",
+            status: if payload_ok: "OK" else: "FAILED",
             detail: "",
         )]
 

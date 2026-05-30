@@ -408,6 +408,13 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_db_get_int_by_pk",
     "rt_db_update_int",
     "rt_db_update_text",
+    // Hosted linalg matrix-handle ABI.
+    "__simple_runtime_matrix_f64_new",
+    "__simple_runtime_matrix_f64_free",
+    "__simple_runtime_matrix_f64_rows",
+    "__simple_runtime_matrix_f64_cols",
+    "__simple_runtime_matrix_f64_get",
+    "__simple_runtime_gemm_add",
     // Integer-PK DB operations (zero string alloc from caller)
     "rt_db_iput3",
     "rt_db_iget_int",

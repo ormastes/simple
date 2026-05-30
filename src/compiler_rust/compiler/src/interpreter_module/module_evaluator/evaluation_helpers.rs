@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use tracing::{trace, warn};
 
-use simple_parser::ast::{ClassDef, Expr, ImportTarget, Node, Pattern, Visibility};
+use simple_parser::ast::{Attribute, ClassDef, Expr, FunctionDef, ImportTarget, Node, Pattern, Visibility};
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
@@ -20,6 +20,23 @@ use crate::interpreter::module_cache::filter_functions_from_value;
 
 type Enums = HashMap<String, Arc<simple_parser::ast::EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>;
+
+fn has_driver_manifest_attr(attrs: &[Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attr| attr.name == "driver" || attr.name == "native_lib")
+}
+
+fn method_with_impl_driver_attrs(method: &FunctionDef, impl_attrs: &[Attribute]) -> FunctionDef {
+    if !has_driver_manifest_attr(impl_attrs) || has_driver_manifest_attr(&method.attributes) {
+        return method.clone();
+    }
+    let mut method = method.clone();
+    let mut attrs = impl_attrs.to_vec();
+    attrs.extend(method.attributes);
+    method.attributes = attrs;
+    method
+}
 
 use crate::interpreter::evaluate_expr;
 use crate::interpreter::MODULE_GLOBALS;
