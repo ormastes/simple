@@ -721,5 +721,9 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
     `cargo test --manifest-path /tmp/simple-final-sync/src/compiler_rust/parser/Cargo.toml --test statements -- parse_bare_expect_parenthesized_comparison_as_single_argument --nocapture`
     and
     `SIMPLE_LIB=/tmp/simple-final-sync/src /tmp/simple-final-sync/src/compiler_rust/target/debug/simple test test/feature/usage/parser_keywords_spec.spl --mode=interpreter --clean --fail-fast`.
-  - `parser_operators_spec.spl` logical cases pass with the rebuilt binary, but
-    the full file still has unrelated assignment-operator failures.
+  - Follow-up 2026-05-30: the unrelated full-file failure in
+    `parser_operators_spec.spl` was fixed by routing BDD block augmented
+    assignments through the normal interpreter augmented-assignment path.
+    Verification now passes with the rebuilt release compiler:
+    `parser_operators_spec.spl` (`48/48`) and `parser_keywords_spec.spl`
+    (`22/22`).

@@ -1236,3 +1236,60 @@ Spawned read-only explorers:
       than false completion claims.
     - Integration was done from a clean `origin/main` worktree because the
       default checkout had concurrent live edits and `jj` conflict state.
+81. FAT32 4K overwrite baseline gap closed with external VFAT blocker.
+    - Integrated the leftover `/tmp/simple-fat32-gap` tracker/SPipe evidence.
+    - Reverified the direct-C gate:
+      `SIMPLE_LIB=src bin/simple check test/perf/bench/fat32_4k_compare.spl`
+      passed and
+      `FAT32_4K_RUNS=3 scripts/perf/run-fat32-4k-cfat-baseline.shs`
+      passed with Simple median p50 13us/14us versus direct C 33us/29us.
+    - Required VFAT gate fails cleanly before benchmarking because
+      `/tmp/simple_vfat_bench_mnt` is vfat but root-owned, unseeded,
+      unwritable, and passwordless sudo is unavailable. Remaining action is
+      operational, not repository code.
+82. FR-PLUG-0004 backend fallback improved; true fusion remains open.
+    - Cranelift now routes single `MatMul` and broadcast MIR ops through
+      runtime calls instead of the generic integer-add fallback.
+    - Verification passed:
+      `SIMPLE_LIB=/tmp/simple-next-main/src bin/simple check src/compiler/70.backend/backend/cranelift_codegen_adapter.spl test/feature/plugin/sugar_plugin_spec.spl`
+      and
+      `SIMPLE_LIB=/tmp/simple-next-main/src bin/simple test test/feature/plugin/sugar_plugin_spec.spl --mode=interpreter --clean --fail-fast`
+      (`14/14`).
+    - Remaining blocker: real `rt_gemm_add(A, B, C, m, n, k)` fusion needs
+      MIR/codegen adjacent-pattern context and shape operands.
+83. Parser operator follow-up completed.
+    - Fixed BDD block execution so `+=`, `-=`, `*=`, `/=`, and `%=` use the
+      normal interpreter augmented-assignment path instead of being treated as
+      plain `=`.
+    - Verification passed with rebuilt release compiler:
+      `parser_operators_spec.spl` (`48/48`) and `parser_keywords_spec.spl`
+      (`22/22`).
+84. FR-DRIVER-0001 function-level live path bridged.
+    - Added Rust seed AST-interpreter fallback synthesis for stub-only
+      function-level `@driver(..., ops=...)`, mirroring the HIR bridge and
+      self-hosted synthetic-registration path.
+    - Added live system proof and SPipe mirror:
+      `test/system/compiler/driver_synthetic_registration_live_spec.spl` and
+      `doc/06_spec/app/compiler/feature/driver_synthetic_registration_live_spec.spl`.
+    - Verification passed with rebuilt release compiler for both specs.
+    - Remaining driver scope: module/impl-level `@driver(...)` sugar and
+      `@native_lib(...)` synthesis remain open.
+
+## Remaining Open Work After 2026-05-30 Salvage
+
+- Ctype perf: native static/global `[u8]` LUT checksum corruption and broader
+  native loop/branch performance remain open; the ctype backend agent is still
+  investigating.
+- FR-PLUG-0004: single-op runtime-call emission is landed, but true GEMM-add
+  fusion and performance proof remain open.
+- FR-DRIVER-0001: function-level live bridge is landed, but module/impl-level
+  sugar and `@native_lib(...)` synthesis remain open.
+- SimpleOS in-guest toolchain execution: status gate is landed, but real
+  `clang_static`/`rustc_static` payloads and live QEMU compiler execution
+  evidence remain open.
+- NDArray push: no ndarray work was found in `/tmp/simple-ndarray-push`; the
+  detached commit there is unrelated and should be preserved or explicitly
+  discarded before removing that worktree.
+- Default checkout health: `/home/ormastes/dev/pub/simple` still has separate
+  concurrent dirty edits; integration work is being done from clean detached
+  `origin/main` worktrees to avoid mixing unrelated changes.
