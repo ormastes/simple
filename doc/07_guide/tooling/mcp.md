@@ -29,6 +29,17 @@ Install platform-specific config automatically:
 sh config/mcp/install.shs
 ```
 
+On Windows PowerShell or CMD environments where `sh` is not installed, use the
+native installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File config\mcp\install.ps1
+```
+
+The Windows installer writes `config\mcp\win\.mcp.json` to the project root and
+registers Codex MCP servers directly against `bin\simple_mcp_server.cmd` and
+`bin\simple_lsp_mcp_server.cmd`.
+
 ### Claude Desktop
 
 Configure in the Claude Desktop config file:

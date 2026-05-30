@@ -69,17 +69,30 @@ mod cuda_dlopen {
 
     pub fn load_cuda() -> Option<CudaFns> {
         unsafe {
-            let lib_name = CString::new("libcuda.so.1").ok()?;
-            let handle = libc::dlopen(lib_name.as_ptr(), libc::RTLD_LAZY);
-            if handle.is_null() {
-                let lib_name2 = CString::new("libcuda.so").ok()?;
-                let handle2 = libc::dlopen(lib_name2.as_ptr(), libc::RTLD_LAZY);
-                if handle2.is_null() {
+            #[cfg(unix)]
+            {
+                let lib_name = CString::new("libcuda.so.1").ok()?;
+                let handle = libc::dlopen(lib_name.as_ptr(), libc::RTLD_LAZY);
+                if handle.is_null() {
+                    let lib_name2 = CString::new("libcuda.so").ok()?;
+                    let handle2 = libc::dlopen(lib_name2.as_ptr(), libc::RTLD_LAZY);
+                    if handle2.is_null() {
+                        return None;
+                    }
+                    return load_syms(handle2);
+                }
+                load_syms(handle)
+            }
+            #[cfg(windows)]
+            {
+                use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
+                let lib_name = CString::new("nvcuda.dll").ok()?;
+                let handle = LoadLibraryA(lib_name.as_ptr() as *const u8);
+                if handle.is_null() {
                     return None;
                 }
-                return load_syms(handle2);
+                load_syms(handle as *mut c_void)
             }
-            load_syms(handle)
         }
     }
 
@@ -87,7 +100,16 @@ mod cuda_dlopen {
         macro_rules! sym {
             ($name:expr) => {{
                 let n = CString::new($name).ok()?;
+                #[cfg(unix)]
                 let p = libc::dlsym(handle, n.as_ptr());
+                #[cfg(windows)]
+                let p = {
+                    use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+                    match GetProcAddress(handle as _, n.as_ptr() as *const u8) {
+                        Some(f) => f as *mut c_void,
+                        None => std::ptr::null_mut(),
+                    }
+                };
                 if p.is_null() {
                     return None;
                 }
@@ -2106,25 +2128,55 @@ mod vulkan_dlopen {
 
     pub fn load_vulkan() -> Option<VkFns> {
         unsafe {
-            let names = &["libvulkan.so.1", "libvulkan.so"];
-            let handle = names.iter().find_map(|name| {
-                let n = CString::new(*name).ok()?;
-                let h = libc::dlopen(n.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
-                if h.is_null() {
-                    None
-                } else {
-                    Some(h)
-                }
-            })?;
-            load_vk_syms(handle)
+            #[cfg(unix)]
+            {
+                let names = &["libvulkan.so.1", "libvulkan.so"];
+                let handle = names.iter().find_map(|name| {
+                    let n = CString::new(*name).ok()?;
+                    let h = libc::dlopen(n.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
+                    if h.is_null() {
+                        None
+                    } else {
+                        Some(h)
+                    }
+                })?;
+                load_vk_syms(handle)
+            }
+            #[cfg(windows)]
+            {
+                let handle = load_library(&["vulkan-1.dll"])?;
+                load_vk_syms(handle)
+            }
         }
+    }
+
+    #[cfg(windows)]
+    unsafe fn load_library(names: &[&str]) -> Option<*mut c_void> {
+        use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
+        for name in names {
+            let n = CString::new(*name).ok()?;
+            let handle = LoadLibraryA(n.as_ptr() as *const u8);
+            if !handle.is_null() {
+                return Some(handle as *mut c_void);
+            }
+        }
+        None
     }
 
     unsafe fn load_vk_syms(handle: *mut c_void) -> Option<VkFns> {
         macro_rules! sym {
             ($name:expr) => {{
                 let n = CString::new($name).ok()?;
+                #[cfg(unix)]
                 let p = libc::dlsym(handle, n.as_ptr());
+                #[cfg(windows)]
+                let p = {
+                    use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+                    match GetProcAddress(handle as _, n.as_ptr() as *const u8) {
+                        Some(f) => f as *mut c_void,
+                        None => std::ptr::null_mut(),
+                    }
+                };
                 if p.is_null() {
                     return None;
                 }
@@ -2181,20 +2233,34 @@ mod vulkan_dlopen {
 
     pub fn load_shaderc() -> Option<ShadercFns> {
         unsafe {
-            let names = &["libshaderc_shared.so.1", "libshaderc_shared.so"];
-            let handle = names.iter().find_map(|name| {
-                let n = CString::new(*name).ok()?;
-                let h = libc::dlopen(n.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
-                if h.is_null() {
-                    None
-                } else {
-                    Some(h)
-                }
-            })?;
+            #[cfg(unix)]
+            let handle = {
+                let names = &["libshaderc_shared.so.1", "libshaderc_shared.so"];
+                names.iter().find_map(|name| {
+                    let n = CString::new(*name).ok()?;
+                    let h = libc::dlopen(n.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
+                    if h.is_null() {
+                        None
+                    } else {
+                        Some(h)
+                    }
+                })?
+            };
+            #[cfg(windows)]
+            let handle = load_library(&["shaderc_shared.dll", "shaderc.dll"])?;
             macro_rules! sym {
                 ($name:expr) => {{
                     let n = CString::new($name).ok()?;
+                    #[cfg(unix)]
                     let p = libc::dlsym(handle, n.as_ptr());
+                    #[cfg(windows)]
+                    let p = {
+                        use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+                        match GetProcAddress(handle as _, n.as_ptr() as *const u8) {
+                            Some(f) => f as *mut c_void,
+                            None => std::ptr::null_mut(),
+                        }
+                    };
                     if p.is_null() {
                         return None;
                     }
@@ -3289,7 +3355,7 @@ pub fn rt_vulkan_dispatch_fn(args: &[Value]) -> Result<Value, CompileError> {
         let memory_barrier = vulkan_dlopen::VkMemoryBarrier {
             s_type: 6,
             p_next: ptr::null(),
-            src_access_mask: 0x40,  // VK_ACCESS_SHADER_WRITE_BIT
+            src_access_mask: 0x40,   // VK_ACCESS_SHADER_WRITE_BIT
             dst_access_mask: 0x2000, // VK_ACCESS_HOST_READ_BIT
         };
         (s.fns.cmd_pipeline_barrier)(

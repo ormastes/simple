@@ -46,30 +46,37 @@ fn install_parent_death_watchdog() {
     if WATCHDOG_INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }
-    let enabled = std::env::var("SIMPLE_PARENT_DEATH_EXIT")
-        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
-    if !enabled {
+    #[cfg(not(unix))]
+    {
         return;
     }
-    let initial_ppid = unsafe { libc::getppid() };
-    if initial_ppid <= 1 {
-        // Already orphaned or invalid — nothing to watch.
-        return;
+    #[cfg(unix)]
+    {
+        let enabled = std::env::var("SIMPLE_PARENT_DEATH_EXIT")
+            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        if !enabled {
+            return;
+        }
+        let initial_ppid = unsafe { libc::getppid() };
+        if initial_ppid <= 1 {
+            // Already orphaned or invalid — nothing to watch.
+            return;
+        }
+        let _ = std::thread::Builder::new()
+            .name("simple-parent-death-watchdog".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let current_ppid = unsafe { libc::getppid() };
+                if current_ppid == 1 || current_ppid != initial_ppid {
+                    eprintln!(
+                        "[simple-runtime] parent died (ppid {} -> {}), exiting",
+                        initial_ppid, current_ppid
+                    );
+                    std::process::exit(0);
+                }
+            });
     }
-    let _ = std::thread::Builder::new()
-        .name("simple-parent-death-watchdog".into())
-        .spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            let current_ppid = unsafe { libc::getppid() };
-            if current_ppid == 1 || current_ppid != initial_ppid {
-                eprintln!(
-                    "[simple-runtime] parent died (ppid {} -> {}), exiting",
-                    initial_ppid, current_ppid
-                );
-                std::process::exit(0);
-            }
-        });
 }
 
 /// Set program arguments from argc/argv (called once at startup).

@@ -136,7 +136,7 @@ impl LoadedNativeLib {
 
     #[cfg(windows)]
     pub fn load_shared(name: String, path: &Path) -> Result<Self, String> {
-        use std::os::windows::sffi::OsStrExt;
+        use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
 
         let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -235,7 +235,7 @@ impl LoadedNativeLib {
 
     #[cfg(windows)]
     pub fn load_system(name: String) -> Result<Self, String> {
-        use std::os::windows::sffi::OsStrExt;
+        use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
 
         let dll_name = format!("{}.dll", name);

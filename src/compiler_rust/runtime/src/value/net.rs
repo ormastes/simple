@@ -9,7 +9,9 @@ use socket2::Socket;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
@@ -354,7 +356,53 @@ include!("net_http_stub.rs");
 // Unix-domain socket SFFI functions (extracted to net_uds.rs)
 // Added 2026-04-26 for jj-wrapper-daemon (D-4 / SJ-UDS-001)
 // ============================================================================
+#[cfg(unix)]
 include!("net_uds.rs");
+
+#[cfg(windows)]
+mod net_uds_windows {
+    const NEG_ENOSYS: i64 = -38;
+    const NEG_EINVAL: i64 = -22;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_unix_socket_listen(_path_ptr: i64, _path_len: i64, _backlog: i32) -> i64 {
+        NEG_ENOSYS
+    }
+
+    #[no_mangle]
+    pub extern "C" fn rt_unix_socket_accept(_fd: i64) -> i64 {
+        NEG_ENOSYS
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_unix_socket_send(_fd: i64, data_ptr: i64, data_len: i64) -> i64 {
+        if data_ptr == 0 || data_len < 0 {
+            return NEG_EINVAL;
+        }
+        NEG_ENOSYS
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_unix_socket_recv(_fd: i64, _max_len: i64, out_len: *mut i64) -> i64 {
+        if !out_len.is_null() {
+            *out_len = NEG_ENOSYS;
+        }
+        0
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_unix_socket_free_buf(_ptr: i64, _len: i64) {}
+
+    #[no_mangle]
+    pub extern "C" fn rt_unix_socket_close(_fd: i64) -> i32 {
+        NEG_ENOSYS as i32
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_unix_socket_connect(_path_ptr: i64, _path_len: i64) -> i64 {
+        NEG_ENOSYS
+    }
+}
 
 // ============================================================================
 // Registry Cleanup (for test isolation)

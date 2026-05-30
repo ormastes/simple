@@ -7,16 +7,49 @@
 
 #include <stdint.h>
 #include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+
+static int64_t win_filetime_unix_micros(void) {
+    FILETIME ft;
+    GetSystemTimePreciseAsFileTime(&ft);
+    ULARGE_INTEGER uli;
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    return (int64_t)((uli.QuadPart - 116444736000000000ULL) / 10ULL);
+}
+
+static int64_t win_monotonic_nanos(void) {
+    static LARGE_INTEGER freq;
+    static LARGE_INTEGER start;
+    static int initialized = 0;
+    LARGE_INTEGER now;
+    if (!initialized) {
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&start);
+        initialized = 1;
+    }
+    QueryPerformanceCounter(&now);
+    return (int64_t)(((now.QuadPart - start.QuadPart) * 1000000000LL) / freq.QuadPart);
+}
+#endif
 
 /* ---- Wall clock: microseconds since Unix epoch ---- */
 int64_t rt_time_now_unix_micros(void) {
+#ifdef _WIN32
+    return win_filetime_unix_micros();
+#else
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+#endif
 }
 
 /* ---- Monotonic clock: nanoseconds from process-local epoch ---- */
 int64_t rt_time_now_nanos(void) {
+#ifdef _WIN32
+    return win_monotonic_nanos();
+#else
     static struct timespec start;
     static int initialized = 0;
     if (!initialized) {
@@ -28,6 +61,7 @@ int64_t rt_time_now_nanos(void) {
     int64_t diff = (int64_t)(now.tv_sec - start.tv_sec) * 1000000000LL
                  + (int64_t)(now.tv_nsec - start.tv_nsec);
     return diff < 0 ? 0 : diff;
+#endif
 }
 
 /* ---- Monotonic clock: microseconds (= nanos / 1000) ---- */
@@ -37,9 +71,13 @@ int64_t rt_time_now_micros(void) {
 
 /* ---- Unix timestamp in seconds as f64 (fractional) ---- */
 double rt_time_now_seconds_f64(void) {
+#ifdef _WIN32
+    return (double)rt_time_now_unix_micros() / 1000000.0;
+#else
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+#endif
 }
 
 /* ---- Civil date helpers (Howard Hinnant algorithm) ----
@@ -149,20 +187,37 @@ int64_t rt_timestamp_diff_days(int64_t micros1, int64_t micros2) {
 }
 
 /* ---- Progress tracking (process-local monotonic timer) ---- */
-static struct timespec g_progress_start;
 static int g_progress_initialized = 0;
+#ifndef _WIN32
+static struct timespec g_progress_start;
+#endif
 
 void rt_progress_init(void) {
+#ifdef _WIN32
+    g_progress_initialized = 1;
+#else
     clock_gettime(CLOCK_MONOTONIC, &g_progress_start);
     g_progress_initialized = 1;
+#endif
 }
 
 void rt_progress_reset(void) {
+#ifdef _WIN32
+    g_progress_initialized = 1;
+#else
     clock_gettime(CLOCK_MONOTONIC, &g_progress_start);
     g_progress_initialized = 1;
+#endif
 }
 
 double rt_progress_get_elapsed_seconds(void) {
+#ifdef _WIN32
+    if (!g_progress_initialized) {
+        rt_progress_init();
+        return 0.0;
+    }
+    return (double)rt_time_now_nanos() / 1000000000.0;
+#else
     if (!g_progress_initialized) {
         rt_progress_init();
         return 0.0;
@@ -172,4 +227,5 @@ double rt_progress_get_elapsed_seconds(void) {
     double secs = (double)(now.tv_sec  - g_progress_start.tv_sec)
                 + (double)(now.tv_nsec - g_progress_start.tv_nsec) / 1e9;
     return secs < 0.0 ? 0.0 : secs;
+#endif
 }

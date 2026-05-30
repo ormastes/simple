@@ -4,6 +4,10 @@ use std::time::{Duration, Instant};
 
 use crate::value::{rt_string_new, RuntimeValue};
 
+const NEG_ENOSYS: i64 = -38;
+#[cfg(windows)]
+const NEG_EIO: i64 = -5;
+
 #[derive(Clone)]
 struct Completion {
     id: i64,
@@ -123,8 +127,14 @@ fn with_driver_mut<R>(handle: i64, f: impl FnOnce(&mut Driver) -> R) -> Option<R
     Some(f(driver))
 }
 
+#[cfg(unix)]
 fn os_error_code() -> i64 {
     -(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO) as i64)
+}
+
+#[cfg(windows)]
+fn os_error_code() -> i64 {
+    -(io::Error::last_os_error().raw_os_error().unwrap_or(NEG_EIO as i32) as i64)
 }
 
 unsafe fn bytes_from_raw<'a>(ptr: *const u8, len: i64) -> Option<&'a [u8]> {
@@ -152,6 +162,7 @@ fn data_completion(id: i64, result: i64, data: Vec<u8>) -> Completion {
     }
 }
 
+#[cfg(unix)]
 fn execute_operation(operation: Operation) -> Completion {
     match operation {
         Operation::Accept { id, listen_fd } => {
@@ -258,6 +269,27 @@ fn execute_operation(operation: Operation) -> Completion {
     }
 }
 
+#[cfg(windows)]
+fn execute_operation(operation: Operation) -> Completion {
+    match operation {
+        Operation::Timeout { id, timeout_ms } => {
+            if timeout_ms > 0 {
+                std::thread::sleep(Duration::from_millis(timeout_ms as u64));
+            }
+            completion(id, 0)
+        }
+        Operation::Accept { id, .. }
+        | Operation::Recv { id, .. }
+        | Operation::Send { id, .. }
+        | Operation::Sendfile { id, .. }
+        | Operation::Read { id, .. }
+        | Operation::Write { id, .. }
+        | Operation::Open { id, .. }
+        | Operation::Close { id, .. }
+        | Operation::Fsync { id, .. } => completion(id, NEG_ENOSYS),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_driver_create(queue_depth: i64) -> i64 {
     let mut guard = match drivers().lock() {
@@ -298,7 +330,7 @@ pub unsafe extern "C" fn rt_driver_submit_connect(
     _addr_len: i64,
     _port: i64,
 ) -> i64 {
-    -(libc::ENOSYS as i64)
+    NEG_ENOSYS
 }
 
 #[no_mangle]

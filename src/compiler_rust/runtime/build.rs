@@ -106,54 +106,29 @@ fn main() {
 fn compile_c_runtime_sources() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let runtime_c_dir = manifest_dir.join("../../runtime");
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
-
     let c_sources = ["runtime_memory.c", "runtime_time.c", "runtime_db.c"];
-    let mut objects = Vec::new();
 
+    let mut build = cc::Build::new();
+    build.opt_level(2).warnings(false);
+    if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
+        build.flag_if_supported("-std=gnu11");
+    }
     for source in &c_sources {
         let src_path = runtime_c_dir.join(source);
-        if !src_path.exists() {
-            continue;
-        }
-        let obj_name = source.replace(".c", ".o");
-        let obj_path = out_dir.join(&obj_name);
-        let status = std::process::Command::new("cc")
-            .arg("-c")
-            .arg("-O2")
-            .arg("-fPIC")
-            .arg("-std=gnu11")
-            .arg(&src_path)
-            .arg("-o")
-            .arg(&obj_path)
-            .status();
-        if let Ok(s) = status {
-            if s.success() {
-                objects.push(obj_path);
-            }
+        if src_path.exists() {
+            build.file(src_path);
         }
     }
+    build.compile("runtime_sffi_c");
 
-    if !objects.is_empty() {
-        let archive = out_dir.join("libruntime_sffi_c.a");
-        let mut cmd = std::process::Command::new("ar");
-        cmd.arg("rcs").arg(&archive);
-        for obj in &objects {
-            cmd.arg(obj);
-        }
-        if let Ok(s) = cmd.status() {
-            if s.success() {
-                println!("cargo:rustc-link-search=native={}", out_dir.display());
-                println!("cargo:rustc-link-lib=static=runtime_sffi_c");
-                println!("cargo:rustc-link-lib=dylib=m");
-                // openpty / forkpty live in libutil on Linux and most BSDs.
-                // On macOS they are part of libc itself; on Windows the functions don't exist.
-                let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-                if matches!(target_os.as_str(), "linux" | "freebsd" | "netbsd" | "openbsd") {
-                    println!("cargo:rustc-link-lib=dylib=util");
-                }
-            }
-        }
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os != "windows" {
+        println!("cargo:rustc-link-lib=dylib=m");
+    }
+    // openpty / forkpty live in libutil on Linux and most BSDs.
+    // On macOS they are part of libc itself; on Windows the functions don't exist.
+    if matches!(target_os.as_str(), "linux" | "freebsd" | "netbsd" | "openbsd") {
+        println!("cargo:rustc-link-lib=dylib=util");
     }
 }
 
