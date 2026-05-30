@@ -44,6 +44,33 @@ Current direct serial result after reverting the rejected SHA route:
 This means the latest dirty-tree live state is broader than the 2026-04-28
 baseline and should be re-narrowed before changing SHA internals again.
 
+## 2026-05-30 Update 2: A1 narrowed to C seed helper multi-block SHA
+
+Added live diagnostics to `examples/simple_os/arch/x86_64/tls_unit_entry.spl`
+and `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`.
+
+Findings:
+- `rt_tls13_hkdf_extract_into` receives the correct RFC 5869 TC1 inputs:
+  `salt_len=13`, `ikm_len=22`, `salt0=0`, `salt12=12`, `ikm0=11`.
+- Direct `rt_tls13_sha256("abc")` is correct at the checked bytes:
+  `186 120 22 191 ... 242 0 21 173`.
+- The C helper HMAC inner hash for `SHA256(ipad || ikm)` is wrong:
+  observed first bytes `166 198 87 31`; expected
+  `244 47 229 74`.
+- The final helper PRK is therefore wrong:
+  observed `81 245 248 101 ... 172 152 252 48`; expected
+  `7 119 9 54 ... 215 194 179 229`.
+- Rewriting `_tls_hmac_sha256` to build one-shot `ipad || data` and
+  `opad || inner_hash` buffers did not change the result.
+- Rewriting `_tls_sha256_digest` to one-shot pad/process all blocks also did
+  not change the result.
+
+Conclusion: the current A1 blocker is inside `_tls_sha256_process_block` when
+hashing more than one block in the baremetal C seed helper. Empty and short
+one-block SHA probes are insufficient evidence. Next repair should add a
+two-block C helper SHA probe and fix `_tls_sha256_process_block` or replace it
+with a known-good one-shot implementation verified against an 86-byte vector.
+
 ## 2026-04-28 Update: Compiler-side hypothesis disproven
 
 The original A2 root-cause hypothesis was **indexed `[u32]` reads lower as

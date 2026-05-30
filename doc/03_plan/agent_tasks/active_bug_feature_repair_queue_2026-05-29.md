@@ -1139,3 +1139,15 @@ Spawned read-only explorers:
       failing in the dirty tree. Next repair should re-narrow
       `rt_tls13_hkdf_extract_into` byte materialization/output writing before
       touching SHA internals again.
+75. TLS live A1 re-narrowed to baremetal C seed SHA multi-block helper.
+    - Confirmed `rt_tls13_hkdf_extract_into` receives the correct RFC 5869 TC1
+      salt and IKM bytes.
+    - Confirmed direct C helper `rt_tls13_sha256("abc")` matches checked RFC
+      bytes, so one-block helper SHA is not the failing case.
+    - Confirmed C helper HMAC inner SHA over `ipad || ikm` is wrong before the
+      final HMAC stage, isolating the immediate A1 failure to multi-block
+      `_tls_sha256_process_block` behavior in
+      `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`.
+    - Tried one-shot HMAC and one-shot SHA digest wrappers; neither changed the
+      live result. Next step is replacing or fixing `_tls_sha256_process_block`
+      against an 86-byte/multi-block vector.

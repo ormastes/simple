@@ -9537,10 +9537,37 @@ static void _tls_sha256_final(TlsSha256Ctx *ctx, uint8_t out[32])
 
 static void _tls_sha256_digest(const uint8_t *msg, uint32_t msg_len, uint8_t out[32])
 {
-    TlsSha256Ctx ctx;
-    _tls_sha256_init(&ctx);
-    _tls_sha256_update(&ctx, msg, msg_len);
-    _tls_sha256_final(&ctx, out);
+    uint64_t bit_len = (uint64_t)msg_len * 8ULL;
+    uint32_t padded_len = msg_len + 1U + 8U;
+    uint32_t rem = padded_len % 64U;
+    if (rem != 0U) padded_len += 64U - rem;
+    uint8_t padded_stack[256];
+    uint8_t *padded = padded_stack;
+    uint32_t h[8];
+    if (padded_len > sizeof(padded_stack)) {
+        padded = (uint8_t *)malloc(padded_len > 0U ? padded_len : 1U);
+        if (!padded && padded_len != 0U) {
+            memset(out, 0, 32U);
+            return;
+        }
+    }
+    memset(padded, 0, padded_len);
+    if (msg_len > 0U && msg) memcpy(padded, msg, msg_len);
+    padded[msg_len] = 0x80U;
+    for (int i = 0; i < 8; i++) {
+        padded[padded_len - 8U + (uint32_t)i] = (uint8_t)(bit_len >> (56 - i * 8));
+    }
+    for (int i = 0; i < 8; i++) h[i] = _sha256_H[i];
+    for (uint32_t off = 0; off < padded_len; off += 64U) {
+        _tls_sha256_process_block(padded + off, h);
+    }
+    if (padded != padded_stack) free(padded);
+    for (int i = 0; i < 8; i++) {
+        out[i * 4] = (uint8_t)(h[i] >> 24);
+        out[i * 4 + 1] = (uint8_t)(h[i] >> 16);
+        out[i * 4 + 2] = (uint8_t)(h[i] >> 8);
+        out[i * 4 + 3] = (uint8_t)h[i];
+    }
 }
 
 static void _tls_hmac_sha256(const uint8_t *key, uint32_t key_len, const uint8_t *data, uint32_t data_len, uint8_t out[32])
@@ -9549,7 +9576,9 @@ static void _tls_hmac_sha256(const uint8_t *key, uint32_t key_len, const uint8_t
     uint8_t ipad[64];
     uint8_t opad[64];
     uint8_t inner_hash[32];
-    TlsSha256Ctx ctx;
+    uint32_t inner_len = 64U + data_len;
+    uint8_t *inner_input = (uint8_t *)malloc(inner_len > 0U ? inner_len : 1U);
+    uint8_t outer_input[96];
     memset(k0, 0, sizeof(k0));
     if (key_len > 64U) {
         _tls_sha256_digest(key, key_len, k0);
@@ -9560,14 +9589,29 @@ static void _tls_hmac_sha256(const uint8_t *key, uint32_t key_len, const uint8_t
         ipad[i] = (uint8_t)(k0[i] ^ 0x36U);
         opad[i] = (uint8_t)(k0[i] ^ 0x5cU);
     }
-    _tls_sha256_init(&ctx);
-    _tls_sha256_update(&ctx, ipad, 64U);
-    _tls_sha256_update(&ctx, data, data_len);
-    _tls_sha256_final(&ctx, inner_hash);
-    _tls_sha256_init(&ctx);
-    _tls_sha256_update(&ctx, opad, 64U);
-    _tls_sha256_update(&ctx, inner_hash, 32U);
-    _tls_sha256_final(&ctx, out);
+    if (!inner_input && inner_len != 0U) {
+        memset(out, 0, 32U);
+        return;
+    }
+    memcpy(inner_input, ipad, 64U);
+    if (data_len > 0U) memcpy(inner_input + 64U, data, data_len);
+    _tls_sha256_digest(inner_input, inner_len, inner_hash);
+    free(inner_input);
+
+    memcpy(outer_input, opad, 64U);
+    memcpy(outer_input + 64U, inner_hash, 32U);
+    _tls_sha256_digest(outer_input, 96U, out);
+    if (key_len == 13U && data_len == 22U && key && data && key[0] == 0U && key[12] == 12U && data[0] == 11U) {
+        serial_puts("[DBG_C] hmac inner=");
+        serial_put_dec((int64_t)inner_hash[0]); serial_puts(" ");
+        serial_put_dec((int64_t)inner_hash[1]); serial_puts(" ");
+        serial_put_dec((int64_t)inner_hash[2]); serial_puts(" ");
+        serial_put_dec((int64_t)inner_hash[3]); serial_puts(" out=");
+        serial_put_dec((int64_t)out[0]); serial_puts(" ");
+        serial_put_dec((int64_t)out[1]); serial_puts(" ");
+        serial_put_dec((int64_t)out[2]); serial_puts(" ");
+        serial_put_dec((int64_t)out[3]); serial_puts("\r\n");
+    }
 }
 
 static uint8_t *_tls_copy_runtime_bytes(RuntimeValue rv, uint32_t *out_len)
@@ -10213,6 +10257,17 @@ int64_t rt_tls13_hkdf_extract_into(RuntimeValue salt_rv, RuntimeValue ikm_rv, Ru
         if (ikm_heap) free(ikm_heap);
         return 0;
     }
+    serial_puts("[DBG_C] hkdf_extract_into salt_len=");
+    serial_put_dec((int64_t)salt_len);
+    serial_puts(" ikm_len=");
+    serial_put_dec((int64_t)ikm_len);
+    serial_puts(" salt0=");
+    serial_put_dec(salt_len > 0 ? (int64_t)salt[0] : -1);
+    serial_puts(" salt12=");
+    serial_put_dec(salt_len > 12 ? (int64_t)salt[12] : -1);
+    serial_puts(" ikm0=");
+    serial_put_dec(ikm_len > 0 ? (int64_t)ikm[0] : -1);
+    serial_puts("\r\n");
     if (salt_len == 0) {
         memset(zero_salt, 0, sizeof(zero_salt));
         _tls_hmac_sha256(zero_salt, 32, ikm, ikm_len, out);
