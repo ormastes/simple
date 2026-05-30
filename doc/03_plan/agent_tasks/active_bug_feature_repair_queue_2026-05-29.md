@@ -1287,9 +1287,16 @@ Spawned read-only explorers:
 - SimpleOS in-guest toolchain execution: status gate is landed, but real
   `clang_static`/`rustc_static` payloads and live QEMU compiler execution
   evidence remain open.
-- NDArray push: no ndarray work was found in `/tmp/simple-ndarray-push`; the
-  detached commit there is unrelated and should be preserved or explicitly
-  discarded before removing that worktree.
+- NDArray push: disposition clarified 2026-05-30. A focused repo/tracking/test
+  search found no concrete ndarray-push implementation request beyond this
+  queue note, and `/tmp/simple-ndarray-push` remains clean at detached commit
+  `613f39dacb67ddc6269fa4056e3438aa48ca174b` (`fix: fail synthetic test
+  passes with assert ran`). Compared with main anchor
+  `d39018a9fe436f86c221a0d04b14a5d2553222db`, that commit changes only
+  test-runner/assert-ran and scilib-perf-sugar tracking files; no ndarray,
+  tensor, or array-push files are touched. Preserve the worktree until its
+  unrelated assert-ran owner protects or discards the detached commit; no
+  ndarray implementation or follow-up cleanup is blocked on it.
 - Default checkout health: `/home/ormastes/dev/pub/simple` still has separate
   concurrent dirty edits; integration work is being done from clean detached
   `origin/main` worktrees to avoid mixing unrelated changes.
