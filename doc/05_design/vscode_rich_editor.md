@@ -1,6 +1,12 @@
 <!-- codex-design -->
 # VS Code Rich Editor Detail Design
 
+> Status note (2026-05-30): this document is legacy detail design for the
+> standalone VS Code extension/webview path. It does not describe the current
+> Simple IDE/editor merge or the host/SimpleOS-safe shared editor library.
+> Current source-of-truth docs are `doc/07_guide/ide_llm_integration_guide.md`
+> and `doc/07_guide/editor_tui.md`.
+
 **Feature:** `vscode_rich_editor`  
 **Date:** 2026-04-12  
 **Status:** Provisional design based on recommended options

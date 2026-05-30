@@ -28,6 +28,7 @@ The editor library follows VS Code-like package names for reusable code:
 
 - `src/lib/editor/buffer/` — text storage, piece table, undo, syntax helpers
 - `src/lib/editor/core/` — document/session/keybinding/plugin state
+  (`launch.spl` and `path_text.spl` hold reusable app/IDE/MCP helper logic)
 - `src/lib/editor/view/` — dock zones, split tree, panels, tabs, breadcrumbs
 - `src/lib/editor/render/` — markdown/block/terminal render models
 - `src/lib/editor/extensions/` — extension host, manifests, built-ins, and
@@ -109,26 +110,24 @@ line-numbered content + reverse-video status bar; line count computed by
 ␛[7m NORMAL  file.spl  4 lines  ␛[0m
 ```
 
-## Current status / blockers (2026-05-29)
+## Current status (2026-05-30)
 
-- **Editor render code: complete** — all editor files compile and link
-  (`60 compiled, 0 cached, 0 failed` with `--runtime-bundle rust-hosted`).
-- **Frame: renders** via the interpreter path above (the editor's real
-  `EditorBuffer`).
-- **Full interactive native binary: blocked** by two seed/runtime bugs (not
-  editor code):
-  - AOT (`core-c-bootstrap`): duplicate `_rt_file_exists` in
-    `libsimple_runtime.a`.
-  - JIT (`rust-hosted`): `rt_compile_to_native_with_opt` is an interpreter-host
-    extern with no C-ABI symbol; the JIT-at-startup cannot resolve it.
-  Tracked in `doc/08_tracking/bug/editor_render_runtime_blockers_2026-05-29.md`
-  and `editor_jit_run_route_blockers_2026-05-28.md`.
-- **Pending feature:** the full markdown-editing subsystem — see
-  `doc/08_tracking/feature_request/editor_markdown_editing_subsystem_2026-05-28.md`.
+- **Editor render code: complete** — all editor files compile and link on the
+  verified lanes described in
+  `doc/08_tracking/bug/editor_render_runtime_blockers_2026-05-29.md`.
+- **Frame: renders** via the interpreter proof above and through full native
+  TUI loops in both `rust-hosted` and `core-c-bootstrap` lanes, timing out
+  normally as expected for an interactive loop.
+- **Shared launch surface: verified** — `src/lib/editor/core/launch.spl` is
+  used by `src/app/editor/main.spl`, `src/app/editor/tui_main.spl`,
+  `src/app/ide/main.spl`, and `examples/ide/simple_ide_launch.spl`.
+- **Markdown-first checks:** `test/system/editor_markdown_spec.spl` covers the
+  shared markdown block model, renderer, preview pane, table/task/callout
+  editing, controller wiring, TUI/GUI preview/status wiring, and property
+  diagnostics.
 
-When the seed/runtime bugs land cleanly on `main` (resolving the duplicate
-symbol and the interpreter↔JIT extern bridge), a clean bootstrap produces the
-full runnable editor — the editor-side code is ready.
+Remaining work should be tracked as focused feature gaps rather than as a
+global editor-runtime blocker.
 
 ## MCP tool surface & LLM / agent-dashboard integration
 

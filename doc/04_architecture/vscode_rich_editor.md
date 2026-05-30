@@ -1,6 +1,13 @@
 <!-- codex-design -->
 # VS Code Rich Editor Architecture
 
+> Status note (2026-05-30): this document is legacy architecture for the
+> standalone VS Code extension/webview path. It is not the source of truth for
+> the Simple IDE/editor merge, embedded IDE app, example IDE, host/SimpleOS TUI
+> path, or shared `src/lib/editor/` backend. For the current IDE architecture and
+> runnable surfaces, see `doc/07_guide/ide_llm_integration_guide.md` and
+> `doc/07_guide/editor_tui.md`.
+
 **Feature:** `vscode_rich_editor`  
 **Date:** 2026-04-12  
 **Status:** Provisional design based on recommended options  

@@ -20,6 +20,8 @@ model). Editor surface details: `doc/07_guide/editor_tui.md`.
 | **svim** (vim-like TUI) | `src/app/svim/` | `bin/simple run src/app/svim/main.spl <files> [--interactive]` | Line/TUI editor over the shared session model |
 | **Editor TUI** | `src/app/editor/tui_main.spl` | `bin/simple run src/app/editor/tui_main.spl <files>` | Split-pane, file-tree, diagnostics, command palette (`EditorController`) |
 | **Editor GUI** | `src/app/editor/gui_shell_core.spl` | GUI shell (SDL/Winit) | Same backend, desktop shell |
+| **Simple IDE** | `src/app/ide/main.spl` | `bin/simple run src/app/ide/main.spl [--tui|--gui|--gui-sdl] <files>` | Thin VS Code-like product entrypoint over the shared editor launch contract |
+| **Example IDE** | `examples/ide/simple_ide_launch.spl` | `bin/simple run examples/ide/simple_ide_launch.spl` | Minimal embedded/sample IDE launch integration |
 | **Shared backend** | `src/lib/editor/` (~129 files) | — | Piece-table buffers, multi-buffer, split panes, LSP/diagnostics/markdown/wiki services |
 
 Both svim and the Editor consume the same `src/lib/editor/` backend (epic
