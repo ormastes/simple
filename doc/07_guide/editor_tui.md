@@ -131,9 +131,13 @@ line-numbered content + reverse-video status bar; line count computed by
 - **Frame: renders** via the interpreter proof above and through full native
   TUI loops in both `rust-hosted` and `core-c-bootstrap` lanes, timing out
   normally as expected for an interactive loop.
-- **Shared launch surface: verified** — `src/lib/editor/core/launch.spl` is
-  used by `src/app/editor/main.spl`, `src/app/editor/tui_main.spl`,
-  `src/app/ide/main.spl`, and `examples/ide/simple_ide_launch.spl`.
+- **Shared launch parsing/readiness surface: verified** —
+  `src/lib/editor/core/launch.spl` is used by `src/app/editor/main.spl`,
+  `src/app/editor/tui_main.spl`, `src/app/ide/main.spl`, and
+  `examples/ide/simple_ide_launch.spl`. `test/unit/lib/editor/editor_launch_contract_spec.spl`
+  runs the IDE and example entrypoints through `bin/simple`; frame-render
+  evidence above applies to `src/app/editor/tui_main.spl`, not to the
+  readiness-only IDE/example entrypoints.
 - **Markdown-first checks:** `test/system/editor_markdown_spec.spl` covers the
   shared markdown block model, renderer, preview pane, table/task/callout
   editing, controller wiring, TUI/GUI preview/status wiring, and property
