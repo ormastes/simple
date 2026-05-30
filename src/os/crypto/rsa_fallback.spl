@@ -245,32 +245,69 @@ fn _bi_mod(a: list, b: list) -> list:
     if _bi_compare(a, b) < 0:
         return _bi_normalize(a)
 
-    val bit_len = _bi_bit_length(a)
-    var remainder = _bi_zero()
-    var i = bit_len - 1
-    while i >= 0:
-        remainder = _bi_shift_left_one(remainder)
-        if _bi_get_bit(a, i) == 1:
-            remainder = _bi_add(remainder, _bi_one())
-        if _bi_compare(remainder, b) >= 0:
-            remainder = _bi_sub(remainder, b)
-        i = i - 1
-    _bi_normalize(remainder)
+    var r = _bi_normalize(a)
+    val r_bits = _bi_bit_length(r)
+    val b_bits = _bi_bit_length(b)
+    var shift = r_bits - b_bits
+    var shifted_b = b
+    var k = 0
+    while k < shift:
+        shifted_b = _bi_shift_left_one(shifted_b)
+        k = k + 1
+    while shift >= 0:
+        if _bi_compare(r, shifted_b) >= 0:
+            r = _bi_sub(r, shifted_b)
+        if shift > 0:
+            var halved = []
+            var i = shifted_b.len() - 1
+            var carry = 0
+            while i >= 0:
+                val v = shifted_b[i] + carry * _RSA_BIGINT_BASE
+                halved.push(v / 2)
+                carry = v % 2
+                i = i - 1
+            var rev = []
+            var j = halved.len() - 1
+            while j >= 0:
+                rev.push(halved[j])
+                j = j - 1
+            shifted_b = _bi_normalize(rev)
+        shift = shift - 1
+    _bi_normalize(r)
 
 fn _bi_mod_exp(base: list, exp: list, modulus: list) -> list:
     if _bi_is_zero(modulus):
         return _bi_zero()
 
+    var powers = []
+    powers.push(_bi_one())
+    powers.push(_bi_mod(base, modulus))
+    var p = 2
+    while p < 16:
+        powers.push(_bi_mod(_bi_mul(powers[p - 1], powers[1]), modulus))
+        p = p + 1
+
     var result = _bi_one()
-    var base_mod = _bi_mod(base, modulus)
-    var exp_copy = exp
-    while !_bi_is_zero(exp_copy):
-        val divmod_2 = _bi_divmod_i64(exp_copy, 2)
-        val remainder = divmod_2[1]
-        if !_bi_is_zero(remainder):
-            result = _bi_mod(_bi_mul(result, base_mod), modulus)
-        exp_copy = divmod_2[0]
-        base_mod = _bi_mod(_bi_mul(base_mod, base_mod), modulus)
+    val bits = _bi_bit_length(exp)
+    var i = bits - 1
+    while i >= 0:
+        if _bi_get_bit(exp, i) == 0:
+            result = _bi_mod(_bi_mul(result, result), modulus)
+            i = i - 1
+        else:
+            var low = i - 3
+            if low < 0:
+                low = 0
+            while _bi_get_bit(exp, low) == 0:
+                low = low + 1
+            var win = 0
+            var j = i
+            while j >= low:
+                win = win * 2 + _bi_get_bit(exp, j)
+                result = _bi_mod(_bi_mul(result, result), modulus)
+                j = j - 1
+            result = _bi_mod(_bi_mul(result, powers[win]), modulus)
+            i = low - 1
     result
 
 fn _append_bytes(dst: [u8], src: [u8]) -> [u8]:

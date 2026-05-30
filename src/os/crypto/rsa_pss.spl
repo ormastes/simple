@@ -38,6 +38,11 @@ fn _pss_bi_zero() -> list:
     r.push(0)
     r
 
+fn _pss_bi_one() -> list:
+    var r: list = []
+    r.push(1)
+    r
+
 fn _pss_bi_normalize(a: list) -> list:
     var r: list = []
     var i = 0
@@ -190,17 +195,39 @@ fn _pss_bi_mod(a: list, m: list) -> list:
     _pss_bi_normalize(r)
 
 fn _pss_bi_mod_exp(base: list, exp: list, modulus: list) -> list:
-    # Square-and-multiply, MSB-first.
-    var result = _pss_bi_zero()
-    result[0] = 1
+    # Fixed 4-bit sliding window, MSB-first.
+    if _pss_bi_is_zero(modulus):
+        return _pss_bi_zero()
+    var powers: list = []
+    powers.push(_pss_bi_one())
+    powers.push(_pss_bi_mod(base, modulus))
+    var p: i64 = 2
+    while p < 16:
+        powers.push(_pss_bi_mod(_pss_bi_mul(powers[p - 1], powers[1]), modulus))
+        p = p + 1
+
+    var result = _pss_bi_one()
     var b = _pss_bi_mod(base, modulus)
     val bits = _pss_bi_bit_length(exp)
     var i: i64 = bits - 1
     while i >= 0:
-        result = _pss_bi_mod(_pss_bi_mul(result, result), modulus)
-        if _pss_bi_get_bit(exp, i) == 1:
-            result = _pss_bi_mod(_pss_bi_mul(result, b), modulus)
-        i = i - 1
+        if _pss_bi_get_bit(exp, i) == 0:
+            result = _pss_bi_mod(_pss_bi_mul(result, result), modulus)
+            i = i - 1
+        else:
+            var low = i - 3
+            if low < 0:
+                low = 0
+            while _pss_bi_get_bit(exp, low) == 0:
+                low = low + 1
+            var win: i64 = 0
+            var j = i
+            while j >= low:
+                win = win * 2 + _pss_bi_get_bit(exp, j)
+                result = _pss_bi_mod(_pss_bi_mul(result, result), modulus)
+                j = j - 1
+            result = _pss_bi_mod(_pss_bi_mul(result, powers[win]), modulus)
+            i = low - 1
     result
 
 fn _pss_bytes_to_bigint_be(bytes: [u8]) -> list:
@@ -623,55 +650,85 @@ fn rsa_pss_parse_spki(spki: [u8]) -> RsaPssPublicKey:
 class RsaPssPrivateKey:
     val modulus: [u8]
     val private_exp: [u8]
+    val p: [u8]
+    val q: [u8]
+    val d_p: [u8]
+    val d_q: [u8]
+    val q_inv: [u8]
     val ok: bool
 
 fn rsa_pss_parse_pkcs8(pkcs8: [u8]) -> RsaPssPrivateKey:
     val outer = _pss_read_tlv(pkcs8, 0u64)
     if not outer.ok or outer.tag != 0x30u8:
-        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+        return RsaPssPrivateKey(modulus: [], private_exp: [], p: [], q: [], d_p: [], d_q: [], q_inv: [], ok: false)
     var pos = outer.value_off
     # version
     val ver = _pss_read_tlv(pkcs8, pos)
     if not ver.ok:
-        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+        return RsaPssPrivateKey(modulus: [], private_exp: [], p: [], q: [], d_p: [], d_q: [], q_inv: [], ok: false)
     pos = ver.next_off
     # algorithm
     val alg = _pss_read_tlv(pkcs8, pos)
     if not alg.ok:
-        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+        return RsaPssPrivateKey(modulus: [], private_exp: [], p: [], q: [], d_p: [], d_q: [], q_inv: [], ok: false)
     pos = alg.next_off
     # privateKey OCTET STRING
     val pkey = _pss_read_tlv(pkcs8, pos)
     if not pkey.ok or pkey.tag != 0x04u8:
-        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+        return RsaPssPrivateKey(modulus: [], private_exp: [], p: [], q: [], d_p: [], d_q: [], q_inv: [], ok: false)
     val rsa_der = _pss_slice(pkcs8, pkey.value_off, pkey.value_len)
     # RSAPrivateKey SEQUENCE
     val rsa_seq = _pss_read_tlv(rsa_der, 0u64)
     if not rsa_seq.ok or rsa_seq.tag != 0x30u8:
-        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+        return RsaPssPrivateKey(modulus: [], private_exp: [], p: [], q: [], d_p: [], d_q: [], q_inv: [], ok: false)
     var inner = rsa_seq.value_off
     # version
     val rver = _pss_read_tlv(rsa_der, inner)
     if not rver.ok:
-        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+        return RsaPssPrivateKey(modulus: [], private_exp: [], p: [], q: [], d_p: [], d_q: [], q_inv: [], ok: false)
     inner = rver.next_off
     # modulus
     val mod_tlv = _pss_read_tlv(rsa_der, inner)
     if not mod_tlv.ok or mod_tlv.tag != 0x02u8:
-        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+        return RsaPssPrivateKey(modulus: [], private_exp: [], p: [], q: [], d_p: [], d_q: [], q_inv: [], ok: false)
     val modulus = _pss_strip_int_padding(_pss_slice(rsa_der, mod_tlv.value_off, mod_tlv.value_len))
     inner = mod_tlv.next_off
     # publicExponent
     val pub_exp = _pss_read_tlv(rsa_der, inner)
     if not pub_exp.ok:
-        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+        return RsaPssPrivateKey(modulus: [], private_exp: [], p: [], q: [], d_p: [], d_q: [], q_inv: [], ok: false)
     inner = pub_exp.next_off
     # privateExponent
     val priv_exp = _pss_read_tlv(rsa_der, inner)
     if not priv_exp.ok or priv_exp.tag != 0x02u8:
-        return RsaPssPrivateKey(modulus: [], private_exp: [], ok: false)
+        return RsaPssPrivateKey(modulus: [], private_exp: [], p: [], q: [], d_p: [], d_q: [], q_inv: [], ok: false)
     val d = _pss_strip_int_padding(_pss_slice(rsa_der, priv_exp.value_off, priv_exp.value_len))
-    RsaPssPrivateKey(modulus: modulus, private_exp: d, ok: true)
+    inner = priv_exp.next_off
+    val p_tlv = _pss_read_tlv(rsa_der, inner)
+    if not p_tlv.ok or p_tlv.tag != 0x02u8:
+        return RsaPssPrivateKey(modulus: modulus, private_exp: d, p: [], q: [], d_p: [], d_q: [], q_inv: [], ok: true)
+    val p = _pss_strip_int_padding(_pss_slice(rsa_der, p_tlv.value_off, p_tlv.value_len))
+    inner = p_tlv.next_off
+    val q_tlv = _pss_read_tlv(rsa_der, inner)
+    if not q_tlv.ok or q_tlv.tag != 0x02u8:
+        return RsaPssPrivateKey(modulus: modulus, private_exp: d, p: [], q: [], d_p: [], d_q: [], q_inv: [], ok: true)
+    val q = _pss_strip_int_padding(_pss_slice(rsa_der, q_tlv.value_off, q_tlv.value_len))
+    inner = q_tlv.next_off
+    val dp_tlv = _pss_read_tlv(rsa_der, inner)
+    if not dp_tlv.ok or dp_tlv.tag != 0x02u8:
+        return RsaPssPrivateKey(modulus: modulus, private_exp: d, p: [], q: [], d_p: [], d_q: [], q_inv: [], ok: true)
+    val d_p = _pss_strip_int_padding(_pss_slice(rsa_der, dp_tlv.value_off, dp_tlv.value_len))
+    inner = dp_tlv.next_off
+    val dq_tlv = _pss_read_tlv(rsa_der, inner)
+    if not dq_tlv.ok or dq_tlv.tag != 0x02u8:
+        return RsaPssPrivateKey(modulus: modulus, private_exp: d, p: [], q: [], d_p: [], d_q: [], q_inv: [], ok: true)
+    val d_q = _pss_strip_int_padding(_pss_slice(rsa_der, dq_tlv.value_off, dq_tlv.value_len))
+    inner = dq_tlv.next_off
+    val qi_tlv = _pss_read_tlv(rsa_der, inner)
+    if not qi_tlv.ok or qi_tlv.tag != 0x02u8:
+        return RsaPssPrivateKey(modulus: modulus, private_exp: d, p: [], q: [], d_p: [], d_q: [], q_inv: [], ok: true)
+    val q_inv = _pss_strip_int_padding(_pss_slice(rsa_der, qi_tlv.value_off, qi_tlv.value_len))
+    RsaPssPrivateKey(modulus: modulus, private_exp: d, p: p, q: q, d_p: d_p, d_q: d_q, q_inv: q_inv, ok: true)
 
 # ============================================================================
 # RSASSA-PSS-SIGN (RFC 8017 §8.1.1) — pure-Simple, textbook (n,d) modexp.
@@ -702,9 +759,23 @@ fn _rsa_pss_sign_internal(pkcs8: [u8], message: [u8], salt: [u8], h: RsaPssHash)
     if em.len().to_i64() == 0:
         return []
     val n = _pss_bytes_to_bigint_be(key.modulus)
-    val d = _pss_bytes_to_bigint_be(key.private_exp)
     val m_int = _pss_bytes_to_bigint_be(em)
-    val s = _pss_bi_mod_exp(m_int, d, n)
+    var s = _pss_bi_zero()
+    if key.p.len() > 0 and key.q.len() > 0 and key.d_p.len() > 0 and key.d_q.len() > 0 and key.q_inv.len() > 0:
+        val p = _pss_bytes_to_bigint_be(key.p)
+        val q = _pss_bytes_to_bigint_be(key.q)
+        val d_p = _pss_bytes_to_bigint_be(key.d_p)
+        val d_q = _pss_bytes_to_bigint_be(key.d_q)
+        val q_inv = _pss_bytes_to_bigint_be(key.q_inv)
+        val m1 = _pss_bi_mod_exp(_pss_bi_mod(m_int, p), d_p, p)
+        val m2 = _pss_bi_mod_exp(_pss_bi_mod(m_int, q), d_q, q)
+        val diff = if _pss_bi_compare(m1, m2) >= 0 { _pss_bi_sub(m1, m2) } else { _pss_bi_sub(p, _pss_bi_sub(m2, m1)) }
+        val q_mul = _pss_bi_mul(q_inv, diff)
+        val h_crt = _pss_bi_mod(q_mul, p)
+        s = _pss_bi_add(m2, _pss_bi_mul(h_crt, q))
+    else:
+        val d = _pss_bytes_to_bigint_be(key.private_exp)
+        s = _pss_bi_mod_exp(m_int, d, n)
     _pss_bigint_to_bytes_be(s, k.to_u64())
 
 # Public signing entry points. `salt` is caller-provided so callers can run

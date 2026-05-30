@@ -1182,3 +1182,18 @@ Spawned read-only explorers:
       `src/compiler_rust/target/debug/simple compile test/unit/compiler/native_enum_if_val_probe.spl --native --backend=cranelift -o /tmp/native_enum_if_val_probe && /tmp/native_enum_if_val_probe`,
       and
       `SIMPLE_LIB=src bin/simple test test/unit/compiler/native_enum_u8_regression_spec.spl --mode=native --clean --force-rebuild`.
+78. RSA pure-Simple modexp performance remains open after safe speedups.
+    - Added PSS PKCS#8 CRT field parsing and routed PSS signing through two
+      half-size CRT modexps when `p`, `q`, `dP`, `dQ`, and `qInv` are present.
+    - Replaced the fallback exponent loop's divide-by-two square-and-multiply
+      path with the same 4-bit MSB-first sliding-window shape used by PSS, and
+      changed fallback `_bi_mod` to the shifted-modulus reducer shape.
+    - Verification passed:
+      `SIMPLE_LIB=src bin/simple check src/os/crypto/rsa_pss.spl src/os/crypto/rsa_fallback.spl test/unit/lib/crypto/rsa_pss_sha256_roundtrip_slow_spec.spl test/unit/lib/crypto/rsa_pkcs1_v15_spec.spl`,
+      `SIMPLE_LIB=src bin/simple test test/unit/lib/crypto/rsa_pss_sha256_kat_spec.spl --mode=interpreter --clean --fail-fast`,
+      and
+      `SIMPLE_LIB=src bin/simple test test/unit/os/crypto/rsa_contract_parity_spec.spl --mode=interpreter --clean --fail-fast`.
+    - Acceptance is still not complete:
+      `timeout 60s env SIMPLE_LIB=src bin/simple test --only-slow test/unit/lib/crypto/rsa_pss_sha256_roundtrip_slow_spec.spl --mode=interpreter --clean --fail-fast`
+      timed out. The next implementation step is a correct Montgomery or
+      Barrett reducer for the 30-bit-limb bignum representation.

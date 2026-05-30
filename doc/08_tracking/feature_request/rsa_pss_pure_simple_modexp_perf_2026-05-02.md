@@ -6,7 +6,25 @@
 - **Filed-by:** W14-E (RSA-PSS sign/verify wave)
 - **Target:** crypto / interpreter perf
 - **Priority:** P1
-- **Status:** PARTIAL 2026-05-10 — `rt_bigint_mod_exp` extern declared in
+- **Status:** PARTIAL 2026-05-30 — safe pure-Simple speedups landed, but the
+  RSA-2048 interpreter acceptance budget is still not met. `rsa_pss.spl` now
+  parses CRT private-key fields and signs via two half-size CRT modexps when
+  PKCS#8 includes `p`, `q`, `dP`, `dQ`, and `qInv`; both `rsa_pss.spl` and
+  `rsa_fallback.spl` use a 4-bit MSB-first sliding-window exponent loop, and
+  `rsa_fallback._bi_mod` uses the shifted-modulus reducer shape already used
+  by PSS instead of rebuilding the remainder bit-by-bit. Verification:
+  `SIMPLE_LIB=src bin/simple check src/os/crypto/rsa_pss.spl src/os/crypto/rsa_fallback.spl test/unit/lib/crypto/rsa_pss_sha256_roundtrip_slow_spec.spl test/unit/lib/crypto/rsa_pkcs1_v15_spec.spl`,
+  `SIMPLE_LIB=src bin/simple test test/unit/lib/crypto/rsa_pss_sha256_kat_spec.spl --mode=interpreter --clean --fail-fast`,
+  and
+  `SIMPLE_LIB=src bin/simple test test/unit/os/crypto/rsa_contract_parity_spec.spl --mode=interpreter --clean --fail-fast`
+  passed. The explicit acceptance command
+  `timeout 60s env SIMPLE_LIB=src bin/simple test --only-slow test/unit/lib/crypto/rsa_pss_sha256_roundtrip_slow_spec.spl --mode=interpreter --clean --fail-fast`
+  still timed out, so the remaining work is a correct Montgomery/Barrett
+  reducer or shared runtime-independent bigint modexp. A temporary Montgomery
+  REDC experiment completed the PKCS#1 interpreter spec in ~37s but produced
+  invalid signatures, so it was not kept.
+
+  Prior partial status from 2026-05-10: `rt_bigint_mod_exp` extern declared in
   `src/lib/nogc_sync_mut/io/signature_sffi.spl` (runtime-accelerated path stub
   exists); however `src/lib/common/math/bignum/` does NOT exist and no
   sliding-window pure-Simple `mod_exp` was written. The status note in the
@@ -14,10 +32,10 @@
   acceptance-criteria specs are unverified. Also note: the file referenced in
   the original status (`signature_ffi.spl`) does not contain the extern — it is
   in `signature_sffi.spl`.
-  - **Remaining work:** implement sliding-window w=4 `mod_exp` in pure Simple
-    (new file `src/lib/common/math/bignum/bignat.spl` or inline in
-    `os.crypto.rsa_pss` / `rsa_fallback`), wire callers to use it, and verify
-    both acceptance-criteria specs pass in interpreter mode within 60s.
+  - **Remaining work:** implement a correct fast pure-Simple modular reducer
+    (Montgomery or Barrett) for the existing 30-bit-limb representation, wire
+    both RSA modules through it or extract shared bignum code, and verify both
+    acceptance-criteria specs pass in interpreter mode within 60s.
 - **Requested-semantics:**
   Pure-Simple `_pss_bi_mod_exp` against a 2048-bit modulus and 2048-bit
   exponent runs O(bits^3) with the current schoolbook `_pss_bi_mod` doing
