@@ -16,6 +16,8 @@ use compiler.mir.mir_instructions.{MirBlock, BlockId, MirInst, MirInstKind, MirB
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileOptions, CompileError, compileerror_backend_error}
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
+use compiler.backend.backend.cranelift_gemm_fusion.{detect_gemm_add_pair}
+use compiler.backend.backend.cranelift_runtime_imports.{translate_runtime_import_call_i64}
 use std.sffi.codegen.*
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
@@ -277,9 +279,28 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
         if i > 0:
             cranelift_switch_to_block(ctx, cl_block)
 
-        # Compile instructions
-        for inst in block.instructions:
+        # Compile instructions. Keep a small adjacent-pattern window so
+        # MatMul followed by BroadcastAdd can lower as one fused GEMM-add call.
+        var inst_index = 0
+        while inst_index < block.instructions.len():
+            val inst = block.instructions[inst_index]
+            if inst_index + 1 < block.instructions.len():
+                val next_inst = block.instructions[inst_index + 1]
+                val fusion = detect_gemm_add_pair(func, inst, next_inst)
+                if fusion.?:
+                    val plan = fusion.unwrap()
+                    val a = translate_operand(ctx, plan.matmul_left, value_map, slot_map, func)
+                    val b = translate_operand(ctx, plan.matmul_right, value_map, slot_map, func)
+                    val c = translate_operand(ctx, plan.addend, value_map, slot_map, func)
+                    val result = translate_runtime_import_call_i64(ctx, cl_module, "__simple_runtime_gemm_add", [a, b, c])
+                    value_map[plan.dest.id] = result
+                    if slot_map.has(plan.dest.id):
+                        val addr = cranelift_stack_addr(ctx, slot_map[plan.dest.id], 0)
+                        cranelift_store(ctx, result, addr, 0)
+                    inst_index = inst_index + 2
+                    continue
             translate_instruction(ctx, inst, value_map, slot_map, block_map, cl_module, func_handles, func)
+            inst_index = inst_index + 1
 
         # Compile terminator
         translate_terminator(ctx, block.id, block.terminator, value_map, slot_map, block_map, func)
@@ -627,16 +648,6 @@ fn translate_const_value(ctx: i64, value: MirConstValue, type_: MirType) -> i64:
 # Binary Operation Translation
 # ============================================================================
 
-fn translate_runtime_binop_call(ctx: i64, cl_module: i64, name: text, a: i64, b: i64) -> i64:
-    val sig = cranelift_new_signature(CL_CC_SYSTEM_V)
-    cranelift_sig_add_param(sig, CL_TYPE_I64)
-    cranelift_sig_add_param(sig, CL_TYPE_I64)
-    cranelift_sig_set_return(sig, CL_TYPE_I64)
-    val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT)
-    val func_ref = cranelift_import_function(ctx, handle)
-    var args: [i64] = [a, b]
-    cranelift_call(ctx, func_ref, args.ptr(), args.len())
-
 fn translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, a: i64, b: i64, left_operand: MirOperand, func: MirFunction) -> i64:
     val is_float = operand_is_float(left_operand, func)
     match op:
@@ -675,17 +686,17 @@ fn translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, a: i64, b: i64, left_
         case Offset:
             cranelift_iadd(ctx, a, b)
         case MatMul:
-            translate_runtime_binop_call(ctx, cl_module, "__simple_runtime_matmul", a, b)
+            translate_runtime_import_call_i64(ctx, cl_module, "__simple_runtime_matmul", [a, b])
         case BroadcastAdd:
-            translate_runtime_binop_call(ctx, cl_module, "__simple_runtime_broadcast_add", a, b)
+            translate_runtime_import_call_i64(ctx, cl_module, "__simple_runtime_broadcast_add", [a, b])
         case BroadcastSub:
-            translate_runtime_binop_call(ctx, cl_module, "__simple_runtime_broadcast_sub", a, b)
+            translate_runtime_import_call_i64(ctx, cl_module, "__simple_runtime_broadcast_sub", [a, b])
         case BroadcastMul:
-            translate_runtime_binop_call(ctx, cl_module, "__simple_runtime_broadcast_mul", a, b)
+            translate_runtime_import_call_i64(ctx, cl_module, "__simple_runtime_broadcast_mul", [a, b])
         case BroadcastDiv:
-            translate_runtime_binop_call(ctx, cl_module, "__simple_runtime_broadcast_div", a, b)
+            translate_runtime_import_call_i64(ctx, cl_module, "__simple_runtime_broadcast_div", [a, b])
         case BroadcastPow:
-            translate_runtime_binop_call(ctx, cl_module, "__simple_runtime_broadcast_pow", a, b)
+            translate_runtime_import_call_i64(ctx, cl_module, "__simple_runtime_broadcast_pow", [a, b])
         case _:
             # Pow and unsupported future ops still use the scalar fallback.
             cranelift_iadd(ctx, a, b)
