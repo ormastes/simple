@@ -92,6 +92,18 @@ trait ComputeSession:
 
 **AC:** CudaSession conforms to ComputeSession, C-2 test GREEN.
 
+Progress 2026-05-30:
+- Added the public shared `ComputeSession` contract surface and `ComputeError`
+  helper in the canonical no-GC backend-session module.
+- Added missing backend kind names for CPU-SIMD, HIP, ROCm, OpenCL, and
+  Qualcomm in both the canonical session contract and the GC async Engine2D API
+  resolver.
+- Added focused coverage in
+  `test/unit/lib/gpu/engine2d/backend_session_contract_spec.spl`.
+- Remaining Phase 1 work: retrofit `CudaSession` with the full kernel-dispatch
+  wrapper methods and replace the blocked CUDA-selectable placeholder with live
+  evidence.
+
 ### Phase 2: CPU-SIMD conformance + native acceleration
 
 **Files:** `cpu_simd_session.spl`, `simd_kernels.spl`, runtime C
