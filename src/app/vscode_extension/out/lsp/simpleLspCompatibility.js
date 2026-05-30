@@ -142,13 +142,13 @@ class SimpleLspCompatibilitySurface {
             return this.fail('Failed to restart attached LSP client.', error);
         }
     }
-    dispose() {
+    async dispose() {
         if (this.disposed) {
             return;
         }
         this.disposed = true;
         try {
-            void this.client?.dispose?.();
+            await this.client?.dispose?.();
         }
         finally {
             this.outputChannel.dispose();

@@ -37,7 +37,7 @@ export declare class SimpleLspCompatibilitySurface implements vscode.Disposable 
     attachClient(client: SimpleLspClientLifecycle | undefined): void;
     bootstrapClient(resolveFrom?: string): Promise<SimpleLspOperationResult>;
     restartClient(): Promise<SimpleLspOperationResult>;
-    dispose(): void;
+    dispose(): Promise<void>;
     private log;
     private fail;
 }

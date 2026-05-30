@@ -158,13 +158,13 @@ export class SimpleLspCompatibilitySurface implements vscode.Disposable {
         }
     }
 
-    public dispose(): void {
+    public async dispose(): Promise<void> {
         if (this.disposed) {
             return;
         }
         this.disposed = true;
         try {
-            void this.client?.dispose?.();
+            await this.client?.dispose?.();
         } finally {
             this.outputChannel.dispose();
         }
