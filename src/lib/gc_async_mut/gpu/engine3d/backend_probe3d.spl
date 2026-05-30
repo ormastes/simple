@@ -1,0 +1,143 @@
+# 3D Engine — Strict Backend Capability Probe Contract
+#
+# Engine3D still routes rendering through the CPU facade in this tree. This
+# module records explicit strict diagnostics for the partial 3D backend surface
+# so callers can distinguish managed-but-unavailable GPU paths from CPU fallback.
+
+val BACKEND3D_CPU: text = "cpu"
+val BACKEND3D_SOFTWARE: text = "software"
+val BACKEND3D_CUDA: text = "cuda"
+val BACKEND3D_ROCM: text = "rocm"
+val BACKEND3D_HIP: text = "hip"
+val BACKEND3D_OPENCL: text = "opencl"
+val BACKEND3D_METAL: text = "metal"
+val BACKEND3D_VULKAN: text = "vulkan"
+val BACKEND3D_WEBGPU: text = "webgpu"
+val BACKEND3D_OPTIX: text = "optix"
+
+enum Engine3DBackendStatus:
+    Initialized
+    Unavailable
+    Unsupported
+    Fallback
+
+fn engine3d_backend_status_text(status: Engine3DBackendStatus) -> text:
+    match status:
+        case Initialized: "Initialized"
+        case Unavailable: "Unavailable"
+        case Unsupported: "Unsupported"
+        case Fallback: "Fallback"
+
+class Engine3DBackendProbeResult:
+    requested_name: text
+    selected_name: text
+    status: Engine3DBackendStatus
+    api_name: text
+    feature_gate: text
+    shader_format: text
+    session_mode: text
+    managed_session: bool
+    strict_backend: bool
+    has_compute: bool
+    has_graphics: bool
+    has_present: bool
+    has_ray_tracing: bool
+    fallback_reason: text
+
+    static fn create(requested: text, status: Engine3DBackendStatus, api: text, gate: text, shader: text, session_mode: text, managed: bool, compute: bool, graphics: bool, present: bool, rays: bool, reason: text) -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult(
+            requested_name: requested,
+            selected_name: requested,
+            status: status,
+            api_name: api,
+            feature_gate: gate,
+            shader_format: shader,
+            session_mode: session_mode,
+            managed_session: managed,
+            strict_backend: true,
+            has_compute: compute,
+            has_graphics: graphics,
+            has_present: present,
+            has_ray_tracing: rays,
+            fallback_reason: reason
+        )
+
+    fn is_usable() -> bool:
+        self.status == Engine3DBackendStatus.Initialized
+
+    fn strict_failure_without_fallback() -> bool:
+        if self.status == Engine3DBackendStatus.Fallback:
+            return false
+        if self.selected_name != self.requested_name:
+            return false
+        true
+
+    fn diagnostic_text() -> text:
+        "requested={self.requested_name};selected={self.selected_name};status={engine3d_backend_status_text(self.status)};api={self.api_name};gate={self.feature_gate};shader={self.shader_format};session={self.session_mode};managed={self.managed_session.to_text()};compute={self.has_compute.to_text()};graphics={self.has_graphics.to_text()};present={self.has_present.to_text()};rays={self.has_ray_tracing.to_text()};reason={self.fallback_reason}"
+
+    fn summary() -> text:
+        self.diagnostic_text()
+
+class Engine3DBackendProber:
+
+    static fn create() -> Engine3DBackendProber:
+        Engine3DBackendProber()
+
+    fn probe_cpu() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_CPU, Engine3DBackendStatus.Initialized, "cpu", "cpu_3d_raster", "none", "managed_shared", true, true, true, true, false, "CPU 3D renderer is available")
+
+    fn probe_software() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_SOFTWARE, Engine3DBackendStatus.Initialized, "software", "software_3d_raster", "none", "managed_shared", true, true, true, true, false, "software 3D renderer is available")
+
+    fn probe_cuda() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_CUDA, Engine3DBackendStatus.Unavailable, "cuda", "cuda_3d_runtime", "ptx", "managed_shared", true, true, true, false, false, "CUDA 3D session requires runtime device evidence")
+
+    fn probe_rocm() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_ROCM, Engine3DBackendStatus.Unavailable, "rocm", "rocm_hip_3d_runtime", "hsaco", "managed_shared", true, true, true, false, false, "ROCm/HIP 3D session requires runtime device evidence")
+
+    fn probe_hip() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_HIP, Engine3DBackendStatus.Unavailable, "hip", "hip_3d_runtime", "hsaco", "managed_shared", true, true, true, false, false, "HIP 3D session requires runtime device evidence")
+
+    fn probe_opencl() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_OPENCL, Engine3DBackendStatus.Unsupported, "opencl", "opencl_compute_only", "spirv", "managed_shared", true, true, false, false, false, "OpenCL is compute-only here and is not a complete Engine3D raster backend")
+
+    fn probe_metal() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_METAL, Engine3DBackendStatus.Unavailable, "metal", "macos_metal_3d_runtime", "msl", "managed_shared", true, true, true, true, false, "Metal 3D session requires macOS/iOS runtime evidence")
+
+    fn probe_vulkan() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_VULKAN, Engine3DBackendStatus.Unavailable, "vulkan", "vulkan_3d_runtime", "spirv", "managed_shared", true, true, true, true, false, "Vulkan 3D session requires runtime device evidence")
+
+    fn probe_webgpu() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_WEBGPU, Engine3DBackendStatus.Unavailable, "webgpu", "webgpu_3d_runtime", "wgsl", "managed_shared", true, true, true, true, false, "WebGPU 3D session requires browser/runtime evidence")
+
+    fn probe_optix() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_OPTIX, Engine3DBackendStatus.Unsupported, "optix", "optix_ray_tracing_only", "ptx", "perf_exclusive", true, true, false, false, true, "OptiX is ray tracing only and is not a complete Engine3D raster/present backend")
+
+    fn probe_backend(name: text) -> Engine3DBackendProbeResult:
+        if name == BACKEND3D_CPU:
+            return self.probe_cpu()
+        if name == BACKEND3D_SOFTWARE:
+            return self.probe_software()
+        if name == BACKEND3D_CUDA:
+            return self.probe_cuda()
+        if name == BACKEND3D_ROCM:
+            return self.probe_rocm()
+        if name == BACKEND3D_HIP:
+            return self.probe_hip()
+        if name == BACKEND3D_OPENCL:
+            return self.probe_opencl()
+        if name == BACKEND3D_METAL:
+            return self.probe_metal()
+        if name == BACKEND3D_VULKAN:
+            return self.probe_vulkan()
+        if name == BACKEND3D_WEBGPU:
+            return self.probe_webgpu()
+        if name == BACKEND3D_OPTIX:
+            return self.probe_optix()
+        Engine3DBackendProbeResult.create(name, Engine3DBackendStatus.Unsupported, name, "unknown_3d_backend", "none", "none", false, false, false, false, false, "unknown Engine3D backend: " + name)
+
+    fn probe_all_summary() -> text:
+        self.probe_cpu().summary() + " | " + self.probe_software().summary() + " | " + self.probe_cuda().summary() + " | " + self.probe_rocm().summary() + " | " + self.probe_hip().summary() + " | " + self.probe_opencl().summary() + " | " + self.probe_metal().summary() + " | " + self.probe_vulkan().summary() + " | " + self.probe_webgpu().summary() + " | " + self.probe_optix().summary()
+
+fn engine3d_strict_probe_backend(name: text) -> Engine3DBackendProbeResult:
+    Engine3DBackendProber.create().probe_backend(name)

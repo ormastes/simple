@@ -1,0 +1,81 @@
+# @cover src/lib/gc_async_mut/gpu/engine3d/backend_probe3d.spl 90%
+# @tag: unit, gpu, engine3d, strict, diagnostics, partial-3d
+
+use std.gpu.engine3d.backend_probe3d.{Engine3DBackendProber, Engine3DBackendStatus, engine3d_strict_probe_backend}
+
+describe "Engine3D strict partial backend diagnostics":
+
+    it "reports CPU and software 3D paths as managed usable renderers":
+        val cpu = engine3d_strict_probe_backend("cpu")
+        val software = engine3d_strict_probe_backend("software")
+
+        expect(cpu.status).to_equal(Engine3DBackendStatus.Initialized)
+        expect(cpu.managed_session).to_equal(true)
+        expect(cpu.has_compute).to_equal(true)
+        expect(cpu.has_graphics).to_equal(true)
+        expect(cpu.has_present).to_equal(true)
+        expect(cpu.strict_failure_without_fallback()).to_equal(true)
+        expect(software.status).to_equal(Engine3DBackendStatus.Initialized)
+        expect(software.api_name).to_equal("software")
+        expect(software.strict_failure_without_fallback()).to_equal(true)
+
+    it "reports CUDA ROCm HIP Metal Vulkan and WebGPU as managed but unavailable without fallback":
+        val prober = Engine3DBackendProber.create()
+        val cuda = prober.probe_backend("cuda")
+        val rocm = prober.probe_backend("rocm")
+        val hip = prober.probe_backend("hip")
+        val metal = prober.probe_backend("metal")
+        val vulkan = prober.probe_backend("vulkan")
+        val webgpu = prober.probe_backend("webgpu")
+
+        expect(cuda.status).to_equal(Engine3DBackendStatus.Unavailable)
+        expect(cuda.shader_format).to_equal("ptx")
+        expect(cuda.managed_session).to_equal(true)
+        expect(cuda.strict_failure_without_fallback()).to_equal(true)
+        expect(rocm.shader_format).to_equal("hsaco")
+        expect(rocm.feature_gate).to_equal("rocm_hip_3d_runtime")
+        expect(hip.api_name).to_equal("hip")
+        expect(hip.strict_failure_without_fallback()).to_equal(true)
+        expect(metal.shader_format).to_equal("msl")
+        expect(metal.has_present).to_equal(true)
+        expect(vulkan.shader_format).to_equal("spirv")
+        expect(vulkan.has_graphics).to_equal(true)
+        expect(webgpu.shader_format).to_equal("wgsl")
+        expect(webgpu.strict_failure_without_fallback()).to_equal(true)
+
+    it "reports OpenCL as compute-only rather than a complete 3D raster backend":
+        val probe = engine3d_strict_probe_backend("opencl")
+
+        expect(probe.status).to_equal(Engine3DBackendStatus.Unsupported)
+        expect(probe.api_name).to_equal("opencl")
+        expect(probe.feature_gate).to_equal("opencl_compute_only")
+        expect(probe.has_compute).to_equal(true)
+        expect(probe.has_graphics).to_equal(false)
+        expect(probe.has_present).to_equal(false)
+        expect(probe.strict_failure_without_fallback()).to_equal(true)
+
+    it "reports OptiX as ray-tracing-only with no raster or present fallback":
+        val probe = engine3d_strict_probe_backend("optix")
+
+        expect(probe.status).to_equal(Engine3DBackendStatus.Unsupported)
+        expect(probe.api_name).to_equal("optix")
+        expect(probe.feature_gate).to_equal("optix_ray_tracing_only")
+        expect(probe.has_compute).to_equal(true)
+        expect(probe.has_graphics).to_equal(false)
+        expect(probe.has_present).to_equal(false)
+        expect(probe.has_ray_tracing).to_equal(true)
+        expect(probe.strict_failure_without_fallback()).to_equal(true)
+
+    it "summary includes all hardened partial 3D backend names":
+        val summary = Engine3DBackendProber.create().probe_all_summary()
+
+        expect(summary).to_contain("requested=cpu")
+        expect(summary).to_contain("requested=software")
+        expect(summary).to_contain("requested=cuda")
+        expect(summary).to_contain("requested=rocm")
+        expect(summary).to_contain("requested=hip")
+        expect(summary).to_contain("requested=opencl")
+        expect(summary).to_contain("requested=metal")
+        expect(summary).to_contain("requested=vulkan")
+        expect(summary).to_contain("requested=webgpu")
+        expect(summary).to_contain("requested=optix")

@@ -192,6 +192,13 @@ Create a shared SSpec support library rather than scattering helper functions:
 
 1. **Documentation and skills**
    - Add local/domain research and this plan.
+   - Starter progress: `test/README.md` now states that generated
+     `doc/06_spec/...` output must read as scenario-based manuals for
+     user-visible, system, protocol, MCP, UI, hardware, and environmental
+     tests.
+   - Starter progress: `doc/07_guide/testing/sspec_scenario_manual.md`
+     documents inline/previous/include metadata, capture kinds, environmental
+     evidence, MCP manual shape, and visibility policy for generated manuals.
    - Update `test/README.md`, testing guide, SPipe skills, and verification
      skills to require manual-quality generated docs.
 2. **Docgen metadata parser**
