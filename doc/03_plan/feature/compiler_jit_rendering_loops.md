@@ -1,7 +1,7 @@
 # Plan: JIT-Compile Pure-Simple Software Rendering Loops (FR-COMPILER-012)
 
 - **Date:** 2026-05-30
-- **Status:** Implemented (2026-05-30)
+- **Status:** Implemented (2026-05-30) — Phase 1-3 code landed, bootstrap build passes, pending end-to-end verification
 - **Priority:** P2
 - **FR:** `doc/08_tracking/feature_request/compiler_requests.md` (FR-COMPILER-012)
 - **Effort:** L (2-3 weeks)

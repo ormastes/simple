@@ -462,7 +462,10 @@ simple_min_total_us="n/a"
 simple_min_bytes="n/a"
 simple_min_closure_bytes="n/a"
 simple_trial_count=0
+simple_failed_trial_count=0
+simple_timeout_trial_count=0
 gtk_trial_count=0
+gtk_failed_trial_count=0
 simple_run_lib_spl_files="$(spl_file_count_of_path_list "$SIMPLE_RUN_LIB")"
 simple_full_src_spl_files="$(spl_file_count_of_path_list "$ROOT_DIR/src")"
 
@@ -471,19 +474,30 @@ if [ -x "$SIMPLE_BINARY" ]; then
     trial=1
     while [ "$trial" -le "$GTK_EVIDENCE_TRIALS" ]; do
         trial_out="$BUILD_DIR/simple_gui_render_bench.trial_${trial}.out"
-        if SIMPLE_LIB="$SIMPLE_RUN_LIB" with_timeout "$SIMPLE_BINARY" run "$SIMPLE_ENTRY" >"$trial_out" 2>&1; then
+        set +e
+        SIMPLE_LIB="$SIMPLE_RUN_LIB" with_timeout "$SIMPLE_BINARY" run "$SIMPLE_ENTRY" >"$trial_out" 2>&1
+        trial_code=$?
+        set -e
+        if [ "$trial_code" -eq 0 ]; then
             trial_status="$(field_of simple_render_status "$trial_out")"
             if [ "$trial_status" = "ok" ]; then
                 simple_trial_count=$((simple_trial_count + 1))
                 simple_outputs="$simple_outputs $trial_out"
                 cp "$trial_out" "$SIMPLE_OUT"
             else
+                simple_failed_trial_count=$((simple_failed_trial_count + 1))
                 simple_status="failed"
                 simple_reason="simple_trial_${trial}_${trial_status:-missing_status}"
             fi
         else
+            simple_failed_trial_count=$((simple_failed_trial_count + 1))
             simple_status="failed"
-            simple_reason="simple_trial_${trial}_run_failed"
+            if [ "$trial_code" -eq 124 ] || [ "$trial_code" -eq 137 ]; then
+                simple_timeout_trial_count=$((simple_timeout_trial_count + 1))
+                simple_reason="simple_trial_${trial}_timeout"
+            else
+                simple_reason="simple_trial_${trial}_run_failed_code_${trial_code}"
+            fi
         fi
         trial=$((trial + 1))
     done
@@ -617,17 +631,19 @@ EOF
                     gtk_trial_count=$((gtk_trial_count + 1))
                     gtk_outputs="$gtk_outputs $trial_out"
                     cp "$trial_out" "$GTK_OUT"
-                else
-                    gtk_status="$trial_status"
-                    gtk_reason="$(field_of gtk_reason "$trial_out")"
-                    if [ -z "$gtk_reason" ]; then
+            else
+                gtk_failed_trial_count=$((gtk_failed_trial_count + 1))
+                gtk_status="$trial_status"
+                gtk_reason="$(field_of gtk_reason "$trial_out")"
+                if [ -z "$gtk_reason" ]; then
                         gtk_reason="gtk_trial_${trial}_${trial_status:-missing_status}"
                     fi
-                fi
-            else
-                gtk_status="failed"
-                gtk_reason="gtk_trial_${trial}_run_failed"
             fi
+        else
+            gtk_failed_trial_count=$((gtk_failed_trial_count + 1))
+            gtk_status="failed"
+            gtk_reason="gtk_trial_${trial}_run_failed"
+        fi
             trial=$((trial + 1))
         done
         if [ "$gtk_trial_count" -gt 0 ]; then
@@ -772,7 +788,10 @@ fi
     echo "| simple_iterations | $SIMPLE_ITERATIONS |"
     echo "| gtk_iterations | $GTK_ITERATIONS |"
     echo "| simple_trial_count | $simple_trial_count |"
+    echo "| simple_failed_trial_count | $simple_failed_trial_count |"
+    echo "| simple_timeout_trial_count | $simple_timeout_trial_count |"
     echo "| gtk_trial_count | $gtk_trial_count |"
+    echo "| gtk_failed_trial_count | $gtk_failed_trial_count |"
     echo
     echo "## Static Shell Size"
     echo
@@ -888,4 +907,7 @@ echo "gtk_benchmark_gtk_text_us=$gtk_benchmark_gtk_text_us"
 echo "gtk_benchmark_simple_iterations=$SIMPLE_ITERATIONS"
 echo "gtk_benchmark_gtk_iterations=$GTK_ITERATIONS"
 echo "gtk_benchmark_simple_trial_count=$simple_trial_count"
+echo "gtk_benchmark_simple_failed_trial_count=$simple_failed_trial_count"
+echo "gtk_benchmark_simple_timeout_trial_count=$simple_timeout_trial_count"
 echo "gtk_benchmark_gtk_trial_count=$gtk_trial_count"
+echo "gtk_benchmark_gtk_failed_trial_count=$gtk_failed_trial_count"
