@@ -135,11 +135,11 @@ fn fast_int_binop(op: &BinOp, left: i64, right: i64) -> Result<Option<Value>, Co
     Ok(Some(value))
 }
 
-/// Try to dispatch a binary operator to a dunder method on an Object value.
+/// Try to dispatch a binary operator to a method on an Object value.
 /// Returns None if the left value is not an Object or doesn't have the method.
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
-fn try_dunder_binop(
-    dunder_name: &str,
+fn try_object_binop_method(
+    method_name: &str,
     left: &Value,
     right: &Value,
     env: &mut Env,
@@ -151,12 +151,12 @@ fn try_dunder_binop(
     if let Value::Object { class, fields } = left {
         let method = classes
             .get(class.as_str())
-            .and_then(|cd| cd.methods.iter().find(|m| m.name == dunder_name).cloned())
+            .and_then(|cd| cd.methods.iter().find(|m| m.name == method_name).cloned())
             .map(Arc::new)
             .or_else(|| {
                 impl_methods
                     .get(class.as_str())
-                    .and_then(|ms| ms.iter().find(|m| m.name == dunder_name).cloned())
+                    .and_then(|ms| ms.iter().find(|m| m.name == method_name).cloned())
             });
         if let Some(method) = method {
             let self_ctx = Some((class.as_str(), fields));
@@ -641,7 +641,18 @@ pub(super) fn eval_op_expr(
                     _ if use_f32 => Ok(Value::Float32(as_f32(&left_val)? + as_f32(&right_val)?)),
                     _ if use_float => Ok(Value::Float(left_val.as_float()? + right_val.as_float()?)),
                     _ => {
-                        if let Some(result) = try_dunder_binop(
+                        if let Some(result) = try_object_binop_method(
+                            "add_scalar",
+                            &left_val,
+                            &right_val,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
+                            result
+                        } else if let Some(result) = try_object_binop_method(
                             "__add__",
                             &left_val,
                             &right_val,
@@ -667,7 +678,18 @@ pub(super) fn eval_op_expr(
                         Ok(Value::Float32(as_f32(&left_val)? - as_f32(&right_val)?))
                     } else if use_float {
                         Ok(Value::Float(left_val.as_float()? - right_val.as_float()?))
-                    } else if let Some(result) = try_dunder_binop(
+                    } else if let Some(result) = try_object_binop_method(
+                        "sub_scalar",
+                        &left_val,
+                        &right_val,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    ) {
+                        result
+                    } else if let Some(result) = try_object_binop_method(
                         "__sub__",
                         &left_val,
                         &right_val,
@@ -707,7 +729,18 @@ pub(super) fn eval_op_expr(
                         _ if use_f32 => Ok(Value::Float32(as_f32(&left_val)? * as_f32(&right_val)?)),
                         _ if use_float => Ok(Value::Float(left_val.as_float()? * right_val.as_float()?)),
                         _ => {
-                            if let Some(result) = try_dunder_binop(
+                            if let Some(result) = try_object_binop_method(
+                                "mul_scalar",
+                                &left_val,
+                                &right_val,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            ) {
+                                result
+                            } else if let Some(result) = try_object_binop_method(
                                 "__mul__",
                                 &left_val,
                                 &right_val,
@@ -752,7 +785,18 @@ pub(super) fn eval_op_expr(
                         } else {
                             Ok(Value::Float(left_val.as_float()? / r))
                         }
-                    } else if let Some(result) = try_dunder_binop(
+                    } else if let Some(result) = try_object_binop_method(
+                        "div_scalar",
+                        &left_val,
+                        &right_val,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    ) {
+                        result
+                    } else if let Some(result) = try_object_binop_method(
                         "__div__",
                         &left_val,
                         &right_val,
@@ -801,7 +845,7 @@ pub(super) fn eval_op_expr(
                         } else {
                             Ok(Value::Float(left_val.as_float()? % r))
                         }
-                    } else if let Some(result) = try_dunder_binop(
+                    } else if let Some(result) = try_object_binop_method(
                         "__mod__",
                         &left_val,
                         &right_val,
@@ -827,7 +871,7 @@ pub(super) fn eval_op_expr(
                     }
                 }
                 BinOp::Eq => {
-                    if let Some(result) = try_dunder_binop(
+                    if let Some(result) = try_object_binop_method(
                         "__eq__",
                         &left_val,
                         &right_val,
@@ -843,7 +887,7 @@ pub(super) fn eval_op_expr(
                     }
                 }
                 BinOp::NotEq => {
-                    if let Some(result) = try_dunder_binop(
+                    if let Some(result) = try_object_binop_method(
                         "__ne__",
                         &left_val,
                         &right_val,
@@ -871,7 +915,7 @@ pub(super) fn eval_op_expr(
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? < right_val.as_float()?)),
                     _ => {
-                        if let Some(result) = try_dunder_binop(
+                        if let Some(result) = try_object_binop_method(
                             "__lt__",
                             &left_val,
                             &right_val,
@@ -900,7 +944,7 @@ pub(super) fn eval_op_expr(
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? > right_val.as_float()?)),
                     _ => {
-                        if let Some(result) = try_dunder_binop(
+                        if let Some(result) = try_object_binop_method(
                             "__gt__",
                             &left_val,
                             &right_val,
@@ -929,7 +973,7 @@ pub(super) fn eval_op_expr(
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? <= right_val.as_float()?)),
                     _ => {
-                        if let Some(result) = try_dunder_binop(
+                        if let Some(result) = try_object_binop_method(
                             "__le__",
                             &left_val,
                             &right_val,
@@ -958,7 +1002,7 @@ pub(super) fn eval_op_expr(
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? >= right_val.as_float()?)),
                     _ => {
-                        if let Some(result) = try_dunder_binop(
+                        if let Some(result) = try_object_binop_method(
                             "__ge__",
                             &left_val,
                             &right_val,
@@ -1133,7 +1177,7 @@ pub(super) fn eval_op_expr(
                         }
 
                         _ => {
-                            if let Some(result) = try_dunder_binop(
+                            if let Some(result) = try_object_binop_method(
                                 "__matmul__",
                                 &left_val,
                                 &right_val,

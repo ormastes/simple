@@ -270,7 +270,7 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
 - **Filed-on:** 2026-04-27
 - **Filed-by:** scilib-port research agent
 - **Priority:** P2
-- **Status:** observed
+- **Status:** fixed 2026-05-30
 - **Expected-repro:**
   ```
   let b = a + Float64(1.0)    // broadcast add scalar to all elements
@@ -292,6 +292,19 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
   blocks). The LLVM backend emits an unsupported-panic for these. NDArray
   operator-overload methods (`fn add(self, rhs)` etc.) still missing — the MIR
   ops exist in-compiler but are not exposed as user-callable methods on NDArray.
+  Fixed 2026-05-30 for the user-callable Float64 scalar RHS surface: the
+  interpreter object-operator fallback now routes `+`, `-`, `*`, and `/` to
+  `add_scalar`, `sub_scalar`, `mul_scalar`, and `div_scalar` when the left
+  object exposes those methods, so `a + Float64.new(x)`, `a - Float64.new(x)`,
+  `a * Float64.new(x)`, and `a / Float64.new(x)` reuse the existing scalar
+  broadcast implementation. Multi-dimensional `flat_*` accessors now compute
+  their resolved offset directly, avoiding a nested `self` method-call loss when
+  scalar helpers operate on reshaped arrays.
+  Verification:
+  `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/lib/nogc_async_mut/ndarray/mod.spl test/feature/scilib/ndarray_broadcast_spec.spl`,
+  `cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml`,
+  and
+  `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/feature/scilib/ndarray_broadcast_spec.spl --mode=interpreter --clean --fail-fast`.
 
 ---
 
