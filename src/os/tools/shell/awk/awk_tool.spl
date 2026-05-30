@@ -187,7 +187,10 @@ fn _find_after(program: text, needle: text) -> i32:
     return -1
 
 fn _extract_rules(program: text) -> [(text, text)]:
-    """Extract (pattern, action) pairs, excluding BEGIN/END blocks."""
+    """Extract (pattern, action) pairs, excluding BEGIN/END blocks.
+
+    Patterns: /regex/, !/regex/, NR==N, or empty (bare action).
+    """
     var rules: [(text, text)] = []
     # Remove BEGIN and END blocks first
     val cleaned = _remove_block(program, "BEGIN")
@@ -206,6 +209,22 @@ fn _extract_rules(program: text) -> [(text, text)]:
             val body_pair = _read_brace_body(cleaned2, pos)
             rules = rules.push(("", body_pair.0.trim()))
             pos = body_pair.1
+        elif ch == "!" and pos + 1 < plen and cleaned2.char_at(pos + 1) == "/":
+            # !/pattern/ { action } — negation
+            pos = pos + 2  # skip !/
+            var pattern = "!"
+            while pos < plen and cleaned2.char_at(pos) != "/":
+                pattern = "{pattern}{cleaned2.char_at(pos)}"
+                pos = pos + 1
+            pos = pos + 1  # consume closing /
+            # Skip whitespace until '{'
+            while pos < plen and (cleaned2.char_at(pos) == " " or cleaned2.char_at(pos) == "\t"):
+                pos = pos + 1
+            if pos < plen and cleaned2.char_at(pos) == "{":
+                pos = pos + 1
+                val body_neg = _read_brace_body(cleaned2, pos)
+                rules = rules.push((pattern, body_neg.0.trim()))
+                pos = body_neg.1
         elif ch == "/":
             # /pattern/ { action }
             pos = pos + 1
@@ -223,7 +242,19 @@ fn _extract_rules(program: text) -> [(text, text)]:
                 rules = rules.push((pattern, body_pair2.0.trim()))
                 pos = body_pair2.1
         else:
-            pos = pos + 1
+            # Read a word pattern (e.g. NR==2) until '{'
+            var word_pat = ""
+            while pos < plen and cleaned2.char_at(pos) != "{" and cleaned2.char_at(pos) != "\n":
+                word_pat = "{word_pat}{cleaned2.char_at(pos)}"
+                pos = pos + 1
+            val word_pat_t = word_pat.trim()
+            if word_pat_t.len() > 0 and pos < plen and cleaned2.char_at(pos) == "{":
+                pos = pos + 1
+                val body_word = _read_brace_body(cleaned2, pos)
+                rules = rules.push(("NR_EXPR:{word_pat_t}", body_word.0.trim()))
+                pos = body_word.1
+            else:
+                pos = pos + 1
     return rules
 
 fn _remove_block(program: text, keyword: text) -> text:
@@ -326,26 +357,47 @@ fn _split_whitespace(line: text) -> [text]:
 # Action execution
 # ---------------------------------------------------------------------------
 
-fn _exec_action(action: text, line: text, fields: [text], nr: i32, nf: i32, sep: text, terminal: Terminal) -> i32:
-    """Execute an action string. Returns 1 if 'next' was encountered, 0 otherwise."""
-    val stmts = split_lines(action)
+fn _exec_action(action: text, line: text, fields: [text], nr: i32, nf: i32, sep: text, terminal: Terminal, vars: [(text, text)]) -> (i32, [(text, text)]):
+    """Execute an action string. Returns (ctrl, vars) where ctrl=1 means 'next'."""
+    # Split on semicolons and newlines
+    var stmts: [text] = []
+    var cur_stmt = ""
+    var ai = 0
+    while ai < action.len():
+        val ac = action.char_at(ai)
+        if ac == ";" or ac == "\n":
+            val trimmed_s = cur_stmt.trim()
+            if trimmed_s.len() > 0:
+                stmts = stmts.push(trimmed_s)
+            cur_stmt = ""
+        else:
+            cur_stmt = "{cur_stmt}{ac}"
+        ai = ai + 1
+    val last_s = cur_stmt.trim()
+    if last_s.len() > 0:
+        stmts = stmts.push(last_s)
+
+    var cur_vars = vars
     for stmt in stmts:
         val s = stmt.trim()
         if s.len() == 0:
             pass_dn
         elif s == "next":
-            return 1
+            return (1, cur_vars)
         elif s == "print" or s == "print $0":
             write_line(terminal, line)
         elif s.starts_with("print "):
             val rest = s.slice(6, s.len()).trim()
-            val resolved = _resolve_expr(rest, line, fields, nr, nf)
+            val resolved = _resolve_multi_expr(rest, line, fields, nr, nf, cur_vars)
             write_line(terminal, resolved)
         elif s.starts_with("printf "):
             val rest2 = s.slice(7, s.len()).trim()
-            val resolved2 = _resolve_expr(rest2, line, fields, nr, nf)
-            terminal.write_string(resolved2)
-    return 0
+            val formatted = _exec_printf(rest2, line, fields, nr, nf, cur_vars)
+            terminal.write_string(formatted)
+        else:
+            # Variable assignment / accumulation: sum += $1, n++, var = expr
+            cur_vars = _exec_assign(s, line, fields, nr, nf, cur_vars)
+    return (0, cur_vars)
 
 fn _resolve_expr(expr: text, line: text, fields: [text], nr: i32, nf: i32) -> text:
     """Resolve a simple expression: $N, NR, NF, or literal text."""

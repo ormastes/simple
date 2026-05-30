@@ -33,8 +33,61 @@ fn _flatten_at_blocks(css: text) -> text:
     var out = css
     out = out.replace("@layer components {", "")
     out = out.replace("@layer utilities {", "")
+    # Known-valid @supports conditions: strip the wrapper, keep the inner rules.
     out = out.replace("@supports (display: grid) {", "")
     out = out.replace("@supports (display: flex) {", "")
+    out = out.replace("@supports (text-overflow: ellipsis) {", "")
+    out = out.replace("@supports (text-transform: uppercase) {", "")
+    out = out.replace("@supports selector(:has()) {", "")
+    # Handle @supports not (...) — strip the wrapper, keep inner rules (condition is false → rules apply via not).
+    out = _strip_supports_not_blocks(out)
+    # Strip unknown/invalid @supports blocks entirely (including their inner rules).
+    out = _strip_unknown_supports_blocks(out)
+    out
+
+fn _strip_supports_not_blocks(css: text) -> text:
+    # Replace "@supports not (...) { ... }" by keeping the inner rules (not-false = apply).
+    var out = ""
+    var pos: i64 = 0
+    while pos < css.len():
+        val at_pos = css.index_of("@supports not", pos)
+        if at_pos < 0:
+            out = out + css.substring(pos, css.len())
+            break
+        out = out + css.substring(pos, at_pos)
+        val open = css.index_of("{", at_pos)
+        if open < 0:
+            out = out + css.substring(at_pos, css.len())
+            break
+        val close = css.index_of("}", open)
+        if close < 0:
+            out = out + css.substring(at_pos, css.len())
+            break
+        # Keep the inner content (without the wrapper braces)
+        out = out + css.substring(open + 1, close)
+        pos = close + 1
+    out
+
+fn _strip_unknown_supports_blocks(css: text) -> text:
+    # Strip any remaining "@supports (...) { ... }" blocks entirely.
+    var out = ""
+    var pos: i64 = 0
+    while pos < css.len():
+        val at_pos = css.index_of("@supports", pos)
+        if at_pos < 0:
+            out = out + css.substring(pos, css.len())
+            break
+        out = out + css.substring(pos, at_pos)
+        val open = css.index_of("{", at_pos)
+        if open < 0:
+            out = out + css.substring(at_pos, css.len())
+            break
+        val close = css.index_of("}", open)
+        if close < 0:
+            out = out + css.substring(at_pos, css.len())
+            break
+        # Skip the entire block (condition not recognized = strip)
+        pos = close + 1
     out
 
 fn _normalize_css_nesting(css: text) -> text:

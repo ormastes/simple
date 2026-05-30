@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-30 03:02:08*
+*Generated: 2026-05-30 08:28:54*
 
-## test/system
+## test/system/compiler
 
-❌ **editor_markdown_spec.spl** (273ms)
-  - Source: `test/system/editor_markdown_spec.spl`
-  - Generated doc: `spec/editor_markdown_spec.md`
+❌ **driver_synthetic_registration_live_spec.spl** (3217ms)
+  - Source: `test/system/compiler/driver_synthetic_registration_live_spec.spl`
+  - Generated doc: `spec/driver_synthetic_registration_live_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 0 ✅
-- **Failed:** 1 ❌
-- **Duration:** 276ms
+- **Passed:** 2 ✅
+- **Failed:** 2 ❌
+- **Duration:** 3224ms

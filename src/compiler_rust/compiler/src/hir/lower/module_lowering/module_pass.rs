@@ -61,10 +61,7 @@ fn has_driver_manifest_attr(attrs: &[ast::Attribute]) -> bool {
         .any(|attr| attr.name == "driver" || attr.name == "native_lib")
 }
 
-fn method_with_impl_driver_attrs(
-    method: &ast::FunctionDef,
-    impl_attrs: &[ast::Attribute],
-) -> ast::FunctionDef {
+fn method_with_impl_driver_attrs(method: &ast::FunctionDef, impl_attrs: &[ast::Attribute]) -> ast::FunctionDef {
     if !has_driver_manifest_attr(impl_attrs) || has_driver_manifest_attr(&method.attributes) {
         return method.clone();
     }

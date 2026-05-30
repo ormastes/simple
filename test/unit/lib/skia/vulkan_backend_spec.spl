@@ -12,7 +12,7 @@ use std.skia.entity.color.{SkColor, sk_color_black}
 use std.skia.backend.vulkan.backend.{
     VulkanBackend, PipelineKey, ShaderModule, ShaderKind,
     Vertex, VertexBuffer, DescriptorSet, RenderPassDesc,
-    CommandBufferRecord, VkCommandKind,
+    CommandBufferRecord, VulkanSubmissionRecord, VkCommand, VkCommandKind,
     vk_backend_new,
     triangulate_path, build_vertex_buffer,
     compile_shader_module, allocate_descriptor_set,
@@ -120,3 +120,40 @@ describe "VulkanBackend":
         expect(top_ok).to_equal(true)
         expect(right_ok).to_equal(true)
         expect(bot_ok).to_equal(true)
+
+    it "render_picture reuses pipeline cache across repeated ops":
+        var backend = vk_backend_new()
+        val cull = SkRect(left: 0.0, top: 0.0, right: 100.0, bottom: 100.0)
+        val cb = backend.render_picture(_picture_with_ops(2), cull)
+        expect(cb.commands.len()).to_equal(4)
+        expect(cb.unique_pipelines).to_equal(1)
+        expect(cb.pipeline_cache_hits).to_equal(1)
+
+    it "submit accepts bound draw commands and reports deterministic accounting":
+        var backend = vk_backend_new()
+        val cull = SkRect(left: 0.0, top: 0.0, right: 100.0, bottom: 100.0)
+        val cb = backend.render_picture(_picture_with_ops(2), cull)
+        val submission = backend.submit(cb)
+        expect(submission.ok).to_equal(true)
+        expect(submission.submitted_commands).to_equal(4)
+        expect(submission.draw_commands).to_equal(2)
+        expect(submission.rejected_commands).to_equal(0)
+        expect(submission.last_pipeline_id).to_equal(1)
+
+    it "submit rejects draw commands without a matching bound pipeline":
+        var backend = vk_backend_new()
+        val cull = SkRect(left: 0.0, top: 0.0, right: 100.0, bottom: 100.0)
+        val draw = VkCommand(
+            kind: VkCommandKind.Draw,
+            pipeline_id: 7,
+            vertex_count: 3,
+            descriptor_set_id: 0,
+            render_pass_bounds: cull
+        )
+        val commands = [draw]
+        val cb = CommandBufferRecord(commands: commands, pipeline_cache_hits: 0, unique_pipelines: 0)
+        val submission = backend.submit(cb)
+        expect(submission.ok).to_equal(false)
+        expect(submission.submitted_commands).to_equal(0)
+        expect(submission.draw_commands).to_equal(0)
+        expect(submission.rejected_commands).to_equal(1)

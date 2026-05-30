@@ -192,7 +192,9 @@ fn impl_level_driver_attr_ops_stub_executes_synthesized_static_registration() {
     fs::write(&source, IMPL_LEVEL_DRIVER_SOURCE).expect("write source");
 
     let runner = Runner::new();
-    let exit = runner.run_file(&source).expect("run synthetic impl driver registration");
+    let exit = runner
+        .run_file(&source)
+        .expect("run synthetic impl driver registration");
 
     assert_eq!(
         exit, 1,
@@ -248,7 +250,9 @@ fn impl_level_native_lib_attr_ops_stub_executes_synthesized_static_registration(
     fs::write(&source, IMPL_LEVEL_NATIVE_LIB_SOURCE).expect("write source");
 
     let runner = Runner::new();
-    let exit = runner.run_file(&source).expect("run synthetic impl native-lib registration");
+    let exit = runner
+        .run_file(&source)
+        .expect("run synthetic impl native-lib registration");
 
     assert_eq!(
         exit, 1,

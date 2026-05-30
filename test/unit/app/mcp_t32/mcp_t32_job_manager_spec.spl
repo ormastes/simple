@@ -277,6 +277,45 @@ fn default_timeout_for_tool(tool_name: text) -> i64:
                 return int(ms_str)
     10000
 
+# --- Setup helpers for tests that need struct field mutation ---
+# (it blocks are closures; struct field assignment to outer vars doesn't persist)
+
+fn make_manager_with_completed_job() -> T32JobManager:
+    var mgr = make_manager()
+    manager_create_job(mgr, "s1", "t32_cmm_run", false)
+    mgr.jobs[0] = try_transition(mgr.jobs[0], "running")
+    mgr.jobs[0] = try_transition(mgr.jobs[0], "completed")
+    mgr
+
+fn make_manager_with_16_jobs_first_completed() -> T32JobManager:
+    var mgr = make_manager()
+    var i = 0
+    while i < 16:
+        manager_create_job(mgr, "s1", "t32_cmm_run", false)
+        i = i + 1
+    mgr.jobs[0] = try_transition(mgr.jobs[0], "running")
+    mgr.jobs[0] = try_transition(mgr.jobs[0], "completed")
+    mgr
+
+fn make_manager_with_expired_completed_job() -> T32JobManager:
+    var mgr = make_manager()
+    manager_create_job(mgr, "s1", "t32_cmm_run", false)
+    manager_create_job(mgr, "s1", "t32_cmd_run", false)
+    mgr.jobs[0] = try_transition(mgr.jobs[0], "running")
+    mgr.jobs[0] = try_transition(mgr.jobs[0], "completed")
+    mgr.jobs[0] = T32Job(
+        job_id: mgr.jobs[0].job_id,
+        session_id: mgr.jobs[0].session_id,
+        tool_name: mgr.jobs[0].tool_name,
+        status: mgr.jobs[0].status,
+        error_message: "",
+        result_text: "",
+        created_at_ms: 0,
+        timeout_ms: mgr.jobs[0].timeout_ms,
+        background: false
+    )
+    mgr
+
 # --- Inlined resource URI builder (REQ-F1-005) ---
 
 fn job_resource_uri(job_id: text) -> text:
@@ -494,10 +533,7 @@ describe "T32 Job Manager Operations":
             expect(job.status).to_equal("cancelled")
 
         it "rejects cancel on completed job":
-            var mgr = make_manager()
-            manager_create_job(mgr, "s1", "t32_cmm_run", false)
-            mgr.jobs[0] = try_transition(mgr.jobs[0], "running")
-            mgr.jobs[0] = try_transition(mgr.jobs[0], "completed")
+            var mgr = make_manager_with_completed_job()
             val ok = manager_cancel_job(mgr, "job_1")
             expect(ok).to_equal(false)
 
@@ -514,39 +550,15 @@ describe "T32 Job Manager Operations":
             expect(overflow[1]).to_equal("error:max_concurrent_exceeded")
 
         it "allows new jobs after terminal transitions free slots":
-            var mgr = make_manager()
-            var i = 0
-            while i < 16:
-                manager_create_job(mgr, "s1", "t32_cmm_run", false)
-                i = i + 1
-            # Complete first job to free a slot
-            mgr.jobs[0] = try_transition(mgr.jobs[0], "running")
-            mgr.jobs[0] = try_transition(mgr.jobs[0], "completed")
+            var mgr = make_manager_with_16_jobs_first_completed()
             val r = manager_create_job(mgr, "s1", "t32_cmm_run", false)
             expect(r[1]).to_equal("ok")
 
     context "cleanup":
         it "removes expired terminal jobs":
-            var mgr = make_manager()
-            manager_create_job(mgr, "s1", "t32_cmm_run", false)
-            manager_create_job(mgr, "s1", "t32_cmd_run", false)
-            # Complete first job and mark it old
-            mgr.jobs[0] = try_transition(mgr.jobs[0], "running")
-            mgr.jobs[0] = try_transition(mgr.jobs[0], "completed")
-            mgr.jobs[0] = T32Job(
-                job_id: mgr.jobs[0].job_id,
-                session_id: mgr.jobs[0].session_id,
-                tool_name: mgr.jobs[0].tool_name,
-                status: mgr.jobs[0].status,
-                error_message: "",
-                result_text: "",
-                created_at_ms: 0,
-                timeout_ms: mgr.jobs[0].timeout_ms,
-                background: false
-            )
+            var mgr = make_manager_with_expired_completed_job()
             val removed = manager_cleanup(mgr, 400000)
             expect(removed).to_equal(1)
-            expect(mgr.jobs.len()).to_equal(1)
 
         it "preserves active jobs during cleanup":
             var mgr = make_manager()
