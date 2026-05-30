@@ -1,5 +1,5 @@
 <!-- codex-design -->
-# VS Code Rich Editor Architecture
+# Legacy VS Code Rich Editor Architecture
 
 > Status note (2026-05-30): this document is legacy architecture for the
 > standalone VS Code extension/webview path. It is not the source of truth for
@@ -8,14 +8,15 @@
 > runnable surfaces, see `doc/07_guide/ide_llm_integration_guide.md` and
 > `doc/07_guide/editor_tui.md`.
 
-**Feature:** `vscode_rich_editor`  
+**Feature:** legacy `vscode_rich_editor`; current feature is the shared Simple IDE/editor with a VS Code-compatible extension surface
 **Date:** 2026-04-12  
 **Status:** Provisional design based on recommended options  
 **Assumption:** Feature Option 2 + NFR Option 2
 
 ## Architecture Decision
 
-Build `vscode_rich_editor` as a standalone VS Code extension package that uses:
+This legacy design built `vscode_rich_editor` as a standalone VS Code extension
+package that used:
 
 1. `CustomTextEditorProvider`
 2. `TextDocument` as the canonical model
@@ -35,8 +36,8 @@ Owns:
 
 Legacy primary files were under `src/app/vscode_rich_editor/`; that package has
 been removed. The current product entrypoint is `src/app/ide/main.spl`, with the
-reusable editor backend under `src/lib/editor/` and the sample embedded
-integration in `examples/ide/simple_ide_launch.spl`.
+reusable editor backend under `src/lib/editor/`. The `examples/ide/**` files are
+sample integrations only, not embedded app ownership.
 
 ### 2. Host Editor Provider
 

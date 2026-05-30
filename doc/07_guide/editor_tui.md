@@ -27,7 +27,7 @@ render an editor frame, and the known blockers.
 The editor library follows VS Code-like package names for reusable code:
 
 - `src/lib/editor/buffer/` — text storage, piece table, undo, syntax helpers
-- `src/lib/editor/core/` — document/session/keybinding/plugin state
+- `src/lib/editor/core/` — document/session/keybinding state
   (`launch.spl` and `path_text.spl` hold reusable app/IDE/MCP helper logic)
 - `src/lib/editor/view/` — dock zones, split tree, panels, tabs, breadcrumbs
 - `src/lib/editor/render/` — markdown/block/terminal render models
@@ -42,14 +42,16 @@ configured roots, activates on `onLanguage:*` / `onCommand:*` events, and
 registers command, language, and debug-adapter contributions. Root policy stays
 in `src/lib/editor/extensions/roots.spl`; app code only injects environment
 values. `test/unit/lib/editor/extension_discovery_contract_spec.spl` covers a
-real temp-root manifest discovery and activation path, plus the embedded IDE
-example extension at `examples/ide/extensions/markdown-notes/extension.sdn` and
+real temp-root manifest discovery and activation path, plus the sample IDE
+extension at `examples/ide/extensions/markdown-notes/extension.sdn` and
 its sandbox-gated `main.spl` runtime entrypoint.
 
 Do not add duplicate MDSOC-numbered aliases such as `30.view` or
 `60.services`. MDSOC+ layering is documented in architecture/design docs; code
-paths stay semantic so `src/app/editor`, `src/app/svim`, embedded editor apps,
-examples, and the VS Code extension consume one shared editor library.
+paths stay semantic for editor concepts, with canonical numbered boundary
+capsules such as `00.common` and `70.backend` only where the current tree
+already uses them. `src/app/editor`, `src/app/svim`, embedded editor apps,
+examples, and VS Code-compatible adapters consume one shared editor library.
 
 ## Host and SimpleOS Runtime Contract
 

@@ -1,5 +1,5 @@
 <!-- codex-design -->
-# VS Code Rich Editor Detail Design
+# Legacy VS Code Rich Editor Detail Design
 
 > Status note (2026-05-30): this document is legacy detail design for the
 > standalone VS Code extension/webview path. It does not describe the current
@@ -7,7 +7,7 @@
 > Current source-of-truth docs are `doc/07_guide/ide_llm_integration_guide.md`
 > and `doc/07_guide/editor_tui.md`.
 
-**Feature:** `vscode_rich_editor`  
+**Feature:** legacy `vscode_rich_editor`; current feature is the shared Simple IDE/editor with a VS Code-compatible extension surface
 **Date:** 2026-04-12  
 **Status:** Provisional design based on recommended options
 
@@ -18,7 +18,13 @@ reopened `.spl` files in a `CustomTextEditorProvider` and rendered
 natural-height math and image widgets inside a CodeMirror 6 webview. That
 standalone implementation tree has been removed; current work routes through
 the shared Simple editor/IDE surfaces in `src/lib/editor/`, `src/app/editor/`,
-`src/app/ide/main.spl`, and `examples/ide/simple_ide_launch.spl`.
+and `src/app/ide/main.spl`. The `examples/ide/**` files are sample integrations
+that demonstrate launch and render contracts; they are not the embedded app.
+
+Current work is Markdown-first: Markdown notes, wiki links, preview, outline,
+tasks, tables, callouts, and attachments are first-class editor workflows.
+`.spl` remains a supported language mode over the same shared buffer/session
+model.
 
 The backing `TextDocument` remains canonical.
 

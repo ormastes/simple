@@ -72,7 +72,7 @@ The IDE must run on both host platforms and SimpleOS:
   without host-only APIs.
 - **Verification:** `test/unit/lib/editor/host_simpleos_surface_contract_spec.spl`
   guards the boundary by scanning the shared editor services, TUI path, Simple
-  IDE entrypoint, and embedded example IDE for host-only API names, and by
+  IDE entrypoint, and sample IDE examples for host-only API names, and by
   rendering editor GUI HTML through the shared GUI backend.
 - **Tauri evidence:** `test/unit/lib/editor/editor_web_tauri_render_contract_spec.spl`
   proves editor-specific GUI HTML reaches both pure Simple WebRender artifacts
@@ -123,10 +123,11 @@ plane (MCP assistant) and the operator plane (dashboard).
 
 - **Assistant core owns truth** (the store), **dashboard observes**, **bridge
   syncs** — never the source of truth. This is the KAIROS contract.
-- The editor exposes a **55-tool `editor.*` MCP surface** via
+- The editor exposes a broader **55-tool in-process `editor.*` command surface** via
   `editor_mcp_dispatch(session, tool_name, args)` (`src/app/editor/mcp_tools.spl`,
-  registry `editor_mcp_tools()`), so an agent can drive the editor (open files,
-  read buffers, edit, run LSP, navigate a wiki vault).
+  registry `editor_mcp_tools()`), so embedded apps/tests can drive the editor
+  (open files, read buffers, edit, run LSP, navigate a wiki vault) over an
+  explicit `EditSession`.
 
 ## Wired vs. contract-only — read this before relying on anything
 
@@ -134,13 +135,17 @@ plane (MCP assistant) and the operator plane (dashboard).
 - The 11 `assistant_*` tools are routed in `main_dispatch.spl` (`_is_in_process_tool` → `_dispatch_in_process`) and persist to the store.
 - Dashboard views (`dashboard.views/assistant_*.spl`) + `assistant_bridge.spl` read the store and render session state (LIVE/ACTIVE/COMPLETED/FAILED/STALE/DEGRADED).
 - The editor's 55 `editor.*` tools work in-process: exercised directly over an `EditSession` in `test/system/editor_controller_spec.spl`, `editor_md_wiki_index_spec.spl`, `editor_gui_spec.spl`.
+- The live `simple mcp` server wires the safe stateful subset
+  `editor.open_file`, `editor.read_buffer`, and `editor.list_open_files` in
+  `src/app/mcp/main.spl`, backed by reusable session logic in
+  `src/lib/editor/mcp/session_tools.spl`.
 
 **Contract-only / NOT wired (do not assume these run)**
-- **`editor.*` is not registered in the MCP server.** `editor_mcp_tools()` /
-  `editor_mcp_dispatch()` have **no caller** in `src/app/mcp/`; `main_dispatch.spl`
-  contains no `editor.*` routing. The surface is a tested library API, not a
-  live `simple mcp` endpoint. To make an agent drive the editor over MCP, this
-  registration is the missing wire.
+- **Most `editor.*` commands are not registered in the MCP server.**
+  `editor.edit`, `editor.search`, `editor.diagnostics`, and the broader
+  `editor.lsp_*` / `editor.wiki_*` catalog remain in-process APIs until each
+  command has stateful dispatch, JSON argument mapping, and stdio integration
+  coverage.
 - **No editor→dashboard reverse channel.** No `editor_watcher`, no
   `.build/llm_dashboard/editor_events/` stream; the dashboard does not reflect
   live editor activity.

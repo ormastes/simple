@@ -1,10 +1,15 @@
-# Editor Plugin Design: Unicode Beautification
+# Editor Extension Design: Unicode Beautification
 
 ## Overview
 
-Editor plugins for Simple that provide Unicode-rendered display of operators, math blocks, and custom blocks. Two plugins: `simple.nvim` (Neovim) and `simple-vscode` (VS Code).
+Editor extensions for Simple that provide Unicode-rendered display of
+operators, math blocks, Markdown blocks, and custom blocks. The shared in-repo
+extension model lives under `src/lib/editor/extensions/` and uses
+`extension.sdn` manifests. Host ecosystem adapters can still use their native
+packaging names, for example `simple.nvim` for Neovim and a VS Code-compatible
+extension adapter, but reusable behavior belongs in the shared editor library.
 
-## Conceal Rules (Both Editors)
+## Conceal Rules (Editor Extensions)
 
 Applied in normal/view mode only; raw text shown in insert mode.
 
@@ -28,7 +33,7 @@ Applied in normal/view mode only; raw text shown in insert mode.
 | `forall` | `∀` | Universal quantifier |
 | `exists` | `∃` | Existential quantifier |
 
-## Neovim Plugin (`simple.nvim`)
+## Neovim Host Adapter (`simple.nvim`)
 
 ### Architecture
 
@@ -66,14 +71,16 @@ require("simple").setup({
 })
 ```
 
-## VS Code Extension (`simple-vscode`)
+## VS Code-Compatible Host Adapter
 
 ### Architecture
 
 - `TextEditorDecorationType` for inline operator beautification
 - `CompletionItemProvider` for Lean-style Unicode input (`\alpha` + Tab -> `α`)
 - `HoverProvider` for math/lean block preview
-- LSP integration via Rich render mode for hover/inlay hints
+- LSP integration via shared editor render/extension services for hover/inlay hints
+- Markdown-first preview support for notes, wiki links, callouts, tables, tasks,
+  and attachments
 
 ### Unicode Input Method
 
@@ -110,7 +117,10 @@ The LSP server can use this for:
 
 ## Implementation Order
 
-1. Tree-sitter grammar (`tree-sitter-simple`) -- prerequisite for nvim plugin
-2. `simple.nvim` with conceal queries + math virtual text
-3. `simple-vscode` with decorations + Unicode input + hover
-4. LSP integration (requires Rich render mode, already implemented in runtime)
+1. Shared editor extension manifest and command contribution contracts
+   (`src/lib/editor/extensions/`, `extension.sdn`)
+2. Markdown-first preview/beautification commands in the shared editor library
+3. Tree-sitter grammar (`tree-sitter-simple`) for host adapters that need it
+4. `simple.nvim` with conceal queries + math/Markdown virtual text
+5. VS Code-compatible adapter with decorations + Unicode input + hover
+6. LSP integration through shared render services

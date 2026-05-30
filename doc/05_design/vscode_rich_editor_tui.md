@@ -1,20 +1,20 @@
 <!-- codex-design -->
-# VS Code Rich Editor UI Sketch
+# Legacy VS Code Rich Editor UI Sketch
 
 > Status note (2026-05-30): this is a legacy UI sketch for the removed
 > standalone VS Code rich-editor package. The current editor/IDE UI source of
 > truth is `doc/07_guide/editor_tui.md`, with reusable code in
-> `src/lib/editor/`, the product entrypoint in `src/app/ide/main.spl`, and the
-> sample embedded integration in `examples/ide/simple_ide_launch.spl`.
+> `src/lib/editor/` and the product entrypoint in `src/app/ide/main.spl`.
+> `examples/ide/**` contains sample integrations only.
 
-**Feature:** `vscode_rich_editor`  
+**Feature:** legacy `vscode_rich_editor`; current feature is the shared Simple IDE/editor UI
 **Date:** 2026-04-12
 
 ## Primary Editor Layout
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
-│ Simple Rich Editor                                          │
+│ Simple IDE / Editor                                         │
 ├──────────────────────────────────────────────────────────────┤
 │ 1  use math                                                 │
 │ 2                                                          │
@@ -27,6 +27,10 @@
 │ 9  val raw = m{ x + y }   <- when cursor enters block      │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+Current UI work is Markdown-first. The same panes/renderers support Markdown
+notes, wiki preview, outline, tasks/tables/callouts/attachments, and `.spl`
+language editing as one mode of the shared editor.
 
 ## Interaction Model
 
