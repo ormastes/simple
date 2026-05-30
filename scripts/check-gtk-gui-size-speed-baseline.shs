@@ -13,6 +13,8 @@ GTK_EVIDENCE_MIN_ITERATIONS="${GTK_EVIDENCE_MIN_ITERATIONS:-3}"
 GTK_EVIDENCE_MIN_TRIALS="${GTK_EVIDENCE_MIN_TRIALS:-3}"
 GTK_EVIDENCE_TRIALS="${GTK_EVIDENCE_TRIALS:-$GTK_EVIDENCE_MIN_TRIALS}"
 SKIP_SIMPLE_NATIVE="${SKIP_SIMPLE_NATIVE:-0}"
+GTK_EVIDENCE_FORCE_GTK_UNAVAILABLE="${GTK_EVIDENCE_FORCE_GTK_UNAVAILABLE:-0}"
+GTK_EVIDENCE_FORCE_VECTOR_FONT_UNAVAILABLE="${GTK_EVIDENCE_FORCE_VECTOR_FONT_UNAVAILABLE:-0}"
 SIMPLE_RUN_TIMEOUT_SECS="${SIMPLE_RUN_TIMEOUT_SECS:-120}"
 SIMPLE_RUN_TIMEOUT_KILL_SECS="${SIMPLE_RUN_TIMEOUT_KILL_SECS:-10}"
 SIMPLE_NATIVE_BUILD_TIMEOUT_SECS="${SIMPLE_NATIVE_BUILD_TIMEOUT_SECS:-240}"
@@ -20,6 +22,10 @@ SIMPLE_NATIVE_BUILD_TIMEOUT_KILL_SECS="${SIMPLE_NATIVE_BUILD_TIMEOUT_KILL_SECS:-
 GTK_EVIDENCE_SIMPLE_MODE="${GTK_EVIDENCE_SIMPLE_MODE:-full}"
 SIMPLE_RUN_LIB="${SIMPLE_RUN_LIB:-$ROOT_DIR/src/lib:$ROOT_DIR/src/app}"
 SIMPLE_NATIVE_LIB="${SIMPLE_NATIVE_LIB:-$SIMPLE_RUN_LIB}"
+simple_vector_text_run="Simple GUI static shell text grid alpha beta gamma delta"
+if [ "$GTK_EVIDENCE_FORCE_VECTOR_FONT_UNAVAILABLE" = "1" ]; then
+    simple_vector_text_run=""
+fi
 
 mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
 rm -rf \
@@ -463,7 +469,7 @@ fn main() -> i64:
         total = total + pixels.len()
         i = i + 1
     val frame_elapsed = rt_time_now_unix_micros() - frame_start
-    val text_run = "Simple GUI static shell text grid alpha beta gamma delta"
+    val text_run = "$simple_vector_text_run"
     var warm_ink = 0
     var warm_width = 0
     var wi = 0
@@ -661,7 +667,9 @@ gtk_total_us="n/a"
 gtk_bytes="n/a"
 gtk_closure_bytes="n/a"
 
-if have pkg-config && pkg-config --exists gtk4; then
+if [ "$GTK_EVIDENCE_FORCE_GTK_UNAVAILABLE" = "1" ]; then
+    gtk_reason="forced_gtk_unavailable"
+elif have pkg-config && pkg-config --exists gtk4; then
     gtk_pkg="gtk4"
 elif have pkg-config && pkg-config --exists gtk+-3.0; then
     gtk_pkg="gtk+-3.0"
@@ -805,33 +813,45 @@ gtk_benchmark_evidence_reason="$(awk \
     -v scene="$gtk_benchmark_evidence_scene" \
     -v so="$simple_open_total_us" \
     -v go="$gtk_open_total_us" \
-    -v sf="$simple_browser_cached_frame_total_us" \
-    -v gf="$gtk_total_us" \
-    -v st="$simple_vector_text_total_us" \
-    -v gt="$gtk_total_us" \
+    -v sf="$gtk_benchmark_simple_frame_us" \
+    -v gf="$gtk_benchmark_gtk_frame_us" \
+    -v st="$gtk_benchmark_simple_text_us" \
+    -v gt="$gtk_benchmark_gtk_text_us" \
     -v ink="$simple_vector_text_ink_pixels" \
     -v det="$simple_vector_text_deterministic" \
     -v si="$SIMPLE_ITERATIONS" \
     -v gi="$GTK_ITERATIONS" \
     -v stc="$simple_trial_count" \
     -v gtc="$gtk_trial_count" \
+    -v gs="$gtk_status" \
+    -v gr="$gtk_reason" \
     -v min_iters="$GTK_EVIDENCE_MIN_ITERATIONS" \
     -v min_trials="$GTK_EVIDENCE_MIN_TRIALS" \
     'BEGIN {
         if (scene == "") { print "missing-scene"; exit }
         if (!(si ~ /^[0-9]+$/) || !(gi ~ /^[0-9]+$/) || si <= 0 || gi <= 0) { print "missing-iterations"; exit }
-        if (!(stc ~ /^[0-9]+$/) || !(gtc ~ /^[0-9]+$/) || stc <= 0 || gtc <= 0) { print "missing-trials"; exit }
+        if (!(stc ~ /^[0-9]+$/) || stc <= 0) { print "missing-simple-trials"; exit }
+        if (!(gtc ~ /^[0-9]+$/) || gtc <= 0) {
+            if (gs != "ok") {
+                if (gr == "") gr = "unknown";
+                gsub(/[^A-Za-z0-9_:-]/, "-", gr);
+                print "gtk-unavailable-" gr;
+                exit;
+            }
+            print "missing-gtk-trials";
+            exit;
+        }
         if (!(min_iters ~ /^[0-9]+$/) || min_iters <= 0) { print "invalid-min-iterations"; exit }
         if (!(min_trials ~ /^[0-9]+$/) || min_trials <= 0) { print "invalid-min-trials"; exit }
         if (si < min_iters || gi < min_iters) { print "sample-count-too-low"; exit }
         if (stc < min_trials || gtc < min_trials) { print "trial-count-too-low"; exit }
         if (!(so ~ /^[0-9]+$/) || !(go ~ /^[0-9]+$/) || so <= 0 || go <= 0) { print "missing-open-timings"; exit }
-        if (!(sf ~ /^[0-9]+$/) || !(gf ~ /^[0-9]+$/) || !(st ~ /^[0-9]+$/) || !(gt ~ /^[0-9]+$/) || sf <= 0 || gf <= 0 || st <= 0 || gt <= 0) { print "missing-timings"; exit }
         if (!(ink ~ /^[0-9]+$/) || ink <= 0) { print "empty-vector-text-output"; exit }
         if (det != "true") { print "nondeterministic-vector-text-output"; exit }
+        if (!(sf ~ /^[0-9]+$/) || !(gf ~ /^[0-9]+$/) || !(st ~ /^[0-9]+$/) || !(gt ~ /^[0-9]+$/) || sf <= 0 || gf <= 0 || st <= 0 || gt <= 0) { print "missing-timings"; exit }
         if (so >= go) { print "open-not-faster"; exit }
-        if ((sf * gi) >= (gf * si)) { print "frame-not-faster"; exit }
-        if ((st * gi) >= (gt * si)) { print "text-not-faster"; exit }
+        if (sf >= gf) { print "frame-not-faster"; exit }
+        if (st >= gt) { print "text-not-faster"; exit }
         print "pass"
     }')"
 gtk_benchmark_evidence_sample_status="$(awk \
@@ -1008,6 +1028,8 @@ fi
     echo "- Set SKIP_SIMPLE_NATIVE=1 to skip Simple native binary size measurement for faster smoke runs."
     echo "- GTK executable size is reported separately from the linked shared-library closure."
     echo "- GTK speed uses xvfb-run when available; otherwise it is unavailable on headless hosts without a display."
+    echo "- GTK_EVIDENCE_FORCE_GTK_UNAVAILABLE=1 verifies the benchmark records unavailable native GTK without producing a false pass."
+    echo "- GTK_EVIDENCE_FORCE_VECTOR_FONT_UNAVAILABLE=1 verifies empty vector-font evidence fails closed."
     echo "- Simple run timeout is ${SIMPLE_RUN_TIMEOUT_SECS}s with ${SIMPLE_RUN_TIMEOUT_KILL_SECS}s kill-after; Simple native-build timeout is ${SIMPLE_NATIVE_BUILD_TIMEOUT_SECS}s with ${SIMPLE_NATIVE_BUILD_TIMEOUT_KILL_SECS}s kill-after."
     echo "- Override SIMPLE_RUN_LIB or SIMPLE_NATIVE_LIB to audit broader or narrower source roots."
     echo "- Simple speed measures the pure software HTML-to-pixel path and records the shared render optimization profile."
@@ -1044,6 +1066,7 @@ echo "simple_min_total_us=$simple_min_total_us"
 echo "simple_min_bytes=$simple_min_bytes"
 echo "simple_min_closure_bytes=$simple_min_closure_bytes"
 echo "gtk_status=$gtk_status"
+echo "gtk_reason=$gtk_reason"
 echo "gtk_bytes=$gtk_bytes"
 echo "gtk_closure_bytes=$gtk_closure_bytes"
 echo "gtk_open_total_us=$gtk_open_total_us"
