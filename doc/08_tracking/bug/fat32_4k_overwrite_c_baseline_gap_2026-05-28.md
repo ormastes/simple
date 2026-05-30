@@ -2,8 +2,10 @@
 
 ## Status
 
-Open — direct-C write gap fixed in the pure-Simple benchmark mock on
-2026-05-29; VFAT same-device evidence remains blocked by mount permissions.
+Closed with external VFAT evidence blocker — direct-C write gap fixed in the
+pure-Simple benchmark mock on 2026-05-29 and reverified on 2026-05-30; VFAT
+same-device evidence cannot be collected in this sandbox because the available
+VFAT mount is root-owned/unseeded and noninteractive sudo is unavailable.
 Exhaustive search of existing bulk-copy externs completed 2026-05-29 found no
 suitable in-place `[u8]` bulk-copy extern, but the benchmark no longer needs
 one for this gate because it now stores sectors as `[u8]` arrays and replaces a
@@ -15,7 +17,7 @@ sector with one array assignment.
    the target sector with one assignment. The repeated direct-C gate now passes.
 
 2. **VFAT same-device evidence:** Blocked in this sandbox — all mount paths
-   denied without root. See details below.
+   denied without root or a polkit-authorized loop mount. See details below.
 
 ## Evidence
 
@@ -74,6 +76,55 @@ The C gate now passes with:
 ```text
 PASS: simple_fat32 is faster than direct C FAT32 for 4K random read/write p50
 ```
+
+Closure recheck on 2026-05-30:
+
+```text
+SIMPLE_LIB=src bin/simple check test/perf/bench/fat32_4k_compare.spl
+FAT32_4K_RUNS=3 scripts/perf/run-fat32-4k-cfat-baseline.shs
+```
+
+Results:
+
+- Simple FAT32 read/write median p50: 25us/31us.
+- Direct C FAT32 read/write median p50: 32us/39us.
+- Result: `PASS: simple_fat32 is faster than direct C FAT32 for 4K random read/write p50`.
+
+Follow-up recheck on 2026-05-30 after salvage integration:
+
+```text
+SIMPLE_LIB=src bin/simple check test/perf/bench/fat32_4k_compare.spl
+FAT32_4K_RUNS=3 scripts/perf/run-fat32-4k-cfat-baseline.shs
+```
+
+Results:
+
+- Simple FAT32 read/write median p50: 13us/14us.
+- Direct C FAT32 read/write median p50: 33us/29us.
+- Result: `PASS: simple_fat32 is faster than direct C FAT32 for 4K random read/write p50`.
+
+VFAT readiness on 2026-05-30:
+
+```text
+scripts/perf/prepare-fat32-4k-vfat.shs --diagnose
+FAT32_4K_RUNS=1 REQUIRE_VFAT_BASELINE=1 scripts/perf/run-fat32-4k-cfat-baseline.shs
+```
+
+Results:
+
+- `vfat_prepare_diagnosis: not-ready`
+- Mount: `/tmp/simple_vfat_bench_mnt`
+- Source/fstype: `/dev/loop21` / `vfat`
+- Writable: `false`
+- Seeded: `false`
+- Noninteractive sudo: `false`
+- Required-VFAT gate fails before benchmarking with `FAILED: VFAT baseline is
+  required but /tmp/simple_vfat_bench_mnt is missing, unseeded, unwritable, or
+  not vfat/msdos`.
+
+No repository change can collect the same-device VFAT baseline without a
+writable VFAT mount. The required follow-up is operational: remount or recreate
+the VFAT image with `uid=1000,gid=1000`, then rerun the required-VFAT gate.
 
 Current re-probe on 2026-05-28 shows the direct-C comparison is still noisy:
 
