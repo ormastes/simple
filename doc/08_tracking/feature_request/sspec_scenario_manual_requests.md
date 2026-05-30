@@ -146,6 +146,8 @@ documentation to hand-written-quality scenario manuals.
         field comments.
   - [x] Shared model supports TUI/GUI selected rectangle, highlight target,
         inverted active menu, and visible-state summaries.
+  - [x] API/protocol helper API captures params, headers, response fields, and
+        redaction notes for provider implementations.
   - [ ] API/protocol providers capture full params, headers, response fields,
         and redacted sensitive values.
   - [ ] Execution providers capture args, input trigger/output pairs,
@@ -162,7 +164,9 @@ documentation to hand-written-quality scenario manuals.
   stdout/stderr/exit, and binary raw-byte/decoded-field summaries. Concrete
   provider integrations and domain-specific decoders remain open. UI selection
   helper payloads are represented in the shared model, but concrete TUI/GUI
-  provider wiring remains future work.
+  provider wiring remains future work. `scenario_helpers` now exposes
+  API/protocol capture helpers that produce the rich shared evidence artifacts;
+  runtime provider wiring remains future work.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none
