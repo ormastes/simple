@@ -6,14 +6,18 @@ use std.common.spec.scenario_evidence.{
     scenario_capture_off,
     scenario_capture_policy,
     scenario_api_evidence,
+    scenario_api_protocol_evidence,
     scenario_binary_evidence,
+    scenario_binary_detailed_evidence,
     scenario_checker_evidence,
     scenario_checker_manual_summary,
+    scenario_exec_detailed_evidence,
     scenario_exec_evidence,
     scenario_evidence_artifact,
     scenario_evidence_manual_summary,
     scenario_policy_manual_summary,
-    scenario_redacted_evidence_artifact
+    scenario_redacted_evidence_artifact,
+    scenario_ui_selection_evidence
 }
 
 describe "scenario evidence capture policy":
@@ -73,6 +77,26 @@ describe "scenario evidence artifact":
         expect(artifact.body).to_contain("status: 200")
         expect(artifact.body).to_contain("body: token issued")
 
+    it "creates protocol evidence with params headers response fields and redaction notes":
+        val artifact = scenario_api_protocol_evidence(
+            "MCP tools call",
+            "POST",
+            "/mcp",
+            "method=tools/call id=7",
+            "authorization=<redacted>; content-type=application/json",
+            "result.content[0].text; isError=false",
+            "authorization token",
+            "mcp",
+            "tools-call"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.protocol)
+        expect(artifact.redacted).to_equal(true)
+        expect(artifact.body).to_contain("POST /mcp")
+        expect(artifact.body).to_contain("params: method=tools/call id=7")
+        expect(artifact.body).to_contain("headers: authorization=<redacted>; content-type=application/json")
+        expect(artifact.body).to_contain("response fields: result.content[0].text; isError=false")
+        expect(artifact.body).to_contain("redacted: authorization token")
+
     it "creates execution evidence with command and exit code":
         val artifact = scenario_exec_evidence(
             "Bootstrap command",
@@ -86,6 +110,26 @@ describe "scenario evidence artifact":
         expect(artifact.body).to_contain("$ simple test test/system/bootstrap_mcp_spec.spl")
         expect(artifact.body).to_contain("exit: 0")
 
+    it "creates detailed execution evidence with args input streams and exit code":
+        val artifact = scenario_exec_detailed_evidence(
+            "MCP stdio command",
+            "simple_mcp_server",
+            "--stdio --log-level warn",
+            "stdin: initialize then tools/list",
+            "stdout: initialize result and tools",
+            "stderr: no panic",
+            0,
+            "mcp",
+            "stdio"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.exec)
+        expect(artifact.body).to_contain("$ simple_mcp_server")
+        expect(artifact.body).to_contain("args: --stdio --log-level warn")
+        expect(artifact.body).to_contain("input: stdin: initialize then tools/list")
+        expect(artifact.body).to_contain("stdout: stdout: initialize result and tools")
+        expect(artifact.body).to_contain("stderr: stderr: no panic")
+        expect(artifact.body).to_contain("exit: 0")
+
     it "creates binary evidence with format and field summary":
         val artifact = scenario_binary_evidence(
             "ELF header",
@@ -97,6 +141,60 @@ describe "scenario evidence artifact":
         expect(artifact.kind).to_equal(ScenarioCaptureKind.binary)
         expect(artifact.body).to_contain("format: ELF64")
         expect(artifact.body).to_contain("e_machine: riscv64")
+
+    it "creates detailed binary evidence with raw bytes decoded fields and comments":
+        val artifact = scenario_binary_detailed_evidence(
+            "ELF header",
+            "ELF64",
+            "7f 45 4c 46 ...",
+            "e_machine=riscv64; e_type=executable",
+            "e_machine selects the target architecture",
+            "loader",
+            "parse"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.binary)
+        expect(artifact.body).to_contain("format: ELF64")
+        expect(artifact.body).to_contain("raw bytes: 7f 45 4c 46 ...")
+        expect(artifact.body).to_contain("decoded fields: e_machine=riscv64; e_type=executable")
+        expect(artifact.body).to_contain("field comments: e_machine selects the target architecture")
+
+    it "creates TUI selection evidence with rectangle highlight and active menu":
+        val artifact = scenario_ui_selection_evidence(
+            ScenarioCaptureKind.tui,
+            "Settings menu after keyboard navigation",
+            "x=4 y=2 w=18 h=1",
+            "menu item: Save",
+            "File > Save",
+            "focus on Save, status Ready",
+            "artifacts/settings-menu.txt",
+            "settings",
+            "open-menu"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.tui)
+        expect(artifact.mime).to_equal("text/plain")
+        expect(artifact.path).to_equal("artifacts/settings-menu.txt")
+        expect(artifact.body).to_contain("selected rectangle: x=4 y=2 w=18 h=1")
+        expect(artifact.body).to_contain("highlight: menu item: Save")
+        expect(artifact.body).to_contain("inverted active menu: File > Save")
+        expect(artifact.body).to_contain("visible state: focus on Save, status Ready")
+
+    it "creates GUI selection evidence with image mime":
+        val artifact = scenario_ui_selection_evidence(
+            ScenarioCaptureKind.gui,
+            "Toolbar button after hover",
+            "x=10 y=12 w=32 h=32",
+            "Save toolbar button",
+            "",
+            "button highlighted",
+            "artifacts/toolbar.png",
+            "toolbar",
+            "hover-save"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.gui)
+        expect(artifact.mime).to_equal("image/png")
+        expect(artifact.body).to_contain("selected rectangle: x=10 y=12 w=32 h=32")
+        expect(artifact.body).to_contain("highlight: Save toolbar button")
+        expect(artifact.body).to_contain("visible state: button highlighted")
 
     it "links checker assertion status to captured evidence":
         val artifact = scenario_api_evidence(

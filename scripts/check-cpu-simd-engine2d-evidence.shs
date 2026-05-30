@@ -1,0 +1,191 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+TIMEOUT_SECS="${SIMPLE_CPU_SIMD_EVIDENCE_TIMEOUT_SECS:-120}"
+WORK_DIR="${BUILD_DIR:-build/cpu-simd-engine2d-evidence}"
+REPORT_PATH="${REPORT_PATH:-$WORK_DIR/report.md}"
+EVIDENCE_SRC="$WORK_DIR/cpu_simd_engine2d_evidence.spl"
+EVIDENCE_LOG="$WORK_DIR/evidence.log"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+run_with_timeout() {
+    if have timeout; then
+        timeout "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+value_of() {
+    key="$1"
+    sed -n "s/^${key}=//p" "$EVIDENCE_LOG" | tail -n 1
+}
+
+emit_report() {
+    mkdir -p "$(dirname -- "$REPORT_PATH")"
+    {
+        echo "# CPU SIMD Engine2D Evidence"
+        echo
+        echo "- status: ${STATUS:-unknown}"
+        echo "- reason: ${REASON:-unknown}"
+        echo "- arch: ${ARCH:-unknown}"
+        echo "- feature: ${FEATURE:-unknown}"
+        echo "- level: ${LEVEL:-unknown}"
+        echo "- checksum: ${CHECKSUM:-0}"
+        echo "- provider_hits: ${REPORT_HITS:-0}"
+        echo "- x86_status: ${X86_STATUS:-unknown}"
+        echo "- arm_status: ${ARM_STATUS:-unknown}"
+        echo "- riscv_status: ${RISCV_STATUS:-unknown}"
+        echo "- evidence_log: $EVIDENCE_LOG"
+    } >"$REPORT_PATH"
+}
+
+mkdir -p "$WORK_DIR"
+rm -f "$EVIDENCE_LOG" "$REPORT_PATH"
+
+echo "check=cpu_simd_engine2d_evidence"
+echo "simple_bin=$SIMPLE_BIN"
+echo "timeout_secs=$TIMEOUT_SECS"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    STATUS=fail
+    REASON="missing-simple-bin"
+    ARCH=unknown
+    FEATURE=unknown
+    LEVEL=unknown
+    CHECKSUM=0
+    REPORT_HITS=0
+    X86_STATUS=unknown
+    ARM_STATUS=unknown
+    RISCV_STATUS=unknown
+    emit_report
+    echo "cpu_simd_evidence_status=$STATUS"
+    echo "cpu_simd_evidence_reason=$REASON"
+    echo "report_path=$REPORT_PATH"
+    exit 1
+fi
+
+cat >"$EVIDENCE_SRC" <<'SIMPLE'
+use std.gpu.engine2d.backend_probe.{StrictBackendFactory, backend_status_text}
+use std.gpu.engine2d.rendering_opt_provider.{rendering_opt_report_from_simd}
+use std.gpu.engine2d.simd_kernels.{cpu_simd_runtime_evidence}
+use std.gpu.engine2d.simd_provider.{reset_simd_hits}
+
+fn main() -> i64:
+    reset_simd_hits()
+    val evidence = cpu_simd_runtime_evidence()
+    val report = rendering_opt_report_from_simd(evidence.arch, evidence.feature)
+    val factory = StrictBackendFactory.strict()
+    val general = factory.create_backend("cpu_simd")
+    val x86 = factory.create_backend("cpu_simd_x86")
+    val arm = factory.create_backend("cpu_simd_arm")
+    val riscv = factory.create_backend("cpu_simd_riscv")
+
+    print("cpu_simd_arch=" + evidence.arch)
+    print("cpu_simd_feature=" + evidence.feature)
+    print("cpu_simd_level=" + evidence.level)
+    print("cpu_simd_executed_all=" + evidence.executed_all().to_text())
+    print("cpu_simd_checksum=" + evidence.checksum.to_text())
+    print("cpu_simd_hit_summary=" + evidence.hit_summary)
+    print("cpu_simd_provider_hits=" + report.total_hits.to_text())
+    print("cpu_simd_provider_changes=" + report.total_changes.to_text())
+    print("cpu_simd_probe_status=" + backend_status_text(general.status))
+    print("cpu_simd_x86_status=" + backend_status_text(x86.status))
+    print("cpu_simd_arm_status=" + backend_status_text(arm.status))
+    print("cpu_simd_riscv_status=" + backend_status_text(riscv.status))
+    print("cpu_simd_x86_diag=" + x86.diagnostic_text())
+    print("cpu_simd_arm_diag=" + arm.diagnostic_text())
+    print("cpu_simd_riscv_diag=" + riscv.diagnostic_text())
+
+    if not evidence.executed_all():
+        print("overall=fail")
+        return 1
+    if evidence.checksum <= 0:
+        print("overall=fail")
+        return 1
+    if report.total_hits < 4:
+        print("overall=fail")
+        return 1
+    print("overall=pass")
+    return 0
+SIMPLE
+
+echo "evidence_source=$EVIDENCE_SRC"
+
+set +e
+SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" run "$EVIDENCE_SRC" --mode=interpreter --clean >"$EVIDENCE_LOG" 2>&1
+EVIDENCE_CODE=$?
+set -e
+
+cat "$EVIDENCE_LOG"
+echo "evidence_exit_code=$EVIDENCE_CODE"
+
+ARCH="$(value_of cpu_simd_arch)"
+FEATURE="$(value_of cpu_simd_feature)"
+LEVEL="$(value_of cpu_simd_level)"
+EXECUTED_ALL="$(value_of cpu_simd_executed_all)"
+CHECKSUM="$(value_of cpu_simd_checksum)"
+REPORT_HITS="$(value_of cpu_simd_provider_hits)"
+GENERAL_STATUS="$(value_of cpu_simd_probe_status)"
+X86_STATUS="$(value_of cpu_simd_x86_status)"
+ARM_STATUS="$(value_of cpu_simd_arm_status)"
+RISCV_STATUS="$(value_of cpu_simd_riscv_status)"
+OVERALL="$(value_of overall)"
+
+STATUS=pass
+REASON=runtime-evidence-verified
+
+if [ "$EVIDENCE_CODE" -ne 0 ] || [ "$OVERALL" != "pass" ]; then
+    STATUS=fail
+    REASON=simple-evidence-program-failed
+elif [ "$EXECUTED_ALL" != "true" ]; then
+    STATUS=fail
+    REASON=simd-kernels-not-executed
+elif [ "$GENERAL_STATUS" != "Initialized" ]; then
+    STATUS=fail
+    REASON=general-simd-probe-not-initialized
+elif [ "$ARCH" = "x86_64" ] && [ "$FEATURE" != "scalar" ] && [ "$X86_STATUS" != "Initialized" ]; then
+    STATUS=fail
+    REASON=x86-simd-feature-without-initialized-probe
+elif [ "$ARCH" = "aarch64" ] && [ "$FEATURE" != "scalar" ] && [ "$ARM_STATUS" != "Initialized" ]; then
+    STATUS=fail
+    REASON=arm-simd-feature-without-initialized-probe
+elif [ "$ARCH" = "riscv64" ] && [ "$FEATURE" != "scalar" ] && [ "$RISCV_STATUS" != "Initialized" ]; then
+    STATUS=fail
+    REASON=riscv-simd-feature-without-initialized-probe
+elif [ "$ARCH" != "x86_64" ] && [ "$X86_STATUS" = "Initialized" ]; then
+    STATUS=fail
+    REASON=x86-probe-initialized-on-non-x86-runtime
+elif [ "$ARCH" != "aarch64" ] && [ "$ARM_STATUS" = "Initialized" ]; then
+    STATUS=fail
+    REASON=arm-probe-initialized-on-non-arm-runtime
+elif [ "$ARCH" != "riscv64" ] && [ "$RISCV_STATUS" = "Initialized" ]; then
+    STATUS=fail
+    REASON=riscv-probe-initialized-on-non-riscv-runtime
+fi
+
+emit_report
+
+echo "cpu_simd_evidence_status=$STATUS"
+echo "cpu_simd_evidence_reason=$REASON"
+echo "cpu_simd_evidence_arch=$ARCH"
+echo "cpu_simd_evidence_feature=$FEATURE"
+echo "cpu_simd_evidence_level=$LEVEL"
+echo "cpu_simd_evidence_checksum=$CHECKSUM"
+echo "cpu_simd_evidence_provider_hits=$REPORT_HITS"
+echo "cpu_simd_evidence_general_status=$GENERAL_STATUS"
+echo "cpu_simd_evidence_x86_status=$X86_STATUS"
+echo "cpu_simd_evidence_arm_status=$ARM_STATUS"
+echo "cpu_simd_evidence_riscv_status=$RISCV_STATUS"
+echo "report_path=$REPORT_PATH"
+
+if [ "$STATUS" != "pass" ]; then
+    exit 1
+fi

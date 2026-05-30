@@ -305,21 +305,28 @@ Create a shared SSpec support library rather than scattering helper functions:
 - Inline/previous scenarios expand without printing redundant `Previous:`.
 - Executable SPipe is folded by default.
 - Folded executable blocks include runnable source line-count summaries.
+- Folded executable blocks state that they contain the complete executable
+  scenario source for reproduction.
 - Scenario captures appear under the step that caused them.
+- Step-local provider artifact metadata appears under the step that caused it.
 - Step capture labels use typed wording such as `Protocol capture` and
   `API capture`.
+- Protocol/API/exec captures appear under the manual step that produced them.
 - Captured steps with generated expected checks include compact `Evidence:`
   previews under the step.
 - Boolean assertion summaries render as expected-result bullets under the
   manual step that produced them.
-- Detailed edge/advanced scenarios are folded or skipped according to policy.
+- Long JSON expected values are shortened in visible summaries while the full
+  assertion stays in folded executable source.
+- Detailed edge/advanced scenarios are folded or skipped according to policy,
+  and intensive matrix/stress/schema/OOM/loop detail scenarios fold by default.
 - Environmental tests show meaningful `exec`, `protocol`, `api`, `binary`, or
   `log` evidence instead of empty screenshots.
 - MCP scenario manual is reviewed as a hand-written-quality exemplar.
 
 Current verification note: syntax checks pass. The scenario evidence unit test
 passes 9/9, and `test/unit/app/tooling/spipe_docgen_scenario_body_spec.spl`
-reports 46 examples / 0 failures after replacing unsupported negative matchers
+reports 50 examples / 0 failures after replacing unsupported negative matchers
 with built-in assertions, fixing the `spipe-docgen` runtime path issues found
 during the manual-generation check, adding metadata warning/cycle diagnostic
 coverage, fixing blank folded executable output for expanded scenarios, adding
@@ -335,7 +342,7 @@ source expansion with step-local capture metadata. It also verifies generated
 expected-result bullets for boolean contains assertions, including normalized
 escaped JSON string fragments, and truncates long expected-result values while
 preserving the full assertion in folded executable source. The direct spec run
-still exits nonzero after reporting 46 examples / 0
+still exits nonzero after reporting 50 examples / 0
 failures because of the existing
 repo-level `compiler_driver_create` semantic finalization issue also noted in
 `doc/03_plan/port_rust_c_to_pure_simple.md`.

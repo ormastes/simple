@@ -81,17 +81,26 @@ Boolean assertions after a rendered step become expected-result bullets. For
 example, `expect(output.contains("ready")).to_equal(true)` renders as an
 expected result under the previous step. String contains values are normalized
 for manual display, so escaped JSON fragments render without Simple string
-escape syntax. Long expected-result values are shortened in the visible summary
-and point reviewers to the folded executable source. The original assertion
-remains in the folded executable source.
+escape syntax. Direct string equality assertions such as
+`expect(payload).to_equal("{...}")` also become expected-result bullets. Long
+expected-result values are shortened in the visible summary and point reviewers
+to the folded executable source. The original assertion remains in the folded
+executable source.
 Capture metadata attached to a rendered step uses typed labels such as
 `Protocol capture: after_step`, `API capture: after_step`, or
 `TUI capture: after_step`.
+Concrete provider artifacts may be attached to the next manual step with
+`# @artifact("path/to/artifact")` or `# @artifact: path/to/artifact`; generated
+docs render the artifact under the producing step and omit the metadata from
+the folded executable source.
 When a captured step also has generated expected results, docgen adds a compact
 `Evidence:` line that names the captured surface and how many expected checks
 verify it.
 Folded executable blocks include a `Runnable source: N lines folded for
 reproduction.` summary so reviewers can judge source size before expanding it.
+They also state that the folded block contains the complete executable scenario
+source, so a reviewer can reproduce the scenario without opening the source
+test file.
 
 ## Inline and Previous Scenarios
 
@@ -290,8 +299,11 @@ slow_it "important slow operator flow":
     ...
 ```
 
-`slow_it` scenarios fold by default in generated docs. Use `# @manual: show`
-only when the slow scenario is part of the primary manual.
+`slow_it` scenarios fold by default in generated docs. Regular scenarios also
+fold by default when their title identifies intensive detail content such as
+stress checks, matrix rows, schema inventories, OOM details, loops, or large
+JSON payloads. Use `# @manual: show` only when the scenario is part of the
+primary manual.
 
 Folder and root defaults use the nearest config file named `.sspec-manual` or
 `sspec-manual.sdn`:

@@ -37,7 +37,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** claude (engine2d_shapes_gui high-DPI session)
 - **Target:** compiler (Cranelift JIT / HIR lowering)
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented (2026-05-30 — Phase 1-3 landed: TypedInteger inference, rt_array_repeat registration, scalar sqrt/abs/floor/ceil/round intrinsics)
 - **Requested-semantics:**
   Pure-Simple per-pixel rasterizers (e.g. the SDF software renderer in
   `examples/ui/engine2d_shapes_gui.spl`) currently fall back to the tree-walk

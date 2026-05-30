@@ -178,6 +178,36 @@ pub(crate) fn compile_builtin_method<M: Module>(
         }
         return Ok(());
     }
+    // FR-COMPILER-012: scalar float intrinsics — sqrt, abs, floor, ceil, round
+    // These are first-class Cranelift instructions for IEEE 754 floats.
+    if matches!(method, "sqrt" | "abs" | "floor" | "ceil" | "round") {
+        let src_ty = builder.func.dfg.value_type(receiver_val);
+        let is_float = src_ty == types::F32 || src_ty == types::F64;
+        if is_float {
+            let result_val = match method {
+                "sqrt" => builder.ins().sqrt(receiver_val),
+                "abs" => builder.ins().fabs(receiver_val),
+                "floor" => builder.ins().floor(receiver_val),
+                "ceil" => builder.ins().ceil(receiver_val),
+                "round" => builder.ins().nearest(receiver_val),
+                _ => unreachable!(),
+            };
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, result_val);
+            }
+            return Ok(());
+        } else if method == "sqrt" {
+            // Integer sqrt: convert to f64, compute sqrt, return as f64
+            let f64_val = builder.ins().fcvt_from_sint(types::F64, receiver_val);
+            let result_val = builder.ins().sqrt(f64_val);
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, result_val);
+                ctx.vreg_types.insert(*d, TypeId::F64);
+            }
+            return Ok(());
+        }
+        // Non-sqrt integer methods fall through to normal dispatch
+    }
     let result = match (receiver_type, method) {
         ("Array", "push") | ("array", "push") => {
             let arg_val = ctx.get_vreg(&args[0])?;

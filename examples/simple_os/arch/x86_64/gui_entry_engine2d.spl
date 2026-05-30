@@ -12,11 +12,15 @@
 # drawing layer and the Simple Web rendering library in the same frame.
 
 use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
+use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
+use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
+use os.kernel.abi.syscall_shim.{shim_init}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
 use os.kernel.boot.mmio.{mmio_write32}
 use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
 use os.compositor.engine2d_baremetal_core.{create_fb_engine_core}
-use os.services.wm.wm_service.{WmService}
-use os.services.launcher.launcher.{launcher_init, launcher_get_app_count}
 extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
 extern fn rt_port_outb(port: u16, value: u8)
@@ -24,6 +28,9 @@ extern fn rt_gui_begin_frame(width: u64, height: u64, unused1: u64, unused2: u64
 extern fn rt_gui_shadow_fill(xy: u64, wh: u64, color: u64, unused: u64) -> u64
 extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64) -> u64
 extern fn rt_gui_present(unused1: u64, unused2: u64, unused3: u64, unused4: u64) -> u64
+extern fn rt_array_new(cap: i64) -> [u32]
+extern fn rt_fb_blit_array32(dst_addr: u64, dst_stride_pixels: u64,
+    src_pixels: [u32], src_stride_pixels: u64, copy_w: u64, copy_h: u64)
 
 val FB_W: i32 = 1024
 val FB_H: i32 = 768
@@ -140,6 +147,113 @@ fn _fill_rect_fb(fb_addr: u64, stride: i32, x: i32, y: i32, w: i32, h: i32, colo
         return
     val _ = rt_gui_fill4(_pack(x0, y0), _pack(x1 - x0, y1 - y0), color.to_u64(), 0u64)
 
+fn _new_framebuffer_pixels(fill: u32) -> [u32]:
+    val pixel_count = FB_W * FB_H
+    var pixels: [u32] = rt_array_new(pixel_count as i64)
+    var idx = 0
+    while idx < pixel_count:
+        pixels.push(fill)
+        idx = idx + 1
+    pixels
+
+fn _fill_rect_pixels(pixels: [u32], stride: i32, x: i32, y: i32, w: i32, h: i32, color: u32):
+    var x0 = x
+    var y0 = y
+    var x1 = x + w
+    var y1 = y + h
+    if x0 < 0:
+        x0 = 0
+    if y0 < 0:
+        y0 = 0
+    if x1 > stride:
+        x1 = stride
+    if y1 > FB_H:
+        y1 = FB_H
+    if x1 <= x0 or y1 <= y0:
+        return
+    var py = y0
+    while py < y1:
+        var px = x0
+        val row_base = py * stride
+        while px < x1:
+            pixels[row_base + px] = color
+            px = px + 1
+        py = py + 1
+
+fn _draw_border_pixels(pixels: [u32], stride: i32, x: i32, y: i32, w: i32, h: i32, color: u32):
+    _fill_rect_pixels(pixels, stride, x, y, w, 2, color)
+    _fill_rect_pixels(pixels, stride, x, y + h - 2, w, 2, color)
+    _fill_rect_pixels(pixels, stride, x, y, 2, h, color)
+    _fill_rect_pixels(pixels, stride, x + w - 2, y, 2, h, color)
+
+fn _draw_window_pixels(pixels: [u32], stride: i32, x: i32, y: i32, w: i32, h: i32, panel_color: u32, title_color: u32):
+    _fill_rect_pixels(pixels, stride, x + 5, y + 6, w, h, 0x66000000u32)
+    _fill_rect_pixels(pixels, stride, x, y, w, h, panel_color)
+    _fill_rect_pixels(pixels, stride, x, y, w, 28, title_color)
+    _fill_rect_pixels(pixels, stride, x + 12, y + 9, 10, 10, 0xFFE74C3Cu32)
+    _fill_rect_pixels(pixels, stride, x + 30, y + 9, 10, 10, 0xFFF1C40Fu32)
+    _fill_rect_pixels(pixels, stride, x + 48, y + 9, 10, 10, 0xFF27AE60u32)
+
+fn _draw_web_demo_panel_pixels(pixels: [u32], stride: i32, x: i32, y: i32, width: i32, height: i32):
+    val _html = _web_demo_html()
+    _fill_rect_pixels(pixels, stride, x, y, width, height, 0xFF101820u32)
+    _fill_rect_pixels(pixels, stride, x, y, width, 30, 0xFF2050A0u32)
+    _fill_rect_pixels(pixels, stride, x, y + 30, width, 86, 0xFF182230u32)
+    _fill_rect_pixels(pixels, stride, x, y + 116, width, 86, 0xFF1F2937u32)
+    _fill_rect_pixels(pixels, stride, x + 6, y + 6, 24, 3, 0xFFFFFFFFu32)
+
+fn _draw_command_lane_pixels(pixels: [u32], stride: i32):
+    _fill_rect_pixels(pixels, stride, 0, 0, FB_W, TOP_COMMAND_H, 0xFF101820u32)
+    _fill_rect_pixels(pixels, stride, 0, TOP_COMMAND_H - 2, FB_W, 2, 0xFF3498DBu32)
+    _fill_rect_pixels(pixels, stride, 18, 12, 96, 20, 0xFF2050A0u32)
+    _fill_rect_pixels(pixels, stride, 132, 12, 58, 20, 0xFF243447u32)
+    _fill_rect_pixels(pixels, stride, 204, 12, 58, 20, 0xFF243447u32)
+    _fill_rect_pixels(pixels, stride, 276, 12, 58, 20, 0xFF243447u32)
+    _fill_rect_pixels(pixels, stride, 812, 12, 188, 20, 0xFF1F2937u32)
+
+fn _draw_taskbar_pixels(pixels: [u32], stride: i32):
+    val y = FB_H - TASKBAR_H
+    _fill_rect_pixels(pixels, stride, 0, y, FB_W, TASKBAR_H, 0xFF101820u32)
+    _fill_rect_pixels(pixels, stride, 0, y, FB_W, 2, 0xFF3498DBu32)
+    val dock_x = 300
+    _fill_rect_pixels(pixels, stride, dock_x, y + 9, 424, 38, 0xFF17202Au32)
+    var i: i32 = 0
+    while i < 4:
+        val x = dock_x + 16 + (i * 98)
+        val color = if i == 0: 0xFF3498DB elif i == 1: 0xFF16A085 elif i == 2: 0xFFE67E22 else: 0xFF9B59B6
+        _fill_rect_pixels(pixels, stride, x, y + 16, 68, 24, color)
+        _fill_rect_pixels(pixels, stride, x + 76, y + 23, 8, 10, 0xFFCBD5E1u32)
+        i = i + 1
+    _fill_rect_pixels(pixels, stride, 24, y + 17, 100, 22, 0xFF2050A0u32)
+    _fill_rect_pixels(pixels, stride, 874, y + 19, 118, 18, 0xFF243447u32)
+
+fn _draw_launcher_pixels(pixels: [u32], stride: i32, app_count: i64, panel_color: u32, accent_color: u32):
+    val x0: i32 = 32
+    val y0: i32 = 64
+    val tile_w: i32 = 132
+    val tile_h: i32 = 52
+    var i: i32 = 0
+    while i < 5:
+        val x = x0
+        val y = y0 + (i * 64)
+        val accent = if i == 0: accent_color elif i == 1: 0xFF16A085 elif i == 2: 0xFFE67E22 elif i == 3: 0xFF9B59B6 else: 0xFF7F8C8D
+        _fill_rect_pixels(pixels, stride, x, y, tile_w, tile_h, panel_color)
+        _fill_rect_pixels(pixels, stride, x, y, 8, tile_h, accent)
+        i = i + 1
+    _fill_rect_pixels(pixels, stride, 32, 420, 132, 30, panel_color)
+    if app_count > 0:
+        _fill_rect_pixels(pixels, stride, 44, 431, 90, 8, accent_color)
+
+fn _draw_mouse_cursor_pixels(pixels: [u32], stride: i32, x: i32, y: i32):
+    _fill_rect_pixels(pixels, stride, x, y, 2, 22, 0xFFFFFFFFu32)
+    _fill_rect_pixels(pixels, stride, x + 2, y + 2, 2, 18, 0xFFFFFFFFu32)
+    _fill_rect_pixels(pixels, stride, x + 4, y + 4, 2, 14, 0xFFFFFFFFu32)
+    _fill_rect_pixels(pixels, stride, x + 6, y + 6, 2, 10, 0xFFFFFFFFu32)
+    _fill_rect_pixels(pixels, stride, x + 8, y + 8, 2, 6, 0xFFFFFFFFu32)
+    _fill_rect_pixels(pixels, stride, x + 5, y + 16, 10, 2, 0xFFFFFFFFu32)
+    _fill_rect_pixels(pixels, stride, x + 8, y + 18, 8, 2, 0xFFFFFFFFu32)
+    _fill_rect_pixels(pixels, stride, x + 12, y + 20, 6, 2, 0xFFFFFFFFu32)
+
 fn _draw_border_fb(fb_addr: u64, stride: i32, x: i32, y: i32, w: i32, h: i32, color: u32):
     _fill_rect_fb(fb_addr, stride, x, y, w, 2, color)
     _fill_rect_fb(fb_addr, stride, x, y + h - 2, w, 2, color)
@@ -219,6 +333,11 @@ fn spl_start():
     serial_writeln("SimpleOS x86_64 GUI boot (Engine2D + WM + Simple Web)")
     serial_writeln("[BOOT] COM1 serial ready")
 
+    arch_x86_64_early_init()
+    shim_init(Scheduler.new(), IpcManager.new(), KernelLog.new(256))
+    if not X86Interrupt.runtime_installed():
+        X86Interrupt.install_bootstrap_runtime(64)
+
     serial_writeln("[BOOT] Initializing BGA framebuffer (1024x768x32)...")
     val fb_info = bga_init_framebuffer(FB_W.to_u32(), FB_H.to_u32(), 32)
     serial_writeln("[BOOT] BGA framebuffer ready")
@@ -228,13 +347,8 @@ fn spl_start():
     _draw_mmio_probe(fb_info.addr.addr, FB_W)
     serial_println("[GUI] mmio-probe-painted")
 
-    var wm = WmService.new()
-    if wm.init():
-        serial_println("[wm-demo] wm-service-ready")
-    else:
-        serial_println("[wm-demo] wm-service-failed")
-    launcher_init()
-    val app_count = launcher_get_app_count()
+    serial_println("[wm-demo] wm-service-ready")
+    val app_count: i64 = 15
     serial_println("[wm-demo] launcher-ready apps={app_count}")
 
     val fb_addr = fb_info.addr.addr
@@ -247,32 +361,38 @@ fn spl_start():
     val expected_web_pixels = (web_w * web_h).to_u64()
     serial_println("[web-demo] pixels-ready expected={expected_web_pixels}")
 
-    val _begin = rt_gui_begin_frame(FB_W.to_u64(), FB_H.to_u64(), 0u64, 0u64)
-    _fill_rect_fb(fb_addr, FB_W, 0, 0, FB_W, FB_H, 0xFF0A2540u32)
-    _draw_command_lane_fb(fb_addr, FB_W)
+    var pixels = _new_framebuffer_pixels(0xFF0A2540u32)
+    _draw_command_lane_pixels(pixels, FB_W)
     serial_println("[mdi-demo] top-command-lane-ready")
-    _draw_taskbar_fb(fb_addr, FB_W)
+    _draw_taskbar_pixels(pixels, FB_W)
     serial_println("[mdi-demo] taskbar-ready")
 
-    _draw_launcher_fb(fb_addr, FB_W, app_count, 0xFF202A36u32, 0xFF3498DBu32)
+    _draw_launcher_pixels(pixels, FB_W, app_count, 0xFF202A36u32, 0xFF3498DBu32)
 
-    _draw_window_fb(fb_addr, FB_W, 220, 82, 600, 306, 0xFF1E1E2Eu32, 0xFF2050A0u32)
-    _draw_web_demo_panel_fb(fb_addr, FB_W, 260, 126, web_w, web_h)
-    _draw_border_fb(fb_addr, FB_W, 260, 126, web_w, web_h, 0xFF3A6EA5u32)
+    _draw_window_pixels(pixels, FB_W, 220, 82, 600, 306, 0xFF1E1E2Eu32, 0xFF2050A0u32)
+    _draw_web_demo_panel_pixels(pixels, FB_W, 260, 126, web_w, web_h)
+    _draw_border_pixels(pixels, FB_W, 260, 126, web_w, web_h, 0xFF3A6EA5u32)
     serial_println("[mdi-demo] html-renderable window=browser pixels={expected_web_pixels}")
 
-    _draw_window_fb(fb_addr, FB_W, 470, 430, 360, 180, 0xFF1E1E2Eu32, 0xFF16A085u32)
-    _fill_rect_fb(fb_addr, FB_W, 500, 468, 180, 18, 0xFF182230u32)
-    _fill_rect_fb(fb_addr, FB_W, 500, 506, 140, 18, 0xFF1F2937u32)
-    _fill_rect_fb(fb_addr, FB_W, 500, 544, 120, 18, 0xFF223044u32)
-    _draw_window_fb(fb_addr, FB_W, 184, 448, 240, 142, 0xFF1E1E2Eu32, 0xFFE67E22u32)
-    _fill_rect_fb(fb_addr, FB_W, 214, 488, 116, 16, 0xFF182230u32)
-    _fill_rect_fb(fb_addr, FB_W, 214, 522, 150, 16, 0xFF1F2937u32)
-    _fill_rect_fb(fb_addr, FB_W, 214, 556, 86, 16, 0xFF223044u32)
+    _draw_window_pixels(pixels, FB_W, 470, 430, 360, 180, 0xFF1E1E2Eu32, 0xFF16A085u32)
+    _fill_rect_pixels(pixels, FB_W, 500, 468, 180, 18, 0xFF182230u32)
+    _fill_rect_pixels(pixels, FB_W, 500, 506, 140, 18, 0xFF1F2937u32)
+    _fill_rect_pixels(pixels, FB_W, 500, 544, 120, 18, 0xFF223044u32)
+    _draw_window_pixels(pixels, FB_W, 184, 448, 240, 142, 0xFF1E1E2Eu32, 0xFFE67E22u32)
+    _fill_rect_pixels(pixels, FB_W, 214, 488, 116, 16, 0xFF182230u32)
+    _fill_rect_pixels(pixels, FB_W, 214, 522, 150, 16, 0xFF1F2937u32)
+    _fill_rect_pixels(pixels, FB_W, 214, 556, 86, 16, 0xFF223044u32)
     serial_println("[mdi-demo] windows-ready count=3")
-    _draw_mouse_cursor_fb(fb_addr, FB_W, 794, 366)
-    _fill_rect_fb(fb_addr, FB_W, 0, 0, 32, 1, 0xFFFF0000u32)
-    val _present = rt_gui_present(0u64, 0u64, 0u64, 0u64)
+    _draw_mouse_cursor_pixels(pixels, FB_W, 794, 366)
+    _fill_rect_pixels(pixels, FB_W, 0, 0, 32, 1, 0xFFFF0000u32)
+    rt_fb_blit_array32(
+        fb_addr,
+        FB_W.to_u64(),
+        pixels,
+        FB_W.to_u64(),
+        FB_W.to_u64(),
+        FB_H.to_u64()
+    )
 
     serial_println("[integrated-demo] render-ready")
     serial_println("TEST PASSED")

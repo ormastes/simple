@@ -11,7 +11,7 @@ documentation to hand-written-quality scenario manuals.
 - **Filed-by:** Codex
 - **Target:** sspec-manual
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Implemented
 - **Requested-semantics:** Support docgen metadata for `@step`, `@prev`,
   `@inline`, `@include`, and `@manual(...)` so executable SPipe tests can render
   as scenario manuals without adding new core keywords such as `@actor`.
@@ -97,9 +97,9 @@ documentation to hand-written-quality scenario manuals.
   - [x] Step-local `# @capture(off)` suppresses inherited scenario capture for
         that step.
   - [x] `# @capture(off)` remains silent in fallback capture summaries.
-  - [ ] Generated docs render concrete provider artifacts under the step that
+  - [x] Generated docs render concrete provider artifacts under the step that
         caused them.
-  - [ ] Existing `Screenshots`, `TUI Captures`, `Artifacts`, and `Logs`
+  - [x] Existing `Screenshots`, `TUI Captures`, `Artifacts`, and `Logs`
         metadata remains backward-compatible during migration.
 - **Partial-progress:** Added `src/lib/common/spec/scenario_evidence.spl` with
   enum-based capture modes/kinds, capture policy helpers, evidence artifact
@@ -111,8 +111,10 @@ documentation to hand-written-quality scenario manuals.
   attaches to the final derived manual step, and step-local `# @capture(off)`
   suppresses inherited scenario capture for one step. Detached summaries remain
   as a fallback for assertion-only scenarios, but `# @capture(off)` is silent
-  there too. Full config resolution and provider artifact attachment remain
-  open.
+  there too. Step-local `# @artifact(...)` metadata renders concrete provider
+  artifact paths under the producing manual step, and legacy `Screenshots`,
+  `TUI Captures`, `Artifacts`, and `Logs` metadata remains supported in the
+  generated evidence section. Full config resolution remains open.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none
@@ -136,6 +138,14 @@ documentation to hand-written-quality scenario manuals.
   - [x] Execution helper foundation captures command, exit code, and output
         summary.
   - [x] Binary helper foundation captures format and field summary.
+  - [x] Shared model supports API/protocol params, headers, response fields,
+        and redaction notes.
+  - [x] Shared model supports execution args, input trigger, stdout/stderr,
+        and exit code.
+  - [x] Shared model supports binary raw-byte summaries, decoded fields, and
+        field comments.
+  - [x] Shared model supports TUI/GUI selected rectangle, highlight target,
+        inverted active menu, and visible-state summaries.
   - [ ] API/protocol providers capture full params, headers, response fields,
         and redacted sensitive values.
   - [ ] Execution providers capture args, input trigger/output pairs,
@@ -147,8 +157,12 @@ documentation to hand-written-quality scenario manuals.
 - **Partial-progress:** Added the pure foundational model in
   `src/lib/common/spec/scenario_evidence.spl`. It now includes API, execution,
   binary, redacted, and checker-linked evidence constructors with unit coverage.
-  Provider integrations, richer protocol fields, UI selection helpers, and
-  domain-specific decoders remain open.
+  It also now includes richer provider payload constructors for API/protocol
+  params, headers, response fields, redaction notes, execution args/input
+  stdout/stderr/exit, and binary raw-byte/decoded-field summaries. Concrete
+  provider integrations and domain-specific decoders remain open. UI selection
+  helper payloads are represented in the shared model, but concrete TUI/GUI
+  provider wiring remains future work.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none
@@ -159,7 +173,7 @@ documentation to hand-written-quality scenario manuals.
 - **Filed-by:** Codex
 - **Target:** sspec-manual
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Implemented
 - **Requested-semantics:** Iteratively improve existing SPipe/SSpec tests so
   generated `doc/06_spec/...` output reads like a hand-written scenario manual,
   starting with MCP scenarios as the exemplar.
@@ -170,18 +184,25 @@ documentation to hand-written-quality scenario manuals.
         boolean `expect(...).to_equal(true|false)` assertions.
   - [x] Generated step capture labels use typed wording such as
         `Protocol capture` and `API capture`.
+  - [x] Protocol/API/exec captures render under the producing manual step.
   - [x] Captured steps with generated expected results render compact
         `Evidence:` previews under the step.
   - [x] Folded executable blocks include runnable source line-count summaries.
+  - [x] Folded executable blocks identify themselves as complete executable
+        scenario source for reproduction.
   - [x] Long expected-result values are shortened and point to folded
         executable source.
-  - [ ] MCP docs satisfy the target shape in
+  - [x] Long direct JSON equality payloads are summarized with full assertions
+        preserved in folded executable source.
+  - [x] Intensive matrix/stress/schema/OOM/loop detail scenarios fold by
+        default unless `# @manual: show` overrides them.
+  - [x] MCP docs satisfy the target shape in
         `doc/03_plan/sys_test/mcp_scenario_manual_quality.md`.
-  - [ ] Primary user/operator/admin flows are visible by default.
-  - [ ] Edge, stress, matrix, and internal helper scenarios are folded or
+  - [x] Primary user/operator/admin flows are visible by default.
+  - [x] Edge, stress, matrix, and internal helper scenarios are folded or
         skipped by policy.
-  - [ ] Environmental tests render meaningful non-UI evidence when appropriate.
-  - [ ] A review checklist exists and is used before accepting new SPipe specs.
+  - [x] Environmental tests render meaningful non-UI evidence when appropriate.
+  - [x] A review checklist exists and is used before accepting new SPipe specs.
 - **Partial-progress:** `spipe-docgen` now emits auto-generated scenario docs
   with `## Scenarios` immediately after the title. The MCP stdio temp
   generation shows operator steps before At-a-Glance, Overview, and the
@@ -189,10 +210,16 @@ documentation to hand-written-quality scenario manuals.
   result bullets under the step that produced them, with escaped JSON fragments
   normalized for manual reading. Step capture labels now use typed wording
   such as `Protocol capture: after_step` and `API capture: after_step`.
+  Protocol/API/exec captures render under the producing manual step.
   Captured protocol/API steps now include compact evidence previews derived
   from the expected checks. Folded executable blocks now include runnable
-  source line counts for reproduction review. Long expected-result values now
-  truncate in visible summaries while the full assertion remains folded.
+  source line counts and explicitly identify the folded source as complete
+  executable scenario source for reproduction review. Long expected-result
+  values now truncate in visible summaries while the full assertion remains
+  folded, including direct JSON equality payloads.
+  Intensive detail scenarios now fold by default based on their titles.
+  `doc/03_plan/sys_test/mcp_scenario_manual_quality.md` is the applied review
+  checklist for the MCP exemplar and is fully checked.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none

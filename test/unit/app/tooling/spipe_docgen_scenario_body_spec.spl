@@ -20,6 +20,7 @@ describe "spipe docgen scenario body extraction":
         expect(structure).to_contain("expect(result).to_equal(5)")
         expect(structure).to_contain("<summary>Executable SPipe</summary>")
         expect(structure).to_contain("Runnable source: 2 lines folded for reproduction.")
+        expect(structure).to_contain("Reproduction: this block contains the complete executable scenario source.")
         expect(structure).to_contain("<summary>Rendered scenario source</summary>")
         expect(structure).to_contain("> val result = $2 + 3$<br>\n> expect(result).to_equal(5)")
         expect(structure.contains("Rendered `m{...}`")).to_equal(false)
@@ -235,6 +236,25 @@ describe "spipe docgen scenario body extraction":
         expect(structure).to_contain("#### shows important slow operator flow _(slow)_")
         expect(structure.contains("<summary>Advanced: shows important slow operator flow</summary>")).to_equal(false)
 
+    it "folds intensive detail scenarios by default but allows manual show override":
+        val source = "describe \"Manual visibility\":\n" +
+            "    it \"covers protocol matrix lock rows\":\n" +
+            "        expect(\"matrix\").to_equal(\"matrix\")\n" +
+            "    pending \"documents schema inventory gaps\":\n" +
+            "        expect(\"schema\").to_equal(\"schema\")\n" +
+            "    skip_it \"records OOM skip details\":\n" +
+            "        expect(\"oom\").to_equal(\"oom\")\n" +
+            "    # @manual: show\n" +
+            "    it \"shows primary matrix operator flow\":\n" +
+            "        expect(\"operator\").to_equal(\"operator\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("<summary>Advanced: covers protocol matrix lock rows</summary>")
+        expect(structure).to_contain("<summary>Advanced: documents schema inventory gaps</summary>")
+        expect(structure).to_contain("<summary>Advanced: records OOM skip details</summary>")
+        expect(structure).to_contain("#### records OOM skip details _(skipped)_")
+        expect(structure).to_contain("#### shows primary matrix operator flow")
+        expect(structure.contains("<summary>Advanced: shows primary matrix operator flow</summary>")).to_equal(false)
+
     it "renders bare capture as after step tui scenario evidence":
         val source = "describe \"Capture policy\":\n" +
             "    # @capture\n" +
@@ -336,6 +356,36 @@ describe "spipe docgen scenario body extraction":
         expect(structure).to_contain("   - Expected: output contains `\"protocolVersion\":\"2025-06-18\"`")
         expect(structure).to_contain("   - Expected: output does not contain `error`")
 
+    it "places exec capture and evidence under the producing step":
+        val source = "describe \"Manual expected results\":\n" +
+            "    it \"summarizes command output\":\n" +
+            "        # @step: Operator runs the smoke command\n" +
+            "        # @capture(exec)\n" +
+            "        val output = run_smoke()\n" +
+            "        expect(output.contains(\"PASS smoke\")).to_equal(true)\n" +
+            "        expect(output.contains(\"panic\")).to_equal(false)\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator runs the smoke command\n   - Exec capture: after_step\n   - Evidence: execution result verified by 2 expected checks")
+        expect(structure).to_contain("   - Expected: output contains `PASS smoke`")
+        expect(structure).to_contain("   - Expected: output does not contain `panic`")
+        expect(structure.contains("# @capture(exec)")).to_equal(false)
+
+    it "places concrete provider artifacts under the producing step":
+        val source = "describe \"Manual artifacts\":\n" +
+            "    it \"captures provider output\":\n" +
+            "        # @step: Operator opens the captured screen\n" +
+            "        # @capture(tui)\n" +
+            "        # @artifact(\"artifacts/screen.ansi\")\n" +
+            "        ui.open_screen()\n" +
+            "        # @step: Operator reviews protocol payload\n" +
+            "        # @artifact: artifacts/protocol.json\n" +
+            "        operator.review_payload()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator opens the captured screen\n   - TUI capture: after_step\n   - Artifact: text `artifacts/screen.ansi`")
+        expect(structure).to_contain("2. Operator reviews protocol payload\n   - Artifact: json `artifacts/protocol.json`")
+        expect(structure.contains("# @artifact")).to_equal(false)
+        expect(structure).to_contain("```simple\nui.open_screen()\noperator.review_payload()\n```")
+
     it "summarizes long expected result values but keeps full source folded":
         val source = "describe \"Manual expected results\":\n" +
             "    it \"summarizes long json fragments\":\n" +
@@ -347,6 +397,18 @@ describe "spipe docgen scenario body extraction":
         expect(structure).to_contain("full value in folded executable source")
         expect(structure.contains("Create a debug session with a long schema payload`")).to_equal(false)
         expect(structure).to_contain("expect(output.contains(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")).to_equal(true)")
+
+    it "summarizes long direct json equality values but keeps full source folded":
+        val source = "describe \"Manual expected results\":\n" +
+            "    it \"summarizes large json payload equality\":\n" +
+            "        # @step: Operator verifies the exact payload\n" +
+            "        val payload = read_payload()\n" +
+            "        expect(payload).to_equal(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator verifies the exact payload")
+        expect(structure).to_contain("   - Expected: payload equals `{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"debug_create_session\",\"des... (full value in folded executable source)`")
+        expect(structure.contains("Create a debug session with a long schema payload`")).to_equal(false)
+        expect(structure).to_contain("expect(payload).to_equal(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")")
 
     it "renders quoted step metadata before folded executable source":
         val source = "describe \"Manual steps\":\n" +

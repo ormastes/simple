@@ -169,11 +169,11 @@ about an MCP-backed UI surface.
 - [x] Folded executable blocks show runnable source line counts.
 - [x] Long expected-value snippets are truncated and point to folded executable
       source.
-- [ ] Protocol/API/exec captures appear under the step that produced them.
-- [ ] Long JSON payloads are summarized, with full payload folded or linked.
-- [ ] Intensive loops, matrix locks, schema inventories, and OOM-skip details
+- [x] Protocol/API/exec captures appear under the step that produced them.
+- [x] Long JSON payloads are summarized, with full payload folded or linked.
+- [x] Intensive loops, matrix locks, schema inventories, and OOM-skip details
       are folded by default.
-- [ ] The manual can be used to reproduce the scenario without opening the
+- [x] The manual can be used to reproduce the scenario without opening the
       source test file.
 
 ## Implementation Dependency

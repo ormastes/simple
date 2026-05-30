@@ -564,7 +564,7 @@ fn render_executable_spipe(lines: [text]) -> text:
     var line_word = "lines"
     if line_count == 1:
         line_word = "line"
-    "\n<details>\n<summary>Executable SPipe</summary>\n\nRunnable source: " + line_count.to_string() + " " + line_word + " folded for reproduction.\n" + rendered + "</details>\n\n"
+    "\n<details>\n<summary>Executable SPipe</summary>\n\nRunnable source: " + line_count.to_string() + " " + line_word + " folded for reproduction.\nReproduction: this block contains the complete executable scenario source.\n" + rendered + "</details>\n\n"
 
 fn normalize_manual_visibility(value: text) -> text:
     val lower = value.lower().trim()
@@ -691,6 +691,30 @@ fn manual_default(file_visibility: text, fallback: text) -> text:
         return file_visibility
     fallback
 
+fn scenario_builtin_manual_visibility(name: text, fallback: text) -> text:
+    val lower = name.lower()
+    if lower.contains("stress"):
+        return "folded"
+    if lower.contains("matrix"):
+        return "folded"
+    if lower.contains("schema inventory"):
+        return "folded"
+    if lower.contains("schema inventories"):
+        return "folded"
+    if lower.contains("oom"):
+        return "folded"
+    if lower.contains("out of memory"):
+        return "folded"
+    if lower.contains("out-of-memory"):
+        return "folded"
+    if lower.contains("loop"):
+        return "folded"
+    if lower.contains("large json"):
+        return "folded"
+    if lower.contains("json payload"):
+        return "folded"
+    return fallback
+
 fn is_capture_metadata_line(trimmed: text) -> bool:
     val lower = trimmed.lower().trim()
     lower.starts_with("# @capture") or lower.starts_with("@capture")
@@ -791,6 +815,51 @@ fn scenario_capture_policy(lines: [text], scenario_index: i64) -> text:
             continue
         break
     ""
+
+fn artifact_path_from_metadata_line(trimmed: text) -> text:
+    if not (trimmed.starts_with("# @artifact") or trimmed.starts_with("@artifact")):
+        return ""
+    if trimmed.contains("("):
+        val open_parts = trimmed.split("(")
+        if open_parts.len() >= 2:
+            val close_parts = open_parts[1].split(")")
+            if close_parts.len() >= 1:
+                var value = close_parts[0].trim()
+                if value.starts_with("\"") and value.ends_with("\"") and value.len() >= 2:
+                    value = value[1:value.len() - 1]
+                return value
+    if trimmed.contains(":"):
+        val parts = trimmed.split(":")
+        if parts.len() >= 2:
+            return parts[1].trim()
+    ""
+
+fn artifact_kind_from_path(path: text) -> text:
+    val lower = path.lower()
+    if lower.ends_with(".png"):
+        return "image"
+    if lower.ends_with(".jpg"):
+        return "image"
+    if lower.ends_with(".jpeg"):
+        return "image"
+    if lower.ends_with(".gif"):
+        return "image"
+    if lower.ends_with(".webp"):
+        return "image"
+    if lower.ends_with(".svg"):
+        return "image"
+    if lower.ends_with(".txt"):
+        return "text"
+    if lower.ends_with(".ansi"):
+        return "text"
+    if lower.ends_with(".log"):
+        return "text"
+    if lower.ends_with(".json"):
+        return "json"
+    return "artifact"
+
+fn manual_artifact_summary(path: text) -> text:
+    "Artifact: " + artifact_kind_from_path(path) + " `" + path + "`"
 
 fn prev_title_from_metadata_line(trimmed: text) -> text:
     if not (trimmed.starts_with("# @prev") or trimmed.starts_with("@prev")):
@@ -1149,7 +1218,8 @@ fn strip_manual_metadata_lines(lines: [text]) -> [text]:
         val is_include = include_title_from_metadata_line(trimmed) != ""
         val is_warning = manual_warning_from_metadata_line(trimmed) != ""
         val is_step = is_step_metadata_line(trimmed)
-        if not is_capture and not is_include and not is_warning and not is_step:
+        val is_artifact = artifact_path_from_metadata_line(trimmed) != ""
+        if not is_capture and not is_include and not is_warning and not is_step and not is_artifact:
             result.push(line)
         i = i + 1
     result
@@ -1294,6 +1364,15 @@ fn expect_subject_from_line(trimmed: text) -> text:
         return parts[0].trim()
     ""
 
+fn expected_equal_argument_from_line(trimmed: text) -> text:
+    val parts = trimmed.split(").to_equal(")
+    if parts.len() < 2:
+        return ""
+    var expected = parts[1].trim()
+    if expected.ends_with(")"):
+        expected = expected[0:expected.len() - 1].trim()
+    expected
+
 fn manual_expected_value_label(value: text) -> text:
     var label = value.trim()
     if label.starts_with("\"") and label.ends_with("\"") and label.len() >= 2:
@@ -1312,7 +1391,8 @@ fn assertion_expected_summary(trimmed: text) -> text:
         expected_true = true
     elif trimmed.contains(".to_equal(false)"):
         expected_false = true
-    else:
+    val expected_equal_value = expected_equal_argument_from_line(trimmed)
+    if expected_equal_value == "":
         return ""
 
     if trimmed.contains(".contains("):
@@ -1338,7 +1418,9 @@ fn assertion_expected_summary(trimmed: text) -> text:
         return ""
     if expected_true:
         return subject + " is true"
-    subject + " is false"
+    if expected_false:
+        return subject + " is false"
+    subject + " equals `" + manual_expected_value_label(expected_equal_value) + "`"
 
 fn render_manual_steps(lines: [text], scenario_capture: text) -> text:
     val without_docstring = strip_leading_docstring(lines)
@@ -1350,6 +1432,7 @@ fn render_manual_steps(lines: [text], scenario_capture: text) -> text:
     var steps: [text] = []
     var pending_capture = ""
     var pending_label = ""
+    var pending_artifacts: [text] = []
     var step_captures: [text] = []
     var step_expected_counts: [i64] = []
     var step_count = 0
@@ -1363,6 +1446,11 @@ fn render_manual_steps(lines: [text], scenario_capture: text) -> text:
             i = i + 1
             continue
         if is_step_metadata_line(line_trimmed):
+            i = i + 1
+            continue
+        val artifact_path = artifact_path_from_metadata_line(line_trimmed)
+        if artifact_path != "":
+            pending_artifacts.push(artifact_path)
             i = i + 1
             continue
         val step_capture = capture_policy_from_metadata_line(line_trimmed)
@@ -1390,10 +1478,13 @@ fn render_manual_steps(lines: [text], scenario_capture: text) -> text:
                     step_captures.push("")
             if step_captures.len() < step_count:
                 step_captures.push("")
+            for path in pending_artifacts:
+                rendered = rendered + "\n   - " + manual_artifact_summary(path)
             step_expected_counts.push(0)
             steps.push(rendered)
             pending_capture = ""
             pending_label = ""
+            pending_artifacts = []
         else:
             val expected_summary = assertion_expected_summary(line_trimmed)
             if expected_summary != "" and steps.len() > 0:
@@ -1650,7 +1741,8 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val expanded_body = expand_prev_scenario_body(lines, i, body)
             val included_body = expand_include_scenario_body(lines, i, expanded_body)
             val final_body = add_scenario_metadata_warnings(lines, i, included_body)
-            val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "show"))
+            val fallback_visibility = scenario_builtin_manual_visibility(name, "show")
+            val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, fallback_visibility))
             val capture = scenario_capture_policy(lines, i)
             result_parts.push(render_manual_scenario(name, " _(skipped)_", final_body, visibility, capture))
             i = next_index - 1
@@ -1663,7 +1755,8 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val expanded_body = expand_prev_scenario_body(lines, i, body)
             val included_body = expand_include_scenario_body(lines, i, expanded_body)
             val final_body = add_scenario_metadata_warnings(lines, i, included_body)
-            val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "show"))
+            val fallback_visibility = scenario_builtin_manual_visibility(name, "show")
+            val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, fallback_visibility))
             val capture = scenario_capture_policy(lines, i)
             result_parts.push(render_manual_scenario(name, " _(pending)_", final_body, visibility, capture))
             i = next_index - 1
@@ -1689,7 +1782,8 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val expanded_body = expand_prev_scenario_body(lines, i, body)
             val included_body = expand_include_scenario_body(lines, i, expanded_body)
             val final_body = add_scenario_metadata_warnings(lines, i, included_body)
-            val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "show"))
+            val fallback_visibility = scenario_builtin_manual_visibility(name, "show")
+            val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, fallback_visibility))
             val capture = scenario_capture_policy(lines, i)
             result_parts.push(render_manual_scenario(name, "", final_body, visibility, capture))
             i = next_index - 1

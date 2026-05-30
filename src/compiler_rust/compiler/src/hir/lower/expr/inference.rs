@@ -14,6 +14,40 @@ impl Lowerer {
             Expr::FString { .. } => Ok(TypeId::STRING),
             Expr::Bool(_) => Ok(TypeId::BOOL),
             Expr::Nil => Ok(TypeId::NIL),
+            // FR-COMPILER-012: TypedInteger / TypedFloat / TypedString inference
+            // Without these arms, `0u32`-style literals fall through to the
+            // catch-all and emit "Cannot infer type: TypedInteger(0, U32)".
+            Expr::TypedInteger(_, suffix) => {
+                use simple_parser::NumericSuffix;
+                Ok(match suffix {
+                    NumericSuffix::I8 => TypeId::I8,
+                    NumericSuffix::I16 => TypeId::I16,
+                    NumericSuffix::I32 => TypeId::I32,
+                    NumericSuffix::I64 => TypeId::I64,
+                    NumericSuffix::U8 => TypeId::U8,
+                    NumericSuffix::U16 => TypeId::U16,
+                    NumericSuffix::U32 => TypeId::U32,
+                    NumericSuffix::U64 => TypeId::U64,
+                    NumericSuffix::F32 | NumericSuffix::F64 | NumericSuffix::Unit(_) => TypeId::I64,
+                })
+            }
+            Expr::TypedFloat(_, suffix) => {
+                use simple_parser::NumericSuffix;
+                Ok(match suffix {
+                    NumericSuffix::F32 => TypeId::F32,
+                    NumericSuffix::F64 => TypeId::F64,
+                    _ => TypeId::F64,
+                })
+            }
+            Expr::TypedString(_, _) => Ok(TypeId::STRING),
+            // FR-COMPILER-012: ArrayRepeat inference — `[value; count]`
+            Expr::ArrayRepeat { value, .. } => {
+                let elem_ty = self.infer_type(value, ctx)?;
+                Ok(self.module.types.register(HirType::Array {
+                    element: elem_ty,
+                    size: None,
+                }))
+            }
             Expr::Identifier(name) => {
                 if let Some(idx) = ctx.lookup(name) {
                     Ok(ctx.locals[idx].ty)

@@ -861,6 +861,29 @@ fn try_compile_builtin_method_call<M: Module>(
         return Ok(Some(converted));
     }
 
+    // FR-COMPILER-012: scalar float intrinsics via MethodCallStatic path
+    if matches!(method, "sqrt" | "abs" | "floor" | "ceil" | "round") {
+        let src_ty = builder.func.dfg.value_type(receiver_val);
+        let is_float = src_ty == types::F32 || src_ty == types::F64;
+        if is_float {
+            let result_val = match method {
+                "sqrt" => builder.ins().sqrt(receiver_val),
+                "abs" => builder.ins().fabs(receiver_val),
+                "floor" => builder.ins().floor(receiver_val),
+                "ceil" => builder.ins().ceil(receiver_val),
+                "round" => builder.ins().nearest(receiver_val),
+                _ => unreachable!(),
+            };
+            return Ok(Some(result_val));
+        } else if method == "sqrt" {
+            // Integer sqrt: convert to f64, compute sqrt
+            let f64_val = builder.ins().fcvt_from_sint(types::F64, receiver_val);
+            let result_val = builder.ins().sqrt(f64_val);
+            return Ok(Some(result_val));
+        }
+        // Non-sqrt integer math methods fall through to normal dispatch
+    }
+
     // Map method names to runtime functions
     let runtime_func = match method {
         // String methods

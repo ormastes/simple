@@ -1214,6 +1214,18 @@ int8_t rt_array_push(SplArray* a, int64_t val) {
     return 1;
 }
 
+/* FR-COMPILER-012: array-repeat for `[value; count]` syntax in JIT.
+ * Creates a new array with `count` copies of `value`. */
+SplArray* rt_array_repeat(int64_t value, int64_t count) {
+    int64_t n = rt_core_numeric_arg(count);
+    if (n < 0) n = 0;
+    SplArray* a = rt_array_new(n);
+    for (int64_t i = 0; i < n; i++) {
+        rt_array_push(a, value);
+    }
+    return a;
+}
+
 int64_t rt_array_data_ptr(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     return array ? (int64_t)(uintptr_t)array->data : 0;
