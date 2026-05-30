@@ -1,0 +1,503 @@
+"""SimpleOS FS Apps Remaining — spipe specification.
+
+Self-contained: all classes defined inline. 20 tests covering
+disk packaging, launcher resolution, VFS read proofs, process-backed
+launch proofs, browser WM/render proofs, and toolchain-launch proofs.
+"""
+
+use std.spipe.*
+
+# ---------------------------------------------------------------------------
+# Inline re-implementations (self-contained per test rules)
+# ---------------------------------------------------------------------------
+
+class AppDiskPackage:
+    canonical_name: text
+    canonical_path: text
+    smf_path: text
+    fat32_alias: text
+    on_disk: bool
+    smf_present: bool
+
+    static fn create(name: text, alias: text) -> AppDiskPackage:
+        AppDiskPackage(
+            canonical_name: name,
+            canonical_path: "/sys/apps/" + name,
+            smf_path: "/sys/apps/" + name + ".smf",
+            fat32_alias: alias,
+            on_disk: false,
+            smf_present: false
+        )
+
+    me mark_on_disk() -> AppDiskPackage:
+        self.on_disk = true
+        self
+
+    me mark_smf_present() -> AppDiskPackage:
+        self.smf_present = true
+        self
+
+    me is_fully_packaged() -> bool:
+        self.on_disk and self.smf_present
+
+    me alias_resolves_to_canonical() -> bool:
+        self.fat32_alias != "" and self.on_disk
+
+    me canonical_identity() -> text:
+        self.canonical_path
+
+
+class LauncherAppEntry:
+    canonical_id: text
+    canonical_exec: text
+    short_name: text
+    launch_state: text
+    identity_match: bool
+
+    static fn create(name: text, alias: text) -> LauncherAppEntry:
+        LauncherAppEntry(
+            canonical_id: name,
+            canonical_exec: "/sys/apps/" + name,
+            short_name: alias,
+            launch_state: "idle",
+            identity_match: true
+        )
+
+    me launch() -> LauncherAppEntry:
+        self.launch_state = "running"
+        self
+
+    me is_running() -> bool:
+        self.launch_state == "running"
+
+    me is_idle() -> bool:
+        self.launch_state == "idle"
+
+    me canonical_exec_path() -> text:
+        self.canonical_exec
+
+    me alias_matches_canonical() -> bool:
+        self.identity_match and self.canonical_id != ""
+
+    me resolve_from_alias(alias: text) -> text:
+        if alias == self.short_name:
+            return self.canonical_exec
+        if alias == self.canonical_id:
+            return self.canonical_exec
+        ""
+
+
+class ToolAppRegistry:
+    count: i64
+    n0: text
+    e0: text
+    n1: text
+    e1: text
+    n2: text
+    e2: text
+    n3: text
+    e3: text
+    n4: text
+    e4: text
+    n5: text
+    e5: text
+
+    static fn create() -> ToolAppRegistry:
+        ToolAppRegistry(
+            count: 0,
+            n0: "", e0: "",
+            n1: "", e1: "",
+            n2: "", e2: "",
+            n3: "", e3: "",
+            n4: "", e4: "",
+            n5: "", e5: ""
+        )
+
+    me register(entry: LauncherAppEntry) -> i64:
+        if self.count == 0:
+            self.n0 = entry.canonical_id
+            self.e0 = entry.canonical_exec
+        if self.count == 1:
+            self.n1 = entry.canonical_id
+            self.e1 = entry.canonical_exec
+        if self.count == 2:
+            self.n2 = entry.canonical_id
+            self.e2 = entry.canonical_exec
+        if self.count == 3:
+            self.n3 = entry.canonical_id
+            self.e3 = entry.canonical_exec
+        if self.count == 4:
+            self.n4 = entry.canonical_id
+            self.e4 = entry.canonical_exec
+        if self.count == 5:
+            self.n5 = entry.canonical_id
+            self.e5 = entry.canonical_exec
+        self.count = self.count + 1
+        self.count
+
+    me find_exec(name: text) -> text:
+        if self.n0 == name: return self.e0
+        if self.n1 == name: return self.e1
+        if self.n2 == name: return self.e2
+        if self.n3 == name: return self.e3
+        if self.n4 == name: return self.e4
+        if self.n5 == name: return self.e5
+        ""
+
+    me is_registered(name: text) -> bool:
+        if self.n0 == name: return true
+        if self.n1 == name: return true
+        if self.n2 == name: return true
+        if self.n3 == name: return true
+        if self.n4 == name: return true
+        if self.n5 == name: return true
+        false
+
+
+class VfsReadProof:
+    app_id: text
+    source: text
+    path: text
+    bytes_read: i64
+    emitted: bool
+
+    static fn create(app: text) -> VfsReadProof:
+        VfsReadProof(
+            app_id: app,
+            source: "generic-vfs",
+            path: "/sys/apps/" + app,
+            bytes_read: 0,
+            emitted: false
+        )
+
+    static fn resident_fallback(app: text) -> VfsReadProof:
+        VfsReadProof(
+            app_id: app,
+            source: "resident-manifest",
+            path: "/sys/apps/" + app,
+            bytes_read: 0,
+            emitted: false
+        )
+
+    me record_read(sz: i64) -> VfsReadProof:
+        self.bytes_read = sz
+        self.emitted = true
+        self
+
+    me is_generic_vfs() -> bool:
+        self.source == "generic-vfs"
+
+    me is_resident_fallback() -> bool:
+        self.source == "resident-manifest"
+
+    me is_valid_proof() -> bool:
+        self.emitted and self.is_generic_vfs() and self.bytes_read > 0
+
+    me serial_marker() -> text:
+        "[desktop-e2e] vfs-app-read:ok source=" + self.source + " path=" + self.path + " bytes=" + self.bytes_read.to_text()
+
+
+class VfsProofSet:
+    count: i64
+    p0_app: text
+    p0_ok: bool
+    p1_app: text
+    p1_ok: bool
+    p2_app: text
+    p2_ok: bool
+    p3_app: text
+    p3_ok: bool
+    p4_app: text
+    p4_ok: bool
+    p5_app: text
+    p5_ok: bool
+
+    static fn create() -> VfsProofSet:
+        VfsProofSet(
+            count: 0,
+            p0_app: "", p0_ok: false,
+            p1_app: "", p1_ok: false,
+            p2_app: "", p2_ok: false,
+            p3_app: "", p3_ok: false,
+            p4_app: "", p4_ok: false,
+            p5_app: "", p5_ok: false
+        )
+
+    me record(proof: VfsReadProof) -> i64:
+        val ok = proof.is_valid_proof()
+        if self.count == 0:
+            self.p0_app = proof.app_id
+            self.p0_ok = ok
+        if self.count == 1:
+            self.p1_app = proof.app_id
+            self.p1_ok = ok
+        if self.count == 2:
+            self.p2_app = proof.app_id
+            self.p2_ok = ok
+        if self.count == 3:
+            self.p3_app = proof.app_id
+            self.p3_ok = ok
+        if self.count == 4:
+            self.p4_app = proof.app_id
+            self.p4_ok = ok
+        if self.count == 5:
+            self.p5_app = proof.app_id
+            self.p5_ok = ok
+        self.count = self.count + 1
+        self.count
+
+    me all_ok() -> bool:
+        self.p0_ok and self.p1_ok and self.p2_ok and self.p3_ok and self.p4_ok and self.p5_ok
+
+    me ok_count() -> i64:
+        var n = 0
+        if self.p0_ok: n = n + 1
+        if self.p1_ok: n = n + 1
+        if self.p2_ok: n = n + 1
+        if self.p3_ok: n = n + 1
+        if self.p4_ok: n = n + 1
+        if self.p5_ok: n = n + 1
+        n
+
+
+class ProcessBackedProof:
+    app_id: text
+    pid: i64
+    emitted: bool
+    is_process_backed: bool
+
+    static fn create(app: text) -> ProcessBackedProof:
+        ProcessBackedProof(
+            app_id: app,
+            pid: 0,
+            emitted: false,
+            is_process_backed: false
+        )
+
+    me record_launch(pid_val: i64) -> ProcessBackedProof:
+        self.pid = pid_val
+        self.emitted = true
+        self.is_process_backed = true
+        self
+
+    me is_valid_proof() -> bool:
+        self.emitted and self.is_process_backed and self.pid > 0
+
+    me serial_marker() -> text:
+        "[desktop-e2e] process-backed:ok app=" + self.app_id + " pid=" + self.pid.to_text()
+
+
+class BrowserProof:
+    app_id: text
+    pid: i64
+    wm_owner_ok: bool
+    render_proof_ok: bool
+    page_rendered_ok: bool
+
+    static fn create() -> BrowserProof:
+        BrowserProof(
+            app_id: "simple_browser",
+            pid: 0,
+            wm_owner_ok: false,
+            render_proof_ok: false,
+            page_rendered_ok: false
+        )
+
+    me record_wm_owner(pid_val: i64) -> BrowserProof:
+        self.pid = pid_val
+        self.wm_owner_ok = true
+        self
+
+    me record_render_proof() -> BrowserProof:
+        self.render_proof_ok = true
+        self
+
+    me record_page_rendered() -> BrowserProof:
+        self.page_rendered_ok = true
+        self
+
+    me is_fully_proven() -> bool:
+        self.wm_owner_ok and self.render_proof_ok and self.page_rendered_ok
+
+    me wm_marker() -> text:
+        "[desktop-e2e] wm-owner:ok app=simple_browser pid=" + self.pid.to_text()
+
+    me render_marker() -> text:
+        "[desktop-e2e] render-proof:ok app=simple_browser pid=" + self.pid.to_text()
+
+
+class ToolchainProof:
+    app_id: text
+    mode: text
+    lane: text
+    status: text
+    tool_path: text
+    emitted: bool
+
+    static fn llvm_native_wrapper() -> ToolchainProof:
+        ToolchainProof(
+            app_id: "llvm",
+            mode: "native-wrapper",
+            lane: "x86_64-simpleos",
+            status: "guest-exec",
+            tool_path: "/usr/bin/clang",
+            emitted: false
+        )
+
+    static fn rust_native_wrapper() -> ToolchainProof:
+        ToolchainProof(
+            app_id: "rust",
+            mode: "native-wrapper",
+            lane: "x86_64-simpleos",
+            status: "report-and-gate",
+            tool_path: "/usr/bin/rustc",
+            emitted: false
+        )
+
+    me record_launch() -> ToolchainProof:
+        self.emitted = true
+        self
+
+    me is_valid_proof() -> bool:
+        self.emitted and self.mode == "native-wrapper"
+
+    me serial_marker() -> text:
+        "[desktop-e2e] toolchain-launch:ok app=" + self.app_id + " mode=" + self.mode + " lane=" + self.lane + " status=" + self.status + " tool=" + self.tool_path
+
+# ---------------------------------------------------------------------------
+
+describe "SimpleOS FS Apps Remains":
+
+    it "app_disk_package_canonical_path_for_simple_browser":
+        val pkg = AppDiskPackage.create("simple_browser", "sbrowser")
+        expect(pkg.canonical_path).to_equal("/sys/apps/simple_browser")
+        expect(pkg.canonical_name).to_equal("simple_browser")
+
+    it "app_disk_package_smf_path_derived_from_name":
+        val pkg = AppDiskPackage.create("simple_compiler", "scompiler")
+        expect(pkg.smf_path).to_equal("/sys/apps/simple_compiler.smf")
+
+    it "app_disk_package_not_packaged_until_marked":
+        val pkg = AppDiskPackage.create("llvm", "llvm")
+        expect(pkg.is_fully_packaged()).to_equal(false)
+
+    it "app_disk_package_fully_packaged_after_both_marks":
+        var pkg = AppDiskPackage.create("rust", "rust")
+        pkg.mark_on_disk()
+        pkg.mark_smf_present()
+        expect(pkg.is_fully_packaged()).to_equal(true)
+
+    it "app_disk_package_alias_resolves_only_when_on_disk":
+        var pkg = AppDiskPackage.create("simple_loader", "sloader")
+        expect(pkg.alias_resolves_to_canonical()).to_equal(false)
+        pkg.mark_on_disk()
+        expect(pkg.alias_resolves_to_canonical()).to_equal(true)
+
+    it "launcher_entry_canonical_exec_path_format":
+        val entry = LauncherAppEntry.create("simple_browser", "sbrowser")
+        expect(entry.canonical_exec_path()).to_equal("/sys/apps/simple_browser")
+
+    it "launcher_entry_starts_idle":
+        val entry = LauncherAppEntry.create("simple_compiler", "scompiler")
+        expect(entry.is_idle()).to_equal(true)
+        expect(entry.is_running()).to_equal(false)
+
+    it "launcher_entry_state_transitions_to_running":
+        var entry = LauncherAppEntry.create("llvm", "llvm")
+        entry.launch()
+        expect(entry.is_running()).to_equal(true)
+        expect(entry.is_idle()).to_equal(false)
+
+    it "launcher_entry_resolve_from_short_alias":
+        val entry = LauncherAppEntry.create("simple_interpreter", "sinterp")
+        val resolved = entry.resolve_from_alias("sinterp")
+        expect(resolved).to_equal("/sys/apps/simple_interpreter")
+
+    it "launcher_entry_resolve_from_canonical_id":
+        val entry = LauncherAppEntry.create("simple_loader", "sloader")
+        val resolved = entry.resolve_from_alias("simple_loader")
+        expect(resolved).to_equal("/sys/apps/simple_loader")
+
+    it "tool_app_registry_registers_six_apps":
+        var reg = ToolAppRegistry.create()
+        reg.register(LauncherAppEntry.create("simple_browser", "sbrowser"))
+        reg.register(LauncherAppEntry.create("simple_compiler", "scompiler"))
+        reg.register(LauncherAppEntry.create("simple_interpreter", "sinterp"))
+        reg.register(LauncherAppEntry.create("simple_loader", "sloader"))
+        reg.register(LauncherAppEntry.create("llvm", "llvm"))
+        reg.register(LauncherAppEntry.create("rust", "rust"))
+        expect(reg.count).to_equal(6)
+        expect(reg.is_registered("llvm")).to_equal(true)
+        expect(reg.is_registered("rust")).to_equal(true)
+
+    it "vfs_read_proof_generic_vfs_source":
+        val proof = VfsReadProof.create("simple_browser")
+        expect(proof.is_generic_vfs()).to_equal(true)
+        expect(proof.is_resident_fallback()).to_equal(false)
+
+    it "vfs_read_proof_resident_fallback_is_not_valid":
+        var proof = VfsReadProof.resident_fallback("simple_compiler")
+        proof.record_read(4096)
+        expect(proof.is_valid_proof()).to_equal(false)
+
+    it "vfs_read_proof_generic_vfs_with_bytes_is_valid":
+        var proof = VfsReadProof.create("simple_interpreter")
+        proof.record_read(8192)
+        expect(proof.is_valid_proof()).to_equal(true)
+
+    it "vfs_proof_set_all_ok_when_six_valid_proofs":
+        var pset = VfsProofSet.create()
+        var p0 = VfsReadProof.create("simple_browser")
+        p0.record_read(1024)
+        var p1 = VfsReadProof.create("simple_compiler")
+        p1.record_read(2048)
+        var p2 = VfsReadProof.create("simple_interpreter")
+        p2.record_read(512)
+        var p3 = VfsReadProof.create("simple_loader")
+        p3.record_read(256)
+        var p4 = VfsReadProof.create("llvm")
+        p4.record_read(4096)
+        var p5 = VfsReadProof.create("rust")
+        p5.record_read(4096)
+        pset.record(p0)
+        pset.record(p1)
+        pset.record(p2)
+        pset.record(p3)
+        pset.record(p4)
+        pset.record(p5)
+        expect(pset.all_ok()).to_equal(true)
+        expect(pset.ok_count()).to_equal(6)
+
+    it "process_backed_proof_requires_positive_pid":
+        val proof = ProcessBackedProof.create("simple_browser")
+        expect(proof.is_valid_proof()).to_equal(false)
+
+    it "process_backed_proof_valid_after_launch_with_pid":
+        var proof = ProcessBackedProof.create("simple_compiler")
+        proof.record_launch(42)
+        expect(proof.is_valid_proof()).to_equal(true)
+        expect(proof.pid).to_equal(42)
+
+    it "browser_proof_requires_all_three_markers":
+        var bp = BrowserProof.create()
+        bp.record_wm_owner(100)
+        bp.record_render_proof()
+        expect(bp.is_fully_proven()).to_equal(false)
+        bp.record_page_rendered()
+        expect(bp.is_fully_proven()).to_equal(true)
+
+    it "toolchain_proof_llvm_native_wrapper_valid_after_launch":
+        var tp = ToolchainProof.llvm_native_wrapper()
+        expect(tp.is_valid_proof()).to_equal(false)
+        tp.record_launch()
+        expect(tp.is_valid_proof()).to_equal(true)
+        expect(tp.app_id).to_equal("llvm")
+        expect(tp.mode).to_equal("native-wrapper")
+
+    it "toolchain_proof_rust_native_wrapper_serial_marker":
+        var tp = ToolchainProof.rust_native_wrapper()
+        tp.record_launch()
+        val marker = tp.serial_marker()
+        expect(tp.app_id).to_equal("rust")
+        expect(tp.status).to_equal("report-and-gate")
+        expect(tp.is_valid_proof()).to_equal(true)

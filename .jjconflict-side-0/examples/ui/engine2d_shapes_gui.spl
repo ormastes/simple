@@ -1,0 +1,213 @@
+# engine2d_shapes_gui.spl — Engine2D primitives in an on-screen window (pure Simple).
+#
+# Draws square / circle / line / text / shade (gradient) / rounded-rect on the
+# CPU (software) backend — pure Simple, no Rust GPU backend — and presents the
+# framebuffer to a winit window.
+#
+# Two DPI modes (env SIMPLE_GUI_DPI, default "low"):
+#   low  — 160x120, no supersampling. Fast under the interpreter; intended for
+#          LLM/headless UI debugging. Also prints an ASCII thumbnail of the frame
+#          so the layout can be checked from text alone.
+#   high — 240x180 render presented to a 720x540 window. What a user actually
+#          sees. The pure-Simple CPU raster runs on the tree-walk interpreter
+#          (the JIT falls back on a u32 type-inference limit), so high-res is
+#          slow here (minutes) and is fast on the native-compiled path. Set
+#          SIMPLE_GUI_SS=2 for supersampled anti-aliasing (4x slower).
+#
+# Launch on macOS (opens a real window via a .app bundle so it composites):
+#   SIMPLE_GUI_DPI=high scripts/macos-gui-run.shs examples/ui/engine2d_shapes_gui.spl
+#
+# Headless (render only, prints pixel count + ASCII preview in low mode):
+#   SIMPLE_EXECUTION_MODE=interpret bin/simple run examples/ui/engine2d_shapes_gui.spl
+
+use std.gpu.engine2d.engine.{Engine2D}
+
+extern fn rt_winit_event_loop_new() -> i64
+extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_free(ev: i64)
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
+extern fn rt_env_get(key: text) -> text
+
+# Logical layout space; all scene coordinates are expressed in these units and
+# scaled to the chosen output resolution.
+val LOGICAL_W: i32 = 160
+val LOGICAL_H: i32 = 120
+val EVT_CLOSE: i64 = 3
+
+val BG: u32 = 0xFF101822u32
+val SQUARE_COL: u32 = 0xFFE53935u32
+val CIRCLE_COL: u32 = 0xFF43A047u32
+val LINE_COL: u32 = 0xFF1E88E5u32
+val TEXT_COL: u32 = 0xFFFFFFFFu32
+val GRAD_TOP: u32 = 0xFFFFB300u32
+val GRAD_BOT: u32 = 0xFF8E24AAu32
+val ROUND_COL: u32 = 0xFF00ACC1u32
+
+fn max1(v: i32) -> i32:
+    if v < 1:
+        return 1
+    v
+
+# Map a logical coordinate/length onto a device dimension.
+fn sc(c: i32, dim: i32, logical: i32) -> i32:
+    (c * dim) / logical
+
+# Box-downsample an ss*ss-supersampled buffer to display size (anti-aliasing).
+fn downsample(hi: [u32], rw: i32, rh: i32, ss: i32) -> [u32]:
+    val ow = rw / ss
+    val oh = rh / ss
+    val n: u32 = (ss * ss).to_u32()
+    var out: [u32] = [0u32; ow * oh]
+    var y = 0
+    while y < oh:
+        var x = 0
+        while x < ow:
+            var r: u32 = 0u32
+            var g: u32 = 0u32
+            var b: u32 = 0u32
+            var dy = 0
+            while dy < ss:
+                var dx = 0
+                while dx < ss:
+                    val px = hi[(y * ss + dy) * rw + (x * ss + dx)]
+                    r = r + ((px >> 16) & 0xFFu32)
+                    g = g + ((px >> 8) & 0xFFu32)
+                    b = b + (px & 0xFFu32)
+                    dx = dx + 1
+                dy = dy + 1
+            out[y * ow + x] = 0xFF000000u32 | ((r / n) << 16) | ((g / n) << 8) | (b / n)
+            x = x + 1
+        y = y + 1
+    out
+
+# Render the scene at out_w x out_h, supersampled by ss for anti-aliasing.
+fn render_scene(out_w: i32, out_h: i32, ss: i32) -> [u32]:
+    val rw = out_w * ss
+    val rh = out_h * ss
+    var e = Engine2D.create_with_backend(rw, rh, "cpu")
+    e.clear(BG)
+    val font = max1(sc(13, rh, LOGICAL_H))
+    val thick = max1(sc(4, rh, LOGICAL_H))
+    val radius = sc(10, rw, LOGICAL_W)
+    e.draw_text(sc(8, rw, LOGICAL_W), sc(6, rh, LOGICAL_H), "Simple 2D", TEXT_COL, font)
+    e.draw_rect_filled(sc(10, rw, LOGICAL_W), sc(28, rh, LOGICAL_H), sc(36, rw, LOGICAL_W), sc(36, rh, LOGICAL_H), SQUARE_COL)
+    e.draw_circle_filled(sc(112, rw, LOGICAL_W), sc(46, rh, LOGICAL_H), sc(24, rw, LOGICAL_W), CIRCLE_COL)
+    e.draw_line(sc(10, rw, LOGICAL_W), sc(84, rh, LOGICAL_H), sc(150, rw, LOGICAL_W), sc(84, rh, LOGICAL_H), LINE_COL, thick)
+    e.draw_gradient_rect(sc(10, rw, LOGICAL_W), sc(94, rh, LOGICAL_H), sc(66, rw, LOGICAL_W), sc(22, rh, LOGICAL_H), GRAD_TOP, GRAD_BOT)
+    e.draw_rounded_rect(sc(86, rw, LOGICAL_W), sc(94, rh, LOGICAL_H), sc(62, rw, LOGICAL_W), sc(22, rh, LOGICAL_H), radius, ROUND_COL)
+    e.present()
+    val px = e.read_pixels()
+    e.shutdown()
+    if ss == 1:
+        return px
+    downsample(px, rw, rh, ss)
+
+# Classify a pixel into a single readable glyph so the layout can be inspected
+# from text in low-DPI debug mode.
+fn color_char(c: u32) -> text:
+    val r = ((c >> 16) & 0xFFu32).to_i32()
+    val g = ((c >> 8) & 0xFFu32).to_i32()
+    val b = (c & 0xFFu32).to_i32()
+    if r > 180 and g > 180 and b > 180:
+        return "#"
+    if r + g + b < 90:
+        return "."
+    if r > 170 and g > 120 and b < 110:
+        return "Y"
+    if r > 120 and b > 120 and g < 110:
+        return "P"
+    if b > g + 50 and b > r:
+        return "B"
+    if g > 120 and b > 120 and r < 110:
+        return "C"
+    if r > g and r > b:
+        return "R"
+    if g > r and g > b:
+        return "G"
+    if b > r and b > g:
+        return "B"
+    " "
+
+fn ascii_preview(px: [u32], w: i32, h: i32):
+    val cols = 60
+    val rows = 24
+    print "ASCII preview ({w}x{h} -> {cols}x{rows}): #=text .=bg R=square G=circle B=line Y/P=gradient C=rounded"
+    var ry = 0
+    while ry < rows:
+        var line = ""
+        var rx = 0
+        while rx < cols:
+            val sxp = (rx * w) / cols
+            val syp = (ry * h) / rows
+            line = line + color_char(px[syp * w + sxp])
+            rx = rx + 1
+        print line
+        ry = ry + 1
+
+fn pack_pixels(src: [u32]) -> [i64]:
+    # softbuffer treats each u32 as 0x00RRGGBB; mask to 24-bit RGB.
+    var out: [i64] = []
+    var i = 0
+    while i < src.len():
+        out = out.push(src[i].to_i64() & 0xFFFFFF)
+        i = i + 1
+    out
+
+fn main() -> i64:
+    val high = rt_env_get("SIMPLE_GUI_DPI") == "high"
+    # out_w/out_h = render (framebuffer) size; win_w/win_h = on-screen window size.
+    var out_w = LOGICAL_W
+    var out_h = LOGICAL_H
+    var win_w = 480
+    var win_h = 360
+    var ss = 1
+    if high:
+        out_w = 240
+        out_h = 180
+        win_w = 720
+        win_h = 540
+        if rt_env_get("SIMPLE_GUI_SS") == "2":
+            ss = 2
+    val mode = if high: "high" else: "low"
+    print "Engine2D shapes GUI — {mode} DPI: render {out_w}x{out_h} (ss={ss}) -> window {win_w}x{win_h}, cpu backend"
+    val pixels = render_scene(out_w, out_h, ss)
+    print "Rendered {pixels.len()} px"
+    if not high:
+        ascii_preview(pixels, out_w, out_h)
+
+    if rt_env_get("SIMPLE_GUI") != "1":
+        print "No GUI requested (use scripts/macos-gui-run.shs to open a window); headless only."
+        return 0
+
+    val el = rt_winit_event_loop_new()
+    if el == 0:
+        print "No GUI runtime available."
+        return 0
+    val win = rt_winit_window_new(el, win_w.to_i64(), win_h.to_i64(), "Simple Engine2D — shapes ({mode})")
+    if win == 0:
+        print "Window creation failed."
+        rt_winit_event_loop_free(el)
+        return 0
+    val packed = pack_pixels(pixels)
+    rt_winit_window_present_rgba(win, out_w.to_i64(), out_h.to_i64(), packed)
+    # Poll continuously (never sleep): the interpreter owns the main thread, so
+    # AppKit needs a handler between frames or the window never composites.
+    var running = true
+    var iters = 0
+    while running and iters < 2000000:
+        var ev = rt_winit_event_loop_poll_events(el, 1)
+        while ev != 0:
+            if rt_winit_event_get_type(ev) == EVT_CLOSE:
+                running = false
+            rt_winit_event_free(ev)
+            ev = rt_winit_event_loop_poll_events(el, 1)
+        if iters % 200 == 0:
+            rt_winit_window_present_rgba(win, out_w.to_i64(), out_h.to_i64(), packed)
+        iters = iters + 1
+    rt_winit_window_free(win)
+    rt_winit_event_loop_free(el)
+    return 0

@@ -1,0 +1,104 @@
+# Drawing selection — read-only and mutable selection state.
+#
+# DrawingSelection is an immutable snapshot of selected pixel coordinates.
+# MutableSelection is its mutable companion used during interactive editing.
+# Both are consumed by tool_app.spl in the drawing subsystem.
+
+use std.common.drawing.vector.{SkPoint, SkRect}
+
+# ============================================================================
+# Immutable selection snapshot
+# ============================================================================
+
+struct DrawingSelection:
+    """Read-only snapshot of the current selection.
+
+    `points` holds each selected pixel (or control point) as SkPoint.
+    `bounds` is the axis-aligned bounding rect of all selected points.
+    An empty selection has `points = []` and `bounds = SkRect.zero()`.
+    """
+    points: [SkPoint]
+    bounds: SkRect
+    is_empty: bool
+
+impl DrawingSelection:
+    static fn empty() -> DrawingSelection:
+        DrawingSelection(points: [], bounds: SkRect.zero(), is_empty: true)
+
+    static fn from_points(points: [SkPoint]) -> DrawingSelection:
+        """Build a selection from a list of points, computing bounds."""
+        if points.len() == 0:
+            return DrawingSelection.empty()
+        var min_x = points[0].x
+        var min_y = points[0].y
+        var max_x = points[0].x
+        var max_y = points[0].y
+        var i = 1
+        while i < points.len():
+            val p = points[i]
+            min_x = if p.x < min_x: p.x else: min_x
+            min_y = if p.y < min_y: p.y else: min_y
+            max_x = if p.x > max_x: p.x else: max_x
+            max_y = if p.y > max_y: p.y else: max_y
+            i = i + 1
+        val bounds = SkRect.from_ltrb(min_x, min_y, max_x + 1.0, max_y + 1.0)
+        DrawingSelection(points: points, bounds: bounds, is_empty: false)
+
+    static fn from_rect(rect: SkRect) -> DrawingSelection:
+        """Build a rectangular selection from a bounding rect."""
+        val tl = SkPoint.from_xy(rect.left, rect.top)
+        val tr = SkPoint.from_xy(rect.right, rect.top)
+        val bl = SkPoint.from_xy(rect.left, rect.bottom)
+        val br = SkPoint.from_xy(rect.right, rect.bottom)
+        DrawingSelection(points: [tl, tr, bl, br], bounds: rect, is_empty: false)
+
+    fn contains_point(self, p: SkPoint) -> bool:
+        self.bounds.contains_point(p)
+
+    fn point_count(self) -> i64:
+        self.points.len()
+
+# ============================================================================
+# Mutable selection builder
+# ============================================================================
+
+struct MutableSelection:
+    """Accumulated selection being built during user interaction."""
+    points: [SkPoint]
+
+impl MutableSelection:
+    static fn empty() -> MutableSelection:
+        MutableSelection(points: [])
+
+    fn add_point(self, p: SkPoint) -> MutableSelection:
+        """Append a point to the selection."""
+        MutableSelection(points: self.points.push(p))
+
+    fn add_rect(self, rect: SkRect) -> MutableSelection:
+        """Add the four corner points of a rectangle."""
+        val tl = SkPoint.from_xy(rect.left, rect.top)
+        val tr = SkPoint.from_xy(rect.right, rect.top)
+        val bl = SkPoint.from_xy(rect.left, rect.bottom)
+        val br = SkPoint.from_xy(rect.right, rect.bottom)
+        var s = self.add_point(tl)
+        s = s.add_point(tr)
+        s = s.add_point(bl)
+        s.add_point(br)
+
+    fn remove_point(self, p: SkPoint) -> MutableSelection:
+        """Remove a point (by exact coordinate match)."""
+        var kept: [SkPoint] = []
+        for pt in self.points:
+            if not pt.equals(p):
+                kept = kept.push(pt)
+        MutableSelection(points: kept)
+
+    fn clear(self) -> MutableSelection:
+        MutableSelection(points: [])
+
+    fn to_selection(self) -> DrawingSelection:
+        """Snapshot as an immutable DrawingSelection."""
+        DrawingSelection.from_points(self.points)
+
+    fn is_empty(self) -> bool:
+        self.points.len() == 0

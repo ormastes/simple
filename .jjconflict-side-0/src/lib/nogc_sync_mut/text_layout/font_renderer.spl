@@ -1,0 +1,248 @@
+use std.nogc_sync_mut.sffi.spl_fonts.{FontRasterizer, GlyphBitmap, LayoutGlyph, SubpixelGlyphBitmap}
+use std.nogc_sync_mut.text_layout.font_provider.{
+    browser_font_dylib_candidates,
+    browser_serif_font_candidates,
+    browser_font_candidates_for_family
+}
+use std.nogc_sync_mut.text_layout.font_rasterizer.{
+    _sffi_glyph_to_cached,
+    rasterize_ttf,
+    rasterize_vector,
+    rasterize_bitmap,
+    blit_glyph
+}
+use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands}
+
+# Shared Font Renderer — unified text rendering for both OS and browser
+#
+# Provides buffer-based text rendering using three font backends:
+#   1. TrueType (via stb_truetype SFFI) — full Unicode, AA, proportional
+#   2. Vector font (outline commands) — 29 glyphs, 2x2 sub-pixel AA
+#   3. Bitmap 8x16 (VGA fallback) — monospace, no AA
+#
+# The renderer auto-selects the best available backend per glyph:
+#   - If TrueType font loaded → use TrueType
+#   - If vector glyph available → use vector
+#   - Otherwise → bitmap fallback
+#
+# This module has NO dependency on CompositorBackend, so it can be used
+# by the OS compositor, browser engine, and game engine alike.
+#
+# Sub-modules:
+#   font_provider.spl     — font candidate lists, CSS @font-face parsing, materialization
+#   font_rasterizer.spl   — glyph rasterization backends + blit_glyph
+#   font_vector_data.spl  — vector outline tables + system font constants
+
+# ============================================================================
+# Glyph Cache Entry
+# ============================================================================
+
+class CachedGlyph:
+    codepoint: i32
+    font_size: i32
+    width: i32
+    height: i32
+    advance: i32
+    bearing_x: i32
+    bearing_y: i32
+    pixels: [u8]    # grayscale alpha (0-255) per pixel, row-major
+
+    static fn empty(cp: i32, fs: i32) -> CachedGlyph:
+        CachedGlyph(codepoint: cp, font_size: fs, width: 0, height: 0, advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
+
+# ============================================================================
+# Glyph Cache
+# ============================================================================
+
+class GlyphCache:
+    entries: [CachedGlyph]
+    max_entries: i32
+
+    static fn new(max_size: i32) -> GlyphCache:
+        GlyphCache(entries: [], max_entries: max_size)
+
+    fn lookup(codepoint: i32, font_size: i32) -> CachedGlyph?:
+        for entry in self.entries:
+            if entry.codepoint == codepoint and entry.font_size == font_size:
+                return entry
+        nil
+
+    me insert(glyph: CachedGlyph):
+        # Evict oldest if cache full
+        if self.entries.len() >= self.max_entries:
+            self.entries = self.entries.slice(1, self.entries.len())
+        self.entries.push(glyph)
+
+# ============================================================================
+# Font Renderer
+# ============================================================================
+
+class FontRenderer:
+    cache: GlyphCache
+    ttf_handle: i64     # TrueType font handle (0 = not loaded)
+    use_vector: bool     # enable vector font fallback
+    use_bitmap: bool     # enable bitmap font fallback
+    ttf_rasterizer: FontRasterizer?  # Phase 3b: SFFI spl_fonts TTF backend (nil = disabled)
+
+    static fn new() -> FontRenderer:
+        FontRenderer(
+            cache: GlyphCache.new(512),
+            ttf_handle: 0,
+            use_vector: true,
+            use_bitmap: true,
+            ttf_rasterizer: nil
+        )
+
+    static fn with_ttf(handle: i64) -> FontRenderer:
+        FontRenderer(
+            cache: GlyphCache.new(512),
+            ttf_handle: handle,
+            use_vector: true,
+            use_bitmap: true,
+            ttf_rasterizer: nil
+        )
+
+    static fn browser_serif_default() -> FontRenderer:
+        FontRenderer.browser_default_for_family("serif")
+
+    static fn browser_default_for_family(family: text) -> FontRenderer:
+        var renderer = FontRenderer.new()
+        for font_path in browser_font_candidates_for_family(family):
+            for dylib_path in browser_font_dylib_candidates():
+                if renderer.try_enable_ttf(dylib_path, font_path):
+                    return renderer
+        renderer
+
+    fn has_ttf() -> bool:
+        self.ttf_handle != 0
+
+    # -----------------------------------------------------------------------
+    # Phase 3b: opt-in SFFI spl_fonts TrueType backend
+    # -----------------------------------------------------------------------
+    # Attempts to load `dylib_path` and initialize it with `ttf_path`. On
+    # success the renderer will prefer the SFFI spl_fonts rasterizer for
+    # glyphs (highest-priority backend). On any failure the renderer stays
+    # in its default state and callers fall through to the vector/bitmap
+    # paths unchanged. Caller opt-in only — default FontRenderer.new()
+    # instances behave exactly as before.
+    me try_enable_ttf(dylib_path: text, ttf_path: text) -> bool:
+        val r = FontRasterizer.load(dylib_path, ttf_path)
+        if r != nil:
+            self.ttf_rasterizer = r
+            return true
+        false
+
+    me try_enable_browser_serif_default() -> bool:
+        for dylib_path in browser_font_dylib_candidates():
+            for font_path in browser_serif_font_candidates():
+                if self.try_enable_ttf(dylib_path, font_path):
+                    return true
+        false
+
+    fn has_sffi_ttf() -> bool:
+        self.ttf_rasterizer != nil
+
+    me horizontal_kern(left_codepoint: i32, right_codepoint: i32, font_size: i32) -> i32:
+        val rast = self.ttf_rasterizer
+        if rast != nil:
+            return rast.horizontal_kern(left_codepoint.to_i64(), right_codepoint.to_i64(), font_size.to_i64()).to_i32()
+        0
+
+    me horizontal_line_metric(font_size: i32, field: i32) -> i32:
+        val rast = self.ttf_rasterizer
+        if rast != nil:
+            return rast.horizontal_line_metric(font_size.to_i64(), field.to_i64()).to_i32()
+        0
+
+    me layout_text(content: text, font_size: i32, max_width: i32) -> [LayoutGlyph]:
+        val rast = self.ttf_rasterizer
+        if rast != nil:
+            return rast.layout_text(content, font_size.to_i64(), max_width.to_i64())
+        []
+
+    me rasterize_subpixel(codepoint: i32, font_size: i32) -> SubpixelGlyphBitmap?:
+        val rast = self.ttf_rasterizer
+        if rast != nil:
+            return rast.rasterize_subpixel(codepoint.to_i64(), font_size.to_i64())
+        nil
+
+    # -----------------------------------------------------------------------
+    # Get glyph (cached) — returns rasterized alpha bitmap
+    # -----------------------------------------------------------------------
+    me get_glyph(codepoint: i32, font_size: i32) -> CachedGlyph:
+        # Check cache first
+        val cached = self.cache.lookup(codepoint, font_size)
+        if val Some(g) = cached:
+            return g
+
+        # Rasterize
+        var glyph = CachedGlyph.empty(codepoint, font_size)
+
+        # Phase 3b: prefer SFFI spl_fonts TrueType backend when the caller
+        # has opted in via try_enable_ttf(). Any failure falls through to
+        # the existing vector/bitmap path unchanged. Under the interpreter,
+        # static-fn Option<T> returns are typed as T directly, so we use
+        # `!= nil` rather than `if val Some(x) =` destructuring.
+        var handled = false
+        val rast = self.ttf_rasterizer
+        if rast != nil:
+            val gb = rast.rasterize(codepoint.to_i64(), font_size.to_i64())
+            if gb != nil:
+                glyph = _sffi_glyph_to_cached(gb, codepoint, font_size)
+                handled = true
+
+        if handled:
+            pass_do_nothing
+        else if self.has_ttf():
+            glyph = rasterize_ttf(self.ttf_handle, codepoint, font_size)
+        else if self.use_vector:
+            val vector_cmds = vf_glyph_commands(codepoint)
+            if vector_cmds.len() > 0:
+                glyph = rasterize_vector(vector_cmds, codepoint, font_size)
+            else if self.use_bitmap:
+                glyph = rasterize_bitmap(codepoint, font_size)
+        else if self.use_bitmap:
+            glyph = rasterize_bitmap(codepoint, font_size)
+
+        self.cache.insert(glyph)
+        glyph
+
+    # -----------------------------------------------------------------------
+    # Measure text width using actual glyph advances
+    # -----------------------------------------------------------------------
+    me measure_text_width(content: text, font_size: i32) -> i32:
+        var total_w = 0
+        var prev_cp = -1
+        for ch in content:
+            val cp = ch.char_code_at(0)
+            if prev_cp >= 0:
+                total_w = total_w + self.horizontal_kern(prev_cp, cp, font_size)
+            val glyph = self.get_glyph(cp, font_size)
+            if glyph.advance > 0:
+                total_w = total_w + glyph.advance
+            else:
+                # Fallback: approximate
+                total_w = total_w + font_size * 55 / 100
+            prev_cp = cp
+        total_w
+
+    # -----------------------------------------------------------------------
+    # Render text into a pixel buffer (ARGB u32)
+    # -----------------------------------------------------------------------
+    me render_text(buffer: [u32], buf_w: i32, buf_h: i32,
+                   x: i32, y: i32, content: text,
+                   color: u32, font_size: i32) -> [u32]:
+        """Render text string into an ARGB pixel buffer with anti-aliased glyphs."""
+        var out = buffer
+        var cx = x
+        var prev_cp = -1
+        for ch in content:
+            val cp = ch.char_code_at(0)
+            if prev_cp >= 0:
+                cx = cx + self.horizontal_kern(prev_cp, cp, font_size)
+            val glyph = self.get_glyph(cp, font_size)
+            if glyph.width > 0 and glyph.height > 0:
+                out = blit_glyph(out, buf_w, buf_h, cx, y, glyph, color)
+            cx = cx + glyph.advance
+            prev_cp = cp
+        out

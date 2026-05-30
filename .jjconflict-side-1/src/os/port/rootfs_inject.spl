@@ -1,0 +1,57 @@
+# SimpleOS FAT32 rootfs binary injection helper.
+#
+# Provides rootfs_inject_binary() for post-hoc injection of a host binary into
+# an already-built FAT32 disk image via mcopy (mtools). Complements the
+# staging-time injection in scripts/make_os_disk.shs.
+#
+# Usage:
+#   match rootfs_inject_binary("build/os/fat32-x86_64.img", "bin/mold/mold", "/usr/bin/mold"):
+#     case Ok(()):  print "injected"
+#     case Err(e):  print "skipped: " + e
+
+use std.io_runtime as io
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
+
+fn _mcopy_available() -> bool:
+    """Return true if mcopy (mtools) is on PATH."""
+    val (_, _, code) = rt_process_run_timeout("sh", ["-c", "command -v mcopy >/dev/null 2>&1"], 5000)
+    code == 0
+
+fn _guest_path_to_mcopy_dest(guest_path: text) -> text:
+    """Convert a Unix guest path like /usr/bin/mold to the mcopy :: form ::/usr/bin/mold."""
+    "::" + guest_path
+
+fn rootfs_inject_binary(image: text, host_src: text, guest_dest: text) -> Result<(), text>:
+    """Inject a host binary into a FAT32 disk image at the given guest path.
+
+    Uses mcopy (mtools) to write host_src into the image without mounting.
+    Skips gracefully if host_src does not exist or mcopy is unavailable.
+
+    Args:
+        image:      Path to the raw FAT32 image (e.g. "build/os/fat32-x86_64.img").
+        host_src:   Path to the host binary to inject (e.g. "bin/mold/mold").
+        guest_dest: Guest filesystem path (e.g. "/usr/bin/mold").
+
+    Returns:
+        Ok(()) on success or graceful skip; Err(msg) on tool failure.
+    """
+    if not rt_file_exists(host_src):
+        return Err("rootfs_inject_binary: host source not found: " + host_src)
+    if not rt_file_exists(image):
+        return Err("rootfs_inject_binary: disk image not found: " + image)
+    if not _mcopy_available():
+        return Err("rootfs_inject_binary: mcopy not found (install mtools)")
+
+    val dest = _guest_path_to_mcopy_dest(guest_dest)
+    val args: [text] = ["-i", image, "-o", host_src, dest]
+    val (stdout, stderr, code) = rt_process_run_timeout("mcopy", args, 30000)
+    if code != 0:
+        val detail = if stderr != "": stderr else: stdout
+        return Err("rootfs_inject_binary: mcopy failed (exit " + code.to_text() + "): " + detail)
+    Ok(())
+
+fn rootfs_inject_mold(image: text, mold_host_path: text) -> Result<(), text>:
+    """Convenience wrapper: inject bin/mold/mold into /usr/bin/mold in image."""
+    rootfs_inject_binary(image, mold_host_path, "/usr/bin/mold")

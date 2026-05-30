@@ -1,0 +1,737 @@
+# Editor LSP Result Panel — tree of LSP results (symbols, references, code
+# actions, call hierarchy) with selection, expansion, and pending state.
+#
+# Provides: LspResultPanel, LspResultRow, lsp_result_panel_new and the
+# panel query/transform helpers used by the controller layer.
+
+use std.editor.services.lsp_client.{LspResponse}
+use std.editor.core.path_text.*
+
+struct LspResultRow:
+    icon: text
+    label: text
+    detail: text
+    path: text
+    line: i64
+    col: i64
+    command_name: text
+    command_payload: text
+    depth: i64
+    expanded: bool
+
+struct LspResultPanel:
+    title: text
+    rows: [LspResultRow]
+    selected: i64
+    scroll_offset: i64
+    visible: bool
+    pending: bool
+    request_id: i64
+
+fn lsp_result_panel_new(title: text) -> LspResultPanel:
+    LspResultPanel(title: title, rows: [], selected: 0, scroll_offset: 0,
+                   visible: false, pending: false, request_id: 0)
+
+fn lsp_result_panel_with_rows(title: text, rows: [LspResultRow]) -> LspResultPanel:
+    LspResultPanel(title: title, rows: rows, selected: 0, scroll_offset: 0,
+                   visible: true, pending: false, request_id: 0)
+
+# Move the selection cursor, clamping into the row range.
+fn lsp_result_panel_select(panel: LspResultPanel, selected: i64) -> LspResultPanel:
+    var sel = selected
+    if sel < 0:
+        sel = 0
+    if panel.rows.len() > 0 and sel >= panel.rows.len():
+        sel = panel.rows.len() - 1
+    LspResultPanel(title: panel.title, rows: panel.rows, selected: sel,
+                   scroll_offset: panel.scroll_offset, visible: panel.visible,
+                   pending: panel.pending, request_id: panel.request_id)
+
+# Toggle the expanded flag on the selected row.
+fn lsp_result_panel_toggle_expanded(panel: LspResultPanel) -> LspResultPanel:
+    if panel.selected < 0 or panel.selected >= panel.rows.len():
+        return panel
+    var rows: [LspResultRow] = []
+    var i = 0
+    while i < panel.rows.len():
+        val r = panel.rows[i]
+        if i == panel.selected:
+            rows.push(LspResultRow(icon: r.icon, label: r.label, detail: r.detail,
+                                   path: r.path, line: r.line, col: r.col,
+                                   command_name: r.command_name, command_payload: r.command_payload,
+                                   depth: r.depth, expanded: not r.expanded))
+        else:
+            rows.push(r)
+        i = i + 1
+    LspResultPanel(title: panel.title, rows: rows, selected: panel.selected,
+                   scroll_offset: panel.scroll_offset, visible: panel.visible,
+                   pending: panel.pending, request_id: panel.request_id)
+
+# A panel waiting for an async LSP response.
+fn lsp_result_panel_pending(kind: text, request_id: i64) -> LspResultPanel:
+    LspResultPanel(title: _lsp_result_panel_title_for(kind), rows: [LspResultRow(icon: "pending", label: "Waiting for language server", detail: "", path: "", line: 0, col: 0, command_name: "", command_payload: "", depth: 0, expanded: false)], selected: 0,
+                   scroll_offset: 0, visible: true, pending: true, request_id: request_id)
+
+# Build a populated panel from a completed LSP response. Row hydration is done
+# by the controller layer from result_json; this keeps the panel shell.
+fn lsp_result_panel_from_response(kind: text, response: LspResponse) -> LspResultPanel:
+    LspResultPanel(title: _lsp_result_panel_title_for(kind), rows: _lsp_result_rows_from_json(kind, response.result_json), selected: _lsp_result_selected_from_json(kind, response.result_json),
+                   scroll_offset: 0, visible: true, pending: false, request_id: response.id)
+
+# A workspace-edit preview panel.
+fn lsp_result_panel_workspace_edit_preview(title: text, edit_json: text, request_id: i64) -> LspResultPanel:
+    LspResultPanel(title: _lsp_workspace_edit_preview_title(title),
+                   rows: _lsp_workspace_edit_rows_from_json(edit_json),
+                   selected: 0, scroll_offset: 0,
+                   visible: true, pending: false, request_id: request_id)
+
+fn _lsp_result_panel_title_for(kind: text) -> text:
+    if kind == "document-symbols":
+        return "Document Symbols"
+    if kind == "code-lens":
+        return "Code Lens"
+    if kind == "workspace-symbols":
+        return "Workspace Symbols"
+    if kind == "rename-preview":
+        return "Rename Preview"
+    if kind == "inlay-hints":
+        return "Inlay Hints"
+    if kind == "code-lens-resolve":
+        return "Resolved Code Lens"
+    if kind == "code-action":
+        return "Code Actions"
+    if kind == "completion":
+        return "Completion"
+    if kind == "hover":
+        return "Hover"
+    if kind == "definition":
+        return "Definition"
+    if kind == "references":
+        return "References"
+    if kind == "selection-ranges":
+        return "Selection Ranges"
+    if kind == "signature-help":
+        return "Signature Help"
+    if kind == "folding-ranges":
+        return "Folding Ranges"
+    if kind == "document-links":
+        return "Document Links"
+    if kind == "call-hierarchy":
+        return "Call Hierarchy"
+    if kind == "call-hierarchy-incoming":
+        return "Incoming Calls"
+    if kind == "call-hierarchy-outgoing":
+        return "Outgoing Calls"
+    if kind == "semantic-tokens":
+        return "Semantic Tokens"
+    "LSP Results"
+
+fn lsp_result_title(kind: text) -> text:
+    _lsp_result_panel_title_for(kind)
+
+fn _lsp_result_rows_from_json(kind: text, json: text) -> [LspResultRow]:
+    if kind == "code-lens" or kind == "code-lens-resolve":
+        return _lsp_code_lens_rows_from_json(json)
+    if kind == "document-symbols":
+        return _lsp_symbol_rows_from_json(json)
+    if kind == "selection-ranges":
+        return _lsp_selection_range_rows_from_json(json)
+    if kind == "signature-help":
+        return _lsp_signature_rows_from_json(json)
+    if kind == "folding-ranges":
+        return _lsp_folding_rows_from_json(json)
+    if kind == "document-links":
+        return _lsp_document_link_rows_from_json(json)
+    if kind == "call-hierarchy" or kind == "call-hierarchy-incoming" or kind == "call-hierarchy-outgoing":
+        return _lsp_call_hierarchy_rows_from_json(kind, json)
+    if kind == "semantic-tokens":
+        return _lsp_semantic_token_rows_from_json(json)
+    if kind == "inlay-hints":
+        return _lsp_inlay_hint_rows_from_json(json)
+    if kind == "hover":
+        return _lsp_hover_rows_from_json(json)
+    _lsp_location_rows_from_json(json)
+
+fn _lsp_result_selected_from_json(kind: text, json: text) -> i64:
+    if kind == "signature-help":
+        return _lsp_json_i64_after(json, "\"activeSignature\"", 0)
+    0
+
+fn _lsp_location_rows_from_json(json: text) -> [LspResultRow]:
+    var rows: [LspResultRow] = []
+    var cursor = 0
+    while cursor < json.len():
+        val scan = json.slice(cursor, json.len())
+        val uri_key = scan.index_of("\"uri\"")
+        if uri_key < 0:
+            return rows
+        val start = cursor + uri_key
+        val uri = _lsp_json_string_after(json, "\"uri\"", start)
+        val line = _lsp_json_i64_after(json, "\"line\"", start)
+        val col = _lsp_json_i64_after(json, "\"character\"", start)
+        val path = _lsp_file_uri_to_path(uri)
+        rows.push(LspResultRow(icon: "ref", label: _lsp_result_basename(path) + ":" + (line + 1).to_text(), detail: path + ":" + (line + 1).to_text(), path: path, line: line, col: col, command_name: "", command_payload: "", depth: 0, expanded: false))
+        cursor = start + 5
+    rows
+
+fn _lsp_symbol_rows_from_json(json: text) -> [LspResultRow]:
+    var rows: [LspResultRow] = []
+    var cursor = 0
+    while cursor < json.len():
+        val scan = json.slice(cursor, json.len())
+        val name_key = scan.index_of("\"name\"")
+        if name_key < 0:
+            return rows
+        val start = cursor + name_key
+        val name = _lsp_json_string_after(json, "\"name\"", start)
+        val line = _lsp_json_i64_after(json, "\"line\"", start)
+        val col = _lsp_json_i64_after(json, "\"character\"", start)
+        rows.push(LspResultRow(icon: "symbol", label: name, detail: "", path: "", line: line, col: col, command_name: "", command_payload: "", depth: 0, expanded: false))
+        cursor = start + 6
+    rows
+
+fn _lsp_code_lens_rows_from_json(json: text) -> [LspResultRow]:
+    var rows: [LspResultRow] = []
+    var cursor = 0
+    while cursor < json.len():
+        val scan = json.slice(cursor, json.len())
+        val command_key = scan.index_of("\"command\"")
+        if command_key < 0:
+            return rows
+        val start = cursor + command_key
+        val title = _lsp_json_string_after(json, "\"title\"", start)
+        val command = _lsp_json_string_after(json, "\"command\"", start + 9)
+        val arg = _lsp_json_arguments_payload_after(json, start)
+        val arg_detail = _lsp_json_arguments_detail_after(json, start)
+        val line = _lsp_json_i64_after(json, "\"line\"", cursor)
+        val col = _lsp_json_i64_after(json, "\"character\"", cursor)
+        val detail = command + " line " + (line + 1).to_text() + ":" + (col + 1).to_text() + if arg_detail == "" then "" else: " args " + arg_detail
+        rows.push(LspResultRow(icon: "lens", label: title, detail: detail, path: "", line: line, col: col, command_name: command, command_payload: arg, depth: 0, expanded: false))
+        cursor = start + 9
+    rows
+
+fn _lsp_selection_range_rows_from_json(json: text) -> [LspResultRow]:
+    var rows: [LspResultRow] = []
+    var cursor = 0
+    var depth = 0
+    while cursor < json.len():
+        val scan = json.slice(cursor, json.len())
+        val range_rel = scan.index_of("\"range\"")
+        if range_rel < 0:
+            return rows
+        val start = cursor + range_rel
+        val start_line = _lsp_json_i64_after(json, "\"line\"", start)
+        val start_col = _lsp_json_i64_after(json, "\"character\"", start)
+        val end_pos = _lsp_json_object_field_start(json, "\"end\"", start)
+        val end_line = _lsp_json_i64_after(json, "\"line\"", end_pos)
+        val end_col = _lsp_json_i64_after(json, "\"character\"", end_pos)
+        val detail = _lsp_workspace_edit_label(start_line, start_col, end_line, end_col)
+        rows.push(LspResultRow(icon: "selection", label: "Selection " + (rows.len() + 1).to_text(), detail: detail, path: "", line: start_line, col: start_col, command_name: "", command_payload: end_line.to_text() + "|" + end_col.to_text(), depth: depth, expanded: true))
+        depth = depth + 1
+        cursor = start + 7
+    rows
+
+fn _lsp_signature_rows_from_json(json: text) -> [LspResultRow]:
+    var rows: [LspResultRow] = []
+    val active_parameter = _lsp_json_i64_after(json, "\"activeParameter\"", 0)
+    var cursor = 0
+    while cursor < json.len():
+        val scan = json.slice(cursor, json.len())
+        val label_rel = scan.index_of("\"label\"")
+        if label_rel < 0:
+            return rows
+        val start = cursor + label_rel
+        val label = _lsp_json_string_after(json, "\"label\"", start)
+        val documentation = _lsp_json_string_after(json, "\"documentation\"", start)
+        val parameter = _lsp_signature_parameter(label, active_parameter)
+        rows.push(LspResultRow(icon: "signature", label: label, detail: documentation, path: "", line: 0, col: 0, command_name: parameter, command_payload: parameter, depth: 0, expanded: false))
+        cursor = start + 7
+    rows
+
+fn _lsp_signature_parameter(label: text, index: i64) -> text:
+    val open = label.index_of("(")
+    val close = label.index_of(")")
+    if open < 0 or close <= open:
+        return ""
+    var current = 0
+    var start = open + 1
+    var fallback = ""
+    var i = open + 1
+    while i <= close:
+        if i == close or label.char_at(i) == ",":
+            fallback = label.slice(start, i).trim()
+            if current == index:
+                return fallback
+            current = current + 1
+            start = i + 1
+        i = i + 1
+    fallback
+
+fn _lsp_folding_rows_from_json(json: text) -> [LspResultRow]:
+    var rows: [LspResultRow] = []
+    var cursor = 0
+    while cursor < json.len():
+        val scan = json.slice(cursor, json.len())
+        val rel = scan.index_of("\"startLine\"")
+        if rel < 0:
+            return rows
+        val start = cursor + rel
+        val start_line = _lsp_json_i64_after(json, "\"startLine\"", start)
+        val end_line = _lsp_json_i64_after(json, "\"endLine\"", start)
+        val kind = _lsp_json_string_after(json, "\"kind\"", start)
+        rows.push(LspResultRow(icon: "fold", label: "Lines " + (start_line + 1).to_text() + "-" + (end_line + 1).to_text(), detail: kind, path: "", line: start_line, col: 0, command_name: "", command_payload: end_line.to_text(), depth: 0, expanded: false))
+        cursor = start + 11
+    rows
+
+fn _lsp_document_link_rows_from_json(json: text) -> [LspResultRow]:
+    var rows: [LspResultRow] = []
+    var cursor = 0
+    while cursor < json.len():
+        val scan = json.slice(cursor, json.len())
+        val rel = scan.index_of("\"target\"")
+        if rel < 0:
+            return rows
+        val start = cursor + rel
+        val target = _lsp_json_string_after(json, "\"target\"", start)
+        val path = _lsp_file_uri_to_path(target)
+        val line = _lsp_json_i64_after(json, "\"line\"", cursor)
+        val col = _lsp_json_i64_after(json, "\"character\"", cursor)
+        rows.push(LspResultRow(icon: "link", label: path, detail: "line " + (line + 1).to_text() + ":" + (col + 1).to_text(), path: path, line: line, col: col, command_name: "", command_payload: "", depth: 0, expanded: false))
+        cursor = start + 8
+    rows
+
+fn _lsp_workspace_edit_preview_title(title: text) -> text:
+    val clean = title.trim().lower()
+    if clean == "formatting" or clean == "formatting preview":
+        return "Formatting Preview"
+    if clean == "range formatting" or clean == "range formatting preview":
+        return "Range Formatting Preview"
+    if clean == "rename" or clean == "rename preview":
+        return "Rename Preview"
+    if clean == "workspace edit" or clean == "workspace edit preview":
+        return "Workspace Edit Preview"
+    title
+
+fn _lsp_workspace_edit_rows_from_json(json: text) -> [LspResultRow]:
+    if json.contains("\"changes\""):
+        return _lsp_workspace_edit_changes_rows_from_json(json)
+    _lsp_workspace_edit_rows_from_slice(json, "")
+
+fn _lsp_workspace_edit_changes_rows_from_json(json: text) -> [LspResultRow]:
+    var rows: [LspResultRow] = []
+    var cursor = 0
+    while cursor < json.len():
+        val scan = json.slice(cursor, json.len())
+        val uri_rel = scan.index_of("\"file://")
+        if uri_rel < 0:
+            return rows
+        val uri_start = cursor + uri_rel + 1
+        var uri_end = uri_start
+        while uri_end < json.len() and json.char_at(uri_end) != "\"":
+            uri_end = uri_end + 1
+        val path = _lsp_file_uri_to_path(json.slice(uri_start, uri_end))
+        var next_uri = json.len()
+        val next_scan = json.slice(uri_end + 1, json.len())
+        val next_rel = next_scan.index_of("\"file://")
+        if next_rel >= 0:
+            next_uri = uri_end + 1 + next_rel
+        val file_rows = _lsp_workspace_edit_rows_from_slice(json.slice(uri_end, next_uri), path)
+        var i = 0
+        while i < file_rows.len():
+            rows.push(file_rows[i])
+            i = i + 1
+        cursor = next_uri
+    rows
+
+fn _lsp_workspace_edit_rows_from_slice(json: text, path: text) -> [LspResultRow]:
+    var rows: [LspResultRow] = []
+    var cursor = 0
+    while cursor < json.len():
+        val scan = json.slice(cursor, json.len())
+        val edit_rel = scan.index_of("\"newText\"")
+        if edit_rel < 0:
+            return rows
+        val edit_start = cursor + edit_rel
+        val start_line = _lsp_json_i64_after(json, "\"line\"", cursor)
+        val start_col = _lsp_json_i64_after(json, "\"character\"", cursor)
+        var end_scan = cursor
+        val scan_end = json.slice(cursor, json.len())
+        val end_rel = scan_end.index_of("\"end\"")
+        if end_rel >= 0:
+            end_scan = cursor + end_rel
+        val end_line = _lsp_json_i64_after(json, "\"line\"", end_scan)
+        val end_col = _lsp_json_i64_after(json, "\"character\"", end_scan)
+        val new_text = _lsp_json_string_after(json, "\"newText\"", edit_start)
+        val label = _lsp_workspace_edit_label(start_line, start_col, end_line, end_col)
+        rows.push(LspResultRow(icon: "edit", label: label, detail: label + " -> " + new_text,
+                               path: path, line: start_line, col: start_col,
+                               command_name: "", command_payload: new_text,
+                               depth: 0, expanded: false))
+        cursor = edit_start + 9
+    rows
+
+fn _lsp_workspace_edit_label(start_line: i64, start_col: i64, end_line: i64, end_col: i64) -> text:
+    "line " + (start_line + 1).to_text() + ":" + (start_col + 1).to_text() + "-" + (end_line + 1).to_text() + ":" + (end_col + 1).to_text()
+
+fn _lsp_call_hierarchy_rows_from_json(kind: text, json: text) -> [LspResultRow]:
+    var rows: [LspResultRow] = []
+    var cursor = 0
+    while cursor < json.len():
+        val scan = json.slice(cursor, json.len())
+        val name_rel = scan.index_of("\"name\"")
+        if name_rel < 0:
+            return rows
+        val start = cursor + name_rel
+        var item_start = start
+        if kind == "call-hierarchy-incoming":
+            item_start = _lsp_json_object_field_start(json, "\"from\"", cursor)
+        if kind == "call-hierarchy-outgoing":
+            item_start = _lsp_json_object_field_start(json, "\"to\"", cursor)
+        val payload = _lsp_json_balanced_object_at(json, item_start)
+        val item_json = if payload == "" then _lsp_json_balanced_object_at(json, cursor) else: payload
+        val name = _lsp_json_string_after(json, "\"name\"", item_start)
+        val uri = _lsp_json_string_after(json, "\"uri\"", item_start)
+        val path = _lsp_file_uri_to_path(uri)
+        val sel = _lsp_json_object_field_start(json, "\"selectionRange\"", item_start)
+        val line = _lsp_json_i64_after(json, "\"line\"", sel)
+        val col = _lsp_json_i64_after(json, "\"character\"", sel)
+        var detail = path + ":" + (line + 1).to_text()
+        var depth = 0
+        if kind == "call-hierarchy-incoming":
+            detail = "incoming from " + path + ":" + (line + 1).to_text()
+            depth = 1
+        if kind == "call-hierarchy-outgoing":
+            detail = "outgoing to " + path + ":" + (line + 1).to_text()
+            depth = 1
+        rows.push(LspResultRow(icon: "call", label: name, detail: detail, path: path, line: line, col: col, command_name: "", command_payload: item_json, depth: depth, expanded: false))
+        cursor = start + 6
+    rows
+
+fn _lsp_semantic_token_rows_from_json(json: text) -> [LspResultRow]:
+    var rows: [LspResultRow] = []
+    val data = _lsp_json_numbers_in_array_field(json, "\"data\"")
+    var i = 0
+    var line = 0
+    var col = 0
+    while i + 4 < data.len():
+        val delta_line = data[i]
+        val delta_start = data[i + 1]
+        val length = data[i + 2]
+        val token_type = data[i + 3]
+        val token_mods = data[i + 4]
+        line = line + delta_line
+        if delta_line == 0:
+            col = col + delta_start
+        else:
+            col = delta_start
+        val type_name = _lsp_json_string_array_value(json, "\"tokenTypes\"", token_type)
+        val mods = _lsp_semantic_modifier_names(json, token_mods)
+        val detail = "line " + (line + 1).to_text() + ":" + (col + 1).to_text() + " len " + length.to_text() + " type " + type_name + if mods == "" then "" else: " mods " + mods
+        rows.push(LspResultRow(icon: "semantic", label: "Token " + (rows.len() + 1).to_text(), detail: detail, path: "", line: line, col: col, command_name: "", command_payload: "", depth: 0, expanded: false))
+        i = i + 5
+    rows
+
+fn _lsp_inlay_hint_rows_from_json(json: text) -> [LspResultRow]:
+    var rows: [LspResultRow] = []
+    var cursor = 0
+    while cursor < json.len():
+        val scan = json.slice(cursor, json.len())
+        val rel = scan.index_of("\"position\"")
+        if rel < 0:
+            return rows
+        val start = cursor + rel
+        val line = _lsp_json_i64_after(json, "\"line\"", start)
+        val col = _lsp_json_i64_after(json, "\"character\"", start)
+        val label = _lsp_json_string_after(json, "\"label\"", start)
+        rows.push(LspResultRow(icon: "hint", label: label, detail: "line " + (line + 1).to_text() + ":" + (col + 1).to_text(), path: "", line: line, col: col, command_name: "", command_payload: "", depth: 0, expanded: false))
+        cursor = start + 10
+    rows
+
+fn _lsp_hover_rows_from_json(json: text) -> [LspResultRow]:
+    val content = _lsp_json_string_after(json, "\"value\"", 0)
+    val line = _lsp_json_i64_after(json, "\"line\"", 0)
+    val col = _lsp_json_i64_after(json, "\"character\"", 0)
+    [LspResultRow(icon: "hover", label: content, detail: "line " + (line + 1).to_text() + ":" + (col + 1).to_text(), path: "", line: line, col: col, command_name: "", command_payload: "", depth: 0, expanded: false)]
+
+fn _lsp_json_string_after(json: text, key: text, start: i64) -> text:
+    val scan = json.slice(start, json.len())
+    val rel = scan.index_of(key)
+    if rel < 0:
+        return ""
+    var i = start + rel + key.len()
+    while i < json.len() and json.char_at(i) != "\"":
+        i = i + 1
+    i = i + 1
+    val value_start = i
+    while i < json.len() and json.char_at(i) != "\"":
+        i = i + 1
+    json.slice(value_start, i)
+
+fn _lsp_json_i64_after(json: text, key: text, start: i64) -> i64:
+    val scan = json.slice(start, json.len())
+    val rel = scan.index_of(key)
+    if rel < 0:
+        return 0
+    var i = start + rel + key.len()
+    while i < json.len() and (json.char_at(i) < "0" or json.char_at(i) > "9"):
+        i = i + 1
+    val value_start = i
+    while i < json.len() and json.char_at(i) >= "0" and json.char_at(i) <= "9":
+        i = i + 1
+    val digits = json.slice(value_start, i)
+    if digits == "":
+        return 0
+    digits.to_i64()
+
+fn _lsp_json_arguments_payload_after(json: text, start: i64) -> text:
+    val values = _lsp_json_arguments_values_after(json, start)
+    var payload = ""
+    var i = 0
+    while i < values.len():
+        if i > 0:
+            payload = payload + "|"
+        payload = payload + values[i]
+        i = i + 1
+    payload
+
+fn _lsp_json_arguments_detail_after(json: text, start: i64) -> text:
+    val values = _lsp_json_arguments_values_after(json, start)
+    var detail = ""
+    var i = 0
+    while i < values.len():
+        if i > 0:
+            detail = detail + ", "
+        detail = detail + values[i]
+        i = i + 1
+    detail
+
+fn _lsp_json_arguments_values_after(json: text, start: i64) -> [text]:
+    var values: [text] = []
+    val scan = json.slice(start, json.len())
+    val rel = scan.index_of("\"arguments\"")
+    if rel < 0:
+        return values
+    val array_start = _lsp_json_array_start_after(json, start + rel)
+    if array_start < 0:
+        return values
+    var i = array_start + 1
+    while i < json.len() and json.char_at(i) != "]":
+        while i < json.len() and (json.char_at(i) == " " or json.char_at(i) == ","):
+            i = i + 1
+        if i >= json.len() or json.char_at(i) == "]":
+            return values
+        if json.char_at(i) == "\"":
+            val value = _lsp_json_string_at(json, i)
+            values.push(value)
+            i = i + value.len() + 2
+        elif json.char_at(i) == "{":
+            val object_json = _lsp_json_balanced_object_at(json, i)
+            values.push(object_json)
+            i = i + object_json.len()
+        else:
+            val value_start = i
+            while i < json.len() and json.char_at(i) != "," and json.char_at(i) != "]":
+                i = i + 1
+            values.push(json.slice(value_start, i).trim())
+    values
+
+fn _lsp_json_string_at(json: text, start: i64) -> text:
+    var i = start + 1
+    val value_start = i
+    while i < json.len() and json.char_at(i) != "\"":
+        i = i + 1
+    json.slice(value_start, i)
+
+fn _lsp_json_array_start_after(json: text, start: i64) -> i64:
+    var i = start
+    while i < json.len():
+        if json.char_at(i) == "[":
+            return i
+        i = i + 1
+    -1
+
+fn _lsp_json_object_field_start(json: text, key: text, start: i64) -> i64:
+    val scan = json.slice(start, json.len())
+    val rel = scan.index_of(key)
+    if rel < 0:
+        return start
+    var i = start + rel + key.len()
+    while i < json.len() and json.char_at(i) != "{":
+        i = i + 1
+    i
+
+fn _lsp_json_balanced_object_at(json: text, start: i64) -> text:
+    var i = start
+    while i < json.len() and json.char_at(i) != "{":
+        i = i + 1
+    if i >= json.len():
+        return ""
+    val object_start = i
+    var depth = 0
+    var in_string = false
+    while i < json.len():
+        val ch = json.char_at(i)
+        if ch == "\"":
+            in_string = not in_string
+        elif not in_string and ch == "{":
+            depth = depth + 1
+        elif not in_string and ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                return json.slice(object_start, i + 1)
+        i = i + 1
+    ""
+
+fn _lsp_json_numbers_in_array_field(json: text, key: text) -> [i64]:
+    var nums: [i64] = []
+    val scan = json.slice(0, json.len())
+    val rel = scan.index_of(key)
+    if rel < 0:
+        return nums
+    val array_start = _lsp_json_array_start_after(json, rel)
+    if array_start < 0:
+        return nums
+    var i = array_start + 1
+    while i < json.len() and json.char_at(i) != "]":
+        while i < json.len() and (json.char_at(i) == " " or json.char_at(i) == ","):
+            i = i + 1
+        val value_start = i
+        while i < json.len() and json.char_at(i) >= "0" and json.char_at(i) <= "9":
+            i = i + 1
+        if i > value_start:
+            nums.push(json.slice(value_start, i).to_i64())
+        else:
+            i = i + 1
+    nums
+
+fn _lsp_json_string_array_value(json: text, key: text, index: i64) -> text:
+    val rel = json.index_of(key)
+    if rel < 0:
+        return index.to_text()
+    val array_start = _lsp_json_array_start_after(json, rel)
+    if array_start < 0:
+        return index.to_text()
+    var i = array_start + 1
+    var current = 0
+    while i < json.len() and json.char_at(i) != "]":
+        if json.char_at(i) == "\"":
+            val value = _lsp_json_string_at(json, i)
+            if current == index:
+                return value
+            current = current + 1
+            i = i + value.len() + 2
+        else:
+            i = i + 1
+    index.to_text()
+
+fn _lsp_semantic_modifier_names(json: text, mask: i64) -> text:
+    var names = ""
+    var bit = 1
+    var index = 0
+    while index < 16:
+        if (mask / bit) % 2 == 1:
+            val name = _lsp_json_string_array_value(json, "\"tokenModifiers\"", index)
+            if names != "":
+                names = names + " "
+            names = names + name
+        bit = bit * 2
+        index = index + 1
+    names
+
+fn _lsp_file_uri_to_path(uri: text) -> text:
+    if uri.starts_with("file://"):
+        return uri.slice(7, uri.len())
+    uri
+
+fn _lsp_result_basename(path: text) -> text:
+    editor_path_basename(path)
+
+# --- target accessors for the selected row ---
+fn _lsp_result_panel_selected_row(panel: LspResultPanel) -> LspResultRow:
+    if panel.selected < 0 or panel.selected >= panel.rows.len():
+        return LspResultRow(icon: "", label: "", detail: "", path: "", line: 0, col: 0,
+                            command_name: "", command_payload: "", depth: 0, expanded: false)
+    panel.rows[panel.selected]
+
+fn lsp_result_panel_target_path(panel: LspResultPanel) -> text:
+    _lsp_result_panel_selected_row(panel).path
+
+fn lsp_result_panel_target_line(panel: LspResultPanel) -> i64:
+    _lsp_result_panel_selected_row(panel).line
+
+fn lsp_result_panel_target_col(panel: LspResultPanel) -> i64:
+    _lsp_result_panel_selected_row(panel).col
+
+fn lsp_result_panel_target_command(panel: LspResultPanel) -> text:
+    _lsp_result_panel_selected_row(panel).command_name
+
+fn lsp_result_panel_target_command_payload(panel: LspResultPanel) -> text:
+    _lsp_result_panel_selected_row(panel).command_payload
+
+# --- call-hierarchy state save/restore (serialized selection) ---
+fn lsp_result_panel_call_state(panel: LspResultPanel) -> text:
+    panel.title + "|" + panel.selected.to_text()
+
+fn lsp_result_panel_restore_call_state(panel: LspResultPanel, state: text) -> LspResultPanel:
+    val parts = state.split("|")
+    if parts.len() < 2:
+        return panel
+    val sel = parts[1].to_int()
+    lsp_result_panel_select(panel, sel)
+
+# Merge child rows from a resolved call-hierarchy request into the parent panel.
+fn lsp_result_panel_with_call_children(merge_panel: LspResultPanel, merge_index: i64, child_panel: LspResultPanel) -> LspResultPanel:
+    if merge_index < 0 or merge_index >= merge_panel.rows.len():
+        return merge_panel
+    var rows: [LspResultRow] = []
+    var i = 0
+    while i < merge_panel.rows.len():
+        rows.push(merge_panel.rows[i])
+        if i == merge_index:
+            var j = 0
+            while j < child_panel.rows.len():
+                val c = child_panel.rows[j]
+                rows.push(LspResultRow(icon: c.icon, label: c.label, detail: c.detail,
+                                       path: c.path, line: c.line, col: c.col,
+                                       command_name: c.command_name, command_payload: c.command_payload,
+                                       depth: c.depth + 1, expanded: c.expanded))
+                j = j + 1
+        i = i + 1
+    LspResultPanel(title: merge_panel.title, rows: rows, selected: merge_panel.selected,
+                   scroll_offset: merge_panel.scroll_offset, visible: merge_panel.visible,
+                   pending: merge_panel.pending, request_id: merge_panel.request_id)
+
+# Render the panel into display lines.
+fn lsp_result_panel_render(panel: LspResultPanel, height: i64) -> [text]:
+    var lines: [text] = []
+    if height <= 0:
+        return lines
+    if panel.pending:
+        lines.push(panel.title)
+        lines.push("  (loading...)")
+        return lines
+    if panel.rows.len() == 0:
+        lines.push(panel.title)
+        lines.push("  (no results)")
+        return lines
+    var i = 0
+    var collapsed_depth = -1
+    while i < panel.rows.len() and lines.len() < height:
+        val r = panel.rows[i]
+        if collapsed_depth >= 0 and r.depth > collapsed_depth:
+            i = i + 1
+        else:
+            collapsed_depth = -1
+            var indent = ""
+            var d = 0
+            while d < r.depth:
+                indent = indent + "  "
+                d = d + 1
+            val marker = if i == panel.selected then "> " else: "  "
+            val icon = if r.icon == "" then "" else: r.icon + " "
+            lines.push(marker + indent + icon + r.label)
+            if not r.expanded:
+                collapsed_depth = r.depth
+            i = i + 1
+        
+    lines

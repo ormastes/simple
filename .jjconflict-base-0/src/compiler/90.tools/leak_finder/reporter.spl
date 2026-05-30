@@ -1,0 +1,110 @@
+# Memory Leak Finder - SDN Report Generation
+#
+# Generates SDN format output for leak reports.
+
+use types
+use shell.*
+
+# Generate SDN report from leak report
+fn generate_sdn_report(report: types.LeakReport) -> text:
+    var parts: [text] = []
+
+    # Header
+    parts.push("# Memory Leak Finder Report\n")
+    parts.push("# Generated: {report.timestamp}\n\n")
+
+    # Summary section
+    parts.push("leak_report:\n")
+    parts.push("    timestamp: \"{report.timestamp}\"\n")
+    parts.push("    test_type: \"{report.test_type}\"\n")
+    parts.push("    total_tests: {report.total_tests}\n")
+    parts.push("    baseline_memory_kb: {report.baseline_memory_kb}\n")
+    parts.push("    final_memory_kb: {report.final_memory_kb}\n")
+    parts.push("    total_growth_kb: {report.total_growth_kb()}\n")
+    parts.push("    leak_count: {report.leak_count()}\n")
+    parts.push("\n")
+
+    # Leaks table
+    parts.push("leaks |test_file, consecutive_count, growth_kb, first_test_index|\n")
+    for leak in report.leaks:
+        val escaped_file = escape_sdn_string(leak.test_file)
+        parts.push("    \"{escaped_file}\", {leak.consecutive_count}, {leak.growth_kb}, {leak.first_test_index}\n")
+    parts.push("\n")
+
+    # Test runs table
+    parts.push("test_runs |test_file, memory_before_kb, memory_after_kb, diff_kb, status, duration_ms|\n")
+    for run in report.test_runs:
+        val escaped_file = escape_sdn_string(run.test_file)
+        parts.push("    \"{escaped_file}\", {run.memory_before_kb}, {run.memory_after_kb}, {run.diff_kb}, \"{run.status}\", {run.duration_ms}\n")
+
+    parts.join("")
+
+# Escape string for SDN format
+fn escape_sdn_string(s: text) -> text:
+    s.replace("\\", "\\\\").replace("\"", "\\\"")
+
+# Write report to file
+fn write_report(report: types.LeakReport, path: text) -> Result<(), text>:
+    val content = generate_sdn_report(report)
+    file.write_text(path, content)
+    Ok(())
+
+# Print report to stdout
+fn print_report(report: types.LeakReport):
+    print(generate_sdn_report(report))
+
+# Generate summary for console output
+fn generate_summary(report: types.LeakReport) -> text:
+    var parts: [text] = []
+    parts.push("\n=== Memory Leak Finder Summary ===\n")
+    parts.push("Test type: {report.test_type}\n")
+    parts.push("Total tests: {report.total_tests}\n")
+    parts.push("Baseline memory: {format_kb(report.baseline_memory_kb)}\n")
+    parts.push("Final memory: {format_kb(report.final_memory_kb)}\n")
+
+    val total_change = report.total_growth_kb()
+    if total_change > 0:
+        parts.push("Net memory freed: {format_kb(total_change)}\n")
+    elif total_change < 0:
+        parts.push("Net memory consumed: {format_kb(-total_change)}\n")
+    else:
+        parts.push("Net memory change: 0 KB\n")
+
+    parts.push("\n")
+
+    if report.has_leaks():
+        parts.push("LEAKS DETECTED: {report.leak_count()}\n")
+        parts.push("---\n")
+        for leak in report.leaks:
+            parts.push("  {leak.format()}\n")
+    else:
+        parts.push("No sustained memory leaks detected.\n")
+
+    # Test status summary
+    var ok_count = 0
+    var failed_count = 0
+    var timeout_count = 0
+    for run in report.test_runs:
+        if run.status == "ok":
+            ok_count = ok_count + 1
+        elif run.status == "failed":
+            failed_count = failed_count + 1
+        elif run.status == "timeout":
+            timeout_count = timeout_count + 1
+
+    parts.push("\nTest results: {ok_count} ok, {failed_count} failed, {timeout_count} timeout\n")
+
+    parts.join("")
+
+# Format KB value with units
+fn format_kb(kb: i64) -> text:
+    if kb >= 1048576:  # >= 1 GB
+        val gb = (kb as f64) / 1048576.0
+        "{gb:.2} GB"
+    elif kb >= 1024:   # >= 1 MB
+        val mb = (kb as f64) / 1024.0
+        "{mb:.2} MB"
+    else:
+        "{kb} KB"
+
+# Export functions

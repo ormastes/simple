@@ -1,0 +1,212 @@
+# Aspect-Oriented Programming - Full Simple Extensions
+#
+# Runtime advice with lambdas, Any type, class-based aspects.
+# Core AOP (types, pointcuts, config, weaving, diagnostics) is in core.aop.
+#
+# Port of rust/compiler/src/weaving/ (1,382 lines) into shared module.
+
+use compiler.core.aop.{PointcutKind, Pointcut, AdviceKind, AdviceForm}
+use compiler.core.aop.{DiagnosticLevel, JoinPointKind}
+use compiler.core.aop.{InstructionInfo, AdviceCallInfo, AdviceMatchResult}
+use compiler.core.aop.{JoinPointContext, JoinPoint, MatchedAdvice}
+use compiler.core.aop.{MirBlockInfo, WeavingRule, WeavingConfig}
+use compiler.core.aop.{WeavingDiagnostic, WeavingResult}
+use compiler.core.aop.{glob_match, matches_predicate, predicate_specificity}
+use compiler.core.aop.{weavingconfig_all_rules}
+use compiler.core.aop.{detect_join_points, match_advice_for_join_point, weave_function}
+
+use compiler.frontend.core.aop_debug_log.{debug_log_enter, debug_log_exit, debug_log_is_enabled}
+
+# Temporary workaround: Define Logger locally since compiler.common.config.Logger isn't being transpiled
+struct Logger:
+    level: i64
+    fn log(level: i64, prefix: text, message: text):
+        if level <= self.level:
+            print "[{prefix}] {message}"
+
+# use compiler.config (Logger)
+
+
+# ============================================================================
+# Advice (Full Simple - uses function type with Any)
+# ============================================================================
+
+struct Advice:
+    kind: AdviceKind
+    pointcut: Pointcut
+    handler: fn(text, [Any]) -> Any
+    order: i64
+
+# ============================================================================
+# Aspects (Runtime - Full Simple classes)
+# ============================================================================
+
+class LogAspect:
+    level: i64
+
+    fn log_aop(prefix: text, message: text):
+        if self.level > 0:
+            print "[AOP] {prefix} {message}"
+
+    fn before(name: text, args: [Any]):
+        self.log_aop(">>", name)
+
+    fn after(name: text, result: Any):
+        self.log_aop("<<", name)
+
+    fn around(name: text, args: [Any], proceed: fn() -> Any) -> Any:
+        self.before(name, args)
+        val result = proceed()
+        self.after(name, result)
+        result
+
+class TracingAspect:
+    level: i64
+
+    fn before(name: text, args: [Any]):
+        print "[TRACE] enter {name}"
+
+    fn after(name: text, result: Any):
+        print "[TRACE] exit {name}"
+
+class ContractAspect:
+    enabled: bool
+
+    fn check_pre(name: text, args: [Any]) -> bool:
+        if not self.enabled:
+            return true
+        if name == nil or name.trim() == "":
+            return false
+        args != nil
+
+    fn check_post(name: text, result: Any) -> bool:
+        if not self.enabled:
+            return true
+        if name == nil or name.trim() == "":
+            return false
+        true
+
+# ============================================================================
+# AOP Weaver (Full Simple - runtime advice + MIR delegation to core)
+# ============================================================================
+
+class AopWeaver:
+    advices: [Advice]
+    config: WeavingConfig
+    logger: Logger
+    runtime_enabled: bool
+    runtime_allowlist: [text]
+
+    # --- Runtime advice registration ---
+
+    me add_before(pointcut: Pointcut, handler: fn(text, [Any]) -> Any, order: i64):
+        self.advices = self.advices.push(Advice(
+            kind: AdviceKind.Before, pointcut: pointcut,
+            handler: handler, order: order))
+
+    me add_after(pointcut: Pointcut, handler: fn(text, [Any]) -> Any, order: i64):
+        self.advices = self.advices.push(Advice(
+            kind: AdviceKind.After, pointcut: pointcut,
+            handler: handler, order: order))
+
+    me add_around(pointcut: Pointcut, handler: fn(text, [Any]) -> Any, order: i64):
+        self.advices = self.advices.push(Advice(
+            kind: AdviceKind.Around, pointcut: pointcut,
+            handler: handler, order: order))
+
+    me add_log_aspect(aspect: LogAspect, pointcut: Pointcut):
+        # Normalize args to avoid nil/empty edge cases during bootstrap.
+        self.add_before(pointcut, \name, args:
+            if args == nil:
+                aspect.before(name, [])
+            else:
+                aspect.before(name, args)
+        , 100)
+
+        self.add_after(pointcut, \name, args:
+            if args == nil:
+                aspect.after(name, nil)
+            else if args.len() > 0:
+                aspect.after(name, args[0])
+            else:
+                aspect.after(name, nil)
+        , 100)
+
+    me add_tracing_aspect(aspect: TracingAspect, pointcut: Pointcut):
+        self.add_before(pointcut, \name, args:
+            if args == nil:
+                aspect.before(name, [])
+            else:
+                aspect.before(name, args)
+        , 50)
+
+        self.add_after(pointcut, \name, args:
+            if args == nil:
+                aspect.after(name, nil)
+            else if args.len() > 0:
+                aspect.after(name, args[0])
+            else:
+                aspect.after(name, nil)
+        , 50)
+
+    me add_debug_log_aspect(pointcut: Pointcut):
+        self.add_before(pointcut, \name, args:
+            if debug_log_is_enabled():
+                debug_log_enter(name, "", "", 0, "")
+        , 200)
+        self.add_after(pointcut, \name, args:
+            if debug_log_is_enabled():
+                debug_log_exit(name, "", 0, 0)
+        , 200)
+
+    fn advices_for(fn_name: text) -> [Advice]:
+        # Runtime gating: if runtime is disabled, return empty
+        if not self.runtime_enabled:
+            return []
+        # Allowlist check: if allowlist is non-empty, only allow listed functions
+        if self.runtime_allowlist.len() > 0:
+            var allowed = false
+            for pattern in self.runtime_allowlist:
+                if glob_match(pattern, fn_name):
+                    allowed = true
+            if not allowed:
+                return []
+        var matching: [Advice] = []
+        for advice in self.advices:
+            if advice.pointcut.matches_name(fn_name):
+                matching.push(advice)
+        sort_advices_by_order(matching)
+
+    # --- MIR-level weaving (delegates to core free functions) ---
+
+    me set_config(new_config: WeavingConfig):
+        self.config = new_config
+
+    fn weave_mir_function(func_name: text, module_path: text,
+                          attributes: [text], effects: [text],
+                          blocks: [MirBlockInfo]) -> WeavingResult:
+        weave_function(self.config, func_name, module_path, attributes, effects, blocks)
+
+    fn weave(mir: Any) -> Any:
+        # Legacy runtime weave - returns MIR unchanged if config not set
+        mir
+
+fn sort_advices_by_order(items: [Advice]) -> [Advice]:
+    var remaining = items
+    var sorted: [Advice] = []
+    while remaining.len() > 0:
+        var best_idx = 0
+        var idx = 1
+        while idx < remaining.len():
+            if remaining[idx].order > remaining[best_idx].order:
+                best_idx = idx
+            idx = idx + 1
+        sorted.push(remaining[best_idx])
+        var next_remaining: [Advice] = []
+        idx = 0
+        while idx < remaining.len():
+            if idx != best_idx:
+                next_remaining.push(remaining[idx])
+            idx = idx + 1
+        remaining = next_remaining
+    sorted

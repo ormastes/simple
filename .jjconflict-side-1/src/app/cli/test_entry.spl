@@ -1,0 +1,76 @@
+# Lightweight test entry point for `simple test`
+#
+# This file loads only the minimal imports needed to run tests,
+# avoiding the overhead of loading the full CLI with all its modules
+# (build system, type checker, stats, etc.).
+#
+# Usage:
+#   bin/simple run src/app/cli/test_entry.spl test [options] [path]
+#
+# Performance:
+#   Full CLI (main.spl): ~460ms overhead
+#   This entry (test_entry.spl): ~220ms overhead
+#   Direct runtime: ~90ms
+
+use std.cli.cli_util (get_cli_args)
+use app.io.cli_commands (cli_run_tests)
+use app.io.mod (env_get, env_set, fault_set_stack_overflow_detection,
+    fault_set_max_recursion_depth, fault_set_timeout, fault_set_execution_limit)
+
+# Maximum nesting depth for `simple test` invocations.
+# A depth of 1 means only the outermost call is allowed; any nested
+# `simple test` launched from within a spec or script is refused.
+val SIMPLE_TEST_MAX_DEPTH = 1
+
+fn main() -> i64:
+    # Recursion guard: refuse if a parent `simple test` is already running.
+    val depth_str = env_get("SIMPLE_TEST_DEPTH")
+    val depth = if depth_str == "" or depth_str == nil: 0 else: depth_str.to_int()
+    if depth >= SIMPLE_TEST_MAX_DEPTH:
+        print "ERROR: simple test recursion guard triggered (SIMPLE_TEST_DEPTH={depth_str})"
+        print "  Nested `bin/simple test` invocations are not allowed."
+        print "  A spec or script is calling `bin/simple test` from inside a test run."
+        return 1
+    env_set("SIMPLE_TEST_DEPTH", "{depth + 1}")
+
+    val all_args = get_cli_args()
+
+    # Strip script path and "test" command from args
+    # get_cli_args() returns: [script_path, "test", ...test_args...]
+    var test_args = []
+    var gc_log = false
+    var gc_off = false
+    var i = 0
+
+    # Skip script path (first arg)
+    if all_args.len() > 0:
+        i = 1
+
+    # Skip "test" command if present
+    if i < all_args.len() and all_args[i] == "test":
+        i = i + 1
+
+    # Parse remaining args, extracting global flags
+    while i < all_args.len():
+        val arg = all_args[i]
+        if arg == "--gc-log":
+            gc_log = true
+        elif arg == "--gc-off" or arg == "--gc=off":
+            gc_off = true
+        elif arg.starts_with("--max-recursion-depth="):
+            val depth = arg[21:].to_int()
+            fault_set_max_recursion_depth(depth)
+            fault_set_stack_overflow_detection(true)
+        elif arg.starts_with("--timeout="):
+            val secs = arg[10:].to_int()
+            fault_set_timeout(secs)
+        elif arg.starts_with("--execution-limit="):
+            val limit = arg[18:].to_int()
+            fault_set_execution_limit(limit)
+        elif arg == "--stack-overflow-detection":
+            fault_set_stack_overflow_detection(true)
+        else:
+            test_args.push(arg)
+        i = i + 1
+
+    cli_run_tests(test_args, gc_log, gc_off)

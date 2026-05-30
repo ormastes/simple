@@ -1,0 +1,273 @@
+name: Live KMS Security Gates
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: 'Live KMS provider to exercise'
+        required: true
+        default: 'aws'
+        type: choice
+        options:
+          - aws
+          - gcp
+          - azure
+          - hsm
+          - all
+      auth:
+        description: 'Cloud authentication mode for AWS/GCP/Azure lanes'
+        required: true
+        default: 'secret'
+        type: choice
+        options:
+          - secret
+          - oidc
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.provider }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  aws-live-kms:
+    name: AWS KMS live sign
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.provider == 'aws' || inputs.provider == 'all') }}
+    runs-on: ubuntu-latest
+    environment: live-kms-aws
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SIMPLE_LIVE_KMS_PROVIDER: aws
+      SIMPLE_LIVE_KMS_AUTH: ${{ inputs.auth }}
+      SIMPLE_LIVE_KMS_AWS_ENDPOINT: ${{ secrets.SIMPLE_LIVE_KMS_AWS_ENDPOINT }}
+      SIMPLE_LIVE_KMS_AWS_KEY_ID: ${{ secrets.SIMPLE_LIVE_KMS_AWS_KEY_ID }}
+      SIMPLE_LIVE_KMS_AWS_AUTHORIZATION: ${{ secrets.SIMPLE_LIVE_KMS_AWS_AUTHORIZATION }}
+      SIMPLE_LIVE_KMS_AWS_ALGORITHM: ${{ secrets.SIMPLE_LIVE_KMS_AWS_ALGORITHM || 'RSASSA_PSS_SHA_256' }}
+      SIMPLE_LIVE_KMS_AWS_OIDC_ROLE_ARN: ${{ secrets.SIMPLE_LIVE_KMS_AWS_OIDC_ROLE_ARN }}
+      SIMPLE_LIVE_KMS_AWS_REGION: ${{ secrets.SIMPLE_LIVE_KMS_AWS_REGION }}
+      SIMPLE_LIVE_KMS_PAYLOAD: ${{ secrets.SIMPLE_LIVE_KMS_PAYLOAD || 'simple-live-kms-ci' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require AWS OIDC setup
+        if: ${{ inputs.auth == 'oidc' }}
+        run: |
+          missing=0
+          for name in SIMPLE_LIVE_KMS_AWS_OIDC_ROLE_ARN SIMPLE_LIVE_KMS_AWS_REGION; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required for AWS OIDC bootstrap"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - name: Configure AWS OIDC credentials
+        if: ${{ inputs.auth == 'oidc' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.SIMPLE_LIVE_KMS_AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.SIMPLE_LIVE_KMS_AWS_REGION }}
+      - name: Probe AWS OIDC identity
+        if: ${{ inputs.auth == 'oidc' }}
+        run: |
+          aws sts get-caller-identity
+          echo "SIMPLE_LIVE_KMS_AWS_AMZ_DATETIME=$(date -u +%Y%m%dT%H%M%SZ)" >> "$GITHUB_ENV"
+      - name: Build bootstrap runtime
+        run: cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
+      - name: Require AWS live KMS credentials
+        run: |
+          missing=0
+          for name in SIMPLE_LIVE_KMS_AWS_ENDPOINT SIMPLE_LIVE_KMS_AWS_KEY_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required for AWS live KMS"
+              missing=1
+            fi
+          done
+          if [ "${{ inputs.auth }}" = "secret" ]; then
+            if [ -z "$SIMPLE_LIVE_KMS_AWS_AUTHORIZATION" ]; then
+              echo "::error::SIMPLE_LIVE_KMS_AWS_AUTHORIZATION is required for AWS secret auth"
+              missing=1
+            fi
+          else
+            for name in SIMPLE_LIVE_KMS_AWS_OIDC_ROLE_ARN SIMPLE_LIVE_KMS_AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN SIMPLE_LIVE_KMS_AWS_AMZ_DATETIME; do
+              if [ -z "${!name}" ]; then
+                echo "::error::$name is required for AWS OIDC live KMS"
+                missing=1
+              fi
+            done
+          fi
+          exit "$missing"
+      - name: Run AWS live KMS gate
+        run: SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/integration/lib/security/live_kms_transport_spec.spl --mode=interpreter
+
+  gcp-live-kms:
+    name: GCP Cloud KMS live sign
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.provider == 'gcp' || inputs.provider == 'all') }}
+    runs-on: ubuntu-latest
+    environment: live-kms-gcp
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SIMPLE_LIVE_KMS_PROVIDER: gcp
+      SIMPLE_LIVE_KMS_AUTH: ${{ inputs.auth }}
+      SIMPLE_LIVE_KMS_GCP_ENDPOINT: ${{ secrets.SIMPLE_LIVE_KMS_GCP_ENDPOINT }}
+      SIMPLE_LIVE_KMS_GCP_KEY_VERSION: ${{ secrets.SIMPLE_LIVE_KMS_GCP_KEY_VERSION }}
+      SIMPLE_LIVE_KMS_GCP_BEARER: ${{ secrets.SIMPLE_LIVE_KMS_GCP_BEARER }}
+      SIMPLE_LIVE_KMS_DIGEST_SHA256: ${{ secrets.SIMPLE_LIVE_KMS_DIGEST_SHA256 }}
+      SIMPLE_LIVE_KMS_GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.SIMPLE_LIVE_KMS_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      SIMPLE_LIVE_KMS_GCP_SERVICE_ACCOUNT: ${{ secrets.SIMPLE_LIVE_KMS_GCP_SERVICE_ACCOUNT }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require GCP OIDC setup
+        if: ${{ inputs.auth == 'oidc' }}
+        run: |
+          missing=0
+          for name in SIMPLE_LIVE_KMS_GCP_WORKLOAD_IDENTITY_PROVIDER SIMPLE_LIVE_KMS_GCP_SERVICE_ACCOUNT; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required for GCP OIDC"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - name: Authenticate to GCP with OIDC
+        id: gcp-auth
+        if: ${{ inputs.auth == 'oidc' }}
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: access_token
+          workload_identity_provider: ${{ env.SIMPLE_LIVE_KMS_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.SIMPLE_LIVE_KMS_GCP_SERVICE_ACCOUNT }}
+      - name: Export GCP OIDC bearer
+        if: ${{ inputs.auth == 'oidc' }}
+        env:
+          GCP_ACCESS_TOKEN: ${{ steps.gcp-auth.outputs.access_token }}
+        run: |
+          echo "::add-mask::$GCP_ACCESS_TOKEN"
+          echo "SIMPLE_LIVE_KMS_GCP_BEARER=$GCP_ACCESS_TOKEN" >> "$GITHUB_ENV"
+      - name: Build bootstrap runtime
+        run: cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
+      - name: Require GCP live KMS credentials
+        run: |
+          missing=0
+          if [ "${{ inputs.auth }}" = "oidc" ]; then
+            for name in SIMPLE_LIVE_KMS_GCP_WORKLOAD_IDENTITY_PROVIDER SIMPLE_LIVE_KMS_GCP_SERVICE_ACCOUNT; do
+              if [ -z "${!name}" ]; then
+                echo "::error::$name is required for GCP OIDC"
+                missing=1
+              fi
+            done
+          fi
+          for name in SIMPLE_LIVE_KMS_GCP_ENDPOINT SIMPLE_LIVE_KMS_GCP_KEY_VERSION SIMPLE_LIVE_KMS_GCP_BEARER SIMPLE_LIVE_KMS_DIGEST_SHA256; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required for GCP live KMS"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - name: Run GCP live KMS gate
+        run: SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/integration/lib/security/live_kms_transport_spec.spl --mode=interpreter
+
+  azure-live-kms:
+    name: Azure Key Vault live sign
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.provider == 'azure' || inputs.provider == 'all') }}
+    runs-on: ubuntu-latest
+    environment: live-kms-azure
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SIMPLE_LIVE_KMS_PROVIDER: azure
+      SIMPLE_LIVE_KMS_AUTH: ${{ inputs.auth }}
+      SIMPLE_LIVE_KMS_AZURE_VAULT: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_VAULT }}
+      SIMPLE_LIVE_KMS_AZURE_KEY: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_KEY }}
+      SIMPLE_LIVE_KMS_AZURE_BEARER: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_BEARER }}
+      SIMPLE_LIVE_KMS_AZURE_ALGORITHM: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_ALGORITHM || 'PS256' }}
+      SIMPLE_LIVE_KMS_DIGEST_BASE64URL: ${{ secrets.SIMPLE_LIVE_KMS_DIGEST_BASE64URL }}
+      SIMPLE_LIVE_KMS_AZURE_CLIENT_ID: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_CLIENT_ID }}
+      SIMPLE_LIVE_KMS_AZURE_TENANT_ID: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_TENANT_ID }}
+      SIMPLE_LIVE_KMS_AZURE_SUBSCRIPTION_ID: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require Azure OIDC setup
+        if: ${{ inputs.auth == 'oidc' }}
+        run: |
+          missing=0
+          for name in SIMPLE_LIVE_KMS_AZURE_CLIENT_ID SIMPLE_LIVE_KMS_AZURE_TENANT_ID SIMPLE_LIVE_KMS_AZURE_SUBSCRIPTION_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required for Azure OIDC"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - name: Authenticate to Azure with OIDC
+        if: ${{ inputs.auth == 'oidc' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.SIMPLE_LIVE_KMS_AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.SIMPLE_LIVE_KMS_AZURE_TENANT_ID }}
+          subscription-id: ${{ env.SIMPLE_LIVE_KMS_AZURE_SUBSCRIPTION_ID }}
+      - name: Export Azure OIDC bearer
+        if: ${{ inputs.auth == 'oidc' }}
+        run: |
+          token=$(az account get-access-token --resource https://vault.azure.net --query accessToken -o tsv)
+          echo "::add-mask::$token"
+          echo "SIMPLE_LIVE_KMS_AZURE_BEARER=$token" >> "$GITHUB_ENV"
+      - name: Build bootstrap runtime
+        run: cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
+      - name: Require Azure live KMS credentials
+        run: |
+          missing=0
+          if [ "${{ inputs.auth }}" = "oidc" ]; then
+            for name in SIMPLE_LIVE_KMS_AZURE_CLIENT_ID SIMPLE_LIVE_KMS_AZURE_TENANT_ID SIMPLE_LIVE_KMS_AZURE_SUBSCRIPTION_ID; do
+              if [ -z "${!name}" ]; then
+                echo "::error::$name is required for Azure OIDC"
+                missing=1
+              fi
+            done
+          fi
+          for name in SIMPLE_LIVE_KMS_AZURE_VAULT SIMPLE_LIVE_KMS_AZURE_KEY SIMPLE_LIVE_KMS_AZURE_BEARER SIMPLE_LIVE_KMS_DIGEST_BASE64URL; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required for Azure live KMS"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - name: Run Azure live KMS gate
+        run: SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/integration/lib/security/live_kms_transport_spec.spl --mode=interpreter
+
+  hsm-live-kms:
+    name: PKCS11 HSM live sign
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.provider == 'hsm' || inputs.provider == 'all') }}
+    runs-on: ubuntu-latest
+    environment: live-kms-hsm
+    timeout-minutes: 20
+    env:
+      SIMPLE_LIVE_KMS_PROVIDER: hsm
+      SIMPLE_LIVE_KMS_AUTH: secret
+      SIMPLE_LIVE_KMS_HSM_ENDPOINT: ${{ secrets.SIMPLE_LIVE_KMS_HSM_ENDPOINT }}
+      SIMPLE_LIVE_KMS_HSM_SLOT: ${{ secrets.SIMPLE_LIVE_KMS_HSM_SLOT }}
+      SIMPLE_LIVE_KMS_HSM_KEY: ${{ secrets.SIMPLE_LIVE_KMS_HSM_KEY }}
+      SIMPLE_LIVE_KMS_HSM_AUTHORIZATION: ${{ secrets.SIMPLE_LIVE_KMS_HSM_AUTHORIZATION }}
+      SIMPLE_LIVE_KMS_HSM_MECHANISM: ${{ secrets.SIMPLE_LIVE_KMS_HSM_MECHANISM || 'CKM_ECDSA_SHA256' }}
+      SIMPLE_LIVE_KMS_PAYLOAD: ${{ secrets.SIMPLE_LIVE_KMS_PAYLOAD || 'simple-live-kms-ci' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build bootstrap runtime
+        run: cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
+      - name: Require HSM live KMS credentials
+        run: |
+          missing=0
+          for name in SIMPLE_LIVE_KMS_HSM_ENDPOINT SIMPLE_LIVE_KMS_HSM_SLOT SIMPLE_LIVE_KMS_HSM_KEY SIMPLE_LIVE_KMS_HSM_AUTHORIZATION; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required for HSM live KMS"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - name: Run HSM live KMS gate
+        run: SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/integration/lib/security/live_kms_transport_spec.spl --mode=interpreter

@@ -1,0 +1,118 @@
+# Prefix/radix index for reusable namespace and key-span scans.
+#
+# Phase 2 of std.db.accel — replaces repeated linear summary-hash scans with
+# a persistent sorted-key prefix structure supporting O(log n) range lookup.
+#
+# All implementations are scalar; SIMD upgrade path is additive.
+
+struct PrefixEntry:
+    key: text
+    row_id: i64
+
+struct PrefixIndex:
+    entries: [PrefixEntry]
+    sorted: bool
+
+struct PrefixLookupRange:
+    start: i64
+    end: i64
+    matched_count: i64
+
+fn prefix_index_new() -> PrefixIndex:
+    PrefixIndex(entries: [], sorted: false)
+
+fn prefix_index_insert(idx: PrefixIndex, key: text, row_id: i64) -> PrefixIndex:
+    var entries = idx.entries
+    entries.push(PrefixEntry(key: key, row_id: row_id))
+    PrefixIndex(entries: entries, sorted: false)
+
+fn prefix_index_sort(idx: PrefixIndex) -> PrefixIndex:
+    val n = idx.entries.len()
+    if n <= 1:
+        return PrefixIndex(entries: idx.entries, sorted: true)
+    var entries = idx.entries
+    var i = 1
+    while i < n:
+        val cur = entries[i as i32]
+        var j = i - 1
+        while j >= 0 and entries[j as i32].key > cur.key:
+            entries[(j + 1) as i32] = entries[j as i32]
+            j = j - 1
+        entries[(j + 1) as i32] = cur
+        i = i + 1
+    PrefixIndex(entries: entries, sorted: true)
+
+fn prefix_index_lookup_prefix(idx: PrefixIndex, prefix_str: text) -> [i64]:
+    val sorted_idx = prefix_index_ready(idx)
+    val range = prefix_index_prefix_range(sorted_idx, prefix_str)
+    var result: [i64] = []
+    var i = range.start
+    while i < range.end:
+        result.push(sorted_idx.entries[i as i32].row_id)
+        i = i + 1
+    result
+
+fn prefix_index_lookup_exact(idx: PrefixIndex, key: text) -> [i64]:
+    val sorted_idx = prefix_index_ready(idx)
+    var result: [i64] = []
+    val n = sorted_idx.entries.len()
+    var i = prefix_index_lower_bound(sorted_idx, key)
+    while i < n:
+        val entry = sorted_idx.entries[i as i32]
+        if entry.key != key:
+            return result
+        result.push(entry.row_id)
+        i = i + 1
+    result
+
+fn prefix_index_lookup_descendants(idx: PrefixIndex, root: text) -> [i64]:
+    if root == "":
+        return prefix_index_lookup_prefix(idx, "")
+    val child_prefix = root + "/"
+    val sorted_idx = prefix_index_ready(idx)
+    val range = prefix_index_prefix_range(sorted_idx, child_prefix)
+    var result: [i64] = []
+    val exact = prefix_index_lookup_exact(sorted_idx, root)
+    var ei = 0
+    while ei < exact.len():
+        result.push(exact[ei as i32])
+        ei = ei + 1
+    var i = range.start
+    while i < range.end:
+        result.push(sorted_idx.entries[i as i32].row_id)
+        i = i + 1
+    result
+
+fn prefix_index_prefix_range(idx: PrefixIndex, prefix_str: text) -> PrefixLookupRange:
+    val sorted_idx = prefix_index_ready(idx)
+    val n = sorted_idx.entries.len()
+    val start = prefix_index_lower_bound(sorted_idx, prefix_str)
+    var end_pos = start
+    while end_pos < n and sorted_idx.entries[end_pos as i32].key.starts_with(prefix_str):
+        end_pos = end_pos + 1
+    PrefixLookupRange(start: start, end: end_pos, matched_count: end_pos - start)
+
+fn prefix_index_ready(idx: PrefixIndex) -> PrefixIndex:
+    if idx.sorted:
+        return idx
+    prefix_index_sort(idx)
+
+fn prefix_index_lower_bound(idx: PrefixIndex, key: text) -> i64:
+    var lo = 0
+    var hi = idx.entries.len()
+    while lo < hi:
+        val mid = (lo + hi) / 2
+        if idx.entries[mid as i32].key < key:
+            lo = mid + 1
+        else:
+            hi = mid
+    lo
+
+fn prefix_index_size(idx: PrefixIndex) -> i64:
+    idx.entries.len()
+
+fn prefix_entry_key(e: PrefixEntry) -> text:
+    e.key
+
+fn prefix_entry_row_id(e: PrefixEntry) -> i64:
+    e.row_id

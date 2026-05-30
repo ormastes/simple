@@ -1,0 +1,122 @@
+# Editor Layout — top-level arrangement of panes and dock zones.
+#
+# Provides: EditorLayout, LayoutPane, EditorGroup, GroupTab, SplitRect, layout_new.
+
+use std.editor.view.dock_zone.{DockZone, DockPosition, dock_zone_new}
+use std.editor.view.split_tree.{SplitTree, split_tree_leaf}
+
+enum LayoutOrientation:
+    Horizontal
+    Vertical
+
+struct LayoutPane:
+    pane_id: i64
+    path: text
+    width: i64
+    height: i64
+
+# A tab within an editor group — points at a document by id.
+struct GroupTab:
+    doc_id: i64
+
+# An editor group — one pane that hosts a set of document tabs.
+struct EditorGroup:
+    id: i64
+    tabs: [GroupTab]
+    active_tab_index: i64
+
+# Pixel rectangle for a rendered group/split pane.
+struct SplitRect:
+    group_id: i64
+    x: i64
+    y: i64
+    w: i64
+    h: i64
+
+struct EditorLayout:
+    panes: [LayoutPane]
+    active_pane_id: i64
+    sidebar: DockZone
+    panel: DockZone
+    orientation: LayoutOrientation
+    tree: SplitTree
+    groups: [EditorGroup]
+    active_group_id: i64
+    active_group_index: i64
+
+fn layout_new() -> EditorLayout:
+    EditorLayout(
+        panes: [],
+        active_pane_id: 0,
+        sidebar: dock_zone_new(1, DockPosition.Left),
+        panel: dock_zone_new(2, DockPosition.Bottom),
+        orientation: LayoutOrientation.Horizontal,
+        tree: split_tree_leaf(1),
+        groups: [EditorGroup(id: 1, tabs: [], active_tab_index: 0)],
+        active_group_id: 1,
+        active_group_index: 0)
+
+impl EditorGroup:
+
+    me select_tab(index: i64) -> bool:
+        if index < 0 or index >= me.tabs.len():
+            return false
+        me.active_tab_index = index
+        true
+
+    me select_matching_doc(doc_id: EditorDocumentId) -> bool:
+        var i = 0
+        while i < me.tabs.len():
+            if me.tabs[i].doc_id == doc_id.value:
+                me.active_tab_index = i
+                return true
+            i = i + 1
+        false
+
+fn editor_layout_active_group_index(layout: EditorLayout) -> i64:
+    var i = 0
+    while i < layout.groups.len():
+        if layout.groups[i].id == layout.active_group_id:
+            return i
+        i = i + 1
+    layout.active_group_index
+
+fn editor_layout_group_count_raw(layout: EditorLayout) -> i64:
+    layout.groups.len()
+
+fn editor_layout_group_at(layout: EditorLayout, index: i64) -> EditorGroup:
+    layout.groups[index]
+
+fn editor_layout_with_group(layout: EditorLayout, index: i64, group: EditorGroup) -> EditorLayout:
+    var groups = layout.groups
+    groups[index] = group
+    EditorLayout(
+        panes: layout.panes,
+        active_pane_id: layout.active_pane_id,
+        sidebar: layout.sidebar,
+        panel: layout.panel,
+        orientation: layout.orientation,
+        tree: layout.tree,
+        groups: groups,
+        active_group_id: layout.active_group_id,
+        active_group_index: editor_layout_active_group_index(layout)
+    )
+
+# Compute pixel rectangles for each editor group inside the editor area.
+# Single-pane layouts (leaf_count == 1) yield one rect spanning the area;
+# multi-pane split traversal is wired through the split tree later.
+fn editor_layout_compute_rects(layout: EditorLayout, x: i64, y: i64, w: i64, h: i64) -> [SplitRect]:
+    var rects: [SplitRect] = []
+    if layout.groups.len() <= 1:
+        rects.push(SplitRect(group_id: layout.active_group_id, x: x, y: y, w: w, h: h))
+        return rects
+    # Even horizontal tiling fallback until the split tree drives ratios.
+    val count = layout.groups.len()
+    val each_w = w / count
+    var i = 0
+    while i < count:
+        val gx = x + each_w * i
+        val gw = if i == count - 1 then w - each_w * i else: each_w
+        rects.push(SplitRect(group_id: layout.groups[i].id, x: gx, y: y, w: gw, h: h))
+        i = i + 1
+    rects

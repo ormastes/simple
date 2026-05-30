@@ -1,0 +1,132 @@
+# od — Octal/hex dump
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error}
+
+fn tool_od(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Dump file contents in octal or hex format.
+
+    Usage: od [-t x1|-t o1] [-A x|-A o] FILE
+    Flags: -t x1 (hex bytes), -t o1 (octal, default)
+           -A x (hex addresses), -A o (octal addresses, default)
+    """
+    if vfs == nil:
+        write_error(terminal, "od: no filesystem mounted")
+        return 1
+
+    var hex_bytes = false
+    var hex_addr = false
+    var file_arg = ""
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "-t" and i + 1 < args.len():
+            val fmt = args[i + 1]
+            if fmt == "x1":
+                hex_bytes = true
+            i = i + 2
+        elif a == "-A" and i + 1 < args.len():
+            val afmt = args[i + 1]
+            if afmt == "x":
+                hex_addr = true
+            i = i + 2
+        elif a.starts_with("-t"):
+            val fmt = a.slice(2, a.len())
+            if fmt == "x1":
+                hex_bytes = true
+            i = i + 1
+        elif a.starts_with("-A"):
+            val afmt = a.slice(2, a.len())
+            if afmt == "x":
+                hex_addr = true
+            i = i + 1
+        else:
+            file_arg = a
+            i = i + 1
+
+    if file_arg == "":
+        write_error(terminal, "od: missing file operand")
+        return 1
+
+    val path = resolve_path(cwd, file_arg)
+    val result = vfs.read_text(path)
+    if result.is_err():
+        write_error(terminal, "od: {path}: {result.unwrap_err()}")
+        return 1
+
+    val content = result.unwrap()
+    var offset = 0
+    var chunk = ""
+    var col = 0
+
+    for ch in content:
+        val byte_val = ch.to_i32() & 0xFF
+        val formatted = if hex_bytes: _to_hex2(byte_val) else: _to_octal(byte_val)
+        chunk = "{chunk} {formatted}"
+        col = col + 1
+        if col == 16:
+            val addr = if hex_addr: _addr_hex(offset) else: _addr_octal(offset)
+            write_line(terminal, "{addr}{chunk}")
+            offset = offset + 16
+            chunk = ""
+            col = 0
+
+    if col > 0:
+        val addr = if hex_addr: _addr_hex(offset) else: _addr_octal(offset)
+        write_line(terminal, "{addr}{chunk}")
+        offset = offset + col
+
+    # Print final address
+    val addr = if hex_addr: _addr_hex(offset) else: _addr_octal(offset)
+    write_line(terminal, "{addr}")
+    return 0
+
+fn _to_octal(n: i32) -> text:
+    """Format n as 3-digit octal string."""
+    val d2 = (n / 64) % 8
+    val d1 = (n / 8) % 8
+    val d0 = n % 8
+    return "{d2}{d1}{d0}"
+
+fn _to_hex2(n: i32) -> text:
+    """Format n as 2-digit hex string."""
+    val digits = "0123456789abcdef"
+    val hi = (n / 16) & 0xF
+    val lo = n & 0xF
+    return "{digits.char_at(hi)}{digits.char_at(lo)}"
+
+fn _addr_octal(n: i32) -> text:
+    """Format address as 7-digit octal."""
+    var result = ""
+    var remaining = n
+    var i = 0
+    while i < 7:
+        val shift = 6 - i
+        var denom = 1
+        var k = 0
+        while k < shift:
+            denom = denom * 8
+            k = k + 1
+        val digit = (remaining / denom) % 8
+        result = "{result}{digit}"
+        i = i + 1
+    return result
+
+fn _addr_hex(n: i32) -> text:
+    """Format address as 7-digit hex."""
+    val digits = "0123456789abcdef"
+    var result = ""
+    var i = 0
+    while i < 7:
+        val shift = 6 - i
+        var denom = 1
+        var k = 0
+        while k < shift:
+            denom = denom * 16
+            k = k + 1
+        val digit = (n / denom) % 16
+        result = "{result}{digits.char_at(digit)}"
+        i = i + 1
+    return result

@@ -1,0 +1,100 @@
+# 8086 Segment:Offset Address Resolution
+#
+# Real mode physical address calculation:
+#   physical_addr = segment * 16 + offset
+#
+# 20-bit address space (1MB) from 16-bit segment and offset.
+
+use core.types.{IrTcTypeKind, IrTcValue, GuestArch}
+use core.ops.{IrTcOp}
+use core.mem_op.{GuestRegId}
+use core.builder.{IrTcBuilder}
+use guest.i8086.cpu.{X86_REG_CS, X86_REG_DS, X86_REG_SS, X86_REG_ES}
+
+# ============================================================================
+# Segment Types
+# ============================================================================
+
+enum SegmentKind:
+    """Which segment register to use for address calculation."""
+    CS      # Code segment (instruction fetch)
+    DS      # Data segment (default for MOV, etc.)
+    SS      # Stack segment (PUSH/POP, BP-relative)
+    ES      # Extra segment (string destination)
+
+impl SegmentKind:
+    fn reg_index() -> i64:
+        match self:
+            CS: X86_REG_CS
+            DS: X86_REG_DS
+            SS: X86_REG_SS
+            ES: X86_REG_ES
+
+    fn to_text() -> text:
+        match self:
+            CS: "CS"
+            DS: "DS"
+            SS: "SS"
+            ES: "ES"
+
+# ============================================================================
+# Address Resolution
+# ============================================================================
+
+fn resolve_segment_offset(segment: i64, offset: i64) -> i64:
+    """Calculate 20-bit physical address from segment:offset.
+
+    physical = segment * 16 + offset
+    Wraps at 1MB boundary (20-bit).
+    """
+    (segment * 16 + offset) & 0xFFFFF
+
+fn default_segment_for_base(base_reg_index: i64) -> SegmentKind:
+    """Determine default segment based on base register.
+
+    BP → SS (stack segment)
+    All others → DS (data segment)
+    """
+    if base_reg_index == 6:     # BP
+        SegmentKind.SS
+    else:
+        SegmentKind.DS
+
+# ============================================================================
+# Builder Helpers for Segment Resolution
+# ============================================================================
+
+fn emit_segment_resolve(builder: IrTcBuilder, segment: SegmentKind, offset: IrTcValue) -> IrTcValue:
+    """Emit IR_TC ops to compute physical address from segment:offset.
+
+    Generates:
+        %seg = read_guest_reg <segment_reg>
+        %seg32 = zext %seg to i32
+        %seg_shifted = shl %seg32, 4       ; segment * 16
+        %off32 = zext %offset to i32
+        %phys = add %seg_shifted, %off32
+        %masked = and %phys, 0xFFFFF       ; 20-bit wrap
+    """
+    val seg_reg = GuestRegId.new(GuestArch.I8086, segment.reg_index(), segment.to_text())
+
+    # Read segment register (16-bit)
+    val seg_val = builder.read_guest_reg(seg_reg, IrTcTypeKind.I16)
+
+    # Extend to 32-bit for arithmetic (avoid 16-bit overflow)
+    val seg32 = builder.ext(seg_val, IrTcTypeKind.I32, false)
+
+    # Shift left by 4 (multiply by 16)
+    val four = builder.new_value(IrTcTypeKind.I32)
+    val seg_shifted = builder.shl(seg32, four)
+
+    # Extend offset to 32-bit
+    val off32 = builder.ext(offset, IrTcTypeKind.I32, false)
+
+    # Add segment base + offset
+    val phys = builder.add(seg_shifted, off32)
+
+    # Mask to 20 bits (1MB wrap)
+    val mask = builder.new_value(IrTcTypeKind.I32)
+    val masked = builder.and_(phys, mask)
+
+    masked

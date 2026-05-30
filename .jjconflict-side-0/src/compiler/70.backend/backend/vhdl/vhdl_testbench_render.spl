@@ -1,0 +1,188 @@
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+class CombinationalBench:
+    bench_name: text
+    dut_entity: text
+    stimulus_count: int
+    assertion_count: int
+    has_clock: bool
+
+    me is_combinational() -> bool:
+        return self.has_clock == false
+
+    me total_checks() -> int:
+        return self.stimulus_count + self.assertion_count
+
+    me to_text() -> text:
+        return "comb-bench:" + self.bench_name + " dut=" + self.dut_entity + " stim=" + self.stimulus_count.to_text() + " assert=" + self.assertion_count.to_text()
+
+    static fn create(name: text, dut: text, stim: int, asserts: int) -> CombinationalBench:
+        return CombinationalBench(
+            bench_name: name,
+            dut_entity: dut,
+            stimulus_count: stim,
+            assertion_count: asserts,
+            has_clock: false
+        )
+
+
+class ClockedBench:
+    bench_name: text
+    dut_entity: text
+    clock_period_ns: int
+    reset_cycles: int
+    total_cycles: int
+
+    me has_reset() -> bool:
+        return self.reset_cycles > 0
+
+    me sim_time_ns() -> int:
+        return self.total_cycles * self.clock_period_ns
+
+    me to_text() -> text:
+        return "clocked-bench:" + self.bench_name + " dut=" + self.dut_entity + " period=" + self.clock_period_ns.to_text() + "ns cycles=" + self.total_cycles.to_text()
+
+    static fn create(name: text, dut: text, period: int, reset: int, total: int) -> ClockedBench:
+        return ClockedBench(
+            bench_name: name,
+            dut_entity: dut,
+            clock_period_ns: period,
+            reset_cycles: reset,
+            total_cycles: total
+        )
+
+
+class GhdlResult:
+    phase: text
+    passed: bool
+    stderr_capture: text
+    exit_code: i64
+
+    me is_analyze() -> bool:
+        return self.phase == "analyze"
+
+    me is_elaborate() -> bool:
+        return self.phase == "elaborate"
+
+    me is_run() -> bool:
+        return self.phase == "run"
+
+    me is_failure() -> bool:
+        return self.passed == false
+
+    me to_text() -> text:
+        if self.passed:
+            return "GHDL " + self.phase + ": OK"
+        return "GHDL " + self.phase + ": FAIL exit={self.exit_code}"
+
+    static fn ok(p: text) -> GhdlResult:
+        return GhdlResult(
+            phase: p,
+            passed: true,
+            stderr_capture: "",
+            exit_code: 0
+        )
+
+    static fn fail(p: text, err: text, code: i64) -> GhdlResult:
+        return GhdlResult(
+            phase: p,
+            passed: false,
+            stderr_capture: err,
+            exit_code: code
+        )
+
+
+class RenderOutput:
+    entity_name: text
+    vhdl_text: text
+    line_count: int
+    has_source_map: bool
+
+    me is_empty() -> bool:
+        return self.line_count == 0
+
+    me with_source_map() -> RenderOutput:
+        return RenderOutput(
+            entity_name: self.entity_name,
+            vhdl_text: self.vhdl_text,
+            line_count: self.line_count,
+            has_source_map: true
+        )
+
+    me to_text() -> text:
+        return "render:" + self.entity_name + " " + self.line_count.to_text() + " lines"
+
+    static fn create(name: text, vhdl: text, lines: int) -> RenderOutput:
+        return RenderOutput(
+            entity_name: name,
+            vhdl_text: vhdl,
+            line_count: lines,
+            has_source_map: false
+        )
+
+
+fn _ghdl_available() -> bool:
+    """Return true if ghdl is on PATH; false otherwise."""
+    val (out, err, code) = rt_process_run("/bin/sh", ["-c", "command -v ghdl 2>/dev/null"])
+    return code == 0
+
+fn _ghdl_run_phase(phase: text, phase_args: [text]) -> GhdlResult:
+    """Run one GHDL phase and return a GhdlResult."""
+    val (stdout, stderr, code) = rt_process_run("ghdl", phase_args)
+    if code == 0:
+        return GhdlResult.ok(phase)
+    return GhdlResult.fail(phase, stderr, code)
+
+fn _ghdl_workdir_from_path(vhdl_path: text) -> text:
+    """Extract the directory portion of vhdl_path for use as --workdir."""
+    val last_slash = vhdl_path.last_index_of("/")
+    if last_slash < 0:
+        return "."
+    return vhdl_path.substring(0, last_slash)
+
+fn run_vhdl_testbench_with_ghdl(vhdl_path: text, entity_name: text) -> GhdlResult:
+    """
+    Run a rendered VHDL testbench through GHDL analyze/elaborate/run phases.
+
+    Phases:
+      analyze   — ghdl -a --workdir=<dir> <vhdl_path>
+      elaborate — ghdl -e --workdir=<dir> <entity_name>
+      run       — ghdl -r --workdir=<dir> <entity_name>
+
+    --workdir scopes GHDL library files to the VHDL file's own directory so
+    CWD is never polluted. Returns the first failing phase result, or the
+    run-phase result on full success. Returns an analyze-phase failure
+    if GHDL is not installed.
+    """
+    if not _ghdl_available():
+        return GhdlResult.fail("analyze", "ghdl not found on PATH", 127i64)
+
+    val workdir = _ghdl_workdir_from_path(vhdl_path)
+    val workdir_flag = "--workdir=" + workdir
+
+    val analyze_result = _ghdl_run_phase("analyze", ["-a", workdir_flag, vhdl_path])
+    if analyze_result.is_failure():
+        return analyze_result
+
+    val elaborate_result = _ghdl_run_phase("elaborate", ["-e", workdir_flag, entity_name])
+    if elaborate_result.is_failure():
+        return elaborate_result
+
+    return _ghdl_run_phase("run", ["-r", workdir_flag, entity_name])
+
+
+fn run_vhdl_testbench_artifact_with_ghdl(artifact_entity: text, vhdl_text: text, work_dir: text) -> GhdlResult:
+    """
+    Write vhdl_text to <work_dir>/<artifact_entity>.vhd, then run GHDL phases.
+
+    This helper is the primary entry point for the testbench pipeline:
+    it takes a VhdlTestbenchArtifact's fields and handles the file write
+    before delegating to run_vhdl_testbench_with_ghdl. GHDL library files
+    are scoped to work_dir via --workdir so CWD is never polluted.
+    """
+    val vhdl_path = work_dir + "/" + artifact_entity + ".vhd"
+    val wrote = rt_file_write_text(vhdl_path, vhdl_text)
+    if not wrote:
+        return GhdlResult.fail("analyze", "failed to write VHDL to " + vhdl_path, 1i64)
+    return run_vhdl_testbench_with_ghdl(vhdl_path, artifact_entity)

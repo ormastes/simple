@@ -1,0 +1,197 @@
+# Browser session — cookie management functions.
+#
+# Free functions for:
+# - merge_cookie_text: merge a Set-Cookie header value into the cookie jar
+# - parse_cookie_line: parse a single cookie string into BrowserCookie
+# - upsert_cookie: add-or-replace a cookie in the jar
+# - cookie_text_for_url: build a Cookie: header value for a given URL
+# - cookie_matches_url: test whether a stored cookie applies to a URL
+# - normalize_cookie_path / normalize_cookie_domain
+# - cookie_max_age_is_expired / cookie_expires_is_past
+# - cookie_text_has_attributes / split_cookie_assignments
+# - split_text / join_text: text-splitting helpers used by cookie parsing
+
+use common.string_builder.{StringBuilder}
+use std.gc_async_mut.web.browser_session.{BrowserCookie}
+use std.gc_async_mut.web.browser_session_url.{find_text, url_pathname, url_host}
+
+fn split_text(input: text, delimiter: text) -> [text]:
+    if delimiter.len() == 0:
+        return [input]
+    var out: [text] = []
+    var pos = 0
+    while pos <= input.len():
+        val next = find_text(input, delimiter, pos)
+        if next < 0:
+            out.push(input.slice(pos, input.len()))
+            return out
+        out.push(input.slice(pos, next))
+        pos = next + delimiter.len()
+    out
+
+fn join_text(parts: [text], delimiter: text) -> text:
+    val sb = StringBuilder.new()
+    var i = 0
+    while i < parts.len():
+        if i > 0:
+            sb.push(delimiter)
+        sb.push(parts[i])
+        i = i + 1
+    sb.to_text()
+
+fn merge_cookie_text(existing: [BrowserCookie], cookie_text: text) -> [BrowserCookie]:
+    var jar = existing
+    if cookie_text_has_attributes(cookie_text):
+        if val Some(cookie) = parse_cookie_line(cookie_text):
+            return upsert_cookie(jar, cookie)
+    val cookie_lines = split_cookie_assignments(cookie_text)
+    for line in cookie_lines:
+        if val Some(cookie) = parse_cookie_line(line):
+            jar = upsert_cookie(jar, cookie)
+    jar
+
+fn cookie_text_has_attributes(cookie_text: text) -> bool:
+    val segments = split_text(cookie_text.trim(), ";")
+    var i = 1
+    while i < segments.len():
+        val seg = segments[i].trim()
+        val eq = find_text(seg, "=", 0)
+        val key = if eq > 0:
+            seg.slice(0, eq).trim().lower()
+        else:
+            seg.lower()
+        if key == "path" or
+           key == "domain" or
+           key == "expires" or
+           key == "max-age" or
+           key == "secure" or
+           key == "samesite" or
+           key == "httponly" or
+           key == "partitioned":
+            return true
+        i = i + 1
+    false
+
+fn split_cookie_assignments(cookie_text: text) -> [text]:
+    var parts: [text] = []
+    val sb = StringBuilder.new()
+    var i = 0
+    while i < cookie_text.len():
+        val ch = cookie_text.slice(i, i + 1)
+        if ch == ";":
+            val trimmed = sb.to_text().trim()
+            if trimmed.len() > 0 and trimmed.contains("="):
+                parts.push(trimmed)
+            sb.clear()
+        else:
+            sb.push(ch)
+        i = i + 1
+    val trimmed = sb.to_text().trim()
+    if trimmed.len() > 0 and trimmed.contains("="):
+        parts.push(trimmed)
+    parts
+
+fn parse_cookie_line(cookie_line: text) -> BrowserCookie?:
+    val trimmed = cookie_line.trim()
+    if trimmed.len() == 0:
+        return nil
+    val segments = split_text(trimmed, ";")
+    if segments.len() == 0:
+        return nil
+    val base = segments[0].trim()
+    val eq = find_text(base, "=", 0)
+    if eq <= 0:
+        return nil
+    val name = base.slice(0, eq).trim()
+    val value = base.slice(eq + 1, base.len()).trim()
+    val lowered_name = name.lower()
+    if lowered_name == "path" or
+       lowered_name == "domain" or
+       lowered_name == "expires" or
+       lowered_name == "max-age" or
+       lowered_name == "secure" or
+       lowered_name == "samesite" or
+       lowered_name == "httponly" or
+       lowered_name == "partitioned":
+        return nil
+    var path = ""
+    var domain = ""
+    var expired = false
+    var i = 1
+    while i < segments.len():
+        val seg = segments[i].trim()
+        val seg_eq = find_text(seg, "=", 0)
+        if seg_eq > 0:
+            val key = seg.slice(0, seg_eq).trim().lower()
+            val attr_value = seg.slice(seg_eq + 1, seg.len()).trim()
+            if key == "path":
+                path = normalize_cookie_path(attr_value)
+            else if key == "domain":
+                domain = normalize_cookie_domain(attr_value)
+            else if key == "max-age":
+                expired = cookie_max_age_is_expired(attr_value)
+            else if key == "expires":
+                expired = cookie_expires_is_past(attr_value)
+        i = i + 1
+    Some(BrowserCookie.create(name: name, value: value, path: path, domain: domain, expired: expired))
+
+fn upsert_cookie(existing: [BrowserCookie], cookie: BrowserCookie) -> [BrowserCookie]:
+    var out: [BrowserCookie] = []
+    var found = false
+    for current in existing:
+        if current.name == cookie.name and current.path == cookie.path and current.domain == cookie.domain:
+            if not cookie.expired:
+                out.push(cookie)
+            found = true
+        else:
+            out.push(current)
+    if not found and not cookie.expired:
+        out.push(cookie)
+    out
+
+fn cookie_text_for_url(cookies: [BrowserCookie], url: text) -> text:
+    var parts: [text] = []
+    for cookie in cookies:
+        if cookie_matches_url(cookie, url):
+            parts.push("{cookie.name}={cookie.value}")
+    join_text(parts, "; ")
+
+fn cookie_matches_url(cookie: BrowserCookie, url: text) -> bool:
+    if cookie.domain.len() > 0:
+        val host = normalize_cookie_domain(url_host(url))
+        if host != cookie.domain and not host.ends_with(".{cookie.domain}"):
+            return false
+    if cookie.path.len() > 0:
+        val pathname = url_pathname(url)
+        if pathname != cookie.path and
+           not cookie.path.ends_with("/") and
+           not pathname.starts_with(cookie.path + "/"):
+            return false
+        if cookie.path.ends_with("/") and not pathname.starts_with(cookie.path):
+            return false
+    true
+
+fn normalize_cookie_path(path: text) -> text:
+    val trimmed = path.trim()
+    if trimmed.len() == 0:
+        return ""
+    if trimmed.starts_with("/"):
+        return trimmed
+    "/" + trimmed
+
+fn normalize_cookie_domain(domain: text) -> text:
+    var normalized = domain.trim().lower()
+    while normalized.starts_with(".") and normalized.len() > 1:
+        normalized = normalized.slice(1, normalized.len())
+    normalized
+
+fn cookie_max_age_is_expired(value: text) -> bool:
+    val trimmed = value.trim()
+    trimmed == "0" or trimmed.starts_with("-")
+
+fn cookie_expires_is_past(value: text) -> bool:
+    val lowered = value.trim().lower()
+    lowered.contains("01 jan 1970") or
+        lowered.contains("jan 1970") or
+        lowered.contains("1970") or
+        lowered.contains("1969")

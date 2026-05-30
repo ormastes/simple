@@ -1,0 +1,187 @@
+# Skia Color Space — named color space descriptors for HDR / wide-gamut work
+#
+# Provides SkColorSpace with named variants (sRGB, Display P3, Rec2020, DCI-P3, …),
+# transfer functions, chromaticity primaries, and RGB→XYZ primary matrices.
+#
+# Reference standards: W3C CSS Color 4, ITU-R BT.709, ITU-R BT.2020, SMPTE ST.2084.
+
+use std.skia.entity.matrix.{Matrix3x3}
+
+# ============================================================================
+# SkColorSpaceKind — named color space primaries
+# ============================================================================
+
+enum SkColorSpaceKind:
+    Srgb        # standard sRGB IEC 61966-2-1
+    DisplayP3   # Apple Display P3
+    Rec2020     # ITU-R BT.2020 (HDR wide gamut)
+    DciP3       # DCI-P3 (theatrical / consumer D65 variant)
+    Rec709      # ITU-R BT.709 (HDTV)
+    Linear      # linear extended sRGB
+    AdobeRgb    # Adobe RGB 1998
+    Unknown     # ICC blob that did not match any named space
+
+# ============================================================================
+# SkTransferFn — electro-optical transfer functions
+# ============================================================================
+
+enum SkTransferFn:
+    Srgb            # standard sRGB piecewise gamma
+    LinearApprox22  # gamma 2.2 approximation
+    Linear          # identity (linear light)
+    Pq              # Perceptual Quantizer SMPTE ST.2084 — HDR
+    Hlg             # Hybrid Log-Gamma — HDR
+    DciP3           # DCI-P3 2.6 gamma
+
+# ============================================================================
+# SkChromaticities — CIE xy chromaticity coordinates for primaries + white
+# ============================================================================
+
+class SkChromaticities:
+    red_x: f64
+    red_y: f64
+    green_x: f64
+    green_y: f64
+    blue_x: f64
+    blue_y: f64
+    white_x: f64
+    white_y: f64
+
+# ============================================================================
+# SkColorSpace — the main descriptor
+# ============================================================================
+
+class SkColorSpace:
+    kind: SkColorSpaceKind
+    transfer_fn: SkTransferFn
+    chromaticities: SkChromaticities
+
+# ============================================================================
+# Named chromaticity constants (W3C / ITU standards)
+# ============================================================================
+
+fn _chroma_srgb() -> SkChromaticities:
+    SkChromaticities(
+        red_x: 0.6400, red_y: 0.3300,
+        green_x: 0.3000, green_y: 0.6000,
+        blue_x: 0.1500, blue_y: 0.0600,
+        white_x: 0.3127, white_y: 0.3290
+    )
+
+fn _chroma_display_p3() -> SkChromaticities:
+    SkChromaticities(
+        red_x: 0.6800, red_y: 0.3200,
+        green_x: 0.2650, green_y: 0.6900,
+        blue_x: 0.1500, blue_y: 0.0600,
+        white_x: 0.3127, white_y: 0.3290
+    )
+
+fn _chroma_rec2020() -> SkChromaticities:
+    SkChromaticities(
+        red_x: 0.7080, red_y: 0.2920,
+        green_x: 0.1700, green_y: 0.7970,
+        blue_x: 0.1310, blue_y: 0.0460,
+        white_x: 0.3127, white_y: 0.3290
+    )
+
+fn _chroma_dci_p3() -> SkChromaticities:
+    # Consumer D65 variant (same primaries as Display P3)
+    SkChromaticities(
+        red_x: 0.6800, red_y: 0.3200,
+        green_x: 0.2650, green_y: 0.6900,
+        blue_x: 0.1500, blue_y: 0.0600,
+        white_x: 0.3127, white_y: 0.3290
+    )
+
+# ============================================================================
+# Named constructor functions
+# ============================================================================
+
+fn srgb() -> SkColorSpace:
+    SkColorSpace(
+        kind: SkColorSpaceKind.Srgb,
+        transfer_fn: SkTransferFn.Srgb,
+        chromaticities: _chroma_srgb()
+    )
+
+fn display_p3() -> SkColorSpace:
+    SkColorSpace(
+        kind: SkColorSpaceKind.DisplayP3,
+        transfer_fn: SkTransferFn.Srgb,
+        chromaticities: _chroma_display_p3()
+    )
+
+fn rec2020() -> SkColorSpace:
+    SkColorSpace(
+        kind: SkColorSpaceKind.Rec2020,
+        transfer_fn: SkTransferFn.Pq,
+        chromaticities: _chroma_rec2020()
+    )
+
+fn dci_p3() -> SkColorSpace:
+    SkColorSpace(
+        kind: SkColorSpaceKind.DciP3,
+        transfer_fn: SkTransferFn.DciP3,
+        chromaticities: _chroma_dci_p3()
+    )
+
+fn linear_srgb() -> SkColorSpace:
+    SkColorSpace(
+        kind: SkColorSpaceKind.Linear,
+        transfer_fn: SkTransferFn.Linear,
+        chromaticities: _chroma_srgb()
+    )
+
+# ============================================================================
+# Predicate helpers
+# ============================================================================
+
+fn sk_color_space_is_srgb(cs: SkColorSpace) -> bool:
+    cs.kind == SkColorSpaceKind.Srgb
+
+fn sk_color_space_is_wide_gamut(cs: SkColorSpace) -> bool:
+    cs.kind == SkColorSpaceKind.DisplayP3
+        || cs.kind == SkColorSpaceKind.Rec2020
+        || cs.kind == SkColorSpaceKind.DciP3
+        || cs.kind == SkColorSpaceKind.AdobeRgb
+
+fn sk_color_space_is_hdr(cs: SkColorSpace) -> bool:
+    cs.transfer_fn == SkTransferFn.Pq || cs.transfer_fn == SkTransferFn.Hlg
+
+# ============================================================================
+# ICC primary matrix stubs — RGB→XYZ D65, row-major (precomputed constants)
+# ============================================================================
+
+fn _matrix_srgb() -> Matrix3x3:
+    Matrix3x3(
+        m00: 0.4124564, m01: 0.3575761, m02: 0.1804375,
+        m10: 0.2126729, m11: 0.7151522, m12: 0.0721750,
+        m20: 0.0193339, m21: 0.1191920, m22: 0.9503041
+    )
+
+fn _matrix_display_p3() -> Matrix3x3:
+    Matrix3x3(
+        m00: 0.4865709, m01: 0.2656676, m02: 0.1982172,
+        m10: 0.2289745, m11: 0.6917385, m12: 0.0792869,
+        m20: 0.0000000, m21: 0.0451133, m22: 1.0439443
+    )
+
+fn _matrix_rec2020() -> Matrix3x3:
+    Matrix3x3(
+        m00: 0.6369580, m01: 0.1446169, m02: 0.1688809,
+        m10: 0.2627002, m11: 0.6779981, m12: 0.0593017,
+        m20: 0.0000000, m21: 0.0280727, m22: 1.0609851
+    )
+
+fn primary_matrix_for(cs: SkColorSpace) -> Matrix3x3:
+    if cs.kind == SkColorSpaceKind.Srgb:
+        _matrix_srgb()
+    elif cs.kind == SkColorSpaceKind.DisplayP3:
+        _matrix_display_p3()
+    elif cs.kind == SkColorSpaceKind.Rec2020:
+        _matrix_rec2020()
+    elif cs.kind == SkColorSpaceKind.DciP3:
+        # DCI-P3 consumer D65 uses Display P3 primaries
+        _matrix_display_p3()
+    else:
+        Matrix3x3.identity()

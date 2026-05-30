@@ -1,0 +1,72 @@
+use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
+
+trait CompositorGlassCapable:
+    me blend_rect(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8)
+    me blur_region(x: i32, y: i32, w: i32, h: i32, radius: u32)
+    me gradient_v(x: i32, y: i32, w: i32, h: i32, color_top: u32, color_bottom: u32)
+    fn read_pixel(x: i32, y: i32) -> u32
+
+trait CompositorBackend:
+    fn width() -> i32
+    fn height() -> i32
+    me clear(color: u32)
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32)
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32)
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32)
+    me put_pixel(x: i32, y: i32, color: u32)
+    me present()
+    me present_rect(x: i32, y: i32, w: i32, h: i32)
+    fn as_glass_capable() -> CompositorGlassCapable?
+
+var _gpu_compositor_next_id: i32 = 1
+var _gpu_compositor_override_enabled: bool = false
+var _gpu_compositor_override_id: i32 = 0
+var _gpu_compositor_override_width: i32 = 0
+var _gpu_compositor_override_height: i32 = 0
+var _gpu_compositor_override_pixels: [u32] = []
+
+class GpuCompositorBackend:
+    id: i32
+    driver: VirtioGpuDriver
+    width: i32
+    height: i32
+
+    static fn new(driver: VirtioGpuDriver) -> GpuCompositorBackend:
+        val id = _gpu_compositor_next_id
+        _gpu_compositor_next_id = _gpu_compositor_next_id + 1
+        GpuCompositorBackend(id: id, driver: driver, width: driver.width.to_i32(), height: driver.height.to_i32())
+
+    fn as_glass_capable() -> GpuCompositorBackend?:
+        self
+
+    fn get_pixel_buffer() -> [u32]:
+        if _gpu_compositor_override_enabled and _gpu_compositor_override_id == self.id and _gpu_compositor_override_width == self.width and _gpu_compositor_override_height == self.height:
+            _gpu_compositor_override_enabled = false
+            return _gpu_compositor_override_pixels
+        val total = if self.width > 0 and self.height > 0: self.width * self.height else: 0
+        [0u32; total]
+
+    fn set_pixel_buffer_override(pixels: [u32]):
+        _gpu_compositor_override_id = self.id
+        _gpu_compositor_override_width = self.width
+        _gpu_compositor_override_height = self.height
+        _gpu_compositor_override_pixels = pixels
+        _gpu_compositor_override_enabled = true
+
+    me blend_rect(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
+        self.set_pixel_buffer_override(self.get_pixel_buffer())
+
+    me blur_region(x: i32, y: i32, w: i32, h: i32, radius: u32):
+        self.set_pixel_buffer_override(self.get_pixel_buffer())
+
+    me gradient_v(x: i32, y: i32, w: i32, h: i32, color_top: u32, color_bottom: u32):
+        self.set_pixel_buffer_override(self.get_pixel_buffer())
+
+    fn read_pixel(x: i32, y: i32) -> u32:
+        if x < 0 or y < 0 or x >= self.width or y >= self.height:
+            return 0u32
+        val pixels = self.get_pixel_buffer()
+        val idx = y * self.width + x
+        if idx >= 0 and idx < pixels.len():
+            return pixels[idx]
+        0u32

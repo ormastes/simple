@@ -1,0 +1,333 @@
+# test/perf/bench/fat32_4k_compare.spl — focused 4K FAT comparison.
+# Seed the optional VFAT baseline with:
+#   scripts/perf/prepare-fat32-4k-vfat.shs
+
+use std.io_runtime.{time_now_unix_micros}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_text_at, file_write_text_at}
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.types.{FileHandle}
+use std.fs_driver.fat32_core.{Fat32Core}
+
+extern fn rt_env_get(key: text) -> text
+
+var __bench_sectors: [[u8]] = []
+var __bench_active_bank: i32 = 0
+
+fn _byte_buf(n: i64, value: u8) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        out.push(value)
+        i = i + 1
+    out
+
+fn _alloc_bank() -> i32:
+    __bench_sectors = []
+    0
+
+fn _set_sec(bid: i32, sec: i32, data: [u8]):
+    while __bench_sectors.len() <= sec:
+        __bench_sectors.push(_byte_buf(512, 0u8))
+    __bench_sectors[sec] = data
+
+fn _get_sec(bid: i32, sec: i32) -> [u8]:
+    if sec >= 0 and sec < __bench_sectors.len():
+        return __bench_sectors[sec]
+    _byte_buf(512, 0u8)
+
+fn _fat_sector() -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < 512:
+        var v: u8 = 0u8
+        if i == 0:
+            v = 0xF8u8
+        elif i == 1 or i == 2:
+            v = 0xFFu8
+        elif i == 3:
+            v = 0x0Fu8
+        elif i == 4 or i == 5 or i == 6:
+            v = 0xFFu8
+        elif i == 7:
+            v = 0x0Fu8
+        elif i == 8:
+            v = 0xF8u8
+        elif i == 9 or i == 10:
+            v = 0xFFu8
+        elif i == 11:
+            v = 0x0Fu8
+        out.push(v)
+        i = i + 1
+    out
+
+fn _init_image(bid: i32):
+    _set_sec(bid, 32, _fat_sector())
+
+class BenchBlockDevice:
+    bank_id: i32
+
+impl BenchBlockDevice:
+    static fn new() -> BenchBlockDevice:
+        val bid = _alloc_bank()
+        _init_image(bid)
+        __bench_active_bank = bid
+        BenchBlockDevice(bank_id: bid)
+
+impl BlockDevice for BenchBlockDevice:
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        val idx = lba.to_i32()
+        if idx < 0 or idx >= 4096:
+            return Ok(_byte_buf(512, 0u8))
+        Ok(_get_sec(__bench_active_bank, idx))
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        val idx = lba.to_i32()
+        if idx < 0 or idx >= 4096:
+            return Err("sector out of range")
+        _set_sec(__bench_active_bank, idx, data)
+        Ok(true)
+
+    fn sector_size() -> u32:
+        512
+
+struct BenchResult:
+    name: text
+    p50_us: i64
+    p99_us: i64
+    skipped: bool
+
+fn _make_core() -> Fat32Core:
+    val dev = BenchBlockDevice.new()
+    var core: Fat32Core = Fat32Core.new(dev)
+    # This benchmark measures 4K FAT data-path cost; mount/BPB parsing is covered elsewhere.
+    core.bytes_per_sector = 512
+    core.sectors_per_cluster = 8
+    core.reserved_sectors = 32
+    core.num_fats = 2
+    core.fat_size = 1
+    core.root_cluster = 2
+    core.data_start_sector = 34
+    core.total_clusters = 507
+    core.mounted = true
+    core
+
+fn _fill_bytes(n: i64, value: u8) -> [u8]:
+    _byte_buf(n, value)
+
+fn _fill_text(n: i64) -> text:
+    val chunk = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    if n <= 256:
+        chunk
+    else:
+        chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk
+
+fn _rand_block(i: i64, block_count: i64) -> i64:
+    ((i * 1103515245 + 12345) & 0x7FFFFFFF) % block_count
+
+fn prepare_host_file(path: text, block_count: i64) -> bool:
+    val block = _fill_text(4096)
+    var b: i64 = 0
+    while b < block_count:
+        val wrote = file_write_text_at(path, b * 4096, block)
+        if wrote < 4096:
+            return false
+        b = b + 1
+    true
+
+fn percentile(latencies: [i64], pct: i64) -> i64:
+    val n = latencies.len()
+    if n == 0:
+        return 0
+    var idx = (n * pct) / 100
+    if idx >= n:
+        idx = n - 1
+    var i = 0
+    while i < n:
+        val candidate = latencies[i]
+        var less = 0
+        var leq = 0
+        var j = 0
+        while j < n:
+            if latencies[j] < candidate:
+                less = less + 1
+            if latencies[j] <= candidate:
+                leq = leq + 1
+            j = j + 1
+        if less <= idx and idx < leq:
+            return candidate
+        i = i + 1
+    latencies[n - 1]
+
+fn bench_simple_read(iters: i64, block_count: i64) -> BenchResult:
+    var core = _make_core()
+    val h = core.alloc_file_handle(0, 0, false)
+    val block = _fill_bytes(4096, 0x52)
+    var b: i64 = 0
+    while b < block_count:
+        val _w = core.write(h, block, 4096)
+        if _w.is_err():
+            print "FATAL: simple seed write failed: {_w.unwrap_err()}"
+            return BenchResult(name: "simple_fat32_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+        if _w.unwrap() != 4096:
+            val of_rc = core.get_open_file(h)
+            if of_rc.is_err():
+                print "FATAL: simple seed write short: {_w.unwrap()}"
+                return BenchResult(name: "simple_fat32_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+            val of = of_rc.unwrap()
+            if of.position < (b + 1) * 4096 or of.size < of.position:
+                print "FATAL: simple seed write short: {_w.unwrap()}"
+                return BenchResult(name: "simple_fat32_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+        b = b + 1
+    var latencies: [i64] = []
+    var read_buf = _fill_bytes(4096, 0)
+    var i: i64 = 0
+    while i < iters:
+        val offset = _rand_block(i, block_count) * 4096
+        val _s = core.seek(h, offset)
+        val t0 = time_now_unix_micros()
+        val _r = core.read(h, read_buf, 4096)
+        if _r.is_err():
+            print "FATAL: simple read failed: {_r.unwrap_err()}"
+            return BenchResult(name: "simple_fat32_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+        latencies.push(time_now_unix_micros() - t0)
+        i = i + 1
+    val _c = core.close(h)
+    BenchResult(name: "simple_fat32_read4k", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99), skipped: false)
+
+fn bench_simple_write(iters: i64, block_count: i64) -> BenchResult:
+    var core = _make_core()
+    val h = core.alloc_file_handle(0, 0, false)
+    val seed = _fill_bytes(4096, 0x41)
+    val patch = _fill_bytes(4096, 0x57)
+    var b: i64 = 0
+    while b < block_count:
+        val _w = core.write(h, seed, 4096)
+        if _w.is_err():
+            print "FATAL: simple seed write failed: {_w.unwrap_err()}"
+            return BenchResult(name: "simple_fat32_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+        if _w.unwrap() != 4096:
+            val of_rc = core.get_open_file(h)
+            if of_rc.is_err():
+                print "FATAL: simple seed write short: {_w.unwrap()}"
+                return BenchResult(name: "simple_fat32_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+            val of = of_rc.unwrap()
+            if of.position < (b + 1) * 4096 or of.size < of.position:
+                print "FATAL: simple seed write short: {_w.unwrap()}"
+                return BenchResult(name: "simple_fat32_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+        b = b + 1
+    val start_rc = core.get_open_file(h)
+    if start_rc.is_err():
+        print "FATAL: simple write setup failed: {start_rc.unwrap_err()}"
+        return BenchResult(name: "simple_fat32_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+    val start_cluster = start_rc.unwrap().start_cluster
+    var latencies: [i64] = []
+    var i: i64 = 0
+    while i < iters:
+        val offset = _rand_block(i, block_count) * 4096
+        val t0 = time_now_unix_micros()
+        val _w2 = core.write_4k_overwrite_cluster_at(start_cluster, offset, patch)
+        if _w2.is_err():
+            print "FATAL: simple write failed: {_w2.unwrap_err()}"
+            return BenchResult(name: "simple_fat32_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+        latencies.push(time_now_unix_micros() - t0)
+        i = i + 1
+    val _c = core.close(h)
+    BenchResult(name: "simple_fat32_write4k", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99), skipped: false)
+
+fn bench_host_read_at(iters: i64, block_count: i64, path: text, name: text) -> BenchResult:
+    var latencies: [i64] = []
+    var i: i64 = 0
+    while i < iters:
+        val offset = _rand_block(i, block_count) * 4096
+        val t0 = time_now_unix_micros()
+        val _r = file_read_text_at(path, offset, 4096)
+        if _r.len() < 4096:
+            return BenchResult(name: name, p50_us: 999999999, p99_us: 999999999, skipped: true)
+        latencies.push(time_now_unix_micros() - t0)
+        i = i + 1
+    BenchResult(name: name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99), skipped: false)
+
+fn bench_host_write_at(iters: i64, block_count: i64, path: text, name: text) -> BenchResult:
+    val patch = _fill_text(4096)
+    var latencies: [i64] = []
+    var i: i64 = 0
+    while i < iters:
+        val offset = _rand_block(i, block_count) * 4096
+        val t0 = time_now_unix_micros()
+        val _w = file_write_text_at(path, offset, patch)
+        if _w < 0:
+            return BenchResult(name: name, p50_us: 999999999, p99_us: 999999999, skipped: true)
+        latencies.push(time_now_unix_micros() - t0)
+        i = i + 1
+    BenchResult(name: name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99), skipped: false)
+
+fn bench_host_read(iters: i64, block_count: i64) -> BenchResult:
+    val path = "/tmp/simple_fat32_4k_host_read.bin"
+    if not prepare_host_file(path, block_count):
+        return BenchResult(name: "host_posix_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+    bench_host_read_at(iters, block_count, path, "host_posix_read4k")
+
+fn bench_host_write(iters: i64, block_count: i64) -> BenchResult:
+    val path = "/tmp/simple_fat32_4k_host_write.bin"
+    if not prepare_host_file(path, block_count):
+        return BenchResult(name: "host_posix_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+    bench_host_write_at(iters, block_count, path, "host_posix_write4k")
+
+fn vfat_bench_mount() -> text:
+    val configured = rt_env_get("VFAT_MNT")
+    if configured != "":
+        return configured
+    "/tmp/simple_vfat_bench_mnt"
+
+fn bench_vfat_read(iters: i64, block_count: i64) -> BenchResult:
+    val path = vfat_bench_mount() + "/simple_fat32_4k_vfat_read.bin"
+    if not file_exists(path):
+        return BenchResult(name: "c_fat_vfat_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+    bench_host_read_at(iters, block_count, path, "c_fat_vfat_read4k")
+
+fn bench_vfat_write(iters: i64, block_count: i64) -> BenchResult:
+    val path = vfat_bench_mount() + "/simple_fat32_4k_vfat_write.bin"
+    if not file_exists(path):
+        return BenchResult(name: "c_fat_vfat_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+    bench_host_write_at(iters, block_count, path, "c_fat_vfat_write4k")
+
+fn print_result(r: BenchResult):
+    if r.skipped:
+        print "{r.name}: SKIPPED"
+        return
+    print "{r.name}: p50={r.p50_us}us p99={r.p99_us}us"
+
+fn main():
+    val iters: i64 = 8
+    val blocks: i64 = 8
+    print "=== FAT32 4K focused comparison ==="
+    val sr = bench_simple_read(iters, blocks)
+    print_result(sr)
+    val sw = bench_simple_write(iters, blocks)
+    print_result(sw)
+    val hr = bench_host_read(iters, blocks)
+    print_result(hr)
+    val hw = bench_host_write(iters, blocks)
+    print_result(hw)
+    val vr = bench_vfat_read(iters, blocks)
+    val vw = bench_vfat_write(iters, blocks)
+    print_result(vr)
+    print_result(vw)
+    if vr.skipped or vw.skipped:
+        print "vfat_baseline: missing or unseeded run scripts/perf/prepare-fat32-4k-vfat.shs"
+    if not hr.skipped and sr.p50_us < hr.p50_us:
+        print "read4k: simple_fat32 faster"
+    else:
+        print "read4k: simple_fat32 not proven"
+    if not hw.skipped and sw.p50_us < hw.p50_us:
+        print "write4k: simple_fat32 faster"
+    else:
+        print "write4k: simple_fat32 not proven"
+    if not vr.skipped and sr.p50_us < vr.p50_us:
+        print "read4k_vfat: simple_fat32 faster"
+    else:
+        print "read4k_vfat: not proven"
+    if not vw.skipped and sw.p50_us < vw.p50_us:
+        print "write4k_vfat: simple_fat32 faster"
+    else:
+        print "write4k_vfat: not proven"

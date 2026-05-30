@@ -1,0 +1,64 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+use std.spec
+use std.js.types.js_types.{JsValue}
+use std.js.engine.js_error.{Logger}
+use examples.browser.feature.script.web_api.timer_binding.{TimerBinding}
+
+fn _binding() -> TimerBinding:
+    TimerBinding.new_at(Logger(name: "timer-binding-spec"), 0)
+
+describe "TimerBinding":
+    describe "clock source":
+        it "uses runtime wall clock for production construction":
+            var binding = TimerBinding.new(Logger(name: "timer-binding-spec"))
+            binding.js_setTimeout([JsValue.Function(id: 3), JsValue.Number(v: 1.0)])
+
+            expect(binding.tick(0)).to_equal([])
+
+    describe "setTimeout":
+        it "does not fire before delay and fires after delay":
+            var binding = _binding()
+            val timer_id = binding.js_setTimeout([JsValue.Function(id: 7), JsValue.Number(v: 50.0)])
+
+            expect(binding.tick(49)).to_equal([])
+            expect(binding.tick(50)).to_equal([7])
+
+        it "marks one shot timers cancelled after firing":
+            var binding = _binding()
+            binding.js_setTimeout([JsValue.Function(id: 8), JsValue.Number(v: 10.0)])
+
+            val fired = binding.fire_timers(10)
+
+            expect(fired.len()).to_equal(1)
+            expect(binding.tick(11)).to_equal([])
+
+    describe "clearTimeout":
+        it "prevents a due timer from firing":
+            var binding = _binding()
+            val timer_value = binding.js_setTimeout([JsValue.Function(id: 9), JsValue.Number(v: 5.0)])
+
+            binding.js_clearTimeout([timer_value])
+
+            expect(binding.tick(5)).to_equal([])
+
+    describe "setInterval":
+        it "reschedules repeating timers after firing":
+            var binding = _binding()
+            binding.js_setInterval([JsValue.Function(id: 11), JsValue.Number(v: 20.0)])
+
+            expect(binding.tick(20)).to_equal([11])
+            binding.reschedule_intervals_at(20)
+
+            expect(binding.tick(39)).to_equal([])
+            expect(binding.tick(40)).to_equal([11])
+
+    describe "requestAnimationFrame":
+        it "fires on the next frame boundary":
+            var binding = _binding()
+            binding.js_requestAnimationFrame([JsValue.Function(id: 10)])
+
+            expect(binding.tick(15)).to_equal([])
+            expect(binding.tick(16)).to_equal([10])

@@ -1,0 +1,101 @@
+# Part 1 of src/compiler/20.hir/hir_lowering/items.spl
+use compiler.hir.hir_lowering.items.*
+# HIR Lowering - Item Lowering
+#
+# This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types.{Module as ParserModule, Function, ImportItem, Param}
+use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.expressions.*
+use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
+use compiler.types.type_layout.{LayoutAttr, LayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.core.ast.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
+use compiler.core.ast_stmt.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
+use compiler.core.ast_expr.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts}
+use compiler.core.tokens.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
+use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, custom_primitive_bind_symbol, custom_primitive_is_name}
+use compiler.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
+use compiler.core.types.{int_to_str}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_env_get(key: text) -> text
+
+var _bootstrap_hir_functions: [HirFunction] = []
+
+fn bootstrap_hir_function_count() -> i64:
+    _bootstrap_hir_functions.len()
+
+fn bootstrap_hir_function_at(index: i64) -> HirFunction:
+    if index < _bootstrap_hir_functions.len():
+        return _bootstrap_hir_functions[index]
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        val fn_: Function = flat_bootstrap_function_at(index)
+        var lowering = HirLowering.new()
+        return lowering.lower_function(fn_)
+    _bootstrap_hir_functions[index]
+
+# Item Lowering (Functions, Classes, Structs, Enums, Traits, Impls)
+# ============================================================================
+
+fn platform_has_diagnostic_level(platform: PlatformParseResult, level: PlatformDiagnosticLevel) -> bool:
+    var i = 0
+    while i < platform.diagnostics.len():
+        if platform.diagnostics[i].level() == level:
+            return true
+        i = i + 1
+    false
+
+fn platform_first_diagnostic_message(platform: PlatformParseResult) -> text:
+    if platform.diagnostics.len() == 0:
+        return ""
+    platform.diagnostics[0].message()
+
+fn platform_first_diagnostic_line(platform: PlatformParseResult) -> i64:
+    if platform.diagnostics.len() == 0:
+        return 0
+    platform.diagnostics[0].span().line
+
+fn function_params(fn_: Function) -> [Param]:
+    match fn_:
+        case Function(_, _, params, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _):
+            params
+
+fn module_functions_destructure(module: ParserModule) -> Dict<text, Function>:
+    match module:
+        case Module(_, _, _, _, functions, _, _, _, _, _, _, _, _, _, _, _, _, _, _):
+            functions
+
+fn bootstrap_function_names_from_env() -> [text]:
+    var names: [text] = []
+    var i = 0
+    while i < 64:
+        val tag = rt_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(i)) ?? ""
+        if tag == "1":
+            val name = rt_env_get("SIMPLE_BOOTSTRAP_DECL_NAME_" + int_to_str(i)) ?? ""
+            if name != "":
+                names.push(name)
+        i = i + 1
+    names
+
+fn bootstrap_hir_symbol_for_name(name: text) -> SymbolId:
+    if name == "bootstrap_version":
+        return SymbolId(id: 1)
+    if name == "native_build_help":
+        return SymbolId(id: 2)
+    if name == "compile_result_exit":
+        return SymbolId(id: 3)
+    if name == "bootstrap_output_from_args":
+        return SymbolId(id: 7)
+    if name == "run_native_build_bootstrap":
+        return SymbolId(id: 4)
+    if name == "get_cli_args":
+        return SymbolId(id: 5)
+    if name == "main":
+        return SymbolId(id: 6)
+    SymbolId(id: 100)

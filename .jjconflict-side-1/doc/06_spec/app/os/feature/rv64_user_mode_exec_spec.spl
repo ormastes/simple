@@ -1,0 +1,56 @@
+# System-spec checks for RV64 user-mode exec behavior.
+#
+# This spec focuses on the stable pure-contract surface for the blocker slice:
+# user-vs-kernel initial context, trap classification, syscall marshalling,
+# and syscall result write-back.
+
+use std.spec
+use os.kernel.arch.riscv64.trap_model.{RV64_CAUSE_INTERRUPT_BIT, RV64_CAUSE_S_EXTERNAL_INTERRUPT, RV64_CAUSE_ECALL_FROM_U, RV64_SSTATUS_SPP, Rv64TrapKind, create_rv64_kernel_context, create_rv64_user_context, classify_rv64_trap, rv64_syscall_args_from_context, rv64_apply_syscall_result}
+use os.kernel.arch.arch_context.{Riscv64Context}
+use os.kernel.types.syscall_types.{SyscallResult}
+
+describe "rv64_user_mode_exec feature spec":
+    it "keeps kernel and user initial return privilege distinct":
+        val kernel_ctx = create_rv64_kernel_context(0x80200000, 0x80400000, 0)
+        val user_ctx = create_rv64_user_context(0x400000, 0x410000, 0)
+        expect((kernel_ctx.sstatus & RV64_SSTATUS_SPP) != 0).to_equal(true)
+        expect((user_ctx.sstatus & RV64_SSTATUS_SPP) != 0).to_equal(false)
+
+    it "classifies user ecall as the supported runtime syscall path":
+        val kind = classify_rv64_trap(RV64_CAUSE_ECALL_FROM_U)
+        match kind:
+            case Rv64TrapKind.UserEcall:
+                expect(true).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
+
+    it "keeps external interrupts separate from user ecall handling":
+        val kind = classify_rv64_trap(RV64_CAUSE_INTERRUPT_BIT | RV64_CAUSE_S_EXTERNAL_INTERRUPT)
+        match kind:
+            case Rv64TrapKind.ExternalInterrupt:
+                expect(true).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
+
+    it "maps rv64 syscall registers to the stable syscall ABI":
+        val ctx = Riscv64Context(
+            ra: 0, sp: 0, gp: 0, tp: 0,
+            t0: 0, t1: 0, t2: 0,
+            s0: 0, s1: 0,
+            a0: 1, a1: 2, a2: 3, a3: 4, a4: 5, a5: 6, a6: 0, a7: 60,
+            s2: 0, s3: 0, s4: 0, s5: 0, s6: 0, s7: 0, s8: 0, s9: 0, s10: 0, s11: 0,
+            t3: 0, t4: 0, t5: 0, t6: 0,
+            sepc: 0x1000,
+            sstatus: 0,
+            scause: RV64_CAUSE_ECALL_FROM_U
+        )
+        val args = rv64_syscall_args_from_context(ctx)
+        expect(args.id).to_equal(60)
+        expect(args.arg0).to_equal(1)
+        expect(args.arg5).to_equal(6)
+
+    it "writes syscall result to a0 and advances sepc past ecall":
+        val ctx = create_rv64_user_context(0x400000, 0x410000, 0)
+        val updated = rv64_apply_syscall_result(ctx, SyscallResult(value: 7))
+        expect(updated.a0).to_equal(7)
+        expect(updated.sepc).to_equal(0x400004)

@@ -1,0 +1,774 @@
+# MCP T32 Job Manager spec — tests job lifecycle, manager ops, background model, timeouts
+# Requirements: doc/requirement/t32_mcp_cli_improvements.md (F1: Job Manager)
+# REQ-F1-001 through REQ-F1-007, AC-F1-01 through AC-F1-08
+
+# --- Inlined job status constants ---
+
+fn status_queued() -> text: "queued"
+fn status_running() -> text: "running"
+fn status_waiting_target() -> text: "waiting_target"
+fn status_waiting_practice() -> text: "waiting_practice"
+fn status_completed() -> text: "completed"
+fn status_failed() -> text: "failed"
+fn status_timed_out() -> text: "timed_out"
+fn status_cancelled() -> text: "cancelled"
+
+# --- Inlined T32Job class (REQ-F1-001) ---
+
+class T32Job:
+    job_id: text
+    session_id: text
+    tool_name: text
+    status: text
+    error_message: text
+    result_text: text
+    created_at_ms: i64
+    timeout_ms: i64
+    background: bool
+
+fn make_job(id: text, session_id: text, tool_name: text) -> T32Job:
+    T32Job(
+        job_id: id,
+        session_id: session_id,
+        tool_name: tool_name,
+        status: status_queued(),
+        error_message: "",
+        result_text: "",
+        created_at_ms: 0,
+        timeout_ms: 10000,
+        background: false
+    )
+
+fn make_bg_job(id: text, session_id: text, tool_name: text) -> T32Job:
+    T32Job(
+        job_id: id,
+        session_id: session_id,
+        tool_name: tool_name,
+        status: status_queued(),
+        error_message: "",
+        result_text: "",
+        created_at_ms: 0,
+        timeout_ms: 10000,
+        background: true
+    )
+
+# --- Inlined state machine transition validator (REQ-F1-001) ---
+
+fn is_valid_transition(from_status: text, to_status: text) -> bool:
+    # queued -> running
+    if from_status == "queued" and to_status == "running":
+        return true
+    # running -> completed, failed, timed_out, cancelled, waiting_target, waiting_practice
+    if from_status == "running" and to_status == "completed":
+        return true
+    if from_status == "running" and to_status == "failed":
+        return true
+    if from_status == "running" and to_status == "timed_out":
+        return true
+    if from_status == "running" and to_status == "cancelled":
+        return true
+    if from_status == "running" and to_status == "waiting_target":
+        return true
+    if from_status == "running" and to_status == "waiting_practice":
+        return true
+    # waiting_target -> running, timed_out, cancelled
+    if from_status == "waiting_target" and to_status == "running":
+        return true
+    if from_status == "waiting_target" and to_status == "timed_out":
+        return true
+    if from_status == "waiting_target" and to_status == "cancelled":
+        return true
+    # waiting_practice -> running, completed, failed, timed_out, cancelled
+    if from_status == "waiting_practice" and to_status == "running":
+        return true
+    if from_status == "waiting_practice" and to_status == "completed":
+        return true
+    if from_status == "waiting_practice" and to_status == "failed":
+        return true
+    if from_status == "waiting_practice" and to_status == "timed_out":
+        return true
+    if from_status == "waiting_practice" and to_status == "cancelled":
+        return true
+    # queued -> cancelled (cancel before start)
+    if from_status == "queued" and to_status == "cancelled":
+        return true
+    # All terminal states reject transitions
+    false
+
+fn try_transition(job: T32Job, new_status: text) -> T32Job:
+    if is_valid_transition(job.status, new_status):
+        return T32Job(
+            job_id: job.job_id,
+            session_id: job.session_id,
+            tool_name: job.tool_name,
+            status: new_status,
+            error_message: job.error_message,
+            result_text: job.result_text,
+            created_at_ms: job.created_at_ms,
+            timeout_ms: job.timeout_ms,
+            background: job.background
+        )
+    # Return unchanged on invalid transition
+    job
+
+fn try_transition_with_error(job: T32Job, new_status: text, error: text) -> T32Job:
+    if is_valid_transition(job.status, new_status):
+        return T32Job(
+            job_id: job.job_id,
+            session_id: job.session_id,
+            tool_name: job.tool_name,
+            status: new_status,
+            error_message: error,
+            result_text: job.result_text,
+            created_at_ms: job.created_at_ms,
+            timeout_ms: job.timeout_ms,
+            background: job.background
+        )
+    job
+
+fn set_result(job: T32Job, result: text) -> T32Job:
+    T32Job(
+        job_id: job.job_id,
+        session_id: job.session_id,
+        tool_name: job.tool_name,
+        status: job.status,
+        error_message: job.error_message,
+        result_text: result,
+        created_at_ms: job.created_at_ms,
+        timeout_ms: job.timeout_ms,
+        background: job.background
+    )
+
+# --- Inlined T32JobManager (REQ-F1-002) ---
+
+class T32JobManager:
+    jobs: [T32Job]
+    next_id: i64
+    max_concurrent: i64
+    retention_ms: i64
+
+fn make_manager() -> T32JobManager:
+    T32JobManager(
+        jobs: [],
+        next_id: 1,
+        max_concurrent: 16,
+        retention_ms: 300000
+    )
+
+fn manager_create_job(mgr: T32JobManager, session_id: text, tool_name: text, background: bool) -> [text]:
+    # Returns [job_id, "ok"] or ["", "error:..."]
+    # Check concurrent limit (count non-terminal jobs)
+    var active_count = 0
+    for j in mgr.jobs:
+        if (j.status == "queued" or j.status == "running" or
+            j.status == "waiting_target" or j.status == "waiting_practice"):
+            active_count = active_count + 1
+    if active_count >= mgr.max_concurrent:
+        return ["", "error:max_concurrent_exceeded"]
+
+    val id_str = "job_" + str(mgr.next_id)
+    val job = T32Job(
+        job_id: id_str,
+        session_id: session_id,
+        tool_name: tool_name,
+        status: status_queued(),
+        error_message: "",
+        result_text: "",
+        created_at_ms: 0,
+        timeout_ms: 10000,
+        background: background
+    )
+    mgr.jobs.push(job)
+    mgr.next_id = mgr.next_id + 1
+    [id_str, "ok"]
+
+fn manager_get_job(mgr: T32JobManager, job_id: text) -> T32Job:
+    for j in mgr.jobs:
+        if j.job_id == job_id:
+            return j
+    # Return a sentinel nil-like job
+    T32Job(
+        job_id: "",
+        session_id: "",
+        tool_name: "",
+        status: "not_found",
+        error_message: "",
+        result_text: "",
+        created_at_ms: 0,
+        timeout_ms: 0,
+        background: false
+    )
+
+fn manager_list_jobs(mgr: T32JobManager) -> [T32Job]:
+    var result: [T32Job] = []
+    for j in mgr.jobs:
+        if (j.status == "queued" or j.status == "running" or
+            j.status == "waiting_target" or j.status == "waiting_practice"):
+            result.push(j)
+    result
+
+fn manager_list_jobs_by_session(mgr: T32JobManager, session_id: text) -> [T32Job]:
+    var result: [T32Job] = []
+    for j in mgr.jobs:
+        if j.session_id == session_id:
+            result.push(j)
+    result
+
+fn manager_cancel_job(mgr: T32JobManager, job_id: text) -> bool:
+    var i = 0
+    for j in mgr.jobs:
+        if j.job_id == job_id:
+            if is_valid_transition(j.status, status_cancelled()):
+                mgr.jobs[i] = try_transition(j, status_cancelled())
+                return true
+            return false
+        i = i + 1
+    false
+
+fn manager_cleanup(mgr: T32JobManager, current_time_ms: i64) -> i64:
+    # Remove jobs past retention period that are in terminal state
+    var kept: [T32Job] = []
+    var removed = 0
+    for j in mgr.jobs:
+        val is_terminal = (j.status == "completed" or j.status == "failed" or
+                           j.status == "timed_out" or j.status == "cancelled")
+        val age = current_time_ms - j.created_at_ms
+        if is_terminal and age > mgr.retention_ms:
+            removed = removed + 1
+        else:
+            kept.push(j)
+    mgr.jobs = kept
+    removed
+
+# --- Inlined timeout defaults per tool (REQ-F1-001, F5) ---
+
+fn job_find_char(s: text, ch: text) -> i64:
+    var i = 0
+    for c in s:
+        if c == ch:
+            return i
+        i = i + 1
+    -1
+
+fn job_substr(s: text, start: i64, end: i64) -> text:
+    var buf: [text] = []
+    var i = 0
+    for ch in s:
+        if i >= start and i < end:
+            buf.push(ch)
+        i = i + 1
+    buf.join("")
+
+fn default_timeout_for_tool(tool_name: text) -> i64:
+    val timeouts = [
+        "t32_cmm_run|60000",
+        "t32_cmd_run|10000",
+        "t32_eval|3000",
+        "t32_window_capture|5000",
+        "t32_screenshot|10000",
+        "t32_flash_program|120000"
+    ]
+    for entry in timeouts:
+        val pipe_pos = job_find_char(entry, "|")
+        if pipe_pos > 0:
+            val name = job_substr(entry, 0, pipe_pos)
+            if name == tool_name and pipe_pos + 1 < entry.len():
+                val ms_str = job_substr(entry, pipe_pos + 1, entry.len())
+                return int(ms_str)
+    10000
+
+# --- Inlined resource URI builder (REQ-F1-005) ---
+
+fn job_resource_uri(job_id: text) -> text:
+    "t32://jobs/" + job_id
+
+# --- Inlined poll response builder ---
+
+fn poll_status(job: T32Job) -> text:
+    if job.status == "completed":
+        return "completed"
+    if job.status == "failed":
+        return "failed"
+    if job.status == "timed_out":
+        return "timed_out"
+    if job.status == "cancelled":
+        return "cancelled"
+    "pending"
+
+fn result_available(job: T32Job) -> bool:
+    job.status == "completed" or job.status == "failed"
+
+# --- Tests ---
+
+# ============================================================================
+# Test Group 1: Job Lifecycle (REQ-F1-001, AC-F1-01, AC-F1-02)
+# ============================================================================
+
+describe "T32 Job Lifecycle":
+
+    context "job creation":
+        it "creates job with valid id":
+            val job = make_job("job_1", "session_a", "t32_cmm_run")
+            expect(job.job_id).to_equal("job_1")
+            expect(job.session_id).to_equal("session_a")
+            expect(job.tool_name).to_equal("t32_cmm_run")
+
+        it "starts in queued status":
+            val job = make_job("job_2", "session_a", "t32_cmd_run")
+            expect(job.status).to_equal("queued")
+
+    context "valid transitions":
+        it "transitions queued to running":
+            val job = make_job("job_3", "s1", "t32_cmm_run")
+            val running = try_transition(job, "running")
+            expect(running.status).to_equal("running")
+
+        it "transitions running to completed":
+            var job = make_job("job_4", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            val done = try_transition(job, "completed")
+            expect(done.status).to_equal("completed")
+
+        it "transitions running to failed with error message":
+            var job = make_job("job_5", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            val failed = try_transition_with_error(job, "failed", "PRACTICE script error at line 42")
+            expect(failed.status).to_equal("failed")
+            expect(failed.error_message).to_equal("PRACTICE script error at line 42")
+
+        it "transitions running to timed_out":
+            var job = make_job("job_6", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            val timed = try_transition(job, "timed_out")
+            expect(timed.status).to_equal("timed_out")
+
+        it "transitions running to cancelled":
+            var job = make_job("job_7", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            val cancelled = try_transition(job, "cancelled")
+            expect(cancelled.status).to_equal("cancelled")
+
+        it "transitions running to waiting_target":
+            var job = make_job("job_8", "s1", "t32_cmd_run")
+            job = try_transition(job, "running")
+            val waiting = try_transition(job, "waiting_target")
+            expect(waiting.status).to_equal("waiting_target")
+
+        it "transitions waiting_target back to running":
+            var job = make_job("job_9", "s1", "t32_cmd_run")
+            job = try_transition(job, "running")
+            job = try_transition(job, "waiting_target")
+            val resumed = try_transition(job, "running")
+            expect(resumed.status).to_equal("running")
+
+        it "transitions running to waiting_practice":
+            var job = make_job("job_10", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            val waiting = try_transition(job, "waiting_practice")
+            expect(waiting.status).to_equal("waiting_practice")
+
+    context "invalid transitions":
+        it "rejects completed to running":
+            var job = make_job("job_11", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = try_transition(job, "completed")
+            val invalid = try_transition(job, "running")
+            expect(invalid.status).to_equal("completed")
+
+        it "rejects failed to running":
+            var job = make_job("job_12", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = try_transition(job, "failed")
+            val invalid = try_transition(job, "running")
+            expect(invalid.status).to_equal("failed")
+
+        it "rejects timed_out to running":
+            var job = make_job("job_13", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = try_transition(job, "timed_out")
+            val invalid = try_transition(job, "running")
+            expect(invalid.status).to_equal("timed_out")
+
+        it "rejects cancelled to running":
+            var job = make_job("job_14", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = try_transition(job, "cancelled")
+            val invalid = try_transition(job, "running")
+            expect(invalid.status).to_equal("cancelled")
+
+        it "rejects queued to completed directly":
+            val job = make_job("job_15", "s1", "t32_cmm_run")
+            val invalid = try_transition(job, "completed")
+            expect(invalid.status).to_equal("queued")
+
+        it "allows queued to cancelled":
+            val job = make_job("job_16", "s1", "t32_cmm_run")
+            val cancelled = try_transition(job, "cancelled")
+            expect(cancelled.status).to_equal("cancelled")
+
+
+# ============================================================================
+# Test Group 2: Job Manager Operations (REQ-F1-002, AC-F1-04 through AC-F1-07)
+# ============================================================================
+
+describe "T32 Job Manager Operations":
+
+    context "job creation via manager":
+        it "creates job and increments counter":
+            var mgr = make_manager()
+            val result1 = manager_create_job(mgr, "s1", "t32_cmm_run", false)
+            expect(result1[0]).to_equal("job_1")
+            expect(result1[1]).to_equal("ok")
+            val result2 = manager_create_job(mgr, "s1", "t32_cmd_run", false)
+            expect(result2[0]).to_equal("job_2")
+            expect(result2[1]).to_equal("ok")
+
+        it "assigns unique ids across sessions":
+            var mgr = make_manager()
+            val r1 = manager_create_job(mgr, "s1", "t32_cmm_run", false)
+            val r2 = manager_create_job(mgr, "s2", "t32_cmm_run", false)
+            expect(r1[0] == r2[0]).to_equal(false)
+
+    context "listing jobs":
+        it "lists all active jobs":
+            var mgr = make_manager()
+            manager_create_job(mgr, "s1", "t32_cmm_run", false)
+            manager_create_job(mgr, "s1", "t32_cmd_run", false)
+            manager_create_job(mgr, "s2", "t32_eval", false)
+            val active = manager_list_jobs(mgr)
+            expect(active.len()).to_equal(3)
+
+        it "filters jobs by session_id":
+            var mgr = make_manager()
+            manager_create_job(mgr, "s1", "t32_cmm_run", false)
+            manager_create_job(mgr, "s2", "t32_cmd_run", false)
+            manager_create_job(mgr, "s1", "t32_eval", false)
+            val s1_jobs = manager_list_jobs_by_session(mgr, "s1")
+            expect(s1_jobs.len()).to_equal(2)
+            expect(s1_jobs[0].session_id).to_equal("s1")
+            expect(s1_jobs[1].session_id).to_equal("s1")
+
+        it "excludes terminal jobs from active list":
+            var mgr = make_manager()
+            manager_create_job(mgr, "s1", "t32_cmm_run", false)
+            manager_create_job(mgr, "s1", "t32_cmd_run", false)
+            # Transition second job to completed
+            mgr.jobs[1] = try_transition(mgr.jobs[1], "running")
+            mgr.jobs[1] = try_transition(mgr.jobs[1], "completed")
+            val active = manager_list_jobs(mgr)
+            expect(active.len()).to_equal(1)
+            expect(active[0].job_id).to_equal("job_1")
+
+    context "getting jobs":
+        it "returns correct job by id":
+            var mgr = make_manager()
+            manager_create_job(mgr, "s1", "t32_cmm_run", false)
+            manager_create_job(mgr, "s2", "t32_cmd_run", false)
+            val job = manager_get_job(mgr, "job_2")
+            expect(job.job_id).to_equal("job_2")
+            expect(job.session_id).to_equal("s2")
+            expect(job.tool_name).to_equal("t32_cmd_run")
+
+        it "returns not_found sentinel for nonexistent id":
+            var mgr = make_manager()
+            val job = manager_get_job(mgr, "job_999")
+            expect(job.job_id).to_equal("")
+            expect(job.status).to_equal("not_found")
+
+    context "cancelling jobs":
+        it "cancels a queued job":
+            var mgr = make_manager()
+            manager_create_job(mgr, "s1", "t32_cmm_run", false)
+            val ok = manager_cancel_job(mgr, "job_1")
+            expect(ok).to_equal(true)
+            val job = manager_get_job(mgr, "job_1")
+            expect(job.status).to_equal("cancelled")
+
+        it "cancels a running job":
+            var mgr = make_manager()
+            manager_create_job(mgr, "s1", "t32_cmm_run", false)
+            mgr.jobs[0] = try_transition(mgr.jobs[0], "running")
+            val ok = manager_cancel_job(mgr, "job_1")
+            expect(ok).to_equal(true)
+            val job = manager_get_job(mgr, "job_1")
+            expect(job.status).to_equal("cancelled")
+
+        it "rejects cancel on completed job":
+            var mgr = make_manager()
+            manager_create_job(mgr, "s1", "t32_cmm_run", false)
+            mgr.jobs[0] = try_transition(mgr.jobs[0], "running")
+            mgr.jobs[0] = try_transition(mgr.jobs[0], "completed")
+            val ok = manager_cancel_job(mgr, "job_1")
+            expect(ok).to_equal(false)
+
+    context "concurrent limit":
+        it "enforces max 16 concurrent jobs":
+            var mgr = make_manager()
+            var i = 0
+            while i < 16:
+                val r = manager_create_job(mgr, "s1", "t32_cmm_run", false)
+                expect(r[1]).to_equal("ok")
+                i = i + 1
+            val overflow = manager_create_job(mgr, "s1", "t32_cmm_run", false)
+            expect(overflow[0]).to_equal("")
+            expect(overflow[1]).to_equal("error:max_concurrent_exceeded")
+
+        it "allows new jobs after terminal transitions free slots":
+            var mgr = make_manager()
+            var i = 0
+            while i < 16:
+                manager_create_job(mgr, "s1", "t32_cmm_run", false)
+                i = i + 1
+            # Complete first job to free a slot
+            mgr.jobs[0] = try_transition(mgr.jobs[0], "running")
+            mgr.jobs[0] = try_transition(mgr.jobs[0], "completed")
+            val r = manager_create_job(mgr, "s1", "t32_cmm_run", false)
+            expect(r[1]).to_equal("ok")
+
+    context "cleanup":
+        it "removes expired terminal jobs":
+            var mgr = make_manager()
+            manager_create_job(mgr, "s1", "t32_cmm_run", false)
+            manager_create_job(mgr, "s1", "t32_cmd_run", false)
+            # Complete first job and mark it old
+            mgr.jobs[0] = try_transition(mgr.jobs[0], "running")
+            mgr.jobs[0] = try_transition(mgr.jobs[0], "completed")
+            mgr.jobs[0] = T32Job(
+                job_id: mgr.jobs[0].job_id,
+                session_id: mgr.jobs[0].session_id,
+                tool_name: mgr.jobs[0].tool_name,
+                status: mgr.jobs[0].status,
+                error_message: "",
+                result_text: "",
+                created_at_ms: 0,
+                timeout_ms: mgr.jobs[0].timeout_ms,
+                background: false
+            )
+            val removed = manager_cleanup(mgr, 400000)
+            expect(removed).to_equal(1)
+            expect(mgr.jobs.len()).to_equal(1)
+
+        it "preserves active jobs during cleanup":
+            var mgr = make_manager()
+            manager_create_job(mgr, "s1", "t32_cmm_run", false)
+            # Job stays queued (active)
+            val removed = manager_cleanup(mgr, 999999)
+            expect(removed).to_equal(0)
+            expect(mgr.jobs.len()).to_equal(1)
+
+
+# ============================================================================
+# Test Group 3: Background Execution Model (REQ-F1-003, REQ-F1-006, AC-F1-03, AC-F1-08)
+# ============================================================================
+
+describe "T32 Background Execution Model":
+
+    context "background flag":
+        it "background true returns immediately with job_id":
+            var mgr = make_manager()
+            val result = manager_create_job(mgr, "s1", "t32_cmm_run", true)
+            expect(result[0]).to_equal("job_1")
+            expect(result[1]).to_equal("ok")
+            val job = manager_get_job(mgr, "job_1")
+            expect(job.background).to_equal(true)
+            expect(job.status).to_equal("queued")
+
+        it "foreground job also gets job_id for timeout continuation":
+            var mgr = make_manager()
+            val result = manager_create_job(mgr, "s1", "t32_cmm_run", false)
+            expect(result[0]).to_equal("job_1")
+            val job = manager_get_job(mgr, "job_1")
+            expect(job.background).to_equal(false)
+
+    context "polling":
+        it "poll returns pending for queued job":
+            val job = make_job("job_1", "s1", "t32_cmm_run")
+            expect(poll_status(job)).to_equal("pending")
+
+        it "poll returns pending for running job":
+            var job = make_job("job_1", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            expect(poll_status(job)).to_equal("pending")
+
+        it "poll returns completed for finished job":
+            var job = make_job("job_1", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = try_transition(job, "completed")
+            expect(poll_status(job)).to_equal("completed")
+
+        it "poll returns failed for error job":
+            var job = make_job("job_1", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = try_transition(job, "failed")
+            expect(poll_status(job)).to_equal("failed")
+
+    context "result availability":
+        it "result available after completion":
+            var job = make_job("job_1", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = set_result(job, "Flash programming complete")
+            job = try_transition(job, "completed")
+            expect(result_available(job)).to_equal(true)
+            expect(job.result_text).to_equal("Flash programming complete")
+
+        it "result not available while running":
+            var job = make_job("job_1", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            expect(result_available(job)).to_equal(false)
+
+        it "result available after failure with error":
+            var job = make_job("job_1", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = try_transition_with_error(job, "failed", "connection lost")
+            expect(result_available(job)).to_equal(true)
+            expect(job.error_message).to_equal("connection lost")
+
+    context "resource URI":
+        it "produces correct resource URI format":
+            val uri = job_resource_uri("job_42")
+            expect(uri).to_equal("t32://jobs/job_42")
+
+        it "URI starts with t32 scheme":
+            val uri = job_resource_uri("job_1")
+            expect(uri).to_start_with("t32://")
+
+        it "URI contains jobs path":
+            val uri = job_resource_uri("job_123")
+            expect(uri).to_contain("/jobs/")
+
+
+# ============================================================================
+# Test Group 4: Timeout Policy (REQ-F1-001, REQ-F5-004)
+# ============================================================================
+
+describe "T32 Job Timeout Policy":
+
+    context "default timeouts per tool type":
+        it "cmm_run has 60s default timeout":
+            expect(default_timeout_for_tool("t32_cmm_run")).to_equal(60000)
+
+        it "cmd_run has 10s default timeout":
+            expect(default_timeout_for_tool("t32_cmd_run")).to_equal(10000)
+
+        it "eval has 3s default timeout":
+            expect(default_timeout_for_tool("t32_eval")).to_equal(3000)
+
+        it "window_capture has 5s default timeout":
+            expect(default_timeout_for_tool("t32_window_capture")).to_equal(5000)
+
+        it "screenshot has 10s default timeout":
+            expect(default_timeout_for_tool("t32_screenshot")).to_equal(10000)
+
+        it "flash_program has 120s default timeout":
+            expect(default_timeout_for_tool("t32_flash_program")).to_equal(120000)
+
+        it "unknown tool gets default 10s timeout":
+            expect(default_timeout_for_tool("t32_unknown")).to_equal(10000)
+
+    context "custom timeout override":
+        it "custom timeout_ms overrides default":
+            var job = make_job("job_1", "s1", "t32_cmm_run")
+            # Simulate custom timeout
+            val custom_job = T32Job(
+                job_id: job.job_id,
+                session_id: job.session_id,
+                tool_name: job.tool_name,
+                status: job.status,
+                error_message: job.error_message,
+                result_text: job.result_text,
+                created_at_ms: job.created_at_ms,
+                timeout_ms: 30000,
+                background: job.background
+            )
+            expect(custom_job.timeout_ms).to_equal(30000)
+            # Verify default would have been different
+            expect(default_timeout_for_tool("t32_cmm_run")).to_equal(60000)
+
+    context "timeout behavior":
+        it "timed out status set correctly on timeout":
+            var job = make_job("job_1", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = try_transition(job, "timed_out")
+            expect(job.status).to_equal("timed_out")
+
+        it "timeout does not affect background job flag":
+            var job = make_bg_job("job_1", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = try_transition(job, "timed_out")
+            expect(job.status).to_equal("timed_out")
+            expect(job.background).to_equal(true)
+
+        it "timed_out is a terminal state":
+            var job = make_job("job_1", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = try_transition(job, "timed_out")
+            # Cannot transition out of timed_out
+            val invalid = try_transition(job, "running")
+            expect(invalid.status).to_equal("timed_out")
+
+
+# ============================================================================
+# Test Group 5: Edge Cases and Integration (additional coverage)
+# ============================================================================
+
+describe "T32 Job Manager Edge Cases":
+
+    context "state machine completeness":
+        it "waiting_practice can complete directly":
+            var job = make_job("job_1", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = try_transition(job, "waiting_practice")
+            job = try_transition(job, "completed")
+            expect(job.status).to_equal("completed")
+
+        it "waiting_practice can fail":
+            var job = make_job("job_1", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = try_transition(job, "waiting_practice")
+            job = try_transition_with_error(job, "failed", "PRACTICE error")
+            expect(job.status).to_equal("failed")
+            expect(job.error_message).to_equal("PRACTICE error")
+
+        it "waiting_target can time out":
+            var job = make_job("job_1", "s1", "t32_cmd_run")
+            job = try_transition(job, "running")
+            job = try_transition(job, "waiting_target")
+            job = try_transition(job, "timed_out")
+            expect(job.status).to_equal("timed_out")
+
+        it "waiting_target can be cancelled":
+            var job = make_job("job_1", "s1", "t32_cmd_run")
+            job = try_transition(job, "running")
+            job = try_transition(job, "waiting_target")
+            job = try_transition(job, "cancelled")
+            expect(job.status).to_equal("cancelled")
+
+    context "manager with mixed sessions":
+        it "handles multiple sessions independently":
+            var mgr = make_manager()
+            manager_create_job(mgr, "session_a", "t32_cmm_run", true)
+            manager_create_job(mgr, "session_b", "t32_cmd_run", false)
+            manager_create_job(mgr, "session_a", "t32_eval", false)
+            val a_jobs = manager_list_jobs_by_session(mgr, "session_a")
+            val b_jobs = manager_list_jobs_by_session(mgr, "session_b")
+            expect(a_jobs.len()).to_equal(2)
+            expect(b_jobs.len()).to_equal(1)
+            expect(a_jobs[0].tool_name).to_equal("t32_cmm_run")
+            expect(a_jobs[1].tool_name).to_equal("t32_eval")
+            expect(b_jobs[0].tool_name).to_equal("t32_cmd_run")
+
+    context "job result lifecycle":
+        it "result persists through completion":
+            var job = make_job("job_1", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = set_result(job, "DO flash_program.cmm completed successfully")
+            job = try_transition(job, "completed")
+            expect(job.result_text).to_equal("DO flash_program.cmm completed successfully")
+            expect(job.status).to_equal("completed")
+
+        it "error message persists on failure":
+            var job = make_job("job_1", "s1", "t32_cmm_run")
+            job = try_transition(job, "running")
+            job = try_transition_with_error(job, "failed", "T4101: Command timed out after 60000ms")
+            expect(job.error_message).to_start_with("T4101")
+            expect(job.error_message).to_contain("60000ms")

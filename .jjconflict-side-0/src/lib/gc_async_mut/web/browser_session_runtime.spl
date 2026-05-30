@@ -1,0 +1,348 @@
+# Browser session — runtime state sync and script evaluation methods.
+#
+# impl BrowserSession extension block covering:
+# - eval_script: evaluate a JS string against the live runtime
+# - render / render_to_pixels / render_html_document: rendering entry points
+# - current_entry: current history entry accessor
+# - _load_page_source: parse HTML and kick off stylesheet/script loading
+# - _ensure_runtime_state: lazy-create a BrowserRuntimeState
+# - _sync_from_runtime: pull title/body/cookie/storage back from the JS runtime
+# - _sync_runtime_cookie_string: push cookie jar into the live runtime
+# - _build_request: build a BrowserRequest with cookie header attached
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
+use std.js.types.js_types.{JsValue}
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, BrowserLoadState, BrowserRequest, BrowserHistoryEntry}
+use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, sync_browser_runtime_state, pair_value, upsert_pair, is_storage_api_property, is_storage_internal_property, storage_public_key_from_internal, js_value_to_storage_text}
+use std.js.types.pair.{Pair}
+use std.gc_async_mut.web.browser_session_url.{resolve_relative_url, url_protocol, url_pathname, url_origin, url_host, url_search, url_hash}
+use std.gc_async_mut.web.browser_session_cookies.{cookie_text_for_url, merge_cookie_text, parse_cookie_line, upsert_cookie}
+use std.gc_async_mut.web.browser_session_html.{
+    extract_title_text, extract_body_inner_html, own_text,
+    html_to_text, escape_html_text,
+    strip_script_blocks, extract_stylesheet_sources, _guest_runtime_probe_url
+}
+use std.gc_async_mut.web.browser_session_modules.{extract_script_blocks}
+
+fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pair<text, text>]:
+    val obj = state.runtime.get_host_object(object_id)
+    var out: [Pair<text, text>] = []
+    for prop in obj.properties:
+        if is_storage_internal_property(prop.key):
+            out = upsert_pair(out, storage_public_key_from_internal(prop.key), js_value_to_storage_text(prop.value))
+        else if not is_storage_api_property(prop.key):
+            out = upsert_pair(out, prop.key, js_value_to_storage_text(prop.value))
+    out
+
+impl BrowserSession:
+
+    me eval_script(script: text) -> Result<JsValue, text>:
+        if self.runtime_state == nil:
+            val _ = self._ensure_runtime_state()
+        if val Some(state) = self.runtime_state:
+            var runtime = state.runtime
+            val result = runtime.eval(script)
+            state.runtime = runtime
+            self.runtime_state = Some(state)
+            match result:
+                Ok(value):
+                    self._flush_runtime_side_effects()
+                    return Ok(value)
+                Err(e):
+                    return Err(e.message)
+        Err("no active page runtime")
+
+    fn render(width: i32, height: i32) -> BeRenderResult:
+        var renderer = BrowserRenderer.create(width, height)
+        renderer.render_html(self.render_html_document())
+
+    fn render_to_pixels(width: i32, height: i32) -> BeRenderResult:
+        var renderer = BrowserRenderer.create(width, height)
+        renderer.render_html_to_pixels(self.render_html_document())
+
+    fn render_html_document() -> text:
+        val title = if self.current_title != "": self.current_title else: self.current_url
+        val body_html = if self.current_body_html.len() > 0: self.current_body_html else: ""
+        val style_html = self.current_style_html
+        "<!DOCTYPE html><html><head><title>{title}</title>{style_html}</head><body>{body_html}</body></html>"
+
+    fn current_entry() -> BrowserHistoryEntry?:
+        if self.current_index >= 0 and self.current_index < self.history.len():
+            return Some(self.history[self.current_index])
+        nil
+
+    me _load_page_source(
+        url: text,
+        html: text,
+        target_index: i32,
+        push_history: bool
+    ) -> Result<bool, text>:
+        if url.starts_with("https://guest.runtime/"):
+            print "[BRS] load page source start"
+        val script_blocks = extract_script_blocks(html)
+        if url.starts_with("https://guest.runtime/"):
+            print "[BRS] script blocks={script_blocks.len()}"
+        val has_runtime_scripts = self.runtime_enabled and script_blocks.len() > 0
+        val cleaned_html = if has_runtime_scripts:
+            html
+        else:
+            strip_script_blocks(html)
+        val initial_title = own_text(extract_title_text(html))
+        val initial_body_html = own_text(extract_body_inner_html(cleaned_html))
+        val body_html = if initial_body_html.len() > 0:
+            initial_body_html
+        else:
+            own_text(cleaned_html)
+
+        val style_sources = extract_stylesheet_sources(html)
+        if url.starts_with("https://guest.runtime/"):
+            print "[BRS] style sources={style_sources.len()}"
+
+        if self.runtime_enabled and script_blocks.len() > 0:
+            val cookie_text = cookie_text_for_url(self.cookies, url)
+            var state = BrowserRuntimeState.create(
+                own_text(url),
+                initial_title,
+                body_html,
+                self.session_storage,
+                self.local_storage,
+                own_text(cookie_text)
+            )
+            self.runtime_state = Some(state)
+            if url.starts_with("https://guest.runtime/"):
+                print "[BRS] runtime state created"
+        else:
+            self.runtime_state = nil
+        self.current_url = own_text(url)
+        self.current_title = if initial_title.len() > 0: initial_title else: own_text(url)
+        self.current_body_html = body_html
+        self.current_style_html = ""
+        self.source_html = own_text(html)
+
+        self.active_load = Some(BrowserLoadState.create(
+            document_url: url,
+            source_html: html,
+            target_index: target_index,
+            push_history: push_history,
+            script_blocks: script_blocks,
+            style_sources: style_sources
+        ))
+        if url.starts_with("https://guest.runtime/"):
+            print "[BRS] active load created"
+        self._advance_stylesheet_loading()
+
+    me _ensure_runtime_state() -> BrowserRuntimeState?:
+        if not self.runtime_enabled:
+            return nil
+        if val Some(state) = self.runtime_state:
+            return Some(state)
+        val cookie_text = cookie_text_for_url(self.cookies, self.current_url)
+        val state = BrowserRuntimeState.create(
+            self.current_url,
+            self.current_title,
+            self.current_body_html,
+            self.session_storage,
+            self.local_storage,
+            cookie_text
+        )
+        self.runtime_state = Some(state)
+        Some(state)
+
+    me _sync_from_runtime(state: BrowserRuntimeState):
+        var title_val = state.runtime.interpreter.host_document_title_value
+        if strict_equals(title_val, JsValue.Undefined):
+            title_val = state.runtime.get_host_property(
+                state.document_id,
+                "title"
+            )
+        if val JsValue.String(title) = title_val:
+            if title.len() > 0:
+                self.current_title = title
+
+        val old_url = self.current_url
+        var navigation_mode = ""
+        val navigation_mode_val = state.runtime.get_host_property(
+            state.location_id,
+            "__simple_navigation_mode"
+        )
+        if val JsValue.String(mode) = navigation_mode_val:
+            navigation_mode = mode
+            state.runtime.set_host_property(
+                state.location_id,
+                "__simple_navigation_mode",
+                JsValue.String(v: "")
+            )
+        val history_mode_val = state.runtime.get_host_property(
+            state.history_id,
+            "__simple_navigation_mode"
+        )
+        if val JsValue.String(mode) = history_mode_val:
+            if mode != "":
+                navigation_mode = mode
+            state.runtime.set_host_property(
+                state.history_id,
+                "__simple_navigation_mode",
+                JsValue.String(v: "")
+            )
+
+        val href_val = state.runtime.get_host_property(
+            state.location_id,
+            "href"
+        )
+        if val JsValue.String(href) = href_val:
+            if href.len() > 0:
+                var next_href = href
+                if navigation_mode == "pushState" or navigation_mode == "replaceState":
+                    var history_url_val = state.runtime.get_host_property(
+                        state.location_id,
+                        "__simple_history_url"
+                    )
+                    if strict_equals(history_url_val, JsValue.Undefined):
+                        history_url_val = state.runtime.get_host_property(
+                            state.history_id,
+                            "__simple_url"
+                        )
+                    if val JsValue.String(history_url) = history_url_val:
+                        if history_url.len() > 0:
+                            next_href = resolve_relative_url(old_url, history_url)
+                    val history_state_val = state.runtime.get_host_property(
+                        state.location_id,
+                        "__simple_history_state"
+                    )
+                    if not strict_equals(history_state_val, JsValue.Undefined):
+                        state.runtime.set_host_property(
+                            state.history_id,
+                            "state",
+                            history_state_val
+                        )
+                    state.runtime.set_host_property(
+                        state.location_id,
+                        "__simple_history_url",
+                        JsValue.String(v: "")
+                    )
+                self.current_url = next_href
+                browser_session_sync_location_object(state, next_href)
+                state.runtime.set_host_property(
+                    state.document_id,
+                    "URL",
+                    JsValue.String(v: next_href)
+                )
+                if navigation_mode == "assign" and next_href != old_url:
+                    self._push_runtime_history_entry()
+                else if navigation_mode == "pushState":
+                    self._push_runtime_history_entry()
+
+        var inner_html_val = state.runtime.interpreter.host_body_inner_html_value
+        if strict_equals(inner_html_val, JsValue.Undefined):
+            inner_html_val = state.runtime.get_host_property(
+                state.body_id,
+                "innerHTML"
+            )
+        var text_content_val = state.runtime.interpreter.host_body_text_content_value
+        if strict_equals(text_content_val, JsValue.Undefined):
+            text_content_val = state.runtime.get_host_property(
+                state.body_id,
+                "textContent"
+            )
+
+        var next_body_html = self.current_body_html
+        if val JsValue.String(body_html) = inner_html_val:
+            next_body_html = body_html
+
+        if val JsValue.String(body_text) = text_content_val:
+            val rendered_text = escape_html_text(body_text)
+            if rendered_text != escape_html_text(html_to_text(next_body_html)):
+                next_body_html = rendered_text
+
+        self.current_body_html = next_body_html
+        self.session_storage = storage_pairs_from_object(state, state.session_storage_id)
+        self.local_storage = storage_pairs_from_object(state, state.local_storage_id)
+        state.runtime = sync_storage_runtime_state(state.runtime, state.session_storage_id, self.session_storage)
+        state.runtime = sync_storage_runtime_state(state.runtime, state.local_storage_id, self.local_storage)
+
+        var cookie_val = state.runtime.interpreter.host_document_cookie_value
+        if strict_equals(cookie_val, JsValue.Undefined):
+            cookie_val = state.runtime.get_host_property(
+                state.document_id,
+                "cookie"
+            )
+        if val JsValue.String(cookie_text) = cookie_val:
+            val visible_cookie_before_sync = cookie_text_for_url(self.cookies, self.current_url)
+            if cookie_text != visible_cookie_before_sync:
+                self.cookies = merge_cookie_text(self.cookies, cookie_text)
+
+        val visible_cookie_text = cookie_text_for_url(self.cookies, self.current_url)
+        var runtime = state.runtime
+        var interpreter = runtime.interpreter
+        interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)
+        runtime.interpreter = interpreter
+        state.runtime = runtime
+        state.runtime = sync_browser_runtime_state(state.runtime, state.window_id, state.chrome_id, self.current_url, visible_cookie_text)
+        state.runtime.set_host_property(
+            state.document_id,
+            "readyState",
+            JsValue.String(v: "complete")
+        )
+
+    me _push_runtime_history_entry():
+        var source_html = self.source_html
+        if self.current_index >= 0 and self.current_index < self.history.len():
+            source_html = self.history[self.current_index].source_html
+        if self.current_index < self.history.len() - 1:
+            var trimmed: [BrowserHistoryEntry] = []
+            var i = 0
+            while i <= self.current_index:
+                if i >= 0 and i < self.history.len():
+                    trimmed.push(self.history[i])
+                i = i + 1
+            self.history = trimmed
+        self.history.push(BrowserHistoryEntry.create(
+            url: self.current_url,
+            title: self.current_title,
+            source_html: source_html
+        ))
+        self.current_index = self.history.len() - 1
+
+    me _sync_runtime_cookie_string():
+        if val Some(state) = self.runtime_state:
+            val visible_cookie_text = cookie_text_for_url(self.cookies, self.current_url)
+            var runtime = state.runtime
+            var interpreter = runtime.interpreter
+            interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)
+            runtime.interpreter = interpreter
+            runtime.set_host_property(
+                state.document_id,
+                "cookie",
+            JsValue.String(v: visible_cookie_text)
+        )
+            state.runtime = runtime
+            self.runtime_state = Some(state)
+
+    me _build_request(kind: text, url: text, method: text, headers: text, body: text, content_type: text) -> BrowserRequest:
+        val normalized_method = if method.trim() != "": method.upper() else: "GET"
+        var request_headers = headers
+        val cookie_header = self.cookie_header_for_request(url)
+        if cookie_header != "":
+            if request_headers != "":
+                request_headers = request_headers + "\n"
+            request_headers = request_headers + "Cookie: " + cookie_header
+        val request_id = "{kind}-{self.next_request_seq}"
+        self.next_request_seq = self.next_request_seq + 1
+        BrowserRequest.create(
+            id: request_id,
+            kind: kind,
+            url: url,
+            method: normalized_method,
+            headers: request_headers,
+            body: body,
+            content_type: content_type
+        )
+
+fn browser_session_sync_location_object(state: BrowserRuntimeState, href: text):
+    state.runtime.set_host_property(state.location_id, "href", JsValue.String(v: href))
+    state.runtime.set_host_property(state.location_id, "protocol", JsValue.String(v: url_protocol(href)))
+    state.runtime.set_host_property(state.location_id, "host", JsValue.String(v: url_host(href)))
+    state.runtime.set_host_property(state.location_id, "origin", JsValue.String(v: url_origin(href)))
+    state.runtime.set_host_property(state.location_id, "pathname", JsValue.String(v: url_pathname(href)))
+    state.runtime.set_host_property(state.location_id, "search", JsValue.String(v: url_search(href)))
+    state.runtime.set_host_property(state.location_id, "hash", JsValue.String(v: url_hash(href)))

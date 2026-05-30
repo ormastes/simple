@@ -1,0 +1,327 @@
+# RISC-V MMU and Privilege Level Support
+#
+# Provides privilege-mode definitions, SATP register encoding/decoding,
+# and page-table entry (PTE) helpers for Sv32, Sv39, and Sv48 virtual
+# memory modes.
+#
+# Reference: RISC-V Privileged ISA Specification v1.12, Chapter 4
+#
+# ============================================================================
+# Privilege Levels
+# ============================================================================
+
+val PRIV_U: u64 = 0   # User mode
+val PRIV_S: u64 = 1   # Supervisor mode
+val PRIV_M: u64 = 3   # Machine mode
+
+fn privilege_name(level: u64) -> text:
+    """Return the name of a privilege level."""
+    if level == PRIV_U:
+        return "User"
+    if level == PRIV_S:
+        return "Supervisor"
+    if level == PRIV_M:
+        return "Machine"
+    "Unknown"
+
+# ============================================================================
+# SATP Register Layout (Supervisor Address Translation and Protection)
+# ============================================================================
+#
+# RV64 SATP layout:
+#   bits [63:60] — MODE (4 bits)
+#   bits [59:44] — ASID (16 bits)
+#   bits [43:0]  — PPN  (44 bits — physical page number of root page table)
+#
+# RV32 SATP layout:
+#   bit  [31]    — MODE (1 bit: 0=Bare, 1=Sv32)
+#   bits [30:22] — ASID (9 bits)
+#   bits [21:0]  — PPN  (22 bits)
+
+# SATP MODE values (RV64)
+val SATP_MODE_BARE: u64 = 0   # No translation
+val SATP_MODE_SV39: u64 = 8   # 39-bit virtual addressing (3-level)
+val SATP_MODE_SV48: u64 = 9   # 48-bit virtual addressing (4-level)
+val SATP_MODE_SV57: u64 = 10  # 57-bit virtual addressing (5-level)
+
+# SATP MODE values (RV32)
+val SATP32_MODE_BARE: u64 = 0  # No translation
+val SATP32_MODE_SV32: u64 = 1  # 32-bit virtual addressing (2-level)
+
+fn satp_mode_name(mode: u64) -> text:
+    """Return the name of a SATP mode."""
+    if mode == SATP_MODE_BARE:
+        return "Bare"
+    if mode == SATP_MODE_SV39:
+        return "Sv39"
+    if mode == SATP_MODE_SV48:
+        return "Sv48"
+    if mode == SATP_MODE_SV57:
+        return "Sv57"
+    "Unknown"
+
+# ============================================================================
+# SATP Encode / Decode (RV64)
+# ============================================================================
+
+fn satp_encode(mode: u64, asid: u64, ppn: u64) -> u64:
+    """Encode a SATP register value for RV64.
+
+    mode — translation mode (SATP_MODE_*)
+    asid — address-space identifier (16-bit)
+    ppn  — physical page number of root page table (44-bit)
+    """
+    var value: u64 = 0
+    value.bits[60..64] = mode & 0x0F
+    value.bits[44..60] = asid & 0xFFFF
+    value.bits[0..44] = ppn & 0x0FFFFFFFFFFF
+    value
+
+fn satp_mode(satp: u64) -> u64:
+    """Extract MODE field from SATP (bits 63:60)."""
+    satp.bits[60..64]
+
+fn satp_asid(satp: u64) -> u64:
+    """Extract ASID field from SATP (bits 59:44)."""
+    satp.bits[44..60]
+
+fn satp_ppn(satp: u64) -> u64:
+    """Extract PPN field from SATP (bits 43:0)."""
+    satp.bits[0..44]
+
+# ============================================================================
+# SATP Encode / Decode (RV32)
+# ============================================================================
+
+fn satp32_encode(mode: u64, asid: u64, ppn: u64) -> u64:
+    """Encode a SATP register value for RV32.
+
+    mode — 0 = Bare, 1 = Sv32
+    asid — 9-bit address-space identifier
+    ppn  — 22-bit physical page number of root page table
+    """
+    var value: u64 = 0
+    value.bits[31..32] = mode & 0x01
+    value.bits[22..31] = asid & 0x1FF
+    value.bits[0..22] = ppn & 0x3FFFFF
+    value
+
+fn satp32_mode(satp: u64) -> u64:
+    """Extract MODE bit from RV32 SATP."""
+    satp.bits[31..32]
+
+fn satp32_asid(satp: u64) -> u64:
+    """Extract ASID from RV32 SATP (bits 30:22)."""
+    satp.bits[22..31]
+
+fn satp32_ppn(satp: u64) -> u64:
+    """Extract PPN from RV32 SATP (bits 21:0)."""
+    satp.bits[0..22]
+
+# ============================================================================
+# Page Table Entry (PTE) Bit Fields
+# ============================================================================
+#
+# Common to Sv32/Sv39/Sv48 — lower 10 bits are flags.
+#
+#   bit 0 — V (Valid)
+#   bit 1 — R (Readable)
+#   bit 2 — W (Writable)
+#   bit 3 — X (Executable)
+#   bit 4 — U (User accessible)
+#   bit 5 — G (Global mapping)
+#   bit 6 — A (Accessed)
+#   bit 7 — D (Dirty)
+#   bits 9:8 — RSW (reserved for software)
+
+val PTE_V: u64 = 1 << 0   # Valid
+val PTE_R: u64 = 1 << 1   # Readable
+val PTE_W: u64 = 1 << 2   # Writable
+val PTE_X: u64 = 1 << 3   # Executable
+val PTE_U: u64 = 1 << 4   # User
+val PTE_G: u64 = 1 << 5   # Global
+val PTE_A: u64 = 1 << 6   # Accessed
+val PTE_D: u64 = 1 << 7   # Dirty
+
+# Common permission combinations
+val PTE_RWXV: u64 = PTE_R | PTE_W | PTE_X | PTE_V
+val PTE_RV: u64 = PTE_R | PTE_V
+val PTE_RWV: u64 = PTE_R | PTE_W | PTE_V
+val PTE_RXV: u64 = PTE_R | PTE_X | PTE_V
+
+# ============================================================================
+# PTE Helpers
+# ============================================================================
+
+fn pte_is_valid(pte: u64) -> bool:
+    """Check if a PTE is valid."""
+    (pte & PTE_V) != 0
+
+fn pte_is_leaf(pte: u64) -> bool:
+    """Check if a PTE is a leaf (has R, W, or X set)."""
+    (pte & (PTE_R | PTE_W | PTE_X)) != 0
+
+fn pte_is_readable(pte: u64) -> bool:
+    """Check if a PTE grants read permission."""
+    (pte & PTE_R) != 0
+
+fn pte_is_writable(pte: u64) -> bool:
+    """Check if a PTE grants write permission."""
+    (pte & PTE_W) != 0
+
+fn pte_is_executable(pte: u64) -> bool:
+    """Check if a PTE grants execute permission."""
+    (pte & PTE_X) != 0
+
+fn pte_is_user(pte: u64) -> bool:
+    """Check if a PTE is accessible in user mode."""
+    (pte & PTE_U) != 0
+
+fn pte_is_dirty(pte: u64) -> bool:
+    """Check if a PTE has been written to (dirty bit set)."""
+    (pte & PTE_D) != 0
+
+fn pte_is_accessed(pte: u64) -> bool:
+    """Check if a PTE has been accessed."""
+    (pte & PTE_A) != 0
+
+fn pte_flags(pte: u64) -> u64:
+    """Extract the 10-bit flags from a PTE."""
+    pte.bits[0..10]
+
+# ============================================================================
+# Sv39 PTE Layout (RV64, 3-level page table)
+# ============================================================================
+#
+# bits [9:0]   — flags (V,R,W,X,U,G,A,D,RSW)
+# bits [53:10] — PPN (44 bits; PPN[0]=bits[18:10], PPN[1]=bits[27:19], PPN[2]=bits[53:28])
+# bits [63:54] — reserved
+
+fn sv39_pte_encode(ppn: u64, flags: u64) -> u64:
+    """Encode a Sv39 PTE from physical page number and flags."""
+    var pte: u64 = 0
+    pte.bits[0..10] = flags & 0x3FF
+    pte.bits[10..54] = ppn & 0x0FFFFFFFFFFF
+    pte
+
+fn sv39_pte_ppn(pte: u64) -> u64:
+    """Extract PPN from a Sv39 PTE (bits 53:10)."""
+    pte.bits[10..54]
+
+fn sv39_pte_ppn_to_phys(pte: u64) -> u64:
+    """Convert PPN from a Sv39 PTE to a physical address (shift left by 12)."""
+    sv39_pte_ppn(pte) << 12
+
+# ============================================================================
+# Sv48 PTE Layout (RV64, 4-level page table)
+# ============================================================================
+#
+# Same layout as Sv39 PTEs — the only difference is the 4th level.
+# PTE encoding is identical.
+
+fn sv48_pte_encode(ppn: u64, flags: u64) -> u64:
+    """Encode a Sv48 PTE (same layout as Sv39)."""
+    sv39_pte_encode(ppn, flags)
+
+fn sv48_pte_ppn(pte: u64) -> u64:
+    """Extract PPN from Sv48 PTE."""
+    sv39_pte_ppn(pte)
+
+# ============================================================================
+# Sv32 PTE Layout (RV32, 2-level page table)
+# ============================================================================
+#
+# bits [9:0]   — flags
+# bits [31:10] — PPN (22 bits; PPN[0]=bits[19:10], PPN[1]=bits[31:20])
+
+fn sv32_pte_encode(ppn: u64, flags: u64) -> u64:
+    """Encode a Sv32 PTE."""
+    var pte: u64 = 0
+    pte.bits[0..10] = flags & 0x3FF
+    pte.bits[10..32] = ppn & 0x3FFFFF
+    pte
+
+fn sv32_pte_ppn(pte: u64) -> u64:
+    """Extract PPN from a Sv32 PTE (bits 31:10)."""
+    pte.bits[10..32]
+
+# ============================================================================
+# Virtual Address Decomposition
+# ============================================================================
+
+# Page size constants
+val PAGE_SIZE: u64 = 4096       # 4 KiB base page
+val MEGA_PAGE_SIZE: u64 = 2 * 1024 * 1024   # 2 MiB (Sv39 level-1 superpage)
+val GIGA_PAGE_SIZE: u64 = 1024 * 1024 * 1024  # 1 GiB (Sv39 level-2 superpage)
+
+fn sv39_vpn(va: u64, level: u64) -> u64:
+    """Extract a VPN field from a Sv39 virtual address.
+
+    level 0: bits [20:12] — VPN[0]
+    level 1: bits [29:21] — VPN[1]
+    level 2: bits [38:30] — VPN[2]
+    """
+    if level == 0:
+        return va.bits[12..21]
+    if level == 1:
+        return va.bits[21..30]
+    if level == 2:
+        return va.bits[30..39]
+    0
+
+fn sv39_page_offset(va: u64) -> u64:
+    """Extract the 12-bit page offset from a virtual address."""
+    va.bits[0..12]
+
+fn sv48_vpn(va: u64, level: u64) -> u64:
+    """Extract a VPN field from a Sv48 virtual address.
+
+    level 0: bits [20:12]
+    level 1: bits [29:21]
+    level 2: bits [38:30]
+    level 3: bits [47:39]
+    """
+    if level == 0:
+        return va.bits[12..21]
+    if level == 1:
+        return va.bits[21..30]
+    if level == 2:
+        return va.bits[30..39]
+    if level == 3:
+        return va.bits[39..48]
+    0
+
+# ============================================================================
+# SFENCE.VMA (TLB Flush)
+# ============================================================================
+
+fn sfence_vma_all():
+    """Flush the entire TLB (sfence.vma x0, x0).
+
+    Stub — real hardware executes the sfence.vma instruction.
+    """
+    # unsafe:
+    #     asm volatile: "sfence.vma zero, zero"
+    pass
+
+fn sfence_vma_addr(vaddr: u64):
+    """Flush TLB entries for a specific virtual address.
+
+    Stub — real hardware executes sfence.vma with the address.
+    """
+    # unsafe:
+    #     asm volatile:
+    #         "sfence.vma {0}, zero"
+    #         in(reg) vaddr
+    pass
+
+fn sfence_vma_asid(asid: u64):
+    """Flush TLB entries for a specific ASID.
+
+    Stub — real hardware executes sfence.vma with the ASID.
+    """
+    # unsafe:
+    #     asm volatile:
+    #         "sfence.vma zero, {0}"
+    #         in(reg) asid
+    pass

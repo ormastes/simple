@@ -1,0 +1,35 @@
+use std.spec
+use os.qemu_runner.{
+    get_scenario,
+    scenario_riscv64_hosted,
+    scenario_target,
+    scenario_test_timeout_ms,
+    build_scenario_command,
+}
+use os.kernel.arch.arch_context.{Architecture}
+
+describe "SimpleOS RV64 hosted QEMU":
+    describe "REQ-RV64-HOSTED-001/002: scenario shape":
+        it "registers the hosted RV64 scenario with disk and forwarded network":
+            val scenario = scenario_riscv64_hosted()
+            expect(scenario.name).to_equal("riscv64-hosted")
+            expect(scenario.arch).to_equal(Architecture.Riscv64)
+            expect(scenario.qemu_extra).to_contain("virtio-blk-device,drive=rvdisk")
+            expect(scenario.qemu_extra).to_contain("user,id=n0,hostfwd=tcp::2222-:22,hostfwd=tcp::8080-:80")
+            expect(scenario.qemu_extra).to_contain("virtio-net-pci,netdev=n0,disable-legacy=on")
+            expect(scenario_test_timeout_ms(scenario)).to_equal(120000)
+
+        it "resolves the scenario and target by name":
+            if val resolved = get_scenario("riscv64-hosted"):
+                expect(resolved.name).to_equal("riscv64-hosted")
+            else:
+                expect("missing").to_equal("riscv64-hosted")
+            val target = scenario_target(scenario_riscv64_hosted())
+            expect(target.entry).to_equal("examples/simple_os/arch/riscv64/hosted_entry.spl")
+            expect(target.output).to_equal("build/os/simpleos_riscv64_hosted.elf")
+
+        it "builds a QEMU command with host-forwarded SSH and HTTP":
+            val cmd = build_scenario_command(scenario_riscv64_hosted(), "build/os/simpleos_riscv64_hosted.elf")
+            expect(cmd[0]).to_equal("qemu-system-riscv64")
+            expect(cmd).to_contain("user,id=n0,hostfwd=tcp::2222-:22,hostfwd=tcp::8080-:80")
+            expect(cmd).to_contain("virtio-net-pci,netdev=n0,disable-legacy=on")

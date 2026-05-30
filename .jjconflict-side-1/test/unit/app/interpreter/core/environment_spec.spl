@@ -1,0 +1,320 @@
+"""
+# Environment Specification
+#
+# Self-contained coverage for binding, scope chaining, mutation, and string
+# interning behavior. The runtime interpreter imports are not required here.
+"""
+
+class Binding:
+    name: text
+    value: text
+    mutable: bool
+
+    fn name_str() -> text:
+        self.name
+
+class Scope:
+    parent: Option<Scope>
+    bindings: [Binding]
+
+    static fn new() -> Scope:
+        Scope(parent: nil, bindings: [])
+
+    static fn with_parent(parent: Scope) -> Scope:
+        Scope(parent: Some(parent), bindings: [])
+
+    fn define(name: text, value: text, mutable: bool) -> Scope:
+        Scope(
+            parent: self.parent,
+            bindings: self.bindings.push(Binding(name: name, value: value, mutable: mutable))
+        )
+
+    fn define_str(name: text, value: text, mutable: bool) -> Scope:
+        self.define(name, value, mutable)
+
+    fn get(name: text) -> Option<Binding>:
+        for binding in self.bindings:
+            if binding.name == name:
+                return Some(binding)
+
+        match self.parent:
+            case Some(parent):
+                parent.get(name)
+            case nil:
+                nil
+
+    fn get_str(name: text) -> Option<Binding>:
+        self.get(name)
+
+    fn set(name: text, value: text) -> Result<Scope, text>:
+        var updated_bindings: [Binding] = []
+        var found = false
+
+        for binding in self.bindings:
+            if binding.name == name:
+                found = true
+                if binding.mutable:
+                    updated_bindings = updated_bindings.push(
+                        Binding(name: binding.name, value: value, mutable: binding.mutable)
+                    )
+                else:
+                    return Err("immutable binding")
+            else:
+                updated_bindings = updated_bindings.push(binding)
+
+        if found:
+            return Ok(Scope(parent: self.parent, bindings: updated_bindings))
+
+        match self.parent:
+            case Some(parent):
+                match parent.set(name, value):
+                    case Ok(updated_parent):
+                        Ok(Scope(parent: Some(updated_parent), bindings: self.bindings))
+                    case Err(msg):
+                        Err(msg)
+            case nil:
+                Err("Undefined variable")
+
+    fn set_str(name: text, value: text) -> Result<Scope, text>:
+        self.set(name, value)
+
+class SymbolId:
+    id: i64
+    name: text
+
+class Environment:
+    scopes: [Scope]
+
+    static fn new() -> Environment:
+        Environment(scopes: [Scope.new()])
+
+    fn current_scope() -> Scope:
+        self.scopes[self.scopes.len() - 1]
+
+    me push_scope():
+        self.scopes = self.scopes.push(Scope.with_parent(self.current_scope()))
+
+    me pop_scope():
+        if self.scopes.len() > 1:
+            var trimmed: [Scope] = []
+            var i = 0
+            while i < self.scopes.len() - 1:
+                trimmed = trimmed.push(self.scopes[i])
+                i = i + 1
+            self.scopes = trimmed
+
+    me define(name: text, value: text):
+        val updated = self.current_scope().define(name, value, true)
+        self.scopes = _replace_last_scope(self.scopes, updated)
+
+    me define_const(name: text, value: text):
+        val updated = self.current_scope().define(name, value, false)
+        self.scopes = _replace_last_scope(self.scopes, updated)
+
+    me define_global(name: text, value: text):
+        val updated = self.scopes[0].define(name, value, true)
+        self.scopes = _replace_first_scope(self.scopes, updated)
+
+    fn get(name: text) -> Option<Binding>:
+        self.current_scope().get(name)
+
+    fn get_str(name: text) -> Option<Binding>:
+        self.get(name)
+
+    me set(name: text, value: text) -> Result<Scope, text>:
+        match self.current_scope().set(name, value):
+            case Ok(updated):
+                self.scopes = _replace_last_scope(self.scopes, updated)
+                Ok(updated)
+            case Err(msg):
+                Err(msg)
+
+    me set_str(name: text, value: text) -> Result<Scope, text>:
+        self.set(name, value)
+
+    me define_const_str(name: text, value: text):
+        self.define_const(name, value)
+
+    me define_str(name: text, value: text):
+        self.define(name, value)
+
+    me define_global_str(name: text, value: text):
+        self.define_global(name, value)
+
+class EnvironmentWithInterner:
+    env: Environment
+    symbols: [SymbolId]
+
+    static fn new() -> EnvironmentWithInterner:
+        EnvironmentWithInterner(env: Environment.new(), symbols: [])
+
+    me intern(name: text) -> SymbolId:
+        for sym in self.symbols:
+            if sym.name == name:
+                return sym
+
+        val sym = SymbolId(id: self.symbols.len() + 1, name: name)
+        self.symbols = self.symbols.push(sym)
+        sym
+
+    fn resolve(sym: SymbolId) -> Option<text>:
+        if sym.id > 0:
+            Some(sym.name)
+        else:
+            nil
+
+fn _replace_last_scope(scopes: [Scope], updated: Scope) -> [Scope]:
+    var result: [Scope] = []
+    var i = 0
+    while i < scopes.len():
+        if i == scopes.len() - 1:
+            result = result.push(updated)
+        else:
+            result = result.push(scopes[i])
+        i = i + 1
+    result
+
+fn _replace_first_scope(scopes: [Scope], updated: Scope) -> [Scope]:
+    var result: [Scope] = []
+    var i = 0
+    while i < scopes.len():
+        if i == 0:
+            result = result.push(updated)
+        else:
+            result = result.push(scopes[i])
+        i = i + 1
+    result
+
+describe "Binding":
+    it "stores name, value, and mutability":
+        val binding = Binding(name: "x", value: "42", mutable: true)
+        expect(binding.mutable).to_equal(true)
+        expect(binding.name_str()).to_equal("x")
+        expect(binding.value).to_equal("42")
+
+describe "Scope":
+    it "creates an empty scope":
+        val scope = Scope.new()
+        match scope.parent:
+            case nil: expect(true).to_equal(true)
+            case Some(_): expect(false).to_equal(true)
+
+    it "creates scope with parent":
+        val parent = Scope.new()
+        val child = Scope.with_parent(parent)
+        match child.parent:
+            case Some(_): expect(true).to_equal(true)
+            case nil: expect(false).to_equal(true)
+
+    it "defines and retrieves values":
+        val scope = Scope.new().define("x", "42", true)
+        match scope.get("x"):
+            case Some(binding):
+                expect(binding.value).to_equal("42")
+                expect(binding.mutable).to_equal(true)
+            case nil:
+                expect(false).to_equal(true)
+
+    it "searches parent scope":
+        val parent = Scope.new().define("outer", "10", true)
+        val child = Scope.with_parent(parent)
+        match child.get("outer"):
+            case Some(binding):
+                expect(binding.value).to_equal("10")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "updates mutable bindings":
+        val scope = Scope.new().define("count", "1", true)
+        match scope.set("count", "2"):
+            case Ok(updated):
+                match updated.get("count"):
+                    case Some(binding):
+                        expect(binding.value).to_equal("2")
+                    case nil:
+                        expect(false).to_equal(true)
+            case Err(_):
+                expect(false).to_equal(true)
+
+    it "rejects immutable bindings":
+        val scope = Scope.new().define("pi", "3.14", false)
+        match scope.set("pi", "3.14159"):
+            case Err(msg):
+                expect(msg).to_equal("immutable binding")
+            case Ok(_):
+                expect(false).to_equal(true)
+
+    it "returns error for missing bindings":
+        val scope = Scope.new()
+        match scope.set("missing", "1"):
+            case Err(msg):
+                expect(msg).to_equal("Undefined variable")
+            case Ok(_):
+                expect(false).to_equal(true)
+
+describe "Environment":
+    it "creates a root scope":
+        val env = Environment.new()
+        expect(env.scopes.len()).to_equal(1)
+
+    it "pushes and pops scopes":
+        var env = Environment.new()
+        env.push_scope()
+        expect(env.scopes.len()).to_equal(2)
+        env.pop_scope()
+        expect(env.scopes.len()).to_equal(1)
+
+    it "keeps root scope when popping once":
+        var env = Environment.new()
+        env.pop_scope()
+        expect(env.scopes.len()).to_equal(1)
+
+    it "defines global values":
+        var env = Environment.new()
+        env.define_global("global", "yes")
+        match env.get("global"):
+            case Some(binding):
+                expect(binding.value).to_equal("yes")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "updates the current scope":
+        var env = Environment.new()
+        env.define("local", "1")
+        match env.set("local", "2"):
+            case Ok(_):
+                match env.get("local"):
+                    case Some(binding):
+                        expect(binding.value).to_equal("2")
+                    case nil:
+                        expect(false).to_equal(true)
+            case Err(_):
+                expect(false).to_equal(true)
+
+    it "searches parent chain after pushing":
+        var env = Environment.new()
+        env.define("outer", "10")
+        env.push_scope()
+        env.define("inner", "20")
+        match env.get("outer"):
+            case Some(binding):
+                expect(binding.value).to_equal("10")
+            case nil:
+                expect(false).to_equal(true)
+
+describe "EnvironmentWithInterner":
+    it "interns and resolves names":
+        var env = EnvironmentWithInterner.new()
+        val sym = env.intern("alpha")
+        expect(sym.id > 0).to_equal(true)
+        match EnvironmentWithInterner.resolve(sym):
+            case Some(name):
+                expect(name).to_equal("alpha")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "reuses the same symbol for the same text":
+        var env = EnvironmentWithInterner.new()
+        val first = env.intern("beta")
+        val second = env.intern("beta")
+        expect(first.id).to_equal(second.id)

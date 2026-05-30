@@ -1,0 +1,148 @@
+# Network Remote Transport Specification
+#
+# Feature IDs: PROD-005 / AC-5
+# Category: Infrastructure
+# Difficulty: 4/5
+# Status: Draft
+# Requirements: N/A
+# Plan: doc/03_plan/agent_tasks/scv.md
+# Design: .spipe/scv-production-features/arch_ws_d.md
+# Artifacts: N/A
+
+use app.io.mod (process_run)
+
+fn _run_net_remote_script(script: text) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", script])
+    "{out}{err}\nexit={code}\n"
+
+# ---------------------------------------------------------------------------
+# Helper: start a minimal HTTP server on a free loopback port and export PORT
+# Uses Python3 which is available in the build environment.
+# The server root is $REMOTE_DIR; caller must kill $HTTP_PID on exit.
+# ---------------------------------------------------------------------------
+
+describe "scv network remote push with fsck-verified pack":
+    it "pushes a verified branch to a loopback HTTP remote":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-push-src.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-push-remote.XXXXXX)\nprintf 'payload\\n' > \"$SRC/a.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://127.0.0.1\" \"$REMOTE_DIR\" main\nprintf 'push_done=%s\\n' \"$?\"\ntest -f \"$REMOTE_DIR/branches/main/manifest.sdn\"\nprintf 'manifest_exists=1\\n'\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push-verify \"$REMOTE_DIR\" main\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("network-push")
+        expect(out).to_contain("push_done=0")
+        expect(out).to_contain("manifest_exists=1")
+        expect(out).to_contain("fsck ok")
+        expect(out).to_contain("exit=0")
+
+    it "rejects network push when public_ready gate has not been set":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-push-nogate-src.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-push-nogate-remote.XXXXXX)\nprintf 'payload\\n' > \"$SRC/a.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://127.0.0.1\" \"$REMOTE_DIR\" main)\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("ERROR public_ready gate not set")
+        expect(out).to_contain("bad_code=1")
+        expect(out).to_contain("exit=0")
+
+    it "rejects network push when pack fsck verification fails":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-push-fsck-src.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-push-fsck-remote.XXXXXX)\nprintf 'payload\\n' > \"$SRC/a.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nPACK=$(find .scv/packs -name '*.gz' 2>/dev/null | head -1)\nif [ -n \"$PACK\" ]; then printf 'corrupted' >> \"$PACK\"; fi\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://127.0.0.1\" \"$REMOTE_DIR\" main)\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("ERROR")
+        expect(out).to_contain("bad_code=1")
+        expect(out).to_contain("exit=0")
+
+describe "scv network remote pull with pack verification":
+    it "pulls a verified pack from a loopback HTTP remote and checks fsck":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-pull-src.XXXXXX)\nDST=$(mktemp -d /tmp/scv-net-pull-dst.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-pull-remote.XXXXXX)\nprintf 'hello\\n' > \"$SRC/hello.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://127.0.0.1\" \"$REMOTE_DIR\" main >/dev/null\ncd \"$DST\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-pull \"http://127.0.0.1\" \"$REMOTE_DIR\" main\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" fsck\ncmp \"$SRC/hello.txt\" hello.txt\nprintf 'pulled_hello=%s\\n' \"$(cat hello.txt | tr '\\n' '|')\"\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("network-pull")
+        expect(out).to_contain("remote_commit=commit_")
+        expect(out).to_contain("OK checked=")
+        expect(out).to_contain("pulled_hello=hello|")
+        expect(out).to_contain("exit=0")
+
+    it "rejects a pull when the remote pack manifest hash is corrupted":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-pull-corrupt-src.XXXXXX)\nDST=$(mktemp -d /tmp/scv-net-pull-corrupt-dst.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-pull-corrupt-remote.XXXXXX)\nprintf 'data\\n' > \"$SRC/data.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://127.0.0.1\" \"$REMOTE_DIR\" main >/dev/null\nsed -E '0,/sha256_[0-9a-f]+/s//sha256_bad/' \"$REMOTE_DIR/branches/main/manifest.sdn\" > \"$REMOTE_DIR/branches/main/manifest.tmp\"\nmv \"$REMOTE_DIR/branches/main/manifest.tmp\" \"$REMOTE_DIR/branches/main/manifest.sdn\"\ncd \"$DST\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-pull \"http://127.0.0.1\" \"$REMOTE_DIR\" main)\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("ERROR")
+        expect(out).to_contain("bad_code=1")
+        expect(out).to_contain("exit=0")
+
+describe "scv network remote CAS ref update":
+    it "performs a successful compare-and-swap refs update":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-cas-src.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-cas-remote.XXXXXX)\nprintf 'v1\\n' > \"$SRC/a.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://127.0.0.1\" \"$REMOTE_DIR\" main\nCOMMIT1=$(awk -F'|' '/^main\\|/ {print $2}' \"$REMOTE_DIR/refs.sdn\")\nprintf 'commit1=%s\\n' \"$COMMIT1\"\nprintf 'v2\\n' >> a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://127.0.0.1\" \"$REMOTE_DIR\" main\nCOMMIT2=$(awk -F'|' '/^main\\|/ {print $2}' \"$REMOTE_DIR/refs.sdn\")\nprintf 'commit2=%s\\n' \"$COMMIT2\"\ntest \"$COMMIT1\" != \"$COMMIT2\"\nCOUNT=$(grep -c '^main|' \"$REMOTE_DIR/refs.sdn\")\nprintf 'main_refs=%s\\n' \"$COUNT\"\ntest \"$COUNT\" = 1\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("commit1=commit_")
+        expect(out).to_contain("commit2=commit_")
+        expect(out).to_contain("main_refs=1")
+        expect(out).to_contain("exit=0")
+
+    it "returns a conflict error and does not advance refs when a concurrent push races ahead":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-cas-conflict-src.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-cas-conflict-remote.XXXXXX)\nprintf 'base\\n' > \"$SRC/a.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://127.0.0.1\" \"$REMOTE_DIR\" main >/dev/null\nOLD_ETAG=$(awk -F'|' '/^main\\|/ {print $2}' \"$REMOTE_DIR/refs.sdn\")\nprintf 'raced\\n' >> \"$REMOTE_DIR/refs.sdn.tmp\"\ncp \"$REMOTE_DIR/refs.sdn\" \"$REMOTE_DIR/refs.sdn.bak\"\nprintf 'v2\\n' >> a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nprintf 'format: scv-remote-refs-v1\\nmain|commit_raced_ahead|/nowhere\\n' > \"$REMOTE_DIR/refs.sdn\"\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push-cas \"http://127.0.0.1\" \"$REMOTE_DIR\" main \"$OLD_ETAG\")\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("conflict: remote advanced, pull first")
+        expect(out).to_contain("bad_code=1")
+        expect(out).to_contain("exit=0")
+
+describe "scv network remote SSRF origin validation":
+    it "rejects a refs response whose pack_url points to a different host":
+        val script = "set -eu\nREPO=$(pwd)\nDST=$(mktemp -d /tmp/scv-net-ssrf-dst.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-ssrf-remote.XXXXXX)\nmkdir -p \"$REMOTE_DIR/branches/main\"\nprintf 'format: scv-remote-refs-v1\\nmain|commit_abc123def456abc123def456abc123def456abc1|http://internal-corp/secret/pack.gz\\n' > \"$REMOTE_DIR/refs.sdn\"\ncd \"$DST\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-pull \"http://127.0.0.1\" \"$REMOTE_DIR\" main)\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("ERROR ssrf")
+        expect(out).to_contain("bad_code=1")
+        expect(out).to_contain("exit=0")
+
+    it "rejects a refs response whose pack_url redirects to an RFC1918 address":
+        val script = "set -eu\nREPO=$(pwd)\nDST=$(mktemp -d /tmp/scv-net-ssrf-rfc1918-dst.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-ssrf-rfc1918-remote.XXXXXX)\nmkdir -p \"$REMOTE_DIR/branches/main\"\nprintf 'format: scv-remote-refs-v1\\nmain|commit_abc123def456abc123def456abc123def456abc1|http://10.0.0.1/pack.gz\\n' > \"$REMOTE_DIR/refs.sdn\"\ncd \"$DST\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-pull \"http://127.0.0.1\" \"$REMOTE_DIR\" main)\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("ERROR ssrf")
+        expect(out).to_contain("bad_code=1")
+        expect(out).to_contain("exit=0")
+
+    it "accepts a pack_url that stays within the same loopback origin":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-ssrf-ok-src.XXXXXX)\nDST=$(mktemp -d /tmp/scv-net-ssrf-ok-dst.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-ssrf-ok-remote.XXXXXX)\nprintf 'ok\\n' > \"$SRC/ok.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://127.0.0.1\" \"$REMOTE_DIR\" main >/dev/null\ncd \"$DST\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-pull \"http://127.0.0.1\" \"$REMOTE_DIR\" main\nprintf 'ssrf_ok=1\\n'\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("ssrf_ok=1")
+        expect(out).to_contain("exit=0")
+
+describe "scv network remote interrupted transfer resume and discard":
+    it "resumes an interrupted chunked upload from the last committed chunk":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-resume-src.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-resume-remote.XXXXXX)\nprintf 'chunk_data\\n' > \"$SRC/data.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://127.0.0.1\" \"$REMOTE_DIR\" main --chunk-bytes=1024\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push-verify \"$REMOTE_DIR\" main\nprintf 'resumed_ok=1\\n'\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("resumed_ok=1")
+        expect(out).to_contain("exit=0")
+
+    it "discards a partially downloaded pack when the download is interrupted before verification":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-discard-src.XXXXXX)\nDST=$(mktemp -d /tmp/scv-net-discard-dst.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-discard-remote.XXXXXX)\nprintf 'partial\\n' > \"$SRC/p.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://127.0.0.1\" \"$REMOTE_DIR\" main >/dev/null\nPACK_URL=$(awk -F'|' '/^main\\|/ {print $3}' \"$REMOTE_DIR/refs.sdn\" 2>/dev/null || printf '')\ncd \"$DST\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-pull-simulate-interrupt \"http://127.0.0.1\" \"$REMOTE_DIR\" main 2>&1 || true\nTMP_COUNT=$(find .scv/tmp -name '*.partial' 2>/dev/null | wc -l)\nprintf 'partial_files=%s\\n' \"$TMP_COUNT\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-pull-discard \"$REMOTE_DIR\" main\nAFTER_COUNT=$(find .scv/tmp -name '*.partial' 2>/dev/null | wc -l)\nprintf 'after_discard=%s\\n' \"$AFTER_COUNT\"\ntest \"$AFTER_COUNT\" = 0\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("after_discard=0")
+        expect(out).to_contain("exit=0")
+
+describe "scv network remote public_ready gate enforcement":
+    it "blocks network push when public_ready is absent even after snapshot and test-gate":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-gate-src.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-gate-remote.XXXXXX)\nprintf 'data\\n' > \"$SRC/f.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://127.0.0.1\" \"$REMOTE_DIR\" main)\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("ERROR public_ready gate not set")
+        expect(out).to_contain("bad_code=1")
+        expect(out).to_contain("exit=0")
+
+    it "allows network push after all gates pass including public_ready":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-gate-ok-src.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-gate-ok-remote.XXXXXX)\nprintf 'ready\\n' > \"$SRC/r.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://127.0.0.1\" \"$REMOTE_DIR\" main\nprintf 'push_allowed=1\\n'\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("push_allowed=1")
+        expect(out).to_contain("exit=0")
+
+describe "scv network remote auth method configuration":
+    it "configures Token auth and includes the Authorization header in push requests":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-auth-token-src.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-auth-token-remote.XXXXXX)\nprintf 'secure\\n' > \"$SRC/s.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-config set-auth token --header=Authorization --token=test_token_abc >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://127.0.0.1\" \"$REMOTE_DIR\" main\nprintf 'auth_push_done=1\\n'\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("auth_push_done=1")
+        expect(out).to_contain("exit=0")
+
+    it "rejects an https base_url with tls_verify=false unless host is loopback":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-tls-src.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-tls-remote.XXXXXX)\nprintf 'data\\n' > \"$SRC/d.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-config set-tls-no-verify --base-url=https://public-host.example.com)\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("ERROR tls_verify=false only permitted for loopback")
+        expect(out).to_contain("bad_code=1")
+        expect(out).to_contain("exit=0")
+
+    it "rejects a non-https base_url for non-loopback remotes":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-net-scheme-src.XXXXXX)\nREMOTE_DIR=$(mktemp -d /tmp/scv-net-scheme-remote.XXXXXX)\nprintf 'data\\n' > \"$SRC/d.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" public-ready >/dev/null\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" network-push \"http://public-host.example.com\" \"$REMOTE_DIR\" main)\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
+        val out = _run_net_remote_script(script)
+        expect(out).to_contain("ERROR https required for non-loopback remote")
+        expect(out).to_contain("bad_code=1")
+        expect(out).to_contain("exit=0")

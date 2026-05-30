@@ -1,0 +1,74 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+PROOF_PATH="${SIMPLE_ELECTRON_PROOF_PATH:-build/electron_shell_envelope.json}"
+WIDTH="${SIMPLE_ELECTRON_SMOKE_WIDTH:-1280}"
+HEIGHT="${SIMPLE_ELECTRON_SMOKE_HEIGHT:-720}"
+TIMEOUT_SECS="${SIMPLE_ELECTRON_SMOKE_TIMEOUT_SECS:-60}"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+if [ "${SKIP_ELECTRON_LIVE_SMOKE:-0}" = "1" ]; then
+    echo "electron_live_smoke=skipped"
+    echo "reason=SKIP_ELECTRON_LIVE_SMOKE"
+    exit 0
+fi
+
+for required in node npm xvfb-run; do
+    if ! have "$required"; then
+        echo "electron_live_smoke=unavailable"
+        echo "error=missing_command:$required"
+        exit 1
+    fi
+done
+
+if [ ! -f "tools/electron-shell/package.json" ]; then
+    echo "electron_live_smoke=unavailable"
+    echo "error=missing_tools/electron-shell/package.json"
+    exit 1
+fi
+
+mkdir -p "$(dirname "$PROOF_PATH")"
+rm -f "$PROOF_PATH"
+
+run_smoke() {
+    SIMPLE_ELECTRON_PROOF_PATH="../../$PROOF_PATH" \
+        xvfb-run -a --server-args="-screen 0 ${WIDTH}x${HEIGHT}x24" \
+        npm --prefix tools/electron-shell run live-smoke
+}
+
+if have timeout; then
+    timeout "$TIMEOUT_SECS" env SIMPLE_ELECTRON_PROOF_PATH="../../$PROOF_PATH" \
+        xvfb-run -a --server-args="-screen 0 ${WIDTH}x${HEIGHT}x24" \
+        npm --prefix tools/electron-shell run live-smoke
+else
+    run_smoke
+fi
+
+node - "$PROOF_PATH" "$WIDTH" "$HEIGHT" <<'NODE'
+const fs = require('fs');
+const [proofPath, widthText, heightText] = process.argv.slice(2);
+if (!fs.existsSync(proofPath)) {
+  console.error(`missing proof file: ${proofPath}`);
+  process.exit(1);
+}
+const proof = JSON.parse(fs.readFileSync(proofPath, 'utf8'));
+const expected = {
+  target: 'electron',
+  surface_id: 'main',
+  width: Number(widthText),
+  height: Number(heightText),
+};
+for (const [key, value] of Object.entries(expected)) {
+  if (proof[key] !== value) {
+    console.error(`unexpected ${key}: ${JSON.stringify(proof[key])}`);
+    process.exit(1);
+  }
+}
+console.log(`electron_live_smoke=pass proof=${proofPath}`);
+NODE

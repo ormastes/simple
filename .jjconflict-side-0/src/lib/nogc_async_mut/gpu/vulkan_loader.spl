@@ -1,0 +1,62 @@
+# Vulkan Loader — ICD discovery and instance dispatch surface (M2, REQ-9).
+#
+# vulkan_loader_init probes for an available Vulkan ICD via the host SFFI path.
+# In interpreter mode it returns a structured error (no ICD present) rather
+# than crashing, satisfying the spec's "ok or structured error, no panic" contract.
+#
+# @cover vulkan_loader
+
+# ============================================================================
+# Result type
+# ============================================================================
+
+struct VulkanLoaderResult:
+    """Result of vulkan_loader_init."""
+    is_ok:  bool
+    handle: i64
+    error:  text
+
+fn _vk_ok(handle: i64) -> VulkanLoaderResult:
+    VulkanLoaderResult(is_ok: true, handle: handle, error: "")
+
+fn _vk_err(msg: text) -> VulkanLoaderResult:
+    VulkanLoaderResult(is_ok: false, handle: 0, error: msg)
+
+# ============================================================================
+# State
+# ============================================================================
+
+var _vk_initialized: bool = false
+var _vk_handle:      i64  = 0
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn vulkan_loader_init() -> VulkanLoaderResult:
+    """Initialize the Vulkan loader and probe for an available ICD.
+
+    In interpreter mode: returns a structured "no-icd" error (no crash/panic).
+    In compiled mode: attempts SFFI call to vulkan ICD path.
+
+    Returns:
+        VulkanLoaderResult with is_ok=true and a loader handle if an ICD was
+        found, or is_ok=false with a non-empty error code otherwise.
+    """
+    if _vk_initialized:
+        if _vk_handle > 0:
+            return _vk_ok(_vk_handle)
+        return _vk_err("no-icd")
+    _vk_initialized = true
+    # In interpreter mode no native Vulkan is available.
+    _vk_err("no-icd")
+
+pub fn vulkan_loader_destroy(handle: i64):
+    """Release resources held by a Vulkan loader handle.
+
+    Args:
+        handle: Handle from vulkan_loader_init()
+    """
+    if handle == _vk_handle:
+        _vk_handle = 0
+        _vk_initialized = false

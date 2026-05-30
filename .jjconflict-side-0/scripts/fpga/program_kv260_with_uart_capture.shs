@@ -1,0 +1,88 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BITSTREAM="${1:-build/build/xilinx_kv260/gateware/xilinx_kv260.bit}"
+OUT_DIR="${OUT_DIR:-build/kv260_uart_program_$(date +%Y%m%d_%H%M%S)}"
+BAUD="${BAUD:-115200}"
+CAPTURE_SECONDS="${CAPTURE_SECONDS:-30}"
+
+mkdir -p "$OUT_DIR"
+
+ports=""
+for link in /dev/serial/by-id/usb-Xilinx_ML_Carrier_Card_*-port0; do
+    if [ -e "$link" ]; then
+        port="$(readlink -f "$link")"
+        case " $ports " in
+            *" $port "*) ;;
+            *) ports="$ports $port" ;;
+        esac
+    fi
+done
+
+if [ -z "$ports" ]; then
+    for port in /dev/ttyUSB4 /dev/ttyUSB5 /dev/ttyUSB6; do
+        if [ -e "$port" ]; then
+            ports="$ports $port"
+        fi
+    done
+fi
+
+if [ -z "$ports" ]; then
+    echo "UART_CAPTURE_STATUS=no_xilinx_serial_ports"
+    exit 1
+fi
+
+pids=""
+for port in $ports; do
+    base="$(echo "$port" | tr '/ ' '__')"
+    raw="$OUT_DIR/${base}.raw"
+    txt="$OUT_DIR/${base}.txt"
+    stty -F "$port" "$BAUD" cs8 -cstopb -parenb -ixon -ixoff raw -echo
+    timeout "$CAPTURE_SECONDS" dd if="$port" of="$raw" bs=1 count=65536 status=none &
+    pids="$pids $!"
+    : >"$txt"
+    echo "UART_CAPTURE_STARTED port=$port baud=$BAUD seconds=$CAPTURE_SECONDS raw=$raw"
+done
+
+program_status=0
+OUT_DIR="$OUT_DIR" sh scripts/fpga/program_kv260_bitstream.shs "$BITSTREAM" || program_status=$?
+
+for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+done
+
+capture_status=1
+for port in $ports; do
+    base="$(echo "$port" | tr '/ ' '__')"
+    raw="$OUT_DIR/${base}.raw"
+    txt="$OUT_DIR/${base}.txt"
+    tr -cd '\11\12\15\40-\176' <"$raw" >"$txt"
+    bytes="$(wc -c <"$raw" | tr -d ' ')"
+    echo "UART_CAPTURE_DONE port=$port bytes=$bytes raw=$raw text=$txt"
+    if [ "$bytes" -gt 0 ]; then
+        capture_status=0
+        echo "UART_TEXT_BEGIN port=$port"
+        sed -n '1,80p' "$txt"
+        echo "UART_TEXT_END port=$port"
+    fi
+done
+
+if [ "$program_status" -eq 0 ]; then
+    echo "PROGRAM_CAPTURE_PROGRAM_STATUS=ok"
+else
+    echo "PROGRAM_CAPTURE_PROGRAM_STATUS=fail exit=$program_status"
+fi
+
+if [ "$capture_status" -eq 0 ]; then
+    echo "UART_CAPTURE_STATUS=output_seen"
+else
+    echo "UART_CAPTURE_STATUS=no_output"
+fi
+
+if [ "$program_status" -ne 0 ]; then
+    exit "$program_status"
+fi
+exit "$capture_status"

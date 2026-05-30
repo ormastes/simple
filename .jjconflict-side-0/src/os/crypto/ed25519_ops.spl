@@ -1,0 +1,480 @@
+# Ed25519 Extended Point Operations (RFC 8032)
+#
+# Provides the EdPoint struct, field helpers (fe_neg, fe_sqrt, etc.),
+# curve constants (d, 2d, base point B), and extended-coordinate point
+# operations (add, double, cselect, scalar_mul, encode, decode).
+#
+# Imported by ed25519.spl (hub) and ed25519_scalar.spl does NOT import here.
+#
+# References:
+#   RFC 8032 — Edwards-Curve Digital Signature Algorithm
+#   HWCD08   — Twisted Edwards Curves Revisited
+
+use os.crypto.curve25519.{Fe25519, fe_zero, fe_one, fe_add, fe_sub, fe_mul, fe_sq, fe_invert, fe_reduce, fe_from_bytes, fe_to_bytes}
+
+# ============================================================================
+# Extended Point on Ed25519
+# ============================================================================
+
+struct EdPoint:
+    """Point on the Ed25519 Edwards curve in extended coordinates (X, Y, Z, T).
+
+    Represents the affine point (X/Z, Y/Z) with T = X*Y/Z.
+    """
+    x: Fe25519
+    y: Fe25519
+    z: Fe25519
+    t: Fe25519
+
+# ============================================================================
+# Field Helpers (supplementing curve25519.spl)
+# ============================================================================
+
+fn fe_neg(a: Fe25519) -> Fe25519:
+    """Negate a field element: -a mod p."""
+    fe_sub(a: fe_zero(), b: a)
+
+fn fe_is_negative(a: Fe25519) -> bool:
+    """Check if the field element is "negative" (low bit of canonical form is 1)."""
+    val bytes = fe_to_bytes(a)
+    (bytes[0] & 1) == 1
+
+fn fe_pow2252m3(u: Fe25519) -> Fe25519:
+    """Compute u^(2^252 - 3) mod p.
+
+    This is u^((p+3)/8 - 1) which is useful for square root computation.
+    (p+3)/8 = 2^252 - 2, so u^((p+3)/8) = u * u^(2^252-3).
+    Uses the same addition-chain structure as fe_invert.
+    """
+    # z^2
+    var z2 = fe_sq(u)
+
+    # z^(2^2) = z^4
+    var t = fe_sq(z2)
+    # z^(2^3) = z^8
+    t = fe_sq(t)
+
+    # z^9 = z^8 * z
+    var z9 = fe_mul(t, u)
+    # z^11 = z^9 * z^2
+    var z11 = fe_mul(z9, z2)
+
+    # z^22
+    t = fe_sq(z11)
+    # z^31 = z^22 * z^9
+    var z_2_5_0 = fe_mul(t, z9)
+
+    # z^(2^10 - 1)
+    t = fe_sq(z_2_5_0)
+    var i: u64 = 1
+    while i < 5:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_10_0 = fe_mul(t, z_2_5_0)
+
+    # z^(2^20 - 1)
+    t = fe_sq(z_2_10_0)
+    i = 1
+    while i < 10:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_20_0 = fe_mul(t, z_2_10_0)
+
+    # z^(2^40 - 1)
+    t = fe_sq(z_2_20_0)
+    i = 1
+    while i < 20:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_20_0)
+
+    # z^(2^50 - 1)
+    i = 0
+    while i < 10:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_50_0 = fe_mul(t, z_2_10_0)
+
+    # z^(2^100 - 1)
+    t = fe_sq(z_2_50_0)
+    i = 1
+    while i < 50:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_100_0 = fe_mul(t, z_2_50_0)
+
+    # z^(2^200 - 1)
+    t = fe_sq(z_2_100_0)
+    i = 1
+    while i < 100:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_100_0)
+
+    # z^(2^250 - 1)
+    i = 0
+    while i < 50:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_50_0)
+
+    # z^(2^252 - 4)
+    t = fe_sq(t)
+    t = fe_sq(t)
+
+    # z^(2^252 - 3) = z^(2^252 - 4) * z
+    fe_mul(t, u)
+
+fn fe_sqrt(u: Fe25519) -> Fe25519:
+    """Compute the square root of u mod p, if it exists.
+
+    Uses u^((p+3)/8) with adjustment by sqrt(-1) if needed.
+    For p = 2^255 - 19, (p+3)/8 = 2^252 - 2.
+
+    Returns a root r such that r^2 = u. If u is not a quadratic residue,
+    the result is unspecified (caller should verify r^2 == u).
+    """
+    # r = u^((p+3)/8) = u * u^(2^252 - 3)
+    val r_base = fe_mul(u, fe_pow2252m3(u))
+
+    # Check: r^2 == u?
+    val r_sq = fe_sq(r_base)
+    val check = fe_sub(r_sq, u)
+    val check_reduced = fe_reduce(check)
+
+    # If r^2 == u, we're done
+    if check_reduced.l0 == 0:
+        if check_reduced.l1 == 0:
+            if check_reduced.l2 == 0:
+                if check_reduced.l3 == 0:
+                    if check_reduced.l4 == 0:
+                        return r_base
+
+    # Otherwise try r * sqrt(-1)
+    # sqrt(-1) = 2^((p-1)/4) mod p
+    # We compute sqrt(-1) via the pow chain
+    val sqrt_m1 = _fe_sqrt_m1()
+    val r_adj = fe_mul(r_base, sqrt_m1)
+
+    r_adj
+
+fn _fe_sqrt_m1() -> Fe25519:
+    """Compute sqrt(-1) mod p = 2^((p-1)/4) mod p.
+
+    p-1 = 2^255 - 20, so (p-1)/4 = 2^253 - 5.
+    We compute 2^(2^253 - 5) mod p.
+
+    sqrt(-1) = 0x2b8324804fc1df0b2b4d00993dfbd7a72f431806ad2fe478c4ee1b274a0ea0b0
+    """
+    # Precomputed sqrt(-1) as bytes (little-endian)
+    var bytes: [u8] = [
+        0xb0, 0xa0, 0x0e, 0x4a, 0x27, 0x1b, 0xee, 0xc4,
+        0x78, 0xe4, 0x2f, 0xad, 0x06, 0x18, 0x43, 0x2f,
+        0xa7, 0xd7, 0xfb, 0x3d, 0x99, 0x00, 0x4d, 0x2b,
+        0x0b, 0xdf, 0xc1, 0x4f, 0x80, 0x24, 0x83, 0x2b
+    ]
+    fe_from_bytes(bytes)
+
+# ============================================================================
+# Curve Constant d
+# ============================================================================
+
+fn _ed25519_d() -> Fe25519:
+    """Compute d = -121665/121666 mod p = -121665 * inv(121666) mod p.
+
+    d = 0x52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3
+    """
+    # Precomputed d as bytes (little-endian)
+    var bytes: [u8] = [
+        0xa3, 0x78, 0x59, 0x13, 0xca, 0x4d, 0xeb, 0x75,
+        0xab, 0xd8, 0x41, 0x41, 0x4d, 0x0a, 0x70, 0x00,
+        0x98, 0xe8, 0x79, 0x77, 0x79, 0x40, 0xc7, 0x8c,
+        0x73, 0xfe, 0x6f, 0x2b, 0xee, 0x6c, 0x03, 0x52
+    ]
+    fe_from_bytes(bytes)
+
+fn _ed25519_2d() -> Fe25519:
+    """Compute 2*d mod p. Used in point addition formulas."""
+    val d = _ed25519_d()
+    fe_add(d, d)
+
+# ============================================================================
+# Ed25519 Base Point B
+# ============================================================================
+
+fn _ed25519_base_point() -> EdPoint:
+    """Return the Ed25519 base point B.
+
+    B has y = 4/5 mod p, and x is the positive (even) square root.
+
+    By = 0x6666666666666666666666666666666666666666666666666666666666666658
+    Bx = 0x216936d3cd6e53fec0a4e231fdd6dc5c692cc7609525a7b2c9562d608f25d51a
+    """
+    # Bx in little-endian
+    var bx_bytes: [u8] = [
+        0x1a, 0xd5, 0x25, 0x8f, 0x60, 0x2d, 0x56, 0xc9,
+        0xb2, 0xa7, 0x25, 0x95, 0x60, 0xc7, 0x2c, 0x69,
+        0x5c, 0xdc, 0xd6, 0xfd, 0x31, 0xe2, 0xa4, 0xc0,
+        0xfe, 0x53, 0x6e, 0xcd, 0xd3, 0x36, 0x69, 0x21
+    ]
+    # By in little-endian
+    var by_bytes: [u8] = [
+        0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66
+    ]
+    val bx = fe_from_bytes(bx_bytes)
+    val by = fe_from_bytes(by_bytes)
+    EdPoint(
+        x: bx,
+        y: by,
+        z: fe_one(),
+        t: fe_mul(bx, by)
+    )
+
+# ============================================================================
+# Extended Coordinate Point Operations (HWCD08)
+# ============================================================================
+
+fn ed_point_identity() -> EdPoint:
+    """Return the neutral element (identity point): (0, 1, 1, 0)."""
+    EdPoint(x: fe_zero(), y: fe_one(), z: fe_one(), t: fe_zero())
+
+fn ed_point_add(p1: EdPoint, p2: EdPoint) -> EdPoint:
+    """Add two points in extended coordinates.
+
+    Uses unified addition formula from HWCD08 for twisted Edwards curve
+    -x^2 + y^2 = 1 + d*x^2*y^2 (a = -1).
+
+    A = X1*X2, B = Y1*Y2, C = T1*d*T2, D = Z1*Z2
+    E = (X1+Y1)*(X2+Y2) - A - B
+    F = D - C, G = D + C, H = B + A  (+ because a=-1: B - a*A = B+A)
+    X3 = E*F, Y3 = G*H, T3 = E*H, Z3 = F*G
+    """
+    val d = _ed25519_d()
+
+    val a = fe_mul(p1.x, p2.x)
+    val b = fe_mul(p1.y, p2.y)
+    val c = fe_mul(fe_mul(p1.t, p2.t), d)
+    val dd = fe_mul(p1.z, p2.z)
+
+    val x1_plus_y1 = fe_add(p1.x, p1.y)
+    val x2_plus_y2 = fe_add(p2.x, p2.y)
+    val e = fe_sub(fe_sub(fe_mul(x1_plus_y1, x2_plus_y2), a), b)
+
+    val f = fe_sub(dd, c)
+    val g = fe_add(dd, c)
+    val h = fe_add(b, a)
+
+    EdPoint(
+        x: fe_mul(e, f),
+        y: fe_mul(g, h),
+        z: fe_mul(f, g),
+        t: fe_mul(e, h)
+    )
+
+fn ed_point_double(p1: EdPoint) -> EdPoint:
+    """Double a point in extended coordinates.
+
+    Uses dedicated doubling formula from HWCD08 for a = -1:
+    A = X1^2, B = Y1^2, C = 2*Z1^2
+    D = -A (since a = -1), E = (X1+Y1)^2 - A - B
+    G = D + B, F = G - C, H = D - B
+    X3 = E*F, Y3 = G*H, T3 = E*H, Z3 = F*G
+    """
+    val a = fe_sq(p1.x)
+    val b = fe_sq(p1.y)
+    val c = fe_add(fe_sq(p1.z), fe_sq(p1.z))
+
+    val d = fe_neg(a)
+    val x_plus_y = fe_add(p1.x, p1.y)
+    val e = fe_sub(fe_sub(fe_sq(x_plus_y), a), b)
+
+    val g = fe_add(d, b)
+    val f = fe_sub(g, c)
+    val h = fe_sub(d, b)
+
+    EdPoint(
+        x: fe_mul(e, f),
+        y: fe_mul(g, h),
+        z: fe_mul(f, g),
+        t: fe_mul(e, h)
+    )
+
+fn ed_point_cselect(p0: EdPoint, p1: EdPoint, choose_p1: u64) -> EdPoint:
+    """Constant-time point select: returns p1 if choose_p1=1, else p0.
+
+    Uses the XOR-mask pattern from `fe_cswap` (curve25519.spl):
+        out = a ^ (mask & (a ^ b))
+    where mask = 0 - choose_p1 (all-ones if 1, all-zeros if 0).
+
+    No branches on `choose_p1`; the same field operations execute regardless of
+    the bit value. Matches the constant-time discipline used by the Curve25519
+    Montgomery ladder. Compiler must NOT branch-fold these XOR/AND ops — they
+    are arithmetic, not compares (per the B6 memory note on CT compares).
+    """
+    val mask: u64 = 0 - choose_p1
+    EdPoint(
+        x: Fe25519(
+            l0: p0.x.l0 ^ (mask & (p0.x.l0 ^ p1.x.l0)),
+            l1: p0.x.l1 ^ (mask & (p0.x.l1 ^ p1.x.l1)),
+            l2: p0.x.l2 ^ (mask & (p0.x.l2 ^ p1.x.l2)),
+            l3: p0.x.l3 ^ (mask & (p0.x.l3 ^ p1.x.l3)),
+            l4: p0.x.l4 ^ (mask & (p0.x.l4 ^ p1.x.l4))
+        ),
+        y: Fe25519(
+            l0: p0.y.l0 ^ (mask & (p0.y.l0 ^ p1.y.l0)),
+            l1: p0.y.l1 ^ (mask & (p0.y.l1 ^ p1.y.l1)),
+            l2: p0.y.l2 ^ (mask & (p0.y.l2 ^ p1.y.l2)),
+            l3: p0.y.l3 ^ (mask & (p0.y.l3 ^ p1.y.l3)),
+            l4: p0.y.l4 ^ (mask & (p0.y.l4 ^ p1.y.l4))
+        ),
+        z: Fe25519(
+            l0: p0.z.l0 ^ (mask & (p0.z.l0 ^ p1.z.l0)),
+            l1: p0.z.l1 ^ (mask & (p0.z.l1 ^ p1.z.l1)),
+            l2: p0.z.l2 ^ (mask & (p0.z.l2 ^ p1.z.l2)),
+            l3: p0.z.l3 ^ (mask & (p0.z.l3 ^ p1.z.l3)),
+            l4: p0.z.l4 ^ (mask & (p0.z.l4 ^ p1.z.l4))
+        ),
+        t: Fe25519(
+            l0: p0.t.l0 ^ (mask & (p0.t.l0 ^ p1.t.l0)),
+            l1: p0.t.l1 ^ (mask & (p0.t.l1 ^ p1.t.l1)),
+            l2: p0.t.l2 ^ (mask & (p0.t.l2 ^ p1.t.l2)),
+            l3: p0.t.l3 ^ (mask & (p0.t.l3 ^ p1.t.l3)),
+            l4: p0.t.l4 ^ (mask & (p0.t.l4 ^ p1.t.l4))
+        )
+    )
+
+fn ed_scalar_mul(scalar: [u8], p: EdPoint) -> EdPoint:
+    """Constant-time scalar multiplication: scalar * P (always-add-and-select).
+
+    scalar: 32-byte little-endian scalar.
+
+    For every one of the 256 bits we ALWAYS execute `ed_point_add` AND
+    `ed_point_double`. The conditional branch on the scalar bit is replaced by
+    a constant-time `ed_point_cselect`. No data-dependent branch, no early
+    exit. Wall-time is ~2x the previous branching form but independent of the
+    scalar's Hamming weight. Required because callers pass the secret scalar
+    `a` (clamped seed-derived) on the sign hot path.
+
+    Fixes `doc/08_tracking/bug/ed25519_scalar_mul_not_constant_time_2026-05-01.md`.
+    """
+    var result = ed_point_identity()
+    var q = p
+
+    # Process all 256 bits, low to high: ALWAYS add (then constant-time select),
+    # ALWAYS double. No `if` on `byte_val`/`bit`.
+    var byte_idx: u64 = 0
+    while byte_idx < 32:
+        val byte_val = scalar[byte_idx]
+        var bit: u64 = 0
+        while bit < 8:
+            val bit_set: u64 = (byte_val.to_u64() >> bit) & 1
+            val sum = ed_point_add(p1: result, p2: q)
+            result = ed_point_cselect(p0: result, p1: sum, choose_p1: bit_set)
+            q = ed_point_double(q)
+            bit = bit + 1
+        byte_idx = byte_idx + 1
+
+    result
+
+# ============================================================================
+# Point Encoding / Decoding (RFC 8032 section 5.1.2)
+# ============================================================================
+
+fn ed_point_encode(p: EdPoint) -> [u8]:
+    """Encode a point to 32 bytes.
+
+    Encoding: y-coordinate in little-endian, with top bit of last byte
+    set to the sign (low bit) of the x-coordinate.
+    """
+    val z_inv = fe_invert(p.z)
+    val x = fe_mul(p.x, z_inv)
+    val y = fe_mul(p.y, z_inv)
+
+    var encoded = fe_to_bytes(y)
+
+    # Set top bit of last byte to the sign of x
+    if fe_is_negative(x):
+        encoded[31] = encoded[31] | 0x80
+
+    encoded
+
+fn ed_point_decode(bytes: [u8]) -> EdPoint:
+    """Decode a 32-byte encoding to a point on the curve.
+
+    Extracts y from the low 255 bits, recovers x from the curve equation,
+    and uses the top bit to select the sign of x.
+
+    Returns the decoded point. If the encoding is invalid (not on curve),
+    the result is unspecified.
+    """
+    # Extract sign bit of x from top bit of last byte
+    val x_sign: u64 = (bytes[31].to_u64() >> 7) & 1
+
+    # Clear top bit to get y
+    var y_bytes: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        y_bytes.push(bytes[i])
+        i = i + 1
+    y_bytes[31] = y_bytes[31] & 0x7F
+
+    val y = fe_from_bytes(y_bytes)
+
+    # Recover x from curve equation: -x^2 + y^2 = 1 + d*x^2*y^2
+    # x^2 = (y^2 - 1) / (d*y^2 + 1)
+    val y_sq = fe_sq(y)
+    val d = _ed25519_d()
+
+    val u = fe_sub(y_sq, fe_one())         # u = y^2 - 1
+    val v = fe_add(fe_mul(d, y_sq), fe_one())  # v = d*y^2 + 1
+
+    # x = sqrt(u/v) = u * v^3 * (u * v^7)^((p-5)/8)
+    # Or equivalently: x^2 = u * v^(-1), then x = sqrt(u * v^(-1))
+    # We use: x = u * v^3 * (u * v^7)^((p-5)/8)
+    # Since (p-5)/8 = 2^252 - 3
+    val v_sq = fe_sq(v)
+    val v_cubed = fe_mul(v_sq, v)
+    val v4 = fe_sq(v_sq)
+    val v7 = fe_mul(v4, v_cubed)
+    val uv7 = fe_mul(u, v7)
+
+    # (u * v^7)^(2^252 - 3)
+    val uv7_pow = fe_pow2252m3(uv7)
+
+    # x = u * v^3 * (u * v^7)^(2^252 - 3)
+    var x = fe_mul(fe_mul(u, v_cubed), uv7_pow)
+
+    # Verify: v * x^2 == u?
+    val vx2 = fe_mul(v, fe_sq(x))
+    val check = fe_reduce(fe_sub(vx2, u))
+
+    if check.l0 != 0:
+        # Try v * x^2 == -u (need to multiply x by sqrt(-1))
+        val sqrt_m1 = _fe_sqrt_m1()
+        x = fe_mul(x, sqrt_m1)
+    else:
+        if check.l1 != 0:
+            val sqrt_m1 = _fe_sqrt_m1()
+            x = fe_mul(x, sqrt_m1)
+        else:
+            if check.l2 != 0:
+                val sqrt_m1 = _fe_sqrt_m1()
+                x = fe_mul(x, sqrt_m1)
+            else:
+                if check.l3 != 0:
+                    val sqrt_m1 = _fe_sqrt_m1()
+                    x = fe_mul(x, sqrt_m1)
+                else:
+                    if check.l4 != 0:
+                        val sqrt_m1 = _fe_sqrt_m1()
+                        x = fe_mul(x, sqrt_m1)
+
+    # Adjust sign of x to match the encoded sign bit
+    if fe_is_negative(x) != (x_sign == 1):
+        x = fe_neg(x)
+
+    val t = fe_mul(x, y)
+    EdPoint(x: x, y: y, z: fe_one(), t: t)

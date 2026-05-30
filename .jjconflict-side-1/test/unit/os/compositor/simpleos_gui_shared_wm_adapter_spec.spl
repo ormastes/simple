@@ -1,0 +1,135 @@
+# @cover src/os/compositor/host_compositor_entry.spl 80%
+"""
+# SimpleOS GUI Shared WM Adapter Spec
+
+Focused proof that the SimpleOS GUI adapter uses the shared WM bridge,
+input, and framebuffer render path instead of only reporting capability names.
+"""
+
+use std.spec.{describe, it, expect}
+use common.window_protocol.geometry.{Size}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.host_compositor_entry.{
+    SimpleOsGuiAdapter,
+    simpleos_gui_adapter_display_path_name,
+    simpleos_gui_adapter_content_renderer_name,
+}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_MOVE, COMP_RESIZE, COMP_MINIMIZE, COMP_RESTORE, COMP_SET_TITLE, COMP_FOCUS, COMP_MAXIMIZE, COMP_UPDATE_TREE, COMP_DESTROY_WINDOW}
+
+var _adapter_present_count: i64 = 0
+var _adapter_chrome_fill_count: i64 = 0
+var _adapter_clear_color: u32 = 0u32
+
+class AdapterCaptureBackend:
+    w: i32
+    h: i32
+
+impl CompositorBackend for AdapterCaptureBackend:
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        _adapter_clear_color = color
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if color == 0xFF2563EBu32:
+            _adapter_chrome_fill_count = _adapter_chrome_fill_count + 1
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        if text_str.len() > 0:
+            self.fill_rect(x, y, text_str.len().to_i32() * 8, 16, bg)
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        self.fill_rect(x, y, 8, 16, bg)
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        _adapter_clear_color = _adapter_clear_color
+
+    me present():
+        _adapter_present_count = _adapter_present_count + 1
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        _adapter_present_count = _adapter_present_count + 1
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+describe "SimpleOS GUI adapter shared WM proof":
+
+    it "routes bridge, input, and framebuffer presentation through HostCompositor":
+        _adapter_present_count = 0
+        _adapter_chrome_fill_count = 0
+        _adapter_clear_color = 0u32
+        val backend = AdapterCaptureBackend(w: 240, h: 180)
+        val adapter = SimpleOsGuiAdapter.new(backend, Size.wh(240, 180))
+
+        adapter.deliver_bridge_request(1, 44, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 24, 36, 128, 92, "adapter-ready", 800, "/sys/apps/terminal")
+        adapter.render_framebuffer_frame()
+
+        expect(simpleos_gui_adapter_display_path_name(adapter)).to_equal("simpleos-framebuffer")
+        expect(simpleos_gui_adapter_content_renderer_name(adapter)).to_equal("simple_web")
+        expect(adapter.delivered_bridge_events).to_equal(1)
+        expect(adapter.presented_frames).to_equal(1)
+        expect(adapter.compositor.windows.len()).to_equal(1)
+        expect(adapter.compositor.windows[0].content).to_equal("adapter-ready")
+        expect(_adapter_present_count).to_equal(1)
+        expect(_adapter_chrome_fill_count).to_be_greater_than(0)
+        expect(_adapter_clear_color).to_equal(0xFF0F172Au32)
+
+    it "applies bridge lifecycle actions through the shared host compositor path":
+        val backend = AdapterCaptureBackend(w: 240, h: 180)
+        val adapter = SimpleOsGuiAdapter.new(backend, Size.wh(240, 180))
+
+        adapter.deliver_bridge_request(1, 44, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 24, 36, 128, 92, "adapter-ready", 800, "/sys/apps/terminal")
+        val wid = adapter.compositor.windows[0].id
+
+        adapter.deliver_bridge_request(2, 44, COMP_MOVE.to_i64(), wid, "", 48, 52, 0, 0, "", 0, "/sys/apps/terminal")
+        adapter.deliver_bridge_request(3, 44, COMP_RESIZE.to_i64(), wid, "", 0, 0, 144, 104, "", 0, "/sys/apps/terminal")
+        expect(adapter.compositor.windows[0].x).to_equal(48)
+        expect(adapter.compositor.windows[0].y).to_equal(52)
+        expect(adapter.compositor.windows[0].w).to_equal(144)
+        expect(adapter.compositor.windows[0].h).to_equal(104)
+
+        adapter.deliver_bridge_request(4, 44, COMP_MINIMIZE.to_i64(), wid, "", 0, 0, 0, 0, "", 0, "/sys/apps/terminal")
+        expect(adapter.compositor.windows[0].minimized).to_equal(true)
+
+        adapter.deliver_bridge_request(5, 44, COMP_RESTORE.to_i64(), wid, "", 0, 0, 0, 0, "", 0, "/sys/apps/terminal")
+        expect(adapter.compositor.windows[0].minimized).to_equal(false)
+        expect(adapter.compositor.windows[0].focused).to_equal(true)
+        expect(adapter.delivered_bridge_events).to_equal(5)
+
+    it "applies title focus maximize update and destroy through the adapter bridge":
+        val backend = AdapterCaptureBackend(w: 320, h: 240)
+        val adapter = SimpleOsGuiAdapter.new(backend, Size.wh(320, 240))
+
+        adapter.deliver_bridge_request(1, 44, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 24, 36, 128, 92, "adapter-ready", 800, "/sys/apps/terminal")
+        adapter.deliver_bridge_request(2, 55, COMP_CREATE_WINDOW.to_i64(), 0, "Editor", 64, 76, 150, 120, "editor-ready", 801, "/sys/apps/editor")
+        val first_id = adapter.compositor.windows[0].id
+        val second_id = adapter.compositor.windows[1].id
+
+        adapter.deliver_bridge_request(3, 44, COMP_SET_TITLE.to_i64(), first_id, "Terminal Renamed", 0, 0, 0, 0, "", 0, "/sys/apps/terminal")
+        expect(adapter.compositor.windows[0].title).to_equal("Terminal Renamed")
+
+        adapter.deliver_bridge_request(4, 44, COMP_FOCUS.to_i64(), first_id, "", 0, 0, 0, 0, "", 0, "/sys/apps/terminal")
+        expect(adapter.compositor.windows[1].id).to_equal(first_id)
+        expect(adapter.compositor.windows[1].focused).to_equal(true)
+        expect(adapter.compositor.windows[0].id).to_equal(second_id)
+        expect(adapter.compositor.windows[0].focused).to_equal(false)
+
+        adapter.deliver_bridge_request(5, 44, COMP_MAXIMIZE.to_i64(), first_id, "", 0, 0, 0, 0, "", 0, "/sys/apps/terminal")
+        expect(adapter.compositor.windows[1].x).to_equal(0)
+        expect(adapter.compositor.windows[1].y).to_equal(48)
+        expect(adapter.compositor.windows[1].w).to_equal(320)
+        expect(adapter.compositor.windows[1].h).to_equal(144)
+
+        adapter.deliver_bridge_request(6, 44, COMP_UPDATE_TREE.to_i64(), first_id, "", 0, 0, 0, 0, "updated-content", 0, "/sys/apps/terminal")
+        expect(adapter.compositor.windows[1].content).to_equal("updated-content")
+
+        adapter.deliver_bridge_request(7, 44, COMP_DESTROY_WINDOW.to_i64(), first_id, "", 0, 0, 0, 0, "", 0, "/sys/apps/terminal")
+        expect(adapter.compositor.windows.len()).to_equal(1)
+        expect(adapter.compositor.windows[0].id).to_equal(second_id)
+        expect(adapter.delivered_bridge_events).to_equal(7)

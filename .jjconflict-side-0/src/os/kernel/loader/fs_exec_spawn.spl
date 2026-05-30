@@ -1,0 +1,212 @@
+# Shared filesystem-exec scheduler bridge.
+#
+# Keeps executable-byte resolution, process-image construction, scheduler task
+# creation, and common status mapping in one place. Per-arch differences are
+# reduced to the active architecture selection, byte-source bridge, and the
+# optional live handoff hook.
+
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.process_image.{build_user_process_image_unchecked}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check}
+use os.kernel.scheduler.scheduler_types.{
+    Scheduler, SchedulerBootstrapUserTaskResult,
+    TaskControlBlock, ReadyQueue, CpuRunQueue,
+    MAX_TASKS, PRIORITY_LEVELS
+}
+use os.kernel.scheduler.scheduler_arm_bootstrap.{scheduler_create_bootstrap_user_task_pid}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.types.task_types.{TaskId, TaskPriority, scheduler_flat_topology, user_process_image_entry, user_process_image_segment_count}
+
+extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
+extern fn serial_println(msg: text)
+
+@cfg(arm64)
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
+
+@cfg(arm32)
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
+
+@cfg(x86_64)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(x86)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(riscv64)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(riscv32)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(x86_64)
+fn _fs_exec_active_arch() -> Architecture:
+    Architecture.X86_64
+
+@cfg(x86)
+fn _fs_exec_active_arch() -> Architecture:
+    Architecture.X86
+
+@cfg(arm64)
+fn _fs_exec_active_arch() -> Architecture:
+    Architecture.Arm64
+
+@cfg(arm32)
+fn _fs_exec_active_arch() -> Architecture:
+    Architecture.Arm32
+
+@cfg(riscv64)
+fn _fs_exec_active_arch() -> Architecture:
+    Architecture.Riscv64
+
+@cfg(riscv32)
+fn _fs_exec_active_arch() -> Architecture:
+    Architecture.Riscv32
+
+@cfg(arm64)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    arm_fs_exec_read_file_bytes(path)
+
+@cfg(arm32)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    arm_fs_exec_read_file_bytes(path)
+
+@cfg(x86_64)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+@cfg(x86)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+@cfg(riscv64)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+@cfg(riscv32)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+pub struct FsExecPrepareResult:
+    scheduler: Scheduler
+    pid: i64
+
+fn _fs_exec_new_bootstrap_scheduler() -> Scheduler:
+    """Create the one-CPU scheduler state fs-exec needs without importing the full scheduler hub."""
+    var tasks: [TaskControlBlock?] = []
+    var i = 0
+    while i < MAX_TASKS:
+        tasks.push(nil)
+        i = i + 1
+    var queues: [ReadyQueue] = []
+    var p = 0
+    while p < PRIORITY_LEVELS:
+        queues.push(ReadyQueue.new())
+        p = p + 1
+    Scheduler(
+        tasks: tasks,
+        current: TaskId(id: 0),
+        current_by_cpu: [TaskId(id: 0)],
+        preempt_pending_by_cpu: [nil],
+        ready_queues: queues,
+        cpu_runqueues: [CpuRunQueue.new(0u32)],
+        topology: scheduler_flat_topology(1u32),
+        rt_runtime_ns_by_cpu: [0],
+        rt_period_ns_by_cpu: [0],
+        rt_consumed_ns_by_cpu: [0],
+        rt_replenish_ns_by_cpu: [0],
+        rt_throttled_by_cpu: [false],
+        deadline_remaining_ns_by_slot: [],
+        deadline_period_start_ns_by_slot: [],
+        deadline_miss_count_by_slot: [],
+        deadline_overrun_count_by_slot: [],
+        rt_base_priority_by_slot: [],
+        trace_events: [],
+        trace_head: 0,
+        trace_count: 0,
+        tick_count: 0,
+        next_task_id: 1
+    )
+
+pub fn fs_exec_read_executable_bytes(path: text) -> [u8]:
+    """Read executable bytes through the active target's filesystem bridge."""
+    _fs_exec_read_bytes(path)
+
+@cfg(arm64)
+fn _fs_exec_segment_count_for_log(image) -> i32:
+    if user_process_image_entry(image) == 0:
+        return 0
+    1
+
+@cfg(arm32)
+fn _fs_exec_segment_count_for_log(image) -> i32:
+    user_process_image_segment_count(image)
+
+@cfg(riscv64)
+fn _fs_exec_segment_count_for_log(image) -> i32:
+    user_process_image_segment_count(image)
+
+@cfg(riscv32)
+fn _fs_exec_segment_count_for_log(image) -> i32:
+    user_process_image_segment_count(image)
+
+@cfg(x86_64)
+fn _fs_exec_segment_count_for_log(image) -> i32:
+    user_process_image_segment_count(image)
+
+@cfg(x86)
+fn _fs_exec_segment_count_for_log(image) -> i32:
+    user_process_image_segment_count(image)
+
+pub fn fs_exec_prepare_spawn_from_bytes(path: text, bytes: [u8], arch: Architecture, argv: [text], envp: [text]) -> FsExecPrepareResult:
+    """Build a user image from already-resolved executable bytes and register a bootstrap task."""
+    val byte_len = rt_arm_array_len_u32(bytes)
+    serial_println("[fs-exec] spawn:bytes path={path} len={byte_len}")
+    if byte_len <= 4:
+        serial_println("[fs-exec] spawn:resolve-fail path={path}")
+        return FsExecPrepareResult(scheduler: _fs_exec_new_bootstrap_scheduler(), pid: -2)
+
+    val image = build_user_process_image_unchecked(path, bytes, arch, argv, envp)
+    serial_println(
+        "[fs-exec] spawn:image entry={user_process_image_entry(image)} segments={_fs_exec_segment_count_for_log(image)}"
+    )
+    if user_process_image_entry(image) == 0:
+        serial_println("[fs-exec] spawn:image-fail path={path}")
+        return FsExecPrepareResult(scheduler: _fs_exec_new_bootstrap_scheduler(), pid: -8)
+
+    var scheduler = _fs_exec_new_bootstrap_scheduler()
+    val scheduler_result: SchedulerBootstrapUserTaskResult = scheduler_create_bootstrap_user_task_pid(
+        scheduler, image, TaskPriority.Normal, CapabilitySet.full()
+    )
+    scheduler = scheduler_result.scheduler
+    val pid = scheduler_result.pid
+    if pid == 0:
+        serial_println("[fs-exec] spawn:scheduler-fail path={path}")
+        return FsExecPrepareResult(scheduler: scheduler, pid: -12)
+
+    FsExecPrepareResult(scheduler: scheduler, pid: pid as i64)
+
+pub fn fs_exec_prepare_spawn(path: text, argv: [text], envp: [text]) -> FsExecPrepareResult:
+    """Resolve bytes, build an image, and register a bootstrap user task."""
+    serial_println("[fs-exec] spawn:resolve path={path}")
+    val bytes = _fs_exec_read_bytes(path)
+    fs_exec_prepare_spawn_from_bytes(path, bytes, _fs_exec_active_arch(), argv, envp)
+
+pub fn fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
+    """Load a filesystem executable, register it, and perform the arch handoff."""
+    fs_exec_spawn_as(0, path, argv, envp)
+
+pub fn fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [text]) -> i64:
+    """Capability-gated spawn: checks FileExec + ProcessSpawn before loading.
+
+    caller == 0 is the kernel-origin sentinel (bypasses capability check).
+    Returns the new PID on success, or a negative errno on failure.
+    """
+    val gate = exec_cap_check(caller, path)
+    if gate != 0:
+        serial_println("[fs-exec] spawn:denied caller={caller} path={path} err={gate}")
+        return gate as i64
+    val prepared = fs_exec_prepare_spawn(path, argv, envp)
+    if prepared.pid <= 0:
+        return prepared.pid
+    serial_println("[fs-exec] spawn:pid={prepared.pid} path={path}")
+    prepared.pid

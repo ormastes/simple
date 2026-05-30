@@ -1,0 +1,119 @@
+# Simple CLI - bug-resolve command
+# Marks a bug as Closed in doc/08_tracking/bug/bug_db.sdn
+
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use nogc_sync_mut.database.bug.{load_bug_database}
+use app.io.mod (file_exists, file_read, file_write)
+use std.log.{error}
+
+val BUG_DB_PATH = "doc/08_tracking/bug/bug_db.sdn"
+
+fn print_help():
+    print "Usage: simple bug-resolve --id=<id>"
+    print ""
+    print "Mark a bug as Closed in the bug database."
+    print ""
+    print "Options:"
+    print "  --id=<id>      Bug identifier to resolve"
+    print "  --date=<date>  Resolution date (default: 2026-04-14)"
+    print "  --json         Output as JSON"
+    for line in log_options_help():
+        print "  {line}"
+    print "  -h, --help     Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn parse_flag(args: [text], prefix: text) -> text:
+    for arg in args:
+        if arg.starts_with(prefix):
+            return arg[prefix.len():]
+    ""
+
+fn resolve_bug_text_fallback(id: text, timestamp: text) -> bool:
+    if not file_exists(BUG_DB_PATH):
+        return false
+    val content = file_read(BUG_DB_PATH)
+    val lines = content.split("\n")
+    var out: [text] = []
+    var changed = false
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("{id},"):
+            val fields = trimmed.split(",")
+            if fields.len() >= 10:
+                fields[2] = " closed"
+                fields[8] = " " + timestamp
+                out.push("    " + fields.join(","))
+                changed = true
+            else:
+                out.push(line)
+        else:
+            out.push(line)
+    if changed:
+        file_write(BUG_DB_PATH, out.join("\n"))
+        return true
+    false
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("bug-resolve", log_opts.error)
+        return 1
+
+    var as_json = log_opts.log_mode == "json"
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        ai = ai + 1
+
+    val id = parse_flag(args, "--id=")
+    val date_str = parse_flag(args, "--date=")
+
+    if id == "":
+        print "Error: --id is required"
+        print_help()
+        return 1
+
+    val timestamp = if date_str != "": date_str else: "2026-04-14"
+
+    val db_opt = load_bug_database(BUG_DB_PATH)
+    if not db_opt.?:
+        print "Error: could not load bug database at {BUG_DB_PATH}"
+        return 1
+    var db = db_opt.unwrap()
+
+    if not db.resolve_bug(id, timestamp):
+        if not resolve_bug_text_fallback(id, timestamp):
+            print "Error: bug '{id}' not found in database"
+            return 1
+    else:
+        if not db.save():
+            print "Error: failed to save bug database"
+            return 1
+
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, 1, 1, "bug-resolve")
+        if progress_line != "":
+            print progress_line
+    if as_json:
+        print "{\"command\":\"bug-resolve\",\"status\":\"ok\",\"id\":\"" + id + "\",\"updated_at\":\"" + timestamp + "\"}"
+    else:
+        print "Resolved bug {id} (status: Closed, updated_at: {timestamp})"
+    0

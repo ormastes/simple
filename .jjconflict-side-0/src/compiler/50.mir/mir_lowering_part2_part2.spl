@@ -1,0 +1,447 @@
+# Part 2 of src/compiler/50.mir/mir_lowering_part2.spl
+use compiler.mir.mir_lowering_part2.*
+# Part 2 of src/compiler/50.mir/mir_lowering.spl
+use compiler.mir.mir_lowering.*
+# MIR Lowering - HIR to MIR Transformation
+#
+# This module handles lowering from HIR (High-level IR) to MIR (Mid-level IR).
+# It converts:
+# - Nested expressions to SSA form
+# - Control flow to basic blocks
+# - Memory operations to explicit loads/stores
+# - Type system from HIR to MIR representation
+#
+# Split into:
+# - mir_lowering_types.spl: Struct definitions (MirLowering, MirError)
+# - mir_lowering.spl: Core coordinator, module/function/type lowering, asm/target (this file)
+# - mir_lowering_expr.spl: Expression lowering, operators, calls, literals
+# - mir_lowering_stmts.spl: Statement lowering, control flow (if/loop/for)
+# - mir_lowering_ml.spl: ML blocks, async/await, custom blocks
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
+use compiler.hir.hir.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
+use compiler.common.diagnostics.span.{Span}
+use compiler.blocks.value.BlockValue
+use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
+use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
+use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
+use compiler.core.types.{custom_primitive_underlying_type_tag_by_symbol}
+
+# Import struct definitions from types module
+use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+
+# Import split modules so their impl blocks are linked
+use compiler.mir.mir_lowering_expr.*
+use compiler.mir.mir_lowering_stmts.*
+use compiler.mir.mir_lowering_ml.*
+
+impl MirLowering:
+    me lower_function(fn_: HirFunction) -> MirFunction:
+        """Lower HIR function to MIR."""
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_REAL_LOWER") ?? "") != "1":
+            print "[mir-lower] lower_function:bootstrap:start"
+            val signature = MirSignature(
+                params: [],
+                return_type: MirType.i64(),
+                is_variadic: false
+            )
+            var bldr = self.builder
+            bldr.begin_function(fn_.symbol, fn_.name, signature, nil)
+            bldr.terminate_return(Some(mir_operand_const_int(0)))
+            val fn_result = bldr.end_function()
+            self.builder = bldr
+            print "[mir-lower] lower_function:bootstrap:done"
+            return fn_result
+
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and fn_.name == "bootstrap_version":
+            print "[mir-lower] bootstrap-known:bootstrap_version"
+            val str_type = MirType(kind: MirTypeKind.Opaque("str"))
+            val signature = MirSignature(params: [], return_type: str_type, is_variadic: false)
+            var bldr_known = self.builder
+            bldr_known.begin_function(fn_.symbol, fn_.name, signature, nil)
+            val dest = bldr_known.new_temp(str_type)
+            bldr_known.emit_const(dest, MirConstValue.Str("0.9.8"), str_type)
+            bldr_known.terminate_return(Some(mir_operand_copy(dest)))
+            val fn_result = bldr_known.end_function()
+            self.builder = bldr_known
+            return fn_result
+
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and fn_.name == "native_build_help":
+            print "[mir-lower] bootstrap-known:native_build_help"
+            val signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+            var bldr_known = self.builder
+            bldr_known.begin_function(fn_.symbol, fn_.name, signature, nil)
+            val result = bldr_known.emit_const_int(0)
+            bldr_known.terminate_return(Some(mir_operand_copy(result)))
+            val fn_result = bldr_known.end_function()
+            self.builder = bldr_known
+            return fn_result
+
+        self.local_map = {}
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:start {fn_.name}"
+
+        # Build signature
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:params {fn_.name}"
+        var params: [MirType] = []
+        var pmi = 0
+        while pmi < fn_.params.len():
+            params = params.push(self.lower_type(fn_.params[pmi].type_))
+            pmi = pmi + 1
+
+        val return_type = self.lower_type(fn_.return_type)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:return-type {fn_.name}"
+        val signature = MirSignature(
+            params: params,
+            return_type: return_type,
+            is_variadic: false
+        )
+
+        # Begin function (copy-modify-reassign for interpreter)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:begin {fn_.name}"
+        var bldr = self.builder
+        bldr.begin_function(fn_.symbol, fn_.name, signature, fn_.span)
+        self.builder = bldr
+
+        # Map parameters to locals
+        var arg_locals: Dict<i64, LocalId> = {}
+        var lmi = 0
+        while lmi < self.builder.locals.len():
+            val local = self.builder.locals[lmi]
+            match local.kind:
+                case Arg(index):
+                    arg_locals[index] = local.id
+                case _:
+                    ()
+            lmi = lmi + 1
+
+        var pli = 0
+        while pli < fn_.params.len():
+            val param = fn_.params[pli]
+            val local = if arg_locals.has(pli):
+                arg_locals[pli]
+            else:
+                LocalId(id: pli + 1)
+            self.local_map[param.symbol] = local
+            pli = pli + 1
+
+        val previous_has_vhdl_metadata = self.current_has_vhdl_metadata
+        self.current_has_vhdl_metadata = fn_.has_vhdl_metadata
+
+        # Lower body
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:body {fn_.name}"
+        val result = self.lower_block(fn_.body)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:body-done {fn_.name}"
+        self.current_has_vhdl_metadata = previous_has_vhdl_metadata
+
+        # Return result (copy-modify-reassign for interpreter)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:return {fn_.name}"
+        var bldr2 = self.builder
+        if result.?:
+            bldr2.terminate_return(Some(mir_operand_copy(result.unwrap())))
+        else:
+            bldr2.terminate_return(nil)
+        self.builder = bldr2
+
+        var bldr3 = self.builder
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:end {fn_.name}"
+        var fn_result = bldr3.end_function()
+        self.builder = bldr3
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:done {fn_.name}"
+
+        # Propagate @gpu_kernel flag from HIR func_attr
+        if fn_.func_attr.?:
+            val fa = fn_.func_attr.unwrap()
+            if fa.is_gpu_kernel:
+                fn_result.is_kernel = true
+            if fa.has_fast_math:
+                fn_result.has_fast_math = true
+
+        # Propagate @export("C") from HIR export_attr
+        if fn_.export_attr.?:
+            val ea = fn_.export_attr.unwrap()
+            if ea.is_export_c:
+                fn_result.is_export_c = true
+                fn_result.export_name = ea.export_name
+
+        # Propagate @driver/@native_lib manifest metadata for backend registry
+        # synthesis and manifest emission.
+        if fn_.has_driver_manifest_attr:
+            fn_result.driver_manifest_attr = fn_.driver_manifest_attr
+            fn_result = apply_synthetic_driver_codegen(fn_, fn_result, self.symbols)
+
+        if fn_.has_vhdl_metadata:
+            fn_result.vhdl_metadata = fn_.vhdl_metadata
+
+        fn_result
+
+    me lower_const(const_: HirConst):
+        """Lower HIR constant to MIR static."""
+        val value = self.lower_const_expr(const_.value)
+        if value.?:
+            # Copy-modify-reassign: self.builder.module nested access
+            var bldr = self.builder
+            var module = bldr.module
+            var constants = module.constants
+            constants[const_.symbol] = MirConstant(
+                symbol: const_.symbol,
+                name: const_.name,
+                type_: self.lower_type(const_.type_),
+                value: value.unwrap()
+            )
+            module.constants = constants
+            bldr.module = module
+            self.builder = bldr
+
+    me lower_type(type_: HirType) -> MirType:
+        """Lower HIR type to MIR type."""
+        match type_.kind:
+            case Int(bits, signed):
+                if signed:
+                    match bits:
+                        case 8: MirType(kind: MirTypeKind.I8)
+                        case 16: MirType(kind: MirTypeKind.I16)
+                        case 32: MirType(kind: MirTypeKind.I32)
+                        case _: MirType(kind: MirTypeKind.I64)
+                else:
+                    match bits:
+                        case 8: MirType(kind: MirTypeKind.U8)
+                        case 16: MirType(kind: MirTypeKind.U16)
+                        case 32: MirType(kind: MirTypeKind.U32)
+                        case _: MirType(kind: MirTypeKind.U64)
+            case Float(bits):
+                match bits:
+                    case 32: MirType(kind: MirTypeKind.F32)
+                    case _: MirType(kind: MirTypeKind.F64)
+            case Bool:
+                MirType(kind: MirTypeKind.Bool)
+            case Char:
+                MirType(kind: MirTypeKind.Char)
+            case Str:
+                # String is a fat pointer (ptr, len)
+                MirType(kind: MirTypeKind.Tuple([
+                    MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),
+                    MirType(kind: MirTypeKind.U64)
+                ]))
+            case Unit:
+                MirType(kind: MirTypeKind.Unit)
+            case Tuple(elements):
+                var mir_elements: [MirType] = []
+                for e in elements:
+                    mir_elements = mir_elements.push(self.lower_type(e))
+                MirType(kind: MirTypeKind.Tuple(mir_elements))
+            case Array(element, size):
+                val array_size = if size != nil: size else: 0
+                MirType(kind: MirTypeKind.Array(self.lower_type(element), array_size))
+            case Ref(inner, mutable):
+                MirType(kind: MirTypeKind.Ref(self.lower_type(inner), mutable))
+            case Optional(inner):
+                # Optional is enum { nil, Some(T) }
+                MirType(kind: MirTypeKind.Tuple([
+                    MirType(kind: MirTypeKind.Bool),  # has_value
+                    self.lower_type(inner)
+                ]))
+            case Union(members):
+                # Union is a tagged union: [discriminant (I64), ...member types]
+                # At the MIR level, store all member types for backend layout
+                var mir_members: [MirType] = []
+                for m in members:
+                    mir_members = mir_members.push(self.lower_type(m))
+                MirType(kind: MirTypeKind.Union(mir_members))
+            case Named(symbol, _):
+                val underlying = custom_primitive_underlying_type_tag_by_symbol(self.symbol_id_value(symbol))
+                if underlying == TYPE_BOOL:
+                    return MirType(kind: MirTypeKind.Bool)
+                if underlying == TYPE_I64:
+                    return MirType(kind: MirTypeKind.I64)
+                if underlying == TYPE_F64:
+                    return MirType(kind: MirTypeKind.F64)
+                MirType(kind: MirTypeKind.Struct(symbol))
+            case Never:
+                MirType(kind: MirTypeKind.Never)
+            case _:
+                self.error("unsupported MIR type kind: {type_.kind}", nil)
+                MirType(kind: MirTypeKind.I64)
+
+    me lower_block(block: HirBlock) -> LocalId?:
+        """Lower HIR block to MIR, return result local if any."""
+        val block_stmts: [HirStmt]
+        val block_value: HirExpr?
+        match block:
+            case HirBlock(stmts, value, _):
+                block_stmts = stmts
+                block_value = value
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] block:start"
+            print "[mir-lower] block:stmts {block_stmts.len()}"
+        var blk_i = 0
+        while blk_i < block_stmts.len():
+            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                print "[mir-lower] block:stmt {blk_i}"
+            val stmt = block_stmts[blk_i]
+            self.lower_stmt(stmt)
+            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                print "[mir-lower] block:stmt-done {blk_i}"
+            blk_i = blk_i + 1
+
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] block:value-check"
+        if block_value.?:
+            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                print "[mir-lower] block:value-present"
+            val value = block_value.unwrap()
+            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                print "[mir-lower] block:value-unwrapped"
+            val local = self.lower_expr(value)
+            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                print "[mir-lower] block:value-lowered"
+            Some(local)
+        else:
+            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                print "[mir-lower] block:no-value"
+            nil
+
+# ============================================================================
+# Range Lowering
+# ============================================================================
+
+    me lower_range(start: HirExpr?, end: HirExpr?, inclusive: bool, step: HirExpr?) -> LocalId:
+        """Lower range expression to runtime call.
+
+        Generates call to rt_range(start, end) or rt_range_inclusive(start, end).
+        When a step parameter is provided, generates rt_range_step(start, end, step)
+        or rt_range_inclusive_step(start, end, step) instead.
+        """
+        # Lower start and end to locals
+        val start_local = if start.?: self.lower_expr(start.unwrap()) else: self.builder.emit_const_int(0)
+        val end_local = if end.?: self.lower_expr(end.unwrap()) else: self.builder.emit_const_int(0)
+
+        # Create function operand for the appropriate runtime call
+        val func_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Int(0),  # Function symbol (will be resolved in codegen)
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+
+        if step.?:
+            # Step parameter provided: rt_range_step(start, end, step)
+            # or rt_range_inclusive_step(start, end, step)
+            val step_local = self.lower_expr(step.unwrap())
+
+            val result = self.builder.emit_call(func_operand, [
+                mir_operand_copy(start_local),
+                mir_operand_copy(end_local),
+                mir_operand_copy(step_local)
+            ], MirType.i64())
+
+            result ?? self.builder.new_temp(MirType.i64())
+        else:
+            # No step: rt_range(start, end) or rt_range_inclusive(start, end)
+            val result = self.builder.emit_call(func_operand, [
+                mir_operand_copy(start_local),
+                mir_operand_copy(end_local)
+            ], MirType.i64())
+
+            result ?? self.builder.new_temp(MirType.i64())
+
+# ============================================================================
+# Inline Assembly Lowering
+# ============================================================================
+
+    me lower_inline_asm(asm: HirAsm) -> LocalId:
+        """Lower inline assembly from HIR to MIR.
+
+        Converts HIR inline assembly constraints to MIR operands.
+        """
+        # Lower all constraint value expressions to MIR operands
+        var inputs: [MirAsmOperand] = []
+        var outputs: [MirAsmOperand] = []
+
+        for constraint in asm.constraints:
+            # Lower the HIR expression to a local
+            val value_local = self.lower_expr(constraint.value)
+            val mir_operand = mir_operand_copy(value_local)
+
+            val asm_operand = MirAsmOperand(
+                name: constraint.name,
+                kind: constraint.kind,
+                location: constraint.location,
+                operand: mir_operand
+            )
+
+            # Categorize as input or output
+            match constraint.kind:
+                case In:
+                    inputs.push(asm_operand)
+                case Out | LateOut:
+                    outputs.push(asm_operand)
+                case InOut:
+                    # InOut constraints appear in both lists
+                    inputs.push(asm_operand)
+                    outputs.push(asm_operand)
+
+        # Emit inline assembly instruction
+        self.builder.emit(MirInst(
+            kind: MirInstKind.InlineAsm(
+                asm_template: asm.asm_template,
+                is_volatile: asm.is_volatile,
+                inputs: inputs,
+                outputs: outputs,
+                clobbers: asm.clobbers
+            ),
+            span: Some(asm.span)
+        ))
+
+        # Return a unit value (inline asm doesn't produce a value directly)
+        self.builder.new_temp(MirType.unit())
+
+# ============================================================================
+# Field Resolution
+# ============================================================================
+
+    me resolve_field_index(base: HirExpr, field_name: text, resolved: SymbolId?) -> i64:
+        """Resolve field index within a struct/class type.
+
+        Uses the base expression's type to look up field ordering.
+        Falls back to 0 if type cannot be determined.
+        """
+        # Try to get the type symbol from the base expression's type
+        val type_sym = self.expr_type_symbol(base)
+        if type_sym.?:
+            val sym_id = self.symbol_id_value(type_sym.unwrap())
+            if self.field_map.has(sym_id):
+                val fields = self.field_map[sym_id]
+                val n = fields.len()
+                var idx = 0
+                while idx < n:
+                    if fields[idx] == field_name:
+                        return idx
+                    idx = idx + 1
+
+        0  # Default fallback when type is unknown
+
+    fn expr_type_symbol(expr: HirExpr) -> SymbolId?:
+        """Determine the type symbol of an expression from its HIR type annotation."""
+        if expr.type_.?:
+            val ty = expr.type_.unwrap()
+            match ty.kind:
+                case Named(symbol, _):
+                    Some(symbol)
+                case _:
+                    nil
+        else:
+            nil
+
+# ============================================================================
+# Target-Qualified Assembly
+# ============================================================================

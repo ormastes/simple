@@ -1,0 +1,462 @@
+# SCV fallback parser index.
+
+use app.io.mod (file_exists, file_read)
+use std.nogc_sync_mut.io.file_ops.{file_read_bytes}
+use std.scv.store.{scv_content_id_for_bytes, scv_write_text, scv_hash_text}
+use std.scv.store.{scv_mark_current_state}
+use std.scv.core.{scv_parser_index_path, scv_object_path, scv_rel_path}
+use std.scv.core.{scv_state_parsed_error, scv_state_parsed_ok}
+use std.scv.parser_registry.{scv_langmap_validate, scv_language_for_path, scv_parser_for_path, scv_locked_parser_hash}
+use std.scv.wasm_executor.{scv_wasm_executor_available, scv_wasm_parse}
+
+fn scv_first_line(content: text) -> text:
+    val lines = content.split("\n")
+    if lines.len() > 0:
+        lines[0].trim()
+    else:
+        ""
+
+fn scv_language_for_shebang(content: text) -> text:
+    val line = scv_first_line(content)
+    if not line.starts_with("#!"):
+        return ""
+    if line.contains("python"):
+        "python"
+    elif line.contains("simple") or line.contains("spl"):
+        "simple"
+    elif line.contains("rust-script") or line.contains("cargo"):
+        "rust"
+    else:
+        ""
+
+fn scv_language_for_text(root: text, path: text, content: text) -> text:
+    val by_path = scv_language_for_path(root, path)
+    if by_path != "fallback":
+        return by_path
+    val by_shebang = scv_language_for_shebang(content)
+    if by_shebang != "":
+        by_shebang
+    else:
+        by_path
+
+fn scv_is_binary_text(content: text) -> bool:
+    content.contains("\u0000")
+
+fn scv_is_binary_bytes(bytes: [i64]) -> bool:
+    for b in bytes:
+        if (b & 0xFF) == 0:
+            return true
+    false
+
+fn scv_trim_trailing_space(line: text) -> text:
+    var end = line.len()
+    while end > 0 and (line.char_at(end - 1) == " " or line.char_at(end - 1) == "\t"):
+        end = end - 1
+    line[0:end]
+
+fn scv_fallback_syntax_view(content: text) -> text:
+    var out = ""
+    var line_no = 1
+    for line in content.split("\n"):
+        out = out + "line:{line_no}:{line}\n"
+        line_no = line_no + 1
+    out
+
+fn scv_fallback_semantic_view(content: text) -> text:
+    var out = ""
+    var line_no = 1
+    for line in content.split("\n"):
+        out = out + "line:{line_no}:{scv_trim_trailing_space(line)}\n"
+        line_no = line_no + 1
+    out
+
+fn scv_fallback_syntax_hash(content: text) -> text:
+    scv_hash_text("syntax", scv_fallback_syntax_view(content))
+
+fn scv_fallback_semantic_hash(content: text) -> text:
+    scv_hash_text("semantic", scv_fallback_semantic_view(content))
+
+fn scv_parser_execution_for_kind(kind: text) -> text:
+    if kind == "fallback-binary":
+        "fallback-binary"
+    elif kind == "tree-sitter-wasm":
+        "tree-sitter-wasm"
+    else:
+        "fallback-line"
+
+fn scv_simple_delimiters_balanced(content: text) -> bool:
+    var paren = 0
+    var bracket = 0
+    var brace = 0
+    for ch in content:
+        if ch == "(":
+            paren = paren + 1
+        elif ch == ")":
+            paren = paren - 1
+        elif ch == "[":
+            bracket = bracket + 1
+        elif ch == "]":
+            bracket = bracket - 1
+        elif ch == "{":
+            brace = brace + 1
+        elif ch == "}":
+            brace = brace - 1
+        if paren < 0 or bracket < 0 or brace < 0:
+            return false
+    paren == 0 and bracket == 0 and brace == 0
+
+fn scv_fallback_parse_status(language: text, content: text) -> text:
+    if language == "simple" and not scv_simple_delimiters_balanced(content):
+        "parsed_error"
+    else:
+        "parsed_ok"
+
+fn scv_join_node_ids(ids: [text]) -> text:
+    var out = ""
+    var i = 0
+    while i < ids.len():
+        if i > 0:
+            out = out + ","
+        out = out + ids[i]
+        i = i + 1
+    out
+
+fn scv_write_syntax_node(root: text, payload: text) -> text:
+    val id = scv_hash_text("syntax_node", payload)
+    val path = scv_object_path(root, "syntax", id)
+    if not file_exists(path):
+        scv_write_text(path, payload)
+    id
+
+fn scv_binary_chunk_size() -> i64:
+    8192
+
+fn scv_binary_chunk_node(root: text, offset: i64, bytes: [i64]) -> text:
+    val raw_hash = scv_content_id_for_bytes(bytes)
+    val syntax_hash = scv_hash_text("syntax", "chunk:{offset}:{raw_hash}:{bytes.len()}")
+    val payload = "grammar: fallback-binary\nversion: builtin\nexecution: fallback-binary\nkind: chunk\nfield:\nchildren:\noffset: {offset}\nbyte_len: {bytes.len()}\nraw: {raw_hash}\nsyntax: {syntax_hash}\nsemantic: {syntax_hash}\nparse_status: ok\n"
+    scv_write_syntax_node(root, payload)
+
+fn scv_binary_node_ids(root: text, bytes: [i64]) -> [text]:
+    var children: [text] = []
+    var part: [i64] = []
+    var offset = 0
+    var i = 0
+    while i < bytes.len():
+        part.push(bytes[i] & 0xFF)
+        if part.len() >= scv_binary_chunk_size() or i == bytes.len() - 1:
+            children.push(scv_binary_chunk_node(root, offset, part))
+            offset = i + 1
+            part = []
+        i = i + 1
+    if bytes.len() == 0:
+        children.push(scv_binary_chunk_node(root, 0, []))
+    children
+
+fn scv_binary_chunk_count(bytes: [i64]) -> i64:
+    if bytes.len() == 0:
+        return 1
+    var count = 0
+    var i = 0
+    while i < bytes.len():
+        count = count + 1
+        i = i + scv_binary_chunk_size()
+    count
+
+fn scv_binary_syntax_hash(bytes: [i64]) -> text:
+    scv_hash_text("syntax", "binary:{scv_content_id_for_bytes(bytes)}:{bytes.len()}:{scv_binary_chunk_count(bytes)}")
+
+fn scv_fallback_binary_root(root: text, path: text, bytes: [i64], language: text, raw: text, syntax_hash: text) -> text:
+    val child_ids = scv_join_node_ids(scv_binary_node_ids(root, bytes))
+    val rel = scv_rel_path(root, path)
+    val payload = "grammar: fallback-binary\nversion: builtin\nexecution: fallback-binary\nkind: binary\nfield: root\nchildren: {child_ids}\npath: {rel}\nlanguage: {language}\nbyte_len: {bytes.len()}\nraw: {raw}\nsyntax: {syntax_hash}\nsemantic: {syntax_hash}\nparse_status: ok\n"
+    scv_write_syntax_node(root, payload)
+
+fn scv_fallback_line_node(root: text, language: text, line_no: i64, line: text, byte_start: i64) -> text:
+    val syntax_hash = scv_hash_text("syntax", "line:{line_no}:{line}")
+    val semantic_hash = scv_hash_text("semantic", "line:{line_no}:{scv_trim_trailing_space(line)}")
+    val raw_hash = scv_hash_text("raw", line)
+    val payload = "grammar: fallback-line\nversion: builtin\nexecution: fallback-line\nkind: line\nfield:\nchildren:\nline: {line_no}\nbyte_start: {byte_start}\nbyte_end: {byte_start + line.len()}\nlanguage: {language}\nraw: {raw_hash}\nsyntax: {syntax_hash}\nsemantic: {semantic_hash}\nparse_status: ok\n"
+    scv_write_syntax_node(root, payload)
+
+fn scv_fallback_syntax_root(root: text, path: text, content: text, language: text, parser_kind: text, parser_version: text, parser_hash: text, raw: text, syntax_hash: text, semantic_hash: text, parse_status: text) -> text:
+    var children: [text] = []
+    var line_no = 1
+    var byte_start = 0
+    for line in content.split("\n"):
+        val child = scv_fallback_line_node(root, language, line_no, line, byte_start)
+        children.push(child)
+        byte_start = byte_start + line.len() + 1
+        line_no = line_no + 1
+    val child_ids = scv_join_node_ids(children)
+    val rel = scv_rel_path(root, path)
+    val payload = "grammar: {parser_kind}\nversion: {parser_version}\nparser_hash: {parser_hash}\nexecution: fallback-line\nkind: file\nfield: root\nchildren: {child_ids}\npath: {rel}\nlanguage: {language}\nraw: {raw}\nsyntax: {syntax_hash}\nsemantic: {semantic_hash}\nparse_status: {parse_status}\n"
+    scv_write_syntax_node(root, payload)
+
+fn scv_parse_file_wasm_or_fallback(root: text, path: text, content: text,
+                                    language: text, kind: text, version: text,
+                                    parser_hash: text, raw: text, syntax_hash: text,
+                                    semantic_hash: text, parse_status: text) -> text:
+    if kind == "tree-sitter-wasm" and scv_wasm_executor_available():
+        val (node_id, err) = scv_wasm_parse(root, language, kind, version, parser_hash, content)
+        if err != "":
+            scv_fallback_syntax_root(root, path, content, language,
+                                     kind, version, parser_hash,
+                                     raw, syntax_hash, semantic_hash, parse_status)
+        else:
+            node_id
+    else:
+        scv_fallback_syntax_root(root, path, content, language,
+                                 kind, version, parser_hash,
+                                 raw, syntax_hash, semantic_hash, parse_status)
+
+fn scv_parse_file(root: text, path: text) -> text:
+    if not file_exists(path):
+        return "ERROR missing file\n"
+    val rel = scv_rel_path(root, path)
+    if not scv_metadata_path_safe(rel):
+        return "ERROR unsafe path for SCV metadata: {rel}\n"
+    val langmap_error = scv_langmap_validate(root)
+    if langmap_error != "":
+        return "{langmap_error}\n"
+    val bytes = file_read_bytes(path) ?? []
+    val raw = scv_content_id_for_bytes(bytes)
+    var language = scv_language_for_path(root, path)
+    var kind = "fallback-line"
+    var metric = ""
+    var syntax_hash = ""
+    var semantic_hash = ""
+    var node = ""
+    var parse_status = "parsed_ok"
+    if scv_is_binary_bytes(bytes):
+        kind = "fallback-binary"
+        metric = "chunks={scv_binary_chunk_count(bytes)}"
+        syntax_hash = scv_binary_syntax_hash(bytes)
+        semantic_hash = syntax_hash
+        node = scv_fallback_binary_root(root, path, bytes, language, raw, syntax_hash)
+    else:
+        val content = file_read(path)
+        language = scv_language_for_text(root, path, content)
+        val (parser_kind, parser_version) = scv_parser_for_path(root, path, language)
+        if parser_kind.starts_with("ERROR"):
+            return "{parser_kind}\n"
+        kind = parser_kind
+        val parser_hash = scv_locked_parser_hash(root, language, kind, parser_version)
+        parse_status = scv_fallback_parse_status(language, content)
+        metric = "lines={content.split(\"\\n\").len()}"
+        syntax_hash = scv_hash_text("syntax", "{kind}:{parser_version}:{parser_hash}:{scv_fallback_syntax_view(content)}")
+        semantic_hash = scv_fallback_semantic_hash(content)
+        node = scv_parse_file_wasm_or_fallback(root, path, content, language, kind, parser_version, parser_hash, raw, syntax_hash, semantic_hash, parse_status)
+    "path: {path}\nlanguage: {language}\nraw: {raw}\nsyntax: {syntax_hash}\nsemantic: {semantic_hash}\nnode: {node}\nparser: {kind}\nexecution={scv_parser_execution_for_kind(kind)}\nstatus: {parse_status}\n{metric}\n"
+
+fn scv_parse_index_line(root: text, path: text) -> text:
+    val rel = scv_rel_path(root, path)
+    if not scv_metadata_path_safe(rel):
+        return "ERROR unsafe path for SCV metadata: {rel}"
+    val langmap_error = scv_langmap_validate(root)
+    if langmap_error != "":
+        return langmap_error
+    val bytes = file_read_bytes(path) ?? []
+    val raw = scv_content_id_for_bytes(bytes)
+    var language = scv_language_for_path(root, path)
+    var kind = "fallback-line"
+    var metric = ""
+    var syntax_hash = ""
+    var semantic_hash = ""
+    var node = ""
+    var parse_status = "parsed_ok"
+    if scv_is_binary_bytes(bytes):
+        kind = "fallback-binary"
+        metric = "chunks={scv_binary_chunk_count(bytes)}"
+        syntax_hash = scv_binary_syntax_hash(bytes)
+        semantic_hash = syntax_hash
+        node = scv_fallback_binary_root(root, path, bytes, language, raw, syntax_hash)
+    else:
+        val content = file_read(path)
+        language = scv_language_for_text(root, path, content)
+        val (parser_kind, parser_version) = scv_parser_for_path(root, path, language)
+        if parser_kind.starts_with("ERROR"):
+            return parser_kind
+        kind = parser_kind
+        val parser_hash = scv_locked_parser_hash(root, language, kind, parser_version)
+        parse_status = scv_fallback_parse_status(language, content)
+        metric = "lines={content.split(\"\\n\").len()}"
+        syntax_hash = scv_hash_text("syntax", "{kind}:{parser_version}:{parser_hash}:{scv_fallback_syntax_view(content)}")
+        semantic_hash = scv_fallback_semantic_hash(content)
+        node = scv_parse_file_wasm_or_fallback(root, path, content, language, kind, parser_version, parser_hash, raw, syntax_hash, semantic_hash, parse_status)
+    "{rel}|{language}|{raw}|{syntax_hash}|{semantic_hash}|{kind}|{parse_status}|{metric}|node={node}"
+
+fn scv_existing_parse_index_line(root: text, rel: text) -> text:
+    val index_path = scv_parser_index_path(root)
+    if not file_exists(index_path):
+        return ""
+    for line in file_read(index_path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() > 0 and parts[0] == rel:
+            return trimmed
+    ""
+
+fn scv_current_parse_identity(root: text, path: text) -> (text, text, text):
+    val bytes = file_read_bytes(path) ?? []
+    val raw = scv_content_id_for_bytes(bytes)
+    if scv_is_binary_bytes(bytes):
+        return (raw, scv_language_for_path(root, path), "fallback-binary@builtin")
+    val content = file_read(path)
+    val language = scv_language_for_text(root, path, content)
+    val (kind, version) = scv_parser_for_path(root, path, language)
+    if kind.starts_with("ERROR"):
+        return (raw, language, kind)
+    (raw, language, "{kind}@{version}@{scv_locked_parser_hash(root, language, kind, version)}")
+
+fn scv_cached_parse_index_line(root: text, path: text) -> text:
+    val rel = scv_rel_path(root, path)
+    if not scv_metadata_path_safe(rel):
+        return ""
+    if scv_langmap_validate(root) != "":
+        return ""
+    val current = scv_existing_parse_index_line(root, rel)
+    if current == "":
+        return ""
+    val parts = current.split("|")
+    if parts.len() < 9:
+        return ""
+    val (raw, language, parser_identity) = scv_current_parse_identity(root, path)
+    val current_version = if parts[5] == "fallback-binary": "builtin" else: scv_syntax_node_version(root, parts[8])
+    val current_hash = if parts[5] == "fallback-binary": "builtin" else: scv_syntax_node_parser_hash(root, parts[8])
+    val current_identity = "{parts[5]}@{current_version}@{current_hash}"
+    if parts[2] == raw and parts[1] == language and current_identity == parser_identity:
+        current
+    else:
+        ""
+
+fn scv_node_field_from_index_line(line: text) -> text:
+    val parts = line.split("|")
+    if parts.len() < 9:
+        return ""
+    val marker = "node="
+    if parts[8].starts_with(marker):
+        parts[8][marker.len():]
+    else:
+        ""
+
+fn scv_syntax_node_children(root: text, node: text) -> [text]:
+    if node == "":
+        return []
+    val path = scv_object_path(root, "syntax", node)
+    if not file_exists(path):
+        return []
+    for line in file_read(path).split("\n"):
+        if line.starts_with("children:"):
+            val children = line[9:].trim()
+            if children == "":
+                return []
+            return children.split(",")
+    []
+
+fn scv_node_list_contains(nodes: [text], node: text) -> bool:
+    for existing in nodes:
+        if existing == node:
+            return true
+    false
+
+fn scv_parse_reuse_metric(root: text, old_line: text, new_line: text) -> text:
+    if old_line == "" or new_line == "":
+        return ""
+    val old_parts = old_line.split("|")
+    val new_parts = new_line.split("|")
+    if old_parts.len() < 9 or new_parts.len() < 9:
+        return ""
+    if old_parts[5] == "fallback-binary" or new_parts[5] == "fallback-binary":
+        return ""
+    val old_children = scv_syntax_node_children(root, scv_node_field_from_index_line(old_line))
+    val new_children = scv_syntax_node_children(root, scv_node_field_from_index_line(new_line))
+    if new_children.len() == 0:
+        return ""
+    var reused = 0
+    for child in new_children:
+        if scv_node_list_contains(old_children, child):
+            reused = reused + 1
+    val changed = new_children.len() - reused
+    "reused_lines={reused}\nchanged_lines={changed}\n"
+
+fn scv_syntax_node_version(root: text, node_field: text) -> text:
+    val marker = "node="
+    if not node_field.starts_with(marker):
+        return ""
+    val node = node_field[marker.len():]
+    val path = scv_object_path(root, "syntax", node)
+    if not file_exists(path):
+        return ""
+    for line in file_read(path).split("\n"):
+        if line.starts_with("version:"):
+            return line[8:].trim()
+    ""
+
+fn scv_syntax_node_parser_hash(root: text, node_field: text) -> text:
+    val marker = "node="
+    if not node_field.starts_with(marker):
+        return ""
+    val node = node_field[marker.len():]
+    val path = scv_object_path(root, "syntax", node)
+    if not file_exists(path):
+        return ""
+    for line in file_read(path).split("\n"):
+        if line.starts_with("parser_hash:"):
+            return line[12:].trim()
+    "builtin"
+
+fn scv_write_parse_index_entry(root: text, path: text) -> text:
+    val index_path = scv_parser_index_path(root)
+    val rel = scv_rel_path(root, path)
+    val current = if file_exists(index_path): file_read(index_path) else: ""
+    val next_line = scv_parse_index_line(root, path)
+    if next_line.starts_with("ERROR"):
+        return next_line
+    var next = ""
+    var replaced = false
+    for line in current.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() > 0 and parts[0] == rel:
+            next = next + next_line + "\n"
+            replaced = true
+        else:
+            next = next + trimmed + "\n"
+    if not replaced:
+        next = next + next_line + "\n"
+    scv_write_text(index_path, next)
+    next_line
+
+fn scv_parse_gate(root: text, path: text) -> text:
+    val cached = scv_cached_parse_index_line(root, path)
+    if cached != "":
+        val parts = cached.split("|")
+        val status = if parts.len() >= 7: parts[6] else: "parsed_ok"
+        val state = if status == "parsed_error": scv_state_parsed_error() else: scv_state_parsed_ok()
+        return "path: {path}\nlanguage: {parts[1]}\nraw: {parts[2]}\nsyntax: {parts[3]}\nsemantic: {parts[4]}\nparser: {parts[5]}\nexecution={scv_parser_execution_for_kind(parts[5])}\nstatus: {status}\ncache: reused\n" + scv_mark_current_state(root, state)
+    val result = scv_parse_file(root, path)
+    if result.starts_with("ERROR"):
+        return result
+    val old_line = scv_existing_parse_index_line(root, scv_rel_path(root, path))
+    val new_line = scv_write_parse_index_entry(root, path)
+    val reuse_metric = scv_parse_reuse_metric(root, old_line, new_line)
+    if result.contains("status: parsed_error\n"):
+        result + reuse_metric + scv_mark_current_state(root, scv_state_parsed_error())
+    else:
+        result + reuse_metric + scv_mark_current_state(root, scv_state_parsed_ok())
+
+fn scv_parse_index(root: text) -> text:
+    val path = scv_parser_index_path(root)
+    if file_exists(path):
+        val content = file_read(path)
+        if content == "":
+            "empty\n"
+        else:
+            content
+    else:
+        "empty\n"

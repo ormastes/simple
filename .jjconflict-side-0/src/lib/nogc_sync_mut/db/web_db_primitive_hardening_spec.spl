@@ -1,0 +1,352 @@
+"""Web DB Primitive Hardening — specification tests.
+
+Self-contained: all helper classes and functions defined inline.
+Covers BoundedChannel close semantics, backpressure, DB persistence, and DB queries.
+20 tests total.
+"""
+
+use std.spipe.*
+
+# ---------------------------------------------------------------------------
+# Inline re-implementations (self-contained per test rules)
+# ---------------------------------------------------------------------------
+
+# --- Channel state constants ---
+
+fn chan_state_open() -> i64:
+    0
+
+fn chan_state_closed() -> i64:
+    1
+
+fn pressure_none() -> i64:
+    0
+
+fn pressure_high() -> i64:
+    1
+
+fn pressure_saturated() -> i64:
+    2
+
+fn row_not_found() -> i64:
+    -1
+
+# --- BoundedChannel ---
+
+class BoundedChannel:
+    capacity: i64
+    items: [i64]
+    state: i64
+
+    fn is_closed() -> bool:
+        self.state == chan_state_closed()
+
+    fn is_full() -> bool:
+        self.items.len() >= self.capacity
+
+    fn is_empty() -> bool:
+        self.items.len() == 0
+
+    fn len() -> i64:
+        self.items.len()
+
+    me fn send(item: i64) -> bool:
+        if self.is_closed():
+            return false
+        if self.is_full():
+            return false
+        self.items.push(item)
+        true
+
+    me fn recv() -> i64:
+        if self.items.len() > 0:
+            val item = self.items[0]
+            self.items.remove(0)
+            return item
+        if self.is_closed():
+            return -2
+        -1
+
+    me fn close():
+        self.state = chan_state_closed()
+
+fn bounded_channel_new(capacity: i64) -> BoundedChannel:
+    BoundedChannel(capacity: capacity, items: [], state: chan_state_open())
+
+# --- BackpressureMonitor ---
+
+class BackpressureConfig:
+    high_watermark: i64
+    low_watermark: i64
+
+class BackpressureMonitor:
+    cfg: BackpressureConfig
+    pressure: i64
+
+    me fn update(current_len: i64, capacity: i64):
+        if capacity == 0:
+            return
+        if current_len >= capacity:
+            self.pressure = pressure_saturated()
+        else:
+            if current_len >= self.cfg.high_watermark:
+                self.pressure = pressure_high()
+            else:
+                if current_len <= self.cfg.low_watermark:
+                    self.pressure = pressure_none()
+
+    fn is_saturated() -> bool:
+        self.pressure == pressure_saturated()
+
+    fn is_high() -> bool:
+        self.pressure == pressure_high()
+
+    fn is_clear() -> bool:
+        self.pressure == pressure_none()
+
+fn backpressure_monitor_new(high_wm: i64, low_wm: i64) -> BackpressureMonitor:
+    BackpressureMonitor(
+        cfg: BackpressureConfig(high_watermark: high_wm, low_watermark: low_wm),
+        pressure: pressure_none()
+    )
+
+# --- DbRow / DbTable ---
+
+class DbRow:
+    id: i64
+    key: text
+    payload: text
+
+class DbTable:
+    name: text
+    rows: [DbRow]
+    next_id: i64
+
+    me fn insert(k: text, v: text) -> i64:
+        val new_id = self.next_id
+        self.rows.push(DbRow(id: new_id, key: k, payload: v))
+        self.next_id = self.next_id + 1
+        new_id
+
+    fn find_by_key(k: text) -> i64:
+        var i = 0
+        while i < self.rows.len():
+            if self.rows[i].key == k:
+                return self.rows[i].id
+            i = i + 1
+        row_not_found()
+
+    fn get_by_id(ident: i64) -> text:
+        var i = 0
+        while i < self.rows.len():
+            if self.rows[i].id == ident:
+                return self.rows[i].payload
+            i = i + 1
+        ""
+
+    me fn delete_by_key(k: text) -> bool:
+        var i = 0
+        while i < self.rows.len():
+            if self.rows[i].key == k:
+                self.rows.remove(i)
+                return true
+            i = i + 1
+        false
+
+    fn row_count() -> i64:
+        self.rows.len()
+
+fn db_table_new(table_name: text) -> DbTable:
+    DbTable(name: table_name, rows: [], next_id: 0)
+
+# --- Query helpers ---
+
+class QueryResult:
+    ids: [i64]
+    count: i64
+
+fn db_prefix_scan(rows: [DbRow], prefix: text) -> QueryResult:
+    var ids: [i64] = []
+    var i = 0
+    while i < rows.len():
+        if rows[i].key.starts_with(prefix):
+            ids.push(rows[i].id)
+        i = i + 1
+    QueryResult(ids: ids, count: ids.len())
+
+fn db_range_scan(rows: [DbRow], min_id: i64, max_id: i64) -> QueryResult:
+    var ids: [i64] = []
+    var i = 0
+    while i < rows.len():
+        val rid = rows[i].id
+        if rid >= min_id and rid <= max_id:
+            ids.push(rid)
+        i = i + 1
+    QueryResult(ids: ids, count: ids.len())
+
+fn db_all_ids(rows: [DbRow]) -> QueryResult:
+    var ids: [i64] = []
+    var i = 0
+    while i < rows.len():
+        ids.push(rows[i].id)
+        i = i + 1
+    QueryResult(ids: ids, count: ids.len())
+
+# ===========================================================================
+# Test Group 1: BoundedChannel close semantics
+# ===========================================================================
+
+describe "BoundedChannel close semantics":
+    """Hardened close semantics: send returns false after close;
+    existing items remain drainable; closed-empty signals -2."""
+
+    it "new channel is open and empty":
+        val ch = bounded_channel_new(4)
+        expect(ch.is_closed() == false).to_equal(true)
+        expect(ch.is_empty()).to_equal(true)
+
+    it "send returns true on open channel":
+        val ch = bounded_channel_new(4)
+        val ok = ch.send(42)
+        expect(ok).to_equal(true)
+
+    it "send returns false after close":
+        val ch = bounded_channel_new(4)
+        ch.close()
+        val ok = ch.send(99)
+        expect(ok == false).to_equal(true)
+
+    it "recv drains items after close":
+        val ch = bounded_channel_new(4)
+        ch.send(10)
+        ch.send(20)
+        ch.close()
+        val a = ch.recv()
+        val b = ch.recv()
+        expect(a).to_equal(10)
+        expect(b).to_equal(20)
+
+    it "recv returns -2 when closed and empty":
+        val ch = bounded_channel_new(4)
+        ch.close()
+        val got = ch.recv()
+        expect(got).to_equal(-2)
+
+    it "send returns false when full":
+        val ch = bounded_channel_new(2)
+        ch.send(1)
+        ch.send(2)
+        val full_result = ch.send(3)
+        expect(full_result == false).to_equal(true)
+
+# ===========================================================================
+# Test Group 2: Backpressure monitor
+# ===========================================================================
+
+describe "BackpressureMonitor watermarks":
+    """Flow control via high/low watermarks over a BoundedChannel."""
+
+    it "starts with no pressure":
+        val mon = backpressure_monitor_new(6, 2)
+        expect(mon.is_clear()).to_equal(true)
+
+    it "reports high pressure at high watermark":
+        val mon = backpressure_monitor_new(6, 2)
+        mon.update(6, 10)
+        expect(mon.is_high()).to_equal(true)
+
+    it "reports saturated when at capacity":
+        val mon = backpressure_monitor_new(6, 2)
+        mon.update(10, 10)
+        expect(mon.is_saturated()).to_equal(true)
+
+    it "clears pressure when back at low watermark":
+        val mon = backpressure_monitor_new(6, 2)
+        mon.update(10, 10)
+        mon.update(2, 10)
+        expect(mon.is_clear()).to_equal(true)
+
+# ===========================================================================
+# Test Group 3: DB persistence workflows
+# ===========================================================================
+
+describe "DbTable persistence":
+    """Production persistence: insert/find/delete with monotonic IDs."""
+
+    it "insert returns sequential IDs from zero":
+        val t = db_table_new("users")
+        val id0 = t.insert("alice", "data0")
+        val id1 = t.insert("bob", "data1")
+        expect(id0).to_equal(0)
+        expect(id1).to_equal(1)
+
+    it "find_by_key returns correct id":
+        val t = db_table_new("users")
+        t.insert("alice", "payload_a")
+        t.insert("bob", "payload_b")
+        val found = t.find_by_key("bob")
+        expect(found).to_equal(1)
+
+    it "find_by_key returns -1 for missing key":
+        val t = db_table_new("users")
+        t.insert("alice", "x")
+        val found = t.find_by_key("carol")
+        expect(found).to_equal(-1)
+
+    it "get_by_id retrieves correct payload":
+        val t = db_table_new("items")
+        val rid = t.insert("widget", "blue widget")
+        val payload = t.get_by_id(rid)
+        expect(payload).to_equal("blue widget")
+
+    it "delete_by_key removes row and decrements count":
+        val t = db_table_new("items")
+        t.insert("alpha", "v1")
+        t.insert("beta", "v2")
+        val removed = t.delete_by_key("alpha")
+        expect(removed).to_equal(true)
+        expect(t.row_count()).to_equal(1)
+
+    it "delete_by_key returns false for missing key":
+        val t = db_table_new("items")
+        t.insert("alpha", "v1")
+        val removed = t.delete_by_key("missing")
+        expect(removed == false).to_equal(true)
+
+# ===========================================================================
+# Test Group 4: DB query primitives
+# ===========================================================================
+
+describe "DB query primitives":
+    """Production query workflows: prefix scan, range scan, all-ids."""
+
+    it "prefix scan finds matching keys":
+        val t = db_table_new("events")
+        t.insert("user:alice", "a")
+        t.insert("user:bob", "b")
+        t.insert("order:1", "c")
+        val qr = db_prefix_scan(t.rows, "user:")
+        expect(qr.count).to_equal(2)
+
+    it "prefix scan returns empty for no matches":
+        val t = db_table_new("events")
+        t.insert("order:1", "c")
+        val qr = db_prefix_scan(t.rows, "user:")
+        expect(qr.count).to_equal(0)
+
+    it "range scan returns ids within bounds":
+        val t = db_table_new("log")
+        t.insert("a", "1")
+        t.insert("b", "2")
+        t.insert("c", "3")
+        t.insert("d", "4")
+        val qr = db_range_scan(t.rows, 1, 2)
+        expect(qr.count).to_equal(2)
+
+    it "all_ids returns every row id":
+        val t = db_table_new("log")
+        t.insert("x", "1")
+        t.insert("y", "2")
+        t.insert("z", "3")
+        val qr = db_all_ids(t.rows)
+        expect(qr.count).to_equal(3)

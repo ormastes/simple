@@ -1,0 +1,113 @@
+# VSCode Adapter — demonstrates how a VSCode extension consumes the unified backend.
+#
+# In production, the VSCode extension communicates via LSP/MCP JSON-RPC.
+# This adapter translates between the unified backend API and the
+# request/response protocol that the TypeScript extension host expects.
+#
+# Provides: VscodeEditorAdapter, VscodeRequest, VscodeResponse.
+
+use std.editor.unified.unified_backend.{UnifiedEditorBackend}
+use std.editor.unified.backend_trait.{EditorResult, editor_ok, editor_err}
+use std.editor.unified.syntax_facade.{SyntaxNode}
+
+struct VscodeRequest:
+    method: text
+    path: text
+    content: text
+    line: i64
+    col: i64
+    count: i64
+    query: text
+
+struct VscodeResponse:
+    ok: bool
+    method: text
+    message: text
+    data: text
+
+class VscodeEditorAdapter:
+    """VSCode extension adapter over the unified editor backend.
+
+    Translates JSON-RPC-style requests into backend calls and
+    returns structured responses for the TypeScript extension host.
+    """
+    backend: UnifiedEditorBackend
+
+    static fn new(backend: UnifiedEditorBackend) -> VscodeEditorAdapter:
+        VscodeEditorAdapter(backend: backend)
+
+    me dispatch(req: VscodeRequest) -> VscodeResponse:
+        """Route a VSCode request to the appropriate backend method."""
+        if req.method == "open":
+            val result = me.backend.open_file(req.path)
+            return _to_response("open", result, "")
+
+        if req.method == "save":
+            val result = me.backend.save_active()
+            return _to_response("save", result, "")
+
+        if req.method == "close":
+            val result = me.backend.close_active()
+            return _to_response("close", result, "")
+
+        if req.method == "insert":
+            me.backend.move_cursor(req.line, req.col)
+            val result = me.backend.insert_text(req.content)
+            return _to_response("insert", result, "")
+
+        if req.method == "delete":
+            val result = me.backend.delete_range(req.line, req.col, req.count)
+            return _to_response("delete", result, "")
+
+        if req.method == "undo":
+            val result = me.backend.undo()
+            return _to_response("undo", result, "")
+
+        if req.method == "redo":
+            val result = me.backend.redo()
+            return _to_response("redo", result, "")
+
+        if req.method == "outline":
+            val nodes = me.backend.get_syntax().outline()
+            val data = _outline_to_text(nodes)
+            return VscodeResponse(ok: true, method: "outline", message: "ok", data: data)
+
+        if req.method == "search":
+            val result = me.backend.search_text(req.query)
+            return _to_response("search", result, "")
+
+        if req.method == "goto":
+            val result = me.backend.goto_line(req.line)
+            return _to_response("goto", result, "")
+
+        if req.method == "content":
+            val content = me.backend.active_content()
+            return VscodeResponse(ok: true, method: "content", message: "ok", data: content)
+
+        if req.method == "config_get":
+            val value = me.backend.get_config(req.query)
+            return VscodeResponse(ok: true, method: "config_get", message: "ok", data: value)
+
+        if req.method == "config_set":
+            val result = me.backend.set_config(req.query, req.content)
+            return _to_response("config_set", result, "")
+
+        VscodeResponse(ok: false, method: req.method, message: "Unknown method: " + req.method, data: "")
+
+fn _to_response(method: text, result: EditorResult, data: text) -> VscodeResponse:
+    VscodeResponse(
+        ok: result.ok,
+        method: method,
+        message: result.message,
+        data: data
+    )
+
+fn _outline_to_text(nodes: [SyntaxNode]) -> text:
+    """Serialize outline nodes to a simple text format."""
+    var parts: [text] = []
+    var i = 0
+    while i < nodes.len():
+        val n = nodes[i]
+        parts.push(n.kind + ":" + n.label + ":" + n.start_line.to_text())
+        i = i + 1
+    parts.join("\n")

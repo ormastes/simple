@@ -1,0 +1,82 @@
+# Common SPipe process harness logic shared by Codex, Claude, and Gemini hooks.
+
+use std.nogc_async_mut.spipe_process_harness.types.{
+    GateDecision, HudSnapshot, HookDeploySnippet
+}
+
+fn normalize_provider(provider: text) -> text:
+    val p = provider.lower().trim()
+    if p.contains("claude"):
+        return "claude"
+    if p.contains("codex") or p.contains("openai") or p.contains("gpt"):
+        return "codex"
+    if p.contains("gemini") or p.contains("google"):
+        return "gemini"
+    if p == "":
+        return "unknown"
+    p
+
+fn state_path(feature: text) -> text:
+    val clean = if feature.trim() == "": "spipe-process-harness" else: feature.trim()
+    ".spipe/{clean}/state.md"
+
+fn event_log_path(feature: text) -> text:
+    val clean = if feature.trim() == "": "spipe-process-harness" else: feature.trim()
+    ".spipe/{clean}/events.jsonl"
+
+fn provider_hook_events(provider: text) -> [text]:
+    val p = normalize_provider(provider)
+    if p == "claude":
+        return [
+            "PreToolUse", "PostToolUse", "PostToolUseFailure",
+            "SessionStart", "SessionEnd", "SubagentStart",
+            "SubagentStop", "UserPromptSubmit", "Stop"
+        ]
+    if p == "codex":
+        return ["session_start", "tool_start", "tool_finish", "turn_finish", "session_end"]
+    if p == "gemini":
+        return ["session_start", "tool_start", "tool_finish", "prompt_submit", "session_end"]
+    []
+
+fn hook_command(provider: text) -> text:
+    "bin/simple spipe-process-harness hook --provider {normalize_provider(provider)}"
+
+fn hook_jsonl(provider: text, event: text, session_id: text, model: text, raw_payload: text) -> text:
+    val p = normalize_provider(provider)
+    "{\"type\":\"spipe_hook\",\"provider\":\"{p}\",\"event\":\"{event}\",\"session_id\":\"{session_id}\",\"model\":\"{model}\",\"raw\":{json_string(raw_payload)}}"
+
+fn json_string(value: text) -> text:
+    "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\""
+
+fn gate_from_state(state: text, require_approval: bool) -> GateDecision:
+    if state.trim() == "":
+        return GateDecision(allowed: false, exit_code: 2, reason: "missing SPipe state")
+    if require_approval and not state.contains("User Approved: true"):
+        return GateDecision(allowed: false, exit_code: 2, reason: "user approval missing")
+    if state.contains("Prevent: block") or state.contains("STATUS: FAIL"):
+        return GateDecision(allowed: false, exit_code: 2, reason: "SPipe prevention gate is blocking")
+    GateDecision(allowed: true, exit_code: 0, reason: "allow")
+
+fn render_state(feature: text, request: text, goal: text, approved: bool) -> text:
+    val approval = if approved: "true" else: "false"
+    "# SPipe State: {feature}\n\n## User Request\n> {request}\n\n## Refined Goal\n> {goal}\n\n## Harness\n- User Approved: {approval}\n- Prevent: allow\n- Hook Providers: codex, claude, gemini\n- Event Log: {event_log_path(feature)}\n\n## Acceptance Criteria\n- [ ] AC-1: Common hook envelopes are normalized for Codex, Claude, and Gemini.\n- [ ] AC-2: Provider hooks feed one shared event log and gate path.\n- [ ] AC-3: The HUD shows model, jj worktree, commit, hours remaining, week remaining, and goal.\n- [ ] AC-4: Skill deploy output documents provider hook snippets.\n- [ ] AC-5: Prevention blocks when approval/state gates fail.\n"
+
+fn render_hud(snapshot: HudSnapshot) -> text:
+    "model={snapshot.model} | jj={snapshot.jj_worktree} | commit={snapshot.commit_id} | hr={snapshot.hours_remaining} | week={snapshot.week_remaining} | goal={snapshot.goal}"
+
+fn deploy_snippets() -> [HookDeploySnippet]:
+    [
+        HookDeploySnippet(provider: "claude", path: ".spipe/hook-deploy/claude-settings-hooks.json", content: claude_hook_snippet()),
+        HookDeploySnippet(provider: "codex", path: ".spipe/hook-deploy/codex-hook.sdn", content: codex_hook_snippet()),
+        HookDeploySnippet(provider: "gemini", path: ".spipe/hook-deploy/gemini-settings-hooks.json", content: gemini_hook_snippet())
+    ]
+
+fn claude_hook_snippet() -> text:
+    "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\".*\",\"hooks\":[{\"type\":\"command\",\"command\":\"bin/simple spipe-process-harness hook --provider claude\"}]}],\"PostToolUse\":[{\"matcher\":\".*\",\"hooks\":[{\"type\":\"command\",\"command\":\"bin/simple spipe-process-harness hook --provider claude\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"bin/simple spipe-process-harness hook --provider claude\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"bin/simple spipe-process-harness hook --provider claude\"}]}]}}"
+
+fn codex_hook_snippet() -> text:
+    "provider: codex\ncommand: \"bin/simple spipe-process-harness hook --provider codex\"\nevents: [session_start, tool_start, tool_finish, turn_finish, session_end]\n"
+
+fn gemini_hook_snippet() -> text:
+    "{\"hooks\":{\"session_start\":\"bin/simple spipe-process-harness hook --provider gemini\",\"tool_start\":\"bin/simple spipe-process-harness hook --provider gemini\",\"tool_finish\":\"bin/simple spipe-process-harness hook --provider gemini\",\"session_end\":\"bin/simple spipe-process-harness hook --provider gemini\"}}"
+

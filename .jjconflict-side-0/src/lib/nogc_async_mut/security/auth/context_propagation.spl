@@ -1,0 +1,173 @@
+# Request-scoped SecurityContext propagation.
+#
+# Provides a module-level store for associating SecurityContexts with
+# request correlation IDs. Each HTTP request or operation gets a unique
+# context keyed by its correlation_id.
+#
+# Thread-local context is simulated via a module-level variable
+# (current_correlation_id) that is set/cleared around request handling.
+
+use std.security.types.{SecurityContext}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+# Module-level storage for request-scoped security contexts.
+#
+# Contexts are keyed by correlation_id. The store provides set/get/clear
+# operations and a sweep for expired entries.
+class SecurityContextStore:
+    contexts: Dict<text, SecurityContext>
+    timestamps: Dict<text, i64>
+
+    # Create an empty context store.
+    static fn new() -> SecurityContextStore:
+        SecurityContextStore(
+            contexts: {},
+            timestamps: {}
+        )
+
+    # Associate a SecurityContext with a correlation ID.
+    me set_context(correlation_id: text, ctx: SecurityContext):
+        self.contexts = self.contexts.set(correlation_id, ctx)
+        self.timestamps = self.timestamps.set(correlation_id, current_time_ms())
+
+    # Retrieve the SecurityContext for a correlation ID, if present.
+    fn get_context(correlation_id: text) -> SecurityContext?:
+        self.contexts.get(correlation_id)
+
+    # Remove the context for a correlation ID (e.g., at request end).
+    me clear_context(correlation_id: text):
+        self.contexts = self.contexts.remove(correlation_id)
+        self.timestamps = self.timestamps.remove(correlation_id)
+
+    # Remove all contexts older than max_age_ms.
+    #
+    # This prevents unbounded growth when requests complete without
+    # explicitly clearing their context.
+    me clear_expired(max_age_ms: i64):
+        val now = current_time_ms()
+        var to_remove: List<text> = []
+
+        for entry in self.timestamps:
+            val id = entry.key
+            val ts = entry.value
+            if now - ts > max_age_ms:
+                to_remove = to_remove.push(id)
+
+        for id in to_remove:
+            self.contexts = self.contexts.remove(id)
+            self.timestamps = self.timestamps.remove(id)
+
+# Explicit task-scoped context store for async/fiber runtimes.
+#
+# This avoids using a process-global "current" correlation id as the semantic
+# model when multiple tasks can interleave on the same thread.
+class TaskSecurityContextStore:
+    contexts: Dict<text, SecurityContext>
+
+    static fn new() -> TaskSecurityContextStore:
+        TaskSecurityContextStore(
+            contexts: {}
+        )
+
+    me set_task_context(task_id: text, ctx: SecurityContext):
+        self.contexts = self.contexts.set(task_id, ctx)
+
+    fn get_task_context(task_id: text) -> SecurityContext?:
+        self.contexts.get(task_id)
+
+    me clear_task_context(task_id: text):
+        self.contexts = self.contexts.remove(task_id)
+
+# ---------------------------------------------------------------------------
+# Module-level context accessor
+# ---------------------------------------------------------------------------
+
+# Module-level store instance for the current process.
+var _global_store = SecurityContextStore.new()
+
+# Module-level task context store for async runtimes that pass a task id.
+var _task_store = TaskSecurityContextStore.new()
+var _task_contexts: Dict<text, SecurityContext> = {}
+
+class TaskSecurityContextPrevious:
+    var had_context: bool
+    var ctx: SecurityContext
+
+# Module-level correlation ID for the current request scope.
+var _current_correlation_id: text = ""
+
+# Get the SecurityContext for the current request scope.
+#
+# Returns an anonymous context if no context has been set for the
+# current scope (default-deny: unauthenticated until proven otherwise).
+fn current_security_context() -> SecurityContext:
+    """
+    Returns the current request-scoped SecurityContext.
+    Falls back to anonymous if none is set.
+
+    sdoctest:
+        val ctx = current_security_context()
+        expect(ctx.is_authenticated()).to_equal(false)
+    """
+    if _current_correlation_id == "":
+        return SecurityContext.anonymous("unknown")
+
+    val maybe_ctx = _global_store.get_context(_current_correlation_id)
+    if val ctx = maybe_ctx:
+        ctx
+    else:
+        SecurityContext.anonymous("unknown")
+
+# Get the SecurityContext scoped to an explicit async task id.
+#
+# Returns anonymous when the task id has no context. Passing an empty task id
+# falls back to the legacy request-scoped accessor for sync runtimes.
+fn current_task_security_context(task_id: text) -> SecurityContext:
+    if task_id == "":
+        return current_security_context()
+
+    if _task_contexts.has(task_id):
+        return _task_contexts[task_id]
+    return SecurityContext.anonymous("unknown")
+
+# Execute a block with a specific SecurityContext in scope.
+#
+# Sets the context before the block runs and clears it after,
+# ensuring cleanup even if the block fails.
+fn enter_security_context(ctx: SecurityContext) -> text:
+    val prev_id = _current_correlation_id
+    _current_correlation_id = ctx.correlation_id
+    _global_store.set_context(ctx.correlation_id, ctx)
+    return prev_id
+
+fn exit_security_context(ctx: SecurityContext, prev_id: text):
+    _global_store.clear_context(ctx.correlation_id)
+    _current_correlation_id = prev_id
+
+fn with_security_context(ctx: SecurityContext, block: fn()):
+    val prev_id = enter_security_context(ctx)
+    block()
+    exit_security_context(ctx, prev_id)
+
+fn enter_task_security_context(task_id: text, ctx: SecurityContext) -> TaskSecurityContextPrevious:
+    val previous = TaskSecurityContextPrevious(
+        had_context: _task_contexts.has(task_id),
+        ctx: current_task_security_context(task_id)
+    )
+    _task_contexts = _task_contexts.set(task_id, ctx)
+    return previous
+
+fn exit_task_security_context(task_id: text, previous: TaskSecurityContextPrevious):
+    if previous.had_context:
+        _task_contexts = _task_contexts.set(task_id, previous.ctx)
+        return
+    _task_contexts = _task_contexts.remove(task_id)
+
+# Execute a block with a SecurityContext isolated to one async task id.
+#
+# Any prior task context is restored after the block. Other task ids are not
+# affected, which keeps request identity out of thread-local semantics.
+fn with_task_security_context(task_id: text, ctx: SecurityContext, block: fn()):
+    val previous = enter_task_security_context(task_id, ctx)
+    block()
+    exit_task_security_context(task_id, previous)

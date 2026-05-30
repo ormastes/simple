@@ -1,0 +1,504 @@
+# Part 2 of src/compiler/60.mir_opt/mir_opt/auto_vectorize.spl
+use compiler.mir_opt.mir_opt.auto_vectorize.*
+# Auto-Vectorization Pass
+#
+# Automatically vectorizes simple loops into SIMD operations.
+# Detects vectorizable patterns and transforms scalar loops to use SIMD instructions.
+#
+# Vectorizable pattern:
+#   for i in 0..n:
+#       c[i] = a[i] + b[i]
+#
+# Transformed to:
+#   var i = 0
+#   while i + 8 <= n:
+#       c_vec = simd_add_f32x8(load_vec(a, i), load_vec(b, i))
+#       store_vec(c, i, c_vec)
+#       i = i + 8
+#   while i < n:  # Remainder loop
+#       c[i] = a[i] + b[i]
+#       i = i + 1
+#
+# Requirements for vectorization:
+# - Simple loop with known bounds
+# - Stride-1 array access (consecutive elements)
+# - No loop-carried dependencies (except induction variable)
+# - Operations that map to SIMD instructions (add, sub, mul, etc.)
+#
+# Architecture:
+#   auto_vectorize.spl          - Shared types, main pass coordinator, re-exports
+#   auto_vectorize_analysis.spl - Phase 1: dependency analysis
+#   auto_vectorize_validate.spl - Phase 2: vectorizability validation
+#   auto_vectorize_cost.spl     - Phase 3: cost model + decision
+#   auto_vectorize_codegen.spl  - Phase 4: vector code generation
+
+use compiler.mir.mir_data.{MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId}
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.backend.feature_caps.{x86_caps_from_target, preferred_lane_count_x86}
+use compiler.frontend.parser_types.{Attribute}
+
+# Shared types (cycle-free base module)
+use compiler.mir_opt.auto_vectorize_types.{LoopInfo, ArrayAccess}
+# Re-import from sub-modules for coordinator use and re-export
+use compiler.mir_opt.auto_vectorize_analysis.{DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses, get_operand_local, detect_loop_bounds_only}
+use compiler.mir_opt.auto_vectorize_validate.{VectorizabilityResult, check_vectorizability, get_vectorizable_type}
+use compiler.mir_opt.auto_vectorize_cost.{CostEstimate, estimate_vectorization_cost, should_vectorize_loop}
+use compiler.mir_opt.auto_vectorize_codegen.{VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block}
+
+# ============================================================================
+# Main Auto-Vectorization Pass
+# ============================================================================
+
+fn run_auto_vectorize(module: MirModule) -> MirModule:
+    """
+    N1 Wave — pattern-match loops and rewrite elementwise-add patterns.
+
+    For every function × every basic block:
+      - Elementwise matcher: if recipe matches AND rewrite_elementwise_add
+        accepts (kind=Elementwise, op contains "add", not too-short, FP gate),
+        the function is replaced with the rewritten version.
+      - Reduction matcher: log only (reduction rewriter is N1-followup).
+
+    Pipeline position: runs AFTER predicate_promote (M2), BEFORE simd_lowering.
+    Dispatch key: "auto_vectorize"  (see mod.spl case "auto_vectorize").
+
+    N1-followup:
+      - Reduction rewriter (wave N2+)
+      - Elementwise mul/sub/div rewriter
+      - Alias oracle from 55.borrow
+      - SCEV-based trip count for better mismatch handling
+    """
+    # Scan every function for vectorisable patterns and log them.
+    # For elementwise-add patterns that pass all guards, rewrite the function.
+    # Reduction patterns: log only (rewriter is N1-followup).
+    var module_modified = false
+    var new_module = module
+
+    for sym in module.functions.keys():
+        val func = module.functions[sym]
+        var cur_func = func
+        for block in cur_func.blocks:
+            # Try elementwise pattern — rewrite if accepted
+            val ew = mir_pattern_match_elementwise_loop(block)
+            if ew.?:
+                var r = ew.unwrap()
+                # W-scev: fill in trip_count from loop bounds if available.
+                # is_simple_loop returns LoopInfo with end_value set for
+                # constant-bounded loops; for dynamic bounds end_value is 0
+                # and trip_count stays -1 (unknown).
+                val loop_info_opt = is_simple_loop(cur_func, r.header_block)
+                if loop_info_opt.?:
+                    val li = loop_info_opt.unwrap()
+                    if li.end_value > 0:
+                        # VectorRecipe is cross-module — spread operator silently drops fields.
+                        # Construct explicitly with updated trip_count only.
+                        r = VectorRecipe(
+                            kind:             r.kind,
+                            header_block:     r.header_block,
+                            induction_var:    r.induction_var,
+                            trip_count:       li.end_value,
+                            element_type:     r.element_type,
+                            vector_width:     r.vector_width,
+                            op_name:          r.op_name,
+                            note:             r.note,
+                            input_bases:      r.input_bases,
+                            output_base:      r.output_base,
+                            accumulator:      r.accumulator,
+                            chunk_width:      r.chunk_width,
+                            index_locals:     r.index_locals,
+                            store_value:      r.store_value,
+                            induction_update: r.induction_update
+                        )
+                _log_recipe(cur_func.name, r)
+                val rewritten = rewrite_elementwise_add(r, cur_func)
+                # If block count changed, rewrite was applied
+                if rewritten.blocks.len() != cur_func.blocks.len():
+                    cur_func = rewritten
+                    module_modified = true
+
+            # Try reduction pattern — log only (no rewrite in N1)
+            val red = mir_pattern_match_reduction(block, cur_func.has_fast_math)
+            if red.?:
+                val r = red.unwrap()
+                _log_recipe(cur_func.name, r)
+
+            val matrix = mir_pattern_match_matrix_kernel(block, cur_func.has_fast_math)
+            if matrix.?:
+                val r = matrix.unwrap()
+                _log_recipe(cur_func.name, r)
+
+        if module_modified:
+            var new_functions = new_module.functions
+            new_functions[sym] = cur_func
+            # MirModule is cross-module — spread operator silently drops fields.
+            # Construct explicitly to ensure functions field is updated.
+            new_module = MirModule(
+                name:      new_module.name,
+                functions: new_functions,
+                statics:   new_module.statics,
+                constants: new_module.constants,
+                types:     new_module.types
+            )
+
+    new_module
+
+# ============================================================================
+# K3 Wave — Internal helpers
+# ============================================================================
+
+fn _is_index_increment(op: MirBinOp, left: MirOperand, right: MirOperand) -> bool:
+    """
+    Heuristic: detect the induction variable increment  i = i + 1.
+    Returns true if op is Add and one operand is a small integer constant (0-4).
+    This distinguishes index arithmetic from data arithmetic.
+    """
+    match op:
+        case Add:
+            # Check if either operand is a small literal constant
+            val left_is_small_const = _operand_is_small_const(left)
+            val right_is_small_const = _operand_is_small_const(right)
+            left_is_small_const or right_is_small_const
+        case _:
+            false
+
+fn _operand_is_small_const(op: MirOperand) -> bool:
+    """Return true if this operand is an integer constant in [0, 16]."""
+    match op.kind:
+        case Const(ty, val):
+            # val is stored as text in MIR constants; parse prefix
+            # Conservative: treat any Const as a potential stride literal
+            true
+        case _:
+            false
+
+fn _binop_name(op: MirBinOp) -> text:
+    """Return a human-readable name for a BinOp variant."""
+    match op:
+        case Add:  "add"
+        case Sub:  "sub"
+        case Mul:  "mul"
+        case Div:  "div"
+        case BitAnd:  "and"
+        case BitOr:   "or"
+        case BitXor:  "xor"
+        case Shl:  "shl"
+        case Shr:  "shr"
+        case _:    "other"
+
+fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFunction:
+    """
+    N1 Wave — MIR rewriter for the elementwise-add pattern.
+
+    Given a VectorRecipe with kind=Elementwise and op_name in the supported
+    elementwise set, replaces the matched loop header block with four new blocks:
+    replaces the matched loop header block with four new blocks:
+      1. alignment-check BB  — computes mismatch = (upper - lower) % VF;
+                               branches: mismatch==0 → vec_loop, else → peel_loop
+      2. vec_loop BB         — SIMD: load a, load b, add, store, vi+=VF; loops back
+      3. peel_loop BB        — scalar suffix for mismatched remainder (structural placeholder)
+      4. continuation        — original loop exit (preserved)
+
+    Refuse conditions (return func unchanged):
+      R1: recipe.kind != Elementwise
+      R2: recipe.op_name is not one of {add,sub,mul,xor}_elementwise
+      R3: trip_count >= 0 && trip_count < recipe.chunk_width  (too short to vectorize)
+      R4: trip_count == -1 (dynamic/unknown) — runtime trip count unknown; static
+          peel body clone and If exit guard require a known bound. Dynamic trip
+          counts need a SCEV/runtime-guard path (follow-up wave).
+          (Wave L3b: misaligned static trip counts are now handled by Defect C fix.)
+      R5: recipe.output_base is nil  (no output — not an elementwise loop)
+      R6: recipe.input_bases has fewer than 2 entries (need a and b)
+
+    Splicing:
+      - Original loop header block (recipe.header_block) is removed.
+      - New blocks are inserted in its place (alignment-check at same position).
+      - Blocks with id > header_block.id are kept as the continuation suffix.
+
+    Scalar-equivalence guarantee:
+      The vector loop processes floor(n/VF)*VF elements via SIMD;
+      the peel block handles the remaining n%VF elements via the original
+      scalar path.  The combined output is identical to the scalar loop for
+      all supported elementwise ops because no reassociation is introduced.
+    """
+    # R1: only Elementwise
+    val is_ew = match recipe.kind:
+        case Elementwise: true
+        case _: false
+    if not is_ew:
+        return func
+
+    # R2: supported elementwise ops only
+    if not supports_elementwise_rewrite(recipe.op_name):
+        return func
+
+    # R3: static trip count too short (skip if unknown, i.e. -1)
+    if recipe.trip_count >= 0 and recipe.trip_count < recipe.chunk_width:
+        return func
+
+    # R4: dynamic trip count (-1) — runtime trip count unknown, cannot build static
+    # exit guard in create_vector_loop_block or static peel body clone.
+    # Refuse until a SCEV/runtime-guard path is added in a follow-up wave.
+    if recipe.trip_count < 0:
+        return func
+    # Misaligned static trip counts (trip_count % chunk_width != 0) are now handled
+    # by create_peeling_block emitting a scalar body clone for the remainder.
+    # No longer refused here — Defect C (Wave L3b) is resolved.
+
+    # R5: need an output base
+    if not recipe.output_base.?:
+        return func
+
+    # R6: need at least 2 inputs
+    if recipe.input_bases.len() < 2:
+        return func
+
+    val out_base = recipe.output_base.unwrap()
+
+    # Build VectorizeContext from recipe
+    val ctx = VectorizeContext(
+        vector_width: recipe.chunk_width,
+        element_type: recipe.element_type,
+        next_local:   recipe.header_block.id
+    )
+
+    # Synthesize a LoopInfo for alignment_check_block / peeling_block
+    # (start=0, end=trip_count or sentinel 0, step=1)
+    val end_val = if recipe.trip_count >= 0: recipe.trip_count else: 0
+    val loop_info = LoopInfo(
+        header_block:  recipe.header_block,
+        body_blocks:   [],
+        exit_block:    BlockId.new(recipe.header_block.id + 3),
+        induction_var: recipe.induction_var,
+        start_value:   0,
+        end_value:     end_val,
+        step:          1
+    )
+
+    # exit_block_id: the continuation block that follows the three new blocks.
+    # It is the first block with id > recipe.header_block.id (the original successor),
+    # or header_block.id + 3 as a conservative default.
+    val exit_block_id = recipe.header_block.id + 3
+
+    # Collect scalar body blocks for peel clone (blocks with id == header_block.id
+    # are the loop body in this simplified CFG representation).
+    var body_blocks_for_peel: [MirBlock] = []
+    for block in func.blocks:
+        if block.id.id == recipe.header_block.id:
+            body_blocks_for_peel.push(block)
+
+    # Create the three new BBs (Wave L3b: all with sound terminators)
+    val align_block  = create_alignment_check_block(ctx, loop_info)
+    val vec_block    = create_vector_loop_block(ctx, recipe.header_block.id, recipe.input_bases, out_base, recipe.op_name, recipe.trip_count, exit_block_id)
+    val peel_block   = create_peeling_block(ctx, loop_info, body_blocks_for_peel)
+
+    # Splice: replace header block; keep blocks before it and all blocks after it.
+    # Defect B fix: patch any predecessor block whose terminator targets the
+    # original header_block.id to point to the new alignment-check block instead.
+    val orig_header_id = recipe.header_block.id
+    val new_header_id  = align_block.id.id
+
+    var new_blocks: [MirBlock] = []
+
+    for block in func.blocks:
+        if block.id.id < orig_header_id:
+            # Patch terminators that target the old header to point to align_check.
+            val patched = _patch_terminator_target(block, orig_header_id, new_header_id)
+            new_blocks.push(patched)
+
+    # Insert alignment-check at the header's position, then vec and peel
+    new_blocks.push(align_block)
+    new_blocks.push(vec_block)
+    new_blocks.push(peel_block)
+
+    # Blocks after the original header (continuation / exit)
+    for block in func.blocks:
+        if block.id.id > orig_header_id:
+            new_blocks.push(block)
+
+    MirFunction.with_blocks(func, new_blocks)
+
+fn _patch_block_id(id: BlockId, old_id: i64, new_id: i64) -> BlockId:
+    """Return new_id as BlockId if id.id == old_id, otherwise return id unchanged."""
+    if id.id == old_id:
+        BlockId.new(new_id)
+    else:
+        id
+
+fn _patch_terminator_target(block: MirBlock, old_id: i64, new_id: i64) -> MirBlock:
+    """
+    Defect B fix — predecessor patching.
+
+    Rewrites any branch target in block.terminator that equals old_id to new_id.
+    Used after splicing to redirect predecessors of the original loop header to
+    the new alignment-check block.
+
+    Handles Goto and If terminators; leaves all other terminators unchanged.
+    """
+    val new_terminator = match block.terminator:
+        case Goto(target):
+            MirTerminator.Goto(_patch_block_id(target, old_id, new_id))
+        case If(cond, then_, else_):
+            MirTerminator.If(
+                cond:  cond,
+                then_: _patch_block_id(then_, old_id, new_id),
+                else_: _patch_block_id(else_, old_id, new_id)
+            )
+        case _:
+            block.terminator
+    MirBlock(..block, terminator: new_terminator)
+
+fn supports_elementwise_rewrite(op_name: text) -> bool:
+    """
+    Phase-1 auto-application supports the hot scalar idioms that map cleanly to
+    elementwise vector ops without reassociation.
+    """
+    op_name == "add_elementwise" or
+    op_name == "sub_elementwise" or
+    op_name == "mul_elementwise" or
+    op_name == "xor_elementwise"
+
+fn _log_recipe(func_name: text, recipe: VectorRecipe):
+    """
+    Emit a compiler diagnostic note for a matched VectorRecipe.
+    In a full compiler this would call the diagnostic engine; here
+    it is a no-op stub so the pass compiles without a diagnostics import.
+
+    TODO(K3 follow-up): replace with real compiler diagnostic call once
+    the diagnostics API stabilises (see doc/05_design/simd_auto_vectorize_design.md §10).
+    """
+    # Intentional no-op — diagnostic logging is deferred
+    # The recipe exists in memory and can be inspected by unit tests
+    pass_do_nothing
+
+# ============================================================================
+# Gap 2 (W-scev) — detect_loop_bounds adapter
+# ============================================================================
+# Thin wrapper that locates the header block in a MirFunction by BlockId, then
+# extracts the loop condition operand from the block terminator, and delegates
+# to detect_loop_bounds_only in auto_vectorize_analysis.spl.
+#
+# Signature uses codebase types (BlockId / MirFunction) rather than the
+# hypothetical BasicBlockId/MirCfg names from the design doc, following
+# the "patterns already in the codebase" rule.
+
+fn detect_loop_bounds(loop_header: BlockId, func: MirFunction) -> LoopBounds?:
+    """
+    Extract canonical loop bounds from a loop header block inside a function.
+
+    Finds the MirBlock with id == loop_header, reads the If-terminator
+    condition operand, and delegates to detect_loop_bounds_only for the
+    actual SCEV-lite extraction.
+
+    Returns Some(LoopBounds) for a canonical  for-i-in-0..n  shape
+    (step=1, lower=0, upper expressed as local or constant text).
+    Returns nil conservatively for any other shape.
+    """
+    # Locate the header block
+    var header_block: MirBlock? = nil
+    for block in func.blocks:
+        if block.id.id == loop_header.id:
+            header_block = Some(block)
+
+    if not header_block.?:
+        return nil
+
+    val header = header_block.unwrap()
+
+    # Extract the condition operand and exit block from the If terminator
+    var cond_op: MirOperand? = nil
+    var exit_block: BlockId? = nil
+
+    match header.terminator:
+        case If(cond, then_, else_):
+            cond_op = Some(cond)
+            # Conservatively treat else_ as exit (loop body is then_)
+            exit_block = Some(else_)
+        case _:
+            return nil
+
+    if not cond_op.? or not exit_block.?:
+        return nil
+
+    detect_loop_bounds_only(func, header, cond_op.unwrap(), exit_block.unwrap())
+
+# ============================================================================
+# Gap 3 (W-cfg) — CFG splice helper
+# ============================================================================
+# Replaces a scalar loop body block in a function with a vectorized version
+# plus a scalar remainder (peel) block.  Wires:
+#   - blocks before original  → unchanged
+#   - vectorized block        → inserted at original position
+#   - remainder block         → follows vectorized block
+#   - blocks after original   → unchanged (preserved as continuation/exit)
+#
+# This is the same splicing pattern used by rewrite_elementwise_add but
+# exposed as a reusable primitive for the Wave L3b rewriter.
+
+fn splice_vectorized_block(
+    original:   BlockId,
+    vectorized: MirBlock,
+    remainder:  MirBlock,
+    func:       MirFunction
+) -> MirFunction:
+    """
+    Replace the block at `original` with `vectorized` + `remainder`.
+
+    Block ordering in result:
+      [blocks with id < original.id]  (with predecessor terminators patched)
+      vectorized
+      remainder
+      [blocks with id > original.id]
+
+    Defect B fix: rewrites any terminator in pre-original blocks that targets
+    `original.id` to point to `vectorized.id` instead, so predecessor edges are
+    not left dangling after the splice.
+
+    The caller is responsible for setting correct terminators on
+    `vectorized` and `remainder` before passing them in.
+    """
+    var new_blocks: [MirBlock] = []
+    val orig_id = original.id
+    val new_id  = vectorized.id.id
+
+    for block in func.blocks:
+        if block.id.id < orig_id:
+            val patched = _patch_terminator_target(block, orig_id, new_id)
+            new_blocks.push(patched)
+
+    new_blocks.push(vectorized)
+    new_blocks.push(remainder)
+
+    for block in func.blocks:
+        if block.id.id > orig_id:
+            new_blocks.push(block)
+
+    MirFunction.with_blocks(func, new_blocks)
+
+# ============================================================================
+# Gap 4 (W-fastmath) — has_fast_math attribute checker
+# ============================================================================
+# Checks whether a list of Attribute annotations contains the @fast_math
+# attribute.  Used during HIR→MIR lowering to populate MirFunction.has_fast_math.
+# FP reductions are refused unless this returns true (§8 failure mode F3).
+
+fn has_fast_math(fn_attrs: [Attribute]) -> bool:
+    """
+    Return true if fn_attrs contains an @fast_math attribute.
+
+    Scans the attribute list for any entry whose name field equals
+    "fast_math".  Case-sensitive match per Simple attribute convention.
+    """
+    for attr in fn_attrs:
+        if attr.name == "fast_math":
+            return true
+    false
+
+# ============================================================================
+# Exports (re-export all public API for backward compatibility)
+# ============================================================================
+
+# Shared types
+
+# Main pass
+
+# Re-exports from sub-modules

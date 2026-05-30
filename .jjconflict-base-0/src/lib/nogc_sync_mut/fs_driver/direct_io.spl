@@ -1,0 +1,219 @@
+# Direct I/O request model for filesystem and block-driver DMA paths.
+#
+# Buffered file APIs remain the default. This module represents the explicit
+# opt-in path where a caller supplies a SharedDmaBuffer and a DirectIoExt
+# capability decides whether the request may bypass heap copy buffers.
+
+use std.fs_driver.error.{FsError}
+use std.fs_driver.extension.{DirectIoExt}
+use std.io.dma.{
+    SharedDmaBuffer,
+    DmaReleaseRequest,
+    validate_shared_dma_release,
+    dma_shared_sync_cpu_to_device,
+    dma_shared_sync_device_to_cpu
+}
+
+val DIRECT_IO_READ: u8 = 1
+val DIRECT_IO_WRITE: u8 = 2
+val DIRECT_IO_TIMEOUT_CODE: i32 = 110
+
+struct DirectIoRequest:
+    """Explicit DMA-backed file/block I/O request."""
+    handle_id: u64
+    file_offset: i64
+    op: u8
+    buffer: SharedDmaBuffer
+    timeout_polls: u32
+
+struct DirectIoBatchRequest:
+    """Explicit DMA-backed batch of same-size random I/O requests.
+
+    file_offsets contains one file-relative offset per 4KiB slot in buffer.
+    Backends must reject unsupported batch sizes instead of silently falling
+    back to buffered I/O.
+    """
+    handle_id: u64
+    file_offsets: [i64]
+    op: u8
+    buffer: SharedDmaBuffer
+    timeout_polls: u32
+
+struct DirectIoResult:
+    """Observable result for a direct-I/O request."""
+    submitted: bool
+    bytes: u64
+    backend_tag: text
+    status: text
+    durable: bool
+    buffered_copy_bytes: u64
+    direct_dma_copy_bytes: u64
+    cleanup_required: bool
+
+struct DirectIoExtent:
+    """Filesystem-owned mapping from file offset to physical storage LBA."""
+    consumer: text
+    file_offset: i64
+    storage_lba: u64
+    byte_len: u64
+    sector_size: u32
+
+struct DirectIoBenchmarkReport:
+    """Comparison of buffered-copy and direct-DMA cost on one fixture."""
+    fixture_bytes: u64
+    backend_tag: text
+    buffered_copy_bytes: u64
+    direct_dma_copy_bytes: u64
+    direct_supported: bool
+
+fn direct_io_read_request(handle_id: u64, file_offset: i64, buffer: SharedDmaBuffer, timeout_polls: u32) -> DirectIoRequest:
+    DirectIoRequest(
+        handle_id: handle_id,
+        file_offset: file_offset,
+        op: DIRECT_IO_READ,
+        buffer: buffer,
+        timeout_polls: timeout_polls
+    )
+
+fn direct_io_write_request(handle_id: u64, file_offset: i64, buffer: SharedDmaBuffer, timeout_polls: u32) -> DirectIoRequest:
+    DirectIoRequest(
+        handle_id: handle_id,
+        file_offset: file_offset,
+        op: DIRECT_IO_WRITE,
+        buffer: buffer,
+        timeout_polls: timeout_polls
+    )
+
+fn direct_io_read_batch_request(handle_id: u64, file_offsets: [i64], buffer: SharedDmaBuffer, timeout_polls: u32) -> DirectIoBatchRequest:
+    DirectIoBatchRequest(
+        handle_id: handle_id,
+        file_offsets: file_offsets,
+        op: DIRECT_IO_READ,
+        buffer: buffer,
+        timeout_polls: timeout_polls
+    )
+
+fn direct_io_write_batch_request(handle_id: u64, file_offsets: [i64], buffer: SharedDmaBuffer, timeout_polls: u32) -> DirectIoBatchRequest:
+    DirectIoBatchRequest(
+        handle_id: handle_id,
+        file_offsets: file_offsets,
+        op: DIRECT_IO_WRITE,
+        buffer: buffer,
+        timeout_polls: timeout_polls
+    )
+
+fn direct_io_nvme_filesystem_extension(consumer: text, sector_size: u32) -> DirectIoExt:
+    """DirectIo metadata shared by FAT32, NVFS, and DBFS over a SimpleOS NVMe lease."""
+    val alignment = if sector_size > 4096u32: sector_size else: 4096u32
+    DirectIoExt(
+        sector_alignment: alignment,
+        file_alignment: alignment,
+        max_io_bytes: 0u64,
+        backend_tag: "simpleos-nvme-fs-direct-io:" + consumer,
+        bounce_allowed: false
+    )
+
+fn direct_io_validate_batch(ext: DirectIoExt, req: DirectIoBatchRequest, slot_bytes: u64) -> Result<u64, FsError>:
+    """Validate a same-size random direct-I/O batch without issuing it."""
+    if req.handle_id == 0:
+        return Err(FsError.InvalidArg)
+    if req.op != DIRECT_IO_READ and req.op != DIRECT_IO_WRITE:
+        return Err(FsError.InvalidArg)
+    if req.timeout_polls == 0:
+        return Err(FsError.Transient(code: DIRECT_IO_TIMEOUT_CODE))
+    if req.file_offsets.len() == 0:
+        return Err(FsError.InvalidArg)
+    if slot_bytes == 0u64:
+        return Err(FsError.InvalidArg)
+    val expected_bytes = req.file_offsets.len().to_u64() * slot_bytes
+    if req.buffer.byte_len < expected_bytes:
+        return Err(FsError.InvalidArg)
+    val valid = ext.validate_shared_buffer(req.file_offsets[0], req.buffer)
+    if val Err(e) = valid:
+        return Err(e)
+    for offset in req.file_offsets:
+        val offset_valid = ext.validate_shared_buffer(offset, req.buffer)
+        if val Err(e) = offset_valid:
+            return Err(e)
+    Ok(expected_bytes)
+
+fn direct_io_submit(ext: DirectIoExt, req: DirectIoRequest) -> Result<DirectIoResult, FsError>:
+    """Validate and model an explicit direct-I/O submission."""
+    if req.handle_id == 0:
+        return Err(FsError.InvalidArg)
+    if req.op != DIRECT_IO_READ and req.op != DIRECT_IO_WRITE:
+        return Err(FsError.InvalidArg)
+    if req.timeout_polls == 0:
+        return Err(FsError.Transient(code: DIRECT_IO_TIMEOUT_CODE))
+
+    val valid = ext.validate_shared_buffer(req.file_offset, req.buffer)
+    if val Err(e) = valid:
+        if ext.bounce_allowed and req.buffer.is_valid():
+            return Ok(DirectIoResult(
+                submitted: true,
+                bytes: req.buffer.byte_len,
+                backend_tag: ext.backend_tag,
+                status: "bounce-buffered",
+                durable: false,
+                buffered_copy_bytes: req.buffer.byte_len,
+                direct_dma_copy_bytes: req.buffer.byte_len,
+                cleanup_required: true
+            ))
+        return Err(e)
+
+    if req.op == DIRECT_IO_WRITE:
+        dma_shared_sync_cpu_to_device(req.buffer)
+    else:
+        dma_shared_sync_device_to_cpu(req.buffer)
+
+    Ok(DirectIoResult(
+        submitted: true,
+        bytes: req.buffer.byte_len,
+        backend_tag: ext.backend_tag,
+        status: "submitted",
+        durable: false,
+        buffered_copy_bytes: 0,
+        direct_dma_copy_bytes: 0,
+        cleanup_required: true
+    ))
+
+fn direct_io_submit_batch(ext: DirectIoExt, req: DirectIoBatchRequest, slot_bytes: u64) -> Result<DirectIoResult, FsError>:
+    """Validate and model an explicit batched direct-I/O submission."""
+    val expected_bytes = direct_io_validate_batch(ext, req, slot_bytes)
+    if expected_bytes.is_err():
+        return Err(expected_bytes.unwrap_err())
+
+    if req.op == DIRECT_IO_WRITE:
+        dma_shared_sync_cpu_to_device(req.buffer)
+    else:
+        dma_shared_sync_device_to_cpu(req.buffer)
+
+    Ok(DirectIoResult(
+        submitted: true,
+        bytes: expected_bytes.unwrap(),
+        backend_tag: ext.backend_tag,
+        status: "submitted",
+        durable: false,
+        buffered_copy_bytes: 0,
+        direct_dma_copy_bytes: 0,
+        cleanup_required: true
+    ))
+
+fn direct_io_cleanup_allowed(buffer: SharedDmaBuffer, req: DmaReleaseRequest) -> Result<bool, FsError>:
+    """Validate task-exit cleanup authority for a submitted direct-I/O buffer."""
+    val valid = validate_shared_dma_release(buffer, req)
+    if valid.is_err():
+        return Err(FsError.Permission)
+    Ok(true)
+
+fn direct_io_benchmark_report(ext: DirectIoExt, fixture_bytes: u64, aligned: bool) -> DirectIoBenchmarkReport:
+    """Compare buffered-copy and direct-DMA copy cost for one fixture size."""
+    val supported = ext.max_io_bytes == 0 or fixture_bytes <= ext.max_io_bytes
+    val direct_bytes = if aligned and supported: 0u64 else: fixture_bytes
+    DirectIoBenchmarkReport(
+        fixture_bytes: fixture_bytes,
+        backend_tag: ext.backend_tag,
+        buffered_copy_bytes: fixture_bytes,
+        direct_dma_copy_bytes: direct_bytes,
+        direct_supported: supported
+    )

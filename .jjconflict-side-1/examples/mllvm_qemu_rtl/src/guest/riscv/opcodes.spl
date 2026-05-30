@@ -1,0 +1,464 @@
+# RISC-V Opcode Table — RV32I/RV64I Base Integer Instruction Set
+#
+# Shared opcode enum covering both RV32I and RV64I base instructions.
+# RV64-only variants are marked with comments and gated by is_rv64 in the decoder.
+#
+# Reference: RISC-V ISA Manual, Volume I, Chapters 2 (RV32I) and 5 (RV64I)
+
+use guest.riscv.common.{
+    rv_opcode, rv_rd, rv_funct3, rv_rs1, rv_rs2, rv_funct7,
+    rv_imm_i, rv_imm_s, rv_imm_b, rv_imm_u, rv_imm_j
+}
+
+# ============================================================================
+# RISC-V Opcode Enum
+# ============================================================================
+
+enum RvOpcode:
+    """All RV32I + RV64I base integer instructions."""
+
+    # ---- Upper Immediate (2 ops) ----
+    LUI(rd: i64, imm: i64)             # rd <- imm (upper 20 bits)
+    AUIPC(rd: i64, imm: i64)           # rd <- PC + imm (upper 20 bits)
+
+    # ---- Jumps (2 ops) ----
+    JAL(rd: i64, offset: i64)           # rd <- PC+4, PC <- PC + offset
+    JALR(rd: i64, rs1: i64, offset: i64)  # rd <- PC+4, PC <- (rs1 + offset) & ~1
+
+    # ---- Branches (6 ops) ----
+    BEQ(rs1: i64, rs2: i64, offset: i64)   # if rs1 == rs2: PC <- PC + offset
+    BNE(rs1: i64, rs2: i64, offset: i64)   # if rs1 != rs2: PC <- PC + offset
+    BLT(rs1: i64, rs2: i64, offset: i64)   # if rs1 < rs2 (signed): PC <- PC + offset
+    BGE(rs1: i64, rs2: i64, offset: i64)   # if rs1 >= rs2 (signed): PC <- PC + offset
+    BLTU(rs1: i64, rs2: i64, offset: i64)  # if rs1 < rs2 (unsigned): PC <- PC + offset
+    BGEU(rs1: i64, rs2: i64, offset: i64)  # if rs1 >= rs2 (unsigned): PC <- PC + offset
+
+    # ---- Loads (5 RV32I + 2 RV64I) ----
+    LB(rd: i64, rs1: i64, offset: i64)     # rd <- sign_ext(mem[rs1+offset][7:0])
+    LH(rd: i64, rs1: i64, offset: i64)     # rd <- sign_ext(mem[rs1+offset][15:0])
+    LW(rd: i64, rs1: i64, offset: i64)     # rd <- sign_ext(mem[rs1+offset][31:0])
+    LBU(rd: i64, rs1: i64, offset: i64)    # rd <- zero_ext(mem[rs1+offset][7:0])
+    LHU(rd: i64, rs1: i64, offset: i64)    # rd <- zero_ext(mem[rs1+offset][15:0])
+    LWU(rd: i64, rs1: i64, offset: i64)    # rd <- zero_ext(mem[rs1+offset][31:0])  (RV64I)
+    LD(rd: i64, rs1: i64, offset: i64)     # rd <- mem[rs1+offset][63:0]             (RV64I)
+
+    # ---- Stores (3 RV32I + 1 RV64I) ----
+    SB(rs1: i64, rs2: i64, offset: i64)    # mem[rs1+offset][7:0] <- rs2[7:0]
+    SH(rs1: i64, rs2: i64, offset: i64)    # mem[rs1+offset][15:0] <- rs2[15:0]
+    SW(rs1: i64, rs2: i64, offset: i64)    # mem[rs1+offset][31:0] <- rs2[31:0]
+    SD(rs1: i64, rs2: i64, offset: i64)    # mem[rs1+offset][63:0] <- rs2[63:0]     (RV64I)
+
+    # ---- Immediate ALU (9 ops) ----
+    ADDI(rd: i64, rs1: i64, imm: i64)      # rd <- rs1 + imm
+    SLTI(rd: i64, rs1: i64, imm: i64)      # rd <- (rs1 < imm) ? 1 : 0 (signed)
+    SLTIU(rd: i64, rs1: i64, imm: i64)     # rd <- (rs1 < imm) ? 1 : 0 (unsigned)
+    XORI(rd: i64, rs1: i64, imm: i64)      # rd <- rs1 ^ imm
+    ORI(rd: i64, rs1: i64, imm: i64)       # rd <- rs1 | imm
+    ANDI(rd: i64, rs1: i64, imm: i64)      # rd <- rs1 & imm
+    SLLI(rd: i64, rs1: i64, shamt: i64)    # rd <- rs1 << shamt
+    SRLI(rd: i64, rs1: i64, shamt: i64)    # rd <- rs1 >> shamt (logical)
+    SRAI(rd: i64, rs1: i64, shamt: i64)    # rd <- rs1 >> shamt (arithmetic)
+
+    # ---- Register ALU (10 ops) ----
+    ADD(rd: i64, rs1: i64, rs2: i64)       # rd <- rs1 + rs2
+    SUB(rd: i64, rs1: i64, rs2: i64)       # rd <- rs1 - rs2
+    SLL(rd: i64, rs1: i64, rs2: i64)       # rd <- rs1 << rs2[4:0]
+    SLT(rd: i64, rs1: i64, rs2: i64)       # rd <- (rs1 < rs2) ? 1 : 0 (signed)
+    SLTU(rd: i64, rs1: i64, rs2: i64)      # rd <- (rs1 < rs2) ? 1 : 0 (unsigned)
+    XOR(rd: i64, rs1: i64, rs2: i64)       # rd <- rs1 ^ rs2
+    SRL(rd: i64, rs1: i64, rs2: i64)       # rd <- rs1 >> rs2[4:0] (logical)
+    SRA(rd: i64, rs1: i64, rs2: i64)       # rd <- rs1 >> rs2[4:0] (arithmetic)
+    OR(rd: i64, rs1: i64, rs2: i64)        # rd <- rs1 | rs2
+    AND(rd: i64, rs1: i64, rs2: i64)       # rd <- rs1 & rs2
+
+    # ---- RV64I Word-Width ALU (9 ops) ----
+    ADDIW(rd: i64, rs1: i64, imm: i64)     # rd <- sign_ext((rs1 + imm)[31:0])
+    SLLIW(rd: i64, rs1: i64, shamt: i64)   # rd <- sign_ext((rs1 << shamt)[31:0])
+    SRLIW(rd: i64, rs1: i64, shamt: i64)   # rd <- sign_ext((rs1 >> shamt)[31:0]) (logical)
+    SRAIW(rd: i64, rs1: i64, shamt: i64)   # rd <- sign_ext((rs1 >>> shamt)[31:0]) (arith)
+    ADDW(rd: i64, rs1: i64, rs2: i64)      # rd <- sign_ext((rs1 + rs2)[31:0])
+    SUBW(rd: i64, rs1: i64, rs2: i64)      # rd <- sign_ext((rs1 - rs2)[31:0])
+    SLLW(rd: i64, rs1: i64, rs2: i64)      # rd <- sign_ext((rs1 << rs2[4:0])[31:0])
+    SRLW(rd: i64, rs1: i64, rs2: i64)      # rd <- sign_ext((rs1 >> rs2[4:0])[31:0]) (logical)
+    SRAW(rd: i64, rs1: i64, rs2: i64)      # rd <- sign_ext((rs1 >>> rs2[4:0])[31:0]) (arith)
+
+    # ---- System (2 ops) ----
+    ECALL                                   # Environment call
+    EBREAK                                  # Environment breakpoint
+
+    # ---- CSR (6 ops) ----
+    CSRRW(rd: i64, csr: i64, rs1: i64)     # t=CSR; CSR=rs1; rd=t
+    CSRRS(rd: i64, csr: i64, rs1: i64)     # t=CSR; CSR=t|rs1; rd=t
+    CSRRC(rd: i64, csr: i64, rs1: i64)     # t=CSR; CSR=t&~rs1; rd=t
+    CSRRWI(rd: i64, csr: i64, uimm: i64)   # t=CSR; CSR=uimm; rd=t
+    CSRRSI(rd: i64, csr: i64, uimm: i64)   # t=CSR; CSR=t|uimm; rd=t
+    CSRRCI(rd: i64, csr: i64, uimm: i64)   # t=CSR; CSR=t&~uimm; rd=t
+
+    # ---- Fence (1 op) ----
+    FENCE(pred: i64, succ: i64)             # Memory ordering
+
+impl RvOpcode:
+    fn to_text() -> text:
+        match self:
+            # Upper immediate
+            LUI(rd, imm): "lui x{rd}, {imm}"
+            AUIPC(rd, imm): "auipc x{rd}, {imm}"
+            # Jumps
+            JAL(rd, offset): "jal x{rd}, {offset}"
+            JALR(rd, rs1, offset): "jalr x{rd}, x{rs1}, {offset}"
+            # Branches
+            BEQ(rs1, rs2, offset): "beq x{rs1}, x{rs2}, {offset}"
+            BNE(rs1, rs2, offset): "bne x{rs1}, x{rs2}, {offset}"
+            BLT(rs1, rs2, offset): "blt x{rs1}, x{rs2}, {offset}"
+            BGE(rs1, rs2, offset): "bge x{rs1}, x{rs2}, {offset}"
+            BLTU(rs1, rs2, offset): "bltu x{rs1}, x{rs2}, {offset}"
+            BGEU(rs1, rs2, offset): "bgeu x{rs1}, x{rs2}, {offset}"
+            # Loads
+            LB(rd, rs1, offset): "lb x{rd}, {offset}(x{rs1})"
+            LH(rd, rs1, offset): "lh x{rd}, {offset}(x{rs1})"
+            LW(rd, rs1, offset): "lw x{rd}, {offset}(x{rs1})"
+            LBU(rd, rs1, offset): "lbu x{rd}, {offset}(x{rs1})"
+            LHU(rd, rs1, offset): "lhu x{rd}, {offset}(x{rs1})"
+            LWU(rd, rs1, offset): "lwu x{rd}, {offset}(x{rs1})"
+            LD(rd, rs1, offset): "ld x{rd}, {offset}(x{rs1})"
+            # Stores
+            SB(rs1, rs2, offset): "sb x{rs2}, {offset}(x{rs1})"
+            SH(rs1, rs2, offset): "sh x{rs2}, {offset}(x{rs1})"
+            SW(rs1, rs2, offset): "sw x{rs2}, {offset}(x{rs1})"
+            SD(rs1, rs2, offset): "sd x{rs2}, {offset}(x{rs1})"
+            # Immediate ALU
+            ADDI(rd, rs1, imm): "addi x{rd}, x{rs1}, {imm}"
+            SLTI(rd, rs1, imm): "slti x{rd}, x{rs1}, {imm}"
+            SLTIU(rd, rs1, imm): "sltiu x{rd}, x{rs1}, {imm}"
+            XORI(rd, rs1, imm): "xori x{rd}, x{rs1}, {imm}"
+            ORI(rd, rs1, imm): "ori x{rd}, x{rs1}, {imm}"
+            ANDI(rd, rs1, imm): "andi x{rd}, x{rs1}, {imm}"
+            SLLI(rd, rs1, shamt): "slli x{rd}, x{rs1}, {shamt}"
+            SRLI(rd, rs1, shamt): "srli x{rd}, x{rs1}, {shamt}"
+            SRAI(rd, rs1, shamt): "srai x{rd}, x{rs1}, {shamt}"
+            # Register ALU
+            ADD(rd, rs1, rs2): "add x{rd}, x{rs1}, x{rs2}"
+            SUB(rd, rs1, rs2): "sub x{rd}, x{rs1}, x{rs2}"
+            SLL(rd, rs1, rs2): "sll x{rd}, x{rs1}, x{rs2}"
+            SLT(rd, rs1, rs2): "slt x{rd}, x{rs1}, x{rs2}"
+            SLTU(rd, rs1, rs2): "sltu x{rd}, x{rs1}, x{rs2}"
+            XOR(rd, rs1, rs2): "xor x{rd}, x{rs1}, x{rs2}"
+            SRL(rd, rs1, rs2): "srl x{rd}, x{rs1}, x{rs2}"
+            SRA(rd, rs1, rs2): "sra x{rd}, x{rs1}, x{rs2}"
+            OR(rd, rs1, rs2): "or x{rd}, x{rs1}, x{rs2}"
+            AND(rd, rs1, rs2): "and x{rd}, x{rs1}, x{rs2}"
+            # RV64I word-width ALU
+            ADDIW(rd, rs1, imm): "addiw x{rd}, x{rs1}, {imm}"
+            SLLIW(rd, rs1, shamt): "slliw x{rd}, x{rs1}, {shamt}"
+            SRLIW(rd, rs1, shamt): "srliw x{rd}, x{rs1}, {shamt}"
+            SRAIW(rd, rs1, shamt): "sraiw x{rd}, x{rs1}, {shamt}"
+            ADDW(rd, rs1, rs2): "addw x{rd}, x{rs1}, x{rs2}"
+            SUBW(rd, rs1, rs2): "subw x{rd}, x{rs1}, x{rs2}"
+            SLLW(rd, rs1, rs2): "sllw x{rd}, x{rs1}, x{rs2}"
+            SRLW(rd, rs1, rs2): "srlw x{rd}, x{rs1}, x{rs2}"
+            SRAW(rd, rs1, rs2): "sraw x{rd}, x{rs1}, x{rs2}"
+            # System
+            ECALL: "ecall"
+            EBREAK: "ebreak"
+            # CSR
+            CSRRW(rd, csr, rs1): "csrrw x{rd}, {csr}, x{rs1}"
+            CSRRS(rd, csr, rs1): "csrrs x{rd}, {csr}, x{rs1}"
+            CSRRC(rd, csr, rs1): "csrrc x{rd}, {csr}, x{rs1}"
+            CSRRWI(rd, csr, uimm): "csrrwi x{rd}, {csr}, {uimm}"
+            CSRRSI(rd, csr, uimm): "csrrsi x{rd}, {csr}, {uimm}"
+            CSRRCI(rd, csr, uimm): "csrrci x{rd}, {csr}, {uimm}"
+            # Fence
+            FENCE(pred, succ): "fence {pred}, {succ}"
+
+    fn is_rv64_only() -> bool:
+        """Returns true if this opcode is only valid on RV64."""
+        match self:
+            LWU(_, _, _): true
+            LD(_, _, _): true
+            SD(_, _, _): true
+            ADDIW(_, _, _): true
+            SLLIW(_, _, _): true
+            SRLIW(_, _, _): true
+            SRAIW(_, _, _): true
+            ADDW(_, _, _): true
+            SUBW(_, _, _): true
+            SLLW(_, _, _): true
+            SRLW(_, _, _): true
+            SRAW(_, _, _): true
+            _: false
+
+    fn is_branch() -> bool:
+        """Returns true if this opcode is a branch instruction."""
+        match self:
+            BEQ(_, _, _): true
+            BNE(_, _, _): true
+            BLT(_, _, _): true
+            BGE(_, _, _): true
+            BLTU(_, _, _): true
+            BGEU(_, _, _): true
+            _: false
+
+    fn is_jump() -> bool:
+        """Returns true if this opcode is an unconditional jump."""
+        match self:
+            JAL(_, _): true
+            JALR(_, _, _): true
+            _: false
+
+# ============================================================================
+# Instruction Decoder — 32-bit word to RvOpcode
+# ============================================================================
+
+fn decode_rv_opcode(inst: i64, is_rv64: bool) -> RvOpcode?:
+    """Decode a 32-bit RISC-V instruction word into an RvOpcode.
+
+    Args:
+        inst: 32-bit instruction word (little-endian)
+        is_rv64: true for RV64I mode, false for RV32I mode
+
+    Returns nil for unrecognized encodings or RV64 opcodes in RV32 mode.
+    """
+    val op = rv_opcode(inst)
+    val rd_ = rv_rd(inst)
+    val f3 = rv_funct3(inst)
+    val rs1_ = rv_rs1(inst)
+    val rs2_ = rv_rs2(inst)
+    val f7 = rv_funct7(inst)
+
+    match op:
+        # ---- LUI: opcode 0110111 (0x37) ----
+        0x37:
+            val imm = rv_imm_u(inst)
+            Some(RvOpcode.LUI(rd: rd_, imm: imm))
+
+        # ---- AUIPC: opcode 0010111 (0x17) ----
+        0x17:
+            val imm = rv_imm_u(inst)
+            Some(RvOpcode.AUIPC(rd: rd_, imm: imm))
+
+        # ---- JAL: opcode 1101111 (0x6F) ----
+        0x6F:
+            val offset = rv_imm_j(inst)
+            Some(RvOpcode.JAL(rd: rd_, offset: offset))
+
+        # ---- JALR: opcode 1100111 (0x67) ----
+        0x67:
+            if f3 == 0:
+                val offset = rv_imm_i(inst)
+                Some(RvOpcode.JALR(rd: rd_, rs1: rs1_, offset: offset))
+            else:
+                nil
+
+        # ---- Branch: opcode 1100011 (0x63) ----
+        0x63:
+            val offset = rv_imm_b(inst)
+            match f3:
+                0: Some(RvOpcode.BEQ(rs1: rs1_, rs2: rs2_, offset: offset))
+                1: Some(RvOpcode.BNE(rs1: rs1_, rs2: rs2_, offset: offset))
+                4: Some(RvOpcode.BLT(rs1: rs1_, rs2: rs2_, offset: offset))
+                5: Some(RvOpcode.BGE(rs1: rs1_, rs2: rs2_, offset: offset))
+                6: Some(RvOpcode.BLTU(rs1: rs1_, rs2: rs2_, offset: offset))
+                7: Some(RvOpcode.BGEU(rs1: rs1_, rs2: rs2_, offset: offset))
+                _: nil
+
+        # ---- Load: opcode 0000011 (0x03) ----
+        0x03:
+            val offset = rv_imm_i(inst)
+            match f3:
+                0: Some(RvOpcode.LB(rd: rd_, rs1: rs1_, offset: offset))
+                1: Some(RvOpcode.LH(rd: rd_, rs1: rs1_, offset: offset))
+                2: Some(RvOpcode.LW(rd: rd_, rs1: rs1_, offset: offset))
+                4: Some(RvOpcode.LBU(rd: rd_, rs1: rs1_, offset: offset))
+                5: Some(RvOpcode.LHU(rd: rd_, rs1: rs1_, offset: offset))
+                6:
+                    if is_rv64:
+                        Some(RvOpcode.LWU(rd: rd_, rs1: rs1_, offset: offset))
+                    else:
+                        nil
+                3:
+                    if is_rv64:
+                        Some(RvOpcode.LD(rd: rd_, rs1: rs1_, offset: offset))
+                    else:
+                        nil
+                _: nil
+
+        # ---- Store: opcode 0100011 (0x23) ----
+        0x23:
+            val offset = rv_imm_s(inst)
+            match f3:
+                0: Some(RvOpcode.SB(rs1: rs1_, rs2: rs2_, offset: offset))
+                1: Some(RvOpcode.SH(rs1: rs1_, rs2: rs2_, offset: offset))
+                2: Some(RvOpcode.SW(rs1: rs1_, rs2: rs2_, offset: offset))
+                3:
+                    if is_rv64:
+                        Some(RvOpcode.SD(rs1: rs1_, rs2: rs2_, offset: offset))
+                    else:
+                        nil
+                _: nil
+
+        # ---- OP-IMM: opcode 0010011 (0x13) ----
+        0x13:
+            val imm = rv_imm_i(inst)
+            match f3:
+                0: Some(RvOpcode.ADDI(rd: rd_, rs1: rs1_, imm: imm))
+                2: Some(RvOpcode.SLTI(rd: rd_, rs1: rs1_, imm: imm))
+                3: Some(RvOpcode.SLTIU(rd: rd_, rs1: rs1_, imm: imm))
+                4: Some(RvOpcode.XORI(rd: rd_, rs1: rs1_, imm: imm))
+                6: Some(RvOpcode.ORI(rd: rd_, rs1: rs1_, imm: imm))
+                7: Some(RvOpcode.ANDI(rd: rd_, rs1: rs1_, imm: imm))
+                1:
+                    # SLLI: shamt in rs2 field (5 bits RV32, 6 bits RV64)
+                    val shamt = if is_rv64: rs2_ | ((f7 & 1) << 5) else: rs2_
+                    val f7_check = if is_rv64: f7 >> 1 else: f7
+                    if f7_check == 0:
+                        Some(RvOpcode.SLLI(rd: rd_, rs1: rs1_, shamt: shamt))
+                    else:
+                        nil
+                5:
+                    # SRLI/SRAI: distinguished by funct7 bit 5
+                    val shamt = if is_rv64: rs2_ | ((f7 & 1) << 5) else: rs2_
+                    val f7_check = if is_rv64: f7 >> 1 else: f7
+                    if f7_check == 0:
+                        Some(RvOpcode.SRLI(rd: rd_, rs1: rs1_, shamt: shamt))
+                    else:
+                        if f7_check == 0x20:
+                            Some(RvOpcode.SRAI(rd: rd_, rs1: rs1_, shamt: shamt))
+                        else:
+                            nil
+                _: nil
+
+        # ---- OP: opcode 0110011 (0x33) ----
+        0x33:
+            match f3:
+                0:
+                    if f7 == 0x00:
+                        Some(RvOpcode.ADD(rd: rd_, rs1: rs1_, rs2: rs2_))
+                    else:
+                        if f7 == 0x20:
+                            Some(RvOpcode.SUB(rd: rd_, rs1: rs1_, rs2: rs2_))
+                        else:
+                            nil
+                1:
+                    if f7 == 0x00:
+                        Some(RvOpcode.SLL(rd: rd_, rs1: rs1_, rs2: rs2_))
+                    else:
+                        nil
+                2:
+                    if f7 == 0x00:
+                        Some(RvOpcode.SLT(rd: rd_, rs1: rs1_, rs2: rs2_))
+                    else:
+                        nil
+                3:
+                    if f7 == 0x00:
+                        Some(RvOpcode.SLTU(rd: rd_, rs1: rs1_, rs2: rs2_))
+                    else:
+                        nil
+                4:
+                    if f7 == 0x00:
+                        Some(RvOpcode.XOR(rd: rd_, rs1: rs1_, rs2: rs2_))
+                    else:
+                        nil
+                5:
+                    if f7 == 0x00:
+                        Some(RvOpcode.SRL(rd: rd_, rs1: rs1_, rs2: rs2_))
+                    else:
+                        if f7 == 0x20:
+                            Some(RvOpcode.SRA(rd: rd_, rs1: rs1_, rs2: rs2_))
+                        else:
+                            nil
+                6:
+                    if f7 == 0x00:
+                        Some(RvOpcode.OR(rd: rd_, rs1: rs1_, rs2: rs2_))
+                    else:
+                        nil
+                7:
+                    if f7 == 0x00:
+                        Some(RvOpcode.AND(rd: rd_, rs1: rs1_, rs2: rs2_))
+                    else:
+                        nil
+                _: nil
+
+        # ---- OP-IMM-32: opcode 0011011 (0x1B) — RV64I only ----
+        0x1B:
+            if not is_rv64:
+                return nil
+            val imm = rv_imm_i(inst)
+            match f3:
+                0: Some(RvOpcode.ADDIW(rd: rd_, rs1: rs1_, imm: imm))
+                1:
+                    val shamt = rs2_
+                    if f7 == 0x00:
+                        Some(RvOpcode.SLLIW(rd: rd_, rs1: rs1_, shamt: shamt))
+                    else:
+                        nil
+                5:
+                    val shamt = rs2_
+                    if f7 == 0x00:
+                        Some(RvOpcode.SRLIW(rd: rd_, rs1: rs1_, shamt: shamt))
+                    else:
+                        if f7 == 0x20:
+                            Some(RvOpcode.SRAIW(rd: rd_, rs1: rs1_, shamt: shamt))
+                        else:
+                            nil
+                _: nil
+
+        # ---- OP-32: opcode 0111011 (0x3B) — RV64I only ----
+        0x3B:
+            if not is_rv64:
+                return nil
+            match f3:
+                0:
+                    if f7 == 0x00:
+                        Some(RvOpcode.ADDW(rd: rd_, rs1: rs1_, rs2: rs2_))
+                    else:
+                        if f7 == 0x20:
+                            Some(RvOpcode.SUBW(rd: rd_, rs1: rs1_, rs2: rs2_))
+                        else:
+                            nil
+                1:
+                    if f7 == 0x00:
+                        Some(RvOpcode.SLLW(rd: rd_, rs1: rs1_, rs2: rs2_))
+                    else:
+                        nil
+                5:
+                    if f7 == 0x00:
+                        Some(RvOpcode.SRLW(rd: rd_, rs1: rs1_, rs2: rs2_))
+                    else:
+                        if f7 == 0x20:
+                            Some(RvOpcode.SRAW(rd: rd_, rs1: rs1_, rs2: rs2_))
+                        else:
+                            nil
+                _: nil
+
+        # ---- SYSTEM: opcode 1110011 (0x73) ----
+        0x73:
+            val csr_addr = (inst >> 20) & 0xFFF
+            val uimm = rs1_   # For CSR immediate variants, rs1 field holds uimm
+            match f3:
+                0:
+                    # ECALL / EBREAK distinguished by imm field
+                    if (inst >> 20) == 0:
+                        Some(RvOpcode.ECALL)
+                    else:
+                        if (inst >> 20) == 1:
+                            Some(RvOpcode.EBREAK)
+                        else:
+                            nil
+                1: Some(RvOpcode.CSRRW(rd: rd_, csr: csr_addr, rs1: rs1_))
+                2: Some(RvOpcode.CSRRS(rd: rd_, csr: csr_addr, rs1: rs1_))
+                3: Some(RvOpcode.CSRRC(rd: rd_, csr: csr_addr, rs1: rs1_))
+                5: Some(RvOpcode.CSRRWI(rd: rd_, csr: csr_addr, uimm: uimm))
+                6: Some(RvOpcode.CSRRSI(rd: rd_, csr: csr_addr, uimm: uimm))
+                7: Some(RvOpcode.CSRRCI(rd: rd_, csr: csr_addr, uimm: uimm))
+                _: nil
+
+        # ---- FENCE: opcode 0001111 (0x0F) ----
+        0x0F:
+            if f3 == 0:
+                val pred = (inst >> 24) & 0xF
+                val succ = (inst >> 20) & 0xF
+                Some(RvOpcode.FENCE(pred: pred, succ: succ))
+            else:
+                nil
+
+        _: nil

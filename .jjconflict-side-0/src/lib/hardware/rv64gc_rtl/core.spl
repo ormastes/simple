@@ -1,0 +1,387 @@
+# ============================================================================
+# RV64GC RTL Core — Single-Cycle Datapath (64-bit)
+# ============================================================================
+#
+# Adapts RV32I core pattern for 64-bit RV64GC.  Top-level module that wires
+# the decoder, ALU, register file, LSU, mul/div, and atomics into a
+# single-cycle pipeline.
+#
+# Architecture:
+#   - core64_combinational()  — all combinational datapath logic
+#   - core64_update()         — clocked sequential logic (PC, semihosting, halt)
+#   - core64_reset()          — initial state at reset
+#
+# Semihosting: detects the same 3-instruction magic sequence as RV32
+#   slli zero,zero,0x1f  /  ebreak  /  srai zero,zero,0x7
+# (32-bit instruction encoding is unchanged).
+# ============================================================================
+
+use std.hardware.rv64gc_rtl.pkg.{OP_LUI, OP_AUIPC, OP_JAL, OP_JALR}
+use std.hardware.rv64gc_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_SYSTEM}
+use std.hardware.rv64gc_rtl.pkg.{BR_BEQ, BR_BNE, BR_BLT, BR_BGE, BR_BLTU, BR_BGEU}
+use std.hardware.rv64gc_rtl.pkg.{SEMI_ENTRY, SEMI_BREAK, SEMI_EXIT, SYS_EXIT}
+use std.hardware.rv64gc_rtl.decode.{DecodeResult64, decode_instruction_64}
+use std.hardware.rv64gc_rtl.alu.{AluResult64, alu64_compute, i64_signed_lt}
+use std.hardware.rv64gc_rtl.regfile.{RegFile64, RegReadResult64, regfile64_read}
+use std.hardware.rv64gc_rtl.lsu.lsu64_load
+use std.hardware.rv64gc_rtl.mul_div.{MulDivState, mul_div_ready}
+use std.hardware.rv64gc_rtl.atomics.AtomicsState
+use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_create}
+use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create}
+use std.hardware.rv64gc_rtl.pkg.{SocBus64, soc_bus64_init}
+
+# ============================================================================
+# Core sequential state (clocked registers)
+# ============================================================================
+
+struct CoreState64:
+    """Sequential state updated on each clock edge."""
+    pc: i64             # Program counter (64-bit)
+    halt: bool          # CPU halted
+    semi_phase: u32     # Semihosting sequence detector (0/1/2)
+    semi_op: i64        # Latched semihosting operation (a0)
+    semi_param: i64     # Latched semihosting parameter (a1)
+    semi_suppress: bool # Suppress normal execution during semihost sequence
+    semi_trigger: bool  # One-cycle pulse when semihosting completes
+    mul_div: MulDivState  # M extension state
+    atomics: AtomicsState # A extension state
+    priv_mode: i64      # Current privilege mode: M=3, S=1, U=0
+    csr_m: CsrFile64    # M-mode CSR file
+    csr_s: CsrSMode64   # S-mode CSR file
+
+# ============================================================================
+# Combinational result bundle
+# ============================================================================
+
+struct CoreCombResult64:
+    """All combinational outputs from one cycle of the datapath."""
+    # Decoder outputs
+    dec: DecodeResult64
+
+    # Register file read results
+    rs1_data: i64
+    rs2_data: i64
+    a0_val: i64
+    a1_val: i64
+
+    # ALU results
+    alu_result: i64
+    alu_zero: bool
+
+    # Branch evaluation
+    branch_taken: bool
+    branch_target: i64
+
+    # Next PC (combinational)
+    pc_next: i64
+    pc_plus4: i64
+
+    # Write-back data for rd
+    rd_data: i64
+
+    # Data memory interface
+    dmem_addr: i64
+    dmem_wdata: i64
+    dmem_we: bool
+    dmem_re: bool
+    dmem_width: u32
+
+    # Instruction memory address
+    imem_addr: i64
+
+# ============================================================================
+# External port bundle (top-level I/O)
+# ============================================================================
+
+struct CorePorts64:
+    """Top-level external port signals for the core."""
+    # Instruction memory interface
+    imem_addr: i64
+
+    # Data memory interface
+    dmem_addr: i64
+    dmem_wdata: i64
+    dmem_we: bool
+    dmem_re: bool
+    dmem_width: u32
+
+    # Status
+    halted: bool
+
+    # Semihosting interface
+    semi_trigger: bool
+    semi_op: i64
+    semi_param: i64
+
+# ============================================================================
+# Signed comparison helpers for branch evaluation
+# ============================================================================
+
+fn i64_signed_ge(a: i64, b: i64) -> bool:
+    """Signed greater-than-or-equal for i64."""
+    not i64_signed_lt(a, b)
+
+# ============================================================================
+# Unsigned comparison helpers for branch evaluation
+# ============================================================================
+
+fn i64_unsigned_lt(a: i64, b: i64) -> bool:
+    """Unsigned less-than for i64 (two's complement)."""
+    val flip: i64 = 0x8000000000000000
+    val fa = a ^ flip
+    val fb = b ^ flip
+    fa < fb
+
+fn i64_unsigned_ge(a: i64, b: i64) -> bool:
+    """Unsigned greater-than-or-equal for i64."""
+    not i64_unsigned_lt(a, b)
+
+# ============================================================================
+# Branch evaluation
+# ============================================================================
+
+fn eval_branch_64(funct3: u32, rs1_data: i64, rs2_data: i64) -> bool:
+    """Evaluate branch condition. Returns true if branch is taken."""
+    if funct3 == BR_BEQ:
+        return rs1_data == rs2_data
+    if funct3 == BR_BNE:
+        return rs1_data != rs2_data
+    if funct3 == BR_BLT:
+        return i64_signed_lt(rs1_data, rs2_data)
+    if funct3 == BR_BGE:
+        return i64_signed_ge(rs1_data, rs2_data)
+    if funct3 == BR_BLTU:
+        return i64_unsigned_lt(rs1_data, rs2_data)
+    if funct3 == BR_BGEU:
+        return i64_unsigned_ge(rs1_data, rs2_data)
+    false
+
+# ============================================================================
+# Combinational datapath
+# ============================================================================
+
+fn core64_combinational(state: CoreState64, imem_data: u32, dmem_rdata: i64, rf: RegFile64) -> CoreCombResult64:
+    """Compute all combinational signals for one cycle."""
+
+    val pc = state.pc
+    val pc_plus4 = pc + 4
+
+    val imem_addr = pc
+
+    # Decode
+    val dec = decode_instruction_64(imem_data)
+
+    # Register file read
+    val rr = regfile64_read(rf, dec.rs1, dec.rs2)
+    val rs1_data = rr.rs1_data
+    val rs2_data = rr.rs2_data
+
+    # ALU input muxes
+    var alu_a: i64 = rs1_data
+    if dec.opcode == OP_AUIPC or dec.opcode == OP_JAL:
+        alu_a = pc
+
+    var alu_b: i64 = rs2_data
+    if dec.alu_src:
+        alu_b = dec.imm
+
+    # ALU
+    val alu_res = alu64_compute(alu_a, alu_b, dec.alu_op)
+
+    # Branch evaluation
+    var branch_taken: bool = false
+    if dec.branch:
+        branch_taken = eval_branch_64(dec.funct3, rs1_data, rs2_data)
+
+    val branch_target = pc + dec.imm
+
+    # Next PC mux
+    var pc_next: i64 = pc_plus4
+    if dec.opcode == OP_JALR:
+        pc_next = alu_res.result
+    else if branch_taken or dec.jump:
+        pc_next = branch_target
+
+    # Write-back data mux
+    var rd_data: i64 = alu_res.result
+    if dec.mem_to_reg:
+        rd_data = lsu64_load(dmem_rdata, dec.funct3)
+    else if dec.jump:
+        rd_data = pc_plus4
+
+    # Data memory interface
+    val dmem_addr = alu_res.result
+    val dmem_wdata = rs2_data
+    val dmem_we = dec.mem_write and (state.semi_suppress == false)
+    val dmem_re = dec.mem_read
+    val dmem_width = dec.funct3 & 0x3
+
+    CoreCombResult64(
+        dec: dec,
+        rs1_data: rs1_data,
+        rs2_data: rs2_data,
+        a0_val: rr.a0_val,
+        a1_val: rr.a1_val,
+        alu_result: alu_res.result,
+        alu_zero: alu_res.zero,
+        branch_taken: branch_taken,
+        branch_target: branch_target,
+        pc_next: pc_next,
+        pc_plus4: pc_plus4,
+        rd_data: rd_data,
+        dmem_addr: dmem_addr,
+        dmem_wdata: dmem_wdata,
+        dmem_we: dmem_we,
+        dmem_re: dmem_re,
+        dmem_width: dmem_width,
+        imem_addr: imem_addr
+    )
+
+# ============================================================================
+# Sequential update (clocked logic)
+# ============================================================================
+
+fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_val: i64, a1_val: i64) -> CoreState64:
+    """Update sequential state on rising clock edge.
+    Handles PC advancement, semihosting detection, and halt."""
+
+    var new_pc = state.pc
+    var new_halt = state.halt
+    var new_semi_phase = state.semi_phase
+    var new_semi_op = state.semi_op
+    var new_semi_param = state.semi_param
+    var new_semi_suppress = state.semi_suppress
+    var new_semi_trigger: bool = false
+    var new_mul_div = state.mul_div
+    var new_atomics = state.atomics
+
+    if state.halt == false:
+        if imem_data == SEMI_ENTRY and state.semi_phase == 0:
+            new_semi_phase = 1
+            new_pc = comb.pc_plus4
+
+        else if imem_data == SEMI_BREAK and state.semi_phase == 1:
+            new_semi_phase = 2
+            new_semi_op = a0_val
+            new_semi_param = a1_val
+            new_semi_suppress = true
+            new_pc = comb.pc_plus4
+
+        else if imem_data == SEMI_EXIT and state.semi_phase == 2:
+            new_semi_phase = 0
+            new_semi_suppress = false
+            new_semi_trigger = true
+            val exit_code: i64 = SYS_EXIT as i64
+            if new_semi_op == exit_code:
+                new_halt = true
+            else:
+                new_pc = comb.pc_plus4
+
+        else if comb.dec.opcode == OP_SYSTEM and state.semi_phase == 0:
+            new_halt = true
+
+        else:
+            new_semi_phase = 0
+            new_semi_suppress = false
+            new_pc = comb.pc_next
+
+    CoreState64(
+        pc: new_pc,
+        halt: new_halt,
+        semi_phase: new_semi_phase,
+        semi_op: new_semi_op,
+        semi_param: new_semi_param,
+        semi_suppress: new_semi_suppress,
+        semi_trigger: new_semi_trigger,
+        mul_div: new_mul_div,
+        atomics: new_atomics,
+        priv_mode: state.priv_mode,
+        csr_m: state.csr_m,
+        csr_s: state.csr_s
+    )
+
+# ============================================================================
+# Semihosting trigger detection
+# ============================================================================
+
+fn core64_semi_triggered(state: CoreState64, imem_data: u32) -> bool:
+    """Return true if this cycle completes a semihosting sequence."""
+    imem_data == SEMI_EXIT and state.semi_phase == 2
+
+# ============================================================================
+# External port extraction
+# ============================================================================
+
+fn core64_ports(state: CoreState64, comb: CoreCombResult64) -> CorePorts64:
+    """Extract top-level port signals from the core state and combinational results."""
+    CorePorts64(
+        imem_addr: comb.imem_addr,
+        dmem_addr: comb.dmem_addr,
+        dmem_wdata: comb.dmem_wdata,
+        dmem_we: comb.dmem_we,
+        dmem_re: comb.dmem_re,
+        dmem_width: comb.dmem_width,
+        halted: state.halt,
+        semi_trigger: state.semi_trigger,
+        semi_op: state.semi_op,
+        semi_param: state.semi_param
+    )
+
+# ============================================================================
+# Reset state
+# ============================================================================
+
+fn core64_reset(reset_addr: i64) -> CoreState64:
+    """Create initial core state after reset."""
+    CoreState64(
+        pc: reset_addr,
+        halt: false,
+        semi_phase: 0,
+        semi_op: 0,
+        semi_param: 0,
+        semi_suppress: false,
+        semi_trigger: false,
+        mul_div: MulDivState(busy: false, op: 0, a: 0, b: 0, result: 0, cycles_left: 0),
+        atomics: AtomicsState(reservation_valid: false, reservation_addr: 0),
+        priv_mode: 3,
+        csr_m: csr64_create(0),
+        csr_s: csr_s64_create()
+    )
+
+# ============================================================================
+# Full initialization with privilege and CSR state
+# ============================================================================
+
+fn core64_init(reset_vec: i64) -> CoreState64:
+    """Create full initial core state with privilege mode and CSR state.
+    Starts in M-mode (priv_mode=3) with all CSRs zeroed."""
+    CoreState64(
+        pc: reset_vec,
+        halt: false,
+        semi_phase: 0,
+        semi_op: 0,
+        semi_param: 0,
+        semi_suppress: false,
+        semi_trigger: false,
+        mul_div: MulDivState(busy: false, op: 0, a: 0, b: 0, result: 0, cycles_left: 0),
+        atomics: AtomicsState(reservation_valid: false, reservation_addr: 0),
+        priv_mode: 3,
+        csr_m: csr64_create(0),
+        csr_s: csr_s64_create()
+    )
+
+# ============================================================================
+# Core step result
+# ============================================================================
+
+struct Core64StepResult:
+    """Result of a single core step (one clock cycle)."""
+    state: CoreState64
+
+fn core64_step(state: CoreState64, bus: SocBus64) -> Core64StepResult:
+    """Advance the core by one clock cycle.
+    For interpreter-mode testing: increments PC by 4 unconditionally.
+    Full RTL simulation requires compiled mode with memory bus."""
+    var new_state = state
+    new_state.pc = state.pc + 4
+    Core64StepResult(state: new_state)

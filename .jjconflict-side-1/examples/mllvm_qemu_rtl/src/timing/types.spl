@@ -1,0 +1,256 @@
+# Timing Types
+#
+# Entity-dimension types for the timing overlay model (REQ-SIM-001).
+# These types attach to IR_TC instructions via parallel maps —
+# no modification to IrTcInst is needed.
+
+# ============================================================================
+# Simulation Mode
+# ============================================================================
+
+enum SimMode:
+    """Simulation execution mode for the hybrid simulator."""
+    Fast                # Existing IR_TC fast path — no timing info
+    TimingApproximate   # Fast execution + parallel timing overlay
+    RtlCycleAccurate    # Native RTL cycle-accurate simulation
+
+impl SimMode:
+    fn to_text() -> text:
+        match self:
+            Fast: "fast"
+            TimingApproximate: "timing-approximate"
+            RtlCycleAccurate: "rtl-cycle-accurate"
+
+# ============================================================================
+# Pipeline Stage
+# ============================================================================
+
+enum PipelineStage:
+    """Classic 5-stage in-order RISC pipeline."""
+    Fetch
+    Decode
+    Execute
+    Memory
+    Writeback
+
+impl PipelineStage:
+    fn to_text() -> text:
+        match self:
+            Fetch: "IF"
+            Decode: "ID"
+            Execute: "EX"
+            Memory: "MEM"
+            Writeback: "WB"
+
+    fn index() -> i64:
+        """Stage index (0-based) for pipeline slot tracking."""
+        match self:
+            Fetch: 0
+            Decode: 1
+            Execute: 2
+            Memory: 3
+            Writeback: 4
+
+# ============================================================================
+# Cycle Count
+# ============================================================================
+
+struct CycleCount:
+    """Cycle counter with breakdown by category."""
+    total: i64
+    execution: i64
+    stall_data: i64
+    stall_control: i64
+    stall_memory: i64
+
+impl CycleCount:
+    static fn zero() -> CycleCount:
+        CycleCount(total: 0, execution: 0, stall_data: 0, stall_control: 0, stall_memory: 0)
+
+    fn add(other: CycleCount) -> CycleCount:
+        CycleCount(
+            total: self.total + other.total,
+            execution: self.execution + other.execution,
+            stall_data: self.stall_data + other.stall_data,
+            stall_control: self.stall_control + other.stall_control,
+            stall_memory: self.stall_memory + other.stall_memory
+        )
+
+    fn to_text() -> text:
+        "total={self.total} exec={self.execution} data_stall={self.stall_data} ctrl_stall={self.stall_control} mem_stall={self.stall_memory}"
+
+# ============================================================================
+# Latency Table
+# ============================================================================
+
+enum InstructionCategory:
+    """Instruction categories for latency lookup."""
+    AluReg          # Register-register ALU (ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU)
+    AluImm          # Register-immediate ALU (ADDI, SLTI, etc.)
+    Load            # Memory load (LB, LH, LW, LBU, LHU)
+    Store           # Memory store (SB, SH, SW)
+    Branch          # Conditional branch (BEQ, BNE, BLT, BGE, BLTU, BGEU)
+    Jump            # Unconditional jump (JAL, JALR)
+    UpperImm        # Upper immediate (LUI, AUIPC)
+    System          # System (ECALL, EBREAK, FENCE, CSR)
+
+impl InstructionCategory:
+    fn to_text() -> text:
+        match self:
+            AluReg: "alu_reg"
+            AluImm: "alu_imm"
+            Load: "load"
+            Store: "store"
+            Branch: "branch"
+            Jump: "jump"
+            UpperImm: "upper_imm"
+            System: "system"
+
+struct LatencyTable:
+    """Instruction latency lookup by category.
+
+    Default latencies model a simple 5-stage in-order pipeline:
+    - ALU: 1 cycle (result available after EX)
+    - Load: 2 cycles (result available after MEM)
+    - Store: 1 cycle (no data dependency on result)
+    - Branch: 1 cycle base + 2 cycle mispredict penalty
+    - Jump: 1 cycle base + 1 cycle redirect penalty
+    """
+    alu_reg_latency: i64
+    alu_imm_latency: i64
+    load_latency: i64
+    store_latency: i64
+    branch_latency: i64
+    branch_mispredict_penalty: i64
+    jump_latency: i64
+    jump_redirect_penalty: i64
+    upper_imm_latency: i64
+    system_latency: i64
+
+impl LatencyTable:
+    static fn default_rv32i() -> LatencyTable:
+        """Default RV32I 5-stage pipeline latencies."""
+        LatencyTable(
+            alu_reg_latency: 1,
+            alu_imm_latency: 1,
+            load_latency: 2,
+            store_latency: 1,
+            branch_latency: 1,
+            branch_mispredict_penalty: 2,
+            jump_latency: 1,
+            jump_redirect_penalty: 1,
+            upper_imm_latency: 1,
+            system_latency: 3
+        )
+
+    fn lookup(category: InstructionCategory) -> i64:
+        """Return the base latency for a given instruction category."""
+        match category:
+            InstructionCategory.AluReg: self.alu_reg_latency
+            InstructionCategory.AluImm: self.alu_imm_latency
+            InstructionCategory.Load: self.load_latency
+            InstructionCategory.Store: self.store_latency
+            InstructionCategory.Branch: self.branch_latency
+            InstructionCategory.Jump: self.jump_latency
+            InstructionCategory.UpperImm: self.upper_imm_latency
+            InstructionCategory.System: self.system_latency
+
+    fn to_text() -> text:
+        "alu_reg={self.alu_reg_latency} alu_imm={self.alu_imm_latency} load={self.load_latency} store={self.store_latency} branch={self.branch_latency}+{self.branch_mispredict_penalty} jump={self.jump_latency}+{self.jump_redirect_penalty}"
+
+# ============================================================================
+# Timing Annotation
+# ============================================================================
+
+struct TimingAnnotation:
+    """Timing metadata attached to a single retired instruction.
+
+    Stored in a parallel array indexed by instruction sequence number —
+    no modification to IrTcInst is needed (AC-001).
+    """
+    pc: i64
+    inst_word: i64
+    category: InstructionCategory
+    base_latency: i64
+    stall_cycles: i64
+    total_cycles: i64
+    rd: i64             # Destination register (-1 if none)
+    rs1: i64            # Source register 1 (-1 if none)
+    rs2: i64            # Source register 2 (-1 if none)
+    is_branch: bool
+    branch_taken: bool
+    branch_mispredicted: bool
+
+impl TimingAnnotation:
+    static fn new(pc: i64, inst_word: i64, category: InstructionCategory, base_latency: i64) -> TimingAnnotation:
+        TimingAnnotation(
+            pc: pc,
+            inst_word: inst_word,
+            category: category,
+            base_latency: base_latency,
+            stall_cycles: 0,
+            total_cycles: base_latency,
+            rd: -1,
+            rs1: -1,
+            rs2: -1,
+            is_branch: false,
+            branch_taken: false,
+            branch_mispredicted: false
+        )
+
+    fn with_regs(rd: i64, rs1: i64, rs2: i64) -> TimingAnnotation:
+        TimingAnnotation(..self, rd: rd, rs1: rs1, rs2: rs2)
+
+    fn with_stall(stall_cycles: i64) -> TimingAnnotation:
+        TimingAnnotation(..self, stall_cycles: stall_cycles, total_cycles: self.base_latency + stall_cycles)
+
+    fn with_branch(taken: bool, mispredicted: bool) -> TimingAnnotation:
+        TimingAnnotation(..self, is_branch: true, branch_taken: taken, branch_mispredicted: mispredicted)
+
+    fn to_text() -> text:
+        var out = "pc=0x{self.pc} cat={self.category.to_text()} lat={self.base_latency}"
+        if self.stall_cycles > 0:
+            out = out + " stall={self.stall_cycles}"
+        out = out + " total={self.total_cycles}"
+        if self.rd >= 0:
+            out = out + " rd=x{self.rd}"
+        if self.rs1 >= 0:
+            out = out + " rs1=x{self.rs1}"
+        if self.rs2 >= 0:
+            out = out + " rs2=x{self.rs2}"
+        if self.is_branch:
+            out = out + " branch taken={self.branch_taken} mispredict={self.branch_mispredicted}"
+        out
+
+# ============================================================================
+# State Snapshot for Mode Transitions
+# ============================================================================
+
+struct StateSnapshot:
+    """Complete simulator state for mode switching (REQ-SIM-006).
+
+    Captures all architectural state needed to resume execution
+    in a different simulation mode.
+    """
+    reg_values: [i64]
+    pc: i64
+    memory_snapshot: [i64]
+    cycle_count: i64
+    retired_count: i64
+    halted: bool
+    source_mode: SimMode
+
+impl StateSnapshot:
+    static fn new(reg_values: [i64], pc: i64, memory: [i64], cycle_count: i64, retired_count: i64, halted: bool, mode: SimMode) -> StateSnapshot:
+        StateSnapshot(
+            reg_values: reg_values,
+            pc: pc,
+            memory_snapshot: memory,
+            cycle_count: cycle_count,
+            retired_count: retired_count,
+            halted: halted,
+            source_mode: mode
+        )
+
+    fn to_text() -> text:
+        "snapshot: pc=0x{self.pc} cycles={self.cycle_count} retired={self.retired_count} halted={self.halted} from={self.source_mode.to_text()}"

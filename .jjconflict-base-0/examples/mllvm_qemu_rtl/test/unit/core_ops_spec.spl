@@ -1,0 +1,181 @@
+"""
+IR_TC Instruction Set Specification
+
+Tests for IrTcOp helper methods: is_terminator, is_emulation_only,
+is_memory_access, and dest_value.
+"""
+
+use std.spec.{describe, it, expect}
+use core.types.{IrTcTypeKind, IrTcValue, IrTcCond}
+use core.ops.{IrTcOp}
+use core.block.{BlockId}
+use core.mem_op.{MemOp, Endian, GuestRegId}
+
+# ============================================================================
+# Helper: create typed test values
+# ============================================================================
+
+fn i32_val(id: i64) -> IrTcValue:
+    IrTcValue.new(id, IrTcTypeKind.I32)
+
+fn i1_val(id: i64) -> IrTcValue:
+    IrTcValue.new(id, IrTcTypeKind.I1)
+
+fn ptr_val(id: i64) -> IrTcValue:
+    IrTcValue.new(id, IrTcTypeKind.Ptr(addr_space: 0))
+
+fn mem_op_default() -> MemOp:
+    MemOp.new(4, false, Endian.Little)
+
+# ============================================================================
+# IrTcOp.is_terminator
+# ============================================================================
+
+describe "IrTcOp.is_terminator":
+    """
+    ## Irtcop.Is_Terminator Tests
+
+    Validates IrTcOp.is_terminator functionality.
+    """
+
+    it "returns true for Br":
+        val op = IrTcOp.Br(target: BlockId.new(1))
+        expect(op.is_terminator()).to_equal(true)
+
+    it "returns true for BrCond":
+        val op = IrTcOp.BrCond(cond: i1_val(0), true_: BlockId.new(1), false_: BlockId.new(2))
+        expect(op.is_terminator()).to_equal(true)
+
+    it "returns true for Ret":
+        val op = IrTcOp.Ret(value: Some(i32_val(0)))
+        expect(op.is_terminator()).to_equal(true)
+
+    it "returns true for ExitTB":
+        val op = IrTcOp.ExitTB(exit_code: 0)
+        expect(op.is_terminator()).to_equal(true)
+
+    it "returns true for Unreachable":
+        val op = IrTcOp.Unreachable
+        expect(op.is_terminator()).to_equal(true)
+
+    it "returns false for Add":
+        val op = IrTcOp.Add(dest: i32_val(2), a: i32_val(0), b: i32_val(1))
+        expect(op.is_terminator()).to_equal(false)
+
+    it "returns false for Load":
+        val op = IrTcOp.Load(dest: i32_val(1), addr: ptr_val(0), mem: mem_op_default())
+        expect(op.is_terminator()).to_equal(false)
+
+    it "returns false for Nop":
+        val op = IrTcOp.Nop
+        expect(op.is_terminator()).to_equal(false)
+
+# ============================================================================
+# IrTcOp.is_emulation_only
+# ============================================================================
+
+describe "IrTcOp.is_emulation_only":
+    it "returns true for GuestLoad":
+        val op = IrTcOp.GuestLoad(dest: i32_val(1), addr: ptr_val(0), mem: mem_op_default(), mmu_idx: 0)
+        expect(op.is_emulation_only()).to_equal(true)
+
+    it "returns true for GuestStore":
+        val op = IrTcOp.GuestStore(value: i32_val(0), addr: ptr_val(1), mem: mem_op_default(), mmu_idx: 0)
+        expect(op.is_emulation_only()).to_equal(true)
+
+    it "returns true for ReadGuestReg":
+        val reg = GuestRegId.new(GuestArch.Avr, 0, "r0")
+        val op = IrTcOp.ReadGuestReg(dest: i32_val(0), guest_reg: reg)
+        expect(op.is_emulation_only()).to_equal(true)
+
+    it "returns true for WriteGuestReg":
+        val reg = GuestRegId.new(GuestArch.Avr, 0, "r0")
+        val op = IrTcOp.WriteGuestReg(guest_reg: reg, value: i32_val(0))
+        expect(op.is_emulation_only()).to_equal(true)
+
+    it "returns true for ExitTB":
+        val op = IrTcOp.ExitTB(exit_code: 0)
+        expect(op.is_emulation_only()).to_equal(true)
+
+    it "returns false for Add":
+        val op = IrTcOp.Add(dest: i32_val(2), a: i32_val(0), b: i32_val(1))
+        expect(op.is_emulation_only()).to_equal(false)
+
+    it "returns false for Load":
+        val op = IrTcOp.Load(dest: i32_val(1), addr: ptr_val(0), mem: mem_op_default())
+        expect(op.is_emulation_only()).to_equal(false)
+
+    it "returns false for Br":
+        val op = IrTcOp.Br(target: BlockId.new(0))
+        expect(op.is_emulation_only()).to_equal(false)
+
+# ============================================================================
+# IrTcOp.is_memory_access
+# ============================================================================
+
+describe "IrTcOp.is_memory_access":
+    it "returns true for Load":
+        val op = IrTcOp.Load(dest: i32_val(1), addr: ptr_val(0), mem: mem_op_default())
+        expect(op.is_memory_access()).to_equal(true)
+
+    it "returns true for Store":
+        val op = IrTcOp.Store(value: i32_val(0), addr: ptr_val(1), mem: mem_op_default())
+        expect(op.is_memory_access()).to_equal(true)
+
+    it "returns true for GuestLoad":
+        val op = IrTcOp.GuestLoad(dest: i32_val(1), addr: ptr_val(0), mem: mem_op_default(), mmu_idx: 0)
+        expect(op.is_memory_access()).to_equal(true)
+
+    it "returns true for GuestStore":
+        val op = IrTcOp.GuestStore(value: i32_val(0), addr: ptr_val(1), mem: mem_op_default(), mmu_idx: 0)
+        expect(op.is_memory_access()).to_equal(true)
+
+    it "returns false for Add":
+        val op = IrTcOp.Add(dest: i32_val(2), a: i32_val(0), b: i32_val(1))
+        expect(op.is_memory_access()).to_equal(false)
+
+    it "returns false for Br":
+        val op = IrTcOp.Br(target: BlockId.new(0))
+        expect(op.is_memory_access()).to_equal(false)
+
+# ============================================================================
+# IrTcOp.dest_value
+# ============================================================================
+
+describe "IrTcOp.dest_value":
+    it "returns Some for Add":
+        val dest = i32_val(2)
+        val op = IrTcOp.Add(dest: dest, a: i32_val(0), b: i32_val(1))
+        val result = op.dest_value()
+        expect(result.?).to_equal(true)
+
+    it "returns the correct destination value for Sub":
+        val dest = i32_val(5)
+        val op = IrTcOp.Sub(dest: dest, a: i32_val(0), b: i32_val(1))
+        val result = op.dest_value()
+        expect(result.?).to_equal(true)
+
+    it "returns Some for Load":
+        val op = IrTcOp.Load(dest: i32_val(1), addr: ptr_val(0), mem: mem_op_default())
+        val result = op.dest_value()
+        expect(result.?).to_equal(true)
+
+    it "returns nil for Store":
+        val op = IrTcOp.Store(value: i32_val(0), addr: ptr_val(1), mem: mem_op_default())
+        val result = op.dest_value()
+        expect(result).to_be_nil()
+
+    it "returns nil for Br":
+        val op = IrTcOp.Br(target: BlockId.new(0))
+        val result = op.dest_value()
+        expect(result).to_be_nil()
+
+    it "returns nil for Ret":
+        val op = IrTcOp.Ret(value: Some(i32_val(0)))
+        val result = op.dest_value()
+        expect(result).to_be_nil()
+
+    it "returns nil for Nop":
+        val op = IrTcOp.Nop
+        val result = op.dest_value()
+        expect(result).to_be_nil()

@@ -1,0 +1,183 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/resource_loader.spl 80%
+"""
+# Resource Loader Specification
+
+**Feature IDs:** #M16-AC3, #M16-AC4
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Draft
+
+## Overview
+
+Verifies ResourceLoader content-type detection logic and the [u8] body decode
+boundary. No network calls — pure Content-Type string/body-sniff logic.
+"""
+
+use std.spipe.*
+
+use std.gc_async_mut.gpu.browser_engine.resource_loader.{ResourceLoader, ContentType, detect_content_type}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchResponse}
+
+
+# ============================================================================
+# Content-Type Detection from Headers
+# ============================================================================
+
+describe "detect_content_type from headers":
+    """
+    ## Header-based content type detection
+
+    When a Content-Type response header is present, its value determines the
+    ContentType variant.  Body sniffing is only used as fallback.
+    """
+
+    it "AC-3: text/html header yields Html":
+        val ct = detect_content_type("Content-Type: text/html; charset=utf-8", [])
+        val is_html = (ct == ContentType.Html)
+        expect(is_html).to_equal(true)
+
+    it "AC-3: text/css header yields Css":
+        val ct = detect_content_type("Content-Type: text/css", [])
+        val is_css = (ct == ContentType.Css)
+        expect(is_css).to_equal(true)
+
+    it "AC-3: application/javascript header yields JavaScript":
+        val ct = detect_content_type("Content-Type: application/javascript", [])
+        val is_js = (ct == ContentType.JavaScript)
+        expect(is_js).to_equal(true)
+
+    it "AC-3: text/javascript header yields JavaScript":
+        val ct = detect_content_type("Content-Type: text/javascript", [])
+        val is_js = (ct == ContentType.JavaScript)
+        expect(is_js).to_equal(true)
+
+    it "AC-3: image/png header yields Image":
+        val ct = detect_content_type("Content-Type: image/png", [])
+        val is_img = (ct == ContentType.Image)
+        expect(is_img).to_equal(true)
+
+    it "AC-3: image/jpeg header yields Image":
+        val ct = detect_content_type("Content-Type: image/jpeg", [])
+        val is_img = (ct == ContentType.Image)
+        expect(is_img).to_equal(true)
+
+    it "AC-3: image/webp header yields Image":
+        val ct = detect_content_type("Content-Type: image/webp", [])
+        val is_img = (ct == ContentType.Image)
+        expect(is_img).to_equal(true)
+
+    it "AC-3: application/octet-stream yields Binary":
+        val ct = detect_content_type("Content-Type: application/octet-stream", [])
+        val is_bin = (ct == ContentType.Binary)
+        expect(is_bin).to_equal(true)
+
+    it "AC-3: unknown content-type yields Unknown":
+        val ct = detect_content_type("Content-Type: application/x-custom-type", [])
+        val is_unknown = (ct == ContentType.Unknown)
+        expect(is_unknown).to_equal(true)
+
+    it "AC-3: missing Content-Type header falls back to body sniff":
+        val ct = detect_content_type("", html_body_prefix())
+        val is_html = (ct == ContentType.Html)
+        expect(is_html).to_equal(true)
+
+
+# ============================================================================
+# Body Sniffing Fallback
+# ============================================================================
+
+describe "detect_content_type body sniffing":
+    """
+    ## Body-prefix sniffing when Content-Type header is absent
+
+    The first bytes of the response body can indicate HTML or other types
+    when no Content-Type header is present.
+    """
+
+    it "AC-3: body starting with <!DOCTYPE html sniffs as Html":
+        val ct = detect_content_type("", make_bytes("<!DOCTYPE html><html>"))
+        val is_html = (ct == ContentType.Html)
+        expect(is_html).to_equal(true)
+
+    it "AC-3: body starting with <html sniffs as Html":
+        val ct = detect_content_type("", make_bytes("<html><head>"))
+        val is_html = (ct == ContentType.Html)
+        expect(is_html).to_equal(true)
+
+    it "AC-3: PNG magic bytes sniff as Image":
+        val ct = detect_content_type("", png_magic_bytes())
+        val is_img = (ct == ContentType.Image)
+        expect(is_img).to_equal(true)
+
+    it "AC-3: empty body with no header yields Unknown":
+        val ct = detect_content_type("", [])
+        val is_unknown = (ct == ContentType.Unknown)
+        expect(is_unknown).to_equal(true)
+
+
+# ============================================================================
+# [u8] Body Path — AC-4
+# ============================================================================
+
+describe "ResourceLoader [u8] body boundary":
+    """
+    ## Binary-safe body decode at parse boundary (AC-4)
+
+    ResourceLoader.load() must produce a ParserInput whose text content is
+    decoded via rt_bytes_to_text at the loader boundary, not before.
+    The raw [u8] body must be accessible before decode.
+    """
+
+    it "AC-4: FetchResponse body field is [u8] not text":
+        val resp = make_fetch_response_with_bytes()
+        # body is [u8]; length > 0
+        expect(resp.body.length).to_be_greater_than(0)
+
+    it "AC-4: body_text() returns decoded text":
+        val resp = make_fetch_response_with_bytes()
+        val decoded = resp.body_text()
+        expect(decoded).to_start_with("<html>")
+
+    it "AC-4: binary body bytes are preserved before decode":
+        val resp = make_binary_response()
+        # First byte is 0xFF (PNG magic); accessible as raw byte
+        expect(resp.body.length).to_be_greater_than(3)
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+fn make_bytes(s: text) -> [u8]:
+    return rt_text_to_bytes(s)
+
+fn html_body_prefix() -> [u8]:
+    return make_bytes("<!DOCTYPE html><html>")
+
+fn png_magic_bytes() -> [u8]:
+    # PNG magic: 0x89 0x50 0x4E 0x47 0x0D 0x0A 0x1A 0x0A
+    var b: [u8] = []
+    b.push(0x89)
+    b.push(0x50)
+    b.push(0x4E)
+    b.push(0x47)
+    return b
+
+fn html_body_bytes() -> [u8]:
+    return make_bytes("<html><body>hello</body></html>")
+
+fn make_fetch_response_with_bytes() -> FetchResponse:
+    return FetchResponse {
+        status: 200,
+        headers: "Content-Type: text/html",
+        body: html_body_bytes()
+    }
+
+fn make_binary_response() -> FetchResponse:
+    return FetchResponse {
+        status: 200,
+        headers: "Content-Type: image/png",
+        body: png_magic_bytes()
+    }
