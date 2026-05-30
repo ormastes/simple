@@ -106,9 +106,14 @@ Progress 2026-05-30:
 - Added generated 2D CUDA launch wrappers for fill/copy/alpha/scroll that use
   `generated_2d_launch_plan(...)` and fail closed when no cached module,
   argument buffer, or valid plan exists.
-- Remaining Phase 1 work: wire concrete backend surfaces to populate the shared
-  session argument buffers and replace the blocked CUDA-selectable placeholder
-  with live evidence on a CUDA host.
+- Routed the existing CUDA backend surface's prepared argument buffers through
+  `CudaSession.launch_kernel_args(...)`, removing direct
+  `cuda_launch_kernel(self.session.module_cache, ...)` calls from the surface
+  draw paths.
+- Remaining Phase 1 work: replace the blocked CUDA-selectable placeholder with
+  live evidence on a CUDA host and decide whether the legacy renderer PTX should
+  be replaced by the portable `simple_2d_*` kernel module in this phase or in
+  the Phase 6 integration pass.
 
 ### Phase 2: CPU-SIMD conformance + native acceleration
 
