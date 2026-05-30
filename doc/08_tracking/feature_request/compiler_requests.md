@@ -31,6 +31,45 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 
 ## Open Requests
 
+### FR-COMPILER-012 — JIT-compile pure-Simple software rendering loops (unblock high-DPI 2D)
+
+- **Filed-on:** 2026-05-30
+- **Filed-by:** claude (engine2d_shapes_gui high-DPI session)
+- **Target:** compiler (Cranelift JIT / HIR lowering)
+- **Priority:** P2
+- **Status:** Open
+- **Requested-semantics:**
+  Pure-Simple per-pixel rasterizers (e.g. the SDF software renderer in
+  `examples/ui/engine2d_shapes_gui.spl`) currently fall back to the tree-walk
+  interpreter because JIT/HIR lowering bails with `Cannot infer type:
+  TypedInteger(0, U32)` (and some lean variants hard-panic on
+  `rt_function_not_found` from `[u32; N]` array-repeat / `.to_u32()` lowering).
+  Tree-walk rasterization runs at only ~hundreds–low-thousands of px/sec, which
+  caps the live demo at 320x240 (~90s render). With the same code JIT-compiled,
+  the inner pixel loops (f64 math, `.sqrt()`, `[u32]` index writes) would run at
+  native speed and true high-DPI (720p+) windows would render in well under a
+  second. The ask: (a) make JIT infer `0u32`-style typed-integer literals
+  instead of failing, and (b) ensure `[u32; N]` array-repeat + `.to_u32()`
+  resolve in JIT rather than emitting an unresolved `rt_function_not_found`
+  symbol that panics at `finalize_definitions`.
+- **Acceptance-criteria:**
+  - [ ] `bin/simple run examples/ui/engine2d_shapes_gui.spl` JIT-compiles
+        without `Cannot infer type: TypedInteger(0, U32)` interpreter fallback.
+  - [ ] No `can't resolve symbol rt_function_not_found` panic for a program that
+        only uses `[u32; N]`, `.to_u32()`, `.to_f64()`, `.sqrt()`, and `[u32]`
+        index assignment.
+  - [ ] High mode at 640x480+ renders in under a few seconds (vs ~minutes today).
+- **Related-upfront:** none
+- **Related-design-doc:** tbd
+- **Notes:**
+  Workarounds already applied in the demo: lean direct-buffer SDF (no Engine2D,
+  ~12x faster than the engine path) + per-shape bounding-box culling. These help
+  but do not remove the interpreter ceiling. The native-compiled path
+  (`bin/simple native-build`) is the existing fast route; this request is about
+  making the JIT `run` path fast too. Related interpreter limits live in the
+  `read_pixels` / `_dispatch_metal_*` TODOs in
+  `src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl`.
+
 ### FR-COMPILER-002 — Fix self-hosted import resolver: same-named structs in different modules shadow each other
 
 - **Filed-on:** 2026-04-18
