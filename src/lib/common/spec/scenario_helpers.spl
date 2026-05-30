@@ -10,11 +10,9 @@
 use std.common.spec.scenario_evidence.{
     ScenarioCaptureKind,
     ScenarioEvidenceArtifact,
-    ScenarioCheckerEvidence,
     scenario_evidence_artifact,
     scenario_api_evidence,
-    scenario_api_protocol_evidence,
-    scenario_checker_evidence
+    scenario_api_protocol_evidence
 }
 
 extern fn rt_file_exists(path: text) -> bool
@@ -24,22 +22,15 @@ pub struct ScenarioStepResult:
     description: text
     passed: bool
 
-# ---------------------------------------------------------------------------
-# Checker helpers — produce bool + ScenarioCheckerEvidence side output
-# ---------------------------------------------------------------------------
-
 # Check whether actual text contains the expected substring.
-# Returns true when the substring is found.
 pub fn check_text_contains(actual: text, expected: text) -> bool:
     actual.contains(expected)
 
 # Check whether an HTTP/protocol status code matches the expected value.
-# Returns true when the codes are equal.
 pub fn check_status_code(actual: i64, expected: i64) -> bool:
     actual == expected
 
 # Check whether a file exists at the given path.
-# Returns true when the file is present on disk.
 pub fn check_file_exists(path: text) -> bool:
     rt_file_exists(path)
 
@@ -49,10 +40,6 @@ pub fn check_file_exists(path: text) -> bool:
 pub fn check_json_field(json_text: text, field: text) -> bool:
     val needle = "\"" + field + "\":"
     json_text.contains(needle)
-
-# ---------------------------------------------------------------------------
-# Capture helpers — produce ScenarioEvidenceArtifact for manual rendering
-# ---------------------------------------------------------------------------
 
 # Capture a plain text snippet as evidence.
 pub fn capture_text(label: text, content: text) -> ScenarioEvidenceArtifact:
@@ -103,6 +90,48 @@ pub fn capture_api_response(
         ""
     )
 
+# Return true for common API/protocol field names whose values must be hidden
+# in generated manuals and provider evidence.
+pub fn is_sensitive_api_field(name: text) -> bool:
+    name == "authorization" or
+        name == "cookie" or
+        name == "set-cookie" or
+        name == "token" or
+        name == "access_token" or
+        name == "refresh_token" or
+        name == "api_key" or
+        name == "password" or
+        name == "secret"
+
+# Render a single API/protocol field summary with redaction applied.
+pub fn api_field_summary(name: text, value: text) -> text:
+    if is_sensitive_api_field(name):
+        return name + "=<redacted>"
+    name + "=" + value
+
+# Render aligned field names and values as a semicolon-separated summary.
+pub fn api_field_list_summary(names: [text], values: [text]) -> text:
+    var limit = names.len()
+    if values.len() < limit:
+        limit = values.len()
+    var out = ""
+    for i in 0..limit:
+        if i > 0:
+            out = out + "; "
+        out = out + api_field_summary(names[i], values[i])
+    out
+
+# Render the sensitive field names that were redacted from an API/protocol
+# capture. Values are intentionally not included.
+pub fn redacted_api_field_names(names: [text]) -> text:
+    var out = ""
+    for name in names:
+        if is_sensitive_api_field(name):
+            if out != "":
+                out = out + "; "
+            out = out + name
+    out
+
 # Capture protocol/API provider details with params, headers, response fields,
 # and sensitive-value redaction notes.
 pub fn capture_api_protocol(
@@ -126,9 +155,34 @@ pub fn capture_api_protocol(
         ""
     )
 
-# ---------------------------------------------------------------------------
-# Step result helper — wrap a check outcome with a human description
-# ---------------------------------------------------------------------------
+# Capture protocol/API provider details from structured field lists. Header
+# values are redacted by common sensitive field names before manual rendering.
+pub fn capture_api_protocol_fields(
+    label: text,
+    method: text,
+    path: text,
+    param_names: [text],
+    param_values: [text],
+    header_names: [text],
+    header_values: [text],
+    response_field_names: [text],
+    response_field_values: [text]
+) -> ScenarioEvidenceArtifact:
+    val params_summary = api_field_list_summary(param_names, param_values)
+    val headers_summary = api_field_list_summary(header_names, header_values)
+    val response_fields = api_field_list_summary(response_field_names, response_field_values)
+    val redacted_values = redacted_api_field_names(header_names)
+    scenario_api_protocol_evidence(
+        label,
+        method,
+        path,
+        params_summary,
+        headers_summary,
+        response_fields,
+        redacted_values,
+        "",
+        ""
+    )
 
 # Create a step result from a description and pass/fail boolean.
 pub fn step_result(description: text, passed: bool) -> ScenarioStepResult:

@@ -9,6 +9,11 @@ use std.common.spec.scenario_helpers.{
     capture_log,
     capture_api_response,
     capture_api_protocol,
+    capture_api_protocol_fields,
+    is_sensitive_api_field,
+    api_field_summary,
+    api_field_list_summary,
+    redacted_api_field_names,
     step_result,
     step_result_summary
 }
@@ -38,7 +43,6 @@ describe "scenario checker helpers":
         expect(check_json_field(json, "missing")).to_equal(false)
 
     it "checks file exists for a known path":
-        # /dev/null exists on all unix systems
         expect(check_file_exists("/dev/null")).to_equal(true)
 
     it "checks file does not exist for bogus path":
@@ -95,6 +99,49 @@ describe "scenario capture helpers":
         expect(artifact.body).to_contain("headers: authorization=<redacted>; content-type=application/json")
         expect(artifact.body).to_contain("response fields: result.content[0].text; isError=false")
         expect(artifact.body).to_contain("redacted: authorization token")
+
+    it "detects sensitive api fields":
+        expect(is_sensitive_api_field("authorization")).to_equal(true)
+        expect(is_sensitive_api_field("access_token")).to_equal(true)
+        expect(is_sensitive_api_field("content-type")).to_equal(false)
+
+    it "redacts sensitive field summaries":
+        expect(api_field_summary("authorization", "Bearer secret")).to_equal("authorization=<redacted>")
+        expect(api_field_summary("content-type", "application/json")).to_equal("content-type=application/json")
+
+    it "summarizes aligned api field lists":
+        val names = ["method", "id", "access_token"]
+        val values = ["tools/call", "7", "secret-token"]
+        val summary = api_field_list_summary(names, values)
+        expect(summary).to_equal("method=tools/call; id=7; access_token=<redacted>")
+
+    it "summarizes only available name value pairs":
+        val names = ["method", "id", "extra"]
+        val values = ["tools/list", "8"]
+        expect(api_field_list_summary(names, values)).to_equal("method=tools/list; id=8")
+
+    it "lists redacted api field names without values":
+        val names = ["content-type", "authorization", "cookie"]
+        expect(redacted_api_field_names(names)).to_equal("authorization; cookie")
+
+    it "captures protocol provider details from structured fields":
+        val artifact = capture_api_protocol_fields(
+            "MCP tools call",
+            "POST",
+            "/mcp",
+            ["method", "id"],
+            ["tools/call", "7"],
+            ["authorization", "content-type"],
+            ["Bearer secret", "application/json"],
+            ["result.content[0].text", "isError"],
+            ["ok", "false"]
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.protocol)
+        expect(artifact.redacted).to_equal(true)
+        expect(artifact.body).to_contain("params: method=tools/call; id=7")
+        expect(artifact.body).to_contain("headers: authorization=<redacted>; content-type=application/json")
+        expect(artifact.body).to_contain("response fields: result.content[0].text=ok; isError=false")
+        expect(artifact.body).to_contain("redacted: authorization")
 
 describe "scenario step result":
     it "creates a passing step result":

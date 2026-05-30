@@ -165,8 +165,10 @@ documentation to hand-written-quality scenario manuals.
   provider integrations and domain-specific decoders remain open. UI selection
   helper payloads are represented in the shared model, but concrete TUI/GUI
   provider wiring remains future work. `scenario_helpers` now exposes
-  API/protocol capture helpers that produce the rich shared evidence artifacts;
-  runtime provider wiring remains future work.
+  API/protocol capture helpers that produce the rich shared evidence artifacts,
+  including structured field-list summaries and common sensitive-field
+  redaction for provider implementations; runtime provider wiring remains
+  future work.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none
