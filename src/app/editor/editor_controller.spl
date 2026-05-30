@@ -22,6 +22,7 @@ use std.editor.view.wiki_panel.*
 use std.editor.view.file_tree.*
 use std.editor.view.settings_view.*
 use app.editor.debug_process_runtime.*
+use app.editor.editor_ctrl_commands.*
 use app.editor.editor_ctrl_core.*
 use app.editor.editor_ctrl_debug.*
 use app.editor.editor_ctrl_diagnostics.*
@@ -588,289 +589,55 @@ impl EditorController:
         ctrl_execute_palette_command(me, command_name, command_payload)
 
     me _execute_wiki_quick_switch(query: text) -> EditorAction:
-        val needle = query.trim()
-        me.wiki_quick_switch_query = needle
-        val index = ctrl_wiki_index_open_documents(me)
-        me.wiki_panel = wiki_panel_from_documents(md_wiki_quick_switch(index, needle))
-        var session = me.session
-        var layout = session.dock_layout
-        layout.show_right("wiki-panel")
-        session.dock_layout = layout
-        me.session = session
-        me.status_msg = "wiki quick switch panel"
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        ctrl_wiki_quick_switch(me, query)
 
     me _execute_daily_note_create(payload: text) -> EditorAction:
-        val date = _editor_payload_part(payload, 0)
-        if date == "":
-            me.status_msg = "missing daily note date"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        val folder = if _editor_payload_part(payload, 1) == "" then "Daily" else: _editor_payload_part(payload, 1)
-        val template_body = if _editor_payload_part(payload, 2) == "" then "# {{title}}\n\n" else: _editor_payload_part(payload, 2)
-        val title_format = if _editor_payload_part(payload, 3) == "" then "{{date}}" else: _editor_payload_part(payload, 3)
-        val config = md_wiki_daily_note_config_with_title(folder, title_format, _editor_payload_part(payload, 4), template_body)
-        val path = md_wiki_daily_note_path(config, date)
-        val content = md_wiki_daily_note_content(config, date)
-        if not rt_file_write_text(path, content):
-            me.status_msg = "failed to create daily note"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        var session_daily = me.session
-        val target_doc_id = session_daily.open_file(path)
-        me._replace_session(session_daily)
-        ctrl_focus_lsp_target_doc(me, target_doc_id)
-        me.status_msg = "created daily note: " + path
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        ctrl_wiki_daily_note_create(me, payload)
 
     me _execute_daily_note_picker(payload: text) -> EditorAction:
-        val date = _editor_payload_part(payload, 0)
-        val folder = if _editor_payload_part(payload, 1) == "" then "Daily" else: _editor_payload_part(payload, 1)
-        val template_body = if _editor_payload_part(payload, 2) == "" then "# {{title}}\n\n" else: _editor_payload_part(payload, 2)
-        val title_format = if _editor_payload_part(payload, 3) == "" then "{{date}}" else: _editor_payload_part(payload, 3)
-        val config = md_wiki_daily_note_config_with_title(folder, title_format, _editor_payload_part(payload, 4), template_body)
-        me.wiki_daily_note_payload = date + "|" + folder + "|" + template_body + "|" + title_format + "|" + config.extension
-        val preview_date = if date == "" then "YYYY-MM-DD" else: date
-        val path = md_wiki_daily_note_path(config, preview_date)
-        me.wiki_panel = wiki_panel_with_rows("Daily Notes", [
-            WikiPanelRow(icon: "calendar", label: preview_date, detail: me.wiki_daily_note_payload, path: path, line: 0)
-        ])
-        me._show_right_dock("wiki-panel")
-        me.status_msg = "daily notes"
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        ctrl_wiki_daily_note_picker(me, payload)
 
     me _execute_template_insert(payload: text) -> EditorAction:
-        val template_path = _editor_payload_part(payload, 0)
-        val target_path = _editor_payload_part(payload, 1)
-        val title = _editor_payload_part(payload, 2)
-        val date = _editor_payload_part(payload, 3)
-        if template_path == "" or target_path == "":
-            me.status_msg = "missing template or target path"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        val rendered = _editor_apply_template_text(rt_file_read_text(template_path) ?? "", title, date)
-        val existing = rt_file_read_text(target_path) ?? ""
-        val sep = if existing == "" or existing.ends_with("\n") then "" else: "\n"
-        if not rt_file_write_text(target_path, existing + sep + rendered):
-            me.status_msg = "failed to insert template"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        me.status_msg = "inserted template: " + template_path
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        ctrl_wiki_template_insert(me, payload)
 
     me _execute_template_picker(payload: text) -> EditorAction:
-        val folder = _editor_payload_part(payload, 0)
-        val target_path = _editor_payload_part(payload, 1)
-        val title = _editor_payload_part(payload, 2)
-        val date = _editor_payload_part(payload, 3)
-        val query = _editor_payload_part(payload, 4).trim().to_lower()
-        if folder == "":
-            me.status_msg = "missing template folder"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        me.wiki_template_picker_payload = folder + "|" + target_path + "|" + title + "|" + date + "|" + query
-        me.wiki_template_query = query
-        me.wiki_panel = wiki_panel_with_rows("Templates", _editor_template_picker_rows(folder, target_path, title, date, query))
-        var session = me.session
-        var layout = session.dock_layout
-        layout.show_right("wiki-panel")
-        session.dock_layout = layout
-        me.session = session
-        me.status_msg = "templates: " + me.wiki_panel.rows.len().to_text()
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        ctrl_wiki_template_picker(me, payload)
 
     me _execute_attachment_picker(payload: text) -> EditorAction:
-        val root = _editor_payload_part(payload, 0)
-        val query = _editor_payload_part(payload, 1).to_lower()
-        val target_path = _editor_payload_part(payload, 2)
-        val storage_dir = _editor_payload_part(payload, 3)
-        if root == "":
-            me.status_msg = "missing attachment root"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        me.wiki_attachment_picker_payload = root + "|" + query + "|" + target_path + "|" + storage_dir
-        me.wiki_attachment_query = query
-        me.wiki_panel = wiki_panel_with_rows("Attachment Picker", _editor_attachment_picker_rows(root, query, target_path, storage_dir))
-        var session = me.session
-        var layout = session.dock_layout
-        layout.show_right("wiki-panel")
-        session.dock_layout = layout
-        me.session = session
-        me.status_msg = "attachments: " + me.wiki_panel.rows.len().to_text()
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        ctrl_wiki_attachment_picker(me, payload)
 
     me _execute_wiki_vault_search(payload: text) -> EditorAction:
-        val root = _editor_payload_part(payload, 0)
-        val query = _editor_payload_part(payload, 1)
-        if root == "" or query == "":
-            me.status_msg = "missing vault root or query"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        me.wiki_vault_search_root = root
-        me.wiki_vault_search_query = query
-        val docs = _editor_markdown_vault_documents(root)
-        var index = me.vault_search_index
-        if index.root != root:
-            val loaded = md_vault_search_index_load(_editor_vault_search_cache_path(root))
-            if loaded.root == root and not loaded.dirty and md_vault_search_index_matches_documents(loaded, docs):
-                index = loaded
-            else:
-                index = md_vault_search_index_new(root, docs)
-                md_vault_search_index_save(index, _editor_vault_search_cache_path(root))
-        elif index.dirty:
-            index = md_vault_search_index_refresh(index, docs)
-            md_vault_search_index_save(index, _editor_vault_search_cache_path(root))
-        me.vault_search_index = index
-        val matches = md_vault_search_index_search(index, query)
-        me.wiki_panel = wiki_panel_from_vault_search(matches)
-        var session = me.session
-        var layout = session.dock_layout
-        layout.show_right("wiki-panel")
-        session.dock_layout = layout
-        me.session = session
-        me.status_msg = "wiki vault search: " + matches.len().to_text()
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        ctrl_wiki_vault_search(me, payload)
 
     me _request_quickfix() -> EditorAction:
-        if me.session.active_index < 0 or me.session.active_index >= me.session.buffers.len():
-            me.status_msg = "no file open"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        val doc = me.session.documents[me.session.active_index]
-        val buffer = me.session.buffers[me.session.active_index]
-        if doc.language_id == "markdown":
-            val content = md_buffer_content(buffer)
-            val row = buffer.cursor_row
-            val line = buffer.line_at(row)
-            val fixed = _editor_markdown_quickfix_line(line)
-            if fixed != line:
-                val edit_json = "{\"line\":" + str(row) + ",\"newText\":\"" + _editor_escape_json(fixed) + "\"}"
-                me.code_actions = [EditorCodeAction(title: "Apply Markdown quick fix", kind: "quickfix", edit_json: edit_json, command: "")]
-                me.status_msg = "1 quick fix"
-                return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-            me.code_actions = []
-            val diags = md_diagnose(content, doc.path())
-            me.status_msg = if diags.len() > 0 then "diagnostics available" else: "no quick fixes"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        me.code_actions = []
-        me.status_msg = "no quick fixes"
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        ctrl_request_quickfix(me)
 
     me _show_diagnostics_panel() -> EditorAction:
-        me.diagnostics_view_mode = "all"
-        me.diagnostics_view_payload = ""
-        me._refresh_diagnostics_panel_view()
-        me._show_right_dock("problems")
-        me.status_msg = "problems: " + me.diagnostic_store.total_count().to_text()
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        ctrl_show_diagnostics_panel(me)
 
     me _show_diagnostics_filter(payload: text) -> EditorAction:
-        me.diagnostics_view_mode = "filter"
-        me.diagnostics_view_payload = payload
-        me._refresh_diagnostics_panel_view()
-        me._show_right_dock("problems")
-        me.status_msg = "problems: " + _editor_problem_visible_count(me.diagnostics_panel).to_text()
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        ctrl_show_diagnostics_filter(me, payload)
 
     me _show_diagnostics_group(payload: text) -> EditorAction:
-        me.diagnostics_view_mode = "group"
-        me.diagnostics_view_payload = if payload == "source" then "source" else: "severity"
-        me._refresh_diagnostics_panel_view()
-        me._show_right_dock("problems")
-        me.status_msg = "problems: " + _editor_problem_visible_count(me.diagnostics_panel).to_text()
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        ctrl_show_diagnostics_group(me, payload)
 
     me _show_diagnostics_sort(payload: text) -> EditorAction:
-        me.diagnostics_view_mode = "sort"
-        me.diagnostics_view_payload = if payload == "source" or payload == "path" then payload else: "severity"
-        me._refresh_diagnostics_panel_view()
-        me._show_right_dock("problems")
-        me.status_msg = "problems: " + _editor_problem_visible_count(me.diagnostics_panel).to_text()
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        ctrl_show_diagnostics_sort(me, payload)
 
     me _refresh_diagnostics_panel_view():
-        if me.diagnostics_view_mode == "filter":
-            val severity = _editor_payload_part(me.diagnostics_view_payload, 0)
-            val source = _editor_payload_part(me.diagnostics_view_payload, 1)
-            me.diagnostics_panel = diagnostics_panel_from_store_filtered(me.diagnostic_store, severity, source)
-            return
-        if me.diagnostics_view_mode == "group":
-            val group_by = if me.diagnostics_view_payload == "source" then "source" else: "severity"
-            me.diagnostics_panel = diagnostics_panel_from_store_grouped(me.diagnostic_store, group_by)
-            return
-        if me.diagnostics_view_mode == "sort":
-            val sort_by = if me.diagnostics_view_payload == "source" or me.diagnostics_view_payload == "path" then me.diagnostics_view_payload else: "severity"
-            me.diagnostics_panel = diagnostics_panel_from_store_sorted(me.diagnostic_store, sort_by)
-            return
-        me.diagnostics_panel = diagnostics_panel_from_store(me.diagnostic_store)
+        ctrl_refresh_diagnostics_panel_view(me)
 
     me _show_right_dock(panel: text):
-        var session = me.session
-        var layout = session.dock_layout
-        layout.show_right(panel)
-        session.dock_layout = layout
-        me.session = session
+        ctrl_show_right_dock(me, panel)
 
     me _apply_first_quickfix() -> EditorAction:
         ctrl_apply_first_quickfix(me)
 
     me _apply_code_action_at(index: i64) -> EditorAction:
-        if me.code_actions.len() == 0:
-            me.status_msg = "no quick fix selected"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        var action_index = index
-        if action_index < 0:
-            action_index = 0
-        if action_index >= me.code_actions.len():
-            action_index = me.code_actions.len() - 1
-        if me.session.active_index < 0 or me.session.active_index >= me.session.buffers.len():
-            me.status_msg = "no file open"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        var buffer = me.session.buffers[me.session.active_index]
-        val action = me.code_actions[action_index]
-        val doc = me.session.documents[me.session.active_index]
-        val applied = _editor_apply_code_action_content(buffer, doc.path(), action.edit_json)
-        if not applied.applied:
-            if action.command != "":
-                val command_requested = me._execute_lsp_code_action_command(action.command)
-                me.code_actions = []
-                me.status_msg = if command_requested then "command requested: " + _editor_lsp_command_name(action.command) else: "code action command unavailable"
-                return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-            me.status_msg = "quick fix has no editable change"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        val extra_file_edits = if action.edit_json.contains("\"changes\"") then ctrl_apply_workspace_edit_extra_paths(me, doc.path(), action.edit_json) else: 0
-        buffer.push_undo_snapshot()
-        buffer.replace_content(applied.content)
-        buffer.dirty = true
-        buffer.move_cursor(applied.line, applied.col)
-        me.session.buffers[me.session.active_index] = buffer
-        ctrl_replace_open_document_buffer(me, doc.path(), buffer)
-        me.code_actions = []
-        if doc.language_id == "markdown":
-            ctrl_update_markdown_preview(me, doc, buffer)
-        me.status_msg = if extra_file_edits > 0 then "applied: " + action.title + " (" + extra_file_edits.to_text() + " file edits)" else: "applied: " + action.title
-        if action.command != "":
-            val command_requested = me._execute_lsp_code_action_command(action.command)
-            if command_requested:
-                me.status_msg = me.status_msg + "; command requested: " + _editor_lsp_command_name(action.command)
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        ctrl_apply_code_action_at(me, index)
 
     me _execute_lsp_code_action_command(command_json: text) -> bool:
-        val params = _editor_lsp_execute_command_params(command_json)
-        if params == "":
-            return false
-        if me.session.active_index < 0 or me.session.active_index >= me.session.documents.len() or me.session.active_index >= me.session.buffers.len():
-            return false
-        val doc = me.session.documents[me.session.active_index]
-        val buffer = me.session.buffers[me.session.active_index]
-        val content = md_buffer_content(buffer)
-        if doc.language_id == "markdown":
-            if not me.md_lsp_state.running:
-                me.md_lsp_state = md_lsp_ensure_open(me.md_lsp_state, doc.path(), content)
-            val result = md_lsp_request(me.md_lsp_state, "execute-command", params, doc.path(), 0, 0)
-            me.md_lsp_state = result.0
-            val md_resp: LspResponse = result.1
-            return md_resp.ok
-        if doc.language_id == "simple" or doc.language_id == "shell":
-            if not me.simple_lsp_state.running:
-                me.simple_lsp_state = simple_lsp_ensure_open(me.simple_lsp_state, doc.path(), content)
-            val simple_result = simple_lsp_request(me.simple_lsp_state, "execute-command", params, doc.path(), 0, 0)
-            me.simple_lsp_state = simple_result.0
-            val simple_resp: LspResponse = simple_result.1
-            return simple_resp.ok
-        false
+        ctrl_execute_lsp_code_action_command(me, command_json)
 
     me _apply_debug_ctrl_state(next: EditorController):
         me.status_msg = next.status_msg

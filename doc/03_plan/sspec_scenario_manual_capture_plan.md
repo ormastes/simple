@@ -304,6 +304,7 @@ Create a shared SSpec support library rather than scattering helper functions:
   operator flow.
 - Inline/previous scenarios expand without printing redundant `Previous:`.
 - Executable SPipe is folded by default.
+- Folded executable blocks include runnable source line-count summaries.
 - Scenario captures appear under the step that caused them.
 - Step capture labels use typed wording such as `Protocol capture` and
   `API capture`.
@@ -318,7 +319,7 @@ Create a shared SSpec support library rather than scattering helper functions:
 
 Current verification note: syntax checks pass. The scenario evidence unit test
 passes 9/9, and `test/unit/app/tooling/spipe_docgen_scenario_body_spec.spl`
-reports 45 examples / 0 failures after replacing unsupported negative matchers
+reports 46 examples / 0 failures after replacing unsupported negative matchers
 with built-in assertions, fixing the `spipe-docgen` runtime path issues found
 during the manual-generation check, adding metadata warning/cycle diagnostic
 coverage, fixing blank folded executable output for expanded scenarios, adding
@@ -332,8 +333,9 @@ including `# @capture(off)`, between a `# @step` label and the labeled action,
 explicit `# @step` labels on executable setup lines, and stable `# @prev`
 source expansion with step-local capture metadata. It also verifies generated
 expected-result bullets for boolean contains assertions, including normalized
-escaped JSON string fragments. The direct spec run still exits nonzero after
-reporting 45 examples / 0
+escaped JSON string fragments, and truncates long expected-result values while
+preserving the full assertion in folded executable source. The direct spec run
+still exits nonzero after reporting 46 examples / 0
 failures because of the existing
 repo-level `compiler_driver_create` semantic finalization issue also noted in
 `doc/03_plan/port_rust_c_to_pure_simple.md`.
@@ -344,7 +346,9 @@ scenario body. The generated MCP steps include expected-result bullets from
 protocol/API assertions, with escaped JSON fragments normalized for manual
 reading. Step captures render as typed labels such as `Protocol capture:
 after_step` and `API capture: after_step`. Captured protocol/API steps include
-compact evidence previews derived from expected checks.
+compact evidence previews derived from expected checks. Folded executable
+blocks include runnable source line counts for reproduction review, and long
+expected values are shortened with a pointer to the folded executable source.
 
 ## First Exemplar: MCP
 

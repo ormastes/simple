@@ -76,6 +76,38 @@ struct WasmHelloGuiCompiledArtifactEvidence:
     ready: bool
     diagnostic: text
 
+struct WasmHelloGuiEventEvidence:
+    target: text
+    button_response: text
+    scroll_response: text
+    text_response: text
+    ignored_response: text
+    button_ok: bool
+    scroll_ok: bool
+    text_ok: bool
+    ignored_ok: bool
+    ready: bool
+    status: text
+    diagnostic: text
+
+struct WasmHelloGuiRenderEvidence:
+    target: text
+    viewport_w: i32
+    viewport_h: i32
+    dpi_scale_milli: i32
+    has_layout_marker: bool
+    has_image: bool
+    image_w: i32
+    image_h: i32
+    primitive_count: i32
+    primitive_bounds_w: i32
+    primitive_bounds_h: i32
+    min_touch_h: i32
+    command_count: i32
+    ready: bool
+    status: text
+    diagnostic: text
+
 fn _wasm_hello_target_name(target: text) -> text:
     if target == WEB_RENDER_TARGET_ANDROID_WASM:
         return "android"
@@ -138,13 +170,45 @@ fn _wasm_hello_event_contract() -> text:
     "button:hello_button:click->hello_button:clicked;scroll:viewport->hello_scroll:accepted;text:hello_text->hello_text:accepted"
 
 fn _wasm_hello_render_contract(target: text) -> text:
-    "viewport={_wasm_hello_viewport_w(target)}x{_wasm_hello_viewport_h(target)};layout=column-gap-8-padding-16;button-min-height=44;dpi=target-native"
+    "viewport={_wasm_hello_viewport_w(target)}x{_wasm_hello_viewport_h(target)};layout=column-gap-8-padding-16;button-min-height=44;input-min-height=44;image=64x64;primitives=rect,circle,line:128x48;dpi=target-native"
+
+fn _wasm_hello_index_of_from(haystack: text, marker: text, start: i64) -> i64:
+    if marker == "":
+        return start
+    var offset = start
+    while offset < haystack.len():
+        val tail = haystack.substring(offset, haystack.len())
+        val found = tail.index_of(marker)
+        if found < 0:
+            return -1
+        return offset + found
+    -1
+
+fn _wasm_hello_count_marker(haystack: text, marker: text) -> i32:
+    if marker == "":
+        return 0
+    var count = 0
+    var offset = 0i64
+    while offset < haystack.len():
+        val found = _wasm_hello_index_of_from(haystack, marker, offset)
+        if found < 0:
+            return count
+        count = count + 1
+        offset = found + marker.len()
+    count
+
+fn _wasm_hello_body(target: text) -> text:
+    val name = _wasm_hello_target_name(target)
+    "<main data-simple-wasm='hello' data-target='" + name + "' data-layout='column-gap-8-padding-16'><button id='hello_button'>Hello World</button><input id='hello_text' value='Generated WASM UI'><img id='hello_image' width='64' height='64' alt='Simple image' src='data:image/svg+xml,%3Csvg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\"%3E%3Crect width=\"64\" height=\"64\" fill=\"%232563eb\"/%3E%3Ccircle cx=\"32\" cy=\"32\" r=\"18\" fill=\"white\"/%3E%3C/svg%3E'><section id='hello_primitives' data-simple-primitives='rect,circle,line'><span data-primitive='rect'></span><span data-primitive='circle'></span><span data-primitive='line'></span></section></main>"
+
+fn _wasm_hello_css() -> text:
+    "main{display:flex;flex-direction:column;gap:8px;padding:16px;}button,input{min-height:44px;}#hello_image{width:64px;height:64px;}#hello_primitives{width:128px;height:48px;position:relative;}[data-primitive]{position:absolute;display:block;}[data-primitive='rect']{left:0;top:0;width:40px;height:28px;background:#2563eb;}[data-primitive='circle']{left:48px;top:0;width:32px;height:32px;border-radius:16px;background:#16a34a;}[data-primitive='line']{left:88px;top:20px;width:40px;height:4px;background:#111827;}"
 
 fn wasm_hello_gui_artifact_for_target(target: text) -> WasmHelloGuiArtifact:
     val name = _wasm_hello_target_name(target)
     val title = "Hello " + name
-    val body = "<main data-simple-wasm='hello' data-target='" + name + "'><button id='hello_button'>Hello World</button><p id='hello_text'>Generated WASM UI</p></main>"
-    val css = "main{display:flex;flex-direction:column;gap:8px;padding:16px;}button{min-height:44px;}"
+    val body = _wasm_hello_body(target)
+    val css = _wasm_hello_css()
     val request = WebRenderRequest.html(target, title, body, css, "", _wasm_hello_viewport_w(target), _wasm_hello_viewport_h(target))
     val module_path = "build/gui/" + name + "/hello.wasm"
     val metadata = WebRenderWasmArtifactMetadata.create(
@@ -152,7 +216,7 @@ fn wasm_hello_gui_artifact_for_target(target: text) -> WasmHelloGuiArtifact:
         web_render_wasm_abi_for_target(target),
         4096,
         256,
-        6
+        10
     )
     val artifact = web_render_generated_wasm_artifact(request, metadata)
     WasmHelloGuiArtifact(
@@ -296,6 +360,100 @@ fn wasm_hello_gui_target_packages() -> [WasmHelloGuiTargetPackage]:
 
 fn wasm_hello_gui_target_package_summary(package: WasmHelloGuiTargetPackage) -> text:
     "target={package.target};platform={package.platform};module={package.module_path};launcher={package.launcher_entry};runtime={package.shell_runtime};no_js={package.no_javascript};events={package.event_contract};render={package.render_contract};ready={package.ready};blocker={package.blocker}"
+
+fn wasm_hello_gui_event_response(event_name: text, target_id: text) -> text:
+    if event_name == "click" and target_id == "hello_button":
+        return "hello_button:clicked"
+    if event_name == "scroll":
+        return "hello_scroll:accepted"
+    if event_name == "text" and target_id == "hello_text":
+        return "hello_text:accepted"
+    "hello_event:ignored"
+
+fn wasm_hello_gui_event_evidence(target: text) -> WasmHelloGuiEventEvidence:
+    val button = wasm_hello_gui_event_response("click", "hello_button")
+    val scroll = wasm_hello_gui_event_response("scroll", "viewport")
+    val text_resp = wasm_hello_gui_event_response("text", "hello_text")
+    val ignored = wasm_hello_gui_event_response("click", "wrong_button")
+    val button_ok = button == "hello_button:clicked"
+    val scroll_ok = scroll == "hello_scroll:accepted"
+    val text_ok = text_resp == "hello_text:accepted"
+    val ignored_ok = ignored == "hello_event:ignored"
+    val ready = button_ok and scroll_ok and text_ok and ignored_ok
+    WasmHelloGuiEventEvidence(
+        target: target,
+        button_response: button,
+        scroll_response: scroll,
+        text_response: text_resp,
+        ignored_response: ignored,
+        button_ok: button_ok,
+        scroll_ok: scroll_ok,
+        text_ok: text_ok,
+        ignored_ok: ignored_ok,
+        ready: ready,
+        status: if ready: "event_contract_verified" else: "event_contract_failed",
+        diagnostic: if ready: "" else: "button scroll text or ignored event response mismatch"
+    )
+
+fn wasm_hello_gui_render_evidence_for_target(target: text, dpi_scale_milli: i32) -> WasmHelloGuiRenderEvidence:
+    val hello = wasm_hello_gui_artifact_for_target(target)
+    val html = hello.artifact.html
+    val css = hello.request.css
+    val scale = if dpi_scale_milli <= 0: 1000 else: dpi_scale_milli
+    val has_layout = html.contains("data-layout='column-gap-8-padding-16'") and css.contains("gap:8px") and css.contains("padding:16px")
+    val has_image = html.contains("id='hello_image'") and html.contains("width='64'") and html.contains("height='64'") and html.contains("data:image/svg+xml")
+    val primitive_count = _wasm_hello_count_marker(html, "data-primitive='")
+    val min_touch = (44 * scale + 999) / 1000
+    var status = "render_contract_verified"
+    var diagnostic = ""
+    var ready = true
+    if hello.request.viewport_w <= 0 or hello.request.viewport_h <= 0:
+        status = "invalid_viewport"
+        diagnostic = "viewport dimensions must be positive"
+        ready = false
+    else:
+        if not has_layout:
+            status = "missing_layout_marker"
+            diagnostic = "layout marker or CSS spacing is missing"
+            ready = false
+        else:
+            if not has_image:
+                status = "missing_image"
+                diagnostic = "image element or dimensions are missing"
+                ready = false
+            else:
+                if primitive_count < 3:
+                    status = "missing_primitives"
+                    diagnostic = "rect circle line primitives are required"
+                    ready = false
+                else:
+                    if min_touch < 44:
+                        status = "invalid_dpi_touch_size"
+                        diagnostic = "scaled touch target is too small"
+                        ready = false
+                    else:
+                        if hello.artifact.binary_command_count < 8:
+                            status = "missing_render_commands"
+                            diagnostic = "render artifact command count is too low for layout image primitives and events"
+                            ready = false
+    WasmHelloGuiRenderEvidence(
+        target: target,
+        viewport_w: hello.request.viewport_w,
+        viewport_h: hello.request.viewport_h,
+        dpi_scale_milli: scale,
+        has_layout_marker: has_layout,
+        has_image: has_image,
+        image_w: 64,
+        image_h: 64,
+        primitive_count: primitive_count,
+        primitive_bounds_w: 128,
+        primitive_bounds_h: 48,
+        min_touch_h: min_touch,
+        command_count: hello.artifact.binary_command_count,
+        ready: ready,
+        status: status,
+        diagnostic: diagnostic
+    )
 
 fn wasm_hello_gui_compiled_artifact_evidence(target: text, output_path: text, size_bytes: i64, magic_hex: text, version: i32, has_smf_marker: bool, has_spl_main: bool, has_ui_exports: bool, has_ui_strings: bool, has_event_strings: bool) -> WasmHelloGuiCompiledArtifactEvidence:
     var status = "compiled_wasm_verified"

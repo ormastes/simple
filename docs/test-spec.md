@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-30 10:42:10*
+*Generated: 2026-05-30 11:07:12*
 
-## test/unit/app/ui
+## test/unit/os/compositor
 
-❌ **async_tui_spec.spl** (440ms)
-  - Source: `test/unit/app/ui/async_tui_spec.spl`
-  - Generated doc: `spec/async_tui_spec.md`
+❌ **wm_scene_spec.spl** (2233ms)
+  - Source: `test/unit/os/compositor/wm_scene_spec.spl`
+  - Generated doc: `spec/wm_scene_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 16 ✅
-- **Failed:** 2 ❌
-- **Duration:** 444ms
+- **Passed:** 12 ✅
+- **Failed:** 7 ❌
+- **Duration:** 2239ms

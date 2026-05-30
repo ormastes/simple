@@ -1,7 +1,7 @@
 # @cover src/lib/gc_async_mut/gpu/engine2d/generated_kernel_dispatch.spl 90%
 # @tag: unit, gpu, engine2d, compute, generated-kernels
 
-use std.gpu.engine2d.generated_kernel_dispatch.{generated_2d_dispatch_for_backend, generated_2d_launch_plan, generated_2d_execution_request, generated_2d_artifact_load_evidence, generated_2d_execution_request_from_load, generated_2d_submit_result, generated_2d_execution_evidence, generated_2d_dispatch_provider, GENERATED_2D_FILL, GENERATED_2D_COPY, GENERATED_2D_ALPHA, GENERATED_2D_SCROLL}
+use std.gpu.engine2d.generated_kernel_dispatch.{generated_2d_dispatch_for_backend, generated_2d_launch_plan, generated_2d_execution_request, generated_2d_artifact_load_evidence, generated_2d_module_artifact_evidence, generated_2d_artifact_load_evidence_from_module, generated_2d_execution_request_from_load, generated_2d_submit_result, generated_2d_execution_evidence, generated_2d_dispatch_provider, GENERATED_2D_FILL, GENERATED_2D_COPY, GENERATED_2D_ALPHA, GENERATED_2D_SCROLL}
 
 describe "Engine2D generated 2D kernel dispatch metadata":
 
@@ -15,6 +15,7 @@ describe "Engine2D generated 2D kernel dispatch metadata":
         expect(dispatch.kernel_count).to_equal(4)
         expect(dispatch.kernel_entry(GENERATED_2D_FILL)).to_equal("simple_2d_fill_u32")
         expect(dispatch.artifact_suffix(GENERATED_2D_FILL)).to_equal("simple_2d_fill_u32.ptx")
+        expect(dispatch.module_artifact_name()).to_equal("simple_2d_optimization.ptx")
 
     it "maps ROCm through the HIP/HSACO generated kernel path":
         val dispatch = generated_2d_dispatch_for_backend("rocm")
@@ -26,6 +27,7 @@ describe "Engine2D generated 2D kernel dispatch metadata":
         expect(dispatch.binary_format).to_equal("hsaco")
         expect(dispatch.kernel_entry(GENERATED_2D_ALPHA)).to_equal("simple_2d_alpha_u32")
         expect(dispatch.artifact_suffix(GENERATED_2D_ALPHA)).to_equal("simple_2d_alpha_u32.hsaco")
+        expect(dispatch.required_entries()).to_contain("simple_2d_scroll_u32")
 
     it "maps OpenCL and Metal to their binary artifact formats":
         val opencl = generated_2d_dispatch_for_backend("opencl")
@@ -45,6 +47,7 @@ describe "Engine2D generated 2D kernel dispatch metadata":
         expect(dispatch.compute_target).to_equal("unsupported")
         expect(dispatch.supports_kernel(GENERATED_2D_FILL)).to_equal(false)
         expect(dispatch.artifact_suffix(GENERATED_2D_FILL)).to_equal("")
+        expect(dispatch.module_artifact_name()).to_equal("")
 
     it "exposes generated dispatch as Engine2D optimization provider metadata":
         val dispatch = generated_2d_dispatch_for_backend("metal")
@@ -62,7 +65,8 @@ describe "Engine2D generated 2D kernel dispatch metadata":
 
         expect(plan.dispatch_ready).to_equal(true)
         expect(plan.entry_name).to_equal("simple_2d_fill_u32")
-        expect(plan.artifact_name).to_equal("simple_2d_fill_u32.ptx")
+        expect(plan.artifact_name).to_equal("simple_2d_optimization.ptx")
+        expect(plan.required_entries).to_contain("simple_2d_copy_u32")
         expect(plan.launch_api).to_equal("rt_cuda_launch_kernel")
         expect(plan.grid_x).to_equal(1200)
         expect(plan.block_x).to_equal(256)
@@ -74,10 +78,11 @@ describe "Engine2D generated 2D kernel dispatch metadata":
         val metal = generated_2d_launch_plan("metal", GENERATED_2D_SCROLL, 10, 10)
 
         expect(hip.launch_api).to_equal("rt_rocm_launch_kernel")
-        expect(hip.artifact_name).to_equal("simple_2d_alpha_u32.hsaco")
+        expect(hip.artifact_name).to_equal("simple_2d_optimization.hsaco")
         expect(opencl.launch_api).to_equal("clEnqueueNDRangeKernel")
-        expect(opencl.artifact_name).to_equal("simple_2d_copy_u32.spirv")
+        expect(opencl.artifact_name).to_equal("simple_2d_optimization.spirv")
         expect(metal.launch_api).to_equal("MTLComputeCommandEncoder.dispatchThreads")
+        expect(metal.artifact_name).to_equal("simple_2d_optimization.metallib")
         expect(metal.args_layout).to_equal("src,dst,width,height,delta_y")
 
     it "fails generated launch plans closed for unsupported backends and dimensions":
@@ -137,6 +142,37 @@ describe "Engine2D generated 2D kernel dispatch metadata":
         expect(metal_load.loaded).to_equal(true)
         expect(metal_request.can_submit).to_equal(true)
         expect(metal_request.call_shape()).to_contain("metal_sffi_dispatch_compute")
+
+    it "validates shared generated 2D module artifacts before loading":
+        val valid = generated_2d_module_artifact_evidence("cuda", GENERATED_2D_FILL, 16, 16, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32", 4486)
+        val missing = generated_2d_module_artifact_evidence("cuda", GENERATED_2D_FILL, 16, 16, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32", 4486)
+        val load = generated_2d_artifact_load_evidence_from_module(valid, true, 0, 77)
+        val blocked = generated_2d_artifact_load_evidence_from_module(missing, true, 0, 77)
+
+        expect(valid.artifact_valid).to_equal(true)
+        expect(valid.reason).to_equal("pass")
+        expect(valid.summary()).to_contain("simple_2d_optimization.ptx")
+        expect(load.loaded).to_equal(true)
+        expect(missing.artifact_valid).to_equal(false)
+        expect(missing.reason).to_equal("missing-entry-symbol:simple_2d_scroll_u32")
+        expect(blocked.loaded).to_equal(false)
+        expect(blocked.reason).to_equal("artifact-not-verified")
+
+    it "keeps OpenCL generated modules fail-closed without runtime and readback evidence":
+        val module = generated_2d_module_artifact_evidence("opencl", GENERATED_2D_COPY, 16, 16, "SPIR-V 1.5", "OpEntryPoint GLCompute %simple_2d_fill_u32 \"simple_2d_fill_u32\" OpEntryPoint GLCompute %simple_2d_copy_u32 \"simple_2d_copy_u32\" OpEntryPoint GLCompute %simple_2d_alpha_u32 \"simple_2d_alpha_u32\" OpEntryPoint GLCompute %simple_2d_scroll_u32 \"simple_2d_scroll_u32\"", 4096)
+        val no_runtime = generated_2d_artifact_load_evidence_from_module(module, false, 11, 22)
+        val request = generated_2d_execution_request_from_load(no_runtime, 0)
+        val submit = generated_2d_submit_result(request, false, true)
+        val evidence = generated_2d_execution_evidence(submit, false, 1234, 1234)
+
+        expect(module.artifact_valid).to_equal(true)
+        expect(module.plan.artifact_name).to_equal("simple_2d_optimization.spirv")
+        expect(no_runtime.loaded).to_equal(false)
+        expect(no_runtime.reason).to_equal("runtime-unavailable")
+        expect(request.can_submit).to_equal(false)
+        expect(submit.submitted).to_equal(false)
+        expect(evidence.device_executed).to_equal(false)
+        expect(evidence.status_code).to_equal("not-submitted")
 
     it "fails generated artifact loads closed for bad artifacts runtime or handles":
         val bad_artifact = generated_2d_artifact_load_evidence("cuda", GENERATED_2D_FILL, 16, 16, false, true, 0, 77)

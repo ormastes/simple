@@ -24,6 +24,7 @@ use os.qemu_runner.{
     is_qemu_success, scenario_qemu_exit_success,
     qemu_protection_serial_accepts_hardening,
     qemu_protection_serial_reason,
+    qemu_scenario_serial_acceptance_reason,
     qemu_scenario_protection_board_id,
     qemu_scenario_protection_serial_accepts_hardening,
     qemu_scenario_protection_serial_reason,
@@ -32,7 +33,7 @@ use os.qemu_runner.{
     qemu_run_options_debug_gui
 }
 use os.kernel.arch.arch_context.{Architecture}
-use os.desktop_qemu_contract.{run_x64_desktop_disk_probe}
+use os.desktop_qemu_contract.{run_x64_desktop_disk_probe, wm_simple_web_required_marker_fragments, wm_simple_web_serial_acceptance_reason, wm_simple_web_serial_accepts_completion}
 use os.port.simpleos_multiplatform_build.{SimpleOsLaneKind, simpleos_platform_qemu_lane}
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -252,6 +253,26 @@ fn expect_tool_app_validation_reference(cmd: text, app_name: text, marker: text,
         expect(cmd).to_contain("-vga")
         expect(cmd).to_contain("std")
         expect(cmd.contains("virtio-gpu,disable-modern=on,disable-legacy=off")).to_equal(false)
+
+    it "requires WM Simple Web render markers instead of a bare TEST PASSED":
+        val scenario = scenario_x64_wm_simple_web_check()
+        val complete = wm_simple_web_required_marker_fragments().join("\n")
+        val bare_pass = "boot ok\nTEST PASSED\n"
+        val missing_taskbar = "[GUI] mmio-probe-painted\n" +
+            "[wm-demo] wm-service-ready\n" +
+            "[e2d-demo] engine-core-ready\n" +
+            "[web-demo] pixels-ready expected=42\n" +
+            "[mdi-demo] windows-ready count=3\n" +
+            "[mdi-demo] top-command-lane-ready\n" +
+            "[mdi-demo] html-renderable window=browser pixels=42\n" +
+            "[integrated-demo] render-ready\n" +
+            "TEST PASSED\n"
+
+        expect(wm_simple_web_serial_accepts_completion(complete)).to_equal(true)
+        expect(wm_simple_web_serial_acceptance_reason(bare_pass)).to_equal("missing-marker:[GUI] mmio-probe-painted")
+        expect(wm_simple_web_serial_acceptance_reason(missing_taskbar)).to_equal("missing-marker:[mdi-demo] taskbar-ready")
+        expect(qemu_scenario_serial_acceptance_reason(scenario, "", complete)).to_equal("ready")
+        expect(qemu_scenario_serial_acceptance_reason(scenario, "", bare_pass)).to_equal("missing-marker:[GUI] mmio-probe-painted")
 
     it "keeps headless targets on stdio and disables the display":
         val target = get_target(Architecture.X86_64)

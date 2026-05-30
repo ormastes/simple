@@ -81,13 +81,17 @@ Boolean assertions after a rendered step become expected-result bullets. For
 example, `expect(output.contains("ready")).to_equal(true)` renders as an
 expected result under the previous step. String contains values are normalized
 for manual display, so escaped JSON fragments render without Simple string
-escape syntax. The original assertion remains in the folded executable source.
+escape syntax. Long expected-result values are shortened in the visible summary
+and point reviewers to the folded executable source. The original assertion
+remains in the folded executable source.
 Capture metadata attached to a rendered step uses typed labels such as
 `Protocol capture: after_step`, `API capture: after_step`, or
 `TUI capture: after_step`.
 When a captured step also has generated expected results, docgen adds a compact
 `Evidence:` line that names the captured surface and how many expected checks
 verify it.
+Folded executable blocks include a `Runnable source: N lines folded for
+reproduction.` summary so reviewers can judge source size before expanding it.
 
 ## Inline and Previous Scenarios
 

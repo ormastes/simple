@@ -1,7 +1,8 @@
 
 use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use common.ui.taskbar_model.{TaskbarModel}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderRequest}
-use common.ui.window_scene.{SharedWmScene}
+use common.ui.window_scene.{SharedWmScene, shared_wm_scene_chrome}
 use os.compositor.web_render_surface.{compositor_render_html_pixels}
 
 class SceneElement:
@@ -69,6 +70,64 @@ fn shared_wm_scene_to_wm_scene(scene: SharedWmScene) -> WmSceneSpec:
             ))
     WmSceneSpec(name: "shared_wm_scene", width: scene.width, height: scene.height, elements: elements)
 
+fn shared_wm_scene_to_chromed_wm_scene(scene: SharedWmScene, taskbar: TaskbarModel, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> WmSceneSpec:
+    val chrome = shared_wm_scene_chrome(scene, dpi_scale_milli, clock_label, right_icon_count, taskbar.pinned.len() + taskbar.running.len())
+    var clock_x = scene.width - (right_icon_count * 32) - 72
+    if clock_x < 0:
+        clock_x = 0
+    var elements: [SceneElement] = [
+        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: scene.width, h: scene.height, color: 0xFF101418u32, text: ""),
+        SceneElement(kind: "command_lane", x: chrome.command_lane.x, y: chrome.command_lane.y, w: chrome.command_lane.width, h: chrome.command_lane.height, color: 0xFF111827u32, text: ""),
+        SceneElement(kind: "command_clock", x: clock_x, y: chrome.command_lane.y, w: 72, h: chrome.command_lane.height, color: 0xFFFFFFFFu32, text: clock_label),
+        SceneElement(kind: "taskbar", x: chrome.taskbar.x, y: chrome.taskbar.y, w: chrome.taskbar.width, h: chrome.taskbar.height, color: 0xCC111827u32, text: "")
+    ]
+    var icon_i = 0
+    while icon_i < right_icon_count:
+        var icon_x = scene.width - ((right_icon_count - icon_i) * 32)
+        if icon_x < 0:
+            icon_x = 0
+        elements = elements.push(SceneElement(
+            kind: "command_icon",
+            x: icon_x,
+            y: chrome.command_lane.y,
+            w: 32,
+            h: chrome.command_lane.height,
+            color: 0xFFE5E7EBu32,
+            text: "right_icon_{icon_i}"
+        ))
+        icon_i = icon_i + 1
+    var pin_i = 0
+    while pin_i < taskbar.pinned.len():
+        val app = taskbar.pinned[pin_i]
+        elements = elements.push(SceneElement(
+            kind: "taskbar_launcher",
+            x: pin_i * 56,
+            y: chrome.taskbar.y,
+            w: 56,
+            h: chrome.taskbar.height,
+            color: 0xFF2563EBu32,
+            text: app.app_id
+        ))
+        pin_i = pin_i + 1
+    var run_i = 0
+    while run_i < taskbar.running.len():
+        val running = taskbar.running[run_i]
+        elements = elements.push(SceneElement(
+            kind: "taskbar_running",
+            x: (taskbar.pinned.len() + run_i) * 56,
+            y: chrome.taskbar.y,
+            w: 56,
+            h: chrome.taskbar.height,
+            color: 0xFF475569u32,
+            text: running.window_id
+        ))
+        run_i = run_i + 1
+    val base = shared_wm_scene_to_wm_scene(scene)
+    for elem in base.elements:
+        if elem.kind != "desktop_chrome":
+            elements = elements.push(elem)
+    WmSceneSpec(name: "shared_wm_chromed_scene", width: scene.width, height: scene.height, elements: elements)
+
 fn render_scene_to_backend(scene: WmSceneSpec, backend) -> [u32]:
     if backend != nil:
         if scene.elements.len() == 0:
@@ -102,11 +161,29 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
             body = body + "<div class='glass' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
         elif elem.kind == "text_label":
             body = body + "<div class='label' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>{elem.text}</div>"
+        elif elem.kind == "command_lane":
+            body = body + "<div class='command-lane' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
+        elif elem.kind == "command_clock":
+            body = body + "<div class='command-clock' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>{elem.text}</div>"
+        elif elem.kind == "command_icon":
+            body = body + "<div class='command-icon' data-target='{elem.text}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
+        elif elem.kind == "taskbar":
+            body = body + "<div class='taskbar' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
+        elif elem.kind == "taskbar_launcher":
+            body = body + "<button class='taskbar-launcher' data-app='{elem.text}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>{elem.text}</button>"
+        elif elem.kind == "taskbar_running":
+            body = body + "<button class='taskbar-running' data-window='{elem.text}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>{elem.text}</button>"
     "<!DOCTYPE html><html><head><style>" +
-    "body{margin:0;width:" + w + "px;height:" + h + "px;background:#0f172a}" +
-    ".desktop{position:absolute;background:#0f172a}" +
-    ".glass{position:absolute;background:rgba(203,213,225,.8);backdrop-filter:blur(8px)}" +
-    ".bar{position:absolute;background:#334155;color:white;font:600 12px system-ui;padding:8px 12px;box-sizing:border-box;overflow:hidden}" +
-    ".label{position:absolute;color:white;font:600 12px system-ui;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}" +
+    "body{{margin:0;width:" + w + "px;height:" + h + "px;background:#0f172a}}" +
+    ".desktop{{position:absolute;background:#0f172a}}" +
+    ".glass{{position:absolute;background:rgba(203,213,225,.8);backdrop-filter:blur(8px)}}" +
+    ".bar{{position:absolute;background:#334155;color:white;font:600 12px system-ui;padding:8px 12px;box-sizing:border-box;overflow:hidden}}" +
+    ".label{{position:absolute;color:white;font:600 12px system-ui;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
+    ".command-lane{{position:absolute;background:#111827}}" +
+    ".command-clock{{position:absolute;color:white;font:600 12px system-ui;display:flex;align-items:center;justify-content:center}}" +
+    ".command-icon{{position:absolute;background:#e5e7eb;border-radius:999px;transform:scale(.35)}}" +
+    ".taskbar{{position:absolute;background:rgba(17,24,39,.8)}}" +
+    ".taskbar-launcher,.taskbar-running{{position:absolute;border:0;color:white;font:600 11px system-ui;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
+    ".taskbar-launcher{{background:#2563eb}}.taskbar-running{{background:#475569}}" +
     "</style></head><body data-width='" + w + "' data-height='" + h + "'>" +
     body + "</body></html>"

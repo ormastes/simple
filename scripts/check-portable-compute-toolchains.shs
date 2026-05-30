@@ -85,6 +85,31 @@ write_opencl_source() {
         printf '%s\n' '    if (i >= count) { return; }'
         printf '%s\n' '    dst[i] = value;'
         printf '%s\n' '}'
+        printf '%s\n' '__kernel void simple_2d_copy_u32(__global const uint* src, __global uint* dst, uint count) {'
+        printf '%s\n' '    uint i = get_global_id(0);'
+        printf '%s\n' '    if (i >= count) { return; }'
+        printf '%s\n' '    dst[i] = src[i];'
+        printf '%s\n' '}'
+        printf '%s\n' '__kernel void simple_2d_alpha_u32(__global const uint* src, __global uint* dst, uint alpha, uint count) {'
+        printf '%s\n' '    uint i = get_global_id(0);'
+        printf '%s\n' '    if (i >= count) { return; }'
+        printf '%s\n' '    uint s = src[i];'
+        printf '%s\n' '    uint d = dst[i];'
+        printf '%s\n' '    uint inv = 255u - alpha;'
+        printf '%s\n' '    uint rb = (((s & 0x00ff00ffu) * alpha) + ((d & 0x00ff00ffu) * inv)) >> 8;'
+        printf '%s\n' '    uint g = (((s & 0x0000ff00u) * alpha) + ((d & 0x0000ff00u) * inv)) >> 8;'
+        printf '%s\n' '    dst[i] = 0xff000000u | (rb & 0x00ff00ffu) | (g & 0x0000ff00u);'
+        printf '%s\n' '}'
+        printf '%s\n' '__kernel void simple_2d_scroll_u32(__global const uint* src, __global uint* dst, uint width, uint height, int delta_y) {'
+        printf '%s\n' '    uint i = get_global_id(0);'
+        printf '%s\n' '    uint count = width * height;'
+        printf '%s\n' '    if (i >= count) { return; }'
+        printf '%s\n' '    uint x = i % width;'
+        printf '%s\n' '    uint y = i / width;'
+        printf '%s\n' '    int sy = (int)y - delta_y;'
+        printf '%s\n' '    if (sy < 0 || sy >= (int)height) { dst[i] = 0u; return; }'
+        printf '%s\n' '    dst[i] = src[(uint)sy * width + x];'
+        printf '%s\n' '}'
     } >"$path"
 }
 
@@ -97,13 +122,35 @@ write_metal_source() {
         printf '%s\n' '    if (gid >= count) { return; }'
         printf '%s\n' '    dst[gid] = value;'
         printf '%s\n' '}'
+        printf '%s\n' 'kernel void simple_2d_copy_u32(device const uint* src [[buffer(0)]], device uint* dst [[buffer(1)]], constant uint& count [[buffer(2)]], uint gid [[thread_position_in_grid]]) {'
+        printf '%s\n' '    if (gid >= count) { return; }'
+        printf '%s\n' '    dst[gid] = src[gid];'
+        printf '%s\n' '}'
+        printf '%s\n' 'kernel void simple_2d_alpha_u32(device const uint* src [[buffer(0)]], device uint* dst [[buffer(1)]], constant uint& alpha [[buffer(2)]], constant uint& count [[buffer(3)]], uint gid [[thread_position_in_grid]]) {'
+        printf '%s\n' '    if (gid >= count) { return; }'
+        printf '%s\n' '    uint s = src[gid];'
+        printf '%s\n' '    uint d = dst[gid];'
+        printf '%s\n' '    uint inv = 255u - alpha;'
+        printf '%s\n' '    uint rb = (((s & 0x00ff00ffu) * alpha) + ((d & 0x00ff00ffu) * inv)) >> 8;'
+        printf '%s\n' '    uint g = (((s & 0x0000ff00u) * alpha) + ((d & 0x0000ff00u) * inv)) >> 8;'
+        printf '%s\n' '    dst[gid] = 0xff000000u | (rb & 0x00ff00ffu) | (g & 0x0000ff00u);'
+        printf '%s\n' '}'
+        printf '%s\n' 'kernel void simple_2d_scroll_u32(device const uint* src [[buffer(0)]], device uint* dst [[buffer(1)]], constant uint& width [[buffer(2)]], constant uint& height [[buffer(3)]], constant int& delta_y [[buffer(4)]], uint gid [[thread_position_in_grid]]) {'
+        printf '%s\n' '    uint count = width * height;'
+        printf '%s\n' '    if (gid >= count) { return; }'
+        printf '%s\n' '    uint x = gid % width;'
+        printf '%s\n' '    uint y = gid / width;'
+        printf '%s\n' '    int sy = (int)y - delta_y;'
+        printf '%s\n' '    if (sy < 0 || sy >= (int)height) { dst[gid] = 0u; return; }'
+        printf '%s\n' '    dst[gid] = src[(uint)sy * width + x];'
+        printf '%s\n' '}'
     } >"$path"
 }
 
 status_for_artifact() {
     target="$1"
     artifact="$2"
-    symbol="$3"
+    shift 2
     bytes="$(bytes_of "$artifact")"
     if [ "$bytes" -le 0 ]; then
         echo "invalid:missing-artifact-bytes:0"
@@ -137,10 +184,12 @@ status_for_artifact() {
             fi
             ;;
     esac
-    if ! contains_symbol "$artifact" "$symbol"; then
-        echo "invalid:missing-entry-symbol:$bytes"
-        return
-    fi
+    for symbol in "$@"; do
+        if ! contains_symbol "$artifact" "$symbol"; then
+            echo "invalid:missing-entry-symbol:$bytes"
+            return
+        fi
+    done
     echo "valid:pass:$bytes"
 }
 
@@ -161,8 +210,8 @@ emit_result() {
 }
 
 run_cuda() {
-    src="$BUILD_DIR/simple_2d_fill_u32.cu"
-    out="$BUILD_DIR/simple_2d_fill_u32.ptx"
+    src="$BUILD_DIR/simple_2d_optimization.cu"
+    out="$BUILD_DIR/simple_2d_optimization.ptx"
     write_cuda_source "$src"
     if ! have "$NVCC_TOOL"; then
         cmd="$NVCC_TOOL --ptx -arch=<auto> -o $out $src"
@@ -181,7 +230,7 @@ run_cuda() {
     cmd="$NVCC_TOOL --ptx -arch=$cuda_arch -o $out $src"
     if $NVCC_TOOL --ptx "-arch=$cuda_arch" -o "$out" "$src" >"$BUILD_DIR/cuda.out" 2>"$BUILD_DIR/cuda.err"; then
         IFS=: read -r valid reason bytes <<EOF
-$(status_for_artifact cuda "$out" simple_2d_fill_u32)
+$(status_for_artifact cuda "$out" simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32)
 EOF
         if [ "$valid" = "valid" ]; then
             emit_result cuda compiled_artifact_verified "$reason" "$bytes" "$cmd" "$out"
@@ -194,8 +243,8 @@ EOF
 }
 
 run_hip() {
-    src="$BUILD_DIR/simple_2d_fill_u32.hip.cpp"
-    out="$BUILD_DIR/simple_2d_fill_u32.hsaco"
+    src="$BUILD_DIR/simple_2d_optimization.hip.cpp"
+    out="$BUILD_DIR/simple_2d_optimization.hsaco"
     write_cuda_source "$src"
     cmd="$HIPCC_TOOL --genco --offload-arch=$HIP_ARCH -o $out $src"
     if ! have "$HIPCC_TOOL"; then
@@ -204,7 +253,7 @@ run_hip() {
     fi
     if $HIPCC_TOOL --genco "--offload-arch=$HIP_ARCH" -o "$out" "$src" >"$BUILD_DIR/hip.out" 2>"$BUILD_DIR/hip.err"; then
         IFS=: read -r valid reason bytes <<EOF
-$(status_for_artifact hip "$out" simple_2d_fill_u32)
+$(status_for_artifact hip "$out" simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32)
 EOF
         if [ "$valid" = "valid" ]; then
             emit_result hip compiled_artifact_verified "$reason" "$bytes" "$cmd" "$out"
@@ -217,8 +266,8 @@ EOF
 }
 
 run_opencl() {
-    src="$BUILD_DIR/simple_2d_fill_u32.cl"
-    out="$BUILD_DIR/simple_2d_fill_u32.spirv"
+    src="$BUILD_DIR/simple_2d_optimization.cl"
+    out="$BUILD_DIR/simple_2d_optimization.spirv"
     write_opencl_source "$src"
     cmd="$OPENCL_SPIRV_TOOL -cl-std=CL2.0 -emit-spirv -o $out $src"
     if ! have "$OPENCL_SPIRV_TOOL"; then
@@ -227,7 +276,7 @@ run_opencl() {
     fi
     if $OPENCL_SPIRV_TOOL -cl-std=CL2.0 -emit-spirv -o "$out" "$src" >"$BUILD_DIR/opencl.out" 2>"$BUILD_DIR/opencl.err"; then
         IFS=: read -r valid reason bytes <<EOF
-$(status_for_artifact opencl "$out" simple_2d_fill_u32)
+$(status_for_artifact opencl "$out" simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32)
 EOF
         if [ "$valid" = "valid" ]; then
             emit_result opencl compiled_artifact_verified "$reason" "$bytes" "$cmd" "$out"
@@ -240,9 +289,9 @@ EOF
 }
 
 run_metal() {
-    src="$BUILD_DIR/simple_2d_fill_u32.metal"
-    air="$BUILD_DIR/simple_2d_fill_u32.air"
-    out="$BUILD_DIR/simple_2d_fill_u32.metallib"
+    src="$BUILD_DIR/simple_2d_optimization.metal"
+    air="$BUILD_DIR/simple_2d_optimization.air"
+    out="$BUILD_DIR/simple_2d_optimization.metallib"
     write_metal_source "$src"
     cmd="$METAL_TOOL -c $src -o $air && $METALLIB_TOOL $air -o $out"
     if ! have "$METAL_TOOL"; then
@@ -255,7 +304,7 @@ run_metal() {
     fi
     if $METAL_TOOL -c "$src" -o "$air" >"$BUILD_DIR/metal.out" 2>"$BUILD_DIR/metal.err" && $METALLIB_TOOL "$air" -o "$out" >>"$BUILD_DIR/metal.out" 2>>"$BUILD_DIR/metal.err"; then
         IFS=: read -r valid reason bytes <<EOF
-$(status_for_artifact metal "$out" simple_2d_fill_u32)
+$(status_for_artifact metal "$out" simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32)
 EOF
         if [ "$valid" = "valid" ]; then
             emit_result metal compiled_artifact_verified "$reason" "$bytes" "$cmd" "$out"

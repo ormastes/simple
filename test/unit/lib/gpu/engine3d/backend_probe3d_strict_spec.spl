@@ -1,7 +1,7 @@
 # @cover src/lib/gc_async_mut/gpu/engine3d/backend_probe3d.spl 90%
 # @tag: unit, gpu, engine3d, strict, diagnostics, partial-3d
 
-use std.gpu.engine3d.backend_probe3d.{Engine3DBackendProber, Engine3DBackendStatus, engine3d_strict_probe_backend, engine3d_reference_render_evidence, engine3d_render_evidence_from_readback}
+use std.gpu.engine3d.backend_probe3d.{Engine3DBackendProber, Engine3DBackendStatus, engine3d_strict_probe_backend, engine3d_reference_render_evidence, engine3d_render_evidence_from_readback, engine3d_readback_evidence, engine3d_render_evidence_from_readback_evidence}
 
 describe "Engine3D strict partial backend diagnostics":
 
@@ -117,3 +117,47 @@ describe "Engine3D strict partial backend diagnostics":
         expect(mismatch.status_code).to_equal("readback-mismatch")
         expect(no_draws.frame_rendered).to_equal(false)
         expect(no_draws.status_code).to_equal("no-draw-calls")
+
+    it "requires runtime target buffer and sync evidence before frame readback is accepted":
+        val no_runtime = engine3d_readback_evidence("cpu", 16, 16, 1, false, 1, 2, true, 123, 123)
+        val no_target = engine3d_readback_evidence("cpu", 16, 16, 1, true, 0, 2, true, 123, 123)
+        val no_buffer = engine3d_readback_evidence("cpu", 16, 16, 1, true, 1, 0, true, 123, 123)
+        val no_sync = engine3d_readback_evidence("cpu", 16, 16, 1, true, 1, 2, false, 123, 123)
+        val ready = engine3d_readback_evidence("cpu", 16, 16, 1, true, 1, 2, true, 123, 123)
+
+        expect(no_runtime.readback_available).to_equal(false)
+        expect(no_runtime.status_code).to_equal("runtime-device-unavailable")
+        expect(no_target.status_code).to_equal("missing-render-target-handle")
+        expect(no_buffer.status_code).to_equal("missing-readback-buffer-handle")
+        expect(no_sync.status_code).to_equal("readback-sync-incomplete")
+        expect(ready.readback_available).to_equal(true)
+        expect(ready.status_code).to_equal("readback-ready")
+        expect(ready.summary()).to_contain("target=1")
+
+    it "converts readback evidence into fail-closed render evidence":
+        val ready = engine3d_readback_evidence("cpu", 16, 16, 1, true, 1, 2, true, 123, 123)
+        val rendered = engine3d_render_evidence_from_readback_evidence(ready)
+        val mismatch = engine3d_readback_evidence("cpu", 16, 16, 1, true, 1, 2, true, 123, 122)
+        val rejected = engine3d_render_evidence_from_readback_evidence(mismatch)
+
+        expect(rendered.frame_rendered).to_equal(true)
+        expect(rendered.status_code).to_equal("frame-rendered")
+        expect(rejected.frame_rendered).to_equal(false)
+        expect(rejected.status_code).to_equal("readback-mismatch")
+
+    it "does not accept GPU readback handles while strict backend probe lacks real runtime evidence":
+        val cuda = engine3d_readback_evidence("cuda", 16, 16, 1, true, 10, 11, true, 123, 123)
+        val hip = engine3d_readback_evidence("hip", 16, 16, 1, true, 10, 11, true, 123, 123)
+        val opencl = engine3d_readback_evidence("opencl", 16, 16, 1, true, 10, 11, true, 123, 123)
+        val metal = engine3d_readback_evidence("metal", 16, 16, 1, true, 10, 11, true, 123, 123)
+        val vulkan = engine3d_readback_evidence("vulkan", 16, 16, 1, true, 10, 11, true, 123, 123)
+        val webgpu = engine3d_readback_evidence("webgpu", 16, 16, 1, true, 10, 11, true, 123, 123)
+        val optix = engine3d_readback_evidence("optix", 16, 16, 1, true, 10, 11, true, 123, 123)
+
+        expect(cuda.status_code).to_equal("backend-not-usable")
+        expect(hip.status_code).to_equal("backend-not-usable")
+        expect(opencl.status_code).to_equal("backend-not-usable")
+        expect(metal.status_code).to_equal("backend-not-usable")
+        expect(vulkan.status_code).to_equal("backend-not-usable")
+        expect(webgpu.status_code).to_equal("backend-not-usable")
+        expect(optix.status_code).to_equal("backend-not-usable")

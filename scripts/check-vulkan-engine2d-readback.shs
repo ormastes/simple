@@ -1,0 +1,194 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+TIMEOUT_SECS="${SIMPLE_VULKAN_READBACK_TIMEOUT_SECS:-180}"
+WORK_DIR="${SIMPLE_VULKAN_READBACK_WORK_DIR:-build/vulkan-engine2d-readback}"
+EVIDENCE_SRC="$WORK_DIR/vulkan_engine2d_readback_evidence.spl"
+EVIDENCE_LOG="$WORK_DIR/evidence.log"
+STRICT_LOG="$WORK_DIR/vulkan_strict.json"
+PARITY_LOG="$WORK_DIR/engine2d_cpu_vulkan_parity.json"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+run_with_timeout() {
+    if have timeout; then
+        timeout "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+emit_file_status() {
+    key="$1"
+    path="$2"
+    if [ -s "$path" ]; then
+        echo "$key=$path"
+    else
+        echo "$key="
+    fi
+}
+
+mkdir -p "$WORK_DIR"
+rm -f "$EVIDENCE_LOG" "$STRICT_LOG" "$PARITY_LOG"
+
+echo "check=vulkan_engine2d_readback"
+echo "simple_bin=$SIMPLE_BIN"
+echo "timeout_secs=$TIMEOUT_SECS"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "vulkan_available=false"
+    echo "evidence_status=fail"
+    echo "overall=fail"
+    echo "error=missing_executable:$SIMPLE_BIN"
+    exit 1
+fi
+
+cat > "$EVIDENCE_SRC" <<'SIMPLE'
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_probe.{backend_status_text}
+
+fn count_rect_mismatches(pixels: [u32], bg: u32, fg: u32) -> i64:
+    var mismatches = 0
+    var y = 0
+    while y < 16:
+        var x = 0
+        while x < 16:
+            val expected = if x >= 2 and x < 8 and y >= 2 and y < 8: fg else: bg
+            if pixels[y * 16 + x] != expected:
+                mismatches = mismatches + 1
+            x = x + 1
+        y = y + 1
+    mismatches
+
+fn main() -> i64:
+    print("evidence_program=engine2d_vulkan_readback")
+    val probe = Engine2D.probe_backend(16, 16, "vulkan")
+    print("vulkan_probe_status=" + backend_status_text(probe.status))
+    print("vulkan_probe_available=" + probe.is_ok().to_text())
+    print("vulkan_probe_diagnostic=" + probe.diagnostic_text())
+
+    if not probe.is_ok():
+        print("vulkan_available=false")
+        print("present_exercised=false")
+        print("readback_exercised=false")
+        print("clear_status=not_run")
+        print("rect_status=not_run")
+        print("evidence_status=fail")
+        print("overall=fail")
+        return 1
+
+    print("vulkan_available=true")
+    val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+    if not result.is_ok():
+        val diag = result.unwrap_err()
+        print("strict_create_status=fail")
+        print("strict_create_diagnostic=" + diag.diagnostic_text())
+        print("present_exercised=false")
+        print("readback_exercised=false")
+        print("evidence_status=fail")
+        print("overall=fail")
+        return 1
+
+    var engine = result.unwrap()
+    print("strict_create_status=pass")
+    print("backend_name=" + engine.backend_name())
+
+    val bg = 0xFF0000FFu32
+    val fg = 0xFFFF0000u32
+    engine.clear(bg)
+    engine.present()
+    val clear_pixels = engine.read_pixels()
+    print("clear_readback_pixels=" + clear_pixels.len().to_text())
+    var clear_mismatches = 0
+    var i = 0
+    while i < clear_pixels.len():
+        if clear_pixels[i] != bg:
+            clear_mismatches = clear_mismatches + 1
+        i = i + 1
+    print("clear_mismatches=" + clear_mismatches.to_text())
+    if clear_mismatches != 0:
+        engine.shutdown()
+        print("present_exercised=true")
+        print("readback_exercised=true")
+        print("clear_status=fail")
+        print("rect_status=not_run")
+        print("evidence_status=fail")
+        print("overall=fail")
+        return 1
+
+    engine.clear(bg)
+    engine.draw_rect_filled(2, 2, 6, 6, fg)
+    engine.present()
+    val rect_pixels = engine.read_pixels()
+    val rect_mismatches = count_rect_mismatches(rect_pixels, bg, fg)
+    print("rect_readback_pixels=" + rect_pixels.len().to_text())
+    print("rect_mismatches=" + rect_mismatches.to_text())
+    engine.shutdown()
+
+    print("present_exercised=true")
+    print("readback_exercised=true")
+    print("clear_status=pass")
+    if rect_mismatches != 0:
+        print("rect_status=fail")
+        print("evidence_status=fail")
+        print("overall=fail")
+        return 1
+
+    print("rect_status=pass")
+    print("evidence_status=pass")
+    print("overall=pass")
+    return 0
+SIMPLE
+
+echo "evidence_source=$EVIDENCE_SRC"
+
+set +e
+SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" "$EVIDENCE_SRC" --mode=interpreter --clean >"$EVIDENCE_LOG" 2>&1
+EVIDENCE_CODE=$?
+set -e
+
+cat "$EVIDENCE_LOG"
+echo "evidence_exit_code=$EVIDENCE_CODE"
+emit_file_status "evidence_log" "$EVIDENCE_LOG"
+
+if [ "$EVIDENCE_CODE" -ne 0 ]; then
+    if ! grep -q '^vulkan_available=false$' "$EVIDENCE_LOG"; then
+        echo "vulkan_available=unknown"
+    fi
+    echo "spec_status=not_run"
+    echo "overall=fail"
+    exit 1
+fi
+
+if ! grep -q '^overall=pass$' "$EVIDENCE_LOG"; then
+    echo "spec_status=not_run"
+    echo "overall=fail"
+    exit 1
+fi
+
+set +e
+SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" test test/integration/rendering/vulkan_strict_spec.spl --mode=interpreter --clean --format json >"$STRICT_LOG" 2>&1
+STRICT_CODE=$?
+SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" test test/integration/rendering/engine2d_cpu_vulkan_parity_spec.spl --mode=interpreter --clean --format json >"$PARITY_LOG" 2>&1
+PARITY_CODE=$?
+set -e
+
+echo "vulkan_strict_exit_code=$STRICT_CODE"
+emit_file_status "vulkan_strict_log" "$STRICT_LOG"
+echo "engine2d_cpu_vulkan_parity_exit_code=$PARITY_CODE"
+emit_file_status "engine2d_cpu_vulkan_parity_log" "$PARITY_LOG"
+
+if [ "$STRICT_CODE" -ne 0 ] || [ "$PARITY_CODE" -ne 0 ]; then
+    echo "spec_status=fail"
+    echo "overall=fail"
+    exit 1
+fi
+
+echo "spec_status=pass"
+echo "overall=pass"

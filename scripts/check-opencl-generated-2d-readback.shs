@@ -1,0 +1,90 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+. "$ROOT_DIR/scripts/generated-2d-readback-lib.shs"
+
+BUILD_DIR="${BUILD_DIR:-build/opencl_generated_2d_readback}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/opencl_generated_2d_readback_$(date -u +%F).md}"
+TOOLCHAIN_BUILD_DIR="${TOOLCHAIN_BUILD_DIR:-$BUILD_DIR/toolchains}"
+SPIRV_PATH="${SPIRV_PATH:-$TOOLCHAIN_BUILD_DIR/simple_2d_optimization.spirv}"
+OPENCL_SPIRV_TOOL="${OPENCL_SPIRV_TOOL:-opencl-c-to-spirv}"
+OPENCL_RUNTIME_PROBE="${OPENCL_RUNTIME_PROBE:-clinfo}"
+
+mkdir -p "$BUILD_DIR" "$TOOLCHAIN_BUILD_DIR" "$(dirname "$REPORT_PATH")"
+
+has_opencl_loader() {
+    generated_2d_loader_present "libOpenCL.so" /usr/lib/libOpenCL.so /usr/lib64/libOpenCL.so /lib/x86_64-linux-gnu/libOpenCL.so /usr/local/cuda/lib64/libOpenCL.so
+}
+
+emit_env() {
+    status="$1"
+    reason="$2"
+    readback="$3"
+    submit="$4"
+    bytes="$(generated_2d_bytes_of "$SPIRV_PATH")"
+    {
+        echo "opencl_generated_2d_readback_status=$status"
+        echo "opencl_generated_2d_readback_reason=$reason"
+        echo "opencl_generated_2d_readback_spirv=$SPIRV_PATH"
+        echo "opencl_generated_2d_readback_spirv_bytes=$bytes"
+        echo "opencl_generated_2d_readback_loader_present=$loader_present"
+        echo "opencl_generated_2d_readback_probe_tool_present=$probe_tool_present"
+        echo "opencl_generated_2d_readback_module_verified=$module_verified"
+        echo "opencl_generated_2d_readback_submit_attempted=$submit"
+        echo "opencl_generated_2d_readback_readback_available=$readback"
+        echo "opencl_generated_2d_readback_expected_checksum=0"
+        echo "opencl_generated_2d_readback_actual_checksum=0"
+        echo "opencl_generated_2d_readback_ops=fill,copy,alpha,scroll"
+    } >"$BUILD_DIR/evidence.env"
+}
+
+loader_present=false
+if has_opencl_loader; then
+    loader_present=true
+fi
+
+probe_tool_present=false
+if generated_2d_have "$OPENCL_RUNTIME_PROBE"; then
+    probe_tool_present=true
+fi
+
+module_verified=false
+if ! generated_2d_module_verified "$SPIRV_PATH"; then
+    REPORT_PATH="$BUILD_DIR/toolchains.md" BUILD_DIR="$TOOLCHAIN_BUILD_DIR" OPENCL_SPIRV_TOOL="$OPENCL_SPIRV_TOOL" sh scripts/check-portable-compute-toolchains.shs >/dev/null
+fi
+
+if generated_2d_module_verified "$SPIRV_PATH"; then
+    module_verified=true
+fi
+
+if [ "$module_verified" != "true" ]; then
+    reason="missing-verified-spirv"
+    if ! generated_2d_have "$OPENCL_SPIRV_TOOL"; then
+        reason="missing-primary-tool"
+    fi
+    emit_env "unavailable" "$reason" "false" "false"
+elif [ "$loader_present" != "true" ]; then
+    emit_env "unavailable" "missing-opencl-runtime-loader" "false" "false"
+elif [ "$probe_tool_present" != "true" ]; then
+    emit_env "unavailable" "missing-opencl-runtime-probe-tool" "false" "false"
+else
+    if "$OPENCL_RUNTIME_PROBE" >"$BUILD_DIR/opencl_probe.out" 2>"$BUILD_DIR/opencl_probe.err"; then
+        emit_env "unavailable" "missing-opencl-submit-readback-harness" "false" "false"
+    else
+        emit_env "unavailable" "opencl-runtime-probe-failed" "false" "false"
+    fi
+fi
+
+. "$BUILD_DIR/evidence.env"
+generated_2d_report_from_env "$REPORT_PATH" "OpenCL Generated 2D Readback Evidence" "$BUILD_DIR/evidence.env" "Generated OpenCL evidence is intentionally fail-closed until a verified SPIR-V module, runtime device/queue/kernel handles, submit, synchronization, and readback checksum are all present."
+
+cat "$BUILD_DIR/evidence.env"
+echo "report_path=$REPORT_PATH"
+
+if [ "$opencl_generated_2d_readback_status" = "pass" ]; then
+    exit 0
+fi
+exit 1

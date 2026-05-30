@@ -4,19 +4,17 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+. "$ROOT_DIR/scripts/generated-2d-readback-lib.shs"
+
 BUILD_DIR="${BUILD_DIR:-build/cuda_generated_2d_readback}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/cuda_generated_2d_readback_$(date -u +%F).md}"
 TOOLCHAIN_BUILD_DIR="${TOOLCHAIN_BUILD_DIR:-$BUILD_DIR/toolchains}"
-PTX_PATH="${PTX_PATH:-$TOOLCHAIN_BUILD_DIR/simple_2d_fill_u32.ptx}"
+PTX_PATH="${PTX_PATH:-$TOOLCHAIN_BUILD_DIR/simple_2d_optimization.ptx}"
 CC_TOOL="${CC_TOOL:-cc}"
 CUDA_ELEMENT_COUNT="${CUDA_ELEMENT_COUNT:-64}"
 CUDA_FILL_VALUE="${CUDA_FILL_VALUE:-16909060}"
 
 mkdir -p "$BUILD_DIR" "$TOOLCHAIN_BUILD_DIR" "$(dirname "$REPORT_PATH")"
-
-have() {
-    command -v "$1" >/dev/null 2>&1
-}
 
 emit_unavailable() {
     reason="$1"
@@ -29,11 +27,11 @@ emit_unavailable() {
     } >"$BUILD_DIR/evidence.env"
 }
 
-if [ ! -f "$PTX_PATH" ] || ! grep -a -F "simple_2d_copy_u32" "$PTX_PATH" >/dev/null 2>&1 || ! grep -a -F "simple_2d_alpha_u32" "$PTX_PATH" >/dev/null 2>&1 || ! grep -a -F "simple_2d_scroll_u32" "$PTX_PATH" >/dev/null 2>&1; then
+if ! generated_2d_module_verified "$PTX_PATH"; then
     REPORT_PATH="$BUILD_DIR/toolchains.md" BUILD_DIR="$TOOLCHAIN_BUILD_DIR" sh scripts/check-portable-compute-toolchains.shs >/dev/null
 fi
 
-if [ ! -f "$PTX_PATH" ]; then
+if ! generated_2d_module_verified "$PTX_PATH"; then
     emit_unavailable "missing-verified-ptx"
 else
     cat >"$BUILD_DIR/cuda_generated_2d_readback.c" <<'C_EOF'
@@ -248,7 +246,7 @@ int main(int argc, char **argv) {
 }
 C_EOF
 
-    if ! have "$CC_TOOL"; then
+    if ! generated_2d_have "$CC_TOOL"; then
         emit_unavailable "missing-c-compiler"
     elif ! "$CC_TOOL" "$BUILD_DIR/cuda_generated_2d_readback.c" -lcuda -o "$BUILD_DIR/cuda_generated_2d_readback" >"$BUILD_DIR/cc.out" 2>"$BUILD_DIR/cc.err"; then
         emit_unavailable "cuda-driver-compile-failed"

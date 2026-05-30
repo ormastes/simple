@@ -557,7 +557,14 @@ fn render_executable_spipe(lines: [text]) -> text:
     val rendered = render_scenario_body(lines)
     if rendered == "":
         return ""
-    "\n<details>\n<summary>Executable SPipe</summary>\n" + rendered + "</details>\n\n"
+    val without_docstring = strip_leading_docstring(lines)
+    val trimmed = trim_trailing_blank_lines(without_docstring)
+    val dedented = dedent_lines(trimmed)
+    val line_count = dedented.len()
+    var line_word = "lines"
+    if line_count == 1:
+        line_word = "line"
+    "\n<details>\n<summary>Executable SPipe</summary>\n\nRunnable source: " + line_count.to_string() + " " + line_word + " folded for reproduction.\n" + rendered + "</details>\n\n"
 
 fn normalize_manual_visibility(value: text) -> text:
     val lower = value.lower().trim()
@@ -1215,6 +1222,124 @@ fn scenario_capture_for_step(scenario_capture: text, step_index: i64, step_count
         return ""
     scenario_capture
 
+fn manual_capture_summary(capture: text) -> text:
+    val parts = capture.split(" ")
+    if parts.len() >= 2:
+        val kind = parts[0]
+        val mode = parts[1]
+        var title = kind
+        if kind == "api":
+            title = "API"
+        elif kind == "tui":
+            title = "TUI"
+        elif kind == "gui":
+            title = "GUI"
+        elif kind == "exec":
+            title = "Exec"
+        elif kind == "log":
+            title = "Log"
+        elif kind == "protocol":
+            title = "Protocol"
+        elif kind == "binary":
+            title = "Binary"
+        elif kind == "text":
+            title = "Text"
+        elif kind == "artifact":
+            title = "Artifact"
+        return title + " capture: " + mode
+    "Capture: " + capture
+
+fn capture_kind_from_policy(capture: text) -> text:
+    val parts = capture.split(" ")
+    if parts.len() > 0:
+        return parts[0]
+    ""
+
+fn manual_capture_evidence_summary(capture: text, expected_count: i64) -> text:
+    if expected_count <= 0 or capture == "":
+        return ""
+    val kind = capture_kind_from_policy(capture)
+    var label = ""
+    if kind == "protocol":
+        label = "protocol response"
+    elif kind == "api":
+        label = "API response"
+    elif kind == "exec":
+        label = "execution result"
+    elif kind == "log":
+        label = "log output"
+    elif kind == "text":
+        label = "text output"
+    elif kind == "binary":
+        label = "binary artifact"
+    elif kind == "artifact":
+        label = "artifact"
+    elif kind == "tui":
+        label = "TUI state"
+    elif kind == "gui":
+        label = "GUI state"
+    if label == "":
+        return ""
+    var plural = "check"
+    if expected_count != 1:
+        plural = "checks"
+    label + " verified by " + expected_count.to_string() + " expected " + plural
+
+fn expect_subject_from_line(trimmed: text) -> text:
+    if not trimmed.starts_with("expect("):
+        return ""
+    val without_prefix = trimmed["expect(".len():]
+    val parts = without_prefix.split(").to_equal")
+    if parts.len() > 0:
+        return parts[0].trim()
+    ""
+
+fn manual_expected_value_label(value: text) -> text:
+    var label = value.trim()
+    if label.starts_with("\"") and label.ends_with("\"") and label.len() >= 2:
+        label = label[1:label.len() - 1]
+    label = label.replace("\\\"", "\"")
+    if label.len() > 80:
+        label = label[0:77] + "... (full value in folded executable source)"
+    label
+
+fn assertion_expected_summary(trimmed: text) -> text:
+    if not trimmed.starts_with("expect("):
+        return ""
+    var expected_true = false
+    var expected_false = false
+    if trimmed.contains(".to_equal(true)"):
+        expected_true = true
+    elif trimmed.contains(".to_equal(false)"):
+        expected_false = true
+    else:
+        return ""
+
+    if trimmed.contains(".contains("):
+        val subject_parts = trimmed.split(".contains(")
+        var subject = subject_parts[0]
+        if subject.starts_with("expect("):
+            subject = subject["expect(".len():].trim()
+        var expected_value = ""
+        if subject_parts.len() >= 2:
+            var value_parts = subject_parts[1].split(")).to_equal")
+            if value_parts.len() == 1:
+                value_parts = subject_parts[1].split(").to_equal")
+            if value_parts.len() > 0:
+                expected_value = value_parts[0].trim()
+        val expected_label = manual_expected_value_label(expected_value)
+        if expected_true:
+            return subject + " contains `" + expected_label + "`"
+        if expected_false:
+            return subject + " does not contain `" + expected_label + "`"
+
+    val subject = expect_subject_from_line(trimmed)
+    if subject == "":
+        return ""
+    if expected_true:
+        return subject + " is true"
+    subject + " is false"
+
 fn render_manual_steps(lines: [text], scenario_capture: text) -> text:
     val without_docstring = strip_leading_docstring(lines)
     val trimmed = trim_trailing_blank_lines(without_docstring)
@@ -1225,6 +1350,8 @@ fn render_manual_steps(lines: [text], scenario_capture: text) -> text:
     var steps: [text] = []
     var pending_capture = ""
     var pending_label = ""
+    var step_captures: [text] = []
+    var step_expected_counts: [i64] = []
     var step_count = 0
     var i = 0
     while i < dedented.len():
@@ -1250,14 +1377,39 @@ fn render_manual_steps(lines: [text], scenario_capture: text) -> text:
             var rendered = step_count.to_string() + ". " + label
             if pending_capture != "":
                 if pending_capture != "off":
-                    rendered = rendered + "\n   - Capture: " + pending_capture
+                    rendered = rendered + "\n   - " + manual_capture_summary(pending_capture)
+                    step_captures.push(pending_capture)
+                else:
+                    step_captures.push("")
             else:
                 val scenario_step_capture = scenario_capture_for_step(scenario_capture, step_count, total_steps)
                 if scenario_step_capture != "":
-                    rendered = rendered + "\n   - Capture: " + scenario_step_capture
+                    rendered = rendered + "\n   - " + manual_capture_summary(scenario_step_capture)
+                    step_captures.push(scenario_step_capture)
+                else:
+                    step_captures.push("")
+            if step_captures.len() < step_count:
+                step_captures.push("")
+            step_expected_counts.push(0)
             steps.push(rendered)
             pending_capture = ""
             pending_label = ""
+        else:
+            val expected_summary = assertion_expected_summary(line_trimmed)
+            if expected_summary != "" and steps.len() > 0:
+                val last_index = steps.len() - 1
+                val next_count = step_expected_counts[last_index] + 1
+                step_expected_counts[last_index] = next_count
+                if next_count == 1:
+                    val evidence_summary = manual_capture_evidence_summary(step_captures[last_index], next_count)
+                    if evidence_summary != "":
+                        steps[last_index] = steps[last_index] + "\n   - Evidence: " + evidence_summary
+                else:
+                    val old_evidence = manual_capture_evidence_summary(step_captures[last_index], next_count - 1)
+                    val new_evidence = manual_capture_evidence_summary(step_captures[last_index], next_count)
+                    if old_evidence != "" and new_evidence != "":
+                        steps[last_index] = steps[last_index].replace("   - Evidence: " + old_evidence, "   - Evidence: " + new_evidence)
+                steps[last_index] = steps[last_index] + "\n   - Expected: " + expected_summary
         i = i + 1
     if steps.len() == 0:
         return ""

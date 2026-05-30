@@ -172,6 +172,9 @@ documentation to hand-written-quality scenario manuals.
         `Protocol capture` and `API capture`.
   - [x] Captured steps with generated expected results render compact
         `Evidence:` previews under the step.
+  - [x] Folded executable blocks include runnable source line-count summaries.
+  - [x] Long expected-result values are shortened and point to folded
+        executable source.
   - [ ] MCP docs satisfy the target shape in
         `doc/03_plan/sys_test/mcp_scenario_manual_quality.md`.
   - [ ] Primary user/operator/admin flows are visible by default.
@@ -187,7 +190,9 @@ documentation to hand-written-quality scenario manuals.
   normalized for manual reading. Step capture labels now use typed wording
   such as `Protocol capture: after_step` and `API capture: after_step`.
   Captured protocol/API steps now include compact evidence previews derived
-  from the expected checks.
+  from the expected checks. Folded executable blocks now include runnable
+  source line counts for reproduction review. Long expected-result values now
+  truncate in visible summaries while the full assertion remains folded.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none

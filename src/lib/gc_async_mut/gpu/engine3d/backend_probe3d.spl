@@ -185,6 +185,37 @@ class Engine3DRenderEvidence:
     fn summary() -> text:
         "Engine3DRenderEvidence[backend={self.probe.requested_name} status={engine3d_backend_status_text(self.probe.status)} size={self.width}x{self.height} draws={self.draw_calls} readback={self.readback_available.to_text()} rendered={self.frame_rendered.to_text()} expected={self.expected_checksum} actual={self.actual_checksum} code={self.status_code} reason={self.reason}]"
 
+class Engine3DReadbackEvidence:
+    probe: Engine3DBackendProbeResult
+    width: i64
+    height: i64
+    draw_calls: i64
+    runtime_device_available: bool
+    render_target_handle: i64
+    readback_buffer_handle: i64
+    sync_completed: bool
+    expected_checksum: i64
+    actual_checksum: i64
+    readback_available: bool
+    status_code: text
+    reason: text
+
+    static fn create(probe: Engine3DBackendProbeResult, width: i64, height: i64, draw_calls: i64, runtime_device_available: bool, render_target_handle: i64, readback_buffer_handle: i64, sync_completed: bool, expected_checksum: i64, actual_checksum: i64) -> Engine3DReadbackEvidence:
+        if not probe.is_usable():
+            return Engine3DReadbackEvidence(probe: probe, width: width, height: height, draw_calls: draw_calls, runtime_device_available: runtime_device_available, render_target_handle: render_target_handle, readback_buffer_handle: readback_buffer_handle, sync_completed: sync_completed, expected_checksum: expected_checksum, actual_checksum: actual_checksum, readback_available: false, status_code: "backend-not-usable", reason: probe.fallback_reason)
+        if not runtime_device_available:
+            return Engine3DReadbackEvidence(probe: probe, width: width, height: height, draw_calls: draw_calls, runtime_device_available: false, render_target_handle: render_target_handle, readback_buffer_handle: readback_buffer_handle, sync_completed: sync_completed, expected_checksum: expected_checksum, actual_checksum: actual_checksum, readback_available: false, status_code: "runtime-device-unavailable", reason: "runtime device evidence required before 3D readback")
+        if render_target_handle <= 0:
+            return Engine3DReadbackEvidence(probe: probe, width: width, height: height, draw_calls: draw_calls, runtime_device_available: true, render_target_handle: render_target_handle, readback_buffer_handle: readback_buffer_handle, sync_completed: sync_completed, expected_checksum: expected_checksum, actual_checksum: actual_checksum, readback_available: false, status_code: "missing-render-target-handle", reason: "3D render target handle required before readback")
+        if readback_buffer_handle <= 0:
+            return Engine3DReadbackEvidence(probe: probe, width: width, height: height, draw_calls: draw_calls, runtime_device_available: true, render_target_handle: render_target_handle, readback_buffer_handle: readback_buffer_handle, sync_completed: sync_completed, expected_checksum: expected_checksum, actual_checksum: actual_checksum, readback_available: false, status_code: "missing-readback-buffer-handle", reason: "3D readback buffer handle required")
+        if not sync_completed:
+            return Engine3DReadbackEvidence(probe: probe, width: width, height: height, draw_calls: draw_calls, runtime_device_available: true, render_target_handle: render_target_handle, readback_buffer_handle: readback_buffer_handle, sync_completed: false, expected_checksum: expected_checksum, actual_checksum: actual_checksum, readback_available: false, status_code: "readback-sync-incomplete", reason: "3D render/readback synchronization must complete before checksum evidence")
+        Engine3DReadbackEvidence(probe: probe, width: width, height: height, draw_calls: draw_calls, runtime_device_available: true, render_target_handle: render_target_handle, readback_buffer_handle: readback_buffer_handle, sync_completed: true, expected_checksum: expected_checksum, actual_checksum: actual_checksum, readback_available: true, status_code: "readback-ready", reason: "3D readback target, buffer, and synchronization evidence present")
+
+    fn summary() -> text:
+        "Engine3DReadbackEvidence[backend={self.probe.requested_name} runtime={self.runtime_device_available.to_text()} target={self.render_target_handle} buffer={self.readback_buffer_handle} sync={self.sync_completed.to_text()} readback={self.readback_available.to_text()} code={self.status_code} reason={self.reason}]"
+
 fn _engine3d_reference_checksum(backend: text, width: i64, height: i64, draw_calls: i64) -> i64:
     if width <= 0 or height <= 0 or draw_calls <= 0:
         return 0
@@ -267,3 +298,10 @@ fn engine3d_reference_render_evidence(name: text, width: i64, height: i64, draw_
 fn engine3d_render_evidence_from_readback(name: text, width: i64, height: i64, draw_calls: i64, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> Engine3DRenderEvidence:
     val probe = engine3d_strict_probe_backend(name)
     Engine3DRenderEvidence.create(probe, width, height, draw_calls, readback_available, expected_checksum, actual_checksum)
+
+fn engine3d_readback_evidence(name: text, width: i64, height: i64, draw_calls: i64, runtime_device_available: bool, render_target_handle: i64, readback_buffer_handle: i64, sync_completed: bool, expected_checksum: i64, actual_checksum: i64) -> Engine3DReadbackEvidence:
+    val probe = engine3d_strict_probe_backend(name)
+    Engine3DReadbackEvidence.create(probe, width, height, draw_calls, runtime_device_available, render_target_handle, readback_buffer_handle, sync_completed, expected_checksum, actual_checksum)
+
+fn engine3d_render_evidence_from_readback_evidence(evidence: Engine3DReadbackEvidence) -> Engine3DRenderEvidence:
+    Engine3DRenderEvidence.create(evidence.probe, evidence.width, evidence.height, evidence.draw_calls, evidence.readback_available, evidence.expected_checksum, evidence.actual_checksum)

@@ -19,6 +19,7 @@ describe "spipe docgen scenario body extraction":
         expect(structure).to_contain("val result = m{ 2 + 3 }")
         expect(structure).to_contain("expect(result).to_equal(5)")
         expect(structure).to_contain("<summary>Executable SPipe</summary>")
+        expect(structure).to_contain("Runnable source: 2 lines folded for reproduction.")
         expect(structure).to_contain("<summary>Rendered scenario source</summary>")
         expect(structure).to_contain("> val result = $2 + 3$<br>\n> expect(result).to_equal(5)")
         expect(structure.contains("Rendered `m{...}`")).to_equal(false)
@@ -37,6 +38,7 @@ describe "spipe docgen scenario body extraction":
         val structure = extract_test_structure(source)
         expect(structure).to_contain("#### keeps runnable code only")
         expect(structure).to_contain("<summary>Executable SPipe</summary>")
+        expect(structure).to_contain("Runnable source: 2 lines folded for reproduction.")
         expect(structure).to_contain("```simple\nval result = 1\nexpect(result).to_equal(1)\n```")
         expect(structure.contains("Explains the scenario.")).to_equal(false)
 
@@ -241,7 +243,7 @@ describe "spipe docgen scenario body extraction":
             "        expect(\"open\").to_equal(\"open\")\n"
         val structure = extract_test_structure(source)
         expect(structure).to_contain("#### captures app after every step")
-        expect(structure).to_contain("1. User open app\n   - Capture: tui after_step")
+        expect(structure).to_contain("1. User open app\n   - TUI capture: after_step")
         expect(structure.contains("**Scenario capture:** tui after_step")).to_equal(false)
         expect(structure).to_contain("```simple\nuser.open_app()\nexpect(\"open\").to_equal(\"open\")\n```")
 
@@ -253,8 +255,8 @@ describe "spipe docgen scenario body extraction":
             "        user.finish_flow()\n" +
             "        expect(\"done\").to_equal(\"done\")\n"
         val structure = extract_test_structure(source)
-        expect(structure).to_contain("1. User open app\n\n2. User finish flow\n   - Capture: gui after_scenario")
-        expect(structure.contains("1. User open app\n   - Capture: gui after_scenario")).to_equal(false)
+        expect(structure).to_contain("1. User open app\n\n2. User finish flow\n   - GUI capture: after_scenario")
+        expect(structure.contains("1. User open app\n   - GUI capture: after_scenario")).to_equal(false)
         expect(structure.contains("**Scenario capture:** gui after_scenario")).to_equal(false)
 
     it "renders step capture metadata without keeping metadata in source code":
@@ -266,7 +268,7 @@ describe "spipe docgen scenario body extraction":
             "        expect(\"ok\").to_equal(\"ok\")\n"
         val structure = extract_test_structure(source)
         expect(structure).to_contain("1. User open app")
-        expect(structure).to_contain("2. User submit login\n   - Capture: api after_step")
+        expect(structure).to_contain("2. User submit login\n   - API capture: after_step")
         expect(structure.contains("**Step captures:**")).to_equal(false)
         expect(structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\").to_equal(\"ok\")\n```")
         expect(structure.contains("# @capture(api)")).to_equal(false)
@@ -280,8 +282,8 @@ describe "spipe docgen scenario body extraction":
             "        user.enter_password()\n" +
             "        user.submit_login()\n"
         val structure = extract_test_structure(source)
-        expect(structure).to_contain("1. User open app\n   - Capture: tui after_step")
-        expect(structure).to_contain("2. User enter password\n\n3. User submit login\n   - Capture: tui after_step")
+        expect(structure).to_contain("1. User open app\n   - TUI capture: after_step")
+        expect(structure).to_contain("2. User enter password\n\n3. User submit login\n   - TUI capture: after_step")
         expect(structure.contains("Capture: off")).to_equal(false)
         expect(structure.contains("# @capture(off)")).to_equal(false)
 
@@ -319,6 +321,33 @@ describe "spipe docgen scenario body extraction":
         expect(structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\").to_equal(\"ok\")\n```")
         expect(structure.contains("# @step: Submit login form")).to_equal(false)
 
+    it "renders expected result bullets from contains assertions":
+        val source = "describe \"Manual expected results\":\n" +
+            "    it \"summarizes protocol assertions\":\n" +
+            "        # @step: Operator lists MCP tools\n" +
+            "        val output = send_mcp(input)\n" +
+            "        expect(output.contains(\"debug_create_session\")).to_equal(true)\n" +
+            "        expect(output.contains(\"\\\"protocolVersion\\\":\\\"2025-06-18\\\"\")).to_equal(true)\n" +
+            "        expect(output.contains(\"error\")).to_equal(false)\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator lists MCP tools")
+        expect(structure.contains("   - Evidence:")).to_equal(false)
+        expect(structure).to_contain("   - Expected: output contains `debug_create_session`")
+        expect(structure).to_contain("   - Expected: output contains `\"protocolVersion\":\"2025-06-18\"`")
+        expect(structure).to_contain("   - Expected: output does not contain `error`")
+
+    it "summarizes long expected result values but keeps full source folded":
+        val source = "describe \"Manual expected results\":\n" +
+            "    it \"summarizes long json fragments\":\n" +
+            "        # @step: Operator checks protocol payload\n" +
+            "        val output = send_mcp(input)\n" +
+            "        expect(output.contains(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")).to_equal(true)\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator checks protocol payload")
+        expect(structure).to_contain("full value in folded executable source")
+        expect(structure.contains("Create a debug session with a long schema payload`")).to_equal(false)
+        expect(structure).to_contain("expect(output.contains(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")).to_equal(true)")
+
     it "renders quoted step metadata before folded executable source":
         val source = "describe \"Manual steps\":\n" +
             "    it \"uses quoted manual step text\":\n" +
@@ -336,7 +365,7 @@ describe "spipe docgen scenario body extraction":
             "        # @capture(api)\n" +
             "        user.submit_login()\n"
         val structure = extract_test_structure(source)
-        expect(structure).to_contain("1. Submit login form\n   - Capture: api after_step")
+        expect(structure).to_contain("1. Submit login form\n   - API capture: after_step")
         expect(structure.contains("unused step metadata")).to_equal(false)
         expect(structure).to_contain("```simple\nuser.submit_login()\n```")
         expect(structure.contains("# @step: Submit login form")).to_equal(false)
@@ -354,10 +383,30 @@ describe "spipe docgen scenario body extraction":
             "        expect(ok).to_equal(true)\n"
         val structure = extract_test_structure(source)
         expect(structure).to_contain("1. Operator sends an initialize request")
-        expect(structure).to_contain("2. Operator verifies the initialize response\n   - Capture: protocol after_scenario")
+        expect(structure).to_contain("2. Operator verifies the initialize response\n   - Protocol capture: after_scenario\n   - Evidence: protocol response verified by 1 expected check")
         expect(structure).to_contain("```simple\nval input = init_request(\"1\")\nval output = send_mcp(input)\nval ok = output.contains(\"protocolVersion\")\nexpect(ok).to_equal(true)\n```")
         expect(structure.contains("unused step metadata")).to_equal(false)
         expect(structure.contains("# @step: Operator")).to_equal(false)
+
+    it "keeps prev executable source stable with step-local capture metadata":
+        val source = "describe \"Manual steps\":\n" +
+            "    # @inline\n" +
+            "    it \"setup protocol\":\n" +
+            "        # @step: Operator initializes protocol\n" +
+            "        # @capture(protocol)\n" +
+            "        val init = build_init()\n" +
+            "        val req = build_request()\n" +
+            "        val input = init + req\n" +
+            "    # @prev(\"setup protocol\")\n" +
+            "    it \"uses protocol setup\":\n" +
+            "        # @step: Operator checks response\n" +
+            "        val output = send(input)\n" +
+            "        expect(output).to_equal(\"ok\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator initializes protocol\n   - Protocol capture: after_step")
+        expect(structure).to_contain("2. Operator checks response")
+        expect(structure).to_contain("```simple\nval init = build_init()\nval req = build_request()\nval input = init + req\n\nval output = send(input)\nexpect(output).to_equal(\"ok\")\n```")
+        expect(structure.contains("val req = build_request()\nval req = build_request()")).to_equal(false)
 
     it "allows capture off between step label and action":
         val source = "describe \"Manual steps\":\n" +
@@ -368,7 +417,7 @@ describe "spipe docgen scenario body extraction":
             "        user.enter_password()\n"
         val structure = extract_test_structure(source)
         expect(structure).to_contain("1. Enter password")
-        expect(structure.contains("Capture: tui after_step")).to_equal(false)
+        expect(structure.contains("TUI capture: after_step")).to_equal(false)
         expect(structure.contains("Capture: off")).to_equal(false)
         expect(structure.contains("unused step metadata")).to_equal(false)
         expect(structure).to_contain("```simple\nuser.enter_password()\n```")
@@ -511,6 +560,33 @@ describe "spipe docgen scenario body extraction":
                         expect(e).to_equal("")
                     case Ok(path):
                         expect(path).to_equal("/tmp/feature/usage/math_blocks_spec.md")
+
+    it "generates auto docs with scenarios immediately after the title":
+        val doc = SspecDoc(
+            file_path: "test/feature/app/manual_first_spec.spl",
+            raw_content: "describe \"Manual First\":\n    it \"operator performs the primary flow\":\n        user.open_app()\n        expect(true).to_equal(true)\n",
+            doc_blocks: [],
+            feature_title: "Manual First",
+            feature_ids: [],
+            metadata: FeatureMetadata.empty()
+        )
+        val result = generate_feature_doc(doc, "/tmp")
+        match result:
+            case Err(e):
+                expect(e).to_equal("")
+            case Ok(path):
+                val generated = read_file(path)
+                val before_scenarios = generated.split("## Scenarios")[0]
+                val after_scenarios_parts = generated.split("## Scenarios")
+                expect(before_scenarios).to_equal("# Manual First\n\n")
+                expect(before_scenarios.contains("## At a Glance")).to_equal(false)
+                expect(before_scenarios.contains("## Overview")).to_equal(false)
+                expect(before_scenarios.contains("## Scenario Summary")).to_equal(false)
+                expect(after_scenarios_parts.len()).to_be_greater_than(1)
+                expect(after_scenarios_parts[1]).to_contain("#### operator performs the primary flow")
+                expect(after_scenarios_parts[1]).to_contain("## At a Glance")
+                expect(after_scenarios_parts[1]).to_contain("## Overview")
+                expect(after_scenarios_parts[1]).to_contain("## Scenario Summary")
 
     it "embeds screenshot and TUI capture evidence in generated docs":
         val tui_path = "/tmp/spipe_docgen_ui_capture.txt"

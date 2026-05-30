@@ -10,6 +10,8 @@ REPORT_PATH="${REPORT_PATH:-doc/09_report/gtk_gui_size_speed_baseline_$(date -u 
 SIMPLE_ITERATIONS="${SIMPLE_ITERATIONS:-4}"
 GTK_ITERATIONS="${GTK_ITERATIONS:-200}"
 GTK_EVIDENCE_MIN_ITERATIONS="${GTK_EVIDENCE_MIN_ITERATIONS:-3}"
+GTK_EVIDENCE_MIN_TRIALS="${GTK_EVIDENCE_MIN_TRIALS:-3}"
+GTK_EVIDENCE_TRIALS="${GTK_EVIDENCE_TRIALS:-$GTK_EVIDENCE_MIN_TRIALS}"
 SKIP_SIMPLE_NATIVE="${SKIP_SIMPLE_NATIVE:-0}"
 SIMPLE_RUN_TIMEOUT_SECS="${SIMPLE_RUN_TIMEOUT_SECS:-120}"
 SIMPLE_RUN_LIB="${SIMPLE_RUN_LIB:-$ROOT_DIR/src/lib:$ROOT_DIR/src/app}"
@@ -88,6 +90,32 @@ field_of() {
     if [ -f "$file" ]; then
         awk -F '=' -v key="$key" '$1 == key {print $2}' "$file" | tail -n 1
     fi
+}
+
+median_field_of() {
+    key="$1"
+    shift
+    for file in "$@"; do
+        field_of "$key" "$file"
+    done | awk '
+        /^[0-9]+$/ { values[++count] = $1 }
+        END {
+            if (count == 0) {
+                print "n/a"
+                exit
+            }
+            for (i = 1; i <= count; i++) {
+                for (j = i + 1; j <= count; j++) {
+                    if (values[j] < values[i]) {
+                        tmp = values[i]
+                        values[i] = values[j]
+                        values[j] = tmp
+                    }
+                }
+            }
+            print values[int((count + 1) / 2)]
+        }
+    '
 }
 
 ratio_of() {
@@ -422,30 +450,49 @@ simple_min_status="unavailable"
 simple_min_total_us="n/a"
 simple_min_bytes="n/a"
 simple_min_closure_bytes="n/a"
+simple_trial_count=0
+gtk_trial_count=0
 simple_run_lib_spl_files="$(spl_file_count_of_path_list "$SIMPLE_RUN_LIB")"
 simple_full_src_spl_files="$(spl_file_count_of_path_list "$ROOT_DIR/src")"
 
 if [ -x "$SIMPLE_BINARY" ]; then
-    if SIMPLE_LIB="$SIMPLE_RUN_LIB" with_timeout "$SIMPLE_BINARY" run "$SIMPLE_ENTRY" >"$SIMPLE_OUT" 2>&1; then
-        simple_status="$(field_of simple_render_status "$SIMPLE_OUT")"
-        simple_total_us="$(field_of simple_render_total_us "$SIMPLE_OUT")"
-        simple_cache_total_us="$(field_of simple_static_cache_total_us "$SIMPLE_OUT")"
-        simple_swbc_total_us="$(field_of simple_static_swbc_total_us "$SIMPLE_OUT")"
-        simple_command_plan_total_us="$(field_of simple_static_command_plan_total_us "$SIMPLE_OUT")"
-        simple_disk_plan_total_us="$(field_of simple_static_disk_plan_total_us "$SIMPLE_OUT")"
-        simple_plan_cache_total_us="$(field_of simple_static_plan_cache_total_us "$SIMPLE_OUT")"
-        simple_command_cache_total_us="$(field_of simple_static_command_cache_total_us "$SIMPLE_OUT")"
-        simple_browser_cached_frame_total_us="$(field_of simple_browser_cached_frame_total_us "$SIMPLE_OUT")"
-        simple_browser_noop_cached_frame_total_us="$(field_of simple_browser_noop_cached_frame_total_us "$SIMPLE_OUT")"
-        simple_browser_present_cache_total_us="$(field_of simple_browser_present_cache_total_us "$SIMPLE_OUT")"
-        simple_engine2d_solid_total_us="$(field_of simple_engine2d_solid_total_us "$SIMPLE_OUT")"
+    simple_outputs=""
+    trial=1
+    while [ "$trial" -le "$GTK_EVIDENCE_TRIALS" ]; do
+        trial_out="$BUILD_DIR/simple_gui_render_bench.trial_${trial}.out"
+        if SIMPLE_LIB="$SIMPLE_RUN_LIB" with_timeout "$SIMPLE_BINARY" run "$SIMPLE_ENTRY" >"$trial_out" 2>&1; then
+            trial_status="$(field_of simple_render_status "$trial_out")"
+            if [ "$trial_status" = "ok" ]; then
+                simple_trial_count=$((simple_trial_count + 1))
+                simple_outputs="$simple_outputs $trial_out"
+                cp "$trial_out" "$SIMPLE_OUT"
+            else
+                simple_status="failed"
+                simple_reason="simple_trial_${trial}_${trial_status:-missing_status}"
+            fi
+        else
+            simple_status="failed"
+            simple_reason="simple_trial_${trial}_run_failed"
+        fi
+        trial=$((trial + 1))
+    done
+    if [ "$simple_trial_count" -gt 0 ]; then
+        simple_status="ok"
+        simple_total_us="$(median_field_of simple_render_total_us $simple_outputs)"
+        simple_cache_total_us="$(median_field_of simple_static_cache_total_us $simple_outputs)"
+        simple_swbc_total_us="$(median_field_of simple_static_swbc_total_us $simple_outputs)"
+        simple_command_plan_total_us="$(median_field_of simple_static_command_plan_total_us $simple_outputs)"
+        simple_disk_plan_total_us="$(median_field_of simple_static_disk_plan_total_us $simple_outputs)"
+        simple_plan_cache_total_us="$(median_field_of simple_static_plan_cache_total_us $simple_outputs)"
+        simple_command_cache_total_us="$(median_field_of simple_static_command_cache_total_us $simple_outputs)"
+        simple_browser_cached_frame_total_us="$(median_field_of simple_browser_cached_frame_total_us $simple_outputs)"
+        simple_browser_noop_cached_frame_total_us="$(median_field_of simple_browser_noop_cached_frame_total_us $simple_outputs)"
+        simple_browser_present_cache_total_us="$(median_field_of simple_browser_present_cache_total_us $simple_outputs)"
+        simple_engine2d_solid_total_us="$(median_field_of simple_engine2d_solid_total_us $simple_outputs)"
         simple_static_html_bytes="$(field_of simple_static_html_bytes "$SIMPLE_OUT")"
         simple_static_binary_plan_bytes="$(field_of simple_static_binary_plan_bytes "$SIMPLE_OUT")"
         simple_static_layout_payload_bytes="$(field_of simple_static_layout_payload_bytes "$SIMPLE_OUT")"
         simple_static_command_payload_bytes="$(field_of simple_static_command_payload_bytes "$SIMPLE_OUT")"
-    else
-        simple_status="failed"
-        simple_reason="simple_run_failed"
     fi
     if [ "$SKIP_SIMPLE_NATIVE" != "1" ]; then
         if SIMPLE_LIB="$SIMPLE_RUN_LIB" with_timeout "$SIMPLE_BINARY" run "$SIMPLE_MIN_ENTRY" >"$SIMPLE_MIN_OUT" 2>&1; then
@@ -549,16 +596,36 @@ EOF
         else
             gtk_runner=""
         fi
-        if ${gtk_runner} "$GTK_BIN" >"$GTK_OUT" 2>&1; then
-            gtk_status="$(field_of gtk_render_status "$GTK_OUT")"
-            gtk_total_us="$(field_of gtk_widget_total_us "$GTK_OUT")"
+        gtk_outputs=""
+        trial=1
+        while [ "$trial" -le "$GTK_EVIDENCE_TRIALS" ]; do
+            trial_out="$BUILD_DIR/gtk_gui_baseline.trial_${trial}.out"
+            if ${gtk_runner} "$GTK_BIN" >"$trial_out" 2>&1; then
+                trial_status="$(field_of gtk_render_status "$trial_out")"
+                if [ "$trial_status" = "ok" ]; then
+                    gtk_trial_count=$((gtk_trial_count + 1))
+                    gtk_outputs="$gtk_outputs $trial_out"
+                    cp "$trial_out" "$GTK_OUT"
+                else
+                    gtk_status="$trial_status"
+                    gtk_reason="$(field_of gtk_reason "$trial_out")"
+                    if [ -z "$gtk_reason" ]; then
+                        gtk_reason="gtk_trial_${trial}_${trial_status:-missing_status}"
+                    fi
+                fi
+            else
+                gtk_status="failed"
+                gtk_reason="gtk_trial_${trial}_run_failed"
+            fi
+            trial=$((trial + 1))
+        done
+        if [ "$gtk_trial_count" -gt 0 ]; then
+            gtk_status="ok"
+            gtk_total_us="$(median_field_of gtk_widget_total_us $gtk_outputs)"
             gtk_reason="$(field_of gtk_reason "$GTK_OUT")"
             if [ -z "$gtk_total_us" ]; then
                 gtk_total_us="n/a"
             fi
-        else
-            gtk_status="failed"
-            gtk_reason="gtk_run_failed"
         fi
     else
         gtk_status="failed"
@@ -590,30 +657,39 @@ gtk_benchmark_evidence_reason="$(awk \
     -v gt="$gtk_total_us" \
     -v si="$SIMPLE_ITERATIONS" \
     -v gi="$GTK_ITERATIONS" \
+    -v stc="$simple_trial_count" \
+    -v gtc="$gtk_trial_count" \
     -v min_iters="$GTK_EVIDENCE_MIN_ITERATIONS" \
+    -v min_trials="$GTK_EVIDENCE_MIN_TRIALS" \
     'BEGIN {
         if (scene == "") { print "missing-scene"; exit }
         if (!(si ~ /^[0-9]+$/) || !(gi ~ /^[0-9]+$/) || si <= 0 || gi <= 0) { print "missing-iterations"; exit }
+        if (!(stc ~ /^[0-9]+$/) || !(gtc ~ /^[0-9]+$/) || stc <= 0 || gtc <= 0) { print "missing-trials"; exit }
         if (!(min_iters ~ /^[0-9]+$/) || min_iters <= 0) { print "invalid-min-iterations"; exit }
+        if (!(min_trials ~ /^[0-9]+$/) || min_trials <= 0) { print "invalid-min-trials"; exit }
         if (si < min_iters || gi < min_iters) { print "sample-count-too-low"; exit }
+        if (stc < min_trials || gtc < min_trials) { print "trial-count-too-low"; exit }
         if (!(sf ~ /^[0-9]+$/) || !(gf ~ /^[0-9]+$/) || !(st ~ /^[0-9]+$/) || !(gt ~ /^[0-9]+$/) || sf <= 0 || gf <= 0 || st <= 0 || gt <= 0) { print "missing-timings"; exit }
         if ((sf * gi) >= (gf * si)) { print "frame-not-faster"; exit }
         if ((st * gi) >= (gt * si)) { print "text-not-faster"; exit }
         print "pass"
     }')"
-gtk_benchmark_evidence_sample_status="low"
-case "$gtk_benchmark_evidence_reason" in
-    pass|missing-timings|frame-not-faster|text-not-faster)
-        gtk_benchmark_evidence_sample_status="$(awk \
-            -v si="$SIMPLE_ITERATIONS" \
-            -v gi="$GTK_ITERATIONS" \
-            -v min_iters="$GTK_EVIDENCE_MIN_ITERATIONS" \
-            'BEGIN {
-                if (si ~ /^[0-9]+$/ && gi ~ /^[0-9]+$/ && min_iters ~ /^[0-9]+$/ && si >= min_iters && gi >= min_iters) print "ok";
-                else print "low"
-            }')"
-        ;;
-esac
+gtk_benchmark_evidence_sample_status="$(awk \
+    -v si="$SIMPLE_ITERATIONS" \
+    -v gi="$GTK_ITERATIONS" \
+    -v min_iters="$GTK_EVIDENCE_MIN_ITERATIONS" \
+    'BEGIN {
+        if (si ~ /^[0-9]+$/ && gi ~ /^[0-9]+$/ && min_iters ~ /^[0-9]+$/ && si >= min_iters && gi >= min_iters) print "ok";
+        else print "low"
+    }')"
+gtk_benchmark_evidence_trial_status="$(awk \
+    -v stc="$simple_trial_count" \
+    -v gtc="$gtk_trial_count" \
+    -v min_trials="$GTK_EVIDENCE_MIN_TRIALS" \
+    'BEGIN {
+        if (stc ~ /^[0-9]+$/ && gtc ~ /^[0-9]+$/ && min_trials ~ /^[0-9]+$/ && stc >= min_trials && gtc >= min_trials) print "ok";
+        else print "low"
+    }')"
 gtk_benchmark_evidence_status="fail"
 if [ "$gtk_benchmark_evidence_reason" = "pass" ]; then
     gtk_benchmark_evidence_status="pass"
@@ -675,13 +751,17 @@ fi
     echo "| status | $gtk_benchmark_evidence_status |"
     echo "| reason | $gtk_benchmark_evidence_reason |"
     echo "| sample_status | $gtk_benchmark_evidence_sample_status |"
+    echo "| trial_status | $gtk_benchmark_evidence_trial_status |"
     echo "| min_iterations | $GTK_EVIDENCE_MIN_ITERATIONS |"
+    echo "| min_trials | $GTK_EVIDENCE_MIN_TRIALS |"
     echo "| simple_frame_us | $gtk_benchmark_simple_frame_us |"
     echo "| gtk_frame_us | $gtk_benchmark_gtk_frame_us |"
     echo "| simple_text_us | $gtk_benchmark_simple_text_us |"
     echo "| gtk_text_us | $gtk_benchmark_gtk_text_us |"
     echo "| simple_iterations | $SIMPLE_ITERATIONS |"
     echo "| gtk_iterations | $GTK_ITERATIONS |"
+    echo "| simple_trial_count | $simple_trial_count |"
+    echo "| gtk_trial_count | $gtk_trial_count |"
     echo
     echo "## Static Shell Size"
     echo
@@ -786,10 +866,14 @@ echo "gtk_benchmark_evidence_scene=$gtk_benchmark_evidence_scene"
 echo "gtk_benchmark_evidence_status=$gtk_benchmark_evidence_status"
 echo "gtk_benchmark_evidence_reason=$gtk_benchmark_evidence_reason"
 echo "gtk_benchmark_evidence_sample_status=$gtk_benchmark_evidence_sample_status"
+echo "gtk_benchmark_evidence_trial_status=$gtk_benchmark_evidence_trial_status"
 echo "gtk_benchmark_evidence_min_iterations=$GTK_EVIDENCE_MIN_ITERATIONS"
+echo "gtk_benchmark_evidence_min_trials=$GTK_EVIDENCE_MIN_TRIALS"
 echo "gtk_benchmark_simple_frame_us=$gtk_benchmark_simple_frame_us"
 echo "gtk_benchmark_gtk_frame_us=$gtk_benchmark_gtk_frame_us"
 echo "gtk_benchmark_simple_text_us=$gtk_benchmark_simple_text_us"
 echo "gtk_benchmark_gtk_text_us=$gtk_benchmark_gtk_text_us"
 echo "gtk_benchmark_simple_iterations=$SIMPLE_ITERATIONS"
 echo "gtk_benchmark_gtk_iterations=$GTK_ITERATIONS"
+echo "gtk_benchmark_simple_trial_count=$simple_trial_count"
+echo "gtk_benchmark_gtk_trial_count=$gtk_trial_count"
