@@ -1,7 +1,7 @@
 # Baremetal `[u8]` direct index equality diverges from byte accessor
 
 Date: 2026-05-30
-Status: Open
+Status: Fixed
 Severity: High
 
 ## Symptom
@@ -42,3 +42,14 @@ xs[0].to_i64() == 23
 
 Then compare the emitted MIR/codegen for index result type and equality
 lowering against the runtime byte accessor path.
+
+## Fix
+
+Native scalar equality and inequality now normalize scalar integer operands to
+`i64` with signedness-aware extension before emitting `icmp`. This avoids
+comparing a narrowed `[u8]` index result directly against an `i64` literal.
+
+## Verification
+
+- `SIMPLE_LIB=src bin/simple check test/unit/compiler/native_enum_if_val_probe.spl test/unit/compiler/native_enum_u8_regression_spec.spl` PASS
+- `SIMPLE_LIB=src bin/simple test test/unit/compiler/native_enum_u8_regression_spec.spl --mode=native --clean --force-rebuild` PASS

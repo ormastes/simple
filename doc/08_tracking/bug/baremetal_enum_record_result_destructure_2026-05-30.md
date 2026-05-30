@@ -1,7 +1,7 @@
 # Baremetal enum RecordResult destructuring corrupts fields
 
 Date: 2026-05-30
-Status: Open
+Status: Fixed
 Severity: High
 
 ## Symptom
@@ -38,3 +38,14 @@ enum E:
 
 Construct `E.Ok(0x16, [0x48u8])`, destructure it, and assert `code == 0x16`
 and `data.len() == 1`.
+
+## Fix
+
+`if val` lowering now types multi-field enum payload wrappers as `ANY` before
+indexing the tuple payload. This matches the existing match-arm behavior and
+prevents the first binding type from being applied to the whole payload.
+
+## Verification
+
+- `SIMPLE_LIB=src bin/simple check test/unit/compiler/native_enum_if_val_probe.spl test/unit/compiler/native_enum_u8_regression_spec.spl` PASS
+- `src/compiler_rust/target/debug/simple compile test/unit/compiler/native_enum_if_val_probe.spl --native --backend=cranelift -o /tmp/native_enum_if_val_probe && /tmp/native_enum_if_val_probe` prints `PASS`

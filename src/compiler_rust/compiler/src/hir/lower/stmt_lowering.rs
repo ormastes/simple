@@ -276,7 +276,11 @@ impl Lowerer {
                                                 ty: subject_ty,
                                             }],
                                         },
-                                        ty: binding_ty,
+                                        ty: if payload_patterns.len() == 1 {
+                                            binding_ty
+                                        } else {
+                                            TypeId::ANY
+                                        },
                                     };
 
                                     let value = if payload_patterns.len() == 1 {
