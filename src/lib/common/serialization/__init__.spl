@@ -33,8 +33,18 @@ fn _join_pairs(items, open, close):
 pub fn serialize_list(items): _join(items, "[", "]")
 pub fn serialize_tuple_text(items): _join(items, "(", ")")
 pub fn serialize_dict(items): _join_pairs(items, "{", "}")
+pub fn serialize_int(value): value.to_text()
+pub fn serialize_text(value): quote_string(value)
 pub fn serialize_int_list(items): serialize_list(items)
-pub fn serialize_text_list(items): serialize_list(items)
+pub fn serialize_text_list(items):
+    var result = "["
+    var i = 0
+    while i < items.len():
+        if i > 0:
+            result = result + ", "
+        result = result + quote_string(items[i])
+        i = i + 1
+    result + "]"
 pub fn serialize_bool_list(items): serialize_list(items)
 pub fn serialize_bool(value): if value: "true" else: "false"
 pub fn serialize_nil(): "nil"
@@ -70,6 +80,7 @@ fn _pretty_items(items, open, close, indent):
 
 pub fn pretty_list(items, indent): _pretty_items(items, "[", "]", indent)
 pub fn pretty_tuple(items, indent): _pretty_items(items, "(", ")", indent)
+pub fn pretty_print(value): value.to_text()
 
 pub fn pretty_dict(items, indent):
     if items.len() == 0:
@@ -92,6 +103,15 @@ pub fn char_code_safe(ch):
             return i + 32
         i = i + 1
     0
+
+pub fn char_from_code_safe(code):
+    if code == 9: return "\t"
+    if code == 10: return "\n"
+    if code == 13: return "\r"
+    val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    if code >= 32 and code <= 126:
+        return chars[code - 32:code - 31]
+    ""
 
 pub fn char_to_digit_safe(ch):
     if ch == "0": return 0
@@ -122,9 +142,28 @@ pub fn is_numeric_text(value):
     true
 
 pub fn parse_int_safe(value):
-    if not is_numeric_text(value):
+    if value.len() == 0:
         return 0
-    value.parse_int() ?? 0
+    var sign = 1
+    var i = 0
+    if value[0:1] == "-":
+        if value.len() == 1:
+            return 0
+        sign = -1
+        i = 1
+    var result = 0
+    var saw_digit = false
+    while i < value.len():
+        val ch = value[i:i + 1]
+        val code = char_code_safe(ch)
+        if code < 48 or code > 57:
+            return result * sign
+        saw_digit = true
+        result = result * 10 + char_to_digit_safe(ch)
+        i = i + 1
+    if not saw_digit:
+        return 0
+    result * sign
 
 pub fn detect_format(value):
     if value.len() == 0:
@@ -144,7 +183,7 @@ pub fn is_valid_sdn(value): detect_format(value) != "unknown"
 
 pub fn tag_type(content, type_name): "@" + type_name + "{" + content + "}"
 
-pub fn get_type_tag(value) -> text?:
+pub fn get_type_tag(value):
     if value.len() < 3:
         return nil
     if value[0:1] != "@":
@@ -169,9 +208,9 @@ pub fn strip_type_tag(value):
         return value.substring(start, value.len() - 1)
     value.substring(start)
 
-pub fn add_version(content, version): "{v: " + version.to_text() + ", data: " + content + "}"
+pub fn add_version(content, version): "\{v: " + version.to_text() + ", data: " + content + "\}"
 
-pub fn get_version(value) -> i64?:
+pub fn get_version(value):
     if not value.starts_with("{v: "):
         return nil
     val rest = value.substring(4)
@@ -191,12 +230,14 @@ pub fn strip_version(value):
             val rest = value.substring(i + 1, value.len() - 1).trim()
             if rest.starts_with("data: "):
                 return rest.substring(6)
-            return rest
+            return value
         i = i + 1
     value
 
-pub fn is_compressed(value): get_type_tag(value) == "compressed"
-pub fn is_encrypted(value): get_type_tag(value) == "encrypted"
+pub fn mark_compressed(content): tag_type(content, "Compressed")
+pub fn mark_encrypted(content): tag_type(content, "Encrypted")
+pub fn is_compressed(value): get_type_tag(value) == "Compressed"
+pub fn is_encrypted(value): get_type_tag(value) == "Encrypted"
 
 pub fn define_schema(fields): serialize_dict(fields)
 
@@ -250,6 +291,14 @@ pub fn read_bytes(data, offset, count):
         i = i + 1
     (out, count)
 
+pub fn write_bytes(data):
+    var out = [data.len()]
+    var i = 0
+    while i < data.len():
+        out.push(data[i])
+        i = i + 1
+    out
+
 pub fn read_bytes_with_length(data, offset):
     if offset >= data.len():
         return ([], 1)
@@ -265,6 +314,7 @@ pub fn serialize_int_bytes(value):
     out
 
 pub fn serialize_bool_bytes(value): if value: [type_bool(), 1] else: [type_bool(), 0]
+pub fn serialize_nil_bytes(): [type_nil()]
 
 pub fn serialize_text_bytes(value):
     var out = [type_text(), value.len()]
@@ -331,8 +381,12 @@ pub fn unescape_string(value):
                 result = result + "\t"
             elif next == "r":
                 result = result + "\r"
+            elif next == "\\":
+                result = result + "\\"
+            elif next == "\"":
+                result = result + "\""
             else:
-                result = result + next
+                result = result + "\\" + next
             i = i + 2
         else:
             result = result + ch
@@ -378,6 +432,34 @@ pub fn deep_equal_list_text(left, right):
         i = i + 1
     true
 
+pub fn combine_hashes(left, right): left * 31 + right
+pub fn structural_hash_int(value): value
+pub fn structural_hash_bool(value): if value: 1 else: 0
+
+pub fn structural_hash_text(value):
+    var hash = 2166136261
+    var i = 0
+    while i < value.len():
+        hash = hash + char_code_safe(value[i:i + 1])
+        i = i + 1
+    hash
+
+pub fn structural_hash_list_int(items):
+    var hash = 2166136261
+    var i = 0
+    while i < items.len():
+        hash = combine_hashes(hash, structural_hash_int(items[i]))
+        i = i + 1
+    hash
+
+pub fn structural_hash_list_text(items):
+    var hash = 2166136261
+    var i = 0
+    while i < items.len():
+        hash = combine_hashes(hash, structural_hash_text(items[i]))
+        i = i + 1
+    hash
+
 pub fn digit_to_hex(value):
     if value == 0: return "0"
     if value == 1: return "1"
@@ -405,3 +487,21 @@ pub fn hex_to_digit(ch):
     if ch == "e" or ch == "E": return 14
     if ch == "f" or ch == "F": return 15
     char_to_digit_safe(ch)
+
+pub fn int_to_hex(value): digit_to_hex(value / 16) + digit_to_hex(value % 16)
+
+pub fn bytes_to_hex(data):
+    var result = ""
+    var i = 0
+    while i < data.len():
+        result = result + int_to_hex(data[i])
+        i = i + 1
+    result
+
+pub fn hex_to_bytes(value):
+    var out = []
+    var i = 0
+    while i + 1 < value.len():
+        out.push(hex_to_digit(value[i:i + 1]) * 16 + hex_to_digit(value[i + 1:i + 2]))
+        i = i + 2
+    out

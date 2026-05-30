@@ -98,6 +98,7 @@ Discovered on-disk 2026-05-29. These files were not in any previous audit pass.
 | `runtime_legacy_core.c` | `spl_int`, `spl_str`, `spl_bool`, `spl_nil`, and minimal SplValue helpers for bridging `runtime_native.c` | `tools.rs` runtime_inputs | `runtime_native.c` (bridge only) | Minimal compatibility shim so `runtime_native.c` bridge fns link without pulling all of `runtime.c`. Cannot remove without restructuring `runtime_native.c`. |
 | `runtime_mcp_core.c` | `rt_stdin_read_mcp_message_text` | `tools.rs` runtime_inputs | `tools.rs` native project | MCP stdio framing; used by native MCP server build. Cannot remove. |
 | `runtime_https_openssl_core.c` | OpenSSL HTTPS helpers | `tools.rs` runtime_inputs (opt-in: `SIMPLE_CORE_C_INCLUDE_HTTPS_OPENSSL=1`) | Optional HTTPS support | Conditional; only linked when env var set. Cannot remove. |
+
 ### Closed Audit Items — On Disk but Not C Runtime Blockers
 
 These files remain on disk, but the C runtime exclusion audit no longer treats
