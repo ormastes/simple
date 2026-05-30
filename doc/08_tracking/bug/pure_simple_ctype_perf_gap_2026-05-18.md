@@ -554,3 +554,26 @@ Conclusion: native module-level static/global array correctness is no longer
 blocking the ctype static LUT diagnostic path. This does not by itself ship the
 LUT optimization into `src/lib/common/ctype.spl`; the next step is rerunning the
 ctype ratio benchmark and only promoting the LUT if it beats the tracked floor.
+
+## 2026-05-30 Post-Fix Ratio Rerun
+
+Reran the current pushed `origin/main` ctype checks and benchmark after the
+static/global array fix:
+
+```bash
+SIMPLE_LIB=/tmp/simple-state-update/src /home/ormastes/dev/pub/simple/bin/simple check test/perf/ctype/ctype_lut_tables.spl test/perf/ctype/global_static_array_smoke.spl test/perf/ctype/bench_ctype_static_lut.spl test/perf/ctype/bench_ctype.spl src/lib/common/ctype.spl
+SIMPLE_CTYPE_BENCH_SAMPLES=1 SIMPLE_CTYPE_BENCH_ENFORCE=0 SIMPLE_CTYPE_BENCH_CLEAN=1 SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=/tmp/simple-state-update/src bash test/perf/ctype/run_ctype_benchmarks.shs
+```
+
+Results:
+
+- Check passed for `ctype.spl`, the direct benchmark, static LUT tables, static
+  LUT benchmark, and `global_static_array_smoke.spl`.
+- Current shipped direct-range `ctype.spl` native ratios were still below the
+  0.50x C floor for five cases: `is_alpha=0.39x`, `is_alnum=0.28x`,
+  `is_space=0.24x`, `to_lower=0.31x`, and `to_upper=0.38x`.
+
+Conclusion: the static LUT diagnostic can now run, but the currently shipped
+ctype implementation still does not meet the native/C floor. Do not promote the
+LUT or close this tracker without a benchmark run showing the candidate
+implementation beats the tracked floor.

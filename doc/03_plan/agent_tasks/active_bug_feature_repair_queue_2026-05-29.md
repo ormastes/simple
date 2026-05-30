@@ -1297,13 +1297,21 @@ Spawned read-only explorers:
     - Focused search found no concrete ndarray-push implementation request.
       `/tmp/simple-ndarray-push` is an unrelated detached assert-ran commit
       and must be preserved until its owner protects or discards it.
+89. Ctype post-fix ratio rerun completed.
+    - Current pushed `origin/main` checks passed for `ctype.spl`, the direct
+      benchmark, static LUT tables, static LUT benchmark, and static-array
+      smoke.
+    - The current shipped direct-range implementation still misses the native/C
+      floor for `is_alpha`, `is_alnum`, `is_space`, `to_lower`, and `to_upper`,
+      so the LUT must not be promoted or the tracker closed without a better
+      benchmark result.
 
 ## Remaining Open Work After 2026-05-30 Salvage
 
 - Ctype perf: native static/global `[u8]` LUT correctness is fixed and the
-  static LUT diagnostic passes. Broader native loop/branch performance and the
-  decision whether to promote the LUT into `src/lib/common/ctype.spl` remain
-  open until the ratio benchmark beats the tracked floor.
+  static LUT diagnostic passes. A post-fix ratio rerun still shows five direct
+  `ctype.spl` cases below the 0.50x native/C floor, so broader native
+  loop/branch performance and any LUT promotion remain open.
 - FR-PLUG-0004: bounded adjacent-pattern GEMM-add codegen fusion is landed,
   but a linkable runtime/plugin GEMM-add implementation, shape/dimension ABI,
   and performance proof remain open.
