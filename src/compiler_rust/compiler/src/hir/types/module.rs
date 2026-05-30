@@ -127,6 +127,12 @@ impl HirDomainBlock {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct HirGlobalArrayInit {
+    pub element_type: TypeId,
+    pub values: Vec<i64>,
+}
+
 /// HIR module
 #[derive(Debug)]
 pub struct HirModule {
@@ -141,6 +147,9 @@ pub struct HirModule {
     /// Maps global name to its string value. These require runtime initialization
     /// (heap allocation) so they can't be stored in the data section directly.
     pub global_init_strings: HashMap<String, String>,
+    /// Integer array literal initial values for module-level `val`/`var`.
+    /// These require runtime allocation, then storage of the resulting array handle.
+    pub global_init_arrays: HashMap<String, HirGlobalArrayInit>,
     /// Set of globals that are defined locally in this module (not imported).
     pub local_globals: HashSet<String>,
     /// Set of globals that are immutable (val/const, not var).
@@ -203,6 +212,7 @@ impl HirModule {
             globals: Vec::new(),
             global_init_values: HashMap::new(),
             global_init_strings: HashMap::new(),
+            global_init_arrays: HashMap::new(),
             local_globals: HashSet::new(),
             immutable_globals: HashSet::new(),
             type_invariants: HashMap::new(),

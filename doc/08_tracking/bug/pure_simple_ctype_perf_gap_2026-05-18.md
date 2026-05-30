@@ -497,3 +497,60 @@ Conclusion: the static-data route is blocked by native correctness for
 cross-module module-level array lookup before it can be considered as a ctype
 performance fix. Do not apply the LUT to `src/lib/common/ctype.spl`; the next
 action belongs in backend/global-array correctness and branch/loop codegen.
+
+## 2026-05-30 Native Static Array Backend Fix
+
+Scoped pass worked in `/tmp/simple-agent-ctype-static`. The previous native
+static LUT failure was reproduced first with the copied worktree and external
+debug compiler: native build succeeded, but
+`test/perf/ctype/bench_ctype_static_lut.spl` exited 1 with corrupted
+checksums (`is_alpha/is_alnum/is_xdigit=128000000`, `is_space=0`).
+
+Root cause found:
+
+- Module-level array literals had no HIR/MIR global initializer record, so
+  native module initialization only handled scalar/string globals.
+- After adding array initialization, cross-module imports still typed
+  `val NAME: [u8]` globals as `Any` because the import loader did not read
+  typed patterns. That made indexed `[u8]` reads use boxed values instead of
+  native byte unboxing.
+
+Backend fix:
+
+- Added HIR/MIR global array initializer metadata and native project mangling.
+- Emitted module init allocation/fill/store for constant global arrays.
+  `[u8]` uses `rt_byte_array_new` plus `rt_typed_bytes_u8_push`; other integer
+  arrays use boxed `rt_array_push`.
+- Fixed imported typed `let`/`val` symbol and type extraction through
+  `Pattern::Typed`.
+- Added `global_static_array_smoke.spl` to check representative cross-module
+  `[i64]` and `[u8]` values before relying on the full ctype benchmark.
+
+Focused verification:
+
+```bash
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple check test/perf/ctype/ctype_lut_tables.spl test/perf/ctype/global_static_array_smoke.spl test/perf/ctype/bench_ctype_static_lut.spl
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple native-build --entry test/perf/ctype/global_static_array_smoke.spl --source src/lib --source test/perf/ctype --entry-closure --backend cranelift --runtime-bundle core-c-bootstrap -o build/perf/ctype/global_static_array_smoke
+build/perf/ctype/global_static_array_smoke
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple native-build --entry test/perf/ctype/bench_ctype_static_lut.spl --source src/lib --source test/perf/ctype --entry-closure --backend cranelift --runtime-bundle core-c-bootstrap -o build/perf/ctype/bench_ctype_static_lut
+build/perf/ctype/bench_ctype_static_lut
+```
+
+Results:
+
+- Static array smoke passed: `[ctype-static-array] ok`.
+- Static LUT benchmark now exits 0 with expected checksums:
+  `is_alpha=52000000`, `is_alnum=62000000`, `is_xdigit=22000000`,
+  `is_space=6000000`, `combined_checksum=142000000`.
+- Rust compiler check/build passed with the existing vendored registry
+  workaround:
+  `cargo check/build --config 'source.vendored-sources.directory="/home/ormastes/dev/pub/simple/src/compiler_rust/vendor"' -p simple-compiler -p simple-driver`.
+- Broader smoke passed:
+  `check src/compiler`, `check src/lib`, `check src/app/mcp`, and
+  `check src/app/simple_lsp_mcp`. Large tree checks still report existing
+  warning classes.
+
+Conclusion: native module-level static/global array correctness is no longer
+blocking the ctype static LUT diagnostic path. This does not by itself ship the
+LUT optimization into `src/lib/common/ctype.spl`; the next step is rerunning the
+ctype ratio benchmark and only promoting the LUT if it beats the tracked floor.

@@ -205,12 +205,7 @@ impl Lowerer {
             Node::Trait(trait_def) => trait_def.name == name,
             Node::Static(static_stmt) => static_stmt.name == name,
             Node::Const(const_stmt) => const_stmt.name == name,
-            Node::Let(let_stmt) => match &let_stmt.pattern {
-                simple_parser::Pattern::Identifier(binding) | simple_parser::Pattern::MutIdentifier(binding) => {
-                    binding == name
-                }
-                _ => false,
-            },
+            Node::Let(let_stmt) => Self::extract_pattern_name(&let_stmt.pattern).as_deref() == Some(name),
             Node::Extern(extern_fn) => extern_fn.name == name,
             _ => false,
         }
@@ -427,14 +422,12 @@ impl Lowerer {
                     }
                 }
                 Node::Let(let_stmt) => {
-                    let name = match &let_stmt.pattern {
-                        simple_parser::Pattern::Identifier(n) => Some(n.clone()),
-                        simple_parser::Pattern::MutIdentifier(n) => Some(n.clone()),
-                        _ => None,
-                    };
+                    let name = Self::extract_pattern_name(&let_stmt.pattern);
                     if let Some(n) = name {
                         if self.should_import_symbol(&n, target) {
                             let ty = if let Some(ref t) = let_stmt.ty {
+                                self.resolve_type(t).unwrap_or(TypeId::ANY)
+                            } else if let Some(t) = Self::extract_pattern_type(&let_stmt.pattern) {
                                 self.resolve_type(t).unwrap_or(TypeId::ANY)
                             } else {
                                 TypeId::ANY

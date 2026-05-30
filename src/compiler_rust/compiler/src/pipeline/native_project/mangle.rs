@@ -154,6 +154,15 @@ pub(crate) fn mangle_mir(
         }
     }
 
+    let old_init_arrays = std::mem::take(&mut mir.global_init_arrays);
+    for (name, val) in old_init_arrays {
+        if let Some(mangled) = local_global_mangled.get(&name) {
+            mir.global_init_arrays.insert(mangled.clone(), val);
+        } else {
+            mir.global_init_arrays.insert(name, val);
+        }
+    }
+
     let old_local = std::mem::take(&mut mir.local_globals);
     for name in old_local {
         if let Some(mangled) = local_global_mangled.get(&name) {

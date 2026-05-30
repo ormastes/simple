@@ -5,9 +5,10 @@ use simple_parser::{self as ast, Expr, Module, Node};
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
-    HirAopAdvice, HirArchRule, HirCapabilityItem, HirCapabilityPolicy, HirDiBinding, HirDomainBlock, HirImpl,
-    HirInjectGraph, HirInjectItem, HirLeanBlock, HirMockDecl, HirModule, HirSandboxItem, HirSandboxPolicy,
-    HirSecurityGate, HirSecurityItem, HirSecurityPolicy, HirType, HirUiPolicy, HirUiPolicyItem, TypeId,
+    HirAopAdvice, HirArchRule, HirCapabilityItem, HirCapabilityPolicy, HirDiBinding, HirDomainBlock,
+    HirGlobalArrayInit, HirImpl, HirInjectGraph, HirInjectItem, HirLeanBlock, HirMockDecl, HirModule, HirSandboxItem,
+    HirSandboxPolicy, HirSecurityGate, HirSecurityItem, HirSecurityPolicy, HirType, HirUiPolicy, HirUiPolicyItem,
+    TypeId,
 };
 
 fn try_const_eval(expr: &Expr) -> Option<i64> {
@@ -51,6 +52,37 @@ fn try_const_eval(expr: &Expr) -> Option<i64> {
             }
         }
         _ => None,
+    }
+}
+
+fn try_const_array_eval(expr: &Expr) -> Option<Vec<i64>> {
+    match expr {
+        Expr::Array(elements) => elements.iter().map(try_const_eval).collect(),
+        Expr::ArrayRepeat { value, count } => {
+            let value = try_const_eval(value)?;
+            let count = try_const_eval(count)?;
+            if count < 0 {
+                return None;
+            }
+            Some(vec![value; count as usize])
+        }
+        _ => None,
+    }
+}
+
+fn record_const_array_init(
+    map: &mut HashMap<String, HirGlobalArrayInit>,
+    name: &str,
+    ty: TypeId,
+    types: &crate::hir::types::TypeRegistry,
+    expr: Option<&Expr>,
+) {
+    if let Some(values) = expr.and_then(try_const_array_eval) {
+        let element_type = match types.get(ty) {
+            Some(HirType::Array { element, .. }) => *element,
+            _ => ty,
+        };
+        map.insert(name.to_string(), HirGlobalArrayInit { element_type, values });
     }
 }
 
@@ -267,6 +299,13 @@ impl Lowerer {
                     let tagged = if *val { 0b011 | (1 << 3) } else { 0b011 };
                     self.global_init_values.insert(s.name.clone(), tagged);
                 }
+                record_const_array_init(
+                    &mut self.global_init_arrays,
+                    &s.name,
+                    ty,
+                    &self.module.types,
+                    Some(&s.value),
+                );
             }
             Node::Const(c) => {
                 // Register constant
@@ -295,6 +334,13 @@ impl Lowerer {
                     let tagged = if *val { 0b011 | (1 << 3) } else { 0b011 };
                     self.global_init_values.insert(c.name.clone(), tagged);
                 }
+                record_const_array_init(
+                    &mut self.global_init_arrays,
+                    &c.name,
+                    ty,
+                    &self.module.types,
+                    Some(&c.value),
+                );
             }
             Node::Let(l) => {
                 // Register module-level variable (var at module scope = global)
@@ -318,7 +364,7 @@ impl Lowerer {
                     }
                     // Extract compile-time constant value from initializer
                     if let Some(val) = l.value.as_ref().and_then(try_const_eval) {
-                        self.global_init_values.insert(n, val);
+                        self.global_init_values.insert(n.clone(), val);
                     } else if let Some(Expr::String(val)) = &l.value {
                         self.global_init_strings.insert(n.clone(), val.clone());
                     } else if let Some(Expr::FString { parts, .. }) = &l.value {
@@ -331,8 +377,15 @@ impl Lowerer {
                         }
                     } else if let Some(Expr::Bool(val)) = &l.value {
                         let tagged = if *val { 0b011 | (1 << 3) } else { 0b011 };
-                        self.global_init_values.insert(n, tagged);
+                        self.global_init_values.insert(n.clone(), tagged);
                     }
+                    record_const_array_init(
+                        &mut self.global_init_arrays,
+                        &n,
+                        ty,
+                        &self.module.types,
+                        l.value.as_ref(),
+                    );
                 }
             }
             _ => {}
@@ -941,6 +994,7 @@ impl Lowerer {
         // Copy compile-time constant init values to HirModule for codegen
         self.module.global_init_values = self.global_init_values.clone();
         self.module.global_init_strings = self.global_init_strings.clone();
+        self.module.global_init_arrays = self.global_init_arrays.clone();
 
         // Copy local globals set to HirModule for codegen linkage decisions
         self.module.local_globals = self.local_globals.clone();
@@ -1217,6 +1271,7 @@ impl Lowerer {
         }
         self.module.global_init_values = self.global_init_values.clone();
         self.module.global_init_strings = self.global_init_strings.clone();
+        self.module.global_init_arrays = self.global_init_arrays.clone();
 
         // Copy local globals set to HirModule for codegen linkage decisions
         self.module.local_globals = self.local_globals.clone();

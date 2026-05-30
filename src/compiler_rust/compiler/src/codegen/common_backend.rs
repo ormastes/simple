@@ -144,6 +144,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_slice"
             | "rt_alloc"
             | "rt_array_new"
+            | "rt_byte_array_new"
             | "rt_array_len"
             | "rt_array_get"
             | "rt_array_get_text"
@@ -152,6 +153,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_array_set_text"
             | "rt_array_set_len_known_text"
             | "rt_array_push"
+            | "rt_typed_bytes_u8_push"
             | "rt_tuple_new"
             | "rt_tuple_set"
             | "rt_enum_new"
@@ -850,6 +852,7 @@ impl<M: Module> CodegenBackend<M> {
             && mir.globals.is_empty()
             && mir.global_init_values.is_empty()
             && mir.global_init_strings.is_empty()
+            && mir.global_init_arrays.is_empty()
             && mir.vtable_impls.is_empty()
             && functions
                 .iter()
@@ -1531,17 +1534,16 @@ impl<M: Module> CodegenBackend<M> {
             }
         }
 
-        // Generate module initialization function for string constants.
-        // This creates a constructor function that allocates runtime strings
-        // from static byte data and stores them to global variables.
-        if !mir.global_init_strings.is_empty() {
-            self.generate_module_init(&mir.global_init_strings)?;
+        // Generate module initialization function for heap-backed global constants.
+        // This allocates runtime strings/arrays and stores their handles in globals.
+        if !mir.global_init_strings.is_empty() || !mir.global_init_arrays.is_empty() {
+            self.generate_module_init(&mir.global_init_strings, &mir.global_init_arrays)?;
         }
 
         Ok(functions)
     }
 
-    /// Generate a `__module_init` function that initializes string global variables.
+    /// Generate a `__module_init` function that initializes heap-backed globals.
     ///
     /// For each string constant (e.g., `val NL = "\n"`), this function:
     /// 1. Creates static byte data in .rodata
@@ -1549,7 +1551,11 @@ impl<M: Module> CodegenBackend<M> {
     /// 3. Stores the result to the global variable
     ///
     /// The function is registered via `.init_array` so it runs before `main()`.
-    fn generate_module_init(&mut self, init_strings: &std::collections::HashMap<String, String>) -> BackendResult<()> {
+    fn generate_module_init(
+        &mut self,
+        init_strings: &std::collections::HashMap<String, String>,
+        init_arrays: &std::collections::HashMap<String, crate::hir::HirGlobalArrayInit>,
+    ) -> BackendResult<()> {
         use cranelift_codegen::ir::{types, MemFlags, UserFuncName};
 
         let init_name = match &self.module_prefix {
@@ -1573,11 +1579,56 @@ impl<M: Module> CodegenBackend<M> {
             .declare_function(&init_name, cranelift_module::Linkage::Preemptible, &sig)
             .map_err(|e| BackendError::ModuleError(format!("declare __module_init: {e}")))?;
 
-        // Get rt_string_new function ID
-        let string_new_id = *self
-            .runtime_funcs
-            .get("rt_string_new")
-            .ok_or_else(|| BackendError::ModuleError("rt_string_new not declared".into()))?;
+        let string_new_id = if init_strings.is_empty() {
+            None
+        } else {
+            Some(
+                *self
+                    .runtime_funcs
+                    .get("rt_string_new")
+                    .ok_or_else(|| BackendError::ModuleError("rt_string_new not declared".into()))?,
+            )
+        };
+        let array_new_id = if init_arrays.is_empty() {
+            None
+        } else {
+            Some(
+                *self
+                    .runtime_funcs
+                    .get("rt_array_new")
+                    .ok_or_else(|| BackendError::ModuleError("rt_array_new not declared".into()))?,
+            )
+        };
+        let array_push_id = if init_arrays.is_empty() {
+            None
+        } else {
+            Some(
+                *self
+                    .runtime_funcs
+                    .get("rt_array_push")
+                    .ok_or_else(|| BackendError::ModuleError("rt_array_push not declared".into()))?,
+            )
+        };
+        let byte_array_new_id = if init_arrays.values().any(|init| init.element_type == TypeId::U8) {
+            Some(
+                *self
+                    .runtime_funcs
+                    .get("rt_byte_array_new")
+                    .ok_or_else(|| BackendError::ModuleError("rt_byte_array_new not declared".into()))?,
+            )
+        } else {
+            None
+        };
+        let byte_push_id = if init_arrays.values().any(|init| init.element_type == TypeId::U8) {
+            Some(
+                *self
+                    .runtime_funcs
+                    .get("rt_typed_bytes_u8_push")
+                    .ok_or_else(|| BackendError::ModuleError("rt_typed_bytes_u8_push not declared".into()))?,
+            )
+        } else {
+            None
+        };
 
         // Build the function body
         self.ctx.func.signature = sig;
@@ -1624,7 +1675,7 @@ impl<M: Module> CodegenBackend<M> {
             let str_len = builder.ins().iconst(types::I64, bytes.len() as i64);
 
             // 3. Call rt_string_new(ptr, len) -> RuntimeValue
-            let string_new_ref = self.module.declare_func_in_func(string_new_id, builder.func);
+            let string_new_ref = self.module.declare_func_in_func(string_new_id.unwrap(), builder.func);
             let call_inst = builder.ins().call(string_new_ref, &[str_ptr, str_len]);
             let string_rv = builder.inst_results(call_inst)[0];
 
@@ -1646,6 +1697,53 @@ impl<M: Module> CodegenBackend<M> {
                     builder.ins().store(MemFlags::new(), string_rv, global_addr, 0);
                 }
                 // If still not found, skip silently (global might be in another module)
+            }
+        }
+
+        let mut sorted_arrays: Vec<_> = init_arrays.iter().collect();
+        sorted_arrays.sort_by_key(|(name, _)| (*name).clone());
+        for (global_name, init) in &sorted_arrays {
+            let capacity = builder.ins().iconst(types::I64, init.values.len() as i64);
+            let array_rv = if init.element_type == TypeId::U8 {
+                let new_ref = self
+                    .module
+                    .declare_func_in_func(byte_array_new_id.unwrap(), builder.func);
+                let call_inst = builder.ins().call(new_ref, &[capacity]);
+                let array = builder.inst_results(call_inst)[0];
+                let push_ref = self.module.declare_func_in_func(byte_push_id.unwrap(), builder.func);
+                for value in &init.values {
+                    let byte = builder.ins().iconst(types::I64, (*value & 0xff) as i64);
+                    builder.ins().call(push_ref, &[array, byte]);
+                }
+                array
+            } else {
+                let new_ref = self.module.declare_func_in_func(array_new_id.unwrap(), builder.func);
+                let call_inst = builder.ins().call(new_ref, &[capacity]);
+                let array = builder.inst_results(call_inst)[0];
+                let push_ref = self.module.declare_func_in_func(array_push_id.unwrap(), builder.func);
+                for value in &init.values {
+                    let raw = builder.ins().iconst(types::I64, *value);
+                    let shift = builder.ins().iconst(types::I64, 3);
+                    let boxed = builder.ins().ishl(raw, shift);
+                    builder.ins().call(push_ref, &[array, boxed]);
+                }
+                array
+            };
+
+            if let Some(&gid) = self.global_ids.get(global_name.as_str()) {
+                let global_ref = self.module.declare_data_in_func(gid, builder.func);
+                let global_addr = builder.ins().global_value(types::I64, global_ref);
+                builder.ins().store(MemFlags::new(), array_rv, global_addr, 0);
+            } else {
+                let mangled = match &self.module_prefix {
+                    Some(prefix) => format!("{}__{}", prefix, global_name),
+                    None => global_name.to_string(),
+                };
+                if let Some(&gid) = self.global_ids.get(mangled.as_str()) {
+                    let global_ref = self.module.declare_data_in_func(gid, builder.func);
+                    let global_addr = builder.ins().global_value(types::I64, global_ref);
+                    builder.ins().store(MemFlags::new(), array_rv, global_addr, 0);
+                }
             }
         }
 
