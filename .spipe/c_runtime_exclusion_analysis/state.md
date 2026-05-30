@@ -24,3 +24,9 @@ dev-done
 
 ## Log
 - dev: Created state file with 5 acceptance criteria (type: code-quality)
+- audit: Closed `hosted_cocoa.c` and `hosted_win32.c` as stale unbuilt C duplicates based on active `spl_hosted_runtime` Rust exports and path/build-reference evidence.
+- verify: `sh scripts/install-spipe-dev-command.shs --check` passed.
+- verify: `cargo check --manifest-path src/runtime/hosted/Cargo.toml` passed.
+- verify: `bin/simple test test/unit/os/compositor/hosted_backend_cocoa_spec.spl` passed 7 examples.
+- verify: `bin/simple test test/unit/os/compositor/hosted_backend_win32_spec.spl` passed 6 examples.
+- verify-blocked: `cargo test --manifest-path src/runtime/hosted/Cargo.toml` is blocked by an existing Rust unit-test type mismatch in `src/runtime/hosted/cocoa.rs` (`rt_cocoa_window_new` now expects `i64`, test passes `std::ptr::null()`); source/test fix is outside this doc-only audit pass.

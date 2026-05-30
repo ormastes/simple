@@ -1,7 +1,7 @@
 # C Runtime Exclusion Analysis
 
 **Date:** 2026-05-18
-**Last audited:** 2026-05-29 (follow-up pass — pty, string_index, async_driver, math/random/error/config, contracts, regex_stub, equality, format, value, and env removed)
+**Last audited:** 2026-05-30 (follow-up pass — hosted_cocoa/hosted_win32 classified as stale unbuilt C duplicates; active hosted ABI resolves through Rust stubs/real-gated crate)
 **Status:** Open — audit still tracks removable C runtime candidates and blocked removals.
 **Context:** Pure Simple conversion project — which C files can be removed
 
@@ -98,8 +98,17 @@ Discovered on-disk 2026-05-29. These files were not in any previous audit pass.
 | `runtime_legacy_core.c` | `spl_int`, `spl_str`, `spl_bool`, `spl_nil`, and minimal SplValue helpers for bridging `runtime_native.c` | `tools.rs` runtime_inputs | `runtime_native.c` (bridge only) | Minimal compatibility shim so `runtime_native.c` bridge fns link without pulling all of `runtime.c`. Cannot remove without restructuring `runtime_native.c`. |
 | `runtime_mcp_core.c` | `rt_stdin_read_mcp_message_text` | `tools.rs` runtime_inputs | `tools.rs` native project | MCP stdio framing; used by native MCP server build. Cannot remove. |
 | `runtime_https_openssl_core.c` | OpenSSL HTTPS helpers | `tools.rs` runtime_inputs (opt-in: `SIMPLE_CORE_C_INCLUDE_HTTPS_OPENSSL=1`) | Optional HTTPS support | Conditional; only linked when env var set. Cannot remove. |
-| `hosted_cocoa.c` | macOS Cocoa UI / window host | **Zero build refs on Linux** (confirmed 2026-05-29 — no `.rs` file outside vendor/ references it). `tools.rs` line 600 comment references `src/runtime/hosted/cocoa.rs` (a Rust file), not this C file. | macOS-specific | Status: not compiled on Linux; may be platform-gated macOS-only. Audit needed on macOS before declaring removable. |
-| `hosted_win32.c` | Win32 UI / window host | **Zero build refs on Linux** (confirmed 2026-05-29). | Windows-specific | Status: not compiled on Linux; may be platform-gated Windows-only. Audit needed on Windows before declaring removable. |
+### Closed Audit Items — On Disk but Not C Runtime Blockers
+
+These files remain on disk, but the C runtime exclusion audit no longer treats
+them as blockers for the pure-Simple direction. The Simple ABI surface is real,
+but it is satisfied by Rust `spl_hosted_runtime` exports in the native-all lane;
+the C files are stale/manual platform experiments, not build inputs.
+
+| C File | Key Symbols | Active Replacement | Evidence | Audit Result |
+|--------|-------------|--------------------|----------|--------------|
+| `hosted_cocoa.c` | `rt_cocoa_window_*`, `rt_cocoa_layer_*`, `rt_cocoa_event_pump` | `src/runtime/hosted/cocoa.rs` via `spl_hosted_runtime`; default is stubs-only, real Cocoa is `cocoa-real` gated | `src/compiler_rust/native_all/src/lib.rs` pulls `spl_hosted_runtime`; `src/compiler_rust/native_all/Cargo.toml` maps `cocoa-real` to `spl_hosted_runtime/cocoa-real`; `src/runtime/hosted/cocoa.rs` exports matching `#[no_mangle]` symbols; path scan found only tracker/self references to `hosted_cocoa.c` outside the file itself | Closed as stale unbuilt duplicate. Deletion is a follow-up source cleanup, not a platform audit blocker. |
+| `hosted_win32.c` | `rt_win32_window_*`, `rt_win32_dib_*`, `rt_win32_message_pump` | `src/runtime/hosted/win32.rs` via `spl_hosted_runtime`; default is stubs-only, real Win32 is `win32-real` gated | `src/compiler_rust/native_all/src/lib.rs` pulls `spl_hosted_runtime`; `src/compiler_rust/native_all/Cargo.toml` maps `win32-real` to `spl_hosted_runtime/win32-real`; `src/runtime/hosted/win32.rs` exports matching `#[no_mangle]` symbols; path scan found only tracker/self references to `hosted_win32.c` outside the file itself | Closed as stale unbuilt duplicate. Deletion is a follow-up source cleanup, not a platform audit blocker. |
 
 ## New Removal Candidates (zero native/codegen callers, interpreter duplicate exists)
 
@@ -229,7 +238,14 @@ is wired into the build system.
 
 For **runtime_db.c**: Active SQLite wrapper; multiple spl callers. Compiled by `runtime/build.rs`. Cannot remove without a pure-Simple or Rust SQLite replacement wired through the same symbols.
 
-For **hosted_cocoa.c / hosted_win32.c**: Zero Linux build references confirmed. Status on macOS/Windows is unknown — audit on those platforms before declaring removable or keeping.
+For **hosted_cocoa.c / hosted_win32.c**:
+Closed 2026-05-30 as stale unbuilt C duplicates, not active platform blockers.
+The active hosted surface ABI is exported from the Rust `spl_hosted_runtime`
+crate: default native-all builds link stubs, while real platform backends remain
+feature-gated through `cocoa-real` and `win32-real`. Pure Simple remains the
+primary compositor/application layer; these Rust exports are seed/tooling
+runtime shims until a pure-Simple or lower-level platform boundary can replace
+them.
 
 ## Pure Simple Replacements (coexist with C)
 
