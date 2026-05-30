@@ -66,6 +66,14 @@ The editor must remain runnable on both host platforms and SimpleOS:
   and Tauri surfaces present those strings through host adapters; they do not
   make Tauri, browser/webview, SDL, or desktop APIs dependencies of the shared
   renderer.
+- Current render evidence is split by boundary:
+  `test/unit/lib/editor/editor_web_tauri_render_contract_spec.spl` proves
+  editor-specific GUI HTML (`gui-editor-source`, `contenteditable`, markdown
+  language markers) reaches both pure Simple WebRender artifacts and the Tauri
+  render envelope. Tauri shell evidence remains adapter-level, covered by
+  `doc/07_guide/testing/tauri_backend_container_testing.md` and
+  `test/unit/app/ui/tauri_backend_spec.spl`; a live Tauri editor-shell WebView
+  screenshot proof is not yet claimed here.
 - `test/unit/lib/editor/host_simpleos_surface_contract_spec.spl` enforces this
   boundary with source-level checks for shared editor services, TUI code,
   `src/app/ide/main.spl`, and `examples/ide/simple_ide_launch.spl`, plus a

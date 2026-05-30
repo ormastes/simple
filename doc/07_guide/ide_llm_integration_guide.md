@@ -72,6 +72,13 @@ The IDE must run on both host platforms and SimpleOS:
   guards the boundary by scanning the shared editor services, TUI path, Simple
   IDE entrypoint, and embedded example IDE for host-only API names, and by
   rendering editor GUI HTML through the shared GUI backend.
+- **Tauri evidence:** `test/unit/lib/editor/editor_web_tauri_render_contract_spec.spl`
+  proves editor-specific GUI HTML reaches both pure Simple WebRender artifacts
+  and the Tauri render envelope. The remaining Tauri proof is shell/adapter-level:
+  `test/unit/app/ui/tauri_backend_spec.spl` checks the Tauri backend model, and
+  `doc/07_guide/testing/tauri_backend_container_testing.md` documents the
+  render-envelope injection path. This is not yet a live Tauri editor-shell
+  WebView screenshot proof.
 
 ### LLM session management
 
