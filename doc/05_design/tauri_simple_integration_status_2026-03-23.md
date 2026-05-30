@@ -109,7 +109,7 @@ DISPLAY=:99 WEBKIT_DISABLE_DMABUF_RENDERER=1 \
   available on mobile.
 - A 2026-05-29 rebuilt APK now renders the bundled Simple UI dashboard/demo on
   the Android emulator; see
-  `doc/09_bugs/tauri_android_asset_root_failure_2026-05-29.md`.
+  `doc/08_tracking/bug/tauri_android_asset_root_failure_2026-05-29.md`.
 - Physical Android device proof is still not recorded.
 
 **How to build:**

@@ -302,7 +302,7 @@ Notes:
 - The per-pixel software render (e.g. the host WM at 1024×768) is slow in the
   interpreter; verify at small resolution or use the compiled path.
 - Full root cause + recipe:
-  [`doc/09_bugs/macos_winit_window_not_displayed_2026-05-28.md`](../09_bugs/macos_winit_window_not_displayed_2026-05-28.md).
+  [`doc/08_tracking/bug/macos_winit_window_not_displayed_2026-05-28.md`](../08_tracking/bug/macos_winit_window_not_displayed_2026-05-28.md).
 
 ## 10. Pointers
 

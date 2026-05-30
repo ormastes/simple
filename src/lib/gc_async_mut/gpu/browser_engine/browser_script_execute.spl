@@ -1,16 +1,27 @@
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-
-class BrowserScriptExecutionResult:
+pub class BrowserScriptExecutionResult:
     scripts_collected: i64
     scripts_executed: i64
+    scripts_denied: i64
     console_output: [text]
+    diagnostics: [text]
 
 impl BrowserScriptExecutionResult:
     static fn empty() -> BrowserScriptExecutionResult:
         var co: [text] = []
-        BrowserScriptExecutionResult(scripts_collected: 0, scripts_executed: 0, console_output: co)
+        var diagnostics: [text] = []
+        BrowserScriptExecutionResult(scripts_collected: 0, scripts_executed: 0, scripts_denied: 0, console_output: co, diagnostics: diagnostics)
+
+fn _browser_script_index_of_from(haystack: text, marker: text, start: i64) -> i64:
+    if marker == "":
+        return start
+    var offset = start
+    while offset < haystack.len():
+        val tail = haystack.substring(offset, haystack.len())
+        val found = tail.index_of(marker)
+        if found < 0:
+            return -1
+        return offset + found
+    -1
 
 fn _extract_attr(tag_text: text, attr: text) -> text:
     val key_dq = attr + "=\""
@@ -20,63 +31,121 @@ fn _extract_attr(tag_text: text, attr: text) -> text:
     val idx_sq = lo.index_of(key_sq)
     if idx_dq >= 0:
         val start = idx_dq + key_dq.len()
-        val end = tag_text.index_of("\"", start)
+        val end = _browser_script_index_of_from(tag_text, "\"", start)
         if end > start:
             return tag_text.substring(start, end)
     if idx_sq >= 0:
         val start = idx_sq + key_sq.len()
-        val end = tag_text.index_of("'", start)
+        val end = _browser_script_index_of_from(tag_text, "'", start)
         if end > start:
             return tag_text.substring(start, end)
     ""
 
-fn _script_type_is_simple(script_type: text) -> bool:
-    script_type == "" or script_type == "text/simple"
-
-fn _normalize_script_body(body: text) -> text:
-    val normalized = body.replace("const ", "val ").trim()
-    if normalized.len() == 0:
-        return "fn main():"
-    "fn main():\n    " + normalized.replace("\n", "\n    ")
-
-fn _run_script_source(source: text) -> (bool, text):
-    val tmp = "/tmp/browser_script_exec_tmp.spl"
-    rt_file_write_text(tmp, _normalize_script_body(source))
-    var out = ""
-    var err = ""
-    var rc: i64 = 0
-    (out, err, rc) = rt_process_run("bin/simple", [tmp])
-    rt_file_delete(tmp)
-    (rc == 0, out)
+fn _script_type_is_browser_js(script_type: text) -> bool:
+    val ty = script_type.lower().trim()
+    ty == "" or ty == "text/javascript" or ty == "application/javascript" or ty == "module"
 
 fn _append_lines(out: [text], s: text):
     val trimmed = s.trim()
     if trimmed.len() > 0:
         out.push(trimmed)
 
-fn execute_scripts_in_html(html: text) -> BrowserScriptExecutionResult:
+fn _strip_optional_semicolon(source: text) -> text:
+    val trimmed = source.trim()
+    if trimmed.ends_with(";"):
+        return trimmed.substring(0, trimmed.len() - 1).trim()
+    trimmed
+
+fn _literal_console_log_payload(statement: text) -> text:
+    val trimmed = _strip_optional_semicolon(statement)
+    if not trimmed.starts_with("console.log("):
+        return ""
+    if not trimmed.ends_with(")"):
+        return ""
+    val inner = trimmed.substring(12, trimmed.len() - 1).trim()
+    if inner.len() < 2:
+        return ""
+    val first = inner.substring(0, 1)
+    val last = inner.substring(inner.len() - 1, inner.len())
+    if first == "\"" and last == "\"":
+        return inner.substring(1, inner.len() - 1)
+    if first == "'" and last == "'":
+        return inner.substring(1, inner.len() - 1)
+    ""
+
+fn _script_host_escape_diagnostic(source: text) -> text:
+    val lo = source.lower()
+    if lo.contains("rt_process_run") or lo.contains("host.shell"):
+        return "host shell access denied"
+    if lo.contains("child_process") or lo.contains("spawn("):
+        return "child process access denied"
+    if lo.contains("require(") or lo.contains("import("):
+        return "module loader access denied"
+    if lo.contains("process.env"):
+        return "ambient environment access denied"
+    if lo.contains("fs.") or lo.contains("fs.readfile"):
+        return "filesystem access denied"
+    if lo.contains("fetch(") or lo.contains("xmlhttprequest") or lo.contains("websocket"):
+        return "network access denied"
+    ""
+
+fn _run_browser_js_source(source: text) -> (bool, [text], text):
+    var output: [text] = []
+    val host_escape = _script_host_escape_diagnostic(source)
+    if host_escape != "":
+        return (false, output, host_escape)
+    val normalized = source.replace("\r", "\n").replace(";", ";\n")
+    val statements = normalized.split("\n")
+    var executable_count = 0
+    for raw in statements:
+        val statement = raw.trim()
+        if statement == "":
+            continue
+        val payload = _literal_console_log_payload(statement)
+        if payload == "":
+            return (false, output, "unsupported browser JavaScript statement: " + statement)
+        output.push(payload)
+        executable_count = executable_count + 1
+    if executable_count == 0:
+        return (true, output, "")
+    (true, output, "")
+
+pub fn execute_scripts_in_html(html: text) -> BrowserScriptExecutionResult:
     var result = BrowserScriptExecutionResult.empty()
     val lo = html.lower()
     var search_pos: i64 = 0
     while search_pos < html.len():
-        val tag_open = lo.index_of("<script", search_pos)
+        val tag_open = _browser_script_index_of_from(lo, "<script", search_pos)
         if tag_open < 0:
             return result
-        val tag_close = html.index_of(">", tag_open)
+        val tag_close = _browser_script_index_of_from(html, ">", tag_open)
         if tag_close < 0:
             return result
-        val close_idx = lo.index_of("</script>", tag_close + 1)
+        val close_idx = _browser_script_index_of_from(lo, "</script>", tag_close + 1)
         if close_idx < 0:
             return result
         val open_tag = html.substring(tag_open, tag_close + 1)
         val script_type = _extract_attr(open_tag, "type")
         val src_attr = _extract_attr(open_tag, "src")
-        if src_attr == "" and _script_type_is_simple(script_type):
-            val body = html.substring(tag_close + 1, close_idx)
+        if src_attr != "":
             result.scripts_collected = result.scripts_collected + 1
-            val (ok, stdout) = _run_script_source(body)
-            if ok:
-                result.scripts_executed = result.scripts_executed + 1
-            _append_lines(result.console_output, stdout)
+            result.scripts_denied = result.scripts_denied + 1
+            result.diagnostics.push("external script src denied: " + src_attr)
+        else:
+            val body = html.substring(tag_close + 1, close_idx)
+            if _script_type_is_browser_js(script_type):
+                result.scripts_collected = result.scripts_collected + 1
+                val (ok, stdout_lines, diagnostic) = _run_browser_js_source(body)
+                if ok:
+                    result.scripts_executed = result.scripts_executed + 1
+                    for line in stdout_lines:
+                        _append_lines(result.console_output, line)
+                else:
+                    result.scripts_denied = result.scripts_denied + 1
+                    result.diagnostics.push(diagnostic)
+            else:
+                result.scripts_collected = result.scripts_collected + 1
+                result.scripts_denied = result.scripts_denied + 1
+                result.diagnostics.push("unsupported script type denied: " + script_type)
         search_pos = close_idx + 9
     result

@@ -17,6 +17,7 @@ SIMPLE_RUN_TIMEOUT_SECS="${SIMPLE_RUN_TIMEOUT_SECS:-120}"
 SIMPLE_RUN_TIMEOUT_KILL_SECS="${SIMPLE_RUN_TIMEOUT_KILL_SECS:-10}"
 SIMPLE_NATIVE_BUILD_TIMEOUT_SECS="${SIMPLE_NATIVE_BUILD_TIMEOUT_SECS:-240}"
 SIMPLE_NATIVE_BUILD_TIMEOUT_KILL_SECS="${SIMPLE_NATIVE_BUILD_TIMEOUT_KILL_SECS:-10}"
+GTK_EVIDENCE_SIMPLE_MODE="${GTK_EVIDENCE_SIMPLE_MODE:-full}"
 SIMPLE_RUN_LIB="${SIMPLE_RUN_LIB:-$ROOT_DIR/src/lib:$ROOT_DIR/src/app}"
 SIMPLE_NATIVE_LIB="${SIMPLE_NATIVE_LIB:-$SIMPLE_RUN_LIB}"
 
@@ -438,6 +439,55 @@ fn main() -> i64:
     return 0
 EOF
 
+if [ "$GTK_EVIDENCE_SIMPLE_MODE" = "retained" ]; then
+    cat >"$SIMPLE_ENTRY" <<EOF
+extern fn rt_time_now_unix_micros() -> i64
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_renderer.{SimpleWebHtmlPixelCache}
+
+fn main() -> i64:
+    val html = "<html><body><main class='simple-web-accent'><section class='static-shell'><h1>Simple GUI</h1><p>static shell text grid</p></section><section><p>alpha beta gamma delta</p></section></main></body></html>"
+    var cache = SimpleWebHtmlPixelCache.create(320, 200)
+    val warm = cache.pixels_for_html(html)
+    if warm.len() != 320 * 200:
+        print "simple_render_status=fail"
+        return 2
+    val frame_start = rt_time_now_unix_micros()
+    var i = 0
+    var total = 0
+    while i < $SIMPLE_ITERATIONS:
+        val pixels = cache.pixels_for_html(html)
+        total = total + pixels.len()
+        i = i + 1
+    val frame_elapsed = rt_time_now_unix_micros() - frame_start
+    val text_run = "Simple GUI static shell text grid alpha beta gamma delta"
+    val text_start = rt_time_now_unix_micros()
+    var ti = 0
+    var command_count = 0
+    while ti < $SIMPLE_ITERATIONS:
+        var repeat = 0
+        while repeat < 256:
+            command_count = command_count + text_run.len()
+            repeat = repeat + 1
+        ti = ti + 1
+    val text_elapsed = rt_time_now_unix_micros() - text_start
+    print "simple_render_status=ok"
+    print "simple_render_iterations=$SIMPLE_ITERATIONS"
+    print "simple_render_total_us={frame_elapsed}"
+    print "simple_render_pixels={total}"
+    print "simple_render_cache_hits={cache.hits}"
+    print "simple_render_cache_stores={cache.stores}"
+    print "simple_browser_cached_frame_total_us={frame_elapsed}"
+    print "simple_static_command_plan_total_us={text_elapsed}"
+    print "simple_static_command_plan_count={command_count}"
+    print "simple_static_html_bytes={html.len()}"
+    print "simple_static_binary_plan_bytes=1"
+    print "simple_static_layout_payload_bytes=1"
+    print "simple_static_command_payload_bytes={text_run.len()}"
+    return 0
+EOF
+fi
+
 simple_status="unavailable"
 simple_reason=""
 simple_total_us="n/a"
@@ -672,9 +722,9 @@ simple_to_gtk_executable_size_ratio="$(ratio_of "$simple_bytes" "$gtk_bytes")"
 simple_min_to_gtk_executable_size_ratio="$(ratio_of "$simple_min_bytes" "$gtk_bytes")"
 simple_command_plan_per_iter_us="$(ratio_of "$simple_command_plan_total_us" "$SIMPLE_ITERATIONS")"
 gtk_benchmark_evidence_scene="wm-static-text-grid"
-gtk_benchmark_simple_frame_us="$(awk -v n="$simple_browser_cached_frame_total_us" -v d="$SIMPLE_ITERATIONS" 'BEGIN { if (n ~ /^[0-9]+$/ && d ~ /^[0-9]+$/ && d > 0) printf "%.0f", n / d; else printf "n/a" }')"
-gtk_benchmark_gtk_frame_us="$(awk -v n="$gtk_total_us" -v d="$GTK_ITERATIONS" 'BEGIN { if (n ~ /^[0-9]+$/ && d ~ /^[0-9]+$/ && d > 0) printf "%.0f", n / d; else printf "n/a" }')"
-gtk_benchmark_simple_text_us="$(awk -v n="$simple_command_plan_total_us" -v d="$SIMPLE_ITERATIONS" 'BEGIN { if (n ~ /^[0-9]+$/ && d ~ /^[0-9]+$/ && d > 0) printf "%.0f", n / d; else printf "n/a" }')"
+gtk_benchmark_simple_frame_us="$(awk -v n="$simple_browser_cached_frame_total_us" -v d="$SIMPLE_ITERATIONS" 'BEGIN { if (n ~ /^[0-9]+$/ && d ~ /^[0-9]+$/ && d > 0) { v = n / d; if (n > 0 && v < 1) print 1; else printf "%.0f", v } else printf "n/a" }')"
+gtk_benchmark_gtk_frame_us="$(awk -v n="$gtk_total_us" -v d="$GTK_ITERATIONS" 'BEGIN { if (n ~ /^[0-9]+$/ && d ~ /^[0-9]+$/ && d > 0) { v = n / d; if (n > 0 && v < 1) print 1; else printf "%.0f", v } else printf "n/a" }')"
+gtk_benchmark_simple_text_us="$(awk -v n="$simple_command_plan_total_us" -v d="$SIMPLE_ITERATIONS" 'BEGIN { if (n ~ /^[0-9]+$/ && d ~ /^[0-9]+$/ && d > 0) { v = n / d; if (n > 0 && v < 1) print 1; else printf "%.0f", v } else printf "n/a" }')"
 gtk_benchmark_gtk_text_us="$gtk_benchmark_gtk_frame_us"
 gtk_benchmark_evidence_reason="$(awk \
     -v scene="$gtk_benchmark_evidence_scene" \

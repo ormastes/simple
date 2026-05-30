@@ -32,12 +32,18 @@ The module owns:
 - fail-closed file, process, network, credential, and terminal grant checks;
 - deterministic capability summaries;
 - QEMU marker data for `riscv`, `x86`, `x85` as x86, and `arm`;
+- a Bun-informed Simple JS runtime profile that captures a cohesive
+  runtime/package/transpile/bundle/test surface without adopting Bun's
+  Zig/JavaScriptCore internals;
+- a generated-WASM/browser GUI contract with allowed imports, denied host
+  escapes, required exports, and browser/QEMU evidence markers;
 - blocker text for the later full Node/V8/libuv implementation layer.
 
 The module does not own:
 
 - actual JavaScript parsing or execution;
 - Node.js ABI/libuv/V8 porting;
+- JavaScriptCore or Zig runtime embedding;
 - npm package installation;
 - live API authentication;
 - host shell fallback success markers.
@@ -58,6 +64,6 @@ package id/version/checksum, with invalidation on package artifact changes.
 
 ## Evidence Strategy
 
-Focused SPipe tests prove REQ-001..REQ-006 and NFR-001..NFR-005 through pure
-contract behavior. REQ-007 and AC-7 are proven by explicit blocker fields and
-docs until QEMU runtime provisioning exists.
+Focused SPipe tests prove REQ-001..REQ-006, REQ-008, REQ-009, and NFR-001..NFR-005
+through pure contract behavior. REQ-007 and AC-7 are proven by explicit blocker
+fields and docs until QEMU runtime provisioning exists.

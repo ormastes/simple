@@ -632,7 +632,7 @@ Exit code 137  # Killed (OOM or timeout)
 - Final process check after cleanup: `active_simple=0`, `zombie_simple=0`.
 
 **Remaining issue recorded separately:**
-- `to_be_greater_than` / numeric matcher behavior is tracked in `doc/09_bugs/test_matcher_numeric_comparison_2026-05-21.md`.
+- `to_be_greater_than` / numeric matcher behavior is tracked in `doc/08_tracking/bug/test_matcher_numeric_comparison_2026-05-21.md`.
 
 **Additional 2026-05-21 targeted crash verification:**
 - `bin/simple test --list-runs --runs-status running` reported no active runs.
@@ -710,7 +710,7 @@ Exit code 137  # Killed (OOM or timeout)
   - rust-hosted native build of the same probe exits 0
   - native probe binary exits 0
   - native symbol table exports `spl_thread_cpu_count`
-- Fixed `src/lib/common/science_math/perf_sugar.spl` direct checker failure by removing a blank `///` separator before an extern declaration; recorded the parser bug in `doc/09_bugs/doc_comment_extern_parse_2026-05-21.md`.
+- Fixed `src/lib/common/science_math/perf_sugar.spl` direct checker failure by removing a blank `///` separator before an extern declaration; recorded the parser bug in `doc/08_tracking/bug/doc_comment_extern_parse_2026-05-21.md`.
 - `bin/simple check src/lib/common/science_math/perf_sugar.spl` passes and `test/feature/scilib/perf_sugar_spec.spl` passes.
 - Full `bin/simple check src/lib` still fails on unrelated library syntax/check issues; no process leaks occurred.
 - Additional bounded probes all completed without kill/leak:

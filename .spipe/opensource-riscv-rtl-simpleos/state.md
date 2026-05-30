@@ -449,7 +449,7 @@ fn litex_fpga_timer_init(map: LitexFpgaMemoryMap) -> unit
 **Agent C — Documentation (AC-4, AC-7):**
 - `doc/07_guide/platform/de10nano_quartus_setup.md` — Quartus Prime Lite 26.1 setup guide
 - `doc/07_guide/platform/riscv_fpga_simpleos_guide.md` — Overall FPGA SimpleOS guide
-- `doc/09_bugs/riscv_fpga_port_bugs.md` — Bug tracking template
+- `doc/08_tracking/bug/riscv_fpga_port_bugs.md` — Bug tracking template
 
 **Gap:** `riscv_noalloc_handoff.spl` not modified (Agent B missed it) — hardcoded constants remain
 
@@ -512,7 +512,7 @@ fn litex_fpga_timer_init(map: LitexFpgaMemoryMap) -> unit
 - Final cleanup verification: `active_simple=0`, `zombie_simple=0`.
 
 **Open issues:**
-- `to_be_greater_than` failed even for positive deltas (`117440512 > 0`) in these specs; tracked separately in `doc/09_bugs/test_matcher_numeric_comparison_2026-05-21.md`.
+- `to_be_greater_than` failed even for positive deltas (`117440512 > 0`) in these specs; tracked separately in `doc/08_tracking/bug/test_matcher_numeric_comparison_2026-05-21.md`.
 
 **Additional crash-scope verification:**
 - `bin/simple test --list-runs --runs-status running` reports no active runs.
@@ -585,7 +585,7 @@ fn litex_fpga_timer_init(map: LitexFpgaMemoryMap) -> unit
   - rust-hosted native build exited 0
   - built native probe exited 0
   - native symbol table contains `spl_thread_cpu_count`
-- Fixed `src/lib/common/science_math/perf_sugar.spl` checker failure caused by blank `///` before an extern; tracked parser issue in `doc/09_bugs/doc_comment_extern_parse_2026-05-21.md`.
+- Fixed `src/lib/common/science_math/perf_sugar.spl` checker failure caused by blank `///` before an extern; tracked parser issue in `doc/08_tracking/bug/doc_comment_extern_parse_2026-05-21.md`.
   - `bin/simple check src/lib/common/science_math/perf_sugar.spl` passes.
   - `test/feature/scilib/perf_sugar_spec.spl` passes.
   - Full `bin/simple check src/lib` still fails on unrelated library syntax/check errors, without process leaks.

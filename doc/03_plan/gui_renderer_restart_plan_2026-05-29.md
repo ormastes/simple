@@ -141,7 +141,7 @@ runtime/performance fix:
 - Android/iOS live mobile proof: Android emulator install/launch now reaches
   `com.simple.ui`, and rebuilt Tauri content renders the bundled Simple UI
   dashboard/demo. The resolved asset-root evidence is recorded in
-  `doc/09_bugs/tauri_android_asset_root_failure_2026-05-29.md`. iOS
+  `doc/08_tracking/bug/tauri_android_asset_root_failure_2026-05-29.md`. iOS
   simulator/device proof remains platform-follow-up work.
 
 ## Current Linux Host Boundary
@@ -241,7 +241,7 @@ Remaining mobile platform blockers:
   `ANDROID_HOME=/usr/lib/android-sdk ANDROID_SDK_ROOT=/usr/lib/android-sdk`
   fixed that failure: the rebuilt universal debug APK renders the bundled
   Simple UI dashboard/demo on the emulator. Evidence is tracked in
-  `doc/09_bugs/tauri_android_asset_root_failure_2026-05-29.md`.
+  `doc/08_tracking/bug/tauri_android_asset_root_failure_2026-05-29.md`.
 - iOS simulator/device proof is unavailable on this Linux host because
   `xcodebuild` and `simctl` are absent.
 - Linux source-level iOS/Tauri proof is present: `tauri_backend_spec` passed
@@ -514,7 +514,7 @@ backend lifecycle smoke passed `8/8`. No CPU-backed rendering divergence was
 found, so there was no CPU-backed fix to apply in this pass. The later live
 Vulkan SPIR-V/readback closure below supersedes the earlier unavailable
 direct-pixel-parity note. The concrete Vulkan shader-path blocker is tracked
-as resolved in `doc/09_bugs/engine2d_vulkan_glsl_spirv_parity_2026-05-29.md`.
+as resolved in `doc/08_tracking/bug/engine2d_vulkan_glsl_spirv_parity_2026-05-29.md`.
 
 CPU/CUDA mirror-backed 2D fix follow-up:
 ```bash

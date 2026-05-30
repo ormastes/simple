@@ -43,7 +43,7 @@ Source/platform evidence:
 
 - Android Tauri asset-root failure is resolved after restoring the complete
   Tauri source tree and rebuilding the APK from source; see
-  `doc/09_bugs/tauri_android_asset_root_failure_2026-05-29.md`.
+  `doc/08_tracking/bug/tauri_android_asset_root_failure_2026-05-29.md`.
 - `tools/tauri-shell/src-tauri/gen/apple/` is now present with generated
   Xcode project, Info.plist, LaunchScreen, assets, and native source.
 - iOS simulator/device execution still requires an Apple host with `xcodebuild`

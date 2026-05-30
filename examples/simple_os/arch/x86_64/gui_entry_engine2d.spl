@@ -18,7 +18,9 @@ use os.kernel.abi.syscall_shim.{shim_init}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
-use os.kernel.boot.mmio.{mmio_write32}
+use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
+use os.kernel.memory.vmm.{vmm_init}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
 use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
 use os.compositor.engine2d_baremetal_core.{create_fb_engine_core}
 extern fn serial_println(msg: text)
@@ -37,6 +39,9 @@ val FB_H: i32 = 768
 val TOP_COMMAND_H: i32 = 44
 val TASKBAR_H: i32 = 56
 val CAPTURE_WAIT_ITERS: u64 = 5000000
+val DIRECT_QEMU_TOTAL_MEMORY: u64 = 0x20000000
+val DIRECT_QEMU_KERNEL_START: u64 = 0x100000
+val DIRECT_QEMU_RESERVED_END: u64 = 0x14000000
 
 fn _pack(hi: i32, lo: i32) -> u64:
     (hi.to_u64() << 32) | lo.to_u64()
@@ -335,12 +340,21 @@ fn _draw_mouse_cursor_fb(fb_addr: u64, stride: i32, x: i32, y: i32):
     _fill_rect_fb(fb_addr, stride, x + 8, y + 18, 8, 2, 0xFFFFFFFFu32)
     _fill_rect_fb(fb_addr, stride, x + 12, y + 20, 6, 2, 0xFFFFFFFFu32)
 
+fn _read_pixel_fb(fb_addr: u64, stride: i32, x: i32, y: i32) -> u32:
+    val offset = ((y * stride + x) * 4).to_u64()
+    mmio_read32(fb_addr + offset)
+
 fn spl_start():
     serial_init()
     serial_writeln("SimpleOS x86_64 GUI boot (Engine2D + WM + Simple Web)")
     serial_writeln("[BOOT] COM1 serial ready")
 
     arch_x86_64_early_init()
+    if pmm_init_identity_range(DIRECT_QEMU_TOTAL_MEMORY, DIRECT_QEMU_KERNEL_START, DIRECT_QEMU_RESERVED_END):
+        vmm_init(g_pmm, 0)
+        serial_println("[GUI] memory-bootstrap:ok")
+    else:
+        serial_println("[GUI] memory-bootstrap:failed")
     shim_init(Scheduler.new(), IpcManager.new(), KernelLog.new(256))
     if not X86Interrupt.runtime_installed():
         X86Interrupt.install_bootstrap_runtime(64)
@@ -392,6 +406,12 @@ fn spl_start():
     serial_println("[mdi-demo] windows-ready count=3")
     _draw_mouse_cursor_fb(fb_addr, FB_W, 794, 366)
     _fill_rect_fb(fb_addr, FB_W, 0, 0, 32, 1, 0xFFFF0000u32)
+    val probe_px = _read_pixel_fb(fb_addr, FB_W, 10, 0)
+    val top_px = _read_pixel_fb(fb_addr, FB_W, 500, 20)
+    val header_px = _read_pixel_fb(fb_addr, FB_W, 270, 136)
+    val body_px = _read_pixel_fb(fb_addr, FB_W, 270, 190)
+    val task_px = _read_pixel_fb(fb_addr, FB_W, 500, 735)
+    serial_println("[capture-debug] readback probe={probe_px} top={top_px} header={header_px} body={body_px} taskbar={task_px}")
 
     serial_println("[integrated-demo] render-ready")
     serial_println("TEST PASSED")

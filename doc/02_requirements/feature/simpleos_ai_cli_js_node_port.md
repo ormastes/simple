@@ -27,6 +27,12 @@ and provides QEMU marker expectations before a full Node/V8/libuv port lands.
   planning unless the user corrects it.
 - REQ-007: Record the full Node.js/V8/libuv port as a later implementation
   layer, not a prerequisite for this first manifest-hardening slice.
+- REQ-008: Define a Bun-informed Simple JS runtime profile that keeps Bun-like
+  single-tool cohesion for runtime, package, transpile, bundle, and test
+  surfaces while preserving the Simple MDSOC+ architecture boundary.
+- REQ-009: Define the WebAssembly/browser integration contract for generated GUI
+  WASM, including supported host targets, allowed imports, denied host escapes,
+  required exports, and browser-render evidence markers.
 
 ## Acceptance Mapping
 
@@ -35,5 +41,5 @@ and provides QEMU marker expectations before a full Node/V8/libuv port lands.
 - AC-3: REQ-001, REQ-002.
 - AC-4: REQ-001, REQ-003.
 - AC-5: REQ-005.
-- AC-6: REQ-001 through REQ-005.
+- AC-6: REQ-001 through REQ-005, REQ-008, REQ-009.
 - AC-7: REQ-007.

@@ -13,6 +13,12 @@ use os.ai_cli_js_node_contract.{
     ai_cli_marker_payload,
     ai_cli_provisioning_plan,
     ai_cli_provisioning_plan_summary,
+    ai_cli_runtime_profile_summary,
+    ai_cli_runtime_profile_supports_manifest,
+    ai_cli_wasm_browser_contract_summary,
+    ai_cli_wasm_exports_satisfy_contract,
+    ai_cli_wasm_import_allowed,
+    ai_cli_wasm_import_denied,
     ai_cli_qemu_lane,
     ai_cli_qemu_lane_summary,
     ai_cli_qemu_lanes,
@@ -20,9 +26,11 @@ use os.ai_cli_js_node_contract.{
     ai_cli_normalize_target,
     ai_cli_qemu_marker_fragments,
     ai_cli_qemu_serial_accepts_lane,
+    bun_informed_simple_js_runtime_profile,
     claude_cli_smoke_manifest,
     codex_cli_smoke_manifest,
-    gemini_cli_smoke_manifest
+    gemini_cli_smoke_manifest,
+    simple_browser_wasm_gui_contract
 }
 
 fn deny_all_manifest() -> AiCliManifest:
@@ -185,3 +193,34 @@ describe "SimpleOS AI CLI JS/Node port manifest contract":
             expect(payload).to_contain("[ai-cli] runtime:start app=claude")
             expect(payload).to_contain("[ai-cli] runtime-status=blocked-runtime-artifact")
             expect(ai_cli_provisioning_plan_summary(plan)).to_contain("disk-manifest=CLAUDE.APP")
+
+    describe "AC-1 AC-2: Bun-informed Simple JS runtime profile":
+        it "keeps Bun-like single-tool lessons while preserving the Simple MDSOC boundary":
+            val profile = bun_informed_simple_js_runtime_profile()
+            val summary = ai_cli_runtime_profile_summary(profile)
+
+            expect(profile.profile_id).to_equal("simple-js-agent-bun-informed")
+            expect(summary).to_contain("single-tool-runtime-plus-package-test-bundle-surfaces")
+            expect(summary).to_contain("Simple-MDSOC-capsule-not-Zig-JavaScriptCore-copy")
+            expect(summary).to_contain("node-surface=fs,process,stdio-tty,timers,net,tls,crypto,module-resolution,package-json,child-process,credentials,webassembly")
+            expect(summary).to_contain("unsupported=native-node-addon-abi,ambient-host-shell,undeclared-npm-install,ambient-credential-read,unbounded-child-process-spawn")
+            expect(ai_cli_runtime_profile_supports_manifest(profile, codex_cli_smoke_manifest())).to_equal(true)
+
+    describe "AC-5 AC-6: Simple browser WASM GUI contract":
+        it "allows only declared browser/WASM imports and rejects host escapes":
+            val contract = simple_browser_wasm_gui_contract()
+            val summary = ai_cli_wasm_browser_contract_summary(contract)
+
+            expect(contract.contract_id).to_equal("simple-browser-wasm-gui-contract")
+            expect(summary).to_contain("targets=simple-browser,host-wm,simpleos-wm,android,ios")
+            expect(ai_cli_wasm_import_allowed(contract, "simple_ui.present")).to_equal(true)
+            expect(ai_cli_wasm_import_denied(contract, "fs.readFile")).to_equal(true)
+            expect(ai_cli_wasm_import_denied(contract, "host.shell")).to_equal(true)
+            expect(ai_cli_wasm_import_denied(contract, "random.unlisted")).to_equal(true)
+
+        it "requires init, render, and event exports before browser execution":
+            val contract = simple_browser_wasm_gui_contract()
+
+            expect(ai_cli_wasm_exports_satisfy_contract(contract, ["simple_app_init", "simple_app_render", "simple_app_event"])).to_equal(true)
+            expect(ai_cli_wasm_exports_satisfy_contract(contract, ["simple_app_init", "simple_app_render"])).to_equal(false)
+            expect(contract.qemu_marker_fragments).to_contain("[wasm-gui] browser-rendered")

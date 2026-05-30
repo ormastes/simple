@@ -108,6 +108,47 @@ struct WasmHelloGuiRenderEvidence:
     status: text
     diagnostic: text
 
+struct WasmHelloGuiModuleContractEvidence:
+    target: text
+    imports: [text]
+    exports: [text]
+    allowed_imports: [text]
+    denied_imports: [text]
+    required_exports: [text]
+    bad_import: text
+    missing_export: text
+    ready: bool
+    status: text
+    diagnostic: text
+
+fn _wasm_hello_allowed_imports() -> [text]:
+    [
+        "env.memory",
+        "simple_ui.present",
+        "simple_ui.input",
+        "simple_ui.image",
+        "simple_ui.text",
+        "simple_ui.time_now_ms"
+    ]
+
+fn _wasm_hello_denied_imports() -> [text]:
+    [
+        "fs.readFile",
+        "fs.writeFile",
+        "child_process.spawn",
+        "process.env",
+        "net.connect",
+        "tls.connect",
+        "host.shell"
+    ]
+
+fn _wasm_hello_required_exports() -> [text]:
+    [
+        "simple_app_init",
+        "simple_app_render",
+        "simple_app_event"
+    ]
+
 fn _wasm_hello_target_name(target: text) -> text:
     if target == WEB_RENDER_TARGET_ANDROID_WASM:
         return "android"
@@ -196,6 +237,26 @@ fn _wasm_hello_count_marker(haystack: text, marker: text) -> i32:
         count = count + 1
         offset = found + marker.len()
     count
+
+fn _wasm_hello_text_list_contains(items: [text], value: text) -> bool:
+    for item in items:
+        if item == value:
+            return true
+    false
+
+fn _wasm_hello_first_bad_import(imports: [text], allowed: [text], denied: [text]) -> text:
+    for import_name in imports:
+        if _wasm_hello_text_list_contains(denied, import_name):
+            return import_name
+        if not _wasm_hello_text_list_contains(allowed, import_name):
+            return import_name
+    ""
+
+fn _wasm_hello_first_missing_export(exports: [text], required: [text]) -> text:
+    for export_name in required:
+        if not _wasm_hello_text_list_contains(exports, export_name):
+            return export_name
+    ""
 
 fn _wasm_hello_body(target: text) -> text:
     val name = _wasm_hello_target_name(target)
@@ -454,6 +515,48 @@ fn wasm_hello_gui_render_evidence_for_target(target: text, dpi_scale_milli: i32)
         status: status,
         diagnostic: diagnostic
     )
+
+fn wasm_hello_gui_module_contract_evidence(target: text, imports: [text], exports: [text]) -> WasmHelloGuiModuleContractEvidence:
+    val allowed = _wasm_hello_allowed_imports()
+    val denied = _wasm_hello_denied_imports()
+    val required = _wasm_hello_required_exports()
+    val bad_import = _wasm_hello_first_bad_import(imports, allowed, denied)
+    val missing_export = _wasm_hello_first_missing_export(exports, required)
+    var ready = true
+    var status = "wasm_browser_contract_verified"
+    var diagnostic = ""
+    if bad_import != "":
+        ready = false
+        status = "wasm_import_denied"
+        diagnostic = "WASM import is not allowed for generated GUI browser execution: " + bad_import
+    else:
+        if missing_export != "":
+            ready = false
+            status = "wasm_export_missing"
+            diagnostic = "WASM export is required for generated GUI browser execution: " + missing_export
+    WasmHelloGuiModuleContractEvidence(
+        target: target,
+        imports: imports,
+        exports: exports,
+        allowed_imports: allowed,
+        denied_imports: denied,
+        required_exports: required,
+        bad_import: bad_import,
+        missing_export: missing_export,
+        ready: ready,
+        status: status,
+        diagnostic: diagnostic
+    )
+
+fn wasm_hello_gui_default_module_contract_evidence(target: text) -> WasmHelloGuiModuleContractEvidence:
+    wasm_hello_gui_module_contract_evidence(
+        target,
+        ["env.memory", "simple_ui.present", "simple_ui.input", "simple_ui.image", "simple_ui.text", "simple_ui.time_now_ms"],
+        ["simple_app_init", "simple_app_render", "simple_app_event"]
+    )
+
+fn wasm_hello_gui_module_contract_summary(evidence: WasmHelloGuiModuleContractEvidence) -> text:
+    "target={evidence.target};status={evidence.status};ready={evidence.ready};imports={evidence.imports.join(\",\")};exports={evidence.exports.join(\",\")};bad_import={evidence.bad_import};missing_export={evidence.missing_export};diagnostic={evidence.diagnostic}"
 
 fn wasm_hello_gui_compiled_artifact_evidence(target: text, output_path: text, size_bytes: i64, magic_hex: text, version: i32, has_smf_marker: bool, has_spl_main: bool, has_ui_exports: bool, has_ui_strings: bool, has_event_strings: bool) -> WasmHelloGuiCompiledArtifactEvidence:
     var status = "compiled_wasm_verified"

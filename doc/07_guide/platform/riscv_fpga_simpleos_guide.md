@@ -168,7 +168,7 @@ Boot sequence: `fpga_boot.spl` → M-mode setup → `riscv_noalloc_handoff.spl` 
 | File | Purpose |
 |------|---------|
 | `doc/07_guide/platform/de10nano_quartus_setup.md` | DE10-Nano Quartus installation guide |
-| `doc/09_bugs/riscv_fpga_port_bugs.md` | Bug tracking for this port |
+| `doc/08_tracking/bug/riscv_fpga_port_bugs.md` | Bug tracking for this port |
 | `src/lib/hardware/opensource_rtl/vexriscv_smp/mod.spl` | VexRiscv-SMP import manifest |
 | `src/lib/hardware/fpga_k26/k26_soc_top.spl` | K26 SoC top wiring |
 | `src/lib/hardware/fpga_k26/k26_axi_hp_bridge.spl` | AXI-HP bridge for K26 PS DDR |

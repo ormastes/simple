@@ -53,6 +53,10 @@ SimpleOS under QEMU for RISC-V, x86, and ARM.
   or credential lookup.
 - AI CLI hardening needs explicit denial tests for host escape, ambient
   credential reads, undeclared network access, and unbounded process spawning.
+- Browser/WASM GUI support exists in pieces (`common.ui.wasm_hello_gui`,
+  browser script renderers, and WASM compiler/runtime tests), but the AI CLI
+  Node-compatible contract did not previously state the allowed browser/WASM
+  imports, required exports, target matrix, or host-escape denials.
 
 ## Recommended Next Local Step
 
@@ -62,3 +66,36 @@ Create a narrow compatibility contract before code changes:
 2. Model each AI CLI as a manifest with required APIs and hardening grants.
 3. Add a focused SPipe spec that fails closed for undeclared CLI privileges.
 4. Wire that spec to QEMU lane metadata before attempting a full Node port.
+
+## 2026-05-30 Contract Extension
+
+`src/os/ai_cli_js_node_contract.spl` now also contains:
+
+- a Bun-informed Simple JS runtime profile that records a cohesive
+  runtime/package/transpile/bundle/test surface while explicitly keeping the
+  implementation as a Simple MDSOC capsule instead of a Zig/JavaScriptCore copy;
+- a Simple browser WASM GUI contract for `simple-browser`, `host-wm`,
+  `simpleos-wm`, `android`, and `ios`;
+- fail-closed WASM import checks for `fs`, process, environment, network/TLS,
+  and host shell escapes;
+- required WASM GUI exports: `simple_app_init`, `simple_app_render`, and
+  `simple_app_event`.
+
+The focused SPipe spec now proves these contract gates in addition to the
+existing Codex/Claude/Gemini manifest and QEMU marker scenarios.
+
+## 2026-05-30 Browser WASM Execution Gate
+
+`src/lib/common/ui/wasm_hello_gui.spl` now carries the same generated-GUI WASM
+import/export contract in the browser-facing artifact path. The executable gate
+distinguishes:
+
+- approved browser imports such as `simple_ui.present`, input, image, text, and
+  time;
+- denied host escapes such as filesystem reads/writes, child process spawning,
+  environment reads, network/TLS connects, and host shell access;
+- required exports: `simple_app_init`, `simple_app_render`, and
+  `simple_app_event`.
+
+This moves the previous AI CLI contract from documentation-only planning into
+the shared generated-WASM browser artifact evidence path.

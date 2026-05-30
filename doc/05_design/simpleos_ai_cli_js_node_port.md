@@ -15,6 +15,12 @@
 Supported runtime kinds are `node-compatible`, `bundled-node`, and
 `simple-js-agent`. Unsupported runtimes fail validation.
 
+The same module now defines:
+
+- `AiCliRuntimeProfile` for the Bun-informed Simple JS runtime shape;
+- `AiCliWasmBrowserContract` for generated GUI WASM import/export and browser
+  evidence gates.
+
 ## Algorithms
 
 - Validation returns an empty string for valid manifests or a deterministic
@@ -25,6 +31,12 @@ Supported runtime kinds are `node-compatible`, `bundled-node`, and
 - Capability summaries are stable text containing identity, runtime, package
   pins, grants, terminal requirement, unsupported features, and QEMU markers.
 - Target normalization maps `x85`, `x86`, and `x86_64` to `x86`.
+- Runtime profile support checks require the Node-compatible surfaces used by
+  AI CLIs, including filesystem, process, TTY, network, TLS, module resolution,
+  and WebAssembly.
+- WASM browser import checks deny unlisted imports and explicit host escapes.
+- WASM browser export checks require init, render, and event entrypoints before
+  execution can be claimed.
 
 ## Built-In Manifests
 
@@ -32,6 +44,27 @@ Codex, Claude, and Gemini smoke manifests use non-authenticated help/version
 style commands and declare credential handles rather than ambient secret reads.
 They include package pin fields as `pending` so real bundle identifiers can be
 added without changing the contract.
+
+## Bun-Informed Runtime Profile
+
+`bun_informed_simple_js_runtime_profile` records the target Simple runtime
+shape: one cohesive developer-facing surface for script execution, package
+manifest reading, transpile hooks, bundle planning, and smoke testing. It keeps
+the implementation as a Simple MDSOC capsule rather than adopting Bun's
+Zig/JavaScriptCore internals.
+
+## Browser/WASM Contract
+
+`simple_browser_wasm_gui_contract` covers Simple browser, host WM, SimpleOS WM,
+Android, and iOS. A generated GUI WASM module must use only declared
+`simple_ui.*` imports, must not import filesystem/process/env/network/TLS/host
+shell escape APIs, and must export `simple_app_init`, `simple_app_render`, and
+`simple_app_event`.
+
+The browser-facing implementation mirrors this gate in
+`common.ui.wasm_hello_gui` through `WasmHelloGuiModuleContractEvidence`. That
+keeps the AI CLI runtime contract and generated-WASM browser artifact evidence
+aligned without duplicating separate policy strings in each test.
 
 ## Error Handling
 
@@ -47,4 +80,8 @@ validation text. Empty text means success; any non-empty text is a hard denial.
 - fail-closed denials for missing file/process/network/credential grants;
 - invalid runtime and missing entry rejection;
 - `x85` target normalization;
-- explicit full Node/V8/libuv blocker declaration.
+- explicit full Node/V8/libuv blocker declaration;
+- Bun-informed runtime profile gates;
+- Simple browser generated-WASM import/export denial gates;
+- generated-WASM hello GUI import/export evidence in
+  `test/unit/lib/common/ui/wasm_hello_gui_spec.spl`.

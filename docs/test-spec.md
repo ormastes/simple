@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-30 11:07:12*
+*Generated: 2026-05-30 12:26:03*
 
-## test/unit/os/compositor
+## test/unit/browser_engine/script
 
-❌ **wm_scene_spec.spl** (2233ms)
-  - Source: `test/unit/os/compositor/wm_scene_spec.spl`
-  - Generated doc: `spec/wm_scene_spec.md`
+❌ **browser_script_execute_spec.spl** (389ms)
+  - Source: `test/unit/browser_engine/script/browser_script_execute_spec.spl`
+  - Generated doc: `spec/browser_script_execute_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 12 ✅
-- **Failed:** 7 ❌
-- **Duration:** 2239ms
+- **Passed:** 2 ✅
+- **Failed:** 1 ❌
+- **Duration:** 395ms
