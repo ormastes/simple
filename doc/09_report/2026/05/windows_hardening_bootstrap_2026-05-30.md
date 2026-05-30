@@ -21,6 +21,8 @@ Bootstrap/native-build hardening on Windows after MCP, SPipe, and Vulkan fixes.
 - PE/COFF vtable data is emitted as explicit zero bytes before relocations, avoiding relocations in contentless `.bss`.
 - UI access files were updated to current struct fields so native-build no longer skips those modules.
 - Added `test/smoke/windows_native_hello.spl` as a minimal native Windows executable smoke.
+- Native HIR hardening cleared the Windows full compiler native-build skip list by adding missing token metadata fields, replacing stale SIMD lane-field access with current `FixedVec` constructors/accessors, and adding explicit imported-type annotations where the native pass previously saw `ANY`.
+- Windows native-build stub filtering now treats additional WinAPI/COM/WSA imports as system symbols and gates `declare_globals` fallback diagnostics behind the existing trace flag.
 
 ## Verified
 
@@ -29,23 +31,13 @@ Bootstrap/native-build hardening on Windows after MCP, SPipe, and Vulkan fixes.
 - `simple.exe native-build --source test\smoke --entry test\smoke\windows_native_hello.spl --entry-closure --threads 1 --timeout 20` builds.
 - `build\windows-hardening\bootstrap\windows_native_hello.exe` prints `windows native hello` and exits `0`.
 - `cargo build --manifest-path src\compiler_rust\Cargo.toml -p simple-native-all --target x86_64-pc-windows-gnu` passes.
+- After syncing to `fad060e49c87`, full compiler native-build probe:
+  - Command: `simple.exe native-build --source src\compiler --source src\lib --source src\app --entry src\app\cli\main.spl --entry-closure --threads 1 --timeout 45 -o build\windows-hardening\bootstrap\stage_probe_zero_skip.exe --verbose`
+  - Result: `Compiled: 970/970 (893 cached, 77 fresh, 0 failed)` and linked `stage_probe_zero_skip.exe`.
+  - Stub fallback remains enabled; generated stubs dropped from 1081 in the clean baseline to 957 after this pass.
 
 ## Remaining Bootstrap Blockers
 
 - Full `simple build bootstrap` still does not complete on Windows.
-- Incremental full compiler native-build reaches link, but 12 files still fail HIR lowering and the linker receives hundreds of Simple stub symbols.
-- A clean full compiler native-build exceeded the local command timeout and needs either more time or finer-grained cache/progress diagnostics.
-- Current failing HIR files include:
-  - `src/app/cli/theme_sync.spl`
-  - `src/app/io/cli_commands_part1.spl`
-  - `src/app/ui.web/taskbar_runtime_part1.spl`
-  - `src/app/ui.web/tls_serve_loop.spl`
-  - `src/compiler/90.tools/fix/main.spl`
-  - `src/compiler/90.tools/lint/main_part4.spl`
-  - `src/lib/common/json/builder.spl`
-  - `src/lib/common/privilege/authority_token.spl`
-  - `src/lib/common/ui/ios_css.spl`
-  - `src/lib/nogc_async_mut/database/test.spl`
-  - `src/lib/nogc_sync_mut/simd/wave2_dispatch.spl`
-  - `src/os/services/vfs/vfs_service.spl`
-
+- Full compiler native-build now reaches link with zero skipped files, but still relies on hundreds of Simple stub symbols. The next bootstrap slice should reduce internal stubs and then retry the full bootstrap driver.
+- A clean full compiler native-build still needs a longer verification pass after the incremental zero-skip probe.

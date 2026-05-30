@@ -838,19 +838,42 @@ fn is_windows_system_name(name: &str) -> bool {
             | "__CxxFrameHandler3"
             | "_tls_index"
             | "_tls_used"
+            | "AddVectoredExceptionHandler"
+            | "AssignProcessToJobObject"
+            | "BCryptGenRandom"
+            | "CancelIo"
             | "CloseHandle"
+            | "CoCreateGuid"
             | "CoTaskMemFree"
+            | "CompareStringOrdinal"
             | "CreateFileMappingW"
+            | "DeviceIoControl"
+            | "DiscardVirtualMemory"
             | "DuplicateHandle"
             | "FlushFileBuffers"
             | "FlushViewOfFile"
+            | "FormatMessageW"
+            | "FreeEnvironmentStringsW"
             | "GetConsoleMode"
             | "GetCurrentProcess"
             | "GetLogicalProcessorInformation"
             | "GetSystemInfo"
+            | "LoadLibraryA"
+            | "LoadLibraryExA"
+            | "LoadLibraryW"
+            | "LockFileEx"
             | "MapViewOfFile"
+            | "Module32FirstW"
+            | "Module32NextW"
+            | "PrefetchVirtualMemory"
+            | "QueryPerformanceCounter"
+            | "QueryPerformanceFrequency"
+            | "ReadFile"
+            | "ReadFileEx"
+            | "RoOriginateErrorW"
             | "SHGetKnownFolderPath"
             | "SetConsoleMode"
+            | "SystemFunction036"
             | "UnmapViewOfFile"
             | "VirtualProtect"
             | "lstrlenW"
@@ -889,6 +912,9 @@ fn is_windows_system_prefix(name: &str) -> bool {
         || name.starts_with("Heap")
         || name.starts_with("Local")
         || name.starts_with("SH")
+        || name.starts_with("PropVariant")
+        || name.starts_with("Variant")
+        || name.starts_with("WSA")
 }
 
 fn is_macos_system_symbol(sym: &str) -> bool {
