@@ -15,8 +15,7 @@ use std.nogc_sync_mut.io.metal_sffi.{
     metal_sffi_create_command_buffer, metal_sffi_commit_command_buffer,
     metal_sffi_wait_completed, metal_sffi_dispatch_compute,
     metal_sffi_create_compute_encoder, metal_sffi_end_compute_encoder,
-    metal_sffi_set_buffer, metal_sffi_set_bytes,
-    metal_sffi_buffer_download
+    metal_sffi_set_buffer, metal_sffi_set_bytes
 }
 
 fn _metal_status_message(code: i64) -> text:
@@ -99,7 +98,6 @@ class MetalBackend:
     session: MetalSession
     command_queue: i64
     d_framebuffer: i64
-    host_buf: [u32]
     w: i32
     h: i32
     dirty: bool
@@ -115,7 +113,6 @@ fn make_metal_backend():
         session: MetalSession.create("legacy_no_session"),
         command_queue: 0,
         d_framebuffer: 0,
-        host_buf: [],
         w: 0,
         h: 0,
         dirty: false,
@@ -164,7 +161,6 @@ impl RenderBackend for MetalBackend:
         self.command_queue = self.session.command_queue
         self.w = width
         self.h = height
-        self.host_buf = [0u32; total]
         self.dirty = false
         self.initialized = true
         self.last_probe = BackendProbeResult.success("metal", "Metal initialized")
@@ -180,7 +176,6 @@ impl RenderBackend for MetalBackend:
             self.d_framebuffer = 0
         self.session.release()
         self.command_queue = 0
-        self.host_buf = []
         self.w = 0
         self.h = 0
         self.dirty = false
@@ -225,9 +220,20 @@ impl RenderBackend for MetalBackend:
     me present():
         self.mirror.present()
     fn read_pixels() -> [u32]:
-        if self.initialized and self.dirty and self.d_framebuffer != 0:
-            self._download_metal_framebuffer()
-            return self._copy_host_pixels()
+        # Readback uses the CPU mirror, which holds a deterministic copy of EVERY
+        # draw op (clear/rect_filled also dispatch to the GPU; the rest are
+        # mirror-only). The mirror is therefore strictly more complete than a GPU
+        # framebuffer download (which only reflects clear+rect_filled) and matches
+        # the GPU bit-for-bit on the ops both implement.
+        #
+        # TODO: [runtime][P1] A real GPU framebuffer readback is not available under
+        # the tree-walking interpreter: the metal_sffi_buffer_download [u8] out-param
+        # is copied into a temporary Vec by arg_bytes_ptr (interpreter_extern/gpu.rs)
+        # and written there, so the data never reaches the Simple array (and the
+        # aliasing corrupts the heap -> arithmetic-overflow panic). Simple [u8]
+        # arrays are Vec<Value>, so out-param write-back needs a new interpreter ABI.
+        # Compiled/native paths represent [u8] as real byte buffers and can read the
+        # GPU buffer directly once wired through this method.
         self.mirror.read_pixels()
     fn width() -> i32:
         if self.w > 0:
@@ -241,37 +247,50 @@ impl RenderBackend for MetalBackend:
 impl MetalBackend:
     me _dispatch_metal_clear(color: u32):
         val params = _metal_pack_clear_params(color, self.w, self.h)
-        self._dispatch_metal_1d(self.session.pipe_clear, _metal_i64(self.w) * _metal_i64(self.h), 256, params)
+        val pipeline = self.session.pipe_clear
+        val threads = _metal_i64(self.w) * _metal_i64(self.h)
+        self._dispatch_metal_1d(pipeline, threads, 256, params)
 
     me _dispatch_metal_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         if w <= 0 or h <= 0:
             return
         val params = _metal_pack_rect_params(x, y, w, h, color, self.w, self.h)
-        self._dispatch_metal_2d(self.session.pipe_rect_filled, w, h, params)
+        val pipeline = self.session.pipe_rect_filled
+        self._dispatch_metal_2d(pipeline, w, h, params)
 
     me _dispatch_metal_1d(pipeline: i64, threads: i64, block_x: i64, params: [u8]):
-        val cmd = metal_sffi_create_command_buffer(self.command_queue)
+        # TODO: [runtime][P2] Interpreter loses the `self` binding when a struct
+        # field is passed inline as a call argument after a prior extern call in
+        # the same method ("variable `self` not found"). Hoisting self.* into
+        # locals first is the workaround applied here and in _dispatch_metal_2d.
+        val q = self.command_queue
+        val fb = self.d_framebuffer
+        val plen = params.len()
+        val cmd = metal_sffi_create_command_buffer(q)
         if cmd == 0:
             return
         val encoder = metal_sffi_create_compute_encoder(cmd)
         if encoder == 0:
             return
-        metal_sffi_set_buffer(encoder, self.d_framebuffer, 0, 0)
-        metal_sffi_set_bytes(encoder, params, params.len(), 1)
+        metal_sffi_set_buffer(encoder, fb, 0, 0)
+        metal_sffi_set_bytes(encoder, params, plen, 1)
         metal_sffi_dispatch_compute(encoder, pipeline, threads, 1, 1, block_x, 1, 1)
         metal_sffi_end_compute_encoder(encoder)
         metal_sffi_commit_command_buffer(cmd)
         metal_sffi_wait_completed(cmd)
 
     me _dispatch_metal_2d(pipeline: i64, w: i32, h: i32, params: [u8]):
-        val cmd = metal_sffi_create_command_buffer(self.command_queue)
+        val q = self.command_queue
+        val fb = self.d_framebuffer
+        val plen = params.len()
+        val cmd = metal_sffi_create_command_buffer(q)
         if cmd == 0:
             return
         val encoder = metal_sffi_create_compute_encoder(cmd)
         if encoder == 0:
             return
-        metal_sffi_set_buffer(encoder, self.d_framebuffer, 0, 0)
-        metal_sffi_set_bytes(encoder, params, params.len(), 1)
+        metal_sffi_set_buffer(encoder, fb, 0, 0)
+        metal_sffi_set_bytes(encoder, params, plen, 1)
         val block_x = 16
         val block_y = 16
         val grid_x = ((_metal_i64(w) + block_x - 1) / block_x) * block_x
@@ -280,30 +299,6 @@ impl MetalBackend:
         metal_sffi_end_compute_encoder(encoder)
         metal_sffi_commit_command_buffer(cmd)
         metal_sffi_wait_completed(cmd)
-
-    me _download_metal_framebuffer():
-        val byte_size = _metal_i64(self.w) * _metal_i64(self.h) * 4
-        val host_bytes: [u8] = [0u8; byte_size]
-        metal_sffi_buffer_download(host_bytes, self.d_framebuffer, byte_size)
-        var i = 0
-        val count = self.w * self.h
-        while i < count:
-            val base = i * 4
-            val b0 = host_bytes[base] as u32
-            val b1 = host_bytes[base + 1] as u32
-            val b2 = host_bytes[base + 2] as u32
-            val b3 = host_bytes[base + 3] as u32
-            self.host_buf[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-            i = i + 1
-        self.dirty = false
-
-    me _copy_host_pixels() -> [u32]:
-        var out: [u32] = []
-        var i = 0
-        while i < self.host_buf.len():
-            out.push(self.host_buf[i])
-            i = i + 1
-        out
 
 impl Engine2DExtended for MetalBackend:
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
