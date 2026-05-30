@@ -182,6 +182,45 @@ mod platform {
         static KQUEUE_FDS: RefCell<HashMap<i64, i32>> = RefCell::new(HashMap::new());
     }
 
+    #[cfg(target_os = "freebsd")]
+    fn make_kevent(
+        ident: libc::uintptr_t,
+        filter: i16,
+        flags: u16,
+        fflags: u32,
+        data: i64,
+        udata: *mut libc::c_void,
+    ) -> libc::kevent {
+        libc::kevent {
+            ident,
+            filter,
+            flags,
+            fflags,
+            data,
+            udata,
+            ext: [0; 4],
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn make_kevent(
+        ident: libc::uintptr_t,
+        filter: i16,
+        flags: u16,
+        fflags: u32,
+        data: i64,
+        udata: *mut libc::c_void,
+    ) -> libc::kevent {
+        libc::kevent {
+            ident,
+            filter,
+            flags,
+            fflags,
+            data,
+            udata,
+        }
+    }
+
     pub fn create() -> i64 {
         let kqfd = unsafe { libc::kqueue() };
         if kqfd < 0 {
@@ -209,26 +248,24 @@ mod platform {
 
             // interest: 0=Read, 1=Write, 2=ReadWrite
             if interest == 0 || interest == 2 {
-                changes.push(libc::kevent {
-                    ident: fd as libc::uintptr_t,
-                    filter: libc::EVFILT_READ,
+                changes.push(make_kevent(
+                    fd as libc::uintptr_t,
+                    libc::EVFILT_READ,
                     flags,
-                    fflags: 0,
-                    data: 0,
-                    udata: token as *mut libc::c_void,
-                    ext: [0; 4],
-                });
+                    0,
+                    0,
+                    token as *mut libc::c_void,
+                ));
             }
             if interest == 1 || interest == 2 {
-                changes.push(libc::kevent {
-                    ident: fd as libc::uintptr_t,
-                    filter: libc::EVFILT_WRITE,
+                changes.push(make_kevent(
+                    fd as libc::uintptr_t,
+                    libc::EVFILT_WRITE,
                     flags,
-                    fflags: 0,
-                    data: 0,
-                    udata: token as *mut libc::c_void,
-                    ext: [0; 4],
-                });
+                    0,
+                    0,
+                    token as *mut libc::c_void,
+                ));
             }
 
             if changes.is_empty() {
@@ -258,24 +295,22 @@ mod platform {
 
             // Remove both filters; ignore ENOENT if one wasn't registered
             let changes = [
-                libc::kevent {
-                    ident: fd as libc::uintptr_t,
-                    filter: libc::EVFILT_READ,
-                    flags: libc::EV_DELETE as u16,
-                    fflags: 0,
-                    data: 0,
-                    udata: std::ptr::null_mut(),
-                    ext: [0; 4],
-                },
-                libc::kevent {
-                    ident: fd as libc::uintptr_t,
-                    filter: libc::EVFILT_WRITE,
-                    flags: libc::EV_DELETE as u16,
-                    fflags: 0,
-                    data: 0,
-                    udata: std::ptr::null_mut(),
-                    ext: [0; 4],
-                },
+                make_kevent(
+                    fd as libc::uintptr_t,
+                    libc::EVFILT_READ,
+                    libc::EV_DELETE as u16,
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                make_kevent(
+                    fd as libc::uintptr_t,
+                    libc::EVFILT_WRITE,
+                    libc::EV_DELETE as u16,
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                ),
             ];
 
             // Best-effort: at least one delete should succeed
@@ -294,18 +329,7 @@ mod platform {
             };
 
             let max = max_events.clamp(1, 1024) as usize;
-            let mut events: Vec<libc::kevent> = vec![
-                libc::kevent {
-                    ident: 0,
-                    filter: 0,
-                    flags: 0,
-                    fflags: 0,
-                    data: 0,
-                    udata: std::ptr::null_mut(),
-                    ext: [0; 4],
-                };
-                max
-            ];
+            let mut events: Vec<libc::kevent> = vec![make_kevent(0, 0, 0, 0, 0, std::ptr::null_mut()); max];
 
             let timeout = if timeout_ms < 0 {
                 std::ptr::null()
