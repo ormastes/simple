@@ -1330,7 +1330,16 @@ pub(super) fn eval_bdd_builtin(
         }
         // Standalone assertion functions
         "assert_true" => {
-            let val = eval_arg(args, 0, Value::Bool(false), env, functions, classes, enums, impl_methods)?;
+            let val = eval_arg(
+                args,
+                0,
+                Value::Bool(false),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             if !val.truthy() {
                 BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
                 BDD_FAILURE_MSG.with(|cell| {
@@ -1399,8 +1408,26 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "assert_contains" => {
-            let haystack = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?;
-            let needle = eval_arg(args, 1, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?;
+            let haystack = eval_arg(
+                args,
+                0,
+                Value::Str(String::new()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            let needle = eval_arg(
+                args,
+                1,
+                Value::Str(String::new()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             let haystack_s = haystack.to_display_string();
             let needle_s = needle.to_display_string();
             if !haystack_s.contains(&needle_s) {
@@ -1415,7 +1442,16 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "fail_assertion" => {
-            let msg = eval_arg(args, 0, Value::Str("assertion failed".to_string()), env, functions, classes, enums, impl_methods)?;
+            let msg = eval_arg(
+                args,
+                0,
+                Value::Str("assertion failed".to_string()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
             BDD_FAILURE_MSG.with(|cell| {
                 *cell.borrow_mut() = Some(msg.to_display_string());

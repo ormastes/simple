@@ -84,7 +84,7 @@ impl FixApplicator {
 
             // Sort by start position (descending) so we can apply from end to start
             // without invalidating earlier offsets
-            replacements.sort_by(|a, b| b.1.span.start.cmp(&a.1.span.start));
+            replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.1.span.start));
 
             // Check for overlapping spans
             for i in 0..replacements.len().saturating_sub(1) {
