@@ -550,6 +550,27 @@ Uncovered or weak areas:
 - Engine2D `draw_text_bg` facade dispatch is resolved in prior tracking; the
   current checkout has no separate draw-text-bg bug artifact to link here.
 
+- A 2026-05-30 change wired generic HTML into a real layout/paint engine.
+  `simple_web_engine2d_render_html_pixels(...)` now computes a result-based
+  discriminator (`heuristic_recognized`): if the HTML resolves a background
+  color, a first-block color, the famous-site corpus, the `wm-app-titlebar`/
+  `wm-app-content` chrome, or the `Simple Web`/`about:network` mark, it keeps
+  the existing substring-heuristic branches whose exact pixels the fixture specs
+  pin; otherwise it routes to `simple_web_layout_render_html_pixels(...)` in the
+  new `simple_web_html_layout_renderer.spl` (parse -> CSS cascade -> block
+  layout -> paint text+boxes, ported from `examples/ui/mini_html_render.spl`).
+  All pinned-fixture specs stay green because every pinned fixture still matches
+  the heuristic discriminator: `simple_web_engine2d_renderer_spec.spl`,
+  `simple_web_html_renderer_spec.spl`, `web_renderer_backend_parity_spec.spl`,
+  and `simple_web_renderer_spec.spl` all pass under
+  `--mode=interpreter --clean`. The remaining follow-ups (generic-HTML render
+  speed under the interpreter, dedicated pixel coverage for the generic-layout
+  branch, and Chrome-compatible text/CSS fidelity) are tracked in
+  `doc/08_tracking/feature_request/simple_web_renderer_generic_layout_followups_2026-05-30.md`.
+  This routing change does not by itself advance Chrome corpus parity — the
+  corpus fixtures still use the heuristic and the open parity work below is
+  unchanged.
+
 Conclusion:
 
 The goal is not complete. The current work establishes research, plan, corpus,
