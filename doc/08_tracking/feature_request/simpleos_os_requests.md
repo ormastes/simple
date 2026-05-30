@@ -152,7 +152,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Codex scheduler/process follow-up
 - **Target:** simpleos-os scheduler
 - **Priority:** P1
-- **Status:** Partial
+- **Status:** Implemented 2026-05-30
 - **Requested-semantics:**
   Replace the current flat default `SchedulerTopology` with hardware-discovered
   scheduler domains for SMT siblings, shared-cache/package groups, and NUMA
@@ -200,6 +200,17 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   (`1/1`, 34289 ms). Manual QEMU serial output also shows
   `[smp] AP trampoline prepared cpu=1 vector=0x08`,
   `[smp] AP reached 64-bit entry`, and `[smp-probe] done`.
+  Status closed on 2026-05-30 because all listed acceptance criteria are now
+  checked and the entry links the architecture/design guide
+  `doc/07_guide/platform/sosix_process_scheduler.md`. Focused non-live
+  verification was rerun with:
+  `SIMPLE_LIB=/tmp/simple-final-sync/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple check test/unit/os/kernel/scheduler/topology_spec.spl test/unit/os/kernel/scheduler/scheduler_spec.spl test/unit/os/kernel/arch/x86_64_topology_spec.spl test/system/simpleos_smp_ap_live_spec.spl`.
+  Interpreter-mode focused specs passed for scheduler topology (7/7) and
+  x86_64 topology (4/4); `test/unit/os/kernel/scheduler/scheduler_spec.spl`
+  static check passed, but its full interpreter run still has separate
+  pre-existing failures outside this topology-close slice. The AP live lane remains gated by
+  `SIMPLEOS_QEMU_SMP_AP_LIVE=1`; prior 2026-05-29 evidence in this entry records
+  the live QEMU AP pass.
 
 ### FR-SOS-018 — Add idle-path balancing and full wakeup preemption
 
