@@ -21,7 +21,12 @@ Make macro `intro result: enclosing.module.let` emissions bind usable values in 
 Broader macro hygiene naming behavior outside the documented nil-binding failure is not part of this slice unless required to make the existing assertions pass.
 
 ## Phase
-dev-done
+verified
 
 ## Log
 - dev: Created state file with 4 acceptance criteria (type: bug).
+- implement: Captured emitted macro-intro variable values and substituted template binding patterns in the Rust seed interpreter path.
+- verify: `cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml` passed with existing warnings.
+- verify: `cargo build -p simple-driver --manifest-path src/compiler_rust/Cargo.toml` passed with existing warnings.
+- verify: `SIMPLE_LIB=src src/compiler_rust/target/debug/simple run test/feature/usage/macro_validation_spec.spl` passed all macro validation groups.
+- verify: `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check test/feature/usage/macro_validation_spec.spl` passed.

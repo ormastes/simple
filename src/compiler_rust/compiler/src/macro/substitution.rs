@@ -1,6 +1,6 @@
 use simple_parser::ast::{
     Argument, AssignmentStmt, Block, ContextStmt, Expr, FStringPart, ForStmt, IfStmt, LetStmt, LoopStmt, MacroArg,
-    MatchArm, MatchStmt, Node, RangeBound, ReturnStmt, WhileStmt, WithStmt,
+    MatchArm, MatchStmt, Node, Pattern, RangeBound, ReturnStmt, WhileStmt, WithStmt,
 };
 use std::collections::HashMap;
 
@@ -105,7 +105,7 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
         Node::Expression(expr) => Node::Expression(substitute_expr_templates(expr, const_bindings)),
         Node::Let(let_stmt) => Node::Let(LetStmt {
             span: let_stmt.span,
-            pattern: let_stmt.pattern.clone(),
+            pattern: substitute_pattern_templates(&let_stmt.pattern, const_bindings, true),
             ty: let_stmt.ty.clone(),
             value: let_stmt
                 .value
@@ -138,7 +138,9 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
                 .iter()
                 .map(|(pattern, cond, block)| {
                     (
-                        pattern.clone(),
+                        pattern
+                            .as_ref()
+                            .map(|pattern| substitute_pattern_templates(pattern, const_bindings, true)),
                         substitute_expr_templates(cond, const_bindings),
                         substitute_block_templates(block, const_bindings),
                     )
@@ -171,7 +173,7 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
         }),
         Node::For(stmt) => Node::For(ForStmt {
             span: stmt.span,
-            pattern: stmt.pattern.clone(),
+            pattern: substitute_pattern_templates(&stmt.pattern, const_bindings, true),
             iterable: substitute_expr_templates(&stmt.iterable, const_bindings),
             body: substitute_block_templates(&stmt.body, const_bindings),
             simd_requested: stmt.simd_requested,
@@ -184,7 +186,10 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
             span: stmt.span,
             condition: substitute_expr_templates(&stmt.condition, const_bindings),
             body: substitute_block_templates(&stmt.body, const_bindings),
-            let_pattern: stmt.let_pattern.clone(),
+            let_pattern: stmt
+                .let_pattern
+                .as_ref()
+                .map(|pattern| substitute_pattern_templates(pattern, const_bindings, true)),
             simd_requested: stmt.simd_requested,
             is_suspend: stmt.is_suspend,
             invariants: stmt.invariants.clone(),
@@ -379,7 +384,7 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
             condition,
         } => Expr::ListComprehension {
             expr: Box::new(substitute_expr_templates(expr, const_bindings)),
-            pattern: pattern.clone(),
+            pattern: substitute_pattern_templates(pattern, const_bindings, true),
             iterable: Box::new(substitute_expr_templates(iterable, const_bindings)),
             condition: condition
                 .as_ref()
@@ -394,7 +399,7 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
         } => Expr::DictComprehension {
             key: Box::new(substitute_expr_templates(key, const_bindings)),
             value: Box::new(substitute_expr_templates(value, const_bindings)),
-            pattern: pattern.clone(),
+            pattern: substitute_pattern_templates(pattern, const_bindings, true),
             iterable: Box::new(substitute_expr_templates(iterable, const_bindings)),
             condition: condition
                 .as_ref()
@@ -493,6 +498,107 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
             }
         }
         _ => expr.clone(),
+    }
+}
+
+fn substitute_pattern_templates(
+    pattern: &Pattern,
+    const_bindings: &HashMap<String, String>,
+    literal_string_as_identifier: bool,
+) -> Pattern {
+    match pattern {
+        Pattern::Identifier(name) => Pattern::Identifier(substitute_template_string(name, const_bindings)),
+        Pattern::MutIdentifier(name) => Pattern::MutIdentifier(substitute_template_string(name, const_bindings)),
+        Pattern::MoveIdentifier(name) => Pattern::MoveIdentifier(substitute_template_string(name, const_bindings)),
+        Pattern::Literal(expr) if literal_string_as_identifier => {
+            if let Some(name) = pattern_literal_identifier(expr, const_bindings) {
+                Pattern::Identifier(name)
+            } else {
+                Pattern::Literal(Box::new(substitute_expr_templates(expr, const_bindings)))
+            }
+        }
+        Pattern::Literal(expr) => Pattern::Literal(Box::new(substitute_expr_templates(expr, const_bindings))),
+        Pattern::Tuple(items) => Pattern::Tuple(
+            items
+                .iter()
+                .map(|item| substitute_pattern_templates(item, const_bindings, literal_string_as_identifier))
+                .collect(),
+        ),
+        Pattern::Array(items) => Pattern::Array(
+            items
+                .iter()
+                .map(|item| substitute_pattern_templates(item, const_bindings, literal_string_as_identifier))
+                .collect(),
+        ),
+        Pattern::Struct { name, fields } => Pattern::Struct {
+            name: name.clone(),
+            fields: fields
+                .iter()
+                .map(|(field, pat)| {
+                    (
+                        field.clone(),
+                        substitute_pattern_templates(pat, const_bindings, literal_string_as_identifier),
+                    )
+                })
+                .collect(),
+        },
+        Pattern::Enum { name, variant, payload } => Pattern::Enum {
+            name: name.clone(),
+            variant: variant.clone(),
+            payload: payload.as_ref().map(|items| {
+                items
+                    .iter()
+                    .map(|item| substitute_pattern_templates(item, const_bindings, literal_string_as_identifier))
+                    .collect()
+            }),
+        },
+        Pattern::Or(items) => Pattern::Or(
+            items
+                .iter()
+                .map(|item| substitute_pattern_templates(item, const_bindings, literal_string_as_identifier))
+                .collect(),
+        ),
+        Pattern::Typed { pattern, ty } => Pattern::Typed {
+            pattern: Box::new(substitute_pattern_templates(
+                pattern,
+                const_bindings,
+                literal_string_as_identifier,
+            )),
+            ty: ty.clone(),
+        },
+        Pattern::Range {
+            start,
+            end,
+            inclusive,
+        } => Pattern::Range {
+            start: Box::new(substitute_expr_templates(start, const_bindings)),
+            end: Box::new(substitute_expr_templates(end, const_bindings)),
+            inclusive: *inclusive,
+        },
+        _ => pattern.clone(),
+    }
+}
+
+fn pattern_literal_identifier(expr: &Expr, const_bindings: &HashMap<String, String>) -> Option<String> {
+    match expr {
+        Expr::String(value) => Some(substitute_template_string(value, const_bindings)),
+        Expr::FString { parts, .. } => {
+            let mut output = String::new();
+            for part in parts {
+                match part {
+                    FStringPart::Literal(text) => output.push_str(&substitute_template_string(text, const_bindings)),
+                    FStringPart::Expr(Expr::Identifier(name)) => {
+                        output.push_str(const_bindings.get(name)?);
+                    }
+                    FStringPart::Expr(Expr::Integer(value)) => {
+                        output.push_str(&value.to_string());
+                    }
+                    _ => return None,
+                }
+            }
+            Some(output)
+        }
+        _ => None,
     }
 }
 

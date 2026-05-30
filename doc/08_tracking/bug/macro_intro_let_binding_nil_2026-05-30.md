@@ -3,7 +3,7 @@
 **Date:** 2026-05-30
 **Severity:** Medium (6 macro validation tests remain failing; fn-intro path is unaffected)
 **Affects:** `test/feature/usage/macro_validation_spec.spl`
-**Status:** Open
+**Status:** Resolved 2026-05-30
 
 ## Symptom
 
@@ -96,3 +96,20 @@ bin/simple run test/feature/usage/macro_validation_spec.spl 2>&1
   "Multi-intro macro gensym creates suffixed names (var1_gensym_1) — Need to resolve macro
   hygiene for multi-intro to expose clean names"
 - Do NOT weaken or skip these tests; they correctly describe the intended behaviour
+
+## Resolution
+
+Fixed in the Rust seed interpreter macro expansion path by carrying runtime
+values for `introduced_vars` out of the hygienic macro-local environment and
+registering those values at the caller scope. Template substitution now also
+resolves string/f-string binding patterns used by macro-generated identifiers,
+which covers `val "var_{i}" = i` inside const-unrolled emit blocks.
+
+Verification:
+
+```bash
+cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml
+cargo build -p simple-driver --manifest-path src/compiler_rust/Cargo.toml
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple run test/feature/usage/macro_validation_spec.spl
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple check test/feature/usage/macro_validation_spec.spl
+```
