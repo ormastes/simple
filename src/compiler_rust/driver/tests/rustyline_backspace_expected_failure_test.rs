@@ -95,6 +95,10 @@ impl PtySession {
     }
 }
 
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "macOS rustyline/PTTY behavior now reports this backspace limitation as fixed"
+)]
 #[test]
 fn test_expect_rustyline_bug_exists() {
     println!("\n╔════════════════════════════════════════════════════════╗");
