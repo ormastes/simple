@@ -15,6 +15,8 @@ owned by other agents and should not block this API slice.
 - Provide redaction-aware API/protocol field summaries.
 - Provide structured `capture_api_protocol_fields(...)` for provider code that
   already has parsed request, header, and response fields.
+- Provide common capture-policy resolution for step, function/checker,
+  scenario, file, folder, root, then built-in defaults.
 - Keep helpers pure except for the existing file-exists extern used by checker
   tests.
 - Verify with focused unit tests before committing.
@@ -23,5 +25,5 @@ owned by other agents and should not block this API slice.
 
 - Web and browser-facing capture providers.
 - TUI/GUI selected rectangle provider wiring.
-- Runtime capture-policy resolution through step, function, scenario, file,
-  folder, and root defaults.
+- Wiring capture-policy resolution through all runtime/docgen provider call
+  sites.

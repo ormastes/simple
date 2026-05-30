@@ -86,7 +86,7 @@ documentation to hand-written-quality scenario manuals.
   - [x] Shared model represents bare `@capture` as `after_step` with default
         kind `tui`.
   - [x] Shared model represents root default capture as `off`.
-  - [ ] Capture policy resolves by step, function/checker, scenario, file,
+  - [x] Capture policy resolves by step, function/checker, scenario, file,
         folder, root, then built-in default.
   - [x] Generated docs render starter scenario and step capture summaries from
         comment metadata when no manual step can be derived.
@@ -114,7 +114,10 @@ documentation to hand-written-quality scenario manuals.
   there too. Step-local `# @artifact(...)` metadata renders concrete provider
   artifact paths under the producing manual step, and legacy `Screenshots`,
   `TUI Captures`, `Artifacts`, and `Logs` metadata remains supported in the
-  generated evidence section. Full config resolution remains open.
+  generated evidence section. The common evidence model now exposes a pure
+  capture-policy resolver for step, function/checker, scenario, file, folder,
+  root, then built-in default precedence with focused unit coverage. Wiring the
+  resolver into all runtime/docgen provider call sites remains open.
 - **Related-upfront:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 - **Related-design-doc:** tbd
 - **Related-issue:** none

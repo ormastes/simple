@@ -4,6 +4,8 @@ use std.common.spec.scenario_evidence.{
     ScenarioCaptureMode,
     scenario_capture_bare,
     scenario_capture_off,
+    scenario_capture_policy_absent,
+    scenario_capture_policy_override,
     scenario_capture_policy,
     scenario_api_evidence,
     scenario_api_protocol_evidence,
@@ -16,7 +18,9 @@ use std.common.spec.scenario_evidence.{
     scenario_evidence_artifact,
     scenario_evidence_manual_summary,
     scenario_policy_manual_summary,
+    scenario_policy_resolution_manual_summary,
     scenario_redacted_evidence_artifact,
+    resolve_scenario_capture_policy,
     scenario_ui_selection_evidence
 }
 
@@ -38,6 +42,159 @@ describe "scenario evidence capture policy":
         )
         expect(policy.enabled).to_equal(true)
         expect(scenario_policy_manual_summary(policy)).to_equal("capture api after_scenario")
+
+    it "uses built in off when no capture policy scope is present":
+        val absent = scenario_capture_policy_absent()
+        val resolution = resolve_scenario_capture_policy(
+            absent,
+            absent,
+            absent,
+            absent,
+            absent,
+            absent
+        )
+        expect(resolution.source).to_equal("built-in")
+        expect(resolution.policy.enabled).to_equal(false)
+        expect(scenario_policy_resolution_manual_summary(resolution)).to_equal("capture off from built-in")
+
+    it "resolves root policy when no closer scope is present":
+        val absent = scenario_capture_policy_absent()
+        val root = scenario_capture_policy_override(
+            scenario_capture_policy(
+                ScenarioCaptureMode.on_failure,
+                ScenarioCaptureKind.log
+            )
+        )
+        val resolution = resolve_scenario_capture_policy(
+            absent,
+            absent,
+            absent,
+            absent,
+            absent,
+            root
+        )
+        expect(resolution.source).to_equal("root")
+        expect(scenario_policy_manual_summary(resolution.policy)).to_equal("capture log on_failure")
+
+    it "resolves folder policy before root policy":
+        val absent = scenario_capture_policy_absent()
+        val folder = scenario_capture_policy_override(
+            scenario_capture_policy(
+                ScenarioCaptureMode.after_scenario,
+                ScenarioCaptureKind.exec
+            )
+        )
+        val root = scenario_capture_policy_override(
+            scenario_capture_policy(
+                ScenarioCaptureMode.on_failure,
+                ScenarioCaptureKind.log
+            )
+        )
+        val resolution = resolve_scenario_capture_policy(
+            absent,
+            absent,
+            absent,
+            absent,
+            folder,
+            root
+        )
+        expect(resolution.source).to_equal("folder")
+        expect(scenario_policy_manual_summary(resolution.policy)).to_equal("capture exec after_scenario")
+
+    it "resolves file policy before folder policy":
+        val absent = scenario_capture_policy_absent()
+        val file = scenario_capture_policy_override(
+            scenario_capture_policy(
+                ScenarioCaptureMode.after_step,
+                ScenarioCaptureKind.api
+            )
+        )
+        val folder = scenario_capture_policy_override(
+            scenario_capture_policy(
+                ScenarioCaptureMode.after_scenario,
+                ScenarioCaptureKind.exec
+            )
+        )
+        val resolution = resolve_scenario_capture_policy(
+            absent,
+            absent,
+            absent,
+            file,
+            folder,
+            absent
+        )
+        expect(resolution.source).to_equal("file")
+        expect(scenario_policy_manual_summary(resolution.policy)).to_equal("capture api after_step")
+
+    it "resolves scenario policy before file policy":
+        val absent = scenario_capture_policy_absent()
+        val scenario = scenario_capture_policy_override(
+            scenario_capture_policy(
+                ScenarioCaptureMode.after_step,
+                ScenarioCaptureKind.protocol
+            )
+        )
+        val file = scenario_capture_policy_override(
+            scenario_capture_policy(
+                ScenarioCaptureMode.after_step,
+                ScenarioCaptureKind.api
+            )
+        )
+        val resolution = resolve_scenario_capture_policy(
+            absent,
+            absent,
+            scenario,
+            file,
+            absent,
+            absent
+        )
+        expect(resolution.source).to_equal("scenario")
+        expect(scenario_policy_manual_summary(resolution.policy)).to_equal("capture protocol after_step")
+
+    it "resolves function checker policy before scenario policy":
+        val absent = scenario_capture_policy_absent()
+        val function_policy = scenario_capture_policy_override(
+            scenario_capture_policy(
+                ScenarioCaptureMode.on_failure,
+                ScenarioCaptureKind.text
+            )
+        )
+        val scenario = scenario_capture_policy_override(
+            scenario_capture_policy(
+                ScenarioCaptureMode.after_step,
+                ScenarioCaptureKind.protocol
+            )
+        )
+        val resolution = resolve_scenario_capture_policy(
+            absent,
+            function_policy,
+            scenario,
+            absent,
+            absent,
+            absent
+        )
+        expect(resolution.source).to_equal("function")
+        expect(scenario_policy_manual_summary(resolution.policy)).to_equal("capture text on_failure")
+
+    it "resolves step policy before function checker policy":
+        val absent = scenario_capture_policy_absent()
+        val step = scenario_capture_policy_override(scenario_capture_bare())
+        val function_policy = scenario_capture_policy_override(
+            scenario_capture_policy(
+                ScenarioCaptureMode.on_failure,
+                ScenarioCaptureKind.text
+            )
+        )
+        val resolution = resolve_scenario_capture_policy(
+            step,
+            function_policy,
+            absent,
+            absent,
+            absent,
+            absent
+        )
+        expect(resolution.source).to_equal("step")
+        expect(scenario_policy_manual_summary(resolution.policy)).to_equal("capture tui after_step")
 
 describe "scenario evidence artifact":
     it "renders path backed evidence for manual output":
