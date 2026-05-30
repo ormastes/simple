@@ -2,19 +2,26 @@
 # @tag: unit, ui, web_render_api
 
 use common.ui.web_render_api.{
+    WEB_RENDER_TARGET_ANDROID_WASM,
     WEB_RENDER_TARGET_ELECTRON,
+    WEB_RENDER_TARGET_HOST_WM_WASM,
+    WEB_RENDER_TARGET_IOS_WASM,
     WEB_RENDER_TARGET_PURE_SIMPLE,
+    WEB_RENDER_TARGET_SIMPLEOS_WM_WASM,
     WEB_RENDER_TARGET_TAURI,
+    WEB_RENDER_WASM_SCHEMA_VERSION,
     WebRenderRequest,
     WebRenderHostWindowCommand,
     WebRenderInputEnvelope,
     WebRenderPatchEnvelope,
     WebRenderSnapshotEnvelope,
     WebRenderBinaryArtifactMetadata,
+    WebRenderWasmArtifactMetadata,
     web_render_artifact_with_binary_metadata,
     web_render_capabilities_for_target,
     web_render_body_html,
     web_render_full_html,
+    web_render_generated_wasm_artifact,
     web_render_host_window_command_to_json,
     web_render_input_envelope_to_json,
     web_render_input_envelope_from_event,
@@ -23,7 +30,11 @@ use common.ui.web_render_api.{
     web_render_pixel_artifact,
     web_render_snapshot_envelope_to_json,
     web_render_transport_bundle,
-    web_render_to_artifact
+    web_render_to_artifact,
+    web_render_wasm_abi_for_target,
+    web_render_wasm_no_js_is_valid,
+    web_render_wasm_no_js_target,
+    web_render_wasm_no_js_validation_error
 }
 use common.ui.widget.{UIEvent}
 
@@ -169,3 +180,37 @@ describe "shared web render API":
         expect(input.event_type).to_equal("input")
         expect(input.target_id).to_equal("name")
         expect(input.value).to_equal("Ada")
+
+    it "declares generated WASM no-JavaScript render targets for mobile and WMs":
+        expect(web_render_wasm_no_js_target(WEB_RENDER_TARGET_ANDROID_WASM)).to_equal(true)
+        expect(web_render_wasm_no_js_target(WEB_RENDER_TARGET_IOS_WASM)).to_equal(true)
+        expect(web_render_wasm_no_js_target(WEB_RENDER_TARGET_HOST_WM_WASM)).to_equal(true)
+        expect(web_render_wasm_no_js_target(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM)).to_equal(true)
+        expect(web_render_wasm_no_js_target(WEB_RENDER_TARGET_ELECTRON)).to_equal(false)
+        expect(web_render_wasm_abi_for_target(WEB_RENDER_TARGET_IOS_WASM)).to_equal("wasm32-simple-ui-ios")
+        expect(web_render_wasm_abi_for_target(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM)).to_equal("wasm32-simple-ui-simpleos-wm")
+
+    it "rejects JavaScript and ABI mismatches for generated WASM targets":
+        val meta = WebRenderWasmArtifactMetadata.create("build/gui/hello-ios.wasm", "wasm32-simple-ui-ios", 4096, 256, 12)
+        val valid = WebRenderRequest.html(WEB_RENDER_TARGET_IOS_WASM, "Hello iOS", "<main>Hello</main>", "main{}", "", 390, 844)
+        val with_js = WebRenderRequest.html(WEB_RENDER_TARGET_IOS_WASM, "Hello iOS", "<main>Hello</main>", "main{}", "boot()", 390, 844)
+        val wrong_abi = WebRenderWasmArtifactMetadata.create("build/gui/hello-ios.wasm", "wasm32-simple-ui-android", 4096, 256, 12)
+
+        expect(web_render_wasm_no_js_is_valid(valid, meta)).to_equal(true)
+        expect(web_render_wasm_no_js_validation_error(with_js, meta)).to_equal("javascript is not allowed for generated wasm target")
+        expect(web_render_wasm_no_js_validation_error(valid, wrong_abi)).to_equal("wasm abi does not match render target")
+
+    it "carries generated WASM metadata without producing host IPC JavaScript":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM, "Hello WM", "<button>Launch</button>", "button{}", "", 800, 600)
+        val meta = WebRenderWasmArtifactMetadata.create("build/gui/simpleos-wm/hello.wasm", web_render_wasm_abi_for_target(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM), 8192, 512, 18)
+        val artifact = web_render_generated_wasm_artifact(req, meta)
+
+        expect(artifact.target).to_equal(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM)
+        expect(artifact.ipc_json).to_equal("")
+        expect(artifact.html).to_contain("<button>Launch</button>")
+        expect(artifact.html.contains("<script>")).to_equal(false)
+        expect(artifact.binary_schema).to_equal(WEB_RENDER_WASM_SCHEMA_VERSION)
+        expect(artifact.binary_cache_path).to_equal("build/gui/simpleos-wm/hello.wasm")
+        expect(artifact.binary_command_count).to_equal(18)
+        expect(artifact.capability_summary).to_contain("generated_wasm")
+        expect(artifact.capability_summary).to_contain("no_javascript")

@@ -33,6 +33,10 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdatomic.h>
+#ifndef _WIN32
+#include <execinfo.h>
+#include <unistd.h>
+#endif
 #include <sys/stat.h>
 #ifndef _WIN32
 #include <dirent.h>

@@ -567,6 +567,22 @@ fn manual_visibility_from_metadata_line(trimmed: text) -> text:
         return normalize_manual_visibility(trimmed)
     ""
 
+fn manual_visibility_warning_from_metadata_line(trimmed: text) -> text:
+    val lower = trimmed.lower().trim()
+    if not (lower.starts_with("# @manual") or lower.starts_with("@manual")):
+        return ""
+    if lower.starts_with("# @manual-file") or lower.starts_with("# @manual_file"):
+        return ""
+    if lower.starts_with("# @manual-default") or lower.starts_with("# @manual_default"):
+        return ""
+    if lower.starts_with("@manual-file") or lower.starts_with("@manual_file"):
+        return ""
+    if lower.starts_with("@manual-default") or lower.starts_with("@manual_default"):
+        return ""
+    if normalize_manual_visibility(lower) != "":
+        return ""
+    "invalid manual visibility metadata: " + trimmed + " (expected show, folded, detail, or skip)"
+
 fn file_manual_visibility_from_metadata_line(trimmed: text) -> text:
     val lower = trimmed.lower().trim()
     if lower.starts_with("# @manual-file") or lower.starts_with("# @manual_file"):
@@ -656,9 +672,49 @@ fn manual_default(file_visibility: text, fallback: text) -> text:
         return file_visibility
     fallback
 
+fn is_capture_metadata_line(trimmed: text) -> bool:
+    val lower = trimmed.lower().trim()
+    lower.starts_with("# @capture") or lower.starts_with("@capture")
+
+fn capture_args_from_metadata_line(trimmed: text) -> text:
+    val lower = trimmed.lower().trim()
+    if not lower.contains("("):
+        return ""
+    val open_parts = lower.split("(")
+    if open_parts.len() < 2:
+        return ""
+    val close_parts = open_parts[1].split(")")
+    close_parts[0].trim()
+
+fn is_capture_metadata_token(token: text) -> bool:
+    val value = token.trim()
+    value == "tui" or value == "gui" or value == "text" or
+        value == "api" or value == "protocol" or value == "exec" or
+        value == "binary" or value == "log" or value == "artifact" or
+        value == "off" or value == "after_step" or
+        value == "after_scenario" or value == "on_failure" or
+        value == "on_fail"
+
+fn capture_warning_from_metadata_line(trimmed: text) -> text:
+    val lower = trimmed.lower().trim()
+    if not is_capture_metadata_line(lower):
+        return ""
+    if not lower.contains("("):
+        return ""
+    val args = capture_args_from_metadata_line(lower)
+    if args == "":
+        return "invalid capture metadata value: empty (expected kind tui|gui|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)"
+    for raw_token in args.split(","):
+        val token = raw_token.trim()
+        if not is_capture_metadata_token(token):
+            return "invalid capture metadata value: " + token + " (expected kind tui|gui|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)"
+    ""
+
 fn capture_kind_from_metadata_line(trimmed: text) -> text:
     val lower = trimmed.lower().trim()
-    if not (lower.starts_with("# @capture") or lower.starts_with("@capture")):
+    if not is_capture_metadata_line(lower):
+        return ""
+    if capture_warning_from_metadata_line(trimmed) != "":
         return ""
     if lower.contains("gui"):
         return "gui"
@@ -680,7 +736,9 @@ fn capture_kind_from_metadata_line(trimmed: text) -> text:
 
 fn capture_mode_from_metadata_line(trimmed: text) -> text:
     val lower = trimmed.lower().trim()
-    if not (lower.starts_with("# @capture") or lower.starts_with("@capture")):
+    if not is_capture_metadata_line(lower):
+        return ""
+    if capture_warning_from_metadata_line(trimmed) != "":
         return ""
     if lower.contains("off"):
         return "off"
@@ -752,6 +810,58 @@ fn is_scenario_line(trimmed: text) -> bool:
         trimmed.starts_with("pending ") or trimmed.starts_with("skip_it ") or
         trimmed.starts_with("skip it ")
 
+fn scenario_title_at(lines: [text], scenario_index: i64) -> text:
+    if scenario_index < 0 or scenario_index >= lines.len():
+        return ""
+    val trimmed = lines[scenario_index].trim()
+    if not is_scenario_line(trimmed):
+        return ""
+    extract_quoted_name(trimmed)
+
+fn previous_scenario_title(lines: [text], scenario_index: i64) -> text:
+    var j = scenario_index - 1
+    while j >= 0:
+        val trimmed = lines[j].trim()
+        if is_scenario_line(trimmed):
+            return extract_quoted_name(trimmed)
+        j = j - 1
+    ""
+
+fn scenario_index_by_title(lines: [text], title: text, excluded_index: i64) -> i64:
+    var j = 0
+    while j < lines.len():
+        val trimmed = lines[j].trim()
+        if j != excluded_index and is_scenario_line(trimmed):
+            val name = extract_quoted_name(trimmed)
+            if name == title:
+                return j
+        j = j + 1
+    -1
+
+fn scenario_body_by_index(lines: [text], scenario_index: i64) -> [text]:
+    if scenario_index < 0 or scenario_index >= lines.len():
+        return []
+    val end_index = find_scenario_body_end(lines, scenario_index + 1, count_leading_indent(lines[scenario_index]))
+    collect_scenario_body(lines, scenario_index + 1, end_index)
+
+fn scenario_references_title(lines: [text], scenario_index: i64, title: text) -> bool:
+    if title == "":
+        return false
+    val prev_title = scenario_prev_title(lines, scenario_index)
+    if prev_title == title:
+        return true
+    if prev_title == "__previous__" and previous_scenario_title(lines, scenario_index) == title:
+        return true
+    val body = scenario_body_by_index(lines, scenario_index)
+    for line in body:
+        val include_title = include_title_from_metadata_line(line.trim())
+        if include_title == title:
+            return true
+    false
+
+fn scenario_cycle_warning(kind: text, from_title: text, to_title: text) -> text:
+    "# @manual-warning: cycle detected in " + kind + " expansion: " + from_title + " -> " + to_title
+
 fn find_previous_scenario_body(lines: [text], scenario_index: i64) -> [text]:
     var j = scenario_index - 1
     while j >= 0:
@@ -765,21 +875,21 @@ fn find_previous_scenario_body(lines: [text], scenario_index: i64) -> [text]:
 fn find_scenario_body_by_title(lines: [text], title: text, scenario_index: i64) -> [text]:
     if title == "__previous__":
         return find_previous_scenario_body(lines, scenario_index)
-    var j = 0
-    while j < lines.len():
-        val trimmed = lines[j].trim()
-        if j != scenario_index and is_scenario_line(trimmed):
-            val name = extract_quoted_name(trimmed)
-            if name == title:
-                val end_index = find_scenario_body_end(lines, j + 1, count_leading_indent(lines[j]))
-                return collect_scenario_body(lines, j + 1, end_index)
-        j = j + 1
-    []
+    scenario_body_by_index(lines, scenario_index_by_title(lines, title, scenario_index))
 
 fn expand_prev_scenario_body(lines: [text], scenario_index: i64, body: [text]) -> [text]:
     val prev_title = scenario_prev_title(lines, scenario_index)
     if prev_title == "":
         return body
+    val current_title = scenario_title_at(lines, scenario_index)
+    val target_title = if prev_title == "__previous__": previous_scenario_title(lines, scenario_index) else: prev_title
+    val target_index = scenario_index_by_title(lines, target_title, scenario_index)
+    if target_title == current_title or scenario_references_title(lines, target_index, current_title):
+        var cycle_body: [text] = []
+        cycle_body.push(scenario_cycle_warning("prev", current_title, target_title))
+        for line in body:
+            cycle_body.push(line)
+        return cycle_body
     val prev_body = find_scenario_body_by_title(lines, prev_title, scenario_index)
     if prev_body.len() == 0:
         var missing_prev: [text] = []
@@ -801,6 +911,11 @@ fn expand_include_scenario_body(lines: [text], scenario_index: i64, body: [text]
         val trimmed = line.trim()
         val include_title = include_title_from_metadata_line(trimmed)
         if include_title != "":
+            val current_title = scenario_title_at(lines, scenario_index)
+            val include_index = scenario_index_by_title(lines, include_title, scenario_index)
+            if include_title == current_title or scenario_references_title(lines, include_index, current_title):
+                expanded.push(scenario_cycle_warning("include", current_title, include_title))
+                continue
             val include_body = find_scenario_body_by_title(lines, include_title, scenario_index)
             if include_body.len() > 0:
                 for include_line in include_body:
@@ -826,6 +941,37 @@ fn scenario_manual_visibility(lines: [text], scenario_index: i64, default_visibi
             continue
         break
     default_visibility
+
+fn scenario_metadata_warnings(lines: [text], scenario_index: i64) -> [text]:
+    var warnings: [text] = []
+    var j = scenario_index - 1
+    while j >= 0:
+        val trimmed = lines[j].trim()
+        if trimmed == "":
+            j = j - 1
+            continue
+        val manual_warning = manual_visibility_warning_from_metadata_line(trimmed)
+        if manual_warning != "":
+            warnings.push(manual_warning)
+        val capture_warning = capture_warning_from_metadata_line(trimmed)
+        if capture_warning != "":
+            warnings.push(capture_warning)
+        if trimmed.starts_with("#") or trimmed.starts_with("@"):
+            j = j - 1
+            continue
+        break
+    warnings
+
+fn add_scenario_metadata_warnings(lines: [text], scenario_index: i64, body: [text]) -> [text]:
+    val warnings = scenario_metadata_warnings(lines, scenario_index)
+    if warnings.len() == 0:
+        return body
+    var result: [text] = []
+    for warning in warnings:
+        result.push("# @manual-warning: " + warning)
+    for line in body:
+        result.push(line)
+    result
 
 fn next_manual_step_label(lines: [text], start_index: i64) -> text:
     var i = start_index
@@ -853,6 +999,9 @@ fn render_manual_warnings(lines: [text]) -> text:
         val warning = manual_warning_from_metadata_line(line.trim())
         if warning != "":
             warnings.push("- " + warning)
+        val capture_warning = capture_warning_from_metadata_line(line.trim())
+        if capture_warning != "":
+            warnings.push("- " + capture_warning)
     if warnings.len() == 0:
         return ""
     "\n**Manual warnings:**\n" + warnings.join("\n") + "\n\n"
@@ -861,7 +1010,7 @@ fn strip_manual_metadata_lines(lines: [text]) -> [text]:
     var result: [text] = []
     for line in lines:
         val trimmed = line.trim()
-        val is_capture = capture_policy_from_metadata_line(trimmed) != ""
+        val is_capture = is_capture_metadata_line(trimmed)
         val is_include = include_title_from_metadata_line(trimmed) != ""
         val is_warning = manual_warning_from_metadata_line(trimmed) != ""
         if not is_capture and not is_include and not is_warning:
@@ -1104,9 +1253,10 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val body = collect_scenario_body(lines, i + 1, next_index)
             val expanded_body = expand_prev_scenario_body(lines, i, body)
             val included_body = expand_include_scenario_body(lines, i, expanded_body)
+            val final_body = add_scenario_metadata_warnings(lines, i, included_body)
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "show"))
             val capture = scenario_capture_policy(lines, i)
-            result_parts.push(render_manual_scenario(name, " _(skipped)_", included_body, visibility, capture))
+            result_parts.push(render_manual_scenario(name, " _(skipped)_", final_body, visibility, capture))
             i = next_index - 1
 
         # pending -> pending bullet
@@ -1116,9 +1266,10 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val body = collect_scenario_body(lines, i + 1, next_index)
             val expanded_body = expand_prev_scenario_body(lines, i, body)
             val included_body = expand_include_scenario_body(lines, i, expanded_body)
+            val final_body = add_scenario_metadata_warnings(lines, i, included_body)
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "show"))
             val capture = scenario_capture_policy(lines, i)
-            result_parts.push(render_manual_scenario(name, " _(pending)_", included_body, visibility, capture))
+            result_parts.push(render_manual_scenario(name, " _(pending)_", final_body, visibility, capture))
             i = next_index - 1
 
         # slow it -> slow bullet
@@ -1128,9 +1279,10 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val body = collect_scenario_body(lines, i + 1, next_index)
             val expanded_body = expand_prev_scenario_body(lines, i, body)
             val included_body = expand_include_scenario_body(lines, i, expanded_body)
+            val final_body = add_scenario_metadata_warnings(lines, i, included_body)
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "folded"))
             val capture = scenario_capture_policy(lines, i)
-            result_parts.push(render_manual_scenario(name, " _(slow)_", included_body, visibility, capture))
+            result_parts.push(render_manual_scenario(name, " _(slow)_", final_body, visibility, capture))
             i = next_index - 1
 
         # regular it -> check bullet
@@ -1140,9 +1292,10 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val body = collect_scenario_body(lines, i + 1, next_index)
             val expanded_body = expand_prev_scenario_body(lines, i, body)
             val included_body = expand_include_scenario_body(lines, i, expanded_body)
+            val final_body = add_scenario_metadata_warnings(lines, i, included_body)
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "show"))
             val capture = scenario_capture_policy(lines, i)
-            result_parts.push(render_manual_scenario(name, "", included_body, visibility, capture))
+            result_parts.push(render_manual_scenario(name, "", final_body, visibility, capture))
             i = next_index - 1
 
         i = i + 1

@@ -211,6 +211,9 @@ Create a shared SSpec support library rather than scattering helper functions:
      call site.
    - Starter progress: missing `# @prev` and `# @include` targets render manual
      warnings.
+   - Starter progress: invalid scenario `# @manual` and scenario/step
+     `# @capture(...)` metadata now render actionable manual warnings instead
+     of silently degrading to a misleading default capture or visibility.
    - Validate enum-like values and produce actionable diagnostics.
 3. **Scenario graph expansion**
    - Build a scenario graph keyed by scenario title/id.
@@ -218,7 +221,9 @@ Create a shared SSpec support library rather than scattering helper functions:
    - Starter progress: expand `# @include` at call sites.
    - Hide `@inline` scenarios from top-level manual output.
    - Starter progress: detect missing inline targets in rendered docs.
-   - Detect cycles.
+   - Starter progress: direct `# @prev` and `# @include` scenario expansion
+     cycles now render manual warnings and keep the current scenario body
+     usable instead of silently stripping recursive metadata.
 4. **Manual renderer**
    - Render manual steps first.
    - Fold executable code by default.

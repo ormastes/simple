@@ -1,5 +1,20 @@
 # 2D Engine — Backend Probe Contract
 
+val BACKEND_CPU: text = "cpu"
+val BACKEND_SOFTWARE: text = "software"
+val BACKEND_VULKAN: text = "vulkan"
+val BACKEND_CUDA: text = "cuda"
+val BACKEND_METAL: text = "metal"
+val BACKEND_WEBGPU: text = "webgpu"
+val BACKEND_ROCM: text = "rocm"
+val BACKEND_CPU_SIMD: text = "cpu_simd"
+val BACKEND_OPTIX: text = "optix"
+
+val STATUS_OK: text = "Initialized"
+val STATUS_FAILED: text = "Failed"
+val STATUS_UNAVAILABLE: text = "Unavailable"
+val STATUS_FALLBACK: text = "Fallback"
+
 enum BackendStatus:
     Initialized
     Failed
@@ -66,9 +81,27 @@ class BackendProbeResult:
     fn is_ok(self) -> bool:
         self.is_usable()
 
+    fn is_hardware(self) -> bool:
+        if self.selected_name == BACKEND_CPU:
+            return false
+        if self.selected_name == BACKEND_SOFTWARE:
+            return false
+        if self.selected_name == BACKEND_CPU_SIMD:
+            return false
+        self.is_usable()
+
+    fn strict_failure_without_fallback(self) -> bool:
+        if self.status == BackendStatus.Fallback:
+            return false
+        if self.selected_name == BACKEND_CPU and self.requested_name != BACKEND_CPU:
+            return false
+        if self.selected_name == BACKEND_SOFTWARE and self.requested_name != BACKEND_SOFTWARE:
+            return false
+        true
+
     fn diagnostic_text(self) -> text:
         val msg = if self.fallback_reason != "": self.fallback_reason else: self.reason
-        "{self.requested_name}:{backend_status_text(self.status)}:{msg}"
+        "requested={self.requested_name};selected={self.selected_name};status={backend_status_text(self.status)};api={self.api_name};gate={self.feature_gate};shader={self.shader_format};reason={msg}"
 
     fn summary(self) -> text:
         self.diagnostic_text()
@@ -81,22 +114,84 @@ class BackendProber:
         BackendProber(probe_count: 0, last_error: "")
 
     fn probe_cpu(self) -> BackendProbeResult:
-        BackendProbeResult.success("cpu", "software renderer always present")
+        var r = BackendProbeResult.success(BACKEND_CPU, "software renderer always present")
+        r.api_name = "cpu"
+        r.feature_gate = "cpu_scalar"
+        r.shader_format = "none"
+        r.has_compute = true
+        r.has_graphics = true
+        r.has_present = true
+        r
+
+    fn probe_software(self) -> BackendProbeResult:
+        var r = BackendProbeResult.success(BACKEND_SOFTWARE, "software renderer always present")
+        r.api_name = "software"
+        r.feature_gate = "software_raster"
+        r.shader_format = "none"
+        r.has_compute = true
+        r.has_graphics = true
+        r.has_present = true
+        r
 
     fn probe_vulkan(self) -> BackendProbeResult:
-        BackendProbeResult.unavailable("vulkan", "vulkan probe unavailable in interpreter")
+        var r = BackendProbeResult.unavailable(BACKEND_VULKAN, "vulkan probe unavailable in interpreter")
+        r.api_name = "vulkan"
+        r.feature_gate = "vulkan_runtime"
+        r.shader_format = "spirv"
+        r
 
     fn probe_cuda(self) -> BackendProbeResult:
-        BackendProbeResult.unavailable("cuda", "cuda probe unavailable in interpreter")
+        var r = BackendProbeResult.unavailable(BACKEND_CUDA, "cuda probe unavailable in interpreter")
+        r.api_name = "cuda"
+        r.feature_gate = "cuda_runtime"
+        r.shader_format = "ptx"
+        r.has_compute = true
+        r
 
     fn probe_metal(self) -> BackendProbeResult:
-        BackendProbeResult.unavailable("metal", "Metal requires macOS")
+        var r = BackendProbeResult.unavailable(BACKEND_METAL, "Metal requires macOS")
+        r.api_name = "metal"
+        r.feature_gate = "macos_metal_runtime"
+        r.shader_format = "msl"
+        r
 
     fn probe_webgpu(self) -> BackendProbeResult:
-        BackendProbeResult.unavailable("webgpu", "webgpu probe unavailable in interpreter")
+        var r = BackendProbeResult.unavailable(BACKEND_WEBGPU, "webgpu probe unavailable in interpreter")
+        r.api_name = "webgpu"
+        r.feature_gate = "wgpu_runtime"
+        r.shader_format = "wgsl"
+        r
+
+    fn probe_rocm(self) -> BackendProbeResult:
+        var r = BackendProbeResult.unavailable(BACKEND_ROCM, "ROCm/HIP probe unavailable in interpreter")
+        r.api_name = "rocm"
+        r.feature_gate = "rocm_hip_runtime"
+        r.shader_format = "hsaco"
+        r.has_compute = true
+        r
+
+    fn probe_cpu_simd(self) -> BackendProbeResult:
+        var r = BackendProbeResult.success(BACKEND_CPU_SIMD, "CPU SIMD provider is capability-gated")
+        r.api_name = "cpu-simd"
+        r.feature_gate = "runtime_cpu_features"
+        r.shader_format = "none"
+        r.has_compute = true
+        r.has_graphics = true
+        r.has_present = true
+        r
+
+    fn probe_optix(self) -> BackendProbeResult:
+        var r = BackendProbeResult.unavailable(BACKEND_OPTIX, "OptiX is ray tracing only and has no Engine2D raster backend")
+        r.api_name = "optix"
+        r.feature_gate = "optix_2d_raster_unsupported"
+        r.shader_format = "ptx"
+        r.has_compute = true
+        r.has_graphics = false
+        r.has_present = false
+        r
 
     fn probe_all_summary(self) -> text:
-        self.probe_cpu().summary() + " | " + self.probe_vulkan().summary() + " | " + self.probe_cuda().summary() + " | " + self.probe_metal().summary() + " | " + self.probe_webgpu().summary()
+        self.probe_cpu().summary() + " | " + self.probe_cpu_simd().summary() + " | " + self.probe_vulkan().summary() + " | " + self.probe_cuda().summary() + " | " + self.probe_metal().summary() + " | " + self.probe_rocm().summary() + " | " + self.probe_webgpu().summary() + " | " + self.probe_optix().summary()
 
 class StrictBackendFactory:
     allow_fallback: bool
@@ -111,12 +206,20 @@ class StrictBackendFactory:
         val prober = BackendProber.create()
         if name == "cpu":
             return prober.probe_cpu()
+        if name == "software":
+            return prober.probe_software()
+        if name == "cpu_simd":
+            return prober.probe_cpu_simd()
         if name == "vulkan":
             return prober.probe_vulkan()
         if name == "cuda":
             return prober.probe_cuda()
         if name == "metal":
             return prober.probe_metal()
+        if name == "rocm":
+            return prober.probe_rocm()
         if name == "webgpu":
             return prober.probe_webgpu()
+        if name == "optix":
+            return prober.probe_optix()
         BackendProbeResult.failed(name, "unknown backend: " + name)

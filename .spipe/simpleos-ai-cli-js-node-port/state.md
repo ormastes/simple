@@ -22,7 +22,7 @@ Enable hardened JavaScript/Node.js-compatible execution for Codex, Claude, and G
 Full upstream Node.js parity, real AI service authentication, release tagging, and physical hardware validation are out of scope until the QEMU lanes prove the guest runtime contract.
 
 ## Phase
-research-options-ready
+implementation-in-progress
 
 ## Log
 - dev: Created state file with 7 acceptance criteria (type: feature). Interpreted `x85` as x86 unless corrected by the user.
@@ -30,7 +30,12 @@ research-options-ready
 - design-draft: Added a pre-requirements runtime contract matrix and draft system-test plan without selecting final requirements.
 - research: Recorded the explicit user-selection gate in `doc/02_requirements/feature/simpleos_ai_cli_js_node_port_selection_needed.md`; interactive selection prompt was unavailable in the current mode.
 - plan: Added `doc/03_plan/agent_tasks/simpleos_ai_cli_js_node_port_traceability_scaffold.md` to map AC-1..AC-7 to pending requirement families and the first post-selection task queue.
+- requirements: Final requirements selected as contract-first compatibility layer with security-first/reproducible manifest gates.
+- implementation: Added `src/os/ai_cli_js_node_contract.spl` with Codex, Claude, and Gemini smoke manifests, fail-closed grant checks, QEMU marker fragments, RISC-V/x86/ARM lane contracts, serial acceptance, and explicit Node/V8/libuv blocker status.
+- verification: Focused SPipe spec `test/system/os/simpleos_ai_cli_js_node_port_spec.spl` passes with 9 scenarios in interpreter mode.
+- verification: Re-ran `test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter` after shared generated-WASM/no-JavaScript web render API hardening; the SimpleOS AI CLI manifest contract still passes.
 
 ## Current Blocker
-Final feature and NFR requirements are blocked on explicit user option
-selection. Recommended reply: `Feature A, NFR 1+3`.
+Full Codex, Claude, and Gemini execution in SimpleOS QEMU remains blocked until
+a Node-compatible runtime artifact is staged in the guest and each RISC-V,
+x86, and ARM lane emits the required guest-side runtime and CLI smoke markers.

@@ -6,6 +6,7 @@
 use common.ui.widget.{UITree}
 use common.ui.window.{WindowManager, ManagedWindow}
 use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_LEGACY}
+use common.ui.taskbar_model.{TaskbarModel}
 
 struct SharedWmWindow:
     surface_id: text
@@ -24,11 +25,34 @@ struct SharedWmWindow:
     focused: bool
     z_index: i32
 
+struct SharedWmRect:
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+
+struct SharedWmChrome:
+    background_color: text
+    command_lane: SharedWmRect
+    content_area: SharedWmRect
+    taskbar: SharedWmRect
+    dpi_scale_milli: i32
+    clock_label: text
+    right_icon_count: i32
+    taskbar_icon_count: i32
+
 struct SharedWmScene:
     width: i32
     height: i32
     backend: text
     windows: [SharedWmWindow]
+
+struct SharedWmDispatchResult:
+    action: text
+    target_id: text
+    app_id: text
+    window_id: text
+    scene: SharedWmScene
 
 fn _project_window(window: ManagedWindow, registry: UiWindowSurfaceRegistry) -> SharedWmWindow:
     val binding = registry.for_surface(window.surface_id)
@@ -90,3 +114,174 @@ fn shared_wm_focused_window_id(scene: SharedWmScene) -> text:
                 best_id = window.window_id
                 best_z = window.z_index
     return best_id
+
+fn _shared_wm_nonnegative(value: i32) -> i32:
+    if value < 0:
+        return 0
+    value
+
+fn _shared_wm_clamp(value: i32, min_value: i32, max_value: i32) -> i32:
+    if value < min_value:
+        return min_value
+    if value > max_value:
+        return max_value
+    value
+
+fn _shared_wm_scale_px(px: i32, dpi_scale_milli: i32) -> i32:
+    val scale = if dpi_scale_milli <= 0: 1000 else: dpi_scale_milli
+    val scaled = (px * scale + 999) / 1000
+    if scaled < 1:
+        return 1
+    scaled
+
+fn shared_wm_scene_chrome(scene: SharedWmScene, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32, taskbar_icon_count: i32) -> SharedWmChrome:
+    val command_h = _shared_wm_scale_px(32, dpi_scale_milli)
+    val taskbar_h = _shared_wm_scale_px(48, dpi_scale_milli)
+    val content_h = _shared_wm_nonnegative(scene.height - command_h - taskbar_h)
+    SharedWmChrome(
+        background_color: "#101418",
+        command_lane: SharedWmRect(x: 0, y: 0, width: scene.width, height: command_h),
+        content_area: SharedWmRect(x: 0, y: command_h, width: scene.width, height: content_h),
+        taskbar: SharedWmRect(x: 0, y: command_h + content_h, width: scene.width, height: taskbar_h),
+        dpi_scale_milli: if dpi_scale_milli <= 0: 1000 else: dpi_scale_milli,
+        clock_label: clock_label,
+        right_icon_count: right_icon_count,
+        taskbar_icon_count: taskbar_icon_count
+    )
+
+fn shared_wm_drag_window(scene: SharedWmScene, surface_id: text, dx: i32, dy: i32) -> SharedWmScene:
+    val chrome = shared_wm_scene_chrome(scene, 1000, "", 0, 0)
+    val min_x = chrome.content_area.x
+    val min_y = chrome.content_area.y
+    var moved: [SharedWmWindow] = []
+    for window in scene.windows:
+        if window.surface_id == surface_id and not window.minimized:
+            val max_x = _shared_wm_nonnegative(chrome.content_area.x + chrome.content_area.width - window.width)
+            val max_y = _shared_wm_nonnegative(chrome.content_area.y + chrome.content_area.height - window.height)
+            moved = moved.push(SharedWmWindow(
+                surface_id: window.surface_id,
+                window_id: window.window_id,
+                surface_kind: window.surface_kind,
+                process_id: window.process_id,
+                app_id: window.app_id,
+                title: window.title,
+                x: _shared_wm_clamp(window.x + dx, min_x, max_x),
+                y: _shared_wm_clamp(window.y + dy, min_y, max_y),
+                width: window.width,
+                height: window.height,
+                tree: window.tree,
+                html: window.html,
+                minimized: window.minimized,
+                focused: true,
+                z_index: window.z_index
+            ))
+        else:
+            moved = moved.push(window)
+    SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: moved)
+
+fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) -> SharedWmScene:
+    var focused: [SharedWmWindow] = []
+    for window in scene.windows:
+        if window.window_id == window_id:
+            focused = focused.push(SharedWmWindow(
+                surface_id: window.surface_id,
+                window_id: window.window_id,
+                surface_kind: window.surface_kind,
+                process_id: window.process_id,
+                app_id: window.app_id,
+                title: window.title,
+                x: window.x,
+                y: window.y,
+                width: window.width,
+                height: window.height,
+                tree: window.tree,
+                html: window.html,
+                minimized: false,
+                focused: true,
+                z_index: window.z_index
+            ))
+        else:
+            focused = focused.push(SharedWmWindow(
+                surface_id: window.surface_id,
+                window_id: window.window_id,
+                surface_kind: window.surface_kind,
+                process_id: window.process_id,
+                app_id: window.app_id,
+                title: window.title,
+                x: window.x,
+                y: window.y,
+                width: window.width,
+                height: window.height,
+                tree: window.tree,
+                html: window.html,
+                minimized: window.minimized,
+                focused: false,
+                z_index: window.z_index
+            ))
+    SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: focused)
+
+fn _shared_wm_dispatch_result(action: text, target_id: text, app_id: text, window_id: text, scene: SharedWmScene) -> SharedWmDispatchResult:
+    SharedWmDispatchResult(action: action, target_id: target_id, app_id: app_id, window_id: window_id, scene: scene)
+
+fn _shared_wm_rect_contains(rect: SharedWmRect, x: i32, y: i32) -> bool:
+    x >= rect.x and y >= rect.y and x < rect.x + rect.width and y < rect.y + rect.height
+
+fn _shared_wm_window_contains(window: SharedWmWindow, x: i32, y: i32) -> bool:
+    x >= window.x and y >= window.y and x < window.x + window.width and y < window.y + window.height
+
+fn _shared_wm_command_lane_dispatch(scene: SharedWmScene, chrome: SharedWmChrome, x: i32) -> SharedWmDispatchResult:
+    val icon_w = _shared_wm_scale_px(32, chrome.dpi_scale_milli)
+    val clock_w = _shared_wm_scale_px(72, chrome.dpi_scale_milli)
+    val icons_w = icon_w * chrome.right_icon_count
+    val icons_start = scene.width - icons_w
+    if chrome.right_icon_count > 0 and x >= icons_start:
+        val rel = x - icons_start
+        val idx = rel / icon_w
+        return _shared_wm_dispatch_result("command_lane_icon", "right_icon_{idx}", "", "", scene)
+    if x >= icons_start - clock_w:
+        return _shared_wm_dispatch_result("command_lane_clock", "clock", "", "", scene)
+    _shared_wm_dispatch_result("command_lane", "command_lane", "", "", scene)
+
+fn _shared_wm_taskbar_dispatch(scene: SharedWmScene, taskbar: TaskbarModel, x: i32) -> SharedWmDispatchResult:
+    val slot_w = 56
+    val slot = x / slot_w
+    if slot < taskbar.pinned.len():
+        val app = taskbar.pinned[slot]
+        return _shared_wm_dispatch_result("launch_app", app.app_id, app.app_id, "", scene)
+    val running_index = slot - taskbar.pinned.len()
+    if running_index >= 0 and running_index < taskbar.running.len():
+        val running = taskbar.running[running_index]
+        val focused_scene = shared_wm_focus_window_by_window_id(scene, running.window_id)
+        return _shared_wm_dispatch_result("focus_window", running.window_id, running.app_id, running.window_id, focused_scene)
+    _shared_wm_dispatch_result("taskbar_empty", "taskbar", "", "", scene)
+
+fn _shared_wm_content_dispatch(scene: SharedWmScene, x: i32, y: i32) -> SharedWmDispatchResult:
+    var best_index = -1
+    var best_z = -1
+    var i = 0
+    while i < scene.windows.len():
+        val window = scene.windows[i]
+        if not window.minimized and _shared_wm_window_contains(window, x, y):
+            if window.z_index > best_z:
+                best_index = i
+                best_z = window.z_index
+        i = i + 1
+    if best_index < 0:
+        return _shared_wm_dispatch_result("desktop_background", "background", "", "", scene)
+    val window = scene.windows[best_index]
+    val focused_scene = shared_wm_focus_window_by_window_id(scene, window.window_id)
+    if y < window.y + _shared_wm_scale_px(28, 1000):
+        return _shared_wm_dispatch_result("begin_drag_window", window.surface_id, window.app_id, window.window_id, focused_scene)
+    _shared_wm_dispatch_result("focus_window", window.window_id, window.app_id, window.window_id, focused_scene)
+
+fn shared_wm_dispatch_pointer(scene: SharedWmScene, taskbar: TaskbarModel, x: i32, y: i32, button: text, kind: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> SharedWmDispatchResult:
+    val chrome = shared_wm_scene_chrome(scene, dpi_scale_milli, clock_label, right_icon_count, taskbar.pinned.len() + taskbar.running.len())
+    if kind != "down" or button != "left":
+        return _shared_wm_dispatch_result("ignored", "", "", "", scene)
+    if _shared_wm_rect_contains(chrome.command_lane, x, y):
+        return _shared_wm_command_lane_dispatch(scene, chrome, x)
+    if _shared_wm_rect_contains(chrome.taskbar, x, y):
+        return _shared_wm_taskbar_dispatch(scene, taskbar, x)
+    if _shared_wm_rect_contains(chrome.content_area, x, y):
+        return _shared_wm_content_dispatch(scene, x, y)
+    _shared_wm_dispatch_result("outside", "", "", "", scene)

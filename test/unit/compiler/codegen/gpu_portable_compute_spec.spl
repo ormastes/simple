@@ -1,7 +1,7 @@
 # @cover src/compiler/70.backend/backend/gpu_portable_compute.spl 90%
 # @tag: unit, compiler, gpu, codegen, cuda, hip, opencl, metal
 
-use compiler.backend.{PortableComputeTarget, emit_portable_u32_fill_kernel, emit_portable_u32_add_kernel, emit_portable_compute_smoke_matrix}
+use compiler.backend.gpu_portable_compute.{PortableComputeTarget, emit_portable_u32_fill_kernel, emit_portable_u32_add_kernel, portable_compute_compile_plan, emit_portable_2d_copy_u32_kernel, emit_portable_2d_alpha_u32_kernel, emit_portable_2d_scroll_u32_kernel, emit_portable_2d_optimization_kernels, emit_portable_compute_smoke_matrix}
 
 describe "portable GPU compute emitter":
 
@@ -45,6 +45,49 @@ describe "portable GPU compute emitter":
         expect(hip.source).to_contain("out[i] = a[i] + b[i];")
         expect(opencl.source).to_contain("out[i] = a[i] + b[i];")
         expect(metal.source).to_contain("out[i] = a[i] + b[i];")
+
+    it "builds target compile plans for source to binary artifacts":
+        val cuda = emit_portable_u32_fill_kernel(PortableComputeTarget.Cuda, "fill_u32")
+        val opencl = emit_portable_u32_fill_kernel(PortableComputeTarget.OpenCl, "fill_u32")
+        val metal = emit_portable_u32_fill_kernel(PortableComputeTarget.Metal, "fill_u32")
+
+        val cuda_plan = portable_compute_compile_plan(cuda, "fill_u32")
+        val opencl_plan = portable_compute_compile_plan(opencl, "fill_u32")
+        val metal_plan = portable_compute_compile_plan(metal, "fill_u32")
+
+        expect(cuda_plan.source_format).to_equal("cuda-c")
+        expect(cuda_plan.tool_hint).to_equal("nvrtc-or-nvcc")
+        expect(cuda_plan.artifact_path_suffix).to_equal("fill_u32.ptx")
+        expect(cuda_plan.produces_binary()).to_equal(true)
+        expect(opencl_plan.binary_format).to_equal("spirv")
+        expect(opencl_plan.tool_hint).to_equal("opencl-c-to-spirv")
+        expect(metal_plan.binary_format).to_equal("metallib")
+        expect(metal_plan.source_format).to_equal("metal-shading-language")
+
+    it "emits portable 2D optimization kernels for copy alpha and scroll":
+        val copy = emit_portable_2d_copy_u32_kernel(PortableComputeTarget.OpenCl)
+        val alpha = emit_portable_2d_alpha_u32_kernel(PortableComputeTarget.Cuda)
+        val scroll = emit_portable_2d_scroll_u32_kernel(PortableComputeTarget.Metal)
+
+        expect(copy.entry_name).to_equal("simple_2d_copy_u32")
+        expect(copy.source).to_contain("dst[i] = src[i];")
+        expect(alpha.entry_name).to_equal("simple_2d_alpha_u32")
+        expect(alpha.source).to_contain("uint inv = 255u - alpha;")
+        expect(alpha.source).to_contain("0xff000000u")
+        expect(scroll.entry_name).to_equal("simple_2d_scroll_u32")
+        expect(scroll.source).to_contain("int sy = int(y) - delta_y;")
+        expect(scroll.source).to_contain("dst[i] = 0u;")
+
+    it "groups Simple-authored 2D optimization kernels per compute target":
+        val cuda = emit_portable_2d_optimization_kernels(PortableComputeTarget.Cuda)
+        val hip = emit_portable_2d_optimization_kernels(PortableComputeTarget.Hip)
+        val opencl = emit_portable_2d_optimization_kernels(PortableComputeTarget.OpenCl)
+        val metal = emit_portable_2d_optimization_kernels(PortableComputeTarget.Metal)
+
+        expect(cuda.len()).to_equal(4)
+        expect(hip[2].entry_name).to_equal("simple_2d_alpha_u32")
+        expect(opencl[3].binary_format).to_equal("spirv")
+        expect(metal[1].source).to_contain("[[buffer(1)]]")
 
     it "builds a smoke matrix for CUDA HIP OpenCL and Metal":
         val matrix = emit_portable_compute_smoke_matrix()

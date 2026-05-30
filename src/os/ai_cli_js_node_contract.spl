@@ -32,6 +32,18 @@ struct AiCliQemuLane:
     blocker: text
     marker_fragments: [text]
 
+struct AiCliProvisioningPlan:
+    app_id: text
+    target: text
+    manifest_path: text
+    launcher_path: text
+    marker_payload_path: text
+    runtime_package_path: text
+    disk_manifest_filename: text
+    command_line: text
+    required_guest_paths: [text]
+    marker_payload: text
+
 pub fn codex_cli_smoke_manifest() -> AiCliManifest:
     _ai_cli_manifest(
         "codex",
@@ -212,6 +224,44 @@ pub fn ai_cli_qemu_missing_markers(lane: AiCliQemuLane, serial_output: text) -> 
             missing.push(marker)
     missing
 
+pub fn ai_cli_provisioning_plan(manifest: AiCliManifest, lane: AiCliQemuLane) -> AiCliProvisioningPlan:
+    val app_root = "/sys/apps/{manifest.app_id}"
+    val manifest_path = "{app_root}/AI_MANIFEST.SDN"
+    val launcher_path = "{app_root}/launch.spl"
+    val marker_payload_path = "{app_root}/qemu_markers.txt"
+    val runtime_package_path = "/sys/runtime/node-compatible/{lane.target}/runtime.smf"
+    val disk_manifest_filename = _ai_cli_disk_manifest_filename(manifest.app_id)
+    val command_line = "{runtime_package_path} {manifest.entry_path} {manifest.args.join(\" \")}"
+    val required_guest_paths = [
+        manifest_path,
+        launcher_path,
+        marker_payload_path,
+        runtime_package_path,
+        manifest.entry_path
+    ]
+    AiCliProvisioningPlan(
+        app_id: manifest.app_id,
+        target: lane.target,
+        manifest_path: manifest_path,
+        launcher_path: launcher_path,
+        marker_payload_path: marker_payload_path,
+        runtime_package_path: runtime_package_path,
+        disk_manifest_filename: disk_manifest_filename,
+        command_line: command_line,
+        required_guest_paths: required_guest_paths,
+        marker_payload: ai_cli_marker_payload(manifest, lane)
+    )
+
+pub fn ai_cli_marker_payload(manifest: AiCliManifest, lane: AiCliQemuLane) -> text:
+    var lines: [text] = []
+    lines.push("[ai-cli] provisioned app={manifest.app_id} target={lane.target}")
+    for marker in lane.marker_fragments:
+        lines.push(marker)
+    lines.join("\n")
+
+pub fn ai_cli_provisioning_plan_summary(plan: AiCliProvisioningPlan) -> text:
+    "app={plan.app_id};target={plan.target};manifest={plan.manifest_path};launcher={plan.launcher_path};markers={plan.marker_payload_path};runtime={plan.runtime_package_path};disk-manifest={plan.disk_manifest_filename};command={plan.command_line}"
+
 pub fn ai_cli_full_node_blocker() -> text:
     "full Node.js/V8/libuv port remains a later layer; this slice proves the SimpleOS manifest, capability, and QEMU marker contract"
 
@@ -236,6 +286,15 @@ fn _ai_cli_qemu_lane(manifest: AiCliManifest, target: text, scenario_name: text,
         blocker: blocker,
         marker_fragments: markers
     )
+
+fn _ai_cli_disk_manifest_filename(app_id: text) -> text:
+    if app_id == "codex":
+        return "CODEX.APP"
+    if app_id == "claude":
+        return "CLAUDE.APP"
+    if app_id == "gemini":
+        return "GEMINI.APP"
+    "AICLI.APP"
 
 fn _grant_value(grant: text) -> text:
     if grant.contains(":"):

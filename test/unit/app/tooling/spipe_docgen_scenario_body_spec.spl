@@ -188,6 +188,35 @@ describe "spipe docgen scenario body extraction":
         expect(structure).to_contain("```simple\nuser.start_flow()\nuser.finish_flow()\n```")
         expect(structure.contains("# @include")).to_equal(false)
 
+    it "renders warning for prev scenario expansion cycles":
+        val source = "describe \"Previous cycle\":\n" +
+            "    # @prev(\"second setup\")\n" +
+            "    it \"first setup\":\n" +
+            "        setup.first()\n" +
+            "    # @prev(\"first setup\")\n" +
+            "    it \"second setup\":\n" +
+            "        setup.second()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("**Manual warnings:**\n- cycle detected in prev expansion: first setup -> second setup")
+        expect(structure).to_contain("**Manual warnings:**\n- cycle detected in prev expansion: second setup -> first setup")
+        expect(structure).to_contain("```simple\nsetup.first()\n```")
+        expect(structure).to_contain("```simple\nsetup.second()\n```")
+
+    it "renders warning for include scenario expansion cycles":
+        val source = "describe \"Include cycle\":\n" +
+            "    it \"first branch\":\n" +
+            "        # @include(\"second branch\")\n" +
+            "        flow.first()\n" +
+            "    it \"second branch\":\n" +
+            "        # @include(\"first branch\")\n" +
+            "        flow.second()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("**Manual warnings:**\n- cycle detected in include expansion: first branch -> second branch")
+        expect(structure).to_contain("**Manual warnings:**\n- cycle detected in include expansion: second branch -> first branch")
+        expect(structure).to_contain("```simple\nflow.first()\n```")
+        expect(structure).to_contain("```simple\nflow.second()\n```")
+        expect(structure.contains("# @include")).to_equal(false)
+
     it "folds slow scenarios by default but allows manual show override":
         val source = "describe \"Slow manual visibility\":\n" +
             "    slow_it \"keeps stress detail folded\":\n" +
@@ -232,6 +261,38 @@ describe "spipe docgen scenario body extraction":
         expect(structure).to_contain("**Step captures:**\n- api after_step before `user.submit_login()`")
         expect(structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\").to_equal(\"ok\")\n```")
         expect(structure.contains("# @capture(api)")).to_equal(false)
+
+    it "warns about invalid scenario manual metadata":
+        val source = "describe \"Manual metadata diagnostics\":\n" +
+            "    # @manual: spotlight\n" +
+            "    it \"keeps invalid manual metadata actionable\":\n" +
+            "        expect(\"visible\").to_equal(\"visible\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("#### keeps invalid manual metadata actionable")
+        expect(structure).to_contain("**Manual warnings:**\n- invalid manual visibility metadata: # @manual: spotlight (expected show, folded, detail, or skip)")
+        expect(structure).to_contain("expect(\"visible\").to_equal(\"visible\")")
+
+    it "warns about invalid scenario capture metadata without rendering a false capture":
+        val source = "describe \"Capture metadata diagnostics\":\n" +
+            "    # @capture(video)\n" +
+            "    it \"keeps invalid scenario capture actionable\":\n" +
+            "        user.open_app()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("#### keeps invalid scenario capture actionable")
+        expect(structure).to_contain("**Manual warnings:**\n- invalid capture metadata value: video (expected kind tui|gui|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)")
+        expect(structure.contains("**Scenario capture:** tui after_step")).to_equal(false)
+        expect(structure.contains("# @capture(video)")).to_equal(false)
+
+    it "warns about invalid step capture metadata and strips it from source":
+        val source = "describe \"Capture metadata diagnostics\":\n" +
+            "    it \"keeps invalid step capture actionable\":\n" +
+            "        user.open_app()\n" +
+            "        # @capture(video)\n" +
+            "        user.capture_screen()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("**Manual warnings:**\n- invalid capture metadata value: video (expected kind tui|gui|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)")
+        expect(structure).to_contain("```simple\nuser.open_app()\nuser.capture_screen()\n```")
+        expect(structure.contains("# @capture(video)")).to_equal(false)
 
     it "captures the math_blocks golden scenario body":
         val source = read_file("test/feature/usage/math_blocks_spec.spl")

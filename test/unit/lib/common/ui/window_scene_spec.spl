@@ -1,11 +1,26 @@
 use std.spec
 use common.ui.builder.{column, label, build_tree_with_title}
+use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
 use common.ui.window.{WindowManager}
 use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_SIMPLE_WEB}
-use common.ui.window_scene.{shared_wm_scene_from_window_manager, shared_wm_visible_windows, shared_wm_focused_window_id}
+use common.ui.window_scene.{shared_wm_dispatch_pointer, shared_wm_focus_window_by_window_id, shared_wm_scene_chrome, shared_wm_drag_window, shared_wm_scene_from_window_manager, shared_wm_visible_windows, shared_wm_focused_window_id}
 
 fn _tree(title: text):
     build_tree_with_title(column("{title}_root", [label("{title}_label", title)]), title, "glass_dark")
+
+fn _taskbar() -> TaskbarModel:
+    TaskbarModel(
+        pinned: [
+            AppRef(app_id: "terminal", display_name: "Terminal", icon: "term"),
+            AppRef(app_id: "browser", display_name: "Browser", icon: "browser")
+        ],
+        running: [
+            WindowRef(window_id: "win1", app_id: "demo.app", title: "Window One", minimized: false)
+        ],
+        tray: [
+            TrayItem(item_id: "clock", label: "09:41", icon: "clock")
+        ]
+    )
 
 describe "SharedWmScene":
 
@@ -39,3 +54,93 @@ describe "SharedWmScene":
         expect(scene.windows.len()).to_equal(2)
         expect(visible.len()).to_equal(1)
         expect(visible[0].surface_id).to_equal("surf1")
+
+    it "projects top command lane, bottom taskbar, background, and DPI scaled content bounds":
+        var manager = WindowManager.new()
+        val _ = manager.open_window("surf1", "One", 10, 40, 300, 200, _tree("one"))
+        val scene = shared_wm_scene_from_window_manager(manager, UiWindowSurfaceRegistry.new(), 800, 600)
+
+        val chrome = shared_wm_scene_chrome(scene, 1000, "09:41", 3, 5)
+        expect(chrome.background_color).to_equal("#101418")
+        expect(chrome.command_lane.x).to_equal(0)
+        expect(chrome.command_lane.y).to_equal(0)
+        expect(chrome.command_lane.width).to_equal(800)
+        expect(chrome.command_lane.height).to_equal(32)
+        expect(chrome.content_area.y).to_equal(32)
+        expect(chrome.content_area.height).to_equal(520)
+        expect(chrome.taskbar.y).to_equal(552)
+        expect(chrome.taskbar.height).to_equal(48)
+        expect(chrome.clock_label).to_equal("09:41")
+        expect(chrome.right_icon_count).to_equal(3)
+        expect(chrome.taskbar_icon_count).to_equal(5)
+
+        val hi_dpi = shared_wm_scene_chrome(scene, 2000, "09:41", 1, 2)
+        expect(hi_dpi.command_lane.height).to_equal(64)
+        expect(hi_dpi.taskbar.height).to_equal(96)
+        expect(hi_dpi.content_area.height).to_equal(440)
+
+    it "clamps inner window drag to the desktop content area":
+        var manager = WindowManager.new()
+        val _ = manager.open_window("surf1", "One", 10, 40, 300, 200, _tree("one"))
+        val scene = shared_wm_scene_from_window_manager(manager, UiWindowSurfaceRegistry.new(), 800, 600)
+
+        val dragged_min = shared_wm_drag_window(scene, "surf1", -100, -100)
+        expect(dragged_min.windows[0].x).to_equal(0)
+        expect(dragged_min.windows[0].y).to_equal(32)
+        expect(dragged_min.windows[0].focused).to_equal(true)
+
+        val dragged_max = shared_wm_drag_window(scene, "surf1", 1000, 1000)
+        expect(dragged_max.windows[0].x).to_equal(500)
+        expect(dragged_max.windows[0].y).to_equal(352)
+
+    it "dispatches command lane clock and right icon clicks":
+        var manager = WindowManager.new()
+        val _ = manager.open_window("surf1", "One", 10, 40, 300, 200, _tree("one"))
+        val scene = shared_wm_scene_from_window_manager(manager, UiWindowSurfaceRegistry.new(), 800, 600)
+
+        val clock = shared_wm_dispatch_pointer(scene, _taskbar(), 704, 8, "left", "down", 1000, "09:41", 2)
+        val icon = shared_wm_dispatch_pointer(scene, _taskbar(), 780, 8, "left", "down", 1000, "09:41", 2)
+
+        expect(clock.action).to_equal("command_lane_clock")
+        expect(clock.target_id).to_equal("clock")
+        expect(icon.action).to_equal("command_lane_icon")
+        expect(icon.target_id).to_equal("right_icon_1")
+
+    it "dispatches bottom taskbar pinned app launch and running window focus":
+        var manager = WindowManager.new()
+        val _one = manager.open_window("surf1", "One", 10, 40, 300, 200, _tree("one"))
+        val _two = manager.open_window("surf2", "Two", 80, 120, 300, 200, _tree("two"))
+        var registry = UiWindowSurfaceRegistry.new()
+        registry.bind_with_kind("win1", "surf1", 42u64, "demo.app", "Window One", UI_SURFACE_KIND_SIMPLE_WEB)
+        registry.bind_with_kind("win2", "surf2", 43u64, "demo.two", "Window Two", UI_SURFACE_KIND_SIMPLE_WEB)
+        val scene = shared_wm_scene_from_window_manager(manager, registry, 800, 600)
+        val taskbar = _taskbar()
+
+        val launch = shared_wm_dispatch_pointer(scene, taskbar, 70, 575, "left", "down", 1000, "09:41", 2)
+        val focus = shared_wm_dispatch_pointer(scene, taskbar, 120, 575, "left", "down", 1000, "09:41", 2)
+
+        expect(launch.action).to_equal("launch_app")
+        expect(launch.app_id).to_equal("browser")
+        expect(focus.action).to_equal("focus_window")
+        expect(focus.window_id).to_equal("win1")
+        expect(shared_wm_focused_window_id(focus.scene)).to_equal("win1")
+
+    it "dispatches titlebar clicks as window drag starts and body clicks as focus":
+        var manager = WindowManager.new()
+        val _one = manager.open_window("surf1", "One", 10, 40, 300, 200, _tree("one"))
+        val _two = manager.open_window("surf2", "Two", 80, 120, 300, 200, _tree("two"))
+        var registry = UiWindowSurfaceRegistry.new()
+        registry.bind_with_kind("win1", "surf1", 42u64, "demo.app", "Window One", UI_SURFACE_KIND_SIMPLE_WEB)
+        registry.bind_with_kind("win2", "surf2", 43u64, "demo.two", "Window Two", UI_SURFACE_KIND_SIMPLE_WEB)
+        val scene = shared_wm_scene_from_window_manager(manager, registry, 800, 600)
+
+        val drag = shared_wm_dispatch_pointer(scene, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2)
+        val focus = shared_wm_dispatch_pointer(scene, _taskbar(), 90, 180, "left", "down", 1000, "09:41", 2)
+        val background = shared_wm_dispatch_pointer(scene, _taskbar(), 780, 300, "left", "down", 1000, "09:41", 2)
+
+        expect(drag.action).to_equal("begin_drag_window")
+        expect(drag.target_id).to_equal("surf2")
+        expect(shared_wm_focused_window_id(drag.scene)).to_equal("win2")
+        expect(focus.action).to_equal("focus_window")
+        expect(focus.window_id).to_equal("win2")
+        expect(background.action).to_equal("desktop_background")

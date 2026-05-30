@@ -8,7 +8,12 @@ val WEB_RENDER_TARGET_SIMPLE_WEB: text = "simple_web"
 val WEB_RENDER_TARGET_ELECTRON: text = "electron"
 val WEB_RENDER_TARGET_TAURI: text = "tauri"
 val WEB_RENDER_TARGET_PURE_SIMPLE: text = "pure_simple"
+val WEB_RENDER_TARGET_ANDROID_WASM: text = "android_wasm"
+val WEB_RENDER_TARGET_IOS_WASM: text = "ios_wasm"
+val WEB_RENDER_TARGET_HOST_WM_WASM: text = "host_wm_wasm"
+val WEB_RENDER_TARGET_SIMPLEOS_WM_WASM: text = "simpleos_wm_wasm"
 val WEB_RENDER_CACHE_SCHEMA_VERSION: text = "simple-web-cache-v1"
+val WEB_RENDER_WASM_SCHEMA_VERSION: text = "simple-web-wasm-v1"
 
 class WebRenderRequest:
     target: text
@@ -116,6 +121,24 @@ class WebRenderBinaryArtifactMetadata:
             command_count: 0
         )
 
+class WebRenderWasmArtifactMetadata:
+    schema: text
+    module_path: text
+    abi: text
+    encoded_bytes: i32
+    layout_bytes: i32
+    command_count: i32
+
+    static fn create(module_path: text, abi: text, encoded_bytes: i32, layout_bytes: i32, command_count: i32) -> WebRenderWasmArtifactMetadata:
+        WebRenderWasmArtifactMetadata(
+            schema: WEB_RENDER_WASM_SCHEMA_VERSION,
+            module_path: module_path,
+            abi: abi,
+            encoded_bytes: encoded_bytes,
+            layout_bytes: layout_bytes,
+            command_count: command_count
+        )
+
 fn web_render_artifact_with_binary_metadata(artifact: WebRenderArtifact, meta: WebRenderBinaryArtifactMetadata) -> WebRenderArtifact:
     WebRenderArtifact(
         target: artifact.target,
@@ -131,7 +154,51 @@ fn web_render_artifact_with_binary_metadata(artifact: WebRenderArtifact, meta: W
         binary_bytes: meta.encoded_bytes,
         binary_layout_bytes: meta.layout_bytes,
         binary_command_count: meta.command_count
-    )
+        )
+
+fn web_render_wasm_no_js_target(target: text) -> bool:
+    target == WEB_RENDER_TARGET_ANDROID_WASM or
+    target == WEB_RENDER_TARGET_IOS_WASM or
+    target == WEB_RENDER_TARGET_HOST_WM_WASM or
+    target == WEB_RENDER_TARGET_SIMPLEOS_WM_WASM
+
+fn web_render_wasm_abi_for_target(target: text) -> text:
+    if target == WEB_RENDER_TARGET_ANDROID_WASM:
+        return "wasm32-simple-ui-android"
+    if target == WEB_RENDER_TARGET_IOS_WASM:
+        return "wasm32-simple-ui-ios"
+    if target == WEB_RENDER_TARGET_HOST_WM_WASM:
+        return "wasm32-simple-ui-host-wm"
+    if target == WEB_RENDER_TARGET_SIMPLEOS_WM_WASM:
+        return "wasm32-simple-ui-simpleos-wm"
+    "wasm32-simple-ui"
+
+fn web_render_wasm_no_js_validation_error(req: WebRenderRequest, meta: WebRenderWasmArtifactMetadata) -> text:
+    if not web_render_wasm_no_js_target(req.target):
+        return "target does not require generated wasm without javascript"
+    if req.js != "":
+        return "javascript is not allowed for generated wasm target"
+    if meta.module_path == "":
+        return "missing wasm module path"
+    if meta.abi != web_render_wasm_abi_for_target(req.target):
+        return "wasm abi does not match render target"
+    if meta.encoded_bytes <= 0:
+        return "missing wasm module bytes"
+    ""
+
+fn web_render_wasm_no_js_is_valid(req: WebRenderRequest, meta: WebRenderWasmArtifactMetadata) -> bool:
+    web_render_wasm_no_js_validation_error(req, meta) == ""
+
+fn web_render_generated_wasm_artifact(req: WebRenderRequest, meta: WebRenderWasmArtifactMetadata) -> WebRenderArtifact:
+    val base = web_render_to_artifact(req)
+    web_render_artifact_with_binary_metadata(base, WebRenderBinaryArtifactMetadata(
+        schema: meta.schema,
+        cache_key: web_render_cache_key(req) + "|wasm=" + meta.module_path + "|abi=" + meta.abi,
+        cache_path: meta.module_path,
+        encoded_bytes: meta.encoded_bytes,
+        layout_bytes: meta.layout_bytes,
+        command_count: meta.command_count
+    ))
 
 class WebRenderOptimizationProfile:
     cache_schema: text
@@ -199,6 +266,8 @@ fn web_render_capability_summary(target: text) -> text:
         return "mouse,color,images,native_dialogs,notification"
     if target == WEB_RENDER_TARGET_TAURI:
         return "mouse,color,images,native_dialogs,notification"
+    if web_render_wasm_no_js_target(target):
+        return "mouse,color,images,touch,generated_wasm,no_javascript"
     "mouse,color,images,touch"
 
 fn web_render_full_html(req: WebRenderRequest) -> text:

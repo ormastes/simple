@@ -30,8 +30,8 @@ QEMU runtime smoke remains pending Node-compatible runtime provisioning.
 
 4. Negative evidence:
    - Host-side command success without guest serial markers fails the scenario.
-   - Placeholder markers containing dummy/fake/stub/synthetic pass are rejected
-     unless the scenario is explicitly a negative test.
+   - Placeholder-style success markers are rejected unless the scenario is
+     explicitly a negative test.
 
 ## Expected SPipe Matcher Set
 
