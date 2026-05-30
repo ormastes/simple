@@ -65,7 +65,7 @@ The IDE must run on both host platforms and SimpleOS:
 - **Host path:** GUI, SDL, browser, Tauri, and desktop affordances remain in
   host adapters such as `src/app/editor/gui_shell_*`,
   `src/app/editor/desktop_commands.spl`, `src/app/ui.tauri/`, and
-  `src/app/ui.browser/`.
+  `src/app/ui.browser/` / `src/app/ui.web/`.
 - **Portable GUI render:** `src/lib/editor/70.backend/gui_backend.spl` renders
   editor and markdown surfaces to pure HTML strings. Host web/Tauri shells own
   presentation and IPC, but the editor/IDE renderer itself stays runnable

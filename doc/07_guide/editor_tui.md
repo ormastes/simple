@@ -64,7 +64,8 @@ The editor must remain runnable on both host platforms and SimpleOS:
   Electron, browser/webview, SDL, desktop dialog, or clipboard APIs.
 - Host-only presentation and integration belong in adapters:
   `src/app/editor/gui_shell_*`, `src/app/editor/desktop_commands.spl`,
-  `src/app/ui.tauri/`, `src/app/ui.browser/`, and related host UI packages.
+  `src/app/ui.tauri/`, `src/app/ui.browser/`, `src/app/ui.web/`, and related
+  host UI packages.
 - Shared GUI rendering is still runtime-neutral: `src/lib/editor/70.backend/gui_backend.spl`
   renders editor and markdown content to pure HTML strings. Web, browser, SDL,
   and Tauri surfaces present those strings through host adapters; they do not
