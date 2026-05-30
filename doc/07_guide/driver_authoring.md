@@ -161,13 +161,11 @@ describe "null_block":
 
 - `@driver(...)` / `@native_lib(...)` with named args — class, vendor,
   device, version, abi — now parses and attaches to the owning
-  declaration (FR-DRIVER-0001 landed). The compiler retains the attribute
-  args on the AST/HIR for FR-DRIVER-0004 to emit as the
-  `.drv_manifest` SMF section. Auto-synthesis of the
-  `register_<module>_driver()` body from the attribute lands once the
-  HIR-lowering pass for module-scope sugar is wired; until then keep the
-  hand-written `register_static_driver(m, ops)` call as in the null_block
-  example — the two paths are interchangeable.
+  declaration. Function-level `@driver(..., ops=...)` and
+  `@native_lib(..., ops=...)` synthesize the stub body in the live Rust
+  seed path. Module-level and impl-level sugar are still open; until those
+  land, keep the hand-written `register_static_driver(m, ops)` call or use
+  the function-level `ops=` form.
 - Loader (Phase B) is in; static-mode registration via
   `register_static_driver(...)` works today. Dynamic `.lsm` loading
   depends on FR-DRIVER-0004 (SMF section writer).

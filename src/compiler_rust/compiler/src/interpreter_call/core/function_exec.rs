@@ -8,8 +8,8 @@ use crate::interpreter::{exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
 use simple_parser::ast::{
-    Argument, Block, ClassDef, EnumDef, Expr, FunctionDef, LetStmt, Mutability, Node, Pattern, ReturnStmt, SelfMode,
-    StorageClass, Type,
+    Argument, Attribute, Block, ClassDef, EnumDef, Expr, FunctionDef, LetStmt, Mutability, Node, Pattern, ReturnStmt,
+    SelfMode, StorageClass, Type,
 };
 use simple_runtime::value::diagram_sffi;
 use std::collections::HashMap;
@@ -41,8 +41,14 @@ fn is_driver_stub_body(body: &Block) -> bool {
     }
 }
 
+fn driver_manifest_attr(func: &FunctionDef) -> Option<&Attribute> {
+    func.attributes
+        .iter()
+        .find(|attr| attr.name == "driver" || attr.name == "native_lib")
+}
+
 fn driver_attr_arg(func: &FunctionDef, key: &str, fallback_idx: usize) -> Option<Expr> {
-    let attr = func.attributes.iter().find(|attr| attr.name == "driver")?;
+    let attr = driver_manifest_attr(func)?;
     if let Some(named) = &attr.named_args {
         for (name, value) in named {
             if name == key {
@@ -54,7 +60,7 @@ fn driver_attr_arg(func: &FunctionDef, key: &str, fallback_idx: usize) -> Option
 }
 
 fn driver_ops_arg(func: &FunctionDef) -> Option<Expr> {
-    let attr = func.attributes.iter().find(|attr| attr.name == "driver")?;
+    let attr = driver_manifest_attr(func)?;
     let named = attr.named_args.as_ref()?;
     named
         .iter()
@@ -72,26 +78,41 @@ fn positional_arg(value: Expr, span: simple_parser::Span) -> Argument {
 
 fn synthetic_driver_registration_body(func: &FunctionDef, ops_expr: Expr) -> Block {
     let span = func.span;
-    let class_expr = driver_attr_arg(func, "class", 0)
-        .or_else(|| driver_attr_arg(func, "dclass", 0))
-        .unwrap_or(Expr::Integer(0));
-    let vendor_expr = driver_attr_arg(func, "vendor", 1).unwrap_or(Expr::Integer(0));
-    let device_expr = driver_attr_arg(func, "device", 2)
-        .or_else(|| driver_attr_arg(func, "devices", 2))
-        .unwrap_or_else(|| Expr::Array(vec![]));
-    let version_expr = driver_attr_arg(func, "version", 3).unwrap_or_else(|| Expr::String("0.1".to_string()));
+    let is_native_lib = driver_manifest_attr(func).is_some_and(|attr| attr.name == "native_lib");
+    let version_fallback_idx = if is_native_lib { 1 } else { 3 };
+    let version_expr =
+        driver_attr_arg(func, "version", version_fallback_idx).unwrap_or_else(|| Expr::String("0.1".to_string()));
+    let manifest_call = if is_native_lib {
+        Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier("DriverManifest".to_string())),
+            method: "for_native_lib".to_string(),
+            args: vec![
+                positional_arg(Expr::String(func.name.clone()), span),
+                positional_arg(version_expr, span),
+            ],
+            generic_args: vec![],
+        }
+    } else {
+        let class_expr = driver_attr_arg(func, "class", 0)
+            .or_else(|| driver_attr_arg(func, "dclass", 0))
+            .unwrap_or(Expr::Integer(0));
+        let vendor_expr = driver_attr_arg(func, "vendor", 1).unwrap_or(Expr::Integer(0));
+        let device_expr = driver_attr_arg(func, "device", 2)
+            .or_else(|| driver_attr_arg(func, "devices", 2))
+            .unwrap_or_else(|| Expr::Array(vec![]));
 
-    let manifest_call = Expr::MethodCall {
-        receiver: Box::new(Expr::Identifier("DriverManifest".to_string())),
-        method: "for_driver".to_string(),
-        args: vec![
-            positional_arg(Expr::String(func.name.clone()), span),
-            positional_arg(version_expr, span),
-            positional_arg(class_expr, span),
-            positional_arg(vendor_expr, span),
-            positional_arg(device_expr, span),
-        ],
-        generic_args: vec![],
+        Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier("DriverManifest".to_string())),
+            method: "for_driver".to_string(),
+            args: vec![
+                positional_arg(Expr::String(func.name.clone()), span),
+                positional_arg(version_expr, span),
+                positional_arg(class_expr, span),
+                positional_arg(vendor_expr, span),
+                positional_arg(device_expr, span),
+            ],
+            generic_args: vec![],
+        }
     };
     let register_call = Expr::Call {
         callee: Box::new(Expr::Identifier("register_static_driver".to_string())),

@@ -140,27 +140,29 @@ fn expr_uses_self(expr: &ast::Expr) -> bool {
     }
 }
 
-/// Extract the `ops=<expr>` named argument from a `@driver(...)` attribute.
+fn driver_manifest_attr(attrs: &[ast::Attribute]) -> Option<&ast::Attribute> {
+    attrs
+        .iter()
+        .find(|attr| attr.name == "driver" || attr.name == "native_lib")
+}
+
+/// Extract the `ops=<expr>` named argument from a driver manifest attribute.
 ///
-/// Returns `Some(expr)` when the attribute is named `"driver"` and has an
+/// Returns `Some(expr)` when `@driver(...)` or `@native_lib(...)` has an
 /// `ops` key in its `named_args`. Returns `None` otherwise.
 fn driver_ops_arg(attrs: &[ast::Attribute]) -> Option<ast::Expr> {
-    for attr in attrs {
-        if attr.name != "driver" {
-            continue;
-        }
-        if let Some(named) = &attr.named_args {
-            for (key, val) in named {
-                if key == "ops" {
-                    return Some(val.clone());
-                }
+    let attr = driver_manifest_attr(attrs)?;
+    if let Some(named) = &attr.named_args {
+        for (key, val) in named {
+            if key == "ops" {
+                return Some(val.clone());
             }
         }
     }
     None
 }
 
-/// Build the synthesized registration body for a `@driver(ops=X)` function.
+/// Build the synthesized registration body for a manifest attribute with `ops=X`.
 ///
 /// The generated body is semantically equivalent to the hand-written pattern:
 ///
@@ -177,6 +179,8 @@ fn driver_ops_arg(attrs: &[ast::Attribute]) -> Option<ast::Expr> {
 /// The manifest args are lifted directly from the `@driver(...)` attribute's
 /// `named_args` list, falling back to positional `args` in declaration order:
 ///   positional[0] = class, [1] = vendor, [2] = device_ids, [3] = version
+/// For `@native_lib(...)`, the manifest uses:
+///   DriverManifest.for_native_lib(<name>, <version>)
 /// The same order is used by the existing Rust-seed text scanner in `compile.rs`.
 fn synthesize_driver_registration_body(
     fn_name: &str,
@@ -205,38 +209,49 @@ fn synthesize_driver_registration_body(
         attr.args.as_ref()?.get(fallback_idx).cloned()
     };
 
-    // Locate the @driver attribute (guaranteed present — caller already checked).
-    let driver_attr = attrs.iter().find(|a| a.name == "driver").unwrap();
+    // Locate the @driver/@native_lib attribute (guaranteed present — caller already checked).
+    let manifest_attr = driver_manifest_attr(attrs).unwrap();
 
     // --- Recover manifest args ---
-    // class: positional[0] or named `class`/`dclass`
-    let class_expr = find_arg(driver_attr, "class", 0)
-        .or_else(|| find_arg(driver_attr, "dclass", 0))
-        .unwrap_or(ast::Expr::Integer(0));
+    // version: @driver positional[3], @native_lib positional[1], or named `version`
+    let version_fallback_idx = if manifest_attr.name == "native_lib" { 1 } else { 3 };
+    let version_expr = find_arg(manifest_attr, "version", version_fallback_idx)
+        .unwrap_or_else(|| ast::Expr::String("0.1".to_string()));
 
-    // vendor: positional[1] or named `vendor`
-    let vendor_expr = find_arg(driver_attr, "vendor", 1).unwrap_or(ast::Expr::Integer(0));
+    // --- Build: val m = DriverManifest.for_driver/for_native_lib(...) ---
+    let manifest_call = if manifest_attr.name == "native_lib" {
+        ast::Expr::MethodCall {
+            receiver: Box::new(ast::Expr::Identifier("DriverManifest".to_string())),
+            method: "for_native_lib".to_string(),
+            args: vec![pos_arg(ast::Expr::String(fn_name.to_string())), pos_arg(version_expr)],
+            generic_args: vec![],
+        }
+    } else {
+        // class: positional[0] or named `class`/`dclass`
+        let class_expr = find_arg(manifest_attr, "class", 0)
+            .or_else(|| find_arg(manifest_attr, "dclass", 0))
+            .unwrap_or(ast::Expr::Integer(0));
 
-    // device_ids: positional[2] or named `device`/`devices`
-    let device_expr = find_arg(driver_attr, "device", 2)
-        .or_else(|| find_arg(driver_attr, "devices", 2))
-        .unwrap_or_else(|| ast::Expr::Array(vec![]));
+        // vendor: positional[1] or named `vendor`
+        let vendor_expr = find_arg(manifest_attr, "vendor", 1).unwrap_or(ast::Expr::Integer(0));
 
-    // version: positional[3] or named `version`
-    let version_expr = find_arg(driver_attr, "version", 3).unwrap_or_else(|| ast::Expr::String("0.1".to_string()));
+        // device_ids: positional[2] or named `device`/`devices`
+        let device_expr = find_arg(manifest_attr, "device", 2)
+            .or_else(|| find_arg(manifest_attr, "devices", 2))
+            .unwrap_or_else(|| ast::Expr::Array(vec![]));
 
-    // --- Build: val m = DriverManifest.for_driver(fn_name, version, class, vendor, device_ids) ---
-    let manifest_call = ast::Expr::MethodCall {
-        receiver: Box::new(ast::Expr::Identifier("DriverManifest".to_string())),
-        method: "for_driver".to_string(),
-        args: vec![
-            pos_arg(ast::Expr::String(fn_name.to_string())),
-            pos_arg(version_expr),
-            pos_arg(class_expr),
-            pos_arg(vendor_expr),
-            pos_arg(device_expr),
-        ],
-        generic_args: vec![],
+        ast::Expr::MethodCall {
+            receiver: Box::new(ast::Expr::Identifier("DriverManifest".to_string())),
+            method: "for_driver".to_string(),
+            args: vec![
+                pos_arg(ast::Expr::String(fn_name.to_string())),
+                pos_arg(version_expr),
+                pos_arg(class_expr),
+                pos_arg(vendor_expr),
+                pos_arg(device_expr),
+            ],
+            generic_args: vec![],
+        }
     };
     let let_m = ast::Node::Let(ast::LetStmt {
         span,

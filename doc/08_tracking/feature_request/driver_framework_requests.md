@@ -22,7 +22,7 @@ or `Rejected` (one-line reason).
 - **Filed-by:** driver-framework rollout (Phase B)
 - **Target:** driver / compiler frontend + HIR lowering
 - **Priority:** P1
-- **Status:** Partial (function-level `@driver(..., ops=...)` live path wired 2026-05-30; module/impl-level sugar and `@native_lib(...)` synthesis still open). Manifest attr + HIR/MIR support (2026-04-22) + synthetic codegen pass in `src/compiler/50.mir/synthetic_driver_codegen.spl` injecting `register_static_driver(manifest, ops)` MIR call for `ReadyToSynthesize` functions. Wired into self-hosted `lower_function` in `mir_lowering.spl`; the Rust seed now mirrors the function-level synthesis in HIR lowering and in the AST interpreter fallback used by `bin/simple`.
+- **Status:** Partial (function-level `@driver(..., ops=...)` live path wired 2026-05-30; function-level `@native_lib(..., ops=...)` live path wired 2026-05-30; module/impl-level sugar still open). Manifest attr + HIR/MIR support (2026-04-22) + synthetic codegen pass in `src/compiler/50.mir/synthetic_driver_codegen.spl` injecting `register_static_driver(manifest, ops)` MIR call for `ReadyToSynthesize` functions. Wired into self-hosted `lower_function` in `mir_lowering.spl`; the Rust seed now mirrors function-level synthesis in HIR lowering and in the AST interpreter fallback used by `bin/simple`.
 - **Requested-semantics:**
   Today every driver registers into the shared registry by calling
   `register_static_driver(manifest, ops)` from a hand-written
@@ -96,6 +96,12 @@ or `Rejected` (one-line reason).
   `doc/06_spec/app/compiler/feature/driver_synthetic_registration_live_spec.spl`,
   plus Rust seed regression
   `src/compiler_rust/driver/tests/synthetic_driver_registration_live.rs`.
+  Codex update 2026-05-30: extended the same live Rust seed HIR and AST
+  interpreter synthesis to stub-only function-level
+  `@native_lib(..., ops=...)`. Native-lib synthesis now builds
+  `DriverManifest.for_native_lib(name, version)` before the shared
+  `register_static_driver(m, ops)` call. Module-level and impl-level
+  `@driver(...)` sugar remain open.
 
 ---
 

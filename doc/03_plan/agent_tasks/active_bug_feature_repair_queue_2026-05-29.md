@@ -1305,6 +1305,15 @@ Spawned read-only explorers:
       floor for `is_alpha`, `is_alnum`, `is_space`, `to_lower`, and `to_upper`,
       so the LUT must not be promoted or the tracker closed without a better
       benchmark result.
+90. FR-DRIVER-0001 function-level `@native_lib(..., ops=...)` live path bridged.
+    - Function-level `@native_lib(..., ops=...)` stubs now synthesize
+      `DriverManifest.for_native_lib(name, version)` followed by
+      `register_static_driver(m, ops)` in both Rust HIR lowering and the AST
+      interpreter fallback, matching the function-level `@driver` bridge.
+    - Verification passed: Rust `synthetic_driver_registration_live` test
+      (`2/2`), system spec (`2/2`), and SPipe mirror (`2/2`).
+    - Remaining driver scope: module/impl-level `@driver(...)` sugar remains
+      open, along with any module/impl-level `@native_lib(...)` extension.
 
 ## Remaining Open Work After 2026-05-30 Salvage
 
@@ -1315,8 +1324,9 @@ Spawned read-only explorers:
 - FR-PLUG-0004: bounded adjacent-pattern GEMM-add codegen fusion is landed,
   but a linkable runtime/plugin GEMM-add implementation, shape/dimension ABI,
   and performance proof remain open.
-- FR-DRIVER-0001: function-level live bridge is landed, but module/impl-level
-  sugar and `@native_lib(...)` synthesis remain open.
+- FR-DRIVER-0001: function-level `@driver(..., ops=...)` and
+  `@native_lib(..., ops=...)` live bridges are landed. Module/impl-level
+  driver/native-lib sugar remains open.
 - SimpleOS in-guest toolchain execution: the status gate now validates real
   static ELF64 x86_64 compiler payloads and rejects dynamic/placeholder/wrong
   machine inputs. Real `clang_static`/`rustc_static` payload builds and live
