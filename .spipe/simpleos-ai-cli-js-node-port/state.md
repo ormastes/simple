@@ -29,3 +29,8 @@ research-options-ready
 - research: Added local research, domain research, feature requirement options, and NFR options. Final requirements are pending user option selection.
 - design-draft: Added a pre-requirements runtime contract matrix and draft system-test plan without selecting final requirements.
 - research: Recorded the explicit user-selection gate in `doc/02_requirements/feature/simpleos_ai_cli_js_node_port_selection_needed.md`; interactive selection prompt was unavailable in the current mode.
+- plan: Added `doc/03_plan/agent_tasks/simpleos_ai_cli_js_node_port_traceability_scaffold.md` to map AC-1..AC-7 to pending requirement families and the first post-selection task queue.
+
+## Current Blocker
+Final feature and NFR requirements are blocked on explicit user option
+selection. Recommended reply: `Feature A, NFR 1+3`.
