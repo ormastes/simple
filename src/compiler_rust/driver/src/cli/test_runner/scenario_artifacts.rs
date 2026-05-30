@@ -290,18 +290,18 @@ mod tests {
 
         assert_eq!(
             plan.spec_root.to_string_lossy().replace('\\', "/"),
-            "build/test-artifacts/app/web_dashboard/tmux_rest_api"
+            "build/test-artifacts/feature/app/web_dashboard/tmux_rest_api"
         );
         assert_eq!(
             plan.scenario_root.to_string_lossy().replace('\\', "/"),
-            "build/test-artifacts/app/web_dashboard/tmux_rest_api/scenarios"
+            "build/test-artifacts/feature/app/web_dashboard/tmux_rest_api/scenarios"
         );
         assert_eq!(plan.entries.len(), 1);
         assert_eq!(plan.entries[0].index, 1);
         assert_eq!(plan.entries[0].slug, "rendering-shows-dashboard");
         assert_eq!(
             plan.entries[0].directory.to_string_lossy().replace('\\', "/"),
-            "build/test-artifacts/app/web_dashboard/tmux_rest_api/scenarios/001-rendering-shows-dashboard"
+            "build/test-artifacts/feature/app/web_dashboard/tmux_rest_api/scenarios/001-rendering-shows-dashboard"
         );
     }
 

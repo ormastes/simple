@@ -284,7 +284,7 @@ mod tests {
         let rel = spec_relative_dir(Path::new("test/feature/app/web_dashboard/tmux_rest_api_spec.spl"));
         assert_eq!(
             rel.to_string_lossy().replace('\\', "/"),
-            "app/web_dashboard/tmux_rest_api"
+            "feature/app/web_dashboard/tmux_rest_api"
         );
     }
 

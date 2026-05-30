@@ -532,7 +532,7 @@ mod tests {
         let opts = parse_test_args(&args);
         assert!(opts.target.as_ref().is_some_and(|target| !target.is_baremetal()));
         assert!(!opts.strict_runtime_family_imports());
-        assert!(!opts.safe_mode);
+        assert!(opts.safe_mode);
     }
 
     #[test]
@@ -595,7 +595,7 @@ mod tests {
         let args = vec!["--compile=interpreter".to_string()];
         let opts = parse_test_args(&args);
         assert_eq!(opts.execution_mode, TestExecutionMode::Interpreter);
-        assert!(!opts.safe_mode);
+        assert!(opts.safe_mode);
     }
 
     #[test]

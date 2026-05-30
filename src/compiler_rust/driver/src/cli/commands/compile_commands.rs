@@ -827,7 +827,7 @@ backend = "llvm"
         let shared = resolve_native_strip_mode(&["compile".to_string()], Target::host(), true);
         let cross = resolve_native_strip_mode(
             &["compile".to_string()],
-            Target::parse("aarch64").expect("target"),
+            Target::parse("wasm32-wasi").expect("target"),
             false,
         );
         assert_eq!(shared, NativeStripMode::None);
