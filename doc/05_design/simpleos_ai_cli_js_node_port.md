@@ -66,6 +66,16 @@ The browser-facing implementation mirrors this gate in
 keeps the AI CLI runtime contract and generated-WASM browser artifact evidence
 aligned without duplicating separate policy strings in each test.
 
+## Browser Script Execution
+
+`browser_script_execute` is currently a hardened in-process policy layer, not a
+full JavaScript VM. It collects `<script>` tags, uses offset-safe scanning, and
+executes only literal `console.log(...)` statements. Node-like and host-like
+escape surfaces are denied before execution, external script URLs are denied,
+and unsupported script types fail closed. The result object reports collected,
+executed, and denied script counts plus diagnostics so future browser rendering
+and QEMU evidence can prove that no host subprocess fallback was used.
+
 ## Error Handling
 
 The first slice avoids `Result` plumbing in callers by returning deterministic
@@ -84,4 +94,6 @@ validation text. Empty text means success; any non-empty text is a hard denial.
 - Bun-informed runtime profile gates;
 - Simple browser generated-WASM import/export denial gates;
 - generated-WASM hello GUI import/export evidence in
-  `test/unit/lib/common/ui/wasm_hello_gui_spec.spl`.
+  `test/unit/lib/common/ui/wasm_hello_gui_spec.spl`;
+- hardened browser script execution and denial coverage in
+  `test/unit/browser_engine/script/browser_script_execute_spec.spl`.

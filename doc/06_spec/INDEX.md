@@ -12,9 +12,9 @@
 
 ---
 
-## Standard Library (1 features)
+## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Wasm Hello Gui Specification](unit/lib/common/ui/wasm_hello_gui_spec.md) | Auto-generated | N/A | 17 | 0% | 0 lines |
+| [Browser Script Execute Specification](unit/browser_engine/script/browser_script_execute_spec.md) | Auto-generated | N/A | 3 | 0% | 0 lines |
 

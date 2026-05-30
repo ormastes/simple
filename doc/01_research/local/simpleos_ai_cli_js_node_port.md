@@ -99,3 +99,21 @@ distinguishes:
 
 This moves the previous AI CLI contract from documentation-only planning into
 the shared generated-WASM browser artifact evidence path.
+
+## 2026-05-30 Browser Script Hardening
+
+`src/lib/gc_async_mut/gpu/browser_engine/browser_script_execute.spl` no longer
+executes collected script text by writing a temporary `.spl` file and spawning
+`bin/simple`. The browser script path now has a deterministic in-process policy:
+
+- inline browser JavaScript may execute only literal `console.log(...)`
+  statements in this first hardened slice;
+- Node/host escape surfaces (`require`, dynamic import, `process.env`, `fs`,
+  child process spawning, network APIs, `rt_process_run`, and `host.shell`) are
+  denied before execution;
+- external `src=` scripts and unsupported script types are collected but denied;
+- denial counts and diagnostics are returned to renderer callers.
+
+This is not a full JS engine yet, but it removes the unsafe host subprocess
+boundary and creates a clear fail-closed contract for expanding the Simple JS
+engine toward the Node/Bun-like runtime profile.
