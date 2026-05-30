@@ -681,3 +681,28 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
     `SIMPLE_LIB=src bin/simple test test/unit/compiler/loader/module_loader_spec.spl --mode=interpreter --clean`,
     `metadata_symbols_spec.spl`, `unload_ownership_spec.spl`, and
     `module_loader_crash_fix_spec.spl`.
+
+### FR-COMPILER-012 — Fix `expect (expr) == val` parser precedence
+
+- **Filed-on:** 2026-05-30
+- **Filed-by:** usage-spec sweep session
+- **Target:** parser / `src/compiler/`
+- **Priority:** P2
+- **Status:** Open
+- **Requested-semantics:**
+  `expect (true and true) == true` is currently parsed as
+  `(expect(true and true)) == true` — i.e., `expect` consumes the parenthesized
+  sub-expression as its argument and the trailing `== true` is evaluated against
+  the return value of `expect`, always yielding a wrong result.
+  The intended parse is `expect((true and true) == true)`.
+  Workaround in tests: wrap the entire comparison in an extra set of parens:
+  `expect((a and b) == c)`.  The grammar should treat `expect` as a statement
+  keyword whose operand extends to end-of-expression (like `return`), not as a
+  function call that stops at the first complete expression.
+- **Acceptance-criteria:**
+  - [ ] `expect (true and true) == true` parses equivalently to
+        `expect((true and true) == true)`.
+  - [ ] No regression in existing passing `expect` tests.
+- **Related-upfront:** none
+- **Notes:** Discovered while fixing `test/feature/usage/parser_keywords_spec.spl`
+  and `parser_operators_spec.spl` (the `and`/`or` operator tests).
