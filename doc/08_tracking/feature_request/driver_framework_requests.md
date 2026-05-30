@@ -22,7 +22,7 @@ or `Rejected` (one-line reason).
 - **Filed-by:** driver-framework rollout (Phase B)
 - **Target:** driver / compiler frontend + HIR lowering
 - **Priority:** P1
-- **Status:** Partial (function-level `@driver(..., ops=...)` live path wired 2026-05-30; function-level `@native_lib(..., ops=...)` live path wired 2026-05-30; module/impl-level sugar still open). Manifest attr + HIR/MIR support (2026-04-22) + synthetic codegen pass in `src/compiler/50.mir/synthetic_driver_codegen.spl` injecting `register_static_driver(manifest, ops)` MIR call for `ReadyToSynthesize` functions. Wired into self-hosted `lower_function` in `mir_lowering.spl`; the Rust seed now mirrors function-level synthesis in HIR lowering and in the AST interpreter fallback used by `bin/simple`.
+- **Status:** Partial (function-level `@driver(..., ops=...)` live path wired 2026-05-30; function-level `@native_lib(..., ops=...)` live path wired 2026-05-30; impl-level `@driver(..., ops=...)` / `@native_lib(..., ops=...)` inheritance wired 2026-05-30; bare module-level sugar still open). Manifest attr + HIR/MIR support (2026-04-22) + synthetic codegen pass in `src/compiler/50.mir/synthetic_driver_codegen.spl` injecting `register_static_driver(manifest, ops)` MIR call for `ReadyToSynthesize` functions. Wired into self-hosted `lower_function` in `mir_lowering.spl`; the Rust seed now mirrors function-level synthesis in HIR lowering and in the AST interpreter fallback used by `bin/simple`.
 - **Requested-semantics:**
   Today every driver registers into the shared registry by calling
   `register_static_driver(manifest, ops)` from a hand-written
@@ -102,6 +102,15 @@ or `Rejected` (one-line reason).
   `DriverManifest.for_native_lib(name, version)` before the shared
   `register_static_driver(m, ops)` call. Module-level and impl-level
   `@driver(...)` sugar remain open.
+  Codex update 2026-05-30: extended the live Rust seed HIR and AST
+  interpreter fallback to impl-level `@driver(..., ops=...)` and
+  `@native_lib(..., ops=...)` by inheriting the impl manifest attribute onto
+  contained stub-only registration methods that do not already declare their
+  own manifest. Bare module-level sugar remains blocked because the
+  self-hosted `Module` AST still has no `attributes` field and the live Rust
+  semantics for file-level manifest ownership/name selection are not yet
+  specified. Coverage: `test/system/compiler/driver_synthetic_registration_live_spec.spl`
+  and `src/compiler_rust/driver/tests/synthetic_driver_registration_live.rs`.
 
 ---
 

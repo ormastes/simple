@@ -189,24 +189,45 @@ pub(super) fn register_definitions(
                 if let Some(type_name) = type_name {
                     // Handle classes
                     if let Some(class_def) = local_classes.get_mut(&type_name) {
-                        Arc::make_mut(class_def).methods.extend(impl_block.methods.clone());
+                        Arc::make_mut(class_def).methods.extend(
+                            impl_block
+                                .methods
+                                .iter()
+                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
+                        );
                     }
                     if let Some(class_def) = global_classes.get_mut(&type_name) {
-                        Arc::make_mut(class_def).methods.extend(impl_block.methods.clone());
+                        Arc::make_mut(class_def).methods.extend(
+                            impl_block
+                                .methods
+                                .iter()
+                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
+                        );
                     }
                     // Handle enums - add impl methods to enum definition
                     if let Some(enum_def) = local_enums.get_mut(&type_name) {
-                        Arc::make_mut(enum_def).methods.extend(impl_block.methods.clone());
+                        Arc::make_mut(enum_def).methods.extend(
+                            impl_block
+                                .methods
+                                .iter()
+                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
+                        );
                     }
                     if let Some(enum_def) = global_enums.get_mut(&type_name) {
-                        Arc::make_mut(enum_def).methods.extend(impl_block.methods.clone());
+                        Arc::make_mut(enum_def).methods.extend(
+                            impl_block
+                                .methods
+                                .iter()
+                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
+                        );
                     }
                     // Register static methods from impl blocks as mangled free functions
                     for method in &impl_block.methods {
+                        let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
                         let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                         if is_static {
                             let mangled = format!("{}__{}", type_name, method.name);
-                            let arc_method = Arc::new(method.clone());
+                            let arc_method = Arc::new(method);
                             local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                             global_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                             exports.insert(
@@ -224,7 +245,12 @@ pub(super) fn register_definitions(
                     GLOBAL_IMPL_METHODS.with(|cell| {
                         let mut global_impls = cell.borrow_mut();
                         let methods = global_impls.entry(type_name.clone()).or_default();
-                        methods.extend(impl_block.methods.iter().map(|m| Arc::new(m.clone())));
+                        methods.extend(
+                            impl_block
+                                .methods
+                                .iter()
+                                .map(|m| Arc::new(method_with_impl_driver_attrs(m, &impl_block.attributes))),
+                        );
                     });
                     // Update MODULE_CLASSES_CACHE with the enriched class definition
                     // so cross-module fallback lookups find impl-added methods

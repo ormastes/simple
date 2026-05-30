@@ -577,3 +577,69 @@ Conclusion: the static LUT diagnostic can now run, but the currently shipped
 ctype implementation still does not meet the native/C floor. Do not promote the
 LUT or close this tracker without a benchmark run showing the candidate
 implementation beats the tracked floor.
+
+## 2026-05-30 Active Lane Recheck
+
+Scoped recheck used current `origin/main` (`400212747d9dc1e93699c6ebca56f066bd25c074`)
+as the integration baseline. The working checkout had one unrelated local
+commit and unrelated dirty files, but no ctype/perf/codegen source changes were
+present before this pass.
+
+Focused syntax/type check:
+
+```bash
+SIMPLE_LIB=src bin/simple check src/lib/common/ctype.spl test/perf/ctype/ctype_lut_tables.spl test/perf/ctype/global_static_array_smoke.spl test/perf/ctype/bench_ctype_static_lut.spl test/perf/ctype/bench_ctype.spl test/perf/ctype/bench_ctype_inline.spl test/perf/ctype/bench_ctype_lut.spl
+```
+
+Result: pass for all seven files.
+
+Clean native static-array probe:
+
+```bash
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple native-build --clean --entry test/perf/ctype/global_static_array_smoke.spl --source src/lib --source test/perf/ctype --entry-closure --backend cranelift --runtime-bundle core-c-bootstrap -o build/perf/ctype/global_static_array_smoke
+build/perf/ctype/global_static_array_smoke
+```
+
+Result: failed with
+`[ctype-static-array-error] i64 table tab entry actual=3`.
+
+Clean static LUT benchmark:
+
+```bash
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple native-build --clean --entry test/perf/ctype/bench_ctype_static_lut.spl --source src/lib --source test/perf/ctype --entry-closure --backend cranelift --runtime-bundle core-c-bootstrap -o build/perf/ctype/bench_ctype_static_lut
+build/perf/ctype/bench_ctype_static_lut
+```
+
+Result: failed with corrupted checksums:
+`is_alpha=128000000`, `is_alnum=128000000`, `is_xdigit=128000000`,
+`is_space=0`, `combined_checksum=384000000`.
+
+Direct-range warn-only benchmark:
+
+```bash
+SIMPLE_CTYPE_BENCH_SAMPLES=1 SIMPLE_CTYPE_BENCH_ENFORCE=0 SIMPLE_CTYPE_BENCH_CLEAN=1 SIMPLE_LIB=src bash test/perf/ctype/run_ctype_benchmarks.shs
+```
+
+Result: checksum parity passed and native compilation succeeded. Native/C
+ratios were `is_digit 0.64x`, `is_upper 0.50x` (warned as below exact floor),
+`is_lower 0.46x`, `is_alpha 0.35x`, `is_alnum 0.33x`, `is_xdigit 0.41x`,
+`is_space 0.24x`, `to_lower 0.31x`, and `to_upper 0.37x`.
+
+Additional trace:
+
+```bash
+SIMPLE_TRACE_MIR_GLOBALS=1 SIMPLE_TRACE_MIR_GLOBALS_FILTER=ctype_lut SIMPLE_LIB=src src/compiler_rust/target/debug/simple native-build --clean --entry test/perf/ctype/global_static_array_smoke.spl --source src/lib --source test/perf/ctype --entry-closure --backend cranelift --runtime-bundle core-c-bootstrap -o build/perf/ctype/global_static_array_smoke
+```
+
+Result: the imported `CTYPE_BYTE_SMOKE_TABLE` and `CTYPE_FLAG_TABLE` globals
+were declared, but the linked binary exposed only the table data symbols and a
+weak `__simple_call_module_inits`; no `__module_init_ctype_lut_tables` symbol
+was present. The static LUT candidate is therefore still blocked by native
+module-level array initialization/linking before performance can be trusted.
+
+Conclusion: no bounded ctype library implementation is appropriate in this
+lane. The direct-range implementation still misses the floor, and the static
+LUT route is currently correctness-blocked in native codegen/linking. Keep this
+tracker open for backend global-array initialization/linking plus broader
+branch/loop codegen work; do not promote LUT code into `src/lib/common/ctype.spl`
+from the current evidence.

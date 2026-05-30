@@ -26,7 +26,11 @@ pub extern "C" fn sffi_regex_captures(_pattern: RuntimeValue, _text: RuntimeValu
 }
 
 #[no_mangle]
-pub extern "C" fn sffi_regex_replace(_pattern: RuntimeValue, text: RuntimeValue, _replacement: RuntimeValue) -> RuntimeValue {
+pub extern "C" fn sffi_regex_replace(
+    _pattern: RuntimeValue,
+    text: RuntimeValue,
+    _replacement: RuntimeValue,
+) -> RuntimeValue {
     text
 }
 
