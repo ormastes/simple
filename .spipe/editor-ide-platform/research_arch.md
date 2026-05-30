@@ -36,19 +36,19 @@ Layer structure: `00.common` → `10.buffer` → `20.core` → `30.view` → `40
 
 ## Recommended Implementation Tracks
 
-### Track A — Shared backend additions (`src/lib/editor/30.view/`)
+### Track A — Shared backend additions (`src/lib/editor/view/`)
 The `30.view` directory already exists. No new directory is needed.
 
 New files:
-- `src/lib/editor/30.view/multi_buffer.spl` — `MultiBufferManager`: unified registry mapping `EditorBufferId` → `EditorDocument`; open/close/lookup across split groups.
-- `src/lib/editor/30.view/split_pane.spl` — `SplitPaneLayout`: higher-level split management (horizontal/vertical splits, resize, focus-cycle) built on the existing `SplitTree`.
+- `src/lib/editor/view/multi_buffer.spl` — `MultiBufferManager`: unified registry mapping `EditorBufferId` → `EditorDocument`; open/close/lookup across split groups.
+- `src/lib/editor/view/split_pane.spl` — `SplitPaneLayout`: higher-level split management (horizontal/vertical splits, resize, focus-cycle) built on the existing `SplitTree`.
 
 ### Track B — SVIM rewiring (`src/app/svim/`)
 Replace `SvimSession`'s internal piece table and layout with the shared lib.
 
 Modified files:
 - `src/app/svim/core.spl` — swap `PieceTable` usages to `EditorPieceTable`; replace `SvimBuffer` undo logic with `EditorBuffer`; delegate window/tab state to `EditSession`.
-- `src/app/svim/language_port.spl` — remove manual `DiagnosticItem` conversion; use `std.editor.60.services.diagnostics` types directly.
+- `src/app/svim/language_port.spl` — remove manual `DiagnosticItem` conversion; use `std.editor.services.diagnostics` types directly.
 
 New file:
 - `src/app/svim/session_adapter.spl` — thin adapter mapping `SvimSession` method surface onto `EditSession` so existing `tui_shell.spl` and `main.spl` callers need no changes.

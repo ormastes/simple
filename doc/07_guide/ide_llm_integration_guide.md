@@ -25,6 +25,31 @@ model). Editor surface details: `doc/07_guide/editor_tui.md`.
 Both svim and the Editor consume the same `src/lib/editor/` backend (epic
 `.spipe/editor-ide-platform`, CLOSED 2026-05-20).
 
+The reusable backend uses semantic package names (`buffer`, `core`, `view`,
+`render`, `extensions`, `services`, `unified`) rather than duplicate numbered
+layer directories. MDSOC+ layer boundaries are still part of the architecture,
+but code paths stay VS Code-like so TUI, GUI, embedded editor apps, examples,
+and the VS Code extension all point at one library surface.
+
+### Host and SimpleOS runtime contract
+
+The IDE must run on both host platforms and SimpleOS:
+
+- **Shared logic:** `src/lib/editor/` stays runtime-neutral. It owns buffers,
+  documents, views, markdown-first services, LSP/DAP models, extension metadata,
+  and unified adapters.
+- **SimpleOS path:** `src/app/editor/tui_main.spl`,
+  `src/app/editor/tui_shell.spl`, and `src/lib/editor/70.backend/tui_backend.spl`
+  use terminal/TUI abstractions only and must not import Tauri, Electron,
+  browser/webview, SDL, or desktop dialog/clipboard APIs.
+- **Host path:** GUI, SDL, browser, Tauri, and desktop affordances remain in
+  host adapters such as `src/app/editor/gui_shell_*`,
+  `src/app/editor/desktop_commands.spl`, `src/app/ui.tauri/`, and
+  `src/app/ui.browser/`.
+- **Verification:** `test/unit/lib/editor/host_simpleos_surface_contract_spec.spl`
+  guards the boundary by scanning the shared/TUI entrypoints for host-only API
+  names.
+
 ### LLM session management
 
 | Piece | Path | Role |
@@ -105,7 +130,7 @@ plane (MCP assistant) and the operator plane (dashboard).
    live endpoint (mirror the `assistant_*` wiring in `main_dispatch.spl`).
 2. Add an editor→dashboard event stream + watcher for live activity.
 3. Add a dashboard "open in editor" action and an assistant/agent panel in the
-   editor shell (`src/lib/editor/30.view/`).
+   editor shell (`src/lib/editor/view/`).
 
 ## See also
 - `doc/07_guide/editor_tui.md` — editor components, rendering, status/blockers

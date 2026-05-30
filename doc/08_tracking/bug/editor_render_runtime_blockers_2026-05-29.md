@@ -98,9 +98,9 @@ was written against but that never existed:
 
 - `FileTreeState` + `FileTreeVisibleNode` (+ `new`/`visible_nodes`/`select_next`/
   `select_prev`/`toggle_expand`/`selected_is_dir`/`selected_path`) in
-  `src/lib/editor/30.view/file_tree.spl`.
+  `src/lib/editor/view/file_tree.spl`.
 - `SettingsViewState` (categories/category_index/filtered/selected_index/
-  editing/edit_value) in `src/lib/editor/30.view/settings_view.spl`.
+  editing/edit_value) in `src/lib/editor/view/settings_view.spl`.
 - Wired `use std.editor.view.file_tree.*` / `settings_view.*` into the
   controller, ctrl_core, tui_shell_panels, gui_backend.
 - `LspResponse` tuple-element annotations in `editor_ctrl_core2.spl`.
@@ -173,7 +173,7 @@ fn main():
 and the binary exits `0` with output `0`.
 
 ### (fixed) `PaletteState` was an undefined type
-Fixed 2026-05-29 in `src/lib/editor/60.services/command_palette.spl` by adding
+Fixed 2026-05-29 in `src/lib/editor/services/command_palette.spl` by adding
 `PaletteState`, fuzzy matching/ranking, and the `palette_new` /
 `palette_show` / `palette_hide` / `palette_update_query` / selection helpers
 used by the controller and TUI palette renderer.
@@ -181,7 +181,7 @@ used by the controller and TUI palette renderer.
 Verification:
 
 ```bash
-SIMPLE_LIB=src bin/simple check src/app/editor/tui_main.spl src/app/editor/editor_controller.spl src/app/editor/editor_ctrl_core.spl src/app/editor/editor_ctrl_core2.spl src/app/editor/tui_shell.spl src/app/editor/tui_shell_panels.spl src/lib/editor/60.services/command_palette.spl src/lib/editor/extensions/builtin/md_commands.spl test/system/editor_palette_spec.spl
+SIMPLE_LIB=src bin/simple check src/app/editor/tui_main.spl src/app/editor/editor_controller.spl src/app/editor/editor_ctrl_core.spl src/app/editor/editor_ctrl_core2.spl src/app/editor/tui_shell.spl src/app/editor/tui_shell_panels.spl src/lib/editor/services/command_palette.spl src/lib/editor/extensions/builtin/md_commands.spl test/system/editor_palette_spec.spl
 SIMPLE_LIB=src bin/simple test test/system/editor_palette_spec.spl --mode=interpreter --clean
 ```
 

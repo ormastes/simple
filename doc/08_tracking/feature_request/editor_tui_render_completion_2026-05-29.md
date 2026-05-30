@@ -64,7 +64,7 @@ Resolved runtime/fidelity blockers are tracked in
   fixed.
 
 ### 3. Define `PaletteState` — done 2026-05-29
-`src/lib/editor/60.services/command_palette.spl` now defines `PaletteState`,
+`src/lib/editor/services/command_palette.spl` now defines `PaletteState`,
 fuzzy matching/ranking, and the `palette_new`/`palette_show` API used by the
 controller and TUI palette renderer. `test/system/editor_palette_spec.spl`
 passes 11/11.

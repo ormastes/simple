@@ -29,7 +29,7 @@ The current session restored and verified a narrow DAP/editor/LSP slice:
 - LSP client/transport now have `textDocument/codeAction` request support.
 - Markdown LSP advertises `codeActionProvider` and returns simple quick-fix actions.
 - Editor controller has quick-fix/debug-start command routing and state fields.
-- `src/lib/editor/60.services/simple_lsp_config.spl` was added as the Simple LSP config surface.
+- `src/lib/editor/services/simple_lsp_config.spl` was added as the Simple LSP config surface.
 - Latest 2026-05-13 verification also has the full editor controller system
   spec green under the interpreter, plus native DAP process command/launch
   smokes and the LSP activation smoke green using
@@ -38,11 +38,11 @@ The current session restored and verified a narrow DAP/editor/LSP slice:
 Verified commands that passed before this handoff:
 
 ```bash
-bin/simple check src/lib/editor/50.extensions/manifest.spl src/lib/editor/50.extensions/host.spl src/lib/editor/50.extensions/builtin/spl_language.spl src/lib/editor/50.extensions/builtin/md_language.spl test/system/editor_extension_spec.spl src/app/dap/simple_dap_main.spl test/system/dap_protocol_live_spec.spl
+bin/simple check src/lib/editor/extensions/manifest.spl src/lib/editor/extensions/host.spl src/lib/editor/extensions/builtin/spl_language.spl src/lib/editor/extensions/builtin/md_language.spl test/system/editor_extension_spec.spl src/app/dap/simple_dap_main.spl test/system/dap_protocol_live_spec.spl
 python3 scripts/dap_protocol_smoke.py
 bin/simple test test/system/dap_protocol_live_spec.spl --mode=interpreter
 bin/simple test test/system/editor_extension_spec.spl --mode=interpreter
-bin/simple check src/lib/editor/60.services/lsp_transport.spl src/lib/editor/60.services/lsp_client.spl src/lib/editor/60.services/md_lsp_config.spl src/lib/editor/60.services/simple_lsp_config.spl src/lib/editor/60.services/diagnostics.spl src/app/md_lsp/md_lsp_handler.spl src/app/editor/commands.spl src/app/editor/editor_controller.spl
+bin/simple check src/lib/editor/services/lsp_transport.spl src/lib/editor/services/lsp_client.spl src/lib/editor/services/md_lsp_config.spl src/lib/editor/services/simple_lsp_config.spl src/lib/editor/services/diagnostics.spl src/app/md_lsp/md_lsp_handler.spl src/app/editor/commands.spl src/app/editor/editor_controller.spl
 bin/simple test test/system/editor_controller_spec.spl --mode=interpreter
 bin/simple test test/system/editor_md_lsp_code_action_spec.spl --mode=interpreter
 bin/simple test test/system/editor_lsp_spec.spl --mode=interpreter
@@ -63,15 +63,15 @@ The editor/DAP/LSP work currently touches:
 - `src/app/editor/commands.spl`
 - `src/app/editor/editor_controller.spl`
 - `src/app/md_lsp/md_lsp_handler.spl`
-- `src/lib/editor/50.extensions/builtin/md_language.spl`
-- `src/lib/editor/50.extensions/builtin/spl_language.spl`
-- `src/lib/editor/50.extensions/host.spl`
-- `src/lib/editor/50.extensions/manifest.spl`
-- `src/lib/editor/60.services/diagnostics.spl`
-- `src/lib/editor/60.services/lsp_client.spl`
-- `src/lib/editor/60.services/lsp_transport.spl`
-- `src/lib/editor/60.services/md_lsp_config.spl`
-- `src/lib/editor/60.services/simple_lsp_config.spl`
+- `src/lib/editor/extensions/builtin/md_language.spl`
+- `src/lib/editor/extensions/builtin/spl_language.spl`
+- `src/lib/editor/extensions/host.spl`
+- `src/lib/editor/extensions/manifest.spl`
+- `src/lib/editor/services/diagnostics.spl`
+- `src/lib/editor/services/lsp_client.spl`
+- `src/lib/editor/services/lsp_transport.spl`
+- `src/lib/editor/services/md_lsp_config.spl`
+- `src/lib/editor/services/simple_lsp_config.spl`
 - `test/system/editor_controller_spec.spl`
 - `test/system/editor_extension_spec.spl`
 - `test/system/editor_lsp_spec.spl`

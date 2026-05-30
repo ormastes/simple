@@ -621,7 +621,7 @@ Spawned read-only explorers:
 43. Editor command palette state implemented.
     - Added `PaletteState`, fuzzy match/ranking helpers, and the
       `palette_new`/`palette_show`/selection API in
-      `src/lib/editor/60.services/command_palette.spl`.
+      `src/lib/editor/services/command_palette.spl`.
     - Added Markdown command palette entries in
       `src/lib/editor/extensions/builtin/md_commands.spl` and updated the
       source-contract spec to the current split controller/module paths.
@@ -629,7 +629,7 @@ Spawned read-only explorers:
       listed as unresolved; remaining editor items are AOT/JIT runtime
       dispatch issues and controller split consolidation.
     - Verification passed:
-      `SIMPLE_LIB=src bin/simple check src/app/editor/tui_main.spl src/app/editor/editor_controller.spl src/app/editor/editor_ctrl_core.spl src/app/editor/tui_shell.spl src/app/editor/tui_shell_panels.spl src/lib/editor/60.services/command_palette.spl src/lib/editor/extensions/builtin/md_commands.spl test/system/editor_palette_spec.spl`
+      `SIMPLE_LIB=src bin/simple check src/app/editor/tui_main.spl src/app/editor/editor_controller.spl src/app/editor/editor_ctrl_core.spl src/app/editor/tui_shell.spl src/app/editor/tui_shell_panels.spl src/lib/editor/services/command_palette.spl src/lib/editor/extensions/builtin/md_commands.spl test/system/editor_palette_spec.spl`
       and
       `SIMPLE_LIB=src bin/simple test test/system/editor_palette_spec.spl --mode=interpreter --clean`
       (`11/11`).
@@ -702,7 +702,7 @@ Spawned read-only explorers:
     - Added `rt_file_exists(root)` guards in both extension-host mirrors before
       calling `rt_dir_walk`.
     - Verification passed:
-      `SIMPLE_LIB=src bin/simple check src/lib/editor/50.extensions/host.spl src/lib/editor/extensions/host.spl src/app/editor/editor_controller.spl test/unit/lib/editor/extension_discovery_contract_spec.spl test/system/editor_extension_spec.spl`.
+      `SIMPLE_LIB=src bin/simple check src/lib/editor/extensions/host.spl src/lib/editor/extensions/host.spl src/app/editor/editor_controller.spl test/unit/lib/editor/extension_discovery_contract_spec.spl test/system/editor_extension_spec.spl`.
     - Core-C stage probe now reaches `stage:done`.
     - Full core-C TUI verification now times out normally in the interactive
       loop with no stderr and frame markers (`No file open`, `NORMAL`, `ready`):
@@ -752,7 +752,7 @@ Spawned read-only explorers:
       already-patched nested string-method dispatch and empty environment-value
       handling were active in the installed wrapper used by the tests.
     - Verification passed:
-      `SIMPLE_LIB=src bin/simple check src/app/editor/editor_controller.spl src/app/editor/tui_shell.spl src/lib/editor/buffer/buffer.spl src/lib/editor/30.view/lsp_result_panel.spl src/runtime/simple_core/core_env.spl`
+      `SIMPLE_LIB=src bin/simple check src/app/editor/editor_controller.spl src/app/editor/tui_shell.spl src/lib/editor/buffer/buffer.spl src/lib/editor/view/lsp_result_panel.spl src/runtime/simple_core/core_env.spl`
       and
       `SIMPLE_LIB=src bin/simple test test/system/editor_controller_spec.spl --mode=interpreter --clean --format json`
       (`92/92`).

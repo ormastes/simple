@@ -17,10 +17,42 @@ render an editor frame, and the known blockers.
 - **Render panels:** `src/app/editor/tui_shell_panels.spl` — tab bar, file tree,
   editor content (line-number gutter), status bar, command line.
 - **File-tree state:** `FileTreeState` / `FileTreeVisibleNode`
-  (`src/lib/editor/30.view/file_tree.spl`).
+  (`src/lib/editor/view/file_tree.spl`).
 - **Settings/palette state:** `SettingsViewState`
-  (`src/lib/editor/30.view/settings_view.spl`), `CommandPalette`
-  (`src/lib/editor/60.services/command_palette.spl`).
+  (`src/lib/editor/view/settings_view.spl`), `CommandPalette`
+  (`src/lib/editor/services/command_palette.spl`).
+
+## Canonical Shared-Library Layout
+
+The editor library follows VS Code-like package names for reusable code:
+
+- `src/lib/editor/buffer/` — text storage, piece table, undo, syntax helpers
+- `src/lib/editor/core/` — document/session/keybinding/plugin state
+- `src/lib/editor/view/` — dock zones, split tree, panels, tabs, breadcrumbs
+- `src/lib/editor/render/` — markdown/block/terminal render models
+- `src/lib/editor/extensions/` — extension host, manifests, built-ins
+- `src/lib/editor/services/` — LSP, diagnostics, search, wiki, debug, watchers
+- `src/lib/editor/unified/` — shared adapters for TUI/VS Code/project surfaces
+
+Do not add duplicate MDSOC-numbered aliases such as `30.view` or
+`60.services`. MDSOC+ layering is documented in architecture/design docs; code
+paths stay semantic so `src/app/editor`, `src/app/svim`, embedded editor apps,
+examples, and the VS Code extension consume one shared editor library.
+
+## Host and SimpleOS Runtime Contract
+
+The editor must remain runnable on both host platforms and SimpleOS:
+
+- `src/lib/editor/` contains runtime-neutral editor/IDE logic only.
+- `src/app/editor/tui_main.spl`, `src/app/editor/tui_shell.spl`, and
+  `src/lib/editor/70.backend/tui_backend.spl` are the SimpleOS-safe terminal
+  path. They may use `std.tui` and shared editor services, but not Tauri,
+  Electron, browser/webview, SDL, desktop dialog, or clipboard APIs.
+- Host-only presentation and integration belong in adapters:
+  `src/app/editor/gui_shell_*`, `src/app/editor/desktop_commands.spl`,
+  `src/app/ui.tauri/`, `src/app/ui.browser/`, and related host UI packages.
+- `test/unit/lib/editor/host_simpleos_surface_contract_spec.spl` enforces this
+  boundary with source-level checks.
 
 ## Rendering a frame (today)
 

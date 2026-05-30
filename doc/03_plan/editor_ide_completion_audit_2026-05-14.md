@@ -14,9 +14,9 @@ and `doc/03_plan/editor_ide_production_matrix_2026-05-13.md`.
 
 - `failed=0; total=0; for f in test/system/editor_*_spec.spl test/system/dap_protocol_live_spec.spl; do ...; done`
   - Result: PASS, 31 files run, 0 failures.
-- `src/compiler_rust/target/bootstrap/simple check src/app/dap/simple_dap_main.spl src/app/editor/editor_controller.spl src/lib/editor/60.services/debug_session.spl test/system/dap_protocol_live_spec.spl test/system/editor_controller_spec.spl test/system/editor_debug_session_spec.spl`
+- `src/compiler_rust/target/bootstrap/simple check src/app/dap/simple_dap_main.spl src/app/editor/editor_controller.spl src/lib/editor/services/debug_session.spl test/system/dap_protocol_live_spec.spl test/system/editor_controller_spec.spl test/system/editor_debug_session_spec.spl`
   - Result: PASS, 6 files checked.
-- `src/compiler_rust/target/bootstrap/simple check src/app/dap/simple_dap_main.spl src/app/editor/commands.spl src/app/editor/editor_controller.spl src/app/editor/gui_shell.spl src/app/editor/md_dispatch.spl src/app/editor/tui_shell.spl src/lib/editor/30.view/preview_pane.spl src/lib/editor/60.services/debug_session.spl src/lib/editor/70.backend/gui_backend.spl test/system/dap_protocol_live_spec.spl test/system/editor_controller_spec.spl test/system/editor_debug_session_spec.spl test/system/editor_gui_spec.spl test/system/editor_keybinding_spec.spl test/system/editor_markdown_spec.spl`
+- `src/compiler_rust/target/bootstrap/simple check src/app/dap/simple_dap_main.spl src/app/editor/commands.spl src/app/editor/editor_controller.spl src/app/editor/gui_shell.spl src/app/editor/md_dispatch.spl src/app/editor/tui_shell.spl src/lib/editor/view/preview_pane.spl src/lib/editor/services/debug_session.spl src/lib/editor/70.backend/gui_backend.spl test/system/dap_protocol_live_spec.spl test/system/editor_controller_spec.spl test/system/editor_debug_session_spec.spl test/system/editor_gui_spec.spl test/system/editor_keybinding_spec.spl test/system/editor_markdown_spec.spl`
   - Result: PASS, 15 files checked.
 - `python3 scripts/dap_protocol_smoke.py`
   - Result: `STATUS: PASS dap_protocol_smoke`.

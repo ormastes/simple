@@ -38,4 +38,4 @@ NOT the full feature. This request tracks the complete subsystem.
 ## Files
 
 - `src/app/editor/{editor_ctrl_core,editor_ctrl_core2,editor_ctrl_wiki,tui_shell_panels}.spl`
-- `src/lib/editor/render/`, `src/lib/editor/30.view/`
+- `src/lib/editor/render/`, `src/lib/editor/view/`

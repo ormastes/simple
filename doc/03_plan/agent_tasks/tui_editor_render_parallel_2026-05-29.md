@@ -79,7 +79,7 @@ outside this focused TUI render fix.
 2026-05-29 later GUI compatibility increment:
 
 ```text
-SIMPLE_LIB=src bin/simple check src/lib/editor/render/md_renderer.spl src/lib/editor/view/preview_pane.spl src/lib/editor/30.view/preview_pane.spl test/system/editor_gui_spec.spl
+SIMPLE_LIB=src bin/simple check src/lib/editor/render/md_renderer.spl src/lib/editor/view/preview_pane.spl src/lib/editor/view/preview_pane.spl test/system/editor_gui_spec.spl
 PASS: All checks passed (4 files)
 
 SIMPLE_LIB=src bin/simple check src/app/editor/main.spl test/system/editor_gui_spec.spl
@@ -114,7 +114,7 @@ table/property editing, and fold rendering; they remain open.
 2026-05-29 parallel-agent follow-up:
 
 ```text
-SIMPLE_LIB=src bin/simple check src/app/editor/editor_ctrl_core2.spl src/app/editor/gui_shell_core.spl src/app/editor/gui_shell_render.spl src/lib/editor/buffer/buffer.spl src/lib/editor/30.view/lsp_popup.spl src/lib/editor/view/lsp_popup.spl test/system/editor_gui_spec.spl
+SIMPLE_LIB=src bin/simple check src/app/editor/editor_ctrl_core2.spl src/app/editor/gui_shell_core.spl src/app/editor/gui_shell_render.spl src/lib/editor/buffer/buffer.spl src/lib/editor/view/lsp_popup.spl src/lib/editor/view/lsp_popup.spl test/system/editor_gui_spec.spl
 PASS: All checks passed (7 files)
 
 SIMPLE_LIB=src timeout 180s bin/simple test test/system/editor_gui_spec.spl --mode=interpreter --clean --format json
@@ -162,7 +162,7 @@ reports `opened link:` or `created note:`. The legacy GUI suite improved from
 2026-05-29 GUI shell state-return increment:
 
 ```text
-SIMPLE_LIB=src bin/simple check src/app/editor/editor_controller.spl src/app/editor/gui_shell_core.spl src/app/editor/gui_shell_render.spl src/app/editor/editor_ctrl_wiki.spl src/app/editor/editor_ctrl_core2.spl src/lib/editor/buffer/buffer.spl src/lib/editor/30.view/wiki_panel.spl src/lib/editor/view/wiki_panel.spl test/system/editor_gui_spec.spl
+SIMPLE_LIB=src bin/simple check src/app/editor/editor_controller.spl src/app/editor/gui_shell_core.spl src/app/editor/gui_shell_render.spl src/app/editor/editor_ctrl_wiki.spl src/app/editor/editor_ctrl_core2.spl src/lib/editor/buffer/buffer.spl src/lib/editor/view/wiki_panel.spl src/lib/editor/view/wiki_panel.spl test/system/editor_gui_spec.spl
 PASS: focused checks passed during the slice fixes
 
 SIMPLE_LIB=src timeout 60s bin/simple test build/editor_gui_current_slices/editor_gui_22_spec.spl --mode=interpreter --clean --format json

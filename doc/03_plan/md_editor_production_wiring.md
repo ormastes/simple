@@ -152,7 +152,7 @@ A markdown parser library also exists at `src/lib/common/markdown/` (1,684 LOC) 
 | `src/app/editor/tui_shell.spl` | Preview/outline rendering, right dock layout, status bar stats |
 | `src/app/editor/commands.spl` | Merge md palette entries, diagnostics-on-save, palette command |
 | `src/app/editor/gui_shell.spl` | Mirror TUI wiring for GUI mode |
-| `src/lib/editor/40.render/md_renderer.spl` | Fix block.content bug |
+| `src/lib/editor/render/md_renderer.spl` | Fix block.content bug |
 | `test/system/editor_markdown_spec.spl` | Extend with wiring verification tests |
 | `test/system/editor_palette_spec.spl` | Dedicated palette service, routing, and Markdown command tests |
 
