@@ -40,7 +40,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Codex x86_32 parity follow-up
 - **Target:** simpleos-os x86_32
 - **Priority:** P2
-- **Status:** Partial
+- **Status:** Implemented 2026-05-30
 - **Requested-semantics:**
   Treat x86_32 as a documented boot/probe target until it has the same
   observable OS surface as the x86_64 lane. Do not mark x86_32 as a full OS
@@ -134,6 +134,17 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   (`5/5`, 4853 ms). The same lane is now registered as
   `x86_32-initrd-fat32-smf` in the QEMU runner/catalog and passes
   `SIMPLE_LIB=src bin/simple os test --scenario=x86_32-initrd-fat32-smf`.
+  Status closed on 2026-05-30 because all listed acceptance criteria are now
+  checked and the entry links the detail design
+  `doc/05_design/simpleos_fr_sos_025_x86_32_parity.md`. Focused non-live
+  verification was rerun with:
+  `SIMPLE_LIB=/tmp/simple-final-sync/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple check test/unit/os/kernel/arch/x86_32_context_spec.spl test/unit/os/kernel/arch/x86_32_interrupt_spec.spl test/unit/os/kernel/arch/x86_32_paging_timer_spec.spl test/unit/os/kernel/arch/x86_32_trap_model_spec.spl test/unit/os/kernel/arch/x86_32_early_syscall_spec.spl test/system/os/boot_smoke_spec.spl test/system/simpleos_x86_32_boot_probe_live_spec.spl`
+  and interpreter-mode focused specs passed for x86_32 context (4/4),
+  interrupt (5/5), paging/timer (4/4), trap model (2/2), early syscall (1/1),
+  and boot smoke (16/16). The live
+  QEMU lane remains explicitly gated by `SIMPLEOS_QEMU_X86_32_BOOT_LIVE=1`, but
+  prior 2026-05-29 evidence in this entry records the live five-check pass and
+  scenario registration.
 
 ### FR-SOS-017 — Discover hardware scheduler topology domains
 
