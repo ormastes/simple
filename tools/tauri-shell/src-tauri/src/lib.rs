@@ -662,10 +662,12 @@ pub fn run() {
                 }
             }
         } else {
-            startup_error = Some(
-                "Mobile shell started without a bundled Simple runtime.\n\nProvide an Android-compatible runtime at build time with one of:\n- SIMPLE_ANDROID_RUNTIME_AARCH64\n- SIMPLE_ANDROID_RUNTIME_X86_64\n- SIMPLE_ANDROID_RUNTIME_ARMV7\n- SIMPLE_ANDROID_RUNTIME_I686\n\nOr set `SIMPLE_BIN` to a valid mobile runtime path, or use `--url` / `SIMPLE_DASHBOARD_URL` to attach the shell to an external UI service.".to_string()
-            );
-            eprintln!("[tauri-shell] mobile mode has no bundled Simple binary; skipping subprocess launch");
+            // No bundled Simple runtime on mobile: the embedded frontendDist
+            // (app://index.html) is a complete static render and is the intended
+            // UI, so we let it display instead of overlaying a startup error.
+            // The diagnostic still goes to stderr/logcat for anyone wiring up a
+            // live runtime via SIMPLE_BIN / a bundled runtime / --url.
+            eprintln!("[tauri-shell] mobile mode has no bundled Simple binary; showing embedded static UI (set SIMPLE_BIN / a bundled runtime / --url for a live Simple subprocess)");
         }
     }
 
