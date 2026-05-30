@@ -294,10 +294,13 @@ fn canonicalize_enabled(mut parsed: HostCpuConfig, detected: &HostCpuConfig) -> 
 }
 
 fn select_enabled_tier(requested: SimdTier, detected: &HostCpuConfig) -> SimdTier {
-    let requested = requested.best_available_implementation();
     let supported = &detected.simple_support.simd_tier_fallbacks;
     if supported.contains(&requested) {
         return requested;
+    }
+    let implementation = requested.best_available_implementation();
+    if implementation != SimdTier::Scalar && supported.contains(&implementation) {
+        return implementation;
     }
     supported.first().copied().unwrap_or(SimdTier::Scalar)
 }
