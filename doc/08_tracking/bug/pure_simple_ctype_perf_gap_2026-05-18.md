@@ -408,3 +408,40 @@ Disassembly confirms hot `ctype.is_digit` calls no longer call
 `common__ctype__is_digit`; they lower to inline compare instructions. The
 remaining misses are now branch/loop codegen quality against gcc `-O2`
 (`is_alnum`, `is_space`, conversions), not cross-module call overhead alone.
+
+## 2026-05-30 Pure-Simple Scope Recheck
+
+Scoped pass owned only pure Simple ctype/perf files, focused benchmark docs,
+`.spipe/pure_simple_ctype_perf_gap/**`, and this tracker. No Rust changes were
+made.
+
+`src/lib/common/ctype.spl` is still in the direct range-check form for all hot
+predicates and conversions. The previous lookup-table experiment remains a
+non-shippable benchmark-only kernel: it requires amortized table construction,
+adds bounds guards for real library semantics, regresses leaf predicates and
+conversions, and does not close the gap to the 0.50x C floor.
+
+Focused check:
+
+```bash
+SIMPLE_LIB=src bin/simple check src/lib/common/ctype.spl test/perf/ctype/bench_ctype.spl test/perf/ctype/bench_ctype_inline.spl test/perf/ctype/bench_ctype_lut.spl
+```
+
+Result: pass for all four files.
+
+Warn-only benchmark:
+
+```bash
+SIMPLE_CTYPE_BENCH_SAMPLES=1 SIMPLE_CTYPE_BENCH_ENFORCE=0 SIMPLE_CTYPE_BENCH_CLEAN=1 SIMPLE_LIB=src bash test/perf/ctype/run_ctype_benchmarks.shs
+```
+
+Result: checksum parity passed, native compilation succeeded, and native/C
+ratios remained below the 0.50x floor for eight of nine entries:
+`is_digit 0.39x`, `is_upper 0.40x`, `is_lower 0.53x`, `is_alpha 0.43x`,
+`is_alnum 0.25x`, `is_xdigit 0.50x` (warned as below exact floor),
+`is_space 0.15x`, `to_lower 0.41x`, `to_upper 0.25x`.
+
+Conclusion for pure-Simple scope: no concrete shippable library mitigation is
+available without changing backend/static-data/value-copy behavior. The bug
+should remain open for native backend/codegen work; further `ctype.spl` churn is
+not justified by the current evidence.
