@@ -28,6 +28,7 @@ skill at `.claude/skills/spipe_doc_wiki_refactor.md` so stale docs, command
 references, wiki-style process knowledge, and feature/layer expert links are
 cleaned before completion.
 
-Run `sh scripts/install-spipe-dev-command.shs --check` to verify that this
-repository still routes Codex development through `/sp_dev` and does not carry a
-separate `/dev` skill.
+Run `sh scripts/install-spipe-dev-command.shs --check` on Unix-like hosts, or
+`powershell -ExecutionPolicy Bypass -File scripts\install-spipe-dev-command.ps1 --check`
+on Windows, to verify that this repository still routes Codex development
+through `/sp_dev` and does not carry a separate `/dev` skill.
