@@ -428,6 +428,45 @@ pub fn rt_bytes_alloc(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::array(arr))
 }
 
+fn typed_alloc_len(args: &[Value]) -> Option<usize> {
+    match args.first() {
+        Some(Value::Int(n)) if *n > 0 => Some(*n as usize),
+        _ => None,
+    }
+}
+
+/// Allocate a zero-filled `[f64]` for interpreter-mode numeric buffers.
+pub fn rt_f64_array_alloc(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(len) = typed_alloc_len(args) else {
+        return Ok(Value::array(vec![]));
+    };
+    Ok(Value::array(vec![Value::Float(0.0); len]))
+}
+
+/// Allocate a zero-filled `[f32]` for interpreter-mode numeric buffers.
+pub fn rt_f32_array_alloc(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(len) = typed_alloc_len(args) else {
+        return Ok(Value::array(vec![]));
+    };
+    Ok(Value::array(vec![Value::Float32(0.0); len]))
+}
+
+/// Allocate a zero-filled `[i64]` for interpreter-mode numeric buffers.
+pub fn rt_i64_array_alloc(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(len) = typed_alloc_len(args) else {
+        return Ok(Value::array(vec![]));
+    };
+    Ok(Value::array(vec![Value::Int(0); len]))
+}
+
+/// Allocate a zero-filled `[i32]` for interpreter-mode numeric buffers.
+pub fn rt_i32_array_alloc(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(len) = typed_alloc_len(args) else {
+        return Ok(Value::array(vec![]));
+    };
+    Ok(Value::array(vec![Value::Int(0); len]))
+}
+
 /// Allocate a `[u32]` of `len` elements all set to `fill` in O(len) C-side.
 ///
 /// Same family as `rt_bytes_alloc` (B2, feedback_interpreter_bulk_buffer.md):

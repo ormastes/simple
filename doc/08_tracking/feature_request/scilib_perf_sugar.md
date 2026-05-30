@@ -34,7 +34,7 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
 - **Filed-on:** 2026-04-27
 - **Filed-by:** scilib-port research agent
 - **Priority:** P0
-- **Status:** observed
+- **Status:** fixed 2026-05-30
 - **Expected-repro:**
   ```
   let a: NDArray<Float64> = NDArray.zeros(Shape(1024, 1024))
@@ -43,20 +43,30 @@ Python inventory, math-block spec, naming audit, and Codex risk research.
   dispatch per element → O(n²) for large arrays.
 - **Current-cost:** unknown — measure during impl. Analogous `[u8]` push-loop cost
   was >30 s for 32 MiB before `rt_bytes_alloc` fixed it (feedback_interpreter_bulk_buffer).
-- **Proposed-sugar:** Add `extern fn rt_f64_array_alloc(len: u64) -> [Float64]`
+- **Proposed-sugar:** Add `extern fn rt_f64_array_alloc(len: i64) -> [f64]`
   (and `rt_i64_array_alloc`, `rt_f32_array_alloc`) that zero-fill C-side, matching
   the `rt_bytes_alloc` pattern. Alternatively, a generic
   `rt_typed_array_alloc<T>(len: u64, default: T) -> [T]` extern if the compiler
   can monomorphize it.
-- **Notes:** `rt_bytes_alloc` fixed the `[u8]` case (B2, 2026-04-25). Extern
+- **Notes:** Fixed 2026-05-30. `rt_bytes_alloc` fixed the `[u8]` case
+  (B2, 2026-04-25). Extern
   declarations `rt_f64_array_alloc`, `rt_f32_array_alloc`, `rt_i64_array_alloc`,
   `rt_i32_array_alloc` now exist in
   `src/lib/common/science_math/perf_sugar.spl` and
-  `src/lib/nogc_sync_mut/ndarray/rt_alloc.spl` (2026-05-29). However,
-  `src/lib/common/science_math/linalg.spl` still uses `data.push(0.0)` loops
-  in `mat_zeros` and `mat_identity`, and the Rust interpreter has not yet
-  registered the new externs. Remaining work: (1) wire externs in Rust runtime,
-  (2) update `linalg.spl` callers to use `alloc_f64`.
+  `src/lib/nogc_sync_mut/ndarray/rt_alloc.spl`; the Rust interpreter now
+  registers all four externs in `interpreter_extern::init_dispatch_table`, with
+  zero-filled `Value::Float`, `Value::Float32`, and `Value::Int` array
+  representations. `alloc_f64`, `alloc_f32`, `alloc_i64`, and `alloc_i32` are
+  public facade helpers. `mat_zeros`, `mat_identity`, `mat_mul`, and
+  `mat_transpose` now preallocate f64 output buffers with `alloc_f64` and assign
+  by index instead of building result data with repeated `push` loops.
+  Verification passed with the rebuilt seed CLI:
+  `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/lib/common/science_math/perf_sugar.spl src/lib/common/science_math/linalg.spl test/unit/lib/science_math/typed_alloc_linalg_spec.spl test/perf/typed_array_alloc_spec.spl`,
+  `cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml`,
+  `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/science_math/typed_alloc_linalg_spec.spl --mode=interpreter --clean --fail-fast`,
+  `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/perf/typed_array_alloc_spec.spl --mode=interpreter --clean --fail-fast`,
+  and
+  `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/feature/scilib/perf_sugar_spec.spl --mode=interpreter --clean --fail-fast`.
 
 ---
 

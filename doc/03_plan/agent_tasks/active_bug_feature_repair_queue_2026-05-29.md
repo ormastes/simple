@@ -1197,3 +1197,24 @@ Spawned read-only explorers:
       `timeout 60s env SIMPLE_LIB=src bin/simple test --only-slow test/unit/lib/crypto/rsa_pss_sha256_roundtrip_slow_spec.spl --mode=interpreter --clean --fail-fast`
       timed out. The next implementation step is a correct Montgomery or
       Barrett reducer for the 30-bit-limb bignum representation.
+79. PERF-SUGAR-001 typed numeric allocation completed.
+    - Registered `rt_f64_array_alloc`, `rt_f32_array_alloc`,
+      `rt_i64_array_alloc`, and `rt_i32_array_alloc` in the Rust seed
+      interpreter extern table, returning zero-filled interpreter arrays with
+      the correct `Value::Float`, `Value::Float32`, and `Value::Int`
+      representations.
+    - Made the pure-Simple `alloc_f64`, `alloc_f32`, `alloc_i64`, and
+      `alloc_i32` facade helpers public.
+    - Updated `mat_zeros`, `mat_identity`, `mat_mul`, and `mat_transpose` to
+      preallocate f64 result buffers with `alloc_f64` and assign by index
+      instead of growing output arrays with repeated push loops.
+    - Added focused coverage in
+      `test/unit/lib/science_math/typed_alloc_linalg_spec.spl` and corrected
+      stale f32/i32 extern signatures in `test/perf/typed_array_alloc_spec.spl`.
+    - Verification passed with rebuilt `src/compiler_rust/target/debug/simple`:
+      `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/lib/common/science_math/perf_sugar.spl src/lib/common/science_math/linalg.spl test/unit/lib/science_math/typed_alloc_linalg_spec.spl test/perf/typed_array_alloc_spec.spl`,
+      `cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml`,
+      `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/science_math/typed_alloc_linalg_spec.spl --mode=interpreter --clean --fail-fast`,
+      `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/perf/typed_array_alloc_spec.spl --mode=interpreter --clean --fail-fast`,
+      and
+      `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/feature/scilib/perf_sugar_spec.spl --mode=interpreter --clean --fail-fast`.
