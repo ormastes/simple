@@ -2330,6 +2330,10 @@ impl JsInterpreter:
                 if instr_start > body_end:
                     return -1
                 var stack: [i64] = []
+                val memory_page_count = self._native_webassembly_memory_min_pages(hex)
+                val memory_byte_len = memory_page_count * 65536
+                var memory_addrs: [i64] = []
+                var memory_bytes: [i64] = []
                 var cursor = instr_start
                 while cursor < body_end:
                     val opcode = self._native_webassembly_hex_byte_at(hex, cursor)
@@ -2407,6 +2411,72 @@ impl JsInterpreter:
                         if global_value < 0:
                             return -1
                         stack.push(global_value)
+                        cursor = next_pos
+                        continue
+                    if opcode == 40:
+                        val align = self._native_webassembly_read_leb_value(hex, cursor + 1)
+                        val offset_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
+                        if align < 0 or offset_pos < 0 or offset_pos > body_end:
+                            return -1
+                        val offset = self._native_webassembly_read_leb_value(hex, offset_pos)
+                        val next_pos = self._native_webassembly_read_leb_next(hex, offset_pos)
+                        if offset < 0 or next_pos < 0 or next_pos > body_end or stack.len() < 1:
+                            return -1
+                        val address = stack.get(stack.len() - 1) + offset
+                        if memory_byte_len <= 0 or address < 0 or address + 4 > memory_byte_len:
+                            return -1
+                        stack.pop()
+                        var loaded = 0
+                        var byte_index = 0
+                        while byte_index < 4:
+                            val wanted_addr = address + byte_index
+                            var load_byte = 0
+                            var mem_index = 0
+                            while mem_index < memory_addrs.len():
+                                if memory_addrs.get(mem_index) == wanted_addr:
+                                    load_byte = memory_bytes.get(mem_index)
+                                    break
+                                mem_index = mem_index + 1
+                            loaded = loaded + (load_byte * self._native_webassembly_pow2(byte_index * 8))
+                            byte_index = byte_index + 1
+                        if loaded >= 2147483648:
+                            loaded = loaded - 4294967296
+                        stack.push(loaded)
+                        cursor = next_pos
+                        continue
+                    if opcode == 54:
+                        val align = self._native_webassembly_read_leb_value(hex, cursor + 1)
+                        val offset_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
+                        if align < 0 or offset_pos < 0 or offset_pos > body_end:
+                            return -1
+                        val offset = self._native_webassembly_read_leb_value(hex, offset_pos)
+                        val next_pos = self._native_webassembly_read_leb_next(hex, offset_pos)
+                        if offset < 0 or next_pos < 0 or next_pos > body_end or stack.len() < 2:
+                            return -1
+                        var raw_value = stack.get(stack.len() - 1)
+                        val address = stack.get(stack.len() - 2) + offset
+                        if memory_byte_len <= 0 or address < 0 or address + 4 > memory_byte_len:
+                            return -1
+                        stack.pop()
+                        stack.pop()
+                        while raw_value < 0:
+                            raw_value = raw_value + 4294967296
+                        var store_index = 0
+                        while store_index < 4:
+                            val wanted_addr = address + store_index
+                            val store_byte = (raw_value / self._native_webassembly_pow2(store_index * 8)) % 256
+                            var found = false
+                            var mem_index = 0
+                            while mem_index < memory_addrs.len():
+                                if memory_addrs.get(mem_index) == wanted_addr:
+                                    memory_bytes[mem_index] = store_byte
+                                    found = true
+                                    break
+                                mem_index = mem_index + 1
+                            if not found:
+                                memory_addrs.push(wanted_addr)
+                                memory_bytes.push(store_byte)
+                            store_index = store_index + 1
                         cursor = next_pos
                         continue
                     if opcode == 16:
