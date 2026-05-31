@@ -1377,7 +1377,7 @@ expect(image.format).to_equal(ImageFormat.JpegXl)
 
 </details>
 
-#### keeps JPEG XL split partial color metadata fail-closed until wired
+#### stitches JPEG XL split partial color metadata lazily
 
 <details>
 <summary>Executable SPipe</summary>
@@ -1389,11 +1389,11 @@ Reproduction: this block contains the complete executable scenario source.
 val profile = detect_image_color_profile_info(_jpegxl_container_with_split_partial_small_codestream_16x24())
 
 expect(profile.format).to_equal("jpegxl")
-expect(profile.has_profile).to_equal(false)
-expect(profile.profile_kind).to_equal("container-color-metadata-pending")
+expect(profile.has_profile).to_equal(true)
+expect(profile.profile_kind).to_equal("structured-color-default-srgb")
 expect(profile.requires_color_transform).to_equal(false)
 expect(profile.initializes_transform_now).to_equal(false)
-expect(profile.reason).to_equal("jpegxl-container-color-metadata-pending")
+expect(profile.reason).to_equal("jpegxl-structured-default-srgb-lazy")
 ```
 
 </details>

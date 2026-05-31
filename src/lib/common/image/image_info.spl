@@ -454,6 +454,7 @@ fn _jpeg_xl_color_profile_info_at(data: text, start: i64, length: i64) -> ImageC
 
 fn _jpeg_xl_container_color_profile_info(data: text) -> ImageColorProfileInfo:
     var offset = 12
+    var partial_codestream = ""
     while offset + 8 <= data.len():
         val box_size = _read_u32_be(data, offset)
         val box_type = offset + 4
@@ -484,10 +485,17 @@ fn _jpeg_xl_container_color_profile_info(data: text) -> ImageColorProfileInfo:
             )
         if _jpeg_xl_box_type_at(data, box_type, 106, 120, 108, 99):
             return _jpeg_xl_color_profile_info_at(data, payload_offset, next_offset - payload_offset)
+        if _jpeg_xl_box_type_at(data, box_type, 106, 120, 108, 112):
+            val partial_payload_length = next_offset - payload_offset
+            if partial_payload_length < 4:
+                return image_color_profile_unknown("jpegxl-partial-codestream-truncated")
+            partial_codestream = partial_codestream + data.slice(payload_offset + 4, next_offset)
         if box_size == 0:
             offset = data.len()
         else:
             offset = next_offset
+    if partial_codestream.len() > 0:
+        return _jpeg_xl_color_profile_info_at(partial_codestream, 0, partial_codestream.len())
     ImageColorProfileInfo(
         format: "jpegxl",
         has_profile: false,
