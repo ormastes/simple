@@ -15,6 +15,9 @@
 - qemu-side perf status: unavailable
 - qemu-side perf reason: missing-qmp-socket
 - qemu-side perf comparison available: false
+- fake QMP screendump status: pass
+- fake QMP screendump reason: fake-qmp-screendump-pass
+- fake QMP screendump report: build/qemu_gtk_wm_capture_evidence/fake-qmp-capture.md
 
 ## Raw Evidence
 - qemu_gtk_wm_capture_status=unavailable
@@ -37,6 +40,9 @@
 - qemu_gtk_wm_capture_perf_gtk_frame_us=0
 - qemu_gtk_wm_capture_perf_iterations=0
 - qemu_gtk_wm_capture_perf_comparison_available=false
+- qemu_gtk_wm_capture_fake_qmp_status=pass
+- qemu_gtk_wm_capture_fake_qmp_reason=fake-qmp-screendump-pass
+- qemu_gtk_wm_capture_fake_qmp_report_path=build/qemu_gtk_wm_capture_evidence/fake-qmp-capture.md
 - qemu_gtk_wm_capture_host_evidence_status=pass
 - qemu_gtk_wm_capture_host_evidence_reason=wm-launch-capture-contract-verified
 - qemu_gtk_wm_capture_host_contract_status=pass
@@ -47,6 +53,76 @@
 - qemu_gtk_wm_capture_host_qemu_live_reason=RUN_QEMU_LIVE_CAPTURE=0
 - qemu_gtk_wm_capture_host_qemu_live_pixels=0
 - qemu_gtk_wm_capture_host_report_path=build/qemu_gtk_wm_capture_evidence/wm-host-launch-capture.md
+
+## Fake QMP Capture Output
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/common/image/ppm_decode.spl:33:33
+-    |
+-  33 |             while p < n and data[p] != 10:
+-    |                                 ^
+- 
+- Use angle brackets: data<...> instead of data[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/common/image/ppm_decode.spl:33:33
+-    |
+-  33 |             while p < n and data[p] != 10:
+-    |                                 ^
+- 
+- Use angle brackets: data<...> instead of data[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- qemu_capture_fake_qmp_success=true
+- qemu_capture_fake_qmp_backend=qemu_vm
+- qemu_capture_fake_qmp_width=64
+- qemu_capture_fake_qmp_height=48
+- qemu_capture_fake_qmp_pixels=3072
+- qemu_capture_fake_qmp_capture_checksum=20215336677919650
+- qemu_capture_fake_qmp_reference_checksum=20215336677919650
+- qemu_capture_fake_qmp_mismatch_count=0
+- qemu_capture_fake_qmp_first_mismatch=-1
+- qemu_capture_fake_qmp_blur_or_tolerance_used=false
+- qemu_capture_fake_qmp_capture_us=263062
+- qemu_capture_fake_qmp_pixel0=4280307872
+- qemu_capture_fake_qmp_pixel384=4279310375
+- qemu_capture_fake_qmp_pixel1000=4293257195
+- qemu_capture_fake_qmp_error=
+- fake_qmp_socket=build/qemu_gtk_wm_capture_evidence/fake-qmp/fake-qmp.sock
+- qemu_capture_fake_qmp_status=pass
+- qemu_capture_fake_qmp_reason=fake-qmp-screendump-pass
+- qemu_capture_fake_qmp_report=build/qemu_gtk_wm_capture_evidence/fake-qmp-capture.md
 
 ## Host WM Smoke Output
 - check=wm_launch_capture_evidence
@@ -126,7 +202,7 @@
 - 
 - Running: test/unit/app/ui/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/app/ui/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (210ms)
+-   [32mPASSED[0m (201ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -134,12 +210,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 215ms
+- Duration: 206ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        210ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
+-        201ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -153,7 +229,7 @@
 - 
 - Running: test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - [1/1] test/unit/app/ui/host_wm_runtime_loop_spec.spl
--   [32mPASSED[0m (1036ms)
+-   [32mPASSED[0m (1006ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -161,12 +237,12 @@
 - Files: 1
 - [32mPassed: 2[0m
 - Failed: 0
-- Duration: 1041ms
+- Duration: 1011ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--       1036ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
+-       1006ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -180,7 +256,7 @@
 - 
 - Running: test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/os/desktop/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (204ms)
+-   [32mPASSED[0m (205ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -188,12 +264,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 209ms
+- Duration: 210ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        204ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
+-        205ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/qemu_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -207,7 +283,7 @@
 - 
 - Running: test/unit/os/compositor/qemu_capture_spec.spl
 - [1/1] test/unit/os/compositor/qemu_capture_spec.spl
--   [32mPASSED[0m (899ms)
+-   [32mPASSED[0m (850ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -215,12 +291,12 @@
 - Files: 1
 - [32mPassed: 11[0m
 - Failed: 0
-- Duration: 904ms
+- Duration: 855ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        899ms  test/unit/os/compositor/qemu_capture_spec.spl
+-        850ms  test/unit/os/compositor/qemu_capture_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/electron_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -234,7 +310,7 @@
 - 
 - Running: test/unit/os/compositor/electron_capture_spec.spl
 - [1/1] test/unit/os/compositor/electron_capture_spec.spl
--   [32mPASSED[0m (754ms)
+-   [32mPASSED[0m (778ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -242,12 +318,12 @@
 - Files: 1
 - [32mPassed: 7[0m
 - Failed: 0
-- Duration: 759ms
+- Duration: 785ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        754ms  test/unit/os/compositor/electron_capture_spec.spl
+-        778ms  test/unit/os/compositor/electron_capture_spec.spl
 - spec_exit_code=0
 - wm_launch_capture_evidence_status=pass
 - wm_launch_capture_evidence_reason=wm-launch-capture-contract-verified

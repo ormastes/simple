@@ -22,11 +22,29 @@ const socketPath = process.argv[2];
 const expectedOut = process.argv[3];
 
 function ppmBytes() {
-  return Buffer.from([
-    0x50, 0x36, 0x0a, 0x32, 0x20, 0x31, 0x0a, 0x32, 0x35, 0x35, 0x0a,
-    0xff, 0x00, 0x00,
-    0x00, 0xff, 0x00,
-  ]);
+  const width = 64;
+  const height = 48;
+  const header = Buffer.from(`P6\n${width} ${height}\n255\n`, 'ascii');
+  const body = Buffer.alloc(width * height * 3);
+  function rgbAt(x, y) {
+    if (y < 6) return [32, 80, 160];
+    if (y >= height - 8) return [15, 23, 42];
+    if (x >= 6 && x < 42 && y >= 10 && y < 32) return [229, 231, 235];
+    if (x >= 12 && x < 34 && y >= 15 && y < 20) return [34, 197, 94];
+    if (x >= 28 && x < 58 && y >= 20 && y < 39) return [51, 65, 85];
+    if (x >= 32 && x < 53 && y >= 25 && y < 30) return [245, 158, 11];
+    return [17, 24, 39];
+  }
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const [r, g, b] = rgbAt(x, y);
+      const off = (y * width + x) * 3;
+      body[off] = r;
+      body[off + 1] = g;
+      body[off + 2] = b;
+    }
+  }
+  return Buffer.concat([header, body]);
 }
 
 try { fs.unlinkSync(socketPath); } catch {}
@@ -92,26 +110,54 @@ extern fn rt_time_now_nanos() -> i64
 
 use os.compositor.qemu_capture.{capture_qemu_vm}
 
+fn expected_pixel(x: i32, y: i32) -> u32:
+    var r: u32 = 17u32
+    var g: u32 = 24u32
+    var b: u32 = 39u32
+    if y < 6:
+        return 0xFF2050A0u32
+    elif y >= 40:
+        return 0xFF0F172Au32
+    elif x >= 6 and x < 42 and y >= 10 and y < 32:
+        return 0xFFE5E7EBu32
+    elif x >= 12 and x < 34 and y >= 15 and y < 20:
+        return 0xFF22C55Eu32
+    elif x >= 28 and x < 58 and y >= 20 and y < 39:
+        return 0xFF334155u32
+    elif x >= 32 and x < 53 and y >= 25 and y < 30:
+        return 0xFFF59E0Bu32
+    0xFF000000u32 | (r << 16) | (g << 8) | b
+
 fn main() -> i64:
     val start = rt_time_now_nanos()
     val cap = capture_qemu_vm("$SOCKET_PATH", "$SCREEN_PATH")
     val elapsed = rt_time_now_nanos() - start
-    val reference = [4294901760, 4278255360]
     var capture_checksum: i64 = 0
     var reference_checksum: i64 = 0
     var mismatch_count: i64 = 0
+    var first_mismatch: i64 = -1
     var i = 0
-    while i < reference.len():
-        reference_checksum = reference_checksum + reference[i].to_i64() * ((i + 1) as i64)
+    val expected_len = 64 * 48
+    while i < expected_len:
+        val x = i % 64
+        val y = i / 64
+        val expected = expected_pixel(x, y)
+        reference_checksum = reference_checksum + expected.to_i64() * ((i + 1) as i64)
         if i < cap.pixels.len():
             capture_checksum = capture_checksum + cap.pixels[i].to_i64() * ((i + 1) as i64)
-            if cap.pixels[i] != reference[i]:
+            if cap.pixels[i] != expected:
                 mismatch_count = mismatch_count + 1
+                if first_mismatch < 0:
+                    first_mismatch = i.to_i64()
         else:
             mismatch_count = mismatch_count + 1
+            if first_mismatch < 0:
+                first_mismatch = i.to_i64()
         i = i + 1
-    if cap.pixels.len() > reference.len():
-        mismatch_count = mismatch_count + (cap.pixels.len() - reference.len()).to_i64()
+    if cap.pixels.len() > expected_len:
+        mismatch_count = mismatch_count + (cap.pixels.len() - expected_len).to_i64()
+        if first_mismatch < 0:
+            first_mismatch = expected_len.to_i64()
     print("qemu_capture_fake_qmp_success=" + cap.success.to_text())
     print("qemu_capture_fake_qmp_backend=" + cap.backend_name)
     print("qemu_capture_fake_qmp_width=" + cap.width.to_text())
@@ -120,11 +166,13 @@ fn main() -> i64:
     print("qemu_capture_fake_qmp_capture_checksum=" + capture_checksum.to_text())
     print("qemu_capture_fake_qmp_reference_checksum=" + reference_checksum.to_text())
     print("qemu_capture_fake_qmp_mismatch_count=" + mismatch_count.to_text())
+    print("qemu_capture_fake_qmp_first_mismatch=" + first_mismatch.to_text())
     print("qemu_capture_fake_qmp_blur_or_tolerance_used=false")
     print("qemu_capture_fake_qmp_capture_us=" + (elapsed / 1000).to_text())
-    if cap.pixels.len() >= 2:
+    if cap.pixels.len() >= 1024:
         print("qemu_capture_fake_qmp_pixel0=" + cap.pixels[0].to_text())
-        print("qemu_capture_fake_qmp_pixel1=" + cap.pixels[1].to_text())
+        print("qemu_capture_fake_qmp_pixel384=" + cap.pixels[384].to_text())
+        print("qemu_capture_fake_qmp_pixel1000=" + cap.pixels[1000].to_text())
     print("qemu_capture_fake_qmp_error=" + cap.error)
     return 0
 SIMPLE
@@ -145,10 +193,12 @@ width="$(sed -n 's/^qemu_capture_fake_qmp_width=//p' "$SIMPLE_LOG" | tail -n 1)"
 height="$(sed -n 's/^qemu_capture_fake_qmp_height=//p' "$SIMPLE_LOG" | tail -n 1)"
 pixels="$(sed -n 's/^qemu_capture_fake_qmp_pixels=//p' "$SIMPLE_LOG" | tail -n 1)"
 pixel0="$(sed -n 's/^qemu_capture_fake_qmp_pixel0=//p' "$SIMPLE_LOG" | tail -n 1)"
-pixel1="$(sed -n 's/^qemu_capture_fake_qmp_pixel1=//p' "$SIMPLE_LOG" | tail -n 1)"
+pixel384="$(sed -n 's/^qemu_capture_fake_qmp_pixel384=//p' "$SIMPLE_LOG" | tail -n 1)"
+pixel1000="$(sed -n 's/^qemu_capture_fake_qmp_pixel1000=//p' "$SIMPLE_LOG" | tail -n 1)"
 capture_checksum="$(sed -n 's/^qemu_capture_fake_qmp_capture_checksum=//p' "$SIMPLE_LOG" | tail -n 1)"
 reference_checksum="$(sed -n 's/^qemu_capture_fake_qmp_reference_checksum=//p' "$SIMPLE_LOG" | tail -n 1)"
 mismatch_count="$(sed -n 's/^qemu_capture_fake_qmp_mismatch_count=//p' "$SIMPLE_LOG" | tail -n 1)"
+first_mismatch="$(sed -n 's/^qemu_capture_fake_qmp_first_mismatch=//p' "$SIMPLE_LOG" | tail -n 1)"
 blur_or_tolerance_used="$(sed -n 's/^qemu_capture_fake_qmp_blur_or_tolerance_used=//p' "$SIMPLE_LOG" | tail -n 1)"
 capture_us="$(sed -n 's/^qemu_capture_fake_qmp_capture_us=//p' "$SIMPLE_LOG" | tail -n 1)"
 error="$(sed -n 's/^qemu_capture_fake_qmp_error=//p' "$SIMPLE_LOG" | tail -n 1)"
@@ -158,10 +208,10 @@ reason=fake-qmp-screendump-pass
 if [ "$simple_code" -ne 0 ] || [ "$server_code" -ne 0 ]; then
     status=fail
     reason=process-exit-failed
-elif [ "$success" != "true" ] || [ "$backend" != "qemu_vm" ] || [ "$width" != "2" ] || [ "$height" != "1" ] || [ "$pixels" != "2" ]; then
+elif [ "$success" != "true" ] || [ "$backend" != "qemu_vm" ] || [ "$width" != "64" ] || [ "$height" != "48" ] || [ "$pixels" != "3072" ]; then
     status=fail
     reason=capture-fields-mismatch
-elif [ "$pixel0" != "4294901760" ] || [ "$pixel1" != "4278255360" ]; then
+elif [ "$pixel0" != "4280307872" ] || [ "$pixel384" != "4279310375" ] || [ "$pixel1000" != "4293257195" ]; then
     status=fail
     reason=decoded-pixels-mismatch
 elif [ "$capture_checksum" != "$reference_checksum" ] || [ "$mismatch_count" != "0" ] || [ "$blur_or_tolerance_used" != "false" ]; then
@@ -180,10 +230,12 @@ fi
     echo "- dimensions: ${width:-0}x${height:-0}"
     echo "- pixels: ${pixels:-0}"
     echo "- pixel0_argb: ${pixel0:-}"
-    echo "- pixel1_argb: ${pixel1:-}"
+    echo "- pixel384_argb: ${pixel384:-}"
+    echo "- pixel1000_argb: ${pixel1000:-}"
     echo "- capture_checksum: ${capture_checksum:-0}"
     echo "- reference_checksum: ${reference_checksum:-0}"
     echo "- mismatch_count: ${mismatch_count:-0}"
+    echo "- first_mismatch: ${first_mismatch:-}"
     echo "- blur_or_tolerance_used: ${blur_or_tolerance_used:-}"
     echo "- capture_us: ${capture_us:-0}"
     echo "- error: ${error:-}"

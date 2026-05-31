@@ -5,15 +5,17 @@
 - simple_exit_code: 0
 - fake_qmp_exit_code: 0
 - backend: qemu_vm
-- dimensions: 2x1
-- pixels: 2
-- pixel0_argb: 4294901760
-- pixel1_argb: 4278255360
-- capture_checksum: 12851412480
-- reference_checksum: 12851412480
+- dimensions: 64x48
+- pixels: 3072
+- pixel0_argb: 4280307872
+- pixel384_argb: 4279310375
+- pixel1000_argb: 4293257195
+- capture_checksum: 20215336677919650
+- reference_checksum: 20215336677919650
 - mismatch_count: 0
+- first_mismatch: -1
 - blur_or_tolerance_used: false
-- capture_us: 142395
+- capture_us: 274049
 - error: 
 - socket_path: build/qemu_capture_fake_qmp_evidence/fake-qmp.sock
 - screendump_path: build/qemu_capture_fake_qmp_evidence/fake-screendump.ppm

@@ -8,11 +8,12 @@ BUILD_DIR="${BUILD_DIR:-build/qemu_gtk_wm_capture_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/qemu_gtk_wm_capture_evidence_$(date -u +%F).md}"
 WM_REPORT_PATH="${WM_REPORT_PATH:-$BUILD_DIR/wm-launch-capture.md}"
 WM_HOST_REPORT_PATH="${WM_HOST_REPORT_PATH:-$BUILD_DIR/wm-host-launch-capture.md}"
+FAKE_QMP_REPORT_PATH="${FAKE_QMP_REPORT_PATH:-$BUILD_DIR/fake-qmp-capture.md}"
 QEMU_ARCH="${QEMU_ARCH:-x86_64}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-$QEMU_ARCH}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$REPORT_PATH" "$BUILD_DIR/evidence.env" "$BUILD_DIR/qemu-display-help.txt" "$BUILD_DIR/wm.out" "$BUILD_DIR/wm-host.out"
+rm -f "$REPORT_PATH" "$BUILD_DIR/evidence.env" "$BUILD_DIR/qemu-display-help.txt" "$BUILD_DIR/wm.out" "$BUILD_DIR/wm-host.out" "$BUILD_DIR/fake-qmp.out"
 
 qemu_display_gtk_supported=false
 qemu_display_reason=missing-qemu-bin
@@ -40,8 +41,25 @@ perf_reason=missing-qmp-socket
 perf_simple_frame_us=0
 perf_gtk_frame_us=0
 perf_iterations=0
+fake_qmp_status=not-run
+fake_qmp_reason=not-run
+fake_qmp_report_path="$FAKE_QMP_REPORT_PATH"
 
 if [ -z "${QEMU_QMP_SOCKET:-}" ]; then
+    set +e
+    BUILD_DIR="$BUILD_DIR/fake-qmp" \
+    REPORT_PATH="$FAKE_QMP_REPORT_PATH" \
+        sh scripts/check-qemu-capture-fake-qmp-evidence.shs >"$BUILD_DIR/fake-qmp.out" 2>&1
+    fake_qmp_exit_code=$?
+    set -e
+    fake_qmp_status="$(sed -n 's/^qemu_capture_fake_qmp_status=//p' "$BUILD_DIR/fake-qmp.out" | tail -n 1)"
+    fake_qmp_reason="$(sed -n 's/^qemu_capture_fake_qmp_reason=//p' "$BUILD_DIR/fake-qmp.out" | tail -n 1)"
+    if [ -z "$fake_qmp_status" ]; then
+        fake_qmp_status=fail
+    fi
+    if [ -z "$fake_qmp_reason" ]; then
+        fake_qmp_reason=fake-qmp-evidence-failed
+    fi
     set +e
     RUN_ELECTRON_LIVE_SMOKE=0 \
     RUN_QEMU_LIVE_CAPTURE=0 \
@@ -106,6 +124,9 @@ fi
     echo "qemu_gtk_wm_capture_perf_gtk_frame_us=$perf_gtk_frame_us"
     echo "qemu_gtk_wm_capture_perf_iterations=$perf_iterations"
     echo "qemu_gtk_wm_capture_perf_comparison_available=false"
+    echo "qemu_gtk_wm_capture_fake_qmp_status=$fake_qmp_status"
+    echo "qemu_gtk_wm_capture_fake_qmp_reason=$fake_qmp_reason"
+    echo "qemu_gtk_wm_capture_fake_qmp_report_path=$fake_qmp_report_path"
     if [ -f "$BUILD_DIR/wm.out" ]; then
         sed -n 's/^wm_launch_capture_/qemu_gtk_wm_capture_wm_/p' "$BUILD_DIR/wm.out"
     fi
@@ -132,9 +153,17 @@ fi
     echo "- qemu-side perf status: $perf_status"
     echo "- qemu-side perf reason: $perf_reason"
     echo "- qemu-side perf comparison available: false"
+    echo "- fake QMP screendump status: $fake_qmp_status"
+    echo "- fake QMP screendump reason: $fake_qmp_reason"
+    echo "- fake QMP screendump report: $fake_qmp_report_path"
     echo
     echo "## Raw Evidence"
     sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    if [ -f "$BUILD_DIR/fake-qmp.out" ]; then
+        echo
+        echo "## Fake QMP Capture Output"
+        sed 's/^/- /' "$BUILD_DIR/fake-qmp.out"
+    fi
     if [ -f "$BUILD_DIR/wm.out" ]; then
         echo
         echo "## WM Capture Output"
