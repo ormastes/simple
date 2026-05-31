@@ -664,6 +664,38 @@ match result:
 
 </details>
 
+#### should expose bounded callable function exports through BrowserSession
+
+1. var session = BrowserSession new
+
+2. session open html
+
+3. Ok
+   - Expected: _display_js(value) equals `run:function:run:function:undefined`
+
+4. Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+val result = session.eval_script("var m = new WebAssembly.Module('0061736d01000000010401600000030201000707010372756e00000a040102000b'); var i = new WebAssembly.Instance(m); m.firstExportName + ':' + m.firstExportKind + ':' + m.functionExportName + ':' + typeof i.exports.run + ':' + i.exports.run()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("run:function:run:function:undefined")
+    Err(err):
+        expect("unexpected js error: {err}").to_equal("")
+```
+
+</details>
+
 #### should construct bounded WebAssembly.Memory through BrowserSession
 
 1. var session = BrowserSession new
@@ -721,8 +753,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

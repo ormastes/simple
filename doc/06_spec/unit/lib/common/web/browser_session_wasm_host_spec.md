@@ -382,6 +382,60 @@ match instance:
 
 </details>
 
+#### exposes bounded function export metadata and callable export shape
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, module, "validated") equals `true`
+   - Expected: _object_property_text(interp, module, "hasTypeSection") equals `true`
+   - Expected: _object_property_text(interp, module, "hasExportSection") equals `true`
+   - Expected: _object_property_text(interp, module, "exportCount") equals `1`
+   - Expected: _object_property_text(interp, module, "firstExportName") equals `run`
+   - Expected: _object_property_text(interp, module, "firstExportKind") equals `function`
+   - Expected: _object_property_text(interp, module, "functionExportName") equals `run`
+
+2. JsValue Object
+
+3. JsValue Object
+   - Expected: _display_js(run_value) equals `[Function]`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [])) equals `undefined`
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d01000000010401600000030201000707010372756e00000a040102000b")])
+expect(_object_property_text(interp, module, "validated")).to_equal("true")
+expect(_object_property_text(interp, module, "hasTypeSection")).to_equal("true")
+expect(_object_property_text(interp, module, "hasExportSection")).to_equal("true")
+expect(_object_property_text(interp, module, "exportCount")).to_equal("1")
+expect(_object_property_text(interp, module, "firstExportName")).to_equal("run")
+expect(_object_property_text(interp, module, "firstExportKind")).to_equal("function")
+expect(_object_property_text(interp, module, "functionExportName")).to_equal("run")
+
+val instance = interp._native_webassembly_instance([module])
+match instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                val run_value = interp.get_object_property(exports_id, "run")
+                expect(_display_js(run_value)).to_equal("[Function]")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, []))).to_equal("undefined")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
 #### constructs bounded WebAssembly.Memory values and grows within maximum
 
 1. var interp =  new interpreter
@@ -444,8 +498,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
