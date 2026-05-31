@@ -2224,9 +2224,35 @@ impl JsInterpreter:
             if body_end > end:
                 return -1
             if index == wanted_body_index:
-                val local_count = self._native_webassembly_read_leb_value(hex, body_start)
-                val instr_start = self._native_webassembly_read_leb_next(hex, body_start)
-                if local_count != 0 or instr_start < 0:
+                val local_decl_count = self._native_webassembly_read_leb_value(hex, body_start)
+                var instr_start = self._native_webassembly_read_leb_next(hex, body_start)
+                if local_decl_count < 0 or instr_start < 0:
+                    return -1
+                var local_vals: [i64] = []
+                var arg_index = 0
+                while arg_index < arg_vals.len():
+                    match arg_vals.get(arg_index):
+                        JsValue.Number(v):
+                            local_vals.push(f64_to_i64(v))
+                        _:
+                            return -1
+                    arg_index = arg_index + 1
+                var local_decl_index = 0
+                while local_decl_index < local_decl_count:
+                    val declared_count = self._native_webassembly_read_leb_value(hex, instr_start)
+                    val type_pos = self._native_webassembly_read_leb_next(hex, instr_start)
+                    if declared_count < 0 or type_pos < 0 or type_pos >= body_end:
+                        return -1
+                    val value_type = self._native_webassembly_hex_byte_at(hex, type_pos)
+                    if value_type != 127:
+                        return -1
+                    var declared_index = 0
+                    while declared_index < declared_count:
+                        local_vals.push(0)
+                        declared_index = declared_index + 1
+                    instr_start = type_pos + 1
+                    local_decl_index = local_decl_index + 1
+                if instr_start > body_end:
                     return -1
                 var stack: [i64] = []
                 var cursor = instr_start
@@ -2249,13 +2275,27 @@ impl JsInterpreter:
                     if opcode == 32:
                         val local_index = self._native_webassembly_read_leb_value(hex, cursor + 1)
                         val next_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
-                        if local_index < 0 or next_pos < 0 or next_pos > body_end or local_index >= arg_vals.len():
+                        if local_index < 0 or next_pos < 0 or next_pos > body_end or local_index >= local_vals.len():
                             return -1
-                        match arg_vals.get(local_index):
-                            JsValue.Number(v):
-                                stack.push(f64_to_i64(v))
-                            _:
-                                return -1
+                        stack.push(local_vals.get(local_index))
+                        cursor = next_pos
+                        continue
+                    if opcode == 33:
+                        val local_index = self._native_webassembly_read_leb_value(hex, cursor + 1)
+                        val next_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
+                        if local_index < 0 or next_pos < 0 or next_pos > body_end or local_index >= local_vals.len() or stack.len() < 1:
+                            return -1
+                        val value = stack.get(stack.len() - 1)
+                        stack.pop()
+                        local_vals[local_index] = value
+                        cursor = next_pos
+                        continue
+                    if opcode == 34:
+                        val local_index = self._native_webassembly_read_leb_value(hex, cursor + 1)
+                        val next_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
+                        if local_index < 0 or next_pos < 0 or next_pos > body_end or local_index >= local_vals.len() or stack.len() < 1:
+                            return -1
+                        local_vals[local_index] = stack.get(stack.len() - 1)
                         cursor = next_pos
                         continue
                     if opcode == 106:
