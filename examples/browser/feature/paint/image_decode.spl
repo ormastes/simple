@@ -949,11 +949,9 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
             pass_dn
         i = i + 1
 
-    print("debug tiff fields w=" + width.to_text() + " h=" + height.to_text() + " bps_count=" + bits_per_sample_count.to_text() + " bps_value=" + bits_per_sample_value.to_text() + " bps_offset=" + bits_per_sample_offset.to_text() + " samples=" + samples_per_pixel.to_text() + " rows=" + rows_per_strip.to_text() + " strips=" + strip_offset_count.to_text() + " strip_entry=" + strip_offset_entry.to_text() + " byte_entry=" + strip_byte_count_entry.to_text() + " len=" + raw_data.len().to_text())
-
     if width <= 0 or height <= 0:
         return nil
-    if compression != 1:
+    if compression != 1 and compression != 32773:
         return nil
     if samples_per_pixel != 1 and samples_per_pixel != 3 and samples_per_pixel != 4:
         return nil
@@ -969,6 +967,7 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         return nil
 
     val bytes_per_pixel = samples_per_pixel
+    val decoded_pixel_bytes_needed = width * height * bytes_per_pixel
     if rows_per_strip <= 0:
         rows_per_strip = height
     val strip_count_needed = (height + rows_per_strip - 1) / rows_per_strip
@@ -978,25 +977,43 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         return nil
     if strip_byte_count_count != 0 and strip_byte_count_count != 1 and strip_byte_count_count < strip_count_needed:
         return nil
+    var packbits_pixels: [i64] = []
+    if compression == 32773:
+        if strip_byte_count_entry <= 0:
+            return nil
+        packbits_pixels = _tiff_decode_packbits_strips(
+            raw_data,
+            strip_offset_entry,
+            strip_offset_count,
+            strip_byte_count_entry,
+            strip_byte_count_count,
+            strip_count_needed,
+            decoded_pixel_bytes_needed,
+            little
+        )
+        if packbits_pixels.len() < decoded_pixel_bytes_needed:
+            return nil
 
     var rgba = []
     var pixel_index = 0
     while pixel_index < width * height:
-        val row = pixel_index / width
-        val col = pixel_index - row * width
-        val strip_index = row / rows_per_strip
-        val row_in_strip = row - strip_index * rows_per_strip
-        val strip_lookup_index = _tiff_strip_lookup_index(strip_index, strip_offset_count)
-        val byte_count_lookup_index = _tiff_strip_lookup_index(strip_index, strip_byte_count_count)
-        val strip_offset = _tiff_entry_value_at(raw_data, strip_offset_entry, strip_lookup_index, little)
-        val strip_byte_count = _tiff_entry_value_at(raw_data, strip_byte_count_entry, byte_count_lookup_index, little)
-        val pixel_offset = strip_offset + (row_in_strip * width + col) * bytes_per_pixel
-        if strip_offset <= 0 or pixel_offset + bytes_per_pixel > raw_data.len():
-            return nil
-        if strip_byte_count > 0 and pixel_offset + bytes_per_pixel > strip_offset + strip_byte_count:
-            return nil
+        var pixel_offset = pixel_index * bytes_per_pixel
+        if compression == 1:
+            val row = pixel_index / width
+            val col = pixel_index - row * width
+            val strip_index = row / rows_per_strip
+            val row_in_strip = row - strip_index * rows_per_strip
+            val strip_lookup_index = _tiff_strip_lookup_index(strip_index, strip_offset_count)
+            val byte_count_lookup_index = _tiff_strip_lookup_index(strip_index, strip_byte_count_count)
+            val strip_offset = _tiff_entry_value_at(raw_data, strip_offset_entry, strip_lookup_index, little)
+            val strip_byte_count = _tiff_entry_value_at(raw_data, strip_byte_count_entry, byte_count_lookup_index, little)
+            pixel_offset = strip_offset + (row_in_strip * width + col) * bytes_per_pixel
+            if strip_offset <= 0 or pixel_offset + bytes_per_pixel > raw_data.len():
+                return nil
+            if strip_byte_count > 0 and pixel_offset + bytes_per_pixel > strip_offset + strip_byte_count:
+                return nil
         if samples_per_pixel == 1:
-            var gray = _byte_at(raw_data, pixel_offset)
+            var gray = _tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset, compression == 32773)
             if photometric == 0:
                 gray = 255 - gray
             rgba.push(gray)
@@ -1005,25 +1022,78 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
             rgba.push(255)
         else if photometric == 8:
             val argb = _tiff_cielab_pixel_to_argb(
-                _byte_at(raw_data, pixel_offset),
-                _byte_at(raw_data, pixel_offset + 1),
-                _byte_at(raw_data, pixel_offset + 2)
+                _tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset, compression == 32773),
+                _tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset + 1, compression == 32773),
+                _tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset + 2, compression == 32773)
             )
             rgba.push((argb / 65536) & 255)
             rgba.push((argb / 256) & 255)
             rgba.push(argb & 255)
             rgba.push(255)
         else:
-            rgba.push(_byte_at(raw_data, pixel_offset))
-            rgba.push(_byte_at(raw_data, pixel_offset + 1))
-            rgba.push(_byte_at(raw_data, pixel_offset + 2))
+            rgba.push(_tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset, compression == 32773))
+            rgba.push(_tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset + 1, compression == 32773))
+            rgba.push(_tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset + 2, compression == 32773))
             if samples_per_pixel == 4:
-                rgba.push(_byte_at(raw_data, pixel_offset + 3))
+                rgba.push(_tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset + 3, compression == 32773))
             else:
                 rgba.push(255)
         pixel_index = pixel_index + 1
 
     Some(ImageData(width: width, height: height, format: ImageFormat.Tiff, data: rgba))
+
+fn _tiff_pixel_byte(raw_data: text, decoded_pixels: [i64], offset: i64, compressed: bool) -> i64:
+    if compressed:
+        return decoded_pixels[offset]
+    _byte_at(raw_data, offset)
+
+fn _tiff_decode_packbits_strips(
+    data: text,
+    strip_offset_entry: i64,
+    strip_offset_count: i64,
+    strip_byte_count_entry: i64,
+    strip_byte_count_count: i64,
+    strip_count_needed: i64,
+    expected_len: i64,
+    little: bool
+) -> [i64]:
+    var out: [i64] = []
+    var strip_index = 0
+    while strip_index < strip_count_needed and out.len() < expected_len:
+        val strip_lookup_index = _tiff_strip_lookup_index(strip_index, strip_offset_count)
+        val byte_count_lookup_index = _tiff_strip_lookup_index(strip_index, strip_byte_count_count)
+        val strip_offset = _tiff_entry_value_at(data, strip_offset_entry, strip_lookup_index, little)
+        val strip_byte_count = _tiff_entry_value_at(data, strip_byte_count_entry, byte_count_lookup_index, little)
+        if strip_offset <= 0 or strip_byte_count <= 0 or strip_offset + strip_byte_count > data.len():
+            return []
+        val strip_end = strip_offset + strip_byte_count
+        var pos = strip_offset
+        while pos < strip_end and out.len() < expected_len:
+            val header = _byte_at(data, pos)
+            pos = pos + 1
+            if header <= 127:
+                val literal_count = header + 1
+                if pos + literal_count > strip_end:
+                    return []
+                var i = 0
+                while i < literal_count and out.len() < expected_len:
+                    out.push(_byte_at(data, pos + i))
+                    i = i + 1
+                pos = pos + literal_count
+            else if header == 128:
+                pass_dn
+            else:
+                if pos >= strip_end:
+                    return []
+                val repeat_count = 257 - header
+                val value = _byte_at(data, pos)
+                pos = pos + 1
+                var i = 0
+                while i < repeat_count and out.len() < expected_len:
+                    out.push(value)
+                    i = i + 1
+        strip_index = strip_index + 1
+    out
 
 fn _tiff_strip_lookup_index(strip_index: i64, value_count: i64) -> i64:
     if value_count == 1:
