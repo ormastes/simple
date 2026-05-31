@@ -126,7 +126,7 @@
 - 
 - Running: test/unit/app/ui/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/app/ui/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (207ms)
+-   [32mPASSED[0m (210ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -134,12 +134,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 212ms
+- Duration: 215ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        207ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
+-        210ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -153,7 +153,7 @@
 - 
 - Running: test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - [1/1] test/unit/app/ui/host_wm_runtime_loop_spec.spl
--   [32mPASSED[0m (1037ms)
+-   [32mPASSED[0m (1036ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -161,12 +161,12 @@
 - Files: 1
 - [32mPassed: 2[0m
 - Failed: 0
-- Duration: 1042ms
+- Duration: 1041ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--       1037ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
+-       1036ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -180,7 +180,7 @@
 - 
 - Running: test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/os/desktop/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (196ms)
+-   [32mPASSED[0m (204ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -188,12 +188,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 200ms
+- Duration: 209ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        196ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
+-        204ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/qemu_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -207,7 +207,7 @@
 - 
 - Running: test/unit/os/compositor/qemu_capture_spec.spl
 - [1/1] test/unit/os/compositor/qemu_capture_spec.spl
--   [32mPASSED[0m (879ms)
+-   [32mPASSED[0m (899ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -215,12 +215,12 @@
 - Files: 1
 - [32mPassed: 11[0m
 - Failed: 0
-- Duration: 884ms
+- Duration: 904ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        879ms  test/unit/os/compositor/qemu_capture_spec.spl
+-        899ms  test/unit/os/compositor/qemu_capture_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/electron_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -234,7 +234,7 @@
 - 
 - Running: test/unit/os/compositor/electron_capture_spec.spl
 - [1/1] test/unit/os/compositor/electron_capture_spec.spl
--   [32mPASSED[0m (753ms)
+-   [32mPASSED[0m (754ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -247,7 +247,7 @@
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        753ms  test/unit/os/compositor/electron_capture_spec.spl
+-        754ms  test/unit/os/compositor/electron_capture_spec.spl
 - spec_exit_code=0
 - wm_launch_capture_evidence_status=pass
 - wm_launch_capture_evidence_reason=wm-launch-capture-contract-verified
