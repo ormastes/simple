@@ -900,6 +900,15 @@ impl JsInterpreter:
             if function_name != "":
                 val fn_id = self._register_native(function_name, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION)
                 self.set_object_property(exports_id, function_name, JsValue.Function(id: fn_id))
+                var body_fn_ids = self.wasm_export_body_fn_ids
+                var body_module_ids = self.wasm_export_body_module_ids
+                var body_indices = self.wasm_export_body_indices
+                body_fn_ids.push(fn_id)
+                body_module_ids.push(module_id)
+                body_indices.push(index)
+                self.wasm_export_body_fn_ids = body_fn_ids
+                self.wasm_export_body_module_ids = body_module_ids
+                self.wasm_export_body_indices = body_indices
                 val const_return = self._native_webassembly_module_function_export_i32_result_at(module_id, index)
                 if const_return >= 0:
                     var const_fn_ids = self.wasm_export_const_fn_ids
@@ -998,6 +1007,15 @@ impl JsInterpreter:
             self.call_stack.pop()
             self.control_return = saved_return
             return result
+        if lookup_fn_id >= 0 and arg_vals.len() > 0:
+            var body_map_i = 0
+            while body_map_i < self.wasm_export_body_fn_ids.len():
+                if self.wasm_export_body_fn_ids.get(body_map_i) == lookup_fn_id:
+                    val call_result = self._native_webassembly_module_function_export_i32_result_with_args_at(self.wasm_export_body_module_ids.get(body_map_i), self.wasm_export_body_indices.get(body_map_i), arg_vals)
+                    if call_result >= 0:
+                        return JsValue.Number(v: call_result.to_f64())
+                    break
+                body_map_i = body_map_i + 1
         if const_return >= 0:
             return JsValue.Number(v: const_return.to_f64())
         JsValue.Undefined
@@ -1602,6 +1620,9 @@ impl JsInterpreter:
             _: ""
 
     me _native_webassembly_module_function_export_i32_result_at(module_id: i64, index: i64) -> i64:
+        self._native_webassembly_module_function_export_i32_result_with_args_at(module_id, index, [])
+
+    me _native_webassembly_module_function_export_i32_result_with_args_at(module_id: i64, index: i64, arg_vals: [JsValue]) -> i64:
         var hex = ""
         match self.get_object_property(module_id, "payloadHex"):
             JsValue.String(v): hex = v
@@ -1619,7 +1640,7 @@ impl JsInterpreter:
         val body_index = wasm_index - function_import_count
         if body_index < 0:
             return -1
-        self._native_webassembly_function_body_i32_result(hex, body_index)
+        self._native_webassembly_function_body_i32_result_with_args(hex, body_index, arg_vals)
 
     me _native_webassembly_table_export_name(hex: text) -> text:
         val count = self._native_webassembly_export_count(hex)
@@ -1720,6 +1741,9 @@ impl JsInterpreter:
         self._native_webassembly_read_leb_value(hex, index_pos)
 
     me _native_webassembly_function_body_i32_result(hex: text, wanted_body_index: i64) -> i64:
+        self._native_webassembly_function_body_i32_result_with_args(hex, wanted_body_index, [])
+
+    me _native_webassembly_function_body_i32_result_with_args(hex: text, wanted_body_index: i64, arg_vals: [JsValue]) -> i64:
         val start = self._native_webassembly_section_payload_start(hex, 10)
         val end = self._native_webassembly_section_payload_end(hex, 10)
         if start < 0 or end <= start:
@@ -1756,6 +1780,18 @@ impl JsInterpreter:
                         if value < 0 or next_pos < 0 or next_pos > body_end:
                             return -1
                         stack.push(value)
+                        cursor = next_pos
+                        continue
+                    if opcode == 32:
+                        val local_index = self._native_webassembly_read_leb_value(hex, cursor + 1)
+                        val next_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
+                        if local_index < 0 or next_pos < 0 or next_pos > body_end or local_index >= arg_vals.len():
+                            return -1
+                        match arg_vals.get(local_index):
+                            JsValue.Number(v):
+                                stack.push(f64_to_i64(v))
+                            _:
+                                return -1
                         cursor = next_pos
                         continue
                     if opcode == 106:

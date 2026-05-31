@@ -486,6 +486,7 @@ match instance:
    - Expected: _object_property_text(interp, module, "functionExportName") equals `run`
    - Expected: _object_property_text(interp, module, "functionExportCount") equals `1`
    - Expected: _object_property_text(interp, module, "functionExportName0") equals `run`
+   - Expected: interp.wasm_export_body_fn_ids.len() equals `1`
 
 2. JsValue Object
 
@@ -499,7 +500,7 @@ match instance:
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -517,6 +518,7 @@ expect(_object_property_text(interp, module, "functionExportCount")).to_equal("1
 expect(_object_property_text(interp, module, "functionExportName0")).to_equal("run")
 
 val instance = interp._native_webassembly_instance([module])
+expect(interp.wasm_export_body_fn_ids.len()).to_equal(1)
 match instance:
     JsValue.Object(instance_id):
         match interp.get_object_property(instance_id, "exports"):
@@ -667,6 +669,60 @@ match instance:
                 val run_value = interp.get_object_property(exports_id, "run")
                 expect(_display_js(run_value)).to_equal("[Function]")
                 expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("42")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
+#### executes bounded i32.add export body with call arguments
+
+1. var interp =  new interpreter
+
+2. JsValue Object
+   - Expected: interp._native_webassembly_module_function_export_i32_result_with_args_at(module_id, 0, [JsValue.Number(v: 40.0), JsValue.Number(v: 2.0)]) equals `42`
+   - Expected: "missing module" equals ``
+
+3. JsValue Object
+
+4. JsValue Object
+
+5. JsValue Function
+   - Expected: interp.wasm_export_body_fn_ids.get(0) equals `fn_id`
+   - Expected: "missing function" equals ``
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d0100000001070160027f7f017f030201000707010372756e00000a09010700200020016a0b")])
+match module:
+    JsValue.Object(module_id):
+        expect(interp._native_webassembly_module_function_export_i32_result_with_args_at(module_id, 0, [JsValue.Number(v: 40.0), JsValue.Number(v: 2.0)])).to_equal(42)
+    _:
+        expect("missing module").to_equal("")
+
+val instance = interp._native_webassembly_instance([module])
+match instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                val run_value = interp.get_object_property(exports_id, "run")
+                match run_value:
+                    JsValue.Function(fn_id):
+                        expect(interp.wasm_export_body_fn_ids.get(0)).to_equal(fn_id)
+                    _:
+                        expect("missing function").to_equal("")
             _:
                 expect("missing exports").to_equal("")
     _:
@@ -1122,8 +1178,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
