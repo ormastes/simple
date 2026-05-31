@@ -1988,6 +1988,34 @@ expect(_eval_str("new TextEncoder().encode('hello')[1]")).to_equal("101")
 
 </details>
 
+#### encodes text into caller-provided Uint8Array storage
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var dst = new Uint8Array(5); var r = new TextEncoder().encodeInto('hello', dst); r.read + ':' + r.written + ':' + dst[0] + ':' + dst[4]")).to_equal("5:5:104:111")
+```
+
+</details>
+
+#### reports partial encodeInto writes when destination storage is short
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var dst = new Uint8Array(3); var r = new TextEncoder().encodeInto('hello', dst); r.read + ':' + r.written + ':' + dst[0] + ':' + dst[2]")).to_equal("3:3:104:108")
+```
+
+</details>
+
 #### decodes Uint8Array-compatible bytes as UTF-8
 
 <details>
@@ -2124,8 +2152,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 140 |
-| Active scenarios | 140 |
+| Total scenarios | 142 |
+| Active scenarios | 142 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

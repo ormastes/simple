@@ -325,6 +325,34 @@ expect(_display_js(interp._native_text_decoder_decode(decoder, [encoded]))).to_e
 
 </details>
 
+#### encodes TextEncoder bytes into existing Uint8Array storage
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, result, "read") equals `4`
+   - Expected: _object_property_text(interp, result, "written") equals `4`
+   - Expected: _display_js(interp.get_object_property(_get_obj_id(target), "0")) equals `119`
+   - Expected: _display_js(interp.get_object_property(_get_obj_id(target), "3")) equals `109`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+val encoder = interp._native_text_encoder([])
+val target = interp._native_uint8_array([JsValue.Number(v: 4.0)])
+val result = interp._native_text_encoder_encode_into(encoder, [JsValue.String(v: "wasm"), target])
+expect(_object_property_text(interp, result, "read")).to_equal("4")
+expect(_object_property_text(interp, result, "written")).to_equal("4")
+expect(_display_js(interp.get_object_property(_get_obj_id(target), "0"))).to_equal("119")
+expect(_display_js(interp.get_object_property(_get_obj_id(target), "3"))).to_equal("109")
+```
+
+</details>
+
 #### parses bounded WASM section metadata and rejects truncated sections
 
 1. var interp =  new interpreter
@@ -4428,8 +4456,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 92 |
-| Active scenarios | 92 |
+| Total scenarios | 93 |
+| Active scenarios | 93 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
