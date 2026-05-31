@@ -306,7 +306,7 @@ expect(packages[3].blocker).to_equal("")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 73 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -317,6 +317,9 @@ val ok = wasm_hello_gui_compiled_artifact_evidence(
     "0061736d",
     1,
     false,
+    true,
+    true,
+    true,
     true,
     true,
     true,
@@ -332,6 +335,24 @@ val smf = wasm_hello_gui_compiled_artifact_evidence(
     true,
     true,
     true,
+    true,
+    true,
+    true,
+    true
+)
+val missing_render = wasm_hello_gui_compiled_artifact_evidence(
+    WEB_RENDER_TARGET_HOST_WM_WASM,
+    "/tmp/hello_wasm_gui_feature.wasm",
+    1906,
+    "0061736d",
+    1,
+    false,
+    true,
+    true,
+    false,
+    true,
+    true,
+    true,
     true
 )
 val missing_events = wasm_hello_gui_compiled_artifact_evidence(
@@ -344,14 +365,22 @@ val missing_events = wasm_hello_gui_compiled_artifact_evidence(
     true,
     true,
     true,
+    true,
+    true,
+    true,
     false
 )
 
 expect(ok.status).to_equal("compiled_wasm_verified")
 expect(ok.ready).to_equal(true)
+expect(ok.has_simple_app_init).to_equal(true)
+expect(ok.has_simple_app_render).to_equal(true)
+expect(ok.has_simple_app_event).to_equal(true)
 expect(ok.diagnostic).to_equal("")
 expect(smf.status).to_equal("smf_artifact_not_wasm")
 expect(smf.ready).to_equal(false)
+expect(missing_render.status).to_equal("missing_simple_app_render")
+expect(missing_render.diagnostic).to_contain("simple_app_render")
 expect(missing_events.status).to_equal("missing_event_strings")
 expect(missing_events.diagnostic).to_contain("button scroll text")
 ```
