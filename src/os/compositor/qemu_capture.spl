@@ -11,6 +11,14 @@ class QemuScreendumpCommandResult:
     success: bool
     error: text
 
+class QemuScreendumpProbeResult:
+    success: bool
+    backend_name: text
+    width: i32
+    height: i32
+    pixel_count: i64
+    error: text
+
 fn capture_qemu_inprocess(scene: WmSceneSpec) -> CaptureResult:
     val pixels = render_scene_to_backend(scene, nil)
     CaptureResult(backend_name: "browser_compositor", width: scene.width, height: scene.height, pixels: pixels, success: true, error: "")
@@ -57,3 +65,38 @@ fn capture_qemu_vm(qmp_socket: text, out_path: text) -> CaptureResult:
         return capture_error("qemu_vm", 0, 0, "QEMU screendump did not create output: {out_path}")
     val data: [u8] = rt_file_read_bytes(out_path) ?? []
     decode_qemu_screendump_ppm(data)
+
+fn probe_qemu_vm_screendump(qmp_socket: text, out_path: text) -> QemuScreendumpProbeResult:
+    if qmp_socket.len() == 0:
+        return QemuScreendumpProbeResult(success: false, backend_name: "qemu_vm", width: 0, height: 0, pixel_count: 0, error: "QEMU screendump unavailable: empty QMP socket path")
+    if out_path.len() == 0:
+        return QemuScreendumpProbeResult(success: false, backend_name: "qemu_vm", width: 0, height: 0, pixel_count: 0, error: "QEMU screendump unavailable: empty output path")
+    if not rt_file_exists(qmp_socket):
+        return QemuScreendumpProbeResult(success: false, backend_name: "qemu_vm", width: 0, height: 0, pixel_count: 0, error: "QEMU screendump unavailable for socket: {qmp_socket}")
+    val dumped = qemu_screendump_to_file(qmp_socket, out_path)
+    if not dumped.success:
+        return QemuScreendumpProbeResult(success: false, backend_name: "qemu_vm", width: 0, height: 0, pixel_count: 0, error: "QEMU screendump command failed for socket: {qmp_socket} ({dumped.error})")
+    val script = "import pathlib,sys;" +
+        "p=pathlib.Path(sys.argv[1]);" +
+        "data=p.read_bytes();" +
+        "parts=data.split(None,4);" +
+        "ok=len(parts)>=4 and parts[0]==b'P6' and parts[3]==b'255';" +
+        "w=int(parts[1]) if ok else 0;" +
+        "h=int(parts[2]) if ok else 0;" +
+        "need=w*h*3;" +
+        "print('width='+str(w));print('height='+str(h));print('pixels='+str(w*h));" +
+        "sys.exit(0 if ok and len(data)>=need else 2)"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout("python3", ["-c", script, out_path], 10000)
+    if exit_code != 0:
+        val err = if stderr.trim().len() > 0: stderr.trim() else: "invalid PPM screendump"
+        return QemuScreendumpProbeResult(success: false, backend_name: "qemu_vm", width: 0, height: 0, pixel_count: 0, error: err)
+    val width = _probe_value(stdout, "width=").to_i32()
+    val height = _probe_value(stdout, "height=").to_i32()
+    val pixels = _probe_value(stdout, "pixels=")
+    QemuScreendumpProbeResult(success: width > 0 and height > 0 and pixels > 0, backend_name: "qemu_vm", width: width, height: height, pixel_count: pixels, error: "")
+
+fn _probe_value(output: text, prefix: text) -> i64:
+    for line in output.split("\n"):
+        if line.starts_with(prefix):
+            return line.slice(prefix.len() as u64, line.len() as u64).trim().parse_i64() ?? 0
+    0
