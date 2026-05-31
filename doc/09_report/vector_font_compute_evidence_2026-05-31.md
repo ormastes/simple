@@ -7,7 +7,7 @@
 - font size: 24
 - CPU checksum: 13090264
 - CPU ink pixels: 247
-- CPU frame us: 1535694
+- CPU frame us: 1547856
 - production render checksum: 3707484892911777
 - production render ink pixels: 247
 - production vector raster hits: 0
@@ -97,67 +97,7 @@
 - blur/tolerance used: false
 
 ## Raw Evidence
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_sync_mut/text_layout/font_renderer.spl:3:1
--    |
--   3 | export use std.gc_async_mut.text_layout.font_renderer.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
-- 
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_sync_mut/text_layout/font_rasterizer.spl:3:1
--    |
--   3 | export use std.gc_async_mut.text_layout.font_rasterizer.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
-- 
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_sync_mut/text_layout/font_vector_data.spl:3:1
--    |
--   3 | export use std.gc_async_mut.text_layout.font_vector_data.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
-- 
 - [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: cannot use `self` in static method
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_sync_mut/text_layout/font_renderer.spl:3:1
--    |
--   3 | export use std.gc_async_mut.text_layout.font_renderer.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
-- 
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_sync_mut/text_layout/font_rasterizer.spl:3:1
--    |
--   3 | export use std.gc_async_mut.text_layout.font_rasterizer.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
-- 
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_sync_mut/text_layout/font_vector_data.spl:3:1
--    |
--   3 | export use std.gc_async_mut.text_layout.font_vector_data.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
-- 
 - [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.text_layout.font_renderer' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.text_layout.font_rasterizer' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
@@ -167,11 +107,11 @@
 - vector_font_compute_scene=wm-vector-text-grid
 - vector_font_compute_text_run=HARDENED
 - vector_font_compute_font_size=24
-- vector_font_compute_iterations=2
+- vector_font_compute_iterations=4
 - vector_font_compute_cpu_warm_checksum=13090264
 - vector_font_compute_cpu_checksum=13090264
 - vector_font_compute_cpu_ink_pixels=247
-- vector_font_compute_cpu_frame_us=1513308
+- vector_font_compute_cpu_frame_us=1525264
 - vector_font_compute_production_render_checksum=3707484892911777
 - vector_font_compute_production_render_ink_pixels=247
 - vector_font_compute_production_vector_raster_hits=0
@@ -638,11 +578,11 @@
 - vector_font_compute_scene=wm-vector-text-grid
 - vector_font_compute_text_run=HARDENED
 - vector_font_compute_font_size=24
-- vector_font_compute_iterations=2
+- vector_font_compute_iterations=4
 - vector_font_compute_cpu_warm_checksum=13090264
 - vector_font_compute_cpu_checksum=13090264
 - vector_font_compute_cpu_ink_pixels=247
-- vector_font_compute_cpu_frame_us=1535694
+- vector_font_compute_cpu_frame_us=1547856
 - vector_font_compute_production_render_checksum=3707484892911777
 - vector_font_compute_production_render_ink_pixels=247
 - vector_font_compute_production_vector_raster_hits=0
