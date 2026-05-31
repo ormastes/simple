@@ -480,7 +480,7 @@ expect(simpleos.viewport_h).to_equal(600)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -491,6 +491,7 @@ expect(evidence.status).to_equal("wasm_browser_contract_verified")
 expect(evidence.ready).to_equal(true)
 expect(evidence.allowed_imports).to_contain("simple_ui.present")
 expect(evidence.denied_imports).to_contain("host.shell")
+expect(evidence.required_exports).to_contain("spl_main")
 expect(evidence.required_exports).to_contain("simple_app_event")
 expect(summary).to_contain("ready=true")
 ```
@@ -509,17 +510,17 @@ Reproduction: this block contains the complete executable scenario source.
 val host_escape = wasm_hello_gui_module_contract_evidence(
     WEB_RENDER_TARGET_HOST_WM_WASM,
     ["env.memory", "simple_ui.present", "host.shell"],
-    ["simple_app_init", "simple_app_render", "simple_app_event"]
+    ["spl_main", "simple_app_init", "simple_app_render", "simple_app_event"]
 )
 val missing_export = wasm_hello_gui_module_contract_evidence(
     WEB_RENDER_TARGET_ANDROID_WASM,
     ["env.memory", "simple_ui.present", "simple_ui.input"],
-    ["simple_app_init", "simple_app_render"]
+    ["spl_main", "simple_app_init", "simple_app_render"]
 )
 val unlisted_import = wasm_hello_gui_module_contract_evidence(
     WEB_RENDER_TARGET_IOS_WASM,
     ["env.memory", "random.unlisted"],
-    ["simple_app_init", "simple_app_render", "simple_app_event"]
+    ["spl_main", "simple_app_init", "simple_app_render", "simple_app_event"]
 )
 
 expect(host_escape.status).to_equal("wasm_import_denied")
@@ -530,6 +531,29 @@ expect(missing_export.missing_export).to_equal("simple_app_event")
 expect(missing_export.ready).to_equal(false)
 expect(unlisted_import.status).to_equal("wasm_import_denied")
 expect(unlisted_import.bad_import).to_equal("random.unlisted")
+```
+
+</details>
+
+#### rejects generated-WASM browser modules without the Simple entrypoint
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val missing_entry = wasm_hello_gui_module_contract_evidence(
+    WEB_RENDER_TARGET_SIMPLEOS_WM_WASM,
+    ["env.memory", "simple_ui.present", "simple_ui.input"],
+    ["simple_app_init", "simple_app_render", "simple_app_event"]
+)
+
+expect(missing_entry.status).to_equal("wasm_export_missing")
+expect(missing_entry.missing_export).to_equal("spl_main")
+expect(missing_entry.ready).to_equal(false)
+expect(missing_entry.diagnostic).to_contain("spl_main")
 ```
 
 </details>
@@ -553,8 +577,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
