@@ -7,17 +7,17 @@
 - font size: 24
 - CPU checksum: 13090264
 - CPU ink pixels: 247
-- CPU frame us: 1409742
+- CPU frame us: 1442931
 - production render checksum: 3707484892911777
 - production render ink pixels: 247
-- production vector raster hits: 6
-- production vector output pixels: 1392
+- production vector raster hits: 3
+- production vector output pixels: 672
 - production accelerator attempts: 8
-- production CUDA hits: 7
-- production OpenCL hits: 1
-- production CPU fallback hits: 6
-- production GPU returned glyphs: 2
-- production GPU returned glyph pixels: 504
+- production CUDA hits: 5
+- production OpenCL hits: 3
+- production CPU fallback hits: 3
+- production GPU returned glyphs: 5
+- production GPU returned glyph pixels: 1224
 - production accelerator unavailable reason: cuda-opencl-vector-font-glyph-pixels-returned
 - matrix CUDAOPENCL/16 checksum: 2208479644694289
 - matrix CUDAOPENCL/16 ink pixels: 162
@@ -127,17 +127,17 @@
 - vector_font_compute_cpu_warm_checksum=13090264
 - vector_font_compute_cpu_checksum=13090264
 - vector_font_compute_cpu_ink_pixels=247
-- vector_font_compute_cpu_frame_us=1455591
+- vector_font_compute_cpu_frame_us=1459977
 - vector_font_compute_production_render_checksum=3707484892911777
 - vector_font_compute_production_render_ink_pixels=247
-- vector_font_compute_production_vector_raster_hits=6
-- vector_font_compute_production_vector_output_pixels=1392
+- vector_font_compute_production_vector_raster_hits=3
+- vector_font_compute_production_vector_output_pixels=672
 - vector_font_compute_production_accelerator_attempts=8
-- vector_font_compute_production_cuda_hits=7
-- vector_font_compute_production_opencl_hits=1
-- vector_font_compute_production_cpu_fallback_hits=6
-- vector_font_compute_production_gpu_returned_glyphs=2
-- vector_font_compute_production_gpu_returned_glyph_pixels=504
+- vector_font_compute_production_cuda_hits=5
+- vector_font_compute_production_opencl_hits=3
+- vector_font_compute_production_cpu_fallback_hits=3
+- vector_font_compute_production_gpu_returned_glyphs=5
+- vector_font_compute_production_gpu_returned_glyph_pixels=1224
 - vector_font_compute_production_accelerator_unavailable_reason=cuda-opencl-vector-font-glyph-pixels-returned
 - vector_font_compute_matrix_0_text=CUDAOPENCL
 - vector_font_compute_matrix_0_font_size=16
@@ -554,7 +554,7 @@
 - vector_font_compute_cuda_status=pass
 - vector_font_compute_cuda_reason=cuda-vector-font-rasterize-kernel-matched-cpu
 - vector_font_compute_cuda_checksum=13090264
-- vector_font_compute_cuda_glyph_count=1
+- vector_font_compute_cuda_glyph_count=2
 - vector_font_compute_cuda_glyph_0_codepoint=72
 - vector_font_compute_cuda_glyph_0_font_size=24
 - vector_font_compute_cuda_glyph_0_width=10
@@ -562,10 +562,17 @@
 - vector_font_compute_cuda_glyph_0_advance=11
 - vector_font_compute_cuda_glyph_0_checksum=399885
 - vector_font_compute_cuda_glyph_0_ink_pixels=30
+- vector_font_compute_cuda_glyph_1_codepoint=82
+- vector_font_compute_cuda_glyph_1_font_size=24
+- vector_font_compute_cuda_glyph_1_width=10
+- vector_font_compute_cuda_glyph_1_height=24
+- vector_font_compute_cuda_glyph_1_advance=11
+- vector_font_compute_cuda_glyph_1_checksum=296579
+- vector_font_compute_cuda_glyph_1_ink_pixels=34
 - vector_font_compute_opencl_status=pass
 - vector_font_compute_opencl_reason=opencl-vector-font-rasterize-kernel-matched-cpu
 - vector_font_compute_opencl_checksum=13090264
-- vector_font_compute_opencl_glyph_count=1
+- vector_font_compute_opencl_glyph_count=2
 - vector_font_compute_opencl_glyph_0_codepoint=65
 - vector_font_compute_opencl_glyph_0_font_size=24
 - vector_font_compute_opencl_glyph_0_width=11
@@ -573,6 +580,13 @@
 - vector_font_compute_opencl_glyph_0_advance=12
 - vector_font_compute_opencl_glyph_0_checksum=414452
 - vector_font_compute_opencl_glyph_0_ink_pixels=33
+- vector_font_compute_opencl_glyph_1_codepoint=68
+- vector_font_compute_opencl_glyph_1_font_size=24
+- vector_font_compute_opencl_glyph_1_width=10
+- vector_font_compute_opencl_glyph_1_height=24
+- vector_font_compute_opencl_glyph_1_advance=11
+- vector_font_compute_opencl_glyph_1_checksum=407799
+- vector_font_compute_opencl_glyph_1_ink_pixels=31
 - vector_font_compute_blur_or_tolerance_used=false
 - vector_font_compute_summary=WebRenderVectorFontComputeEvidence[scene=wm-vector-text-grid cpu_checksum=13090264 cpu_ink_pixels=247 cuda_status=pass cuda_reason=cuda-vector-font-rasterize-kernel-matched-cpu cuda_checksum=13090264 opencl_status=pass opencl_reason=opencl-vector-font-rasterize-kernel-matched-cpu opencl_checksum=13090264 blur_or_tolerance_used=false status=pass reason=pass]
 - vector_font_compute_status=pass
@@ -584,17 +598,17 @@
 - vector_font_compute_cpu_warm_checksum=13090264
 - vector_font_compute_cpu_checksum=13090264
 - vector_font_compute_cpu_ink_pixels=247
-- vector_font_compute_cpu_frame_us=1409742
+- vector_font_compute_cpu_frame_us=1442931
 - vector_font_compute_production_render_checksum=3707484892911777
 - vector_font_compute_production_render_ink_pixels=247
-- vector_font_compute_production_vector_raster_hits=6
-- vector_font_compute_production_vector_output_pixels=1392
+- vector_font_compute_production_vector_raster_hits=3
+- vector_font_compute_production_vector_output_pixels=672
 - vector_font_compute_production_accelerator_attempts=8
-- vector_font_compute_production_cuda_hits=7
-- vector_font_compute_production_opencl_hits=1
-- vector_font_compute_production_cpu_fallback_hits=6
-- vector_font_compute_production_gpu_returned_glyphs=2
-- vector_font_compute_production_gpu_returned_glyph_pixels=504
+- vector_font_compute_production_cuda_hits=5
+- vector_font_compute_production_opencl_hits=3
+- vector_font_compute_production_cpu_fallback_hits=3
+- vector_font_compute_production_gpu_returned_glyphs=5
+- vector_font_compute_production_gpu_returned_glyph_pixels=1224
 - vector_font_compute_production_accelerator_unavailable_reason=cuda-opencl-vector-font-glyph-pixels-returned
 - vector_font_compute_matrix_0_text=CUDAOPENCL
 - vector_font_compute_matrix_0_font_size=16
@@ -1011,7 +1025,7 @@
 - vector_font_compute_cuda_status=pass
 - vector_font_compute_cuda_reason=cuda-vector-font-rasterize-kernel-matched-cpu
 - vector_font_compute_cuda_checksum=13090264
-- vector_font_compute_cuda_glyph_count=1
+- vector_font_compute_cuda_glyph_count=2
 - vector_font_compute_cuda_glyph_0_codepoint=72
 - vector_font_compute_cuda_glyph_0_font_size=24
 - vector_font_compute_cuda_glyph_0_width=10
@@ -1019,10 +1033,17 @@
 - vector_font_compute_cuda_glyph_0_advance=11
 - vector_font_compute_cuda_glyph_0_checksum=399885
 - vector_font_compute_cuda_glyph_0_ink_pixels=30
+- vector_font_compute_cuda_glyph_1_codepoint=82
+- vector_font_compute_cuda_glyph_1_font_size=24
+- vector_font_compute_cuda_glyph_1_width=10
+- vector_font_compute_cuda_glyph_1_height=24
+- vector_font_compute_cuda_glyph_1_advance=11
+- vector_font_compute_cuda_glyph_1_checksum=296579
+- vector_font_compute_cuda_glyph_1_ink_pixels=34
 - vector_font_compute_opencl_status=pass
 - vector_font_compute_opencl_reason=opencl-vector-font-rasterize-kernel-matched-cpu
 - vector_font_compute_opencl_checksum=13090264
-- vector_font_compute_opencl_glyph_count=1
+- vector_font_compute_opencl_glyph_count=2
 - vector_font_compute_opencl_glyph_0_codepoint=65
 - vector_font_compute_opencl_glyph_0_font_size=24
 - vector_font_compute_opencl_glyph_0_width=11
@@ -1030,5 +1051,12 @@
 - vector_font_compute_opencl_glyph_0_advance=12
 - vector_font_compute_opencl_glyph_0_checksum=414452
 - vector_font_compute_opencl_glyph_0_ink_pixels=33
+- vector_font_compute_opencl_glyph_1_codepoint=68
+- vector_font_compute_opencl_glyph_1_font_size=24
+- vector_font_compute_opencl_glyph_1_width=10
+- vector_font_compute_opencl_glyph_1_height=24
+- vector_font_compute_opencl_glyph_1_advance=11
+- vector_font_compute_opencl_glyph_1_checksum=407799
+- vector_font_compute_opencl_glyph_1_ink_pixels=31
 - vector_font_compute_blur_or_tolerance_used=false
 - vector_font_compute_summary=WebRenderVectorFontComputeEvidence[scene=wm-vector-text-grid cpu_checksum=13090264 cpu_ink_pixels=247 cuda_status=pass cuda_reason=cuda-vector-font-rasterize-kernel-matched-cpu cuda_checksum=13090264 opencl_status=pass opencl_reason=opencl-vector-font-rasterize-kernel-matched-cpu opencl_checksum=13090264 blur_or_tolerance_used=false status=pass reason=pass]
