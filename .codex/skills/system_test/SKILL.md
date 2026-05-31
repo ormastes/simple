@@ -31,6 +31,8 @@ Codex excels at systematic test generation with full requirement traceability. U
 ## Phase 2: SPipe BDD Test Generation
 
 Generate test specs using **built-in matchers only**.
+Executable specs belong under `test/...`; `doc/06_spec/...` is reserved for
+generated/manual scenario documentation derived from those specs.
 
 ### Built-in Matchers (ONLY these are allowed)
 
@@ -161,7 +163,8 @@ Output: `doc/03_plan/sys_test/<feature>.md`
 
 | Artifact | Path |
 |----------|------|
-| System test specs | `doc/06_spec/<mirrored-test-path>/<feature>_spec.spl` |
+| System test specs | `test/<mirrored-test-path>/<feature>_spec.spl` |
+| Generated spec docs | `doc/06_spec/<mirrored-test-path>/<feature>_spec.md` |
 | Test plan | `doc/03_plan/sys_test/<feature>.md` |
 | Traceability matrix | Included in test plan |
 

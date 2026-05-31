@@ -35,7 +35,7 @@ Current local evidence supports a narrower and defensible target:
 
 - `doc/04_architecture/rv64_user_mode_exec.md`
 - `doc/05_design/rv64_user_mode_exec.md`
-- `doc/06_spec/app/os/feature/rv64_user_mode_exec_spec.spl`
+- `test/system/app/os/feature/rv64_user_mode_exec_spec.spl`
 
 This is the clearest current example of a narrow, honest OS proof package:
 
@@ -124,7 +124,7 @@ They are **not** enough for a credible full proof of:
 
 ### Healthy evidence
 
-- `doc/06_spec/app/os/feature/rv64_user_mode_exec_spec.spl` passes
+- `test/system/app/os/feature/rv64_user_mode_exec_spec.spl` passes
 - local SimpleOS research already exists:
   - `doc/01_research/local/simpleos_l4_exokernel_platform.md`
   - `doc/01_research/local/simpleos_qemu_validation.md`

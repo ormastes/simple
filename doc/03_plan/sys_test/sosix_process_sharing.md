@@ -31,7 +31,7 @@ bin/simple test test/unit/os/sosix/share_api_spec.spl
 Run the system feature spec:
 
 ```bash
-bin/simple test doc/06_spec/app/os/feature/sosix_process_sharing_spec.spl
+bin/simple test test/system/app/os/feature/sosix_process_sharing_spec.spl
 ```
 
 Run the full SOSIX unit suite before merging with adjacent SOSIX changes:
@@ -44,9 +44,9 @@ bin/simple test test/unit/os/sosix
 
 | Requirement | Test File | Test Cases | Coverage |
 |-------------|-----------|------------|----------|
-| REQ-SOSIX-SHARE-001 | `test/unit/os/sosix/share_api_spec.spl`, `doc/06_spec/app/os/feature/sosix_process_sharing_spec.spl` | create, seal, read, reject post-seal write | Full |
-| REQ-SOSIX-SHARE-002 | `test/unit/os/sosix/share_api_spec.spl`, `doc/06_spec/app/os/feature/sosix_process_sharing_spec.spl` | send, receive, payload bytes, readiness restoration | Full |
-| REQ-SOSIX-SHARE-003 | `test/unit/os/sosix/share_api_spec.spl`, `doc/06_spec/app/os/feature/sosix_process_sharing_spec.spl` | sealed attachment transfer, attached dataset read, unsealed rejection | Full |
+| REQ-SOSIX-SHARE-001 | `test/unit/os/sosix/share_api_spec.spl`, `test/system/app/os/feature/sosix_process_sharing_spec.spl` | create, seal, read, reject post-seal write | Full |
+| REQ-SOSIX-SHARE-002 | `test/unit/os/sosix/share_api_spec.spl`, `test/system/app/os/feature/sosix_process_sharing_spec.spl` | send, receive, payload bytes, readiness restoration | Full |
+| REQ-SOSIX-SHARE-003 | `test/unit/os/sosix/share_api_spec.spl`, `test/system/app/os/feature/sosix_process_sharing_spec.spl` | sealed attachment transfer, attached dataset read, unsealed rejection | Full |
 
 ## Pass Criteria
 

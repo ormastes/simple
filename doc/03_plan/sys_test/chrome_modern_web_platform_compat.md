@@ -23,7 +23,7 @@ Out of scope:
 
 - Repository root: `/home/ormastes/dev/pub/simple`
 - Test runner: `bin/simple test`
-- Primary SPipe: `doc/06_spec/app/lib/feature/chrome_modern_web_platform_compat_spec.spl`
+- Primary SPipe: `test/system/app/lib/feature/chrome_modern_web_platform_compat_spec.spl`
 - Focused renderer SPipe: `test/unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl`
 
 ## Traceability Matrix

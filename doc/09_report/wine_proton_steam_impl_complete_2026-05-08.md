@@ -85,7 +85,7 @@ MDSOC+ pattern: kernel (baremetal) stays MDSOC-only; process supervisor, WM, and
 - `test/unit/os/kernel/wine/kernel_thread_primitives_spec.spl`
 - `test/unit/os/kernel/wine/thread_sffi_extensions_spec.spl`
 - `test/unit/os/kernel/wine/kernel_namespace_spec.spl`
-- `doc/06_spec/app/simpleos/feature/simpleos_wine_proton_steam_impl_spec.spl`
+- `test/system/app/simpleos/feature/simpleos_wine_proton_steam_impl_spec.spl`
 
 ### Design Doc
 - `doc/05_design/simpleos_wine_proton_steam_impl.md`

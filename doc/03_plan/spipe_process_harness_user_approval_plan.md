@@ -56,7 +56,7 @@ The user approved full scope on 2026-05-15:
 - TUI design: `doc/05_design/spipe_process_harness_tui.md`
 - System test plan: `doc/03_plan/sys_test/spipe_process_harness.md`
 - Agent task plan: `doc/03_plan/agent_tasks/spipe_process_harness.md`
-- System spec: `doc/06_spec/app/spipe_process_harness/feature/spipe_process_harness_spec.spl`
+- System spec: `test/system/app/spipe_process_harness/feature/spipe_process_harness_spec.spl`
 - Durable example state: `.spipe/spipe-process-harness/state.md`
 - CLI entrypoint: `src/app/spipe_process_harness/main.spl`
 - Library API: `src/lib/nogc_async_mut/spipe_process_harness/`
@@ -138,7 +138,7 @@ bin/release/simple check \
   src/lib/nogc_async_mut/spipe_process_harness/*.spl \
   src/app/spipe_process_harness/main.spl \
   test/unit/lib/spipe_process_harness/spipe_process_harness_spec.spl \
-  doc/06_spec/app/spipe_process_harness/feature/spipe_process_harness_spec.spl
+  test/system/app/spipe_process_harness/feature/spipe_process_harness_spec.spl
 
 SIMPLE_LIB=src bin/release/simple test \
   test/unit/lib/spipe_process_harness/spipe_process_harness_spec.spl \

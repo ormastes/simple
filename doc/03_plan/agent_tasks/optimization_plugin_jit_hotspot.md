@@ -84,7 +84,7 @@ bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mod
 bin/simple test test/unit/compiler/mir_opt/var_reassign_analysis_spec.spl --mode=interpreter --progress none
 # PASS: 17 tests
 
-bin/simple test doc/06_spec/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl --mode=interpreter --progress none
+bin/simple test test/system/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl --mode=interpreter --progress none
 # PASS: 9 tests
 
 bin/simple run test/perf/compiler/jit_hotspot_plan_bench.spl --mode=interpreter
@@ -111,7 +111,7 @@ src/compiler_rust/target/debug/simple test test/unit/compiler/mir_opt/var_reassi
 src/compiler_rust/target/debug/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean --progress none
 # PASS: 51 tests, 0 leftover matching test processes
 
-src/compiler_rust/target/debug/simple test doc/06_spec/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl --mode=interpreter --progress none
+src/compiler_rust/target/debug/simple test test/system/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl --mode=interpreter --progress none
 # PASS: 9 tests
 
 src/compiler_rust/target/debug/simple run test/perf/compiler/jit_hotspot_plan_bench.spl --mode=interpreter

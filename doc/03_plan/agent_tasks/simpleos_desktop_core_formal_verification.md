@@ -20,7 +20,7 @@ Files:
 
 - `src/os/kernel/arch/riscv64/trap_model.spl`
 - `doc/04_architecture/simpleos_interfaces.md`
-- `doc/06_spec/app/os/feature/rv64_user_mode_exec_spec.spl`
+- `test/system/app/os/feature/rv64_user_mode_exec_spec.spl`
 
 ## Desktop Contract Lane
 

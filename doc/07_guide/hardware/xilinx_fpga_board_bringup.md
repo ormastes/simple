@@ -86,7 +86,7 @@ Vendor bundle search and acquisition notes:
 These are useful, but they do not prove board support by themselves:
 
 ```bash
-bin/simple test doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl
+bin/simple test test/system/app/hardware/feature/riscv_fpga_linux_spec.spl
 bin/simple run src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl -- /tmp/fpga_bundle
 ```
 

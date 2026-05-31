@@ -41,7 +41,7 @@ Out of scope until implementation exists: real browser GPU driver execution, pix
    - `src/compiler_rust/target/debug/simple test test/unit/compiler/wasm_codegen_spec.spl --mode=interpreter`
    - `src/compiler_rust/target/debug/simple test test/feature/usage/wasm_compile_spec.spl --mode=interpreter`
 4. New examples:
-   - `src/compiler_rust/target/debug/simple test doc/06_spec/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter`
+   - `src/compiler_rust/target/debug/simple test test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter`
 
 ## Pass/Fail Criteria
 

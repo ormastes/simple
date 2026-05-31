@@ -22,7 +22,8 @@ description: "Codex implementation skill. 15-phase workflow from research throug
 | Requirements | `doc/02_requirements/feature/<feature>.md` | Phase 4 |
 | Architecture | `doc/04_architecture/<feature>.md` | Phase 6 |
 | Design | `doc/05_design/<feature>.md` | Phase 6 |
-| System tests | `doc/06_spec/<mirrored-test-path>/<feature>_spec.spl` | Phase 8 |
+| System tests | `test/<mirrored-test-path>/<feature>_spec.spl` | Phase 8 |
+| Generated spec docs | `doc/06_spec/<mirrored-test-path>/<feature>_spec.md` | Phase 8 |
 
 **If ALL exist**, skip to Phase 8 (Implementation).
 

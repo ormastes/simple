@@ -15,7 +15,7 @@ Codex, Claude, or Gemini settings.
 | REQ-001 | `test/unit/lib/spipe_process_harness/spipe_process_harness_spec.spl` | provider normalization and provider hook event lists |
 | REQ-002 | `test/unit/lib/spipe_process_harness/spipe_process_harness_spec.spl` | JSONL hook envelope contains provider, event, session, model, and escaped raw payload |
 | REQ-003 | `test/unit/lib/spipe_process_harness/spipe_process_harness_spec.spl` | deploy snippets exist for Claude, Codex, and Gemini with expected paths |
-| REQ-004 | `doc/06_spec/app/spipe_process_harness/feature/spipe_process_harness_spec.spl` | HUD renders model, jj, commit, hr, week, and goal fields |
+| REQ-004 | `test/system/app/spipe_process_harness/feature/spipe_process_harness_spec.spl` | HUD renders model, jj, commit, hr, week, and goal fields |
 | REQ-005 | `test/unit/lib/spipe_process_harness/spipe_process_harness_spec.spl` | default and feature-specific state/event paths |
 | REQ-006 | both SPipe spec files | missing state, missing approval, explicit block marker, and approved allow path |
 
@@ -61,5 +61,5 @@ Focused verification:
 
 ```bash
 bin/release/simple test test/unit/lib/spipe_process_harness/spipe_process_harness_spec.spl --fail-fast
-bin/release/simple test doc/06_spec/app/spipe_process_harness/feature/spipe_process_harness_spec.spl --fail-fast
+bin/release/simple test test/system/app/spipe_process_harness/feature/spipe_process_harness_spec.spl --fail-fast
 ```

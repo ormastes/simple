@@ -11,7 +11,7 @@ Production-level SCV features remain planned separately in
 
 ## Evidence
 
-- `bin/release/simple check src/lib/scv/*.spl src/app/scv/main.spl test/integration/app/scv_*.spl doc/06_spec/app/scv/feature/scv_*.spl doc/06_spec/app/scv/feature/scv_spec.spl`
+- `bin/release/simple check src/lib/scv/*.spl src/app/scv/main.spl test/integration/app/scv_*.spl test/system/app/scv/feature/scv_*.spl test/system/app/scv/feature/scv_spec.spl`
   passed for 51 SCV files.
 - `bin/release/simple check src/lib/scv/integrity.spl test/integration/app/scv_parser_wasm_spec.spl`
   passed.

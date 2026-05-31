@@ -16,11 +16,11 @@ Historical helper-proof scope:
 
 | REQ | Executable Spec | Coverage |
 |-----|-----------------|----------|
-| REQ-RFL-001..002 | `doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl` board profile prepare/boot validation | Full |
-| REQ-RFL-003..005 | `doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl` historical lane defaults and current dual-arch generated-Linux truthfulness checks | Full |
-| REQ-RFL-006..007 | `doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl` deterministic prepare manifest and Vivado plan | Full |
-| REQ-RFL-008 | `doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl` generated Simple hardware source expectations for the implemented helper set | Full |
-| REQ-RFL-009 | `doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl` VHDL source-map and RTL manifest expectations for the implemented helper set | Full |
+| REQ-RFL-001..002 | `test/system/app/hardware/feature/riscv_fpga_linux_spec.spl` board profile prepare/boot validation | Full |
+| REQ-RFL-003..005 | `test/system/app/hardware/feature/riscv_fpga_linux_spec.spl` historical lane defaults and current dual-arch generated-Linux truthfulness checks | Full |
+| REQ-RFL-006..007 | `test/system/app/hardware/feature/riscv_fpga_linux_spec.spl` deterministic prepare manifest and Vivado plan | Full |
+| REQ-RFL-008 | `test/system/app/hardware/feature/riscv_fpga_linux_spec.spl` generated Simple hardware source expectations for the implemented helper set | Full |
+| REQ-RFL-009 | `test/system/app/hardware/feature/riscv_fpga_linux_spec.spl` VHDL source-map and RTL manifest expectations for the implemented helper set | Full |
 | REQ-RFL-010 | MIR bitfield lowering hook spec covering opcode/rd/funct3/rs1/rs2/funct7 extraction handoff to hardware decode, plus MIR JSON export visibility for functions, blocks, instructions, and terminators | Full for the implemented generated helper set: writeback, branch immediate, store immediate, I-type immediate, upper immediate, execute control, execute datapath, branch datapath, control-flow datapath, memory access control, jump immediate, dispatch class, and trap/halt control now parse/lower through frontend -> HIR -> MIR with exact slice/concat proof coverage |
 | REQ-RFL-011 | VHDL slice-emission spec proving typed MIR bitfield extracts lower to deterministic `downto` slices with source-map entries after the expanded MIR JSON export exposes the lowering shape | Full for the implemented generated helper set: backend specs assert exact helper guards, slice emission, concat expressions, and source-map records for writeback/branch/store/I-type/upper/execute-control/execute-datapath/branch-datapath/control-flow-datapath/memory-access/jump/dispatch/trap-halt helpers |
 

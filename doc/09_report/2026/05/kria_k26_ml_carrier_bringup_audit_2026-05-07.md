@@ -40,7 +40,7 @@ Check the newly connected FPGA board, research how to use it, inspect UART first
 - `bin/simple test test/system/qemu/rv64gc_qemu_boot_spec.spl --mode=interpreter` passed 14 examples.
 - RISC-V semihost hello passed in GHDL with `Hello, RISC-V 32!` and `[SEMIHOST TEST] Success - exit code 0`.
 - `bin/simple test test/unit/os/qemu_runner_spec.spl --mode=interpreter` passed 55 examples, including RV64 hosted and RV64 VirtIO FAT32 SMF scenario checks.
-- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_rv64_hosted_qemu_spec.spl --mode=interpreter` passed 3 examples, proving the RV64 hosted QEMU command includes disk and SSH/HTTP host-forwarding.
+- `bin/simple test test/system/app/simpleos/feature/simpleos_rv64_hosted_qemu_spec.spl --mode=interpreter` passed 3 examples, proving the RV64 hosted QEMU command includes disk and SSH/HTTP host-forwarding.
 - Rebuilt `src/compiler_rust/target/debug/simple` with `LLVM_SYS_180_PREFIX=/usr/lib/llvm-18 cargo build --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --features llvm --bin simple`.
 - Created `build/os/fat32-riscv64.img` with `sh scripts/make_os_disk.shs 64 build/os/fat32-riscv64.img "" riscv64`.
 - `timeout 180 bin/simple run examples/simple_os/run.spl -- --arch=riscv64` built `build/os/simpleos_riscv64_smf_fs.elf`, booted under `qemu-system-riscv64`, and printed `SIMPLEOS_RISCV_SMF_FS_PASS` plus `TEST PASSED`.

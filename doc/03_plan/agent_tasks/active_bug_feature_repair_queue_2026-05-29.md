@@ -1270,7 +1270,7 @@ Spawned read-only explorers:
       self-hosted synthetic-registration path.
     - Added live system proof and SPipe mirror:
       `test/system/compiler/driver_synthetic_registration_live_spec.spl` and
-      `doc/06_spec/app/compiler/feature/driver_synthetic_registration_live_spec.spl`.
+      `test/system/app/compiler/feature/driver_synthetic_registration_live_spec.spl`.
     - Verification passed with rebuilt release compiler for both specs.
     - Remaining driver scope: module/impl-level `@driver(...)` sugar and
       `@native_lib(...)` synthesis remain open.

@@ -14,7 +14,7 @@
 
 ## Phase 2: System Test Design
 
-1. Generate SPipe BDD tests: `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl`
+1. Generate SPipe BDD tests: `test/system/app/<app_name>/feature/<feature>_spec.spl`
 2. Follow SPipe rules:
    - `describe`, `it`, `expect` built-in (no import)
    - One assertion concept per test
@@ -34,7 +34,8 @@
 | Artifact | Location |
 |----------|----------|
 | Architecture | `doc/04_architecture/<feature>.md` |
-| System tests | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` |
+| System tests | `test/system/app/<app_name>/feature/<feature>_spec.spl` |
+| Generated spec docs | `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md` |
 | Test plan | `doc/03_plan/sys_test/<feature>.md` |
 
 ## Critical Rules

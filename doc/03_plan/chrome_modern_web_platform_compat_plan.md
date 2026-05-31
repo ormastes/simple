@@ -36,7 +36,7 @@ This plan does not assume "fully Chrome-compatible" is a single implementation t
 - Feature requirements: `doc/02_requirements/feature/chrome_modern_web_platform_compat.md`
 - NFR requirements: `doc/02_requirements/nfr/chrome_modern_web_platform_compat.md`
 - System test plan and BDD scenarios: `doc/03_plan/sys_test/chrome_modern_web_platform_compat.md`
-- Executable SPipe acceptance tests: `doc/06_spec/app/lib/feature/chrome_modern_web_platform_compat_spec.spl`
+- Executable SPipe acceptance tests: `test/system/app/lib/feature/chrome_modern_web_platform_compat_spec.spl`
 
 ## Phase 1: Inventory And Compatibility Matrix
 

@@ -120,7 +120,7 @@ Related design artifacts:
 
 - `doc/04_architecture/html_css_binary_caching.md`
 - `doc/05_design/html_css_binary_caching.md`
-- `doc/06_spec/app/ui/feature/html_css_binary_caching_spec.spl`
+- `test/system/app/ui/feature/html_css_binary_caching_spec.spl`
 
 ---
 

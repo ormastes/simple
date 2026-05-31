@@ -8,14 +8,14 @@ Validate the research-first verification package with executable specs now, then
 
 ### Gate ST-1: Existing kernel seam remains green
 
-- run `doc/06_spec/app/os/feature/rv64_user_mode_exec_spec.spl`
+- run `test/system/app/os/feature/rv64_user_mode_exec_spec.spl`
 - expected:
   - pass
   - no regressions in trap/syscall/privilege seam behavior
 
 ### Gate ST-2: New combined OS-core verification spec passes
 
-- run `doc/06_spec/app/os/feature/simpleos_desktop_core_formal_verification_spec.spl`
+- run `test/system/app/os/feature/simpleos_desktop_core_formal_verification_spec.spl`
 - expected:
   - pass
   - exercises both kernel-core and desktop-contract slices

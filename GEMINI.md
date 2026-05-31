@@ -40,7 +40,8 @@ Before starting any step, **check if prerequisite artifacts exist**:
 | Requirements | `doc/02_requirements/feature/<feature>.md` | Research first, then generate + ask user to select |
 | UI design | `doc/05_design/<feature>_tui.md` | Create TUI/GUI mockups yourself |
 | Architecture | `doc/04_architecture/<feature>.md` | Design architecture yourself |
-| System tests | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` | Create SPipe tests yourself |
+| System tests | `test/system/app/<app_name>/feature/<feature>_spec.spl` | Create SPipe tests yourself |
+| Generated spec docs | `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md` | Generate from executable tests |
 | Detail design | `doc/05_design/<feature>.md` | Create detail design yourself |
 | Implementation | `src/**/<feature>.spl` | Implement the feature |
 
@@ -140,7 +141,8 @@ If missing, do all:
 - Output: `doc/04_architecture/<feature>.md`
 
 ### System Test Design
-- SPipe BDD tests: `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl`
+- SPipe BDD tests: `test/system/app/<app_name>/feature/<feature>_spec.spl`
+- Generated/manual SPipe docs: `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md`
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
 - Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 
@@ -217,6 +219,7 @@ This repo is a registered Gemini CLI extension via `gemini-extension.json`.
 | 2 | Architecture | `doc/04_architecture/<feature>.md` |
 | 2 | UI design | `doc/05_design/<feature>_tui.md`, `_gui.md` |
 | 2 | Detail design | `doc/05_design/<feature>.md` |
-| 2 | System tests | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` |
+| 2 | System tests | `test/system/app/<app_name>/feature/<feature>_spec.spl` |
+| 2 | Generated spec docs | `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md` |
 | 3 | Source code | `src/**/<feature>.spl` |
 | 4 | Verify report | Terminal output (PASS/FAIL/WARN) |

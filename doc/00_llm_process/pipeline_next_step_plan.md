@@ -89,7 +89,7 @@ Design flow:
    - `doc/05_design/<feature>.md`
    - `doc/03_plan/sys_test/<feature>.md`
    - `doc/03_plan/agent_tasks/<feature>_impl.md`
-   - `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` when system tests are ready.
+   - `test/system/app/<app_name>/feature/<feature>_spec.spl` when system tests are ready.
 5. Feature and layer expert agents update their own `skill.md` files with new design links, changed contracts, affected modules, test obligations, and handoff notes for implementation.
 
 Research and design outputs are drafts until the lead agent reconciles conflicts between experts and records the final merged plan.

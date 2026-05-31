@@ -113,5 +113,5 @@ requiring provider-specific gate implementations.
 
 The detailed SPipe tests live in:
 
-- `doc/06_spec/app/spipe_process_harness/feature/spipe_process_harness_spec.spl`
+- `test/system/app/spipe_process_harness/feature/spipe_process_harness_spec.spl`
 - `test/unit/lib/spipe_process_harness/spipe_process_harness_spec.spl`

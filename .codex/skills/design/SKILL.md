@@ -68,7 +68,8 @@ Output: `doc/04_architecture/<feature>.md`
   after-step capture with default kind `tui`.
 
 Output:
-- Test specs: `doc/06_spec/<mirrored-test-path>/<feature>_spec.spl`
+- Test specs: `test/<mirrored-test-path>/<feature>_spec.spl`
+- Generated/manual spec docs: `doc/06_spec/<mirrored-test-path>/<feature>_spec.md`
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
 
 Generated/manual SPipe docs mirror executable test paths after stripping the
@@ -146,7 +147,8 @@ Reference: `doc/07_guide/testing/sspec_scenario_manual.md`.
 | Artifact | Path |
 |----------|------|
 | Architecture | `doc/04_architecture/<feature>.md` |
-| System test specs | `doc/06_spec/<mirrored-test-path>/<feature>_spec.spl` |
+| System test specs | `test/<mirrored-test-path>/<feature>_spec.spl` |
+| Generated spec docs | `doc/06_spec/<mirrored-test-path>/<feature>_spec.md` |
 | Test plan | `doc/03_plan/sys_test/<feature>.md` |
 | Detail design | `doc/05_design/<feature>.md` |
 | Agent tasks | `doc/03_plan/agent_tasks/<feature>.md` |

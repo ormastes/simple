@@ -19,7 +19,7 @@ Date: 2026-05-06
 
 ## Evidence Commands
 
-- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`
+- `bin/simple test test/system/app/simpleos/feature/simpleos_wine_substrate_spec.spl`
 - `bin/simple test test/unit/lib/common/wine_vm_adapter_spec.spl --mode=interpreter --clean`
 - `bin/simple test test/unit/lib/common/wine_posix_adapter_spec.spl --mode=interpreter --clean`
 - `bin/simple test test/unit/lib/common/wine_thread_adapter_spec.spl --mode=interpreter --clean`

@@ -9,13 +9,13 @@ fallback when semantic proof is missing.
 
 ## System Spec
 
-`doc/06_spec/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl`
+`test/system/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl`
 
 ## Execution
 
 ```bash
-bin/simple check doc/06_spec/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl
-bin/simple test doc/06_spec/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl --mode=interpreter
+bin/simple check test/system/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl
+bin/simple test test/system/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl --mode=interpreter
 ```
 
 ## Pass Criteria

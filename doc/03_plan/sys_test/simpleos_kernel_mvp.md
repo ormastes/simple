@@ -15,7 +15,7 @@ scheduler, or loader code.
 
 ## Evidence Targets
 
-- pure spec coverage in `doc/06_spec/app/os/feature/kernel_mvp_spec.spl`
+- pure spec coverage in `test/system/app/os/feature/kernel_mvp_spec.spl`
 - runnable system smoke coverage in `test/system/kernel_mvp_spec.spl`
 - kernel log ring-buffer coverage in `test/unit/os/kernel/logging/kernel_log_spec.spl`
 
@@ -23,7 +23,7 @@ scheduler, or loader code.
 
 ### Gate MVP-1: Ring-3 context setup stays correct
 
-- run `doc/06_spec/app/os/feature/kernel_mvp_spec.spl`
+- run `test/system/app/os/feature/kernel_mvp_spec.spl`
 - expect:
   - x86_64 user context uses ring-3 selectors
   - user-mode flags are preserved
@@ -31,7 +31,7 @@ scheduler, or loader code.
 
 ### Gate MVP-2: FAT32-backed x86_64 exec path resolves
 
-- run `doc/06_spec/app/os/feature/kernel_mvp_spec.spl`
+- run `test/system/app/os/feature/kernel_mvp_spec.spl`
 - expect:
   - synthetic filesystem-backed executable bytes resolve
   - process-image construction succeeds for x86_64 bytes
@@ -39,14 +39,14 @@ scheduler, or loader code.
 
 ### Gate MVP-3: Shell smoke advertises dmesg
 
-- run `doc/06_spec/app/os/feature/kernel_mvp_spec.spl`
+- run `test/system/app/os/feature/kernel_mvp_spec.spl`
 - expect:
   - shell help output includes `dmesg [N]`
   - shell command surface remains discoverable
 
 ### Gate MVP-4: Fault smoke rejects invalid entry cleanly
 
-- run `doc/06_spec/app/os/feature/kernel_mvp_spec.spl`
+- run `test/system/app/os/feature/kernel_mvp_spec.spl`
 - expect:
   - invalid ring-3 entry returns `-22`
   - unknown syscall dispatch returns `-1`
@@ -62,7 +62,7 @@ scheduler, or loader code.
 ## System Smoke Command
 
 ```sh
-bin/simple test doc/06_spec/app/os/feature/kernel_mvp_spec.spl
+bin/simple test test/system/app/os/feature/kernel_mvp_spec.spl
 bin/simple test test/system/kernel_mvp_spec.spl
 bin/simple test test/unit/os/kernel/logging/kernel_log_spec.spl
 ```

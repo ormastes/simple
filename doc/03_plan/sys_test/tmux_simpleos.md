@@ -46,7 +46,7 @@ Excluded from this slice:
 Focused design-level feature spec:
 
 ```bash
-bin/simple test doc/06_spec/app/simpleos/feature/tmux_simpleos_spec.spl
+bin/simple test test/system/app/simpleos/feature/tmux_simpleos_spec.spl
 ```
 
 Perf smoke for hosted/dev NFR evidence:

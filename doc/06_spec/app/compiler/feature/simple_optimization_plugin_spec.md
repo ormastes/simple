@@ -85,7 +85,7 @@ Documentation validation:
 ```bash
 test -f doc/07_guide/compiler_optimization_plugin.md
 test -f doc/04_architecture/simple_optimization_plugin.md
-test -f doc/06_spec/app/compiler/feature/simple_optimization_plugin_spec.md
+test -f test/system/app/compiler/feature/simple_optimization_plugin_spec.md
 rg -n "Simple Optimization Plugin" doc/04_architecture/glossary.md doc/07_guide/README.md
 ```
 
@@ -94,7 +94,7 @@ Implementation validation for providers:
 ```bash
 bin/simple test test/unit/compiler/mir_opt/cipher/pattern_engine_spec.spl --mode=interpreter
 bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter
-bin/simple test doc/06_spec/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl --mode=interpreter
+bin/simple test test/system/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl --mode=interpreter
 bin/simple run test/perf/compiler/jit_hotspot_plan_bench.spl --mode=interpreter
 bin/simple check src/compiler/60.mir_opt
 ```
@@ -110,6 +110,6 @@ opt -verify-each -passes='default<O2>' input.ll -o output.bc
 
 - Guide: `doc/07_guide/compiler_optimization_plugin.md`
 - Architecture: `doc/04_architecture/simple_optimization_plugin.md`
-- JIT hotspot system test: `doc/06_spec/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl`
+- JIT hotspot system test: `test/system/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl`
 - Glossary: `doc/04_architecture/glossary.md`
 - Optimization levels: `doc/07_guide/compiler_optimization_levels.md`

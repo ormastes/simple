@@ -18,7 +18,7 @@ Primary test entrypoints:
 - `test/unit/compiler/backend/riscv_target_spec.spl`
 - `test/feature/usage/llvm_backend_riscv64_spec.spl`
 - `test/feature/baremetal/ghdl_generated_riscv64_linux_smoke_spec.spl`
-- `doc/06_spec/app/hardware/feature/rv64_linux_rtl_pipeline_spec.spl`
+- `test/system/app/hardware/feature/rv64_linux_rtl_pipeline_spec.spl`
 
 Smoke expectations:
 

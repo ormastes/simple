@@ -93,7 +93,7 @@ or `Rejected` (one-line reason).
   increments. Coverage:
   `test/system/compiler/driver_synthetic_registration_live_spec.spl`,
   mirrored at
-  `doc/06_spec/app/compiler/feature/driver_synthetic_registration_live_spec.spl`,
+  `test/system/app/compiler/feature/driver_synthetic_registration_live_spec.spl`,
   plus Rust seed regression
   `src/compiler_rust/driver/tests/synthetic_driver_registration_live.rs`.
   Codex update 2026-05-30: extended the same live Rust seed HIR and AST

@@ -85,7 +85,8 @@ If multiple LLMs participate in research:
 | GUI design | `doc/05_design/<feature>_gui.md` |
 | Architecture | `doc/04_architecture/<feature>.md` |
 | System test plan | `doc/03_plan/sys_test/<feature>.md` |
-| SPipe tests | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` |
+| SPipe tests | `test/system/app/<app_name>/feature/<feature>_spec.spl` |
+| Generated SPipe docs | `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md` |
 | Detail design | `doc/05_design/<feature>.md` |
 | Agent task breakdown | `doc/03_plan/agent_tasks/<feature>.md` |
 
@@ -151,7 +152,7 @@ If multiple LLMs participate in research:
 | Requirements | `doc/02_requirements/feature/<feature>.md` | Do Phase 1 |
 | Architecture | `doc/04_architecture/<feature>.md` | Do Phase 2 |
 | Detail design | `doc/05_design/<feature>.md` | Do Phase 2 |
-| System tests | `doc/06_spec/.../<feature>_spec.spl` | Do Phase 2 |
+| System tests | `test/.../<feature>_spec.spl` | Do Phase 2 |
 
 **If ALL exist**, skip directly to coding (Phase 3.4 below).
 
@@ -408,7 +409,7 @@ Before starting any phase, check if prerequisite artifacts exist:
 | Requirements | `doc/02_requirements/feature/<feature>.md` | Research + user selection |
 | UI design | `doc/05_design/<feature>_tui.md` | Create mockups yourself |
 | Architecture | `doc/04_architecture/<feature>.md` | Design it yourself |
-| System tests | `doc/06_spec/.../<feature>_spec.spl` | Create SPipe tests yourself |
+| System tests | `test/.../<feature>_spec.spl` | Create SPipe tests yourself |
 | Detail design | `doc/05_design/<feature>.md` | Create it yourself |
 | Implementation | `src/**/<feature>.spl` | Implement it yourself |
 | Verification | Verify report shows PASS | Run verify yourself |
@@ -445,13 +446,18 @@ doc/
     <feature>_tui.md              # Phase 2: TUI mockups
     <feature>_gui.md              # Phase 2: GUI mockups
   06_spec/
-    app/<app>/feature/<feature>_spec.spl  # Phase 2: SPipe system tests
+    system/app/<app>/feature/<feature>_spec.md  # Phase 2: generated scenario docs
   07_guide/
     <feature>.md                  # Phase 3: user guide (if needed)
   08_tracking/
     bug/<feature>_limitations.md  # Phase 3: known limitations
   09_report/
     <feature>_complete_<date>.md  # Phase 3: completion report
+```
+
+```
+test/
+  system/app/<app>/feature/<feature>_spec.spl  # Phase 2: executable SPipe system tests
 ```
 
 ---

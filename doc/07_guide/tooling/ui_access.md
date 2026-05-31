@@ -299,7 +299,7 @@ The protocol is covered in:
 - [test/unit/app/ui/ui_access_http_spec.spl](../../../test/unit/app/ui/ui_access_http_spec.spl)
 - [test/unit/os/services/llm/ui_access_dispatch_spec.spl](../../../test/unit/os/services/llm/ui_access_dispatch_spec.spl)
 - [test/system/ui/ui_access_contract_spec.spl](../../../test/system/ui/ui_access_contract_spec.spl)
-- [doc/06_spec/app/os/feature/ui_access_protocol_spec.spl](../../06_spec/app/os/feature/ui_access_protocol_spec.spl)
+- [test/system/app/os/feature/ui_access_protocol_spec.spl](../../../test/system/app/os/feature/ui_access_protocol_spec.spl)
 
 Current limitation:
 

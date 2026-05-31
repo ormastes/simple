@@ -1022,7 +1022,7 @@ match result:
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Source | `doc/06_spec/app/browser/feature/webgpu_js_wasm_simple_spec.spl` |
+| Source | `test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` |
 | Updated | 2026-05-31 |
 | Generator | `simple spipe-docgen` (Simple) |
 
