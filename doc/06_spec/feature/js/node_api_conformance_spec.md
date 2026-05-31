@@ -1075,6 +1075,34 @@ expect(_eval_str("Buffer.alloc(2).writeUInt16BE(4660, 0)")).to_equal("2")
 
 </details>
 
+#### writes little-endian unsigned 32-bit values and returns the next offset
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.alloc(4).writeUInt32LE(1836278016, 0)")).to_equal("4")
+```
+
+</details>
+
+#### writes big-endian unsigned 32-bit values and returns the next offset
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.alloc(4).writeUInt32BE(6388590, 0)")).to_equal("4")
+```
+
+</details>
+
 #### exposes Buffer.concat through require('buffer')
 
 <details>
@@ -1286,8 +1314,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 85 |
-| Active scenarios | 85 |
+| Total scenarios | 87 |
+| Active scenarios | 87 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

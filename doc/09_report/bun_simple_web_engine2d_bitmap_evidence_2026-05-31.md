@@ -16,8 +16,8 @@
 - optimized path: static-pixel-cache
 - simple cache hits: 1000
 - simple cache stores: 1
-- best simple frame us: 5
-- best baseline frame us: 347
+- best simple frame us: 4
+- best baseline frame us: 344
 
 ## Simple Output
 - ## trial 1
@@ -118,7 +118,7 @@
 - checksum=26296152649728
 - weighted_checksum=80792557145241600
 - total_checksum=26296152649728000
-- frame_us=5
+- frame_us=4
 - backend_name=software
 - optimized_path=static-pixel-cache
 - cache_hits=1000
@@ -132,7 +132,7 @@
 - checksum=26296152649728
 - weighted_checksum=80792557145241600
 - total_checksum=26296152649728000
-- frame_us=5
+- frame_us=4
 - backend_name=software
 - optimized_path=static-pixel-cache
 - cache_hits=1000
@@ -354,7 +354,7 @@
 - checksum=26296152649728
 - weighted_checksum=80792557145241600
 - total_checksum=26296152649728000
-- frame_us=5
+- frame_us=4
 - backend_name=software
 - optimized_path=static-pixel-cache
 - cache_hits=1000
@@ -385,7 +385,7 @@
 - checksum=26296152649728
 - weighted_checksum=80792557145241600
 - total_checksum=26296152649728000
-- frame_us=363
+- frame_us=352
 - blur_or_tolerance_used=false
 - ## trial 2
 - renderer=bun-simple-web-engine2d-baseline
@@ -396,7 +396,7 @@
 - checksum=26296152649728
 - weighted_checksum=80792557145241600
 - total_checksum=26296152649728000
-- frame_us=359
+- frame_us=352
 - blur_or_tolerance_used=false
 - ## trial 3
 - renderer=bun-simple-web-engine2d-baseline
@@ -407,5 +407,5 @@
 - checksum=26296152649728
 - weighted_checksum=80792557145241600
 - total_checksum=26296152649728000
-- frame_us=347
+- frame_us=344
 - blur_or_tolerance_used=false
