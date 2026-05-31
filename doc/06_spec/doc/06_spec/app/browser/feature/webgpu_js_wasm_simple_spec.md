@@ -632,6 +632,38 @@ match result:
 
 </details>
 
+#### should expose thenable WebAssembly.instantiate result shape through BrowserSession
+
+1. var session = BrowserSession new
+
+2. session open html
+
+3. Ok
+   - Expected: _display_js(value) equals `function:function:instantiated:1:object`
+
+4. Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+val result = session.eval_script("var r = WebAssembly.instantiate('0061736d01000000010100'); typeof r.then + ':' + typeof r.catch + ':' + r.status + ':' + r.module.sectionCount + ':' + typeof r.instance.exports")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("function:function:instantiated:1:object")
+    Err(err):
+        expect("unexpected js error: {err}").to_equal("")
+```
+
+</details>
+
 #### should expose bounded memory exports through BrowserSession
 
 1. var session = BrowserSession new
@@ -849,8 +881,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 26 |
-| Active scenarios | 26 |
+| Total scenarios | 27 |
+| Active scenarios | 27 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

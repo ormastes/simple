@@ -34,14 +34,17 @@ expect(_display_js(interp._native_webassembly_validate([JsValue.String(v: "not-w
 
 1. var interp =  new interpreter
    - Expected: _object_property_text(interp, valid, "status") equals `instantiated`
+   - Expected: _object_property_text(interp, valid, "then") equals `[Function]`
+   - Expected: _object_property_text(interp, valid, "catch") equals `[Function]`
    - Expected: _object_property_text(interp, invalid, "status") equals `invalid`
    - Expected: _object_property_text(interp, invalid, "error") equals `invalid-wasm-header`
+   - Expected: _object_property_text(interp, invalid, "then") equals `[Function]`
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -49,10 +52,13 @@ var interp = _new_interpreter()
 
 val valid = interp._native_webassembly_instantiate(JsValue.Undefined, [JsValue.String(v: "0061736d01000000")])
 expect(_object_property_text(interp, valid, "status")).to_equal("instantiated")
+expect(_object_property_text(interp, valid, "then")).to_equal("[Function]")
+expect(_object_property_text(interp, valid, "catch")).to_equal("[Function]")
 
 val invalid = interp._native_webassembly_instantiate(JsValue.Undefined, [JsValue.String(v: "0061736d00000000")])
 expect(_object_property_text(interp, invalid, "status")).to_equal("invalid")
 expect(_object_property_text(interp, invalid, "error")).to_equal("invalid-wasm-header")
+expect(_object_property_text(interp, invalid, "then")).to_equal("[Function]")
 ```
 
 </details>
