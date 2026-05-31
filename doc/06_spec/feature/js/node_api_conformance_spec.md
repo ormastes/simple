@@ -567,6 +567,20 @@ expect(_str(os_endianness([]))).to_equal("LE")
 
 </details>
 
+#### uses POSIX EOL for the deterministic compatibility profile
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(os_eol([]))).to_equal("\n")
+```
+
+</details>
+
 ### Node.js Buffer module
 
 ### Buffer.byteLength
@@ -844,7 +858,7 @@ expect(_eval_str("require('fs').status")).to_equal("denied")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -859,6 +873,8 @@ expect(_eval_str("require('node:os').homedir()")).to_equal("/")
 expect(_eval_str("require('node:os').tmpdir()")).to_equal("/tmp")
 expect(_eval_str("require('os').endianness()")).to_equal("LE")
 expect(_eval_str("require('node:os').endianness()")).to_equal("LE")
+expect(_eval_str("require('os').EOL")).to_equal("\n")
+expect(_eval_str("require('node:os').EOL")).to_equal("\n")
 ```
 
 </details>
@@ -1489,8 +1505,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 98 |
-| Active scenarios | 98 |
+| Total scenarios | 99 |
+| Active scenarios | 99 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
