@@ -39,10 +39,8 @@ cd test/perf/graphics_2d/c_reference && make && ./bench_2d
 # Simple runner (smoke mode by default — interpreter-safe 16x16)
 bin/simple test/perf/graphics_2d/simple_runner.spl
 
-# Simple runner full mode: edit simple_runner.spl, set:
-#   RUNNER_MODE = "full", RUNNER_FW = 1920, RUNNER_FH = 1080
-#   RUNNER_WARMUP = 10, RUNNER_FRAMES = 100
-# Then run in compiled mode (native/smf).
+# Simple runner full mode (1920x1080, 10 warmup, 100 timed frames)
+SIMPLE_ENGINE2D_RUNNER_MODE=full bin/simple test/perf/graphics_2d/simple_runner.spl
 ```
 
 ## NFR-2B Requirements

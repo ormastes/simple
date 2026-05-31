@@ -19,18 +19,41 @@
 
 extern fn rt_time_now_nanos() -> i64
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text
 
-val RUNNER_FW: i64     = 16
-val RUNNER_FH: i64     = 16
-val RUNNER_WARMUP: i64 = 1
-val RUNNER_FRAMES: i64 = 3
+val RUNNER_SMOKE_FW: i64     = 16
+val RUNNER_SMOKE_FH: i64     = 16
+val RUNNER_SMOKE_WARMUP: i64 = 1
+val RUNNER_SMOKE_FRAMES: i64 = 3
+
+val RUNNER_FULL_FW: i64     = 1920
+val RUNNER_FULL_FH: i64     = 1080
+val RUNNER_FULL_WARMUP: i64 = 10
+val RUNNER_FULL_FRAMES: i64 = 100
 
 val BYTES_PER_PX: i64 = 4
 val SPRITE_W: i64 = 64
 val SPRITE_H: i64 = 64
 
+fn runner_full_enabled() -> bool:
+    val mode: text = rt_env_get("SIMPLE_ENGINE2D_RUNNER_MODE") ?? ""
+    val full: text = rt_env_get("SIMPLE_ENGINE2D_FULL_MODE") ?? ""
+    mode == "full" or full == "1"
+
 fn runner_mode_text() -> text:
-    "smoke"
+    if runner_full_enabled(): "full" else: "smoke"
+
+fn runner_frame_width() -> i64:
+    if runner_full_enabled(): RUNNER_FULL_FW else: RUNNER_SMOKE_FW
+
+fn runner_frame_height() -> i64:
+    if runner_full_enabled(): RUNNER_FULL_FH else: RUNNER_SMOKE_FH
+
+fn runner_warmup_frames() -> i64:
+    if runner_full_enabled(): RUNNER_FULL_WARMUP else: RUNNER_SMOKE_WARMUP
+
+fn runner_timed_frames() -> i64:
+    if runner_full_enabled(): RUNNER_FULL_FRAMES else: RUNNER_SMOKE_FRAMES
 
 struct Framebuffer:
     data:   [u8]
@@ -68,6 +91,22 @@ fn sprite_pixel(id: i64) -> i64:
     else if id == 1: 0xFF00FF00
     else if id == 2: 0xFFFF0000
     else: 0xFF00FFFF
+
+fn fill_color(id: i64) -> i64:
+    if id == 0: 0xFF0000FF
+    else if id == 1: 0xFF00FF00
+    else if id == 2: 0xFFFF0000
+    else if id == 3: 0xFF808080
+    else: 0xFF00FFFF
+
+fn scroll_row_color(id: i64) -> i64:
+    if id == 0: 0xFFFFFFFF
+    else: 0xFF000000
+
+fn scroll_indicator_color(id: i64) -> i64:
+    if id == 0: 0xFF0000FF
+    else if id == 1: 0xFFFF0000
+    else: 0xFF00FF00
 
 fn do_clear(mut fb: Framebuffer, color: i64):
     val r: u8 = c_r(color)
@@ -145,14 +184,13 @@ fn do_blit(mut fb: Framebuffer, cr: ClipRect, src_id: i64, dst_x: i64, dst_y: i6
 
 fn run_fill(mut fb: Framebuffer) -> i64:
     val cr: ClipRect = clip_none()
-    val colors: [i64] = [0xFF0000FF, 0xFF00FF00, 0xFFFF0000, 0xFF808080, 0xFF00FFFF]
     do_clear(fb, 0xFF000000)
     val max_x: i64 = fb.width - 1
     val max_y: i64 = fb.height - 1
     var i: i64 = 0
     while i < 100:
         val col: i64 = (i * 37) % 5
-        val color: i64 = colors[col as i32]
+        val color: i64 = fill_color(col)
         val rx: i64 = if max_x > 0: (i * 19) % max_x else: 0
         val ry: i64 = if max_y > 0: (i * 11) % max_y else: 0
         val rw: i64 = 1 + (i * 7) % (max_x + 1)
@@ -184,16 +222,14 @@ fn run_scroll(mut fb: Framebuffer) -> i64:
     val ch: i64 = fb.height - cy * 2
     val cr: ClipRect = ClipRect(active: true, x: cx, y: cy, x2: cx + cw, y2: cy + ch)
     val scroll_offset: i64 = 1
-    val row_colors: [i64] = [0xFFFFFFFF, 0xFF000000]
-    val ind_colors: [i64] = [0xFF0000FF, 0xFFFF0000, 0xFF00FF00]
     var count: i64 = 2
     val row_h: i64 = if fb.height > 8: 2 else: 1
     val n_rows: i64 = if fb.height > 4: 4 else: 2
     var row: i64 = 0
     while row < n_rows:
         val ry: i64 = cy + row * (row_h + 1) - scroll_offset
-        do_rect(fb, cr, cx, ry, cw, row_h, row_colors[(row % 2) as i32])
-        do_rect(fb, cr, cx + cw - 2, ry, 2, row_h, ind_colors[(row % 3) as i32])
+        do_rect(fb, cr, cx, ry, cw, row_h, scroll_row_color(row % 2))
+        do_rect(fb, cr, cx + cw - 2, ry, 2, row_h, scroll_indicator_color(row % 3))
         count = count + 2
         row = row + 1
     count + 1
@@ -250,9 +286,13 @@ fn read_rss_kb() -> i64:
     0
 
 fn bench_scene(scene_id: i64, scene_name: text):
-    val fb: Framebuffer = fb_alloc(RUNNER_FW, RUNNER_FH)
+    val fw: i64 = runner_frame_width()
+    val fh: i64 = runner_frame_height()
+    val warmup_frames: i64 = runner_warmup_frames()
+    val timed_frames: i64 = runner_timed_frames()
+    val fb: Framebuffer = fb_alloc(fw, fh)
     var w: i64 = 0
-    while w < RUNNER_WARMUP:
+    while w < warmup_frames:
         if scene_id == 0: run_fill(fb)
         else if scene_id == 1: run_blit(fb)
         else: run_scroll(fb)
@@ -260,7 +300,7 @@ fn bench_scene(scene_id: i64, scene_name: text):
     var samples: [i64] = []
     var total_draws: i64 = 0
     var f: i64 = 0
-    while f < RUNNER_FRAMES:
+    while f < timed_frames:
         val t0: i64 = rt_time_now_nanos()
         val draws: i64 = if scene_id == 0: run_fill(fb)
                          else if scene_id == 1: run_blit(fb)
@@ -272,16 +312,16 @@ fn bench_scene(scene_id: i64, scene_name: text):
     val sorted: [i64] = sort_i64(samples)
     val p50_ns: i64 = pct(sorted, 50, 100)
     val p95_ns: i64 = pct(sorted, 95, 100)
-    val ppf: i64 = RUNNER_FW * RUNNER_FH
+    val ppf: i64 = fw * fh
     val pps: i64 = if p50_ns > 0: (ppf * 1000000000) / p50_ns else: 0
-    val avg_draws: i64 = total_draws / RUNNER_FRAMES
+    val avg_draws: i64 = total_draws / timed_frames
     val dps: i64 = if p50_ns > 0: (avg_draws * 1000000000) / p50_ns else: 0
     val rss: i64 = read_rss_kb()
     val phash: i64 = fnv1a_fb(fb)
-    print "SCENE_RESULT scene={scene_name} backend=simple_cpu_scalar frame_count={RUNNER_FRAMES} p50_ms={p50_ns / 1000000} p95_ms={p95_ns / 1000000} pixels_per_sec={pps} draws_per_sec={dps} rss_kb={rss} pixel_hash={phash} p50_ns={p50_ns} mode={runner_mode_text()}"
+    print "SCENE_RESULT scene={scene_name} backend=simple_cpu_scalar frame_count={timed_frames} p50_ms={p50_ns / 1000000} p95_ms={p95_ns / 1000000} pixels_per_sec={pps} draws_per_sec={dps} rss_kb={rss} pixel_hash={phash} p50_ns={p50_ns} mode={runner_mode_text()}"
 
 fn main():
-    print "# simple_runner mode={runner_mode_text()} frame={RUNNER_FW}x{RUNNER_FH} warmup={RUNNER_WARMUP} frames={RUNNER_FRAMES}"
+    print "# simple_runner mode={runner_mode_text()} frame={runner_frame_width()}x{runner_frame_height()} warmup={runner_warmup_frames()} frames={runner_timed_frames()}"
     bench_scene(0, "fill_1080p")
     bench_scene(1, "blit_tiles")
     bench_scene(2, "clipped_scroll")
