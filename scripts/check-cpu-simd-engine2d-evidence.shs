@@ -7,9 +7,10 @@ cd "$ROOT_DIR"
 SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 TIMEOUT_SECS="${SIMPLE_CPU_SIMD_EVIDENCE_TIMEOUT_SECS:-120}"
 WORK_DIR="${BUILD_DIR:-build/cpu-simd-engine2d-evidence}"
-REPORT_PATH="${REPORT_PATH:-$WORK_DIR/report.md}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/cpu_simd_engine2d_evidence_$(date -u +%F).md}"
 EVIDENCE_SRC="$WORK_DIR/cpu_simd_engine2d_evidence.spl"
 EVIDENCE_LOG="$WORK_DIR/evidence.log"
+ENV_PATH="$WORK_DIR/evidence.env"
 
 have() {
     command -v "$1" >/dev/null 2>&1
@@ -31,6 +32,33 @@ value_of() {
 emit_report() {
     mkdir -p "$(dirname -- "$REPORT_PATH")"
     {
+        echo "cpu_simd_evidence_status=${STATUS:-unknown}"
+        echo "cpu_simd_evidence_reason=${REASON:-unknown}"
+        echo "cpu_simd_evidence_arch=${ARCH:-unknown}"
+        echo "cpu_simd_evidence_feature=${FEATURE:-unknown}"
+        echo "cpu_simd_evidence_level=${LEVEL:-unknown}"
+        echo "cpu_simd_evidence_checksum=${CHECKSUM:-0}"
+        echo "cpu_simd_evidence_provider_hits=${REPORT_HITS:-0}"
+        echo "cpu_simd_evidence_provider_changes=${REPORT_CHANGES:-0}"
+        echo "cpu_simd_evidence_fill_expected_checksum=${FILL_EXPECTED:-0}"
+        echo "cpu_simd_evidence_fill_actual_checksum=${FILL_ACTUAL:-0}"
+        echo "cpu_simd_evidence_fill_mismatch_count=${FILL_MISMATCH:-}"
+        echo "cpu_simd_evidence_copy_expected_checksum=${COPY_EXPECTED:-0}"
+        echo "cpu_simd_evidence_copy_actual_checksum=${COPY_ACTUAL:-0}"
+        echo "cpu_simd_evidence_copy_mismatch_count=${COPY_MISMATCH:-}"
+        echo "cpu_simd_evidence_alpha_expected_checksum=${ALPHA_EXPECTED:-0}"
+        echo "cpu_simd_evidence_alpha_actual_checksum=${ALPHA_ACTUAL:-0}"
+        echo "cpu_simd_evidence_alpha_mismatch_count=${ALPHA_MISMATCH:-}"
+        echo "cpu_simd_evidence_scroll_expected_checksum=${SCROLL_EXPECTED:-0}"
+        echo "cpu_simd_evidence_scroll_actual_checksum=${SCROLL_ACTUAL:-0}"
+        echo "cpu_simd_evidence_scroll_mismatch_count=${SCROLL_MISMATCH:-}"
+        echo "cpu_simd_evidence_blur_or_tolerance_used=false"
+        echo "cpu_simd_evidence_x86_status=${X86_STATUS:-unknown}"
+        echo "cpu_simd_evidence_arm_status=${ARM_STATUS:-unknown}"
+        echo "cpu_simd_evidence_riscv_status=${RISCV_STATUS:-unknown}"
+        echo "cpu_simd_evidence_log=$EVIDENCE_LOG"
+    } >"$ENV_PATH"
+    {
         echo "# CPU SIMD Engine2D Evidence"
         echo
         echo "- status: ${STATUS:-unknown}"
@@ -40,15 +68,35 @@ emit_report() {
         echo "- level: ${LEVEL:-unknown}"
         echo "- checksum: ${CHECKSUM:-0}"
         echo "- provider_hits: ${REPORT_HITS:-0}"
+        echo "- provider_changes: ${REPORT_CHANGES:-0}"
+        echo "- fill expected checksum: ${FILL_EXPECTED:-0}"
+        echo "- fill actual checksum: ${FILL_ACTUAL:-0}"
+        echo "- fill mismatch count: ${FILL_MISMATCH:-}"
+        echo "- copy expected checksum: ${COPY_EXPECTED:-0}"
+        echo "- copy actual checksum: ${COPY_ACTUAL:-0}"
+        echo "- copy mismatch count: ${COPY_MISMATCH:-}"
+        echo "- alpha expected checksum: ${ALPHA_EXPECTED:-0}"
+        echo "- alpha actual checksum: ${ALPHA_ACTUAL:-0}"
+        echo "- alpha mismatch count: ${ALPHA_MISMATCH:-}"
+        echo "- scroll expected checksum: ${SCROLL_EXPECTED:-0}"
+        echo "- scroll actual checksum: ${SCROLL_ACTUAL:-0}"
+        echo "- scroll mismatch count: ${SCROLL_MISMATCH:-}"
+        echo "- blur/tolerance used: false"
         echo "- x86_status: ${X86_STATUS:-unknown}"
         echo "- arm_status: ${ARM_STATUS:-unknown}"
         echo "- riscv_status: ${RISCV_STATUS:-unknown}"
         echo "- evidence_log: $EVIDENCE_LOG"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$ENV_PATH"
+        echo
+        echo "## Evidence Log"
+        sed 's/^/- /' "$EVIDENCE_LOG" 2>/dev/null || true
     } >"$REPORT_PATH"
 }
 
-mkdir -p "$WORK_DIR"
-rm -f "$EVIDENCE_LOG" "$REPORT_PATH"
+mkdir -p "$WORK_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$EVIDENCE_LOG" "$ENV_PATH" "$REPORT_PATH"
 
 echo "check=cpu_simd_engine2d_evidence"
 echo "simple_bin=$SIMPLE_BIN"
@@ -75,8 +123,44 @@ fi
 cat >"$EVIDENCE_SRC" <<'SIMPLE'
 use std.gpu.engine2d.backend_probe.{StrictBackendFactory, backend_status_text}
 use std.gpu.engine2d.rendering_opt_provider.{rendering_opt_report_from_simd}
-use std.gpu.engine2d.simd_kernels.{cpu_simd_runtime_evidence}
+use std.gpu.engine2d.simd_kernels.{cpu_simd_runtime_evidence, fill_span, copy_span, alpha_blend_span, simd_scroll_region}
 use std.gpu.engine2d.simd_provider.{reset_simd_hits}
+
+fn checksum_pixels(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        sum = sum + pixels[i].to_i64() * ((i + 1) as i64)
+        i = i + 1
+    sum
+
+fn mismatch_count(a: [u32], b: [u32]) -> i64:
+    var mismatches: i64 = 0
+    val max_len = if a.len() > b.len(): a.len() else: b.len()
+    var i = 0
+    while i < max_len:
+        if i >= a.len() or i >= b.len() or a[i] != b[i]:
+            mismatches = mismatches + 1
+        i = i + 1
+    mismatches
+
+fn alpha_pixel(s: u32, d: u32) -> u32:
+    val sa = (s >> 24) & 0xFF
+    if sa == 255:
+        return s
+    if sa == 0:
+        return d
+    val inv_a = 255 - sa
+    val dr = (d >> 16) & 0xFF
+    val dg = (d >> 8) & 0xFF
+    val db = d & 0xFF
+    val sr = (s >> 16) & 0xFF
+    val sg = (s >> 8) & 0xFF
+    val sb = s & 0xFF
+    val r = (sr * sa + dr * inv_a) / 255
+    val g = (sg * sa + dg * inv_a) / 255
+    val b = (sb * sa + db * inv_a) / 255
+    (255u32 << 24) | (r << 16) | (g << 8) | b
 
 fn main() -> i64:
     reset_simd_hits()
@@ -88,6 +172,32 @@ fn main() -> i64:
     val arm = factory.create_backend("cpu_simd_arm")
     val riscv = factory.create_backend("cpu_simd_riscv")
 
+    var fill_actual: [u32] = [0u32; 16]
+    var fill_expected: [u32] = [0xFF102030u32; 16]
+    fill_span(fill_actual, 0, 16, 0xFF102030u32)
+
+    var copy_actual: [u32] = [0u32; 16]
+    var copy_expected: [u32] = [0u32; 16]
+    val copy_src: [u32] = [0xFF000001u32, 0xFF000002u32, 0xFF000003u32, 0xFF000004u32, 0xFF000005u32, 0xFF000006u32, 0xFF000007u32, 0xFF000008u32, 0xFF000009u32, 0xFF00000Au32, 0xFF00000Bu32, 0xFF00000Cu32, 0xFF00000Du32, 0xFF00000Eu32, 0xFF00000Fu32, 0xFF000010u32]
+    copy_span(copy_actual, 4, copy_src, 2, 8)
+    var copy_i = 0
+    while copy_i < 8:
+        copy_expected[4 + copy_i] = copy_src[2 + copy_i]
+        copy_i = copy_i + 1
+
+    var alpha_actual: [u32] = [0xFF102030u32; 16]
+    var alpha_expected: [u32] = [0xFF102030u32; 16]
+    val alpha_src: [u32] = [0x804080C0u32; 16]
+    alpha_blend_span(alpha_actual, alpha_src, 0, 16)
+    var alpha_i = 0
+    while alpha_i < 16:
+        alpha_expected[alpha_i] = alpha_pixel(alpha_src[alpha_i], alpha_expected[alpha_i])
+        alpha_i = alpha_i + 1
+
+    var scroll_actual: [u32] = [0xFF000001u32, 0xFF000002u32, 0xFF000003u32, 0xFF000004u32, 0xFF000005u32, 0xFF000006u32, 0xFF000007u32, 0xFF000008u32, 0xFF000009u32, 0xFF00000Au32, 0xFF00000Bu32, 0xFF00000Cu32, 0xFF00000Du32, 0xFF00000Eu32, 0xFF00000Fu32, 0xFF000010u32]
+    val scroll_expected: [u32] = [0xFF000001u32, 0xFF000002u32, 0xFF000003u32, 0xFF000004u32, 0xFF000001u32, 0xFF000002u32, 0xFF000003u32, 0xFF000004u32, 0xFF000005u32, 0xFF000006u32, 0xFF000007u32, 0xFF000008u32, 0xFF00000Du32, 0xFF00000Eu32, 0xFF00000Fu32, 0xFF000010u32]
+    simd_scroll_region(scroll_actual, 4, 0, 0, 4, 3, 1)
+
     print("cpu_simd_arch=" + evidence.arch)
     print("cpu_simd_feature=" + evidence.feature)
     print("cpu_simd_level=" + evidence.level)
@@ -96,6 +206,19 @@ fn main() -> i64:
     print("cpu_simd_hit_summary=" + evidence.hit_summary)
     print("cpu_simd_provider_hits=" + report.total_hits.to_text())
     print("cpu_simd_provider_changes=" + report.total_changes.to_text())
+    print("cpu_simd_fill_expected_checksum=" + checksum_pixels(fill_expected).to_text())
+    print("cpu_simd_fill_actual_checksum=" + checksum_pixels(fill_actual).to_text())
+    print("cpu_simd_fill_mismatch_count=" + mismatch_count(fill_expected, fill_actual).to_text())
+    print("cpu_simd_copy_expected_checksum=" + checksum_pixels(copy_expected).to_text())
+    print("cpu_simd_copy_actual_checksum=" + checksum_pixels(copy_actual).to_text())
+    print("cpu_simd_copy_mismatch_count=" + mismatch_count(copy_expected, copy_actual).to_text())
+    print("cpu_simd_alpha_expected_checksum=" + checksum_pixels(alpha_expected).to_text())
+    print("cpu_simd_alpha_actual_checksum=" + checksum_pixels(alpha_actual).to_text())
+    print("cpu_simd_alpha_mismatch_count=" + mismatch_count(alpha_expected, alpha_actual).to_text())
+    print("cpu_simd_scroll_expected_checksum=" + checksum_pixels(scroll_expected).to_text())
+    print("cpu_simd_scroll_actual_checksum=" + checksum_pixels(scroll_actual).to_text())
+    print("cpu_simd_scroll_mismatch_count=" + mismatch_count(scroll_expected, scroll_actual).to_text())
+    print("cpu_simd_blur_or_tolerance_used=false")
     print("cpu_simd_probe_status=" + backend_status_text(general.status))
     print("cpu_simd_x86_status=" + backend_status_text(x86.status))
     print("cpu_simd_arm_status=" + backend_status_text(arm.status))
@@ -111,6 +234,9 @@ fn main() -> i64:
         print("overall=fail")
         return 1
     if report.total_hits < 4:
+        print("overall=fail")
+        return 1
+    if mismatch_count(fill_expected, fill_actual) != 0 or mismatch_count(copy_expected, copy_actual) != 0 or mismatch_count(alpha_expected, alpha_actual) != 0 or mismatch_count(scroll_expected, scroll_actual) != 0:
         print("overall=fail")
         return 1
     print("overall=pass")
@@ -133,6 +259,19 @@ LEVEL="$(value_of cpu_simd_level)"
 EXECUTED_ALL="$(value_of cpu_simd_executed_all)"
 CHECKSUM="$(value_of cpu_simd_checksum)"
 REPORT_HITS="$(value_of cpu_simd_provider_hits)"
+REPORT_CHANGES="$(value_of cpu_simd_provider_changes)"
+FILL_EXPECTED="$(value_of cpu_simd_fill_expected_checksum)"
+FILL_ACTUAL="$(value_of cpu_simd_fill_actual_checksum)"
+FILL_MISMATCH="$(value_of cpu_simd_fill_mismatch_count)"
+COPY_EXPECTED="$(value_of cpu_simd_copy_expected_checksum)"
+COPY_ACTUAL="$(value_of cpu_simd_copy_actual_checksum)"
+COPY_MISMATCH="$(value_of cpu_simd_copy_mismatch_count)"
+ALPHA_EXPECTED="$(value_of cpu_simd_alpha_expected_checksum)"
+ALPHA_ACTUAL="$(value_of cpu_simd_alpha_actual_checksum)"
+ALPHA_MISMATCH="$(value_of cpu_simd_alpha_mismatch_count)"
+SCROLL_EXPECTED="$(value_of cpu_simd_scroll_expected_checksum)"
+SCROLL_ACTUAL="$(value_of cpu_simd_scroll_actual_checksum)"
+SCROLL_MISMATCH="$(value_of cpu_simd_scroll_mismatch_count)"
 GENERAL_STATUS="$(value_of cpu_simd_probe_status)"
 X86_STATUS="$(value_of cpu_simd_x86_status)"
 ARM_STATUS="$(value_of cpu_simd_arm_status)"
@@ -148,6 +287,9 @@ if [ "$EVIDENCE_CODE" -ne 0 ] || [ "$OVERALL" != "pass" ]; then
 elif [ "$EXECUTED_ALL" != "true" ]; then
     STATUS=fail
     REASON=simd-kernels-not-executed
+elif [ "$FILL_MISMATCH" != "0" ] || [ "$COPY_MISMATCH" != "0" ] || [ "$ALPHA_MISMATCH" != "0" ] || [ "$SCROLL_MISMATCH" != "0" ]; then
+    STATUS=fail
+    REASON=simd-output-mismatch
 elif [ "$GENERAL_STATUS" != "Initialized" ]; then
     STATUS=fail
     REASON=general-simd-probe-not-initialized
@@ -180,6 +322,11 @@ echo "cpu_simd_evidence_feature=$FEATURE"
 echo "cpu_simd_evidence_level=$LEVEL"
 echo "cpu_simd_evidence_checksum=$CHECKSUM"
 echo "cpu_simd_evidence_provider_hits=$REPORT_HITS"
+echo "cpu_simd_evidence_provider_changes=$REPORT_CHANGES"
+echo "cpu_simd_evidence_fill_mismatch_count=$FILL_MISMATCH"
+echo "cpu_simd_evidence_copy_mismatch_count=$COPY_MISMATCH"
+echo "cpu_simd_evidence_alpha_mismatch_count=$ALPHA_MISMATCH"
+echo "cpu_simd_evidence_scroll_mismatch_count=$SCROLL_MISMATCH"
 echo "cpu_simd_evidence_general_status=$GENERAL_STATUS"
 echo "cpu_simd_evidence_x86_status=$X86_STATUS"
 echo "cpu_simd_evidence_arm_status=$ARM_STATUS"
