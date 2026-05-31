@@ -180,23 +180,20 @@ fn _vector_font_env_pixels(key: text, expected_len: i64) -> [u8]:
         i = i + 1
     pixels
 
-fn _try_cuda_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
-    val cuda_status = _vector_font_env_text("CUDA_VECTOR_FONT_STATUS")
-    val cuda_reason = _vector_font_env_text("CUDA_VECTOR_FONT_REASON")
-    if cuda_status != "pass" or not cuda_reason.contains("matched-cpu"):
+fn _try_vector_font_glyph_slot(prefix: text, slot: i64, codepoint: i32, font_size: i32) -> CachedGlyph?:
+    val slot_prefix = prefix + "_VECTOR_FONT_GLYPH_" + slot.to_text()
+    if _vector_font_env_i64(slot_prefix + "_CODEPOINT") != codepoint.to_i64():
         return nil
-    if _vector_font_env_i64("CUDA_VECTOR_FONT_GLYPH_0_CODEPOINT") != codepoint.to_i64():
+    if _vector_font_env_i64(slot_prefix + "_FONT_SIZE") != font_size.to_i64():
         return nil
-    if _vector_font_env_i64("CUDA_VECTOR_FONT_GLYPH_0_FONT_SIZE") != font_size.to_i64():
-        return nil
-    val width = _vector_font_env_i64("CUDA_VECTOR_FONT_GLYPH_0_WIDTH").to_i32()
-    val height = _vector_font_env_i64("CUDA_VECTOR_FONT_GLYPH_0_HEIGHT").to_i32()
-    val advance = _vector_font_env_i64("CUDA_VECTOR_FONT_GLYPH_0_ADVANCE").to_i32()
-    val expected_checksum = _vector_font_env_i64("CUDA_VECTOR_FONT_GLYPH_0_CHECKSUM")
+    val width = _vector_font_env_i64(slot_prefix + "_WIDTH").to_i32()
+    val height = _vector_font_env_i64(slot_prefix + "_HEIGHT").to_i32()
+    val advance = _vector_font_env_i64(slot_prefix + "_ADVANCE").to_i32()
+    val expected_checksum = _vector_font_env_i64(slot_prefix + "_CHECKSUM")
     if width <= 0 or height <= 0 or advance <= 0 or expected_checksum <= 0:
         return nil
     val expected_len = (width * height).to_i64()
-    val pixels = _vector_font_env_pixels("CUDA_VECTOR_FONT_GLYPH_0_PIXELS", expected_len)
+    val pixels = _vector_font_env_pixels(slot_prefix + "_PIXELS", expected_len)
     if pixels.len().to_i64() != expected_len:
         return nil
     val checksum = _vector_font_pixels_checksum(pixels, width, height, advance)
@@ -213,38 +210,27 @@ fn _try_cuda_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
         pixels: pixels
     )
 
+fn _try_vector_font_glyph_from_backend(prefix: text, codepoint: i32, font_size: i32) -> CachedGlyph?:
+    val status = _vector_font_env_text(prefix + "_VECTOR_FONT_STATUS")
+    val reason = _vector_font_env_text(prefix + "_VECTOR_FONT_REASON")
+    if status != "pass" or not reason.contains("matched-cpu"):
+        return nil
+    var glyph_count = _vector_font_env_i64(prefix + "_VECTOR_FONT_GLYPH_COUNT")
+    if glyph_count <= 0:
+        glyph_count = 1
+    var slot: i64 = 0
+    while slot < glyph_count:
+        val glyph = _try_vector_font_glyph_slot(prefix, slot, codepoint, font_size)
+        if glyph != nil:
+            return glyph
+        slot = slot + 1
+    nil
+
+fn _try_cuda_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_vector_font_glyph_from_backend("CUDA", codepoint, font_size)
+
 fn _try_opencl_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
-    val opencl_status = _vector_font_env_text("OPENCL_VECTOR_FONT_STATUS")
-    val opencl_reason = _vector_font_env_text("OPENCL_VECTOR_FONT_REASON")
-    if opencl_status != "pass" or not opencl_reason.contains("matched-cpu"):
-        return nil
-    if _vector_font_env_i64("OPENCL_VECTOR_FONT_GLYPH_0_CODEPOINT") != codepoint.to_i64():
-        return nil
-    if _vector_font_env_i64("OPENCL_VECTOR_FONT_GLYPH_0_FONT_SIZE") != font_size.to_i64():
-        return nil
-    val width = _vector_font_env_i64("OPENCL_VECTOR_FONT_GLYPH_0_WIDTH").to_i32()
-    val height = _vector_font_env_i64("OPENCL_VECTOR_FONT_GLYPH_0_HEIGHT").to_i32()
-    val advance = _vector_font_env_i64("OPENCL_VECTOR_FONT_GLYPH_0_ADVANCE").to_i32()
-    val expected_checksum = _vector_font_env_i64("OPENCL_VECTOR_FONT_GLYPH_0_CHECKSUM")
-    if width <= 0 or height <= 0 or advance <= 0 or expected_checksum <= 0:
-        return nil
-    val expected_len = (width * height).to_i64()
-    val pixels = _vector_font_env_pixels("OPENCL_VECTOR_FONT_GLYPH_0_PIXELS", expected_len)
-    if pixels.len().to_i64() != expected_len:
-        return nil
-    val checksum = _vector_font_pixels_checksum(pixels, width, height, advance)
-    if checksum != expected_checksum:
-        return nil
-    CachedGlyph(
-        codepoint: codepoint,
-        font_size: font_size,
-        width: width,
-        height: height,
-        advance: advance,
-        bearing_x: 0,
-        bearing_y: 0,
-        pixels: pixels
-    )
+    _try_vector_font_glyph_from_backend("OPENCL", codepoint, font_size)
 
 fn rasterize_vector_accelerated(cmds: [i32], codepoint: i32, font_size: i32) -> CachedGlyph:
     _vector_font_accelerator_attempts = _vector_font_accelerator_attempts + 1
