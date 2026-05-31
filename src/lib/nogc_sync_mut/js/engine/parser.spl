@@ -32,6 +32,16 @@ fn _js_parser_statement(stmt: text) -> JsStatement:
 
 fn _js_parser_expression(raw: text) -> JsExpression:
     val expr = _js_parser_strip_outer_parens(raw.trim())
+    val assign = _js_parser_find_top_level_assignment(expr)
+    if assign >= 0:
+        return JsExpression.Assignment(
+            target: _js_parser_expression(expr.slice(0, assign)),
+            value: _js_parser_expression(expr.slice(assign + 1, expr.len()))
+        )
+    if expr.starts_with("-") and expr.len() > 1:
+        return JsExpression.Unary(op: "-", operand: _js_parser_expression(expr.slice(1, expr.len())))
+    if expr.starts_with("!") and expr.len() > 1:
+        return JsExpression.Unary(op: "!", operand: _js_parser_expression(expr.slice(1, expr.len())))
     val plus = _js_parser_find_top_level_right(expr, "+")
     if plus >= 0:
         return JsExpression.Binary(
@@ -276,6 +286,32 @@ fn _js_parser_find_top_level_right(expr: text, needle: text) -> i64:
                 found = i
         i = i + 1
     found
+
+fn _js_parser_find_top_level_assignment(expr: text) -> i64:
+    var depth = 0
+    var quote = ""
+    var i = 0
+    while i < expr.len():
+        val ch = expr.slice(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                i = i + 1
+            else if ch == quote:
+                quote = ""
+        else:
+            if ch == "'" or ch == "\"":
+                quote = ch
+            else if ch == "(" or ch == "[" or ch == "{":
+                depth = depth + 1
+            else if ch == ")" or ch == "]" or ch == "}":
+                depth = depth - 1
+            else if depth == 0 and ch == "=":
+                val prev = if i > 0: expr.slice(i - 1, i) else: ""
+                val next = if i + 1 < expr.len(): expr.slice(i + 1, i + 2) else: ""
+                if prev != "=" and prev != "!" and prev != "<" and prev != ">" and next != "=":
+                    return i
+        i = i + 1
+    -1
 
 fn _js_parser_split_top_level(expr: text, sep: text) -> [text]:
     var parts: [text] = []

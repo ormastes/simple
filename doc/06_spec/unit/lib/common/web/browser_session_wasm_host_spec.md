@@ -42,6 +42,54 @@ match program[0]:
 
 </details>
 
+#### parses computed indexed assignments for typed array writes
+
+1. JsStatement ExprStmt
+
+2. JsExpression Assignment
+
+3. JsExpression ComputedMember
+   - Expected: "computed" equals `computed`
+   - Expected: "expected computed target" equals ``
+
+4. JsExpression Unary
+   - Expected: op equals `-`
+   - Expected: "expected unary negative" equals ``
+   - Expected: "expected assignment" equals ``
+   - Expected: "expected expr stmt" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val program = js_parse_program_subset("view[1] = -1")
+expect(program.len()).to_equal(1)
+match program[0]:
+    JsStatement.ExprStmt(expr):
+        match expr:
+            JsExpression.Assignment(target, value):
+                match target:
+                    JsExpression.ComputedMember(object, property):
+                        expect("computed").to_equal("computed")
+                    _:
+                        expect("expected computed target").to_equal("")
+                match value:
+                    JsExpression.Unary(op, operand):
+                        expect(op).to_equal("-")
+                    _:
+                        expect("expected unary negative").to_equal("")
+            _:
+                expect("expected assignment").to_equal("")
+    _:
+        expect("expected expr stmt").to_equal("")
+```
+
+</details>
+
 #### requires WASM magic and version bytes before validation succeeds
 
 1. var interp =  new interpreter
@@ -722,7 +770,7 @@ expect(_object_property_text(interp, memory, "pages")).to_equal("2")
 6. interp set object property
    - Expected: _display_js(interp.get_object_property(buffer_id, "0")) equals `4`
    - Expected: _display_js(interp.get_object_property(view_id, "0")) equals `4`
-   - Expected: _display_js(interp.get_object_property(view_id, "1")) equals `0`
+   - Expected: _display_js(interp.get_object_property(view_id, "1")) equals `255`
    - Expected: "missing view" equals ``
    - Expected: "missing buffer" equals ``
    - Expected: "missing memory" equals ``
@@ -749,7 +797,7 @@ match memory:
                         interp.set_object_property(view_id, "1", JsValue.Number(v: -1.0))
                         expect(_display_js(interp.get_object_property(buffer_id, "0"))).to_equal("4")
                         expect(_display_js(interp.get_object_property(view_id, "0"))).to_equal("4")
-                        expect(_display_js(interp.get_object_property(view_id, "1"))).to_equal("0")
+                        expect(_display_js(interp.get_object_property(view_id, "1"))).to_equal("255")
                     _:
                         expect("missing view").to_equal("")
             _:
@@ -779,8 +827,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

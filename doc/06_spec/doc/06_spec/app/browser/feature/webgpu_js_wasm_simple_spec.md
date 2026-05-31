@@ -856,6 +856,38 @@ match result:
 
 </details>
 
+#### should share WebAssembly.Memory bytes with BrowserSession Uint8Array views
+
+1. var session = BrowserSession new
+
+2. session open html
+
+3. Ok
+   - Expected: _display_js(value) equals `4:4:255:7:65536:65536`
+
+4. Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+val result = session.eval_script("var mem = new WebAssembly.Memory({initial:1, maximum:1}); var view = new Uint8Array(mem.buffer); view[0] = 260; view[1] = -1; view[2] = 7; view[0] + ':' + mem.buffer[0] + ':' + view[1] + ':' + mem.buffer[2] + ':' + view.length + ':' + mem.buffer.byteLength")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("4:4:255:7:65536:65536")
+    Err(err):
+        expect("unexpected js error: {err}").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -881,8 +913,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 27 |
-| Active scenarios | 27 |
+| Total scenarios | 28 |
+| Active scenarios | 28 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
