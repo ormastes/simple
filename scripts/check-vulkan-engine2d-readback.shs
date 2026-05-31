@@ -13,6 +13,10 @@ EVIDENCE_LOG="$WORK_DIR/evidence.log"
 STRICT_LOG="$WORK_DIR/vulkan_strict.json"
 PARITY_LOG="$WORK_DIR/engine2d_cpu_vulkan_parity.json"
 ENV_PATH="$WORK_DIR/evidence.env"
+CLEAR_EXPECTED_PIXELS="$WORK_DIR/clear-expected-u32.json"
+CLEAR_ACTUAL_PIXELS="$WORK_DIR/clear-actual-u32.json"
+RECT_EXPECTED_PIXELS="$WORK_DIR/rect-expected-u32.json"
+RECT_ACTUAL_PIXELS="$WORK_DIR/rect-actual-u32.json"
 
 have() {
     command -v "$1" >/dev/null 2>&1
@@ -59,11 +63,15 @@ write_report() {
         echo "vulkan_engine2d_readback_clear_expected_checksum=$(value_of clear_expected_checksum)"
         echo "vulkan_engine2d_readback_clear_actual_checksum=$(value_of clear_actual_checksum)"
         echo "vulkan_engine2d_readback_clear_mismatches=$(value_of clear_mismatches)"
+        echo "vulkan_engine2d_readback_clear_expected_pixels_path=$(value_of clear_expected_pixels_path)"
+        echo "vulkan_engine2d_readback_clear_actual_pixels_path=$(value_of clear_actual_pixels_path)"
         echo "vulkan_engine2d_readback_rect_status=$(value_of rect_status)"
         echo "vulkan_engine2d_readback_rect_pixels=$(value_of rect_readback_pixels)"
         echo "vulkan_engine2d_readback_rect_expected_checksum=$(value_of rect_expected_checksum)"
         echo "vulkan_engine2d_readback_rect_actual_checksum=$(value_of rect_actual_checksum)"
         echo "vulkan_engine2d_readback_rect_mismatches=$(value_of rect_mismatches)"
+        echo "vulkan_engine2d_readback_rect_expected_pixels_path=$(value_of rect_expected_pixels_path)"
+        echo "vulkan_engine2d_readback_rect_actual_pixels_path=$(value_of rect_actual_pixels_path)"
         echo "vulkan_engine2d_readback_blur_or_tolerance_used=false"
         echo "vulkan_engine2d_readback_vulkan_strict_exit_code=${STRICT_CODE:-}"
         echo "vulkan_engine2d_readback_cpu_vulkan_parity_exit_code=${PARITY_CODE:-}"
@@ -87,11 +95,15 @@ write_report() {
         echo "- clear expected checksum: $(value_of clear_expected_checksum)"
         echo "- clear actual checksum: $(value_of clear_actual_checksum)"
         echo "- clear mismatches: $(value_of clear_mismatches)"
+        echo "- clear expected pixels: $(value_of clear_expected_pixels_path)"
+        echo "- clear actual pixels: $(value_of clear_actual_pixels_path)"
         echo "- rect status: $(value_of rect_status)"
         echo "- rect pixels: $(value_of rect_readback_pixels)"
         echo "- rect expected checksum: $(value_of rect_expected_checksum)"
         echo "- rect actual checksum: $(value_of rect_actual_checksum)"
         echo "- rect mismatches: $(value_of rect_mismatches)"
+        echo "- rect expected pixels: $(value_of rect_expected_pixels_path)"
+        echo "- rect actual pixels: $(value_of rect_actual_pixels_path)"
         echo "- blur/tolerance used: false"
         echo "- vulkan strict exit code: ${STRICT_CODE:-}"
         echo "- cpu/vulkan parity exit code: ${PARITY_CODE:-}"
@@ -105,7 +117,7 @@ write_report() {
 }
 
 mkdir -p "$WORK_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$EVIDENCE_LOG" "$STRICT_LOG" "$PARITY_LOG" "$ENV_PATH" "$REPORT_PATH"
+rm -f "$EVIDENCE_LOG" "$STRICT_LOG" "$PARITY_LOG" "$ENV_PATH" "$REPORT_PATH" "$CLEAR_EXPECTED_PIXELS" "$CLEAR_ACTUAL_PIXELS" "$RECT_EXPECTED_PIXELS" "$RECT_ACTUAL_PIXELS"
 
 echo "check=vulkan_engine2d_readback"
 echo "simple_bin=$SIMPLE_BIN"
@@ -119,9 +131,16 @@ if [ ! -x "$SIMPLE_BIN" ]; then
     exit 1
 fi
 
-cat > "$EVIDENCE_SRC" <<'SIMPLE'
+cat > "$EVIDENCE_SRC" <<SIMPLE
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{backend_status_text}
+
+val CLEAR_EXPECTED_PIXELS_PATH: text = "$CLEAR_EXPECTED_PIXELS"
+val CLEAR_ACTUAL_PIXELS_PATH: text = "$CLEAR_ACTUAL_PIXELS"
+val RECT_EXPECTED_PIXELS_PATH: text = "$RECT_EXPECTED_PIXELS"
+val RECT_ACTUAL_PIXELS_PATH: text = "$RECT_ACTUAL_PIXELS"
 
 fn count_rect_mismatches(pixels: [u32], bg: u32, fg: u32) -> i64:
     var mismatches = 0
@@ -165,6 +184,37 @@ fn checksum_expected_rect(bg: u32, fg: u32) -> i64:
         y = y + 1
     sum
 
+fn expected_rect_pixels(bg: u32, fg: u32) -> [u32]:
+    var pixels: [u32] = []
+    var y = 0
+    while y < 16:
+        var x = 0
+        while x < 16:
+            val expected = if x >= 2 and x < 8 and y >= 2 and y < 8: fg else: bg
+            pixels.push(expected)
+            x = x + 1
+        y = y + 1
+    pixels
+
+fn expected_clear_pixels(count: i32, color: u32) -> [u32]:
+    var pixels: [u32] = []
+    var i = 0
+    while i < count:
+        pixels.push(color)
+        i = i + 1
+    pixels
+
+fn write_u32_pixels(path: text, producer: text, pixels: [u32]) -> bool:
+    var json = "{\"count\":" + pixels.len().to_text() + ",\"format\":\"u32\",\"producer\":\"" + producer + "\",\"pixels\":["
+    var i = 0
+    while i < pixels.len():
+        if i > 0:
+            json = json + ","
+        json = json + pixels[i].to_i64().to_text()
+        i = i + 1
+    json = json + "]}"
+    rt_file_write_text(path, json)
+
 fn main() -> i64:
     print("evidence_program=engine2d_vulkan_readback")
     val probe = Engine2D.probe_backend(16, 16, "vulkan")
@@ -203,9 +253,16 @@ fn main() -> i64:
     engine.clear(bg)
     engine.present()
     val clear_pixels = engine.read_pixels()
+    val clear_expected_pixels = expected_clear_pixels(clear_pixels.len(), bg)
+    val clear_expected_written = write_u32_pixels(CLEAR_EXPECTED_PIXELS_PATH, "vulkan-clear-expected", clear_expected_pixels)
+    val clear_actual_written = write_u32_pixels(CLEAR_ACTUAL_PIXELS_PATH, "vulkan-clear-readback", clear_pixels)
     print("clear_readback_pixels=" + clear_pixels.len().to_text())
     print("clear_expected_checksum=" + checksum_expected_clear(clear_pixels.len(), bg).to_text())
     print("clear_actual_checksum=" + checksum_pixels(clear_pixels).to_text())
+    print("clear_expected_pixels_path=" + CLEAR_EXPECTED_PIXELS_PATH)
+    print("clear_actual_pixels_path=" + CLEAR_ACTUAL_PIXELS_PATH)
+    print("clear_expected_pixels_written=" + clear_expected_written.to_text())
+    print("clear_actual_pixels_written=" + clear_actual_written.to_text())
     var clear_mismatches = 0
     var i = 0
     while i < clear_pixels.len():
@@ -213,7 +270,7 @@ fn main() -> i64:
             clear_mismatches = clear_mismatches + 1
         i = i + 1
     print("clear_mismatches=" + clear_mismatches.to_text())
-    if clear_mismatches != 0:
+    if clear_mismatches != 0 or not clear_expected_written or not clear_actual_written:
         engine.shutdown()
         print("present_exercised=true")
         print("readback_exercised=true")
@@ -227,17 +284,24 @@ fn main() -> i64:
     engine.draw_rect_filled(2, 2, 6, 6, fg)
     engine.present()
     val rect_pixels = engine.read_pixels()
+    val rect_expected_pixels = expected_rect_pixels(bg, fg)
+    val rect_expected_written = write_u32_pixels(RECT_EXPECTED_PIXELS_PATH, "vulkan-rect-expected", rect_expected_pixels)
+    val rect_actual_written = write_u32_pixels(RECT_ACTUAL_PIXELS_PATH, "vulkan-rect-readback", rect_pixels)
     val rect_mismatches = count_rect_mismatches(rect_pixels, bg, fg)
     print("rect_readback_pixels=" + rect_pixels.len().to_text())
     print("rect_expected_checksum=" + checksum_expected_rect(bg, fg).to_text())
     print("rect_actual_checksum=" + checksum_pixels(rect_pixels).to_text())
     print("rect_mismatches=" + rect_mismatches.to_text())
+    print("rect_expected_pixels_path=" + RECT_EXPECTED_PIXELS_PATH)
+    print("rect_actual_pixels_path=" + RECT_ACTUAL_PIXELS_PATH)
+    print("rect_expected_pixels_written=" + rect_expected_written.to_text())
+    print("rect_actual_pixels_written=" + rect_actual_written.to_text())
     engine.shutdown()
 
     print("present_exercised=true")
     print("readback_exercised=true")
     print("clear_status=pass")
-    if rect_mismatches != 0:
+    if rect_mismatches != 0 or not rect_expected_written or not rect_actual_written:
         print("rect_status=fail")
         print("evidence_status=fail")
         print("overall=fail")
