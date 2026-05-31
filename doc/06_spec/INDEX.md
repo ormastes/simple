@@ -4,17 +4,29 @@
 
 ## Quick Stats
 
-- **Total Features:** 1
+- **Total Features:** 3
 - **Complete Documentation:** 0 (0%)
-- **Stubs Remaining:** 1
+- **Stubs Remaining:** 3
 - **Total Lines:** 0
-- **Warnings:** 1
+- **Warnings:** 3
 
 ---
+
+## Standard Library (1 features)
+
+| Feature | Status | Difficulty | Tests | Coverage | Details |
+|---------|--------|------------|-------|----------|----------|
+| [Browser Session Wasm Host Specification](unit/lib/common/web/browser_session_wasm_host_spec.md) | Auto-generated | N/A | 9 | 0% | 0 lines |
 
 ## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Image Decode Specification](paint/image_decode_spec.md) | Auto-generated | N/A | 35 | 0% | 0 lines |
+| [Webassembly Host Specification](script/webassembly_host_spec.md) | Auto-generated | N/A | 2 | 0% | 0 lines |
+
+## Application (1 features)
+
+| Feature | Status | Difficulty | Tests | Coverage | Details |
+|---------|--------|------------|-------|----------|----------|
+| [Webgpu Js Wasm Simple Specification](doc/06_spec/app/browser/feature/webgpu_js_wasm_simple_spec.md) | Auto-generated | N/A | 22 | 0% | 0 lines |
 

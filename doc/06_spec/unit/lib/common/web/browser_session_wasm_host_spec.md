@@ -320,6 +320,111 @@ expect(_object_property_text(interp, invalid_instance, "error")).to_equal("inval
 
 </details>
 
+#### exposes bounded memory export metadata and instance memory shape
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, module, "validated") equals `true`
+   - Expected: _object_property_text(interp, module, "hasMemorySection") equals `true`
+   - Expected: _object_property_text(interp, module, "hasExportSection") equals `true`
+   - Expected: _object_property_text(interp, module, "memoryMinPages") equals `1`
+   - Expected: _object_property_text(interp, module, "exportCount") equals `1`
+   - Expected: _object_property_text(interp, module, "firstExportName") equals `memory`
+   - Expected: _object_property_text(interp, module, "firstExportKind") equals `memory`
+   - Expected: _object_child_property_text(interp, instance, "exports", "memory") equals `[object Object]`
+
+2. JsValue Object
+
+3. JsValue Object
+
+4. JsValue Object
+   - Expected: _display_js(interp.get_object_property(memory_id, "byteLength")) equals `65536`
+   - Expected: _display_js(interp.get_object_property(memory_id, "pageSize")) equals `65536`
+   - Expected: "missing memory" equals ``
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000503010001070a01066d656d6f72790200")])
+expect(_object_property_text(interp, module, "validated")).to_equal("true")
+expect(_object_property_text(interp, module, "hasMemorySection")).to_equal("true")
+expect(_object_property_text(interp, module, "hasExportSection")).to_equal("true")
+expect(_object_property_text(interp, module, "memoryMinPages")).to_equal("1")
+expect(_object_property_text(interp, module, "exportCount")).to_equal("1")
+expect(_object_property_text(interp, module, "firstExportName")).to_equal("memory")
+expect(_object_property_text(interp, module, "firstExportKind")).to_equal("memory")
+
+val instance = interp._native_webassembly_instance([module])
+expect(_object_child_property_text(interp, instance, "exports", "memory")).to_equal("[object Object]")
+match instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                match interp.get_object_property(exports_id, "memory"):
+                    JsValue.Object(memory_id):
+                        expect(_display_js(interp.get_object_property(memory_id, "byteLength"))).to_equal("65536")
+                        expect(_display_js(interp.get_object_property(memory_id, "pageSize"))).to_equal("65536")
+                    _:
+                        expect("missing memory").to_equal("")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
+#### constructs bounded WebAssembly.Memory values and grows within maximum
+
+1. var interp =  new interpreter
+
+2. interp set object property
+
+3. interp set object property
+   - Expected: _object_property_text(interp, memory, "pages") equals `1`
+   - Expected: _object_property_text(interp, memory, "byteLength") equals `65536`
+   - Expected: _object_child_property_text(interp, memory, "buffer", "byteLength") equals `65536`
+   - Expected: _display_js(interp._native_webassembly_memory_grow(memory, [JsValue.Number(v: 1.0)])) equals `1`
+   - Expected: _object_property_text(interp, memory, "pages") equals `2`
+   - Expected: _object_child_property_text(interp, memory, "buffer", "byteLength") equals `131072`
+   - Expected: _display_js(interp._native_webassembly_memory_grow(memory, [JsValue.Number(v: 1.0)])) equals `-1`
+   - Expected: _object_property_text(interp, memory, "pages") equals `2`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+val options_id = interp.create_object()
+interp.set_object_property(options_id, "initial", JsValue.Number(v: 1.0))
+interp.set_object_property(options_id, "maximum", JsValue.Number(v: 2.0))
+
+val memory = interp._native_webassembly_memory([JsValue.Object(id: options_id)])
+expect(_object_property_text(interp, memory, "pages")).to_equal("1")
+expect(_object_property_text(interp, memory, "byteLength")).to_equal("65536")
+expect(_object_child_property_text(interp, memory, "buffer", "byteLength")).to_equal("65536")
+
+expect(_display_js(interp._native_webassembly_memory_grow(memory, [JsValue.Number(v: 1.0)]))).to_equal("1")
+expect(_object_property_text(interp, memory, "pages")).to_equal("2")
+expect(_object_child_property_text(interp, memory, "buffer", "byteLength")).to_equal("131072")
+expect(_display_js(interp._native_webassembly_memory_grow(memory, [JsValue.Number(v: 1.0)]))).to_equal("-1")
+expect(_object_property_text(interp, memory, "pages")).to_equal("2")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -339,8 +444,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

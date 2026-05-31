@@ -632,6 +632,70 @@ match result:
 
 </details>
 
+#### should expose bounded memory exports through BrowserSession
+
+1. var session = BrowserSession new
+
+2. session open html
+
+3. Ok
+   - Expected: _display_js(value) equals `true:1:1:memory:memory:65536`
+
+4. Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+val result = session.eval_script("var m = new WebAssembly.Module('0061736d010000000503010001070a01066d656d6f72790200'); var i = new WebAssembly.Instance(m); m.hasMemorySection + ':' + m.memoryMinPages + ':' + m.exportCount + ':' + m.firstExportName + ':' + m.firstExportKind + ':' + i.exports.memory.byteLength")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:1:1:memory:memory:65536")
+    Err(err):
+        expect("unexpected js error: {err}").to_equal("")
+```
+
+</details>
+
+#### should construct bounded WebAssembly.Memory through BrowserSession
+
+1. var session = BrowserSession new
+
+2. session open html
+
+3. Ok
+   - Expected: _display_js(value) equals `function:1:2:131072:-1`
+
+4. Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+val result = session.eval_script("var mem = new WebAssembly.Memory({initial:1, maximum:2}); var old = mem.grow(1); typeof WebAssembly.Memory + ':' + old + ':' + mem.pages + ':' + mem.buffer.byteLength + ':' + mem.grow(1)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("function:1:2:131072:-1")
+    Err(err):
+        expect("unexpected js error: {err}").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -657,8 +721,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

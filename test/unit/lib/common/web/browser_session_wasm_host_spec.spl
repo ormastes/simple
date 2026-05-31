@@ -161,3 +161,49 @@ describe "WebAssembly native host validation":
         expect(_object_property_text(interp, invalid_module, "error")).to_equal("invalid-wasm-section")
         expect(_object_property_text(interp, invalid_instance, "status")).to_equal("invalid")
         expect(_object_property_text(interp, invalid_instance, "error")).to_equal("invalid-wasm-module")
+
+    it "exposes bounded memory export metadata and instance memory shape":
+        var interp = _new_interpreter()
+
+        val module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000503010001070a01066d656d6f72790200")])
+        expect(_object_property_text(interp, module, "validated")).to_equal("true")
+        expect(_object_property_text(interp, module, "hasMemorySection")).to_equal("true")
+        expect(_object_property_text(interp, module, "hasExportSection")).to_equal("true")
+        expect(_object_property_text(interp, module, "memoryMinPages")).to_equal("1")
+        expect(_object_property_text(interp, module, "exportCount")).to_equal("1")
+        expect(_object_property_text(interp, module, "firstExportName")).to_equal("memory")
+        expect(_object_property_text(interp, module, "firstExportKind")).to_equal("memory")
+
+        val instance = interp._native_webassembly_instance([module])
+        expect(_object_child_property_text(interp, instance, "exports", "memory")).to_equal("[object Object]")
+        match instance:
+            JsValue.Object(instance_id):
+                match interp.get_object_property(instance_id, "exports"):
+                    JsValue.Object(exports_id):
+                        match interp.get_object_property(exports_id, "memory"):
+                            JsValue.Object(memory_id):
+                                expect(_display_js(interp.get_object_property(memory_id, "byteLength"))).to_equal("65536")
+                                expect(_display_js(interp.get_object_property(memory_id, "pageSize"))).to_equal("65536")
+                            _:
+                                expect("missing memory").to_equal("")
+                    _:
+                        expect("missing exports").to_equal("")
+            _:
+                expect("missing instance").to_equal("")
+
+    it "constructs bounded WebAssembly.Memory values and grows within maximum":
+        var interp = _new_interpreter()
+        val options_id = interp.create_object()
+        interp.set_object_property(options_id, "initial", JsValue.Number(v: 1.0))
+        interp.set_object_property(options_id, "maximum", JsValue.Number(v: 2.0))
+
+        val memory = interp._native_webassembly_memory([JsValue.Object(id: options_id)])
+        expect(_object_property_text(interp, memory, "pages")).to_equal("1")
+        expect(_object_property_text(interp, memory, "byteLength")).to_equal("65536")
+        expect(_object_child_property_text(interp, memory, "buffer", "byteLength")).to_equal("65536")
+
+        expect(_display_js(interp._native_webassembly_memory_grow(memory, [JsValue.Number(v: 1.0)]))).to_equal("1")
+        expect(_object_property_text(interp, memory, "pages")).to_equal("2")
+        expect(_object_child_property_text(interp, memory, "buffer", "byteLength")).to_equal("131072")
+        expect(_display_js(interp._native_webassembly_memory_grow(memory, [JsValue.Number(v: 1.0)]))).to_equal("-1")
+        expect(_object_property_text(interp, memory, "pages")).to_equal("2")
