@@ -56,7 +56,7 @@ doc/            # Documentation
   04_architecture/ # Architecture docs and ADRs
     adr/        # Architecture Decision Records
   05_design/    # Design documents
-  06_spec/      # Specifications
+  06_spec/      # Generated/manual spec docs mirrored from test/ specs
   07_guide/     # User guides
   08_tracking/  # Test results, build status, bug tracking
   09_report/    # Session reports

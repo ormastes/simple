@@ -18,7 +18,8 @@ Maintain process knowledge for the `verification` layer: owned source, architect
 - [Architecture index](../../04_architecture/README.md)
 - [Architecture modules](../../04_architecture/architecture_modules.md)
 - [Design docs](../../05_design/)
-- [Specs](../../06_spec/)
+- [Generated spec manuals](../../06_spec/) mirrored from executable
+  `test/**/*_spec.spl` files; executable specs must stay under `test/`.
 
 ## Update Rule
 

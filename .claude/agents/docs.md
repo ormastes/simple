@@ -16,7 +16,8 @@
 | ADR | `doc/04_architecture/adr/` | Architecture Decision Records (major decisions) |
 | Guide | `doc/07_guide/` | User-facing tutorials, runbooks, how-to |
 | Report | `doc/09_report/` | Session summaries, completion reports |
-| BDD Tests | `test/*_spec.spl` | Executable feature specs (SPipe) |
+| BDD Tests | `test/**/*_spec.spl` | Executable feature specs (SPipe) |
+| Generated Spec Manuals | `doc/06_spec/**/*_spec.md` | Generated/manual SPipe documentation mirrored from `test/` specs |
 
 ## Document Relationship Model
 
@@ -29,7 +30,9 @@ RULES → enforced by CI + review
 
 ## Critical Rules
 
-- Specifications MUST be SPipe test files (`*_spec.spl`), not markdown
+- Executable specifications MUST be SPipe test files under `test/` (`*_spec.spl`)
+- `doc/06_spec/` is for generated/manual markdown mirrors and evidence assets; never put executable `.spl` specs there
+- Before commit or release, `find doc/06_spec -name '*_spec.spl' | wc -l` must print `0`
 - Research goes in `doc/01_research/`, NOT mixed with specs
 - Reports use format: `doc/09_report/<topic>_<date>.md`
 - DO NOT add reports to git unless requested
