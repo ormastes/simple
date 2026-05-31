@@ -66,6 +66,21 @@ expect(_runtime_eval_text("require(\"buffer\").Buffer.from(\"68656c6c6f\", \"hex
 
 </details>
 
+#### fast paths deterministic os tmpdir probes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_runtime_eval_text("require('os').tmpdir()")).to_equal("/tmp")
+expect(_runtime_eval_text("require('node:os').tmpdir()")).to_equal("/tmp")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -85,8 +100,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

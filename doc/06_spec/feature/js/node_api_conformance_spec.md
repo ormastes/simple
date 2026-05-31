@@ -539,6 +539,20 @@ expect(_str(os_homedir([]))).to_equal("/")
 
 </details>
 
+#### keeps tmpdir deterministic without leaking host paths
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(os_tmpdir([]))).to_equal("/tmp")
+```
+
+</details>
+
 ### Node.js Buffer module
 
 ### Buffer.byteLength
@@ -1455,8 +1469,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 96 |
-| Active scenarios | 96 |
+| Total scenarios | 97 |
+| Active scenarios | 97 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
