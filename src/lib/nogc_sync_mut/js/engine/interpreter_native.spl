@@ -756,7 +756,6 @@ impl JsInterpreter:
         val exports_id = self.create_object()
         var has_memory = false
         var memory_name = ""
-        var function_name = ""
         var memory_pages = 0
         match self.get_object_property(module_id, "hasMemorySection"):
             JsValue.Boolean(v): has_memory = v
@@ -767,15 +766,20 @@ impl JsInterpreter:
         match self.get_object_property(module_id, "memoryExportName"):
             JsValue.String(v): memory_name = v
             _: pass_dn
-        match self.get_object_property(module_id, "functionExportName"):
-            JsValue.String(v): function_name = v
-            _: pass_dn
         if has_memory and memory_name != "":
             val memory_value = self._native_webassembly_memory_from_pages(memory_pages, -1)
             self.set_object_property(exports_id, memory_name, memory_value)
-        if function_name != "":
-            val fn_id = self._register_native(function_name, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION)
-            self.set_object_property(exports_id, function_name, JsValue.Function(id: fn_id))
+        var function_count = 0
+        match self.get_object_property(module_id, "functionExportCount"):
+            JsValue.Number(v): function_count = f64_to_i64(v)
+            _: pass_dn
+        var index = 0
+        while index < function_count:
+            val function_name = self._native_webassembly_module_function_export_name_at(module_id, index)
+            if function_name != "":
+                val fn_id = self._register_native(function_name, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION)
+                self.set_object_property(exports_id, function_name, JsValue.Function(id: fn_id))
+            index = index + 1
         exports_id
 
     me _native_webassembly_export_function(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
@@ -988,6 +992,7 @@ impl JsInterpreter:
         self.set_object_property(module_id, "firstExportKind", JsValue.String(v: ""))
         self.set_object_property(module_id, "memoryExportName", JsValue.String(v: ""))
         self.set_object_property(module_id, "functionExportName", JsValue.String(v: ""))
+        self.set_object_property(module_id, "functionExportCount", JsValue.Number(v: 0.0))
         if not validated:
             return
         val section_count = self._native_webassembly_section_count(hex)
@@ -1001,6 +1006,7 @@ impl JsInterpreter:
         val first_export_kind = self._native_webassembly_first_export_kind(hex)
         val memory_export_name = self._native_webassembly_memory_export_name(hex)
         val function_export_name = self._native_webassembly_function_export_name(hex)
+        val function_export_count = self._native_webassembly_function_export_count(hex)
         self.set_object_property(module_id, "sectionCount", JsValue.Number(v: section_count.to_f64()))
         self.set_object_property(module_id, "hasTypeSection", JsValue.Boolean(v: has_type))
         self.set_object_property(module_id, "hasImportSection", JsValue.Boolean(v: has_import))
@@ -1012,6 +1018,15 @@ impl JsInterpreter:
         self.set_object_property(module_id, "firstExportKind", JsValue.String(v: first_export_kind))
         self.set_object_property(module_id, "memoryExportName", JsValue.String(v: memory_export_name))
         self.set_object_property(module_id, "functionExportName", JsValue.String(v: function_export_name))
+        self.set_object_property(module_id, "functionExportCount", JsValue.Number(v: function_export_count.to_f64()))
+        var function_export_index = 0
+        var export_index = 0
+        while export_index < export_count:
+            if self._native_webassembly_export_kind_at(hex, export_index) == "function":
+                val function_name = self._native_webassembly_export_name_at(hex, export_index)
+                self.set_object_property(module_id, "functionExportName{function_export_index}", JsValue.String(v: function_name))
+                function_export_index = function_export_index + 1
+            export_index = export_index + 1
 
     me _native_webassembly_sections_valid(hex: text) -> bool:
         if not self._native_webassembly_valid_header(hex):
@@ -1145,6 +1160,21 @@ impl JsInterpreter:
                 return self._native_webassembly_export_name_at(hex, index)
             index = index + 1
         ""
+
+    me _native_webassembly_function_export_count(hex: text) -> i64:
+        val count = self._native_webassembly_export_count(hex)
+        var index = 0
+        var function_count = 0
+        while index < count:
+            if self._native_webassembly_export_kind_at(hex, index) == "function":
+                function_count = function_count + 1
+            index = index + 1
+        function_count
+
+    me _native_webassembly_module_function_export_name_at(module_id: i64, index: i64) -> text:
+        match self.get_object_property(module_id, "functionExportName{index}"):
+            JsValue.String(v): v
+            _: ""
 
     me _native_webassembly_export_name_at(hex: text, wanted_index: i64) -> text:
         val pos = self._native_webassembly_export_entry_pos(hex, wanted_index)

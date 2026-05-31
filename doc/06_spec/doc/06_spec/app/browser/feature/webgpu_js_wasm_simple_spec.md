@@ -671,7 +671,7 @@ match result:
 2. session open html
 
 3. Ok
-   - Expected: _display_js(value) equals `run:function:run:function:undefined`
+   - Expected: _display_js(value) equals `run:function:run:1:function:undefined`
 
 4. Err
    - Expected: "unexpected js error: {err}" equals ``
@@ -686,10 +686,42 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 var session = BrowserSession.new()
 session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
-val result = session.eval_script("var m = new WebAssembly.Module('0061736d01000000010401600000030201000707010372756e00000a040102000b'); var i = new WebAssembly.Instance(m); m.firstExportName + ':' + m.firstExportKind + ':' + m.functionExportName + ':' + typeof i.exports.run + ':' + i.exports.run()")
+val result = session.eval_script("var m = new WebAssembly.Module('0061736d01000000010401600000030201000707010372756e00000a040102000b'); var i = new WebAssembly.Instance(m); m.firstExportName + ':' + m.firstExportKind + ':' + m.functionExportName + ':' + m.functionExportCount + ':' + typeof i.exports.run + ':' + i.exports.run()")
 match result:
     Ok(value):
-        expect(_display_js(value)).to_equal("run:function:run:function:undefined")
+        expect(_display_js(value)).to_equal("run:function:run:1:function:undefined")
+    Err(err):
+        expect("unexpected js error: {err}").to_equal("")
+```
+
+</details>
+
+#### should expose all bounded callable function exports through BrowserSession
+
+1. var session = BrowserSession new
+
+2. session open html
+
+3. Ok
+   - Expected: _display_js(value) equals `2:init:render:function:function:undefined:undefined`
+
+4. Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+val result = session.eval_script("var m = new WebAssembly.Module('0061736d01000000010401600000030302000007110204696e697400000672656e64657200010a070202000b02000b'); var i = new WebAssembly.Instance(m); m.functionExportCount + ':' + m.functionExportName0 + ':' + m.functionExportName1 + ':' + typeof i.exports.init + ':' + typeof i.exports.render + ':' + i.exports.init() + ':' + i.exports.render()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("2:init:render:function:function:undefined:undefined")
     Err(err):
         expect("unexpected js error: {err}").to_equal("")
 ```
@@ -785,8 +817,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 25 |
+| Active scenarios | 25 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

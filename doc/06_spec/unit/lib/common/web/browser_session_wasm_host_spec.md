@@ -392,6 +392,8 @@ match instance:
    - Expected: _object_property_text(interp, module, "firstExportName") equals `run`
    - Expected: _object_property_text(interp, module, "firstExportKind") equals `function`
    - Expected: _object_property_text(interp, module, "functionExportName") equals `run`
+   - Expected: _object_property_text(interp, module, "functionExportCount") equals `1`
+   - Expected: _object_property_text(interp, module, "functionExportName0") equals `run`
 
 2. JsValue Object
 
@@ -405,7 +407,7 @@ match instance:
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -419,6 +421,8 @@ expect(_object_property_text(interp, module, "exportCount")).to_equal("1")
 expect(_object_property_text(interp, module, "firstExportName")).to_equal("run")
 expect(_object_property_text(interp, module, "firstExportKind")).to_equal("function")
 expect(_object_property_text(interp, module, "functionExportName")).to_equal("run")
+expect(_object_property_text(interp, module, "functionExportCount")).to_equal("1")
+expect(_object_property_text(interp, module, "functionExportName0")).to_equal("run")
 
 val instance = interp._native_webassembly_instance([module])
 match instance:
@@ -428,6 +432,61 @@ match instance:
                 val run_value = interp.get_object_property(exports_id, "run")
                 expect(_display_js(run_value)).to_equal("[Function]")
                 expect(_display_js(interp._native_webassembly_export_function(run_value, []))).to_equal("undefined")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
+#### synthesizes all bounded function exports on an instance
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, module, "validated") equals `true`
+   - Expected: _object_property_text(interp, module, "exportCount") equals `2`
+   - Expected: _object_property_text(interp, module, "functionExportCount") equals `2`
+   - Expected: _object_property_text(interp, module, "functionExportName0") equals `init`
+   - Expected: _object_property_text(interp, module, "functionExportName1") equals `render`
+
+2. JsValue Object
+
+3. JsValue Object
+   - Expected: _display_js(init_value) equals `[Function]`
+   - Expected: _display_js(render_value) equals `[Function]`
+   - Expected: _display_js(interp._native_webassembly_export_function(init_value, [])) equals `undefined`
+   - Expected: _display_js(interp._native_webassembly_export_function(render_value, [])) equals `undefined`
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d01000000010401600000030302000007110204696e697400000672656e64657200010a070202000b02000b")])
+expect(_object_property_text(interp, module, "validated")).to_equal("true")
+expect(_object_property_text(interp, module, "exportCount")).to_equal("2")
+expect(_object_property_text(interp, module, "functionExportCount")).to_equal("2")
+expect(_object_property_text(interp, module, "functionExportName0")).to_equal("init")
+expect(_object_property_text(interp, module, "functionExportName1")).to_equal("render")
+
+val instance = interp._native_webassembly_instance([module])
+match instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                val init_value = interp.get_object_property(exports_id, "init")
+                val render_value = interp.get_object_property(exports_id, "render")
+                expect(_display_js(init_value)).to_equal("[Function]")
+                expect(_display_js(render_value)).to_equal("[Function]")
+                expect(_display_js(interp._native_webassembly_export_function(init_value, []))).to_equal("undefined")
+                expect(_display_js(interp._native_webassembly_export_function(render_value, []))).to_equal("undefined")
             _:
                 expect("missing exports").to_equal("")
     _:
@@ -537,8 +596,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
