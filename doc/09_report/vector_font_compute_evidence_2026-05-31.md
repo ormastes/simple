@@ -7,7 +7,7 @@
 - font size: 24
 - CPU checksum: 13090264
 - CPU ink pixels: 247
-- CPU frame us: 1615720
+- CPU frame us: 1543628
 - production render checksum: 3707484892911777
 - production render ink pixels: 247
 - production vector raster hits: 0
@@ -41,6 +41,8 @@
 - CUDA glyph 0 checksum: 399885
 - CUDA glyph 0 ink pixels: 30
 - CUDA glyph 0 mismatch count: 0
+- CUDA glyph 0 expected pixels: build/vector_font_compute_evidence/cuda-glyph-0-expected-alpha-u8.json
+- CUDA glyph 0 actual pixels: build/vector_font_compute_evidence/cuda-glyph-0-actual-alpha-u8.json
 - CUDA glyph 1 codepoint: 82
 - CUDA glyph 1 font size: 24
 - CUDA glyph 1 width: 10
@@ -49,6 +51,8 @@
 - CUDA glyph 1 checksum: 296579
 - CUDA glyph 1 ink pixels: 34
 - CUDA glyph 1 mismatch count: 0
+- CUDA glyph 1 expected pixels: build/vector_font_compute_evidence/cuda-glyph-1-expected-alpha-u8.json
+- CUDA glyph 1 actual pixels: build/vector_font_compute_evidence/cuda-glyph-1-actual-alpha-u8.json
 - CUDA glyph 2 codepoint: 69
 - CUDA glyph 2 font size: 24
 - CUDA glyph 2 width: 9
@@ -57,6 +61,8 @@
 - CUDA glyph 2 checksum: 282552
 - CUDA glyph 2 ink pixels: 26
 - CUDA glyph 2 mismatch count: 0
+- CUDA glyph 2 expected pixels: build/vector_font_compute_evidence/cuda-glyph-2-expected-alpha-u8.json
+- CUDA glyph 2 actual pixels: build/vector_font_compute_evidence/cuda-glyph-2-actual-alpha-u8.json
 - CUDA glyph 3 codepoint: 69
 - CUDA glyph 3 font size: 24
 - CUDA glyph 3 width: 9
@@ -65,6 +71,8 @@
 - CUDA glyph 3 checksum: 282552
 - CUDA glyph 3 ink pixels: 26
 - CUDA glyph 3 mismatch count: 0
+- CUDA glyph 3 expected pixels: build/vector_font_compute_evidence/cuda-glyph-3-expected-alpha-u8.json
+- CUDA glyph 3 actual pixels: build/vector_font_compute_evidence/cuda-glyph-3-actual-alpha-u8.json
 - OpenCL status: pass
 - OpenCL reason: opencl-vector-font-rasterize-kernel-matched-cpu
 - OpenCL checksum: 13090264
@@ -78,6 +86,8 @@
 - OpenCL glyph 0 checksum: 414452
 - OpenCL glyph 0 ink pixels: 33
 - OpenCL glyph 0 mismatch count: 0
+- OpenCL glyph 0 expected pixels: build/vector_font_compute_evidence/opencl-glyph-0-expected-alpha-u8.json
+- OpenCL glyph 0 actual pixels: build/vector_font_compute_evidence/opencl-glyph-0-actual-alpha-u8.json
 - OpenCL glyph 1 codepoint: 68
 - OpenCL glyph 1 font size: 24
 - OpenCL glyph 1 width: 10
@@ -86,6 +96,8 @@
 - OpenCL glyph 1 checksum: 407799
 - OpenCL glyph 1 ink pixels: 31
 - OpenCL glyph 1 mismatch count: 0
+- OpenCL glyph 1 expected pixels: build/vector_font_compute_evidence/opencl-glyph-1-expected-alpha-u8.json
+- OpenCL glyph 1 actual pixels: build/vector_font_compute_evidence/opencl-glyph-1-actual-alpha-u8.json
 - OpenCL glyph 2 codepoint: 78
 - OpenCL glyph 2 font size: 24
 - OpenCL glyph 2 width: 10
@@ -94,6 +106,8 @@
 - OpenCL glyph 2 checksum: 447921
 - OpenCL glyph 2 ink pixels: 36
 - OpenCL glyph 2 mismatch count: 0
+- OpenCL glyph 2 expected pixels: build/vector_font_compute_evidence/opencl-glyph-2-expected-alpha-u8.json
+- OpenCL glyph 2 actual pixels: build/vector_font_compute_evidence/opencl-glyph-2-actual-alpha-u8.json
 - OpenCL glyph 3 codepoint: 68
 - OpenCL glyph 3 font size: 24
 - OpenCL glyph 3 width: 10
@@ -102,6 +116,8 @@
 - OpenCL glyph 3 checksum: 407799
 - OpenCL glyph 3 ink pixels: 31
 - OpenCL glyph 3 mismatch count: 0
+- OpenCL glyph 3 expected pixels: build/vector_font_compute_evidence/opencl-glyph-3-expected-alpha-u8.json
+- OpenCL glyph 3 actual pixels: build/vector_font_compute_evidence/opencl-glyph-3-actual-alpha-u8.json
 - blur/tolerance used: false
 
 ## Raw Evidence
@@ -116,7 +132,7 @@
 - vector_font_compute_cpu_warm_checksum=13090264
 - vector_font_compute_cpu_checksum=13090264
 - vector_font_compute_cpu_ink_pixels=247
-- vector_font_compute_cpu_frame_us=1558365
+- vector_font_compute_cpu_frame_us=1538183
 - vector_font_compute_production_render_checksum=3707484892911777
 - vector_font_compute_production_render_ink_pixels=247
 - vector_font_compute_production_vector_raster_hits=0
@@ -595,7 +611,7 @@
 - vector_font_compute_cpu_warm_checksum=13090264
 - vector_font_compute_cpu_checksum=13090264
 - vector_font_compute_cpu_ink_pixels=247
-- vector_font_compute_cpu_frame_us=1615720
+- vector_font_compute_cpu_frame_us=1543628
 - vector_font_compute_production_render_checksum=3707484892911777
 - vector_font_compute_production_render_ink_pixels=247
 - vector_font_compute_production_vector_raster_hits=0
