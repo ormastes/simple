@@ -3333,6 +3333,54 @@ impl JsInterpreter:
                         val mem_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
                         if bulk_subop < 0 or mem_pos < 0 or mem_pos > body_end:
                             return -1
+                        if bulk_subop == 10:
+                            val copy_dest_mem_index = self._native_webassembly_read_leb_value(hex, mem_pos)
+                            val copy_src_mem_pos = self._native_webassembly_read_leb_next(hex, mem_pos)
+                            if copy_dest_mem_index != 0 or copy_src_mem_pos < 0 or copy_src_mem_pos > body_end:
+                                return -1
+                            val copy_src_mem_index = self._native_webassembly_read_leb_value(hex, copy_src_mem_pos)
+                            val next_pos = self._native_webassembly_read_leb_next(hex, copy_src_mem_pos)
+                            if copy_src_mem_index != 0 or next_pos < 0 or next_pos > body_end or stack.len() < 3:
+                                return -1
+                            val copy_len = stack.get(stack.len() - 1)
+                            val copy_src = stack.get(stack.len() - 2)
+                            val copy_dest = stack.get(stack.len() - 3)
+                            stack.pop()
+                            stack.pop()
+                            stack.pop()
+                            if copy_len < 0 or copy_src < 0 or copy_dest < 0 or memory_byte_len <= 0 or copy_src + copy_len > memory_byte_len or copy_dest + copy_len > memory_byte_len:
+                                return -5
+                            var copied_bytes: [i64] = []
+                            var read_index = 0
+                            while read_index < copy_len:
+                                val read_addr = copy_src + read_index
+                                var read_byte = 0
+                                var read_lookup = 0
+                                while read_lookup < memory_addrs.len():
+                                    if memory_addrs.get(read_lookup) == read_addr:
+                                        read_byte = memory_bytes.get(read_lookup)
+                                        break
+                                    read_lookup = read_lookup + 1
+                                copied_bytes.push(read_byte & 255)
+                                read_index = read_index + 1
+                            var write_index = 0
+                            while write_index < copy_len:
+                                val write_addr = copy_dest + write_index
+                                val write_byte = copied_bytes.get(write_index)
+                                var found = false
+                                var write_lookup = 0
+                                while write_lookup < memory_addrs.len():
+                                    if memory_addrs.get(write_lookup) == write_addr:
+                                        memory_bytes[write_lookup] = write_byte
+                                        found = true
+                                        break
+                                    write_lookup = write_lookup + 1
+                                if not found:
+                                    memory_addrs.push(write_addr)
+                                    memory_bytes.push(write_byte)
+                                write_index = write_index + 1
+                            cursor = next_pos
+                            continue
                         if bulk_subop == 11:
                             val bulk_mem_index = self._native_webassembly_read_leb_value(hex, mem_pos)
                             val next_pos = self._native_webassembly_read_leb_next(hex, mem_pos)
