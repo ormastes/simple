@@ -692,6 +692,10 @@ match instance:
 5. JsValue Function
    - Expected: interp.wasm_export_body_fn_ids.get(0) equals `fn_id`
    - Expected: "missing function" equals ``
+   - Expected: interp.wasm_export_body_module_ids.get(0) equals `module_id`
+   - Expected: interp.wasm_export_body_indices.get(0) equals `0`
+   - Expected: interp._native_webassembly_module_function_export_i32_result_with_args_at(module_id, 0, [JsValue.Number(v: 40.0), JsValue.Number(v: 2.0)]) equals `42`
+   - Expected: _display_js(interp._native_webassembly_export_function(JsValue.Undefined, [JsValue.Number(v: 40.0), JsValue.Number(v: 2.0)], fn_id)) equals `42`
    - Expected: "missing exports" equals ``
    - Expected: "missing instance" equals ``
 
@@ -699,7 +703,7 @@ match instance:
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -723,6 +727,10 @@ match instance:
                         expect(interp.wasm_export_body_fn_ids.get(0)).to_equal(fn_id)
                     _:
                         expect("missing function").to_equal("")
+                expect(interp.wasm_export_body_module_ids.get(0)).to_equal(module_id)
+                expect(interp.wasm_export_body_indices.get(0)).to_equal(0)
+                expect(interp._native_webassembly_module_function_export_i32_result_with_args_at(module_id, 0, [JsValue.Number(v: 40.0), JsValue.Number(v: 2.0)])).to_equal(42)
+                expect(_display_js(interp._native_webassembly_export_function(JsValue.Undefined, [JsValue.Number(v: 40.0), JsValue.Number(v: 2.0)], fn_id))).to_equal("42")
             _:
                 expect("missing exports").to_equal("")
     _:
