@@ -780,6 +780,20 @@ expect(_str(crypto_createHash_digest([JsValue.String(v: "md5"), JsValue.String(v
 
 </details>
 
+#### reports randomBytes unavailable without secure entropy
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(crypto_randomBytes_status([JsValue.Number(v: 16.0)]))).to_equal("denied:no-secure-entropy")
+```
+
+</details>
+
 ### Node.js runtime shape
 
 ### JSON.parse host path
@@ -964,6 +978,22 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("require('crypto').createHash('md5').update('hello').digest('hex')")).to_equal("denied")
+```
+
+</details>
+
+#### fails closed for crypto.randomBytes until secure entropy is wired
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('crypto').randomBytes(16).status")).to_equal("denied")
+expect(_eval_str("require('node:crypto').randomBytes(16).error")).to_equal("no-secure-entropy")
+expect(_eval_str("require('crypto').randomBytes(16).byteLength")).to_equal("16")
 ```
 
 </details>
@@ -1596,8 +1626,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 105 |
-| Active scenarios | 105 |
+| Total scenarios | 107 |
+| Active scenarios | 107 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
