@@ -1272,6 +1272,38 @@ expect(_eval_str("require('node:https').request('https://example.com').scheme"))
 
 </details>
 
+#### resolves Express-like http server creation as fail-closed network API
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("typeof require('http').createServer")).to_equal("function")
+expect(_eval_str("typeof require('node:http').createServer")).to_equal("function")
+```
+
+</details>
+
+#### denies Express-like http server listen without network grants
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('http').createServer((req,res)=>{}).status")).to_equal("denied")
+expect(_eval_str("require('http').createServer((req,res)=>{}).listen(0).error")).to_equal("network-denied")
+expect(_eval_str("require('node:http').createServer((req,res)=>{}).listen(3000).operation")).to_equal("http.Server.listen")
+expect(_eval_str("require('http').createServer((req,res)=>{}).close().status")).to_equal("denied")
+```
+
+</details>
+
 #### resolves readline createInterface as fail-closed terminal API
 
 <details>
@@ -2077,8 +2109,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 137 |
-| Active scenarios | 137 |
+| Total scenarios | 139 |
+| Active scenarios | 139 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

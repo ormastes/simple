@@ -177,7 +177,7 @@ Build minimal Node.js API compatibility on QuickJS + libuv:
 - [x] `child_process.spawn` fail-closed process-grant subset
 - [x] `os.platform()`, `os.arch()`, `os.tmpdir()` deterministic subset
 - [x] `readline` fail-closed terminal-grant subset
-- [ ] Test: run a simple Express-like HTTP server
+- [x] Test: run a simple Express-like HTTP server fail-closed without network grants
 - [ ] Serial marker: `[ai-cli] node-compat:ready target=<arch>`
 
 ### Phase 4: CLI Bundle + Smoke Test (2 weeks)
