@@ -492,6 +492,28 @@ expect(image.data).to_equal([
 
 </details>
 
+#### decodes little-endian uncompressed 16-bit RGB strips to 8-bit RGBA pixels
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val image = decode_tiff(_tiff_le_2x1_rgb16())
+
+expect(image.width).to_equal(2)
+expect(image.height).to_equal(1)
+expect(image.format).to_equal(ImageFormat.Tiff)
+expect(image.data).to_equal([
+    0, 128, 255, 255,
+    1, 32, 64, 255
+])
+```
+
+</details>
+
 #### decodes little-endian uncompressed RGB split across multiple strips
 
 <details>
@@ -597,6 +619,25 @@ expect(image.width).to_equal(1)
 expect(image.height).to_equal(1)
 expect(image.format).to_equal(ImageFormat.Tiff)
 expect(image.data).to_equal([70, 80, 90, 100])
+```
+
+</details>
+
+#### decodes little-endian uncompressed 16-bit RGBA strips with alpha
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val image = decode_tiff(_tiff_le_1x1_rgba16())
+
+expect(image.width).to_equal(1)
+expect(image.height).to_equal(1)
+expect(image.format).to_equal(ImageFormat.Tiff)
+expect(image.data).to_equal([1, 32, 64, 128])
 ```
 
 </details>
@@ -989,8 +1030,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 48 |
-| Active scenarios | 48 |
+| Total scenarios | 50 |
+| Active scenarios | 50 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

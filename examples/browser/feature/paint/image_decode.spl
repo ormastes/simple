@@ -1059,11 +1059,11 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
             rgba.push(argb & 255)
             rgba.push(255)
         else:
-            rgba.push(_tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset, compression == 32773))
-            rgba.push(_tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset + 1, compression == 32773))
-            rgba.push(_tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset + 2, compression == 32773))
+            rgba.push(_tiff_color_sample(raw_data, packbits_pixels, pixel_offset, 0, sample_bits, compression == 32773, little))
+            rgba.push(_tiff_color_sample(raw_data, packbits_pixels, pixel_offset, 1, sample_bits, compression == 32773, little))
+            rgba.push(_tiff_color_sample(raw_data, packbits_pixels, pixel_offset, 2, sample_bits, compression == 32773, little))
             if samples_per_pixel == 4:
-                rgba.push(_tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset + 3, compression == 32773))
+                rgba.push(_tiff_color_sample(raw_data, packbits_pixels, pixel_offset, 3, sample_bits, compression == 32773, little))
             else:
                 rgba.push(255)
         pixel_index = pixel_index + 1
@@ -1116,6 +1116,16 @@ fn _tiff_gray_sample(raw_data: text, decoded_pixels: [i64], offset: i64, sample_
             return (lo + hi * 256) / 257
         return _read_u16(raw_data, offset, little) / 257
     _tiff_pixel_byte(raw_data, decoded_pixels, offset, compressed)
+
+fn _tiff_color_sample(raw_data: text, decoded_pixels: [i64], pixel_offset: i64, channel: i64, sample_bits: i64, compressed: bool, little: bool) -> i64:
+    val channel_offset = pixel_offset + channel * _tiff_bytes_per_sample(sample_bits)
+    if sample_bits == 16:
+        if compressed:
+            val hi = decoded_pixels[channel_offset + 1]
+            val lo = decoded_pixels[channel_offset]
+            return (lo + hi * 256) / 257
+        return _read_u16(raw_data, channel_offset, little) / 257
+    _tiff_pixel_byte(raw_data, decoded_pixels, channel_offset, compressed)
 
 fn _tiff_decode_packbits_strips(
     data: text,
@@ -1232,7 +1242,13 @@ fn _tiff_bytes_per_sample(sample_bits: i64) -> i64:
 fn _tiff_bits_are_supported(data: text, value_count: i64, inline_value: i64, offset: i64, samples_per_pixel: i64, compression: i64, photometric: i64, planar_config: i64, little: bool) -> bool:
     val sample_bits = _tiff_sample_bits(data, value_count, inline_value, offset, little)
     if sample_bits == 16:
-        return value_count == 1 and samples_per_pixel == 1 and compression == 1 and planar_config == 1 and (photometric == 0 or photometric == 1)
+        if compression != 1 or planar_config != 1:
+            return false
+        if photometric != 0 and photometric != 1 and photometric != 2:
+            return false
+        if value_count == 1:
+            return samples_per_pixel == 1
+        return value_count == samples_per_pixel and _tiff_sample_bits_all_equal(data, value_count, offset, 16, little)
     if sample_bits != 8:
         return false
     if value_count == 1:
@@ -1244,6 +1260,16 @@ fn _tiff_bits_are_supported(data: text, value_count: i64, inline_value: i64, off
     var i = 0
     while i < value_count:
         if _read_u16(data, offset + i * 2, little) != 8:
+            return false
+        i = i + 1
+    true
+
+fn _tiff_sample_bits_all_equal(data: text, value_count: i64, offset: i64, expected: i64, little: bool) -> bool:
+    if offset <= 0 or offset + value_count * 2 > data.len():
+        return false
+    var i = 0
+    while i < value_count:
+        if _read_u16(data, offset + i * 2, little) != expected:
             return false
         i = i + 1
     true
