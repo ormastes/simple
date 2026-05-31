@@ -170,8 +170,8 @@ Build minimal Node.js API compatibility on QuickJS + libuv:
 - [x] `process.env`, `process.argv`, `process.cwd()`, `process.exit()` deterministic embedded subset
 - [x] `Buffer` bounded string, array, Uint8Array, and ArrayBuffer subset
 - [x] `EventEmitter` deterministic listener bookkeeping subset
-- [ ] `net.Socket`, `net.createConnection` (via libuv tcp)
-- [ ] `http.request`, `https.request` (via libuv + mbedTLS/BearSSL)
+- [x] `net.Socket`, `net.createConnection` fail-closed network-grant subset
+- [x] `http.request`, `https.request` fail-closed network-grant subset
 - [x] `crypto.createHash` (sha256/sha1 deterministic subset)
 - [x] `crypto.randomBytes` fail-closed subset until secure entropy is wired
 - [x] `child_process.spawn` fail-closed process-grant subset

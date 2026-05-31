@@ -1238,6 +1238,40 @@ expect(_eval_str("require('child_process').spawn('node', ['--version']).command"
 
 </details>
 
+#### resolves net and http request APIs as fail-closed network APIs
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("typeof require('net').Socket")).to_equal("function")
+expect(_eval_str("typeof require('node:net').Socket")).to_equal("function")
+expect(_eval_str("typeof require('http').request")).to_equal("function")
+expect(_eval_str("typeof require('node:https').request")).to_equal("function")
+```
+
+</details>
+
+#### denies net and http APIs without network grants
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('net').createConnection({host:'example.com',port:80}).status")).to_equal("denied")
+expect(_eval_str("require('node:net').createConnection(80, 'example.com').error")).to_equal("network-denied")
+expect(_eval_str("require('http').request('http://example.com').status")).to_equal("denied")
+expect(_eval_str("require('node:https').request('https://example.com').scheme")).to_equal("https")
+```
+
+</details>
+
 ### Buffer global and module shape
 
 #### exposes Buffer through require('buffer')
@@ -2011,8 +2045,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 133 |
-| Active scenarios | 133 |
+| Total scenarios | 135 |
+| Active scenarios | 135 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
