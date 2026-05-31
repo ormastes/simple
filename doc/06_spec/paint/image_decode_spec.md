@@ -1217,6 +1217,30 @@ expect(image.format).to_equal(ImageFormat.JpegXl)
 
 </details>
 
+#### keeps metadata-only 8K JPEG XL placeholder sparse
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val info = detect_image_info(_jpegxl_large_codestream_7680x4320())
+expect(info.format).to_equal("jpegxl")
+expect(info.width).to_equal(7680)
+expect(info.height).to_equal(4320)
+expect(info.supported).to_equal(true)
+
+val image = decode_jpegxl(_jpegxl_large_codestream_7680x4320())
+expect(image.width).to_equal(7680)
+expect(image.height).to_equal(4320)
+expect(image.format).to_equal(ImageFormat.JpegXl)
+expect(image.data.len()).to_equal(4)
+```
+
+</details>
+
 #### parses JPEG XL container boxes and finds full codestream dimensions lazily
 
 <details>
@@ -1439,8 +1463,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 68 |
-| Active scenarios | 68 |
+| Total scenarios | 69 |
+| Active scenarios | 69 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

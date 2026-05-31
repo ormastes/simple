@@ -10,7 +10,7 @@
 - lazy_startup: color transforms, TIFF decoder, and JPEG XL decoder are not initialized by the 8K surface plan
 - red_lab_xyz_argb_roundtrip: true
 - pure_simple_tiff_pixels: covered by focused raster spec for strips, tiles, PackBits, planar, high-bit-depth, palette, gray, RGB/RGBA, and Lab-like paths
-- pure_simple_jpegxl_stage: metadata-sized raster placeholder is covered; full JPEG XL pixel decode remains a follow-up
+- pure_simple_jpegxl_stage: metadata parsing, sparse 8K placeholder allocation, and exact raster tiling are covered; full JPEG XL pixel decode remains a follow-up
 
 ## Evidence
 
@@ -45,7 +45,7 @@
     
     Running: examples/browser/test/gpu/surface_color_plan_spec.spl
     [1/1] examples/browser/test/gpu/surface_color_plan_spec.spl
-      [32mPASSED[0m (319ms)
+      [32mPASSED[0m (317ms)
     
     ═══════════════════════════════════════════════════════════════
     Test Summary
@@ -53,12 +53,12 @@
     Files: 1
     [32mPassed: 2[0m
     Failed: 0
-    Duration: 322ms
+    Duration: 321ms
     
     [32m✓ All tests passed![0m
     
     Slowest tests:
-           319ms  examples/browser/test/gpu/surface_color_plan_spec.spl
+           317ms  examples/browser/test/gpu/surface_color_plan_spec.spl
     spec_exit_code=0
     spec_path=test/unit/lib/common/color/color_lab_xyz_spec.spl
     Simple Test Runner v1.0.0-beta
@@ -72,7 +72,7 @@
     
     Running: test/unit/lib/common/color/color_lab_xyz_spec.spl
     [1/1] test/unit/lib/common/color/color_lab_xyz_spec.spl
-      [32mPASSED[0m (143ms)
+      [32mPASSED[0m (126ms)
     
     ═══════════════════════════════════════════════════════════════
     Test Summary
@@ -80,12 +80,39 @@
     Files: 1
     [32mPassed: 4[0m
     Failed: 0
-    Duration: 148ms
+    Duration: 130ms
     
     [32m✓ All tests passed![0m
     
     Slowest tests:
-           143ms  test/unit/lib/common/color/color_lab_xyz_spec.spl
+           126ms  test/unit/lib/common/color/color_lab_xyz_spec.spl
+    spec_exit_code=0
+    spec_path=examples/browser/test/paint/image_decode_spec.spl
+    Simple Test Runner v1.0.0-beta
+    
+    ───────────────────────────────────────────────────────────────
+    Test Discovery
+    ───────────────────────────────────────────────────────────────
+      Spec files (*_spec.spl):  1
+      Test files (*_test.spl):  0
+    ───────────────────────────────────────────────────────────────
+    
+    Running: examples/browser/test/paint/image_decode_spec.spl
+    [1/1] examples/browser/test/paint/image_decode_spec.spl
+      [32mPASSED[0m (516ms)
+    
+    ═══════════════════════════════════════════════════════════════
+    Test Summary
+    ═══════════════════════════════════════════════════════════════
+    Files: 1
+    [32mPassed: 69[0m
+    Failed: 0
+    Duration: 522ms
+    
+    [32m✓ All tests passed![0m
+    
+    Slowest tests:
+           516ms  examples/browser/test/paint/image_decode_spec.spl
     spec_exit_code=0
     spec_path=examples/browser/test/gpu/tiff_image_raster_spec.spl
     Simple Test Runner v1.0.0-beta
@@ -99,18 +126,18 @@
     
     Running: examples/browser/test/gpu/tiff_image_raster_spec.spl
     [1/1] examples/browser/test/gpu/tiff_image_raster_spec.spl
-      [32mPASSED[0m (515ms)
+      [32mPASSED[0m (518ms)
     
     ═══════════════════════════════════════════════════════════════
     Test Summary
     ═══════════════════════════════════════════════════════════════
     Files: 1
-    [32mPassed: 14[0m
+    [32mPassed: 15[0m
     Failed: 0
-    Duration: 521ms
+    Duration: 523ms
     
     [32m✓ All tests passed![0m
     
     Slowest tests:
-           515ms  examples/browser/test/gpu/tiff_image_raster_spec.spl
+           518ms  examples/browser/test/gpu/tiff_image_raster_spec.spl
     spec_exit_code=0

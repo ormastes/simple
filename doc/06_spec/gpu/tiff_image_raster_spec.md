@@ -446,6 +446,46 @@ expect(pixel(surface, 1, 1)).to_equal([128, 128, 128, 255])
 
 </details>
 
+#### renders sparse 8K JPEG XL placeholder without full-frame allocation
+
+1. var rasterizer = Rasterizer new
+
+2. var surface = GpuSurface create
+
+3. rasterizer raster draw image
+   - Expected: image.width equals `7680`
+   - Expected: image.height equals `4320`
+   - Expected: image.data.len() equals `4`
+   - Expected: pixel(surface, 0, 0) equals `[128, 128, 128, 255]`
+   - Expected: pixel(surface, 1, 0) equals `[128, 128, 128, 255]`
+   - Expected: pixel(surface, 0, 1) equals `[128, 128, 128, 255]`
+   - Expected: pixel(surface, 1, 1) equals `[128, 128, 128, 255]`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var rasterizer = Rasterizer.new(Logger.new("jpegxl-raster-sparse-8k-placeholder-spec"))
+var surface = GpuSurface.create(1, 2, 2, SurfaceFormat.RGBA8)
+val image = decode_jpegxl(_jpegxl_large_codestream_7680x4320())
+
+rasterizer.raster_draw_image(surface, image, 0, 0, 2, 2)
+
+expect(image.width).to_equal(7680)
+expect(image.height).to_equal(4320)
+expect(image.data.len()).to_equal(4)
+expect(pixel(surface, 0, 0)).to_equal([128, 128, 128, 255])
+expect(pixel(surface, 1, 0)).to_equal([128, 128, 128, 255])
+expect(pixel(surface, 0, 1)).to_equal([128, 128, 128, 255])
+expect(pixel(surface, 1, 1)).to_equal([128, 128, 128, 255])
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -465,8 +505,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
