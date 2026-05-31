@@ -39,6 +39,9 @@ function renderHtmlToPixels() {
   if (scene === "simple-web-layout-descendant-scope") {
     return renderLayoutDescendantScope();
   }
+  if (scene === "simple-web-layout-child-scope") {
+    return renderLayoutChildScope();
+  }
   if (scene === "simple-web-engine2d-two-block-content") {
     return renderTwoBlockContent();
   }
@@ -293,6 +296,26 @@ function renderLayoutDescendantScope() {
     [13, "S...S"], [14, "S...S"], [15, "GSSSG"],
     [18, "SSSSS"], [19, "..S"], [20, "..S"], [21, "..S"],
     [22, "..S"], [23, "..S"], [24, "..S"],
+  ]);
+  return renderColorRows(rows, {
+    S: 0xFF334155, G: 0xFF22C55E,
+  });
+}
+
+function renderLayoutChildScope() {
+  const rows = new Map([
+    [0, "SSSSS"], [1, "SS..S"], [2, "S.S.S"], [3, "S..SS"],
+    [4, "S...S"], [5, "S...S"], [6, "SSSSS"],
+    [9, "SSSSS"], [10, "S.G.S"], [11, "SSSSS"], [12, "S.G.S"],
+    [13, "S.G.S"], [14, "S.G.S"], [15, "SSSSS"],
+    [18, "SSSSS"], [19, "S.S.G"], [20, "S.S.G"], [21, "GSSS"],
+    [22, "G.S.S"], [23, "G.SGS"], [24, "SSSSG"],
+    [27, "SSSSS"], [28, "G.S"], [29, "GGSG"], [30, "G.S"],
+    [31, "G.S"], [32, "G.S"], [33, "GGSGG"],
+    [36, "SSSSS"], [37, "S...G"], [38, "SSSS"], [39, "S"],
+    [40, "S"], [41, "S...G"], [42, "SSSSS"],
+    [45, "SSSSG"], [46, "S.G.S"], [47, "S.G.S"], [48, "S.G.S"],
+    [49, "S.G.S"], [50, "S.G.S"], [51, "SSSS"],
   ]);
   return renderColorRows(rows, {
     S: 0xFF334155, G: 0xFF22C55E,
