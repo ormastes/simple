@@ -879,6 +879,34 @@ expect(_eval_str("Buffer.from('68656c6c6f', 'hex').slice(-2, 99).toString('hex')
 
 </details>
 
+#### subarrays buffer byte ranges
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from('68656c6c6f', 'hex').subarray(1, 4).toString('utf8')")).to_equal("ell")
+```
+
+</details>
+
+#### subarrays with negative start
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from('68656c6c6f', 'hex').subarray(-2).toString('hex')")).to_equal("6c6f")
+```
+
+</details>
+
 #### reads unsigned bytes
 
 <details>
@@ -907,6 +935,48 @@ expect(_eval_str("Buffer.from([0,97,255]).readUInt8(99)")).to_equal("0")
 
 </details>
 
+#### reads little-endian unsigned 16-bit values
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from([52,18,86,120]).readUInt16LE(0)")).to_equal("4660")
+```
+
+</details>
+
+#### reads big-endian unsigned 16-bit values
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from([52,18,86,120]).readUInt16BE(2)")).to_equal("22136")
+```
+
+</details>
+
+#### bounds out-of-range unsigned 16-bit reads
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from([52]).readUInt16LE(0)")).to_equal("0")
+```
+
+</details>
+
 #### reads WASM magic as little-endian u32
 
 <details>
@@ -931,6 +1001,76 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("Buffer.from([0,97,115,109,1,0,0,0]).readUInt32LE(4)")).to_equal("1")
+```
+
+</details>
+
+#### reads big-endian unsigned 32-bit values
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from([0,97,115,109,1,0,0,0]).readUInt32BE(0)")).to_equal("6388590")
+```
+
+</details>
+
+#### bounds out-of-range unsigned 32-bit big-endian reads
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from([1,2,3]).readUInt32BE(0)")).to_equal("0")
+```
+
+</details>
+
+#### writes unsigned bytes and returns the next offset
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.alloc(2).writeUInt8(255, 1)")).to_equal("2")
+```
+
+</details>
+
+#### writes little-endian unsigned 16-bit values and returns the next offset
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.alloc(2).writeUInt16LE(4660, 0)")).to_equal("2")
+```
+
+</details>
+
+#### writes big-endian unsigned 16-bit values and returns the next offset
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.alloc(2).writeUInt16BE(4660, 0)")).to_equal("2")
 ```
 
 </details>
@@ -1146,8 +1286,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 75 |
-| Active scenarios | 75 |
+| Total scenarios | 85 |
+| Active scenarios | 85 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -33,6 +33,9 @@ function renderHtmlToPixels() {
   if (scene === "simple-web-engine2d-wide-card-content") {
     return renderWideCardContent();
   }
+  if (scene === "simple-web-engine2d-split-pane-status-list") {
+    return renderSplitPaneStatusList();
+  }
   const pixels = new Uint32Array(width * height);
 
   // Match the Simple web renderer's recognized Engine2D heuristic for this
@@ -61,6 +64,25 @@ function renderWideCardContent() {
   const pixels = new Uint32Array(width * height);
   pixels.fill(0xFF0B1020 >>> 0);
   rect(pixels, 8, 8, 120, 60, 0xFFF59E0B);
+  return pixels;
+}
+
+function renderSplitPaneStatusList() {
+  const pixels = new Uint32Array(width * height);
+  pixels.fill(0xFF101820 >>> 0);
+  rect(pixels, 0, 0, 12, height, 0xFF1F2937);
+  rect(pixels, 3, 8, 6, 6, 0xFFEF4444);
+  rect(pixels, 3, 22, 6, 6, 0xFF22C55E);
+  rect(pixels, 3, 36, 6, 6, 0xFF3B82F6);
+  rect(pixels, 12, 0, width - 12, 10, 0xFF334155);
+  rect(pixels, 16, 14, 34, 44, 0xFF0F172A);
+  rect(pixels, 54, 14, 36, 44, 0xFF111827);
+  rect(pixels, 58, 18, 28, 4, 0xFF374151);
+  rect(pixels, 58, 18, 20, 4, 0xFF22C55E);
+  rect(pixels, 58, 30, 28, 4, 0xFF374151);
+  rect(pixels, 58, 30, 14, 4, 0xFFF59E0B);
+  rect(pixels, 58, 42, 28, 4, 0xFF374151);
+  rect(pixels, 58, 42, 24, 4, 0xFF3B82F6);
   return pixels;
 }
 

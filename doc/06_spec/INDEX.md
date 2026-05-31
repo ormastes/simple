@@ -12,9 +12,9 @@
 
 ---
 
-## Standard Library (1 features)
+## GPU & SIMD (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Wasm Hello Gui Specification](unit/lib/common/ui/wasm_hello_gui_spec.md) | Auto-generated | N/A | 18 | 0% | 0 lines |
+| [Surface Color Plan Specification](gpu/surface_color_plan_spec.md) | Auto-generated | N/A | 2 | 0% | 0 lines |
 

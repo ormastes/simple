@@ -16,6 +16,7 @@ use examples.browser.feature.gpu.raster.{Rasterizer}
 use examples.browser.feature.gpu.texture_cache.{TextureCache}
 use examples.browser.shared.error.{BrowserError, BrowserErrorKind, BrowserResult, paint_error}
 use examples.browser.shared.logging.{Logger, LogLevel}
+use std.common.color.lab_xyz.{PackedSurfacePlan, plan_packed_8k_surface}
 
 # ---------------------------------------------------------------------------
 # SurfaceFormat — pixel format for GPU surfaces.
@@ -273,6 +274,35 @@ fn calculate_surface_memory(width: i64, height: i64, format: SurfaceFormat) -> i
 fn surface_fits_budget(width: i64, height: i64, format: SurfaceFormat, budget_bytes: i64) -> bool:
     val needed = calculate_surface_memory(width, height, format)
     needed <= budget_bytes
+
+# Browser/GUI color policy bridge for the 8K hardening target. This is a
+# planning helper only; it must not allocate the full surface or initialize
+# color transforms/codecs.
+fn browser_packed_color_surface_plan(width: i64, height: i64, format: SurfaceFormat) -> PackedSurfacePlan:
+    if bytes_per_pixel(format) == 4:
+        return plan_packed_8k_surface(width, height)
+    PackedSurfacePlan(
+        width: width,
+        height: height,
+        bytes_per_pixel: bytes_per_pixel(format),
+        framebuffer_bytes: calculate_surface_memory(width, height, format),
+        lab_xyz_full_frame_bytes: width * height * 24,
+        uses_packed_hot_path: false,
+        initializes_color_transforms: false,
+        initializes_tiff_decoder: false,
+        initializes_jpegxl_decoder: false,
+        default_semantic_space: "cielab",
+        connection_space: "cie_xyz"
+    )
+
+fn browser_8k_uhd_surface_plan(format: SurfaceFormat) -> PackedSurfacePlan:
+    browser_packed_color_surface_plan(7680, 4320, format)
+
+fn surface_matches_packed_color_plan(width: i64, height: i64, format: SurfaceFormat, plan: PackedSurfacePlan) -> bool:
+    plan.width == width and
+    plan.height == height and
+    plan.bytes_per_pixel == bytes_per_pixel(format) and
+    plan.framebuffer_bytes == calculate_surface_memory(width, height, format)
 
 # Format a surface description as text.
 fn describe_surface(surface: GpuSurface) -> text:

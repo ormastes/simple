@@ -139,6 +139,30 @@ html,body{margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden
 <section class="card"></section>
 <script>window.__simpleExactBitmapReady=true;</script>`;
   }
+  if (scene === "simple-web-engine2d-split-pane-status-list") {
+    return `<!doctype html>
+<meta charset="utf-8">
+<style>
+html,body{margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden;background:#101820}
+.nav{position:absolute;left:0;top:0;width:12px;height:${height}px;background:#1f2937}
+.i1{position:absolute;left:3px;top:8px;width:6px;height:6px;background:#ef4444}
+.i2{position:absolute;left:3px;top:22px;width:6px;height:6px;background:#22c55e}
+.i3{position:absolute;left:3px;top:36px;width:6px;height:6px;background:#3b82f6}
+.top{position:absolute;left:12px;top:0;width:${width - 12}px;height:10px;background:#334155}
+.pane1{position:absolute;left:16px;top:14px;width:34px;height:44px;background:#0f172a}
+.pane2{position:absolute;left:54px;top:14px;width:36px;height:44px;background:#111827}
+.bar{position:absolute;left:58px;width:28px;height:4px;background:#374151}
+.p1{position:absolute;left:58px;top:18px;width:20px;height:4px;background:#22c55e}
+.p2{position:absolute;left:58px;top:30px;width:14px;height:4px;background:#f59e0b}
+.p3{position:absolute;left:58px;top:42px;width:24px;height:4px;background:#3b82f6}
+</style>
+<div class="nav"></div><div class="i1"></div><div class="i2"></div><div class="i3"></div>
+<div class="top"></div><div class="pane1"></div><div class="pane2"></div>
+<div class="bar" style="top:18px"></div><div class="p1"></div>
+<div class="bar" style="top:30px"></div><div class="p2"></div>
+<div class="bar" style="top:42px"></div><div class="p3"></div>
+<script>window.__simpleExactBitmapReady=true;</script>`;
+  }
   return `<!doctype html>
 <meta charset="utf-8">
 <style>
@@ -157,7 +181,7 @@ function fixtureHtml() {
   if (expectedArgbPath) {
     return expectedArgbCanvasHtml();
   }
-  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content") {
+  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list") {
     return simpleWebEngine2DFixtureHtml();
   }
   return exactFixtureHtml();
@@ -168,11 +192,26 @@ function expectedFramePixels() {
   if (fromFile !== null) {
     return fromFile;
   }
-  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content") {
+  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list") {
     const pixels = new Uint32Array(width * height);
     if (scene === "simple-web-engine2d-wide-card-content") {
       pixels.fill(0xFF0B1020 >>> 0);
       rectArray(pixels, 8, 8, 120, 60, 0xFFF59E0B >>> 0);
+    } else if (scene === "simple-web-engine2d-split-pane-status-list") {
+      pixels.fill(0xFF101820 >>> 0);
+      rectArray(pixels, 0, 0, 12, height, 0xFF1F2937 >>> 0);
+      rectArray(pixels, 3, 8, 6, 6, 0xFFEF4444 >>> 0);
+      rectArray(pixels, 3, 22, 6, 6, 0xFF22C55E >>> 0);
+      rectArray(pixels, 3, 36, 6, 6, 0xFF3B82F6 >>> 0);
+      rectArray(pixels, 12, 0, width - 12, 10, 0xFF334155 >>> 0);
+      rectArray(pixels, 16, 14, 34, 44, 0xFF0F172A >>> 0);
+      rectArray(pixels, 54, 14, 36, 44, 0xFF111827 >>> 0);
+      rectArray(pixels, 58, 18, 28, 4, 0xFF374151 >>> 0);
+      rectArray(pixels, 58, 18, 20, 4, 0xFF22C55E >>> 0);
+      rectArray(pixels, 58, 30, 28, 4, 0xFF374151 >>> 0);
+      rectArray(pixels, 58, 30, 14, 4, 0xFFF59E0B >>> 0);
+      rectArray(pixels, 58, 42, 28, 4, 0xFF374151 >>> 0);
+      rectArray(pixels, 58, 42, 24, 4, 0xFF3B82F6 >>> 0);
     } else {
       pixels.fill(0xFF112233 >>> 0);
     }
@@ -254,7 +293,7 @@ function captureChecksum(buffer) {
     const green = buffer[off + 1];
     const red = buffer[off + 2];
     const alpha = buffer[off + 3];
-    const isArgbScene = expectedArgbPath !== "" || scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content";
+    const isArgbScene = expectedArgbPath !== "" || scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list";
     const value = isArgbScene
       ? (((alpha << 24) >>> 0) | (red << 16) | (green << 8) | blue) >>> 0
       : red;
