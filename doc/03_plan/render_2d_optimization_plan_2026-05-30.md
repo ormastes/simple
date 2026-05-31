@@ -200,9 +200,14 @@ Progress 2026-05-30:
    - In progress: `ComputeDispatch.auto()` selects by the policy order using
      hardened backend probes and returns a probe-backed dispatch result.
 2. Wire through `StrictBackendFactory` — `create_backend` returns a `ComputeSession`
+   - In progress: `ComputeDispatch.from_strict_factory(...)` and
+     `compute_dispatch_for_backend(...)` wrap strict factory probe results in
+     dispatch results without breaking existing `create_backend()` callers.
 3. Connect to `BackendFrame` — frame lifecycle calls `session.synchronize()` per frame
    - In progress: dispatch results expose `synchronize_frame()` and sync
      counters as the narrow frame lifecycle evidence hook.
+   - In progress: `synchronize_backend_frame(frame)` marks a `BackendFrame`
+     submitted and records the synchronization counter.
 4. Export `SimdHitCounts` from all backends (GPU backends count kernel launches, CPU-SIMD counts span ops)
    - In progress: dispatch results expose launch/synchronize counters; CPU SIMD
      still provides concrete per-op hit counts through its session/provider.

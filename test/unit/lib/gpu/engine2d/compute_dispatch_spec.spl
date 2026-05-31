@@ -3,7 +3,8 @@
 
 use std.spec.{describe, it, expect}
 use std.gpu.engine2d.backend_probe.{BackendStatus}
-use std.gpu.engine2d.compute_dispatch.{ComputeDispatch, compute_dispatch_auto}
+use std.gpu.engine2d.backend_session.{BackendFrame}
+use std.gpu.engine2d.compute_dispatch.{ComputeDispatch, compute_dispatch_auto, compute_dispatch_for_backend}
 
 fn _valid_dispatch_name(name: text) -> bool:
     name == "cuda" or name == "rocm" or name == "opencl" or name == "cpu_simd_x86" or name == "cpu_simd_arm" or name == "cpu_simd_riscv" or name == "cpu"
@@ -31,3 +32,22 @@ describe "ComputeDispatch":
         expect(result.hits.kernel_launches).to_equal(1)
         expect(result.hits.synchronize_calls).to_equal(1)
         expect(result.summary()).to_contain("dispatch selected=")
+
+    it "routes explicit backend requests through strict factory probe results":
+        val cpu = compute_dispatch_for_backend("cpu")
+        val unknown = compute_dispatch_for_backend("definitely_missing_backend")
+
+        expect(cpu.selected_name).to_equal("cpu")
+        expect(cpu.is_available()).to_equal(true)
+        expect(unknown.is_available()).to_equal(false)
+        expect(unknown.probe.status == BackendStatus.Failed).to_equal(true)
+
+    it "synchronizes and submits a BackendFrame through the dispatch result":
+        var result = ComputeDispatch.auto()
+        var frame = BackendFrame.create(42, 7, 64, 32)
+
+        expect(result.synchronize_backend_frame(frame)).to_equal("ok")
+        expect(frame.submitted).to_equal(true)
+        expect(result.hits.synchronize_calls).to_equal(1)
+        expect(result.synchronize_backend_frame(frame)).to_equal("already_submitted")
+        expect(result.hits.synchronize_calls).to_equal(2)

@@ -4,7 +4,8 @@
 # the fastest usable compute backend by policy order and exposes frame sync and
 # launch-count evidence while concrete sessions continue to mature.
 
-use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendProber, BackendStatus, BACKEND_CPU, BACKEND_CUDA, BACKEND_OPENCL, BACKEND_ROCM, BACKEND_CPU_SIMD_X86, BACKEND_CPU_SIMD_ARM, BACKEND_CPU_SIMD_RISCV}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendProber, BackendStatus, StrictBackendFactory}
+use std.gpu.engine2d.backend_session.{BackendFrame}
 
 class ComputeDispatchHits:
     kernel_launches: i64
@@ -56,6 +57,15 @@ class ComputeDispatchResult:
         self.hits.record_synchronize()
         self.probe.has_compute
 
+    me synchronize_backend_frame(frame: BackendFrame) -> text:
+        self.hits.record_synchronize()
+        val submit_status = frame.mark_submitted()
+        if not self.probe.has_compute:
+            return "no_compute"
+        if submit_status != "":
+            return submit_status
+        "ok"
+
     fn summary() -> text:
         "dispatch selected={self.selected_name};status={self.probe.status};launches={self.hits.kernel_launches};sync={self.hits.synchronize_calls};probe={self.probe.diagnostic_text()}"
 
@@ -67,6 +77,9 @@ class ComputeDispatch:
 
     static fn auto() -> ComputeDispatchResult:
         ComputeDispatch.create().select_best()
+
+    static fn from_strict_factory(factory: StrictBackendFactory, name: text) -> ComputeDispatchResult:
+        ComputeDispatchResult.create(factory.create_backend(name))
 
     fn select_best() -> ComputeDispatchResult:
         val cuda = self.prober.probe_cuda()
@@ -97,3 +110,6 @@ class ComputeDispatch:
 
 fn compute_dispatch_auto() -> ComputeDispatchResult:
     ComputeDispatch.auto()
+
+fn compute_dispatch_for_backend(name: text) -> ComputeDispatchResult:
+    ComputeDispatch.from_strict_factory(StrictBackendFactory.strict(), name)
