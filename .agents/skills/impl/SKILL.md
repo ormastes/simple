@@ -40,6 +40,9 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   claiming completion: `bin/simple spipe-docgen <spec> --output doc/06_spec`,
   read the output like a manual, then revise steps/captures/visibility until
   primary flows are manual-quality and noisy details are folded or skipped.
+- Executable specs must stay under `test/`; generated/manual docs under
+  `doc/06_spec` must be `.md` only. Require
+  `find doc/06_spec -name '*_spec.spl' | wc -l` to print `0` before sync.
 - Files > 800 lines must be split
 - Run $verify before VCS sync
 - If `src/compiler/**`, `src/lib/**`, `src/app/mcp/**`, `src/app/simple_lsp_mcp/**`, or MCP packaging files changed, finish with:

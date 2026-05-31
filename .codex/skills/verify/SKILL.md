@@ -83,6 +83,8 @@ Scan for stub patterns — any match is a **FAIL**:
 - Every REQ-NNN in `doc/02_requirements/feature/<feature>.md` traced to source code
 - Every BDD scenario in `doc/06_spec/` has a matching `it` block in the mirrored
   executable `test/.../*_spec.spl` file
+- `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`; executable specs
+  under `doc/06_spec` are a hard layout failure
 - Requirement, research, architecture/design, generated spec, plan,
   implementation, guide, and executable test links use the same feature slug or
   an explicit documented alias

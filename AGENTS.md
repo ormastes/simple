@@ -139,6 +139,8 @@ If missing, do all:
 ### System Test Design
 - SPipe BDD tests: `test/system/app/<app_name>/feature/<feature>_spec.spl`
 - Generated/manual SPipe docs: `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md`
+- Never place executable `.spl` specs under `doc/06_spec`; that tree is for
+  generated/manual `.md` manuals and evidence assets only.
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
 - Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 
@@ -236,6 +238,8 @@ MCP server available via npm: `@simple-lang/mcp-server`
 - Production wrappers should execute cached compiled artifacts rather than raw source entrypoints
 - Repeated full-tree scans, repeated rereads, shell-outs, and retry sleeps in hot request handlers require explicit design justification and verification evidence
 - Verify perf-sensitive tooling with warm startup time, representative request latency, and max RSS on realistic fixtures
+- Before commit/release, `find doc/06_spec -name '*_spec.spl' | wc -l` must
+  print `0`; any nonzero result is a layout bug to fix before continuing.
 
 ## Artifacts Summary
 

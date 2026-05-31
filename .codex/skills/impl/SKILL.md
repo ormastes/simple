@@ -40,6 +40,8 @@ Skip if exist. See `design` skill for details.
 - Verify doc cross-references are intact
 - Keep generated/manual SPipe docs under `doc/06_spec/` mirrored from the
   executable `test/...` path after stripping the leading `test/` segment
+- Never put executable `.spl` specs under `doc/06_spec`; verify
+  `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0` before sync.
 - Built-in matchers only (see `design` skill for list)
 - For scenario-oriented specs, run the scenario manual update loop before
   implementation is considered ready: generate the doc, read it as a manual,

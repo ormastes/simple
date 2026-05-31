@@ -33,6 +33,8 @@ description: Create architecture, UI design, system tests, and detail design for
 
 - SPipe BDD tests: `test/system/app/<app_name>/feature/<feature>_spec.spl`
 - Generated/manual SPipe docs: `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md`
+- Never create executable `.spl` specs under `doc/06_spec`; verify
+  `find doc/06_spec -name '*_spec.spl' | wc -l` is `0`.
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
 - Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 - Every REQ-NNN must have at least one test

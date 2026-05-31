@@ -64,6 +64,8 @@ not create, rewrite, or weaken SPipe after verification.
 - `doc/04_architecture/` updated for new modules
 - `doc/05_design/` updated for new features
 - `doc/06_spec/` manual output reviewed for scenario quality when applicable
+- `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`; executable specs
+  under `doc/06_spec` are a hard layout failure
 - Cross-references intact
 
 ## Report Format

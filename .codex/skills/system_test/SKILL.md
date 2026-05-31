@@ -135,6 +135,9 @@ Any REQ with 0 test cases is a **FAIL** — must be addressed.
 
 - Executable tests live under `test/`; generated/manual SPipe docs live under
   `doc/06_spec/`.
+- `doc/06_spec` must not contain executable `.spl` specs. Run
+  `find doc/06_spec -name '*_spec.spl' | wc -l` before completion and require
+  `0`.
 - Mirror the executable path after stripping `test/`, for example
   `test/feature/usage/math_blocks_spec.spl` ->
   `doc/06_spec/feature/usage/math_blocks_spec.md`.
