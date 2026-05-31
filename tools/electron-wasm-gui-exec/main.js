@@ -25,6 +25,8 @@ html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#
     browser_ready: false,
     validate_result: false,
     instantiate_result: false,
+    import_count: 0,
+    import_names: [],
     export_names: [],
     call_results: {},
     error: ""
@@ -33,11 +35,15 @@ html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#
     const raw = Uint8Array.from(atob("${payloadBase64}"), c => c.charCodeAt(0));
     proof.byte_size = raw.byteLength;
     proof.validate_result = WebAssembly.validate(raw);
-    const instantiated = await WebAssembly.instantiate(raw, {});
+    const module = new WebAssembly.Module(raw);
+    const imports = WebAssembly.Module.imports(module);
+    proof.import_count = imports.length;
+    proof.import_names = imports.map(item => item.module + "." + item.name + ":" + item.kind).sort();
+    const instance = await WebAssembly.instantiate(module, {});
     proof.instantiate_result = true;
-    const exports = instantiated.instance.exports;
+    const exports = instance.exports;
     proof.export_names = Object.keys(exports).sort();
-    for (const name of ["simple_app_init", "simple_app_render", "simple_app_event"]) {
+    for (const name of ["spl_main", "simple_app_init", "simple_app_render", "simple_app_event"]) {
       try {
         if (typeof exports[name] !== "function") {
           proof.call_results[name] = "missing";
@@ -104,15 +110,18 @@ async function main() {
   console.log(`gui_wasm_browser_execution_proof=${absoluteProofPath}`);
   console.log(`gui_wasm_browser_execution_validate=${proof.validate_result}`);
   console.log(`gui_wasm_browser_execution_instantiate=${proof.instantiate_result}`);
+  console.log(`gui_wasm_browser_execution_import_count=${proof.import_count}`);
+  console.log(`gui_wasm_browser_execution_imports=${proof.import_names.join(",")}`);
   console.log(`gui_wasm_browser_execution_exports=${proof.export_names.join(",")}`);
 
   await win.close();
   await app.quit();
 
-  const required = ["simple_app_init", "simple_app_render", "simple_app_event"];
+  const required = ["spl_main", "simple_app_init", "simple_app_render", "simple_app_event"];
   const ok = proof.browser_ready === true &&
     proof.validate_result === true &&
     proof.instantiate_result === true &&
+    proof.import_count === 0 &&
     required.every(name => proof.export_names.includes(name) && proof.call_results[name] === "called");
   process.exit(ok ? 0 : 2);
 }
