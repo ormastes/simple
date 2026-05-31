@@ -1831,6 +1831,50 @@ match instance:
 
 </details>
 
+#### executes bounded i32.div_u function export body with unsigned operands
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, module, "validated") equals `true`
+   - Expected: _object_property_text(interp, module, "functionExportName0") equals `run`
+
+2. JsValue Object
+
+3. JsValue Object
+   - Expected: _display_js(run_value) equals `[Function]`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [], -1)) equals `2147483647`
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f030201000707010372756e00000a09010700417e41026e0b")])
+expect(_object_property_text(interp, module, "validated")).to_equal("true")
+expect(_object_property_text(interp, module, "functionExportName0")).to_equal("run")
+
+val instance = interp._native_webassembly_instance([module])
+match instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                val run_value = interp.get_object_property(exports_id, "run")
+                expect(_display_js(run_value)).to_equal("[Function]")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("2147483647")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
 #### executes bounded i32.rem_s function export body
 
 1. var interp =  new interpreter
@@ -2667,6 +2711,105 @@ match instance:
 
 </details>
 
+#### executes bounded i32 unsigned comparisons with unsigned ordering
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, lt_module, "validated") equals `true`
+   - Expected: _object_property_text(interp, gt_module, "validated") equals `true`
+   - Expected: _object_property_text(interp, le_module, "validated") equals `true`
+   - Expected: _object_property_text(interp, ge_module, "validated") equals `true`
+
+2. JsValue Object
+
+3. JsValue Object
+   - Expected: _display_js(interp._native_webassembly_export_function(interp.get_object_property(exports_id, "run"), [], -1)) equals `0`
+   - Expected: "missing lt exports" equals ``
+   - Expected: "missing lt instance" equals ``
+
+4. JsValue Object
+
+5. JsValue Object
+   - Expected: _display_js(interp._native_webassembly_export_function(interp.get_object_property(exports_id, "run"), [], -1)) equals `1`
+   - Expected: "missing gt exports" equals ``
+   - Expected: "missing gt instance" equals ``
+
+6. JsValue Object
+
+7. JsValue Object
+   - Expected: _display_js(interp._native_webassembly_export_function(interp.get_object_property(exports_id, "run"), [], -1)) equals `1`
+   - Expected: "missing le exports" equals ``
+   - Expected: "missing le instance" equals ``
+
+8. JsValue Object
+
+9. JsValue Object
+   - Expected: _display_js(interp._native_webassembly_export_function(interp.get_object_property(exports_id, "run"), [], -1)) equals `1`
+   - Expected: "missing ge exports" equals ``
+   - Expected: "missing ge instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 51 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val lt_module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f030201000707010372756e00000a09010700417f4102490b")])
+val gt_module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f030201000707010372756e00000a09010700417f41024b0b")])
+val le_module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f030201000707010372756e00000a090107004102417f4d0b")])
+val ge_module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f030201000707010372756e00000a09010700417f41024f0b")])
+expect(_object_property_text(interp, lt_module, "validated")).to_equal("true")
+expect(_object_property_text(interp, gt_module, "validated")).to_equal("true")
+expect(_object_property_text(interp, le_module, "validated")).to_equal("true")
+expect(_object_property_text(interp, ge_module, "validated")).to_equal("true")
+
+val lt_instance = interp._native_webassembly_instance([lt_module])
+val gt_instance = interp._native_webassembly_instance([gt_module])
+val le_instance = interp._native_webassembly_instance([le_module])
+val ge_instance = interp._native_webassembly_instance([ge_module])
+match lt_instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                expect(_display_js(interp._native_webassembly_export_function(interp.get_object_property(exports_id, "run"), [], -1))).to_equal("0")
+            _:
+                expect("missing lt exports").to_equal("")
+    _:
+        expect("missing lt instance").to_equal("")
+match gt_instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                expect(_display_js(interp._native_webassembly_export_function(interp.get_object_property(exports_id, "run"), [], -1))).to_equal("1")
+            _:
+                expect("missing gt exports").to_equal("")
+    _:
+        expect("missing gt instance").to_equal("")
+match le_instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                expect(_display_js(interp._native_webassembly_export_function(interp.get_object_property(exports_id, "run"), [], -1))).to_equal("1")
+            _:
+                expect("missing le exports").to_equal("")
+    _:
+        expect("missing le instance").to_equal("")
+match ge_instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                expect(_display_js(interp._native_webassembly_export_function(interp.get_object_property(exports_id, "run"), [], -1))).to_equal("1")
+            _:
+                expect("missing ge exports").to_equal("")
+    _:
+        expect("missing ge instance").to_equal("")
+```
+
+</details>
+
 #### executes bounded i32.gt_s function export body
 
 1. var interp =  new interpreter
@@ -2868,6 +3011,94 @@ Reproduction: this block contains the complete executable scenario source.
 var interp = _new_interpreter()
 
 val module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f030201000707010372756e00000a09010700410741024b0b")])
+expect(_object_property_text(interp, module, "validated")).to_equal("true")
+expect(_object_property_text(interp, module, "functionExportName0")).to_equal("run")
+
+val instance = interp._native_webassembly_instance([module])
+match instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                val run_value = interp.get_object_property(exports_id, "run")
+                expect(_display_js(run_value)).to_equal("[Function]")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("1")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
+#### executes bounded i32.div_u with unsigned negative operands
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, module, "validated") equals `true`
+   - Expected: _object_property_text(interp, module, "functionExportName0") equals `run`
+
+2. JsValue Object
+
+3. JsValue Object
+   - Expected: _display_js(run_value) equals `[Function]`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [], -1)) equals `2147483647`
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f030201000707010372756e00000a09010700417e41026e0b")])
+expect(_object_property_text(interp, module, "validated")).to_equal("true")
+expect(_object_property_text(interp, module, "functionExportName0")).to_equal("run")
+
+val instance = interp._native_webassembly_instance([module])
+match instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                val run_value = interp.get_object_property(exports_id, "run")
+                expect(_display_js(run_value)).to_equal("[Function]")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("2147483647")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
+#### executes bounded i32.gt_u with unsigned negative operands
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, module, "validated") equals `true`
+   - Expected: _object_property_text(interp, module, "functionExportName0") equals `run`
+
+2. JsValue Object
+
+3. JsValue Object
+   - Expected: _display_js(run_value) equals `[Function]`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [], -1)) equals `1`
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f030201000707010372756e00000a09010700417f41014b0b")])
 expect(_object_property_text(interp, module, "validated")).to_equal("true")
 expect(_object_property_text(interp, module, "functionExportName0")).to_equal("run")
 
@@ -3448,8 +3679,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 73 |
-| Active scenarios | 73 |
+| Total scenarios | 77 |
+| Active scenarios | 77 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
