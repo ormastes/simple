@@ -830,15 +830,19 @@ expect(_eval_str("require('fs').status")).to_equal("denied")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("require('os').platform()")).to_equal("linux")
 expect(_eval_str("require('node:os').arch()")).to_equal("x64")
+expect(_eval_str("require('os').type()")).to_equal("Linux")
 expect(_eval_str("require('node:os').type()")).to_equal("Linux")
 expect(_eval_str("require('os').release()")).to_equal("0.0.0-simple")
+expect(_eval_str("require('node:os').release()")).to_equal("0.0.0-simple")
 expect(_eval_str("require('os').homedir()")).to_equal("/")
+expect(_eval_str("require('node:os').homedir()")).to_equal("/")
+expect(_eval_str("require('node:os').tmpdir()")).to_equal("/tmp")
 ```
 
 </details>

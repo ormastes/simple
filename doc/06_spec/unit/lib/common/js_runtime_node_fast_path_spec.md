@@ -81,6 +81,22 @@ expect(_runtime_eval_text("require('node:os').tmpdir()")).to_equal("/tmp")
 
 </details>
 
+#### fast paths os and node:os aliases consistently
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_runtime_eval_text("require('os').type()")).to_equal("Linux")
+expect(_runtime_eval_text("require('node:os').release()")).to_equal("0.0.0-simple")
+expect(_runtime_eval_text("require('node:os').homedir()")).to_equal("/")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -100,8 +116,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
