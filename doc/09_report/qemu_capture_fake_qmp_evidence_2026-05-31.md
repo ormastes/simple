@@ -9,6 +9,11 @@
 - pixels: 2
 - pixel0_argb: 4294901760
 - pixel1_argb: 4278255360
+- capture_checksum: 12851412480
+- reference_checksum: 12851412480
+- mismatch_count: 0
+- blur_or_tolerance_used: false
+- capture_us: 142395
 - error: 
 - socket_path: build/qemu_capture_fake_qmp_evidence/fake-qmp.sock
 - screendump_path: build/qemu_capture_fake_qmp_evidence/fake-screendump.ppm
