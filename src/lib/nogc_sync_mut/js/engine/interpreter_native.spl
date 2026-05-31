@@ -1472,6 +1472,15 @@ impl JsInterpreter:
                     val mapped_body_index = self.wasm_export_body_indices.get(mapped_body_i)
                     val mapped_result = self._native_webassembly_module_function_export_i32_result_with_args_at(mapped_module_id, mapped_body_index, arg_vals)
                     if mapped_result == -1:
+                        var minus_one_is_value = false
+                        match self.get_object_property(mapped_module_id, "lastWasmI32MinusOneValid"):
+                            JsValue.Boolean(v):
+                                if v:
+                                    minus_one_is_value = true
+                            _:
+                                pass_dn
+                        if minus_one_is_value:
+                            return JsValue.Number(v: -1.0)
                         break
                     if mapped_result == -2:
                         return JsValue.String(v: "wasm-trap:integer-divide-by-zero")
@@ -1726,6 +1735,7 @@ impl JsInterpreter:
         self.set_object_property(module_id, "firstImportFieldName", JsValue.String(v: ""))
         self.set_object_property(module_id, "firstImportKind", JsValue.String(v: ""))
         self.set_object_property(module_id, "memoryMinPages", JsValue.Number(v: 0.0))
+        self.set_object_property(module_id, "memoryMaxPages", JsValue.Number(v: -1.0))
         self.set_object_property(module_id, "tableMinElements", JsValue.Number(v: 0.0))
         self.set_object_property(module_id, "exportCount", JsValue.Number(v: 0.0))
         self.set_object_property(module_id, "firstExportName", JsValue.String(v: ""))
@@ -1751,6 +1761,7 @@ impl JsInterpreter:
         val has_global = self._native_webassembly_has_section(hex, 6)
         val has_export = self._native_webassembly_has_section(hex, 7)
         val memory_min_pages = self._native_webassembly_memory_min_pages(hex)
+        val memory_max_pages = self._native_webassembly_memory_max_pages(hex)
         val table_min_elements = self._native_webassembly_table_min_elements(hex)
         val export_count = self._native_webassembly_export_count(hex)
         val first_export_name = self._native_webassembly_first_export_name(hex)
@@ -1781,6 +1792,7 @@ impl JsInterpreter:
         self.set_object_property(module_id, "firstImportFieldName", JsValue.String(v: first_import_field))
         self.set_object_property(module_id, "firstImportKind", JsValue.String(v: first_import_kind))
         self.set_object_property(module_id, "memoryMinPages", JsValue.Number(v: memory_min_pages.to_f64()))
+        self.set_object_property(module_id, "memoryMaxPages", JsValue.Number(v: memory_max_pages.to_f64()))
         self.set_object_property(module_id, "tableMinElements", JsValue.Number(v: table_min_elements.to_f64()))
         self.set_object_property(module_id, "exportCount", JsValue.Number(v: export_count.to_f64()))
         self.set_object_property(module_id, "firstExportName", JsValue.String(v: first_export_name))
@@ -1904,6 +1916,32 @@ impl JsInterpreter:
         if min_pages < 0:
             return 0
         min_pages
+
+    me _native_webassembly_memory_max_pages(hex: text) -> i64:
+        val start = self._native_webassembly_section_payload_start(hex, 5)
+        val end = self._native_webassembly_section_payload_end(hex, 5)
+        if start < 0 or end <= start:
+            return -1
+        val count = self._native_webassembly_read_leb_value(hex, start)
+        var pos = self._native_webassembly_read_leb_next(hex, start)
+        if count <= 0 or pos < 0 or pos >= end:
+            return -1
+        val flags = self._native_webassembly_hex_byte_at(hex, pos)
+        pos = pos + 1
+        if flags < 0 or pos >= end:
+            return -1
+        val min_pages = self._native_webassembly_read_leb_value(hex, pos)
+        pos = self._native_webassembly_read_leb_next(hex, pos)
+        if min_pages < 0 or pos < 0:
+            return -1
+        if (flags & 1) == 0:
+            return -1
+        if pos >= end:
+            return -1
+        val max_pages = self._native_webassembly_read_leb_value(hex, pos)
+        if max_pages < 0:
+            return -1
+        max_pages
 
     me _native_webassembly_table_min_elements(hex: text) -> i64:
         val start = self._native_webassembly_section_payload_start(hex, 4)
@@ -2397,7 +2435,9 @@ impl JsInterpreter:
                     return -1
                 var stack: [i64] = []
                 var memory_page_count = self._native_webassembly_memory_min_pages(hex)
+                val memory_max_pages = self._native_webassembly_memory_max_pages(hex)
                 if module_id >= 0:
+                    self.set_object_property(module_id, "lastWasmI32MinusOneValid", JsValue.Boolean(v: false))
                     match self.get_object_property(module_id, "runtimeMemoryPages"):
                         JsValue.Number(v): memory_page_count = f64_to_i64(v)
                         _:
@@ -2550,10 +2590,14 @@ impl JsInterpreter:
                             continue
                         if stack.len() != 1:
                             return -1
+                        if module_id >= 0 and stack.get(0) == -1:
+                            self.set_object_property(module_id, "lastWasmI32MinusOneValid", JsValue.Boolean(v: true))
                         return stack.get(0)
                     if opcode == 15:
                         if stack.len() != 1:
                             return -1
+                        if module_id >= 0 and stack.get(0) == -1:
+                            self.set_object_property(module_id, "lastWasmI32MinusOneValid", JsValue.Boolean(v: true))
                         return stack.get(0)
                     if opcode == 26:
                         if stack.len() < 1:
@@ -2659,6 +2703,8 @@ impl JsInterpreter:
                         val delta = stack.get(stack.len() - 1)
                         stack.pop()
                         if delta < 0:
+                            stack.push(-1)
+                        else if memory_max_pages >= 0 and memory_page_count + delta > memory_max_pages:
                             stack.push(-1)
                         else:
                             val old_pages = memory_page_count
