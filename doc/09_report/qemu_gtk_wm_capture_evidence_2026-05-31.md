@@ -18,6 +18,8 @@
 - fake QMP screendump status: pass
 - fake QMP screendump reason: fake-qmp-screendump-pass
 - fake QMP screendump report: build/qemu_gtk_wm_capture_evidence/fake-qmp-capture.md
+- fake QMP expected ARGB path: build/qemu_gtk_wm_capture_evidence/fake-qmp/expected-argb.json
+- fake QMP captured ARGB path: build/qemu_gtk_wm_capture_evidence/fake-qmp/captured-argb.json
 
 ## Raw Evidence
 - qemu_gtk_wm_capture_status=unavailable
@@ -43,6 +45,8 @@
 - qemu_gtk_wm_capture_fake_qmp_status=pass
 - qemu_gtk_wm_capture_fake_qmp_reason=fake-qmp-screendump-pass
 - qemu_gtk_wm_capture_fake_qmp_report_path=build/qemu_gtk_wm_capture_evidence/fake-qmp-capture.md
+- qemu_gtk_wm_capture_fake_qmp_expected_argb_path=build/qemu_gtk_wm_capture_evidence/fake-qmp/expected-argb.json
+- qemu_gtk_wm_capture_fake_qmp_captured_argb_path=build/qemu_gtk_wm_capture_evidence/fake-qmp/captured-argb.json
 - qemu_gtk_wm_capture_host_evidence_status=pass
 - qemu_gtk_wm_capture_host_evidence_reason=wm-launch-capture-contract-verified
 - qemu_gtk_wm_capture_host_contract_status=pass
@@ -114,7 +118,7 @@
 - qemu_capture_fake_qmp_mismatch_count=0
 - qemu_capture_fake_qmp_first_mismatch=-1
 - qemu_capture_fake_qmp_blur_or_tolerance_used=false
-- qemu_capture_fake_qmp_capture_us=263062
+- qemu_capture_fake_qmp_capture_us=278750
 - qemu_capture_fake_qmp_pixel0=4280307872
 - qemu_capture_fake_qmp_pixel384=4279310375
 - qemu_capture_fake_qmp_pixel1000=4293257195
@@ -123,6 +127,8 @@
 - qemu_capture_fake_qmp_status=pass
 - qemu_capture_fake_qmp_reason=fake-qmp-screendump-pass
 - qemu_capture_fake_qmp_report=build/qemu_gtk_wm_capture_evidence/fake-qmp-capture.md
+- qemu_capture_fake_qmp_expected_argb_path=build/qemu_gtk_wm_capture_evidence/fake-qmp/expected-argb.json
+- qemu_capture_fake_qmp_captured_argb_path=build/qemu_gtk_wm_capture_evidence/fake-qmp/captured-argb.json
 
 ## Host WM Smoke Output
 - check=wm_launch_capture_evidence
@@ -202,7 +208,7 @@
 - 
 - Running: test/unit/app/ui/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/app/ui/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (201ms)
+-   [32mPASSED[0m (208ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -210,12 +216,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 206ms
+- Duration: 215ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        201ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
+-        208ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -229,7 +235,7 @@
 - 
 - Running: test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - [1/1] test/unit/app/ui/host_wm_runtime_loop_spec.spl
--   [32mPASSED[0m (1006ms)
+-   [32mPASSED[0m (990ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -237,12 +243,12 @@
 - Files: 1
 - [32mPassed: 2[0m
 - Failed: 0
-- Duration: 1011ms
+- Duration: 995ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--       1006ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
+-        990ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -256,7 +262,7 @@
 - 
 - Running: test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/os/desktop/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (205ms)
+-   [32mPASSED[0m (221ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -264,12 +270,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 210ms
+- Duration: 226ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        205ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
+-        221ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/qemu_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -283,7 +289,7 @@
 - 
 - Running: test/unit/os/compositor/qemu_capture_spec.spl
 - [1/1] test/unit/os/compositor/qemu_capture_spec.spl
--   [32mPASSED[0m (850ms)
+-   [32mPASSED[0m (848ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -291,12 +297,12 @@
 - Files: 1
 - [32mPassed: 11[0m
 - Failed: 0
-- Duration: 855ms
+- Duration: 864ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        850ms  test/unit/os/compositor/qemu_capture_spec.spl
+-        848ms  test/unit/os/compositor/qemu_capture_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/electron_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -310,7 +316,7 @@
 - 
 - Running: test/unit/os/compositor/electron_capture_spec.spl
 - [1/1] test/unit/os/compositor/electron_capture_spec.spl
--   [32mPASSED[0m (778ms)
+-   [32mPASSED[0m (792ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -318,12 +324,12 @@
 - Files: 1
 - [32mPassed: 7[0m
 - Failed: 0
-- Duration: 785ms
+- Duration: 798ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        778ms  test/unit/os/compositor/electron_capture_spec.spl
+-        792ms  test/unit/os/compositor/electron_capture_spec.spl
 - spec_exit_code=0
 - wm_launch_capture_evidence_status=pass
 - wm_launch_capture_evidence_reason=wm-launch-capture-contract-verified

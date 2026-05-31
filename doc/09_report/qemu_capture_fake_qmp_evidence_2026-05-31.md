@@ -15,7 +15,9 @@
 - mismatch_count: 0
 - first_mismatch: -1
 - blur_or_tolerance_used: false
-- capture_us: 274049
+- expected_argb_path: build/qemu_capture_fake_qmp_evidence/expected-argb.json
+- captured_argb_path: build/qemu_capture_fake_qmp_evidence/captured-argb.json
+- capture_us: 250777
 - error: 
 - socket_path: build/qemu_capture_fake_qmp_evidence/fake-qmp.sock
 - screendump_path: build/qemu_capture_fake_qmp_evidence/fake-screendump.ppm
