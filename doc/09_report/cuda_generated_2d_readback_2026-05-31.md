@@ -26,4 +26,8 @@ Date: 2026-05-31
 | cuda_generated_2d_readback_ops | fill,copy,alpha,scroll |
 | cuda_generated_2d_readback_count | 64 |
 | cuda_generated_2d_readback_value | 16909060 |
+| cuda_generated_2d_readback_expected_pixels_path | build/cuda_generated_2d_readback/expected-u32.json |
+| cuda_generated_2d_readback_actual_pixels_path | build/cuda_generated_2d_readback/actual-u32.json |
 | ptx_path | build/cuda_generated_2d_readback/toolchains/simple_2d_optimization.ptx |
+| expected_pixels_path | build/cuda_generated_2d_readback/expected-u32.json |
+| actual_pixels_path | build/cuda_generated_2d_readback/actual-u32.json |

@@ -13,6 +13,8 @@ PTX_PATH="${PTX_PATH:-$TOOLCHAIN_BUILD_DIR/simple_2d_optimization.ptx}"
 CC_TOOL="${CC_TOOL:-cc}"
 CUDA_ELEMENT_COUNT="${CUDA_ELEMENT_COUNT:-64}"
 CUDA_FILL_VALUE="${CUDA_FILL_VALUE:-16909060}"
+EXPECTED_PIXELS_PATH="$BUILD_DIR/expected-u32.json"
+ACTUAL_PIXELS_PATH="$BUILD_DIR/actual-u32.json"
 
 mkdir -p "$BUILD_DIR" "$TOOLCHAIN_BUILD_DIR" "$(dirname "$REPORT_PATH")"
 
@@ -87,6 +89,19 @@ static uint64_t mismatch_fill_u32(const uint32_t *actual, uint32_t expected, uns
     return mismatches;
 }
 
+static int write_json_u32(const char *path, const uint32_t *data, unsigned int count, const char *producer) {
+    FILE *f = fopen(path, "w");
+    if (!f) return 0;
+    fprintf(f, "{\"count\":%u,\"format\":\"u32\",\"producer\":\"%s\",\"pixels\":[", count, producer);
+    for (unsigned int i = 0; i < count; i++) {
+        if (i > 0) fputc(',', f);
+        fprintf(f, "%u", data[i]);
+    }
+    fprintf(f, "]}");
+    fclose(f);
+    return 1;
+}
+
 static uint32_t alpha_pixel(uint32_t s, uint32_t d, uint32_t alpha) {
     uint32_t inv = 255u - alpha;
     uint32_t rb = (((s & 0x00ff00ffu) * alpha) + ((d & 0x00ff00ffu) * inv)) >> 8;
@@ -95,13 +110,15 @@ static uint32_t alpha_pixel(uint32_t s, uint32_t d, uint32_t alpha) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 4) {
+    if (argc != 6) {
         fail("invalid-argv", -1, 0, 0);
         return 2;
     }
     const char *ptx_path = argv[1];
     unsigned int count = (unsigned int)strtoul(argv[2], NULL, 10);
     unsigned int value = (unsigned int)strtoul(argv[3], NULL, 10);
+    const char *expected_pixels_path = argv[4];
+    const char *actual_pixels_path = argv[5];
     if (count == 0) {
         fail("invalid-count", -1, 0, 0);
         return 2;
@@ -158,7 +175,9 @@ int main(int argc, char **argv) {
     unsigned int grid = (count + block - 1) / block;
     uint32_t *host = (uint32_t *)calloc(count, sizeof(uint32_t));
     uint32_t *expected_buf = (uint32_t *)calloc(count, sizeof(uint32_t));
-    if (!host || !expected_buf) { fail("host-alloc-failed", -1, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    uint32_t *expected_all = (uint32_t *)calloc((size_t)count * 4u, sizeof(uint32_t));
+    uint32_t *actual_all = (uint32_t *)calloc((size_t)count * 4u, sizeof(uint32_t));
+    if (!host || !expected_buf || !expected_all || !actual_all) { fail("host-alloc-failed", -1, 0, 0); free(host); free(expected_buf); free(expected_all); free(actual_all); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
 
     void *fill_args[] = { &dst, &value, &count };
     rc = cuLaunchKernel(fn_fill, grid, 1, 1, block, 1, 1, 0, 0, fill_args, 0);
@@ -170,6 +189,7 @@ int main(int argc, char **argv) {
     uint64_t fill_actual = checksum_u32(host, count);
     uint64_t fill_expected = (uint64_t)value * (uint64_t)count;
     uint64_t fill_mismatches = mismatch_fill_u32(host, value, count);
+    for (unsigned int i = 0; i < count; i++) { expected_all[i] = value; actual_all[i] = host[i]; }
 
     for (unsigned int i = 0; i < count; i++) expected_buf[i] = 1000u + i;
     rc = cuMemcpyHtoD(src, expected_buf, bytes);
@@ -186,6 +206,7 @@ int main(int argc, char **argv) {
     uint64_t copy_actual = checksum_u32(host, count);
     uint64_t copy_expected = checksum_u32(expected_buf, count);
     uint64_t copy_mismatches = mismatch_u32(host, expected_buf, count);
+    for (unsigned int i = 0; i < count; i++) { expected_all[count + i] = expected_buf[i]; actual_all[count + i] = host[i]; }
 
     for (unsigned int i = 0; i < count; i++) expected_buf[i] = 0xff204060u + i;
     for (unsigned int i = 0; i < count; i++) host[i] = 0xff102030u + i;
@@ -205,6 +226,7 @@ int main(int argc, char **argv) {
     uint64_t alpha_actual = checksum_u32(host, count);
     uint64_t alpha_expected = checksum_u32(expected_buf, count);
     uint64_t alpha_mismatches = mismatch_u32(host, expected_buf, count);
+    for (unsigned int i = 0; i < count; i++) { expected_all[count * 2u + i] = expected_buf[i]; actual_all[count * 2u + i] = host[i]; }
 
     unsigned int width = 8u;
     unsigned int height = count / width;
@@ -230,12 +252,16 @@ int main(int argc, char **argv) {
     uint64_t scroll_actual = checksum_u32(host, count);
     uint64_t scroll_expected = checksum_u32(expected_buf, count);
     uint64_t scroll_mismatches = mismatch_u32(host, expected_buf, count);
+    for (unsigned int i = 0; i < count; i++) { expected_all[count * 3u + i] = expected_buf[i]; actual_all[count * 3u + i] = host[i]; }
 
     uint64_t actual = fill_actual + copy_actual + alpha_actual + scroll_actual;
     uint64_t expected = fill_expected + copy_expected + alpha_expected + scroll_expected;
     uint64_t mismatches = fill_mismatches + copy_mismatches + alpha_mismatches + scroll_mismatches;
 
-    if (actual == expected && mismatches == 0) {
+    int wrote_expected = write_json_u32(expected_pixels_path, expected_all, count * 4u, "cuda-generated-2d-expected");
+    int wrote_actual = write_json_u32(actual_pixels_path, actual_all, count * 4u, "cuda-generated-2d-readback");
+
+    if (actual == expected && mismatches == 0 && wrote_expected && wrote_actual) {
         printf("cuda_generated_2d_readback_status=pass\n");
         printf("cuda_generated_2d_readback_reason=readback-pixels-matched\n");
         printf("cuda_generated_2d_readback_cuda_code=0\n");
@@ -258,12 +284,16 @@ int main(int argc, char **argv) {
         printf("cuda_generated_2d_readback_ops=fill,copy,alpha,scroll\n");
         printf("cuda_generated_2d_readback_count=%u\n", count);
         printf("cuda_generated_2d_readback_value=%u\n", value);
+        printf("cuda_generated_2d_readback_expected_pixels_path=%s\n", expected_pixels_path);
+        printf("cuda_generated_2d_readback_actual_pixels_path=%s\n", actual_pixels_path);
     } else {
-        fail("readback-pixel-mismatch", 0, expected, actual);
+        fail(wrote_expected && wrote_actual ? "readback-pixel-mismatch" : "readback-artifact-write-failed", 0, expected, actual);
     }
 
     free(host);
     free(expected_buf);
+    free(expected_all);
+    free(actual_all);
     cuMemFree(src);
     cuMemFree(dst);
     cuModuleUnload(module);
@@ -277,7 +307,7 @@ C_EOF
         emit_unavailable "missing-c-compiler"
     elif ! "$CC_TOOL" "$BUILD_DIR/cuda_generated_2d_readback.c" -lcuda -o "$BUILD_DIR/cuda_generated_2d_readback" >"$BUILD_DIR/cc.out" 2>"$BUILD_DIR/cc.err"; then
         emit_unavailable "cuda-driver-compile-failed"
-    elif "$BUILD_DIR/cuda_generated_2d_readback" "$PTX_PATH" "$CUDA_ELEMENT_COUNT" "$CUDA_FILL_VALUE" >"$BUILD_DIR/evidence.env" 2>"$BUILD_DIR/run.err"; then
+    elif "$BUILD_DIR/cuda_generated_2d_readback" "$PTX_PATH" "$CUDA_ELEMENT_COUNT" "$CUDA_FILL_VALUE" "$EXPECTED_PIXELS_PATH" "$ACTUAL_PIXELS_PATH" >"$BUILD_DIR/evidence.env" 2>"$BUILD_DIR/run.err"; then
         :
     else
         if [ ! -s "$BUILD_DIR/evidence.env" ]; then
@@ -295,6 +325,8 @@ fi
     echo "|---|---|"
     awk -F= '/^cuda_generated_2d_readback_/ { print "| " $1 " | " $2 " |" }' "$BUILD_DIR/evidence.env"
     echo "| ptx_path | $PTX_PATH |"
+    echo "| expected_pixels_path | $EXPECTED_PIXELS_PATH |"
+    echo "| actual_pixels_path | $ACTUAL_PIXELS_PATH |"
 } >"$REPORT_PATH"
 
 echo "report_path=$REPORT_PATH"

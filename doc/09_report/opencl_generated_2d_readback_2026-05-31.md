@@ -28,6 +28,8 @@ Date: 2026-05-31
 | opencl_generated_2d_readback_ops | fill,copy,alpha,scroll |
 | opencl_generated_2d_readback_count | 64 |
 | opencl_generated_2d_readback_value | 16909060 |
+| opencl_generated_2d_readback_expected_pixels_path | build/opencl_generated_2d_readback/expected-u32.json |
+| opencl_generated_2d_readback_actual_pixels_path | build/opencl_generated_2d_readback/actual-u32.json |
 | opencl_generated_2d_readback_spirv | build/opencl_generated_2d_readback/toolchains/simple_2d_optimization.spirv |
 | opencl_generated_2d_readback_spirv_bytes | 0 |
 | opencl_generated_2d_readback_loader_present | true |
