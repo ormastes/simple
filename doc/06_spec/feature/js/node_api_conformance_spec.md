@@ -1365,6 +1365,52 @@ expect(_eval_str("require('process').argv.length")).to_equal("2")
 
 </details>
 
+### TextEncoder and TextDecoder globals
+
+#### encodes text to Uint8Array-compatible bytes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("new TextEncoder().encode('hello').length")).to_equal("5")
+expect(_eval_str("new TextEncoder().encode('hello')[1]")).to_equal("101")
+```
+
+</details>
+
+#### decodes Uint8Array-compatible bytes as UTF-8
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("new TextDecoder().decode(new Uint8Array([104,101,108,108,111]))")).to_equal("hello")
+```
+
+</details>
+
+#### reports deterministic UTF-8 labels
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("new TextEncoder().encoding")).to_equal("utf-8")
+expect(_eval_str("new TextDecoder('utf8').encoding")).to_equal("utf-8")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -1403,13 +1449,14 @@ Tests covering:
 - require builtins
 - Buffer global and module shape
 - process global shape
+- TextEncoder and TextDecoder globals
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 93 |
-| Active scenarios | 93 |
+| Total scenarios | 96 |
+| Active scenarios | 96 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

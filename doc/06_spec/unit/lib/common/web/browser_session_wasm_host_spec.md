@@ -202,6 +202,37 @@ expect(_display_js(interp._native_webassembly_validate([buffer]))).to_equal("fal
 
 </details>
 
+#### round trips TextEncoder bytes through TextDecoder for WASM-oriented host arrays
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, encoded, "length") equals `4`
+   - Expected: _object_property_text(interp, encoded, "0") equals `119`
+   - Expected: _object_property_text(interp, encoded, "3") equals `109`
+   - Expected: _object_property_text(interp, decoder, "encoding") equals `utf-8`
+   - Expected: _display_js(interp._native_text_decoder_decode(decoder, [encoded])) equals `wasm`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+val encoder = interp._native_text_encoder([])
+val encoded = interp._native_text_encoder_encode(encoder, [JsValue.String(v: "wasm")])
+expect(_object_property_text(interp, encoded, "length")).to_equal("4")
+expect(_object_property_text(interp, encoded, "0")).to_equal("119")
+expect(_object_property_text(interp, encoded, "3")).to_equal("109")
+
+val decoder = interp._native_text_decoder([JsValue.String(v: "utf8")])
+expect(_object_property_text(interp, decoder, "encoding")).to_equal("utf-8")
+expect(_display_js(interp._native_text_decoder_decode(decoder, [encoded]))).to_equal("wasm")
+```
+
+</details>
+
 #### parses bounded WASM section metadata and rejects truncated sections
 
 1. var interp =  new interpreter
@@ -308,8 +339,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
