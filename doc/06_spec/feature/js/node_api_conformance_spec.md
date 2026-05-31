@@ -720,6 +720,66 @@ expect(left.length()).to_equal(5)
 
 </details>
 
+### Node.js crypto module
+
+### createHash digest
+
+#### computes deterministic sha256 hex digests
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(crypto_createHash_digest([JsValue.String(v: "sha256"), JsValue.String(v: "hello"), JsValue.String(v: "hex")]))).to_equal("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+```
+
+</details>
+
+#### accepts Node-style sha-256 aliases
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(crypto_createHash_digest([JsValue.String(v: "sha-256"), JsValue.String(v: "hello"), JsValue.String(v: "hex")]))).to_equal("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+```
+
+</details>
+
+#### computes deterministic sha1 hex digests
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(crypto_createHash_digest([JsValue.String(v: "sha1"), JsValue.String(v: "hello"), JsValue.String(v: "hex")]))).to_equal("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d")
+```
+
+</details>
+
+#### denies unsupported algorithms
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(crypto_createHash_digest([JsValue.String(v: "md5"), JsValue.String(v: "hello"), JsValue.String(v: "hex")]))).to_equal("denied")
+```
+
+</details>
+
 ### Node.js runtime shape
 
 ### JSON.parse host path
@@ -875,6 +935,35 @@ expect(_eval_str("require('os').endianness()")).to_equal("LE")
 expect(_eval_str("require('node:os').endianness()")).to_equal("LE")
 expect(_eval_str("require('os').EOL")).to_equal("\n")
 expect(_eval_str("require('node:os').EOL")).to_equal("\n")
+```
+
+</details>
+
+#### resolves crypto and node:crypto deterministic hashing
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('crypto').createHash('sha256').update('hello').digest('hex')")).to_equal("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+expect(_eval_str("require('node:crypto').createHash('sha1').update('hello').digest('hex')")).to_equal("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d")
+```
+
+</details>
+
+#### denies unsupported crypto algorithms
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('crypto').createHash('md5').update('hello').digest('hex')")).to_equal("denied")
 ```
 
 </details>
@@ -1494,6 +1583,8 @@ Tests covering:
 - Buffer.from(...).toString(...)
 - Buffer.concat
 - NodeBuffer value semantics
+- Node.js crypto module
+- createHash digest
 - Node.js runtime shape
 - JSON.parse host path
 - require builtins
@@ -1505,8 +1596,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 99 |
-| Active scenarios | 99 |
+| Total scenarios | 105 |
+| Active scenarios | 105 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
