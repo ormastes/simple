@@ -4778,6 +4778,63 @@ match memory:
 
 </details>
 
+#### reads and writes WebAssembly.Memory bytes through DataView little-endian methods
+
+1. var interp =  new interpreter
+
+2. interp set object property
+
+3. JsValue Object
+
+4. JsValue Object
+
+5. interp  native data view set
+
+6. interp  native data view set
+   - Expected: _display_js(interp.get_object_property(buffer_id, "4")) equals `4`
+   - Expected: _display_js(interp.get_object_property(buffer_id, "5")) equals `3`
+   - Expected: _display_js(interp.get_object_property(buffer_id, "6")) equals `2`
+   - Expected: _display_js(interp.get_object_property(buffer_id, "7")) equals `1`
+   - Expected: _display_js(interp._native_data_view_get(view, [JsValue.Number(v: 4.0), JsValue.Boolean(v: true)], 4, false)) equals `16909060`
+   - Expected: _display_js(interp._native_data_view_get(view, [JsValue.Number(v: 4.0), JsValue.Boolean(v: true)], 2, false)) equals `772`
+   - Expected: _display_js(interp._native_data_view_get(view, [JsValue.Number(v: 8.0), JsValue.Boolean(v: true)], 4, true)) equals `-2`
+   - Expected: "missing buffer" equals ``
+   - Expected: "missing memory" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+val options_id = interp.create_object()
+interp.set_object_property(options_id, "initial", JsValue.Number(v: 1.0))
+val memory = interp._native_webassembly_memory([JsValue.Object(id: options_id)])
+match memory:
+    JsValue.Object(memory_id):
+        match interp.get_object_property(memory_id, "buffer"):
+            JsValue.Object(buffer_id):
+                val view = interp._native_data_view([JsValue.Object(id: buffer_id)])
+                interp._native_data_view_set(view, [JsValue.Number(v: 4.0), JsValue.Number(v: 16909060.0), JsValue.Boolean(v: true)], 4)
+                interp._native_data_view_set(view, [JsValue.Number(v: 8.0), JsValue.Number(v: -2.0), JsValue.Boolean(v: true)], 4)
+                expect(_display_js(interp.get_object_property(buffer_id, "4"))).to_equal("4")
+                expect(_display_js(interp.get_object_property(buffer_id, "5"))).to_equal("3")
+                expect(_display_js(interp.get_object_property(buffer_id, "6"))).to_equal("2")
+                expect(_display_js(interp.get_object_property(buffer_id, "7"))).to_equal("1")
+                expect(_display_js(interp._native_data_view_get(view, [JsValue.Number(v: 4.0), JsValue.Boolean(v: true)], 4, false))).to_equal("16909060")
+                expect(_display_js(interp._native_data_view_get(view, [JsValue.Number(v: 4.0), JsValue.Boolean(v: true)], 2, false))).to_equal("772")
+                expect(_display_js(interp._native_data_view_get(view, [JsValue.Number(v: 8.0), JsValue.Boolean(v: true)], 4, true))).to_equal("-2")
+            _:
+                expect("missing buffer").to_equal("")
+    _:
+        expect("missing memory").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -4797,8 +4854,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 98 |
-| Active scenarios | 98 |
+| Total scenarios | 99 |
+| Active scenarios | 99 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
