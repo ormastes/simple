@@ -9,8 +9,8 @@
 - auto QMP launch: 1
 - auto QMP status: pass
 - auto QMP reason: pass
-- auto QMP pid: 1038089
-- qmp socket: /tmp/simpleos_desktop_qmp_1035033_1780260055233418.sock
+- auto QMP pid: 1051218
+- qmp socket: /tmp/simpleos_desktop_qmp_1048125_1780260866075224.sock
 - host WM smoke status: unavailable
 - host WM smoke reason: not-run
 - host WM smoke report: build/qemu_gtk_wm_capture_evidence/wm-host-launch-capture.md
@@ -20,6 +20,7 @@
 - live capture non-black pixels: 786432
 - live capture sample matches: 5
 - live capture sample mismatches: 0
+- live capture full-scene mismatches: 0
 - qemu-side perf status: unavailable
 - qemu-side perf reason: qemu-side-gtk-simple-perf-harness-not-wired
 - qemu-side perf comparison available: false
@@ -48,8 +49,8 @@
 - qemu_gtk_wm_capture_auto_qmp_launch=1
 - qemu_gtk_wm_capture_auto_qmp_status=pass
 - qemu_gtk_wm_capture_auto_qmp_reason=pass
-- qemu_gtk_wm_capture_auto_qmp_pid=1038089
-- qemu_gtk_wm_capture_qmp_socket=/tmp/simpleos_desktop_qmp_1035033_1780260055233418.sock
+- qemu_gtk_wm_capture_auto_qmp_pid=1051218
+- qemu_gtk_wm_capture_qmp_socket=/tmp/simpleos_desktop_qmp_1048125_1780260866075224.sock
 - qemu_gtk_wm_capture_wm_exit_code=0
 - qemu_gtk_wm_capture_host_wm_status=unavailable
 - qemu_gtk_wm_capture_host_wm_reason=not-run
@@ -90,6 +91,9 @@
 - qemu_gtk_wm_capture_wm_qemu_live_sample_matches=5
 - qemu_gtk_wm_capture_wm_qemu_live_sample_mismatches=0
 - qemu_gtk_wm_capture_wm_qemu_live_sample_checksum=1264754027807915072
+- qemu_gtk_wm_capture_wm_qemu_live_scene_mismatches=0
+- qemu_gtk_wm_capture_wm_qemu_live_first_mismatch_x=-1
+- qemu_gtk_wm_capture_wm_qemu_live_first_mismatch_y=-1
 - qemu_gtk_wm_capture_wm_report_path=build/qemu_gtk_wm_capture_evidence/wm-launch-capture.md
 
 ## Auto QMP Launch Output
@@ -103,13 +107,13 @@
 - [build][x86_64] phase=spawn timeout_ms=900000
 - [build][x86_64] env: SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$(pwd)/src" SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_OS_LOG_MODE=on PATH="/usr/bin:$PATH"
 - [build][x86_64] cmd: src/compiler_rust/target/debug/simple native-build --source build/os/generated --source src/os --source src/lib --source examples/simple_os --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log on --entry-closure --entry examples/simple_os/arch/x86_64/desktop_e2e_entry.spl --target x86_64-unknown-none -o build/os/simpleos_desktop_e2e_32.elf --linker-script examples/simple_os/arch/x86_64/linker.ld
-- [build][x86_64] phase=native-build OK elapsed_ms=121464
+- [build][x86_64] phase=native-build OK elapsed_ms=124014
 - simpleos_desktop_qmp_status=pass
 - simpleos_desktop_qmp_reason=pass
-- simpleos_desktop_qmp_pid=1038089
-- simpleos_desktop_qmp_socket=/tmp/simpleos_desktop_qmp_1035033_1780260055233418.sock
-- simpleos_desktop_qmp_serial_log=build/os/simpleos_desktop_qmp_1035033_1780260055233418.log
-- simpleos_desktop_qmp_stderr_log=build/os/simpleos_desktop_qmp_1035033_1780260055233418.log.stderr
+- simpleos_desktop_qmp_pid=1051218
+- simpleos_desktop_qmp_socket=/tmp/simpleos_desktop_qmp_1048125_1780260866075224.sock
+- simpleos_desktop_qmp_serial_log=build/os/simpleos_desktop_qmp_1048125_1780260866075224.log
+- simpleos_desktop_qmp_stderr_log=build/os/simpleos_desktop_qmp_1048125_1780260866075224.log.stderr
 
 ## WM Capture Output
 - check=wm_launch_capture_evidence
@@ -189,7 +193,7 @@
 - 
 - Running: test/unit/app/ui/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/app/ui/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (214ms)
+-   [32mPASSED[0m (208ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -197,12 +201,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 218ms
+- Duration: 211ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        214ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
+-        208ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -216,7 +220,7 @@
 - 
 - Running: test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - [1/1] test/unit/app/ui/host_wm_runtime_loop_spec.spl
--   [32mPASSED[0m (1025ms)
+-   [32mPASSED[0m (978ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -224,12 +228,12 @@
 - Files: 1
 - [32mPassed: 2[0m
 - Failed: 0
-- Duration: 1029ms
+- Duration: 983ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--       1025ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
+-        978ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -243,7 +247,7 @@
 - 
 - Running: test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/os/desktop/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (203ms)
+-   [32mPASSED[0m (195ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -251,12 +255,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 206ms
+- Duration: 199ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        203ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
+-        195ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/qemu_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -270,7 +274,7 @@
 - 
 - Running: test/unit/os/compositor/qemu_capture_spec.spl
 - [1/1] test/unit/os/compositor/qemu_capture_spec.spl
--   [32mPASSED[0m (932ms)
+-   [32mPASSED[0m (859ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -278,12 +282,12 @@
 - Files: 1
 - [32mPassed: 11[0m
 - Failed: 0
-- Duration: 938ms
+- Duration: 865ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        932ms  test/unit/os/compositor/qemu_capture_spec.spl
+-        859ms  test/unit/os/compositor/qemu_capture_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/electron_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -297,7 +301,7 @@
 - 
 - Running: test/unit/os/compositor/electron_capture_spec.spl
 - [1/1] test/unit/os/compositor/electron_capture_spec.spl
--   [32mPASSED[0m (762ms)
+-   [32mPASSED[0m (767ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -305,12 +309,12 @@
 - Files: 1
 - [32mPassed: 7[0m
 - Failed: 0
-- Duration: 778ms
+- Duration: 774ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        762ms  test/unit/os/compositor/electron_capture_spec.spl
+-        767ms  test/unit/os/compositor/electron_capture_spec.spl
 - spec_exit_code=0
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
@@ -370,6 +374,9 @@
 - qemu_live_sample_matches=5
 - qemu_live_sample_mismatches=0
 - qemu_live_sample_checksum=1264754027807915072
+- qemu_live_scene_mismatches=0
+- qemu_live_first_mismatch_x=-1
+- qemu_live_first_mismatch_y=-1
 - qemu_live_error=
 - wm_launch_capture_evidence_status=pass
 - wm_launch_capture_evidence_reason=wm-launch-capture-contract-verified
@@ -384,4 +391,7 @@
 - wm_launch_capture_qemu_live_sample_matches=5
 - wm_launch_capture_qemu_live_sample_mismatches=0
 - wm_launch_capture_qemu_live_sample_checksum=1264754027807915072
+- wm_launch_capture_qemu_live_scene_mismatches=0
+- wm_launch_capture_qemu_live_first_mismatch_x=-1
+- wm_launch_capture_qemu_live_first_mismatch_y=-1
 - wm_launch_capture_report_path=build/qemu_gtk_wm_capture_evidence/wm-launch-capture.md
