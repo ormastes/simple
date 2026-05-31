@@ -90,34 +90,32 @@
 ## Electron Output
 
 ### builder_matrix.electron.out
-- [148482:0531/061902.594128:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
-- [148580:0531/061902.971408:ERROR:shared_image_manager.cc(255)] SharedImageManager::ProduceSkia: Trying to produce a Skia representation from an incompatible backing: GLTextureImageBacking
-- [148580:0531/061902.971562:ERROR:raster_decoder.cc(1968)] [.RenderWorker-0x377c00024100]GL ERROR :GL_INVALID_VALUE : glCopySubTexture: unknown mailbox
+- [electron:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
+- [electron:ERROR:shared_image_manager.cc(255)] SharedImageManager::ProduceSkia: Trying to produce a Skia representation from an incompatible backing: GLTextureImageBacking
+- [electron:ERROR:raster_decoder.cc(1968)] [.RenderWorker-ADDR]GL ERROR :GL_INVALID_VALUE : glCopySubTexture: unknown mailbox
 - gui_wasm_browser_execution_proof=/home/ormastes/dev/pub/simple/build/gui_wasm_browser_execution_evidence/builder_matrix_browser_proof.json
 - gui_wasm_browser_execution_validate=true
 - gui_wasm_browser_execution_instantiate=true
 - gui_wasm_browser_execution_exports=simple_app_event,simple_app_init,simple_app_render
-- [148453:0531/061903.212912:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.
+- [electron:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.
 
 ### hello.electron.out
-- [147978:0531/061858.313904:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
-- [148077:0531/061858.686816:ERROR:shared_image_manager.cc(255)] SharedImageManager::ProduceSkia: Trying to produce a Skia representation from an incompatible backing: GLTextureImageBacking
-- [148077:0531/061858.686975:ERROR:raster_decoder.cc(1968)] [.RenderWorker-0x3dcc00024100]GL ERROR :GL_INVALID_VALUE : glCopySubTexture: unknown mailbox
+- [electron:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
+- [electron:ERROR:shared_image_interface_proxy.cc(134)] Buffer handle is null. Not creating a mailbox from it.
+- [electron:ERROR:one_copy_raster_buffer_provider.cc(348)] Creation of StagingBuffer's SharedImage failed.
 - gui_wasm_browser_execution_proof=/home/ormastes/dev/pub/simple/build/gui_wasm_browser_execution_evidence/hello_browser_proof.json
 - gui_wasm_browser_execution_validate=true
 - gui_wasm_browser_execution_instantiate=true
 - gui_wasm_browser_execution_exports=simple_app_event,simple_app_init,simple_app_render
-- [147948:0531/061858.939214:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.
+- [electron:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.
 
 ### widget_matrix.electron.out
-- [148232:0531/061900.439086:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
-- [148329:0531/061900.802103:ERROR:shared_image_manager.cc(255)] SharedImageManager::ProduceSkia: Trying to produce a Skia representation from an incompatible backing: GLTextureImageBacking
-- [148329:0531/061900.802279:ERROR:raster_decoder.cc(1968)] [.RenderWorker-0x3e2c00024100]GL ERROR :GL_INVALID_VALUE : glCopySubTexture: unknown mailbox
+- [electron:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
 - gui_wasm_browser_execution_proof=/home/ormastes/dev/pub/simple/build/gui_wasm_browser_execution_evidence/widget_matrix_browser_proof.json
 - gui_wasm_browser_execution_validate=true
 - gui_wasm_browser_execution_instantiate=true
 - gui_wasm_browser_execution_exports=simple_app_event,simple_app_init,simple_app_render
-- [148201:0531/061901.064112:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.
+- [electron:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.
 
 ## Electron Error
 
