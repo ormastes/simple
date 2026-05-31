@@ -54,7 +54,7 @@ test → keep on improvement, revert on regression. The Simple equivalents are:
 |-----------------------|-----------------|
 | Goal (`program.md`) | The refined request summary + `doc/03_plan/agent_tasks/<feature>_<stage>.md` |
 | Codebase | `src/` |
-| Metric / judge (`prepare.py`) | SPipe specs under `doc/06_spec/` and their executable `test/.../*_spec.spl` mirror; `bin/simple test`, `bin/simple build check` |
+| Metric / judge (`prepare.py`) | Executable SPipe specs under `test/.../*_spec.spl` and generated/manual `doc/06_spec/.../*_spec.md` mirrors; `bin/simple test`, `bin/simple build check` |
 | Keep / revert | `jj` working-copy snapshots (revert a regressing slice; main-only, no branches) |
 | The loop driver | The `research → design → impl → verify → release` pipeline; periodic re-entry via `/spipe_loop` |
 
