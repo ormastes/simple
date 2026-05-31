@@ -171,10 +171,16 @@ Progress 2026-05-30:
 1. Decision: **add a generic OpenCL ICD SFFI** (`libOpenCL.so`) alongside the existing Level Zero (`sffi_intel.spl`)
    - Level Zero stays for Intel-specific optimizations
    - `sffi_opencl.spl` wraps: `clGetPlatformIDs`, `clCreateContext`, `clCreateCommandQueue`, `clCreateProgramWithSource`, `clBuildProgram`, `clCreateKernel`, `clEnqueueNDRangeKernel`, `clEnqueueReadBuffer`, `clFinish`
+   - In progress: `OpenClFfi` exists as the generic ICD wrapper shell and
+     fails closed for name-only launches.
 2. Create `OpenClSession` implementing `ComputeSession`
    - `load_module` → `clCreateProgramWithSource` + `clBuildProgram` using OpenCL C from `gpu_portable_compute`
    - `launch_kernel` → `clEnqueueNDRangeKernel`
    - Pixel ops: kernel dispatch (same pattern as CUDA/HIP)
+   - In progress: `OpenClSession` exists with generated 2D launch wrappers and
+     explicit unavailable behavior when no OpenCL FFI is injected.
+   - Covered by `test/unit/lib/gpu/engine2d/opencl_session_contract_spec.spl`
+     and `test/unit/lib/gpu/engine2d/ffi_opencl_spec.spl`.
 3. Add `BackendProber.probe_opencl` real detection via `clGetPlatformIDs`
 
 **AC:** OpenClSession conforms, passes fill-kernel round-trip test on any OpenCL-capable device.
