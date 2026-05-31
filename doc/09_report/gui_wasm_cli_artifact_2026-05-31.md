@@ -10,7 +10,7 @@
 - reason: pass
 - source: examples/ui/hello_wasm_gui.spl
 - output: build/gui_wasm_cli_artifact/hello_wasm_gui.wasm
-- size bytes: 2787
+- size bytes: 3004
 - magic hex: 0061736d
 - version hex: 01000000
 
@@ -19,7 +19,7 @@
 - reason: pass
 - source: examples/ui/widget_matrix_wasm_gui.spl
 - output: build/gui_wasm_cli_artifact/widget_matrix_wasm_gui.wasm
-- size bytes: 4521
+- size bytes: 4754
 - magic hex: 0061736d
 - version hex: 01000000
 - marker coverage: checkbox, dropdown/select, text input/textfield, textarea, tabs, dialog, table/list, progress, image, tooltip, tree/scroll, menu, statusbar, and supported menu-command/event response strings; this does not claim command-bar coverage for the widget matrix
@@ -30,7 +30,7 @@
 - reason: pass
 - source: examples/ui/builder_matrix_wasm_gui.spl
 - output: build/gui_wasm_cli_artifact/builder_matrix_wasm_gui.wasm
-- size bytes: 7424
+- size bytes: 7659
 - magic hex: 0061736d
 - version hex: 01000000
 - marker coverage: real common.ui builder imports and builder_matrix_tree construction, radio, switch, search_bar, segmented_control, navigation_bar, tab_bar, card, heading, label, divider, command_palette, sidebar, inspector, scroll, textarea, tree/treenode, glass_title_bar, command_bar, workspace_tabs, toast, sheet_modal, context_menu, utility_rail, status_chip, selection_pill, empty_state, and supported builder event response strings

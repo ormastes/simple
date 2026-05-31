@@ -9,7 +9,7 @@
 - reason: pass
 - wasm path: build/gui_wasm_cli_artifact/hello_wasm_gui.wasm
 - proof path: build/gui_wasm_browser_execution_evidence/hello_browser_proof.json
-- byte size: 2787
+- byte size: 3004
 - WebAssembly.validate: true
 - WebAssembly.instantiate: true
 - exports: simple_app_event,simple_app_init,simple_app_render
@@ -23,7 +23,7 @@
 - reason: pass
 - wasm path: build/gui_wasm_cli_artifact/widget_matrix_wasm_gui.wasm
 - proof path: build/gui_wasm_browser_execution_evidence/widget_matrix_browser_proof.json
-- byte size: 4521
+- byte size: 4754
 - WebAssembly.validate: true
 - WebAssembly.instantiate: true
 - exports: simple_app_event,simple_app_init,simple_app_render
@@ -37,7 +37,7 @@
 - reason: pass
 - wasm path: build/gui_wasm_cli_artifact/builder_matrix_wasm_gui.wasm
 - proof path: build/gui_wasm_browser_execution_evidence/builder_matrix_browser_proof.json
-- byte size: 7424
+- byte size: 7659
 - WebAssembly.validate: true
 - WebAssembly.instantiate: true
 - exports: simple_app_event,simple_app_init,simple_app_render
@@ -54,7 +54,7 @@
 - gui_wasm_browser_execution_hello_reason=pass
 - gui_wasm_browser_execution_hello_wasm_path=build/gui_wasm_cli_artifact/hello_wasm_gui.wasm
 - gui_wasm_browser_execution_hello_proof_path=build/gui_wasm_browser_execution_evidence/hello_browser_proof.json
-- gui_wasm_browser_execution_hello_byte_size=2787
+- gui_wasm_browser_execution_hello_byte_size=3004
 - gui_wasm_browser_execution_hello_validate=true
 - gui_wasm_browser_execution_hello_instantiate=true
 - gui_wasm_browser_execution_hello_exports=simple_app_event,simple_app_init,simple_app_render
@@ -66,7 +66,7 @@
 - gui_wasm_browser_execution_widget_matrix_reason=pass
 - gui_wasm_browser_execution_widget_matrix_wasm_path=build/gui_wasm_cli_artifact/widget_matrix_wasm_gui.wasm
 - gui_wasm_browser_execution_widget_matrix_proof_path=build/gui_wasm_browser_execution_evidence/widget_matrix_browser_proof.json
-- gui_wasm_browser_execution_widget_matrix_byte_size=4521
+- gui_wasm_browser_execution_widget_matrix_byte_size=4754
 - gui_wasm_browser_execution_widget_matrix_validate=true
 - gui_wasm_browser_execution_widget_matrix_instantiate=true
 - gui_wasm_browser_execution_widget_matrix_exports=simple_app_event,simple_app_init,simple_app_render
@@ -78,7 +78,7 @@
 - gui_wasm_browser_execution_builder_matrix_reason=pass
 - gui_wasm_browser_execution_builder_matrix_wasm_path=build/gui_wasm_cli_artifact/builder_matrix_wasm_gui.wasm
 - gui_wasm_browser_execution_builder_matrix_proof_path=build/gui_wasm_browser_execution_evidence/builder_matrix_browser_proof.json
-- gui_wasm_browser_execution_builder_matrix_byte_size=7424
+- gui_wasm_browser_execution_builder_matrix_byte_size=7659
 - gui_wasm_browser_execution_builder_matrix_validate=true
 - gui_wasm_browser_execution_builder_matrix_instantiate=true
 - gui_wasm_browser_execution_builder_matrix_exports=simple_app_event,simple_app_init,simple_app_render
@@ -101,8 +101,8 @@
 
 ### hello.electron.out
 - [electron:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
-- [electron:ERROR:shared_image_interface_proxy.cc(134)] Buffer handle is null. Not creating a mailbox from it.
-- [electron:ERROR:one_copy_raster_buffer_provider.cc(348)] Creation of StagingBuffer's SharedImage failed.
+- [electron:ERROR:shared_image_manager.cc(255)] SharedImageManager::ProduceSkia: Trying to produce a Skia representation from an incompatible backing: GLTextureImageBacking
+- [electron:ERROR:raster_decoder.cc(1968)] [.RenderWorker-ADDR]GL ERROR :GL_INVALID_VALUE : glCopySubTexture: unknown mailbox
 - gui_wasm_browser_execution_proof=/home/ormastes/dev/pub/simple/build/gui_wasm_browser_execution_evidence/hello_browser_proof.json
 - gui_wasm_browser_execution_validate=true
 - gui_wasm_browser_execution_instantiate=true
@@ -111,6 +111,8 @@
 
 ### widget_matrix.electron.out
 - [electron:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
+- [electron:ERROR:shared_image_interface_proxy.cc(134)] Buffer handle is null. Not creating a mailbox from it.
+- [electron:ERROR:one_copy_raster_buffer_provider.cc(348)] Creation of StagingBuffer's SharedImage failed.
 - gui_wasm_browser_execution_proof=/home/ormastes/dev/pub/simple/build/gui_wasm_browser_execution_evidence/widget_matrix_browser_proof.json
 - gui_wasm_browser_execution_validate=true
 - gui_wasm_browser_execution_instantiate=true
