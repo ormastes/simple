@@ -197,9 +197,15 @@ Progress 2026-05-30:
    ```
    CUDA > HIP > OpenCL > CPU-SIMD(AVX2) > CPU-SIMD(NEON) > CPU-SIMD(RVV) > Scalar
    ```
+   - In progress: `ComputeDispatch.auto()` selects by the policy order using
+     hardened backend probes and returns a probe-backed dispatch result.
 2. Wire through `StrictBackendFactory` — `create_backend` returns a `ComputeSession`
 3. Connect to `BackendFrame` — frame lifecycle calls `session.synchronize()` per frame
+   - In progress: dispatch results expose `synchronize_frame()` and sync
+     counters as the narrow frame lifecycle evidence hook.
 4. Export `SimdHitCounts` from all backends (GPU backends count kernel launches, CPU-SIMD counts span ops)
+   - In progress: dispatch results expose launch/synchronize counters; CPU SIMD
+     still provides concrete per-op hit counts through its session/provider.
 
 **AC:** `ComputeDispatch.auto()` returns best available session. Frame loop dispatches through trait.
 

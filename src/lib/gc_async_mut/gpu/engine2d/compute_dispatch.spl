@@ -1,0 +1,99 @@
+# Engine2D Compute Dispatch
+#
+# Probe-backed selector for the shared compute-session plan. This layer chooses
+# the fastest usable compute backend by policy order and exposes frame sync and
+# launch-count evidence while concrete sessions continue to mature.
+
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendProber, BackendStatus, BACKEND_CPU, BACKEND_CUDA, BACKEND_OPENCL, BACKEND_ROCM, BACKEND_CPU_SIMD_X86, BACKEND_CPU_SIMD_ARM, BACKEND_CPU_SIMD_RISCV}
+
+class ComputeDispatchHits:
+    kernel_launches: i64
+    synchronize_calls: i64
+    simd_fill_hits: i64
+    simd_copy_hits: i64
+    simd_alpha_hits: i64
+    simd_blit_hits: i64
+    simd_scroll_hits: i64
+
+    static fn zero() -> ComputeDispatchHits:
+        ComputeDispatchHits(
+            kernel_launches: 0,
+            synchronize_calls: 0,
+            simd_fill_hits: 0,
+            simd_copy_hits: 0,
+            simd_alpha_hits: 0,
+            simd_blit_hits: 0,
+            simd_scroll_hits: 0
+        )
+
+    me record_kernel_launch():
+        self.kernel_launches = self.kernel_launches + 1
+
+    me record_synchronize():
+        self.synchronize_calls = self.synchronize_calls + 1
+
+class ComputeDispatchResult:
+    selected_name: text
+    session_kind: text
+    probe: BackendProbeResult
+    hits: ComputeDispatchHits
+
+    static fn create(probe: BackendProbeResult) -> ComputeDispatchResult:
+        ComputeDispatchResult(
+            selected_name: probe.selected_name,
+            session_kind: probe.selected_name,
+            probe: probe,
+            hits: ComputeDispatchHits.zero()
+        )
+
+    fn is_available() -> bool:
+        self.probe.status == BackendStatus.Initialized
+
+    me record_launch():
+        self.hits.record_kernel_launch()
+
+    me synchronize_frame() -> bool:
+        self.hits.record_synchronize()
+        self.probe.has_compute
+
+    fn summary() -> text:
+        "dispatch selected={self.selected_name};status={self.probe.status};launches={self.hits.kernel_launches};sync={self.hits.synchronize_calls};probe={self.probe.diagnostic_text()}"
+
+class ComputeDispatch:
+    prober: BackendProber
+
+    static fn create() -> ComputeDispatch:
+        ComputeDispatch(prober: BackendProber.create())
+
+    static fn auto() -> ComputeDispatchResult:
+        ComputeDispatch.create().select_best()
+
+    fn select_best() -> ComputeDispatchResult:
+        val cuda = self.prober.probe_cuda()
+        if cuda.status == BackendStatus.Initialized:
+            return ComputeDispatchResult.create(cuda)
+
+        val rocm = self.prober.probe_rocm()
+        if rocm.status == BackendStatus.Initialized:
+            return ComputeDispatchResult.create(rocm)
+
+        val opencl = self.prober.probe_opencl()
+        if opencl.status == BackendStatus.Initialized:
+            return ComputeDispatchResult.create(opencl)
+
+        val cpu_x86 = self.prober.probe_cpu_simd_x86()
+        if cpu_x86.status == BackendStatus.Initialized:
+            return ComputeDispatchResult.create(cpu_x86)
+
+        val cpu_arm = self.prober.probe_cpu_simd_arm()
+        if cpu_arm.status == BackendStatus.Initialized:
+            return ComputeDispatchResult.create(cpu_arm)
+
+        val cpu_riscv = self.prober.probe_cpu_simd_riscv()
+        if cpu_riscv.status == BackendStatus.Initialized:
+            return ComputeDispatchResult.create(cpu_riscv)
+
+        ComputeDispatchResult.create(self.prober.probe_cpu())
+
+fn compute_dispatch_auto() -> ComputeDispatchResult:
+    ComputeDispatch.auto()
