@@ -87,6 +87,25 @@ expect(_count_color(pixels, 0xFF141418u32)).to_equal(0)
 
 </details>
 
+#### applies class selector colors and inline overrides in generic layout
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>.status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}#override{background-color:#f59e0b;color:#111827;font-size:8px;padding:1px}</style></head><body><div class='status'>CLASS</div><button id='override' style='background-color:#ef4444;color:#ffffff;font-size:8px;padding:1px'>INLINE</button></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+expect(pixels.len()).to_equal(96 * 64)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(0)
+```
+
+</details>
+
 #### paints famous-site corpus block geometry with Chrome default body margin
 
 <details>
@@ -538,8 +557,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 30 |
-| Active scenarios | 30 |
+| Total scenarios | 31 |
+| Active scenarios | 31 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

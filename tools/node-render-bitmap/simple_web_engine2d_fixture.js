@@ -33,6 +33,9 @@ function renderHtmlToPixels() {
   if (scene === "simple-web-layout-image-text-command-taskbar") {
     return renderLayoutImageTextCommandTaskbar();
   }
+  if (scene === "simple-web-layout-selector-inline-override") {
+    return renderLayoutSelectorInlineOverride();
+  }
   if (scene === "simple-web-engine2d-two-block-content") {
     return renderTwoBlockContent();
   }
@@ -256,6 +259,26 @@ function renderLayoutImageTextCommandTaskbar() {
   ]);
   return renderColorRows(rows, {
     B: 0xFF1D4ED8, N: 0xFF0F172A, F: 0xFF334155, T: 0xFF111827,
+  });
+}
+
+function renderLayoutSelectorInlineOverride() {
+  const rows = new Map([
+    [0, "FFFF"], [1, "F.I.F"], [2, "F.I.F"], [3, "FFFF"],
+    [4, "F.F"], [5, "F.IFS"], [6, "FIIIF"],
+    [9, "FFFFF"], [10, "FI..I"], [11, "FFFFI"], [12, "F..II"],
+    [13, "F...I"], [14, "F...I"], [15, "FFFFF"],
+    [18, "IFFF"], [19, "F...F"], [20, "F...F"], [21, "FFFFF"],
+    [22, "F...F"], [23, "F...F"], [24, "FIIIF"],
+    [27, "FFFFS"], [28, "F.I.F"], [29, "F.I.F"], [30, "FSISF"],
+    [31, "F.I.F"], [32, "F.I.F"], [33, "FFFF"],
+    [36, "FSSSF"], [37, "IF.FI"], [38, "I.F.I"], [39, "ISFII"],
+    [40, "I.F.I"], [41, "I.F.I"], [42, "ISFSI"],
+    [45, "IIIII"], [46, "I"], [47, "IIII"], [48, "I"], [49, "I"],
+    [50, "I"], [51, "IIIII"],
+  ]);
+  return renderColorRows(rows, {
+    F: 0xFF334155, I: 0xFFEF4444, S: 0xFF22C55E,
   });
 }
 
