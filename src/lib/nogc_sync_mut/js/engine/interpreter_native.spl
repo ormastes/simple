@@ -2216,6 +2216,70 @@ impl JsInterpreter:
     me _native_webassembly_function_body_i32_result(hex: text, wanted_body_index: i64) -> i64:
         self._native_webassembly_function_body_i32_result_with_args(hex, wanted_body_index, [])
 
+    me _native_webassembly_function_body_i32_param_count(hex: text, wanted_body_index: i64) -> i64:
+        val function_start = self._native_webassembly_section_payload_start(hex, 3)
+        val function_end = self._native_webassembly_section_payload_end(hex, 3)
+        if function_start < 0 or function_end <= function_start:
+            return -1
+        val function_count = self._native_webassembly_read_leb_value(hex, function_start)
+        var function_pos = self._native_webassembly_read_leb_next(hex, function_start)
+        if function_count < 0 or function_pos < 0 or wanted_body_index < 0 or wanted_body_index >= function_count:
+            return -1
+        var function_index = 0
+        var type_index = -1
+        while function_index < function_count and function_pos < function_end:
+            val current_type_index = self._native_webassembly_read_leb_value(hex, function_pos)
+            val next_function_pos = self._native_webassembly_read_leb_next(hex, function_pos)
+            if current_type_index < 0 or next_function_pos < 0 or next_function_pos > function_end:
+                return -1
+            if function_index == wanted_body_index:
+                type_index = current_type_index
+            function_pos = next_function_pos
+            function_index = function_index + 1
+        if type_index < 0:
+            return -1
+        self._native_webassembly_type_i32_param_count(hex, type_index)
+
+    me _native_webassembly_type_i32_param_count(hex: text, wanted_type_index: i64) -> i64:
+        val type_start = self._native_webassembly_section_payload_start(hex, 1)
+        val type_end = self._native_webassembly_section_payload_end(hex, 1)
+        if type_start < 0 or type_end <= type_start:
+            return -1
+        val type_count = self._native_webassembly_read_leb_value(hex, type_start)
+        var type_pos = self._native_webassembly_read_leb_next(hex, type_start)
+        if type_count < 0 or type_pos < 0 or wanted_type_index < 0 or wanted_type_index >= type_count:
+            return -1
+        var type_index = 0
+        while type_index < type_count and type_pos < type_end:
+            val form = self._native_webassembly_hex_byte_at(hex, type_pos)
+            if form != 96:
+                return -1
+            val param_count = self._native_webassembly_read_leb_value(hex, type_pos + 1)
+            var param_pos = self._native_webassembly_read_leb_next(hex, type_pos + 1)
+            if param_count < 0 or param_pos < 0 or param_pos > type_end:
+                return -1
+            var param_index = 0
+            while param_index < param_count:
+                if param_pos >= type_end or self._native_webassembly_hex_byte_at(hex, param_pos) != 127:
+                    return -1
+                param_pos = param_pos + 1
+                param_index = param_index + 1
+            val result_count = self._native_webassembly_read_leb_value(hex, param_pos)
+            var result_pos = self._native_webassembly_read_leb_next(hex, param_pos)
+            if result_count < 0 or result_pos < 0 or result_pos > type_end:
+                return -1
+            var result_index = 0
+            while result_index < result_count:
+                if result_pos >= type_end or self._native_webassembly_hex_byte_at(hex, result_pos) != 127:
+                    return -1
+                result_pos = result_pos + 1
+                result_index = result_index + 1
+            if type_index == wanted_type_index:
+                return param_count
+            type_pos = result_pos
+            type_index = type_index + 1
+        -1
+
     me _native_webassembly_function_body_i32_result_with_args(hex: text, wanted_body_index: i64, arg_vals: [JsValue]) -> i64:
         val start = self._native_webassembly_section_payload_start(hex, 10)
         val end = self._native_webassembly_section_payload_end(hex, 10)
@@ -2339,7 +2403,20 @@ impl JsInterpreter:
                         val called_body_index = function_index - function_import_count
                         if called_body_index < 0 or called_body_index == wanted_body_index:
                             return -1
-                        val called_value = self._native_webassembly_function_body_i32_result_with_args(hex, called_body_index, [])
+                        val param_count = self._native_webassembly_function_body_i32_param_count(hex, called_body_index)
+                        if param_count < 0 or stack.len() < param_count:
+                            return -1
+                        var call_args: [JsValue] = []
+                        var param_index = 0
+                        while param_index < param_count:
+                            val arg_value = stack.get(stack.len() - param_count + param_index)
+                            call_args.push(JsValue.Number(v: arg_value.to_f64()))
+                            param_index = param_index + 1
+                        var pop_index = 0
+                        while pop_index < param_count:
+                            stack.pop()
+                            pop_index = pop_index + 1
+                        val called_value = self._native_webassembly_function_body_i32_result_with_args(hex, called_body_index, call_args)
                         if called_value < 0:
                             return called_value
                         stack.push(called_value)
