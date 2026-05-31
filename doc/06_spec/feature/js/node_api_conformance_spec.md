@@ -731,6 +731,34 @@ expect(_str(buffer_from_toString([JsValue.String(v: "68656c6c6f"), JsValue.Strin
 
 </details>
 
+#### decodes multibyte hex input as utf8
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(buffer_from_toString([JsValue.String(v: "e282ac"), JsValue.String(v: "hex"), JsValue.String(v: "utf8")]))).to_equal("€")
+```
+
+</details>
+
+#### replaces invalid utf8 bytes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(buffer_from_toString([JsValue.String(v: "c328"), JsValue.String(v: "hex"), JsValue.String(v: "utf8")])).char_code_at(0)).to_equal(65533)
+```
+
+</details>
+
 #### round trips base64 input to utf8
 
 <details>
@@ -1162,6 +1190,34 @@ expect(_eval_str("require('buffer').Buffer.from('68656c6c6f', 'hex').toString('u
 
 </details>
 
+#### decodes multibyte Buffer UTF-8 bytes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from('e282ac', 'hex').toString('utf8')")).to_equal("€")
+```
+
+</details>
+
+#### replaces invalid Buffer UTF-8 bytes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from('c328', 'hex').toString('utf8').charCodeAt(0)")).to_equal("65533")
+```
+
+</details>
+
 #### builds buffers from numeric byte arrays
 
 <details>
@@ -1172,6 +1228,34 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("require('buffer').Buffer.from([104,101,108,108,111]).toString('utf8')")).to_equal("hello")
+```
+
+</details>
+
+#### builds buffers from Uint8Array bytes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from(new Uint8Array([226,130,172])).toString('utf8')")).to_equal("€")
+```
+
+</details>
+
+#### builds zero-filled buffers from ArrayBuffer
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from(new ArrayBuffer(2)).toString('hex')")).to_equal("0000")
 ```
 
 </details>
@@ -1863,8 +1947,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 123 |
-| Active scenarios | 123 |
+| Total scenarios | 129 |
+| Active scenarios | 129 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

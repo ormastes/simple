@@ -168,7 +168,7 @@ Build minimal Node.js API compatibility on QuickJS + libuv:
 - [ ] `fs.promises.readFile`, `fs.promises.writeFile`
 - [x] `path.join`, `path.resolve`, `path.dirname`, `path.basename` deterministic POSIX subset
 - [x] `process.env`, `process.argv`, `process.cwd()`, `process.exit()` deterministic embedded subset
-- [ ] `Buffer` (from QuickJS ArrayBuffer)
+- [x] `Buffer` bounded string, array, Uint8Array, and ArrayBuffer subset
 - [x] `EventEmitter` deterministic listener bookkeeping subset
 - [ ] `net.Socket`, `net.createConnection` (via libuv tcp)
 - [ ] `http.request`, `https.request` (via libuv + mbedTLS/BearSSL)
