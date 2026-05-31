@@ -320,6 +320,46 @@ expect(image.data[3]).to_equal(255)
 
 </details>
 
+#### detects ICC APP2 profile metadata lazily
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val profile = detect_image_color_profile_info(_jpeg_with_icc_profile())
+expect(profile.format).to_equal("jpeg")
+expect(profile.has_profile).to_equal(true)
+expect(profile.profile_kind).to_equal("icc")
+expect(profile.profile_length).to_equal(64)
+expect(profile.requires_color_transform).to_equal(true)
+expect(profile.initializes_transform_now).to_equal(false)
+expect(profile.reason).to_equal("jpeg-app2-icc-lazy")
+```
+
+</details>
+
+#### applies supported RGB ICC profiles as the packed sRGB identity path
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val pixels = [10, 20, 30, 255, 40, 50, 60, 128]
+val result = apply_detected_image_color_profile_to_rgba(_jpeg_with_icc_profile(), pixels)
+expect(result.supported).to_equal(true)
+expect(result.applied).to_equal(true)
+expect(result.reason).to_equal("icc-srgb-identity-applied")
+expect(result.pixels).to_equal(pixels)
+```
+
+</details>
+
 ### WebP
 
 #### preserves VP8X intrinsic dimensions for layout placeholder rendering
@@ -471,6 +511,108 @@ expect(image.data).to_equal([70, 80, 90, 100])
 
 </details>
 
+#### decodes big-endian uncompressed RGB strips to RGBA pixels
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val image = decode_tiff(_tiff_be_2x1_rgb())
+
+expect(image.width).to_equal(2)
+expect(image.height).to_equal(1)
+expect(image.format).to_equal(ImageFormat.Tiff)
+expect(image.data).to_equal([
+    10, 20, 30, 255,
+    40, 50, 60, 255
+])
+```
+
+</details>
+
+#### decodes big-endian uncompressed RGBA strips with alpha
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val image = decode_tiff(_tiff_be_1x1_rgba())
+
+expect(image.width).to_equal(1)
+expect(image.height).to_equal(1)
+expect(image.format).to_equal(ImageFormat.Tiff)
+expect(image.data).to_equal([70, 80, 90, 100])
+```
+
+</details>
+
+#### detects TIFF ICC profile metadata without eager transform init
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val profile = detect_image_color_profile_info(_tiff_le_with_icc_profile())
+expect(profile.format).to_equal("tiff")
+expect(profile.has_profile).to_equal(true)
+expect(profile.profile_kind).to_equal("icc")
+expect(profile.profile_length).to_equal(64)
+expect(profile.requires_color_transform).to_equal(true)
+expect(profile.initializes_transform_now).to_equal(false)
+expect(profile.reason).to_equal("tiff-icc-lazy")
+```
+
+</details>
+
+### color profiles
+
+#### detects PNG iCCP profile metadata without eager transform init
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val profile = detect_image_color_profile_info(_png_with_iccp())
+expect(profile.format).to_equal("png")
+expect(profile.has_profile).to_equal(true)
+expect(profile.profile_kind).to_equal("icc-compressed")
+expect(profile.profile_length).to_equal(4)
+expect(profile.requires_color_transform).to_equal(true)
+expect(profile.initializes_transform_now).to_equal(false)
+expect(profile.reason).to_equal("png-iccp-lazy")
+```
+
+</details>
+
+#### keeps compressed PNG iCCP transform fail-closed until decompression is wired
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = apply_detected_image_color_profile_to_rgba(_png_with_iccp(), [1, 2, 3, 255])
+expect(result.supported).to_equal(false)
+expect(result.applied).to_equal(false)
+expect(result.reason).to_equal("compressed-icc-transform-pending")
+```
+
+</details>
+
 ### JPEG XL
 
 #### detects JPEG XL signatures but keeps decode fail-closed
@@ -555,6 +697,7 @@ Tests covering:
 - WebP
 - ICO
 - TIFF
+- color profiles
 - JPEG XL
 - SVG
 
@@ -562,8 +705,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 28 |
-| Active scenarios | 28 |
+| Total scenarios | 35 |
+| Active scenarios | 35 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

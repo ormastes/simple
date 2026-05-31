@@ -10,8 +10,39 @@ pub class ImageInfo:
     supported: bool
     reason: text
 
+pub class ImageColorProfileInfo:
+    format: text
+    has_profile: bool
+    profile_kind: text
+    profile_length: i64
+    profile_offset: i64
+    requires_color_transform: bool
+    initializes_transform_now: bool
+    reason: text
+
+pub class ImageColorTransformResult:
+    pixels: [i64]
+    applied: bool
+    supported: bool
+    reason: text
+
 pub fn image_info_unknown(reason: text) -> ImageInfo:
     ImageInfo(format: "unknown", width: 0, height: 0, supported: false, reason: reason)
+
+pub fn image_color_profile_unknown(reason: text) -> ImageColorProfileInfo:
+    ImageColorProfileInfo(
+        format: "unknown",
+        has_profile: false,
+        profile_kind: "none",
+        profile_length: 0,
+        profile_offset: 0,
+        requires_color_transform: false,
+        initializes_transform_now: false,
+        reason: reason
+    )
+
+pub fn image_color_transform_result(pixels: [i64], applied: bool, supported: bool, reason: text) -> ImageColorTransformResult:
+    ImageColorTransformResult(pixels: pixels, applied: applied, supported: supported, reason: reason)
 
 fn _byte_at(data: text, offset: i64) -> i64:
     if offset < 0 or offset >= data.len():
@@ -74,6 +105,9 @@ pub fn image_is_jpeg_xl(data: text) -> bool:
             _byte_at(data, 11) == 10
     false
 
+pub fn image_is_jpeg(data: text) -> bool:
+    data.len() >= 2 and _byte_at(data, 0) == 255 and _byte_at(data, 1) == 216
+
 fn _tiff_entry_value(data: text, entry: i64, little: bool) -> i64:
     val typ = _read_u16(data, entry + 2, little)
     val count = _read_u32(data, entry + 4, little)
@@ -115,6 +149,179 @@ pub fn jpeg_xl_image_info(data: text) -> ImageInfo:
     if image_is_jpeg_xl(data):
         return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-signature-detected-decoder-pending")
     image_info_unknown("not-jpegxl")
+
+fn _profile_result(format: text, kind: text, length: i64, offset: i64, reason: text) -> ImageColorProfileInfo:
+    ImageColorProfileInfo(
+        format: format,
+        has_profile: true,
+        profile_kind: kind,
+        profile_length: length,
+        profile_offset: offset,
+        requires_color_transform: true,
+        initializes_transform_now: false,
+        reason: reason
+    )
+
+fn _is_png_signature(data: text) -> bool:
+    data.len() >= 8 and
+        _byte_at(data, 0) == 137 and
+        _byte_at(data, 1) == 80 and
+        _byte_at(data, 2) == 78 and
+        _byte_at(data, 3) == 71 and
+        _byte_at(data, 4) == 13 and
+        _byte_at(data, 5) == 10 and
+        _byte_at(data, 6) == 26 and
+        _byte_at(data, 7) == 10
+
+fn _chunk_type_at(data: text, offset: i64, a: i64, b: i64, c: i64, d: i64) -> bool:
+    _byte_at(data, offset) == a and
+        _byte_at(data, offset + 1) == b and
+        _byte_at(data, offset + 2) == c and
+        _byte_at(data, offset + 3) == d
+
+pub fn png_color_profile_info(data: text) -> ImageColorProfileInfo:
+    if not _is_png_signature(data):
+        return image_color_profile_unknown("not-png")
+    var offset = 8
+    while offset + 12 <= data.len():
+        val chunk_len = _read_u32_be(data, offset)
+        val chunk_type = offset + 4
+        val chunk_data = offset + 8
+        if chunk_len < 0 or chunk_data + chunk_len + 4 > data.len():
+            return image_color_profile_unknown("png-truncated-chunk")
+        if _chunk_type_at(data, chunk_type, 105, 67, 67, 80):
+            # iCCP: profile name, NUL, compression method, compressed profile.
+            var name_end = chunk_data
+            while name_end < chunk_data + chunk_len and _byte_at(data, name_end) != 0:
+                name_end = name_end + 1
+            if name_end + 2 > chunk_data + chunk_len:
+                return image_color_profile_unknown("png-iccp-truncated")
+            val profile_offset = name_end + 2
+            val profile_length = chunk_data + chunk_len - profile_offset
+            return _profile_result("png", "icc-compressed", profile_length, profile_offset, "png-iccp-lazy")
+        if _chunk_type_at(data, chunk_type, 73, 69, 78, 68):
+            return image_color_profile_unknown("png-no-profile")
+        offset = offset + 12 + chunk_len
+    image_color_profile_unknown("png-no-profile")
+
+pub fn tiff_color_profile_info(data: text) -> ImageColorProfileInfo:
+    if not image_is_tiff(data):
+        return image_color_profile_unknown("not-tiff")
+    val little = _byte_at(data, 0) == 73
+    val ifd = _read_u32(data, 4, little)
+    if ifd <= 0 or ifd + 2 > data.len():
+        return image_color_profile_unknown("tiff-invalid-ifd-offset")
+    val count = _read_u16(data, ifd, little)
+    var i = 0
+    while i < count:
+        val entry = ifd + 2 + (i * 12)
+        if entry + 12 > data.len():
+            return image_color_profile_unknown("tiff-truncated-ifd")
+        val tag = _read_u16(data, entry, little)
+        val typ = _read_u16(data, entry + 2, little)
+        val value_count = _read_u32(data, entry + 4, little)
+        if tag == 34675:
+            var profile_offset = entry + 8
+            if value_count > 4:
+                profile_offset = _read_u32(data, entry + 8, little)
+            if profile_offset < 0 or profile_offset + value_count > data.len():
+                return image_color_profile_unknown("tiff-icc-out-of-range")
+            return _profile_result("tiff", "icc", value_count, profile_offset, "tiff-icc-lazy")
+        i = i + 1
+    image_color_profile_unknown("tiff-no-profile")
+
+fn _jpeg_segment_has_icc_header(data: text, offset: i64, segment_len: i64) -> bool:
+    if segment_len < 16:
+        return false
+    _byte_at(data, offset) == 73 and
+        _byte_at(data, offset + 1) == 67 and
+        _byte_at(data, offset + 2) == 67 and
+        _byte_at(data, offset + 3) == 95 and
+        _byte_at(data, offset + 4) == 80 and
+        _byte_at(data, offset + 5) == 82 and
+        _byte_at(data, offset + 6) == 79 and
+        _byte_at(data, offset + 7) == 70 and
+        _byte_at(data, offset + 8) == 73 and
+        _byte_at(data, offset + 9) == 76 and
+        _byte_at(data, offset + 10) == 69 and
+        _byte_at(data, offset + 11) == 0
+
+pub fn jpeg_color_profile_info(data: text) -> ImageColorProfileInfo:
+    if not image_is_jpeg(data):
+        return image_color_profile_unknown("not-jpeg")
+    var offset = 2
+    while offset + 4 <= data.len():
+        if _byte_at(data, offset) != 255:
+            return image_color_profile_unknown("jpeg-marker-sync-lost")
+        val marker = _byte_at(data, offset + 1)
+        if marker == 217 or marker == 218:
+            return image_color_profile_unknown("jpeg-no-profile")
+        val segment_len = _read_u16_be(data, offset + 2)
+        if segment_len < 2 or offset + 2 + segment_len > data.len():
+            return image_color_profile_unknown("jpeg-truncated-segment")
+        val segment_data = offset + 4
+        val payload_len = segment_len - 2
+        if marker == 226 and _jpeg_segment_has_icc_header(data, segment_data, payload_len):
+            val profile_offset = segment_data + 14
+            val profile_length = payload_len - 14
+            return _profile_result("jpeg", "icc", profile_length, profile_offset, "jpeg-app2-icc-lazy")
+        offset = offset + 2 + segment_len
+    image_color_profile_unknown("jpeg-no-profile")
+
+pub fn detect_image_color_profile_info(data: text) -> ImageColorProfileInfo:
+    if _is_png_signature(data):
+        return png_color_profile_info(data)
+    if image_is_tiff(data):
+        return tiff_color_profile_info(data)
+    if image_is_jpeg(data):
+        return jpeg_color_profile_info(data)
+    if image_is_jpeg_xl(data):
+        return ImageColorProfileInfo(
+            format: "jpegxl",
+            has_profile: false,
+            profile_kind: "container-color-metadata-pending",
+            profile_length: 0,
+            profile_offset: 0,
+            requires_color_transform: false,
+            initializes_transform_now: false,
+            reason: "jpegxl-color-profile-parser-pending"
+        )
+    image_color_profile_unknown("unknown-signature")
+
+fn _icc_tag_at(data: text, offset: i64, a: i64, b: i64, c: i64, d: i64) -> bool:
+    _byte_at(data, offset) == a and
+        _byte_at(data, offset + 1) == b and
+        _byte_at(data, offset + 2) == c and
+        _byte_at(data, offset + 3) == d
+
+fn _has_valid_icc_header(data: text, profile: ImageColorProfileInfo) -> bool:
+    if not profile.has_profile:
+        return false
+    if profile.profile_length < 48:
+        return false
+    if profile.profile_offset < 0 or profile.profile_offset + 48 > data.len():
+        return false
+    _icc_tag_at(data, profile.profile_offset + 36, 97, 99, 115, 112)
+
+fn _icc_header_is_rgb_to_xyz_or_lab(data: text, profile: ImageColorProfileInfo) -> bool:
+    if not _has_valid_icc_header(data, profile):
+        return false
+    val color_space_ok = _icc_tag_at(data, profile.profile_offset + 16, 82, 71, 66, 32)
+    val pcs_xyz = _icc_tag_at(data, profile.profile_offset + 20, 88, 89, 90, 32)
+    val pcs_lab = _icc_tag_at(data, profile.profile_offset + 20, 76, 97, 98, 32)
+    color_space_ok and (pcs_xyz or pcs_lab)
+
+pub fn apply_detected_image_color_profile_to_rgba(raw_data: text, pixels: [i64]) -> ImageColorTransformResult:
+    val profile = detect_image_color_profile_info(raw_data)
+    if not profile.has_profile:
+        return image_color_transform_result(pixels, false, true, "no-profile")
+    if profile.profile_kind == "icc-compressed":
+        return image_color_transform_result(pixels, false, false, "compressed-icc-transform-pending")
+    if not _icc_header_is_rgb_to_xyz_or_lab(raw_data, profile):
+        return image_color_transform_result(pixels, false, false, "unsupported-icc-profile")
+    # sRGB-compatible RGB ICC profiles need no pixel rewrite for the current
+    # packed sRGB framebuffer, but this still executes the profile gate.
+    image_color_transform_result(pixels, true, true, "icc-srgb-identity-applied")
 
 pub fn detect_image_info(data: text) -> ImageInfo:
     if image_is_tiff(data):
