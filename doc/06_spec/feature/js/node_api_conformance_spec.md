@@ -1272,6 +1272,38 @@ expect(_eval_str("require('node:https').request('https://example.com').scheme"))
 
 </details>
 
+#### resolves readline createInterface as fail-closed terminal API
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("typeof require('readline').createInterface")).to_equal("function")
+expect(_eval_str("typeof require('node:readline').createInterface")).to_equal("function")
+```
+
+</details>
+
+#### denies readline interaction without terminal grants
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('readline').createInterface({}).status")).to_equal("denied")
+expect(_eval_str("require('node:readline').createInterface({}).error")).to_equal("terminal-denied")
+expect(_eval_str("require('readline').createInterface({}).question('name?').operation")).to_equal("readline.question")
+expect(_eval_str("require('readline').createInterface({}).close().status")).to_equal("denied")
+```
+
+</details>
+
 ### Buffer global and module shape
 
 #### exposes Buffer through require('buffer')
@@ -2045,8 +2077,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 135 |
-| Active scenarios | 135 |
+| Total scenarios | 137 |
+| Active scenarios | 137 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

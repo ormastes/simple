@@ -175,8 +175,8 @@ Build minimal Node.js API compatibility on QuickJS + libuv:
 - [x] `crypto.createHash` (sha256/sha1 deterministic subset)
 - [x] `crypto.randomBytes` fail-closed subset until secure entropy is wired
 - [x] `child_process.spawn` fail-closed process-grant subset
-- [ ] `os.platform()`, `os.arch()`, `os.tmpdir()`
-- [ ] `readline` (for terminal interaction)
+- [x] `os.platform()`, `os.arch()`, `os.tmpdir()` deterministic subset
+- [x] `readline` fail-closed terminal-grant subset
 - [ ] Test: run a simple Express-like HTTP server
 - [ ] Serial marker: `[ai-cli] node-compat:ready target=<arch>`
 

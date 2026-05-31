@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Node Api Conformance Specification](feature/js/node_api_conformance_spec.md) | Auto-generated | N/A | 135 | 0% | 0 lines |
+| [Image Decode Specification](paint/image_decode_spec.md) | Auto-generated | N/A | 67 | 0% | 0 lines |
 
