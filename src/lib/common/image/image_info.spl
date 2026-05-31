@@ -452,20 +452,58 @@ fn _jpeg_xl_color_profile_info_at(data: text, start: i64, length: i64) -> ImageC
         reason: info.reason
     )
 
+fn _jpeg_xl_container_color_profile_info(data: text) -> ImageColorProfileInfo:
+    var offset = 12
+    while offset + 8 <= data.len():
+        val box_size = _read_u32_be(data, offset)
+        val box_type = offset + 4
+        var payload_offset = offset + 8
+        var effective_box_size = box_size
+        if box_size == 1:
+            if offset + 16 > data.len():
+                return image_color_profile_unknown("jpegxl-large-box-header-truncated")
+            effective_box_size = _read_u64_be(data, offset + 8)
+            payload_offset = offset + 16
+            if effective_box_size < 16:
+                return image_color_profile_unknown("jpegxl-invalid-box-size")
+        if effective_box_size != 0 and effective_box_size < 8:
+            return image_color_profile_unknown("jpegxl-invalid-box-size")
+        var next_offset = data.len()
+        if effective_box_size != 0:
+            next_offset = offset + effective_box_size
+        if next_offset > data.len():
+            return ImageColorProfileInfo(
+                format: "jpegxl",
+                has_profile: false,
+                profile_kind: "container-color-metadata-pending",
+                profile_length: 0,
+                profile_offset: 0,
+                requires_color_transform: false,
+                initializes_transform_now: false,
+                reason: "jpegxl-truncated-box"
+            )
+        if _jpeg_xl_box_type_at(data, box_type, 106, 120, 108, 99):
+            return _jpeg_xl_color_profile_info_at(data, payload_offset, next_offset - payload_offset)
+        if box_size == 0:
+            offset = data.len()
+        else:
+            offset = next_offset
+    ImageColorProfileInfo(
+        format: "jpegxl",
+        has_profile: false,
+        profile_kind: "container-color-metadata-pending",
+        profile_length: 0,
+        profile_offset: 0,
+        requires_color_transform: false,
+        initializes_transform_now: false,
+        reason: "jpegxl-container-color-metadata-pending"
+    )
+
 pub fn jpeg_xl_color_profile_info(data: text) -> ImageColorProfileInfo:
     if data.len() >= 2 and _byte_at(data, 0) == 255 and _byte_at(data, 1) == 10:
         return _jpeg_xl_color_profile_info_at(data, 0, data.len())
     if _jpeg_xl_is_container_signature(data):
-        return ImageColorProfileInfo(
-            format: "jpegxl",
-            has_profile: false,
-            profile_kind: "container-color-metadata-pending",
-            profile_length: 0,
-            profile_offset: 0,
-            requires_color_transform: false,
-            initializes_transform_now: false,
-            reason: "jpegxl-container-color-metadata-pending"
-        )
+        return _jpeg_xl_container_color_profile_info(data)
     image_color_profile_unknown("not-jpegxl")
 
 pub fn detect_image_color_profile_info(data: text) -> ImageColorProfileInfo:

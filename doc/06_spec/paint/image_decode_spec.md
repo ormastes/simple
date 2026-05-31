@@ -1241,7 +1241,7 @@ expect(image.format).to_equal(ImageFormat.JpegXl)
 
 </details>
 
-#### keeps JPEG XL container color metadata fail-closed until wired
+#### detects JPEG XL full-container structured color metadata lazily
 
 <details>
 <summary>Executable SPipe</summary>
@@ -1253,11 +1253,11 @@ Reproduction: this block contains the complete executable scenario source.
 val profile = detect_image_color_profile_info(_jpegxl_container_with_small_codestream_16x24())
 
 expect(profile.format).to_equal("jpegxl")
-expect(profile.has_profile).to_equal(false)
-expect(profile.profile_kind).to_equal("container-color-metadata-pending")
+expect(profile.has_profile).to_equal(true)
+expect(profile.profile_kind).to_equal("structured-color-default-srgb")
 expect(profile.requires_color_transform).to_equal(false)
 expect(profile.initializes_transform_now).to_equal(false)
-expect(profile.reason).to_equal("jpegxl-container-color-metadata-pending")
+expect(profile.reason).to_equal("jpegxl-structured-default-srgb-lazy")
 ```
 
 </details>
@@ -1327,12 +1327,33 @@ expect(image.format).to_equal(ImageFormat.JpegXl)
 
 </details>
 
+#### keeps JPEG XL split partial color metadata fail-closed until wired
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val profile = detect_image_color_profile_info(_jpegxl_container_with_split_partial_small_codestream_16x24())
+
+expect(profile.format).to_equal("jpegxl")
+expect(profile.has_profile).to_equal(false)
+expect(profile.profile_kind).to_equal("container-color-metadata-pending")
+expect(profile.requires_color_transform).to_equal(false)
+expect(profile.initializes_transform_now).to_equal(false)
+expect(profile.reason).to_equal("jpegxl-container-color-metadata-pending")
+```
+
+</details>
+
 #### fails closed on truncated JPEG XL container boxes
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1340,6 +1361,12 @@ val info = detect_image_info(_jpegxl_container_truncated_box())
 expect(info.format).to_equal("jpegxl")
 expect(info.supported).to_equal(false)
 expect(info.reason).to_equal("jpegxl-truncated-box")
+
+val profile = detect_image_color_profile_info(_jpegxl_container_truncated_box())
+expect(profile.format).to_equal("jpegxl")
+expect(profile.has_profile).to_equal(false)
+expect(profile.profile_kind).to_equal("container-color-metadata-pending")
+expect(profile.reason).to_equal("jpegxl-truncated-box")
 ```
 
 </details>
@@ -1412,8 +1439,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 67 |
-| Active scenarios | 67 |
+| Total scenarios | 68 |
+| Active scenarios | 68 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
