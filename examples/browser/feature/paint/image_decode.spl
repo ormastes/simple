@@ -1285,7 +1285,7 @@ fn _tiff_lab_component(raw_data: text, decoded_pixels: [i64], offset: i64, sampl
     _tiff_pixel_byte(raw_data, decoded_pixels, offset, compressed)
 
 fn _tiff_itulab_decode_is_supported(data: text, entry: i64, value_count: i64, sample_bits: i64, little: bool) -> bool:
-    if sample_bits != 8:
+    if sample_bits != 8 and sample_bits != 16:
         return false
     val typ = _read_u16(data, entry + 2, little)
     if typ != 10 or value_count < 6:
@@ -1307,10 +1307,13 @@ fn _tiff_srational_value_at(data: text, entry: i64, index: i64, little: bool) ->
     val denominator = _read_i32(data, offset + index * 8 + 4, little)
     (numerator as f64) / (denominator as f64)
 
-fn _tiff_itulab_decode_component(data: text, entry: i64, component: i64, encoded: i64, little: bool) -> f64:
+fn _tiff_itulab_decode_component(data: text, entry: i64, component: i64, encoded: i64, sample_bits: i64, little: bool) -> f64:
     val minimum = _tiff_srational_value_at(data, entry, component * 2, little)
     val maximum = _tiff_srational_value_at(data, entry, component * 2 + 1, little)
-    minimum + (encoded as f64) * (maximum - minimum) / 255.0
+    var encoded_max = 255.0
+    if sample_bits == 16:
+        encoded_max = 65535.0
+    minimum + (encoded as f64) * (maximum - minimum) / encoded_max
 
 fn _tiff_lab_pixel_to_argb(raw_data: text, decoded_pixels: [i64], pixel_offset: i64, sample_bits: i64, compressed: bool, little: bool, photometric: i64, decode_entry: i64) -> i64:
     val l_encoded = _tiff_lab_component(raw_data, decoded_pixels, pixel_offset, sample_bits, compressed, little)
@@ -1334,13 +1337,16 @@ fn _tiff_lab_pixel_to_argb(raw_data: text, decoded_pixels: [i64], pixel_offset: 
         b = (b_encoded - 128) as f64
     else if photometric == 10:
         if decode_entry > 0:
-            l = _tiff_itulab_decode_component(raw_data, decode_entry, 0, l_encoded, little)
-            a = _tiff_itulab_decode_component(raw_data, decode_entry, 1, a_encoded, little)
-            b = _tiff_itulab_decode_component(raw_data, decode_entry, 2, b_encoded, little)
+            l = _tiff_itulab_decode_component(raw_data, decode_entry, 0, l_encoded, sample_bits, little)
+            a = _tiff_itulab_decode_component(raw_data, decode_entry, 1, a_encoded, sample_bits, little)
+            b = _tiff_itulab_decode_component(raw_data, decode_entry, 2, b_encoded, sample_bits, little)
         else:
-            l = (l_encoded as f64) * 100.0 / 255.0
-            a = -21760.0 / 255.0 + (a_encoded as f64) * 170.0 / 255.0
-            b = -19200.0 / 255.0 + (b_encoded as f64) * 200.0 / 255.0
+            var encoded_max = 255.0
+            if sample_bits == 16:
+                encoded_max = 65535.0
+            l = (l_encoded as f64) * 100.0 / encoded_max
+            a = -21760.0 / 255.0 + (a_encoded as f64) * 170.0 / encoded_max
+            b = -19200.0 / 255.0 + (b_encoded as f64) * 200.0 / encoded_max
     else:
         l = (l_encoded as f64) * 100.0 / 255.0
         a = _tiff_signed_byte(a_encoded) as f64
@@ -1388,7 +1394,7 @@ fn _tiff_bits_are_supported(data: text, value_count: i64, inline_value: i64, off
     if sample_bits == 16:
         if compression != 1 and compression != 32773:
             return false
-        if photometric != 0 and photometric != 1 and photometric != 2 and photometric != 8 and photometric != 9:
+        if photometric != 0 and photometric != 1 and photometric != 2 and photometric != 8 and photometric != 9 and photometric != 10:
             return false
         if compression == 32773 and planar_config != 1:
             return false
