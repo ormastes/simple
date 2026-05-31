@@ -509,6 +509,36 @@ expect(_kind(process_nextTick([]))).to_equal("undefined")
 
 </details>
 
+### process.exit
+
+#### returns zero for embedded no-arg exit intent
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(process_exit([]))).to_equal("0")
+```
+
+</details>
+
+#### returns the requested embedded exit code
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(process_exit([JsValue.Number(v: 7.0)]))).to_equal("7")
+```
+
+</details>
+
 ### Node.js os module
 
 ### deterministic os identity
@@ -1652,6 +1682,34 @@ expect(_eval_str("require('process').argv.length")).to_equal("2")
 
 </details>
 
+#### exposes embedded process exit intent
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("process.exit(7)")).to_equal("7")
+```
+
+</details>
+
+#### exposes embedded require process exit intent
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('process').exit(7)")).to_equal("7")
+```
+
+</details>
+
 ### TextEncoder and TextDecoder globals
 
 #### encodes text to Uint8Array-compatible bytes
@@ -1784,6 +1842,7 @@ Tests covering:
 - process working directory and argv
 - process env
 - process.nextTick
+- process.exit
 - Node.js os module
 - deterministic os identity
 - Node.js Buffer module
@@ -1804,8 +1863,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 119 |
-| Active scenarios | 119 |
+| Total scenarios | 123 |
+| Active scenarios | 123 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
