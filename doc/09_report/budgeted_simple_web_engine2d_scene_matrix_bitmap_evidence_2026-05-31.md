@@ -1,0 +1,78 @@
+# Budgeted Simple Web Engine2D Scene Matrix Bitmap Evidence
+
+- status: pass
+- reason: pass
+- scenes: split-pane-status-list, two-block, wide-card
+- iterations: 100
+- trials: 1
+- Electron iterations: 1
+
+## Raw Evidence
+- budgeted_simple_web_engine2d_scene_matrix_status=pass
+- budgeted_simple_web_engine2d_scene_matrix_reason=pass
+- budgeted_simple_web_engine2d_scene_matrix_iterations=100
+- budgeted_simple_web_engine2d_scene_matrix_trials=1
+- budgeted_simple_web_engine2d_scene_matrix_electron_iterations=1
+- budgeted_simple_web_engine2d_scene_matrix_node_simple_frame_limit_us=75
+- budgeted_simple_web_engine2d_scene_matrix_node_baseline_frame_limit_us=750
+- budgeted_simple_web_engine2d_scene_matrix_bun_simple_frame_limit_us=75
+- budgeted_simple_web_engine2d_scene_matrix_bun_baseline_frame_limit_us=1250
+- budgeted_simple_web_engine2d_scene_matrix_electron_frame_limit_us=75000
+- budgeted_simple_web_engine2d_scene_matrix_js_elapsed_limit_ms=30000
+- budgeted_simple_web_engine2d_scene_matrix_electron_elapsed_limit_ms=90000
+- budgeted_simple_web_engine2d_scene_matrix_js_rss_limit_kb=1000000
+- budgeted_simple_web_engine2d_scene_matrix_electron_rss_limit_kb=2000000
+- budgeted_split_pane_status_list_node_status=pass
+- budgeted_split_pane_status_list_node_reason=pass
+- budgeted_split_pane_status_list_node_simple_frame_us=5
+- budgeted_split_pane_status_list_node_baseline_frame_us=114
+- budgeted_split_pane_status_list_node_elapsed_ms=4280
+- budgeted_split_pane_status_list_node_max_rss_kb=124316
+- budgeted_split_pane_status_list_bun_status=pass
+- budgeted_split_pane_status_list_bun_reason=pass
+- budgeted_split_pane_status_list_bun_simple_frame_us=5
+- budgeted_split_pane_status_list_bun_baseline_frame_us=606
+- budgeted_split_pane_status_list_bun_elapsed_ms=4230
+- budgeted_split_pane_status_list_bun_max_rss_kb=125084
+- budgeted_split_pane_status_list_electron_status=pass
+- budgeted_split_pane_status_list_electron_reason=pass
+- budgeted_split_pane_status_list_electron_frame_us=26497
+- budgeted_split_pane_status_list_electron_elapsed_ms=6240
+- budgeted_split_pane_status_list_electron_max_rss_kb=202340
+- budgeted_split_pane_status_list_result=pass
+- budgeted_two_block_node_status=pass
+- budgeted_two_block_node_reason=pass
+- budgeted_two_block_node_simple_frame_us=5
+- budgeted_two_block_node_baseline_frame_us=122
+- budgeted_two_block_node_elapsed_ms=4100
+- budgeted_two_block_node_max_rss_kb=124228
+- budgeted_two_block_bun_status=pass
+- budgeted_two_block_bun_reason=pass
+- budgeted_two_block_bun_simple_frame_us=5
+- budgeted_two_block_bun_baseline_frame_us=617
+- budgeted_two_block_bun_elapsed_ms=4070
+- budgeted_two_block_bun_max_rss_kb=125080
+- budgeted_two_block_electron_status=pass
+- budgeted_two_block_electron_reason=pass
+- budgeted_two_block_electron_frame_us=21524
+- budgeted_two_block_electron_elapsed_ms=6080
+- budgeted_two_block_electron_max_rss_kb=202696
+- budgeted_two_block_result=pass
+- budgeted_wide_card_node_status=pass
+- budgeted_wide_card_node_reason=pass
+- budgeted_wide_card_node_simple_frame_us=5
+- budgeted_wide_card_node_baseline_frame_us=118
+- budgeted_wide_card_node_elapsed_ms=4240
+- budgeted_wide_card_node_max_rss_kb=124748
+- budgeted_wide_card_bun_status=pass
+- budgeted_wide_card_bun_reason=pass
+- budgeted_wide_card_bun_simple_frame_us=5
+- budgeted_wide_card_bun_baseline_frame_us=597
+- budgeted_wide_card_bun_elapsed_ms=4160
+- budgeted_wide_card_bun_max_rss_kb=124684
+- budgeted_wide_card_electron_status=pass
+- budgeted_wide_card_electron_reason=pass
+- budgeted_wide_card_electron_frame_us=22854
+- budgeted_wide_card_electron_elapsed_ms=5930
+- budgeted_wide_card_electron_max_rss_kb=202752
+- budgeted_wide_card_result=pass

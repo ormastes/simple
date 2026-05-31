@@ -61,3 +61,28 @@ per-document, and per-image policy selection. Initialize codec/color transforms
 only when a document or asset requires TIFF, JPEG XL, Lab, XYZ, wide gamut, HDR,
 or ICC handling.
 
+## 2026-05-31 Codex Refresh
+
+Additional source check:
+
+- CSS Color 4 keeps Lab/LCH defined relative to D50-adapted XYZ and keeps
+  `xyz-d50`/`xyz-d65` explicit, so Simple should not collapse Lab and XYZ into
+  one storage format.
+- ICC v4 still treats PCS Lab and PCS XYZ as interchange encodings tied to the
+  profile connection workflow. ICC parsing should stay asset/profile scoped and
+  cached after first use rather than loaded globally.
+- BigTIFF/libtiff practice confirms that broad TIFF support means a matrix of
+  byte order, strips/tiles, planar/chunky, sample widths, compression, alpha,
+  and ICC tag handling. The current pure Simple baseline-strip decoder is the
+  right first stage, but not a complete TIFF claim.
+- JPEG XL color handling includes structured color encodings and ICC payloads,
+  while pixel decode splits into VarDCT and Modular paths with extra channels
+  and progressive features. Pure Simple support should keep metadata and small
+  codestream parsing separate from full pixel decode milestones.
+
+Refined recommendation: keep one hot render representation for UI frames:
+premultiplied 32-bit packed pixels. Use CIELAB as the default public semantic
+color model, CIE XYZ as the conversion/PCS model, and initialize TIFF/JPEG XL
+decode stages plus ICC/Lab/XYZ transform kernels lazily per asset, surface, or
+document. Whole-library startup switching would increase cold-start time and RSS
+for the common sRGB path while giving no hot-frame benefit.

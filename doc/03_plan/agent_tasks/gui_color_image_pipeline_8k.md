@@ -48,3 +48,18 @@ Adopt lazy per-surface/per-asset policy rather than whole-library startup
 switching. Keep 8K display buffers packed and perform Lab/XYZ work in tile-local
 conversion stages.
 
+## Updated Plan Notes
+
+- Treat 7680x4320x32-bit as the optimization target for default UI and browser
+  surfaces: 132,710,400 bytes per framebuffer before swapchain buffering.
+- Keep CIELAB as the default semantic color API and CIE XYZ as the explicit
+  conversion/profile connection space.
+- Do not switch the full library set during startup or init. Add first-use
+  timing/RSS evidence for each lazy subsystem instead: Lab/XYZ transform,
+  ICC/profile parse, TIFF decode variant, JPEG XL container/codestream stage,
+  and GPU/SIMD conversion kernel.
+- Extend TIFF work by capability slice: multi-strip, PackBits, tiled, planar,
+  high-bit-depth, Lab photometric, then compressed variants.
+- Extend JPEG XL work by capability slice: codestream dimensions/color metadata,
+  orientation/extra channels, Modular pixel decode subset, then VarDCT subset.
+- Keep every web/browser/image milestone tied to exact RGBA bitmap evidence.

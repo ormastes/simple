@@ -390,8 +390,36 @@ fn _tiff_be_1x1_rgba() -> text:
 fn _jpegxl_codestream() -> text:
     _bytes([255, 10, 1, 2])
 
+fn _jpegxl_small_codestream_16x24() -> text:
+    _bytes([255, 10, 69, 0])
+
 fn _jpegxl_container() -> text:
     _bytes([0, 0, 0, 12, 74, 88, 76, 32, 13, 10, 135, 10])
+
+fn _jpegxl_container_with_small_codestream_16x24() -> text:
+    _bytes([
+        0, 0, 0, 12, 74, 88, 76, 32, 13, 10, 135, 10,
+        0, 0, 0, 20, 102, 116, 121, 112,
+        106, 120, 108, 32, 0, 0, 0, 0, 106, 120, 108, 32,
+        0, 0, 0, 12, 106, 120, 108, 99,
+        255, 10, 69, 0
+    ])
+
+fn _jpegxl_container_with_partial_codestream() -> text:
+    _bytes([
+        0, 0, 0, 12, 74, 88, 76, 32, 13, 10, 135, 10,
+        0, 0, 0, 20, 102, 116, 121, 112,
+        106, 120, 108, 32, 0, 0, 0, 0, 106, 120, 108, 32,
+        0, 0, 0, 0, 106, 120, 108, 112,
+        0, 0, 0, 1
+    ])
+
+fn _jpegxl_container_truncated_box() -> text:
+    _bytes([
+        0, 0, 0, 12, 74, 88, 76, 32, 13, 10, 135, 10,
+        0, 0, 0, 16, 106, 120, 108, 99,
+        255, 10
+    ])
 
 fn _ico_2x2_bmp32() -> text:
     _bytes([
@@ -678,12 +706,50 @@ describe "Image decode":
             val info = detect_image_info(_jpegxl_container())
             expect(info.format).to_equal("jpegxl")
             expect(info.supported).to_equal(false)
-            expect(info.reason).to_equal("jpegxl-signature-detected-decoder-pending")
+            expect(info.reason).to_equal("jpegxl-container-missing-codestream")
 
             val image = decode_jpegxl(_jpegxl_container())
             expect(image.width).to_equal(1)
             expect(image.height).to_equal(1)
             expect(image.format).to_equal(ImageFormat.JpegXl)
+
+        it "parses JPEG XL small codestream intrinsic dimensions lazily":
+            val info = detect_image_info(_jpegxl_small_codestream_16x24())
+            expect(info.format).to_equal("jpegxl")
+            expect(info.width).to_equal(16)
+            expect(info.height).to_equal(24)
+            expect(info.supported).to_equal(true)
+            expect(info.reason).to_equal("jpegxl-small-codestream-metadata")
+
+            val image = decode_jpegxl(_jpegxl_small_codestream_16x24())
+            expect(image.width).to_equal(16)
+            expect(image.height).to_equal(24)
+            expect(image.format).to_equal(ImageFormat.JpegXl)
+
+        it "parses JPEG XL container boxes and finds full codestream dimensions lazily":
+            val info = detect_image_info(_jpegxl_container_with_small_codestream_16x24())
+            expect(info.format).to_equal("jpegxl")
+            expect(info.width).to_equal(16)
+            expect(info.height).to_equal(24)
+            expect(info.supported).to_equal(true)
+            expect(info.reason).to_equal("jpegxl-small-codestream-metadata")
+
+            val image = decode_jpegxl(_jpegxl_container_with_small_codestream_16x24())
+            expect(image.width).to_equal(16)
+            expect(image.height).to_equal(24)
+            expect(image.format).to_equal(ImageFormat.JpegXl)
+
+        it "detects JPEG XL partial codestream boxes as a staged stitching path":
+            val info = detect_image_info(_jpegxl_container_with_partial_codestream())
+            expect(info.format).to_equal("jpegxl")
+            expect(info.supported).to_equal(false)
+            expect(info.reason).to_equal("jpegxl-container-partial-codestream-stitching-pending")
+
+        it "fails closed on truncated JPEG XL container boxes":
+            val info = detect_image_info(_jpegxl_container_truncated_box())
+            expect(info.format).to_equal("jpegxl")
+            expect(info.supported).to_equal(false)
+            expect(info.reason).to_equal("jpegxl-truncated-box")
 
     describe "SVG":
         it "uses the browser default intrinsic SVG object size":

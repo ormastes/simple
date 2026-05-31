@@ -90,20 +90,7 @@ pub fn image_is_tiff(data: text) -> bool:
 pub fn image_is_jpeg_xl(data: text) -> bool:
     if data.len() >= 2 and _byte_at(data, 0) == 255 and _byte_at(data, 1) == 10:
         return true
-    if data.len() >= 12:
-        return _byte_at(data, 0) == 0 and
-            _byte_at(data, 1) == 0 and
-            _byte_at(data, 2) == 0 and
-            _byte_at(data, 3) == 12 and
-            _byte_at(data, 4) == 74 and
-            _byte_at(data, 5) == 88 and
-            _byte_at(data, 6) == 76 and
-            _byte_at(data, 7) == 32 and
-            _byte_at(data, 8) == 13 and
-            _byte_at(data, 9) == 10 and
-            _byte_at(data, 10) == 135 and
-            _byte_at(data, 11) == 10
-    false
+    _jpeg_xl_is_container_signature(data)
 
 pub fn image_is_jpeg(data: text) -> bool:
     data.len() >= 2 and _byte_at(data, 0) == 255 and _byte_at(data, 1) == 216
@@ -146,9 +133,109 @@ pub fn tiff_image_info(data: text) -> ImageInfo:
     ImageInfo(format: "tiff", width: width, height: height, supported: true, reason: "tiff-baseline-metadata")
 
 pub fn jpeg_xl_image_info(data: text) -> ImageInfo:
-    if image_is_jpeg_xl(data):
-        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-signature-detected-decoder-pending")
+    if data.len() >= 2 and _byte_at(data, 0) == 255 and _byte_at(data, 1) == 10:
+        return _jpeg_xl_codestream_info_at(data, 0, data.len())
+    if _jpeg_xl_is_container_signature(data):
+        return _jpeg_xl_container_info(data)
     image_info_unknown("not-jpegxl")
+
+fn _jpeg_xl_is_container_signature(data: text) -> bool:
+    data.len() >= 12 and
+        _byte_at(data, 0) == 0 and
+        _byte_at(data, 1) == 0 and
+        _byte_at(data, 2) == 0 and
+        _byte_at(data, 3) == 12 and
+        _byte_at(data, 4) == 74 and
+        _byte_at(data, 5) == 88 and
+        _byte_at(data, 6) == 76 and
+        _byte_at(data, 7) == 32 and
+        _byte_at(data, 8) == 13 and
+        _byte_at(data, 9) == 10 and
+        _byte_at(data, 10) == 135 and
+        _byte_at(data, 11) == 10
+
+fn _jpeg_xl_box_type_at(data: text, offset: i64, a: i64, b: i64, c: i64, d: i64) -> bool:
+    _byte_at(data, offset) == a and
+        _byte_at(data, offset + 1) == b and
+        _byte_at(data, offset + 2) == c and
+        _byte_at(data, offset + 3) == d
+
+fn _jpeg_xl_container_info(data: text) -> ImageInfo:
+    var offset = 12
+    var saw_full_codestream = false
+    var saw_partial_codestream = false
+    var saw_file_type = false
+    var full_codestream_offset = 0
+    var full_codestream_length = 0
+    while offset + 8 <= data.len():
+        val box_size = _read_u32_be(data, offset)
+        val box_type = offset + 4
+        if box_size == 1:
+            return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-large-box-parser-pending")
+        if box_size != 0 and box_size < 8:
+            return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-invalid-box-size")
+        var next_offset = data.len()
+        if box_size != 0:
+            next_offset = offset + box_size
+        if next_offset > data.len():
+            return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-truncated-box")
+        if _jpeg_xl_box_type_at(data, box_type, 102, 116, 121, 112):
+            saw_file_type = true
+        if _jpeg_xl_box_type_at(data, box_type, 106, 120, 108, 99):
+            saw_full_codestream = true
+            full_codestream_offset = offset + 8
+            full_codestream_length = next_offset - full_codestream_offset
+        if _jpeg_xl_box_type_at(data, box_type, 106, 120, 108, 112):
+            saw_partial_codestream = true
+        if box_size == 0:
+            offset = data.len()
+        else:
+            offset = next_offset
+    if offset != data.len():
+        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-truncated-box-header")
+    if saw_full_codestream:
+        if saw_file_type:
+            val codestream = _jpeg_xl_codestream_info_at(data, full_codestream_offset, full_codestream_length)
+            if codestream.supported:
+                return codestream
+            return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-container-full-codestream-decoder-pending")
+        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-container-codestream-without-ftyp")
+    if saw_partial_codestream:
+        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-container-partial-codestream-stitching-pending")
+    ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-container-missing-codestream")
+
+fn _jpeg_xl_read_bit(data: text, start: i64, length: i64, bit_pos: i64) -> i64:
+    val byte_offset = start + (bit_pos / 8)
+    if bit_pos < 0 or bit_pos >= length * 8 or byte_offset >= data.len():
+        return 0
+    val value = _byte_at(data, byte_offset)
+    (value / (1 << (bit_pos % 8))) % 2
+
+fn _jpeg_xl_read_bits(data: text, start: i64, length: i64, bit_pos: i64, count: i64) -> i64:
+    var out = 0
+    var i = 0
+    while i < count:
+        out = out | (_jpeg_xl_read_bit(data, start, length, bit_pos + i) << i)
+        i = i + 1
+    out
+
+fn _jpeg_xl_codestream_info_at(data: text, start: i64, length: i64) -> ImageInfo:
+    if length < 2 or start < 0 or start + length > data.len():
+        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-codestream-truncated")
+    if _byte_at(data, start) != 255 or _byte_at(data, start + 1) != 10:
+        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-codestream-missing-signature")
+    if length < 4:
+        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-codestream-size-header-truncated")
+    val bits_start = start + 2
+    val bits_length = length - 2
+    val small = _jpeg_xl_read_bit(data, bits_start, bits_length, 0)
+    if small == 1:
+        val ysize_div8_minus_1 = _jpeg_xl_read_bits(data, bits_start, bits_length, 1, 5)
+        val xsize_div8_minus_1 = _jpeg_xl_read_bits(data, bits_start, bits_length, 6, 5)
+        val width = (xsize_div8_minus_1 + 1) * 8
+        val height = (ysize_div8_minus_1 + 1) * 8
+        return ImageInfo(format: "jpegxl", width: width, height: height, supported: true, reason: "jpegxl-small-codestream-metadata")
+    ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-large-codestream-size-parser-pending")
 
 fn _profile_result(format: text, kind: text, length: i64, offset: i64, reason: text) -> ImageColorProfileInfo:
     ImageColorProfileInfo(
