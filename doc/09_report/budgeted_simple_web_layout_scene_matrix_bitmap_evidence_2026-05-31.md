@@ -3,14 +3,14 @@
 - status: pass
 - reason: pass
 - scenes: simple-web-layout-text-flow, simple-web-layout-commandbar-taskbar-card
-- iterations: 100
+- iterations: 80
 - trials: 1
 - Electron iterations: 1
 
 ## Raw Evidence
 - budgeted_simple_web_layout_scene_matrix_status=pass
 - budgeted_simple_web_layout_scene_matrix_reason=pass
-- budgeted_simple_web_layout_scene_matrix_iterations=100
+- budgeted_simple_web_layout_scene_matrix_iterations=80
 - budgeted_simple_web_layout_scene_matrix_trials=1
 - budgeted_simple_web_layout_scene_matrix_electron_iterations=1
 - budgeted_simple_web_layout_scene_matrix_node_simple_frame_limit_us=75
@@ -25,36 +25,36 @@
 - budgeted_text_flow_node_status=pass
 - budgeted_text_flow_node_reason=pass
 - budgeted_text_flow_node_simple_frame_us=5
-- budgeted_text_flow_node_baseline_frame_us=149
-- budgeted_text_flow_node_elapsed_ms=750
-- budgeted_text_flow_node_max_rss_kb=125648
+- budgeted_text_flow_node_baseline_frame_us=157
+- budgeted_text_flow_node_elapsed_ms=780
+- budgeted_text_flow_node_max_rss_kb=124616
 - budgeted_text_flow_bun_status=pass
 - budgeted_text_flow_bun_reason=pass
 - budgeted_text_flow_bun_simple_frame_us=5
-- budgeted_text_flow_bun_baseline_frame_us=621
-- budgeted_text_flow_bun_elapsed_ms=1040
-- budgeted_text_flow_bun_max_rss_kb=124856
+- budgeted_text_flow_bun_baseline_frame_us=678
+- budgeted_text_flow_bun_elapsed_ms=800
+- budgeted_text_flow_bun_max_rss_kb=125376
 - budgeted_text_flow_electron_status=pass
 - budgeted_text_flow_electron_reason=pass
-- budgeted_text_flow_electron_frame_us=22105
-- budgeted_text_flow_electron_elapsed_ms=2780
-- budgeted_text_flow_electron_max_rss_kb=206128
+- budgeted_text_flow_electron_frame_us=24902
+- budgeted_text_flow_electron_elapsed_ms=2980
+- budgeted_text_flow_electron_max_rss_kb=203976
 - budgeted_text_flow_result=pass
 - budgeted_commandbar_taskbar_card_node_status=pass
 - budgeted_commandbar_taskbar_card_node_reason=pass
 - budgeted_commandbar_taskbar_card_node_simple_frame_us=5
-- budgeted_commandbar_taskbar_card_node_baseline_frame_us=149
-- budgeted_commandbar_taskbar_card_node_elapsed_ms=920
-- budgeted_commandbar_taskbar_card_node_max_rss_kb=124808
+- budgeted_commandbar_taskbar_card_node_baseline_frame_us=155
+- budgeted_commandbar_taskbar_card_node_elapsed_ms=1030
+- budgeted_commandbar_taskbar_card_node_max_rss_kb=125376
 - budgeted_commandbar_taskbar_card_bun_status=pass
 - budgeted_commandbar_taskbar_card_bun_reason=pass
 - budgeted_commandbar_taskbar_card_bun_simple_frame_us=5
-- budgeted_commandbar_taskbar_card_bun_baseline_frame_us=603
-- budgeted_commandbar_taskbar_card_bun_elapsed_ms=920
-- budgeted_commandbar_taskbar_card_bun_max_rss_kb=124612
+- budgeted_commandbar_taskbar_card_bun_baseline_frame_us=701
+- budgeted_commandbar_taskbar_card_bun_elapsed_ms=910
+- budgeted_commandbar_taskbar_card_bun_max_rss_kb=125368
 - budgeted_commandbar_taskbar_card_electron_status=pass
 - budgeted_commandbar_taskbar_card_electron_reason=pass
-- budgeted_commandbar_taskbar_card_electron_frame_us=29173
-- budgeted_commandbar_taskbar_card_electron_elapsed_ms=2900
-- budgeted_commandbar_taskbar_card_electron_max_rss_kb=206352
+- budgeted_commandbar_taskbar_card_electron_frame_us=24067
+- budgeted_commandbar_taskbar_card_electron_elapsed_ms=2970
+- budgeted_commandbar_taskbar_card_electron_max_rss_kb=206132
 - budgeted_commandbar_taskbar_card_result=pass
