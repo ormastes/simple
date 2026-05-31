@@ -293,9 +293,9 @@ fn is_heading(tag: text) -> bool:
     tag == "h1" or tag == "h2" or tag == "h3" or tag == "h4" or tag == "h5" or tag == "h6"
 
 # apply a declaration block onto a style
-fn apply_decls(st: Style, decls: text):
+fn apply_decls(st: Style, decls: text) -> Style:
     if decls.len() == 0:
-        return
+        return st
     val bg = decl_get(decls, "background-color")
     if bg.len() > 0:
         st.bg = parse_color(bg)
@@ -329,6 +329,7 @@ fn apply_decls(st: Style, decls: text):
     val mb = decl_get(decls, "margin-bottom")
     if mb.len() > 0:
         st.margin_b = parse_int(mb)
+    st
 
 # default per-tag tweaks (block/inline, heading sizes, spacing)
 fn tag_defaults(st: Style, tag: text):
@@ -446,24 +447,59 @@ fn selector_matches(sel: text, tag: text, cls: text, id: text) -> bool:
         g = g + 1
     false
 
+fn style_block_decls_for_node(html: text, tag: text, cls: text, id: text) -> text:
+    var out = ""
+    var pos = 0
+    var guard = 0
+    while guard < 1000:
+        guard = guard + 1
+        val sp = find_from(html, "<style", pos)
+        if sp < 0:
+            break
+        val open = find_from(html, ">", sp)
+        if open < 0:
+            break
+        val close = find_from(html, "</style", open)
+        if close < 0:
+            break
+        val css = html.substring(open + 1, close)
+        var cp = 0
+        while cp < css.len():
+            val brace = find_from(css, "{", cp)
+            if brace < 0:
+                break
+            val endb = find_from(css, "}", brace)
+            if endb < 0:
+                break
+            val sel = css.substring(cp, brace).trim()
+            val decl = css.substring(brace + 1, endb).trim()
+            if sel.len() > 0 and decl.len() > 0 and selector_matches(sel, tag, cls, id):
+                out = out + decl + ";"
+            cp = endb + 1
+        pos = close + 1
+    out
+
 # ---------------------------------------------------------------------------
 # Compute styles (cascade: inherit -> tag defaults -> matched rules -> inline)
 # ---------------------------------------------------------------------------
 
-fn compute_styles(nodes: [HNode], rules: Rules) -> [Style]:
+fn compute_styles(nodes: [HNode], rules: Rules, html: text) -> [Style]:
     var styles: [Style] = []
     var i = 0
     while i < nodes.len():
         val nd = nodes[i]
         var st = if nd.parent >= 0: inherit_style(styles[nd.parent]) else: default_style()
         tag_defaults(st, nd.tag)
+        val direct_style_decls = style_block_decls_for_node(html, nd.tag, nd.class_attr, nd.id_attr)
+        if direct_style_decls.len() > 0:
+            st = apply_decls(st, direct_style_decls)
         var r = 0
         while r < rules.sels.len():
             if selector_matches(rules.sels[r], nd.tag, nd.class_attr, nd.id_attr):
-                apply_decls(st, rules.decls[r])
+                st = apply_decls(st, rules.decls[r])
             r = r + 1
         if nd.style_attr.len() > 0:
-            apply_decls(st, nd.style_attr)
+            st = apply_decls(st, nd.style_attr)
         styles.push(st)
         i = i + 1
     styles
@@ -736,7 +772,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
 pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     val nodes = parse_html(html)
     val rules = extract_css(html)
-    val styles = compute_styles(nodes, rules)
+    val styles = compute_styles(nodes, rules, html)
     val boxes = LayoutBoxes(
         bx: [0; nodes.len()],
         by: [0; nodes.len()],
