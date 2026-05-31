@@ -5,9 +5,11 @@ use std.js.types.js_types.JsValue
 use std.js.types.ast_types.JsExpression
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
-use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
+use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_NODE_BUFFER_BYTE_LENGTH, NATIVE_NODE_BUFFER_CONCAT, NATIVE_NODE_BUFFER_FROM, NATIVE_NODE_BUFFER_TO_STRING, NATIVE_NODE_PATH_BASENAME, NATIVE_NODE_PATH_DIRNAME, NATIVE_NODE_PATH_EXTNAME, NATIVE_NODE_PATH_IS_ABSOLUTE, NATIVE_NODE_PATH_JOIN, NATIVE_NODE_PATH_NORMALIZE, NATIVE_NODE_REQUIRE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
 use std.js.engine.parser.{JsParser}
 use std.js.builtins.json.{json_is_valid}
+use std.js.node.path_module.{path_join, path_dirname, path_basename, path_extname, path_isAbsolute, path_normalize}
+use std.js.node.buffer_module.{buffer_byteLength, NodeBuffer}
 use std.gc_async_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask}
 use std.gc_async_mut.js.engine.interpreter.{filter_response_headers_for_script, parse_non_negative_i64_text, text_equals_exact, _simple_fetch_state, _simple_fetch_value, _simple_fetch_marker, _simple_fetch_base_url, _simple_fetch_cookie_header, _resolve_fetch_url}
 use std.gc_async_mut.js.engine.interpreter_object.{JsInterpreter}
@@ -60,7 +62,140 @@ impl JsInterpreter:
             return self._native_webassembly_module(arg_vals)
         if native_id == NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR:
             return self._native_webassembly_instance(arg_vals)
+        if native_id == NATIVE_NODE_REQUIRE:
+            return self._native_node_require(arg_vals)
+        if native_id == NATIVE_NODE_PATH_JOIN:
+            return path_join(arg_vals)
+        if native_id == NATIVE_NODE_PATH_DIRNAME:
+            return path_dirname(arg_vals)
+        if native_id == NATIVE_NODE_PATH_BASENAME:
+            return path_basename(arg_vals)
+        if native_id == NATIVE_NODE_PATH_EXTNAME:
+            return path_extname(arg_vals)
+        if native_id == NATIVE_NODE_PATH_IS_ABSOLUTE:
+            return path_isAbsolute(arg_vals)
+        if native_id == NATIVE_NODE_PATH_NORMALIZE:
+            return path_normalize(arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_BYTE_LENGTH:
+            return buffer_byteLength(arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_FROM:
+            return self._native_node_buffer_from(arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_CONCAT:
+            return self._native_node_buffer_concat(arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_TO_STRING:
+            return self._native_node_buffer_to_string(this_val, arg_vals)
         dispatch_native(native_id, arg_vals, self.logger)
+
+    me _native_node_require(arg_vals: [JsValue]) -> JsValue:
+        if arg_vals.len() == 0:
+            return JsValue.Undefined
+        var specifier = ""
+        match arg_vals.get(0):
+            JsValue.String(v):
+                specifier = v
+            _:
+                return JsValue.Undefined
+        if specifier == "path" or specifier == "node:path":
+            return self._native_node_path_module()
+        if specifier == "buffer" or specifier == "node:buffer":
+            return self._native_node_buffer_module()
+        self._native_node_denied_module(specifier)
+
+    me _native_node_require_function() -> JsValue:
+        JsValue.Function(id: self._register_native("require", NATIVE_NODE_REQUIRE))
+
+    me _native_node_path_module() -> JsValue:
+        val module_id = self.create_object()
+        self._define_method_on(module_id, "join", NATIVE_NODE_PATH_JOIN)
+        self._define_method_on(module_id, "dirname", NATIVE_NODE_PATH_DIRNAME)
+        self._define_method_on(module_id, "basename", NATIVE_NODE_PATH_BASENAME)
+        self._define_method_on(module_id, "extname", NATIVE_NODE_PATH_EXTNAME)
+        self._define_method_on(module_id, "isAbsolute", NATIVE_NODE_PATH_IS_ABSOLUTE)
+        self._define_method_on(module_id, "normalize", NATIVE_NODE_PATH_NORMALIZE)
+        self.set_object_property(module_id, "posix", JsValue.Object(id: module_id))
+        JsValue.Object(id: module_id)
+
+    me _native_node_buffer_module() -> JsValue:
+        val module_id = self.create_object()
+        val buffer_id = self.create_object()
+        self._define_method_on(buffer_id, "byteLength", NATIVE_NODE_BUFFER_BYTE_LENGTH)
+        self._define_method_on(buffer_id, "from", NATIVE_NODE_BUFFER_FROM)
+        self._define_method_on(buffer_id, "concat", NATIVE_NODE_BUFFER_CONCAT)
+        self.set_object_property(module_id, "Buffer", JsValue.Object(id: buffer_id))
+        JsValue.Object(id: module_id)
+
+    me _native_node_buffer_global() -> JsValue:
+        val buffer_id = self.create_object()
+        self._define_method_on(buffer_id, "byteLength", NATIVE_NODE_BUFFER_BYTE_LENGTH)
+        self._define_method_on(buffer_id, "from", NATIVE_NODE_BUFFER_FROM)
+        self._define_method_on(buffer_id, "concat", NATIVE_NODE_BUFFER_CONCAT)
+        JsValue.Object(id: buffer_id)
+
+    me _native_node_buffer_from(arg_vals: [JsValue]) -> JsValue:
+        var value = ""
+        var encoding = "utf8"
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.String(v): value = v
+                _: pass_dn
+        if arg_vals.len() > 1:
+            match arg_vals.get(1):
+                JsValue.String(v): encoding = v
+                _: pass_dn
+        self._native_node_buffer_value(NodeBuffer.from_text(value, encoding))
+
+    me _native_node_buffer_value(buffer: NodeBuffer) -> JsValue:
+        val obj_id = self.create_object()
+        self.set_object_property(obj_id, "__simple_node_buffer", JsValue.Boolean(v: true))
+        self.set_object_property(obj_id, "__simple_node_buffer_utf8", JsValue.String(v: buffer.to_string("utf8")))
+        self.set_object_property(obj_id, "__simple_node_buffer_hex", JsValue.String(v: buffer.to_string("hex")))
+        self.set_object_property(obj_id, "__simple_node_buffer_base64", JsValue.String(v: buffer.to_string("base64")))
+        self.set_object_property(obj_id, "length", JsValue.Number(v: buffer.length().to_f64()))
+        self._define_method_on(obj_id, "toString", NATIVE_NODE_BUFFER_TO_STRING)
+        JsValue.Object(id: obj_id)
+
+    me _native_node_buffer_concat(arg_vals: [JsValue]) -> JsValue:
+        var buffers: [NodeBuffer] = []
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.Array(arr_id):
+                    val arr_len = self.object_store.array_length(arr_id)
+                    var i = 0
+                    while i < arr_len:
+                        val item = self.object_store.get_by_index(arr_id, i)
+                        val item_id = _get_obj_id(item)
+                        if item_id >= 0:
+                            match self.get_object_property(item_id, "__simple_node_buffer_hex"):
+                                JsValue.String(hex):
+                                    buffers.push(NodeBuffer.from_text(hex, "hex"))
+                                _:
+                                    pass_dn
+                        i = i + 1
+                _:
+                    pass_dn
+        self._native_node_buffer_value(NodeBuffer.concat(buffers))
+
+    me _native_node_buffer_to_string(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        var encoding = "utf8"
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.String(v): encoding = v.trim().lower()
+                _: pass_dn
+        val obj_id = _get_obj_id(this_val)
+        if obj_id < 0:
+            return JsValue.String(v: "")
+        if encoding == "hex":
+            return self.get_object_property(obj_id, "__simple_node_buffer_hex")
+        if encoding == "base64":
+            return self.get_object_property(obj_id, "__simple_node_buffer_base64")
+        self.get_object_property(obj_id, "__simple_node_buffer_utf8")
+
+    me _native_node_denied_module(specifier: text) -> JsValue:
+        val module_id = self.create_object()
+        self.set_object_property(module_id, "status", JsValue.String(v: "denied"))
+        self.set_object_property(module_id, "specifier", JsValue.String(v: specifier))
+        self.set_object_property(module_id, "error", JsValue.String(v: "module-denied"))
+        JsValue.Object(id: module_id)
 
     me _native_webassembly_validate(arg_vals: [JsValue]) -> JsValue:
         JsValue.Boolean(v: self._native_webassembly_valid_hex_payload(arg_vals))

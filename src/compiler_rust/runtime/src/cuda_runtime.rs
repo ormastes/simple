@@ -2038,6 +2038,36 @@ pub extern "C" fn rt_cuda_module_load_data(ptx: *const c_char) -> i64 {
     }
 }
 
+/// Load CUDA module from a length-tracked PTX byte buffer.
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_module_load_data_bytes(ptx_ptr: i64, ptx_len: i64) -> i64 {
+    if ptx_ptr == 0 || ptx_len < 0 {
+        return -1;
+    }
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    unsafe {
+        let bytes = std::slice::from_raw_parts(ptx_ptr as *const u8, ptx_len as usize);
+        let Ok(ptx_cstr) = CString::new(bytes) else {
+            return -1;
+        };
+        let mut module: CUmodule = ptr::null_mut();
+        let err = cuModuleLoadData(&mut module, ptx_cstr.as_ptr() as *const c_void);
+        if err != 0 {
+            return -(err as i64);
+        }
+        module as i64
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_module_load_data_bytes(_ptx_ptr: i64, _ptx_len: i64) -> i64 {
+    -3
+}
+
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
 pub extern "C" fn rt_cuda_module_load_data(_ptx: *const c_char) -> i64 {
@@ -2135,6 +2165,60 @@ pub extern "C" fn rt_cuda_launch_kernel(
         }
         0
     }
+}
+
+/// Launch CUDA kernel using a length-tracked UTF-8 function name.
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_launch_kernel_name(
+    module: i64,
+    func_name_ptr: i64,
+    func_name_len: i64,
+    grid_x: i64,
+    grid_y: i64,
+    grid_z: i64,
+    block_x: i64,
+    block_y: i64,
+    block_z: i64,
+    args_ptr: i64,
+) -> i64 {
+    if func_name_ptr == 0 || func_name_len < 0 {
+        return -1;
+    }
+    unsafe {
+        let bytes = std::slice::from_raw_parts(func_name_ptr as *const u8, func_name_len as usize);
+        let Ok(func_name) = CString::new(bytes) else {
+            return -1;
+        };
+        rt_cuda_launch_kernel(
+            module,
+            func_name.as_ptr(),
+            grid_x,
+            grid_y,
+            grid_z,
+            block_x,
+            block_y,
+            block_z,
+            args_ptr,
+        )
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_launch_kernel_name(
+    _module: i64,
+    _func_name_ptr: i64,
+    _func_name_len: i64,
+    _grid_x: i64,
+    _grid_y: i64,
+    _grid_z: i64,
+    _block_x: i64,
+    _block_y: i64,
+    _block_z: i64,
+    _args_ptr: i64,
+) -> i64 {
+    -3
 }
 
 #[no_mangle]
