@@ -129,15 +129,20 @@ expect(_count_color(pixels, 0xFF334155u32)).to_be_greater_than(0)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val html = "<html><head><style>.status{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}.panel > .status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}</style></head><body><section class='panel'><div class='status'>DIRECT</div><div><span class='status'>NESTED</span></div></section><div class='status'>OUT</div></body></html>"
+val html = "<html><head><style>.status{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}.panel>.status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}</style></head><body><section class='panel'><div class='status'>DIRECT</div><div><span class='status'>NESTED</span></div></section><div class='status'>OUT</div></body></html>"
+val descendant_html = "<html><head><style>.status{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}.panel .status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}</style></head><body><section class='panel'><div class='status'>DIRECT</div><div><span class='status'>NESTED</span></div></section><div class='status'>OUT</div></body></html>"
 val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+val descendant_pixels = simple_web_render_html_to_pixels(descendant_html, 96, 64)
+val child_green = _count_color(pixels, 0xFF22C55Eu32)
+val descendant_green = _count_color(descendant_pixels, 0xFF22C55Eu32)
 expect(pixels.len()).to_equal(96 * 64)
-expect(_count_color(pixels, 0xFF22C55Eu32)).to_be_greater_than(0)
+expect(child_green).to_be_greater_than(0)
 expect(_count_color(pixels, 0xFF334155u32)).to_be_greater_than(0)
+expect(child_green).to_be_less_than(descendant_green)
 ```
 
 </details>
