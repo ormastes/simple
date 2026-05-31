@@ -12,9 +12,9 @@
 
 ---
 
-## GPU & SIMD (1 features)
+## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Surface Color Plan Specification](gpu/surface_color_plan_spec.md) | Auto-generated | N/A | 2 | 0% | 0 lines |
+| [Image Decode Specification](paint/image_decode_spec.md) | Auto-generated | N/A | 26 | 0% | 0 lines |
 

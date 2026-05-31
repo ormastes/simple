@@ -1,0 +1,124 @@
+# Pure Simple image metadata probes for web/browser image routing.
+#
+# This file intentionally performs signature and lightweight metadata parsing
+# only. Decoders that cannot return real pixels must fail closed in callers.
+
+pub class ImageInfo:
+    format: text
+    width: i64
+    height: i64
+    supported: bool
+    reason: text
+
+pub fn image_info_unknown(reason: text) -> ImageInfo:
+    ImageInfo(format: "unknown", width: 0, height: 0, supported: false, reason: reason)
+
+fn _byte_at(data: text, offset: i64) -> i64:
+    if offset < 0 or offset >= data.len():
+        return 0
+    data[offset:offset + 1].char_code_at(0)
+
+fn _read_u16_le(data: text, offset: i64) -> i64:
+    _byte_at(data, offset) | (_byte_at(data, offset + 1) << 8)
+
+fn _read_u16_be(data: text, offset: i64) -> i64:
+    (_byte_at(data, offset) << 8) | _byte_at(data, offset + 1)
+
+fn _read_u32_le(data: text, offset: i64) -> i64:
+    _byte_at(data, offset) |
+    (_byte_at(data, offset + 1) << 8) |
+    (_byte_at(data, offset + 2) << 16) |
+    (_byte_at(data, offset + 3) << 24)
+
+fn _read_u32_be(data: text, offset: i64) -> i64:
+    (_byte_at(data, offset) << 24) |
+    (_byte_at(data, offset + 1) << 16) |
+    (_byte_at(data, offset + 2) << 8) |
+    _byte_at(data, offset + 3)
+
+fn _read_u16(data: text, offset: i64, little: bool) -> i64:
+    if little:
+        return _read_u16_le(data, offset)
+    _read_u16_be(data, offset)
+
+fn _read_u32(data: text, offset: i64, little: bool) -> i64:
+    if little:
+        return _read_u32_le(data, offset)
+    _read_u32_be(data, offset)
+
+pub fn image_is_tiff(data: text) -> bool:
+    if data.len() < 4:
+        return false
+    val b0 = _byte_at(data, 0)
+    val b1 = _byte_at(data, 1)
+    val b2 = _byte_at(data, 2)
+    val b3 = _byte_at(data, 3)
+    (b0 == 73 and b1 == 73 and b2 == 42 and b3 == 0) or
+    (b0 == 77 and b1 == 77 and b2 == 0 and b3 == 42)
+
+pub fn image_is_jpeg_xl(data: text) -> bool:
+    if data.len() >= 2 and _byte_at(data, 0) == 255 and _byte_at(data, 1) == 10:
+        return true
+    if data.len() >= 12:
+        return _byte_at(data, 0) == 0 and
+            _byte_at(data, 1) == 0 and
+            _byte_at(data, 2) == 0 and
+            _byte_at(data, 3) == 12 and
+            _byte_at(data, 4) == 74 and
+            _byte_at(data, 5) == 88 and
+            _byte_at(data, 6) == 76 and
+            _byte_at(data, 7) == 32 and
+            _byte_at(data, 8) == 13 and
+            _byte_at(data, 9) == 10 and
+            _byte_at(data, 10) == 135 and
+            _byte_at(data, 11) == 10
+    false
+
+fn _tiff_entry_value(data: text, entry: i64, little: bool) -> i64:
+    val typ = _read_u16(data, entry + 2, little)
+    val count = _read_u32(data, entry + 4, little)
+    if count != 1:
+        return 0
+    if typ == 3:
+        return _read_u16(data, entry + 8, little)
+    if typ == 4:
+        return _read_u32(data, entry + 8, little)
+    0
+
+pub fn tiff_image_info(data: text) -> ImageInfo:
+    if not image_is_tiff(data):
+        return image_info_unknown("not-tiff")
+    val little = _byte_at(data, 0) == 73
+    val ifd = _read_u32(data, 4, little)
+    if ifd <= 0 or ifd + 2 > data.len():
+        return ImageInfo(format: "tiff", width: 0, height: 0, supported: false, reason: "tiff-invalid-ifd-offset")
+    val count = _read_u16(data, ifd, little)
+    var width: i64 = 0
+    var height: i64 = 0
+    var i: i64 = 0
+    while i < count:
+        val entry = ifd + 2 + (i * 12)
+        if entry + 12 > data.len():
+            return ImageInfo(format: "tiff", width: width, height: height, supported: false, reason: "tiff-truncated-ifd")
+        val tag = _read_u16(data, entry, little)
+        val value = _tiff_entry_value(data, entry, little)
+        if tag == 256:
+            width = value
+        if tag == 257:
+            height = value
+        i = i + 1
+    if width <= 0 or height <= 0:
+        return ImageInfo(format: "tiff", width: width, height: height, supported: false, reason: "tiff-missing-dimensions")
+    ImageInfo(format: "tiff", width: width, height: height, supported: true, reason: "tiff-baseline-metadata")
+
+pub fn jpeg_xl_image_info(data: text) -> ImageInfo:
+    if image_is_jpeg_xl(data):
+        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-signature-detected-decoder-pending")
+    image_info_unknown("not-jpegxl")
+
+pub fn detect_image_info(data: text) -> ImageInfo:
+    if image_is_tiff(data):
+        return tiff_image_info(data)
+    if image_is_jpeg_xl(data):
+        return jpeg_xl_image_info(data)
+    image_info_unknown("unknown-signature")

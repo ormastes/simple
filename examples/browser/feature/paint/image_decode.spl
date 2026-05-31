@@ -7,6 +7,7 @@
 use examples.browser.entity.media.image_types.{ImageData, ImageFormat}
 use examples.browser.shared.logging.{Logger, LogLevel}
 use examples.browser.shared.error.{BrowserError, BrowserResult, paint_error}
+use std.common.image.image_info.{detect_image_info, image_is_jpeg_xl, image_is_tiff, jpeg_xl_image_info, tiff_image_info}
 
 # ---------------------------------------------------------------------------
 # Image state tracking
@@ -100,6 +101,10 @@ class ImageDecoder:
                 decoded_data = decode_ico(raw_data)
             ImageFormat.Svg:
                 decoded_data = decode_svg(raw_data)
+            ImageFormat.Tiff:
+                decoded_data = decode_tiff(raw_data)
+            ImageFormat.JpegXl:
+                decoded_data = decode_jpegxl(raw_data)
             _:
                 decoded_data = create_placeholder(100, 100)
         val result = DecodedImage.ready(image_id, "", decoded_data)
@@ -140,6 +145,8 @@ class ImageDecoder:
 # BMP:  66 77        (B M)
 # WebP: RIFF....WEBP
 # ICO:  00 00 01 00
+# TIFF: II*\\0 or MM\\0*
+# JXL:  FF 0A codestream or 00 00 00 0C JXL 20 0D 0A 87 0A container
 # SVG:  <svg or XML text containing an <svg root
 fn detect_format(data: text) -> ImageFormat:
     val len = data.len()
@@ -148,6 +155,12 @@ fn detect_format(data: text) -> ImageFormat:
 
     if _is_svg_data(data):
         return ImageFormat.Svg
+
+    if image_is_tiff(data):
+        return ImageFormat.Tiff
+
+    if image_is_jpeg_xl(data):
+        return ImageFormat.JpegXl
 
     # Check PNG signature
     if len >= 4:
@@ -269,6 +282,20 @@ fn format_name(format: ImageFormat) -> text:
         ImageFormat.Svg: "SVG"
         ImageFormat.Bmp: "BMP"
         ImageFormat.Ico: "ICO"
+        ImageFormat.Tiff: "TIFF"
+        ImageFormat.JpegXl: "JPEG XL"
+
+fn decode_tiff(raw_data: text) -> ImageData:
+    val info = tiff_image_info(raw_data)
+    if info.width > 0 and info.height > 0:
+        return create_placeholder_format(info.width, info.height, ImageFormat.Tiff)
+    create_placeholder_format(1, 1, ImageFormat.Tiff)
+
+fn decode_jpegxl(raw_data: text) -> ImageData:
+    val info = jpeg_xl_image_info(raw_data)
+    if info.width > 0 and info.height > 0:
+        return create_placeholder_format(info.width, info.height, ImageFormat.JpegXl)
+    create_placeholder_format(1, 1, ImageFormat.JpegXl)
 
 # ---------------------------------------------------------------------------
 # PNG Decoder — parse chunks, decompress IDAT, reconstruct pixels

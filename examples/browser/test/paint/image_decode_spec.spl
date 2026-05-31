@@ -5,7 +5,8 @@
 use std.spec
 use std.common.string_core.{char_from_code}
 use examples.browser.entity.media.image_types.{ImageFormat}
-use examples.browser.feature.paint.image_decode.{decode_bmp, decode_gif, decode_ico, decode_jpeg, decode_png, decode_svg, decode_webp, detect_format}
+use examples.browser.feature.paint.image_decode.{decode_bmp, decode_gif, decode_ico, decode_jpeg, decode_jpegxl, decode_png, decode_svg, decode_tiff, decode_webp, detect_format}
+use std.common.image.image_info.{detect_image_info}
 
 fn _bytes(values: [i64]) -> text:
     var out = ""
@@ -66,6 +67,8 @@ fn _fixture_byte(value: i64) -> text:
         return "\x3C"
     if value == 128:
         return "\x80"
+    if value == 135:
+        return "\x87"
     if value == 137:
         return "\x89"
     if value == 192:
@@ -186,6 +189,32 @@ fn _webp_vp8x_65x66() -> text:
 fn _ico_64x33() -> text:
     "\0\0\x01\0\x01\0@!\0\0\x01\0 \0xxxxxxxx"
 
+fn _tiff_le_3x2() -> text:
+    _bytes([
+        73, 73, 42, 0,
+        8, 0, 0, 0,
+        2, 0,
+        0, 1, 4, 0, 1, 0, 0, 0, 3, 0, 0, 0,
+        1, 1, 4, 0, 1, 0, 0, 0, 2, 0, 0, 0,
+        0, 0, 0, 0
+    ])
+
+fn _tiff_be_4x5() -> text:
+    _bytes([
+        77, 77, 0, 42,
+        0, 0, 0, 8,
+        0, 2,
+        1, 0, 0, 4, 0, 0, 0, 1, 0, 0, 0, 4,
+        1, 1, 0, 4, 0, 0, 0, 1, 0, 0, 0, 5,
+        0, 0, 0, 0
+    ])
+
+fn _jpegxl_codestream() -> text:
+    _bytes([255, 10, 1, 2])
+
+fn _jpegxl_container() -> text:
+    _bytes([0, 0, 0, 12, 74, 88, 76, 32, 13, 10, 135, 10])
+
 fn _ico_2x2_bmp32() -> text:
     _bytes([
         0, 0, 1, 0, 1, 0,
@@ -246,6 +275,15 @@ describe "Image decode":
 
         it "detects SVG root text":
             expect(detect_format(_svg_default())).to_equal(ImageFormat.Svg)
+
+        it "detects TIFF little-endian signature":
+            expect(detect_format(_tiff_le_3x2())).to_equal(ImageFormat.Tiff)
+
+        it "detects JPEG XL codestream signature":
+            expect(detect_format(_jpegxl_codestream())).to_equal(ImageFormat.JpegXl)
+
+        it "detects JPEG XL container signature":
+            expect(detect_format(_jpegxl_container())).to_equal(ImageFormat.JpegXl)
 
     describe "BMP":
         it "decodes uncompressed 32-bit BMP pixels to RGBA in display order":
@@ -352,6 +390,39 @@ describe "Image decode":
             expect(image.height).to_equal(33)
             expect(image.format).to_equal(ImageFormat.Ico)
             expect(image.data.len()).to_be_greater_than(0)
+
+    describe "TIFF":
+        it "parses little-endian baseline metadata and returns a fail-closed placeholder":
+            val info = detect_image_info(_tiff_le_3x2())
+            expect(info.format).to_equal("tiff")
+            expect(info.width).to_equal(3)
+            expect(info.height).to_equal(2)
+            expect(info.supported).to_equal(true)
+
+            val image = decode_tiff(_tiff_le_3x2())
+            expect(image.width).to_equal(3)
+            expect(image.height).to_equal(2)
+            expect(image.format).to_equal(ImageFormat.Tiff)
+            expect(image.data.len()).to_equal(24)
+
+        it "parses big-endian baseline metadata":
+            val info = detect_image_info(_tiff_be_4x5())
+            expect(info.format).to_equal("tiff")
+            expect(info.width).to_equal(4)
+            expect(info.height).to_equal(5)
+            expect(info.supported).to_equal(true)
+
+    describe "JPEG XL":
+        it "detects JPEG XL signatures but keeps decode fail-closed":
+            val info = detect_image_info(_jpegxl_container())
+            expect(info.format).to_equal("jpegxl")
+            expect(info.supported).to_equal(false)
+            expect(info.reason).to_equal("jpegxl-signature-detected-decoder-pending")
+
+            val image = decode_jpegxl(_jpegxl_container())
+            expect(image.width).to_equal(1)
+            expect(image.height).to_equal(1)
+            expect(image.format).to_equal(ImageFormat.JpegXl)
 
     describe "SVG":
         it "uses the browser default intrinsic SVG object size":
