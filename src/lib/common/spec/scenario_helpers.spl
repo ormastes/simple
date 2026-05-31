@@ -9,9 +9,12 @@
 
 use std.common.spec.scenario_evidence.{
     ScenarioCaptureKind,
+    ScenarioHtmlCheckTool,
     ScenarioEvidenceArtifact,
     ScenarioCheckerEvidence,
     scenario_evidence_artifact,
+    scenario_html_evidence,
+    scenario_simple_gui_html_evidence,
     scenario_api_evidence,
     scenario_api_protocol_evidence,
     scenario_exec_evidence,
@@ -19,7 +22,9 @@ use std.common.spec.scenario_evidence.{
     scenario_binary_evidence,
     scenario_binary_detailed_evidence,
     scenario_ui_selection_evidence,
-    scenario_checker_evidence
+    scenario_checker_evidence,
+    scenario_html_check_result,
+    ScenarioHtmlCheckResult
 }
 
 extern fn rt_file_exists(path: text) -> bool
@@ -50,6 +55,46 @@ pub fn check_file_exists(path: text) -> bool:
 pub fn check_json_field(json_text: text, field: text) -> bool:
     val needle = "\"" + field + "\":"
     json_text.contains(needle)
+
+pub fn check_html_contains_text(html_text: text, expected: text) -> bool:
+    html_text.contains(expected)
+
+pub fn html_visible_text(html_text: text) -> text:
+    var out = ""
+    var in_tag = false
+    var i = 0
+    while i < html_text.len():
+        val ch = html_text[i:i + 1]
+        if ch == "<":
+            in_tag = true
+            if out != "" and not out.ends_with(" "):
+                out = out + " "
+        elif ch == ">":
+            in_tag = false
+        elif not in_tag:
+            out = out + ch
+        i = i + 1
+    var decoded = out.replace("&nbsp;", " ")
+    decoded = decoded.replace("&amp;", "&")
+    decoded = decoded.replace("&lt;", "<")
+    decoded = decoded.replace("&gt;", ">")
+    decoded.trim()
+
+pub fn check_html_contains_visible_text(html_text: text, expected: text) -> bool:
+    html_visible_text(html_text).contains(expected)
+
+pub fn check_html_has_tag(html_text: text, tag_name: text) -> bool:
+    val lower_html = html_text.lower()
+    val lower_tag = tag_name.lower()
+    lower_html.contains("<" + lower_tag) and (
+        lower_html.contains("</" + lower_tag + ">") or
+        lower_html.contains("<" + lower_tag + " ") or
+        lower_html.contains("<" + lower_tag + "/") or
+        lower_html.contains("<" + lower_tag + ">")
+    )
+
+pub fn check_html_has_element_text(html_text: text, tag_name: text, expected: text) -> bool:
+    check_html_has_tag(html_text, tag_name) and check_html_contains_visible_text(html_text, expected)
 
 pub fn check_text_contains_evidence(
     label: text,
@@ -122,6 +167,51 @@ pub fn check_json_field_evidence(
     scenario_checker_evidence(
         "json field exists " + field,
         check_json_field(json_text, field),
+        artifact
+    )
+
+pub fn check_html_contains_text_evidence(
+    label: text,
+    html_text: text,
+    expected: text
+) -> ScenarioCheckerEvidence:
+    val artifact = capture_html(label, html_text, expected, "")
+    scenario_checker_evidence(
+        "html contains text " + expected,
+        check_html_contains_text(html_text, expected),
+        artifact
+    )
+
+pub fn check_html_contains_visible_text_evidence(
+    label: text,
+    html_text: text,
+    expected: text
+) -> ScenarioCheckerEvidence:
+    val artifact = capture_html_text(label, html_text, "")
+    scenario_checker_evidence(
+        "html visible text contains " + expected,
+        check_html_contains_visible_text(html_text, expected),
+        artifact
+    )
+
+pub fn check_simple_gui_html_contains_text_evidence(
+    label: text,
+    html_text: text,
+    expected: text,
+    artifact_path: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioCheckerEvidence:
+    val artifact = capture_simple_gui_html(
+        label,
+        html_text,
+        artifact_path,
+        scenario_id,
+        step_id
+    )
+    scenario_checker_evidence(
+        "simple gui html visible text contains " + expected,
+        check_html_contains_visible_text(html_text, expected),
         artifact
     )
 
@@ -278,6 +368,107 @@ pub fn capture_gui_selection(
         artifact_path,
         scenario_id,
         step_id
+    )
+
+pub fn capture_html(
+    label: text,
+    html_text: text,
+    visible_text_summary: text,
+    artifact_path: text
+) -> ScenarioEvidenceArtifact:
+    scenario_html_evidence(
+        label,
+        html_text,
+        visible_text_summary,
+        artifact_path,
+        "",
+        ""
+    )
+
+pub fn capture_html_text(
+    label: text,
+    html_text: text,
+    artifact_path: text
+) -> ScenarioEvidenceArtifact:
+    scenario_html_evidence(
+        label,
+        html_text,
+        html_visible_text(html_text),
+        artifact_path,
+        "",
+        ""
+    )
+
+pub fn capture_gui_html(
+    label: text,
+    html_text: text,
+    visible_text_summary: text,
+    artifact_path: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    scenario_html_evidence(
+        label,
+        html_text,
+        visible_text_summary,
+        artifact_path,
+        scenario_id,
+        step_id
+    )
+
+pub fn capture_simple_gui_html(
+    label: text,
+    html_text: text,
+    artifact_path: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    scenario_simple_gui_html_evidence(
+        label,
+        html_text,
+        html_visible_text(html_text),
+        artifact_path,
+        scenario_id,
+        step_id
+    )
+
+pub fn capture_gui_with_html_if_possible(
+    label: text,
+    html_text: text,
+    visible_state_summary: text,
+    artifact_path: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    if html_text != "":
+        return capture_simple_gui_html(label, html_text, artifact_path, scenario_id, step_id)
+    scenario_ui_selection_evidence(
+        ScenarioCaptureKind.gui,
+        label,
+        "",
+        "",
+        "",
+        visible_state_summary,
+        artifact_path,
+        scenario_id,
+        step_id
+    )
+
+pub fn html_check_result(
+    tool: ScenarioHtmlCheckTool,
+    label: text,
+    html_text: text,
+    passed: bool,
+    summary: text,
+    messages: text
+) -> ScenarioHtmlCheckResult:
+    val artifact = capture_html_text(label, html_text, "")
+    scenario_html_check_result(
+        tool,
+        passed,
+        summary,
+        messages,
+        artifact
     )
 
 # Capture a plain text snippet as evidence.

@@ -164,6 +164,12 @@ Rules:
 - `@capture(after_scenario, gui)` means one GUI capture at scenario end.
 - Step-local `@capture(...)` applies only to the next rendered manual step.
 - Captures attach to rendered manual steps, not to a detached evidence section.
+- `gui` capture prefers HTML evidence when the GUI surface is Simple Web or
+  otherwise has an HTML backing document available. Screenshot/image GUI
+  evidence remains the fallback when HTML cannot be captured.
+- `html` capture records both source markup and visible text summaries so
+  generated manuals can check what the user sees without matching hidden
+  implementation details.
 
 ## Checker and Capture Library
 
@@ -285,7 +291,14 @@ Create a shared SSpec support library rather than scattering helper functions:
      command input/stdout/stderr/exit evidence, retain binary raw-byte and
      decoded-field summaries, and capture TUI/GUI selected rectangles,
      highlight targets, inverted active menu state, visible-state summaries,
-     and artifact paths.
+   and artifact paths.
+   - Progress: HTML-aware helpers now capture Simple Web GUI surfaces as
+     `html` evidence when markup is available, expose visible-text checks, and
+     model checker output from `simple_html_heuristic`, `nu_html_checker`,
+     `html_validate`, `axe_core`, and `playwright_locator`.
+   - Progress: generated docs now label GUI capture as HTML-preferred when
+     available, embed TUI evidence, and keep screenshots/other evidence linked
+     by default.
 7. **Repository uplift**
    - Improve MCP scenario manuals first as the exemplar. Use
      `doc/03_plan/sys_test/mcp_scenario_manual_quality.md` as the target shape
@@ -315,6 +328,9 @@ Create a shared SSpec support library rather than scattering helper functions:
 - Folded executable blocks state that they contain the complete executable
   scenario source for reproduction.
 - Scenario captures appear under the step that caused them.
+- GUI captures document the HTML-preferred fallback when a Simple Web/HTML
+  backing document is available.
+- HTML captures include visible text summaries for user-facing checks.
 - Step-local provider artifact metadata appears under the step that caused it.
 - Step capture labels use typed wording such as `Protocol capture` and
   `API capture`.

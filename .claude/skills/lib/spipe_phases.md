@@ -96,7 +96,7 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 |-------|-------|
 | **Role** | QA Lead |
 | **Agent** | `.claude/agents/spipe/spec.md` |
-| **Focus** | Write BDD specs and test skeletons BEFORE implementation (Superpowers: spec-first) |
+| **Focus** | Write BDD specs that double as scenario manuals — design the manual first, make it executable |
 | **Context Budget** | 30% |
 
 **Entry Criteria:**
@@ -104,18 +104,24 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 
 **Actions:**
 1. Read architecture and ACs from state file
-2. Create SPipe test file(s) following `/spipe` conventions
-3. Write `describe`/`it` blocks covering every AC
-4. Include edge cases and error paths
-5. Tests should be runnable but FAILING (red phase of TDD)
+2. **Design manual shape:** decide which scenarios are primary (show), edge (folded), plumbing (skip)
+3. **Write step helpers** named as manual sentences (`open_editor`, `Then_file_is_saved`)
+4. **Write scenarios** using helpers with `@inline`/`@prev` chains and `@capture` evidence
+5. Create SPipe test file(s) following `.claude/templates/spipe_template.spl`
 6. Add `# @cover src/path/to/impl.spl` coverage markers
+7. Tests should be runnable but FAILING (red phase of TDD)
 
 **Exit Criteria:**
 - At least one `.spl` spec file created in `test/`
 - Every AC has at least one corresponding `it` block
 - Spec file(s) follow SPipe format (describe/it/expect with built-in matchers only)
+- **Step helpers read as manual sentences** — no raw function calls in scenario bodies
+- **Manual visibility assigned:** `@manual: show/folded/skip` on every scenario group
+- **Capture kinds match spec type** (tui/exec/protocol/api/log/binary)
+- **Inline/prev chains** connect setup to dependent scenarios
 - Tests reference implementation files that will be created in Phase 5
 - Coverage markers present
+- State file includes Manual Shape table alongside AC Coverage Matrix
 
 ---
 
@@ -180,6 +186,8 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - All TODOs are genuine (not disguised NOTEs)
 - Code style consistent with project conventions
 - No newly added/renamed file uses numbered copy/version/part naming
+- **Spec step helpers** read as manual sentences (refactor names if not)
+- **Manual visibility annotations** are present and appropriate
 - A doc/wiki refactor pass is recorded in the state file, including either
   updated doc paths or "no doc/wiki updates needed"
 
@@ -202,13 +210,18 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 2. Run the full test suite to check for regressions: `bin/simple test`
 3. Verify each AC from the state file against actual implementation
 4. Check that all spec `it` blocks have corresponding implementation
-5. Mark ACs as checked in the state file
-6. If any test fails, document the failure and note whether it needs Phase 5 re-run
+5. **Run docgen** on each spec: `bin/simple spipe-docgen <spec> --output doc/06_spec`
+6. **Read generated docs** as scenario manuals — if they read like test plumbing,
+   note which step helpers or visibility annotations need improvement
+7. Mark ACs as checked in the state file
+8. If any test fails, document the failure and note whether it needs Phase 5 re-run
 
 **Exit Criteria:**
 - All spec tests pass (or documented reason for interpreter-mode limitation)
 - No regressions in existing tests
 - Every AC is marked as verified with evidence
+- **Generated docs reviewed:** run `bin/simple spipe-docgen <spec> --output doc/06_spec`
+  and verify output reads like a hand-written manual (not test plumbing)
 - If any AC cannot be verified, it is documented with a clear reason
 
 ---

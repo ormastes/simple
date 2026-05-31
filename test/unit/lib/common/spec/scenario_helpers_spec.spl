@@ -6,10 +6,18 @@ use std.common.spec.scenario_helpers.{
     check_exit_code,
     check_file_exists,
     check_json_field,
+    check_html_contains_visible_text,
+    check_html_has_element_text,
     check_text_contains_evidence,
     check_status_code_evidence,
     check_exit_code_evidence,
     check_json_field_evidence,
+    check_html_contains_visible_text_evidence,
+    check_simple_gui_html_contains_text_evidence,
+    capture_html_text,
+    capture_simple_gui_html,
+    capture_gui_with_html_if_possible,
+    html_check_result,
     capture_text,
     capture_log,
     capture_exec_response,
@@ -35,6 +43,8 @@ use std.common.spec.scenario_helpers.{
 }
 use std.common.spec.scenario_evidence.{
     ScenarioCaptureKind,
+    ScenarioHtmlCheckTool,
+    scenario_html_check_manual_summary,
     scenario_checker_manual_summary
 }
 
@@ -70,6 +80,16 @@ describe "scenario checker helpers":
 
     it "checks file does not exist for bogus path":
         expect(check_file_exists("/tmp/nonexistent_scenario_helper_test_file_xyz")).to_equal(false)
+
+    it "checks visible html text without matching attributes":
+        val html = "<html><body><button aria-label=\"Hidden label\">Save &amp; close</button></body></html>"
+        expect(check_html_contains_visible_text(html, "Save & close")).to_equal(true)
+        expect(check_html_contains_visible_text(html, "Hidden label")).to_equal(false)
+
+    it "checks html element visible text":
+        val html = "<main><h1>Dashboard</h1></main>"
+        expect(check_html_has_element_text(html, "h1", "Dashboard")).to_equal(true)
+        expect(check_html_has_element_text(html, "section", "Dashboard")).to_equal(false)
 
 describe "scenario checker evidence helpers":
     it "creates passing text containment evidence":
@@ -159,6 +179,33 @@ describe "scenario checker evidence helpers":
         expect(evidence.assertion).to_equal("json field exists result")
         expect(evidence.artifact.body).to_contain("expected field: result")
         expect(evidence.artifact.body).to_contain("\"result\"")
+
+    it "creates visible HTML text evidence":
+        val evidence = check_html_contains_visible_text_evidence(
+            "Rendered page",
+            "<html><body><h1>Ready</h1></body></html>",
+            "Ready"
+        )
+        expect(evidence.passed).to_equal(true)
+        expect(evidence.assertion).to_equal("html visible text contains Ready")
+        expect(evidence.artifact.kind).to_equal(ScenarioCaptureKind.html)
+        expect(evidence.artifact.body).to_contain("visible text: Ready")
+
+    it "creates Simple Web GUI HTML check evidence":
+        val evidence = check_simple_gui_html_contains_text_evidence(
+            "Simple Web app",
+            "<html><body><button>Launch</button></body></html>",
+            "Launch",
+            "artifacts/simple-web.html",
+            "simple-web",
+            "launch"
+        )
+        expect(evidence.passed).to_equal(true)
+        expect(evidence.assertion).to_equal("simple gui html visible text contains Launch")
+        expect(evidence.artifact.kind).to_equal(ScenarioCaptureKind.html)
+        expect(evidence.artifact.path).to_equal("artifacts/simple-web.html")
+        expect(evidence.artifact.scenario_id).to_equal("simple-web")
+        expect(evidence.artifact.step_id).to_equal("launch")
 
 describe "scenario capture helpers":
     it "captures text evidence with correct kind and body":
@@ -306,6 +353,65 @@ describe "scenario capture helpers":
         expect(artifact.mime).to_equal("image/png")
         expect(artifact.path).to_equal("artifacts/toolbar.png")
         expect(artifact.body).to_contain("highlight: Save toolbar button")
+
+    it "captures html text evidence from markup":
+        val artifact = capture_html_text(
+            "Rendered page",
+            "<html><body><h1>Status</h1><p>Ready</p></body></html>",
+            "artifacts/page.html"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.html)
+        expect(artifact.path).to_equal("artifacts/page.html")
+        expect(artifact.body).to_contain("visible text: Status Ready")
+
+    it "captures Simple Web GUI as HTML evidence":
+        val artifact = capture_simple_gui_html(
+            "Simple Web app",
+            "<html><body>Ready</body></html>",
+            "artifacts/simple-web.html",
+            "simple-web",
+            "ready"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.html)
+        expect(artifact.body).to_contain("simple gui html capture")
+        expect(artifact.scenario_id).to_equal("simple-web")
+
+    it "prefers HTML evidence for GUI capture when markup is available":
+        val artifact = capture_gui_with_html_if_possible(
+            "GUI step",
+            "<html><body>Ready</body></html>",
+            "fallback screenshot state",
+            "artifacts/gui.html",
+            "gui",
+            "step"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.html)
+        expect(artifact.body).to_contain("visible text: Ready")
+
+    it "falls back to GUI evidence when HTML is unavailable":
+        val artifact = capture_gui_with_html_if_possible(
+            "GUI step",
+            "",
+            "button highlighted",
+            "artifacts/gui.png",
+            "gui",
+            "step"
+        )
+        expect(artifact.kind).to_equal(ScenarioCaptureKind.gui)
+        expect(artifact.mime).to_equal("image/png")
+        expect(artifact.body).to_contain("visible state: button highlighted")
+
+    it "records html checker tool results":
+        val result = html_check_result(
+            ScenarioHtmlCheckTool.axe_core,
+            "Accessible page",
+            "<main><h1>Ready</h1></main>",
+            true,
+            "no serious violations",
+            ""
+        )
+        expect(result.passed).to_equal(true)
+        expect(scenario_html_check_manual_summary(result)).to_contain("axe_core passed: no serious violations")
 
     it "captures basic API response evidence":
         val artifact = capture_api_response(

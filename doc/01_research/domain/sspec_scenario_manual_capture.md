@@ -57,3 +57,39 @@ Useful source:
   choose when detailed scenarios are visible, folded, or omitted.
 - Environmental tests should use the same manual style. Their captures are often
   `exec`, `protocol`, `api`, `log`, or `binary`, not screenshots.
+
+## 2026-05-31 Addendum: HTML Capture and Checking
+
+User request: extend SSpec capture/check support so GUI captures from
+Simple/Web-backed surfaces prefer HTML capture when possible, expose visible
+HTML text for checks, and research HTML checking tools.
+
+Findings:
+
+- Nu Html Checker / Validator.nu is the standards-oriented HTML5 validation
+  path and exposes a service/API model for validating submitted HTML. It is
+  best suited for conformance checks on full HTML documents.
+  Source: https://about.validator.nu/
+- `html-validate` is an offline HTML5 validator with CLI and API support,
+  including inline string validation. It is a good fit for local/CI checks and
+  eventually for a first native integration behind an SSpec HTML checker.
+  Sources:
+  - https://html-validate.org/usage/
+  - https://html-validate.org/usage/cli.html
+  - https://html-validate.org/guide/api/getting-started.html
+- Playwright documents accessibility testing through `@axe-core/playwright`.
+  This is a good fit when the HTML state only exists after a user interaction
+  or when the check must run against a browser DOM rather than a static string.
+  Source: https://playwright.dev/docs/next/accessibility-testing
+
+Implications for SPipe:
+
+- `gui` capture should stay available for screenshot/image evidence, but when a
+  GUI surface is backed by Simple Web/HTML, the provider should emit `html`
+  evidence first because it is inspectable, diffable, and checkable.
+- HTML checks should distinguish raw markup containment from visible text
+  checks. Visible text checks are the safer default for manuals because they
+  verify what a user can read instead of matching hidden attributes or scripts.
+- SSpec should model checker tool output separately from the initial heuristic
+  helpers so later providers can attach `nu_html_checker`, `html_validate`,
+  `axe_core`, or `playwright_locator` results without changing manual output.
