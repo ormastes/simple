@@ -226,6 +226,12 @@ Progress 2026-05-30:
      with compute-only backends such as OpenCL or CPU-SIMD.
    - Covered by real `engine_platform_spec.spl` assertions for best-backend
      dispatch and strict explicit-backend diagnostics.
+   - Blocked for direct game2d adapter wiring by runtime-family capsule
+     boundaries: game2d command/canvas/backend types live in `nogc_*`, while
+     Engine2D and ComputeDispatch live in `gc_async_mut`. A prototype adapter
+     produced boundary warnings in both possible placements, so it was not
+     landed. Tracking bug:
+     `doc/08_tracking/bug/game2d_engine2d_compute_adapter_capsule_boundary_2026-05-31.md`.
 2. End-to-end benchmark: 1920×1080 fill+blit+scroll frame at 60fps target
    - Measure per-backend: CUDA, HIP, OpenCL, AVX2, NEON, scalar
    - In progress: benchmark evidence is recorded in
