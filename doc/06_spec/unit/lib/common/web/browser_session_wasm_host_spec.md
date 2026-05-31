@@ -2805,6 +2805,77 @@ match instance:
 
 </details>
 
+#### executes bounded i32 sign-extension function export bodies
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, extend8, "validated") equals `true`
+   - Expected: _object_property_text(interp, extend8, "functionExportName0") equals `run`
+
+2. JsValue Object
+
+3. JsValue Object
+   - Expected: _display_js(run_value) equals `[Function]`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [], -1)) equals `-1`
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+   - Expected: _object_property_text(interp, extend16, "validated") equals `true`
+   - Expected: _object_property_text(interp, extend16, "functionExportName0") equals `run`
+
+4. JsValue Object
+
+5. JsValue Object
+   - Expected: _display_js(run_value) equals `[Function]`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [], -1)) equals `-1`
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val extend8 = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f030201000707010372756e00000a0801060041ff01c00b")])
+expect(_object_property_text(interp, extend8, "validated")).to_equal("true")
+expect(_object_property_text(interp, extend8, "functionExportName0")).to_equal("run")
+
+val extend8_instance = interp._native_webassembly_instance([extend8])
+match extend8_instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                val run_value = interp.get_object_property(exports_id, "run")
+                expect(_display_js(run_value)).to_equal("[Function]")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("-1")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+
+val extend16 = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f030201000707010372756e00000a0901070041ffff03c10b")])
+expect(_object_property_text(interp, extend16, "validated")).to_equal("true")
+expect(_object_property_text(interp, extend16, "functionExportName0")).to_equal("run")
+
+val extend16_instance = interp._native_webassembly_instance([extend16])
+match extend16_instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                val run_value = interp.get_object_property(exports_id, "run")
+                expect(_display_js(run_value)).to_equal("[Function]")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("-1")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
 #### executes bounded i32.eqz function export body
 
 1. var interp =  new interpreter
@@ -3999,8 +4070,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 83 |
-| Active scenarios | 83 |
+| Total scenarios | 84 |
+| Active scenarios | 84 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
