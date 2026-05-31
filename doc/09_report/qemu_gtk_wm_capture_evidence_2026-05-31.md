@@ -9,13 +9,17 @@
 - auto QMP launch: 1
 - auto QMP status: pass
 - auto QMP reason: pass
-- auto QMP pid: 1020309
-- qmp socket: /tmp/simpleos_desktop_qmp_1020207_1780259212766846.sock
+- auto QMP pid: 1038089
+- qmp socket: /tmp/simpleos_desktop_qmp_1035033_1780260055233418.sock
 - host WM smoke status: unavailable
 - host WM smoke reason: not-run
 - host WM smoke report: build/qemu_gtk_wm_capture_evidence/wm-host-launch-capture.md
 - live capture status: pass
 - live capture reason: pass
+- live capture pixels: 786432
+- live capture non-black pixels: 786432
+- live capture sample matches: 5
+- live capture sample mismatches: 0
 - qemu-side perf status: unavailable
 - qemu-side perf reason: qemu-side-gtk-simple-perf-harness-not-wired
 - qemu-side perf comparison available: false
@@ -44,8 +48,8 @@
 - qemu_gtk_wm_capture_auto_qmp_launch=1
 - qemu_gtk_wm_capture_auto_qmp_status=pass
 - qemu_gtk_wm_capture_auto_qmp_reason=pass
-- qemu_gtk_wm_capture_auto_qmp_pid=1020309
-- qemu_gtk_wm_capture_qmp_socket=/tmp/simpleos_desktop_qmp_1020207_1780259212766846.sock
+- qemu_gtk_wm_capture_auto_qmp_pid=1038089
+- qemu_gtk_wm_capture_qmp_socket=/tmp/simpleos_desktop_qmp_1035033_1780260055233418.sock
 - qemu_gtk_wm_capture_wm_exit_code=0
 - qemu_gtk_wm_capture_host_wm_status=unavailable
 - qemu_gtk_wm_capture_host_wm_reason=not-run
@@ -82,6 +86,10 @@
 - qemu_gtk_wm_capture_wm_qemu_live_status=pass
 - qemu_gtk_wm_capture_wm_qemu_live_reason=live-qmp-screendump-pass
 - qemu_gtk_wm_capture_wm_qemu_live_pixels=786432
+- qemu_gtk_wm_capture_wm_qemu_live_non_black_pixels=786432
+- qemu_gtk_wm_capture_wm_qemu_live_sample_matches=5
+- qemu_gtk_wm_capture_wm_qemu_live_sample_mismatches=0
+- qemu_gtk_wm_capture_wm_qemu_live_sample_checksum=1264754027807915072
 - qemu_gtk_wm_capture_wm_report_path=build/qemu_gtk_wm_capture_evidence/wm-launch-capture.md
 
 ## Auto QMP Launch Output
@@ -91,13 +99,17 @@
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.test_runner.system_monitor' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.process_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.sysinfo_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [build][x86_64] phase=native-build persistent-cache output=build/os/simpleos_desktop_e2e_32.elf
+- [build][x86_64] phase=plan entry=examples/simple_os/arch/x86_64/desktop_e2e_entry.spl target=x86_64-unknown-none backend=cranelift log=on
+- [build][x86_64] phase=spawn timeout_ms=900000
+- [build][x86_64] env: SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$(pwd)/src" SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_OS_LOG_MODE=on PATH="/usr/bin:$PATH"
+- [build][x86_64] cmd: src/compiler_rust/target/debug/simple native-build --source build/os/generated --source src/os --source src/lib --source examples/simple_os --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log on --entry-closure --entry examples/simple_os/arch/x86_64/desktop_e2e_entry.spl --target x86_64-unknown-none -o build/os/simpleos_desktop_e2e_32.elf --linker-script examples/simple_os/arch/x86_64/linker.ld
+- [build][x86_64] phase=native-build OK elapsed_ms=121464
 - simpleos_desktop_qmp_status=pass
 - simpleos_desktop_qmp_reason=pass
-- simpleos_desktop_qmp_pid=1020309
-- simpleos_desktop_qmp_socket=/tmp/simpleos_desktop_qmp_1020207_1780259212766846.sock
-- simpleos_desktop_qmp_serial_log=build/os/simpleos_desktop_qmp_1020207_1780259212766846.log
-- simpleos_desktop_qmp_stderr_log=build/os/simpleos_desktop_qmp_1020207_1780259212766846.log.stderr
+- simpleos_desktop_qmp_pid=1038089
+- simpleos_desktop_qmp_socket=/tmp/simpleos_desktop_qmp_1035033_1780260055233418.sock
+- simpleos_desktop_qmp_serial_log=build/os/simpleos_desktop_qmp_1035033_1780260055233418.log
+- simpleos_desktop_qmp_stderr_log=build/os/simpleos_desktop_qmp_1035033_1780260055233418.log.stderr
 
 ## WM Capture Output
 - check=wm_launch_capture_evidence
@@ -177,7 +189,7 @@
 - 
 - Running: test/unit/app/ui/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/app/ui/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (213ms)
+-   [32mPASSED[0m (214ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -185,12 +197,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 216ms
+- Duration: 218ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        213ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
+-        214ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -204,7 +216,7 @@
 - 
 - Running: test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - [1/1] test/unit/app/ui/host_wm_runtime_loop_spec.spl
--   [32mPASSED[0m (1019ms)
+-   [32mPASSED[0m (1025ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -212,12 +224,12 @@
 - Files: 1
 - [32mPassed: 2[0m
 - Failed: 0
-- Duration: 1023ms
+- Duration: 1029ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--       1019ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
+-       1025ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -231,7 +243,7 @@
 - 
 - Running: test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/os/desktop/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (198ms)
+-   [32mPASSED[0m (203ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -239,12 +251,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 201ms
+- Duration: 206ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        198ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
+-        203ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/qemu_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -258,7 +270,7 @@
 - 
 - Running: test/unit/os/compositor/qemu_capture_spec.spl
 - [1/1] test/unit/os/compositor/qemu_capture_spec.spl
--   [32mPASSED[0m (907ms)
+-   [32mPASSED[0m (932ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -266,12 +278,12 @@
 - Files: 1
 - [32mPassed: 11[0m
 - Failed: 0
-- Duration: 912ms
+- Duration: 938ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        907ms  test/unit/os/compositor/qemu_capture_spec.spl
+-        932ms  test/unit/os/compositor/qemu_capture_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/electron_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -285,7 +297,7 @@
 - 
 - Running: test/unit/os/compositor/electron_capture_spec.spl
 - [1/1] test/unit/os/compositor/electron_capture_spec.spl
--   [32mPASSED[0m (828ms)
+-   [32mPASSED[0m (762ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -293,12 +305,12 @@
 - Files: 1
 - [32mPassed: 7[0m
 - Failed: 0
-- Duration: 835ms
+- Duration: 778ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        828ms  test/unit/os/compositor/electron_capture_spec.spl
+-        762ms  test/unit/os/compositor/electron_capture_spec.spl
 - spec_exit_code=0
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
@@ -354,6 +366,10 @@
 - qemu_live_width=1024
 - qemu_live_height=768
 - qemu_live_pixels=786432
+- qemu_live_non_black_pixels=786432
+- qemu_live_sample_matches=5
+- qemu_live_sample_mismatches=0
+- qemu_live_sample_checksum=1264754027807915072
 - qemu_live_error=
 - wm_launch_capture_evidence_status=pass
 - wm_launch_capture_evidence_reason=wm-launch-capture-contract-verified
@@ -364,4 +380,8 @@
 - wm_launch_capture_qemu_live_status=pass
 - wm_launch_capture_qemu_live_reason=live-qmp-screendump-pass
 - wm_launch_capture_qemu_live_pixels=786432
+- wm_launch_capture_qemu_live_non_black_pixels=786432
+- wm_launch_capture_qemu_live_sample_matches=5
+- wm_launch_capture_qemu_live_sample_mismatches=0
+- wm_launch_capture_qemu_live_sample_checksum=1264754027807915072
 - wm_launch_capture_report_path=build/qemu_gtk_wm_capture_evidence/wm-launch-capture.md
