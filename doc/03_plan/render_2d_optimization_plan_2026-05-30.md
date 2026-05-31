@@ -134,6 +134,12 @@ Progress 2026-05-30:
    - x86: AVX2 `_mm256_set1_epi32` fill, `_mm256_loadu_si256`/`_mm256_storeu_si256` copy, Porter-Duff blend
    - ARM: NEON `vdupq_n_u32` fill, `vld1q_u32`/`vst1q_u32` copy, `vmulq_u32` blend
    - RISC-V: RVV `vse32` fill, `vle32`/`vse32` copy (when available)
+   - In progress: hosted C runtime entrypoints now exist for native fill/copy
+     spans (`rt_engine2d_simd_fill_u32`, `rt_engine2d_simd_copy_u32`) with AVX2
+     64-bit lane stores/loads and scalar fallback.
+   - Wiring into `simd_kernels.spl` is intentionally blocked until mutable
+     `[u32]` extern dispatch is proven for interpreter parity; tracked in
+     `doc/08_tracking/bug/cpu_simd_mutable_array_extern_wiring_2026-05-31.md`.
 3. Wire native kernels via `rt_simd_fill_avx2`, `rt_simd_fill_neon`, etc. externs
 4. Benchmark: fill 1920×1080 framebuffer, scalar vs native, report speedup
 

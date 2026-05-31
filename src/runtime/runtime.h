@@ -742,6 +742,11 @@ void     spl_panic(const char* msg) __attribute__((noreturn));
 
 void     simd_text_init(void);
 
+/* ===== Engine2D CPU SIMD Span Kernels ===== */
+
+int64_t  rt_engine2d_simd_fill_u32(SplArray* dst, int64_t offset, int64_t count, int64_t color);
+int64_t  rt_engine2d_simd_copy_u32(SplArray* dst, int64_t dst_off, SplArray* src, int64_t src_off, int64_t count);
+
 /* ===== SIMD UTF-8 Operations ===== */
 
 int64_t  rt_text_count_codepoints_cached(int64_t value);

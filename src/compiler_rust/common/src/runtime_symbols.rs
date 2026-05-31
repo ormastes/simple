@@ -673,6 +673,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_simd_str_search",
     "rt_simd_str_last_index_of",
     "rt_simd_str_equal",
+    "rt_engine2d_simd_fill_u32",
+    "rt_engine2d_simd_copy_u32",
     "rt_text_to_lower_ascii",
     "rt_text_to_upper_ascii",
     "rt_numeric_active_simd_tier",
