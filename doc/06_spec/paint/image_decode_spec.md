@@ -538,6 +538,30 @@ expect(image.data).to_equal([
 
 </details>
 
+#### decodes little-endian uncompressed RGB from a single tile
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val image = decode_tiff(_tiff_le_2x2_rgb_single_tile())
+
+expect(image.width).to_equal(2)
+expect(image.height).to_equal(2)
+expect(image.format).to_equal(ImageFormat.Tiff)
+expect(image.data).to_equal([
+    10, 20, 30, 255,
+    40, 50, 60, 255,
+    70, 80, 90, 255,
+    100, 110, 120, 255
+])
+```
+
+</details>
+
 #### decodes little-endian PackBits RGB strips to RGBA pixels
 
 <details>
@@ -1030,8 +1054,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 50 |
-| Active scenarios | 50 |
+| Total scenarios | 51 |
+| Active scenarios | 51 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -909,6 +909,12 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
     var strip_offset_count = 0
     var strip_byte_count_entry = 0
     var strip_byte_count_count = 0
+    var tile_width = 0
+    var tile_length = 0
+    var tile_offset_entry = 0
+    var tile_offset_count = 0
+    var tile_byte_count_entry = 0
+    var tile_byte_count_count = 0
     var bits_per_sample_count = 1
     var bits_per_sample_value = 8
     var bits_per_sample_offset = 0
@@ -953,6 +959,16 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         else if tag == 320:
             color_map_entry = entry
             color_map_count = value_count
+        else if tag == 322:
+            tile_width = first_value
+        else if tag == 323:
+            tile_length = first_value
+        else if tag == 324:
+            tile_offset_entry = entry
+            tile_offset_count = value_count
+        else if tag == 325:
+            tile_byte_count_entry = entry
+            tile_byte_count_count = value_count
         else:
             pass_dn
         i = i + 1
@@ -977,6 +993,9 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         return nil
     if photometric == 3 and (samples_per_pixel != 1 or not _tiff_colormap_is_supported(raw_data, color_map_entry, color_map_count, little)):
         return nil
+    val is_tiled = tile_offset_entry > 0
+    if is_tiled and (compression != 1 or planar_config != 1 or tile_width <= 0 or tile_length <= 0 or tile_byte_count_entry <= 0):
+        return nil
     val sample_bits = _tiff_sample_bits(raw_data, bits_per_sample_count, bits_per_sample_value, bits_per_sample_offset, little)
     if not _tiff_bits_are_supported(raw_data, bits_per_sample_count, bits_per_sample_value, bits_per_sample_offset, samples_per_pixel, compression, photometric, planar_config, little):
         return nil
@@ -987,15 +1006,26 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
     if rows_per_strip <= 0:
         rows_per_strip = height
     val strip_count_needed = (height + rows_per_strip - 1) / rows_per_strip
-    if strip_offset_entry <= 0:
-        return nil
-    val strip_offset_count_needed = _tiff_strip_offset_count_needed(strip_count_needed, samples_per_pixel, planar_config)
-    if strip_offset_count != 1 and strip_offset_count < strip_offset_count_needed:
-        return nil
-    if strip_byte_count_count != 0 and strip_byte_count_count != 1 and strip_byte_count_count < strip_offset_count_needed:
-        return nil
+    val tiles_across = if is_tiled: (width + tile_width - 1) / tile_width else: 0
+    val tiles_down = if is_tiled: (height + tile_length - 1) / tile_length else: 0
+    val tile_count_needed = tiles_across * tiles_down
+    if is_tiled:
+        if tile_offset_count != 1 and tile_offset_count < tile_count_needed:
+            return nil
+        if tile_byte_count_count != 1 and tile_byte_count_count < tile_count_needed:
+            return nil
+    else:
+        if strip_offset_entry <= 0:
+            return nil
+        val strip_offset_count_needed = _tiff_strip_offset_count_needed(strip_count_needed, samples_per_pixel, planar_config)
+        if strip_offset_count != 1 and strip_offset_count < strip_offset_count_needed:
+            return nil
+        if strip_byte_count_count != 0 and strip_byte_count_count != 1 and strip_byte_count_count < strip_offset_count_needed:
+            return nil
     var packbits_pixels: [i64] = []
     if compression == 32773:
+        if is_tiled:
+            return nil
         if strip_byte_count_entry <= 0:
             return nil
         packbits_pixels = _tiff_decode_packbits_strips(
@@ -1017,7 +1047,22 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         var pixel_offset = pixel_index * bytes_per_pixel
         val row = pixel_index / width
         val col = pixel_index - row * width
-        if compression == 1 and planar_config == 1:
+        if is_tiled:
+            val tile_x = col / tile_width
+            val tile_y = row / tile_length
+            val tile_index = tile_y * tiles_across + tile_x
+            val tile_lookup_index = _tiff_strip_lookup_index(tile_index, tile_offset_count)
+            val byte_count_lookup_index = _tiff_strip_lookup_index(tile_index, tile_byte_count_count)
+            val tile_offset = _tiff_entry_value_at(raw_data, tile_offset_entry, tile_lookup_index, little)
+            val tile_byte_count = _tiff_entry_value_at(raw_data, tile_byte_count_entry, byte_count_lookup_index, little)
+            val local_x = col - tile_x * tile_width
+            val local_y = row - tile_y * tile_length
+            pixel_offset = tile_offset + (local_y * tile_width + local_x) * bytes_per_pixel
+            if tile_offset <= 0 or pixel_offset + bytes_per_pixel > raw_data.len():
+                return nil
+            if tile_byte_count <= 0 or pixel_offset + bytes_per_pixel > tile_offset + tile_byte_count:
+                return nil
+        else if compression == 1 and planar_config == 1:
             val strip_index = row / rows_per_strip
             val row_in_strip = row - strip_index * rows_per_strip
             val strip_lookup_index = _tiff_strip_lookup_index(strip_index, strip_offset_count)
