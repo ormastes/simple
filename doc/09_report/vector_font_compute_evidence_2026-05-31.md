@@ -7,7 +7,7 @@
 - font size: 24
 - CPU checksum: 13090264
 - CPU ink pixels: 247
-- CPU frame us: 1560413
+- CPU frame us: 1615720
 - production render checksum: 3707484892911777
 - production render ink pixels: 247
 - production vector raster hits: 0
@@ -40,6 +40,7 @@
 - CUDA glyph 0 advance: 11
 - CUDA glyph 0 checksum: 399885
 - CUDA glyph 0 ink pixels: 30
+- CUDA glyph 0 mismatch count: 0
 - CUDA glyph 1 codepoint: 82
 - CUDA glyph 1 font size: 24
 - CUDA glyph 1 width: 10
@@ -47,6 +48,7 @@
 - CUDA glyph 1 advance: 11
 - CUDA glyph 1 checksum: 296579
 - CUDA glyph 1 ink pixels: 34
+- CUDA glyph 1 mismatch count: 0
 - CUDA glyph 2 codepoint: 69
 - CUDA glyph 2 font size: 24
 - CUDA glyph 2 width: 9
@@ -54,6 +56,7 @@
 - CUDA glyph 2 advance: 10
 - CUDA glyph 2 checksum: 282552
 - CUDA glyph 2 ink pixels: 26
+- CUDA glyph 2 mismatch count: 0
 - CUDA glyph 3 codepoint: 69
 - CUDA glyph 3 font size: 24
 - CUDA glyph 3 width: 9
@@ -61,6 +64,7 @@
 - CUDA glyph 3 advance: 10
 - CUDA glyph 3 checksum: 282552
 - CUDA glyph 3 ink pixels: 26
+- CUDA glyph 3 mismatch count: 0
 - OpenCL status: pass
 - OpenCL reason: opencl-vector-font-rasterize-kernel-matched-cpu
 - OpenCL checksum: 13090264
@@ -73,6 +77,7 @@
 - OpenCL glyph 0 advance: 12
 - OpenCL glyph 0 checksum: 414452
 - OpenCL glyph 0 ink pixels: 33
+- OpenCL glyph 0 mismatch count: 0
 - OpenCL glyph 1 codepoint: 68
 - OpenCL glyph 1 font size: 24
 - OpenCL glyph 1 width: 10
@@ -80,6 +85,7 @@
 - OpenCL glyph 1 advance: 11
 - OpenCL glyph 1 checksum: 407799
 - OpenCL glyph 1 ink pixels: 31
+- OpenCL glyph 1 mismatch count: 0
 - OpenCL glyph 2 codepoint: 78
 - OpenCL glyph 2 font size: 24
 - OpenCL glyph 2 width: 10
@@ -87,6 +93,7 @@
 - OpenCL glyph 2 advance: 11
 - OpenCL glyph 2 checksum: 447921
 - OpenCL glyph 2 ink pixels: 36
+- OpenCL glyph 2 mismatch count: 0
 - OpenCL glyph 3 codepoint: 68
 - OpenCL glyph 3 font size: 24
 - OpenCL glyph 3 width: 10
@@ -94,6 +101,7 @@
 - OpenCL glyph 3 advance: 11
 - OpenCL glyph 3 checksum: 407799
 - OpenCL glyph 3 ink pixels: 31
+- OpenCL glyph 3 mismatch count: 0
 - blur/tolerance used: false
 
 ## Raw Evidence
@@ -108,7 +116,7 @@
 - vector_font_compute_cpu_warm_checksum=13090264
 - vector_font_compute_cpu_checksum=13090264
 - vector_font_compute_cpu_ink_pixels=247
-- vector_font_compute_cpu_frame_us=1562820
+- vector_font_compute_cpu_frame_us=1558365
 - vector_font_compute_production_render_checksum=3707484892911777
 - vector_font_compute_production_render_ink_pixels=247
 - vector_font_compute_production_vector_raster_hits=0
@@ -142,6 +150,7 @@
 - vector_font_compute_glyph_0_ink_pixels=30
 - vector_font_compute_glyph_0_codepoint=72
 - vector_font_compute_glyph_0_width=10
+- vector_font_compute_glyph_0_pixels=255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,127,127,127,255,0,0,0,0,0,255,127,127,127,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_0_command_count=42
 - vector_font_compute_glyph_0_command_0=0
 - vector_font_compute_glyph_0_command_1=0
@@ -189,6 +198,7 @@
 - vector_font_compute_glyph_1_ink_pixels=33
 - vector_font_compute_glyph_1_codepoint=65
 - vector_font_compute_glyph_1_width=11
+- vector_font_compute_glyph_1_pixels=0,0,191,0,0,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,0,63,255,63,0,0,0,0,0,0,0,0,127,255,127,0,0,0,0,0,0,0,0,127,63,127,0,0,0,0,0,0,0,0,255,0,255,0,0,0,0,0,0,0,0,255,0,255,0,0,0,0,0,0,0,63,255,255,255,63,0,0,0,0,0,0,127,255,0,63,127,0,0,0,0,0,0,127,255,0,0,127,0,0,0,0,0,0,255,127,0,0,191,0,0,0,0,0,0,255,127,0,0,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_1_command_count=45
 - vector_font_compute_glyph_1_command_0=0
 - vector_font_compute_glyph_1_command_1=0
@@ -239,6 +249,7 @@
 - vector_font_compute_glyph_2_ink_pixels=34
 - vector_font_compute_glyph_2_codepoint=82
 - vector_font_compute_glyph_2_width=10
+- vector_font_compute_glyph_2_pixels=255,255,255,191,0,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,127,127,255,63,0,0,0,0,0,255,0,63,0,0,0,0,0,0,0,255,0,0,127,0,0,0,0,0,0,255,0,0,63,0,0,0,0,0,0,255,0,0,63,0,0,0,0,0,0,255,0,0,0,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_2_command_count=57
 - vector_font_compute_glyph_2_command_0=0
 - vector_font_compute_glyph_2_command_1=0
@@ -301,6 +312,7 @@
 - vector_font_compute_glyph_3_ink_pixels=31
 - vector_font_compute_glyph_3_codepoint=68
 - vector_font_compute_glyph_3_width=10
+- vector_font_compute_glyph_3_pixels=255,255,255,63,0,0,0,0,0,0,255,0,0,255,63,0,0,0,0,0,255,0,0,63,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,63,191,0,0,0,0,0,255,255,255,191,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_3_command_count=45
 - vector_font_compute_glyph_3_command_0=0
 - vector_font_compute_glyph_3_command_1=0
@@ -351,6 +363,7 @@
 - vector_font_compute_glyph_4_ink_pixels=26
 - vector_font_compute_glyph_4_codepoint=69
 - vector_font_compute_glyph_4_width=9
+- vector_font_compute_glyph_4_pixels=255,255,255,255,127,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,255,255,255,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_4_command_count=42
 - vector_font_compute_glyph_4_command_0=0
 - vector_font_compute_glyph_4_command_1=0
@@ -398,6 +411,7 @@
 - vector_font_compute_glyph_5_ink_pixels=36
 - vector_font_compute_glyph_5_codepoint=78
 - vector_font_compute_glyph_5_width=10
+- vector_font_compute_glyph_5_pixels=255,0,0,0,255,0,0,0,0,0,255,63,0,0,255,0,0,0,0,0,255,127,0,0,255,0,0,0,0,0,255,191,0,0,255,0,0,0,0,0,255,127,63,0,255,0,0,0,0,0,255,0,127,0,255,0,0,0,0,0,255,0,191,0,255,0,0,0,0,0,255,0,127,63,255,0,0,0,0,0,255,0,0,127,255,0,0,0,0,0,255,0,0,191,255,0,0,0,0,0,255,0,0,127,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_5_command_count=36
 - vector_font_compute_glyph_5_command_0=0
 - vector_font_compute_glyph_5_command_1=0
@@ -439,6 +453,7 @@
 - vector_font_compute_glyph_6_ink_pixels=26
 - vector_font_compute_glyph_6_codepoint=69
 - vector_font_compute_glyph_6_width=9
+- vector_font_compute_glyph_6_pixels=255,255,255,255,127,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,255,255,255,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_6_command_count=42
 - vector_font_compute_glyph_6_command_0=0
 - vector_font_compute_glyph_6_command_1=0
@@ -486,6 +501,7 @@
 - vector_font_compute_glyph_7_ink_pixels=31
 - vector_font_compute_glyph_7_codepoint=68
 - vector_font_compute_glyph_7_width=10
+- vector_font_compute_glyph_7_pixels=255,255,255,63,0,0,0,0,0,0,255,0,0,255,63,0,0,0,0,0,255,0,0,63,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,63,191,0,0,0,0,0,255,255,255,191,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_7_command_count=45
 - vector_font_compute_glyph_7_command_0=0
 - vector_font_compute_glyph_7_command_1=0
@@ -579,7 +595,7 @@
 - vector_font_compute_cpu_warm_checksum=13090264
 - vector_font_compute_cpu_checksum=13090264
 - vector_font_compute_cpu_ink_pixels=247
-- vector_font_compute_cpu_frame_us=1560413
+- vector_font_compute_cpu_frame_us=1615720
 - vector_font_compute_production_render_checksum=3707484892911777
 - vector_font_compute_production_render_ink_pixels=247
 - vector_font_compute_production_vector_raster_hits=0
@@ -613,6 +629,7 @@
 - vector_font_compute_glyph_0_ink_pixels=30
 - vector_font_compute_glyph_0_codepoint=72
 - vector_font_compute_glyph_0_width=10
+- vector_font_compute_glyph_0_pixels=255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,127,127,127,255,0,0,0,0,0,255,127,127,127,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_0_command_count=42
 - vector_font_compute_glyph_0_command_0=0
 - vector_font_compute_glyph_0_command_1=0
@@ -660,6 +677,7 @@
 - vector_font_compute_glyph_1_ink_pixels=33
 - vector_font_compute_glyph_1_codepoint=65
 - vector_font_compute_glyph_1_width=11
+- vector_font_compute_glyph_1_pixels=0,0,191,0,0,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,0,63,255,63,0,0,0,0,0,0,0,0,127,255,127,0,0,0,0,0,0,0,0,127,63,127,0,0,0,0,0,0,0,0,255,0,255,0,0,0,0,0,0,0,0,255,0,255,0,0,0,0,0,0,0,63,255,255,255,63,0,0,0,0,0,0,127,255,0,63,127,0,0,0,0,0,0,127,255,0,0,127,0,0,0,0,0,0,255,127,0,0,191,0,0,0,0,0,0,255,127,0,0,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_1_command_count=45
 - vector_font_compute_glyph_1_command_0=0
 - vector_font_compute_glyph_1_command_1=0
@@ -710,6 +728,7 @@
 - vector_font_compute_glyph_2_ink_pixels=34
 - vector_font_compute_glyph_2_codepoint=82
 - vector_font_compute_glyph_2_width=10
+- vector_font_compute_glyph_2_pixels=255,255,255,191,0,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,127,127,255,63,0,0,0,0,0,255,0,63,0,0,0,0,0,0,0,255,0,0,127,0,0,0,0,0,0,255,0,0,63,0,0,0,0,0,0,255,0,0,63,0,0,0,0,0,0,255,0,0,0,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_2_command_count=57
 - vector_font_compute_glyph_2_command_0=0
 - vector_font_compute_glyph_2_command_1=0
@@ -772,6 +791,7 @@
 - vector_font_compute_glyph_3_ink_pixels=31
 - vector_font_compute_glyph_3_codepoint=68
 - vector_font_compute_glyph_3_width=10
+- vector_font_compute_glyph_3_pixels=255,255,255,63,0,0,0,0,0,0,255,0,0,255,63,0,0,0,0,0,255,0,0,63,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,63,191,0,0,0,0,0,255,255,255,191,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_3_command_count=45
 - vector_font_compute_glyph_3_command_0=0
 - vector_font_compute_glyph_3_command_1=0
@@ -822,6 +842,7 @@
 - vector_font_compute_glyph_4_ink_pixels=26
 - vector_font_compute_glyph_4_codepoint=69
 - vector_font_compute_glyph_4_width=9
+- vector_font_compute_glyph_4_pixels=255,255,255,255,127,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,255,255,255,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_4_command_count=42
 - vector_font_compute_glyph_4_command_0=0
 - vector_font_compute_glyph_4_command_1=0
@@ -869,6 +890,7 @@
 - vector_font_compute_glyph_5_ink_pixels=36
 - vector_font_compute_glyph_5_codepoint=78
 - vector_font_compute_glyph_5_width=10
+- vector_font_compute_glyph_5_pixels=255,0,0,0,255,0,0,0,0,0,255,63,0,0,255,0,0,0,0,0,255,127,0,0,255,0,0,0,0,0,255,191,0,0,255,0,0,0,0,0,255,127,63,0,255,0,0,0,0,0,255,0,127,0,255,0,0,0,0,0,255,0,191,0,255,0,0,0,0,0,255,0,127,63,255,0,0,0,0,0,255,0,0,127,255,0,0,0,0,0,255,0,0,191,255,0,0,0,0,0,255,0,0,127,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_5_command_count=36
 - vector_font_compute_glyph_5_command_0=0
 - vector_font_compute_glyph_5_command_1=0
@@ -910,6 +932,7 @@
 - vector_font_compute_glyph_6_ink_pixels=26
 - vector_font_compute_glyph_6_codepoint=69
 - vector_font_compute_glyph_6_width=9
+- vector_font_compute_glyph_6_pixels=255,255,255,255,127,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,255,255,255,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_6_command_count=42
 - vector_font_compute_glyph_6_command_0=0
 - vector_font_compute_glyph_6_command_1=0
@@ -957,6 +980,7 @@
 - vector_font_compute_glyph_7_ink_pixels=31
 - vector_font_compute_glyph_7_codepoint=68
 - vector_font_compute_glyph_7_width=10
+- vector_font_compute_glyph_7_pixels=255,255,255,63,0,0,0,0,0,0,255,0,0,255,63,0,0,0,0,0,255,0,0,63,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,63,191,0,0,0,0,0,255,255,255,191,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_7_command_count=45
 - vector_font_compute_glyph_7_command_0=0
 - vector_font_compute_glyph_7_command_1=0

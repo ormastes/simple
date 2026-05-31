@@ -138,6 +138,17 @@ fn glyph_width(codepoint: i32) -> i32:
     val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, FONT_SIZE)
     glyph.width
 
+fn glyph_pixels_csv(codepoint: i32) -> text:
+    val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, FONT_SIZE)
+    var csv = ""
+    var i = 0
+    while i < glyph.pixels.len():
+        if i > 0:
+            csv = csv + ","
+        csv = csv + glyph.pixels[i].to_i64().to_text()
+        i = i + 1
+    csv
+
 fn run_checksum() -> (i64, i64):
     var checksum: i64 = 0
     var ink_pixels: i64 = 0
@@ -280,6 +291,7 @@ fn main():
         print "vector_font_compute_glyph_{glyph_idx}_ink_pixels={glyph_ink_pixels(codepoint)}"
         print "vector_font_compute_glyph_{glyph_idx}_codepoint={codepoint}"
         print "vector_font_compute_glyph_{glyph_idx}_width={glyph_width(codepoint)}"
+        print "vector_font_compute_glyph_{glyph_idx}_pixels={glyph_pixels_csv(codepoint)}"
         val command_count = glyph_command_count(codepoint)
         print "vector_font_compute_glyph_{glyph_idx}_command_count={command_count}"
         var command_idx = 0
@@ -398,6 +410,10 @@ set_var() {
 get_var() {
     name="$1"
     eval "printf '%s' \"\${$name:-}\""
+}
+
+csv_mismatch_count() {
+    node -e 'const a=(process.argv[1]||"").split(",").filter((v)=>v.length); const b=(process.argv[2]||"").split(",").filter((v)=>v.length); let n=0; const m=Math.max(a.length,b.length); for (let i=0;i<m;i+=1) { if ((a[i]||"") !== (b[i]||"")) n += 1; } console.log(n);' "$1" "$2"
 }
 
 export_vector_font_env() {
@@ -713,9 +729,15 @@ CUDA_EOF
             expected_width="$(value_of "vector_font_compute_glyph_${source_index}_width")"
             expected_checksum="$(value_of "vector_font_compute_glyph_${source_index}_checksum")"
             expected_ink="$(value_of "vector_font_compute_glyph_${source_index}_ink_pixels")"
+            expected_pixels="$(value_of "vector_font_compute_glyph_${source_index}_pixels")"
+            actual_pixels="$(get_var "CUDA_GLYPH_${slot}_PIXELS")"
+            set_var "CUDA_GLYPH_${slot}_MISMATCH_COUNT" "$(csv_mismatch_count "$expected_pixels" "$actual_pixels")"
             if [ "$CUDA_STATUS" = "pass" ] && { [ "$(get_var "CUDA_GLYPH_${slot}_WIDTH")" != "$expected_width" ] || [ "$(get_var "CUDA_GLYPH_${slot}_CHECKSUM")" != "$expected_checksum" ] || [ "$(get_var "CUDA_GLYPH_${slot}_INK_PIXELS")" != "$expected_ink" ] || [ -z "$(get_var "CUDA_GLYPH_${slot}_PIXELS")" ]; }; then
                 CUDA_STATUS="fail"
                 CUDA_REASON="cuda-vector-font-glyph${slot}-mismatch"
+            elif [ "$CUDA_STATUS" = "pass" ] && [ "$(get_var "CUDA_GLYPH_${slot}_MISMATCH_COUNT")" != "0" ]; then
+                CUDA_STATUS="fail"
+                CUDA_REASON="cuda-vector-font-glyph${slot}-pixel-mismatch"
             fi
             slot=$((slot + 1))
         done
@@ -898,9 +920,15 @@ OPENCL_EOF
             expected_width="$(value_of "vector_font_compute_glyph_${source_index}_width")"
             expected_checksum="$(value_of "vector_font_compute_glyph_${source_index}_checksum")"
             expected_ink="$(value_of "vector_font_compute_glyph_${source_index}_ink_pixels")"
+            expected_pixels="$(value_of "vector_font_compute_glyph_${source_index}_pixels")"
+            actual_pixels="$(get_var "OPENCL_GLYPH_${slot}_PIXELS")"
+            set_var "OPENCL_GLYPH_${slot}_MISMATCH_COUNT" "$(csv_mismatch_count "$expected_pixels" "$actual_pixels")"
             if [ "$OPENCL_STATUS" = "pass" ] && { [ "$(get_var "OPENCL_GLYPH_${slot}_WIDTH")" != "$expected_width" ] || [ "$(get_var "OPENCL_GLYPH_${slot}_CHECKSUM")" != "$expected_checksum" ] || [ "$(get_var "OPENCL_GLYPH_${slot}_INK_PIXELS")" != "$expected_ink" ] || [ -z "$(get_var "OPENCL_GLYPH_${slot}_PIXELS")" ]; }; then
                 OPENCL_STATUS="fail"
                 OPENCL_REASON="opencl-vector-font-glyph${slot}-mismatch"
+            elif [ "$OPENCL_STATUS" = "pass" ] && [ "$(get_var "OPENCL_GLYPH_${slot}_MISMATCH_COUNT")" != "0" ]; then
+                OPENCL_STATUS="fail"
+                OPENCL_REASON="opencl-vector-font-glyph${slot}-pixel-mismatch"
             fi
             slot=$((slot + 1))
         done
@@ -1130,6 +1158,7 @@ fi
         echo "vector_font_compute_cuda_glyph_${slot}_advance=$(get_var "CUDA_GLYPH_${slot}_ADVANCE")"
         echo "vector_font_compute_cuda_glyph_${slot}_checksum=$(get_var "CUDA_GLYPH_${slot}_CHECKSUM")"
         echo "vector_font_compute_cuda_glyph_${slot}_ink_pixels=$(get_var "CUDA_GLYPH_${slot}_INK_PIXELS")"
+        echo "vector_font_compute_cuda_glyph_${slot}_mismatch_count=$(get_var "CUDA_GLYPH_${slot}_MISMATCH_COUNT")"
         slot=$((slot + 1))
     done
     slot=0
@@ -1141,6 +1170,7 @@ fi
         echo "vector_font_compute_opencl_glyph_${slot}_advance=$(get_var "OPENCL_GLYPH_${slot}_ADVANCE")"
         echo "vector_font_compute_opencl_glyph_${slot}_checksum=$(get_var "OPENCL_GLYPH_${slot}_CHECKSUM")"
         echo "vector_font_compute_opencl_glyph_${slot}_ink_pixels=$(get_var "OPENCL_GLYPH_${slot}_INK_PIXELS")"
+        echo "vector_font_compute_opencl_glyph_${slot}_mismatch_count=$(get_var "OPENCL_GLYPH_${slot}_MISMATCH_COUNT")"
         slot=$((slot + 1))
     done
     echo "vector_font_compute_status=$status"
@@ -1192,6 +1222,7 @@ fi
         echo "- CUDA glyph $slot advance: $(get_var "CUDA_GLYPH_${slot}_ADVANCE")"
         echo "- CUDA glyph $slot checksum: $(get_var "CUDA_GLYPH_${slot}_CHECKSUM")"
         echo "- CUDA glyph $slot ink pixels: $(get_var "CUDA_GLYPH_${slot}_INK_PIXELS")"
+        echo "- CUDA glyph $slot mismatch count: $(get_var "CUDA_GLYPH_${slot}_MISMATCH_COUNT")"
         slot=$((slot + 1))
     done
     echo "- OpenCL status: $OPENCL_STATUS"
@@ -1208,6 +1239,7 @@ fi
         echo "- OpenCL glyph $slot advance: $(get_var "OPENCL_GLYPH_${slot}_ADVANCE")"
         echo "- OpenCL glyph $slot checksum: $(get_var "OPENCL_GLYPH_${slot}_CHECKSUM")"
         echo "- OpenCL glyph $slot ink pixels: $(get_var "OPENCL_GLYPH_${slot}_INK_PIXELS")"
+        echo "- OpenCL glyph $slot mismatch count: $(get_var "OPENCL_GLYPH_${slot}_MISMATCH_COUNT")"
         slot=$((slot + 1))
     done
     echo "- blur/tolerance used: false"
