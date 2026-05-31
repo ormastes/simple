@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 "use strict";
 
+const fs = require("fs");
+
 const width = Number(process.env.NODE_BITMAP_WIDTH || 96);
 const height = Number(process.env.NODE_BITMAP_HEIGHT || 64);
 const iterations = Number(process.env.NODE_BITMAP_ITERATIONS || 1000);
 const runtime = process.env.JS_RENDER_RUNTIME || "node";
 const scene = process.env.SIMPLE_WEB_ENGINE2D_SCENE || "simple-web-engine2d-image-taskbar-command";
+const pixelOut = process.env.SIMPLE_WEB_ENGINE2D_PIXEL_OUT || "";
 
 const html = "<html><body style='background-color: #112233'><div class='wm-app-titlebar' style='background-color: #445566; width: 80px; height: 40px'></div><main class='wm-app-content simple-web-accent'>image taskbar command</main></body></html>";
 const fontCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,:;!?-_()[]/\\'\"+=#%&@*<>";
@@ -226,6 +229,15 @@ function weightedChecksum(pixels) {
 }
 
 const warm = renderHtmlToPixels();
+if (pixelOut) {
+  fs.writeFileSync(pixelOut, JSON.stringify({
+    width,
+    height,
+    format: "argb-u32",
+    producer: `${runtime}-simple-web-engine2d-baseline`,
+    pixels: Array.from(warm, (px) => px >>> 0),
+  }));
+}
 const warmChecksum = checksum(warm);
 const warmWeighted = weightedChecksum(warm);
 let total = 0n;

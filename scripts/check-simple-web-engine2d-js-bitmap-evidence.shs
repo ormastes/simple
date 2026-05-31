@@ -17,9 +17,11 @@ SCENE="${SIMPLE_WEB_ENGINE2D_SCENE:-simple-web-engine2d-image-taskbar-command}"
 SIMPLE_SRC="$BUILD_DIR/simple_web_engine2d_cache_fixture.spl"
 SIMPLE_OUT="$BUILD_DIR/simple.out"
 JS_OUT="$BUILD_DIR/${JS_RENDER_RUNTIME}.out"
+SIMPLE_ARGB="$BUILD_DIR/simple-argb.json"
+JS_ARGB="$BUILD_DIR/${JS_RENDER_RUNTIME}-argb.json"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$JS_OUT" "$REPORT_PATH"
+rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$JS_OUT" "$SIMPLE_ARGB" "$JS_ARGB" "$REPORT_PATH"
 
 field_of() {
     key="$1"
@@ -51,11 +53,13 @@ emit_unavailable() {
 cat >"$SIMPLE_SRC" <<SIMPLE_EOF
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{SimpleWebEngine2DStaticPixelCache}
 
+extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_time_now_nanos() -> i64
 
 val WIDTH: i32 = $WIDTH
 val HEIGHT: i32 = $HEIGHT
 val ITERATIONS: i64 = $ITERATIONS
+val SIMPLE_ARGB_PATH: text = "$SIMPLE_ARGB"
 
 fn checksum(pixels: [u32]) -> i64:
     var sum: i64 = 0
@@ -73,6 +77,17 @@ fn weighted_checksum(pixels: [u32]) -> i64:
         i = i + 1
     sum
 
+fn write_argb_bitmap(pixels: [u32]) -> bool:
+    var json = "{\"width\":" + WIDTH.to_text() + ",\"height\":" + HEIGHT.to_text() + ",\"format\":\"argb-u32\",\"producer\":\"pure-simple-web-engine2d-cache\",\"pixels\":["
+    var i = 0
+    while i < pixels.len():
+        if i > 0:
+            json = json + ","
+        json = json + pixels[i].to_i64().to_text()
+        i = i + 1
+    json = json + "]}"
+    rt_file_write_text(SIMPLE_ARGB_PATH, json)
+
 fn main():
     var html = "<html><body style='background-color: #112233'><div class='wm-app-titlebar' style='background-color: #445566; width: 80px; height: 40px'></div><main class='wm-app-content simple-web-accent'>image taskbar command</main></body></html>"
     if "$SCENE" == "simple-web-layout-text-flow":
@@ -89,6 +104,9 @@ fn main():
     val warm = cache.pixels_for_html(html)
     val warm_checksum = checksum(warm)
     val warm_weighted = weighted_checksum(warm)
+    val wrote_argb = write_argb_bitmap(warm)
+    if !wrote_argb:
+        print "renderer_error=write-argb-failed"
     val start = rt_time_now_nanos()
     var i: i64 = 0
     while i < ITERATIONS:
@@ -113,6 +131,7 @@ fn main():
     print "optimized_path=static-pixel-cache"
     print "cache_hits={cache.hits}"
     print "cache_stores={cache.stores}"
+    print "argb_path={SIMPLE_ARGB_PATH}"
     print "blur_or_tolerance_used=false"
 
 main()
@@ -146,12 +165,14 @@ simple_frame_us=""
 js_frame_us=""
 simple_cache_hits=""
 simple_cache_stores=""
+mismatch_count=""
 while [ "$trial" -le "$TRIALS" ]; do
     trial_simple_out="$BUILD_DIR/simple.$trial.out"
     trial_js_out="$BUILD_DIR/${JS_RENDER_RUNTIME}.$trial.out"
+    rm -f "$SIMPLE_ARGB" "$JS_ARGB"
     SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$trial_simple_out" 2>&1
     simple_code=$?
-    JS_RENDER_RUNTIME="$JS_RENDER_RUNTIME" SIMPLE_WEB_ENGINE2D_SCENE="$SCENE" NODE_BITMAP_WIDTH="$WIDTH" NODE_BITMAP_HEIGHT="$HEIGHT" NODE_BITMAP_ITERATIONS="$ITERATIONS" "$JS_RENDER_RUNTIME_BIN" tools/node-render-bitmap/simple_web_engine2d_fixture.js >"$trial_js_out" 2>&1
+    JS_RENDER_RUNTIME="$JS_RENDER_RUNTIME" SIMPLE_WEB_ENGINE2D_SCENE="$SCENE" NODE_BITMAP_WIDTH="$WIDTH" NODE_BITMAP_HEIGHT="$HEIGHT" NODE_BITMAP_ITERATIONS="$ITERATIONS" SIMPLE_WEB_ENGINE2D_PIXEL_OUT="$JS_ARGB" "$JS_RENDER_RUNTIME_BIN" tools/node-render-bitmap/simple_web_engine2d_fixture.js >"$trial_js_out" 2>&1
     js_code=$?
     {
         echo "## trial $trial"
@@ -162,6 +183,10 @@ while [ "$trial" -le "$TRIALS" ]; do
         cat "$trial_js_out"
     } >>"$JS_OUT"
     if [ "$simple_code" -ne 0 ] || [ "$js_code" -ne 0 ]; then
+        break
+    fi
+    if [ ! -s "$SIMPLE_ARGB" ] || [ ! -s "$JS_ARGB" ]; then
+        simple_code=1
         break
     fi
 
@@ -179,6 +204,7 @@ while [ "$trial" -le "$TRIALS" ]; do
     trial_js_frame_us="$(field_of frame_us "$trial_js_out")"
     trial_simple_cache_hits="$(field_of cache_hits "$trial_simple_out")"
     trial_simple_cache_stores="$(field_of cache_stores "$trial_simple_out")"
+    trial_mismatch_count="$(node -e 'const fs=require("fs"); const a=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const b=JSON.parse(fs.readFileSync(process.argv[2],"utf8")); let n=0; if (a.width!==b.width || a.height!==b.height || a.pixels.length!==b.pixels.length) { n = Math.max(a.pixels.length, b.pixels.length); } else { for (let i=0;i<a.pixels.length;i+=1) if ((a.pixels[i]>>>0)!==(b.pixels[i]>>>0)) n+=1; } console.log(n);' "$SIMPLE_ARGB" "$JS_ARGB")"
 
     if [ -z "$simple_checksum" ]; then
         simple_checksum="$trial_simple_checksum"
@@ -195,10 +221,15 @@ while [ "$trial" -le "$TRIALS" ]; do
         js_frame_us="$trial_js_frame_us"
         simple_cache_hits="$trial_simple_cache_hits"
         simple_cache_stores="$trial_simple_cache_stores"
+        mismatch_count="$trial_mismatch_count"
     else
         if [ "$simple_checksum" != "$trial_simple_checksum" ] || [ "$js_checksum" != "$trial_js_checksum" ] || [ "$simple_weighted" != "$trial_simple_weighted" ] || [ "$js_weighted" != "$trial_js_weighted" ]; then
             simple_checksum="inconsistent"
             js_checksum="inconsistent"
+            break
+        fi
+        if [ "$mismatch_count" != "$trial_mismatch_count" ]; then
+            mismatch_count="inconsistent"
             break
         fi
         if [ "$trial_simple_frame_us" -gt 0 ] && [ "$trial_simple_frame_us" -lt "$simple_frame_us" ]; then
@@ -236,6 +267,9 @@ else
     elif [ -z "$simple_weighted" ] || [ -z "$js_weighted" ] || [ "$simple_weighted" != "$js_weighted" ]; then
         status=fail
         reason=weighted-checksum-mismatch
+    elif [ -z "$mismatch_count" ] || [ "$mismatch_count" != "0" ]; then
+        status=fail
+        reason=pixel-mismatch
     elif [ -z "$simple_cache_hits" ] || [ "$simple_cache_hits" -lt "$ITERATIONS" ] || [ "$simple_cache_stores" != "1" ]; then
         status=fail
         reason=optimized-cache-not-hit
@@ -256,6 +290,12 @@ simple_frame_us="${simple_frame_us:-0}"
 js_frame_us="${js_frame_us:-0}"
 simple_cache_hits="${simple_cache_hits:-0}"
 simple_cache_stores="${simple_cache_stores:-0}"
+if [ "$simple_frame_us" -gt 0 ]; then
+    speedup_x1000=$((js_frame_us * 1000 / simple_frame_us))
+else
+    speedup_x1000=0
+fi
+mismatch_count="${mismatch_count:-}"
 
 {
     echo "simple_web_engine2d_js_status=$status"
@@ -270,13 +310,16 @@ simple_cache_stores="${simple_cache_stores:-0}"
     echo "simple_web_engine2d_js_baseline_checksum=$js_checksum"
     echo "simple_web_engine2d_js_simple_weighted_checksum=$simple_weighted"
     echo "simple_web_engine2d_js_baseline_weighted_checksum=$js_weighted"
-    echo "simple_web_engine2d_js_mismatch_count=0"
+    echo "simple_web_engine2d_js_mismatch_count=$mismatch_count"
     echo "simple_web_engine2d_js_blur_or_tolerance_used=false"
     echo "simple_web_engine2d_js_simple_frame_us=$simple_frame_us"
     echo "simple_web_engine2d_js_baseline_frame_us=$js_frame_us"
+    echo "simple_web_engine2d_js_speedup_x1000=$speedup_x1000"
     echo "simple_web_engine2d_js_simple_cache_hits=$simple_cache_hits"
     echo "simple_web_engine2d_js_simple_cache_stores=$simple_cache_stores"
     echo "simple_web_engine2d_js_optimized_path=static-pixel-cache"
+    echo "simple_web_engine2d_js_simple_argb_path=$SIMPLE_ARGB"
+    echo "simple_web_engine2d_js_baseline_argb_path=$JS_ARGB"
 } >"$BUILD_DIR/evidence.env"
 
 {
@@ -293,13 +336,16 @@ simple_cache_stores="${simple_cache_stores:-0}"
     echo "- baseline checksum: $js_checksum"
     echo "- simple weighted checksum: $simple_weighted"
     echo "- baseline weighted checksum: $js_weighted"
-    echo "- mismatch count: 0"
+    echo "- mismatch count: $mismatch_count"
     echo "- blur/tolerance used: false"
     echo "- optimized path: static-pixel-cache"
     echo "- simple cache hits: $simple_cache_hits"
     echo "- simple cache stores: $simple_cache_stores"
     echo "- best simple frame us: $simple_frame_us"
     echo "- best baseline frame us: $js_frame_us"
+    echo "- baseline/simple speedup x1000: $speedup_x1000"
+    echo "- simple ARGB path: $SIMPLE_ARGB"
+    echo "- baseline ARGB path: $JS_ARGB"
     echo
     echo "## Simple Output"
     sed 's/^/- /' "$SIMPLE_OUT" 2>/dev/null || true
