@@ -1365,14 +1365,15 @@ impl JsInterpreter:
                 self.wasm_export_body_fn_ids = body_fn_ids
                 self.wasm_export_body_module_ids = body_module_ids
                 self.wasm_export_body_indices = body_indices
-                val const_return = self._native_webassembly_module_function_export_i32_result_at(module_id, index)
-                if const_return >= 0:
-                    var const_fn_ids = self.wasm_export_const_fn_ids
-                    var const_values = self.wasm_export_const_values
-                    const_fn_ids.push(fn_id)
-                    const_values.push(const_return)
-                    self.wasm_export_const_fn_ids = const_fn_ids
-                    self.wasm_export_const_values = const_values
+                if not self._native_webassembly_module_has_mutable_global(module_id):
+                    val const_return = self._native_webassembly_module_function_export_i32_result_at(module_id, index)
+                    if const_return >= 0:
+                        var const_fn_ids = self.wasm_export_const_fn_ids
+                        var const_values = self.wasm_export_const_values
+                        const_fn_ids.push(fn_id)
+                        const_values.push(const_return)
+                        self.wasm_export_const_fn_ids = const_fn_ids
+                        self.wasm_export_const_values = const_values
                 val bound_import = self._native_webassembly_bound_single_import_function(module_id, imports_value)
                 match bound_import:
                     JsValue.Function(id):
@@ -1499,6 +1500,21 @@ impl JsInterpreter:
             JsValue.Number(v): self.set_object_property(global_id, "value", JsValue.Number(v: v))
             _: self.set_object_property(global_id, "value", JsValue.Undefined)
         JsValue.Object(id: global_id)
+
+    me _native_webassembly_module_has_mutable_global(module_id: i64) -> bool:
+        var hex = ""
+        match self.get_object_property(module_id, "payloadHex"):
+            JsValue.String(v): hex = v
+            _: pass_dn
+        if hex == "":
+            return false
+        val global_count = self._native_webassembly_global_count(hex)
+        var index = 0
+        while index < global_count:
+            if self._native_webassembly_global_i32_mutability_at(hex, index) == 1:
+                return true
+            index = index + 1
+        false
 
     me _native_webassembly_memory(arg_vals: [JsValue]) -> JsValue:
         var initial = 0
@@ -1913,6 +1929,45 @@ impl JsInterpreter:
     me _native_webassembly_missing_i32_const() -> i64:
         -2147483649
 
+    me _native_webassembly_global_count(hex: text) -> i64:
+        val start = self._native_webassembly_section_payload_start(hex, 6)
+        if start < 0:
+            return 0
+        val count = self._native_webassembly_read_leb_value(hex, start)
+        if count < 0:
+            return 0
+        count
+
+    me _native_webassembly_global_i32_mutability_at(hex: text, wanted_index: i64) -> i64:
+        val start = self._native_webassembly_section_payload_start(hex, 6)
+        val end = self._native_webassembly_section_payload_end(hex, 6)
+        if start < 0 or end <= start:
+            return -1
+        val count = self._native_webassembly_read_leb_value(hex, start)
+        var pos = self._native_webassembly_read_leb_next(hex, start)
+        if count <= 0 or pos < 0 or wanted_index < 0 or wanted_index >= count:
+            return -1
+        var index = 0
+        while index < count and pos < end:
+            if pos + 3 >= end:
+                return -1
+            val value_type = self._native_webassembly_hex_byte_at(hex, pos)
+            val mutability = self._native_webassembly_hex_byte_at(hex, pos + 1)
+            val opcode = self._native_webassembly_hex_byte_at(hex, pos + 2)
+            if value_type != 127 or mutability < 0 or opcode != 65:
+                return -1
+            val next_pos = self._native_webassembly_read_leb_next(hex, pos + 3)
+            if next_pos < 0 or next_pos >= end:
+                return -1
+            val terminator = self._native_webassembly_hex_byte_at(hex, next_pos)
+            if terminator != 11:
+                return -1
+            if index == wanted_index:
+                return mutability
+            pos = next_pos + 1
+            index = index + 1
+        -1
+
     me _native_webassembly_global_i32_const_value_at(hex: text, wanted_index: i64) -> i64:
         val missing = self._native_webassembly_missing_i32_const()
         val start = self._native_webassembly_section_payload_start(hex, 6)
@@ -2117,7 +2172,7 @@ impl JsInterpreter:
         val body_index = wasm_index - function_import_count
         if body_index < 0:
             return -1
-        self._native_webassembly_function_body_i32_result_with_args(hex, body_index, arg_vals)
+        self._native_webassembly_function_body_i32_result_with_args_for_module(hex, body_index, arg_vals, module_id)
 
     me _native_webassembly_table_export_name(hex: text) -> text:
         val count = self._native_webassembly_export_count(hex)
@@ -2285,6 +2340,9 @@ impl JsInterpreter:
         -1
 
     me _native_webassembly_function_body_i32_result_with_args(hex: text, wanted_body_index: i64, arg_vals: [JsValue]) -> i64:
+        self._native_webassembly_function_body_i32_result_with_args_for_module(hex, wanted_body_index, arg_vals, -1)
+
+    me _native_webassembly_function_body_i32_result_with_args_for_module(hex: text, wanted_body_index: i64, arg_vals: [JsValue], module_id: i64) -> i64:
         val start = self._native_webassembly_section_payload_start(hex, 10)
         val end = self._native_webassembly_section_payload_end(hex, 10)
         if start < 0 or end <= start:
@@ -2338,6 +2396,23 @@ impl JsInterpreter:
                 val memory_byte_len = memory_page_count * 65536
                 var memory_addrs: [i64] = []
                 var memory_bytes: [i64] = []
+                var global_vals: [i64] = []
+                var global_mutabilities: [i64] = []
+                val global_count = self._native_webassembly_global_count(hex)
+                var global_init_index = 0
+                while global_init_index < global_count:
+                    var global_init_value = self._native_webassembly_global_i32_const_value_at(hex, global_init_index)
+                    val global_mutability = self._native_webassembly_global_i32_mutability_at(hex, global_init_index)
+                    if global_init_value == self._native_webassembly_missing_i32_const() or global_mutability < 0:
+                        return -1
+                    if module_id >= 0:
+                        match self.get_object_property(module_id, "runtimeGlobalValue{global_init_index}"):
+                            JsValue.Number(v): global_init_value = f64_to_i64(v)
+                            _:
+                                self.set_object_property(module_id, "runtimeGlobalValue{global_init_index}", JsValue.Number(v: global_init_value.to_f64()))
+                    global_vals.push(global_init_value)
+                    global_mutabilities.push(global_mutability)
+                    global_init_index = global_init_index + 1
                 var control_kinds: [i64] = []
                 var control_body_starts: [i64] = []
                 var control_end_positions: [i64] = []
@@ -2531,10 +2606,30 @@ impl JsInterpreter:
                         val next_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
                         if global_index < 0 or next_pos < 0 or next_pos > body_end:
                             return -1
-                        val global_value = self._native_webassembly_global_i32_const_value_at(hex, global_index)
-                        if global_value == self._native_webassembly_missing_i32_const():
+                        if global_index >= global_vals.len():
                             return -1
-                        stack.push(global_value)
+                        var runtime_global_value = global_vals.get(global_index)
+                        if module_id >= 0:
+                            match self.get_object_property(module_id, "runtimeGlobalValue{global_index}"):
+                                JsValue.Number(v):
+                                    runtime_global_value = f64_to_i64(v)
+                                    global_vals[global_index] = runtime_global_value
+                                _: pass_dn
+                        stack.push(runtime_global_value)
+                        cursor = next_pos
+                        continue
+                    if opcode == 36:
+                        val global_index = self._native_webassembly_read_leb_value(hex, cursor + 1)
+                        val next_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
+                        if global_index < 0 or next_pos < 0 or next_pos > body_end or stack.len() < 1:
+                            return -1
+                        if global_index >= global_vals.len() or global_mutabilities.get(global_index) != 1:
+                            return -1
+                        val value = stack.get(stack.len() - 1)
+                        stack.pop()
+                        global_vals[global_index] = value
+                        if module_id >= 0:
+                            self.set_object_property(module_id, "runtimeGlobalValue{global_index}", JsValue.Number(v: value.to_f64()))
                         cursor = next_pos
                         continue
                     if opcode == 44:
@@ -2799,7 +2894,7 @@ impl JsInterpreter:
                         while pop_index < param_count:
                             stack.pop()
                             pop_index = pop_index + 1
-                        val called_value = self._native_webassembly_function_body_i32_result_with_args(hex, called_body_index, call_args)
+                        val called_value = self._native_webassembly_function_body_i32_result_with_args_for_module(hex, called_body_index, call_args, module_id)
                         if called_value < 0:
                             return called_value
                         stack.push(called_value)

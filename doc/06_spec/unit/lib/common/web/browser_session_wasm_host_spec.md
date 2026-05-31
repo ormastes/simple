@@ -963,6 +963,58 @@ match instance:
 
 </details>
 
+#### executes bounded mutable i32 global.set function export body
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, module, "validated") equals `true`
+   - Expected: _object_property_text(interp, module, "functionExportName0") equals `run`
+   - Expected: _object_property_text(interp, module, "globalValue") equals `40`
+
+2. JsValue Object
+
+3. JsValue Object
+   - Expected: _display_js(run_value) equals `[Function]`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [], -1)) equals `42`
+   - Expected: _object_property_text(interp, module, "runtimeGlobalValue0") equals `42`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [], -1)) equals `44`
+   - Expected: _object_property_text(interp, module, "runtimeGlobalValue0") equals `44`
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f030201000606017f0141280b0707010372756e00000a0d010b00230041026a240023000b")])
+expect(_object_property_text(interp, module, "validated")).to_equal("true")
+expect(_object_property_text(interp, module, "functionExportName0")).to_equal("run")
+expect(_object_property_text(interp, module, "globalValue")).to_equal("40")
+
+val instance = interp._native_webassembly_instance([module])
+match instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                val run_value = interp.get_object_property(exports_id, "run")
+                expect(_display_js(run_value)).to_equal("[Function]")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("42")
+                expect(_object_property_text(interp, module, "runtimeGlobalValue0")).to_equal("42")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("44")
+                expect(_object_property_text(interp, module, "runtimeGlobalValue0")).to_equal("44")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
 #### executes bounded i32.store and i32.load function export body
 
 1. var interp =  new interpreter
@@ -3024,8 +3076,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 64 |
-| Active scenarios | 64 |
+| Total scenarios | 65 |
+| Active scenarios | 65 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
