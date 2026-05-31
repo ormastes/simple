@@ -15,11 +15,12 @@ SCENE="${ELECTRON_BITMAP_SCENE:-simple-web-layout-text-flow}"
 SIMPLE_SRC="$BUILD_DIR/simple_web_layout_expected.spl"
 SIMPLE_OUT="$BUILD_DIR/simple.out"
 EXPECTED_ARGB="$BUILD_DIR/expected-argb.json"
+CAPTURED_ARGB="$BUILD_DIR/electron-argb.json"
 ELECTRON_OUT="$BUILD_DIR/electron.out"
 ELECTRON_PROOF="$BUILD_DIR/electron-proof.json"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$EXPECTED_ARGB" "$ELECTRON_OUT" "$ELECTRON_PROOF" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$EXPECTED_ARGB" "$CAPTURED_ARGB" "$ELECTRON_OUT" "$ELECTRON_PROOF" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
 
 have() {
     command -v "$1" >/dev/null 2>&1
@@ -157,9 +158,9 @@ fi
 
 set +e
 if have timeout; then
-    timeout "$TIMEOUT_SECS" sh -c 'ELECTRON_BITMAP_SCENE="$1" ELECTRON_BITMAP_WIDTH="$2" ELECTRON_BITMAP_HEIGHT="$3" ELECTRON_BITMAP_ITERATIONS="$4" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$5" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$6" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$7" ELECTRON_BITMAP_PROOF_PATH="$8" SIMPLE_ELECTRON_LIVE_BITMAP=1 xvfb-run -a --server-args="-screen 0 1280x720x24" npm --prefix tools/electron-shell exec -- electron --no-sandbox tools/electron-shell' sh "$SCENE" "$WIDTH" "$HEIGHT" "$ITERATIONS" "$simple_checksum" "$simple_weighted" "$EXPECTED_ARGB" "$ELECTRON_PROOF" >"$ELECTRON_OUT" 2>&1
+    timeout "$TIMEOUT_SECS" sh -c 'ELECTRON_BITMAP_SCENE="$1" ELECTRON_BITMAP_WIDTH="$2" ELECTRON_BITMAP_HEIGHT="$3" ELECTRON_BITMAP_ITERATIONS="$4" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$5" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$6" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$7" ELECTRON_BITMAP_PROOF_PATH="$8" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$9" SIMPLE_ELECTRON_LIVE_BITMAP=1 xvfb-run -a --server-args="-screen 0 1280x720x24" npm --prefix tools/electron-shell exec -- electron --no-sandbox tools/electron-shell' sh "$SCENE" "$WIDTH" "$HEIGHT" "$ITERATIONS" "$simple_checksum" "$simple_weighted" "$EXPECTED_ARGB" "$ELECTRON_PROOF" "$CAPTURED_ARGB" >"$ELECTRON_OUT" 2>&1
 else
-    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
+    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
         xvfb-run -a --server-args="-screen 0 1280x720x24" \
         npm --prefix tools/electron-shell exec -- electron --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1
 fi
@@ -173,6 +174,7 @@ if [ -f "$ELECTRON_PROOF" ]; then
     electron_expected_weighted="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.expected_weighted_checksum||'')" "$ELECTRON_PROOF")"
     mismatch_count="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.mismatch_count ?? ''))" "$ELECTRON_PROOF")"
     electron_frame_us="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.frame_us ?? ''))" "$ELECTRON_PROOF")"
+    captured_argb_written="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.captured_argb_written ?? ''))" "$ELECTRON_PROOF")"
     blur_used="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.blur_or_tolerance_used ?? ''))" "$ELECTRON_PROOF")"
 else
     electron_checksum="$(field_of checksum "$ELECTRON_OUT")"
@@ -181,6 +183,7 @@ else
     electron_expected_weighted="$(field_of expected_weighted_checksum "$ELECTRON_OUT")"
     mismatch_count="$(field_of mismatch_count "$ELECTRON_OUT")"
     electron_frame_us="$(field_of frame_us "$ELECTRON_OUT")"
+    captured_argb_written="$(field_of captured_argb_written "$ELECTRON_OUT")"
     blur_used="$(field_of blur_or_tolerance_used "$ELECTRON_OUT")"
 fi
 
@@ -203,6 +206,9 @@ elif [ "$electron_weighted" != "$simple_weighted" ] || [ "$electron_expected_wei
 elif [ "$mismatch_count" != "0" ]; then
     status=fail
     reason=pixel-mismatch
+elif [ ! -s "$CAPTURED_ARGB" ] || [ "$captured_argb_written" != "true" ]; then
+    status=fail
+    reason=missing-captured-argb
 elif [ -z "$electron_frame_us" ] || [ "$electron_frame_us" -le 0 ]; then
     status=fail
     reason=missing-electron-timing
@@ -223,6 +229,8 @@ fi
     echo "electron_simple_web_layout_blur_or_tolerance_used=${blur_used:-}"
     echo "electron_simple_web_layout_electron_frame_us=${electron_frame_us:-0}"
     echo "electron_simple_web_layout_expected_argb_path=$EXPECTED_ARGB"
+    echo "electron_simple_web_layout_captured_argb_path=$CAPTURED_ARGB"
+    echo "electron_simple_web_layout_captured_argb_written=${captured_argb_written:-}"
     echo "electron_simple_web_layout_exit_code=$electron_code"
 } >"$BUILD_DIR/evidence.env"
 
@@ -241,6 +249,8 @@ fi
     echo "- blur/tolerance used: ${blur_used:-}"
     echo "- Electron frame us: ${electron_frame_us:-0}"
     echo "- expected ARGB path: $EXPECTED_ARGB"
+    echo "- captured ARGB path: $CAPTURED_ARGB"
+    echo "- captured ARGB written: ${captured_argb_written:-}"
     echo
     echo "## Raw Evidence"
     sed 's/^/- /' "$BUILD_DIR/evidence.env"

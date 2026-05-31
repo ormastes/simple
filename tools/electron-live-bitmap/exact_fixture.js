@@ -10,6 +10,7 @@ const iterations = Number(process.env.ELECTRON_BITMAP_ITERATIONS || 5);
 const expectedChecksum = BigInt(process.env.ELECTRON_BITMAP_EXPECTED_CHECKSUM || "0");
 const expectedWeightedChecksum = BigInt(process.env.ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM || "0");
 const expectedArgbPath = process.env.ELECTRON_BITMAP_EXPECTED_ARGB_PATH || "";
+const capturedArgbPath = process.env.ELECTRON_BITMAP_CAPTURED_ARGB_PATH || "";
 const proofPath = process.env.ELECTRON_BITMAP_PROOF_PATH || "";
 const scene = process.env.ELECTRON_BITMAP_SCENE || "wm-image-taskbar-command";
 let expectedArgb = null;
@@ -286,6 +287,7 @@ function captureChecksum(buffer) {
   let weighted = 0n;
   let mismatches = 0;
   const expectedPixels = expectedFramePixels();
+  const capturedPixels = capturedArgbPath ? new Uint32Array(width * height) : null;
 
   for (let i = 0; i < width * height; i += 1) {
     const off = i * 4;
@@ -297,13 +299,31 @@ function captureChecksum(buffer) {
     const value = isArgbScene
       ? (((alpha << 24) >>> 0) | (red << 16) | (green << 8) | blue) >>> 0
       : red;
+    if (capturedPixels !== null) {
+      capturedPixels[i] = isArgbScene
+        ? value
+        : (((alpha << 24) >>> 0) | (red << 16) | (green << 8) | blue) >>> 0;
+    }
     sum += BigInt(value >>> 0);
     weighted += BigInt(value >>> 0) * BigInt(i + 1);
     if (value !== expectedPixels[i] || alpha !== 255 || (!isArgbScene && (blue !== 0 || green !== 0))) {
       mismatches += 1;
     }
   }
-  return { sum, weighted, mismatches };
+  return { sum, weighted, mismatches, capturedPixels };
+}
+
+function writeCapturedArgb(pixels) {
+  if (!capturedArgbPath || !pixels) return false;
+  const payload = {
+    width,
+    height,
+    format: "argb-u32",
+    producer: "electron-live-capture-page",
+    pixels: Array.from(pixels, (v) => v >>> 0),
+  };
+  fs.writeFileSync(capturedArgbPath, JSON.stringify(payload));
+  return true;
 }
 
 async function main() {
@@ -336,6 +356,7 @@ async function main() {
   }
   const elapsed = process.hrtime.bigint() - start;
   const frameUs = elapsed > 0n ? Number(elapsed / BigInt(iterations) / 1000n) : 1;
+  const wroteCapturedArgb = writeCapturedArgb(last.capturedPixels);
 
   emit("renderer", "electron-live-capture-page");
   emit("scene", scene);
@@ -348,6 +369,8 @@ async function main() {
   emit("expected_weighted_checksum", expectedWeighted.toString());
   emit("mismatch_count", last.mismatches);
   emit("frame_us", frameUs > 0 ? frameUs : 1);
+  emit("captured_argb_path", capturedArgbPath);
+  emit("captured_argb_written", String(wroteCapturedArgb));
   emit("blur_or_tolerance_used", "false");
   if (proofPath) {
     fs.writeFileSync(proofPath, JSON.stringify({
@@ -362,6 +385,8 @@ async function main() {
       expected_weighted_checksum: expectedWeighted.toString(),
       mismatch_count: last.mismatches,
       frame_us: frameUs > 0 ? frameUs : 1,
+      captured_argb_path: capturedArgbPath,
+      captured_argb_written: wroteCapturedArgb,
       blur_or_tolerance_used: false
     }));
   }
