@@ -158,6 +158,36 @@ expect(pixel(surface, 1, 0)).to_equal([40, 50, 60, 255])
 
 </details>
 
+#### renders 16-bit grayscale decoded TIFF pixels through the raster image path exactly
+
+1. var rasterizer = Rasterizer new
+
+2. var surface = GpuSurface create
+
+3. rasterizer raster draw image
+   - Expected: pixel(surface, 0, 0) equals `[0, 0, 0, 255]`
+   - Expected: pixel(surface, 1, 0) equals `[255, 255, 255, 255]`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var rasterizer = Rasterizer.new(Logger.new("tiff-raster-gray16-spec"))
+var surface = GpuSurface.create(1, 2, 1, SurfaceFormat.RGBA8)
+val image = decode_tiff(_tiff_le_2x1_gray16_black_is_zero())
+
+rasterizer.raster_draw_image(surface, image, 0, 0, 2, 1)
+
+expect(pixel(surface, 0, 0)).to_equal([0, 0, 0, 255])
+expect(pixel(surface, 1, 0)).to_equal([255, 255, 255, 255])
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -177,8 +207,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

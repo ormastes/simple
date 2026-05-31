@@ -977,10 +977,12 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         return nil
     if photometric == 3 and (samples_per_pixel != 1 or not _tiff_colormap_is_supported(raw_data, color_map_entry, color_map_count, little)):
         return nil
-    if not _tiff_bits_are_8(raw_data, bits_per_sample_count, bits_per_sample_value, bits_per_sample_offset, samples_per_pixel, little):
+    val sample_bits = _tiff_sample_bits(raw_data, bits_per_sample_count, bits_per_sample_value, bits_per_sample_offset, little)
+    if not _tiff_bits_are_supported(raw_data, bits_per_sample_count, bits_per_sample_value, bits_per_sample_offset, samples_per_pixel, compression, photometric, planar_config, little):
         return nil
 
-    val bytes_per_pixel = samples_per_pixel
+    val bytes_per_sample = _tiff_bytes_per_sample(sample_bits)
+    val bytes_per_pixel = samples_per_pixel * bytes_per_sample
     val decoded_pixel_bytes_needed = width * height * bytes_per_pixel
     if rows_per_strip <= 0:
         rows_per_strip = height
@@ -1039,7 +1041,7 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
             rgba.push(_tiff_colormap_byte(raw_data, color_map_entry, color_map_count, palette_index, 2, little))
             rgba.push(255)
         else if samples_per_pixel == 1:
-            var gray = _tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset, compression == 32773)
+            var gray = _tiff_gray_sample(raw_data, packbits_pixels, pixel_offset, sample_bits, compression == 32773, little)
             if photometric == 0:
                 gray = 255 - gray
             rgba.push(gray)
@@ -1105,6 +1107,15 @@ fn _tiff_pixel_byte(raw_data: text, decoded_pixels: [i64], offset: i64, compress
     if compressed:
         return decoded_pixels[offset]
     _byte_at(raw_data, offset)
+
+fn _tiff_gray_sample(raw_data: text, decoded_pixels: [i64], offset: i64, sample_bits: i64, compressed: bool, little: bool) -> i64:
+    if sample_bits == 16:
+        if compressed:
+            val hi = decoded_pixels[offset + 1]
+            val lo = decoded_pixels[offset]
+            return (lo + hi * 256) / 257
+        return _read_u16(raw_data, offset, little) / 257
+    _tiff_pixel_byte(raw_data, decoded_pixels, offset, compressed)
 
 fn _tiff_decode_packbits_strips(
     data: text,
@@ -1206,9 +1217,26 @@ fn _tiff_entry_value_at(data: text, entry: i64, index: i64, little: bool) -> i64
         return _read_u32(data, offset + index * 4, little)
     0
 
-fn _tiff_bits_are_8(data: text, value_count: i64, inline_value: i64, offset: i64, samples_per_pixel: i64, little: bool) -> bool:
+fn _tiff_sample_bits(data: text, value_count: i64, inline_value: i64, offset: i64, little: bool) -> i64:
     if value_count == 1:
-        return inline_value == 8
+        return inline_value
+    if offset <= 0 or offset + 2 > data.len():
+        return 0
+    _read_u16(data, offset, little)
+
+fn _tiff_bytes_per_sample(sample_bits: i64) -> i64:
+    if sample_bits == 16:
+        return 2
+    1
+
+fn _tiff_bits_are_supported(data: text, value_count: i64, inline_value: i64, offset: i64, samples_per_pixel: i64, compression: i64, photometric: i64, planar_config: i64, little: bool) -> bool:
+    val sample_bits = _tiff_sample_bits(data, value_count, inline_value, offset, little)
+    if sample_bits == 16:
+        return value_count == 1 and samples_per_pixel == 1 and compression == 1 and planar_config == 1 and (photometric == 0 or photometric == 1)
+    if sample_bits != 8:
+        return false
+    if value_count == 1:
+        return true
     if value_count != samples_per_pixel:
         return false
     if offset <= 0 or offset + value_count * 2 > data.len():
