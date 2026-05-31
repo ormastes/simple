@@ -1,0 +1,259 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/budgeted_simple_web_layout_scene_matrix_bitmap_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/budgeted_simple_web_layout_scene_matrix_bitmap_evidence_$(date -u +%F).md}"
+ITERATIONS="${BUDGETED_LAYOUT_BITMAP_ITERATIONS:-100}"
+TRIALS="${BUDGETED_LAYOUT_BITMAP_TRIALS:-1}"
+ELECTRON_ITERATIONS="${BUDGETED_LAYOUT_ELECTRON_ITERATIONS:-1}"
+NODE_MAX_SIMPLE_FRAME_US="${BUDGETED_LAYOUT_NODE_MAX_SIMPLE_FRAME_US:-75}"
+NODE_MAX_BASELINE_FRAME_US="${BUDGETED_LAYOUT_NODE_MAX_BASELINE_FRAME_US:-750}"
+BUN_MAX_SIMPLE_FRAME_US="${BUDGETED_LAYOUT_BUN_MAX_SIMPLE_FRAME_US:-75}"
+BUN_MAX_BASELINE_FRAME_US="${BUDGETED_LAYOUT_BUN_MAX_BASELINE_FRAME_US:-1250}"
+ELECTRON_MAX_FRAME_US="${BUDGETED_LAYOUT_ELECTRON_MAX_FRAME_US:-75000}"
+MAX_JS_ELAPSED_MS="${BUDGETED_LAYOUT_JS_MAX_ELAPSED_MS:-30000}"
+MAX_ELECTRON_ELAPSED_MS="${BUDGETED_LAYOUT_ELECTRON_MAX_ELAPSED_MS:-90000}"
+MAX_JS_RSS_KB="${BUDGETED_LAYOUT_JS_MAX_RSS_KB:-1000000}"
+MAX_ELECTRON_RSS_KB="${BUDGETED_LAYOUT_ELECTRON_MAX_RSS_KB:-2000000}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+field_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+elapsed_ms_of() {
+    file="$1"
+    elapsed="$(field_of elapsed_seconds "$file")"
+    awk -v e="${elapsed:-0}" 'BEGIN { printf "%.0f", e * 1000 }'
+}
+
+rss_kb_of() {
+    file="$1"
+    rss="$(field_of max_rss_kb "$file")"
+    if [ -z "$rss" ]; then
+        echo 0
+    else
+        echo "$rss"
+    fi
+}
+
+run_measured() {
+    script="$1"
+    out_file="$2"
+    time_file="$3"
+    set +e
+    if command -v /usr/bin/time >/dev/null 2>&1; then
+        /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kb=%M' -o "$time_file" sh "$script" >"$out_file" 2>&1
+    else
+        start_s="$(date +%s)"
+        sh "$script" >"$out_file" 2>&1
+        code=$?
+        end_s="$(date +%s)"
+        {
+            echo "elapsed_seconds=$((end_s - start_s))"
+            echo "max_rss_kb=0"
+        } >"$time_file"
+        set -e
+        return "$code"
+    fi
+    code=$?
+    set -e
+    return "$code"
+}
+
+append_env() {
+    key="$1"
+    value="$2"
+    echo "$key=$value" >>"$BUILD_DIR/evidence.env"
+}
+
+check_js_budget() {
+    scene_key="$1"
+    runtime="$2"
+    env_file="$3"
+    time_file="$4"
+    simple_limit="$5"
+    baseline_limit="$6"
+    elapsed_limit="$7"
+    rss_limit="$8"
+    status="$(field_of simple_web_engine2d_js_status "$env_file")"
+    reason="$(field_of simple_web_engine2d_js_reason "$env_file")"
+    simple_frame="$(field_of simple_web_engine2d_js_simple_frame_us "$env_file")"
+    baseline_frame="$(field_of simple_web_engine2d_js_baseline_frame_us "$env_file")"
+    elapsed_ms="$(elapsed_ms_of "$time_file")"
+    rss_kb="$(rss_kb_of "$time_file")"
+    prefix="budgeted_${scene_key}_${runtime}"
+    append_env "${prefix}_status" "$status"
+    append_env "${prefix}_reason" "$reason"
+    append_env "${prefix}_simple_frame_us" "${simple_frame:-0}"
+    append_env "${prefix}_baseline_frame_us" "${baseline_frame:-0}"
+    append_env "${prefix}_elapsed_ms" "$elapsed_ms"
+    append_env "${prefix}_max_rss_kb" "$rss_kb"
+    if [ "$status" != "pass" ]; then
+        echo "${scene_key}-${runtime}-exact-bitmap-not-pass"
+        return 1
+    fi
+    if [ -z "$simple_frame" ] || [ "$simple_frame" -gt "$simple_limit" ]; then
+        echo "${scene_key}-${runtime}-simple-frame-budget-exceeded"
+        return 1
+    fi
+    if [ -z "$baseline_frame" ] || [ "$baseline_frame" -gt "$baseline_limit" ]; then
+        echo "${scene_key}-${runtime}-baseline-frame-budget-exceeded"
+        return 1
+    fi
+    if [ "$elapsed_ms" -gt "$elapsed_limit" ]; then
+        echo "${scene_key}-${runtime}-elapsed-budget-exceeded"
+        return 1
+    fi
+    if [ "$rss_kb" -gt "$rss_limit" ]; then
+        echo "${scene_key}-${runtime}-rss-budget-exceeded"
+        return 1
+    fi
+    echo pass
+}
+
+check_electron_budget() {
+    scene_key="$1"
+    env_file="$2"
+    time_file="$3"
+    frame_limit="$4"
+    elapsed_limit="$5"
+    rss_limit="$6"
+    status="$(field_of electron_simple_web_layout_status "$env_file")"
+    reason="$(field_of electron_simple_web_layout_reason "$env_file")"
+    frame="$(field_of electron_simple_web_layout_electron_frame_us "$env_file")"
+    elapsed_ms="$(elapsed_ms_of "$time_file")"
+    rss_kb="$(rss_kb_of "$time_file")"
+    prefix="budgeted_${scene_key}_electron"
+    append_env "${prefix}_status" "$status"
+    append_env "${prefix}_reason" "$reason"
+    append_env "${prefix}_frame_us" "${frame:-0}"
+    append_env "${prefix}_elapsed_ms" "$elapsed_ms"
+    append_env "${prefix}_max_rss_kb" "$rss_kb"
+    if [ "$status" != "pass" ]; then
+        echo "${scene_key}-electron-exact-bitmap-not-pass"
+        return 1
+    fi
+    if [ -z "$frame" ] || [ "$frame" -gt "$frame_limit" ]; then
+        echo "${scene_key}-electron-frame-budget-exceeded"
+        return 1
+    fi
+    if [ "$elapsed_ms" -gt "$elapsed_limit" ]; then
+        echo "${scene_key}-electron-elapsed-budget-exceeded"
+        return 1
+    fi
+    if [ "$rss_kb" -gt "$rss_limit" ]; then
+        echo "${scene_key}-electron-rss-budget-exceeded"
+        return 1
+    fi
+    echo pass
+}
+
+run_scene() {
+    scene_key="$1"
+    node_script="$2"
+    bun_script="$3"
+    electron_script="$4"
+    scene_build="$BUILD_DIR/$scene_key"
+    mkdir -p "$scene_build/node" "$scene_build/bun" "$scene_build/electron"
+
+    NODE_BITMAP_ITERATIONS="$ITERATIONS" JS_BITMAP_TRIALS="$TRIALS" BUILD_DIR="$scene_build/node" REPORT_PATH="$scene_build/node.md" \
+        run_measured "$node_script" "$scene_build/node.out" "$scene_build/node.time"
+    NODE_BITMAP_ITERATIONS="$ITERATIONS" JS_BITMAP_TRIALS="$TRIALS" BUILD_DIR="$scene_build/bun" REPORT_PATH="$scene_build/bun.md" \
+        run_measured "$bun_script" "$scene_build/bun.out" "$scene_build/bun.time"
+    ELECTRON_BITMAP_ITERATIONS="$ELECTRON_ITERATIONS" BUILD_DIR="$scene_build/electron" REPORT_PATH="$scene_build/electron.md" \
+        run_measured "$electron_script" "$scene_build/electron.out" "$scene_build/electron.time"
+
+    node_result="$(check_js_budget "$scene_key" node "$scene_build/node/evidence.env" "$scene_build/node.time" "$NODE_MAX_SIMPLE_FRAME_US" "$NODE_MAX_BASELINE_FRAME_US" "$MAX_JS_ELAPSED_MS" "$MAX_JS_RSS_KB")"
+    bun_result="$(check_js_budget "$scene_key" bun "$scene_build/bun/evidence.env" "$scene_build/bun.time" "$BUN_MAX_SIMPLE_FRAME_US" "$BUN_MAX_BASELINE_FRAME_US" "$MAX_JS_ELAPSED_MS" "$MAX_JS_RSS_KB")"
+    electron_result="$(check_electron_budget "$scene_key" "$scene_build/electron/evidence.env" "$scene_build/electron.time" "$ELECTRON_MAX_FRAME_US" "$MAX_ELECTRON_ELAPSED_MS" "$MAX_ELECTRON_RSS_KB")"
+
+    if [ "$node_result" != "pass" ]; then
+        echo "$node_result"
+        return 1
+    fi
+    if [ "$bun_result" != "pass" ]; then
+        echo "$bun_result"
+        return 1
+    fi
+    if [ "$electron_result" != "pass" ]; then
+        echo "$electron_result"
+        return 1
+    fi
+    echo pass
+}
+
+{
+    echo "budgeted_simple_web_layout_scene_matrix_iterations=$ITERATIONS"
+    echo "budgeted_simple_web_layout_scene_matrix_trials=$TRIALS"
+    echo "budgeted_simple_web_layout_scene_matrix_electron_iterations=$ELECTRON_ITERATIONS"
+    echo "budgeted_simple_web_layout_scene_matrix_node_simple_frame_limit_us=$NODE_MAX_SIMPLE_FRAME_US"
+    echo "budgeted_simple_web_layout_scene_matrix_node_baseline_frame_limit_us=$NODE_MAX_BASELINE_FRAME_US"
+    echo "budgeted_simple_web_layout_scene_matrix_bun_simple_frame_limit_us=$BUN_MAX_SIMPLE_FRAME_US"
+    echo "budgeted_simple_web_layout_scene_matrix_bun_baseline_frame_limit_us=$BUN_MAX_BASELINE_FRAME_US"
+    echo "budgeted_simple_web_layout_scene_matrix_electron_frame_limit_us=$ELECTRON_MAX_FRAME_US"
+    echo "budgeted_simple_web_layout_scene_matrix_js_elapsed_limit_ms=$MAX_JS_ELAPSED_MS"
+    echo "budgeted_simple_web_layout_scene_matrix_electron_elapsed_limit_ms=$MAX_ELECTRON_ELAPSED_MS"
+    echo "budgeted_simple_web_layout_scene_matrix_js_rss_limit_kb=$MAX_JS_RSS_KB"
+    echo "budgeted_simple_web_layout_scene_matrix_electron_rss_limit_kb=$MAX_ELECTRON_RSS_KB"
+} >"$BUILD_DIR/evidence.env"
+
+status=pass
+reason=pass
+
+for scene in text_flow commandbar_taskbar_card; do
+    case "$scene" in
+        text_flow)
+            node_script="scripts/check-node-simple-web-layout-bitmap-evidence.shs"
+            bun_script="scripts/check-bun-simple-web-layout-bitmap-evidence.shs"
+            electron_script="scripts/check-electron-simple-web-layout-bitmap-evidence.shs"
+            ;;
+        commandbar_taskbar_card)
+            node_script="scripts/check-node-simple-web-layout-commandbar-taskbar-card-bitmap-evidence.shs"
+            bun_script="scripts/check-bun-simple-web-layout-commandbar-taskbar-card-bitmap-evidence.shs"
+            electron_script="scripts/check-electron-simple-web-layout-commandbar-taskbar-card-bitmap-evidence.shs"
+            ;;
+    esac
+    set +e
+    scene_result="$(run_scene "$scene" "$node_script" "$bun_script" "$electron_script")"
+    scene_code=$?
+    set -e
+    append_env "budgeted_${scene}_result" "$scene_result"
+    if [ "$scene_code" -ne 0 ] && [ "$status" = "pass" ]; then
+        status=fail
+        reason="$scene_result"
+    fi
+done
+
+tmp_env="$BUILD_DIR/evidence.tmp"
+{
+    echo "budgeted_simple_web_layout_scene_matrix_status=$status"
+    echo "budgeted_simple_web_layout_scene_matrix_reason=$reason"
+    cat "$BUILD_DIR/evidence.env"
+} >"$tmp_env"
+mv "$tmp_env" "$BUILD_DIR/evidence.env"
+
+{
+    echo "# Budgeted Simple Web Layout Scene Matrix Bitmap Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- scenes: simple-web-layout-text-flow, simple-web-layout-commandbar-taskbar-card"
+    echo "- iterations: $ITERATIONS"
+    echo "- trials: $TRIALS"
+    echo "- Electron iterations: $ELECTRON_ITERATIONS"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+
+[ "$status" = "pass" ]
