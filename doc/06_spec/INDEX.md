@@ -12,9 +12,9 @@
 
 ---
 
-## Other (1 features)
+## GPU & SIMD (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Image Decode Specification](paint/image_decode_spec.md) | Auto-generated | N/A | 28 | 0% | 0 lines |
+| [Tiff Image Raster Specification](gpu/tiff_image_raster_spec.md) | Auto-generated | N/A | 1 | 0% | 0 lines |
 

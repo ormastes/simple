@@ -9,11 +9,12 @@
 # into a GpuSurface pixel buffer. Hardware-accelerated GPU draw calls are not
 # used at this layer.
 
-use examples.browser.entity.dom.paint_types.{PaintOp, DisplayItem, Color, black, transparent}
+use examples.browser.entity.dom.paint_types.{PaintOp, DisplayItem, black, transparent}
 use examples.browser.entity.media.image_types.{ImageData}
 use examples.browser.feature.gpu.surface.{GpuSurface, SurfaceFormat, bytes_per_pixel}
 use examples.browser.shared.error.{BrowserError, BrowserErrorKind, BrowserResult, paint_error}
 use examples.browser.shared.logging.{Logger, LogLevel}
+use std.common.color.types.{Color}
 
 # ---------------------------------------------------------------------------
 # ClipStack — manages nested clip rectangles.
@@ -113,6 +114,30 @@ fn premultiply_alpha(color: Color) -> Color:
     val g = (color.g.to_f64() * a).to_i64()
     val b = (color.b.to_f64() * a).to_i64()
     Color(r: clamp_byte(r), g: clamp_byte(g), b: clamp_byte(b), a: color.a)
+
+fn _image_channel(image: ImageData, x: i64, y: i64, channel: i64) -> i64:
+    if x < 0 or y < 0 or x >= image.width or y >= image.height:
+        return 0
+    val idx = (y * image.width + x) * 4 + channel
+    if idx < 0 or idx >= image.data.len():
+        return 0
+    val item = image.data.get(idx)
+    if val value = item:
+        return clamp_byte(value)
+    0
+
+fn _lerp_channel(a: i64, b: i64, t: f64) -> i64:
+    val inv_t = 1.0 - t
+    clamp_byte((a.to_f64() * inv_t + b.to_f64() * t).to_i64())
+
+fn _sample_image_channel(image: ImageData, x0: i64, y0: i64, x1: i64, y1: i64, frac_x: f64, frac_y: f64, channel: i64) -> i64:
+    val c00 = _image_channel(image, x0, y0, channel)
+    val c10 = _image_channel(image, x1, y0, channel)
+    val c01 = _image_channel(image, x0, y1, channel)
+    val c11 = _image_channel(image, x1, y1, channel)
+    val top = _lerp_channel(c00, c10, frac_x)
+    val bottom = _lerp_channel(c01, c11, frac_x)
+    _lerp_channel(top, bottom, frac_y)
 
 fn _bitmap_glyph_row(ch: text, row: i64) -> i64:
     val c = ch.to_upper()
@@ -239,14 +264,14 @@ class Rasterizer:
     # Fill a rectangle on the target surface with a solid color.
     me raster_fill_rect(target: GpuSurface, x: i64, y: i64, w: i64, h: i64, color: Color):
         # Apply clip rectangle if any
-        val clipped = self._apply_clip(x, y, w, h)
+        val clipped = self.apply_clip(x, y, w, h)
         if val cr = clipped:
             val cx = cr.x
             val cy = cr.y
             val cw = cr.w
             val ch = cr.h
 
-            val alpha = self._current_opacity()
+            val alpha = self.current_opacity()
             val effective_color = if alpha < 1.0:
                 blend_pixel(color, transparent(), alpha)
             else:
@@ -285,7 +310,7 @@ class Rasterizer:
 
     # Draw text at a baseline position using a small built-in bitmap font.
     me raster_draw_text(target: GpuSurface, x: i64, y: i64, text_content: text, font_size: f64, color: Color):
-        val alpha = self._current_opacity()
+        val alpha = self.current_opacity()
         val effective_color = if alpha < 1.0:
             blend_pixel(color, transparent(), alpha)
         else:
@@ -322,7 +347,7 @@ class Rasterizer:
 
     # Draw a line between two points with the given color and width.
     me raster_draw_line(target: GpuSurface, x1: i64, y1: i64, x2: i64, y2: i64, color: Color, width: f64):
-        val alpha = self._current_opacity()
+        val alpha = self.current_opacity()
         val effective_color = if alpha < 1.0:
             blend_pixel(color, transparent(), alpha)
         else:
@@ -370,7 +395,7 @@ class Rasterizer:
 
     # Blit an image onto the target surface at the specified destination rectangle.
     me raster_draw_image(target: GpuSurface, image: ImageData, dst_x: i64, dst_y: i64, dst_w: i64, dst_h: i64):
-        val clipped = self._apply_clip(dst_x, dst_y, dst_w, dst_h)
+        val clipped = self.apply_clip(dst_x, dst_y, dst_w, dst_h)
         if val cr = clipped:
             val cx = cr.x
             val cy = cr.y
@@ -410,25 +435,22 @@ class Rasterizer:
                             val x1_s = if x0 + 1 < src_w: x0 + 1 else: x0
                             val y1_s = if y0 + 1 < src_h: y0 + 1 else: y0
 
-                            val c00 = image.get_pixel(x0, y0)
-                            val c10 = image.get_pixel(x1_s, y0)
-                            val c01 = image.get_pixel(x0, y1_s)
-                            val c11 = image.get_pixel(x1_s, y1_s)
+                            val sampled_r = _sample_image_channel(image, x0, y0, x1_s, y1_s, frac_x, frac_y, 0)
+                            val sampled_g = _sample_image_channel(image, x0, y0, x1_s, y1_s, frac_x, frac_y, 1)
+                            val sampled_b = _sample_image_channel(image, x0, y0, x1_s, y1_s, frac_x, frac_y, 2)
+                            val sampled_a = _sample_image_channel(image, x0, y0, x1_s, y1_s, frac_x, frac_y, 3)
 
-                            # Bilinear interpolation
-                            val top = lerp_color(c00, c10, frac_x)
-                            val bottom = lerp_color(c01, c11, frac_x)
-                            val sampled = lerp_color(top, bottom, frac_y)
-
-                            # Alpha-blend sampled color onto destination pixel
-                            val src_a = sampled.a.to_f64() / 255.0
+                            # Alpha-blend sampled color onto destination pixel.
+                            # Image pixels are sampled directly from RGBA bytes to avoid
+                            # per-pixel Color object construction in the hot blit path.
+                            val src_a = sampled_a.to_f64() / 255.0
                             if src_a > 0.0:
                                 val dst_pixel = target.get_pixel(px, py)
                                 val inv_a = 1.0 - src_a
-                                val out_r = (sampled.r.to_f64() * src_a + dst_pixel.get(0).to_f64() * inv_a).to_i64()
-                                val out_g = (sampled.g.to_f64() * src_a + dst_pixel.get(1).to_f64() * inv_a).to_i64()
-                                val out_b = (sampled.b.to_f64() * src_a + dst_pixel.get(2).to_f64() * inv_a).to_i64()
-                                val out_a = (sampled.a.to_f64() * src_a + dst_pixel.get(3).to_f64() * inv_a).to_i64()
+                                val out_r = (sampled_r.to_f64() * src_a + dst_pixel.get(0).to_f64() * inv_a).to_i64()
+                                val out_g = (sampled_g.to_f64() * src_a + dst_pixel.get(1).to_f64() * inv_a).to_i64()
+                                val out_b = (sampled_b.to_f64() * src_a + dst_pixel.get(2).to_f64() * inv_a).to_i64()
+                                val out_a = (sampled_a.to_f64() * src_a + dst_pixel.get(3).to_f64() * inv_a).to_i64()
                                 target.set_pixel(px, py, out_r, out_g, out_b, out_a)
                         col = col + 1
                 row = row + 1
@@ -465,7 +487,7 @@ class Rasterizer:
             self.raster_fill_rect(target, x + w - right_w, y + top_w, right_w, h - top_w - bottom_w, right_color)
 
     # Apply the current clip stack to a rectangle, returning the clipped result.
-    me _apply_clip(x: i64, y: i64, w: i64, h: i64) -> RasterRect?:
+    me apply_clip(x: i64, y: i64, w: i64, h: i64) -> RasterRect?:
         if self.clip_stack.clips.len() > 0:
             val c = self.clip_stack.clips[self.clip_stack.clips.len() - 1]
             return clip_rect(x, y, w, h, c.x, c.y, c.w, c.h)
@@ -473,7 +495,7 @@ class Rasterizer:
         RasterRect(x: x, y: y, w: w, h: h)
 
     # Get the combined opacity from the opacity stack.
-    me _current_opacity() -> f64:
+    me current_opacity() -> f64:
         var combined = 1.0
         for alpha in self.opacity_stack:
             combined = combined * alpha
