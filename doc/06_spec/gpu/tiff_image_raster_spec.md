@@ -408,6 +408,44 @@ expect(pixel(surface, 0, 0)).to_equal([0, 16, 32, 64])
 
 </details>
 
+#### renders JPEG XL metadata decode placeholder through the raster image path exactly
+
+1. var rasterizer = Rasterizer new
+
+2. var surface = GpuSurface create
+
+3. rasterizer raster draw image
+   - Expected: image.width equals `16`
+   - Expected: image.height equals `24`
+   - Expected: pixel(surface, 0, 0) equals `[128, 128, 128, 255]`
+   - Expected: pixel(surface, 1, 0) equals `[128, 128, 128, 255]`
+   - Expected: pixel(surface, 0, 1) equals `[128, 128, 128, 255]`
+   - Expected: pixel(surface, 1, 1) equals `[128, 128, 128, 255]`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var rasterizer = Rasterizer.new(Logger.new("jpegxl-raster-placeholder-spec"))
+var surface = GpuSurface.create(1, 2, 2, SurfaceFormat.RGBA8)
+val image = decode_jpegxl(_jpegxl_small_codestream_16x24())
+
+rasterizer.raster_draw_image(surface, image, 0, 0, 2, 2)
+
+expect(image.width).to_equal(16)
+expect(image.height).to_equal(24)
+expect(pixel(surface, 0, 0)).to_equal([128, 128, 128, 255])
+expect(pixel(surface, 1, 0)).to_equal([128, 128, 128, 255])
+expect(pixel(surface, 0, 1)).to_equal([128, 128, 128, 255])
+expect(pixel(surface, 1, 1)).to_equal([128, 128, 128, 255])
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -427,8 +465,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
