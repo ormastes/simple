@@ -728,6 +728,38 @@ match result:
 
 </details>
 
+#### should expose bounded table and global exports through BrowserSession
+
+1. var session = BrowserSession new
+
+2. session open html
+
+3. Ok
+   - Expected: _display_js(value) equals `table:tbl:1:answer:42:table:1:global:42`
+
+4. Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+val result = session.eval_script("var m = new WebAssembly.Module('0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300'); var i = new WebAssembly.Instance(m); m.firstExportKind + ':' + m.tableExportName + ':' + m.tableMinElements + ':' + m.globalExportName + ':' + m.globalValue + ':' + i.exports.tbl.kind + ':' + i.exports.tbl.length + ':' + i.exports.answer.kind + ':' + i.exports.answer.value")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("table:tbl:1:answer:42:table:1:global:42")
+    Err(err):
+        expect("unexpected js error: {err}").to_equal("")
+```
+
+</details>
+
 #### should fail closed on unsupported WASM imports through BrowserSession
 
 1. var session = BrowserSession new
@@ -817,8 +849,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

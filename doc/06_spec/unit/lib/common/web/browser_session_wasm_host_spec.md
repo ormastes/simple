@@ -495,6 +495,91 @@ match instance:
 
 </details>
 
+#### synthesizes bounded table and global export placeholders
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, module, "validated") equals `true`
+   - Expected: _object_property_text(interp, module, "hasTableSection") equals `true`
+   - Expected: _object_property_text(interp, module, "hasGlobalSection") equals `true`
+   - Expected: _object_property_text(interp, module, "exportCount") equals `2`
+   - Expected: _object_property_text(interp, module, "firstExportName") equals `tbl`
+   - Expected: _object_property_text(interp, module, "firstExportKind") equals `table`
+   - Expected: _object_property_text(interp, module, "tableExportName") equals `tbl`
+   - Expected: _object_property_text(interp, module, "tableExportCount") equals `1`
+   - Expected: _object_property_text(interp, module, "tableMinElements") equals `1`
+   - Expected: _object_property_text(interp, module, "globalExportName") equals `answer`
+   - Expected: _object_property_text(interp, module, "globalExportCount") equals `1`
+   - Expected: _object_property_text(interp, module, "globalValue") equals `42`
+   - Expected: _object_child_property_text(interp, instance, "exports", "tbl") equals `[object Object]`
+   - Expected: _object_child_property_text(interp, instance, "exports", "answer") equals `[object Object]`
+
+2. JsValue Object
+
+3. JsValue Object
+
+4. JsValue Object
+   - Expected: _display_js(interp.get_object_property(table_id, "kind")) equals `table`
+   - Expected: _display_js(interp.get_object_property(table_id, "length")) equals `1`
+   - Expected: "missing table" equals ``
+
+5. JsValue Object
+   - Expected: _display_js(interp.get_object_property(global_id, "kind")) equals `global`
+   - Expected: _display_js(interp.get_object_property(global_id, "value")) equals `42`
+   - Expected: "missing global" equals ``
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 39 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300")])
+expect(_object_property_text(interp, module, "validated")).to_equal("true")
+expect(_object_property_text(interp, module, "hasTableSection")).to_equal("true")
+expect(_object_property_text(interp, module, "hasGlobalSection")).to_equal("true")
+expect(_object_property_text(interp, module, "exportCount")).to_equal("2")
+expect(_object_property_text(interp, module, "firstExportName")).to_equal("tbl")
+expect(_object_property_text(interp, module, "firstExportKind")).to_equal("table")
+expect(_object_property_text(interp, module, "tableExportName")).to_equal("tbl")
+expect(_object_property_text(interp, module, "tableExportCount")).to_equal("1")
+expect(_object_property_text(interp, module, "tableMinElements")).to_equal("1")
+expect(_object_property_text(interp, module, "globalExportName")).to_equal("answer")
+expect(_object_property_text(interp, module, "globalExportCount")).to_equal("1")
+expect(_object_property_text(interp, module, "globalValue")).to_equal("42")
+
+val instance = interp._native_webassembly_instance([module])
+expect(_object_child_property_text(interp, instance, "exports", "tbl")).to_equal("[object Object]")
+expect(_object_child_property_text(interp, instance, "exports", "answer")).to_equal("[object Object]")
+match instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                match interp.get_object_property(exports_id, "tbl"):
+                    JsValue.Object(table_id):
+                        expect(_display_js(interp.get_object_property(table_id, "kind"))).to_equal("table")
+                        expect(_display_js(interp.get_object_property(table_id, "length"))).to_equal("1")
+                    _:
+                        expect("missing table").to_equal("")
+                match interp.get_object_property(exports_id, "answer"):
+                    JsValue.Object(global_id):
+                        expect(_display_js(interp.get_object_property(global_id, "kind"))).to_equal("global")
+                        expect(_display_js(interp.get_object_property(global_id, "value"))).to_equal("42")
+                    _:
+                        expect("missing global").to_equal("")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
 #### fails closed when valid modules require unsupported imports
 
 1. var interp =  new interpreter
@@ -596,8 +681,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
