@@ -4,12 +4,12 @@
 - reason: pass
 - scene: wm-vector-text-grid
 - text run: HARDENED
-- font size: 24
-- CPU checksum: 13090264
-- CPU ink pixels: 247
-- CPU frame us: 1571134
-- production render checksum: 3707484892911777
-- production render ink pixels: 247
+- font size: 16
+- CPU checksum: 2073732
+- CPU ink pixels: 127
+- CPU frame us: 646686
+- production render checksum: 1616532737637030
+- production render ink pixels: 127
 - production vector raster hits: 0
 - production vector output pixels: 0
 - production accelerator attempts: 8
@@ -17,11 +17,11 @@
 - production OpenCL hits: 4
 - production CPU fallback hits: 0
 - production GPU returned glyphs: 8
-- production GPU returned glyph pixels: 1896
+- production GPU returned glyph pixels: 784
 - production accelerator unavailable reason: cuda-opencl-vector-font-glyph-pixels-returned
 - matrix CUDAOPENCL/16 checksum: 2208479644694289
 - matrix CUDAOPENCL/16 ink pixels: 162
-- matrix CUDAOPENCL/16 vector raster hits: 9
+- matrix CUDAOPENCL/16 vector raster hits: 5
 - matrix GUIWM/24 checksum: 2701328847073344
 - matrix GUIWM/24 ink pixels: 171
 - matrix GUIWM/24 vector raster hits: 3
@@ -30,94 +30,94 @@
 - matrix FontRender/32 vector raster hits: 9
 - CUDA status: pass
 - CUDA reason: cuda-vector-font-rasterize-kernel-matched-cpu
-- CUDA checksum: 13090264
-- CUDA ink pixels: 247
+- CUDA checksum: 2073732
+- CUDA ink pixels: 127
 - CUDA glyph count: 4
 - CUDA glyph 0 codepoint: 72
-- CUDA glyph 0 font size: 24
-- CUDA glyph 0 width: 10
-- CUDA glyph 0 height: 24
-- CUDA glyph 0 advance: 11
-- CUDA glyph 0 checksum: 399885
-- CUDA glyph 0 ink pixels: 30
+- CUDA glyph 0 font size: 16
+- CUDA glyph 0 width: 6
+- CUDA glyph 0 height: 16
+- CUDA glyph 0 advance: 7
+- CUDA glyph 0 checksum: 52301
+- CUDA glyph 0 ink pixels: 17
 - CUDA glyph 0 mismatch count: 0
-- CUDA glyph 0 expected pixels: build/vector_font_compute_matrix/hardened_24/cuda-glyph-0-expected-alpha-u8.json
-- CUDA glyph 0 actual pixels: build/vector_font_compute_matrix/hardened_24/cuda-glyph-0-actual-alpha-u8.json
+- CUDA glyph 0 expected pixels: build/vector_font_compute_matrix/hardened_16/cuda-glyph-0-expected-alpha-u8.json
+- CUDA glyph 0 actual pixels: build/vector_font_compute_matrix/hardened_16/cuda-glyph-0-actual-alpha-u8.json
 - CUDA glyph 1 codepoint: 82
-- CUDA glyph 1 font size: 24
-- CUDA glyph 1 width: 10
-- CUDA glyph 1 height: 24
-- CUDA glyph 1 advance: 11
-- CUDA glyph 1 checksum: 296579
-- CUDA glyph 1 ink pixels: 34
+- CUDA glyph 1 font size: 16
+- CUDA glyph 1 width: 6
+- CUDA glyph 1 height: 16
+- CUDA glyph 1 advance: 7
+- CUDA glyph 1 checksum: 42515
+- CUDA glyph 1 ink pixels: 16
 - CUDA glyph 1 mismatch count: 0
-- CUDA glyph 1 expected pixels: build/vector_font_compute_matrix/hardened_24/cuda-glyph-1-expected-alpha-u8.json
-- CUDA glyph 1 actual pixels: build/vector_font_compute_matrix/hardened_24/cuda-glyph-1-actual-alpha-u8.json
+- CUDA glyph 1 expected pixels: build/vector_font_compute_matrix/hardened_16/cuda-glyph-1-expected-alpha-u8.json
+- CUDA glyph 1 actual pixels: build/vector_font_compute_matrix/hardened_16/cuda-glyph-1-actual-alpha-u8.json
 - CUDA glyph 2 codepoint: 69
-- CUDA glyph 2 font size: 24
-- CUDA glyph 2 width: 9
-- CUDA glyph 2 height: 24
-- CUDA glyph 2 advance: 10
-- CUDA glyph 2 checksum: 282552
-- CUDA glyph 2 ink pixels: 26
+- CUDA glyph 2 font size: 16
+- CUDA glyph 2 width: 6
+- CUDA glyph 2 height: 16
+- CUDA glyph 2 advance: 7
+- CUDA glyph 2 checksum: 55471
+- CUDA glyph 2 ink pixels: 13
 - CUDA glyph 2 mismatch count: 0
-- CUDA glyph 2 expected pixels: build/vector_font_compute_matrix/hardened_24/cuda-glyph-2-expected-alpha-u8.json
-- CUDA glyph 2 actual pixels: build/vector_font_compute_matrix/hardened_24/cuda-glyph-2-actual-alpha-u8.json
+- CUDA glyph 2 expected pixels: build/vector_font_compute_matrix/hardened_16/cuda-glyph-2-expected-alpha-u8.json
+- CUDA glyph 2 actual pixels: build/vector_font_compute_matrix/hardened_16/cuda-glyph-2-actual-alpha-u8.json
 - CUDA glyph 3 codepoint: 69
-- CUDA glyph 3 font size: 24
-- CUDA glyph 3 width: 9
-- CUDA glyph 3 height: 24
-- CUDA glyph 3 advance: 10
-- CUDA glyph 3 checksum: 282552
-- CUDA glyph 3 ink pixels: 26
+- CUDA glyph 3 font size: 16
+- CUDA glyph 3 width: 6
+- CUDA glyph 3 height: 16
+- CUDA glyph 3 advance: 7
+- CUDA glyph 3 checksum: 55471
+- CUDA glyph 3 ink pixels: 13
 - CUDA glyph 3 mismatch count: 0
-- CUDA glyph 3 expected pixels: build/vector_font_compute_matrix/hardened_24/cuda-glyph-3-expected-alpha-u8.json
-- CUDA glyph 3 actual pixels: build/vector_font_compute_matrix/hardened_24/cuda-glyph-3-actual-alpha-u8.json
+- CUDA glyph 3 expected pixels: build/vector_font_compute_matrix/hardened_16/cuda-glyph-3-expected-alpha-u8.json
+- CUDA glyph 3 actual pixels: build/vector_font_compute_matrix/hardened_16/cuda-glyph-3-actual-alpha-u8.json
 - OpenCL status: pass
 - OpenCL reason: opencl-vector-font-rasterize-kernel-matched-cpu
-- OpenCL checksum: 13090264
-- OpenCL ink pixels: 247
+- OpenCL checksum: 2073732
+- OpenCL ink pixels: 127
 - OpenCL glyph count: 4
 - OpenCL glyph 0 codepoint: 65
-- OpenCL glyph 0 font size: 24
-- OpenCL glyph 0 width: 11
-- OpenCL glyph 0 height: 24
-- OpenCL glyph 0 advance: 12
-- OpenCL glyph 0 checksum: 414452
-- OpenCL glyph 0 ink pixels: 33
+- OpenCL glyph 0 font size: 16
+- OpenCL glyph 0 width: 7
+- OpenCL glyph 0 height: 16
+- OpenCL glyph 0 advance: 8
+- OpenCL glyph 0 checksum: 64634
+- OpenCL glyph 0 ink pixels: 13
 - OpenCL glyph 0 mismatch count: 0
-- OpenCL glyph 0 expected pixels: build/vector_font_compute_matrix/hardened_24/opencl-glyph-0-expected-alpha-u8.json
-- OpenCL glyph 0 actual pixels: build/vector_font_compute_matrix/hardened_24/opencl-glyph-0-actual-alpha-u8.json
+- OpenCL glyph 0 expected pixels: build/vector_font_compute_matrix/hardened_16/opencl-glyph-0-expected-alpha-u8.json
+- OpenCL glyph 0 actual pixels: build/vector_font_compute_matrix/hardened_16/opencl-glyph-0-actual-alpha-u8.json
 - OpenCL glyph 1 codepoint: 68
-- OpenCL glyph 1 font size: 24
-- OpenCL glyph 1 width: 10
-- OpenCL glyph 1 height: 24
-- OpenCL glyph 1 advance: 11
-- OpenCL glyph 1 checksum: 407799
-- OpenCL glyph 1 ink pixels: 31
+- OpenCL glyph 1 font size: 16
+- OpenCL glyph 1 width: 6
+- OpenCL glyph 1 height: 16
+- OpenCL glyph 1 advance: 7
+- OpenCL glyph 1 checksum: 61747
+- OpenCL glyph 1 ink pixels: 18
 - OpenCL glyph 1 mismatch count: 0
-- OpenCL glyph 1 expected pixels: build/vector_font_compute_matrix/hardened_24/opencl-glyph-1-expected-alpha-u8.json
-- OpenCL glyph 1 actual pixels: build/vector_font_compute_matrix/hardened_24/opencl-glyph-1-actual-alpha-u8.json
+- OpenCL glyph 1 expected pixels: build/vector_font_compute_matrix/hardened_16/opencl-glyph-1-expected-alpha-u8.json
+- OpenCL glyph 1 actual pixels: build/vector_font_compute_matrix/hardened_16/opencl-glyph-1-actual-alpha-u8.json
 - OpenCL glyph 2 codepoint: 78
-- OpenCL glyph 2 font size: 24
-- OpenCL glyph 2 width: 10
-- OpenCL glyph 2 height: 24
-- OpenCL glyph 2 advance: 11
-- OpenCL glyph 2 checksum: 447921
-- OpenCL glyph 2 ink pixels: 36
+- OpenCL glyph 2 font size: 16
+- OpenCL glyph 2 width: 6
+- OpenCL glyph 2 height: 16
+- OpenCL glyph 2 advance: 7
+- OpenCL glyph 2 checksum: 59667
+- OpenCL glyph 2 ink pixels: 19
 - OpenCL glyph 2 mismatch count: 0
-- OpenCL glyph 2 expected pixels: build/vector_font_compute_matrix/hardened_24/opencl-glyph-2-expected-alpha-u8.json
-- OpenCL glyph 2 actual pixels: build/vector_font_compute_matrix/hardened_24/opencl-glyph-2-actual-alpha-u8.json
+- OpenCL glyph 2 expected pixels: build/vector_font_compute_matrix/hardened_16/opencl-glyph-2-expected-alpha-u8.json
+- OpenCL glyph 2 actual pixels: build/vector_font_compute_matrix/hardened_16/opencl-glyph-2-actual-alpha-u8.json
 - OpenCL glyph 3 codepoint: 68
-- OpenCL glyph 3 font size: 24
-- OpenCL glyph 3 width: 10
-- OpenCL glyph 3 height: 24
-- OpenCL glyph 3 advance: 11
-- OpenCL glyph 3 checksum: 407799
-- OpenCL glyph 3 ink pixels: 31
+- OpenCL glyph 3 font size: 16
+- OpenCL glyph 3 width: 6
+- OpenCL glyph 3 height: 16
+- OpenCL glyph 3 advance: 7
+- OpenCL glyph 3 checksum: 61747
+- OpenCL glyph 3 ink pixels: 18
 - OpenCL glyph 3 mismatch count: 0
-- OpenCL glyph 3 expected pixels: build/vector_font_compute_matrix/hardened_24/opencl-glyph-3-expected-alpha-u8.json
-- OpenCL glyph 3 actual pixels: build/vector_font_compute_matrix/hardened_24/opencl-glyph-3-actual-alpha-u8.json
+- OpenCL glyph 3 expected pixels: build/vector_font_compute_matrix/hardened_16/opencl-glyph-3-expected-alpha-u8.json
+- OpenCL glyph 3 actual pixels: build/vector_font_compute_matrix/hardened_16/opencl-glyph-3-actual-alpha-u8.json
 - blur/tolerance used: false
 
 ## Raw Evidence
@@ -127,14 +127,14 @@
 - vector_font_compute_reason=pass
 - vector_font_compute_scene=wm-vector-text-grid
 - vector_font_compute_text_run=HARDENED
-- vector_font_compute_font_size=24
+- vector_font_compute_font_size=16
 - vector_font_compute_iterations=1
-- vector_font_compute_cpu_warm_checksum=13090264
-- vector_font_compute_cpu_checksum=13090264
-- vector_font_compute_cpu_ink_pixels=247
-- vector_font_compute_cpu_frame_us=1599038
-- vector_font_compute_production_render_checksum=3707484892911777
-- vector_font_compute_production_render_ink_pixels=247
+- vector_font_compute_cpu_warm_checksum=2073732
+- vector_font_compute_cpu_checksum=2073732
+- vector_font_compute_cpu_ink_pixels=127
+- vector_font_compute_cpu_frame_us=636087
+- vector_font_compute_production_render_checksum=1616532737637030
+- vector_font_compute_production_render_ink_pixels=127
 - vector_font_compute_production_vector_raster_hits=0
 - vector_font_compute_production_vector_output_pixels=0
 - vector_font_compute_production_accelerator_attempts=8
@@ -142,14 +142,14 @@
 - vector_font_compute_production_opencl_hits=4
 - vector_font_compute_production_cpu_fallback_hits=0
 - vector_font_compute_production_gpu_returned_glyphs=8
-- vector_font_compute_production_gpu_returned_glyph_pixels=1896
+- vector_font_compute_production_gpu_returned_glyph_pixels=784
 - vector_font_compute_production_accelerator_unavailable_reason=cuda-opencl-vector-font-glyph-pixels-returned
 - vector_font_compute_matrix_0_text=CUDAOPENCL
 - vector_font_compute_matrix_0_font_size=16
 - vector_font_compute_matrix_0_checksum=2208479644694289
 - vector_font_compute_matrix_0_ink_pixels=162
-- vector_font_compute_matrix_0_vector_raster_hits=9
-- vector_font_compute_matrix_0_cpu_fallback_hits=9
+- vector_font_compute_matrix_0_vector_raster_hits=5
+- vector_font_compute_matrix_0_cpu_fallback_hits=5
 - vector_font_compute_matrix_1_text=GUIWM
 - vector_font_compute_matrix_1_font_size=24
 - vector_font_compute_matrix_1_checksum=2701328847073344
@@ -162,11 +162,11 @@
 - vector_font_compute_matrix_2_ink_pixels=527
 - vector_font_compute_matrix_2_vector_raster_hits=9
 - vector_font_compute_matrix_2_cpu_fallback_hits=9
-- vector_font_compute_glyph_0_checksum=399885
-- vector_font_compute_glyph_0_ink_pixels=30
+- vector_font_compute_glyph_0_checksum=52301
+- vector_font_compute_glyph_0_ink_pixels=17
 - vector_font_compute_glyph_0_codepoint=72
-- vector_font_compute_glyph_0_width=10
-- vector_font_compute_glyph_0_pixels=255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,127,127,127,255,0,0,0,0,0,255,127,127,127,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_0_width=6
+- vector_font_compute_glyph_0_pixels=127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,191,127,191,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_0_command_count=42
 - vector_font_compute_glyph_0_command_0=0
 - vector_font_compute_glyph_0_command_1=0
@@ -210,11 +210,11 @@
 - vector_font_compute_glyph_0_command_39=3
 - vector_font_compute_glyph_0_command_40=0
 - vector_font_compute_glyph_0_command_41=0
-- vector_font_compute_glyph_1_checksum=414452
-- vector_font_compute_glyph_1_ink_pixels=33
+- vector_font_compute_glyph_1_checksum=64634
+- vector_font_compute_glyph_1_ink_pixels=13
 - vector_font_compute_glyph_1_codepoint=65
-- vector_font_compute_glyph_1_width=11
-- vector_font_compute_glyph_1_pixels=0,0,191,0,0,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,0,63,255,63,0,0,0,0,0,0,0,0,127,255,127,0,0,0,0,0,0,0,0,127,63,127,0,0,0,0,0,0,0,0,255,0,255,0,0,0,0,0,0,0,0,255,0,255,0,0,0,0,0,0,0,63,255,255,255,63,0,0,0,0,0,0,127,255,0,63,127,0,0,0,0,0,0,127,255,0,0,127,0,0,0,0,0,0,255,127,0,0,191,0,0,0,0,0,0,255,127,0,0,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_1_width=7
+- vector_font_compute_glyph_1_pixels=0,191,0,0,0,0,0,0,255,0,0,0,0,0,0,191,0,0,0,0,0,127,0,127,0,0,0,0,127,127,127,0,0,0,0,191,0,127,0,0,0,0,255,0,127,0,0,0,0,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_1_command_count=45
 - vector_font_compute_glyph_1_command_0=0
 - vector_font_compute_glyph_1_command_1=0
@@ -261,11 +261,11 @@
 - vector_font_compute_glyph_1_command_42=3
 - vector_font_compute_glyph_1_command_43=0
 - vector_font_compute_glyph_1_command_44=0
-- vector_font_compute_glyph_2_checksum=296579
-- vector_font_compute_glyph_2_ink_pixels=34
+- vector_font_compute_glyph_2_checksum=42515
+- vector_font_compute_glyph_2_ink_pixels=16
 - vector_font_compute_glyph_2_codepoint=82
-- vector_font_compute_glyph_2_width=10
-- vector_font_compute_glyph_2_pixels=255,255,255,191,0,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,127,127,255,63,0,0,0,0,0,255,0,63,0,0,0,0,0,0,0,255,0,0,127,0,0,0,0,0,0,255,0,0,63,0,0,0,0,0,0,255,0,0,63,0,0,0,0,0,0,255,0,0,0,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_2_width=6
+- vector_font_compute_glyph_2_pixels=191,127,127,0,0,0,127,0,255,0,0,0,127,0,255,0,0,0,127,0,255,0,0,0,127,63,127,0,0,0,127,0,0,0,0,0,127,0,63,0,0,0,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_2_command_count=57
 - vector_font_compute_glyph_2_command_0=0
 - vector_font_compute_glyph_2_command_1=0
@@ -324,11 +324,11 @@
 - vector_font_compute_glyph_2_command_54=3
 - vector_font_compute_glyph_2_command_55=0
 - vector_font_compute_glyph_2_command_56=0
-- vector_font_compute_glyph_3_checksum=407799
-- vector_font_compute_glyph_3_ink_pixels=31
+- vector_font_compute_glyph_3_checksum=61747
+- vector_font_compute_glyph_3_ink_pixels=18
 - vector_font_compute_glyph_3_codepoint=68
-- vector_font_compute_glyph_3_width=10
-- vector_font_compute_glyph_3_pixels=255,255,255,63,0,0,0,0,0,0,255,0,0,255,63,0,0,0,0,0,255,0,0,63,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,63,191,0,0,0,0,0,255,255,255,191,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_3_width=6
+- vector_font_compute_glyph_3_pixels=191,127,63,0,0,0,127,0,191,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,255,255,63,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_3_command_count=45
 - vector_font_compute_glyph_3_command_0=0
 - vector_font_compute_glyph_3_command_1=0
@@ -375,11 +375,11 @@
 - vector_font_compute_glyph_3_command_42=3
 - vector_font_compute_glyph_3_command_43=0
 - vector_font_compute_glyph_3_command_44=0
-- vector_font_compute_glyph_4_checksum=282552
-- vector_font_compute_glyph_4_ink_pixels=26
+- vector_font_compute_glyph_4_checksum=55471
+- vector_font_compute_glyph_4_ink_pixels=13
 - vector_font_compute_glyph_4_codepoint=69
-- vector_font_compute_glyph_4_width=9
-- vector_font_compute_glyph_4_pixels=255,255,255,255,127,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,255,255,255,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_4_width=6
+- vector_font_compute_glyph_4_pixels=191,127,127,0,0,0,127,0,0,0,0,0,127,0,0,0,0,0,191,127,0,0,0,0,127,0,0,0,0,0,127,0,0,0,0,0,127,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_4_command_count=42
 - vector_font_compute_glyph_4_command_0=0
 - vector_font_compute_glyph_4_command_1=0
@@ -423,11 +423,11 @@
 - vector_font_compute_glyph_4_command_39=3
 - vector_font_compute_glyph_4_command_40=0
 - vector_font_compute_glyph_4_command_41=0
-- vector_font_compute_glyph_5_checksum=447921
-- vector_font_compute_glyph_5_ink_pixels=36
+- vector_font_compute_glyph_5_checksum=59667
+- vector_font_compute_glyph_5_ink_pixels=19
 - vector_font_compute_glyph_5_codepoint=78
-- vector_font_compute_glyph_5_width=10
-- vector_font_compute_glyph_5_pixels=255,0,0,0,255,0,0,0,0,0,255,63,0,0,255,0,0,0,0,0,255,127,0,0,255,0,0,0,0,0,255,191,0,0,255,0,0,0,0,0,255,127,63,0,255,0,0,0,0,0,255,0,127,0,255,0,0,0,0,0,255,0,191,0,255,0,0,0,0,0,255,0,127,63,255,0,0,0,0,0,255,0,0,127,255,0,0,0,0,0,255,0,0,191,255,0,0,0,0,0,255,0,0,127,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_5_width=6
+- vector_font_compute_glyph_5_pixels=127,0,127,0,0,0,191,0,127,0,0,0,191,0,127,0,0,0,127,127,127,0,0,0,127,63,127,0,0,0,127,63,127,0,0,0,127,0,255,0,0,0,127,0,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_5_command_count=36
 - vector_font_compute_glyph_5_command_0=0
 - vector_font_compute_glyph_5_command_1=0
@@ -465,11 +465,11 @@
 - vector_font_compute_glyph_5_command_33=3
 - vector_font_compute_glyph_5_command_34=0
 - vector_font_compute_glyph_5_command_35=0
-- vector_font_compute_glyph_6_checksum=282552
-- vector_font_compute_glyph_6_ink_pixels=26
+- vector_font_compute_glyph_6_checksum=55471
+- vector_font_compute_glyph_6_ink_pixels=13
 - vector_font_compute_glyph_6_codepoint=69
-- vector_font_compute_glyph_6_width=9
-- vector_font_compute_glyph_6_pixels=255,255,255,255,127,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,255,255,255,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_6_width=6
+- vector_font_compute_glyph_6_pixels=191,127,127,0,0,0,127,0,0,0,0,0,127,0,0,0,0,0,191,127,0,0,0,0,127,0,0,0,0,0,127,0,0,0,0,0,127,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_6_command_count=42
 - vector_font_compute_glyph_6_command_0=0
 - vector_font_compute_glyph_6_command_1=0
@@ -513,11 +513,11 @@
 - vector_font_compute_glyph_6_command_39=3
 - vector_font_compute_glyph_6_command_40=0
 - vector_font_compute_glyph_6_command_41=0
-- vector_font_compute_glyph_7_checksum=407799
-- vector_font_compute_glyph_7_ink_pixels=31
+- vector_font_compute_glyph_7_checksum=61747
+- vector_font_compute_glyph_7_ink_pixels=18
 - vector_font_compute_glyph_7_codepoint=68
-- vector_font_compute_glyph_7_width=10
-- vector_font_compute_glyph_7_pixels=255,255,255,63,0,0,0,0,0,0,255,0,0,255,63,0,0,0,0,0,255,0,0,63,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,63,191,0,0,0,0,0,255,255,255,191,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_7_width=6
+- vector_font_compute_glyph_7_pixels=191,127,63,0,0,0,127,0,191,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,255,255,63,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_7_command_count=45
 - vector_font_compute_glyph_7_command_0=0
 - vector_font_compute_glyph_7_command_1=0
@@ -566,54 +566,54 @@
 - vector_font_compute_glyph_7_command_44=0
 - vector_font_compute_cuda_status=pass
 - vector_font_compute_cuda_reason=cuda-vector-font-rasterize-kernel-matched-cpu
-- vector_font_compute_cuda_checksum=13090264
+- vector_font_compute_cuda_checksum=2073732
 - vector_font_compute_cuda_glyph_count=4
 - vector_font_compute_cuda_glyph_0_codepoint=72
-- vector_font_compute_cuda_glyph_0_font_size=24
-- vector_font_compute_cuda_glyph_0_width=10
-- vector_font_compute_cuda_glyph_0_height=24
-- vector_font_compute_cuda_glyph_0_advance=11
-- vector_font_compute_cuda_glyph_0_checksum=399885
-- vector_font_compute_cuda_glyph_0_ink_pixels=30
+- vector_font_compute_cuda_glyph_0_font_size=16
+- vector_font_compute_cuda_glyph_0_width=6
+- vector_font_compute_cuda_glyph_0_height=16
+- vector_font_compute_cuda_glyph_0_advance=7
+- vector_font_compute_cuda_glyph_0_checksum=52301
+- vector_font_compute_cuda_glyph_0_ink_pixels=17
 - vector_font_compute_cuda_glyph_1_codepoint=82
-- vector_font_compute_cuda_glyph_1_font_size=24
-- vector_font_compute_cuda_glyph_1_width=10
-- vector_font_compute_cuda_glyph_1_height=24
-- vector_font_compute_cuda_glyph_1_advance=11
-- vector_font_compute_cuda_glyph_1_checksum=296579
-- vector_font_compute_cuda_glyph_1_ink_pixels=34
+- vector_font_compute_cuda_glyph_1_font_size=16
+- vector_font_compute_cuda_glyph_1_width=6
+- vector_font_compute_cuda_glyph_1_height=16
+- vector_font_compute_cuda_glyph_1_advance=7
+- vector_font_compute_cuda_glyph_1_checksum=42515
+- vector_font_compute_cuda_glyph_1_ink_pixels=16
 - vector_font_compute_opencl_status=pass
 - vector_font_compute_opencl_reason=opencl-vector-font-rasterize-kernel-matched-cpu
-- vector_font_compute_opencl_checksum=13090264
+- vector_font_compute_opencl_checksum=2073732
 - vector_font_compute_opencl_glyph_count=4
 - vector_font_compute_opencl_glyph_0_codepoint=65
-- vector_font_compute_opencl_glyph_0_font_size=24
-- vector_font_compute_opencl_glyph_0_width=11
-- vector_font_compute_opencl_glyph_0_height=24
-- vector_font_compute_opencl_glyph_0_advance=12
-- vector_font_compute_opencl_glyph_0_checksum=414452
-- vector_font_compute_opencl_glyph_0_ink_pixels=33
+- vector_font_compute_opencl_glyph_0_font_size=16
+- vector_font_compute_opencl_glyph_0_width=7
+- vector_font_compute_opencl_glyph_0_height=16
+- vector_font_compute_opencl_glyph_0_advance=8
+- vector_font_compute_opencl_glyph_0_checksum=64634
+- vector_font_compute_opencl_glyph_0_ink_pixels=13
 - vector_font_compute_opencl_glyph_1_codepoint=68
-- vector_font_compute_opencl_glyph_1_font_size=24
-- vector_font_compute_opencl_glyph_1_width=10
-- vector_font_compute_opencl_glyph_1_height=24
-- vector_font_compute_opencl_glyph_1_advance=11
-- vector_font_compute_opencl_glyph_1_checksum=407799
-- vector_font_compute_opencl_glyph_1_ink_pixels=31
+- vector_font_compute_opencl_glyph_1_font_size=16
+- vector_font_compute_opencl_glyph_1_width=6
+- vector_font_compute_opencl_glyph_1_height=16
+- vector_font_compute_opencl_glyph_1_advance=7
+- vector_font_compute_opencl_glyph_1_checksum=61747
+- vector_font_compute_opencl_glyph_1_ink_pixels=18
 - vector_font_compute_blur_or_tolerance_used=false
-- vector_font_compute_summary=WebRenderVectorFontComputeEvidence[scene=wm-vector-text-grid cpu_checksum=13090264 cpu_ink_pixels=247 cuda_status=pass cuda_reason=cuda-vector-font-rasterize-kernel-matched-cpu cuda_checksum=13090264 opencl_status=pass opencl_reason=opencl-vector-font-rasterize-kernel-matched-cpu opencl_checksum=13090264 blur_or_tolerance_used=false status=pass reason=pass]
+- vector_font_compute_summary=WebRenderVectorFontComputeEvidence[scene=wm-vector-text-grid cpu_checksum=2073732 cpu_ink_pixels=127 cuda_status=pass cuda_reason=cuda-vector-font-rasterize-kernel-matched-cpu cuda_checksum=2073732 opencl_status=pass opencl_reason=opencl-vector-font-rasterize-kernel-matched-cpu opencl_checksum=2073732 blur_or_tolerance_used=false status=pass reason=pass]
 - vector_font_compute_status=pass
 - vector_font_compute_reason=pass
 - vector_font_compute_scene=wm-vector-text-grid
 - vector_font_compute_text_run=HARDENED
-- vector_font_compute_font_size=24
+- vector_font_compute_font_size=16
 - vector_font_compute_iterations=1
-- vector_font_compute_cpu_warm_checksum=13090264
-- vector_font_compute_cpu_checksum=13090264
-- vector_font_compute_cpu_ink_pixels=247
-- vector_font_compute_cpu_frame_us=1571134
-- vector_font_compute_production_render_checksum=3707484892911777
-- vector_font_compute_production_render_ink_pixels=247
+- vector_font_compute_cpu_warm_checksum=2073732
+- vector_font_compute_cpu_checksum=2073732
+- vector_font_compute_cpu_ink_pixels=127
+- vector_font_compute_cpu_frame_us=646686
+- vector_font_compute_production_render_checksum=1616532737637030
+- vector_font_compute_production_render_ink_pixels=127
 - vector_font_compute_production_vector_raster_hits=0
 - vector_font_compute_production_vector_output_pixels=0
 - vector_font_compute_production_accelerator_attempts=8
@@ -621,14 +621,14 @@
 - vector_font_compute_production_opencl_hits=4
 - vector_font_compute_production_cpu_fallback_hits=0
 - vector_font_compute_production_gpu_returned_glyphs=8
-- vector_font_compute_production_gpu_returned_glyph_pixels=1896
+- vector_font_compute_production_gpu_returned_glyph_pixels=784
 - vector_font_compute_production_accelerator_unavailable_reason=cuda-opencl-vector-font-glyph-pixels-returned
 - vector_font_compute_matrix_0_text=CUDAOPENCL
 - vector_font_compute_matrix_0_font_size=16
 - vector_font_compute_matrix_0_checksum=2208479644694289
 - vector_font_compute_matrix_0_ink_pixels=162
-- vector_font_compute_matrix_0_vector_raster_hits=9
-- vector_font_compute_matrix_0_cpu_fallback_hits=9
+- vector_font_compute_matrix_0_vector_raster_hits=5
+- vector_font_compute_matrix_0_cpu_fallback_hits=5
 - vector_font_compute_matrix_1_text=GUIWM
 - vector_font_compute_matrix_1_font_size=24
 - vector_font_compute_matrix_1_checksum=2701328847073344
@@ -641,11 +641,11 @@
 - vector_font_compute_matrix_2_ink_pixels=527
 - vector_font_compute_matrix_2_vector_raster_hits=9
 - vector_font_compute_matrix_2_cpu_fallback_hits=9
-- vector_font_compute_glyph_0_checksum=399885
-- vector_font_compute_glyph_0_ink_pixels=30
+- vector_font_compute_glyph_0_checksum=52301
+- vector_font_compute_glyph_0_ink_pixels=17
 - vector_font_compute_glyph_0_codepoint=72
-- vector_font_compute_glyph_0_width=10
-- vector_font_compute_glyph_0_pixels=255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,127,127,127,255,0,0,0,0,0,255,127,127,127,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_0_width=6
+- vector_font_compute_glyph_0_pixels=127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,191,127,191,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_0_command_count=42
 - vector_font_compute_glyph_0_command_0=0
 - vector_font_compute_glyph_0_command_1=0
@@ -689,11 +689,11 @@
 - vector_font_compute_glyph_0_command_39=3
 - vector_font_compute_glyph_0_command_40=0
 - vector_font_compute_glyph_0_command_41=0
-- vector_font_compute_glyph_1_checksum=414452
-- vector_font_compute_glyph_1_ink_pixels=33
+- vector_font_compute_glyph_1_checksum=64634
+- vector_font_compute_glyph_1_ink_pixels=13
 - vector_font_compute_glyph_1_codepoint=65
-- vector_font_compute_glyph_1_width=11
-- vector_font_compute_glyph_1_pixels=0,0,191,0,0,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,0,63,255,63,0,0,0,0,0,0,0,0,127,255,127,0,0,0,0,0,0,0,0,127,63,127,0,0,0,0,0,0,0,0,255,0,255,0,0,0,0,0,0,0,0,255,0,255,0,0,0,0,0,0,0,63,255,255,255,63,0,0,0,0,0,0,127,255,0,63,127,0,0,0,0,0,0,127,255,0,0,127,0,0,0,0,0,0,255,127,0,0,191,0,0,0,0,0,0,255,127,0,0,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_1_width=7
+- vector_font_compute_glyph_1_pixels=0,191,0,0,0,0,0,0,255,0,0,0,0,0,0,191,0,0,0,0,0,127,0,127,0,0,0,0,127,127,127,0,0,0,0,191,0,127,0,0,0,0,255,0,127,0,0,0,0,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_1_command_count=45
 - vector_font_compute_glyph_1_command_0=0
 - vector_font_compute_glyph_1_command_1=0
@@ -740,11 +740,11 @@
 - vector_font_compute_glyph_1_command_42=3
 - vector_font_compute_glyph_1_command_43=0
 - vector_font_compute_glyph_1_command_44=0
-- vector_font_compute_glyph_2_checksum=296579
-- vector_font_compute_glyph_2_ink_pixels=34
+- vector_font_compute_glyph_2_checksum=42515
+- vector_font_compute_glyph_2_ink_pixels=16
 - vector_font_compute_glyph_2_codepoint=82
-- vector_font_compute_glyph_2_width=10
-- vector_font_compute_glyph_2_pixels=255,255,255,191,0,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,0,0,127,127,0,0,0,0,0,255,127,127,255,63,0,0,0,0,0,255,0,63,0,0,0,0,0,0,0,255,0,0,127,0,0,0,0,0,0,255,0,0,63,0,0,0,0,0,0,255,0,0,63,0,0,0,0,0,0,255,0,0,0,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_2_width=6
+- vector_font_compute_glyph_2_pixels=191,127,127,0,0,0,127,0,255,0,0,0,127,0,255,0,0,0,127,0,255,0,0,0,127,63,127,0,0,0,127,0,0,0,0,0,127,0,63,0,0,0,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_2_command_count=57
 - vector_font_compute_glyph_2_command_0=0
 - vector_font_compute_glyph_2_command_1=0
@@ -803,11 +803,11 @@
 - vector_font_compute_glyph_2_command_54=3
 - vector_font_compute_glyph_2_command_55=0
 - vector_font_compute_glyph_2_command_56=0
-- vector_font_compute_glyph_3_checksum=407799
-- vector_font_compute_glyph_3_ink_pixels=31
+- vector_font_compute_glyph_3_checksum=61747
+- vector_font_compute_glyph_3_ink_pixels=18
 - vector_font_compute_glyph_3_codepoint=68
-- vector_font_compute_glyph_3_width=10
-- vector_font_compute_glyph_3_pixels=255,255,255,63,0,0,0,0,0,0,255,0,0,255,63,0,0,0,0,0,255,0,0,63,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,63,191,0,0,0,0,0,255,255,255,191,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_3_width=6
+- vector_font_compute_glyph_3_pixels=191,127,63,0,0,0,127,0,191,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,255,255,63,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_3_command_count=45
 - vector_font_compute_glyph_3_command_0=0
 - vector_font_compute_glyph_3_command_1=0
@@ -854,11 +854,11 @@
 - vector_font_compute_glyph_3_command_42=3
 - vector_font_compute_glyph_3_command_43=0
 - vector_font_compute_glyph_3_command_44=0
-- vector_font_compute_glyph_4_checksum=282552
-- vector_font_compute_glyph_4_ink_pixels=26
+- vector_font_compute_glyph_4_checksum=55471
+- vector_font_compute_glyph_4_ink_pixels=13
 - vector_font_compute_glyph_4_codepoint=69
-- vector_font_compute_glyph_4_width=9
-- vector_font_compute_glyph_4_pixels=255,255,255,255,127,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,255,255,255,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_4_width=6
+- vector_font_compute_glyph_4_pixels=191,127,127,0,0,0,127,0,0,0,0,0,127,0,0,0,0,0,191,127,0,0,0,0,127,0,0,0,0,0,127,0,0,0,0,0,127,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_4_command_count=42
 - vector_font_compute_glyph_4_command_0=0
 - vector_font_compute_glyph_4_command_1=0
@@ -902,11 +902,11 @@
 - vector_font_compute_glyph_4_command_39=3
 - vector_font_compute_glyph_4_command_40=0
 - vector_font_compute_glyph_4_command_41=0
-- vector_font_compute_glyph_5_checksum=447921
-- vector_font_compute_glyph_5_ink_pixels=36
+- vector_font_compute_glyph_5_checksum=59667
+- vector_font_compute_glyph_5_ink_pixels=19
 - vector_font_compute_glyph_5_codepoint=78
-- vector_font_compute_glyph_5_width=10
-- vector_font_compute_glyph_5_pixels=255,0,0,0,255,0,0,0,0,0,255,63,0,0,255,0,0,0,0,0,255,127,0,0,255,0,0,0,0,0,255,191,0,0,255,0,0,0,0,0,255,127,63,0,255,0,0,0,0,0,255,0,127,0,255,0,0,0,0,0,255,0,191,0,255,0,0,0,0,0,255,0,127,63,255,0,0,0,0,0,255,0,0,127,255,0,0,0,0,0,255,0,0,191,255,0,0,0,0,0,255,0,0,127,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_5_width=6
+- vector_font_compute_glyph_5_pixels=127,0,127,0,0,0,191,0,127,0,0,0,191,0,127,0,0,0,127,127,127,0,0,0,127,63,127,0,0,0,127,63,127,0,0,0,127,0,255,0,0,0,127,0,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_5_command_count=36
 - vector_font_compute_glyph_5_command_0=0
 - vector_font_compute_glyph_5_command_1=0
@@ -944,11 +944,11 @@
 - vector_font_compute_glyph_5_command_33=3
 - vector_font_compute_glyph_5_command_34=0
 - vector_font_compute_glyph_5_command_35=0
-- vector_font_compute_glyph_6_checksum=282552
-- vector_font_compute_glyph_6_ink_pixels=26
+- vector_font_compute_glyph_6_checksum=55471
+- vector_font_compute_glyph_6_ink_pixels=13
 - vector_font_compute_glyph_6_codepoint=69
-- vector_font_compute_glyph_6_width=9
-- vector_font_compute_glyph_6_pixels=255,255,255,255,127,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,127,127,63,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,255,255,255,127,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_6_width=6
+- vector_font_compute_glyph_6_pixels=191,127,127,0,0,0,127,0,0,0,0,0,127,0,0,0,0,0,191,127,0,0,0,0,127,0,0,0,0,0,127,0,0,0,0,0,127,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_6_command_count=42
 - vector_font_compute_glyph_6_command_0=0
 - vector_font_compute_glyph_6_command_1=0
@@ -992,11 +992,11 @@
 - vector_font_compute_glyph_6_command_39=3
 - vector_font_compute_glyph_6_command_40=0
 - vector_font_compute_glyph_6_command_41=0
-- vector_font_compute_glyph_7_checksum=407799
-- vector_font_compute_glyph_7_ink_pixels=31
+- vector_font_compute_glyph_7_checksum=61747
+- vector_font_compute_glyph_7_ink_pixels=18
 - vector_font_compute_glyph_7_codepoint=68
-- vector_font_compute_glyph_7_width=10
-- vector_font_compute_glyph_7_pixels=255,255,255,63,0,0,0,0,0,0,255,0,0,255,63,0,0,0,0,0,255,0,0,63,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,0,255,0,0,0,0,0,255,0,0,63,191,0,0,0,0,0,255,255,255,191,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+- vector_font_compute_glyph_7_width=6
+- vector_font_compute_glyph_7_pixels=191,127,63,0,0,0,127,0,191,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,127,0,127,0,0,0,255,255,63,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 - vector_font_compute_glyph_7_command_count=45
 - vector_font_compute_glyph_7_command_0=0
 - vector_font_compute_glyph_7_command_1=0
@@ -1045,39 +1045,39 @@
 - vector_font_compute_glyph_7_command_44=0
 - vector_font_compute_cuda_status=pass
 - vector_font_compute_cuda_reason=cuda-vector-font-rasterize-kernel-matched-cpu
-- vector_font_compute_cuda_checksum=13090264
+- vector_font_compute_cuda_checksum=2073732
 - vector_font_compute_cuda_glyph_count=4
 - vector_font_compute_cuda_glyph_0_codepoint=72
-- vector_font_compute_cuda_glyph_0_font_size=24
-- vector_font_compute_cuda_glyph_0_width=10
-- vector_font_compute_cuda_glyph_0_height=24
-- vector_font_compute_cuda_glyph_0_advance=11
-- vector_font_compute_cuda_glyph_0_checksum=399885
-- vector_font_compute_cuda_glyph_0_ink_pixels=30
+- vector_font_compute_cuda_glyph_0_font_size=16
+- vector_font_compute_cuda_glyph_0_width=6
+- vector_font_compute_cuda_glyph_0_height=16
+- vector_font_compute_cuda_glyph_0_advance=7
+- vector_font_compute_cuda_glyph_0_checksum=52301
+- vector_font_compute_cuda_glyph_0_ink_pixels=17
 - vector_font_compute_cuda_glyph_1_codepoint=82
-- vector_font_compute_cuda_glyph_1_font_size=24
-- vector_font_compute_cuda_glyph_1_width=10
-- vector_font_compute_cuda_glyph_1_height=24
-- vector_font_compute_cuda_glyph_1_advance=11
-- vector_font_compute_cuda_glyph_1_checksum=296579
-- vector_font_compute_cuda_glyph_1_ink_pixels=34
+- vector_font_compute_cuda_glyph_1_font_size=16
+- vector_font_compute_cuda_glyph_1_width=6
+- vector_font_compute_cuda_glyph_1_height=16
+- vector_font_compute_cuda_glyph_1_advance=7
+- vector_font_compute_cuda_glyph_1_checksum=42515
+- vector_font_compute_cuda_glyph_1_ink_pixels=16
 - vector_font_compute_opencl_status=pass
 - vector_font_compute_opencl_reason=opencl-vector-font-rasterize-kernel-matched-cpu
-- vector_font_compute_opencl_checksum=13090264
+- vector_font_compute_opencl_checksum=2073732
 - vector_font_compute_opencl_glyph_count=4
 - vector_font_compute_opencl_glyph_0_codepoint=65
-- vector_font_compute_opencl_glyph_0_font_size=24
-- vector_font_compute_opencl_glyph_0_width=11
-- vector_font_compute_opencl_glyph_0_height=24
-- vector_font_compute_opencl_glyph_0_advance=12
-- vector_font_compute_opencl_glyph_0_checksum=414452
-- vector_font_compute_opencl_glyph_0_ink_pixels=33
+- vector_font_compute_opencl_glyph_0_font_size=16
+- vector_font_compute_opencl_glyph_0_width=7
+- vector_font_compute_opencl_glyph_0_height=16
+- vector_font_compute_opencl_glyph_0_advance=8
+- vector_font_compute_opencl_glyph_0_checksum=64634
+- vector_font_compute_opencl_glyph_0_ink_pixels=13
 - vector_font_compute_opencl_glyph_1_codepoint=68
-- vector_font_compute_opencl_glyph_1_font_size=24
-- vector_font_compute_opencl_glyph_1_width=10
-- vector_font_compute_opencl_glyph_1_height=24
-- vector_font_compute_opencl_glyph_1_advance=11
-- vector_font_compute_opencl_glyph_1_checksum=407799
-- vector_font_compute_opencl_glyph_1_ink_pixels=31
+- vector_font_compute_opencl_glyph_1_font_size=16
+- vector_font_compute_opencl_glyph_1_width=6
+- vector_font_compute_opencl_glyph_1_height=16
+- vector_font_compute_opencl_glyph_1_advance=7
+- vector_font_compute_opencl_glyph_1_checksum=61747
+- vector_font_compute_opencl_glyph_1_ink_pixels=18
 - vector_font_compute_blur_or_tolerance_used=false
-- vector_font_compute_summary=WebRenderVectorFontComputeEvidence[scene=wm-vector-text-grid cpu_checksum=13090264 cpu_ink_pixels=247 cuda_status=pass cuda_reason=cuda-vector-font-rasterize-kernel-matched-cpu cuda_checksum=13090264 opencl_status=pass opencl_reason=opencl-vector-font-rasterize-kernel-matched-cpu opencl_checksum=13090264 blur_or_tolerance_used=false status=pass reason=pass]
+- vector_font_compute_summary=WebRenderVectorFontComputeEvidence[scene=wm-vector-text-grid cpu_checksum=2073732 cpu_ink_pixels=127 cuda_status=pass cuda_reason=cuda-vector-font-rasterize-kernel-matched-cpu cuda_checksum=2073732 opencl_status=pass opencl_reason=opencl-vector-font-rasterize-kernel-matched-cpu opencl_checksum=2073732 blur_or_tolerance_used=false status=pass reason=pass]
