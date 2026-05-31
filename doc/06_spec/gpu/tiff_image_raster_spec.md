@@ -102,6 +102,36 @@ expect(pixel(surface, 1, 1)).to_equal([100, 110, 120, 255])
 
 </details>
 
+#### renders 16-bit tiled decoded TIFF pixels through the raster image path exactly
+
+1. var rasterizer = Rasterizer new
+
+2. var surface = GpuSurface create
+
+3. rasterizer raster draw image
+   - Expected: pixel(surface, 0, 0) equals `[0, 128, 255, 255]`
+   - Expected: pixel(surface, 1, 0) equals `[1, 32, 64, 255]`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var rasterizer = Rasterizer.new(Logger.new("tiff-raster-rgb16-tile-spec"))
+var surface = GpuSurface.create(1, 2, 1, SurfaceFormat.RGBA8)
+val image = decode_tiff(_tiff_le_2x1_rgb16_single_tile())
+
+rasterizer.raster_draw_image(surface, image, 0, 0, 2, 1)
+
+expect(pixel(surface, 0, 0)).to_equal([0, 128, 255, 255])
+expect(pixel(surface, 1, 0)).to_equal([1, 32, 64, 255])
+```
+
+</details>
+
 #### renders multi-tile decoded TIFF pixels with edge padding exactly
 
 1. var rasterizer = Rasterizer new
@@ -337,8 +367,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
