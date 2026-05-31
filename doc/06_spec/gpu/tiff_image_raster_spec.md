@@ -102,6 +102,44 @@ expect(pixel(surface, 1, 1)).to_equal([100, 110, 120, 255])
 
 </details>
 
+#### renders multi-tile decoded TIFF pixels with edge padding exactly
+
+1. var rasterizer = Rasterizer new
+
+2. var surface = GpuSurface create
+
+3. rasterizer raster draw image
+   - Expected: pixel(surface, 0, 0) equals `[10, 20, 30, 255]`
+   - Expected: pixel(surface, 1, 0) equals `[40, 50, 60, 255]`
+   - Expected: pixel(surface, 2, 0) equals `[70, 80, 90, 255]`
+   - Expected: pixel(surface, 0, 1) equals `[100, 110, 120, 255]`
+   - Expected: pixel(surface, 1, 1) equals `[30, 40, 50, 255]`
+   - Expected: pixel(surface, 2, 1) equals `[60, 70, 80, 255]`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var rasterizer = Rasterizer.new(Logger.new("tiff-raster-multitile-spec"))
+var surface = GpuSurface.create(1, 3, 2, SurfaceFormat.RGBA8)
+val image = decode_tiff(_tiff_le_3x2_rgb_four_tiles())
+
+rasterizer.raster_draw_image(surface, image, 0, 0, 3, 2)
+
+expect(pixel(surface, 0, 0)).to_equal([10, 20, 30, 255])
+expect(pixel(surface, 1, 0)).to_equal([40, 50, 60, 255])
+expect(pixel(surface, 2, 0)).to_equal([70, 80, 90, 255])
+expect(pixel(surface, 0, 1)).to_equal([100, 110, 120, 255])
+expect(pixel(surface, 1, 1)).to_equal([30, 40, 50, 255])
+expect(pixel(surface, 2, 1)).to_equal([60, 70, 80, 255])
+```
+
+</details>
+
 #### renders PackBits decoded TIFF pixels through the raster image path exactly
 
 1. var rasterizer = Rasterizer new
@@ -299,8 +337,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
