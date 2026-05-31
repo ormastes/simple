@@ -2334,8 +2334,15 @@ impl JsInterpreter:
                 val memory_byte_len = memory_page_count * 65536
                 var memory_addrs: [i64] = []
                 var memory_bytes: [i64] = []
+                var control_kinds: [i64] = []
+                var control_body_starts: [i64] = []
+                var control_end_positions: [i64] = []
                 var cursor = instr_start
+                var step_count = 0
                 while cursor < body_end:
+                    step_count = step_count + 1
+                    if step_count > 10000:
+                        return -1
                     val opcode = self._native_webassembly_hex_byte_at(hex, cursor)
                     if opcode == 0:
                         return -3
@@ -2345,6 +2352,26 @@ impl JsInterpreter:
                         val block_type = self._native_webassembly_hex_byte_at(hex, cursor + 1)
                         if block_type != 64 and block_type != 127:
                             return -1
+                        val end_pos = self._native_webassembly_control_end_pos(hex, cursor + 2, body_end)
+                        if end_pos < 0:
+                            return -1
+                        control_kinds.push(0)
+                        control_body_starts.push(cursor + 2)
+                        control_end_positions.push(end_pos)
+                        cursor = cursor + 2
+                        continue
+                    if opcode == 3:
+                        if cursor + 1 >= body_end:
+                            return -1
+                        val block_type = self._native_webassembly_hex_byte_at(hex, cursor + 1)
+                        if block_type != 64 and block_type != 127:
+                            return -1
+                        val end_pos = self._native_webassembly_control_end_pos(hex, cursor + 2, body_end)
+                        if end_pos < 0:
+                            return -1
+                        control_kinds.push(1)
+                        control_body_starts.push(cursor + 2)
+                        control_end_positions.push(end_pos)
                         cursor = cursor + 2
                         continue
                     if opcode == 4:
@@ -2359,6 +2386,9 @@ impl JsInterpreter:
                             return -1
                         val condition = stack.get(stack.len() - 1)
                         stack.pop()
+                        control_kinds.push(0)
+                        control_body_starts.push(cursor + 2)
+                        control_end_positions.push(end_pos)
                         if condition != 0:
                             cursor = cursor + 2
                         else:
@@ -2371,35 +2401,63 @@ impl JsInterpreter:
                         val end_pos = self._native_webassembly_control_end_pos(hex, cursor + 1, body_end)
                         if end_pos < 0:
                             return -1
+                        if control_end_positions.len() > 0 and control_end_positions.get(control_end_positions.len() - 1) == end_pos:
+                            control_end_positions.pop()
+                            control_body_starts.pop()
+                            control_kinds.pop()
                         cursor = end_pos + 1
                         continue
                     if opcode == 12:
                         val label_index = self._native_webassembly_read_leb_value(hex, cursor + 1)
                         val next_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
-                        if label_index != 0 or next_pos < 0 or next_pos > body_end:
+                        if label_index < 0 or next_pos < 0 or next_pos > body_end or label_index >= control_kinds.len():
                             return -1
-                        val end_pos = self._native_webassembly_control_end_pos(hex, next_pos, body_end)
-                        if end_pos < 0:
-                            return -1
-                        cursor = end_pos + 1
+                        val target_control = control_kinds.len() - 1 - label_index
+                        if control_kinds.get(target_control) == 1:
+                            while control_kinds.len() > target_control + 1:
+                                control_end_positions.pop()
+                                control_body_starts.pop()
+                                control_kinds.pop()
+                            cursor = control_body_starts.get(target_control)
+                        else:
+                            val target_end = control_end_positions.get(target_control)
+                            while control_kinds.len() > target_control:
+                                control_end_positions.pop()
+                                control_body_starts.pop()
+                                control_kinds.pop()
+                            cursor = target_end + 1
                         continue
                     if opcode == 13:
                         val label_index = self._native_webassembly_read_leb_value(hex, cursor + 1)
                         val next_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
-                        if label_index != 0 or next_pos < 0 or next_pos > body_end or stack.len() < 1:
+                        if label_index < 0 or next_pos < 0 or next_pos > body_end or stack.len() < 1 or label_index >= control_kinds.len():
                             return -1
                         val condition = stack.get(stack.len() - 1)
                         stack.pop()
                         if condition != 0:
-                            val end_pos = self._native_webassembly_control_end_pos(hex, next_pos, body_end)
-                            if end_pos < 0:
-                                return -1
-                            cursor = end_pos + 1
+                            val target_control = control_kinds.len() - 1 - label_index
+                            if control_kinds.get(target_control) == 1:
+                                while control_kinds.len() > target_control + 1:
+                                    control_end_positions.pop()
+                                    control_body_starts.pop()
+                                    control_kinds.pop()
+                                cursor = control_body_starts.get(target_control)
+                            else:
+                                val target_end = control_end_positions.get(target_control)
+                                while control_kinds.len() > target_control:
+                                    control_end_positions.pop()
+                                    control_body_starts.pop()
+                                    control_kinds.pop()
+                                cursor = target_end + 1
                         else:
                             cursor = next_pos
                         continue
                     if opcode == 11:
                         if cursor + 1 != body_end:
+                            if control_end_positions.len() > 0 and control_end_positions.get(control_end_positions.len() - 1) == cursor:
+                                control_end_positions.pop()
+                                control_body_starts.pop()
+                                control_kinds.pop()
                             cursor = cursor + 1
                             continue
                         if stack.len() != 1:
