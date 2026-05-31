@@ -17,7 +17,10 @@
 - simple cache hits: 1000
 - simple cache stores: 1
 - best simple frame us: 5
-- best baseline frame us: 82
+- best baseline frame us: 81
+- baseline/simple speedup x1000: 16200
+- simple ARGB path: build/node_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/simple-argb.json
+- baseline ARGB path: build/node_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/node-argb.json
 
 ## Simple Output
 - ## trial 1
@@ -58,11 +61,12 @@
 - checksum=26382094520080
 - weighted_checksum=81060129800301416
 - total_checksum=26382094520080000
-- frame_us=5
+- frame_us=4
 - backend_name=software
 - optimized_path=static-pixel-cache
 - cache_hits=1000
 - cache_stores=1
+- argb_path=build/node_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/simple-argb.json
 - blur_or_tolerance_used=false
 - renderer=pure-simple-web-engine2d-cache
 - scene=simple-web-layout-commandbar-taskbar-card
@@ -77,6 +81,7 @@
 - optimized_path=static-pixel-cache
 - cache_hits=1000
 - cache_stores=1
+- argb_path=build/node_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/simple-argb.json
 - blur_or_tolerance_used=false
 - ## trial 2
 - [33mwarning[0m: Deprecated syntax for type parameters
@@ -116,11 +121,12 @@
 - checksum=26382094520080
 - weighted_checksum=81060129800301416
 - total_checksum=26382094520080000
-- frame_us=5
+- frame_us=4
 - backend_name=software
 - optimized_path=static-pixel-cache
 - cache_hits=1000
 - cache_stores=1
+- argb_path=build/node_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/simple-argb.json
 - blur_or_tolerance_used=false
 - renderer=pure-simple-web-engine2d-cache
 - scene=simple-web-layout-commandbar-taskbar-card
@@ -135,6 +141,7 @@
 - optimized_path=static-pixel-cache
 - cache_hits=1000
 - cache_stores=1
+- argb_path=build/node_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/simple-argb.json
 - blur_or_tolerance_used=false
 - ## trial 3
 - [33mwarning[0m: Deprecated syntax for type parameters
@@ -179,6 +186,7 @@
 - optimized_path=static-pixel-cache
 - cache_hits=1000
 - cache_stores=1
+- argb_path=build/node_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/simple-argb.json
 - blur_or_tolerance_used=false
 - renderer=pure-simple-web-engine2d-cache
 - scene=simple-web-layout-commandbar-taskbar-card
@@ -193,6 +201,7 @@
 - optimized_path=static-pixel-cache
 - cache_hits=1000
 - cache_stores=1
+- argb_path=build/node_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/simple-argb.json
 - blur_or_tolerance_used=false
 
 ## Baseline Output
@@ -205,7 +214,7 @@
 - checksum=26382094520080
 - weighted_checksum=81060129800301416
 - total_checksum=26382094520080000
-- frame_us=82
+- frame_us=83
 - blur_or_tolerance_used=false
 - ## trial 2
 - renderer=node-simple-web-engine2d-baseline
@@ -216,7 +225,7 @@
 - checksum=26382094520080
 - weighted_checksum=81060129800301416
 - total_checksum=26382094520080000
-- frame_us=85
+- frame_us=83
 - blur_or_tolerance_used=false
 - ## trial 3
 - renderer=node-simple-web-engine2d-baseline
@@ -227,5 +236,5 @@
 - checksum=26382094520080
 - weighted_checksum=81060129800301416
 - total_checksum=26382094520080000
-- frame_us=85
+- frame_us=81
 - blur_or_tolerance_used=false

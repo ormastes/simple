@@ -86,3 +86,25 @@ color model, CIE XYZ as the conversion/PCS model, and initialize TIFF/JPEG XL
 decode stages plus ICC/Lab/XYZ transform kernels lazily per asset, surface, or
 document. Whole-library startup switching would increase cold-start time and RSS
 for the common sRGB path while giving no hot-frame benefit.
+
+## 2026-05-31 Codex Object-Evidence Refresh
+
+Additional source check:
+
+- W3C CSS Color 4 continues to expose Lab/LCH and XYZ-family spaces as web color
+  syntax, which supports keeping CIELAB as the public semantic color space and
+  CIE XYZ as an explicit conversion space instead of treating them as one
+  framebuffer format.
+- TIFF 6.0 includes CIELAB image support and profile-oriented full-color use
+  cases, but its broad surface area means production support has to be proven by
+  pixel fixtures across strips, tiles, planar/chunky samples, PackBits, palette,
+  high-bit-depth, alpha, and Lab conversion.
+- libjxl decoder APIs expose ICC/structured color profile handling separately
+  from pixel decode. That supports the current staging split: metadata/color
+  profile detection first, followed by explicit Modular and VarDCT pixel-decode
+  milestones before claiming full JPEG XL rendering support.
+
+Current evidence implication: TIFF has real pure Simple pixel raster coverage in
+the browser paint path. JPEG XL support is still limited to format detection,
+dimension metadata, color metadata planning, and exact placeholder raster
+behavior; full JPEG XL pixel decode must remain visible as unfinished work.

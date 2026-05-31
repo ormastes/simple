@@ -16,8 +16,11 @@
 - optimized path: static-pixel-cache
 - simple cache hits: 1000
 - simple cache stores: 1
-- best simple frame us: 5
-- best baseline frame us: 363
+- best simple frame us: 4
+- best baseline frame us: 400
+- baseline/simple speedup x1000: 100000
+- simple ARGB path: build/bun_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/simple-argb.json
+- baseline ARGB path: build/bun_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/bun-argb.json
 
 ## Simple Output
 - ## trial 1
@@ -58,11 +61,12 @@
 - checksum=26382094520080
 - weighted_checksum=81060129800301416
 - total_checksum=26382094520080000
-- frame_us=5
+- frame_us=4
 - backend_name=software
 - optimized_path=static-pixel-cache
 - cache_hits=1000
 - cache_stores=1
+- argb_path=build/bun_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/simple-argb.json
 - blur_or_tolerance_used=false
 - renderer=pure-simple-web-engine2d-cache
 - scene=simple-web-layout-commandbar-taskbar-card
@@ -72,11 +76,12 @@
 - checksum=26382094520080
 - weighted_checksum=81060129800301416
 - total_checksum=26382094520080000
-- frame_us=5
+- frame_us=4
 - backend_name=software
 - optimized_path=static-pixel-cache
 - cache_hits=1000
 - cache_stores=1
+- argb_path=build/bun_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/simple-argb.json
 - blur_or_tolerance_used=false
 - ## trial 2
 - [33mwarning[0m: Deprecated syntax for type parameters
@@ -121,6 +126,7 @@
 - optimized_path=static-pixel-cache
 - cache_hits=1000
 - cache_stores=1
+- argb_path=build/bun_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/simple-argb.json
 - blur_or_tolerance_used=false
 - renderer=pure-simple-web-engine2d-cache
 - scene=simple-web-layout-commandbar-taskbar-card
@@ -130,11 +136,12 @@
 - checksum=26382094520080
 - weighted_checksum=81060129800301416
 - total_checksum=26382094520080000
-- frame_us=6
+- frame_us=5
 - backend_name=software
 - optimized_path=static-pixel-cache
 - cache_hits=1000
 - cache_stores=1
+- argb_path=build/bun_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/simple-argb.json
 - blur_or_tolerance_used=false
 - ## trial 3
 - [33mwarning[0m: Deprecated syntax for type parameters
@@ -179,6 +186,7 @@
 - optimized_path=static-pixel-cache
 - cache_hits=1000
 - cache_stores=1
+- argb_path=build/bun_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/simple-argb.json
 - blur_or_tolerance_used=false
 - renderer=pure-simple-web-engine2d-cache
 - scene=simple-web-layout-commandbar-taskbar-card
@@ -193,6 +201,7 @@
 - optimized_path=static-pixel-cache
 - cache_hits=1000
 - cache_stores=1
+- argb_path=build/bun_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/simple-argb.json
 - blur_or_tolerance_used=false
 
 ## Baseline Output
@@ -205,7 +214,7 @@
 - checksum=26382094520080
 - weighted_checksum=81060129800301416
 - total_checksum=26382094520080000
-- frame_us=384
+- frame_us=407
 - blur_or_tolerance_used=false
 - ## trial 2
 - renderer=bun-simple-web-engine2d-baseline
@@ -216,7 +225,7 @@
 - checksum=26382094520080
 - weighted_checksum=81060129800301416
 - total_checksum=26382094520080000
-- frame_us=383
+- frame_us=400
 - blur_or_tolerance_used=false
 - ## trial 3
 - renderer=bun-simple-web-engine2d-baseline
@@ -227,5 +236,5 @@
 - checksum=26382094520080
 - weighted_checksum=81060129800301416
 - total_checksum=26382094520080000
-- frame_us=363
+- frame_us=404
 - blur_or_tolerance_used=false

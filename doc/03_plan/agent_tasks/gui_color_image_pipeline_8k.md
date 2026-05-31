@@ -63,3 +63,21 @@ conversion stages.
 - Extend JPEG XL work by capability slice: codestream dimensions/color metadata,
   orientation/extra channels, Modular pixel decode subset, then VarDCT subset.
 - Keep every web/browser/image milestone tied to exact RGBA bitmap evidence.
+
+## 2026-05-31 Evidence Status
+
+- Done: 8K BGRA8 packed-surface planning keeps the default hot path at
+  132,710,400 bytes and does not initialize Lab/XYZ transforms, TIFF decode, or
+  JPEG XL decode at startup.
+- Done: CIELAB default semantic color and CIE XYZ conversion-space behavior are
+  covered by focused color specs and the 8K evidence script.
+- Done: TIFF pure Simple raster coverage includes exact web/browser pixels for
+  strips, tiles, PackBits, planar RGB, palette, gray, RGB/RGBA, 16-bit samples,
+  and Lab-like conversion paths.
+- Done: commandbar/taskbar/card web-layout rendering now records exact Simple
+  and Node/Bun ARGB files, mismatch count 0, no blur/tolerance, and static pixel
+  cache perf wins.
+- Remaining: JPEG XL is only metadata-sized placeholder raster support today;
+  full pure Simple pixel decode still needs separate Modular and VarDCT tasks.
+- Remaining: live QEMU WM capture and QEMU-side GTK/Simple perf remain blocked
+  until a real `QEMU_QMP_SOCKET` and guest setup are available.
