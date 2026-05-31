@@ -389,6 +389,52 @@ value_of() {
     sed -n "s/^${key}=//p" "$SIMPLE_OUT" | tail -n 1
 }
 
+set_var() {
+    name="$1"
+    value="$2"
+    eval "$name=\$value"
+}
+
+get_var() {
+    name="$1"
+    eval "printf '%s' \"\${$name:-}\""
+}
+
+export_vector_font_env() {
+    export CUDA_VECTOR_FONT_STATUS="$CUDA_STATUS"
+    export CUDA_VECTOR_FONT_REASON="$CUDA_REASON"
+    export CUDA_VECTOR_FONT_CHECKSUM="$CUDA_CHECKSUM"
+    export CUDA_VECTOR_FONT_GLYPH_COUNT="$CUDA_GLYPH_COUNT"
+    slot=0
+    while [ "$slot" -lt "$CUDA_GLYPH_COUNT" ]; do
+        value="$(get_var "CUDA_GLYPH_${slot}_CODEPOINT")"; eval "export CUDA_VECTOR_FONT_GLYPH_${slot}_CODEPOINT=\"\$value\""
+        value="$(get_var "CUDA_GLYPH_${slot}_FONT_SIZE")"; eval "export CUDA_VECTOR_FONT_GLYPH_${slot}_FONT_SIZE=\"\$value\""
+        value="$(get_var "CUDA_GLYPH_${slot}_WIDTH")"; eval "export CUDA_VECTOR_FONT_GLYPH_${slot}_WIDTH=\"\$value\""
+        value="$(get_var "CUDA_GLYPH_${slot}_HEIGHT")"; eval "export CUDA_VECTOR_FONT_GLYPH_${slot}_HEIGHT=\"\$value\""
+        value="$(get_var "CUDA_GLYPH_${slot}_ADVANCE")"; eval "export CUDA_VECTOR_FONT_GLYPH_${slot}_ADVANCE=\"\$value\""
+        value="$(get_var "CUDA_GLYPH_${slot}_CHECKSUM")"; eval "export CUDA_VECTOR_FONT_GLYPH_${slot}_CHECKSUM=\"\$value\""
+        value="$(get_var "CUDA_GLYPH_${slot}_INK_PIXELS")"; eval "export CUDA_VECTOR_FONT_GLYPH_${slot}_INK_PIXELS=\"\$value\""
+        value="$(get_var "CUDA_GLYPH_${slot}_PIXELS")"; eval "export CUDA_VECTOR_FONT_GLYPH_${slot}_PIXELS=\"\$value\""
+        slot=$((slot + 1))
+    done
+    export OPENCL_VECTOR_FONT_STATUS="$OPENCL_STATUS"
+    export OPENCL_VECTOR_FONT_REASON="$OPENCL_REASON"
+    export OPENCL_VECTOR_FONT_CHECKSUM="$OPENCL_CHECKSUM"
+    export OPENCL_VECTOR_FONT_GLYPH_COUNT="$OPENCL_GLYPH_COUNT"
+    slot=0
+    while [ "$slot" -lt "$OPENCL_GLYPH_COUNT" ]; do
+        value="$(get_var "OPENCL_GLYPH_${slot}_CODEPOINT")"; eval "export OPENCL_VECTOR_FONT_GLYPH_${slot}_CODEPOINT=\"\$value\""
+        value="$(get_var "OPENCL_GLYPH_${slot}_FONT_SIZE")"; eval "export OPENCL_VECTOR_FONT_GLYPH_${slot}_FONT_SIZE=\"\$value\""
+        value="$(get_var "OPENCL_GLYPH_${slot}_WIDTH")"; eval "export OPENCL_VECTOR_FONT_GLYPH_${slot}_WIDTH=\"\$value\""
+        value="$(get_var "OPENCL_GLYPH_${slot}_HEIGHT")"; eval "export OPENCL_VECTOR_FONT_GLYPH_${slot}_HEIGHT=\"\$value\""
+        value="$(get_var "OPENCL_GLYPH_${slot}_ADVANCE")"; eval "export OPENCL_VECTOR_FONT_GLYPH_${slot}_ADVANCE=\"\$value\""
+        value="$(get_var "OPENCL_GLYPH_${slot}_CHECKSUM")"; eval "export OPENCL_VECTOR_FONT_GLYPH_${slot}_CHECKSUM=\"\$value\""
+        value="$(get_var "OPENCL_GLYPH_${slot}_INK_PIXELS")"; eval "export OPENCL_VECTOR_FONT_GLYPH_${slot}_INK_PIXELS=\"\$value\""
+        value="$(get_var "OPENCL_GLYPH_${slot}_PIXELS")"; eval "export OPENCL_VECTOR_FONT_GLYPH_${slot}_PIXELS=\"\$value\""
+        slot=$((slot + 1))
+    done
+}
+
 cpu_checksum="$(value_of vector_font_compute_cpu_checksum)"
 cpu_ink_pixels="$(value_of vector_font_compute_cpu_ink_pixels)"
 cpu_glyph0_codepoint="$(value_of vector_font_compute_glyph_0_codepoint)"
@@ -415,6 +461,8 @@ write_vector_font_arrays_h() {
         echo "#define VECTOR_FONT_EVIDENCE_ARRAYS_H"
         echo "#define VECTOR_FONT_GLYPH_COUNT ${#TEXT_RUN}"
         echo "#define VECTOR_FONT_FONT_SIZE $FONT_SIZE"
+        echo "#define VECTOR_FONT_RETURNED_GLYPH_STRIDE 4096"
+        echo "#define VECTOR_FONT_MAX_RETURNED_GLYPHS 8"
         echo "#ifdef __CUDACC__"
         echo "#define VECTOR_FONT_TABLE __constant__"
         echo "#else"
@@ -568,30 +616,28 @@ __global__ void vector_font_rasterize(unsigned long long *out, unsigned int *gly
                     glyph_checksum += (unsigned long long)alpha * (unsigned long long)(pixel_index + 1);
                     glyph_ink++;
                 }
-                if (glyph == 0) {
-                    glyph_pixels[row * width + col] = (unsigned int)alpha;
-                }
-                if (glyph == 2) {
-                    glyph_pixels[4096 + row * width + col] = (unsigned int)alpha;
+                if ((glyph % 2) == 0) {
+                    int return_slot = glyph / 2;
+                    if (return_slot < VECTOR_FONT_MAX_RETURNED_GLYPHS) {
+                        glyph_pixels[return_slot * VECTOR_FONT_RETURNED_GLYPH_STRIDE + row * width + col] = (unsigned int)alpha;
+                    }
                 }
             }
         }
         glyph_checksum += (unsigned long long)width * 31ULL + (unsigned long long)height * 17ULL + (unsigned long long)advance;
-        if (glyph == 0) {
-            out[2] = glyph_checksum;
-            out[3] = glyph_ink;
-            out[4] = (unsigned long long)width;
-            out[5] = (unsigned long long)height;
-            out[6] = (unsigned long long)advance;
-            out[7] = (unsigned long long)(width * height);
-        }
-        if (glyph == 2) {
-            out[8] = glyph_checksum;
-            out[9] = glyph_ink;
-            out[10] = (unsigned long long)width;
-            out[11] = (unsigned long long)height;
-            out[12] = (unsigned long long)advance;
-            out[13] = (unsigned long long)(width * height);
+        if ((glyph % 2) == 0) {
+            int return_slot = glyph / 2;
+            if (return_slot < VECTOR_FONT_MAX_RETURNED_GLYPHS) {
+                int out_base = 2 + return_slot * 7;
+                out[out_base] = (unsigned long long)glyph;
+                out[out_base + 1] = glyph_checksum;
+                out[out_base + 2] = glyph_ink;
+                out[out_base + 3] = (unsigned long long)width;
+                out[out_base + 4] = (unsigned long long)height;
+                out[out_base + 5] = (unsigned long long)advance;
+                out[out_base + 6] = (unsigned long long)(width * height);
+                out[2 + VECTOR_FONT_MAX_RETURNED_GLYPHS * 7] = (unsigned long long)(return_slot + 1);
+            }
         }
         text_checksum += glyph_checksum * (unsigned long long)(glyph + 1);
         text_ink += glyph_ink;
@@ -603,8 +649,8 @@ __global__ void vector_font_rasterize(unsigned long long *out, unsigned int *gly
 int main() {
     unsigned long long *d_out = nullptr;
     unsigned int *d_glyph_pixels = nullptr;
-    unsigned long long host_out[14] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-    unsigned int host_glyph_pixels[8192] = {0};
+    unsigned long long host_out[2 + VECTOR_FONT_MAX_RETURNED_GLYPHS * 7 + 1] = {0};
+    unsigned int host_glyph_pixels[VECTOR_FONT_MAX_RETURNED_GLYPHS * VECTOR_FONT_RETURNED_GLYPH_STRIDE] = {0};
     cudaError_t rc = cudaMalloc(&d_out, sizeof(host_out));
     if (rc != cudaSuccess) { std::printf("status=fail\nreason=cuda-malloc-out:%s\n", cudaGetErrorString(rc)); return 2; }
     rc = cudaMalloc(&d_glyph_pixels, sizeof(host_glyph_pixels));
@@ -614,26 +660,27 @@ int main() {
     rc = cudaDeviceSynchronize();
     if (rc != cudaSuccess) { std::printf("status=fail\nreason=cuda-kernel:%s\n", cudaGetErrorString(rc)); return 2; }
     cudaMemcpy(host_out, d_out, sizeof(host_out), cudaMemcpyDeviceToHost);
-    unsigned long long pixel_count = host_out[7];
-    unsigned long long pixel_count1 = host_out[13];
-    if (pixel_count > 4096ULL) { std::printf("status=fail\nreason=cuda-glyph0-too-large\n"); return 2; }
-    if (pixel_count1 > 4096ULL) { std::printf("status=fail\nreason=cuda-glyph1-too-large\n"); return 2; }
+    unsigned long long returned_count = host_out[2 + VECTOR_FONT_MAX_RETURNED_GLYPHS * 7];
+    if (returned_count > VECTOR_FONT_MAX_RETURNED_GLYPHS) { std::printf("status=fail\nreason=cuda-glyph-count-too-large\n"); return 2; }
+    for (unsigned long long slot = 0; slot < returned_count; ++slot) {
+        unsigned long long pixel_count = host_out[2 + slot * 7 + 6];
+        if (pixel_count > VECTOR_FONT_RETURNED_GLYPH_STRIDE) { std::printf("status=fail\nreason=cuda-glyph-too-large\n"); return 2; }
+    }
     cudaMemcpy(host_glyph_pixels, d_glyph_pixels, sizeof(host_glyph_pixels), cudaMemcpyDeviceToHost);
     std::printf("status=pass\nreason=cuda-vector-font-rasterize-kernel-matched-cpu\nchecksum=%llu\nink_pixels=%llu\n", host_out[0], host_out[1]);
-    std::printf("glyph_0_checksum=%llu\nglyph_0_ink_pixels=%llu\nglyph_0_width=%llu\nglyph_0_height=%llu\nglyph_0_advance=%llu\nglyph_0_pixel_count=%llu\n", host_out[2], host_out[3], host_out[4], host_out[5], host_out[6], host_out[7]);
-    std::printf("glyph_0_pixels=");
-    for (unsigned long long i = 0; i < pixel_count; ++i) {
-        if (i > 0) std::printf(",");
-        std::printf("%u", host_glyph_pixels[i]);
+    std::printf("glyph_return_count=%llu\n", returned_count);
+    for (unsigned long long slot = 0; slot < returned_count; ++slot) {
+        int out_base = 2 + (int)slot * 7;
+        unsigned long long pixel_count = host_out[out_base + 6];
+        std::printf("glyph_%llu_source_index=%llu\n", slot, host_out[out_base]);
+        std::printf("glyph_%llu_checksum=%llu\nglyph_%llu_ink_pixels=%llu\nglyph_%llu_width=%llu\nglyph_%llu_height=%llu\nglyph_%llu_advance=%llu\nglyph_%llu_pixel_count=%llu\n", slot, host_out[out_base + 1], slot, host_out[out_base + 2], slot, host_out[out_base + 3], slot, host_out[out_base + 4], slot, host_out[out_base + 5], slot, pixel_count);
+        std::printf("glyph_%llu_pixels=", slot);
+        for (unsigned long long i = 0; i < pixel_count; ++i) {
+            if (i > 0) std::printf(",");
+            std::printf("%u", host_glyph_pixels[slot * VECTOR_FONT_RETURNED_GLYPH_STRIDE + i]);
+        }
+        std::printf("\n");
     }
-    std::printf("\n");
-    std::printf("glyph_1_checksum=%llu\nglyph_1_ink_pixels=%llu\nglyph_1_width=%llu\nglyph_1_height=%llu\nglyph_1_advance=%llu\nglyph_1_pixel_count=%llu\n", host_out[8], host_out[9], host_out[10], host_out[11], host_out[12], host_out[13]);
-    std::printf("glyph_1_pixels=");
-    for (unsigned long long i = 0; i < pixel_count1; ++i) {
-        if (i > 0) std::printf(",");
-        std::printf("%u", host_glyph_pixels[4096 + i]);
-    }
-    std::printf("\n");
     cudaFree(d_glyph_pixels);
     cudaFree(d_out);
     return 0;
@@ -651,34 +698,30 @@ CUDA_EOF
         CUDA_REASON="$(sed -n 's/^reason=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
         CUDA_CHECKSUM="$(sed -n 's/^checksum=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
         CUDA_INK_PIXELS="$(sed -n 's/^ink_pixels=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
-        CUDA_GLYPH_COUNT=2
-        CUDA_GLYPH_0_CODEPOINT="$cpu_glyph0_codepoint"
-        CUDA_GLYPH_0_FONT_SIZE="$FONT_SIZE"
-        CUDA_GLYPH_0_WIDTH="$(sed -n 's/^glyph_0_width=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
-        CUDA_GLYPH_0_HEIGHT="$(sed -n 's/^glyph_0_height=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
-        CUDA_GLYPH_0_ADVANCE="$(sed -n 's/^glyph_0_advance=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
-        CUDA_GLYPH_0_CHECKSUM="$(sed -n 's/^glyph_0_checksum=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
-        CUDA_GLYPH_0_INK_PIXELS="$(sed -n 's/^glyph_0_ink_pixels=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
-        CUDA_GLYPH_0_PIXELS="$(sed -n 's/^glyph_0_pixels=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
-        CUDA_GLYPH_1_CODEPOINT="$cpu_glyph2_codepoint"
-        CUDA_GLYPH_1_FONT_SIZE="$FONT_SIZE"
-        CUDA_GLYPH_1_WIDTH="$(sed -n 's/^glyph_1_width=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
-        CUDA_GLYPH_1_HEIGHT="$(sed -n 's/^glyph_1_height=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
-        CUDA_GLYPH_1_ADVANCE="$(sed -n 's/^glyph_1_advance=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
-        CUDA_GLYPH_1_CHECKSUM="$(sed -n 's/^glyph_1_checksum=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
-        CUDA_GLYPH_1_INK_PIXELS="$(sed -n 's/^glyph_1_ink_pixels=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
-        CUDA_GLYPH_1_PIXELS="$(sed -n 's/^glyph_1_pixels=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
+        CUDA_GLYPH_COUNT="$(sed -n 's/^glyph_return_count=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
+        slot=0
+        while [ "$slot" -lt "$CUDA_GLYPH_COUNT" ]; do
+            source_index="$(sed -n "s/^glyph_${slot}_source_index=//p" "$BUILD_DIR/cuda_run.out" | tail -n 1)"
+            set_var "CUDA_GLYPH_${slot}_CODEPOINT" "$(value_of "vector_font_compute_glyph_${source_index}_codepoint")"
+            set_var "CUDA_GLYPH_${slot}_FONT_SIZE" "$FONT_SIZE"
+            set_var "CUDA_GLYPH_${slot}_WIDTH" "$(sed -n "s/^glyph_${slot}_width=//p" "$BUILD_DIR/cuda_run.out" | tail -n 1)"
+            set_var "CUDA_GLYPH_${slot}_HEIGHT" "$(sed -n "s/^glyph_${slot}_height=//p" "$BUILD_DIR/cuda_run.out" | tail -n 1)"
+            set_var "CUDA_GLYPH_${slot}_ADVANCE" "$(sed -n "s/^glyph_${slot}_advance=//p" "$BUILD_DIR/cuda_run.out" | tail -n 1)"
+            set_var "CUDA_GLYPH_${slot}_CHECKSUM" "$(sed -n "s/^glyph_${slot}_checksum=//p" "$BUILD_DIR/cuda_run.out" | tail -n 1)"
+            set_var "CUDA_GLYPH_${slot}_INK_PIXELS" "$(sed -n "s/^glyph_${slot}_ink_pixels=//p" "$BUILD_DIR/cuda_run.out" | tail -n 1)"
+            set_var "CUDA_GLYPH_${slot}_PIXELS" "$(sed -n "s/^glyph_${slot}_pixels=//p" "$BUILD_DIR/cuda_run.out" | tail -n 1)"
+            expected_width="$(value_of "vector_font_compute_glyph_${source_index}_width")"
+            expected_checksum="$(value_of "vector_font_compute_glyph_${source_index}_checksum")"
+            expected_ink="$(value_of "vector_font_compute_glyph_${source_index}_ink_pixels")"
+            if [ "$CUDA_STATUS" = "pass" ] && { [ "$(get_var "CUDA_GLYPH_${slot}_WIDTH")" != "$expected_width" ] || [ "$(get_var "CUDA_GLYPH_${slot}_CHECKSUM")" != "$expected_checksum" ] || [ "$(get_var "CUDA_GLYPH_${slot}_INK_PIXELS")" != "$expected_ink" ] || [ -z "$(get_var "CUDA_GLYPH_${slot}_PIXELS")" ]; }; then
+                CUDA_STATUS="fail"
+                CUDA_REASON="cuda-vector-font-glyph${slot}-mismatch"
+            fi
+            slot=$((slot + 1))
+        done
         if [ "$CUDA_STATUS" = "pass" ] && { [ "$CUDA_CHECKSUM" != "$cpu_checksum" ] || [ "$CUDA_INK_PIXELS" != "$cpu_ink_pixels" ]; }; then
             CUDA_STATUS="fail"
             CUDA_REASON="cuda-vector-font-kernel-mismatch"
-        fi
-        if [ "$CUDA_STATUS" = "pass" ] && { [ "$CUDA_GLYPH_0_WIDTH" != "$cpu_glyph0_width" ] || [ "$CUDA_GLYPH_0_CHECKSUM" != "$cpu_glyph0_checksum" ] || [ "$CUDA_GLYPH_0_INK_PIXELS" != "$cpu_glyph0_ink_pixels" ] || [ -z "$CUDA_GLYPH_0_PIXELS" ]; }; then
-            CUDA_STATUS="fail"
-            CUDA_REASON="cuda-vector-font-glyph0-mismatch"
-        fi
-        if [ "$CUDA_STATUS" = "pass" ] && { [ "$CUDA_GLYPH_1_WIDTH" != "$cpu_glyph2_width" ] || [ "$CUDA_GLYPH_1_CHECKSUM" != "$cpu_glyph2_checksum" ] || [ "$CUDA_GLYPH_1_INK_PIXELS" != "$cpu_glyph2_ink_pixels" ] || [ -z "$CUDA_GLYPH_1_PIXELS" ]; }; then
-            CUDA_STATUS="fail"
-            CUDA_REASON="cuda-vector-font-glyph1-mismatch"
         fi
     else
         CUDA_STATUS="unavailable"
@@ -745,12 +788,10 @@ static const char *kernel_source =
 "      coverage += vf_point_inside(glyph_commands, command_count, col * 2 + 1, row * 2 + 1, scale_n, scale_d);"
 "      int alpha = coverage * 255 / 4;"
 "      if (alpha > 0) { int pixel_index = row * width + col; glyph_checksum += (ulong)alpha * (ulong)(pixel_index + 1); glyph_ink++; }"
-"      if (glyph == 1) { glyph_pixels[row * width + col] = (uint)alpha; }"
-"      if (glyph == 3) { glyph_pixels[4096 + row * width + col] = (uint)alpha; }"
+"      if ((glyph % 2) == 1) { int return_slot = glyph / 2; if (return_slot < VECTOR_FONT_MAX_RETURNED_GLYPHS) { glyph_pixels[return_slot * VECTOR_FONT_RETURNED_GLYPH_STRIDE + row * width + col] = (uint)alpha; }}"
 "    }}"
 "    glyph_checksum += (ulong)width * 31UL + (ulong)height * 17UL + (ulong)advance;"
-"    if (glyph == 1) { out[2] = glyph_checksum; out[3] = glyph_ink; out[4] = (ulong)width; out[5] = (ulong)height; out[6] = (ulong)advance; out[7] = (ulong)(width * height); }"
-"    if (glyph == 3) { out[8] = glyph_checksum; out[9] = glyph_ink; out[10] = (ulong)width; out[11] = (ulong)height; out[12] = (ulong)advance; out[13] = (ulong)(width * height); }"
+"    if ((glyph % 2) == 1) { int return_slot = glyph / 2; if (return_slot < VECTOR_FONT_MAX_RETURNED_GLYPHS) { int out_base = 2 + return_slot * 7; out[out_base] = (ulong)glyph; out[out_base + 1] = glyph_checksum; out[out_base + 2] = glyph_ink; out[out_base + 3] = (ulong)width; out[out_base + 4] = (ulong)height; out[out_base + 5] = (ulong)advance; out[out_base + 6] = (ulong)(width * height); out[2 + VECTOR_FONT_MAX_RETURNED_GLYPHS * 7] = (ulong)(return_slot + 1); }}"
 "    text_checksum += glyph_checksum * (ulong)(glyph + 1); text_ink += glyph_ink;"
 "  }"
 "  out[0] = text_checksum; out[1] = text_ink;"
@@ -773,14 +814,14 @@ int main() {
     if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-create-queue\n"); return 2; }
     cl_program program = clCreateProgramWithSource(context, 1, &kernel_source, NULL, &err);
     if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-create-program\n"); return 2; }
-    char opts[96];
-    snprintf(opts, sizeof(opts), "-D VECTOR_FONT_GLYPH_COUNT=%d -D VECTOR_FONT_FONT_SIZE=%d", VECTOR_FONT_GLYPH_COUNT, VECTOR_FONT_FONT_SIZE);
+    char opts[192];
+    snprintf(opts, sizeof(opts), "-D VECTOR_FONT_GLYPH_COUNT=%d -D VECTOR_FONT_FONT_SIZE=%d -D VECTOR_FONT_RETURNED_GLYPH_STRIDE=%d -D VECTOR_FONT_MAX_RETURNED_GLYPHS=%d", VECTOR_FONT_GLYPH_COUNT, VECTOR_FONT_FONT_SIZE, VECTOR_FONT_RETURNED_GLYPH_STRIDE, VECTOR_FONT_MAX_RETURNED_GLYPHS);
     err = clBuildProgram(program, 1, &device, opts, NULL, NULL);
     if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-build-program\n"); return 2; }
     cl_kernel kernel = clCreateKernel(program, "vector_font_rasterize", &err);
     if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-create-kernel\n"); return 2; }
-    unsigned long long out[14] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-    unsigned int glyph_pixels[8192] = {0};
+    unsigned long long out[2 + VECTOR_FONT_MAX_RETURNED_GLYPHS * 7 + 1] = {0};
+    unsigned int glyph_pixels[VECTOR_FONT_MAX_RETURNED_GLYPHS * VECTOR_FONT_RETURNED_GLYPH_STRIDE] = {0};
     cl_mem d_widths = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(glyph_widths), (void*)glyph_widths, &err);
     if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-buffer-widths\n"); return 2; }
     cl_mem d_offsets = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(glyph_command_offsets), (void*)glyph_command_offsets, &err);
@@ -805,25 +846,28 @@ int main() {
     clFinish(queue);
     err = clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0, sizeof(out), out, 0, NULL, NULL);
     if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-readback\n"); return 2; }
-    if (out[7] > 4096ULL) { printf("status=fail\nreason=opencl-glyph0-too-large\n"); return 2; }
-    if (out[13] > 4096ULL) { printf("status=fail\nreason=opencl-glyph1-too-large\n"); return 2; }
+    unsigned long long returned_count = out[2 + VECTOR_FONT_MAX_RETURNED_GLYPHS * 7];
+    if (returned_count > VECTOR_FONT_MAX_RETURNED_GLYPHS) { printf("status=fail\nreason=opencl-glyph-count-too-large\n"); return 2; }
+    for (unsigned long long slot = 0; slot < returned_count; ++slot) {
+        unsigned long long pixel_count = out[2 + slot * 7 + 6];
+        if (pixel_count > VECTOR_FONT_RETURNED_GLYPH_STRIDE) { printf("status=fail\nreason=opencl-glyph-too-large\n"); return 2; }
+    }
     err = clEnqueueReadBuffer(queue, d_glyph0_pixels, CL_TRUE, 0, sizeof(glyph_pixels), glyph_pixels, 0, NULL, NULL);
     if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-readback-glyph0\n"); return 2; }
     printf("status=pass\nreason=opencl-vector-font-rasterize-kernel-matched-cpu\nchecksum=%llu\nink_pixels=%llu\n", out[0], out[1]);
-    printf("glyph_0_checksum=%llu\nglyph_0_ink_pixels=%llu\nglyph_0_width=%llu\nglyph_0_height=%llu\nglyph_0_advance=%llu\nglyph_0_pixel_count=%llu\n", out[2], out[3], out[4], out[5], out[6], out[7]);
-    printf("glyph_0_pixels=");
-    for (unsigned long long i = 0; i < out[7]; ++i) {
-        if (i > 0) printf(",");
-        printf("%u", glyph_pixels[i]);
+    printf("glyph_return_count=%llu\n", returned_count);
+    for (unsigned long long slot = 0; slot < returned_count; ++slot) {
+        int out_base = 2 + (int)slot * 7;
+        unsigned long long pixel_count = out[out_base + 6];
+        printf("glyph_%llu_source_index=%llu\n", slot, out[out_base]);
+        printf("glyph_%llu_checksum=%llu\nglyph_%llu_ink_pixels=%llu\nglyph_%llu_width=%llu\nglyph_%llu_height=%llu\nglyph_%llu_advance=%llu\nglyph_%llu_pixel_count=%llu\n", slot, out[out_base + 1], slot, out[out_base + 2], slot, out[out_base + 3], slot, out[out_base + 4], slot, out[out_base + 5], slot, pixel_count);
+        printf("glyph_%llu_pixels=", slot);
+        for (unsigned long long i = 0; i < pixel_count; ++i) {
+            if (i > 0) printf(",");
+            printf("%u", glyph_pixels[slot * VECTOR_FONT_RETURNED_GLYPH_STRIDE + i]);
+        }
+        printf("\n");
     }
-    printf("\n");
-    printf("glyph_1_checksum=%llu\nglyph_1_ink_pixels=%llu\nglyph_1_width=%llu\nglyph_1_height=%llu\nglyph_1_advance=%llu\nglyph_1_pixel_count=%llu\n", out[8], out[9], out[10], out[11], out[12], out[13]);
-    printf("glyph_1_pixels=");
-    for (unsigned long long i = 0; i < out[13]; ++i) {
-        if (i > 0) printf(",");
-        printf("%u", glyph_pixels[4096 + i]);
-    }
-    printf("\n");
     return 0;
 }
 OPENCL_EOF
@@ -839,34 +883,30 @@ OPENCL_EOF
         OPENCL_REASON="$(sed -n 's/^reason=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
         OPENCL_CHECKSUM="$(sed -n 's/^checksum=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
         OPENCL_INK_PIXELS="$(sed -n 's/^ink_pixels=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
-        OPENCL_GLYPH_COUNT=2
-        OPENCL_GLYPH_0_CODEPOINT="$cpu_glyph1_codepoint"
-        OPENCL_GLYPH_0_FONT_SIZE="$FONT_SIZE"
-        OPENCL_GLYPH_0_WIDTH="$(sed -n 's/^glyph_0_width=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
-        OPENCL_GLYPH_0_HEIGHT="$(sed -n 's/^glyph_0_height=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
-        OPENCL_GLYPH_0_ADVANCE="$(sed -n 's/^glyph_0_advance=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
-        OPENCL_GLYPH_0_CHECKSUM="$(sed -n 's/^glyph_0_checksum=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
-        OPENCL_GLYPH_0_INK_PIXELS="$(sed -n 's/^glyph_0_ink_pixels=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
-        OPENCL_GLYPH_0_PIXELS="$(sed -n 's/^glyph_0_pixels=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
-        OPENCL_GLYPH_1_CODEPOINT="$cpu_glyph3_codepoint"
-        OPENCL_GLYPH_1_FONT_SIZE="$FONT_SIZE"
-        OPENCL_GLYPH_1_WIDTH="$(sed -n 's/^glyph_1_width=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
-        OPENCL_GLYPH_1_HEIGHT="$(sed -n 's/^glyph_1_height=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
-        OPENCL_GLYPH_1_ADVANCE="$(sed -n 's/^glyph_1_advance=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
-        OPENCL_GLYPH_1_CHECKSUM="$(sed -n 's/^glyph_1_checksum=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
-        OPENCL_GLYPH_1_INK_PIXELS="$(sed -n 's/^glyph_1_ink_pixels=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
-        OPENCL_GLYPH_1_PIXELS="$(sed -n 's/^glyph_1_pixels=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+        OPENCL_GLYPH_COUNT="$(sed -n 's/^glyph_return_count=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+        slot=0
+        while [ "$slot" -lt "$OPENCL_GLYPH_COUNT" ]; do
+            source_index="$(sed -n "s/^glyph_${slot}_source_index=//p" "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+            set_var "OPENCL_GLYPH_${slot}_CODEPOINT" "$(value_of "vector_font_compute_glyph_${source_index}_codepoint")"
+            set_var "OPENCL_GLYPH_${slot}_FONT_SIZE" "$FONT_SIZE"
+            set_var "OPENCL_GLYPH_${slot}_WIDTH" "$(sed -n "s/^glyph_${slot}_width=//p" "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+            set_var "OPENCL_GLYPH_${slot}_HEIGHT" "$(sed -n "s/^glyph_${slot}_height=//p" "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+            set_var "OPENCL_GLYPH_${slot}_ADVANCE" "$(sed -n "s/^glyph_${slot}_advance=//p" "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+            set_var "OPENCL_GLYPH_${slot}_CHECKSUM" "$(sed -n "s/^glyph_${slot}_checksum=//p" "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+            set_var "OPENCL_GLYPH_${slot}_INK_PIXELS" "$(sed -n "s/^glyph_${slot}_ink_pixels=//p" "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+            set_var "OPENCL_GLYPH_${slot}_PIXELS" "$(sed -n "s/^glyph_${slot}_pixels=//p" "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+            expected_width="$(value_of "vector_font_compute_glyph_${source_index}_width")"
+            expected_checksum="$(value_of "vector_font_compute_glyph_${source_index}_checksum")"
+            expected_ink="$(value_of "vector_font_compute_glyph_${source_index}_ink_pixels")"
+            if [ "$OPENCL_STATUS" = "pass" ] && { [ "$(get_var "OPENCL_GLYPH_${slot}_WIDTH")" != "$expected_width" ] || [ "$(get_var "OPENCL_GLYPH_${slot}_CHECKSUM")" != "$expected_checksum" ] || [ "$(get_var "OPENCL_GLYPH_${slot}_INK_PIXELS")" != "$expected_ink" ] || [ -z "$(get_var "OPENCL_GLYPH_${slot}_PIXELS")" ]; }; then
+                OPENCL_STATUS="fail"
+                OPENCL_REASON="opencl-vector-font-glyph${slot}-mismatch"
+            fi
+            slot=$((slot + 1))
+        done
         if [ "$OPENCL_STATUS" = "pass" ] && { [ "$OPENCL_CHECKSUM" != "$cpu_checksum" ] || [ "$OPENCL_INK_PIXELS" != "$cpu_ink_pixels" ]; }; then
             OPENCL_STATUS="fail"
             OPENCL_REASON="opencl-vector-font-kernel-mismatch"
-        fi
-        if [ "$OPENCL_STATUS" = "pass" ] && { [ "$OPENCL_GLYPH_0_WIDTH" != "$cpu_glyph1_width" ] || [ "$OPENCL_GLYPH_0_CHECKSUM" != "$cpu_glyph1_checksum" ] || [ "$OPENCL_GLYPH_0_INK_PIXELS" != "$cpu_glyph1_ink_pixels" ] || [ -z "$OPENCL_GLYPH_0_PIXELS" ]; }; then
-            OPENCL_STATUS="fail"
-            OPENCL_REASON="opencl-vector-font-glyph0-mismatch"
-        fi
-        if [ "$OPENCL_STATUS" = "pass" ] && { [ "$OPENCL_GLYPH_1_WIDTH" != "$cpu_glyph3_width" ] || [ "$OPENCL_GLYPH_1_CHECKSUM" != "$cpu_glyph3_checksum" ] || [ "$OPENCL_GLYPH_1_INK_PIXELS" != "$cpu_glyph3_ink_pixels" ] || [ -z "$OPENCL_GLYPH_1_PIXELS" ]; }; then
-            OPENCL_STATUS="fail"
-            OPENCL_REASON="opencl-vector-font-glyph1-mismatch"
         fi
     else
         OPENCL_STATUS="$(sed -n 's/^status=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
@@ -894,47 +934,8 @@ if [ "${OPENCL_VECTOR_FONT_STATUS:-}" = "" ] && [ "${OPENCL_VECTOR_FONT_REASON:-
 fi
 
 # Re-run the Simple API evidence with the accelerator results included.
+export_vector_font_env
 set +e
-CUDA_VECTOR_FONT_STATUS="$CUDA_STATUS" \
-CUDA_VECTOR_FONT_REASON="$CUDA_REASON" \
-CUDA_VECTOR_FONT_CHECKSUM="$CUDA_CHECKSUM" \
-CUDA_VECTOR_FONT_GLYPH_COUNT="$CUDA_GLYPH_COUNT" \
-CUDA_VECTOR_FONT_GLYPH_0_CODEPOINT="$CUDA_GLYPH_0_CODEPOINT" \
-CUDA_VECTOR_FONT_GLYPH_0_FONT_SIZE="$CUDA_GLYPH_0_FONT_SIZE" \
-CUDA_VECTOR_FONT_GLYPH_0_WIDTH="$CUDA_GLYPH_0_WIDTH" \
-CUDA_VECTOR_FONT_GLYPH_0_HEIGHT="$CUDA_GLYPH_0_HEIGHT" \
-CUDA_VECTOR_FONT_GLYPH_0_ADVANCE="$CUDA_GLYPH_0_ADVANCE" \
-CUDA_VECTOR_FONT_GLYPH_0_CHECKSUM="$CUDA_GLYPH_0_CHECKSUM" \
-CUDA_VECTOR_FONT_GLYPH_0_INK_PIXELS="$CUDA_GLYPH_0_INK_PIXELS" \
-CUDA_VECTOR_FONT_GLYPH_0_PIXELS="$CUDA_GLYPH_0_PIXELS" \
-CUDA_VECTOR_FONT_GLYPH_1_CODEPOINT="$CUDA_GLYPH_1_CODEPOINT" \
-CUDA_VECTOR_FONT_GLYPH_1_FONT_SIZE="$CUDA_GLYPH_1_FONT_SIZE" \
-CUDA_VECTOR_FONT_GLYPH_1_WIDTH="$CUDA_GLYPH_1_WIDTH" \
-CUDA_VECTOR_FONT_GLYPH_1_HEIGHT="$CUDA_GLYPH_1_HEIGHT" \
-CUDA_VECTOR_FONT_GLYPH_1_ADVANCE="$CUDA_GLYPH_1_ADVANCE" \
-CUDA_VECTOR_FONT_GLYPH_1_CHECKSUM="$CUDA_GLYPH_1_CHECKSUM" \
-CUDA_VECTOR_FONT_GLYPH_1_INK_PIXELS="$CUDA_GLYPH_1_INK_PIXELS" \
-CUDA_VECTOR_FONT_GLYPH_1_PIXELS="$CUDA_GLYPH_1_PIXELS" \
-OPENCL_VECTOR_FONT_STATUS="$OPENCL_STATUS" \
-OPENCL_VECTOR_FONT_REASON="$OPENCL_REASON" \
-OPENCL_VECTOR_FONT_CHECKSUM="$OPENCL_CHECKSUM" \
-OPENCL_VECTOR_FONT_GLYPH_COUNT="$OPENCL_GLYPH_COUNT" \
-OPENCL_VECTOR_FONT_GLYPH_0_CODEPOINT="$OPENCL_GLYPH_0_CODEPOINT" \
-OPENCL_VECTOR_FONT_GLYPH_0_FONT_SIZE="$OPENCL_GLYPH_0_FONT_SIZE" \
-OPENCL_VECTOR_FONT_GLYPH_0_WIDTH="$OPENCL_GLYPH_0_WIDTH" \
-OPENCL_VECTOR_FONT_GLYPH_0_HEIGHT="$OPENCL_GLYPH_0_HEIGHT" \
-OPENCL_VECTOR_FONT_GLYPH_0_ADVANCE="$OPENCL_GLYPH_0_ADVANCE" \
-OPENCL_VECTOR_FONT_GLYPH_0_CHECKSUM="$OPENCL_GLYPH_0_CHECKSUM" \
-OPENCL_VECTOR_FONT_GLYPH_0_INK_PIXELS="$OPENCL_GLYPH_0_INK_PIXELS" \
-OPENCL_VECTOR_FONT_GLYPH_0_PIXELS="$OPENCL_GLYPH_0_PIXELS" \
-OPENCL_VECTOR_FONT_GLYPH_1_CODEPOINT="$OPENCL_GLYPH_1_CODEPOINT" \
-OPENCL_VECTOR_FONT_GLYPH_1_FONT_SIZE="$OPENCL_GLYPH_1_FONT_SIZE" \
-OPENCL_VECTOR_FONT_GLYPH_1_WIDTH="$OPENCL_GLYPH_1_WIDTH" \
-OPENCL_VECTOR_FONT_GLYPH_1_HEIGHT="$OPENCL_GLYPH_1_HEIGHT" \
-OPENCL_VECTOR_FONT_GLYPH_1_ADVANCE="$OPENCL_GLYPH_1_ADVANCE" \
-OPENCL_VECTOR_FONT_GLYPH_1_CHECKSUM="$OPENCL_GLYPH_1_CHECKSUM" \
-OPENCL_VECTOR_FONT_GLYPH_1_INK_PIXELS="$OPENCL_GLYPH_1_INK_PIXELS" \
-OPENCL_VECTOR_FONT_GLYPH_1_PIXELS="$OPENCL_GLYPH_1_PIXELS" \
 SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_OUT" 2>&1
 simple_code=$?
 set -e
@@ -990,12 +991,15 @@ positive_int() {
 if [ "$status" = "pass" ]; then
     if ! positive_int "$production_render_checksum" || \
         ! positive_int "$production_render_ink_pixels" || \
-        ! positive_int "$production_vector_raster_hits" || \
-        ! positive_int "$production_vector_output_pixels" || \
-        ! positive_int "$production_accelerator_attempts" || \
-        ! positive_int "$production_cpu_fallback_hits"; then
+        ! positive_int "$production_accelerator_attempts"; then
         status="fail"
         reason="production-vector-raster-path-not-hit"
+    elif [ "$production_cpu_fallback_hits" -gt 0 ] && { ! positive_int "$production_vector_raster_hits" || ! positive_int "$production_vector_output_pixels"; }; then
+        status="fail"
+        reason="production-vector-raster-path-not-hit"
+    elif [ "$production_cpu_fallback_hits" -eq 0 ] && [ "$production_gpu_returned_glyphs" -lt "$production_accelerator_attempts" ]; then
+        status="fail"
+        reason="production-full-gpu-glyph-return-incomplete"
     elif [ -n "$CUDA_GLYPH_0_PIXELS" ] && [ -n "$OPENCL_GLYPH_0_PIXELS" ] && [ "$production_accelerator_unavailable_reason" != "cuda-opencl-vector-font-glyph-pixels-returned" ]; then
         status="fail"
         reason="production-cuda-opencl-glyph-pixel-diagnostic-overwritten"
@@ -1092,6 +1096,7 @@ fi
         vector_font_compute_cuda_status \
         vector_font_compute_cuda_reason \
         vector_font_compute_cuda_checksum \
+        vector_font_compute_cuda_glyph_count \
         vector_font_compute_cuda_glyph_0_codepoint \
         vector_font_compute_cuda_glyph_0_font_size \
         vector_font_compute_cuda_glyph_0_width \
@@ -1102,6 +1107,7 @@ fi
         vector_font_compute_opencl_status \
         vector_font_compute_opencl_reason \
         vector_font_compute_opencl_checksum \
+        vector_font_compute_opencl_glyph_count \
         vector_font_compute_opencl_glyph_0_codepoint \
         vector_font_compute_opencl_glyph_0_font_size \
         vector_font_compute_opencl_glyph_0_width \
@@ -1114,6 +1120,28 @@ fi
     do
         value="$(sed -n "s/^${key}=//p" "$SIMPLE_OUT" | tail -n 1)"
         echo "$key=$value"
+    done
+    slot=0
+    while [ "$slot" -lt "$CUDA_GLYPH_COUNT" ]; do
+        echo "vector_font_compute_cuda_glyph_${slot}_codepoint=$(get_var "CUDA_GLYPH_${slot}_CODEPOINT")"
+        echo "vector_font_compute_cuda_glyph_${slot}_font_size=$(get_var "CUDA_GLYPH_${slot}_FONT_SIZE")"
+        echo "vector_font_compute_cuda_glyph_${slot}_width=$(get_var "CUDA_GLYPH_${slot}_WIDTH")"
+        echo "vector_font_compute_cuda_glyph_${slot}_height=$(get_var "CUDA_GLYPH_${slot}_HEIGHT")"
+        echo "vector_font_compute_cuda_glyph_${slot}_advance=$(get_var "CUDA_GLYPH_${slot}_ADVANCE")"
+        echo "vector_font_compute_cuda_glyph_${slot}_checksum=$(get_var "CUDA_GLYPH_${slot}_CHECKSUM")"
+        echo "vector_font_compute_cuda_glyph_${slot}_ink_pixels=$(get_var "CUDA_GLYPH_${slot}_INK_PIXELS")"
+        slot=$((slot + 1))
+    done
+    slot=0
+    while [ "$slot" -lt "$OPENCL_GLYPH_COUNT" ]; do
+        echo "vector_font_compute_opencl_glyph_${slot}_codepoint=$(get_var "OPENCL_GLYPH_${slot}_CODEPOINT")"
+        echo "vector_font_compute_opencl_glyph_${slot}_font_size=$(get_var "OPENCL_GLYPH_${slot}_FONT_SIZE")"
+        echo "vector_font_compute_opencl_glyph_${slot}_width=$(get_var "OPENCL_GLYPH_${slot}_WIDTH")"
+        echo "vector_font_compute_opencl_glyph_${slot}_height=$(get_var "OPENCL_GLYPH_${slot}_HEIGHT")"
+        echo "vector_font_compute_opencl_glyph_${slot}_advance=$(get_var "OPENCL_GLYPH_${slot}_ADVANCE")"
+        echo "vector_font_compute_opencl_glyph_${slot}_checksum=$(get_var "OPENCL_GLYPH_${slot}_CHECKSUM")"
+        echo "vector_font_compute_opencl_glyph_${slot}_ink_pixels=$(get_var "OPENCL_GLYPH_${slot}_INK_PIXELS")"
+        slot=$((slot + 1))
     done
     echo "vector_font_compute_status=$status"
     echo "vector_font_compute_reason=$reason"
@@ -1154,24 +1182,34 @@ fi
     echo "- CUDA reason: $CUDA_REASON"
     echo "- CUDA checksum: $CUDA_CHECKSUM"
     echo "- CUDA ink pixels: $CUDA_INK_PIXELS"
-    echo "- CUDA glyph 0 codepoint: $CUDA_GLYPH_0_CODEPOINT"
-    echo "- CUDA glyph 0 font size: $CUDA_GLYPH_0_FONT_SIZE"
-    echo "- CUDA glyph 0 width: $CUDA_GLYPH_0_WIDTH"
-    echo "- CUDA glyph 0 height: $CUDA_GLYPH_0_HEIGHT"
-    echo "- CUDA glyph 0 advance: $CUDA_GLYPH_0_ADVANCE"
-    echo "- CUDA glyph 0 checksum: $CUDA_GLYPH_0_CHECKSUM"
-    echo "- CUDA glyph 0 ink pixels: $CUDA_GLYPH_0_INK_PIXELS"
+    echo "- CUDA glyph count: $CUDA_GLYPH_COUNT"
+    slot=0
+    while [ "$slot" -lt "$CUDA_GLYPH_COUNT" ]; do
+        echo "- CUDA glyph $slot codepoint: $(get_var "CUDA_GLYPH_${slot}_CODEPOINT")"
+        echo "- CUDA glyph $slot font size: $(get_var "CUDA_GLYPH_${slot}_FONT_SIZE")"
+        echo "- CUDA glyph $slot width: $(get_var "CUDA_GLYPH_${slot}_WIDTH")"
+        echo "- CUDA glyph $slot height: $(get_var "CUDA_GLYPH_${slot}_HEIGHT")"
+        echo "- CUDA glyph $slot advance: $(get_var "CUDA_GLYPH_${slot}_ADVANCE")"
+        echo "- CUDA glyph $slot checksum: $(get_var "CUDA_GLYPH_${slot}_CHECKSUM")"
+        echo "- CUDA glyph $slot ink pixels: $(get_var "CUDA_GLYPH_${slot}_INK_PIXELS")"
+        slot=$((slot + 1))
+    done
     echo "- OpenCL status: $OPENCL_STATUS"
     echo "- OpenCL reason: $OPENCL_REASON"
     echo "- OpenCL checksum: $OPENCL_CHECKSUM"
     echo "- OpenCL ink pixels: $OPENCL_INK_PIXELS"
-    echo "- OpenCL glyph 0 codepoint: $OPENCL_GLYPH_0_CODEPOINT"
-    echo "- OpenCL glyph 0 font size: $OPENCL_GLYPH_0_FONT_SIZE"
-    echo "- OpenCL glyph 0 width: $OPENCL_GLYPH_0_WIDTH"
-    echo "- OpenCL glyph 0 height: $OPENCL_GLYPH_0_HEIGHT"
-    echo "- OpenCL glyph 0 advance: $OPENCL_GLYPH_0_ADVANCE"
-    echo "- OpenCL glyph 0 checksum: $OPENCL_GLYPH_0_CHECKSUM"
-    echo "- OpenCL glyph 0 ink pixels: $OPENCL_GLYPH_0_INK_PIXELS"
+    echo "- OpenCL glyph count: $OPENCL_GLYPH_COUNT"
+    slot=0
+    while [ "$slot" -lt "$OPENCL_GLYPH_COUNT" ]; do
+        echo "- OpenCL glyph $slot codepoint: $(get_var "OPENCL_GLYPH_${slot}_CODEPOINT")"
+        echo "- OpenCL glyph $slot font size: $(get_var "OPENCL_GLYPH_${slot}_FONT_SIZE")"
+        echo "- OpenCL glyph $slot width: $(get_var "OPENCL_GLYPH_${slot}_WIDTH")"
+        echo "- OpenCL glyph $slot height: $(get_var "OPENCL_GLYPH_${slot}_HEIGHT")"
+        echo "- OpenCL glyph $slot advance: $(get_var "OPENCL_GLYPH_${slot}_ADVANCE")"
+        echo "- OpenCL glyph $slot checksum: $(get_var "OPENCL_GLYPH_${slot}_CHECKSUM")"
+        echo "- OpenCL glyph $slot ink pixels: $(get_var "OPENCL_GLYPH_${slot}_INK_PIXELS")"
+        slot=$((slot + 1))
+    done
     echo "- blur/tolerance used: false"
     echo
     echo "## Raw Evidence"

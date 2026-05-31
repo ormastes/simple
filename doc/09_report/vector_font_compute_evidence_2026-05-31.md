@@ -7,17 +7,17 @@
 - font size: 24
 - CPU checksum: 13090264
 - CPU ink pixels: 247
-- CPU frame us: 1442931
+- CPU frame us: 1535694
 - production render checksum: 3707484892911777
 - production render ink pixels: 247
-- production vector raster hits: 3
-- production vector output pixels: 672
+- production vector raster hits: 0
+- production vector output pixels: 0
 - production accelerator attempts: 8
-- production CUDA hits: 5
-- production OpenCL hits: 3
-- production CPU fallback hits: 3
-- production GPU returned glyphs: 5
-- production GPU returned glyph pixels: 1224
+- production CUDA hits: 4
+- production OpenCL hits: 4
+- production CPU fallback hits: 0
+- production GPU returned glyphs: 8
+- production GPU returned glyph pixels: 1896
 - production accelerator unavailable reason: cuda-opencl-vector-font-glyph-pixels-returned
 - matrix CUDAOPENCL/16 checksum: 2208479644694289
 - matrix CUDAOPENCL/16 ink pixels: 162
@@ -32,6 +32,7 @@
 - CUDA reason: cuda-vector-font-rasterize-kernel-matched-cpu
 - CUDA checksum: 13090264
 - CUDA ink pixels: 247
+- CUDA glyph count: 4
 - CUDA glyph 0 codepoint: 72
 - CUDA glyph 0 font size: 24
 - CUDA glyph 0 width: 10
@@ -39,10 +40,32 @@
 - CUDA glyph 0 advance: 11
 - CUDA glyph 0 checksum: 399885
 - CUDA glyph 0 ink pixels: 30
+- CUDA glyph 1 codepoint: 82
+- CUDA glyph 1 font size: 24
+- CUDA glyph 1 width: 10
+- CUDA glyph 1 height: 24
+- CUDA glyph 1 advance: 11
+- CUDA glyph 1 checksum: 296579
+- CUDA glyph 1 ink pixels: 34
+- CUDA glyph 2 codepoint: 69
+- CUDA glyph 2 font size: 24
+- CUDA glyph 2 width: 9
+- CUDA glyph 2 height: 24
+- CUDA glyph 2 advance: 10
+- CUDA glyph 2 checksum: 282552
+- CUDA glyph 2 ink pixels: 26
+- CUDA glyph 3 codepoint: 69
+- CUDA glyph 3 font size: 24
+- CUDA glyph 3 width: 9
+- CUDA glyph 3 height: 24
+- CUDA glyph 3 advance: 10
+- CUDA glyph 3 checksum: 282552
+- CUDA glyph 3 ink pixels: 26
 - OpenCL status: pass
 - OpenCL reason: opencl-vector-font-rasterize-kernel-matched-cpu
 - OpenCL checksum: 13090264
 - OpenCL ink pixels: 247
+- OpenCL glyph count: 4
 - OpenCL glyph 0 codepoint: 65
 - OpenCL glyph 0 font size: 24
 - OpenCL glyph 0 width: 11
@@ -50,6 +73,27 @@
 - OpenCL glyph 0 advance: 12
 - OpenCL glyph 0 checksum: 414452
 - OpenCL glyph 0 ink pixels: 33
+- OpenCL glyph 1 codepoint: 68
+- OpenCL glyph 1 font size: 24
+- OpenCL glyph 1 width: 10
+- OpenCL glyph 1 height: 24
+- OpenCL glyph 1 advance: 11
+- OpenCL glyph 1 checksum: 407799
+- OpenCL glyph 1 ink pixels: 31
+- OpenCL glyph 2 codepoint: 78
+- OpenCL glyph 2 font size: 24
+- OpenCL glyph 2 width: 10
+- OpenCL glyph 2 height: 24
+- OpenCL glyph 2 advance: 11
+- OpenCL glyph 2 checksum: 447921
+- OpenCL glyph 2 ink pixels: 36
+- OpenCL glyph 3 codepoint: 68
+- OpenCL glyph 3 font size: 24
+- OpenCL glyph 3 width: 10
+- OpenCL glyph 3 height: 24
+- OpenCL glyph 3 advance: 11
+- OpenCL glyph 3 checksum: 407799
+- OpenCL glyph 3 ink pixels: 31
 - blur/tolerance used: false
 
 ## Raw Evidence
@@ -127,17 +171,17 @@
 - vector_font_compute_cpu_warm_checksum=13090264
 - vector_font_compute_cpu_checksum=13090264
 - vector_font_compute_cpu_ink_pixels=247
-- vector_font_compute_cpu_frame_us=1459977
+- vector_font_compute_cpu_frame_us=1513308
 - vector_font_compute_production_render_checksum=3707484892911777
 - vector_font_compute_production_render_ink_pixels=247
-- vector_font_compute_production_vector_raster_hits=3
-- vector_font_compute_production_vector_output_pixels=672
+- vector_font_compute_production_vector_raster_hits=0
+- vector_font_compute_production_vector_output_pixels=0
 - vector_font_compute_production_accelerator_attempts=8
-- vector_font_compute_production_cuda_hits=5
-- vector_font_compute_production_opencl_hits=3
-- vector_font_compute_production_cpu_fallback_hits=3
-- vector_font_compute_production_gpu_returned_glyphs=5
-- vector_font_compute_production_gpu_returned_glyph_pixels=1224
+- vector_font_compute_production_cuda_hits=4
+- vector_font_compute_production_opencl_hits=4
+- vector_font_compute_production_cpu_fallback_hits=0
+- vector_font_compute_production_gpu_returned_glyphs=8
+- vector_font_compute_production_gpu_returned_glyph_pixels=1896
 - vector_font_compute_production_accelerator_unavailable_reason=cuda-opencl-vector-font-glyph-pixels-returned
 - vector_font_compute_matrix_0_text=CUDAOPENCL
 - vector_font_compute_matrix_0_font_size=16
@@ -554,7 +598,7 @@
 - vector_font_compute_cuda_status=pass
 - vector_font_compute_cuda_reason=cuda-vector-font-rasterize-kernel-matched-cpu
 - vector_font_compute_cuda_checksum=13090264
-- vector_font_compute_cuda_glyph_count=2
+- vector_font_compute_cuda_glyph_count=4
 - vector_font_compute_cuda_glyph_0_codepoint=72
 - vector_font_compute_cuda_glyph_0_font_size=24
 - vector_font_compute_cuda_glyph_0_width=10
@@ -572,7 +616,7 @@
 - vector_font_compute_opencl_status=pass
 - vector_font_compute_opencl_reason=opencl-vector-font-rasterize-kernel-matched-cpu
 - vector_font_compute_opencl_checksum=13090264
-- vector_font_compute_opencl_glyph_count=2
+- vector_font_compute_opencl_glyph_count=4
 - vector_font_compute_opencl_glyph_0_codepoint=65
 - vector_font_compute_opencl_glyph_0_font_size=24
 - vector_font_compute_opencl_glyph_0_width=11
@@ -598,17 +642,17 @@
 - vector_font_compute_cpu_warm_checksum=13090264
 - vector_font_compute_cpu_checksum=13090264
 - vector_font_compute_cpu_ink_pixels=247
-- vector_font_compute_cpu_frame_us=1442931
+- vector_font_compute_cpu_frame_us=1535694
 - vector_font_compute_production_render_checksum=3707484892911777
 - vector_font_compute_production_render_ink_pixels=247
-- vector_font_compute_production_vector_raster_hits=3
-- vector_font_compute_production_vector_output_pixels=672
+- vector_font_compute_production_vector_raster_hits=0
+- vector_font_compute_production_vector_output_pixels=0
 - vector_font_compute_production_accelerator_attempts=8
-- vector_font_compute_production_cuda_hits=5
-- vector_font_compute_production_opencl_hits=3
-- vector_font_compute_production_cpu_fallback_hits=3
-- vector_font_compute_production_gpu_returned_glyphs=5
-- vector_font_compute_production_gpu_returned_glyph_pixels=1224
+- vector_font_compute_production_cuda_hits=4
+- vector_font_compute_production_opencl_hits=4
+- vector_font_compute_production_cpu_fallback_hits=0
+- vector_font_compute_production_gpu_returned_glyphs=8
+- vector_font_compute_production_gpu_returned_glyph_pixels=1896
 - vector_font_compute_production_accelerator_unavailable_reason=cuda-opencl-vector-font-glyph-pixels-returned
 - vector_font_compute_matrix_0_text=CUDAOPENCL
 - vector_font_compute_matrix_0_font_size=16
@@ -1025,7 +1069,7 @@
 - vector_font_compute_cuda_status=pass
 - vector_font_compute_cuda_reason=cuda-vector-font-rasterize-kernel-matched-cpu
 - vector_font_compute_cuda_checksum=13090264
-- vector_font_compute_cuda_glyph_count=2
+- vector_font_compute_cuda_glyph_count=4
 - vector_font_compute_cuda_glyph_0_codepoint=72
 - vector_font_compute_cuda_glyph_0_font_size=24
 - vector_font_compute_cuda_glyph_0_width=10
@@ -1043,7 +1087,7 @@
 - vector_font_compute_opencl_status=pass
 - vector_font_compute_opencl_reason=opencl-vector-font-rasterize-kernel-matched-cpu
 - vector_font_compute_opencl_checksum=13090264
-- vector_font_compute_opencl_glyph_count=2
+- vector_font_compute_opencl_glyph_count=4
 - vector_font_compute_opencl_glyph_0_codepoint=65
 - vector_font_compute_opencl_glyph_0_font_size=24
 - vector_font_compute_opencl_glyph_0_width=11
