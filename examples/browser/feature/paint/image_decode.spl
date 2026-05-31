@@ -1017,7 +1017,7 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         return nil
 
     val bytes_per_sample = _tiff_bytes_per_sample(sample_bits)
-    val bytes_per_pixel = samples_per_pixel * bytes_per_sample
+    val bytes_per_pixel = _tiff_storage_bytes_per_pixel(sample_bits, samples_per_pixel)
     val decoded_pixel_bytes_needed = width * height * bytes_per_pixel
     if rows_per_strip <= 0:
         rows_per_strip = height
@@ -1085,10 +1085,21 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
             val byte_count_lookup_index = _tiff_strip_lookup_index(strip_index, strip_byte_count_count)
             val strip_offset = _tiff_entry_value_at(raw_data, strip_offset_entry, strip_lookup_index, little)
             val strip_byte_count = _tiff_entry_value_at(raw_data, strip_byte_count_entry, byte_count_lookup_index, little)
-            pixel_offset = strip_offset + (row_in_strip * width + col) * bytes_per_pixel
-            if strip_offset <= 0 or pixel_offset + bytes_per_pixel > raw_data.len():
+            if sample_bits == 12:
+                pixel_offset = strip_offset * 8 + (row_in_strip * width + col) * samples_per_pixel * 12
+            else:
+                pixel_offset = strip_offset + (row_in_strip * width + col) * bytes_per_pixel
+            if strip_offset <= 0:
                 return nil
-            if strip_byte_count > 0 and pixel_offset + bytes_per_pixel > strip_offset + strip_byte_count:
+            if sample_bits == 12:
+                val pixel_end_bit = pixel_offset + samples_per_pixel * 12
+                if (pixel_end_bit + 7) / 8 > raw_data.len():
+                    return nil
+                if strip_byte_count > 0 and (pixel_end_bit + 7) / 8 > strip_offset + strip_byte_count:
+                    return nil
+            else if pixel_offset + bytes_per_pixel > raw_data.len():
+                return nil
+            else if strip_byte_count > 0 and pixel_offset + bytes_per_pixel > strip_offset + strip_byte_count:
                 return nil
         if planar_config == 2:
             rgba.push(_tiff_planar_sample(raw_data, strip_offset_entry, strip_offset_count, strip_byte_count_entry, strip_byte_count_count, row, col, width, rows_per_strip, strip_count_needed, 0, sample_bits, little))
@@ -1278,6 +1289,8 @@ fn _tiff_signed_u16(value: i64) -> i64:
     value
 
 fn _tiff_lab_component(raw_data: text, decoded_pixels: [i64], offset: i64, sample_bits: i64, compressed: bool, little: bool) -> i64:
+    if sample_bits == 12:
+        return _tiff_read_packed_u12(raw_data, offset)
     if sample_bits == 16:
         if compressed:
             return decoded_pixels[offset] + decoded_pixels[offset + 1] * 256
@@ -1285,7 +1298,7 @@ fn _tiff_lab_component(raw_data: text, decoded_pixels: [i64], offset: i64, sampl
     _tiff_pixel_byte(raw_data, decoded_pixels, offset, compressed)
 
 fn _tiff_itulab_decode_is_supported(data: text, entry: i64, value_count: i64, sample_bits: i64, little: bool) -> bool:
-    if sample_bits != 8 and sample_bits != 16:
+    if sample_bits != 8 and sample_bits != 12 and sample_bits != 16:
         return false
     val typ = _read_u16(data, entry + 2, little)
     if typ != 10 or value_count < 6:
@@ -1311,14 +1324,21 @@ fn _tiff_itulab_decode_component(data: text, entry: i64, component: i64, encoded
     val minimum = _tiff_srational_value_at(data, entry, component * 2, little)
     val maximum = _tiff_srational_value_at(data, entry, component * 2 + 1, little)
     var encoded_max = 255.0
+    if sample_bits == 12:
+        encoded_max = 4095.0
     if sample_bits == 16:
         encoded_max = 65535.0
     minimum + (encoded as f64) * (maximum - minimum) / encoded_max
 
 fn _tiff_lab_pixel_to_argb(raw_data: text, decoded_pixels: [i64], pixel_offset: i64, sample_bits: i64, compressed: bool, little: bool, photometric: i64, decode_entry: i64) -> i64:
     val l_encoded = _tiff_lab_component(raw_data, decoded_pixels, pixel_offset, sample_bits, compressed, little)
-    val a_encoded = _tiff_lab_component(raw_data, decoded_pixels, pixel_offset + _tiff_bytes_per_sample(sample_bits), sample_bits, compressed, little)
-    val b_encoded = _tiff_lab_component(raw_data, decoded_pixels, pixel_offset + _tiff_bytes_per_sample(sample_bits) * 2, sample_bits, compressed, little)
+    var a_offset = pixel_offset + _tiff_bytes_per_sample(sample_bits)
+    var b_offset = pixel_offset + _tiff_bytes_per_sample(sample_bits) * 2
+    if sample_bits == 12:
+        a_offset = pixel_offset + 12
+        b_offset = pixel_offset + 24
+    val a_encoded = _tiff_lab_component(raw_data, decoded_pixels, a_offset, sample_bits, compressed, little)
+    val b_encoded = _tiff_lab_component(raw_data, decoded_pixels, b_offset, sample_bits, compressed, little)
     var l = 0.0
     var a = 0.0
     var b = 0.0
@@ -1342,6 +1362,8 @@ fn _tiff_lab_pixel_to_argb(raw_data: text, decoded_pixels: [i64], pixel_offset: 
             b = _tiff_itulab_decode_component(raw_data, decode_entry, 2, b_encoded, sample_bits, little)
         else:
             var encoded_max = 255.0
+            if sample_bits == 12:
+                encoded_max = 4095.0
             if sample_bits == 16:
                 encoded_max = 65535.0
             l = (l_encoded as f64) * 100.0 / encoded_max
@@ -1389,8 +1411,36 @@ fn _tiff_bytes_per_sample(sample_bits: i64) -> i64:
         return 2
     1
 
+fn _tiff_storage_bytes_per_pixel(sample_bits: i64, samples_per_pixel: i64) -> i64:
+    if sample_bits == 12:
+        return (samples_per_pixel * 12 + 7) / 8
+    samples_per_pixel * _tiff_bytes_per_sample(sample_bits)
+
+fn _tiff_read_packed_u12(data: text, bit_offset: i64) -> i64:
+    val byte_offset = bit_offset / 8
+    val bit_in_byte = bit_offset - byte_offset * 8
+    if byte_offset < 0 or byte_offset + 2 > data.len():
+        return 0
+    val window = _byte_at(data, byte_offset) * 256 + _byte_at(data, byte_offset + 1)
+    if bit_in_byte == 0:
+        return (window / 16) & 4095
+    if byte_offset + 3 > data.len():
+        return 0
+    val wide = window * 256 + _byte_at(data, byte_offset + 2)
+    (wide / _pow2_i64(12 - bit_in_byte)) & 4095
+
+fn _pow2_i64(exp: i64) -> i64:
+    var out = 1
+    var i = 0
+    while i < exp:
+        out = out * 2
+        i = i + 1
+    out
+
 fn _tiff_bits_are_supported(data: text, value_count: i64, inline_value: i64, offset: i64, samples_per_pixel: i64, compression: i64, photometric: i64, planar_config: i64, little: bool) -> bool:
     val sample_bits = _tiff_sample_bits(data, value_count, inline_value, offset, little)
+    if sample_bits == 12:
+        return compression == 1 and planar_config == 1 and photometric == 10 and samples_per_pixel == 3 and value_count == samples_per_pixel and _tiff_sample_bits_all_equal(data, value_count, offset, 12, little)
     if sample_bits == 16:
         if compression != 1 and compression != 32773:
             return false
