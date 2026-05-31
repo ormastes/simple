@@ -155,7 +155,7 @@ match fs:
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -163,6 +163,48 @@ val state = BrowserRuntimeState.create("https://example.test/", "T", "", [], [],
 val process = state.runtime.get_host_property(state.window_id, "process")
 expect(_object_child_property_text(state.runtime.interpreter, process, "argv", "length")).to_equal("2")
 expect(_object_child_property_text(state.runtime.interpreter, process, "argv", "0")).to_equal("simple")
+expect(_object_property_text(state.runtime.interpreter, process, "exit")).to_equal("[Function]")
+expect(_display_js(state.runtime.interpreter._dispatch_native_with_receiver(NATIVE_NODE_PROCESS_EXIT, JsValue.Undefined, [JsValue.Number(v: 7.0)], 0))).to_equal("7")
+```
+
+</details>
+
+#### executes embedded process exit intent in BrowserSession runtime scripts
+
+1. var state = BrowserRuntimeState create
+
+2. Ok
+   - Expected: _display_js(value) equals `7`
+
+3. Err
+   - Expected: err.message equals `ok`
+
+4. Ok
+   - Expected: _display_js(value) equals `7`
+
+5. Err
+   - Expected: err.message equals `ok`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var state = BrowserRuntimeState.create("about:node-process", "Node", "", [], [], "")
+
+match state.runtime.eval("process.exit(7)"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("7")
+    Err(err):
+        expect(err.message).to_equal("ok")
+match state.runtime.eval("require('process').exit(7)"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("7")
+    Err(err):
+        expect(err.message).to_equal("ok")
 ```
 
 </details>
@@ -186,8 +228,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
