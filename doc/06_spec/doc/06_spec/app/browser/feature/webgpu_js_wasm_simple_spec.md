@@ -536,6 +536,38 @@ match result:
 
 </details>
 
+#### should validate TextEncoder-produced WASM bytes through BrowserSession
+
+1. var session = BrowserSession new
+
+2. session open html
+
+3. Ok
+   - Expected: _display_js(value) equals `function:function:wasm:true`
+
+4. Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+val result = session.eval_script("typeof TextEncoder + ':' + typeof TextDecoder + ':' + new TextDecoder().decode(new TextEncoder().encode('wasm')) + ':' + WebAssembly.validate(new TextEncoder().encode('\\u0000asm\\u0001\\u0000\\u0000\\u0000'))")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("function:function:wasm:true")
+    Err(err):
+        expect("unexpected js error: {err}").to_equal("")
+```
+
+</details>
+
 #### should expose bounded WASM section metadata through BrowserSession
 
 1. var session = BrowserSession new
@@ -625,8 +657,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
