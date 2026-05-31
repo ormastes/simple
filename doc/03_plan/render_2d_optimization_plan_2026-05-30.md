@@ -236,6 +236,12 @@ Progress 2026-05-30:
      reason text from the real probes.
    - Covered by `test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl`.
 4. Update specs: `gpu_portable_compute_spec.spl`, `engine_platform_spec.spl`, `ffi_rocm_spec.spl`
+   - Done: `gpu_portable_compute_spec.spl` now checks required generated 2D
+     entries across CUDA, HIP, OpenCL, and Metal compile plans.
+   - Done: `engine_platform_spec.spl` now checks explicit CUDA, ROCm, and
+     OpenCL compute dispatch diagnostics through the Engine2D accessor path.
+   - Done: `ffi_rocm_spec.spl` now includes a hardware-independent dynamic HIP
+     load fail-closed assertion alongside the zero-kernel launch guard.
 
 **AC:** All 4 backends pass through shared trait. Benchmark report shows per-backend throughput.
 
