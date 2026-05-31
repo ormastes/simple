@@ -211,6 +211,8 @@ Progress 2026-05-30:
 4. Export `SimdHitCounts` from all backends (GPU backends count kernel launches, CPU-SIMD counts span ops)
    - In progress: dispatch results expose launch/synchronize counters; CPU SIMD
      still provides concrete per-op hit counts through its session/provider.
+   - In progress: dispatch results can refresh CPU SIMD provider counters into
+     the common dispatch hit summary while preserving GPU kernel-launch counts.
 
 **AC:** `ComputeDispatch.auto()` returns best available session. Frame loop dispatches through trait.
 
