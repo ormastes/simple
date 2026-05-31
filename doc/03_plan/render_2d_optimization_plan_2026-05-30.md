@@ -229,6 +229,12 @@ Progress 2026-05-30:
 2. End-to-end benchmark: 1920×1080 fill+blit+scroll frame at 60fps target
    - Measure per-backend: CUDA, HIP, OpenCL, AVX2, NEON, scalar
 3. Update `BackendProber.probe_all_summary` with runtime evidence from real session init
+   - Done: `probe_all_summary()` now appends a `runtime_evidence` record using
+     the same CUDA, ROCm, OpenCL, CPU-SIMD, and scalar CPU probe order as the
+     compute dispatch selector. The evidence includes selected backend,
+     status, compute/graphics/present flags, device, driver, memory field, and
+     reason text from the real probes.
+   - Covered by `test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl`.
 4. Update specs: `gpu_portable_compute_spec.spl`, `engine_platform_spec.spl`, `ffi_rocm_spec.spl`
 
 **AC:** All 4 backends pass through shared trait. Benchmark report shows per-backend throughput.
