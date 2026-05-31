@@ -934,6 +934,50 @@ expect(image.data).to_equal([
 
 </details>
 
+#### falls back for ITULab Decode tags with too few SRATIONAL values
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val image = decode_tiff(_tiff_le_2x1_itulab_decode_tag_short_count())
+
+expect(image.width).to_equal(2)
+expect(image.height).to_equal(1)
+expect(image.format).to_equal(ImageFormat.Tiff)
+expect(image.data).to_equal([
+    128, 128, 128, 255,
+    128, 128, 128, 255
+])
+```
+
+</details>
+
+#### falls back for ITULab Decode tags with zero denominators
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val image = decode_tiff(_tiff_le_2x1_itulab_decode_tag_zero_denominator())
+
+expect(image.width).to_equal(2)
+expect(image.height).to_equal(1)
+expect(image.format).to_equal(ImageFormat.Tiff)
+expect(image.data).to_equal([
+    128, 128, 128, 255,
+    128, 128, 128, 255
+])
+```
+
+</details>
+
 #### decodes little-endian 16-bit CIELAB neutral TIFF through XYZ to RGBA
 
 <details>
@@ -1326,8 +1370,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 63 |
-| Active scenarios | 63 |
+| Total scenarios | 65 |
+| Active scenarios | 65 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
