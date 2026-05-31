@@ -94,7 +94,12 @@ environmental behavior, author it as an executable scenario manual:
 - Use `@capture` only where manual evidence is useful. Capture is off by
   default; bare `@capture` means after-step capture with default kind `tui`.
 - Use typed capture kinds for non-UI evidence: `api`, `protocol`, `exec`,
-  `binary`, `text`, `log`, or `artifact`.
+  `binary`, `html`, `text`, `log`, or `artifact`.
+- For Simple Web or other HTML-backed GUI surfaces, prefer HTML/visible-text
+  capture and checks; keep screenshot GUI capture as fallback evidence.
+- Use `# @evidence-display: embed_tui`, `links`, or `embed_all` when the
+  generated manual needs a different evidence display policy. The default is
+  embedded TUI captures and linked non-TUI artifacts.
 - Fold or skip very detailed edge, matrix, stress, generated, and helper-only
   scenarios with manual visibility policy instead of forcing them into the main
   manual.

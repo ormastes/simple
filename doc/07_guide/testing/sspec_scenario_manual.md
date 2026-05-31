@@ -89,6 +89,10 @@ executable source.
 Capture metadata attached to a rendered step uses typed labels such as
 `Protocol capture: after_step`, `API capture: after_step`, or
 `TUI capture: after_step`.
+Use `# @capture(html)` when the relevant evidence is an HTML document or
+visible HTML text. Use `# @capture(gui)` for graphical GUI evidence, but when
+the GUI is backed by Simple Web or another HTML-rendered surface, capture the
+HTML text first and keep screenshots as fallback evidence.
 Concrete provider artifacts may be attached to the next manual step with
 `# @artifact("path/to/artifact")` or `# @artifact: path/to/artifact`; generated
 docs render the artifact under the producing step and omit the metadata from
@@ -101,6 +105,15 @@ reproduction.` summary so reviewers can judge source size before expanding it.
 They also state that the folded block contains the complete executable scenario
 source, so a reviewer can reproduce the scenario without opening the source
 test file.
+
+Top-level evidence rendering is selectable:
+
+- `# @evidence-display: embed_tui` embeds TUI captures when possible and links
+  screenshots, logs, and other artifacts. This is the default.
+- `# @evidence-display: links` renders evidence tables only.
+- `# @evidence-display: embed_all` embeds image evidence where practical.
+
+The same policy can be written in a doc block as `**Evidence Display:** ...`.
 
 ## Inline and Previous Scenarios
 

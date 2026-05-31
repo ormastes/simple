@@ -47,6 +47,11 @@ Skip if exist. See `design` skill for details.
 - Do not leave primary manual output dominated by raw test code. Executable
   SPipe should be folded detail; visible content should be scenario steps and
   typed evidence.
+- For Simple Web or other HTML-backed GUI behavior, capture and check HTML
+  visible text when possible, then use GUI screenshots as fallback evidence.
+- Use `# @evidence-display: embed_tui`, `links`, or `embed_all` when generated
+  evidence should differ from the default embedded TUI plus linked non-TUI
+  artifacts.
 
 ### Phase 8: Implementation
 - Implement in `src/**/<feature>.spl`

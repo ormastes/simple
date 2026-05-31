@@ -91,14 +91,21 @@ describe "<Feature Name>":
   manual steps.
 - Capture is off by default. Bare `@capture` enables after-step `tui` capture.
   Use typed capture kinds for the evidence the reader needs: `tui`, `gui`,
-  `text`, `api`, `protocol`, `exec`, `binary`, `log`, or `artifact`.
+  `html`, `text`, `api`, `protocol`, `exec`, `binary`, `log`, or `artifact`.
+- For Simple Web or HTML-backed GUI surfaces, prefer `html` capture and
+  visible-text HTML checks; use `gui` screenshot capture as fallback evidence
+  when HTML cannot be captured.
+- Evidence display is user-selectable with `# @evidence-display: embed_tui`,
+  `links`, or `embed_all`. Default to `embed_tui`: embed TUI evidence and link
+  screenshots, logs, protocol dumps, binary artifacts, and other non-TUI files.
 - Capture and manual visibility policy may be set at root, folder, file,
   scenario, or step scope; the nearest explicit scope wins, and root default
   remains capture off.
 - UI-facing specs include visible-state capture evidence when practical:
   - TUI specs capture text or ANSI output under `build/test-artifacts/<spec-relative-path>/`.
-  - GUI specs capture screenshots/goldens/diffs under `doc/06_spec/image/<spec-relative-path>/`.
-  - Evidence paths appear in `**Screenshots:**` or `**TUI Captures:**` metadata so generated `doc/06_spec/...` docs embed them.
+  - HTML-backed GUI specs capture source HTML/visible text and check user-visible text before screenshot checks.
+  - GUI specs capture screenshots/goldens/diffs under `doc/06_spec/image/<spec-relative-path>/` when HTML is unavailable or insufficient.
+  - Evidence paths appear in `**Screenshots:**` or `**TUI Captures:**` metadata so generated `doc/06_spec/...` docs can render them according to evidence display policy.
   - Raster evidence (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.ppm`) is tracked by Git LFS.
 - Environmental tests should capture command/API/protocol/binary/log evidence
   when that is more meaningful than a screenshot.
