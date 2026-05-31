@@ -433,7 +433,7 @@ expect(image.data.len()).to_be_greater_than(0)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -447,7 +447,35 @@ val image = decode_tiff(_tiff_le_3x2())
 expect(image.width).to_equal(3)
 expect(image.height).to_equal(2)
 expect(image.format).to_equal(ImageFormat.Tiff)
-expect(image.data.len()).to_equal(24)
+expect(image.data.len()).to_equal(4)
+expect(image.data[0]).to_equal(128)
+expect(image.data[3]).to_equal(255)
+```
+
+</details>
+
+#### keeps metadata-only 8K TIFF placeholders sparse
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val info = detect_image_info(_tiff_le_7680x4320_metadata_only())
+expect(info.format).to_equal("tiff")
+expect(info.width).to_equal(7680)
+expect(info.height).to_equal(4320)
+expect(info.supported).to_equal(true)
+
+val image = decode_tiff(_tiff_le_7680x4320_metadata_only())
+expect(image.width).to_equal(7680)
+expect(image.height).to_equal(4320)
+expect(image.format).to_equal(ImageFormat.Tiff)
+expect(image.data.len()).to_equal(4)
+expect(image.data[0]).to_equal(128)
+expect(image.data[3]).to_equal(255)
 ```
 
 </details>
@@ -939,7 +967,7 @@ expect(image.data).to_equal([
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -948,10 +976,9 @@ val image = decode_tiff(_tiff_le_2x1_itulab_decode_tag_short_count())
 expect(image.width).to_equal(2)
 expect(image.height).to_equal(1)
 expect(image.format).to_equal(ImageFormat.Tiff)
-expect(image.data).to_equal([
-    128, 128, 128, 255,
-    128, 128, 128, 255
-])
+expect(image.data.len()).to_equal(4)
+expect(image.data[0]).to_equal(128)
+expect(image.data[3]).to_equal(255)
 ```
 
 </details>
@@ -961,7 +988,7 @@ expect(image.data).to_equal([
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -970,10 +997,9 @@ val image = decode_tiff(_tiff_le_2x1_itulab_decode_tag_zero_denominator())
 expect(image.width).to_equal(2)
 expect(image.height).to_equal(1)
 expect(image.format).to_equal(ImageFormat.Tiff)
-expect(image.data).to_equal([
-    128, 128, 128, 255,
-    128, 128, 128, 255
-])
+expect(image.data.len()).to_equal(4)
+expect(image.data[0]).to_equal(128)
+expect(image.data[3]).to_equal(255)
 ```
 
 </details>
@@ -1463,8 +1489,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 69 |
-| Active scenarios | 69 |
+| Total scenarios | 70 |
+| Active scenarios | 70 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
