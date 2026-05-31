@@ -110,10 +110,13 @@ Progress 2026-05-30:
   `CudaSession.launch_kernel_args(...)`, removing direct
   `cuda_launch_kernel(self.session.module_cache, ...)` calls from the surface
   draw paths.
-- Remaining Phase 1 work: replace the blocked CUDA-selectable placeholder with
-  live evidence on a CUDA host and decide whether the legacy renderer PTX should
-  be replaced by the portable `simple_2d_*` kernel module in this phase or in
-  the Phase 6 integration pass.
+- Replaced the `BackendProber.probe_cuda()` placeholder with live CUDA
+  runtime/device/context evidence. On this host `cuda_available=true` and
+  `StrictBackendFactory.strict().create_backend("cuda")` reports
+  `status=Initialized`, `feature_gate=cuda_context`.
+- Remaining Phase 1 decision: whether the legacy renderer PTX should be
+  replaced by the portable `simple_2d_*` kernel module in this phase or in the
+  Phase 6 integration pass.
 
 ### Phase 2: CPU-SIMD conformance + native acceleration
 

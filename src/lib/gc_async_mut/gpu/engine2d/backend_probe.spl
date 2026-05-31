@@ -1,5 +1,7 @@
 # 2D Engine — Backend Probe Contract
 
+use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count, cuda_device_name, CUDA_SUCCESS}
+use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gpu.engine2d.simd_kernels.{CpuSimdRuntimeEvidence, cpu_simd_runtime_evidence}
 
 val BACKEND_CPU: text = "cpu"
@@ -147,11 +149,48 @@ class BackendProber:
         r
 
     fn probe_cuda(self) -> BackendProbeResult:
-        var r = BackendProbeResult.unavailable(BACKEND_CUDA, "cuda probe unavailable in interpreter")
+        if not cuda_available():
+            var unavailable = BackendProbeResult.unavailable(BACKEND_CUDA, "CUDA runtime unavailable")
+            unavailable.api_name = "cuda"
+            unavailable.feature_gate = "cuda_runtime"
+            unavailable.shader_format = "ptx"
+            unavailable.has_compute = true
+            return unavailable
+        val init_result = cuda_init()
+        if init_result != CUDA_SUCCESS:
+            var failed = BackendProbeResult.failed(BACKEND_CUDA, "CUDA init failed")
+            failed.api_name = "cuda"
+            failed.feature_gate = "cuda_init"
+            failed.shader_format = "ptx"
+            failed.has_compute = true
+            return failed
+        if cuda_device_count() < 1:
+            var no_device = BackendProbeResult.unavailable(BACKEND_CUDA, "no CUDA device")
+            no_device.api_name = "cuda"
+            no_device.feature_gate = "cuda_device"
+            no_device.shader_format = "ptx"
+            no_device.has_compute = true
+            return no_device
+        var session = CudaSession.create()
+        val session_status = session.init()
+        if session_status != CUDA_SUCCESS:
+            var context_failed = BackendProbeResult.failed(BACKEND_CUDA, "CUDA context creation failed")
+            context_failed.api_name = "cuda"
+            context_failed.feature_gate = "cuda_context"
+            context_failed.shader_format = "ptx"
+            context_failed.has_compute = true
+            return context_failed
+        val device_name = cuda_device_name(0)
+        session.release()
+        var r = BackendProbeResult.success(BACKEND_CUDA, "CUDA runtime, device, and context initialized")
         r.api_name = "cuda"
-        r.feature_gate = "cuda_runtime"
+        r.feature_gate = "cuda_context"
         r.shader_format = "ptx"
         r.has_compute = true
+        r.has_graphics = false
+        r.has_present = false
+        r.device_name = device_name
+        r.memory_mb = 1
         r
 
     fn probe_metal(self) -> BackendProbeResult:
