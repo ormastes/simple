@@ -1365,7 +1365,7 @@ impl JsInterpreter:
                 self.wasm_export_body_fn_ids = body_fn_ids
                 self.wasm_export_body_module_ids = body_module_ids
                 self.wasm_export_body_indices = body_indices
-                if not self._native_webassembly_module_has_mutable_global(module_id):
+                if not has_memory and not self._native_webassembly_module_has_mutable_global(module_id):
                     val const_return = self._native_webassembly_module_function_export_i32_result_at(module_id, index)
                     if const_return >= 0:
                         var const_fn_ids = self.wasm_export_const_fn_ids
@@ -2392,8 +2392,13 @@ impl JsInterpreter:
                 if instr_start > body_end:
                     return -1
                 var stack: [i64] = []
-                val memory_page_count = self._native_webassembly_memory_min_pages(hex)
-                val memory_byte_len = memory_page_count * 65536
+                var memory_page_count = self._native_webassembly_memory_min_pages(hex)
+                if module_id >= 0:
+                    match self.get_object_property(module_id, "runtimeMemoryPages"):
+                        JsValue.Number(v): memory_page_count = f64_to_i64(v)
+                        _:
+                            self.set_object_property(module_id, "runtimeMemoryPages", JsValue.Number(v: memory_page_count.to_f64()))
+                var memory_byte_len = memory_page_count * 65536
                 var memory_addrs: [i64] = []
                 var memory_bytes: [i64] = []
                 var global_vals: [i64] = []
@@ -2631,6 +2636,34 @@ impl JsInterpreter:
                         if module_id >= 0:
                             self.set_object_property(module_id, "runtimeGlobalValue{global_index}", JsValue.Number(v: value.to_f64()))
                         cursor = next_pos
+                        continue
+                    if opcode == 63:
+                        if cursor + 1 >= body_end:
+                            return -1
+                        val mem_index = self._native_webassembly_hex_byte_at(hex, cursor + 1)
+                        if mem_index != 0:
+                            return -1
+                        stack.push(memory_page_count)
+                        cursor = cursor + 2
+                        continue
+                    if opcode == 64:
+                        if cursor + 1 >= body_end or stack.len() < 1:
+                            return -1
+                        val mem_index = self._native_webassembly_hex_byte_at(hex, cursor + 1)
+                        if mem_index != 0:
+                            return -1
+                        val delta = stack.get(stack.len() - 1)
+                        stack.pop()
+                        if delta < 0:
+                            stack.push(-1)
+                        else:
+                            val old_pages = memory_page_count
+                            memory_page_count = memory_page_count + delta
+                            memory_byte_len = memory_page_count * 65536
+                            if module_id >= 0:
+                                self.set_object_property(module_id, "runtimeMemoryPages", JsValue.Number(v: memory_page_count.to_f64()))
+                            stack.push(old_pages)
+                        cursor = cursor + 2
                         continue
                     if opcode == 44:
                         val align = self._native_webassembly_read_leb_value(hex, cursor + 1)

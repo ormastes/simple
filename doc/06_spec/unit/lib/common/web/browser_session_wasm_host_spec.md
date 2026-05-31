@@ -1015,6 +1015,58 @@ match instance:
 
 </details>
 
+#### executes bounded memory.grow and memory.size function export body
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, module, "validated") equals `true`
+   - Expected: _object_property_text(interp, module, "memoryMinPages") equals `1`
+   - Expected: _object_property_text(interp, module, "functionExportName0") equals `run`
+
+2. JsValue Object
+
+3. JsValue Object
+   - Expected: _display_js(run_value) equals `[Function]`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [], -1)) equals `2`
+   - Expected: _object_property_text(interp, module, "runtimeMemoryPages") equals `2`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [], -1)) equals `3`
+   - Expected: _object_property_text(interp, module, "runtimeMemoryPages") equals `3`
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f0302010005030100010707010372756e00000a0b010900410140001a3f000b")])
+expect(_object_property_text(interp, module, "validated")).to_equal("true")
+expect(_object_property_text(interp, module, "memoryMinPages")).to_equal("1")
+expect(_object_property_text(interp, module, "functionExportName0")).to_equal("run")
+
+val instance = interp._native_webassembly_instance([module])
+match instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                val run_value = interp.get_object_property(exports_id, "run")
+                expect(_display_js(run_value)).to_equal("[Function]")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("2")
+                expect(_object_property_text(interp, module, "runtimeMemoryPages")).to_equal("2")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("3")
+                expect(_object_property_text(interp, module, "runtimeMemoryPages")).to_equal("3")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
 #### executes bounded i32.store and i32.load function export body
 
 1. var interp =  new interpreter
@@ -2846,6 +2898,106 @@ match instance:
 
 </details>
 
+#### executes bounded memory.size function export body
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, module, "validated") equals `true`
+   - Expected: _object_property_text(interp, module, "hasMemorySection") equals `true`
+   - Expected: _object_property_text(interp, module, "memoryMinPages") equals `1`
+
+2. JsValue Object
+
+3. JsValue Object
+   - Expected: _display_js(run_value) equals `[Function]`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [], -1)) equals `1`
+   - Expected: _object_property_text(interp, module, "runtimeMemoryPages") equals `1`
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f0302010005030100010707010372756e00000a060104003f000b")])
+expect(_object_property_text(interp, module, "validated")).to_equal("true")
+expect(_object_property_text(interp, module, "hasMemorySection")).to_equal("true")
+expect(_object_property_text(interp, module, "memoryMinPages")).to_equal("1")
+
+val instance = interp._native_webassembly_instance([module])
+match instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                val run_value = interp.get_object_property(exports_id, "run")
+                expect(_display_js(run_value)).to_equal("[Function]")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("1")
+                expect(_object_property_text(interp, module, "runtimeMemoryPages")).to_equal("1")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
+#### executes bounded memory.grow function export body and persists pages
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, module, "validated") equals `true`
+   - Expected: _object_property_text(interp, module, "hasMemorySection") equals `true`
+   - Expected: _object_property_text(interp, module, "memoryMinPages") equals `1`
+
+2. JsValue Object
+
+3. JsValue Object
+   - Expected: _display_js(run_value) equals `[Function]`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [], -1)) equals `1`
+   - Expected: _object_property_text(interp, module, "runtimeMemoryPages") equals `2`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [], -1)) equals `2`
+   - Expected: _object_property_text(interp, module, "runtimeMemoryPages") equals `3`
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f0302010005030100010707010372756e00000a08010600410140000b")])
+expect(_object_property_text(interp, module, "validated")).to_equal("true")
+expect(_object_property_text(interp, module, "hasMemorySection")).to_equal("true")
+expect(_object_property_text(interp, module, "memoryMinPages")).to_equal("1")
+
+val instance = interp._native_webassembly_instance([module])
+match instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                val run_value = interp.get_object_property(exports_id, "run")
+                expect(_display_js(run_value)).to_equal("[Function]")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("1")
+                expect(_object_property_text(interp, module, "runtimeMemoryPages")).to_equal("2")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("2")
+                expect(_object_property_text(interp, module, "runtimeMemoryPages")).to_equal("3")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
 #### fails closed when valid modules require unsupported imports
 
 1. var interp =  new interpreter
@@ -3076,8 +3228,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 65 |
-| Active scenarios | 65 |
+| Total scenarios | 68 |
+| Active scenarios | 68 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
