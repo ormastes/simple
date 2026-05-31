@@ -93,3 +93,8 @@ Implications for SPipe:
 - SSpec should model checker tool output separately from the initial heuristic
   helpers so later providers can attach `nu_html_checker`, `html_validate`,
   `axe_core`, or `playwright_locator` results without changing manual output.
+- Evidence display needs a user-selected policy. The practical default is to
+  embed TUI captures because they are compact text/image state and link other
+  artifacts because screenshots, logs, protocol dumps, and binary artifacts can
+  dominate generated manuals. Users still need explicit `links` and `embed_all`
+  modes for review workflows that prefer compact docs or fully visual docs.

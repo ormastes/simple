@@ -170,6 +170,11 @@ Rules:
 - `html` capture records both source markup and visible text summaries so
   generated manuals can check what the user sees without matching hidden
   implementation details.
+- Evidence display is user-selectable with `# @evidence-display: embed_tui`,
+  `# @evidence-display: links`, `# @evidence-display: embed_all`, or the
+  doc-block metadata line `**Evidence Display:** ...`. The built-in default is
+  `embed_tui`: embed TUI captures when possible and link screenshots, logs, and
+  other artifacts.
 
 ## Checker and Capture Library
 
@@ -299,6 +304,8 @@ Create a shared SSpec support library rather than scattering helper functions:
    - Progress: generated docs now label GUI capture as HTML-preferred when
      available, embed TUI evidence, and keep screenshots/other evidence linked
      by default.
+   - Progress: evidence rendering now supports user-selected `embed_tui`,
+     `links`, and `embed_all` display policies from source comments or metadata.
 7. **Repository uplift**
    - Improve MCP scenario manuals first as the exemplar. Use
      `doc/03_plan/sys_test/mcp_scenario_manual_quality.md` as the target shape
@@ -331,6 +338,8 @@ Create a shared SSpec support library rather than scattering helper functions:
 - GUI captures document the HTML-preferred fallback when a Simple Web/HTML
   backing document is available.
 - HTML captures include visible text summaries for user-facing checks.
+- Evidence rendering honors user selection while defaulting to embedded TUI and
+  linked non-TUI artifacts.
 - Step-local provider artifact metadata appears under the step that caused it.
 - Step capture labels use typed wording such as `Protocol capture` and
   `API capture`.

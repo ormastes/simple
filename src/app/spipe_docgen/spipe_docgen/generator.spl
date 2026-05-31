@@ -274,6 +274,56 @@ fn is_text_capture_path(item: text) -> bool:
     val lower = item.lower()
     lower.ends_with(".txt") or lower.ends_with(".ansi") or lower.ends_with(".log")
 
+fn normalize_evidence_display(value: text) -> text:
+    val lower = value.lower().trim()
+    if lower == "":
+        return ""
+    if lower.contains("embed_all") or lower.contains("embed-all") or lower.contains("embed all"):
+        return "embed_all"
+    if lower.contains("link") or lower.contains("table"):
+        return "links"
+    if lower.contains("embed_tui") or lower.contains("embed-tui") or lower.contains("tui"):
+        return "embed_tui"
+    ""
+
+fn evidence_display_from_line(trimmed: text) -> text:
+    val lower = trimmed.lower().trim()
+    if lower.starts_with("**evidence display:**"):
+        return normalize_evidence_display(trimmed["**Evidence Display:**".len():])
+    if lower.starts_with("# @evidence-display") or lower.starts_with("@evidence-display"):
+        if trimmed.contains(":"):
+            val parts = trimmed.split(":")
+            if parts.len() >= 2:
+                return normalize_evidence_display(parts[1])
+        if trimmed.contains("("):
+            val open_parts = trimmed.split("(")
+            if open_parts.len() >= 2:
+                val close_parts = open_parts[1].split(")")
+                if close_parts.len() >= 1:
+                    return normalize_evidence_display(close_parts[0])
+    ""
+
+fn evidence_display_policy(doc: SspecDoc) -> text:
+    val raw_lines = doc.raw_content.split("\n")
+    for line in raw_lines:
+        val policy = evidence_display_from_line(line.trim())
+        if policy != "":
+            return policy
+    for block in doc.doc_blocks:
+        val lines = block.content.split("\n")
+        for line in lines:
+            val policy = evidence_display_from_line(line.trim())
+            if policy != "":
+                return policy
+    "embed_tui"
+
+fn should_embed_evidence_media(title: text, policy: text) -> bool:
+    if policy == "embed_all":
+        return true
+    if policy == "links":
+        return false
+    title == "TUI Captures"
+
 fn escape_markdown_alt(value: text) -> text:
     val without_open = value.replace("[", "(")
     val without_close = without_open.replace("]", ")")
@@ -293,8 +343,10 @@ fn append_evidence_table_group(md_parts: [text], title: text, items: [text]) -> 
     parts.push("\n")
     parts
 
-fn append_embedded_media_group(md_parts: [text], title: text, items: [text]) -> [text]:
+fn append_embedded_media_group(md_parts: [text], title: text, items: [text], policy: text) -> [text]:
     var parts = md_parts
+    if not should_embed_evidence_media(title, policy):
+        return parts
     var wrote_heading = false
     for item in items:
         if is_placeholder_evidence(item):
@@ -308,8 +360,10 @@ fn append_embedded_media_group(md_parts: [text], title: text, items: [text]) -> 
         parts.push("![{escape_markdown_alt(title + \": \" + name)}]({item})\n\n")
     parts
 
-fn append_tui_text_capture_group(md_parts: [text], items: [text]) -> [text]:
+fn append_tui_text_capture_group(md_parts: [text], items: [text], policy: text) -> [text]:
     var parts = md_parts
+    if policy == "links":
+        return parts
     var wrote_heading = false
     for item in items:
         if is_placeholder_evidence(item) or is_image_evidence_path(item) or not is_text_capture_path(item):
@@ -330,7 +384,7 @@ fn append_tui_text_capture_group(md_parts: [text], items: [text]) -> [text]:
         parts.push("</details>\n\n")
     parts
 
-fn append_evidence_section(md_parts: [text], metadata: FeatureMetadata) -> [text]:
+fn append_evidence_section(md_parts: [text], metadata: FeatureMetadata, display_policy: text) -> [text]:
     val artifact_count = evidence_item_count(metadata.artifacts)
     val screenshot_count = evidence_item_count(metadata.screenshots)
     val tui_capture_count = evidence_item_count(metadata.tui_captures)
@@ -340,6 +394,7 @@ fn append_evidence_section(md_parts: [text], metadata: FeatureMetadata) -> [text
 
     var parts = md_parts
     parts.push("## Evidence\n\n")
+    parts.push("Display policy: `{display_policy}`\n\n")
     parts.push("| Category | Count |\n")
     parts.push("|----------|------:|\n")
     if artifact_count > 0:
@@ -353,9 +408,10 @@ fn append_evidence_section(md_parts: [text], metadata: FeatureMetadata) -> [text
     parts.push("\n")
     parts = append_evidence_table_group(parts, "Artifacts", metadata.artifacts)
     parts = append_evidence_table_group(parts, "Screenshots", metadata.screenshots)
+    parts = append_embedded_media_group(parts, "Screenshots", metadata.screenshots, display_policy)
     parts = append_evidence_table_group(parts, "TUI Captures", metadata.tui_captures)
-    parts = append_embedded_media_group(parts, "TUI Captures", metadata.tui_captures)
-    parts = append_tui_text_capture_group(parts, metadata.tui_captures)
+    parts = append_embedded_media_group(parts, "TUI Captures", metadata.tui_captures, display_policy)
+    parts = append_tui_text_capture_group(parts, metadata.tui_captures, display_policy)
     parts = append_evidence_table_group(parts, "Logs", metadata.logs)
     parts
 
@@ -622,7 +678,7 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
             md_parts.push("## Overview\n\n")
             md_parts.push(overview + "\n\n")
 
-    md_parts = append_evidence_section(md_parts, meta)
+    md_parts = append_evidence_section(md_parts, meta, evidence_display_policy(doc))
     md_parts = append_extracted_examples_section(md_parts, doc.raw_content)
 
     if has_docstring:
