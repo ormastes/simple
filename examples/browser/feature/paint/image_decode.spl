@@ -911,6 +911,8 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
     var bits_per_sample_count = 1
     var bits_per_sample_value = 8
     var bits_per_sample_offset = 0
+    var color_map_entry = 0
+    var color_map_count = 0
 
     var i = 0
     while i < count:
@@ -945,6 +947,9 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         else if tag == 279:
             strip_byte_count_entry = entry
             strip_byte_count_count = value_count
+        else if tag == 320:
+            color_map_entry = entry
+            color_map_count = value_count
         else:
             pass_dn
         i = i + 1
@@ -955,13 +960,15 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         return nil
     if samples_per_pixel != 1 and samples_per_pixel != 3 and samples_per_pixel != 4:
         return nil
-    if photometric != 0 and photometric != 1 and photometric != 2 and photometric != 8:
+    if photometric != 0 and photometric != 1 and photometric != 2 and photometric != 3 and photometric != 8:
         return nil
-    if samples_per_pixel == 1 and photometric != 0 and photometric != 1:
+    if samples_per_pixel == 1 and photometric != 0 and photometric != 1 and photometric != 3:
         return nil
     if samples_per_pixel > 1 and photometric != 2 and photometric != 8:
         return nil
     if photometric == 8 and samples_per_pixel != 3:
+        return nil
+    if photometric == 3 and (samples_per_pixel != 1 or not _tiff_colormap_is_supported(raw_data, color_map_entry, color_map_count, little)):
         return nil
     if not _tiff_bits_are_8(raw_data, bits_per_sample_count, bits_per_sample_value, bits_per_sample_offset, samples_per_pixel, little):
         return nil
@@ -1012,7 +1019,13 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
                 return nil
             if strip_byte_count > 0 and pixel_offset + bytes_per_pixel > strip_offset + strip_byte_count:
                 return nil
-        if samples_per_pixel == 1:
+        if photometric == 3:
+            val palette_index = _tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset, compression == 32773)
+            rgba.push(_tiff_colormap_byte(raw_data, color_map_entry, color_map_count, palette_index, 0, little))
+            rgba.push(_tiff_colormap_byte(raw_data, color_map_entry, color_map_count, palette_index, 1, little))
+            rgba.push(_tiff_colormap_byte(raw_data, color_map_entry, color_map_count, palette_index, 2, little))
+            rgba.push(255)
+        else if samples_per_pixel == 1:
             var gray = _tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset, compression == 32773)
             if photometric == 0:
                 gray = 255 - gray
@@ -1094,6 +1107,23 @@ fn _tiff_decode_packbits_strips(
                     i = i + 1
         strip_index = strip_index + 1
     out
+
+fn _tiff_colormap_is_supported(data: text, entry: i64, value_count: i64, little: bool) -> bool:
+    if entry <= 0 or value_count < 768:
+        return false
+    val typ = _read_u16(data, entry + 2, little)
+    if typ != 3:
+        return false
+    val offset = _read_u32(data, entry + 8, little)
+    offset > 0 and offset + value_count * 2 <= data.len()
+
+fn _tiff_colormap_byte(data: text, entry: i64, value_count: i64, palette_index: i64, plane: i64, little: bool) -> i64:
+    val entries_per_plane = value_count / 3
+    if palette_index < 0 or palette_index >= entries_per_plane:
+        return 0
+    val offset = _read_u32(data, entry + 8, little)
+    val value = _read_u16(data, offset + (plane * entries_per_plane + palette_index) * 2, little)
+    value / 257
 
 fn _tiff_strip_lookup_index(strip_index: i64, value_count: i64) -> i64:
     if value_count == 1:
