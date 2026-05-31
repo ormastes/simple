@@ -904,8 +904,10 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
     var photometric = 1
     var samples_per_pixel = 1
     var rows_per_strip = 0
-    var strip_offset = 0
-    var strip_byte_count = 0
+    var strip_offset_entry = 0
+    var strip_offset_count = 0
+    var strip_byte_count_entry = 0
+    var strip_byte_count_count = 0
     var bits_per_sample_count = 1
     var bits_per_sample_value = 8
     var bits_per_sample_offset = 0
@@ -934,16 +936,20 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         else if tag == 262:
             photometric = first_value
         else if tag == 273:
-            strip_offset = first_value
+            strip_offset_entry = entry
+            strip_offset_count = value_count
         else if tag == 277:
             samples_per_pixel = first_value
         else if tag == 278:
             rows_per_strip = first_value
         else if tag == 279:
-            strip_byte_count = first_value
+            strip_byte_count_entry = entry
+            strip_byte_count_count = value_count
         else:
             pass_dn
         i = i + 1
+
+    print("debug tiff fields w=" + width.to_text() + " h=" + height.to_text() + " bps_count=" + bits_per_sample_count.to_text() + " bps_value=" + bits_per_sample_value.to_text() + " bps_offset=" + bits_per_sample_offset.to_text() + " samples=" + samples_per_pixel.to_text() + " rows=" + rows_per_strip.to_text() + " strips=" + strip_offset_count.to_text() + " strip_entry=" + strip_offset_entry.to_text() + " byte_entry=" + strip_byte_count_entry.to_text() + " len=" + raw_data.len().to_text())
 
     if width <= 0 or height <= 0:
         return nil
@@ -959,22 +965,36 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         return nil
     if photometric == 8 and samples_per_pixel != 3:
         return nil
-    if rows_per_strip > 0 and rows_per_strip < height:
-        return nil
     if not _tiff_bits_are_8(raw_data, bits_per_sample_count, bits_per_sample_value, bits_per_sample_offset, samples_per_pixel, little):
         return nil
 
     val bytes_per_pixel = samples_per_pixel
-    val needed = width * height * bytes_per_pixel
-    if strip_offset <= 0 or strip_offset + needed > raw_data.len():
+    if rows_per_strip <= 0:
+        rows_per_strip = height
+    val strip_count_needed = (height + rows_per_strip - 1) / rows_per_strip
+    if strip_offset_entry <= 0:
         return nil
-    if strip_byte_count > 0 and strip_byte_count < needed:
+    if strip_offset_count != 1 and strip_offset_count < strip_count_needed:
+        return nil
+    if strip_byte_count_count != 0 and strip_byte_count_count != 1 and strip_byte_count_count < strip_count_needed:
         return nil
 
     var rgba = []
     var pixel_index = 0
     while pixel_index < width * height:
-        val pixel_offset = strip_offset + pixel_index * bytes_per_pixel
+        val row = pixel_index / width
+        val col = pixel_index - row * width
+        val strip_index = row / rows_per_strip
+        val row_in_strip = row - strip_index * rows_per_strip
+        val strip_lookup_index = _tiff_strip_lookup_index(strip_index, strip_offset_count)
+        val byte_count_lookup_index = _tiff_strip_lookup_index(strip_index, strip_byte_count_count)
+        val strip_offset = _tiff_entry_value_at(raw_data, strip_offset_entry, strip_lookup_index, little)
+        val strip_byte_count = _tiff_entry_value_at(raw_data, strip_byte_count_entry, byte_count_lookup_index, little)
+        val pixel_offset = strip_offset + (row_in_strip * width + col) * bytes_per_pixel
+        if strip_offset <= 0 or pixel_offset + bytes_per_pixel > raw_data.len():
+            return nil
+        if strip_byte_count > 0 and pixel_offset + bytes_per_pixel > strip_offset + strip_byte_count:
+            return nil
         if samples_per_pixel == 1:
             var gray = _byte_at(raw_data, pixel_offset)
             if photometric == 0:
@@ -1005,6 +1025,11 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
 
     Some(ImageData(width: width, height: height, format: ImageFormat.Tiff, data: rgba))
 
+fn _tiff_strip_lookup_index(strip_index: i64, value_count: i64) -> i64:
+    if value_count == 1:
+        return 0
+    strip_index
+
 fn _tiff_cielab_pixel_to_argb(l_byte: i64, a_byte: i64, b_byte: i64) -> i64:
     val l = (l_byte as f64) * 100.0 / 255.0
     val a = (a_byte - 128) as f64
@@ -1012,14 +1037,27 @@ fn _tiff_cielab_pixel_to_argb(l_byte: i64, a_byte: i64, b_byte: i64) -> i64:
     cie_lab_d50_to_srgb_packed_argb(CieLab(l: l, a: a, b: b, white_point: "D50"), 255)
 
 fn _tiff_entry_first_value(data: text, entry: i64, little: bool) -> i64:
+    _tiff_entry_value_at(data, entry, 0, little)
+
+fn _tiff_entry_value_at(data: text, entry: i64, index: i64, little: bool) -> i64:
     val typ = _read_u16(data, entry + 2, little)
     val value_count = _read_u32(data, entry + 4, little)
-    if value_count <= 0:
+    if value_count <= 0 or index < 0 or index >= value_count:
         return 0
     if typ == 3:
-        return _read_u16(data, entry + 8, little)
+        if value_count <= 2:
+            return _read_u16(data, entry + 8 + index * 2, little)
+        val offset = _read_u32(data, entry + 8, little)
+        if offset <= 0 or offset + (index + 1) * 2 > data.len():
+            return 0
+        return _read_u16(data, offset + index * 2, little)
     if typ == 4:
-        return _read_u32(data, entry + 8, little)
+        if value_count == 1:
+            return _read_u32(data, entry + 8, little)
+        val offset = _read_u32(data, entry + 8, little)
+        if offset <= 0 or offset + (index + 1) * 4 > data.len():
+            return 0
+        return _read_u32(data, offset + index * 4, little)
     0
 
 fn _tiff_bits_are_8(data: text, value_count: i64, inline_value: i64, offset: i64, samples_per_pixel: i64, little: bool) -> bool:
