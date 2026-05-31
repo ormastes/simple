@@ -434,7 +434,7 @@ fn class_has(cls: text, want: text) -> bool:
         i = i + 1
     false
 
-# rightmost compound of a (possibly descendant) selector, after splitting commas
+# Rightmost compound only. Kept for callers that do not have tree context.
 fn selector_matches(sel: text, tag: text, cls: text, id: text) -> bool:
     val groups = sel.split(",")
     var g = 0
@@ -447,7 +447,47 @@ fn selector_matches(sel: text, tag: text, cls: text, id: text) -> bool:
         g = g + 1
     false
 
-fn style_block_decls_for_node(html: text, tag: text, cls: text, id: text) -> text:
+fn selector_group_matches_node(nodes: [HNode], idx: i32, group: text) -> bool:
+    val trimmed_group = group.trim()
+    val parts = trimmed_group.split(" ")
+    var right = parts.len() - 1
+    while right >= 0 and parts[right].trim().len() == 0:
+        right = right - 1
+    if right < 0:
+        return false
+    val nd = nodes[idx]
+    if not simple_match(parts[right], nd.tag, nd.class_attr, nd.id_attr):
+        return false
+    var ancestor = nd.parent
+    var want = right - 1
+    while want >= 0:
+        val part = parts[want].trim()
+        if part.len() == 0:
+            want = want - 1
+        else:
+            var found = false
+            while ancestor >= 0 and not found:
+                val anc = nodes[ancestor]
+                if simple_match(part, anc.tag, anc.class_attr, anc.id_attr):
+                    found = true
+                else:
+                    ancestor = anc.parent
+            if not found:
+                return false
+            ancestor = nodes[ancestor].parent
+            want = want - 1
+    true
+
+fn selector_matches_node(nodes: [HNode], idx: i32, sel: text) -> bool:
+    val groups = sel.split(",")
+    var g = 0
+    while g < groups.len():
+        if selector_group_matches_node(nodes, idx, groups[g]):
+            return true
+        g = g + 1
+    false
+
+fn style_block_decls_for_node(html: text, nodes: [HNode], node_index: i32) -> text:
     var out = ""
     var pos = 0
     var guard = 0
@@ -473,7 +513,7 @@ fn style_block_decls_for_node(html: text, tag: text, cls: text, id: text) -> tex
                 break
             val sel = css.substring(cp, brace).trim()
             val decl = css.substring(brace + 1, endb).trim()
-            if sel.len() > 0 and decl.len() > 0 and selector_matches(sel, tag, cls, id):
+            if sel.len() > 0 and decl.len() > 0 and selector_matches_node(nodes, node_index, sel):
                 out = out + decl + ";"
             cp = endb + 1
         pos = close + 1
@@ -490,12 +530,12 @@ fn compute_styles(nodes: [HNode], rules: Rules, html: text) -> [Style]:
         val nd = nodes[i]
         var st = if nd.parent >= 0: inherit_style(styles[nd.parent]) else: default_style()
         tag_defaults(st, nd.tag)
-        val direct_style_decls = style_block_decls_for_node(html, nd.tag, nd.class_attr, nd.id_attr)
+        val direct_style_decls = style_block_decls_for_node(html, nodes, i)
         if direct_style_decls.len() > 0:
             st = apply_decls(st, direct_style_decls)
         var r = 0
         while r < rules.sels.len():
-            if selector_matches(rules.sels[r], nd.tag, nd.class_attr, nd.id_attr):
+            if selector_matches_node(nodes, i, rules.sels[r]):
                 st = apply_decls(st, rules.decls[r])
             r = r + 1
         if nd.style_attr.len() > 0:

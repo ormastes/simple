@@ -106,6 +106,24 @@ expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(0)
 
 </details>
 
+#### scopes descendant selector colors to matching ancestors
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>.status{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}.panel .status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}</style></head><body><section class='panel'><div class='status'>IN</div></section><div class='status'>OUT</div></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+expect(pixels.len()).to_equal(96 * 64)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFF334155u32)).to_be_greater_than(0)
+```
+
+</details>
+
 #### paints famous-site corpus block geometry with Chrome default body margin
 
 <details>
@@ -557,8 +575,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 31 |
-| Active scenarios | 31 |
+| Total scenarios | 32 |
+| Active scenarios | 32 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

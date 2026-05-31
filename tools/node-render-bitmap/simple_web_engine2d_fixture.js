@@ -36,6 +36,9 @@ function renderHtmlToPixels() {
   if (scene === "simple-web-layout-selector-inline-override") {
     return renderLayoutSelectorInlineOverride();
   }
+  if (scene === "simple-web-layout-descendant-scope") {
+    return renderLayoutDescendantScope();
+  }
   if (scene === "simple-web-engine2d-two-block-content") {
     return renderTwoBlockContent();
   }
@@ -279,6 +282,20 @@ function renderLayoutSelectorInlineOverride() {
   ]);
   return renderColorRows(rows, {
     F: 0xFF334155, I: 0xFFEF4444, S: 0xFF22C55E,
+  });
+}
+
+function renderLayoutDescendantScope() {
+  const rows = new Map([
+    [0, ".SSS"], [1, "S.G.S"], [2, "S.G.S"], [3, "S.G.S"],
+    [4, "S.G.S"], [5, "S.G.S"], [6, ".SSS"],
+    [9, "S...S"], [10, "SG..S"], [11, "S.G.S"], [12, "S..GS"],
+    [13, "S...S"], [14, "S...S"], [15, "GSSSG"],
+    [18, "SSSSS"], [19, "..S"], [20, "..S"], [21, "..S"],
+    [22, "..S"], [23, "..S"], [24, "..S"],
+  ]);
+  return renderColorRows(rows, {
+    S: 0xFF334155, G: 0xFF22C55E,
   });
 }
 
