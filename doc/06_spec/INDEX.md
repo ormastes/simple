@@ -16,7 +16,7 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Image Decode Specification](paint/image_decode_spec.md) | Auto-generated | N/A | 57 | 0% | 0 lines |
+| [Image Decode Specification](paint/image_decode_spec.md) | Auto-generated | N/A | 58 | 0% | 0 lines |
 
 ## GPU & SIMD (1 features)
 
