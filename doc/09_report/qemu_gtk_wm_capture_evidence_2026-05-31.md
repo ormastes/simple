@@ -52,26 +52,6 @@
 - check=wm_launch_capture_evidence
 - strict_live_capture=0
 - strict_qemu_capture=0
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/gpu/engine2d/simd_provider.spl:3:1
--    |
--   3 | export use std.nogc_sync_mut.gpu.engine2d.simd_provider.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
-- 
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/opengl_sffi.spl:3:1
--    |
--   3 | export use std.nogc_async_mut.io.opengl_sffi.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
-- 
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
 -    |
@@ -81,16 +61,6 @@
 - Use angle brackets: pp<...> instead of pp[...]
 - 
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/rocm_sffi.spl:3:1
--    |
--   3 | export use std.nogc_async_mut.io.rocm_sffi.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
 - 
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /home/ormastes/dev/pub/simple/src/lib/common/image/ppm_decode.spl:33:33
@@ -103,26 +73,6 @@
 - Run `simple migrate --fix-generics` to automatically update your code
 - 
 - [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/gpu/engine2d/simd_provider.spl:3:1
--    |
--   3 | export use std.nogc_sync_mut.gpu.engine2d.simd_provider.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
-- 
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/opengl_sffi.spl:3:1
--    |
--   3 | export use std.nogc_async_mut.io.opengl_sffi.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
-- 
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
 -    |
@@ -132,16 +82,6 @@
 - Use angle brackets: pp<...> instead of pp[...]
 - 
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/rocm_sffi.spl:3:1
--    |
--   3 | export use std.nogc_async_mut.io.rocm_sffi.*
--    | ^
-- 
-- Use explicit exports instead
-- 
-- Example: export use module.{A, B, C} or export A, B from module
 - 
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /home/ormastes/dev/pub/simple/src/lib/common/image/ppm_decode.spl:33:33
@@ -186,7 +126,7 @@
 - 
 - Running: test/unit/app/ui/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/app/ui/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (209ms)
+-   [32mPASSED[0m (207ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -194,12 +134,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 214ms
+- Duration: 212ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        209ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
+-        207ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -213,7 +153,7 @@
 - 
 - Running: test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - [1/1] test/unit/app/ui/host_wm_runtime_loop_spec.spl
--   [32mPASSED[0m (983ms)
+-   [32mPASSED[0m (1037ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -221,12 +161,12 @@
 - Files: 1
 - [32mPassed: 2[0m
 - Failed: 0
-- Duration: 986ms
+- Duration: 1042ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        983ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
+-       1037ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -240,7 +180,7 @@
 - 
 - Running: test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/os/desktop/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (204ms)
+-   [32mPASSED[0m (196ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -248,12 +188,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 207ms
+- Duration: 200ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        204ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
+-        196ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/qemu_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -267,7 +207,7 @@
 - 
 - Running: test/unit/os/compositor/qemu_capture_spec.spl
 - [1/1] test/unit/os/compositor/qemu_capture_spec.spl
--   [32mPASSED[0m (863ms)
+-   [32mPASSED[0m (879ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -275,12 +215,12 @@
 - Files: 1
 - [32mPassed: 11[0m
 - Failed: 0
-- Duration: 878ms
+- Duration: 884ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        863ms  test/unit/os/compositor/qemu_capture_spec.spl
+-        879ms  test/unit/os/compositor/qemu_capture_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/electron_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -294,7 +234,7 @@
 - 
 - Running: test/unit/os/compositor/electron_capture_spec.spl
 - [1/1] test/unit/os/compositor/electron_capture_spec.spl
--   [32mPASSED[0m (766ms)
+-   [32mPASSED[0m (753ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -302,12 +242,12 @@
 - Files: 1
 - [32mPassed: 7[0m
 - Failed: 0
-- Duration: 772ms
+- Duration: 759ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        766ms  test/unit/os/compositor/electron_capture_spec.spl
+-        753ms  test/unit/os/compositor/electron_capture_spec.spl
 - spec_exit_code=0
 - wm_launch_capture_evidence_status=pass
 - wm_launch_capture_evidence_reason=wm-launch-capture-contract-verified
