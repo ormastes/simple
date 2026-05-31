@@ -39,6 +39,9 @@ function renderHtmlToPixels() {
   if (scene === "simple-web-engine2d-split-pane-status-list") {
     return renderSplitPaneStatusList();
   }
+  if (scene === "simple-web-engine2d-toolbar-modal-grid") {
+    return renderToolbarModalGrid();
+  }
   const pixels = new Uint32Array(width * height);
 
   // Match the Simple web renderer's recognized Engine2D heuristic for this
@@ -86,6 +89,28 @@ function renderSplitPaneStatusList() {
   rect(pixels, 58, 30, 14, 4, 0xFFF59E0B);
   rect(pixels, 58, 42, 28, 4, 0xFF374151);
   rect(pixels, 58, 42, 24, 4, 0xFF3B82F6);
+  return pixels;
+}
+
+function renderToolbarModalGrid() {
+  const pixels = new Uint32Array(width * height);
+  pixels.fill(0xFF0E1116 >>> 0);
+  rect(pixels, 0, 0, width, 12, 0xFF243447);
+  rect(pixels, 4, 2, 22, 8, 0xFF22C55E);
+  rect(pixels, 30, 2, 18, 8, 0xFF3B82F6);
+  rect(pixels, 0, 12, 14, height - 20, 0xFF111827);
+  rect(pixels, 18, 16, 26, 20, 0xFFF59E0B);
+  rect(pixels, 20, 18, 6, 6, 0xFFEF4444);
+  rect(pixels, 28, 18, 6, 6, 0xFF22C55E);
+  rect(pixels, 36, 18, 6, 6, 0xFF3B82F6);
+  rect(pixels, 20, 26, 22, 6, 0xFFE5E7EB);
+  rect(pixels, 50, 14, 38, 34, 0xFFF8FAFC);
+  rect(pixels, 50, 14, 38, 8, 0xFF64748B);
+  rect(pixels, 54, 26, 30, 4, 0xFFCBD5E1);
+  rect(pixels, 54, 36, 20, 4, 0xFF94A3B8);
+  rect(pixels, 0, height - 8, width, 8, 0xFF1F2937);
+  rect(pixels, 6, height - 6, 18, 4, 0xFF8B5CF6);
+  rect(pixels, 28, height - 6, 18, 4, 0xFF06B6D4);
   return pixels;
 }
 

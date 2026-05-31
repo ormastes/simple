@@ -164,6 +164,34 @@ html,body{margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden
 <div class="bar" style="top:42px"></div><div class="p3"></div>
 <script>window.__simpleExactBitmapReady=true;</script>`;
   }
+  if (scene === "simple-web-engine2d-toolbar-modal-grid") {
+    return `<!doctype html>
+<meta charset="utf-8">
+<style>
+html,body{margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden;background:#0e1116}
+.toolbar{position:absolute;left:0;top:0;width:${width}px;height:12px;background:#243447}
+.cmd1{position:absolute;left:4px;top:2px;width:22px;height:8px;background:#22c55e}
+.cmd2{position:absolute;left:30px;top:2px;width:18px;height:8px;background:#3b82f6}
+.rail{position:absolute;left:0;top:12px;width:14px;height:${height - 20}px;background:#111827}
+.image{position:absolute;left:18px;top:16px;width:26px;height:20px;background:#f59e0b}
+.sw1{position:absolute;left:20px;top:18px;width:6px;height:6px;background:#ef4444}
+.sw2{position:absolute;left:28px;top:18px;width:6px;height:6px;background:#22c55e}
+.sw3{position:absolute;left:36px;top:18px;width:6px;height:6px;background:#3b82f6}
+.caption{position:absolute;left:20px;top:26px;width:22px;height:6px;background:#e5e7eb}
+.modal{position:absolute;left:50px;top:14px;width:38px;height:34px;background:#f8fafc}
+.modalhead{position:absolute;left:50px;top:14px;width:38px;height:8px;background:#64748b}
+.bar1{position:absolute;left:54px;top:26px;width:30px;height:4px;background:#cbd5e1}
+.bar2{position:absolute;left:54px;top:36px;width:20px;height:4px;background:#94a3b8}
+.taskbar{position:absolute;left:0;top:${height - 8}px;width:${width}px;height:8px;background:#1f2937}
+.task1{position:absolute;left:6px;top:${height - 6}px;width:18px;height:4px;background:#8b5cf6}
+.task2{position:absolute;left:28px;top:${height - 6}px;width:18px;height:4px;background:#06b6d4}
+</style>
+<div class="toolbar"></div><div class="cmd1"></div><div class="cmd2"></div><div class="rail"></div>
+<div class="image"></div><div class="sw1"></div><div class="sw2"></div><div class="sw3"></div><div class="caption"></div>
+<div class="modal"></div><div class="modalhead"></div><div class="bar1"></div><div class="bar2"></div>
+<div class="taskbar"></div><div class="task1"></div><div class="task2"></div>
+<script>window.__simpleExactBitmapReady=true;</script>`;
+  }
   return `<!doctype html>
 <meta charset="utf-8">
 <style>
@@ -182,7 +210,7 @@ function fixtureHtml() {
   if (expectedArgbPath) {
     return expectedArgbCanvasHtml();
   }
-  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list") {
+  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid") {
     return simpleWebEngine2DFixtureHtml();
   }
   return exactFixtureHtml();
@@ -213,6 +241,24 @@ function expectedFramePixels() {
       rectArray(pixels, 58, 30, 14, 4, 0xFFF59E0B >>> 0);
       rectArray(pixels, 58, 42, 28, 4, 0xFF374151 >>> 0);
       rectArray(pixels, 58, 42, 24, 4, 0xFF3B82F6 >>> 0);
+    } else if (scene === "simple-web-engine2d-toolbar-modal-grid") {
+      pixels.fill(0xFF0E1116 >>> 0);
+      rectArray(pixels, 0, 0, width, 12, 0xFF243447 >>> 0);
+      rectArray(pixels, 4, 2, 22, 8, 0xFF22C55E >>> 0);
+      rectArray(pixels, 30, 2, 18, 8, 0xFF3B82F6 >>> 0);
+      rectArray(pixels, 0, 12, 14, height - 20, 0xFF111827 >>> 0);
+      rectArray(pixels, 18, 16, 26, 20, 0xFFF59E0B >>> 0);
+      rectArray(pixels, 20, 18, 6, 6, 0xFFEF4444 >>> 0);
+      rectArray(pixels, 28, 18, 6, 6, 0xFF22C55E >>> 0);
+      rectArray(pixels, 36, 18, 6, 6, 0xFF3B82F6 >>> 0);
+      rectArray(pixels, 20, 26, 22, 6, 0xFFE5E7EB >>> 0);
+      rectArray(pixels, 50, 14, 38, 34, 0xFFF8FAFC >>> 0);
+      rectArray(pixels, 50, 14, 38, 8, 0xFF64748B >>> 0);
+      rectArray(pixels, 54, 26, 30, 4, 0xFFCBD5E1 >>> 0);
+      rectArray(pixels, 54, 36, 20, 4, 0xFF94A3B8 >>> 0);
+      rectArray(pixels, 0, height - 8, width, 8, 0xFF1F2937 >>> 0);
+      rectArray(pixels, 6, height - 6, 18, 4, 0xFF8B5CF6 >>> 0);
+      rectArray(pixels, 28, height - 6, 18, 4, 0xFF06B6D4 >>> 0);
     } else {
       pixels.fill(0xFF112233 >>> 0);
     }
@@ -295,7 +341,7 @@ function captureChecksum(buffer) {
     const green = buffer[off + 1];
     const red = buffer[off + 2];
     const alpha = buffer[off + 3];
-    const isArgbScene = expectedArgbPath !== "" || scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list";
+    const isArgbScene = expectedArgbPath !== "" || scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid";
     const value = isArgbScene
       ? (((alpha << 24) >>> 0) | (red << 16) | (green << 8) | blue) >>> 0
       : red;
