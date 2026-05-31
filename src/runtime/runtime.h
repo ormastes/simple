@@ -747,6 +747,18 @@ void     simd_text_init(void);
 int64_t  rt_engine2d_simd_fill_u32(SplArray* dst, int64_t offset, int64_t count, int64_t color);
 int64_t  rt_engine2d_simd_copy_u32(SplArray* dst, int64_t dst_off, SplArray* src, int64_t src_off, int64_t count);
 
+/* ===== Generic OpenCL ICD Runtime Hooks ===== */
+
+bool     rt_opencl_is_available(void);
+int64_t  rt_opencl_platform_count(void);
+int64_t  rt_opencl_create_context(int64_t platform);
+int64_t  rt_opencl_create_queue(int64_t context);
+int64_t  rt_opencl_create_program(int64_t context, const char* source);
+bool     rt_opencl_build_program(int64_t program);
+int64_t  rt_opencl_create_kernel(int64_t program, const char* name);
+bool     rt_opencl_enqueue_ndrange(int64_t queue, int64_t kernel, int64_t gx, int64_t gy, int64_t gz, int64_t lx, int64_t ly, int64_t lz);
+bool     rt_opencl_finish(int64_t queue);
+
 /* ===== SIMD UTF-8 Operations ===== */
 
 int64_t  rt_text_count_codepoints_cached(int64_t value);

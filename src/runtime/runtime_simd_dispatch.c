@@ -10,6 +10,88 @@
 #  include <immintrin.h>
 #endif
 
+#if !defined(_WIN32)
+#  include <dlfcn.h>
+#endif
+
+typedef int (*rt_opencl_get_platform_ids_fn)(uint32_t, void*, uint32_t*);
+
+static rt_opencl_get_platform_ids_fn rt_opencl_get_platform_ids_symbol(void) {
+#if defined(_WIN32)
+    return NULL;
+#else
+    static void* opencl_handle = NULL;
+    static rt_opencl_get_platform_ids_fn symbol = NULL;
+    static int attempted = 0;
+    if (attempted) return symbol;
+    attempted = 1;
+    opencl_handle = dlopen("libOpenCL.so.1", RTLD_LAZY | RTLD_LOCAL);
+    if (!opencl_handle) {
+        opencl_handle = dlopen("libOpenCL.so", RTLD_LAZY | RTLD_LOCAL);
+    }
+    if (!opencl_handle) return NULL;
+    symbol = (rt_opencl_get_platform_ids_fn)dlsym(opencl_handle, "clGetPlatformIDs");
+    return symbol;
+#endif
+}
+
+int64_t rt_opencl_platform_count(void) {
+    rt_opencl_get_platform_ids_fn get_platform_ids = rt_opencl_get_platform_ids_symbol();
+    if (!get_platform_ids) return 0;
+    uint32_t count = 0;
+    int status = get_platform_ids(0, NULL, &count);
+    if (status != 0) return 0;
+    return (int64_t)count;
+}
+
+bool rt_opencl_is_available(void) {
+    return rt_opencl_platform_count() > 0;
+}
+
+int64_t rt_opencl_create_context(int64_t platform) {
+    (void)platform;
+    return 0;
+}
+
+int64_t rt_opencl_create_queue(int64_t context) {
+    (void)context;
+    return 0;
+}
+
+int64_t rt_opencl_create_program(int64_t context, const char* source) {
+    (void)context;
+    (void)source;
+    return 0;
+}
+
+bool rt_opencl_build_program(int64_t program) {
+    (void)program;
+    return false;
+}
+
+int64_t rt_opencl_create_kernel(int64_t program, const char* name) {
+    (void)program;
+    (void)name;
+    return 0;
+}
+
+bool rt_opencl_enqueue_ndrange(int64_t queue, int64_t kernel, int64_t gx, int64_t gy, int64_t gz, int64_t lx, int64_t ly, int64_t lz) {
+    (void)queue;
+    (void)kernel;
+    (void)gx;
+    (void)gy;
+    (void)gz;
+    (void)lx;
+    (void)ly;
+    (void)lz;
+    return false;
+}
+
+bool rt_opencl_finish(int64_t queue) {
+    (void)queue;
+    return false;
+}
+
 static inline int64_t engine2d_numeric_arg(int64_t value) {
     uint64_t raw = (uint64_t)value;
     if ((raw & RT_VALUE_TAG_MASK_SIMD) == 0 && raw >= 8) {

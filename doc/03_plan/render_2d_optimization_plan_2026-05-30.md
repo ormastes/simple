@@ -182,6 +182,10 @@ Progress 2026-05-30:
    - Covered by `test/unit/lib/gpu/engine2d/opencl_session_contract_spec.spl`
      and `test/unit/lib/gpu/engine2d/ffi_opencl_spec.spl`.
 3. Add `BackendProber.probe_opencl` real detection via `clGetPlatformIDs`
+   - Done: `probe_opencl()` now checks the generic ICD dynamic SFFI path and
+     reports initialized compute-only OpenCL when `clGetPlatformIDs` is present,
+     otherwise a precise ICD-unavailable result. Interpreter/runtime externs
+     and hosted C stubs were added for static/native follow-up.
 
 **AC:** OpenClSession conforms, passes fill-kernel round-trip test on any OpenCL-capable device.
 

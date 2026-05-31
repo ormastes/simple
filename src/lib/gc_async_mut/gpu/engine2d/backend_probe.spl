@@ -2,6 +2,7 @@
 
 use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count, cuda_device_name, CUDA_SUCCESS}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
+use std.gpu.engine2d.sffi_opencl.{OpenClFfi}
 use std.gpu.engine2d.simd_kernels.{CpuSimdRuntimeEvidence, cpu_simd_runtime_evidence}
 
 val BACKEND_CPU: text = "cpu"
@@ -201,13 +202,44 @@ class BackendProber:
         r
 
     fn probe_opencl(self) -> BackendProbeResult:
-        var r = BackendProbeResult.unavailable(BACKEND_OPENCL, "OpenCL generated compute is available only after explicit runtime device, queue, kernel, and readback evidence")
+        val maybe_ffi = OpenClFfi.create_dynamic()
+        if maybe_ffi == nil:
+            var unavailable = BackendProbeResult.unavailable(BACKEND_OPENCL, "OpenCL ICD library unavailable")
+            unavailable.api_name = "opencl"
+            unavailable.feature_gate = "opencl_icd_platform"
+            unavailable.shader_format = "opencl-c"
+            unavailable.has_compute = true
+            unavailable.has_graphics = false
+            unavailable.has_present = false
+            return unavailable
+        val ffi = maybe_ffi
+        if not ffi.is_available():
+            var missing_symbol = BackendProbeResult.unavailable(BACKEND_OPENCL, "OpenCL ICD missing clGetPlatformIDs")
+            missing_symbol.api_name = "opencl"
+            missing_symbol.feature_gate = "opencl_icd_platform"
+            missing_symbol.shader_format = "opencl-c"
+            missing_symbol.has_compute = true
+            missing_symbol.has_graphics = false
+            missing_symbol.has_present = false
+            return missing_symbol
+        val platform_count = ffi.platform_count()
+        if platform_count < 1:
+            var no_platform = BackendProbeResult.unavailable(BACKEND_OPENCL, "OpenCL ICD returned zero platforms")
+            no_platform.api_name = "opencl"
+            no_platform.feature_gate = "opencl_platform"
+            no_platform.shader_format = "opencl-c"
+            no_platform.has_compute = true
+            no_platform.has_graphics = false
+            no_platform.has_present = false
+            return no_platform
+        var r = BackendProbeResult.success(BACKEND_OPENCL, "OpenCL ICD loaded and reported {platform_count} platform(s)")
         r.api_name = "opencl"
-        r.feature_gate = "opencl_runtime_queue_kernel_readback"
-        r.shader_format = "spirv"
+        r.feature_gate = "opencl_icd_platform"
+        r.shader_format = "opencl-c"
         r.has_compute = true
         r.has_graphics = false
         r.has_present = false
+        r.memory_mb = platform_count
         r
 
     fn probe_webgpu(self) -> BackendProbeResult:

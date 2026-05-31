@@ -10,6 +10,91 @@ use std::ffi::{CStr, CString};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+mod opencl_dlopen {
+    use std::ffi::CString;
+    use std::os::raw::c_void;
+    use std::sync::OnceLock;
+
+    type ClGetPlatformIDs = unsafe extern "C" fn(u32, *mut c_void, *mut u32) -> i32;
+
+    pub struct OpenClFns {
+        pub cl_get_platform_ids: ClGetPlatformIDs,
+    }
+
+    #[cfg(unix)]
+    fn load_symbol(handle: *mut c_void, name: &[u8]) -> Option<*mut c_void> {
+        let symbol = unsafe { libc::dlsym(handle, name.as_ptr() as *const libc::c_char) };
+        if symbol.is_null() {
+            None
+        } else {
+            Some(symbol)
+        }
+    }
+
+    #[cfg(windows)]
+    fn load_symbol(handle: isize, name: &[u8]) -> Option<*mut c_void> {
+        use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+        let symbol = unsafe { GetProcAddress(handle, name.as_ptr()) };
+        symbol.map(|f| f as *mut c_void)
+    }
+
+    fn symbol_to_cl_get_platform_ids(symbol: *mut c_void) -> ClGetPlatformIDs {
+        unsafe { std::mem::transmute::<*mut c_void, ClGetPlatformIDs>(symbol) }
+    }
+
+    pub fn load_opencl() -> Option<OpenClFns> {
+        #[cfg(unix)]
+        {
+            for name in ["libOpenCL.so.1", "libOpenCL.so"] {
+                let c_name = CString::new(name).ok()?;
+                let handle = unsafe { libc::dlopen(c_name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
+                if handle.is_null() {
+                    continue;
+                }
+                if let Some(symbol) = load_symbol(handle, b"clGetPlatformIDs\0") {
+                    return Some(OpenClFns { cl_get_platform_ids: symbol_to_cl_get_platform_ids(symbol) });
+                }
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
+            for name in ["OpenCL.dll"] {
+                let c_name = CString::new(name).ok()?;
+                let handle = unsafe { LoadLibraryA(c_name.as_ptr() as *const u8) };
+                if handle == 0 {
+                    continue;
+                }
+                if let Some(symbol) = load_symbol(handle as isize, b"clGetPlatformIDs\0") {
+                    return Some(OpenClFns { cl_get_platform_ids: symbol_to_cl_get_platform_ids(symbol) });
+                }
+            }
+        }
+
+        None
+    }
+
+    static OPENCL_DL: OnceLock<Option<OpenClFns>> = OnceLock::new();
+
+    pub fn get_opencl() -> Option<&'static OpenClFns> {
+        OPENCL_DL.get_or_init(load_opencl).as_ref()
+    }
+
+    pub fn platform_count() -> i64 {
+        let Some(fns) = get_opencl() else {
+            return 0;
+        };
+        let mut count: u32 = 0;
+        let status = unsafe { (fns.cl_get_platform_ids)(0, std::ptr::null_mut(), &mut count as *mut u32) };
+        if status == 0 {
+            count as i64
+        } else {
+            0
+        }
+    }
+}
+
 // dlopen-based CUDA fallback when compiled without cuda feature
 #[cfg(not(feature = "cuda"))]
 mod cuda_dlopen {
@@ -1540,6 +1625,16 @@ pub fn rt_webgpu_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_webgpu_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(0))
+}
+
+/// `rt_opencl_is_available() -> bool`
+pub fn rt_opencl_is_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(if opencl_dlopen::platform_count() > 0 { 1 } else { 0 }))
+}
+
+/// `rt_opencl_platform_count() -> i64`
+pub fn rt_opencl_platform_count_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(opencl_dlopen::platform_count()))
 }
 
 /// WebGPU surface stubs — no surface is available in interpreter mode.
