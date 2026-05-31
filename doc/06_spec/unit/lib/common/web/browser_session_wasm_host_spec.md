@@ -917,6 +917,52 @@ match instance:
 
 </details>
 
+#### executes bounded signed i32 global.get function export body
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, module, "validated") equals `true`
+   - Expected: _object_property_text(interp, module, "functionExportName0") equals `run`
+   - Expected: _object_property_text(interp, module, "globalValue") equals `-1`
+
+2. JsValue Object
+
+3. JsValue Object
+   - Expected: _display_js(run_value) equals `[Function]`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [], -1)) equals `42`
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105016000017f030201000606017f00417f0b0707010372756e00000a090107002300412b6a0b")])
+expect(_object_property_text(interp, module, "validated")).to_equal("true")
+expect(_object_property_text(interp, module, "functionExportName0")).to_equal("run")
+expect(_object_property_text(interp, module, "globalValue")).to_equal("-1")
+
+val instance = interp._native_webassembly_instance([module])
+match instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                val run_value = interp.get_object_property(exports_id, "run")
+                expect(_display_js(run_value)).to_equal("[Function]")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("42")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
 #### executes bounded i32.store and i32.load function export body
 
 1. var interp =  new interpreter
@@ -2690,6 +2736,64 @@ match instance:
 
 </details>
 
+#### synthesizes bounded signed global export placeholder
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, module, "validated") equals `true`
+   - Expected: _object_property_text(interp, module, "hasGlobalSection") equals `true`
+   - Expected: _object_property_text(interp, module, "globalExportName") equals `answer`
+   - Expected: _object_property_text(interp, module, "globalExportCount") equals `1`
+   - Expected: _object_property_text(interp, module, "globalValue") equals `-1`
+   - Expected: _object_child_property_text(interp, instance, "exports", "answer") equals `[object Object]`
+
+2. JsValue Object
+
+3. JsValue Object
+
+4. JsValue Object
+   - Expected: _display_js(interp.get_object_property(global_id, "kind")) equals `global`
+   - Expected: _display_js(interp.get_object_property(global_id, "value")) equals `-1`
+   - Expected: "missing global" equals ``
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 25 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000606017f00417f0b070a0106616e737765720300")])
+expect(_object_property_text(interp, module, "validated")).to_equal("true")
+expect(_object_property_text(interp, module, "hasGlobalSection")).to_equal("true")
+expect(_object_property_text(interp, module, "globalExportName")).to_equal("answer")
+expect(_object_property_text(interp, module, "globalExportCount")).to_equal("1")
+expect(_object_property_text(interp, module, "globalValue")).to_equal("-1")
+
+val instance = interp._native_webassembly_instance([module])
+expect(_object_child_property_text(interp, instance, "exports", "answer")).to_equal("[object Object]")
+match instance:
+    JsValue.Object(instance_id):
+        match interp.get_object_property(instance_id, "exports"):
+            JsValue.Object(exports_id):
+                match interp.get_object_property(exports_id, "answer"):
+                    JsValue.Object(global_id):
+                        expect(_display_js(interp.get_object_property(global_id, "kind"))).to_equal("global")
+                        expect(_display_js(interp.get_object_property(global_id, "value"))).to_equal("-1")
+                    _:
+                        expect("missing global").to_equal("")
+            _:
+                expect("missing exports").to_equal("")
+    _:
+        expect("missing instance").to_equal("")
+```
+
+</details>
+
 #### fails closed when valid modules require unsupported imports
 
 1. var interp =  new interpreter
@@ -2920,8 +3024,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 62 |
-| Active scenarios | 62 |
+| Total scenarios | 64 |
+| Active scenarios | 64 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
