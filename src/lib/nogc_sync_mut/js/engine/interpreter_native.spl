@@ -6,6 +6,7 @@ use std.js.types.ast_types.{JsExpression, JsStatement}
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
 use std.js.engine.runtime.{dispatch_native, NATIVE_ARRAY_BUFFER_CONSTRUCTOR, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_NODE_BUFFER_ALLOC, NATIVE_NODE_BUFFER_BYTE_LENGTH, NATIVE_NODE_BUFFER_COMPARE, NATIVE_NODE_BUFFER_CONCAT, NATIVE_NODE_BUFFER_EQUALS, NATIVE_NODE_BUFFER_FROM, NATIVE_NODE_BUFFER_IS_BUFFER, NATIVE_NODE_BUFFER_READ_UINT16_BE, NATIVE_NODE_BUFFER_READ_UINT16_LE, NATIVE_NODE_BUFFER_READ_UINT32_BE, NATIVE_NODE_BUFFER_READ_UINT32_LE, NATIVE_NODE_BUFFER_READ_UINT8, NATIVE_NODE_BUFFER_SLICE, NATIVE_NODE_BUFFER_SUBARRAY, NATIVE_NODE_BUFFER_TO_STRING, NATIVE_NODE_BUFFER_WRITE_UINT16_BE, NATIVE_NODE_BUFFER_WRITE_UINT16_LE, NATIVE_NODE_BUFFER_WRITE_UINT32_BE, NATIVE_NODE_BUFFER_WRITE_UINT32_LE, NATIVE_NODE_BUFFER_WRITE_UINT8, NATIVE_NODE_CRYPTO_CREATE_HASH, NATIVE_NODE_CRYPTO_HASH_DIGEST, NATIVE_NODE_CRYPTO_HASH_UPDATE, NATIVE_NODE_CRYPTO_RANDOM_BYTES, NATIVE_NODE_OS_ARCH, NATIVE_NODE_OS_ENDIANNESS, NATIVE_NODE_OS_HOMEDIR, NATIVE_NODE_OS_PLATFORM, NATIVE_NODE_OS_RELEASE, NATIVE_NODE_OS_TMPDIR, NATIVE_NODE_OS_TYPE, NATIVE_NODE_PATH_BASENAME, NATIVE_NODE_PATH_DIRNAME, NATIVE_NODE_PATH_EXTNAME, NATIVE_NODE_PATH_IS_ABSOLUTE, NATIVE_NODE_PATH_JOIN, NATIVE_NODE_PATH_NORMALIZE, NATIVE_NODE_PROCESS_CWD, NATIVE_NODE_PROCESS_NEXT_TICK, NATIVE_NODE_REQUIRE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_TEXT_DECODER_CONSTRUCTOR, NATIVE_TEXT_DECODER_DECODE, NATIVE_TEXT_ENCODER_CONSTRUCTOR, NATIVE_TEXT_ENCODER_ENCODE, NATIVE_UINT8_ARRAY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANTIATE_CATCH, NATIVE_WEBASSEMBLY_INSTANTIATE_THEN, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MEMORY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MEMORY_GROW, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
+use std.js.engine.runtime.{NATIVE_NODE_EVENT_EMITTER_CONSTRUCTOR, NATIVE_NODE_EVENT_EMITTER_EMIT, NATIVE_NODE_EVENT_EMITTER_LISTENER_COUNT, NATIVE_NODE_EVENT_EMITTER_ON, NATIVE_NODE_EVENT_EMITTER_ONCE, NATIVE_NODE_EVENT_EMITTER_REMOVE_ALL_LISTENERS}
 use std.js.engine.parser.{JsParser}
 use std.js.builtins.json.{json_is_valid}
 use std.js.node.path_module.{path_join, path_dirname, path_basename, path_extname, path_isAbsolute, path_normalize}
@@ -150,6 +151,18 @@ impl JsInterpreter:
             return self._native_node_crypto_hash_digest(this_val, arg_vals)
         if native_id == NATIVE_NODE_CRYPTO_RANDOM_BYTES:
             return self._native_node_crypto_random_bytes(arg_vals)
+        if native_id == NATIVE_NODE_EVENT_EMITTER_CONSTRUCTOR:
+            return self._native_node_event_emitter(arg_vals)
+        if native_id == NATIVE_NODE_EVENT_EMITTER_ON:
+            return self._native_node_event_emitter_on(this_val, arg_vals, false)
+        if native_id == NATIVE_NODE_EVENT_EMITTER_ONCE:
+            return self._native_node_event_emitter_on(this_val, arg_vals, true)
+        if native_id == NATIVE_NODE_EVENT_EMITTER_EMIT:
+            return self._native_node_event_emitter_emit(this_val, arg_vals)
+        if native_id == NATIVE_NODE_EVENT_EMITTER_LISTENER_COUNT:
+            return self._native_node_event_emitter_listener_count(this_val, arg_vals)
+        if native_id == NATIVE_NODE_EVENT_EMITTER_REMOVE_ALL_LISTENERS:
+            return self._native_node_event_emitter_remove_all_listeners(this_val, arg_vals)
         if native_id == NATIVE_NODE_PROCESS_CWD:
             return process_cwd(arg_vals)
         if native_id == NATIVE_NODE_PROCESS_NEXT_TICK:
@@ -189,6 +202,8 @@ impl JsInterpreter:
             return self._native_node_os_module()
         if specifier == "crypto" or specifier == "node:crypto":
             return self._native_node_crypto_module()
+        if specifier == "events" or specifier == "node:events":
+            return self._native_node_events_module()
         self._native_node_denied_module(specifier)
 
     me _native_node_require_function() -> JsValue:
@@ -244,6 +259,84 @@ impl JsInterpreter:
         self._define_method_on(module_id, "createHash", NATIVE_NODE_CRYPTO_CREATE_HASH)
         self._define_method_on(module_id, "randomBytes", NATIVE_NODE_CRYPTO_RANDOM_BYTES)
         JsValue.Object(id: module_id)
+
+    me _native_node_events_module() -> JsValue:
+        val module_id = self.create_object()
+        val emitter_fn = JsValue.Function(id: self._register_native("EventEmitter", NATIVE_NODE_EVENT_EMITTER_CONSTRUCTOR))
+        self.set_object_property(module_id, "EventEmitter", emitter_fn)
+        self.set_object_property(module_id, "default", emitter_fn)
+        JsValue.Object(id: module_id)
+
+    me _native_node_event_emitter(arg_vals: [JsValue]) -> JsValue:
+        val emitter_id = self.create_object()
+        self.set_object_property(emitter_id, "__simple_node_event_emitter", JsValue.Boolean(v: true))
+        self._define_method_on(emitter_id, "on", NATIVE_NODE_EVENT_EMITTER_ON)
+        self._define_method_on(emitter_id, "addListener", NATIVE_NODE_EVENT_EMITTER_ON)
+        self._define_method_on(emitter_id, "once", NATIVE_NODE_EVENT_EMITTER_ONCE)
+        self._define_method_on(emitter_id, "emit", NATIVE_NODE_EVENT_EMITTER_EMIT)
+        self._define_method_on(emitter_id, "listenerCount", NATIVE_NODE_EVENT_EMITTER_LISTENER_COUNT)
+        self._define_method_on(emitter_id, "removeAllListeners", NATIVE_NODE_EVENT_EMITTER_REMOVE_ALL_LISTENERS)
+        JsValue.Object(id: emitter_id)
+
+    me _native_node_event_key(arg_vals: [JsValue]) -> text:
+        if arg_vals.len() == 0:
+            return ""
+        "__simple_node_event_count_" + js_to_string(arg_vals[0])
+
+    me _native_node_event_emitter_on(this_val: JsValue, arg_vals: [JsValue], once: bool) -> JsValue:
+        val emitter_id = _get_obj_id(this_val)
+        if emitter_id < 0:
+            return JsValue.Undefined
+        val event_name = if arg_vals.len() > 0: js_to_string(arg_vals[0]) else: ""
+        val key = "__simple_node_event_count_" + event_name
+        var count = 0
+        match self.get_object_property(emitter_id, key):
+            JsValue.Number(v): count = f64_to_i64(v)
+            _: pass_dn
+        self.set_object_property(emitter_id, key, JsValue.Number(v: (count + 1).to_f64()))
+        if once:
+            self.set_object_property(emitter_id, "__simple_node_event_once_" + event_name, JsValue.Number(v: 1.0))
+        this_val
+
+    me _native_node_event_emitter_emit(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val emitter_id = _get_obj_id(this_val)
+        if emitter_id < 0:
+            return JsValue.Boolean(v: false)
+        val event_name = if arg_vals.len() > 0: js_to_string(arg_vals[0]) else: ""
+        val key = "__simple_node_event_count_" + event_name
+        var count = 0
+        match self.get_object_property(emitter_id, key):
+            JsValue.Number(v): count = f64_to_i64(v)
+            _: pass_dn
+        if count <= 0:
+            return JsValue.Boolean(v: false)
+        match self.get_object_property(emitter_id, "__simple_node_event_once_" + event_name):
+            JsValue.Number(v):
+                if f64_to_i64(v) > 0:
+                    self.set_object_property(emitter_id, key, JsValue.Number(v: 0.0))
+                    self.set_object_property(emitter_id, "__simple_node_event_once_" + event_name, JsValue.Number(v: 0.0))
+            _: pass_dn
+        JsValue.Boolean(v: true)
+
+    me _native_node_event_emitter_listener_count(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val emitter_id = _get_obj_id(this_val)
+        if emitter_id < 0:
+            return JsValue.Number(v: 0.0)
+        var count = 0
+        match self.get_object_property(emitter_id, self._native_node_event_key(arg_vals)):
+            JsValue.Number(v): count = f64_to_i64(v)
+            _: pass_dn
+        JsValue.Number(v: count.to_f64())
+
+    me _native_node_event_emitter_remove_all_listeners(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val emitter_id = _get_obj_id(this_val)
+        if emitter_id < 0:
+            return JsValue.Undefined
+        if arg_vals.len() > 0:
+            val event_name = js_to_string(arg_vals[0])
+            self.set_object_property(emitter_id, "__simple_node_event_count_" + event_name, JsValue.Number(v: 0.0))
+            self.set_object_property(emitter_id, "__simple_node_event_once_" + event_name, JsValue.Number(v: 0.0))
+        this_val
 
     me _native_node_crypto_create_hash(arg_vals: [JsValue]) -> JsValue:
         var algorithm = ""

@@ -998,6 +998,64 @@ expect(_eval_str("require('crypto').randomBytes(16).byteLength")).to_equal("16")
 
 </details>
 
+#### resolves events and node:events EventEmitter constructors
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("typeof require('events').EventEmitter")).to_equal("function")
+expect(_eval_str("typeof require('node:events').EventEmitter")).to_equal("function")
+```
+
+</details>
+
+#### tracks EventEmitter listener counts
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new EventEmitter(); e.on('ready', () => 1); e.listenerCount('ready')")).to_equal("1")
+```
+
+</details>
+
+#### reports whether EventEmitter emit found listeners
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new EventEmitter(); e.emit('missing')")).to_equal("false")
+expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new EventEmitter(); e.once('ready', () => 1); e.emit('ready')")).to_equal("true")
+```
+
+</details>
+
+#### removes EventEmitter listeners by event name
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new EventEmitter(); e.on('ready', () => 1); e.removeAllListeners('ready'); e.listenerCount('ready')")).to_equal("0")
+```
+
+</details>
+
 ### Buffer global and module shape
 
 #### exposes Buffer through require('buffer')
@@ -1685,8 +1743,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 111 |
-| Active scenarios | 111 |
+| Total scenarios | 115 |
+| Active scenarios | 115 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

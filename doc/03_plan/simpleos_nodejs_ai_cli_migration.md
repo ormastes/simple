@@ -169,7 +169,7 @@ Build minimal Node.js API compatibility on QuickJS + libuv:
 - [ ] `path.join`, `path.resolve`, `path.dirname`, `path.basename`
 - [ ] `process.env`, `process.argv`, `process.cwd()`, `process.exit()`
 - [ ] `Buffer` (from QuickJS ArrayBuffer)
-- [ ] `EventEmitter` (pure JS)
+- [x] `EventEmitter` deterministic listener bookkeeping subset
 - [ ] `net.Socket`, `net.createConnection` (via libuv tcp)
 - [ ] `http.request`, `https.request` (via libuv + mbedTLS/BearSSL)
 - [x] `crypto.createHash` (sha256/sha1 deterministic subset)
