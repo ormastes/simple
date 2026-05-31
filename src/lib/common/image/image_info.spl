@@ -67,6 +67,9 @@ fn _read_u32_be(data: text, offset: i64) -> i64:
     (_byte_at(data, offset + 2) << 8) |
     _byte_at(data, offset + 3)
 
+fn _read_u64_be(data: text, offset: i64) -> i64:
+    (_read_u32_be(data, offset) << 32) | _read_u32_be(data, offset + 4)
+
 fn _read_u16(data: text, offset: i64, little: bool) -> i64:
     if little:
         return _read_u16_le(data, offset)
@@ -171,24 +174,31 @@ fn _jpeg_xl_container_info(data: text) -> ImageInfo:
     while offset + 8 <= data.len():
         val box_size = _read_u32_be(data, offset)
         val box_type = offset + 4
+        var payload_offset = offset + 8
+        var effective_box_size = box_size
         if box_size == 1:
-            return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-large-box-parser-pending")
-        if box_size != 0 and box_size < 8:
+            if offset + 16 > data.len():
+                return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-large-box-header-truncated")
+            effective_box_size = _read_u64_be(data, offset + 8)
+            payload_offset = offset + 16
+            if effective_box_size < 16:
+                return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-invalid-box-size")
+        if effective_box_size != 0 and effective_box_size < 8:
             return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-invalid-box-size")
         var next_offset = data.len()
-        if box_size != 0:
-            next_offset = offset + box_size
+        if effective_box_size != 0:
+            next_offset = offset + effective_box_size
         if next_offset > data.len():
             return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-truncated-box")
         if _jpeg_xl_box_type_at(data, box_type, 102, 116, 121, 112):
             saw_file_type = true
         if _jpeg_xl_box_type_at(data, box_type, 106, 120, 108, 99):
             saw_full_codestream = true
-            full_codestream_offset = offset + 8
+            full_codestream_offset = payload_offset
             full_codestream_length = next_offset - full_codestream_offset
         if _jpeg_xl_box_type_at(data, box_type, 106, 120, 108, 112):
             saw_partial_codestream = true
-            val partial_payload_offset = offset + 8
+            val partial_payload_offset = payload_offset
             val partial_payload_length = next_offset - partial_payload_offset
             if partial_payload_length < 4:
                 return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-partial-codestream-truncated")
