@@ -71,6 +71,22 @@ static uint64_t checksum_u32(const uint32_t *data, unsigned int count) {
     return sum;
 }
 
+static uint64_t mismatch_u32(const uint32_t *actual, const uint32_t *expected, unsigned int count) {
+    uint64_t mismatches = 0;
+    for (unsigned int i = 0; i < count; i++) {
+        if (actual[i] != expected[i]) mismatches++;
+    }
+    return mismatches;
+}
+
+static uint64_t mismatch_fill_u32(const uint32_t *actual, uint32_t expected, unsigned int count) {
+    uint64_t mismatches = 0;
+    for (unsigned int i = 0; i < count; i++) {
+        if (actual[i] != expected) mismatches++;
+    }
+    return mismatches;
+}
+
 static uint32_t alpha_pixel(uint32_t s, uint32_t d, uint32_t alpha) {
     uint32_t inv = 255u - alpha;
     uint32_t rb = (((s & 0x00ff00ffu) * alpha) + ((d & 0x00ff00ffu) * inv)) >> 8;
@@ -153,6 +169,7 @@ int main(int argc, char **argv) {
     if (rc != CUDA_SUCCESS) { fail("cuMemcpyDtoH-fill-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
     uint64_t fill_actual = checksum_u32(host, count);
     uint64_t fill_expected = (uint64_t)value * (uint64_t)count;
+    uint64_t fill_mismatches = mismatch_fill_u32(host, value, count);
 
     for (unsigned int i = 0; i < count; i++) expected_buf[i] = 1000u + i;
     rc = cuMemcpyHtoD(src, expected_buf, bytes);
@@ -168,6 +185,7 @@ int main(int argc, char **argv) {
     if (rc != CUDA_SUCCESS) { fail("cuMemcpyDtoH-copy-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
     uint64_t copy_actual = checksum_u32(host, count);
     uint64_t copy_expected = checksum_u32(expected_buf, count);
+    uint64_t copy_mismatches = mismatch_u32(host, expected_buf, count);
 
     for (unsigned int i = 0; i < count; i++) expected_buf[i] = 0xff204060u + i;
     for (unsigned int i = 0; i < count; i++) host[i] = 0xff102030u + i;
@@ -186,6 +204,7 @@ int main(int argc, char **argv) {
     if (rc != CUDA_SUCCESS) { fail("cuMemcpyDtoH-alpha-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
     uint64_t alpha_actual = checksum_u32(host, count);
     uint64_t alpha_expected = checksum_u32(expected_buf, count);
+    uint64_t alpha_mismatches = mismatch_u32(host, expected_buf, count);
 
     unsigned int width = 8u;
     unsigned int height = count / width;
@@ -210,29 +229,37 @@ int main(int argc, char **argv) {
     if (rc != CUDA_SUCCESS) { fail("cuMemcpyDtoH-scroll-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
     uint64_t scroll_actual = checksum_u32(host, count);
     uint64_t scroll_expected = checksum_u32(expected_buf, count);
+    uint64_t scroll_mismatches = mismatch_u32(host, expected_buf, count);
 
     uint64_t actual = fill_actual + copy_actual + alpha_actual + scroll_actual;
     uint64_t expected = fill_expected + copy_expected + alpha_expected + scroll_expected;
+    uint64_t mismatches = fill_mismatches + copy_mismatches + alpha_mismatches + scroll_mismatches;
 
-    if (actual == expected) {
+    if (actual == expected && mismatches == 0) {
         printf("cuda_generated_2d_readback_status=pass\n");
-        printf("cuda_generated_2d_readback_reason=readback-checksum-matched\n");
+        printf("cuda_generated_2d_readback_reason=readback-pixels-matched\n");
         printf("cuda_generated_2d_readback_cuda_code=0\n");
         printf("cuda_generated_2d_readback_expected_checksum=%llu\n", (unsigned long long)expected);
         printf("cuda_generated_2d_readback_actual_checksum=%llu\n", (unsigned long long)actual);
+        printf("cuda_generated_2d_readback_mismatch_count=%llu\n", (unsigned long long)mismatches);
         printf("cuda_generated_2d_readback_fill_expected_checksum=%llu\n", (unsigned long long)fill_expected);
         printf("cuda_generated_2d_readback_fill_actual_checksum=%llu\n", (unsigned long long)fill_actual);
+        printf("cuda_generated_2d_readback_fill_mismatch_count=%llu\n", (unsigned long long)fill_mismatches);
         printf("cuda_generated_2d_readback_copy_expected_checksum=%llu\n", (unsigned long long)copy_expected);
         printf("cuda_generated_2d_readback_copy_actual_checksum=%llu\n", (unsigned long long)copy_actual);
+        printf("cuda_generated_2d_readback_copy_mismatch_count=%llu\n", (unsigned long long)copy_mismatches);
         printf("cuda_generated_2d_readback_alpha_expected_checksum=%llu\n", (unsigned long long)alpha_expected);
         printf("cuda_generated_2d_readback_alpha_actual_checksum=%llu\n", (unsigned long long)alpha_actual);
+        printf("cuda_generated_2d_readback_alpha_mismatch_count=%llu\n", (unsigned long long)alpha_mismatches);
         printf("cuda_generated_2d_readback_scroll_expected_checksum=%llu\n", (unsigned long long)scroll_expected);
         printf("cuda_generated_2d_readback_scroll_actual_checksum=%llu\n", (unsigned long long)scroll_actual);
+        printf("cuda_generated_2d_readback_scroll_mismatch_count=%llu\n", (unsigned long long)scroll_mismatches);
+        printf("cuda_generated_2d_readback_blur_or_tolerance_used=false\n");
         printf("cuda_generated_2d_readback_ops=fill,copy,alpha,scroll\n");
         printf("cuda_generated_2d_readback_count=%u\n", count);
         printf("cuda_generated_2d_readback_value=%u\n", value);
     } else {
-        fail("readback-checksum-mismatch", 0, expected, actual);
+        fail("readback-pixel-mismatch", 0, expected, actual);
     }
 
     free(host);
@@ -242,7 +269,7 @@ int main(int argc, char **argv) {
     cuModuleUnload(module);
     cuDevicePrimaryCtxRelease(dev);
     free(ptx);
-    return actual == expected ? 0 : 4;
+    return (actual == expected && mismatches == 0) ? 0 : 4;
 }
 C_EOF
 
