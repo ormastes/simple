@@ -9,11 +9,12 @@ REPORT_PATH="${REPORT_PATH:-doc/09_report/qemu_gtk_wm_capture_evidence_$(date -u
 WM_REPORT_PATH="${WM_REPORT_PATH:-$BUILD_DIR/wm-launch-capture.md}"
 WM_HOST_REPORT_PATH="${WM_HOST_REPORT_PATH:-$BUILD_DIR/wm-host-launch-capture.md}"
 FAKE_QMP_REPORT_PATH="${FAKE_QMP_REPORT_PATH:-$BUILD_DIR/fake-qmp-capture.md}"
+GTK_SCENE_REPORT_PATH="${GTK_SCENE_REPORT_PATH:-$BUILD_DIR/gtk-gl-wm-scene.md}"
 QEMU_ARCH="${QEMU_ARCH:-x86_64}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-$QEMU_ARCH}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$REPORT_PATH" "$BUILD_DIR/evidence.env" "$BUILD_DIR/qemu-display-help.txt" "$BUILD_DIR/wm.out" "$BUILD_DIR/wm-host.out" "$BUILD_DIR/fake-qmp.out"
+rm -f "$REPORT_PATH" "$BUILD_DIR/evidence.env" "$BUILD_DIR/qemu-display-help.txt" "$BUILD_DIR/wm.out" "$BUILD_DIR/wm-host.out" "$BUILD_DIR/fake-qmp.out" "$BUILD_DIR/gtk-gl.out"
 
 qemu_display_gtk_supported=false
 qemu_display_reason=missing-qemu-bin
@@ -46,6 +47,15 @@ fake_qmp_reason=not-run
 fake_qmp_report_path="$FAKE_QMP_REPORT_PATH"
 fake_qmp_expected_argb_path=
 fake_qmp_captured_argb_path=
+gtk_scene_status=not-run
+gtk_scene_reason=not-run
+gtk_scene_report_path="$GTK_SCENE_REPORT_PATH"
+gtk_scene_simple_frame_us=0
+gtk_scene_gtk_frame_us=0
+gtk_scene_rgba_mismatch_count=
+gtk_scene_expected_rgba_path=
+gtk_scene_captured_rgba_path=
+gtk_scene_blur_or_tolerance_used=
 
 if [ -z "${QEMU_QMP_SOCKET:-}" ]; then
     set +e
@@ -80,6 +90,32 @@ if [ -z "${QEMU_QMP_SOCKET:-}" ]; then
     fi
     if [ -z "$host_wm_reason" ]; then
         host_wm_reason=host-wm-smoke-failed
+    fi
+    set +e
+    REPORT_PATH="$GTK_SCENE_REPORT_PATH" \
+    BUILD_DIR="$BUILD_DIR/gtk-gl" \
+        sh scripts/check-gtk-gl-wm-scene-bitmap-evidence.shs >"$BUILD_DIR/gtk-gl.out" 2>&1
+    gtk_scene_exit_code=$?
+    set -e
+    gtk_scene_status="$(sed -n 's/^gtk_gl_wm_scene_status=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    gtk_scene_reason="$(sed -n 's/^gtk_gl_wm_scene_reason=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    gtk_scene_simple_frame_us="$(sed -n 's/^gtk_gl_wm_scene_simple_frame_us=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    gtk_scene_gtk_frame_us="$(sed -n 's/^gtk_gl_wm_scene_gtk_frame_us=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    gtk_scene_rgba_mismatch_count="$(sed -n 's/^gtk_gl_wm_scene_rgba_mismatch_count=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    gtk_scene_expected_rgba_path="$(sed -n 's/^gtk_gl_wm_scene_expected_rgba_path=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    gtk_scene_captured_rgba_path="$(sed -n 's/^gtk_gl_wm_scene_captured_rgba_path=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    gtk_scene_blur_or_tolerance_used="$(sed -n 's/^gtk_gl_wm_scene_blur_or_tolerance_used=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    if [ -z "$gtk_scene_status" ]; then
+        gtk_scene_status=unavailable
+    fi
+    if [ -z "$gtk_scene_reason" ]; then
+        gtk_scene_reason=gtk-gl-wm-scene-evidence-unavailable
+    fi
+    if [ -z "$gtk_scene_simple_frame_us" ]; then
+        gtk_scene_simple_frame_us=0
+    fi
+    if [ -z "$gtk_scene_gtk_frame_us" ]; then
+        gtk_scene_gtk_frame_us=0
     fi
 elif [ -n "${QEMU_QMP_SOCKET:-}" ]; then
     set +e
@@ -133,6 +169,15 @@ fi
     echo "qemu_gtk_wm_capture_fake_qmp_report_path=$fake_qmp_report_path"
     echo "qemu_gtk_wm_capture_fake_qmp_expected_argb_path=$fake_qmp_expected_argb_path"
     echo "qemu_gtk_wm_capture_fake_qmp_captured_argb_path=$fake_qmp_captured_argb_path"
+    echo "qemu_gtk_wm_capture_gtk_scene_status=$gtk_scene_status"
+    echo "qemu_gtk_wm_capture_gtk_scene_reason=$gtk_scene_reason"
+    echo "qemu_gtk_wm_capture_gtk_scene_report_path=$gtk_scene_report_path"
+    echo "qemu_gtk_wm_capture_gtk_scene_simple_frame_us=$gtk_scene_simple_frame_us"
+    echo "qemu_gtk_wm_capture_gtk_scene_gtk_frame_us=$gtk_scene_gtk_frame_us"
+    echo "qemu_gtk_wm_capture_gtk_scene_rgba_mismatch_count=$gtk_scene_rgba_mismatch_count"
+    echo "qemu_gtk_wm_capture_gtk_scene_expected_rgba_path=$gtk_scene_expected_rgba_path"
+    echo "qemu_gtk_wm_capture_gtk_scene_captured_rgba_path=$gtk_scene_captured_rgba_path"
+    echo "qemu_gtk_wm_capture_gtk_scene_blur_or_tolerance_used=$gtk_scene_blur_or_tolerance_used"
     if [ -f "$BUILD_DIR/wm.out" ]; then
         sed -n 's/^wm_launch_capture_/qemu_gtk_wm_capture_wm_/p' "$BUILD_DIR/wm.out"
     fi
@@ -164,6 +209,15 @@ fi
     echo "- fake QMP screendump report: $fake_qmp_report_path"
     echo "- fake QMP expected ARGB path: $fake_qmp_expected_argb_path"
     echo "- fake QMP captured ARGB path: $fake_qmp_captured_argb_path"
+    echo "- host GTK GL WM scene status: $gtk_scene_status"
+    echo "- host GTK GL WM scene reason: $gtk_scene_reason"
+    echo "- host GTK GL WM scene report: $gtk_scene_report_path"
+    echo "- host GTK GL WM scene simple frame us: $gtk_scene_simple_frame_us"
+    echo "- host GTK GL WM scene GTK frame us: $gtk_scene_gtk_frame_us"
+    echo "- host GTK GL WM scene mismatch count: $gtk_scene_rgba_mismatch_count"
+    echo "- host GTK GL WM scene expected RGBA path: $gtk_scene_expected_rgba_path"
+    echo "- host GTK GL WM scene captured RGBA path: $gtk_scene_captured_rgba_path"
+    echo "- host GTK GL WM scene blur/tolerance used: $gtk_scene_blur_or_tolerance_used"
     echo
     echo "## Raw Evidence"
     sed 's/^/- /' "$BUILD_DIR/evidence.env"
@@ -181,6 +235,11 @@ fi
         echo
         echo "## Host WM Smoke Output"
         sed 's/^/- /' "$BUILD_DIR/wm-host.out"
+    fi
+    if [ -f "$BUILD_DIR/gtk-gl.out" ]; then
+        echo
+        echo "## Host GTK GL WM Scene Output"
+        sed 's/^/- /' "$BUILD_DIR/gtk-gl.out"
     fi
 } >"$REPORT_PATH"
 
