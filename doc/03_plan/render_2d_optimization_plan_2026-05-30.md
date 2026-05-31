@@ -219,6 +219,13 @@ Progress 2026-05-30:
 ### Phase 6: Integration + benchmarks
 
 1. Wire game2d render pipeline through `ComputeSession` trait instead of direct backend calls
+   - In progress: `Engine2D` now exposes `create_compute_dispatch()`,
+     `create_compute_dispatch_for_backend(...)`, and
+     `detect_best_compute_backend()` so callers can select the shared compute
+     dispatch path without replacing the existing render-backend constructor
+     with compute-only backends such as OpenCL or CPU-SIMD.
+   - Covered by real `engine_platform_spec.spl` assertions for best-backend
+     dispatch and strict explicit-backend diagnostics.
 2. End-to-end benchmark: 1920×1080 fill+blit+scroll frame at 60fps target
    - Measure per-backend: CUDA, HIP, OpenCL, AVX2, NEON, scalar
 3. Update `BackendProber.probe_all_summary` with runtime evidence from real session init
