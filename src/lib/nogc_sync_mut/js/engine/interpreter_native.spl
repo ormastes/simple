@@ -2445,6 +2445,7 @@ impl JsInterpreter:
                 var memory_byte_len = memory_page_count * 65536
                 var memory_addrs: [i64] = []
                 var memory_bytes: [i64] = []
+                var dropped_data_segments: [i64] = []
                 var global_vals: [i64] = []
                 var global_mutabilities: [i64] = []
                 val global_count = self._native_webassembly_global_count(hex)
@@ -3352,6 +3353,19 @@ impl JsInterpreter:
                             val passive = self._native_webassembly_data_segment_is_passive(hex, data_index)
                             if not passive or data_len < 0 or len < 0 or src < 0 or dest < 0 or memory_byte_len <= 0 or src + len > data_len or dest + len > memory_byte_len:
                                 return -5
+                            if len > 0:
+                                var dropped_lookup = 0
+                                while dropped_lookup < dropped_data_segments.len():
+                                    if dropped_data_segments.get(dropped_lookup) == data_index:
+                                        return -5
+                                    dropped_lookup = dropped_lookup + 1
+                                if module_id >= 0:
+                                    match self.get_object_property(module_id, "runtimeDroppedDataSegment{data_index}"):
+                                        JsValue.Boolean(v):
+                                            if v:
+                                                return -5
+                                        _:
+                                            pass_dn
                             var init_index = 0
                             while init_index < len:
                                 val init_byte = self._native_webassembly_data_segment_byte_at(hex, data_index, src + init_index)
@@ -3370,6 +3384,26 @@ impl JsInterpreter:
                                     memory_addrs.push(init_addr)
                                     memory_bytes.push(init_byte)
                                 init_index = init_index + 1
+                            cursor = next_pos
+                            continue
+                        if bulk_subop == 9:
+                            val drop_data_index = self._native_webassembly_read_leb_value(hex, mem_pos)
+                            val next_pos = self._native_webassembly_read_leb_next(hex, mem_pos)
+                            if drop_data_index < 0 or next_pos < 0 or next_pos > body_end:
+                                return -1
+                            if not self._native_webassembly_data_segment_is_passive(hex, drop_data_index):
+                                return -1
+                            var already_dropped = false
+                            var drop_lookup = 0
+                            while drop_lookup < dropped_data_segments.len():
+                                if dropped_data_segments.get(drop_lookup) == drop_data_index:
+                                    already_dropped = true
+                                    break
+                                drop_lookup = drop_lookup + 1
+                            if not already_dropped:
+                                dropped_data_segments.push(drop_data_index)
+                            if module_id >= 0:
+                                self.set_object_property(module_id, "runtimeDroppedDataSegment{drop_data_index}", JsValue.Boolean(v: true))
                             cursor = next_pos
                             continue
                         if bulk_subop == 10:
