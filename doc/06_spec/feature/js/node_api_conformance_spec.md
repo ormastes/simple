@@ -196,6 +196,50 @@ expect(_str(path_join([JsValue.String(v: "/foo/"), JsValue.String(v: "bar/")])))
 
 </details>
 
+### path.resolve
+
+#### resolves relative paths from deterministic root
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_resolve([JsValue.String(v: "tmp"), JsValue.String(v: "simple.js")]))).to_equal("/tmp/simple.js")
+```
+
+</details>
+
+#### stops at the rightmost absolute path
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_resolve([JsValue.String(v: "/usr"), JsValue.String(v: "local"), JsValue.String(v: "../bin")]))).to_equal("/usr/bin")
+```
+
+</details>
+
+#### normalizes empty resolve to deterministic root
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_resolve([]))).to_equal("/")
+```
+
+</details>
+
 ### path.normalize
 
 #### removes dot and dotdot segments
@@ -903,12 +947,28 @@ expect(_eval_str("require('path').basename('/tmp/simple.js')")).to_equal("simple
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("require('node:path').posix.normalize('foo//bar//')")).to_equal("foo/bar/")
 expect(_eval_str("require('path').posix.join('/foo/', 'bar/')")).to_equal("/foo/bar/")
+expect(_eval_str("require('node:path').posix.resolve('/usr', 'local', '..', 'bin')")).to_equal("/usr/bin")
+```
+
+</details>
+
+#### resolves path and node:path through deterministic root
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('path').resolve('tmp', 'simple.js')")).to_equal("/tmp/simple.js")
+expect(_eval_str("require('node:path').resolve('/usr', 'local', '..', 'bin')")).to_equal("/usr/bin")
 ```
 
 </details>
@@ -1716,6 +1776,7 @@ Tests covering:
 - path.extname
 - path.isAbsolute
 - path.join
+- path.resolve
 - path.normalize
 - Node.js process module
 - process identity
@@ -1743,8 +1804,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 115 |
-| Active scenarios | 115 |
+| Total scenarios | 119 |
+| Active scenarios | 119 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

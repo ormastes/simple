@@ -166,7 +166,7 @@ Following SerenityOS model:
 Build minimal Node.js API compatibility on QuickJS + libuv:
 - [ ] `fs.readFileSync`, `fs.writeFileSync`, `fs.existsSync`, `fs.statSync`
 - [ ] `fs.promises.readFile`, `fs.promises.writeFile`
-- [ ] `path.join`, `path.resolve`, `path.dirname`, `path.basename`
+- [x] `path.join`, `path.resolve`, `path.dirname`, `path.basename` deterministic POSIX subset
 - [ ] `process.env`, `process.argv`, `process.cwd()`, `process.exit()`
 - [ ] `Buffer` (from QuickJS ArrayBuffer)
 - [x] `EventEmitter` deterministic listener bookkeeping subset
