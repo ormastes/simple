@@ -167,6 +167,7 @@ fn _jpeg_xl_container_info(data: text) -> ImageInfo:
     var saw_file_type = false
     var full_codestream_offset = 0
     var full_codestream_length = 0
+    var partial_codestream = ""
     while offset + 8 <= data.len():
         val box_size = _read_u32_be(data, offset)
         val box_type = offset + 4
@@ -187,6 +188,11 @@ fn _jpeg_xl_container_info(data: text) -> ImageInfo:
             full_codestream_length = next_offset - full_codestream_offset
         if _jpeg_xl_box_type_at(data, box_type, 106, 120, 108, 112):
             saw_partial_codestream = true
+            val partial_payload_offset = offset + 8
+            val partial_payload_length = next_offset - partial_payload_offset
+            if partial_payload_length < 4:
+                return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-partial-codestream-truncated")
+            partial_codestream = partial_codestream + data.slice(partial_payload_offset + 4, next_offset)
         if box_size == 0:
             offset = data.len()
         else:
@@ -201,6 +207,10 @@ fn _jpeg_xl_container_info(data: text) -> ImageInfo:
             return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-container-full-codestream-decoder-pending")
         return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-container-codestream-without-ftyp")
     if saw_partial_codestream:
+        if saw_file_type and partial_codestream.len() > 0:
+            val codestream = _jpeg_xl_codestream_info_at(partial_codestream, 0, partial_codestream.len())
+            if codestream.supported:
+                return codestream
         return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-container-partial-codestream-stitching-pending")
     ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-container-missing-codestream")
 

@@ -768,6 +768,30 @@ expect(info.reason).to_equal("jpegxl-container-partial-codestream-stitching-pend
 
 </details>
 
+#### stitches JPEG XL partial codestream boxes for small intrinsic dimensions
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val info = detect_image_info(_jpegxl_container_with_split_partial_small_codestream_16x24())
+expect(info.format).to_equal("jpegxl")
+expect(info.width).to_equal(16)
+expect(info.height).to_equal(24)
+expect(info.supported).to_equal(true)
+expect(info.reason).to_equal("jpegxl-small-codestream-metadata")
+
+val image = decode_jpegxl(_jpegxl_container_with_split_partial_small_codestream_16x24())
+expect(image.width).to_equal(16)
+expect(image.height).to_equal(24)
+expect(image.format).to_equal(ImageFormat.JpegXl)
+```
+
+</details>
+
 #### fails closed on truncated JPEG XL container boxes
 
 <details>
@@ -853,8 +877,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 42 |
-| Active scenarios | 42 |
+| Total scenarios | 43 |
+| Active scenarios | 43 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
