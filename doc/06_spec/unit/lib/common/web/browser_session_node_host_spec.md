@@ -118,24 +118,34 @@ expect(_display_js(interp._dispatch_native_with_receiver(-136, JsValue.Undefined
 #### denies host filesystem module access through require
 
 1. var interp =  new interpreter
-   - Expected: _object_property_text(interp, fs, "status") equals `denied`
-   - Expected: _object_property_text(interp, fs, "error") equals `module-denied`
-   - Expected: _object_property_text(interp, fs, "specifier") equals `fs`
+   - Expected: _object_property_text(interp, fs, "readFileSync") equals `[Function]`
+   - Expected: _object_property_text(interp, fs, "writeFileSync") equals `[Function]`
+
+2. JsValue Object
+   - Expected: _object_property_text(interp, denied, "status") equals `denied`
+   - Expected: _object_property_text(interp, denied, "error") equals `file-denied`
+   - Expected: "missing fs module" equals `object`
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var interp = _new_interpreter()
 
 val fs = interp._native_node_require([JsValue.String(v: "fs")])
-expect(_object_property_text(interp, fs, "status")).to_equal("denied")
-expect(_object_property_text(interp, fs, "error")).to_equal("module-denied")
-expect(_object_property_text(interp, fs, "specifier")).to_equal("fs")
+expect(_object_property_text(interp, fs, "readFileSync")).to_equal("[Function]")
+expect(_object_property_text(interp, fs, "writeFileSync")).to_equal("[Function]")
+match fs:
+    JsValue.Object(fs_id):
+        val denied = interp._dispatch_native_with_receiver(-151, JsValue.Object(id: fs_id), [JsValue.String(v: "/etc/passwd")], 0)
+        expect(_object_property_text(interp, denied, "status")).to_equal("denied")
+        expect(_object_property_text(interp, denied, "error")).to_equal("file-denied")
+    _:
+        expect("missing fs module").to_equal("object")
 ```
 
 </details>
