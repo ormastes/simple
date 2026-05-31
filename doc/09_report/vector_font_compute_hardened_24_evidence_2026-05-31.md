@@ -7,7 +7,7 @@
 - font size: 24
 - CPU checksum: 13090264
 - CPU ink pixels: 247
-- CPU frame us: 1571134
+- CPU frame us: 1618603
 - production render checksum: 3707484892911777
 - production render ink pixels: 247
 - production vector raster hits: 0
@@ -132,7 +132,7 @@
 - vector_font_compute_cpu_warm_checksum=13090264
 - vector_font_compute_cpu_checksum=13090264
 - vector_font_compute_cpu_ink_pixels=247
-- vector_font_compute_cpu_frame_us=1599038
+- vector_font_compute_cpu_frame_us=1706408
 - vector_font_compute_production_render_checksum=3707484892911777
 - vector_font_compute_production_render_ink_pixels=247
 - vector_font_compute_production_vector_raster_hits=0
@@ -611,7 +611,7 @@
 - vector_font_compute_cpu_warm_checksum=13090264
 - vector_font_compute_cpu_checksum=13090264
 - vector_font_compute_cpu_ink_pixels=247
-- vector_font_compute_cpu_frame_us=1571134
+- vector_font_compute_cpu_frame_us=1618603
 - vector_font_compute_production_render_checksum=3707484892911777
 - vector_font_compute_production_render_ink_pixels=247
 - vector_font_compute_production_vector_raster_hits=0
