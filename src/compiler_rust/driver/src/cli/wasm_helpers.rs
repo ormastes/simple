@@ -94,16 +94,7 @@ fn is_generated_gui_wasm_source(source: &str) -> bool {
     let has_app_exports = source.contains("fn simple_app_init(")
         && source.contains("fn simple_app_render(")
         && source.contains("fn simple_app_event(");
-    let legacy_generated_gui = source.contains("data-simple-wasm")
-        && source.contains("hello_button")
-        && source.contains("hello_wasm_gui_event_response")
-        && source.contains("Generated WASM UI");
-    let builder_generated_gui = source.contains("data-simple-wasm='builder_matrix'")
-        && source.contains("common.ui.builder")
-        && source.contains("builder_matrix_tree")
-        && source.contains("hello_wasm_gui_event_response")
-        && source.contains("Generated WASM UI");
-    has_app_exports && (legacy_generated_gui || builder_generated_gui)
+    has_app_exports && source.contains("data-simple-wasm")
 }
 
 fn push_section(module: &mut Vec<u8>, id: u8, payload: &[u8]) {
@@ -201,20 +192,20 @@ mod tests {
 
     #[test]
     fn generated_gui_wasm_source_detection_is_narrow() {
-        let gui = r#"
-fn hello_wasm_gui_event_response(event_name: text, target_id: text) -> text:
-    "<main data-simple-wasm='hello'><button id='hello_button'>Generated WASM UI</button></main>"
+        let widget_gui = r#"
+fn widget_matrix_wasm_gui_event_response(event_name: text, target_id: text) -> text:
+    "matrix_event:ignored"
 
 fn simple_app_init() -> i64:
     1
 
 fn simple_app_render() -> text:
-    "<main data-simple-wasm='hello'><button id='hello_button'>Generated WASM UI</button></main>"
+    "<main data-simple-wasm='widget_matrix'><button id='matrix_button'>Generated WASM UI</button></main>"
 
 fn simple_app_event(event_name: text, target_id: text) -> text:
-    hello_wasm_gui_event_response(event_name, target_id)
+    widget_matrix_wasm_gui_event_response(event_name, target_id)
 "#;
-        assert!(is_generated_gui_wasm_source(gui));
+        assert!(is_generated_gui_wasm_source(widget_gui));
         let builder_gui = r#"
 use common.ui.builder.{build_tree, column}
 
@@ -238,6 +229,17 @@ fn main() -> i64:
     return 0
 "#;
         assert!(is_generated_gui_wasm_source(builder_gui));
+        let non_gui_app_exports = r#"
+fn simple_app_init() -> i64:
+    1
+
+fn simple_app_render() -> text:
+    "not a generated GUI"
+
+fn simple_app_event(event_name: text, target_id: text) -> text:
+    "ignored"
+"#;
+        assert!(!is_generated_gui_wasm_source(non_gui_app_exports));
         let missing_app_exports = r#"
 fn hello_wasm_gui_event_response(event_name: text, target_id: text) -> text:
     "<main data-simple-wasm='hello'><button id='hello_button'>Generated WASM UI</button></main>"
