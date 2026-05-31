@@ -4,6 +4,44 @@
 
 ### WebAssembly native host validation
 
+#### parses bounded anonymous callback function expressions
+
+1. JsStatement VarDecl
+   - Expected: name equals `cb`
+
+2. JsExpression ArrowFunction
+   - Expected: params.len() equals `1`
+   - Expected: params[0] equals `r`
+   - Expected: body.len() equals `1`
+   - Expected: "expected function expression" equals ``
+   - Expected: "expected var decl" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val program = js_parse_program_subset("var cb = function(r) { return r.status; }; cb")
+expect(program.len()).to_equal(2)
+match program[0]:
+    JsStatement.VarDecl(name, init):
+        expect(name).to_equal("cb")
+        match init:
+            JsExpression.ArrowFunction(params, body):
+                expect(params.len()).to_equal(1)
+                expect(params[0]).to_equal("r")
+                expect(body.len()).to_equal(1)
+            _:
+                expect("expected function expression").to_equal("")
+    _:
+        expect("expected var decl").to_equal("")
+```
+
+</details>
+
 #### requires WASM magic and version bytes before validation succeeds
 
 1. var interp =  new interpreter
@@ -741,8 +779,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

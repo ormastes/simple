@@ -24,6 +24,10 @@ fn _js_parser_statement(stmt: text) -> JsStatement:
         if eq >= 0:
             return JsStatement.VarDecl(body.slice(0, eq).trim(), _js_parser_expression(body.slice(eq + 1, body.len())))
         return JsStatement.VarDecl(body, JsExpression.Literal(value: JsValue.Undefined))
+    if stmt.starts_with("return "):
+        return JsStatement.Return(value: _js_parser_expression(stmt.slice(7, stmt.len()).trim()))
+    if stmt == "return":
+        return JsStatement.Return(value: JsExpression.Literal(value: JsValue.Undefined))
     JsStatement.ExprStmt(_js_parser_expression(stmt))
 
 fn _js_parser_expression(raw: text) -> JsExpression:
@@ -123,6 +127,8 @@ fn _js_parser_primary_at(expr: text, pos_in: i64) -> JsExpression:
                     props.push(DestructProp(key: key, value: _js_parser_expression(prop.slice(colon + 1, prop.len()).trim())))
             pi = pi + 1
         return JsExpression.ObjectExpr(properties: props)
+    if expr.slice(pos, expr.len()).starts_with("function"):
+        return _js_parser_function_expression(expr, pos)
     val end = _js_parser_identifier_end(expr, pos)
     val token = expr.slice(pos, end)
     if token == "true":
@@ -152,7 +158,57 @@ fn _js_parser_primary_end(expr: text, pos_in: i64) -> i64:
     if ch == "[":
         val end = _js_parser_matching_bracket(expr, pos)
         return if end >= 0: end + 1 else: expr.len()
+    if expr.slice(pos, expr.len()).starts_with("function"):
+        val body_start = _js_parser_find_function_body_start(expr, pos)
+        if body_start >= 0:
+            val end = _js_parser_matching_brace(expr, body_start)
+            return if end >= 0: end + 1 else: expr.len()
     _js_parser_identifier_end(expr, pos)
+
+fn _js_parser_find_function_body_start(expr: text, pos: i64) -> i64:
+    val open = _js_parser_find_char_from(expr, "(", pos)
+    if open < 0:
+        return -1
+    val close = _js_parser_matching_paren(expr, open)
+    if close < 0:
+        return -1
+    val body_start = _js_parser_skip_spaces(expr, close + 1)
+    if body_start < expr.len() and expr.slice(body_start, body_start + 1) == "{":
+        return body_start
+    -1
+
+fn _js_parser_find_char_from(expr: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i < expr.len():
+        if expr.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _js_parser_function_expression(expr: text, pos: i64) -> JsExpression:
+    val open = _js_parser_find_char_from(expr, "(", pos)
+    if open < 0:
+        return JsExpression.Literal(value: JsValue.Undefined)
+    val close = _js_parser_matching_paren(expr, open)
+    if close < 0:
+        return JsExpression.Literal(value: JsValue.Undefined)
+    val params_text = expr.slice(open + 1, close)
+    val param_parts = _js_parser_split_top_level(params_text, ",")
+    var params: [text] = []
+    var pi = 0
+    while pi < param_parts.len():
+        val p = param_parts.get(pi).trim()
+        if p != "":
+            params.push(p)
+        pi = pi + 1
+    val body_start = _js_parser_find_function_body_start(expr, pos)
+    if body_start < 0:
+        return JsExpression.ArrowFunction(params: params, body: [])
+    val body_end = _js_parser_matching_brace(expr, body_start)
+    if body_end < 0:
+        return JsExpression.ArrowFunction(params: params, body: [])
+    val body_text = expr.slice(body_start + 1, body_end)
+    JsExpression.ArrowFunction(params: params, body: js_parse_program_subset(body_text))
 
 fn _js_parser_identifier_end(expr: text, pos: i64) -> i64:
     var i = pos
