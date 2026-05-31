@@ -1075,9 +1075,9 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
             if strip_byte_count > 0 and pixel_offset + bytes_per_pixel > strip_offset + strip_byte_count:
                 return nil
         if planar_config == 2:
-            rgba.push(_tiff_planar_sample_byte(raw_data, strip_offset_entry, strip_offset_count, strip_byte_count_entry, strip_byte_count_count, row, col, width, rows_per_strip, strip_count_needed, 0, little))
-            rgba.push(_tiff_planar_sample_byte(raw_data, strip_offset_entry, strip_offset_count, strip_byte_count_entry, strip_byte_count_count, row, col, width, rows_per_strip, strip_count_needed, 1, little))
-            rgba.push(_tiff_planar_sample_byte(raw_data, strip_offset_entry, strip_offset_count, strip_byte_count_entry, strip_byte_count_count, row, col, width, rows_per_strip, strip_count_needed, 2, little))
+            rgba.push(_tiff_planar_sample(raw_data, strip_offset_entry, strip_offset_count, strip_byte_count_entry, strip_byte_count_count, row, col, width, rows_per_strip, strip_count_needed, 0, sample_bits, little))
+            rgba.push(_tiff_planar_sample(raw_data, strip_offset_entry, strip_offset_count, strip_byte_count_entry, strip_byte_count_count, row, col, width, rows_per_strip, strip_count_needed, 1, sample_bits, little))
+            rgba.push(_tiff_planar_sample(raw_data, strip_offset_entry, strip_offset_count, strip_byte_count_entry, strip_byte_count_count, row, col, width, rows_per_strip, strip_count_needed, 2, sample_bits, little))
             rgba.push(255)
         else if photometric == 3:
             val palette_index = _tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset, compression == 32773)
@@ -1120,7 +1120,7 @@ fn _tiff_strip_offset_count_needed(strip_count_needed: i64, samples_per_pixel: i
         return strip_count_needed * samples_per_pixel
     strip_count_needed
 
-fn _tiff_planar_sample_byte(
+fn _tiff_planar_sample(
     raw_data: text,
     strip_offset_entry: i64,
     strip_offset_count: i64,
@@ -1132,6 +1132,7 @@ fn _tiff_planar_sample_byte(
     rows_per_strip: i64,
     strip_count_needed: i64,
     sample_plane: i64,
+    sample_bits: i64,
     little: bool
 ) -> i64:
     val strip_index = row / rows_per_strip
@@ -1141,11 +1142,14 @@ fn _tiff_planar_sample_byte(
     val byte_count_lookup_index = _tiff_strip_lookup_index(planar_strip_index, strip_byte_count_count)
     val strip_offset = _tiff_entry_value_at(raw_data, strip_offset_entry, strip_lookup_index, little)
     val strip_byte_count = _tiff_entry_value_at(raw_data, strip_byte_count_entry, byte_count_lookup_index, little)
-    val sample_offset = strip_offset + row_in_strip * width + col
-    if strip_offset <= 0 or sample_offset + 1 > raw_data.len():
+    val bytes_per_sample = _tiff_bytes_per_sample(sample_bits)
+    val sample_offset = strip_offset + (row_in_strip * width + col) * bytes_per_sample
+    if strip_offset <= 0 or sample_offset + bytes_per_sample > raw_data.len():
         return 0
-    if strip_byte_count > 0 and sample_offset + 1 > strip_offset + strip_byte_count:
+    if strip_byte_count > 0 and sample_offset + bytes_per_sample > strip_offset + strip_byte_count:
         return 0
+    if sample_bits == 16:
+        return _read_u16(raw_data, sample_offset, little) / 257
     _byte_at(raw_data, sample_offset)
 
 fn _tiff_pixel_byte(raw_data: text, decoded_pixels: [i64], offset: i64, compressed: bool) -> i64:
@@ -1287,9 +1291,13 @@ fn _tiff_bytes_per_sample(sample_bits: i64) -> i64:
 fn _tiff_bits_are_supported(data: text, value_count: i64, inline_value: i64, offset: i64, samples_per_pixel: i64, compression: i64, photometric: i64, planar_config: i64, little: bool) -> bool:
     val sample_bits = _tiff_sample_bits(data, value_count, inline_value, offset, little)
     if sample_bits == 16:
-        if compression != 1 or planar_config != 1:
+        if compression != 1:
             return false
         if photometric != 0 and photometric != 1 and photometric != 2:
+            return false
+        if planar_config == 2:
+            return photometric == 2 and samples_per_pixel == 3 and value_count == samples_per_pixel and _tiff_sample_bits_all_equal(data, value_count, offset, 16, little)
+        if planar_config != 1:
             return false
         if value_count == 1:
             return samples_per_pixel == 1

@@ -698,6 +698,28 @@ expect(image.data).to_equal([
 
 </details>
 
+#### decodes little-endian 16-bit planar RGB TIFF to RGBA pixels
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val image = decode_tiff(_tiff_le_2x1_planar_rgb16())
+
+expect(image.width).to_equal(2)
+expect(image.height).to_equal(1)
+expect(image.format).to_equal(ImageFormat.Tiff)
+expect(image.data).to_equal([
+    0, 128, 64, 255,
+    255, 32, 1, 255
+])
+```
+
+</details>
+
 #### decodes little-endian uncompressed RGBA strips with alpha
 
 <details>
@@ -1124,8 +1146,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 54 |
-| Active scenarios | 54 |
+| Total scenarios | 55 |
+| Active scenarios | 55 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
