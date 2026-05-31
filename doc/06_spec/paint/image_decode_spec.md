@@ -1172,6 +1172,27 @@ expect(image.format).to_equal(ImageFormat.JpegXl)
 
 </details>
 
+#### detects JPEG XL structured default sRGB color metadata lazily
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val profile = detect_image_color_profile_info(_jpegxl_small_codestream_16x24())
+
+expect(profile.format).to_equal("jpegxl")
+expect(profile.has_profile).to_equal(true)
+expect(profile.profile_kind).to_equal("structured-color-default-srgb")
+expect(profile.requires_color_transform).to_equal(false)
+expect(profile.initializes_transform_now).to_equal(false)
+expect(profile.reason).to_equal("jpegxl-structured-default-srgb-lazy")
+```
+
+</details>
+
 #### parses JPEG XL large explicit codestream dimensions lazily
 
 <details>
@@ -1216,6 +1237,27 @@ val image = decode_jpegxl(_jpegxl_container_with_small_codestream_16x24())
 expect(image.width).to_equal(16)
 expect(image.height).to_equal(24)
 expect(image.format).to_equal(ImageFormat.JpegXl)
+```
+
+</details>
+
+#### keeps JPEG XL container color metadata fail-closed until wired
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val profile = detect_image_color_profile_info(_jpegxl_container_with_small_codestream_16x24())
+
+expect(profile.format).to_equal("jpegxl")
+expect(profile.has_profile).to_equal(false)
+expect(profile.profile_kind).to_equal("container-color-metadata-pending")
+expect(profile.requires_color_transform).to_equal(false)
+expect(profile.initializes_transform_now).to_equal(false)
+expect(profile.reason).to_equal("jpegxl-container-color-metadata-pending")
 ```
 
 </details>
@@ -1370,8 +1412,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 65 |
-| Active scenarios | 65 |
+| Total scenarios | 67 |
+| Active scenarios | 67 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
