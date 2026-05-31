@@ -1470,13 +1470,13 @@ impl JsInterpreter:
                     val mapped_module_id = self.wasm_export_body_module_ids.get(mapped_body_i)
                     val mapped_body_index = self.wasm_export_body_indices.get(mapped_body_i)
                     val mapped_result = self._native_webassembly_module_function_export_i32_result_with_args_at(mapped_module_id, mapped_body_index, arg_vals)
-                    if mapped_result >= 0:
-                        return JsValue.Number(v: mapped_result.to_f64())
+                    if mapped_result == -1:
+                        break
                     if mapped_result == -2:
                         return JsValue.String(v: "wasm-trap:integer-divide-by-zero")
                     if mapped_result == -3:
                         return JsValue.String(v: "wasm-trap:unreachable")
-                    break
+                    return JsValue.Number(v: mapped_result.to_f64())
                 mapped_body_i = mapped_body_i + 1
         if const_return >= 0:
             return JsValue.Number(v: const_return.to_f64())
@@ -2413,6 +2413,31 @@ impl JsInterpreter:
                         stack.push(global_value)
                         cursor = next_pos
                         continue
+                    if opcode == 44:
+                        val align = self._native_webassembly_read_leb_value(hex, cursor + 1)
+                        val offset_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
+                        if align < 0 or offset_pos < 0 or offset_pos > body_end:
+                            return -1
+                        val offset = self._native_webassembly_read_leb_value(hex, offset_pos)
+                        val next_pos = self._native_webassembly_read_leb_next(hex, offset_pos)
+                        if offset < 0 or next_pos < 0 or next_pos > body_end or stack.len() < 1:
+                            return -1
+                        val address = stack.get(stack.len() - 1) + offset
+                        if memory_byte_len <= 0 or address < 0 or address >= memory_byte_len:
+                            return -1
+                        stack.pop()
+                        var load_byte = 0
+                        var mem_index = 0
+                        while mem_index < memory_addrs.len():
+                            if memory_addrs.get(mem_index) == address:
+                                load_byte = memory_bytes.get(mem_index)
+                                break
+                            mem_index = mem_index + 1
+                        if load_byte >= 128:
+                            load_byte = load_byte - 256
+                        stack.push(load_byte)
+                        cursor = next_pos
+                        continue
                     if opcode == 45:
                         val align = self._native_webassembly_read_leb_value(hex, cursor + 1)
                         val offset_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
@@ -2434,6 +2459,37 @@ impl JsInterpreter:
                                 break
                             mem_index = mem_index + 1
                         stack.push(load_byte)
+                        cursor = next_pos
+                        continue
+                    if opcode == 46:
+                        val align = self._native_webassembly_read_leb_value(hex, cursor + 1)
+                        val offset_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
+                        if align < 0 or offset_pos < 0 or offset_pos > body_end:
+                            return -1
+                        val offset = self._native_webassembly_read_leb_value(hex, offset_pos)
+                        val next_pos = self._native_webassembly_read_leb_next(hex, offset_pos)
+                        if offset < 0 or next_pos < 0 or next_pos > body_end or stack.len() < 1:
+                            return -1
+                        val address = stack.get(stack.len() - 1) + offset
+                        if memory_byte_len <= 0 or address < 0 or address + 2 > memory_byte_len:
+                            return -1
+                        stack.pop()
+                        var loaded = 0
+                        var byte_index = 0
+                        while byte_index < 2:
+                            val wanted_addr = address + byte_index
+                            var load_byte = 0
+                            var mem_index = 0
+                            while mem_index < memory_addrs.len():
+                                if memory_addrs.get(mem_index) == wanted_addr:
+                                    load_byte = memory_bytes.get(mem_index)
+                                    break
+                                mem_index = mem_index + 1
+                            loaded = loaded + (load_byte * self._native_webassembly_pow2(byte_index * 8))
+                            byte_index = byte_index + 1
+                        if loaded >= 32768:
+                            loaded = loaded - 65536
+                        stack.push(loaded)
                         cursor = next_pos
                         continue
                     if opcode == 47:
