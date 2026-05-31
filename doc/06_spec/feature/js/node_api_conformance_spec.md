@@ -1174,6 +1174,37 @@ expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new
 
 </details>
 
+#### resolves child_process spawn as fail-closed process API
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("typeof require('child_process').spawn")).to_equal("function")
+expect(_eval_str("typeof require('node:child_process').spawn")).to_equal("function")
+```
+
+</details>
+
+#### denies child_process spawn without process grants
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('child_process').spawn('node', ['--version']).status")).to_equal("denied")
+expect(_eval_str("require('node:child_process').spawn('node', ['--version']).error")).to_equal("process-denied")
+expect(_eval_str("require('child_process').spawn('node', ['--version']).command")).to_equal("node")
+```
+
+</details>
+
 ### Buffer global and module shape
 
 #### exposes Buffer through require('buffer')
@@ -1947,8 +1978,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 129 |
-| Active scenarios | 129 |
+| Total scenarios | 131 |
+| Active scenarios | 131 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

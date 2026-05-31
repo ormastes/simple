@@ -6,7 +6,7 @@ use std.js.types.ast_types.{JsExpression, JsStatement}
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
 use std.js.engine.runtime.{dispatch_native, NATIVE_ARRAY_BUFFER_CONSTRUCTOR, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_NODE_BUFFER_ALLOC, NATIVE_NODE_BUFFER_BYTE_LENGTH, NATIVE_NODE_BUFFER_COMPARE, NATIVE_NODE_BUFFER_CONCAT, NATIVE_NODE_BUFFER_EQUALS, NATIVE_NODE_BUFFER_FROM, NATIVE_NODE_BUFFER_IS_BUFFER, NATIVE_NODE_BUFFER_READ_UINT16_BE, NATIVE_NODE_BUFFER_READ_UINT16_LE, NATIVE_NODE_BUFFER_READ_UINT32_BE, NATIVE_NODE_BUFFER_READ_UINT32_LE, NATIVE_NODE_BUFFER_READ_UINT8, NATIVE_NODE_BUFFER_SLICE, NATIVE_NODE_BUFFER_SUBARRAY, NATIVE_NODE_BUFFER_TO_STRING, NATIVE_NODE_BUFFER_WRITE_UINT16_BE, NATIVE_NODE_BUFFER_WRITE_UINT16_LE, NATIVE_NODE_BUFFER_WRITE_UINT32_BE, NATIVE_NODE_BUFFER_WRITE_UINT32_LE, NATIVE_NODE_BUFFER_WRITE_UINT8, NATIVE_NODE_CRYPTO_CREATE_HASH, NATIVE_NODE_CRYPTO_HASH_DIGEST, NATIVE_NODE_CRYPTO_HASH_UPDATE, NATIVE_NODE_CRYPTO_RANDOM_BYTES, NATIVE_NODE_OS_ARCH, NATIVE_NODE_OS_ENDIANNESS, NATIVE_NODE_OS_HOMEDIR, NATIVE_NODE_OS_PLATFORM, NATIVE_NODE_OS_RELEASE, NATIVE_NODE_OS_TMPDIR, NATIVE_NODE_OS_TYPE, NATIVE_NODE_PATH_BASENAME, NATIVE_NODE_PATH_DIRNAME, NATIVE_NODE_PATH_EXTNAME, NATIVE_NODE_PATH_IS_ABSOLUTE, NATIVE_NODE_PATH_JOIN, NATIVE_NODE_PATH_NORMALIZE, NATIVE_NODE_PATH_RESOLVE, NATIVE_NODE_PROCESS_CWD, NATIVE_NODE_PROCESS_EXIT, NATIVE_NODE_PROCESS_NEXT_TICK, NATIVE_NODE_REQUIRE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_TEXT_DECODER_CONSTRUCTOR, NATIVE_TEXT_DECODER_DECODE, NATIVE_TEXT_ENCODER_CONSTRUCTOR, NATIVE_TEXT_ENCODER_ENCODE, NATIVE_UINT8_ARRAY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANTIATE_CATCH, NATIVE_WEBASSEMBLY_INSTANTIATE_THEN, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MEMORY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MEMORY_GROW, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
-use std.js.engine.runtime.{NATIVE_NODE_EVENT_EMITTER_CONSTRUCTOR, NATIVE_NODE_EVENT_EMITTER_EMIT, NATIVE_NODE_EVENT_EMITTER_LISTENER_COUNT, NATIVE_NODE_EVENT_EMITTER_ON, NATIVE_NODE_EVENT_EMITTER_ONCE, NATIVE_NODE_EVENT_EMITTER_REMOVE_ALL_LISTENERS}
+use std.js.engine.runtime.{NATIVE_NODE_CHILD_PROCESS_SPAWN, NATIVE_NODE_EVENT_EMITTER_CONSTRUCTOR, NATIVE_NODE_EVENT_EMITTER_EMIT, NATIVE_NODE_EVENT_EMITTER_LISTENER_COUNT, NATIVE_NODE_EVENT_EMITTER_ON, NATIVE_NODE_EVENT_EMITTER_ONCE, NATIVE_NODE_EVENT_EMITTER_REMOVE_ALL_LISTENERS}
 use std.js.engine.parser.{JsParser}
 use std.js.builtins.json.{json_is_valid}
 use std.js.node.path_module.{path_join, path_dirname, path_basename, path_extname, path_isAbsolute, path_normalize, path_resolve}
@@ -165,6 +165,8 @@ impl JsInterpreter:
             return self._native_node_event_emitter_listener_count(this_val, arg_vals)
         if native_id == NATIVE_NODE_EVENT_EMITTER_REMOVE_ALL_LISTENERS:
             return self._native_node_event_emitter_remove_all_listeners(this_val, arg_vals)
+        if native_id == NATIVE_NODE_CHILD_PROCESS_SPAWN:
+            return self._native_node_child_process_spawn(arg_vals)
         if native_id == NATIVE_NODE_PROCESS_CWD:
             return process_cwd(arg_vals)
         if native_id == NATIVE_NODE_PROCESS_NEXT_TICK:
@@ -208,6 +210,8 @@ impl JsInterpreter:
             return self._native_node_crypto_module()
         if specifier == "events" or specifier == "node:events":
             return self._native_node_events_module()
+        if specifier == "child_process" or specifier == "node:child_process":
+            return self._native_node_child_process_module()
         self._native_node_denied_module(specifier)
 
     me _native_node_require_function() -> JsValue:
@@ -271,6 +275,29 @@ impl JsInterpreter:
         self.set_object_property(module_id, "EventEmitter", emitter_fn)
         self.set_object_property(module_id, "default", emitter_fn)
         JsValue.Object(id: module_id)
+
+    me _native_node_child_process_module() -> JsValue:
+        val module_id = self.create_object()
+        self._define_method_on(module_id, "spawn", NATIVE_NODE_CHILD_PROCESS_SPAWN)
+        JsValue.Object(id: module_id)
+
+    me _native_node_child_process_spawn(arg_vals: [JsValue]) -> JsValue:
+        val result_id = self.create_object()
+        var command = ""
+        if arg_vals.len() > 0:
+            command = js_to_string(arg_vals[0])
+        var argv_len = 0
+        if arg_vals.len() > 1:
+            match arg_vals[1]:
+                JsValue.Array(arr_id): argv_len = self.object_store.array_length(arr_id)
+                JsValue.Object(obj_id): argv_len = self.object_store.array_length(obj_id)
+                _: pass_dn
+        self.set_object_property(result_id, "status", JsValue.String(v: "denied"))
+        self.set_object_property(result_id, "error", JsValue.String(v: "process-denied"))
+        self.set_object_property(result_id, "command", JsValue.String(v: command))
+        self.set_object_property(result_id, "argvLength", JsValue.Number(v: argv_len.to_f64()))
+        self.set_object_property(result_id, "pid", JsValue.Number(v: -1.0))
+        JsValue.Object(id: result_id)
 
     me _native_node_event_emitter(arg_vals: [JsValue]) -> JsValue:
         val emitter_id = self.create_object()

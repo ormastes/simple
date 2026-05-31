@@ -174,7 +174,7 @@ Build minimal Node.js API compatibility on QuickJS + libuv:
 - [ ] `http.request`, `https.request` (via libuv + mbedTLS/BearSSL)
 - [x] `crypto.createHash` (sha256/sha1 deterministic subset)
 - [x] `crypto.randomBytes` fail-closed subset until secure entropy is wired
-- [ ] `child_process.spawn` (limited — stub or real based on kernel support)
+- [x] `child_process.spawn` fail-closed process-grant subset
 - [ ] `os.platform()`, `os.arch()`, `os.tmpdir()`
 - [ ] `readline` (for terminal interaction)
 - [ ] Test: run a simple Express-like HTTP server
