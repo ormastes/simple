@@ -12,7 +12,7 @@
 - mismatch count: 0
 - blur/tolerance used: false
 - best simple frame us: 59
-- best baseline frame us: 1232
+- best baseline frame us: 1158
 
 ## Simple Output
 - ## trial 1
@@ -22,7 +22,7 @@
 - iterations=5
 - checksum=225350
 - total_checksum=1126750
-- frame_us=60
+- frame_us=89
 - blur_or_tolerance_used=false
 - ## trial 2
 - renderer=pure-simple-exact-fixture
@@ -40,7 +40,7 @@
 - iterations=5
 - checksum=225350
 - total_checksum=1126750
-- frame_us=60
+- frame_us=59
 - blur_or_tolerance_used=false
 
 ## Baseline Output
@@ -51,7 +51,7 @@
 - iterations=5
 - checksum=225350
 - total_checksum=1126750
-- frame_us=1254
+- frame_us=1158
 - blur_or_tolerance_used=false
 - ## trial 2
 - renderer=bun-exact-fixture
@@ -60,7 +60,7 @@
 - iterations=5
 - checksum=225350
 - total_checksum=1126750
-- frame_us=1232
+- frame_us=1204
 - blur_or_tolerance_used=false
 - ## trial 3
 - renderer=bun-exact-fixture
@@ -69,5 +69,5 @@
 - iterations=5
 - checksum=225350
 - total_checksum=1126750
-- frame_us=1784
+- frame_us=1231
 - blur_or_tolerance_used=false

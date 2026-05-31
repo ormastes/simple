@@ -113,23 +113,186 @@ type CUfunction = *mut c_void;
 type CUdeviceptr = u64;
 type CUstream = *mut c_void;
 
-// CUDA Driver API function signatures
 #[cfg(feature = "cuda")]
-#[cfg_attr(target_os = "linux", link(name = "cuda"))]
-#[cfg_attr(target_os = "macos", link(name = "cuda"))]
-extern "C" {
-    fn cuInit(flags: c_uint) -> c_int;
-    fn cuDeviceGetCount(count: *mut c_int) -> c_int;
-    fn cuDeviceGet(device: *mut CUdevice, ordinal: c_int) -> c_int;
-    fn cuDeviceGetName(name: *mut c_char, len: c_int, dev: CUdevice) -> c_int;
-    fn cuDeviceGetAttribute(pi: *mut c_int, attrib: c_int, dev: CUdevice) -> c_int;
-    fn cuCtxCreate_v2(pctx: *mut CUcontext, flags: c_uint, dev: CUdevice) -> c_int;
-    fn cuCtxDestroy_v2(ctx: CUcontext) -> c_int;
-    fn cuCtxSetCurrent(ctx: CUcontext) -> c_int;
-    fn cuModuleLoadData(module: *mut CUmodule, image: *const c_void) -> c_int;
-    fn cuModuleUnload(hmod: CUmodule) -> c_int;
-    fn cuModuleGetFunction(hfunc: *mut CUfunction, hmod: CUmodule, name: *const c_char) -> c_int;
-    fn cuLaunchKernel(
+#[allow(non_snake_case)]
+mod cuda_driver {
+    use super::*;
+    use libloading::Library;
+
+    type CuInit = unsafe extern "C" fn(c_uint) -> c_int;
+    type CuDeviceGetCount = unsafe extern "C" fn(*mut c_int) -> c_int;
+    type CuDeviceGet = unsafe extern "C" fn(*mut CUdevice, c_int) -> c_int;
+    type CuDeviceGetName = unsafe extern "C" fn(*mut c_char, c_int, CUdevice) -> c_int;
+    type CuDeviceGetAttribute = unsafe extern "C" fn(*mut c_int, c_int, CUdevice) -> c_int;
+    type CuCtxCreate = unsafe extern "C" fn(*mut CUcontext, c_uint, CUdevice) -> c_int;
+    type CuCtxDestroy = unsafe extern "C" fn(CUcontext) -> c_int;
+    type CuCtxSetCurrent = unsafe extern "C" fn(CUcontext) -> c_int;
+    type CuModuleLoadData = unsafe extern "C" fn(*mut CUmodule, *const c_void) -> c_int;
+    type CuModuleUnload = unsafe extern "C" fn(CUmodule) -> c_int;
+    type CuModuleGetFunction = unsafe extern "C" fn(*mut CUfunction, CUmodule, *const c_char) -> c_int;
+    type CuLaunchKernel = unsafe extern "C" fn(
+        CUfunction,
+        c_uint,
+        c_uint,
+        c_uint,
+        c_uint,
+        c_uint,
+        c_uint,
+        c_uint,
+        CUstream,
+        *mut *mut c_void,
+        *mut *mut c_void,
+    ) -> c_int;
+    type CuMemAlloc = unsafe extern "C" fn(*mut CUdeviceptr, usize) -> c_int;
+    type CuMemFree = unsafe extern "C" fn(CUdeviceptr) -> c_int;
+    type CuMemcpyHtoD = unsafe extern "C" fn(CUdeviceptr, *const c_void, usize) -> c_int;
+    type CuMemcpyDtoH = unsafe extern "C" fn(*mut c_void, CUdeviceptr, usize) -> c_int;
+    type CuCtxSynchronize = unsafe extern "C" fn() -> c_int;
+    type CuMemcpyDtoD = unsafe extern "C" fn(CUdeviceptr, CUdeviceptr, usize) -> c_int;
+    type CuMemsetD8 = unsafe extern "C" fn(CUdeviceptr, u8, usize) -> c_int;
+    type CuModuleLoad = unsafe extern "C" fn(*mut CUmodule, *const c_char) -> c_int;
+    type CuDeviceComputeCapability = unsafe extern "C" fn(*mut c_int, *mut c_int, CUdevice) -> c_int;
+
+    struct CudaFns {
+        _lib: Library,
+        cuInit: CuInit,
+        cuDeviceGetCount: CuDeviceGetCount,
+        cuDeviceGet: CuDeviceGet,
+        cuDeviceGetName: CuDeviceGetName,
+        cuDeviceGetAttribute: CuDeviceGetAttribute,
+        cuCtxCreate_v2: CuCtxCreate,
+        cuCtxDestroy_v2: CuCtxDestroy,
+        cuCtxSetCurrent: CuCtxSetCurrent,
+        cuModuleLoadData: CuModuleLoadData,
+        cuModuleUnload: CuModuleUnload,
+        cuModuleGetFunction: CuModuleGetFunction,
+        cuLaunchKernel: CuLaunchKernel,
+        cuMemAlloc_v2: CuMemAlloc,
+        cuMemFree_v2: CuMemFree,
+        cuMemcpyHtoD_v2: CuMemcpyHtoD,
+        cuMemcpyDtoH_v2: CuMemcpyDtoH,
+        cuCtxSynchronize: CuCtxSynchronize,
+        cuMemcpyDtoD_v2: CuMemcpyDtoD,
+        cuMemsetD8_v2: CuMemsetD8,
+        cuModuleLoad: CuModuleLoad,
+        cuDeviceComputeCapability: CuDeviceComputeCapability,
+    }
+
+    unsafe impl Send for CudaFns {}
+    unsafe impl Sync for CudaFns {}
+
+    static CUDA_FNS: OnceLock<Result<CudaFns, CudaError>> = OnceLock::new();
+
+    fn load_cuda_fns() -> CudaResult<CudaFns> {
+        #[cfg(target_os = "windows")]
+        const LIB_NAMES: &[&str] = &["nvcuda.dll"];
+        #[cfg(target_os = "macos")]
+        const LIB_NAMES: &[&str] = &["libcuda.dylib"];
+        #[cfg(all(unix, not(target_os = "macos")))]
+        const LIB_NAMES: &[&str] = &["libcuda.so.1", "libcuda.so"];
+
+        let mut lib = None;
+        for name in LIB_NAMES {
+            if let Ok(candidate) = unsafe { Library::new(name) } {
+                lib = Some(candidate);
+                break;
+            }
+        }
+        let lib = lib.ok_or(CudaError::SharedObjectInitFailed)?;
+
+        macro_rules! sym {
+            ($name:literal, $ty:ty) => {{
+                let symbol = unsafe { lib.get::<$ty>($name) }
+                    .map_err(|_| CudaError::SharedObjectSymbolNotFound)?;
+                *symbol
+            }};
+        }
+
+        Ok(CudaFns {
+            cuInit: sym!(b"cuInit\0", CuInit),
+            cuDeviceGetCount: sym!(b"cuDeviceGetCount\0", CuDeviceGetCount),
+            cuDeviceGet: sym!(b"cuDeviceGet\0", CuDeviceGet),
+            cuDeviceGetName: sym!(b"cuDeviceGetName\0", CuDeviceGetName),
+            cuDeviceGetAttribute: sym!(b"cuDeviceGetAttribute\0", CuDeviceGetAttribute),
+            cuCtxCreate_v2: sym!(b"cuCtxCreate_v2\0", CuCtxCreate),
+            cuCtxDestroy_v2: sym!(b"cuCtxDestroy_v2\0", CuCtxDestroy),
+            cuCtxSetCurrent: sym!(b"cuCtxSetCurrent\0", CuCtxSetCurrent),
+            cuModuleLoadData: sym!(b"cuModuleLoadData\0", CuModuleLoadData),
+            cuModuleUnload: sym!(b"cuModuleUnload\0", CuModuleUnload),
+            cuModuleGetFunction: sym!(b"cuModuleGetFunction\0", CuModuleGetFunction),
+            cuLaunchKernel: sym!(b"cuLaunchKernel\0", CuLaunchKernel),
+            cuMemAlloc_v2: sym!(b"cuMemAlloc_v2\0", CuMemAlloc),
+            cuMemFree_v2: sym!(b"cuMemFree_v2\0", CuMemFree),
+            cuMemcpyHtoD_v2: sym!(b"cuMemcpyHtoD_v2\0", CuMemcpyHtoD),
+            cuMemcpyDtoH_v2: sym!(b"cuMemcpyDtoH_v2\0", CuMemcpyDtoH),
+            cuCtxSynchronize: sym!(b"cuCtxSynchronize\0", CuCtxSynchronize),
+            cuMemcpyDtoD_v2: sym!(b"cuMemcpyDtoD_v2\0", CuMemcpyDtoD),
+            cuMemsetD8_v2: sym!(b"cuMemsetD8_v2\0", CuMemsetD8),
+            cuModuleLoad: sym!(b"cuModuleLoad\0", CuModuleLoad),
+            cuDeviceComputeCapability: sym!(b"cuDeviceComputeCapability\0", CuDeviceComputeCapability),
+            _lib: lib,
+        })
+    }
+
+    fn fns() -> CudaResult<&'static CudaFns> {
+        CUDA_FNS.get_or_init(load_cuda_fns).as_ref().map_err(|err| *err)
+    }
+
+    macro_rules! dispatch {
+        ($field:ident ( $($arg:expr),* $(,)? )) => {{
+            match fns() {
+                Ok(fns) => unsafe { (fns.$field)($($arg),*) },
+                Err(err) => err as c_int,
+            }
+        }};
+    }
+
+    pub unsafe fn cuInit(flags: c_uint) -> c_int {
+        dispatch!(cuInit(flags))
+    }
+
+    pub unsafe fn cuDeviceGetCount(count: *mut c_int) -> c_int {
+        dispatch!(cuDeviceGetCount(count))
+    }
+
+    pub unsafe fn cuDeviceGet(device: *mut CUdevice, ordinal: c_int) -> c_int {
+        dispatch!(cuDeviceGet(device, ordinal))
+    }
+
+    pub unsafe fn cuDeviceGetName(name: *mut c_char, len: c_int, dev: CUdevice) -> c_int {
+        dispatch!(cuDeviceGetName(name, len, dev))
+    }
+
+    pub unsafe fn cuDeviceGetAttribute(pi: *mut c_int, attrib: c_int, dev: CUdevice) -> c_int {
+        dispatch!(cuDeviceGetAttribute(pi, attrib, dev))
+    }
+
+    pub unsafe fn cuCtxCreate_v2(pctx: *mut CUcontext, flags: c_uint, dev: CUdevice) -> c_int {
+        dispatch!(cuCtxCreate_v2(pctx, flags, dev))
+    }
+
+    pub unsafe fn cuCtxDestroy_v2(ctx: CUcontext) -> c_int {
+        dispatch!(cuCtxDestroy_v2(ctx))
+    }
+
+    pub unsafe fn cuCtxSetCurrent(ctx: CUcontext) -> c_int {
+        dispatch!(cuCtxSetCurrent(ctx))
+    }
+
+    pub unsafe fn cuModuleLoadData(module: *mut CUmodule, image: *const c_void) -> c_int {
+        dispatch!(cuModuleLoadData(module, image))
+    }
+
+    pub unsafe fn cuModuleUnload(hmod: CUmodule) -> c_int {
+        dispatch!(cuModuleUnload(hmod))
+    }
+
+    pub unsafe fn cuModuleGetFunction(hfunc: *mut CUfunction, hmod: CUmodule, name: *const c_char) -> c_int {
+        dispatch!(cuModuleGetFunction(hfunc, hmod, name))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn cuLaunchKernel(
         f: CUfunction,
         gridDimX: c_uint,
         gridDimY: c_uint,
@@ -141,17 +304,61 @@ extern "C" {
         hStream: CUstream,
         kernelParams: *mut *mut c_void,
         extra: *mut *mut c_void,
-    ) -> c_int;
-    fn cuMemAlloc_v2(dptr: *mut CUdeviceptr, bytesize: usize) -> c_int;
-    fn cuMemFree_v2(dptr: CUdeviceptr) -> c_int;
-    fn cuMemcpyHtoD_v2(dstDevice: CUdeviceptr, srcHost: *const c_void, ByteCount: usize) -> c_int;
-    fn cuMemcpyDtoH_v2(dstHost: *mut c_void, srcDevice: CUdeviceptr, ByteCount: usize) -> c_int;
-    fn cuCtxSynchronize() -> c_int;
-    fn cuMemcpyDtoD_v2(dstDevice: CUdeviceptr, srcDevice: CUdeviceptr, ByteCount: usize) -> c_int;
-    fn cuMemsetD8_v2(dstDevice: CUdeviceptr, uc: u8, N: usize) -> c_int;
-    fn cuModuleLoad(module: *mut CUmodule, fname: *const c_char) -> c_int;
-    fn cuDeviceComputeCapability(major: *mut c_int, minor: *mut c_int, dev: CUdevice) -> c_int;
+    ) -> c_int {
+        dispatch!(cuLaunchKernel(
+            f,
+            gridDimX,
+            gridDimY,
+            gridDimZ,
+            blockDimX,
+            blockDimY,
+            blockDimZ,
+            sharedMemBytes,
+            hStream,
+            kernelParams,
+            extra
+        ))
+    }
+
+    pub unsafe fn cuMemAlloc_v2(dptr: *mut CUdeviceptr, bytesize: usize) -> c_int {
+        dispatch!(cuMemAlloc_v2(dptr, bytesize))
+    }
+
+    pub unsafe fn cuMemFree_v2(dptr: CUdeviceptr) -> c_int {
+        dispatch!(cuMemFree_v2(dptr))
+    }
+
+    pub unsafe fn cuMemcpyHtoD_v2(dstDevice: CUdeviceptr, srcHost: *const c_void, ByteCount: usize) -> c_int {
+        dispatch!(cuMemcpyHtoD_v2(dstDevice, srcHost, ByteCount))
+    }
+
+    pub unsafe fn cuMemcpyDtoH_v2(dstHost: *mut c_void, srcDevice: CUdeviceptr, ByteCount: usize) -> c_int {
+        dispatch!(cuMemcpyDtoH_v2(dstHost, srcDevice, ByteCount))
+    }
+
+    pub unsafe fn cuCtxSynchronize() -> c_int {
+        dispatch!(cuCtxSynchronize())
+    }
+
+    pub unsafe fn cuMemcpyDtoD_v2(dstDevice: CUdeviceptr, srcDevice: CUdeviceptr, ByteCount: usize) -> c_int {
+        dispatch!(cuMemcpyDtoD_v2(dstDevice, srcDevice, ByteCount))
+    }
+
+    pub unsafe fn cuMemsetD8_v2(dstDevice: CUdeviceptr, uc: u8, N: usize) -> c_int {
+        dispatch!(cuMemsetD8_v2(dstDevice, uc, N))
+    }
+
+    pub unsafe fn cuModuleLoad(module: *mut CUmodule, fname: *const c_char) -> c_int {
+        dispatch!(cuModuleLoad(module, fname))
+    }
+
+    pub unsafe fn cuDeviceComputeCapability(major: *mut c_int, minor: *mut c_int, dev: CUdevice) -> c_int {
+        dispatch!(cuDeviceComputeCapability(major, minor, dev))
+    }
 }
+
+#[cfg(feature = "cuda")]
+use cuda_driver::*;
 
 // Stub implementations when CUDA is not available
 #[cfg(not(feature = "cuda"))]
@@ -2102,6 +2309,9 @@ pub extern "C" fn rt_cuda_module_unload(_module: i64) -> i64 {
 pub extern "C" fn rt_cuda_module_get_function(module: i64, func_name: *const c_char) -> i64 {
     if func_name.is_null() {
         return -1;
+    }
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
     }
     unsafe {
         let mut func: CUfunction = ptr::null_mut();

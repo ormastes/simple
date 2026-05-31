@@ -753,6 +753,188 @@ expect(_eval_str("require('buffer').Buffer.from('68656c6c6f', 'hex').toString('u
 
 </details>
 
+#### builds buffers from numeric byte arrays
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('buffer').Buffer.from([104,101,108,108,111]).toString('utf8')")).to_equal("hello")
+```
+
+</details>
+
+#### normalizes numeric array bytes like Node buffers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from([0,97,255,256,-1]).toString('hex')")).to_equal("0061ff00ff")
+```
+
+</details>
+
+#### compares lower buffers before higher buffers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.compare(Buffer.from('61', 'hex'), Buffer.from('62', 'hex'))")).to_equal("-1")
+```
+
+</details>
+
+#### compares higher buffers after lower buffers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('buffer').Buffer.compare(require('buffer').Buffer.from('62', 'hex'), require('buffer').Buffer.from('61', 'hex'))")).to_equal("1")
+```
+
+</details>
+
+#### compares identical buffers equally
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.compare(Buffer.from('6162', 'hex'), Buffer.from('6162', 'hex'))")).to_equal("0")
+```
+
+</details>
+
+#### checks equal buffer contents
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from('6162', 'hex').equals(Buffer.from('6162', 'hex'))")).to_equal("true")
+```
+
+</details>
+
+#### checks unequal buffer contents
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from('6162', 'hex').equals(Buffer.from('6163', 'hex'))")).to_equal("false")
+```
+
+</details>
+
+#### slices buffer byte ranges
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from('68656c6c6f', 'hex').slice(1, 4).toString('utf8')")).to_equal("ell")
+```
+
+</details>
+
+#### slices with negative and clamped indexes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from('68656c6c6f', 'hex').slice(-2, 99).toString('hex')")).to_equal("6c6f")
+```
+
+</details>
+
+#### reads unsigned bytes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from([0,97,255]).readUInt8(1)")).to_equal("97")
+```
+
+</details>
+
+#### bounds out-of-range unsigned byte reads
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from([0,97,255]).readUInt8(99)")).to_equal("0")
+```
+
+</details>
+
+#### reads WASM magic as little-endian u32
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from([0,97,115,109,1,0,0,0]).readUInt32LE(0)")).to_equal("1836278016")
+```
+
+</details>
+
+#### reads WASM version as little-endian u32
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.from([0,97,115,109,1,0,0,0]).readUInt32LE(4)")).to_equal("1")
+```
+
+</details>
+
 #### exposes Buffer.concat through require('buffer')
 
 <details>
@@ -763,6 +945,62 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("require('buffer').Buffer.concat([require('buffer').Buffer.from('6865', 'hex'), require('buffer').Buffer.from('6c6c6f', 'hex')]).toString('utf8')")).to_equal("hello")
+```
+
+</details>
+
+#### allocates zero-filled buffers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.alloc(3).toString('hex')")).to_equal("000000")
+```
+
+</details>
+
+#### allocates filled buffers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('buffer').Buffer.alloc(4, 97).toString('utf8')")).to_equal("aaaa")
+```
+
+</details>
+
+#### identifies bounded Buffer instances
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('buffer').Buffer.isBuffer(require('buffer').Buffer.from('68656c6c6f', 'hex'))")).to_equal("true")
+```
+
+</details>
+
+#### rejects non-buffer values for Buffer.isBuffer
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Buffer.isBuffer('hello')")).to_equal("false")
 ```
 
 </details>
@@ -908,8 +1146,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 58 |
-| Active scenarios | 58 |
+| Total scenarios | 75 |
+| Active scenarios | 75 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
