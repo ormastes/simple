@@ -893,7 +893,7 @@ impl JsInterpreter:
             if function_name != "":
                 val fn_id = self._register_native(function_name, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION)
                 self.set_object_property(exports_id, function_name, JsValue.Function(id: fn_id))
-                val const_return = self._native_webassembly_module_function_export_i32_const_return_at(module_id, index)
+                val const_return = self._native_webassembly_module_function_export_i32_result_at(module_id, index)
                 if const_return >= 0:
                     var const_fn_ids = self.wasm_export_const_fn_ids
                     var const_values = self.wasm_export_const_values
@@ -1594,7 +1594,7 @@ impl JsInterpreter:
             JsValue.String(v): v
             _: ""
 
-    me _native_webassembly_module_function_export_i32_const_return_at(module_id: i64, index: i64) -> i64:
+    me _native_webassembly_module_function_export_i32_result_at(module_id: i64, index: i64) -> i64:
         var hex = ""
         match self.get_object_property(module_id, "payloadHex"):
             JsValue.String(v): hex = v
@@ -1612,7 +1612,7 @@ impl JsInterpreter:
         val body_index = wasm_index - function_import_count
         if body_index < 0:
             return -1
-        self._native_webassembly_function_body_i32_const_return(hex, body_index)
+        self._native_webassembly_function_body_i32_result(hex, body_index)
 
     me _native_webassembly_table_export_name(hex: text) -> text:
         val count = self._native_webassembly_export_count(hex)
@@ -1712,7 +1712,7 @@ impl JsInterpreter:
             return -1
         self._native_webassembly_read_leb_value(hex, index_pos)
 
-    me _native_webassembly_function_body_i32_const_return(hex: text, wanted_body_index: i64) -> i64:
+    me _native_webassembly_function_body_i32_result(hex: text, wanted_body_index: i64) -> i64:
         val start = self._native_webassembly_section_payload_start(hex, 10)
         val end = self._native_webassembly_section_payload_end(hex, 10)
         if start < 0 or end <= start:
@@ -1733,19 +1733,36 @@ impl JsInterpreter:
             if index == wanted_body_index:
                 val local_count = self._native_webassembly_read_leb_value(hex, body_start)
                 val instr_start = self._native_webassembly_read_leb_next(hex, body_start)
-                if local_count != 0 or instr_start < 0 or instr_start + 2 > body_end:
+                if local_count != 0 or instr_start < 0:
                     return -1
-                val opcode = self._native_webassembly_hex_byte_at(hex, instr_start)
-                if opcode != 65:
+                var stack: [i64] = []
+                var cursor = instr_start
+                while cursor < body_end:
+                    val opcode = self._native_webassembly_hex_byte_at(hex, cursor)
+                    if opcode == 11:
+                        if cursor + 1 != body_end or stack.len() != 1:
+                            return -1
+                        return stack.get(0)
+                    if opcode == 65:
+                        val value = self._native_webassembly_read_leb_value(hex, cursor + 1)
+                        val next_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
+                        if value < 0 or next_pos < 0 or next_pos > body_end:
+                            return -1
+                        stack.push(value)
+                        cursor = next_pos
+                        continue
+                    if opcode == 106:
+                        if stack.len() < 2:
+                            return -1
+                        val right = stack.get(stack.len() - 1)
+                        val left = stack.get(stack.len() - 2)
+                        stack.pop()
+                        stack.pop()
+                        stack.push(left + right)
+                        cursor = cursor + 1
+                        continue
                     return -1
-                val value = self._native_webassembly_read_leb_value(hex, instr_start + 1)
-                val next_pos = self._native_webassembly_read_leb_next(hex, instr_start + 1)
-                if value < 0 or next_pos < 0 or next_pos >= body_end:
-                    return -1
-                val terminator = self._native_webassembly_hex_byte_at(hex, next_pos)
-                if terminator != 11 or next_pos + 1 != body_end:
-                    return -1
-                return value
+                return -1
             pos = body_end
             index = index + 1
         -1
