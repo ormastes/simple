@@ -1565,6 +1565,65 @@ expect(_eval_str("new TextDecoder().decode(new Uint8Array([104,101,108,108,111])
 
 </details>
 
+#### encodes multibyte UTF-8 bytes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var b = new TextEncoder().encode('\\u20ac'); b[0]")).to_equal("226")
+expect(_eval_str("var b = new TextEncoder().encode('\\u20ac'); b[1]")).to_equal("130")
+expect(_eval_str("var b = new TextEncoder().encode('\\u20ac'); b[2]")).to_equal("172")
+```
+
+</details>
+
+#### decodes multibyte UTF-8 bytes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var s = new TextDecoder().decode(new Uint8Array([226,130,172])); s.charCodeAt(0)")).to_equal("8364")
+```
+
+</details>
+
+#### replaces invalid UTF-8 continuation bytes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var s = new TextDecoder().decode(new Uint8Array([195,40])); s.charCodeAt(0)")).to_equal("65533")
+expect(_eval_str("var s = new TextDecoder().decode(new Uint8Array([195,40])); s.charAt(1)")).to_equal("(")
+```
+
+</details>
+
+#### replaces truncated UTF-8 sequences
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var s = new TextDecoder().decode(new Uint8Array([226,130])); s.charCodeAt(0)")).to_equal("65533")
+```
+
+</details>
+
 #### reports deterministic UTF-8 labels
 
 <details>
@@ -1626,8 +1685,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 107 |
-| Active scenarios | 107 |
+| Total scenarios | 111 |
+| Active scenarios | 111 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
