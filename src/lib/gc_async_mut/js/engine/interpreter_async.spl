@@ -183,6 +183,41 @@ impl JsInterpreter:
     me _enqueue_promise_task(promise_id: i64, handler_id: i64):
         self.pending_promise_tasks = self.pending_promise_tasks + [PendingPromiseTask.create(promise_id, handler_id)]
 
+    me _resolve_promise_from_callback_result(next_promise_id: i64, value: JsValue, rejected: bool) -> bool:
+        var next_value = value
+        var propagate_rejection = rejected
+        match next_value:
+            JsValue.Object(inner_promise_id):
+                if val JsValue.Boolean(true) = self.get_object_property(inner_promise_id, "__simple_promise_host"):
+                    val inner_state = _simple_fetch_state(inner_promise_id, self.object_store)
+                    if inner_state == "pending":
+                        val adopt_handler_id = self._create_promise_handler(-1, -1, next_promise_id, "then")
+                        self._append_handler(inner_promise_id, adopt_handler_id)
+                        return false
+                    next_value = _simple_fetch_value(inner_promise_id, self.object_store)
+                    propagate_rejection = inner_state == "rejected"
+                else:
+                    val then_id = _get_fn_id(self.get_object_property(inner_promise_id, "then"))
+                    if then_id >= 0:
+                        match self.get_object_property(inner_promise_id, "status"):
+                            JsValue.String(status):
+                                if status == "compiled":
+                                    val module_value = self.get_object_property(inner_promise_id, "module")
+                                    next_value = module_value
+                                    propagate_rejection = false
+                                elif status == "instantiated":
+                                    next_value = JsValue.Object(id: inner_promise_id)
+                                    propagate_rejection = false
+                                elif status == "invalid":
+                                    next_value = JsValue.Object(id: inner_promise_id)
+                                    propagate_rejection = true
+                            _:
+                                pass_dn
+            _:
+                pass_dn
+        self._settle_promise(next_promise_id, next_value, propagate_rejection)
+        true
+
     me _settle_promise(promise_id: i64, value: JsValue, rejected: bool):
         if _simple_fetch_state(promise_id, self.object_store) != "pending":
             return
@@ -247,22 +282,7 @@ impl JsInterpreter:
                                 next_value = settled_value
 
                         if next_promise_id >= 0:
-                            var adopted_pending = false
-                            match next_value:
-                                JsValue.Object(inner_promise_id):
-                                    if val JsValue.Boolean(true) = self.get_object_property(inner_promise_id, "__simple_promise_host"):
-                                        val inner_state = _simple_fetch_state(inner_promise_id, self.object_store)
-                                        if inner_state == "pending":
-                                            val adopt_handler_id = self._create_promise_handler(-1, -1, next_promise_id, "then")
-                                            self._append_handler(inner_promise_id, adopt_handler_id)
-                                            adopted_pending = true
-                                        else:
-                                            next_value = _simple_fetch_value(inner_promise_id, self.object_store)
-                                            propagate_rejection = inner_state == "rejected"
-                                _:
-                                    pass_dn
-                            if not adopted_pending:
-                                self._settle_promise(next_promise_id, next_value, propagate_rejection)
+                            val _ = self._resolve_promise_from_callback_result(next_promise_id, next_value, propagate_rejection)
 
     # Find prototype id for a class constructor
     me _find_class_proto(fn_id: i64) -> i64:

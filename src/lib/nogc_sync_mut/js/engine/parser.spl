@@ -32,6 +32,9 @@ fn _js_parser_statement(stmt: text) -> JsStatement:
 
 fn _js_parser_expression(raw: text) -> JsExpression:
     val expr = _js_parser_strip_outer_parens(raw.trim())
+    val arrow = _js_parser_find_top_level(expr, "=>")
+    if arrow >= 0:
+        return _js_parser_arrow_expression(expr, arrow)
     val assign = _js_parser_find_top_level_assignment(expr)
     if assign >= 0:
         return JsExpression.Assignment(
@@ -59,6 +62,26 @@ fn _js_parser_expression(raw: text) -> JsExpression:
     if expr.starts_with("typeof "):
         return JsExpression.Unary(op: "typeof", operand: _js_parser_expression(expr.slice(7, expr.len())))
     _js_parser_postfix(expr)
+
+fn _js_parser_arrow_expression(expr: text, arrow: i64) -> JsExpression:
+    var params_text = expr.slice(0, arrow).trim()
+    if params_text.starts_with("(") and params_text.ends_with(")"):
+        params_text = params_text.slice(1, params_text.len() - 1).trim()
+    val param_parts = _js_parser_split_top_level(params_text, ",")
+    var params: [text] = []
+    var pi = 0
+    while pi < param_parts.len():
+        val p = param_parts.get(pi).trim()
+        if p != "":
+            params.push(p)
+        pi = pi + 1
+    val body_text = expr.slice(arrow + 2, expr.len()).trim()
+    if body_text.starts_with("{"):
+        val body_end = _js_parser_matching_brace(body_text, 0)
+        if body_end >= 0:
+            return JsExpression.ArrowFunction(params: params, body: js_parse_program_subset(body_text.slice(1, body_end)))
+        return JsExpression.ArrowFunction(params: params, body: [])
+    JsExpression.ArrowFunction(params: params, body: [JsStatement.Return(value: _js_parser_expression(body_text))])
 
 fn _js_parser_postfix(expr: text) -> JsExpression:
     var pos = 0

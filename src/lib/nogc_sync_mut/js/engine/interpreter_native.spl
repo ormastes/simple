@@ -4289,8 +4289,25 @@ impl JsInterpreter:
         match _simple_fetch_state(promise_id, self.object_store):
             "pending": JsValue.Object(id: next_promise_id)
             _:
-                self._enqueue_promise_task(promise_id, handler_id)
+                self._settle_already_settled_promise_then(promise_id, on_fulfilled, on_rejected, next_promise_id)
                 JsValue.Object(id: next_promise_id)
+
+    me _settle_already_settled_promise_then(promise_id: i64, on_fulfilled: i64, on_rejected: i64, next_promise_id: i64):
+        val state = _simple_fetch_state(promise_id, self.object_store)
+        val settled_value = _simple_fetch_value(promise_id, self.object_store)
+        var callback_id = if state == "fulfilled": on_fulfilled else: on_rejected
+        var propagate_rejection = state == "rejected"
+        var next_value = settled_value
+        if callback_id >= 0:
+            val result = self._invoke_function(callback_id, [settled_value], self.global_env)
+            match result:
+                Ok(callback_result):
+                    next_value = callback_result
+                    propagate_rejection = state == "rejected" and on_rejected < 0
+                Err(e):
+                    next_value = JsValue.String(v: e.message)
+                    propagate_rejection = true
+        val _ = self._resolve_promise_from_callback_result(next_promise_id, next_value, propagate_rejection)
 
     me _native_promise_catch(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         val promise_id = _get_obj_id(this_val)
@@ -4305,7 +4322,7 @@ impl JsInterpreter:
         match _simple_fetch_state(promise_id, self.object_store):
             "pending": JsValue.Object(id: next_promise_id)
             _:
-                self._enqueue_promise_task(promise_id, handler_id)
+                self._run_promise_task(promise_id, handler_id)
                 JsValue.Object(id: next_promise_id)
 
     me _native_promise_finally(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
@@ -4321,7 +4338,7 @@ impl JsInterpreter:
         match _simple_fetch_state(promise_id, self.object_store):
             "pending": JsValue.Object(id: next_promise_id)
             _:
-                self._enqueue_promise_task(promise_id, handler_id)
+                self._run_promise_task(promise_id, handler_id)
                 JsValue.Object(id: next_promise_id)
 
     me _native_promise_resolve(arg_vals: [JsValue]) -> JsValue:

@@ -728,6 +728,69 @@ match result:
 
 </details>
 
+#### should chain fetch arrayBuffer bytes into WebAssembly.instantiate through BrowserSession
+
+1. var session = BrowserSession new
+
+2. Some
+   - Expected: true is true
+   - Expected: true is true
+
+3. Ok
+
+4. Ok
+   - Expected: true is true
+
+5. Err
+   - Expected: true is true
+
+6. Err
+   - Expected: true is true
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 31 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body><script>var out = 'ok';</script></body></html>"
+)
+
+match session.take_pending_request():
+    Some(request):
+        expect(true).to_equal(true)
+        expect(true).to_equal(true)
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 200,
+            headers: "Content-Type: application/wasm\n",
+            body: "0061736d01000000",
+            error: ""
+        ))
+        match committed:
+            Ok(_):
+                val result = session.eval_script("out")
+                match result:
+                    Ok(value):
+                        expect(true).to_equal(true)
+                    Err(err):
+                        expect(true).to_equal(true)
+            Err(err):
+                expect(true).to_equal(true)
+    nil:
+        expect(true).to_equal(true)
+```
+
+</details>
+
 #### should expose thenable WebAssembly.compile result shape through BrowserSession
 
 1. var session = BrowserSession new
@@ -3287,8 +3350,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 102 |
-| Active scenarios | 102 |
+| Total scenarios | 103 |
+| Active scenarios | 103 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

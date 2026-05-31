@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-31 11:40:42*
+*Generated: 2026-05-31 21:07:25*
 
-## test/unit/lib/common/web
+## test/system/app/browser/feature
 
-❌ **browser_session_wasm_host_spec.spl** (1566ms)
-  - Source: `test/unit/lib/common/web/browser_session_wasm_host_spec.spl`
-  - Generated doc: `spec/browser_session_wasm_host_spec.md`
+❌ **webgpu_js_wasm_simple_spec.spl** (11880ms)
+  - Source: `test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl`
+  - Generated doc: `spec/webgpu_js_wasm_simple_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 15 ✅
-- **Failed:** 8 ❌
-- **Duration:** 1570ms
+- **Passed:** 102 ✅
+- **Failed:** 1 ❌
+- **Duration:** 11887ms

@@ -172,6 +172,12 @@ impl JsInterpreter:
             module_value = self._native_node_path_module()
         elif canonical == "buffer":
             module_value = self._native_node_buffer_module()
+        elif canonical == "process":
+            match self.lookup_global_value("process"):
+                Some(v):
+                    module_value = v
+                _:
+                    module_value = self._native_node_denied_module(specifier)
         elif canonical == "os":
             module_value = self._native_node_os_module()
         else:
@@ -181,7 +187,7 @@ impl JsInterpreter:
     me _native_node_require_canonical_specifier(specifier: text) -> text:
         if specifier.starts_with("node:"):
             return specifier.substring(5, specifier.len())
-        if specifier == "path" or specifier == "buffer" or specifier == "os":
+        if specifier == "path" or specifier == "buffer" or specifier == "process" or specifier == "os":
             return specifier
         ""
 
@@ -651,7 +657,73 @@ impl JsInterpreter:
             return ""
         match arg_vals[0]:
             JsValue.String(v): self._native_webassembly_normalize_hex(v)
+            JsValue.Array(id): self._native_webassembly_payload_hex_from_indexed(id)
+            JsValue.Object(id): self._native_webassembly_payload_hex_from_indexed(id)
             _: ""
+
+    me _native_webassembly_payload_hex_from_indexed(obj_id: i64) -> text:
+        var length = self.object_store.array_length(obj_id)
+        match self.get_object_property(obj_id, "byteLength"):
+            JsValue.Number(v):
+                length = f64_to_i64(v)
+            _:
+                match self.get_object_property(obj_id, "length"):
+                    JsValue.Number(v2):
+                        length = f64_to_i64(v2)
+                    _:
+                        pass_dn
+        if length <= 0:
+            return ""
+        var out = ""
+        var i = 0
+        while i < length:
+            val item = self.get_object_property(obj_id, "{i}")
+            match item:
+                JsValue.Number(v):
+                    val byte = f64_to_i64(v)
+                    if byte < 0 or byte > 255:
+                        return ""
+                    out = out + self._native_webassembly_byte_to_hex(byte)
+                _:
+                    return ""
+            i = i + 1
+        out
+
+    me _native_webassembly_byte_to_hex(byte: i64) -> text:
+        self._native_webassembly_nibble_to_hex(byte / 16) + self._native_webassembly_nibble_to_hex(byte % 16)
+
+    me _native_webassembly_nibble_to_hex(n: i64) -> text:
+        if n == 0:
+            return "0"
+        if n == 1:
+            return "1"
+        if n == 2:
+            return "2"
+        if n == 3:
+            return "3"
+        if n == 4:
+            return "4"
+        if n == 5:
+            return "5"
+        if n == 6:
+            return "6"
+        if n == 7:
+            return "7"
+        if n == 8:
+            return "8"
+        if n == 9:
+            return "9"
+        if n == 10:
+            return "a"
+        if n == 11:
+            return "b"
+        if n == 12:
+            return "c"
+        if n == 13:
+            return "d"
+        if n == 14:
+            return "e"
+        "f"
 
     me _native_webassembly_normalize_hex(raw: text) -> text:
         var s = raw.trim().lower()
@@ -1106,8 +1178,25 @@ impl JsInterpreter:
         match _simple_fetch_state(promise_id, self.object_store):
             "pending": JsValue.Object(id: next_promise_id)
             _:
-                self._enqueue_promise_task(promise_id, handler_id)
+                self._settle_already_settled_promise_then(promise_id, on_fulfilled, on_rejected, next_promise_id)
                 JsValue.Object(id: next_promise_id)
+
+    me _settle_already_settled_promise_then(promise_id: i64, on_fulfilled: i64, on_rejected: i64, next_promise_id: i64):
+        val state = _simple_fetch_state(promise_id, self.object_store)
+        val settled_value = _simple_fetch_value(promise_id, self.object_store)
+        var callback_id = if state == "fulfilled": on_fulfilled else: on_rejected
+        var propagate_rejection = state == "rejected"
+        var next_value = settled_value
+        if callback_id >= 0:
+            val result = self._invoke_function(callback_id, [settled_value], self.global_env)
+            match result:
+                Ok(callback_result):
+                    next_value = callback_result
+                    propagate_rejection = state == "rejected" and on_rejected < 0
+                Err(e):
+                    next_value = JsValue.String(v: e.message)
+                    propagate_rejection = true
+        val _ = self._resolve_promise_from_callback_result(next_promise_id, next_value, propagate_rejection)
 
     me _native_promise_catch(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         val promise_id = _get_obj_id(this_val)
@@ -1122,7 +1211,7 @@ impl JsInterpreter:
         match _simple_fetch_state(promise_id, self.object_store):
             "pending": JsValue.Object(id: next_promise_id)
             _:
-                self._enqueue_promise_task(promise_id, handler_id)
+                self._run_promise_task(promise_id, handler_id)
                 JsValue.Object(id: next_promise_id)
 
     me _native_promise_finally(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
@@ -1138,7 +1227,7 @@ impl JsInterpreter:
         match _simple_fetch_state(promise_id, self.object_store):
             "pending": JsValue.Object(id: next_promise_id)
             _:
-                self._enqueue_promise_task(promise_id, handler_id)
+                self._run_promise_task(promise_id, handler_id)
                 JsValue.Object(id: next_promise_id)
 
     me _native_promise_resolve(arg_vals: [JsValue]) -> JsValue:

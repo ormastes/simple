@@ -42,6 +42,98 @@ match program[0]:
 
 </details>
 
+#### parses concise arrow callbacks as expression returns
+
+1. JsStatement VarDecl
+   - Expected: name equals `cb`
+
+2. JsExpression ArrowFunction
+   - Expected: params.len() equals `1`
+   - Expected: params[0] equals `r`
+   - Expected: body.len() equals `1`
+
+3. JsStatement Return
+
+4. JsExpression Call
+   - Expected: args.len() equals `0`
+   - Expected: "expected returned call" equals ``
+   - Expected: "expected returned expression" equals ``
+   - Expected: "expected arrow expression" equals ``
+   - Expected: "expected var decl" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val program = js_parse_program_subset("var cb = r => r.arrayBuffer(); cb")
+expect(program.len()).to_equal(2)
+match program[0]:
+    JsStatement.VarDecl(name, init):
+        expect(name).to_equal("cb")
+        match init:
+            JsExpression.ArrowFunction(params, body):
+                expect(params.len()).to_equal(1)
+                expect(params[0]).to_equal("r")
+                expect(body.len()).to_equal(1)
+                match body[0]:
+                    JsStatement.Return(value):
+                        match value:
+                            JsExpression.Call(callee, args):
+                                expect(args.len()).to_equal(0)
+                            _:
+                                expect("expected returned call").to_equal("")
+                    _:
+                        expect("expected returned expression").to_equal("")
+            _:
+                expect("expected arrow expression").to_equal("")
+    _:
+        expect("expected var decl").to_equal("")
+```
+
+</details>
+
+#### parses parenthesized concise arrow callbacks as expression returns
+
+1. JsStatement VarDecl
+   - Expected: name equals `cb`
+
+2. JsExpression ArrowFunction
+   - Expected: params.len() equals `1`
+   - Expected: params[0] equals `bytes`
+   - Expected: body.len() equals `1`
+   - Expected: "expected arrow expression" equals ``
+   - Expected: "expected var decl" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val program = js_parse_program_subset("var cb = (bytes) => WebAssembly.instantiate(bytes); cb")
+expect(program.len()).to_equal(2)
+match program[0]:
+    JsStatement.VarDecl(name, init):
+        expect(name).to_equal("cb")
+        match init:
+            JsExpression.ArrowFunction(params, body):
+                expect(params.len()).to_equal(1)
+                expect(params[0]).to_equal("bytes")
+                expect(body.len()).to_equal(1)
+            _:
+                expect("expected arrow expression").to_equal("")
+    _:
+        expect("expected var decl").to_equal("")
+```
+
+</details>
+
 #### parses computed indexed assignments for typed array writes
 
 1. JsStatement ExprStmt
@@ -4854,8 +4946,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 99 |
-| Active scenarios | 99 |
+| Total scenarios | 101 |
+| Active scenarios | 101 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
