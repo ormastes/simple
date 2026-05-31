@@ -157,6 +157,9 @@ Progress 2026-05-30:
      behavior when no HIP FFI is injected.
    - Covered by `test/unit/lib/gpu/engine2d/rocm_session_contract_spec.spl`.
 2. Fix `sffi_rocm.launch_kernel` — currently passes `0` as kernel handle; must load module + get function first
+   - Done for safety: the legacy name-only convenience method now fails closed
+     instead of dispatching `hipLaunchKernel` with handle `0`. Real dispatch
+     still needs the follow-up module/kernel handle API on `RocmSession`.
 3. Verify and fix test `C-3: hipLaunchKernel dispatches compute kernel`
 
 **AC:** RocmSession conforms, C-3 test GREEN on AMD GPU (or correctly returns `Unavailable` when no AMD GPU).
