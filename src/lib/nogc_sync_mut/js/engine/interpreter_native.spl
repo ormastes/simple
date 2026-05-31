@@ -698,13 +698,25 @@ impl JsInterpreter:
                 _:
                     pass_dn
         if valid_module and module_id >= 0:
-            exports_id = self._native_webassembly_create_exports_object(module_id)
+            if not self._native_webassembly_requires_imports(module_id):
+                exports_id = self._native_webassembly_create_exports_object(module_id)
         self.set_object_property(instance_id, "exports", JsValue.Object(id: exports_id))
-        self.set_object_property(instance_id, "status", JsValue.String(v: if valid_module: "instantiated" else: "invalid"))
+        val instantiated = valid_module and module_id >= 0 and not self._native_webassembly_requires_imports(module_id)
+        self.set_object_property(instance_id, "status", JsValue.String(v: if instantiated: "instantiated" else: "invalid"))
         self.set_object_property(instance_id, "moduleValid", JsValue.Boolean(v: valid_module))
-        if not valid_module:
-            self.set_object_property(instance_id, "error", JsValue.String(v: "invalid-wasm-module"))
+        if valid_module and self._native_webassembly_requires_imports(module_id):
+            self.set_object_property(instance_id, "error", JsValue.String(v: "unsupported-wasm-imports"))
+        else:
+            if not valid_module:
+                self.set_object_property(instance_id, "error", JsValue.String(v: "invalid-wasm-module"))
         JsValue.Object(id: instance_id)
+
+    me _native_webassembly_requires_imports(module_id: i64) -> bool:
+        if module_id < 0:
+            return false
+        match self.get_object_property(module_id, "hasImportSection"):
+            JsValue.Boolean(v): v
+            _: false
 
     me _native_webassembly_instantiate(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         val payload_hex = self._native_webassembly_payload_hex(arg_vals)
@@ -719,7 +731,8 @@ impl JsInterpreter:
             _:
                 pass_dn
         self.set_object_property(result_id, "module", JsValue.Object(id: module_id))
-        if validated:
+        val unsupported_imports = validated and self._native_webassembly_requires_imports(module_id)
+        if validated and not unsupported_imports:
             exports_id = self._native_webassembly_create_exports_object(module_id)
             self.set_object_property(instance_id, "exports", JsValue.Object(id: exports_id))
             self.set_object_property(instance_id, "status", JsValue.String(v: "instantiated"))
@@ -729,11 +742,14 @@ impl JsInterpreter:
         else:
             self.set_object_property(result_id, "instance", JsValue.Null)
             self.set_object_property(result_id, "status", JsValue.String(v: "invalid"))
-            match self.get_object_property(module_id, "error"):
-                JsValue.String(v):
-                    self.set_object_property(result_id, "error", JsValue.String(v: v))
-                _:
-                    self.set_object_property(result_id, "error", JsValue.String(v: "invalid-wasm-header"))
+            if unsupported_imports:
+                self.set_object_property(result_id, "error", JsValue.String(v: "unsupported-wasm-imports"))
+            else:
+                match self.get_object_property(module_id, "error"):
+                    JsValue.String(v):
+                        self.set_object_property(result_id, "error", JsValue.String(v: v))
+                    _:
+                        self.set_object_property(result_id, "error", JsValue.String(v: "invalid-wasm-header"))
         JsValue.Object(id: result_id)
 
     me _native_webassembly_create_exports_object(module_id: i64) -> i64:

@@ -696,6 +696,38 @@ match result:
 
 </details>
 
+#### should fail closed on unsupported WASM imports through BrowserSession
+
+1. var session = BrowserSession new
+
+2. session open html
+
+3. Ok
+   - Expected: _display_js(value) equals `true:invalid:unsupported-wasm-imports:invalid:unsupported-wasm-imports`
+
+4. Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+val result = session.eval_script("var m = new WebAssembly.Module('0061736d01000000010401600000020b0103656e7603666f6f0000'); var i = new WebAssembly.Instance(m); var r = WebAssembly.instantiate('0061736d01000000010401600000020b0103656e7603666f6f0000'); m.hasImportSection + ':' + i.status + ':' + i.error + ':' + r.status + ':' + r.error")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:invalid:unsupported-wasm-imports:invalid:unsupported-wasm-imports")
+    Err(err):
+        expect("unexpected js error: {err}").to_equal("")
+```
+
+</details>
+
 #### should construct bounded WebAssembly.Memory through BrowserSession
 
 1. var session = BrowserSession new
@@ -753,8 +785,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -436,6 +436,45 @@ match instance:
 
 </details>
 
+#### fails closed when valid modules require unsupported imports
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, imported, "validated") equals `true`
+   - Expected: _object_property_text(interp, imported, "hasTypeSection") equals `true`
+   - Expected: _object_property_text(interp, imported, "hasImportSection") equals `true`
+   - Expected: _object_property_text(interp, instance, "status") equals `invalid`
+   - Expected: _object_property_text(interp, instance, "moduleValid") equals `true`
+   - Expected: _object_property_text(interp, instance, "error") equals `unsupported-wasm-imports`
+   - Expected: _object_property_text(interp, result, "status") equals `invalid`
+   - Expected: _object_property_text(interp, result, "error") equals `unsupported-wasm-imports`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val imported = interp._native_webassembly_module([JsValue.String(v: "0061736d01000000010401600000020b0103656e7603666f6f0000")])
+expect(_object_property_text(interp, imported, "validated")).to_equal("true")
+expect(_object_property_text(interp, imported, "hasTypeSection")).to_equal("true")
+expect(_object_property_text(interp, imported, "hasImportSection")).to_equal("true")
+
+val instance = interp._native_webassembly_instance([imported])
+expect(_object_property_text(interp, instance, "status")).to_equal("invalid")
+expect(_object_property_text(interp, instance, "moduleValid")).to_equal("true")
+expect(_object_property_text(interp, instance, "error")).to_equal("unsupported-wasm-imports")
+
+val result = interp._native_webassembly_instantiate(JsValue.Undefined, [JsValue.String(v: "0061736d01000000010401600000020b0103656e7603666f6f0000")])
+expect(_object_property_text(interp, result, "status")).to_equal("invalid")
+expect(_object_property_text(interp, result, "error")).to_equal("unsupported-wasm-imports")
+```
+
+</details>
+
 #### constructs bounded WebAssembly.Memory values and grows within maximum
 
 1. var interp =  new interpreter
@@ -498,8 +537,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
