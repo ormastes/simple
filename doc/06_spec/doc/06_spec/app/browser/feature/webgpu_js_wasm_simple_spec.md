@@ -792,6 +792,38 @@ match result:
 
 </details>
 
+#### should execute a bounded i32.const WASM function export through BrowserSession
+
+1. var session = BrowserSession new
+
+2. session open html
+
+3. Ok
+   - Expected: _display_js(value) equals `run:function:42`
+
+4. Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+val result = session.eval_script("var m = new WebAssembly.Module('0061736d010000000105016000017f030201000707010372756e00000a06010400412a0b'); var i = new WebAssembly.Instance(m); m.functionExportName0 + ':' + typeof i.exports.run + ':' + i.exports.run()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("run:function:42")
+    Err(err):
+        expect("unexpected js error: {err}").to_equal("")
+```
+
+</details>
+
 #### should expose bounded table and global exports through BrowserSession
 
 1. var session = BrowserSession new
@@ -945,8 +977,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 29 |
-| Active scenarios | 29 |
+| Total scenarios | 30 |
+| Active scenarios | 30 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

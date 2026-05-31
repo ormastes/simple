@@ -893,6 +893,14 @@ impl JsInterpreter:
             if function_name != "":
                 val fn_id = self._register_native(function_name, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION)
                 self.set_object_property(exports_id, function_name, JsValue.Function(id: fn_id))
+                val const_return = self._native_webassembly_module_function_export_i32_const_return_at(module_id, index)
+                if const_return >= 0:
+                    var const_fn_ids = self.wasm_export_const_fn_ids
+                    var const_values = self.wasm_export_const_values
+                    const_fn_ids.push(fn_id)
+                    const_values.push(const_return)
+                    self.wasm_export_const_fn_ids = const_fn_ids
+                    self.wasm_export_const_values = const_values
                 val bound_import = self._native_webassembly_bound_single_import_function(module_id, imports_value)
                 match bound_import:
                     JsValue.Function(id):
@@ -920,6 +928,14 @@ impl JsInterpreter:
                     bound_import = self.wasm_export_bound_imports.get(wi)
                     break
                 wi = wi + 1
+        var const_return = -1
+        if lookup_fn_id >= 0:
+            var ci = 0
+            while ci < self.wasm_export_const_fn_ids.len():
+                if self.wasm_export_const_fn_ids.get(ci) == lookup_fn_id:
+                    const_return = self.wasm_export_const_values.get(ci)
+                    break
+                ci = ci + 1
         val exports_id = match this_val:
             JsValue.Object(id): id
             _: -1
@@ -975,6 +991,8 @@ impl JsInterpreter:
             self.call_stack.pop()
             self.control_return = saved_return
             return result
+        if const_return >= 0:
+            return JsValue.Number(v: const_return.to_f64())
         JsValue.Undefined
 
     me _native_webassembly_table_placeholder(module_id: i64) -> JsValue:
@@ -1213,8 +1231,11 @@ impl JsInterpreter:
         self.set_object_property(module_id, "globalExportName", JsValue.String(v: ""))
         self.set_object_property(module_id, "globalExportCount", JsValue.Number(v: 0.0))
         self.set_object_property(module_id, "globalValue", JsValue.Undefined)
+        self.set_object_property(module_id, "payloadHex", JsValue.String(v: ""))
+        self.set_object_property(module_id, "functionImportCount", JsValue.Number(v: 0.0))
         if not validated:
             return
+        self.set_object_property(module_id, "payloadHex", JsValue.String(v: hex))
         val section_count = self._native_webassembly_section_count(hex)
         val has_type = self._native_webassembly_has_section(hex, 1)
         val has_import = self._native_webassembly_has_section(hex, 2)
@@ -1236,6 +1257,7 @@ impl JsInterpreter:
         val global_export_count = self._native_webassembly_global_export_count(hex)
         val global_value = self._native_webassembly_global_i32_const_value(hex)
         val import_count = self._native_webassembly_import_count(hex)
+        val function_import_count = self._native_webassembly_function_import_count(hex)
         val first_import_module = self._native_webassembly_import_module_name_at(hex, 0)
         val first_import_field = self._native_webassembly_import_field_name_at(hex, 0)
         val first_import_kind = self._native_webassembly_import_kind_at(hex, 0)
@@ -1247,6 +1269,7 @@ impl JsInterpreter:
         self.set_object_property(module_id, "hasGlobalSection", JsValue.Boolean(v: has_global))
         self.set_object_property(module_id, "hasExportSection", JsValue.Boolean(v: has_export))
         self.set_object_property(module_id, "importCount", JsValue.Number(v: import_count.to_f64()))
+        self.set_object_property(module_id, "functionImportCount", JsValue.Number(v: function_import_count.to_f64()))
         self.set_object_property(module_id, "firstImportModuleName", JsValue.String(v: first_import_module))
         self.set_object_property(module_id, "firstImportFieldName", JsValue.String(v: first_import_field))
         self.set_object_property(module_id, "firstImportKind", JsValue.String(v: first_import_kind))
@@ -1269,7 +1292,9 @@ impl JsInterpreter:
         while export_index < export_count:
             if self._native_webassembly_export_kind_at(hex, export_index) == "function":
                 val function_name = self._native_webassembly_export_name_at(hex, export_index)
+                val function_wasm_index = self._native_webassembly_export_index_at(hex, export_index)
                 self.set_object_property(module_id, "functionExportName{function_export_index}", JsValue.String(v: function_name))
+                self.set_object_property(module_id, "functionExportWasmIndex{function_export_index}", JsValue.Number(v: function_wasm_index.to_f64()))
                 function_export_index = function_export_index + 1
             export_index = export_index + 1
 
@@ -1436,6 +1461,16 @@ impl JsInterpreter:
             return 0
         count
 
+    me _native_webassembly_function_import_count(hex: text) -> i64:
+        val count = self._native_webassembly_import_count(hex)
+        var index = 0
+        var function_count = 0
+        while index < count:
+            if self._native_webassembly_import_kind_at(hex, index) == "function":
+                function_count = function_count + 1
+            index = index + 1
+        function_count
+
     me _native_webassembly_import_module_name_at(hex: text, wanted_index: i64) -> text:
         val pos = self._native_webassembly_import_entry_pos(hex, wanted_index)
         val end = self._native_webassembly_section_payload_end(hex, 2)
@@ -1559,6 +1594,26 @@ impl JsInterpreter:
             JsValue.String(v): v
             _: ""
 
+    me _native_webassembly_module_function_export_i32_const_return_at(module_id: i64, index: i64) -> i64:
+        var hex = ""
+        match self.get_object_property(module_id, "payloadHex"):
+            JsValue.String(v): hex = v
+            _: pass_dn
+        if hex == "":
+            return -1
+        var function_import_count = 0
+        match self.get_object_property(module_id, "functionImportCount"):
+            JsValue.Number(v): function_import_count = f64_to_i64(v)
+            _: pass_dn
+        var wasm_index = -1
+        match self.get_object_property(module_id, "functionExportWasmIndex{index}"):
+            JsValue.Number(v): wasm_index = f64_to_i64(v)
+            _: pass_dn
+        val body_index = wasm_index - function_import_count
+        if body_index < 0:
+            return -1
+        self._native_webassembly_function_body_i32_const_return(hex, body_index)
+
     me _native_webassembly_table_export_name(hex: text) -> text:
         val count = self._native_webassembly_export_count(hex)
         var index = 0
@@ -1641,6 +1696,59 @@ impl JsInterpreter:
         if kind == 3:
             return "global"
         ""
+
+    me _native_webassembly_export_index_at(hex: text, wanted_index: i64) -> i64:
+        val pos = self._native_webassembly_export_entry_pos(hex, wanted_index)
+        val end = self._native_webassembly_section_payload_end(hex, 7)
+        if pos < 0 or end <= pos:
+            return -1
+        val name_len = self._native_webassembly_read_leb_value(hex, pos)
+        val name_start = self._native_webassembly_read_leb_next(hex, pos)
+        if name_len < 0 or name_start < 0:
+            return -1
+        val kind_pos = name_start + name_len
+        val index_pos = kind_pos + 1
+        if index_pos >= end:
+            return -1
+        self._native_webassembly_read_leb_value(hex, index_pos)
+
+    me _native_webassembly_function_body_i32_const_return(hex: text, wanted_body_index: i64) -> i64:
+        val start = self._native_webassembly_section_payload_start(hex, 10)
+        val end = self._native_webassembly_section_payload_end(hex, 10)
+        if start < 0 or end <= start:
+            return -1
+        val count = self._native_webassembly_read_leb_value(hex, start)
+        var pos = self._native_webassembly_read_leb_next(hex, start)
+        if count < 0 or pos < 0:
+            return -1
+        var index = 0
+        while index < count and pos < end:
+            val body_size = self._native_webassembly_read_leb_value(hex, pos)
+            val body_start = self._native_webassembly_read_leb_next(hex, pos)
+            if body_size < 0 or body_start < 0:
+                return -1
+            val body_end = body_start + body_size
+            if body_end > end:
+                return -1
+            if index == wanted_body_index:
+                val local_count = self._native_webassembly_read_leb_value(hex, body_start)
+                val instr_start = self._native_webassembly_read_leb_next(hex, body_start)
+                if local_count != 0 or instr_start < 0 or instr_start + 2 > body_end:
+                    return -1
+                val opcode = self._native_webassembly_hex_byte_at(hex, instr_start)
+                if opcode != 65:
+                    return -1
+                val value = self._native_webassembly_read_leb_value(hex, instr_start + 1)
+                val next_pos = self._native_webassembly_read_leb_next(hex, instr_start + 1)
+                if value < 0 or next_pos < 0 or next_pos >= body_end:
+                    return -1
+                val terminator = self._native_webassembly_hex_byte_at(hex, next_pos)
+                if terminator != 11 or next_pos + 1 != body_end:
+                    return -1
+                return value
+            pos = body_end
+            index = index + 1
+        -1
 
     me _native_webassembly_export_entry_pos(hex: text, wanted_index: i64) -> i64:
         val start = self._native_webassembly_section_payload_start(hex, 7)
