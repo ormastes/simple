@@ -147,13 +147,43 @@ impl JsInterpreter:
                 specifier = v
             _:
                 return JsValue.Undefined
-        if specifier == "path" or specifier == "node:path":
-            return self._native_node_path_module()
-        if specifier == "buffer" or specifier == "node:buffer":
-            return self._native_node_buffer_module()
-        if specifier == "os" or specifier == "node:os":
-            return self._native_node_os_module()
-        self._native_node_denied_module(specifier)
+        val canonical = self._native_node_require_canonical_specifier(specifier)
+        var cache_key = canonical
+        if cache_key == "":
+            cache_key = specifier
+        var i = self.node_require_cache_names.len() - 1
+        while i >= 0:
+            if self.node_require_cache_names.get(i) == cache_key:
+                return self.node_require_cache_values.get(i)
+            i = i - 1
+        if canonical == "":
+            return self._native_node_require_cached(cache_key, self._native_node_denied_module(specifier))
+        var module_value = JsValue.Undefined
+        if canonical == "path":
+            module_value = self._native_node_path_module()
+        elif canonical == "buffer":
+            module_value = self._native_node_buffer_module()
+        elif canonical == "os":
+            module_value = self._native_node_os_module()
+        else:
+            return self._native_node_require_cached(cache_key, self._native_node_denied_module(specifier))
+        self._native_node_require_cached(cache_key, module_value)
+
+    me _native_node_require_canonical_specifier(specifier: text) -> text:
+        if specifier.starts_with("node:"):
+            return specifier.substring(5, specifier.len())
+        if specifier == "path" or specifier == "buffer" or specifier == "os":
+            return specifier
+        ""
+
+    me _native_node_require_cached(canonical: text, module_value: JsValue) -> JsValue:
+        var names = self.node_require_cache_names
+        var values = self.node_require_cache_values
+        names.push(canonical)
+        values.push(module_value)
+        self.node_require_cache_names = names
+        self.node_require_cache_values = values
+        module_value
 
     me _native_node_require_function() -> JsValue:
         JsValue.Function(id: self._register_native("require", NATIVE_NODE_REQUIRE))
