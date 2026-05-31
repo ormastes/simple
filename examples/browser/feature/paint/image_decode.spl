@@ -903,6 +903,7 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
     var compression = 1
     var photometric = 1
     var samples_per_pixel = 1
+    var planar_config = 1
     var rows_per_strip = 0
     var strip_offset_entry = 0
     var strip_offset_count = 0
@@ -947,6 +948,8 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         else if tag == 279:
             strip_byte_count_entry = entry
             strip_byte_count_count = value_count
+        else if tag == 284:
+            planar_config = first_value
         else if tag == 320:
             color_map_entry = entry
             color_map_count = value_count
@@ -957,6 +960,10 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
     if width <= 0 or height <= 0:
         return nil
     if compression != 1 and compression != 32773:
+        return nil
+    if planar_config != 1 and planar_config != 2:
+        return nil
+    if planar_config == 2 and (compression != 1 or photometric != 2 or samples_per_pixel != 3):
         return nil
     if samples_per_pixel != 1 and samples_per_pixel != 3 and samples_per_pixel != 4:
         return nil
@@ -980,9 +987,10 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
     val strip_count_needed = (height + rows_per_strip - 1) / rows_per_strip
     if strip_offset_entry <= 0:
         return nil
-    if strip_offset_count != 1 and strip_offset_count < strip_count_needed:
+    val strip_offset_count_needed = _tiff_strip_offset_count_needed(strip_count_needed, samples_per_pixel, planar_config)
+    if strip_offset_count != 1 and strip_offset_count < strip_offset_count_needed:
         return nil
-    if strip_byte_count_count != 0 and strip_byte_count_count != 1 and strip_byte_count_count < strip_count_needed:
+    if strip_byte_count_count != 0 and strip_byte_count_count != 1 and strip_byte_count_count < strip_offset_count_needed:
         return nil
     var packbits_pixels: [i64] = []
     if compression == 32773:
@@ -1005,9 +1013,9 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
     var pixel_index = 0
     while pixel_index < width * height:
         var pixel_offset = pixel_index * bytes_per_pixel
-        if compression == 1:
-            val row = pixel_index / width
-            val col = pixel_index - row * width
+        val row = pixel_index / width
+        val col = pixel_index - row * width
+        if compression == 1 and planar_config == 1:
             val strip_index = row / rows_per_strip
             val row_in_strip = row - strip_index * rows_per_strip
             val strip_lookup_index = _tiff_strip_lookup_index(strip_index, strip_offset_count)
@@ -1019,7 +1027,12 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
                 return nil
             if strip_byte_count > 0 and pixel_offset + bytes_per_pixel > strip_offset + strip_byte_count:
                 return nil
-        if photometric == 3:
+        if planar_config == 2:
+            rgba.push(_tiff_planar_sample_byte(raw_data, strip_offset_entry, strip_offset_count, strip_byte_count_entry, strip_byte_count_count, row, col, width, rows_per_strip, strip_count_needed, 0, little))
+            rgba.push(_tiff_planar_sample_byte(raw_data, strip_offset_entry, strip_offset_count, strip_byte_count_entry, strip_byte_count_count, row, col, width, rows_per_strip, strip_count_needed, 1, little))
+            rgba.push(_tiff_planar_sample_byte(raw_data, strip_offset_entry, strip_offset_count, strip_byte_count_entry, strip_byte_count_count, row, col, width, rows_per_strip, strip_count_needed, 2, little))
+            rgba.push(255)
+        else if photometric == 3:
             val palette_index = _tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset, compression == 32773)
             rgba.push(_tiff_colormap_byte(raw_data, color_map_entry, color_map_count, palette_index, 0, little))
             rgba.push(_tiff_colormap_byte(raw_data, color_map_entry, color_map_count, palette_index, 1, little))
@@ -1054,6 +1067,39 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         pixel_index = pixel_index + 1
 
     Some(ImageData(width: width, height: height, format: ImageFormat.Tiff, data: rgba))
+
+fn _tiff_strip_offset_count_needed(strip_count_needed: i64, samples_per_pixel: i64, planar_config: i64) -> i64:
+    if planar_config == 2:
+        return strip_count_needed * samples_per_pixel
+    strip_count_needed
+
+fn _tiff_planar_sample_byte(
+    raw_data: text,
+    strip_offset_entry: i64,
+    strip_offset_count: i64,
+    strip_byte_count_entry: i64,
+    strip_byte_count_count: i64,
+    row: i64,
+    col: i64,
+    width: i64,
+    rows_per_strip: i64,
+    strip_count_needed: i64,
+    sample_plane: i64,
+    little: bool
+) -> i64:
+    val strip_index = row / rows_per_strip
+    val row_in_strip = row - strip_index * rows_per_strip
+    val planar_strip_index = sample_plane * strip_count_needed + strip_index
+    val strip_lookup_index = _tiff_strip_lookup_index(planar_strip_index, strip_offset_count)
+    val byte_count_lookup_index = _tiff_strip_lookup_index(planar_strip_index, strip_byte_count_count)
+    val strip_offset = _tiff_entry_value_at(raw_data, strip_offset_entry, strip_lookup_index, little)
+    val strip_byte_count = _tiff_entry_value_at(raw_data, strip_byte_count_entry, byte_count_lookup_index, little)
+    val sample_offset = strip_offset + row_in_strip * width + col
+    if strip_offset <= 0 or sample_offset + 1 > raw_data.len():
+        return 0
+    if strip_byte_count > 0 and sample_offset + 1 > strip_offset + strip_byte_count:
+        return 0
+    _byte_at(raw_data, sample_offset)
 
 fn _tiff_pixel_byte(raw_data: text, decoded_pixels: [i64], offset: i64, compressed: bool) -> i64:
     if compressed:
