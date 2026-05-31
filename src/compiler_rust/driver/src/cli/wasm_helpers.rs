@@ -77,7 +77,9 @@ fn generated_gui_wasm_fallback(source_path: &Path) -> Result<Option<Vec<u8>>, St
     module.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
     push_custom_section(&mut module, "simple.gui", source.as_bytes());
     push_type_section(&mut module);
-    push_function_section(&mut module, 4);
+    let render_probe = generated_gui_render_probe_value(&source);
+    let event_probe = generated_gui_event_probe_value(&source);
+    push_function_section(&mut module, &[0, 1, 0, 0, 1, 1]);
     push_export_section(
         &mut module,
         &[
@@ -85,9 +87,14 @@ fn generated_gui_wasm_fallback(source_path: &Path) -> Result<Option<Vec<u8>>, St
             ("simple_app_init", 1),
             ("simple_app_render", 2),
             ("simple_app_event", 3),
+            ("simple_app_render_probe", 4),
+            ("simple_app_event_probe", 5),
         ],
     );
-    push_code_section(&mut module, 4);
+    push_code_section(
+        &mut module,
+        &[None, Some(1), None, None, Some(render_probe), Some(event_probe)],
+    );
     Ok(Some(module))
 }
 
@@ -96,6 +103,147 @@ fn is_generated_gui_wasm_source(source: &str) -> bool {
         && source.contains("fn simple_app_render(")
         && source.contains("fn simple_app_event(");
     has_app_exports && source.contains("data-simple-wasm")
+}
+
+fn generated_gui_render_probe_value(source: &str) -> i32 {
+    if source.contains("data-simple-wasm='builder_matrix'") {
+        return count_source_markers(
+            source,
+            &[
+                "data-simple-wasm='builder_matrix'",
+                "data-builder-source='common.ui.builder'",
+                "use common.ui.builder",
+                "use common.ui.ios.builder",
+                "fn builder_matrix_tree() -> UITree",
+                "WidgetKind.RadioButton.to_wire()",
+                "WidgetKind.Heading.to_wire()",
+                "WidgetKind.CommandPalette.to_wire()",
+                "WidgetKind.GlassTitleBar",
+                "WidgetKind.WorkspaceTabs",
+                "WidgetKind.SheetModal",
+                "WidgetKind.ContextMenu",
+                "WidgetKind.EmptyState",
+                "id='builder_navigation_bar' data-simple-surface='navigation_bar tab_bar'",
+                "id='builder_matrix_controls' data-simple-surface='radio switch search_bar segmented_control button'",
+                "id='builder_card_summary' data-simple-surface='card heading label divider command_palette'",
+                "id='builder_layout_surfaces' data-simple-surface='sidebar inspector scroll textarea tree treenode'",
+                "id='builder_shell_surfaces' data-simple-surface='glass_title_bar command_bar workspace_tabs toast sheet_modal context_menu utility_rail status_chip selection_pill empty_state'",
+                "builder_navigation_bar",
+                "builder_tab_bar",
+                "builder_radio_ready",
+                "builder_switch_enabled",
+                "builder_search_bar",
+                "builder_segmented_mode",
+                "builder_card_summary",
+                "builder_heading_title",
+                "builder_label_status",
+                "builder_divider_main",
+                "builder_command_palette",
+                "builder_sidebar",
+                "builder_inspector",
+                "builder_scroll",
+                "builder_textarea_notes",
+                "builder_tree_root",
+                "builder_glass_title_bar",
+                "builder_command_bar",
+                "builder_workspace_tabs",
+                "builder_toast",
+                "builder_sheet_modal",
+                "builder_context_menu",
+                "builder_utility_rail",
+                "builder_status_chip",
+                "builder_selection_pill",
+                "builder_empty_state",
+            ],
+        ) + 4;
+    }
+    if source.contains("data-simple-wasm='widget_matrix'") {
+        return count_source_markers(
+            source,
+            &[
+                "data-simple-wasm='widget_matrix'",
+                "data-layout='column-gap-8-padding-16'",
+                "type='checkbox'",
+                "<select id='matrix_dropdown'",
+                "id='matrix_textfield' type='text'",
+                "<textarea id='matrix_textarea'",
+                "id='matrix_tabs' data-simple-surface='tabs'",
+                "role='tab'",
+                "<dialog id='matrix_dialog'",
+                "<table id='matrix_table'",
+                "<ul id='matrix_list'",
+                "<progress id='matrix_progress'",
+                "<img id='matrix_image'",
+                "title='Widget matrix tooltip'",
+                "id='matrix_tree_scroll' data-simple-surface='tree scroll'",
+                "id='matrix_scroll' style='max-height:64px;overflow:auto'",
+                "<menu id='matrix_menu'",
+                "id='matrix_menu_file'",
+                "id='matrix_statusbar' data-simple-surface='statusbar'",
+            ],
+        );
+    }
+    count_source_markers(
+        source,
+        &[
+            "data-simple-wasm='hello'",
+            "data-layout='column-gap-8-padding-16'",
+            "id='hello_taskbar'",
+            "id='hello_command_bar'",
+            "id='hello_button'",
+            "id='hello_text'",
+            "id='hello_image'",
+            "data-simple-primitives='rect,circle,line'",
+        ],
+    )
+}
+
+fn generated_gui_event_probe_value(source: &str) -> i32 {
+    if source.contains("data-simple-wasm='builder_matrix'") {
+        return count_source_markers(
+            source,
+            &[
+                "builder_radio:changed",
+                "builder_switch:toggled",
+                "builder_search:accepted",
+                "builder_segmented:changed",
+                "builder_command_palette:accepted",
+                "builder_sheet_modal:opened",
+                "builder_context_menu:opened",
+                "builder_event:ignored",
+            ],
+        );
+    }
+    if source.contains("data-simple-wasm='widget_matrix'") {
+        return count_source_markers(
+            source,
+            &[
+                "matrix_checkbox:changed",
+                "matrix_dropdown:changed",
+                "matrix_textfield:accepted",
+                "matrix_textarea:accepted",
+                "matrix_tabs:selected",
+                "matrix_dialog:opened",
+                "matrix_scroll:accepted",
+                "matrix_menu:accepted",
+                "matrix_event:ignored",
+            ],
+        );
+    }
+    count_source_markers(
+        source,
+        &[
+            "hello_button:clicked",
+            "hello_scroll:accepted",
+            "hello_text:accepted",
+            "hello_command:accepted",
+            "hello_event:ignored",
+        ],
+    )
+}
+
+fn count_source_markers(source: &str, markers: &[&str]) -> i32 {
+    markers.iter().filter(|marker| source.contains(**marker)).count() as i32
 }
 
 fn push_section(module: &mut Vec<u8>, id: u8, payload: &[u8]) {
@@ -113,18 +261,22 @@ fn push_custom_section(module: &mut Vec<u8>, name: &str, payload: &[u8]) {
 
 fn push_type_section(module: &mut Vec<u8>) {
     let mut section = Vec::new();
-    push_uleb(&mut section, 1);
+    push_uleb(&mut section, 2);
     section.push(0x60);
     push_uleb(&mut section, 0);
     push_uleb(&mut section, 0);
+    section.push(0x60);
+    push_uleb(&mut section, 0);
+    push_uleb(&mut section, 1);
+    section.push(0x7f);
     push_section(module, 1, &section);
 }
 
-fn push_function_section(module: &mut Vec<u8>, count: u32) {
+fn push_function_section(module: &mut Vec<u8>, type_indices: &[u32]) {
     let mut section = Vec::new();
-    push_uleb(&mut section, count);
-    for _ in 0..count {
-        push_uleb(&mut section, 0);
+    push_uleb(&mut section, type_indices.len() as u32);
+    for index in type_indices {
+        push_uleb(&mut section, *index);
     }
     push_section(module, 3, &section);
 }
@@ -140,11 +292,21 @@ fn push_export_section(module: &mut Vec<u8>, exports: &[(&str, u32)]) {
     push_section(module, 7, &section);
 }
 
-fn push_code_section(module: &mut Vec<u8>, count: u32) {
+fn push_code_section(module: &mut Vec<u8>, returns: &[Option<i32>]) {
     let mut section = Vec::new();
-    push_uleb(&mut section, count);
-    for _ in 0..count {
-        let body = [0x00, 0x0b];
+    push_uleb(&mut section, returns.len() as u32);
+    for return_value in returns {
+        let body = match return_value {
+            Some(value) => {
+                let mut body = Vec::new();
+                body.push(0x00);
+                body.push(0x41);
+                push_sleb(&mut body, *value);
+                body.push(0x0b);
+                body
+            }
+            None => vec![0x00, 0x0b],
+        };
         push_uleb(&mut section, body.len() as u32);
         section.extend_from_slice(&body);
     }
@@ -167,6 +329,19 @@ fn push_uleb(bytes: &mut Vec<u8>, mut value: u32) {
         if value == 0 {
             break;
         }
+    }
+}
+
+fn push_sleb(bytes: &mut Vec<u8>, mut value: i32) {
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        let done = (value == 0 && (byte & 0x40) == 0) || (value == -1 && (byte & 0x40) != 0);
+        if done {
+            bytes.push(byte);
+            break;
+        }
+        bytes.push(byte | 0x80);
     }
 }
 
@@ -259,13 +434,19 @@ fn hello_wasm_gui_event_response(event_name: text, target_id: text) -> text:
 fn hello_wasm_gui_event_response(event_name: text, target_id: text) -> text:
     if event_name == "click" and target_id == "hello_button":
         return "hello_button:clicked"
+    if event_name == "scroll":
+        return "hello_scroll:accepted"
+    if event_name == "text" and target_id == "hello_text":
+        return "hello_text:accepted"
+    if event_name == "command" and target_id == "hello_command_input":
+        return "hello_command:accepted"
     "hello_event:ignored"
 
 fn simple_app_init() -> i64:
     1
 
 fn simple_app_render() -> text:
-    "<main data-simple-wasm='hello'><button id='hello_button'>Generated WASM UI</button></main>"
+    "<main data-simple-wasm='hello' data-layout='column-gap-8-padding-16'><nav id='hello_taskbar'></nav><section id='hello_command_bar'></section><button id='hello_button'>Generated WASM UI</button><input id='hello_text'><img id='hello_image'><section data-simple-primitives='rect,circle,line'></section></main>"
 
 fn simple_app_event(event_name: text, target_id: text) -> text:
     hello_wasm_gui_event_response(event_name, target_id)
@@ -285,6 +466,17 @@ fn main() -> i64:
         assert!(text.contains("simple_app_init"));
         assert!(text.contains("simple_app_render"));
         assert!(text.contains("simple_app_event"));
+        assert!(text.contains("simple_app_render_probe"));
+        assert!(text.contains("simple_app_event_probe"));
         assert!(text.contains("hello_button:clicked"));
+        assert!(bytes
+            .windows([0x00, 0x41, 0x01, 0x0b].len())
+            .any(|window| window == [0x00, 0x41, 0x01, 0x0b]));
+        assert!(bytes
+            .windows([0x00, 0x41, 0x08, 0x0b].len())
+            .any(|window| window == [0x00, 0x41, 0x08, 0x0b]));
+        assert!(bytes
+            .windows([0x00, 0x41, 0x05, 0x0b].len())
+            .any(|window| window == [0x00, 0x41, 0x05, 0x0b]));
     }
 }

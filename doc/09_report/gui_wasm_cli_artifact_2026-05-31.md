@@ -10,7 +10,7 @@
 - reason: pass
 - source: examples/ui/hello_wasm_gui.spl
 - output: build/gui_wasm_cli_artifact/hello_wasm_gui.wasm
-- size bytes: 3019
+- size bytes: 4380
 - magic hex: 0061736d
 - version hex: 01000000
 - import count: 0
@@ -21,7 +21,7 @@
 - reason: pass
 - source: examples/ui/widget_matrix_wasm_gui.spl
 - output: build/gui_wasm_cli_artifact/widget_matrix_wasm_gui.wasm
-- size bytes: 4769
+- size bytes: 7355
 - magic hex: 0061736d
 - version hex: 01000000
 - import count: 0
@@ -34,7 +34,7 @@
 - reason: pass
 - source: examples/ui/builder_matrix_wasm_gui.spl
 - output: build/gui_wasm_cli_artifact/builder_matrix_wasm_gui.wasm
-- size bytes: 7674
+- size bytes: 9486
 - magic hex: 0061736d
 - version hex: 01000000
 - import count: 0

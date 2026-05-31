@@ -10,6 +10,17 @@ const proofPath = process.env.GUI_WASM_EXEC_PROOF_PATH || "build/gui_wasm_browse
 const width = Number(process.env.GUI_WASM_EXEC_WIDTH || 320);
 const height = Number(process.env.GUI_WASM_EXEC_HEIGHT || 200);
 
+function expectedProbeValues(modulePath) {
+  const base = path.basename(modulePath);
+  if (base.includes("builder_matrix")) {
+    return { render: "48", event: "8" };
+  }
+  if (base.includes("widget_matrix")) {
+    return { render: "19", event: "9" };
+  }
+  return { render: "8", event: "5" };
+}
+
 function htmlForWasm(payloadBase64) {
   return `<!doctype html>
 <meta charset="utf-8">
@@ -43,13 +54,13 @@ html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#
     proof.instantiate_result = true;
     const exports = instance.exports;
     proof.export_names = Object.keys(exports).sort();
-    for (const name of ["spl_main", "simple_app_init", "simple_app_render", "simple_app_event"]) {
+    for (const name of ["spl_main", "simple_app_init", "simple_app_render", "simple_app_event", "simple_app_render_probe", "simple_app_event_probe"]) {
       try {
         if (typeof exports[name] !== "function") {
           proof.call_results[name] = "missing";
         } else {
-          exports[name]();
-          proof.call_results[name] = "called";
+          const result = exports[name]();
+          proof.call_results[name] = name === "simple_app_init" || name.endsWith("_probe") ? String(result) : "called";
         }
       } catch (err) {
         proof.call_results[name] = "threw:" + String(err && err.message ? err.message : err);
@@ -104,6 +115,9 @@ async function main() {
   proof.window_width = width;
   proof.window_height = height;
   proof.user_agent = await win.webContents.executeJavaScript("navigator.userAgent");
+  const expected = expectedProbeValues(absoluteWasmPath);
+  proof.expected_render_probe = expected.render;
+  proof.expected_event_probe = expected.event;
 
   fs.mkdirSync(path.dirname(absoluteProofPath), { recursive: true });
   fs.writeFileSync(absoluteProofPath, JSON.stringify(proof, null, 2));
@@ -117,12 +131,18 @@ async function main() {
   await win.close();
   await app.quit();
 
-  const required = ["spl_main", "simple_app_init", "simple_app_render", "simple_app_event"];
+  const required = ["spl_main", "simple_app_init", "simple_app_render", "simple_app_event", "simple_app_render_probe", "simple_app_event_probe"];
   const ok = proof.browser_ready === true &&
     proof.validate_result === true &&
     proof.instantiate_result === true &&
     proof.import_count === 0 &&
-    required.every(name => proof.export_names.includes(name) && proof.call_results[name] === "called");
+    required.every(name => proof.export_names.includes(name)) &&
+    proof.call_results.spl_main === "called" &&
+    proof.call_results.simple_app_init === "1" &&
+    proof.call_results.simple_app_render === "called" &&
+    proof.call_results.simple_app_event === "called" &&
+    proof.call_results.simple_app_render_probe === expected.render &&
+    proof.call_results.simple_app_event_probe === expected.event;
   process.exit(ok ? 0 : 2);
 }
 

@@ -9,13 +9,18 @@
 - reason: pass
 - wasm path: build/gui_wasm_cli_artifact/hello_wasm_gui.wasm
 - proof path: build/gui_wasm_browser_execution_evidence/hello_browser_proof.json
-- byte size: 3004
+- byte size: 4380
 - WebAssembly.validate: true
 - WebAssembly.instantiate: true
-- exports: simple_app_event,simple_app_init,simple_app_render
-- simple_app_init call: called
+- import count: 0
+- imports: 
+- exports: simple_app_event,simple_app_event_probe,simple_app_init,simple_app_render,simple_app_render_probe,spl_main
+- spl_main call: called
+- simple_app_init ready code: 1
 - simple_app_render call: called
 - simple_app_event call: called
+- simple_app_render_probe: 8
+- simple_app_event_probe: 5
 - Electron exit code: 0
 
 ## widget_matrix
@@ -23,13 +28,18 @@
 - reason: pass
 - wasm path: build/gui_wasm_cli_artifact/widget_matrix_wasm_gui.wasm
 - proof path: build/gui_wasm_browser_execution_evidence/widget_matrix_browser_proof.json
-- byte size: 4754
+- byte size: 7355
 - WebAssembly.validate: true
 - WebAssembly.instantiate: true
-- exports: simple_app_event,simple_app_init,simple_app_render
-- simple_app_init call: called
+- import count: 0
+- imports: 
+- exports: simple_app_event,simple_app_event_probe,simple_app_init,simple_app_render,simple_app_render_probe,spl_main
+- spl_main call: called
+- simple_app_init ready code: 1
 - simple_app_render call: called
 - simple_app_event call: called
+- simple_app_render_probe: 19
+- simple_app_event_probe: 9
 - Electron exit code: 0
 
 ## builder_matrix
@@ -37,13 +47,18 @@
 - reason: pass
 - wasm path: build/gui_wasm_cli_artifact/builder_matrix_wasm_gui.wasm
 - proof path: build/gui_wasm_browser_execution_evidence/builder_matrix_browser_proof.json
-- byte size: 7659
+- byte size: 9486
 - WebAssembly.validate: true
 - WebAssembly.instantiate: true
-- exports: simple_app_event,simple_app_init,simple_app_render
-- simple_app_init call: called
+- import count: 0
+- imports: 
+- exports: simple_app_event,simple_app_event_probe,simple_app_init,simple_app_render,simple_app_render_probe,spl_main
+- spl_main call: called
+- simple_app_init ready code: 1
 - simple_app_render call: called
 - simple_app_event call: called
+- simple_app_render_probe: 48
+- simple_app_event_probe: 8
 - Electron exit code: 0
 
 ## Raw Evidence
@@ -54,37 +69,52 @@
 - gui_wasm_browser_execution_hello_reason=pass
 - gui_wasm_browser_execution_hello_wasm_path=build/gui_wasm_cli_artifact/hello_wasm_gui.wasm
 - gui_wasm_browser_execution_hello_proof_path=build/gui_wasm_browser_execution_evidence/hello_browser_proof.json
-- gui_wasm_browser_execution_hello_byte_size=3004
+- gui_wasm_browser_execution_hello_byte_size=4380
 - gui_wasm_browser_execution_hello_validate=true
 - gui_wasm_browser_execution_hello_instantiate=true
-- gui_wasm_browser_execution_hello_exports=simple_app_event,simple_app_init,simple_app_render
-- gui_wasm_browser_execution_hello_call_simple_app_init=called
+- gui_wasm_browser_execution_hello_import_count=0
+- gui_wasm_browser_execution_hello_imports=
+- gui_wasm_browser_execution_hello_exports=simple_app_event,simple_app_event_probe,simple_app_init,simple_app_render,simple_app_render_probe,spl_main
+- gui_wasm_browser_execution_hello_call_spl_main=called
+- gui_wasm_browser_execution_hello_call_simple_app_init=1
 - gui_wasm_browser_execution_hello_call_simple_app_render=called
 - gui_wasm_browser_execution_hello_call_simple_app_event=called
+- gui_wasm_browser_execution_hello_simple_app_render_probe=8
+- gui_wasm_browser_execution_hello_simple_app_event_probe=5
 - gui_wasm_browser_execution_hello_electron_exit_code=0
 - gui_wasm_browser_execution_widget_matrix_status=pass
 - gui_wasm_browser_execution_widget_matrix_reason=pass
 - gui_wasm_browser_execution_widget_matrix_wasm_path=build/gui_wasm_cli_artifact/widget_matrix_wasm_gui.wasm
 - gui_wasm_browser_execution_widget_matrix_proof_path=build/gui_wasm_browser_execution_evidence/widget_matrix_browser_proof.json
-- gui_wasm_browser_execution_widget_matrix_byte_size=4754
+- gui_wasm_browser_execution_widget_matrix_byte_size=7355
 - gui_wasm_browser_execution_widget_matrix_validate=true
 - gui_wasm_browser_execution_widget_matrix_instantiate=true
-- gui_wasm_browser_execution_widget_matrix_exports=simple_app_event,simple_app_init,simple_app_render
-- gui_wasm_browser_execution_widget_matrix_call_simple_app_init=called
+- gui_wasm_browser_execution_widget_matrix_import_count=0
+- gui_wasm_browser_execution_widget_matrix_imports=
+- gui_wasm_browser_execution_widget_matrix_exports=simple_app_event,simple_app_event_probe,simple_app_init,simple_app_render,simple_app_render_probe,spl_main
+- gui_wasm_browser_execution_widget_matrix_call_spl_main=called
+- gui_wasm_browser_execution_widget_matrix_call_simple_app_init=1
 - gui_wasm_browser_execution_widget_matrix_call_simple_app_render=called
 - gui_wasm_browser_execution_widget_matrix_call_simple_app_event=called
+- gui_wasm_browser_execution_widget_matrix_simple_app_render_probe=19
+- gui_wasm_browser_execution_widget_matrix_simple_app_event_probe=9
 - gui_wasm_browser_execution_widget_matrix_electron_exit_code=0
 - gui_wasm_browser_execution_builder_matrix_status=pass
 - gui_wasm_browser_execution_builder_matrix_reason=pass
 - gui_wasm_browser_execution_builder_matrix_wasm_path=build/gui_wasm_cli_artifact/builder_matrix_wasm_gui.wasm
 - gui_wasm_browser_execution_builder_matrix_proof_path=build/gui_wasm_browser_execution_evidence/builder_matrix_browser_proof.json
-- gui_wasm_browser_execution_builder_matrix_byte_size=7659
+- gui_wasm_browser_execution_builder_matrix_byte_size=9486
 - gui_wasm_browser_execution_builder_matrix_validate=true
 - gui_wasm_browser_execution_builder_matrix_instantiate=true
-- gui_wasm_browser_execution_builder_matrix_exports=simple_app_event,simple_app_init,simple_app_render
-- gui_wasm_browser_execution_builder_matrix_call_simple_app_init=called
+- gui_wasm_browser_execution_builder_matrix_import_count=0
+- gui_wasm_browser_execution_builder_matrix_imports=
+- gui_wasm_browser_execution_builder_matrix_exports=simple_app_event,simple_app_event_probe,simple_app_init,simple_app_render,simple_app_render_probe,spl_main
+- gui_wasm_browser_execution_builder_matrix_call_spl_main=called
+- gui_wasm_browser_execution_builder_matrix_call_simple_app_init=1
 - gui_wasm_browser_execution_builder_matrix_call_simple_app_render=called
 - gui_wasm_browser_execution_builder_matrix_call_simple_app_event=called
+- gui_wasm_browser_execution_builder_matrix_simple_app_render_probe=48
+- gui_wasm_browser_execution_builder_matrix_simple_app_event_probe=8
 - gui_wasm_browser_execution_builder_matrix_electron_exit_code=0
 
 ## Electron Output
@@ -96,7 +126,9 @@
 - gui_wasm_browser_execution_proof=/home/ormastes/dev/pub/simple/build/gui_wasm_browser_execution_evidence/builder_matrix_browser_proof.json
 - gui_wasm_browser_execution_validate=true
 - gui_wasm_browser_execution_instantiate=true
-- gui_wasm_browser_execution_exports=simple_app_event,simple_app_init,simple_app_render
+- gui_wasm_browser_execution_import_count=0
+- gui_wasm_browser_execution_imports=
+- gui_wasm_browser_execution_exports=simple_app_event,simple_app_event_probe,simple_app_init,simple_app_render,simple_app_render_probe,spl_main
 - [electron:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.
 
 ### hello.electron.out
@@ -106,17 +138,19 @@
 - gui_wasm_browser_execution_proof=/home/ormastes/dev/pub/simple/build/gui_wasm_browser_execution_evidence/hello_browser_proof.json
 - gui_wasm_browser_execution_validate=true
 - gui_wasm_browser_execution_instantiate=true
-- gui_wasm_browser_execution_exports=simple_app_event,simple_app_init,simple_app_render
+- gui_wasm_browser_execution_import_count=0
+- gui_wasm_browser_execution_imports=
+- gui_wasm_browser_execution_exports=simple_app_event,simple_app_event_probe,simple_app_init,simple_app_render,simple_app_render_probe,spl_main
 - [electron:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.
 
 ### widget_matrix.electron.out
 - [electron:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
-- [electron:ERROR:shared_image_interface_proxy.cc(134)] Buffer handle is null. Not creating a mailbox from it.
-- [electron:ERROR:one_copy_raster_buffer_provider.cc(348)] Creation of StagingBuffer's SharedImage failed.
 - gui_wasm_browser_execution_proof=/home/ormastes/dev/pub/simple/build/gui_wasm_browser_execution_evidence/widget_matrix_browser_proof.json
 - gui_wasm_browser_execution_validate=true
 - gui_wasm_browser_execution_instantiate=true
-- gui_wasm_browser_execution_exports=simple_app_event,simple_app_init,simple_app_render
+- gui_wasm_browser_execution_import_count=0
+- gui_wasm_browser_execution_imports=
+- gui_wasm_browser_execution_exports=simple_app_event,simple_app_event_probe,simple_app_init,simple_app_render,simple_app_render_probe,spl_main
 - [electron:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.
 
 ## Electron Error
