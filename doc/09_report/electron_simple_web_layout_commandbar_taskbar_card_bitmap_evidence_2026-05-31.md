@@ -1,0 +1,160 @@
+# Electron Simple Web Layout Bitmap Evidence
+
+- status: pass
+- reason: pass
+- scene: simple-web-layout-commandbar-taskbar-card
+- dimensions: 96x64
+- Simple checksum: 26382094520080
+- Electron checksum: 26382094520080
+- Simple weighted checksum: 81060129800301416
+- Electron weighted checksum: 81060129800301416
+- mismatch count: 0
+- blur/tolerance used: false
+- Electron frame us: 13970
+- expected ARGB path: build/electron_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/expected-argb.json
+
+## Raw Evidence
+- electron_simple_web_layout_status=pass
+- electron_simple_web_layout_reason=pass
+- electron_simple_web_layout_scene=simple-web-layout-commandbar-taskbar-card
+- electron_simple_web_layout_width=96
+- electron_simple_web_layout_height=64
+- electron_simple_web_layout_iterations=2
+- electron_simple_web_layout_simple_checksum=26382094520080
+- electron_simple_web_layout_electron_checksum=26382094520080
+- electron_simple_web_layout_simple_weighted_checksum=81060129800301416
+- electron_simple_web_layout_electron_weighted_checksum=81060129800301416
+- electron_simple_web_layout_mismatch_count=0
+- electron_simple_web_layout_blur_or_tolerance_used=false
+- electron_simple_web_layout_electron_frame_us=13970
+- electron_simple_web_layout_expected_argb_path=build/electron_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/expected-argb.json
+- electron_simple_web_layout_exit_code=0
+
+## Simple Output
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/gpu/engine2d/simd_provider.spl:3:1
+-    |
+-   3 | export use std.nogc_sync_mut.gpu.engine2d.simd_provider.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/opengl_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.opengl_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/rocm_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.rocm_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/gpu/engine2d/simd_provider.spl:3:1
+-    |
+-   3 | export use std.nogc_sync_mut.gpu.engine2d.simd_provider.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/opengl_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.opengl_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/rocm_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.rocm_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- simple_status=pass
+- simple_reason=pass
+- renderer=pure-simple-web-layout-renderer
+- scene=simple-web-layout-commandbar-taskbar-card
+- width=96
+- height=64
+- checksum=26382094520080
+- weighted_checksum=81060129800301416
+- expected_argb_path=build/electron_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/expected-argb.json
+- blur_or_tolerance_used=false
+- simple_status=pass
+- simple_reason=pass
+- renderer=pure-simple-web-layout-renderer
+- scene=simple-web-layout-commandbar-taskbar-card
+- width=96
+- height=64
+- checksum=26382094520080
+- weighted_checksum=81060129800301416
+- expected_argb_path=build/electron_simple_web_layout_commandbar_taskbar_card_bitmap_evidence/expected-argb.json
+- blur_or_tolerance_used=false
+
+## Electron Output
+- [137791:0531/061038.934830:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
+- [137948:0531/061039.315631:ERROR:shared_image_manager.cc(255)] SharedImageManager::ProduceSkia: Trying to produce a Skia representation from an incompatible backing: GLTextureImageBacking
+- [137948:0531/061039.315775:ERROR:raster_decoder.cc(1968)] [.RenderWorker-0x2b8400024100]GL ERROR :GL_INVALID_VALUE : glCopySubTexture: unknown mailbox
+- renderer=electron-live-capture-page
+- scene=simple-web-layout-commandbar-taskbar-card
+- width=96
+- height=64
+- iterations=2
+- checksum=26382094520080
+- expected_checksum=26382094520080
+- weighted_checksum=81060129800301416
+- expected_weighted_checksum=81060129800301416
+- mismatch_count=0
+- frame_us=13970
+- blur_or_tolerance_used=false
+- [137762:0531/061039.537317:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.

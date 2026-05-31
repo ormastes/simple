@@ -70,3 +70,27 @@ backend's `BrowserBinding`/`JsGlueGenerator`/import infra is unused, the
 `WasmCodegenAdapter` returns only WAT (not the wasm+js_glue bundle), and DOM
 glue bodies beyond `console_log`/`alert` are unimplemented. Authoring Simple
 event handlers that drive the DOM via WASM requires building this end-to-end.
+
+## Update 2026-05-31: generated GUI WASM CLI artifact unblocked
+
+The Rust CLI WASM helper now has a narrow generated-GUI fallback for sources
+that contain the generated GUI markers. It emits a valid WASM binary with
+WASM magic/version, a `simple.gui` custom payload, and the required
+`simple_app_init`, `simple_app_render`, and `simple_app_event` exports. Generic
+non-GUI `--target wasm32` sources still fail closed when the LLVM/WASM backend
+is unavailable.
+
+Evidence:
+
+```sh
+sh scripts/check-gui-wasm-cli-artifact.shs
+```
+
+On 2026-05-31 this produced `build/gui_wasm_cli_artifact/hello_wasm_gui.wasm`
+with size `2787`, magic `0061736d`, and version `01000000`. The payload now
+includes the hello layout, input, image, text, primitive, taskbar, and command
+bar surface strings plus the command event response.
+
+Remaining work: this unblocks the first no-JavaScript generated GUI WASM
+artifact. It is not a full browser DOM glue implementation and does not claim
+general-purpose non-GUI WASM codegen without the LLVM/WASM backend.

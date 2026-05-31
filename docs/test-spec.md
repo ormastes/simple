@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-30 12:26:03*
+*Generated: 2026-05-31 05:41:11*
 
-## test/unit/browser_engine/script
+## test/unit/lib/common/web
 
-❌ **browser_script_execute_spec.spl** (389ms)
-  - Source: `test/unit/browser_engine/script/browser_script_execute_spec.spl`
-  - Generated doc: `spec/browser_script_execute_spec.md`
+❌ **browser_session_wasm_host_spec.spl** (964ms)
+  - Source: `test/unit/lib/common/web/browser_session_wasm_host_spec.spl`
+  - Generated doc: `spec/browser_session_wasm_host_spec.md`
 
 
 ---
@@ -15,5 +15,5 @@
 
 - **Total:** 1 tests
 - **Passed:** 2 ✅
-- **Failed:** 1 ❌
-- **Duration:** 395ms
+- **Failed:** 3 ❌
+- **Duration:** 967ms

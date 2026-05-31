@@ -1,0 +1,916 @@
+# Node Api Conformance Specification
+
+## Scenarios
+
+### Node.js path module
+
+### path.dirname
+
+#### gets directory name
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_dirname([JsValue.String(v: "/usr/local/bin/node")]))).to_equal("/usr/local/bin")
+```
+
+</details>
+
+#### root path
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_dirname([JsValue.String(v: "/file")]))).to_equal("/")
+```
+
+</details>
+
+#### no slash
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_dirname([JsValue.String(v: "file.js")]))).to_equal(".")
+```
+
+</details>
+
+### path.basename
+
+#### gets base name
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_basename([JsValue.String(v: "/usr/local/bin/node")]))).to_equal("node")
+```
+
+</details>
+
+#### strips extension
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_basename([JsValue.String(v: "/path/file.js"), JsValue.String(v: ".js")]))).to_equal("file")
+```
+
+</details>
+
+### path.extname
+
+#### gets extension
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_extname([JsValue.String(v: "file.js")]))).to_equal(".js")
+```
+
+</details>
+
+#### no extension
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_extname([JsValue.String(v: "file")]))).to_equal("")
+```
+
+</details>
+
+#### multiple dots
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_extname([JsValue.String(v: "archive.tar.gz")]))).to_equal(".gz")
+```
+
+</details>
+
+### path.isAbsolute
+
+#### absolute
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_isAbsolute([JsValue.String(v: "/usr/bin")]))).to_equal("true")
+```
+
+</details>
+
+#### relative
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_isAbsolute([JsValue.String(v: "src/main.js")]))).to_equal("false")
+```
+
+</details>
+
+### path.join
+
+#### joins paths
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_join([JsValue.String(v: "/usr"), JsValue.String(v: "local"), JsValue.String(v: "bin")]))).to_equal("/usr/local/bin")
+```
+
+</details>
+
+#### normalizes joined paths
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_join([JsValue.String(v: "/usr/"), JsValue.String(v: "./local"), JsValue.String(v: "../bin")]))).to_equal("/usr/bin")
+```
+
+</details>
+
+#### preserves trailing separator like path.posix.join
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_join([JsValue.String(v: "/foo/"), JsValue.String(v: "bar/")]))).to_equal("/foo/bar/")
+```
+
+</details>
+
+### path.normalize
+
+#### removes dot and dotdot segments
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_normalize([JsValue.String(v: "foo/../bar/./baz")]))).to_equal("bar/baz")
+```
+
+</details>
+
+#### preserves root for absolute paths
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_normalize([JsValue.String(v: "/foo/../bar")]))).to_equal("/bar")
+```
+
+</details>
+
+#### preserves trailing separator like path.posix.normalize
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_normalize([JsValue.String(v: "foo//bar//")]))).to_equal("foo/bar/")
+```
+
+</details>
+
+#### preserves trailing separator for normalized relative dot result
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(path_normalize([JsValue.String(v: "foo/..//")]))).to_equal("./")
+```
+
+</details>
+
+### Node.js process module
+
+### process identity
+
+#### returns a stable Node-like platform
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(process_platform([]))).to_equal("linux")
+```
+
+</details>
+
+#### returns a stable Node-like architecture
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(process_arch([]))).to_equal("x64")
+```
+
+</details>
+
+#### returns a version-shaped string
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(process_version([]))).to_start_with("v")
+```
+
+</details>
+
+### process versions and release
+
+#### returns deterministic process.versions.node
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(process_versions_node([]))).to_equal("0.0.0-simple")
+```
+
+</details>
+
+#### returns deterministic process.versions.v8
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(process_versions_v8([]))).to_equal("simple-js")
+```
+
+</details>
+
+#### keeps libuv version typed unavailable until scheduler parity exists
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(process_versions_uv([]))).to_equal("unavailable")
+```
+
+</details>
+
+#### returns a Node-compatible release name
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(process_release_name([]))).to_equal("node")
+```
+
+</details>
+
+#### does not fake release source URLs
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_kind(process_release_sourceUrl([]))).to_equal("undefined")
+```
+
+</details>
+
+#### reports non-LTS for the deterministic Simple compatibility profile
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(process_release_lts([]))).to_equal("false")
+```
+
+</details>
+
+### process working directory and argv
+
+#### uses deterministic cwd when host cwd is unavailable
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(process_cwd([]))).to_equal("/")
+```
+
+</details>
+
+#### returns a deterministic argv shape
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val argv = process_argv([])
+expect(argv.len()).to_equal(2)
+expect(argv[0]).to_equal("simple")
+expect(argv[1]).to_equal("")
+```
+
+</details>
+
+### process env
+
+#### does not expose ambient host environment
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_kind(process_env_get([JsValue.String(v: "PATH")]))).to_equal("undefined")
+```
+
+</details>
+
+#### keeps missing env keys typed as unavailable
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_kind(process_env_get([JsValue.String(v: "")]))).to_equal("undefined")
+```
+
+</details>
+
+### process.nextTick
+
+#### is typed unavailable without runtime scheduler support
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_kind(process_nextTick([]))).to_equal("undefined")
+```
+
+</details>
+
+### Node.js Buffer module
+
+### Buffer.byteLength
+
+#### counts utf8 bytes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(buffer_byteLength([JsValue.String(v: "hello"), JsValue.String(v: "utf8")]))).to_equal("5")
+```
+
+</details>
+
+#### counts hex decoded bytes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(buffer_byteLength([JsValue.String(v: "68656c6c6f"), JsValue.String(v: "hex")]))).to_equal("5")
+```
+
+</details>
+
+#### counts base64 decoded bytes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(buffer_byteLength([JsValue.String(v: "aGVsbG8="), JsValue.String(v: "base64")]))).to_equal("5")
+```
+
+</details>
+
+### Buffer.from(...).toString(...)
+
+#### encodes utf8 input as hex
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(buffer_from_toString([JsValue.String(v: "hello"), JsValue.String(v: "utf8"), JsValue.String(v: "hex")]))).to_equal("68656c6c6f")
+```
+
+</details>
+
+#### decodes hex input as utf8
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(buffer_from_toString([JsValue.String(v: "68656c6c6f"), JsValue.String(v: "hex"), JsValue.String(v: "utf8")]))).to_equal("hello")
+```
+
+</details>
+
+#### round trips base64 input to utf8
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(buffer_from_toString([JsValue.String(v: "aGVsbG8="), JsValue.String(v: "base64"), JsValue.String(v: "utf8")]))).to_equal("hello")
+```
+
+</details>
+
+#### encodes utf8 input as base64
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(buffer_from_toString([JsValue.String(v: "hello"), JsValue.String(v: "utf8"), JsValue.String(v: "base64")]))).to_equal("aGVsbG8=")
+```
+
+</details>
+
+### Buffer.concat
+
+#### concatenates byte buffers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(buffer_concat_toString([JsValue.String(v: "6865"), JsValue.String(v: "hex"), JsValue.String(v: "6c6c6f"), JsValue.String(v: "hex"), JsValue.String(v: "utf8")]))).to_equal("hello")
+```
+
+</details>
+
+### NodeBuffer value semantics
+
+#### compares exact byte contents
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val left = NodeBuffer.from_text("68656c6c6f", "hex")
+val right = NodeBuffer.from_text("hello", "utf8")
+expect(left.equals(right)).to_equal(true)
+expect(left.length()).to_equal(5)
+```
+
+</details>
+
+### Node.js runtime shape
+
+### JSON.parse host path
+
+#### parses JSON objects through the runtime allocator
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("JSON.parse('{\"ok\":true,\"name\":\"simple\"}').ok")).to_equal("true")
+```
+
+</details>
+
+#### parses JSON object string properties through the runtime allocator
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("JSON.parse('{\"ok\":true,\"name\":\"simple\"}').name")).to_equal("simple")
+```
+
+</details>
+
+#### parses JSON arrays through the runtime allocator
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("JSON.parse('[1,2,3]').length")).to_equal("3")
+```
+
+</details>
+
+#### parses JSON array indexes through the runtime allocator
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("JSON.parse('[1,2,3]')[1]")).to_equal("2")
+```
+
+</details>
+
+#### rejects malformed JSON before JS allocation
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("JSON.parse('{\"ok\":true,}')")).to_equal("error")
+```
+
+</details>
+
+### require builtins
+
+#### resolves node:path through deterministic require
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('node:path').join('/usr', 'local', '..', 'bin')")).to_equal("/usr/bin")
+```
+
+</details>
+
+#### resolves path alias through deterministic require
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('path').basename('/tmp/simple.js')")).to_equal("simple.js")
+```
+
+</details>
+
+#### exposes the POSIX path namespace through require
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('node:path').posix.normalize('foo//bar//')")).to_equal("foo/bar/")
+expect(_eval_str("require('path').posix.join('/foo/', 'bar/')")).to_equal("/foo/bar/")
+```
+
+</details>
+
+#### marks unsupported builtin modules denied
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('fs').status")).to_equal("denied")
+```
+
+</details>
+
+### Buffer global and module shape
+
+#### exposes Buffer through require('buffer')
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('buffer').Buffer.from('68656c6c6f', 'hex').toString('utf8')")).to_equal("hello")
+```
+
+</details>
+
+#### exposes Buffer.concat through require('buffer')
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('buffer').Buffer.concat([require('buffer').Buffer.from('6865', 'hex'), require('buffer').Buffer.from('6c6c6f', 'hex')]).toString('utf8')")).to_equal("hello")
+```
+
+</details>
+
+#### exposes Buffer through globalThis
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("globalThis.Buffer.byteLength('hello', 'utf8')")).to_equal("5")
+```
+
+</details>
+
+### process global shape
+
+#### exposes deterministic process cwd
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("process.cwd()")).to_equal("/")
+```
+
+</details>
+
+#### denies ambient process env values
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("typeof process.env.PATH")).to_equal("undefined")
+```
+
+</details>
+
+#### exposes deterministic process versions
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("process.versions.node")).to_equal("0.0.0-simple")
+```
+
+</details>
+
+#### exposes deterministic process argv length
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("process.argv.length")).to_equal("2")
+```
+
+</details>
+
+#### exposes deterministic process argv executable
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("process.argv[0]")).to_equal("simple")
+```
+
+</details>
+
+#### exposes deterministic require process argv
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('process').argv.length")).to_equal("2")
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/feature/js/node_api_conformance_spec.spl` |
+| Updated | 2026-05-31 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- Node.js path module
+- path.dirname
+- path.basename
+- path.extname
+- path.isAbsolute
+- path.join
+- path.normalize
+- Node.js process module
+- process identity
+- process versions and release
+- process working directory and argv
+- process env
+- process.nextTick
+- Node.js Buffer module
+- Buffer.byteLength
+- Buffer.from(...).toString(...)
+- Buffer.concat
+- NodeBuffer value semantics
+- Node.js runtime shape
+- JSON.parse host path
+- require builtins
+- Buffer global and module shape
+- process global shape
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 58 |
+| Active scenarios | 58 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+

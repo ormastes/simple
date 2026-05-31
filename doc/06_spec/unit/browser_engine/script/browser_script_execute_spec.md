@@ -98,7 +98,7 @@ expect(result.diagnostics).to_contain("network access denied")
 | Category | Other |
 | Status | Active |
 | Source | `test/unit/browser_engine/script/browser_script_execute_spec.spl` |
-| Updated | 2026-05-30 |
+| Updated | 2026-05-31 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

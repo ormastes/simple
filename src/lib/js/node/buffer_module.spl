@@ -1,0 +1,120 @@
+# Node.js-compatible Buffer helpers for deterministic JS/Node infrastructure.
+#
+# This module models a bounded `Buffer` surface without host I/O or process
+# state. It is intentionally byte-oriented so WASM and WebEngine encoding paths
+# can share the same UTF-8, hex, and base64 behavior in tests.
+
+use std.js.types.js_types.{JsValue}
+use std.common.base_encoding.base64.{base64_encode, base64_decode}
+
+class NodeBuffer:
+    bytes: [u8]
+
+    static fn from_text(value: text, encoding: text) -> NodeBuffer:
+        NodeBuffer(bytes: _buffer_decode(value, encoding))
+
+    static fn concat(buffers: [NodeBuffer]) -> NodeBuffer:
+        var out: [u8] = []
+        for buffer in buffers:
+            for b in buffer.bytes:
+                out.push(b)
+        NodeBuffer(bytes: out)
+
+    fn length() -> i64:
+        self.bytes.len()
+
+    fn to_string(encoding: text) -> text:
+        _buffer_encode(self.bytes, encoding)
+
+    fn equals(other: NodeBuffer) -> bool:
+        if self.bytes.len() != other.bytes.len():
+            return false
+        var i = 0
+        while i < self.bytes.len():
+            if self.bytes[i] != other.bytes[i]:
+                return false
+            i = i + 1
+        true
+
+fn _buffer_arg_string(args: [JsValue], index: i64) -> text:
+    if index < 0 or index >= args.len():
+        return ""
+    match args[index]:
+        JsValue.String(v): v
+        _: ""
+
+fn _buffer_normalize_encoding(encoding: text) -> text:
+    val clean = encoding.trim().lower()
+    if clean == "" or clean == "utf-8":
+        return "utf8"
+    clean
+
+fn _buffer_hex_digit(ch: text) -> i64:
+    if ch >= "0" and ch <= "9":
+        return ch.char_at(0) as i64 - 48
+    if ch >= "a" and ch <= "f":
+        return ch.char_at(0) as i64 - 87
+    if ch >= "A" and ch <= "F":
+        return ch.char_at(0) as i64 - 55
+    -1
+
+fn _buffer_decode_hex(value: text) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i + 1 < value.len():
+        val hi = _buffer_hex_digit(value.substring(i, i + 1))
+        val lo = _buffer_hex_digit(value.substring(i + 1, i + 2))
+        if hi < 0 or lo < 0:
+            return out
+        out.push(((hi << 4) | lo) as u8)
+        i = i + 2
+    out
+
+fn _buffer_encode_hex(bytes: [u8]) -> text:
+    val table = "0123456789abcdef"
+    var out = ""
+    for b in bytes:
+        val n = b as i64
+        out = out + table.substring((n >> 4) & 15, ((n >> 4) & 15) + 1)
+        out = out + table.substring(n & 15, (n & 15) + 1)
+    out
+
+fn _buffer_bytes_to_text(bytes: [u8]) -> text:
+    var out = ""
+    for b in bytes:
+        out = out + (b as i64).chr()
+    out
+
+fn _buffer_decode(value: text, encoding: text) -> [u8]:
+    val enc = _buffer_normalize_encoding(encoding)
+    if enc == "hex":
+        return _buffer_decode_hex(value)
+    if enc == "base64":
+        return base64_decode(value).bytes()
+    value.bytes()
+
+fn _buffer_encode(bytes: [u8], encoding: text) -> text:
+    val enc = _buffer_normalize_encoding(encoding)
+    if enc == "hex":
+        return _buffer_encode_hex(bytes)
+    if enc == "base64":
+        return base64_encode(_buffer_bytes_to_text(bytes))
+    _buffer_bytes_to_text(bytes)
+
+fn buffer_byteLength(args: [JsValue]) -> JsValue:
+    val value = _buffer_arg_string(args, 0)
+    val encoding = _buffer_arg_string(args, 1)
+    JsValue.Number(v: _buffer_decode(value, encoding).len().to_f64())
+
+fn buffer_from_toString(args: [JsValue]) -> JsValue:
+    val value = _buffer_arg_string(args, 0)
+    val input_encoding = _buffer_arg_string(args, 1)
+    val output_encoding = _buffer_arg_string(args, 2)
+    val buffer = NodeBuffer.from_text(value, input_encoding)
+    JsValue.String(v: buffer.to_string(output_encoding))
+
+fn buffer_concat_toString(args: [JsValue]) -> JsValue:
+    val left = NodeBuffer.from_text(_buffer_arg_string(args, 0), _buffer_arg_string(args, 1))
+    val right = NodeBuffer.from_text(_buffer_arg_string(args, 2), _buffer_arg_string(args, 3))
+    val output_encoding = _buffer_arg_string(args, 4)
+    JsValue.String(v: NodeBuffer.concat([left, right]).to_string(output_encoding))

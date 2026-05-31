@@ -1,0 +1,152 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/qemu_gtk_wm_capture_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/qemu_gtk_wm_capture_evidence_$(date -u +%F).md}"
+WM_REPORT_PATH="${WM_REPORT_PATH:-$BUILD_DIR/wm-launch-capture.md}"
+WM_HOST_REPORT_PATH="${WM_HOST_REPORT_PATH:-$BUILD_DIR/wm-host-launch-capture.md}"
+QEMU_ARCH="${QEMU_ARCH:-x86_64}"
+QEMU_BIN="${QEMU_BIN:-qemu-system-$QEMU_ARCH}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$REPORT_PATH" "$BUILD_DIR/evidence.env" "$BUILD_DIR/qemu-display-help.txt" "$BUILD_DIR/wm.out" "$BUILD_DIR/wm-host.out"
+
+qemu_display_gtk_supported=false
+qemu_display_reason=missing-qemu-bin
+if command -v "$QEMU_BIN" >/dev/null 2>&1; then
+    if "$QEMU_BIN" -display help >"$BUILD_DIR/qemu-display-help.txt" 2>&1; then
+        qemu_display_reason=gtk-display-unavailable
+        if grep -Eq '(^|[[:space:]])gtk([[:space:],]|$)' "$BUILD_DIR/qemu-display-help.txt"; then
+            qemu_display_gtk_supported=true
+            qemu_display_reason=pass
+        fi
+    else
+        qemu_display_reason=display-help-failed
+    fi
+fi
+
+status=unavailable
+reason=missing-qmp-socket
+wm_exit_code=0
+host_wm_status=unavailable
+host_wm_reason=not-run
+host_wm_exit_code=0
+host_wm_report_path="$WM_HOST_REPORT_PATH"
+perf_status=unavailable
+perf_reason=missing-qmp-socket
+perf_simple_frame_us=0
+perf_gtk_frame_us=0
+perf_iterations=0
+
+if [ -z "${QEMU_QMP_SOCKET:-}" ]; then
+    set +e
+    RUN_ELECTRON_LIVE_SMOKE=0 \
+    RUN_QEMU_LIVE_CAPTURE=0 \
+    STRICT_QEMU_CAPTURE=0 \
+    REPORT_PATH="$WM_HOST_REPORT_PATH" \
+    BUILD_DIR="$BUILD_DIR/wm-host" \
+        sh scripts/check-wm-launch-capture-evidence.shs >"$BUILD_DIR/wm-host.out" 2>&1
+    host_wm_exit_code=$?
+    set -e
+    host_wm_status="$(sed -n 's/^wm_launch_capture_evidence_status=//p' "$BUILD_DIR/wm-host.out" | tail -n 1)"
+    host_wm_reason="$(sed -n 's/^wm_launch_capture_evidence_reason=//p' "$BUILD_DIR/wm-host.out" | tail -n 1)"
+    if [ -z "$host_wm_status" ]; then
+        host_wm_status=fail
+    fi
+    if [ -z "$host_wm_reason" ]; then
+        host_wm_reason=host-wm-smoke-failed
+    fi
+elif [ -n "${QEMU_QMP_SOCKET:-}" ]; then
+    set +e
+    RUN_ELECTRON_LIVE_SMOKE=0 \
+    RUN_QEMU_LIVE_CAPTURE=1 \
+    STRICT_QEMU_CAPTURE=1 \
+    REPORT_PATH="$WM_REPORT_PATH" \
+    BUILD_DIR="$BUILD_DIR/wm" \
+        sh scripts/check-wm-launch-capture-evidence.shs >"$BUILD_DIR/wm.out" 2>&1
+    wm_exit_code=$?
+    set -e
+    if [ "$wm_exit_code" -eq 0 ] && grep -q '^wm_launch_capture_evidence_status=pass' "$BUILD_DIR/wm.out"; then
+        status=pass
+        reason=pass
+        perf_status=unavailable
+        perf_reason=qemu-side-gtk-simple-perf-harness-not-wired
+    else
+        status=fail
+        reason="$(sed -n 's/^wm_launch_capture_evidence_reason=//p; s/^reason=//p' "$BUILD_DIR/wm.out" | tail -n 1)"
+        if [ -z "$reason" ]; then
+            reason=wm-live-capture-failed
+        fi
+        perf_status=fail
+        perf_reason="$reason"
+    fi
+fi
+
+{
+    echo "qemu_gtk_wm_capture_status=$status"
+    echo "qemu_gtk_wm_capture_reason=$reason"
+    echo "qemu_gtk_wm_capture_qemu_bin=$QEMU_BIN"
+    echo "qemu_gtk_wm_capture_qemu_arch=$QEMU_ARCH"
+    echo "qemu_gtk_wm_capture_display_gtk_supported=$qemu_display_gtk_supported"
+    echo "qemu_gtk_wm_capture_display_reason=$qemu_display_reason"
+    echo "qemu_gtk_wm_capture_qmp_socket=${QEMU_QMP_SOCKET:-}"
+    echo "qemu_gtk_wm_capture_wm_exit_code=$wm_exit_code"
+    echo "qemu_gtk_wm_capture_host_wm_status=$host_wm_status"
+    echo "qemu_gtk_wm_capture_host_wm_reason=$host_wm_reason"
+    echo "qemu_gtk_wm_capture_host_wm_exit_code=$host_wm_exit_code"
+    echo "qemu_gtk_wm_capture_host_wm_report_path=$host_wm_report_path"
+    echo "qemu_gtk_wm_capture_live_capture_status=$status"
+    echo "qemu_gtk_wm_capture_live_capture_reason=$reason"
+    echo "qemu_gtk_wm_capture_perf_status=$perf_status"
+    echo "qemu_gtk_wm_capture_perf_reason=$perf_reason"
+    echo "qemu_gtk_wm_capture_perf_simple_frame_us=$perf_simple_frame_us"
+    echo "qemu_gtk_wm_capture_perf_gtk_frame_us=$perf_gtk_frame_us"
+    echo "qemu_gtk_wm_capture_perf_iterations=$perf_iterations"
+    echo "qemu_gtk_wm_capture_perf_comparison_available=false"
+    if [ -f "$BUILD_DIR/wm.out" ]; then
+        sed -n 's/^wm_launch_capture_/qemu_gtk_wm_capture_wm_/p' "$BUILD_DIR/wm.out"
+    fi
+    if [ -f "$BUILD_DIR/wm-host.out" ]; then
+        sed -n 's/^wm_launch_capture_/qemu_gtk_wm_capture_host_/p' "$BUILD_DIR/wm-host.out"
+    fi
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# QEMU GTK WM Capture Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- qemu bin: $QEMU_BIN"
+    echo "- qemu arch: $QEMU_ARCH"
+    echo "- qemu display gtk supported: $qemu_display_gtk_supported"
+    echo "- qemu display reason: $qemu_display_reason"
+    echo "- qmp socket: ${QEMU_QMP_SOCKET:-}"
+    echo "- host WM smoke status: $host_wm_status"
+    echo "- host WM smoke reason: $host_wm_reason"
+    echo "- host WM smoke report: $host_wm_report_path"
+    echo "- live capture status: $status"
+    echo "- live capture reason: $reason"
+    echo "- qemu-side perf status: $perf_status"
+    echo "- qemu-side perf reason: $perf_reason"
+    echo "- qemu-side perf comparison available: false"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    if [ -f "$BUILD_DIR/wm.out" ]; then
+        echo
+        echo "## WM Capture Output"
+        sed 's/^/- /' "$BUILD_DIR/wm.out"
+    fi
+    if [ -f "$BUILD_DIR/wm-host.out" ]; then
+        echo
+        echo "## Host WM Smoke Output"
+        sed 's/^/- /' "$BUILD_DIR/wm-host.out"
+    fi
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+
+[ "$status" = "pass" ]

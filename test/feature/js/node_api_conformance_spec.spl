@@ -1,14 +1,43 @@
 # Node.js API Conformance Tests
-# @cover src/lib/common/js/node/path_module.spl
+# @cover src/lib/js/node/path_module.spl
+# @cover src/lib/js/node/buffer_module.spl
+# @cover src/lib/js/node/process_module.spl
 
 use std.js.node.path_module.{path_join, path_dirname, path_basename, path_extname, path_isAbsolute, path_normalize}
+use std.js.node.buffer_module.{NodeBuffer, buffer_byteLength, buffer_from_toString, buffer_concat_toString}
+use std.js.node.process_module.{process_platform, process_arch, process_version, process_versions_node, process_versions_v8, process_versions_uv, process_release_name, process_release_sourceUrl, process_release_lts, process_cwd, process_argv, process_env_get, process_nextTick}
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.engine.runtime.{JsRuntime}
 use std.js.types.js_types.{JsValue}
 
 fn _str(v: JsValue) -> text:
     match v:
         JsValue.String(s): s
         JsValue.Boolean(b): if b: "true" else: "false"
+        JsValue.Number(n):
+            var s = "{n}"
+            if s.ends_with(".0"):
+                return s.substring(0, s.len() - 2)
+            s
         _: ""
+
+fn _kind(v: JsValue) -> text:
+    match v:
+        JsValue.Undefined: "undefined"
+        JsValue.Null: "null"
+        JsValue.Boolean(b): "boolean"
+        JsValue.Number(n): "number"
+        JsValue.String(s): "string"
+        JsValue.Object(id): "object"
+        JsValue.Array(id): "array"
+        JsValue.Function(id): "function"
+
+fn _eval_str(source: text) -> text:
+    var runtime = JsRuntime.new(Logger.new(LogLevel.Error))
+    val result = runtime.eval(source)
+    match result:
+        Ok(value): _str(value)
+        Err(err): "error"
 
 describe "Node.js path module":
     describe "path.dirname":
@@ -42,3 +71,154 @@ describe "Node.js path module":
     describe "path.join":
         it "joins paths":
             expect(_str(path_join([JsValue.String(v: "/usr"), JsValue.String(v: "local"), JsValue.String(v: "bin")]))).to_equal("/usr/local/bin")
+        it "normalizes joined paths":
+            expect(_str(path_join([JsValue.String(v: "/usr/"), JsValue.String(v: "./local"), JsValue.String(v: "../bin")]))).to_equal("/usr/bin")
+        it "preserves trailing separator like path.posix.join":
+            expect(_str(path_join([JsValue.String(v: "/foo/"), JsValue.String(v: "bar/")]))).to_equal("/foo/bar/")
+
+    describe "path.normalize":
+        it "removes dot and dotdot segments":
+            expect(_str(path_normalize([JsValue.String(v: "foo/../bar/./baz")]))).to_equal("bar/baz")
+        it "preserves root for absolute paths":
+            expect(_str(path_normalize([JsValue.String(v: "/foo/../bar")]))).to_equal("/bar")
+        it "preserves trailing separator like path.posix.normalize":
+            expect(_str(path_normalize([JsValue.String(v: "foo//bar//")]))).to_equal("foo/bar/")
+        it "preserves trailing separator for normalized relative dot result":
+            expect(_str(path_normalize([JsValue.String(v: "foo/..//")]))).to_equal("./")
+
+describe "Node.js process module":
+    describe "process identity":
+        it "returns a stable Node-like platform":
+            expect(_str(process_platform([]))).to_equal("linux")
+        it "returns a stable Node-like architecture":
+            expect(_str(process_arch([]))).to_equal("x64")
+        it "returns a version-shaped string":
+            expect(_str(process_version([]))).to_start_with("v")
+
+    describe "process versions and release":
+        it "returns deterministic process.versions.node":
+            expect(_str(process_versions_node([]))).to_equal("0.0.0-simple")
+        it "returns deterministic process.versions.v8":
+            expect(_str(process_versions_v8([]))).to_equal("simple-js")
+        it "keeps libuv version typed unavailable until scheduler parity exists":
+            expect(_str(process_versions_uv([]))).to_equal("unavailable")
+        it "returns a Node-compatible release name":
+            expect(_str(process_release_name([]))).to_equal("node")
+        it "does not fake release source URLs":
+            expect(_kind(process_release_sourceUrl([]))).to_equal("undefined")
+        it "reports non-LTS for the deterministic Simple compatibility profile":
+            expect(_str(process_release_lts([]))).to_equal("false")
+
+    describe "process working directory and argv":
+        it "uses deterministic cwd when host cwd is unavailable":
+            expect(_str(process_cwd([]))).to_equal("/")
+        it "returns a deterministic argv shape":
+            val argv = process_argv([])
+            expect(argv.len()).to_equal(2)
+            expect(argv[0]).to_equal("simple")
+            expect(argv[1]).to_equal("")
+
+    describe "process env":
+        it "does not expose ambient host environment":
+            expect(_kind(process_env_get([JsValue.String(v: "PATH")]))).to_equal("undefined")
+        it "keeps missing env keys typed as unavailable":
+            expect(_kind(process_env_get([JsValue.String(v: "")]))).to_equal("undefined")
+
+    describe "process.nextTick":
+        it "is typed unavailable without runtime scheduler support":
+            expect(_kind(process_nextTick([]))).to_equal("undefined")
+
+describe "Node.js Buffer module":
+    describe "Buffer.byteLength":
+        it "counts utf8 bytes":
+            expect(_str(buffer_byteLength([JsValue.String(v: "hello"), JsValue.String(v: "utf8")]))).to_equal("5")
+
+        it "counts hex decoded bytes":
+            expect(_str(buffer_byteLength([JsValue.String(v: "68656c6c6f"), JsValue.String(v: "hex")]))).to_equal("5")
+
+        it "counts base64 decoded bytes":
+            expect(_str(buffer_byteLength([JsValue.String(v: "aGVsbG8="), JsValue.String(v: "base64")]))).to_equal("5")
+
+    describe "Buffer.from(...).toString(...)":
+        it "encodes utf8 input as hex":
+            expect(_str(buffer_from_toString([JsValue.String(v: "hello"), JsValue.String(v: "utf8"), JsValue.String(v: "hex")]))).to_equal("68656c6c6f")
+
+        it "decodes hex input as utf8":
+            expect(_str(buffer_from_toString([JsValue.String(v: "68656c6c6f"), JsValue.String(v: "hex"), JsValue.String(v: "utf8")]))).to_equal("hello")
+
+        it "round trips base64 input to utf8":
+            expect(_str(buffer_from_toString([JsValue.String(v: "aGVsbG8="), JsValue.String(v: "base64"), JsValue.String(v: "utf8")]))).to_equal("hello")
+
+        it "encodes utf8 input as base64":
+            expect(_str(buffer_from_toString([JsValue.String(v: "hello"), JsValue.String(v: "utf8"), JsValue.String(v: "base64")]))).to_equal("aGVsbG8=")
+
+    describe "Buffer.concat":
+        it "concatenates byte buffers":
+            expect(_str(buffer_concat_toString([JsValue.String(v: "6865"), JsValue.String(v: "hex"), JsValue.String(v: "6c6c6f"), JsValue.String(v: "hex"), JsValue.String(v: "utf8")]))).to_equal("hello")
+
+    describe "NodeBuffer value semantics":
+        it "compares exact byte contents":
+            val left = NodeBuffer.from_text("68656c6c6f", "hex")
+            val right = NodeBuffer.from_text("hello", "utf8")
+            expect(left.equals(right)).to_equal(true)
+            expect(left.length()).to_equal(5)
+
+describe "Node.js runtime shape":
+    describe "JSON.parse host path":
+        it "parses JSON objects through the runtime allocator":
+            expect(_eval_str("JSON.parse('{\"ok\":true,\"name\":\"simple\"}').ok")).to_equal("true")
+
+        it "parses JSON object string properties through the runtime allocator":
+            expect(_eval_str("JSON.parse('{\"ok\":true,\"name\":\"simple\"}').name")).to_equal("simple")
+
+        it "parses JSON arrays through the runtime allocator":
+            expect(_eval_str("JSON.parse('[1,2,3]').length")).to_equal("3")
+
+        it "parses JSON array indexes through the runtime allocator":
+            expect(_eval_str("JSON.parse('[1,2,3]')[1]")).to_equal("2")
+
+        it "rejects malformed JSON before JS allocation":
+            expect(_eval_str("JSON.parse('{\"ok\":true,}')")).to_equal("error")
+
+    describe "require builtins":
+        it "resolves node:path through deterministic require":
+            expect(_eval_str("require('node:path').join('/usr', 'local', '..', 'bin')")).to_equal("/usr/bin")
+
+        it "resolves path alias through deterministic require":
+            expect(_eval_str("require('path').basename('/tmp/simple.js')")).to_equal("simple.js")
+
+        it "exposes the POSIX path namespace through require":
+            expect(_eval_str("require('node:path').posix.normalize('foo//bar//')")).to_equal("foo/bar/")
+            expect(_eval_str("require('path').posix.join('/foo/', 'bar/')")).to_equal("/foo/bar/")
+
+        it "marks unsupported builtin modules denied":
+            expect(_eval_str("require('fs').status")).to_equal("denied")
+
+    describe "Buffer global and module shape":
+        it "exposes Buffer through require('buffer')":
+            expect(_eval_str("require('buffer').Buffer.from('68656c6c6f', 'hex').toString('utf8')")).to_equal("hello")
+
+        it "exposes Buffer.concat through require('buffer')":
+            expect(_eval_str("require('buffer').Buffer.concat([require('buffer').Buffer.from('6865', 'hex'), require('buffer').Buffer.from('6c6c6f', 'hex')]).toString('utf8')")).to_equal("hello")
+
+        it "exposes Buffer through globalThis":
+            expect(_eval_str("globalThis.Buffer.byteLength('hello', 'utf8')")).to_equal("5")
+
+    describe "process global shape":
+        it "exposes deterministic process cwd":
+            expect(_eval_str("process.cwd()")).to_equal("/")
+
+        it "denies ambient process env values":
+            expect(_eval_str("typeof process.env.PATH")).to_equal("undefined")
+
+        it "exposes deterministic process versions":
+            expect(_eval_str("process.versions.node")).to_equal("0.0.0-simple")
+
+        it "exposes deterministic process argv length":
+            expect(_eval_str("process.argv.length")).to_equal("2")
+
+        it "exposes deterministic process argv executable":
+            expect(_eval_str("process.argv[0]")).to_equal("simple")
+
+        it "exposes deterministic require process argv":
+            expect(_eval_str("require('process').argv.length")).to_equal("2")

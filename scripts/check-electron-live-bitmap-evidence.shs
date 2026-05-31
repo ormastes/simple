@@ -1,0 +1,167 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/electron_live_bitmap_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/electron_live_bitmap_evidence_$(date -u +%F).md}"
+WIDTH="${ELECTRON_BITMAP_WIDTH:-96}"
+HEIGHT="${ELECTRON_BITMAP_HEIGHT:-64}"
+ITERATIONS="${ELECTRON_BITMAP_ITERATIONS:-5}"
+TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-60}"
+NODE_OUT="$BUILD_DIR/node.out"
+ELECTRON_OUT="$BUILD_DIR/electron.out"
+ELECTRON_PROOF="$BUILD_DIR/electron-proof.json"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$NODE_OUT" "$ELECTRON_OUT" "$ELECTRON_PROOF" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+field_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "electron_live_bitmap_status=unavailable"
+        echo "electron_live_bitmap_reason=$reason"
+        echo "electron_live_bitmap_width=$WIDTH"
+        echo "electron_live_bitmap_height=$HEIGHT"
+        echo "electron_live_bitmap_iterations=$ITERATIONS"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# Electron Live Bitmap Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+for required in node npm xvfb-run; do
+    if ! have "$required"; then
+        emit_unavailable "missing-command:$required"
+        exit 1
+    fi
+done
+
+if [ ! -x "tools/electron-shell/node_modules/.bin/electron" ] && [ ! -x "tools/electron-shell/node_modules/electron/dist/electron" ]; then
+    emit_unavailable "missing-electron-dependency"
+    exit 1
+fi
+
+NODE_BITMAP_WIDTH="$WIDTH" NODE_BITMAP_HEIGHT="$HEIGHT" NODE_BITMAP_ITERATIONS="$ITERATIONS" JS_RENDER_RUNTIME=node \
+    node tools/node-render-bitmap/exact_fixture.js >"$NODE_OUT" 2>&1
+
+expected_checksum="$(field_of checksum "$NODE_OUT")"
+node_frame_us="$(field_of frame_us "$NODE_OUT")"
+
+if [ -z "$expected_checksum" ] || [ "$expected_checksum" = "0" ]; then
+    emit_unavailable "missing-node-reference-checksum"
+    exit 1
+fi
+
+run_electron() {
+    ELECTRON_BITMAP_WIDTH="$WIDTH" \
+    ELECTRON_BITMAP_HEIGHT="$HEIGHT" \
+    ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" \
+    ELECTRON_BITMAP_EXPECTED_CHECKSUM="$expected_checksum" \
+    ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" \
+    SIMPLE_ELECTRON_LIVE_BITMAP=1 \
+        xvfb-run -a --server-args="-screen 0 1280x720x24" \
+        npm --prefix tools/electron-shell exec -- electron --no-sandbox tools/electron-shell
+}
+
+set +e
+if have timeout; then
+    timeout "$TIMEOUT_SECS" sh -c 'ELECTRON_BITMAP_WIDTH="$1" ELECTRON_BITMAP_HEIGHT="$2" ELECTRON_BITMAP_ITERATIONS="$3" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$4" ELECTRON_BITMAP_PROOF_PATH="$5" SIMPLE_ELECTRON_LIVE_BITMAP=1 xvfb-run -a --server-args="-screen 0 1280x720x24" npm --prefix tools/electron-shell exec -- electron --no-sandbox tools/electron-shell' sh "$WIDTH" "$HEIGHT" "$ITERATIONS" "$expected_checksum" "$ELECTRON_PROOF" >"$ELECTRON_OUT" 2>&1
+else
+    run_electron >"$ELECTRON_OUT" 2>&1
+fi
+electron_code=$?
+set -e
+
+if [ -f "$ELECTRON_PROOF" ]; then
+    electron_checksum="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.checksum||'')" "$ELECTRON_PROOF")"
+    electron_expected="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.expected_checksum||'')" "$ELECTRON_PROOF")"
+    mismatch_count="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.mismatch_count ?? ''))" "$ELECTRON_PROOF")"
+    electron_frame_us="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.frame_us ?? ''))" "$ELECTRON_PROOF")"
+    blur_used="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.blur_or_tolerance_used ?? ''))" "$ELECTRON_PROOF")"
+else
+    electron_checksum="$(field_of checksum "$ELECTRON_OUT")"
+    electron_expected="$(field_of expected_checksum "$ELECTRON_OUT")"
+    mismatch_count="$(field_of mismatch_count "$ELECTRON_OUT")"
+    electron_frame_us="$(field_of frame_us "$ELECTRON_OUT")"
+    blur_used="$(field_of blur_or_tolerance_used "$ELECTRON_OUT")"
+fi
+
+status=pass
+reason=pass
+if [ "$electron_code" -ne 0 ] && [ ! -f "$ELECTRON_PROOF" ]; then
+    status=fail
+    reason=electron-live-capture-failed
+elif [ "$electron_code" -ne 0 ]; then
+    reason=pass-with-electron-teardown-warning
+elif [ "$blur_used" != "false" ]; then
+    status=fail
+    reason=blur-or-tolerance-not-allowed
+elif [ "$electron_checksum" != "$expected_checksum" ] || [ "$electron_expected" != "$expected_checksum" ]; then
+    status=fail
+    reason=checksum-mismatch
+elif [ "$mismatch_count" != "0" ]; then
+    status=fail
+    reason=pixel-mismatch
+elif [ -z "$electron_frame_us" ] || [ "$electron_frame_us" -le 0 ]; then
+    status=fail
+    reason=missing-electron-timing
+fi
+
+{
+    echo "electron_live_bitmap_status=$status"
+    echo "electron_live_bitmap_reason=$reason"
+    echo "electron_live_bitmap_width=$WIDTH"
+    echo "electron_live_bitmap_height=$HEIGHT"
+    echo "electron_live_bitmap_iterations=$ITERATIONS"
+    echo "electron_live_bitmap_node_checksum=$expected_checksum"
+    echo "electron_live_bitmap_electron_checksum=${electron_checksum:-0}"
+    echo "electron_live_bitmap_mismatch_count=${mismatch_count:-}"
+    echo "electron_live_bitmap_blur_or_tolerance_used=${blur_used:-}"
+    echo "electron_live_bitmap_node_frame_us=${node_frame_us:-0}"
+    echo "electron_live_bitmap_electron_frame_us=${electron_frame_us:-0}"
+    echo "electron_live_bitmap_exit_code=$electron_code"
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# Electron Live Bitmap Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- scene: wm-image-taskbar-command"
+    echo "- dimensions: ${WIDTH}x${HEIGHT}"
+    echo "- Node checksum: $expected_checksum"
+    echo "- Electron checksum: ${electron_checksum:-0}"
+    echo "- mismatch count: ${mismatch_count:-}"
+    echo "- blur/tolerance used: ${blur_used:-}"
+    echo "- Node frame us: ${node_frame_us:-0}"
+    echo "- Electron frame us: ${electron_frame_us:-0}"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    echo
+    echo "## Node Output"
+    sed 's/^/- /' "$NODE_OUT"
+    echo
+    echo "## Electron Output"
+    sed 's/^/- /' "$ELECTRON_OUT"
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+
+[ "$status" = "pass" ]

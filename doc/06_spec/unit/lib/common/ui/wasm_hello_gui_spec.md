@@ -9,7 +9,7 @@
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -21,9 +21,11 @@ expect(hello.artifact.html.contains("<script>")).to_equal(false)
 expect(hello.artifact.html).to_contain("Hello World")
 expect(hello.artifact.html).to_contain("id='hello_image'")
 expect(hello.artifact.html).to_contain("data-simple-primitives='rect,circle,line'")
+expect(hello.artifact.html).to_contain("id='hello_taskbar'")
+expect(hello.artifact.html).to_contain("id='hello_command_bar'")
 expect(hello.artifact.binary_schema).to_equal(WEB_RENDER_WASM_SCHEMA_VERSION)
 expect(hello.artifact.binary_cache_path).to_equal("build/gui/android/hello.wasm")
-expect(hello.artifact.binary_command_count).to_equal(10)
+expect(hello.artifact.binary_command_count).to_equal(14)
 expect(hello.metadata.abi).to_equal("wasm32-simple-ui-android")
 ```
 
@@ -237,7 +239,7 @@ expect(no_source.diagnostic).to_contain("examples/ui/hello_wasm_gui.spl")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -261,6 +263,8 @@ expect(simpleos.event_contract).to_contain("text:hello_text->hello_text:accepted
 expect(simpleos.render_contract).to_contain("button-min-height=44")
 expect(simpleos.render_contract).to_contain("image=64x64")
 expect(simpleos.render_contract).to_contain("primitives=rect,circle,line:128x48")
+expect(simpleos.render_contract).to_contain("taskbar=hello_taskbar")
+expect(simpleos.render_contract).to_contain("command_bar=hello_command_bar")
 expect(summary).to_contain("launcher=simpleos-wm-native-wasm-window")
 expect(summary).to_contain("no_js=true")
 ```
@@ -359,7 +363,7 @@ expect(missing_events.diagnostic).to_contain("button scroll text")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -368,6 +372,7 @@ val evidence = wasm_hello_gui_event_evidence(WEB_RENDER_TARGET_HOST_WM_WASM)
 expect(wasm_hello_gui_event_response("click", "hello_button")).to_equal("hello_button:clicked")
 expect(wasm_hello_gui_event_response("scroll", "viewport")).to_equal("hello_scroll:accepted")
 expect(wasm_hello_gui_event_response("text", "hello_text")).to_equal("hello_text:accepted")
+expect(wasm_hello_gui_event_response("command", "hello_command_input")).to_equal("hello_command:accepted")
 expect(wasm_hello_gui_event_response("text", "wrong_text")).to_equal("hello_event:ignored")
 expect(evidence.status).to_equal("event_contract_verified")
 expect(evidence.ready).to_equal(true)
@@ -375,6 +380,35 @@ expect(evidence.button_ok).to_equal(true)
 expect(evidence.scroll_ok).to_equal(true)
 expect(evidence.text_ok).to_equal(true)
 expect(evidence.ignored_ok).to_equal(true)
+```
+
+</details>
+
+#### verifies generated-WASM GUI library surface coverage
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = wasm_hello_gui_surface_evidence_for_target(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM)
+val summary = wasm_hello_gui_surface_evidence_summary(evidence)
+
+expect(evidence.status).to_equal("surface_contract_verified")
+expect(evidence.ready).to_equal(true)
+expect(evidence.surface_count).to_equal(8)
+expect(evidence.missing_surface).to_equal("")
+expect(evidence.present_surfaces).to_contain("layout")
+expect(evidence.present_surfaces).to_contain("button")
+expect(evidence.present_surfaces).to_contain("input")
+expect(evidence.present_surfaces).to_contain("image")
+expect(evidence.present_surfaces).to_contain("text")
+expect(evidence.present_surfaces).to_contain("primitives")
+expect(evidence.present_surfaces).to_contain("taskbar")
+expect(evidence.present_surfaces).to_contain("command_bar")
+expect(summary).to_contain("surfaces=layout,button,input,image,text,primitives,taskbar,command_bar")
 ```
 
 </details>
@@ -404,7 +438,7 @@ expect(android.primitive_count).to_equal(3)
 expect(android.primitive_bounds_w).to_equal(128)
 expect(android.primitive_bounds_h).to_equal(48)
 expect(android.min_touch_h).to_equal(44)
-expect(android.command_count).to_equal(10)
+expect(android.command_count).to_equal(14)
 expect(ios_hi_dpi.min_touch_h).to_equal(88)
 expect(simpleos.viewport_w).to_equal(800)
 expect(simpleos.viewport_h).to_equal(600)
@@ -478,7 +512,7 @@ expect(unlisted_import.bad_import).to_equal("random.unlisted")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/unit/lib/common/ui/wasm_hello_gui_spec.spl` |
-| Updated | 2026-05-30 |
+| Updated | 2026-05-31 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -490,8 +524,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

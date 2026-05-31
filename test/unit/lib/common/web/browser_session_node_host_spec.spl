@@ -1,0 +1,88 @@
+use std.spec.*
+
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.gc_async_mut.web.browser_session.{BrowserRuntimeState}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_native.*
+use std.nogc_sync_mut.js.engine.interpreter_object.*
+use std.js.node.process_module.{process_platform, process_versions_node, process_env_get}
+use std.js.types.js_types.{JsValue}
+
+fn _display_js(v: JsValue) -> text:
+    match v:
+        JsValue.Undefined: "undefined"
+        JsValue.Null: "null"
+        JsValue.Boolean(b): if b: "true" else: "false"
+        JsValue.Number(n):
+            var s = "{n}"
+            if s.ends_with(".0"):
+                s = s.slice(0, s.len() - 2)
+            s
+        JsValue.String(s): s
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[object Array]"
+        JsValue.Function(id): "[Function]"
+        JsValue.Symbol(id): "Symbol()"
+
+fn _new_interpreter() -> JsInterpreter:
+    JsInterpreter.new(Logger.new(LogLevel.Error))
+
+fn _object_property_text(interp: JsInterpreter, value: JsValue, key: text) -> text:
+    match value:
+        JsValue.Object(id): _display_js(interp.get_object_property(id, key))
+        _: ""
+
+fn _object_child_property_text(interp: JsInterpreter, value: JsValue, child_key: text, key: text) -> text:
+    match value:
+        JsValue.Object(id):
+            val child = interp.get_object_property(id, child_key)
+            match child:
+                JsValue.Object(child_id): _display_js(interp.get_object_property(child_id, key))
+                JsValue.Array(child_id): _display_js(interp.get_object_property(child_id, key))
+                _: ""
+        _: ""
+
+describe "BrowserSession deterministic Node host surface":
+    it "builds deterministic process and Buffer globals without host state":
+        var interp = _new_interpreter()
+
+        expect(_display_js(process_platform([]))).to_equal("linux")
+        expect(_display_js(process_versions_node([]))).to_equal("0.0.0-simple")
+        expect(_display_js(process_env_get([JsValue.String(v: "PATH")]))).to_equal("undefined")
+        expect(_display_js(interp._native_node_buffer_global())).to_equal("[object Object]")
+        expect(_display_js(interp._native_node_require_function())).to_equal("[Function]")
+
+    it "loads deterministic path and Buffer modules through require dispatch":
+        var interp = _new_interpreter()
+
+        val path = interp._native_node_require([JsValue.String(v: "node:path")])
+        expect(_display_js(interp._dispatch_native_with_receiver(-106, JsValue.Undefined, [JsValue.String(v: "/usr"), JsValue.String(v: "local"), JsValue.String(v: ".."), JsValue.String(v: "bin")], 0))).to_equal("/usr/bin")
+        expect(_display_js(interp._dispatch_native_with_receiver(-102, JsValue.Undefined, [JsValue.String(v: "/tmp/demo.txt")], 0))).to_equal("demo.txt")
+        expect(_object_property_text(interp, path, "join")).to_equal("[Function]")
+
+        val buffer_module = interp._native_node_require([JsValue.String(v: "buffer")])
+        expect(_object_property_text(interp, buffer_module, "Buffer")).to_equal("[object Object]")
+        expect(_display_js(interp._dispatch_native_with_receiver(-110, JsValue.Undefined, [JsValue.String(v: "68656c6c6f"), JsValue.String(v: "hex")], 0))).to_equal("5")
+        match buffer_module:
+            JsValue.Object(module_id):
+                match interp.get_object_property(module_id, "Buffer"):
+                    JsValue.Object(buffer_id):
+                        expect(_display_js(interp.get_object_property(buffer_id, "concat"))).to_equal("[Function]")
+                    _: expect("missing Buffer").to_equal("object")
+            _: expect("missing buffer module").to_equal("object")
+        val buffer = interp._native_node_buffer_from([JsValue.String(v: "hello"), JsValue.String(v: "utf8")])
+        expect(_display_js(interp._native_node_buffer_to_string(buffer, [JsValue.String(v: "hex")]))).to_equal("68656c6c6f")
+
+    it "denies host filesystem module access through require":
+        var interp = _new_interpreter()
+
+        val fs = interp._native_node_require([JsValue.String(v: "fs")])
+        expect(_object_property_text(interp, fs, "status")).to_equal("denied")
+        expect(_object_property_text(interp, fs, "error")).to_equal("module-denied")
+        expect(_object_property_text(interp, fs, "specifier")).to_equal("fs")
+
+    it "installs deterministic process argv on BrowserSession runtime globals":
+        val state = BrowserRuntimeState.create("https://example.test/", "T", "", [], [], "")
+        val process = state.runtime.get_host_property(state.window_id, "process")
+        expect(_object_child_property_text(state.runtime.interpreter, process, "argv", "length")).to_equal("2")
+        expect(_object_child_property_text(state.runtime.interpreter, process, "argv", "0")).to_equal("simple")

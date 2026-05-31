@@ -1,6 +1,6 @@
 # Test Specification Index
 
-*Generated: 2026-05-30*
+*Generated: 2026-05-31*
 
 ## Quick Stats
 
@@ -12,9 +12,9 @@
 
 ---
 
-## Hardware & OS (1 features)
+## Standard Library (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Simpleos Ai Cli Js Node Port Specification](system/os/simpleos_ai_cli_js_node_port_spec.md) | Auto-generated | N/A | 16 | 0% | 0 lines |
+| [Wasm Hello Gui Specification](unit/lib/common/ui/wasm_hello_gui_spec.md) | Auto-generated | N/A | 18 | 0% | 0 lines |
 

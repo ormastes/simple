@@ -1,7 +1,7 @@
 # wm_compare Backend Parity Runner
 #
 # Drives the same logical scene through two pixel paths and compares them
-# byte-for-byte plus perceptually:
+# byte-for-byte. Perceptual metrics are retained only as diagnostics:
 #
 #   framebuffer baseline — `os.os.drivers.framebuffer.fb_driver.FramebufferDriver.from_buffer`
 #         The same code path framebuffer baseline (`fb_backend`) uses on real hardware, but
@@ -36,7 +36,10 @@ struct ParityResult:
     differing_pixels: u32       # how many pixels differ at all
     perceptual_pct: u32         # differing_pixels * 10000 / total (basis: 1/100 of a percent)
     pass_exact: bool            # max_channel_delta == 0
-    pass_perceptual: bool       # perceptual_pct <= 100   (≤1 %)
+    pass_perceptual: bool       # diagnostic only; not an acceptance gate
+    exact_required: bool
+    perceptual_diagnostic_only: bool
+    tolerance_acceptance_allowed: bool
 
 # ============================================================================
 # Scene primitives
@@ -365,7 +368,8 @@ fn render_browser_shell(scene: ParityScene) -> [u32]:
 # without spinning up a live Electron runtime (which the spec interpreter
 # cannot do — no Node, no IPC, no PPM round-trip). This keeps the spec
 # runnable in-process while still locking the contract that the electron reference
-# reference-renderer path stays within the ≤1% perceptual budget vs framebuffer baseline.
+# reference-renderer path matches the framebuffer baseline exactly. Perceptual
+# metrics are diagnostics only.
 # ============================================================================
 
 fn render_electron_reference(scene: ParityScene) -> [u32]:
@@ -460,7 +464,10 @@ fn diff_buffers(name: text, w: u32, h: u32, baseline: [u32], reference: [u32]) -
         differing_pixels: differing,
         perceptual_pct: pct,
         pass_exact: max_delta == 0u32,
-        pass_perceptual: pct <= 100u32
+        pass_perceptual: pct <= 100u32,
+        exact_required: true,
+        perceptual_diagnostic_only: true,
+        tolerance_acceptance_allowed: false
     )
 
 # ============================================================================
@@ -477,8 +484,8 @@ fn run_framebuffer_software_parity(scene: ParityScene) -> ParityResult:
 
 fn run_browser_shell_parity(scene: ParityScene) -> ParityResult:
     """Render `scene` through framebuffer baseline and browser shell (`BrowserCompositorBackend`), then
-    diff. The browser-shell gate must stay within the same <=1% perceptual
-    budget as the framebuffer/software gate. The returned `ParityResult` reuses the
+    diff. The browser-shell gate requires exact pixels; perceptual metrics are
+    diagnostics only. The returned `ParityResult` reuses the
     `reference_pixels` field to carry the browser shell buffer — the struct shape is shared
     with `run_framebuffer_software_parity` so `diff_buffers`, PPM dumps, and the golden-gate
     runner all work unchanged."""
@@ -488,8 +495,8 @@ fn run_browser_shell_parity(scene: ParityScene) -> ParityResult:
 
 fn run_electron_reference_parity(scene: ParityScene) -> ParityResult:
     """Render `scene` through framebuffer baseline and electron reference (Electron dev-preview reference
-    pipeline), then diff. The electron-reference gate must stay within the same
-    <=1% perceptual budget as the framebuffer/software gate. The returned
+    pipeline), then diff. The electron-reference gate requires exact pixels;
+    perceptual metrics are diagnostics only. The returned
     `ParityResult` reuses the `reference_pixels` field to carry the electron reference buffer —
     the struct shape is shared with `run_framebuffer_software_parity` / `run_browser_shell_parity` so
     `diff_buffers`, PPM dumps, and the golden-gate runner all work

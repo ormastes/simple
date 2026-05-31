@@ -7,8 +7,8 @@
 #   * Encode the buffer as PPM P6 (binary).
 #   * On REGEN: write `test/system/wm_compare/goldens/<scene>.ppm`.
 #   * Otherwise: load the golden PPM, decode to ARGB, and compare to the
-#     freshly rendered buffer using `diff_buffers`. Fail if any backend
-#     drifts more than the <=1% perceptual budget locked in the framebuffer/software gate.
+#     freshly rendered buffer using `diff_buffers`. Hardened acceptance is
+#     exact-only; perceptual drift metrics remain diagnostic.
 #
 # The gate intentionally re-uses the framebuffer/software gate's `ParityScene`, `render_framebuffer_baseline`, and
 # `diff_buffers` — golden-image work is only the serialization layer on
@@ -45,7 +45,7 @@ struct GoldenGateResult:
     regenerated: bool
     loaded_ok: bool
     diff: ParityResult        # only meaningful if loaded_ok
-    pass_gate: bool           # diff.pass_perceptual && max_channel_delta tiny
+    pass_gate: bool           # exact pixels only
 
 struct DecodeCursor:
     """Result of consuming a decimal field from a PPM header: the parsed
@@ -171,9 +171,8 @@ fn write_golden(scene: ParityScene) -> bool:
     rt_file_write_bytes(golden_path(scene.name), bytes)
 
 fn check_golden(scene: ParityScene) -> GoldenGateResult:
-    """Render `scene` fresh, load the golden, diff. The gate passes if
-    the perceptual delta is ≤1 % AND the max per-channel delta is ≤2 —
-    i.e. drift detection, not perfect pixel comparison.
+    """Render `scene` fresh, load the golden, diff. The gate passes only
+    when pixels are exact. Drift metrics are still reported for diagnostics.
 
     If REGEN_GOLDENS is set, the golden is rewritten first and the
     result is reported as `regenerated=true, pass_gate=true` (we just
@@ -208,7 +207,7 @@ fn check_golden(scene: ParityScene) -> GoldenGateResult:
             diff: placeholder, pass_gate: false
         )
     val d = diff_buffers(scene.name, scene.width, scene.height, golden, fresh)
-    val gate_ok = d.pass_perceptual and (d.max_channel_delta <= 2u32)
+    val gate_ok = d.pass_exact
     GoldenGateResult(
         scene: scene.name, path: path,
         regenerated: false, loaded_ok: true,

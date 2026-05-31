@@ -64,19 +64,19 @@ Documentation was generated from executable SPipe scenarios.
 ## Golden-image gate
 
 golden gate of `doc/03_plan/gui_drawing_layer_variations.md` (golden-image
-gate: same app, four backends, ≤1 % perceptual diff) lands on top of
+gate: same app, four backends, exact pixel parity) lands on top of
 the framebuffer/software gate framebuffer/software parity harness. The gate detects unintentional drift
 in the windowed compositor pipeline by serializing every parity scene
 to a PPM P6 reference image and re-comparing on every test run.
 
 | Field | Value |
 |-------|-------|
-| Gate spec | `test/sys/wm_compare/golden_gate_spec.spl` |
+| Gate spec | `test/system/wm_compare/golden_gate_spec.spl` |
 | Gate runner | `src/app/wm_compare/golden_gate.spl` |
-| Goldens | `test/sys/wm_compare/goldens/<scene>.ppm` |
+| Goldens | `test/system/wm_compare/goldens/<scene>.ppm` |
 | Format | PPM P6 (binary, RGB888, 32x16) — alpha dropped, all parity scenes are opaque |
 | Backend under reference | framebuffer baseline (`FramebufferDriver.from_buffer`, the `fb_backend` code path) |
-| Threshold | `pass_perceptual` (≤1 % differing pixels) AND `max_channel_delta <= 2` |
+| Threshold | exact pixel equality; perceptual values are diagnostic only |
 | Scenes | `solid_fill`, `fill_rect_row_edge`, `text_with_bg`, `glass_blend` (the framebuffer/software gate set) |
 
 ### How the gate runs
@@ -85,9 +85,9 @@ to a PPM P6 reference image and re-comparing on every test run.
 2. `check_golden` re-renders the scene through framebuffer baseline (`render_framebuffer_baseline`), loads
    `goldens/<scene>.ppm`, decodes to ARGB8888, and diffs both buffers
    with the same `diff_buffers` helper framebuffer/software gate uses.
-3. The gate passes when both `ParityResult.pass_perceptual` is true
-   and the maximum per-channel delta is at most 2 — i.e. the gate is
-   for drift detection, not for perfect pixel comparison.
+3. The gate passes only when the rendered pixels are exactly equal to
+   the golden image. Perceptual and channel-delta values remain in the
+   report as diagnostics and must not accept a GUI hardening result.
 
 ### Regenerating goldens
 
@@ -95,7 +95,7 @@ After an intentional rendering change, set the `REGEN_GOLDENS`
 environment variable when running the gate:
 
 ```bash
-REGEN_GOLDENS=1 bin/simple test test/sys/wm_compare/golden_gate_spec.spl
+REGEN_GOLDENS=1 bin/simple test test/system/wm_compare/golden_gate_spec.spl
 ```
 
 `check_golden` then writes the freshly rendered framebuffer baseline buffer back to

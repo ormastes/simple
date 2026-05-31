@@ -7,8 +7,9 @@ use std.js.types.js_types.JsObject
 use std.js.types.js_types.JsProperty
 use std.js.types.ast_types.JsExpression
 use std.js.types.ast_types.JsStatement
-use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
+use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, NativeIdMapping, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
+use std.js.node.buffer_module.{buffer_byteLength}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use std.js.builtins.array.{array_isArray, array_from_values}
@@ -43,6 +44,12 @@ impl JsInterpreter:
                     return Ok(JsValue.Object(id: self.host_session_storage_id))
                 if name == "localStorage" and self.host_local_storage_id >= 0:
                     return Ok(JsValue.Object(id: self.host_local_storage_id))
+                if name == "require":
+                    return Ok(self._native_node_require_function())
+                if name == "Buffer":
+                    return Ok(self._native_node_buffer_global())
+                if name == "process":
+                    return Ok(self._native_node_process_object())
                 if env == self.global_env:
                     val cached = self.lookup_global_value(name)
                     if val Some(v) = cached:
@@ -78,7 +85,7 @@ impl JsInterpreter:
             JsExpression.ArrowFunction(params, body):
                 # Register arrow as a function
                 val fn_id = self.functions.len()
-                val js_fn = JsFunction.create("__arrow__", params, body, env)
+                val js_fn = JsFunction(name: "__arrow__", params: params, body: body, closure_env: env, is_arrow: false)
                 self.functions.push(js_fn)
                 return Ok(JsValue.Function(id: fn_id))
             JsExpression.SpreadElement(argument):
@@ -141,6 +148,12 @@ impl JsInterpreter:
             i = i + 1
         match callee_val:
             JsValue.Function(fn_id):
+                var ni = 0
+                while ni < self.native_id_map.len():
+                    val mapping = self.native_id_map.get(ni)
+                    if mapping.first == fn_id:
+                        return Ok(self._dispatch_native_with_receiver(mapping.second, JsValue.Undefined, arg_vals, env))
+                    ni = ni + 1
                 val obj_id = self.create_object()
                 val this_val = JsValue.Object(id: obj_id)
                 # Set __proto__ to the class prototype for method lookup
@@ -447,6 +460,32 @@ impl JsInterpreter:
                 member_method = method_name
                 member_obj_expr = obj_expr
             _: pass_dn
+
+        if is_member and member_method == "cwd":
+            match member_obj_expr:
+                JsExpression.Identifier(obj_name):
+                    if obj_name == "process":
+                        return Ok(JsValue.String(v: "/"))
+                _: pass_dn
+
+        if is_member and member_method == "byteLength":
+            var byte_length_global = false
+            match member_obj_expr:
+                JsExpression.Member(root_expr, root_prop):
+                    if root_prop == "Buffer":
+                        match root_expr:
+                            JsExpression.Identifier(root_name):
+                                if root_name == "globalThis":
+                                    byte_length_global = true
+                            _: pass_dn
+                _: pass_dn
+            if byte_length_global:
+                var arg_vals: [JsValue] = []
+                var ai_bl = 0
+                while ai_bl < args.len():
+                    arg_vals.push(self.eval_expression(args.get(ai_bl), env)?)
+                    ai_bl = ai_bl + 1
+                return Ok(buffer_byteLength(arg_vals))
 
         if is_member and _is_array_method(member_method):
             val obj_val = self.eval_expression(member_obj_expr, env)?

@@ -1,0 +1,162 @@
+#!/bin/sh
+set -eu
+
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+BUILD_DIR="${BUILD_DIR:-build/qemu_capture_fake_qmp_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/qemu_capture_fake_qmp_evidence_2026-05-31.md}"
+SOCKET_PATH="$BUILD_DIR/fake-qmp.sock"
+SCREEN_PATH="$BUILD_DIR/fake-screendump.ppm"
+SERVER_JS="$BUILD_DIR/fake_qmp_server.js"
+SIMPLE_SRC="$BUILD_DIR/check_qemu_capture_fake_qmp.spl"
+SERVER_LOG="$BUILD_DIR/fake-qmp-server.log"
+SIMPLE_LOG="$BUILD_DIR/simple-capture.log"
+
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+rm -f "$SOCKET_PATH" "$SCREEN_PATH" "$SERVER_LOG" "$SIMPLE_LOG"
+
+cat >"$SERVER_JS" <<'JS'
+const fs = require('fs');
+const net = require('net');
+
+const socketPath = process.argv[2];
+const expectedOut = process.argv[3];
+
+function ppmBytes() {
+  return Buffer.from([
+    0x50, 0x36, 0x0a, 0x32, 0x20, 0x31, 0x0a, 0x32, 0x35, 0x35, 0x0a,
+    0xff, 0x00, 0x00,
+    0x00, 0xff, 0x00,
+  ]);
+}
+
+try { fs.unlinkSync(socketPath); } catch {}
+
+const server = net.createServer((conn) => {
+  let buffer = '';
+  conn.write(JSON.stringify({ QMP: { version: { qemu: { major: 8, minor: 2, micro: 0 } }, capabilities: [] } }) + '\n');
+  conn.on('data', (chunk) => {
+    buffer += chunk.toString('utf8');
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const msg = JSON.parse(line);
+      if (msg.execute === 'qmp_capabilities') {
+        conn.write(JSON.stringify({ return: {} }) + '\n');
+      } else if (msg.execute === 'human-monitor-command') {
+        const command = String(msg.arguments && msg.arguments['command-line'] || '');
+        if (command !== `screendump ${expectedOut}`) {
+          conn.write(JSON.stringify({ error: { class: 'GenericError', desc: `unexpected command ${command}` } }) + '\n');
+          continue;
+        }
+        fs.writeFileSync(expectedOut, ppmBytes());
+        conn.write(JSON.stringify({ return: '' }) + '\n');
+        setTimeout(() => server.close(() => process.exit(0)), 20);
+      } else {
+        conn.write(JSON.stringify({ error: { class: 'CommandNotFound', desc: msg.execute } }) + '\n');
+      }
+    }
+  });
+});
+
+server.listen(socketPath, () => {
+  fs.chmodSync(socketPath, 0o700);
+  console.log(`fake_qmp_socket=${socketPath}`);
+});
+
+setTimeout(() => {
+  console.error('fake QMP timed out waiting for screendump');
+  process.exit(2);
+}, 15000).unref();
+JS
+
+node "$SERVER_JS" "$SOCKET_PATH" "$SCREEN_PATH" >"$SERVER_LOG" 2>&1 &
+server_pid=$!
+trap 'kill "$server_pid" 2>/dev/null || true; rm -f "$SOCKET_PATH"' EXIT
+
+i=0
+while [ ! -S "$SOCKET_PATH" ] && [ "$i" -lt 100 ]; do
+    i=$((i + 1))
+    sleep 0.05
+done
+
+if [ ! -S "$SOCKET_PATH" ]; then
+    echo "qemu_capture_fake_qmp_status=fail"
+    echo "qemu_capture_fake_qmp_reason=socket-not-ready"
+    cat "$SERVER_LOG" || true
+    exit 1
+fi
+
+cat >"$SIMPLE_SRC" <<SIMPLE
+use os.compositor.qemu_capture.{capture_qemu_vm}
+
+fn main() -> i64:
+    val cap = capture_qemu_vm("$SOCKET_PATH", "$SCREEN_PATH")
+    print("qemu_capture_fake_qmp_success=" + cap.success.to_text())
+    print("qemu_capture_fake_qmp_backend=" + cap.backend_name)
+    print("qemu_capture_fake_qmp_width=" + cap.width.to_text())
+    print("qemu_capture_fake_qmp_height=" + cap.height.to_text())
+    print("qemu_capture_fake_qmp_pixels=" + cap.pixels.len().to_text())
+    if cap.pixels.len() >= 2:
+        print("qemu_capture_fake_qmp_pixel0=" + cap.pixels[0].to_text())
+        print("qemu_capture_fake_qmp_pixel1=" + cap.pixels[1].to_text())
+    print("qemu_capture_fake_qmp_error=" + cap.error)
+    return 0
+SIMPLE
+
+set +e
+SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_LOG" 2>&1
+simple_code=$?
+wait "$server_pid"
+server_code=$?
+set -e
+
+cat "$SIMPLE_LOG"
+cat "$SERVER_LOG"
+
+success="$(sed -n 's/^qemu_capture_fake_qmp_success=//p' "$SIMPLE_LOG" | tail -n 1)"
+backend="$(sed -n 's/^qemu_capture_fake_qmp_backend=//p' "$SIMPLE_LOG" | tail -n 1)"
+width="$(sed -n 's/^qemu_capture_fake_qmp_width=//p' "$SIMPLE_LOG" | tail -n 1)"
+height="$(sed -n 's/^qemu_capture_fake_qmp_height=//p' "$SIMPLE_LOG" | tail -n 1)"
+pixels="$(sed -n 's/^qemu_capture_fake_qmp_pixels=//p' "$SIMPLE_LOG" | tail -n 1)"
+pixel0="$(sed -n 's/^qemu_capture_fake_qmp_pixel0=//p' "$SIMPLE_LOG" | tail -n 1)"
+pixel1="$(sed -n 's/^qemu_capture_fake_qmp_pixel1=//p' "$SIMPLE_LOG" | tail -n 1)"
+error="$(sed -n 's/^qemu_capture_fake_qmp_error=//p' "$SIMPLE_LOG" | tail -n 1)"
+
+status=pass
+reason=fake-qmp-screendump-pass
+if [ "$simple_code" -ne 0 ] || [ "$server_code" -ne 0 ]; then
+    status=fail
+    reason=process-exit-failed
+elif [ "$success" != "true" ] || [ "$backend" != "qemu_vm" ] || [ "$width" != "2" ] || [ "$height" != "1" ] || [ "$pixels" != "2" ]; then
+    status=fail
+    reason=capture-fields-mismatch
+elif [ "$pixel0" != "4294901760" ] || [ "$pixel1" != "4278255360" ]; then
+    status=fail
+    reason=decoded-pixels-mismatch
+fi
+
+{
+    echo "# QEMU Capture Fake QMP Evidence - 2026-05-31"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- simple_exit_code: $simple_code"
+    echo "- fake_qmp_exit_code: $server_code"
+    echo "- backend: ${backend:-}"
+    echo "- dimensions: ${width:-0}x${height:-0}"
+    echo "- pixels: ${pixels:-0}"
+    echo "- pixel0_argb: ${pixel0:-}"
+    echo "- pixel1_argb: ${pixel1:-}"
+    echo "- error: ${error:-}"
+    echo "- socket_path: $SOCKET_PATH"
+    echo "- screendump_path: $SCREEN_PATH"
+} >"$REPORT_PATH"
+
+echo "qemu_capture_fake_qmp_status=$status"
+echo "qemu_capture_fake_qmp_reason=$reason"
+echo "qemu_capture_fake_qmp_report=$REPORT_PATH"
+
+if [ "$status" != "pass" ]; then
+    exit 1
+fi

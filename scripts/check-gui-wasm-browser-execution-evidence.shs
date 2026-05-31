@@ -1,0 +1,196 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/gui_wasm_browser_execution_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_wasm_browser_execution_evidence_$(date -u +%F).md}"
+ARTIFACT_BUILD_DIR="${GUI_WASM_ARTIFACT_BUILD_DIR:-build/gui_wasm_cli_artifact}"
+ARTIFACT_REPORT_PATH="${GUI_WASM_ARTIFACT_REPORT_PATH:-doc/09_report/gui_wasm_cli_artifact_$(date -u +%F).md}"
+TIMEOUT_SECS="${GUI_WASM_EXEC_TIMEOUT_SECS:-60}"
+ELECTRON_APP_PATH="$ROOT_DIR/tools/electron-wasm-gui-exec"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$BUILD_DIR"/*_browser_proof.json "$BUILD_DIR"/*.electron.out "$BUILD_DIR"/*.electron.err "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "gui_wasm_browser_execution_status=unavailable"
+        echo "gui_wasm_browser_execution_reason=$reason"
+        echo "gui_wasm_browser_execution_targets=hello,widget_matrix,builder_matrix"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# GUI WASM Browser Execution Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+for required in node npm xvfb-run; do
+    if ! have "$required"; then
+        emit_unavailable "missing-command:$required"
+        exit 1
+    fi
+done
+
+if [ ! -x "tools/electron-shell/node_modules/.bin/electron" ] && [ ! -x "tools/electron-shell/node_modules/electron/dist/electron" ]; then
+    emit_unavailable "missing-electron-dependency"
+    exit 1
+fi
+
+BUILD_DIR="$ARTIFACT_BUILD_DIR" \
+REPORT_PATH="$ARTIFACT_REPORT_PATH" \
+    sh scripts/check-gui-wasm-cli-artifact.shs >"$BUILD_DIR/artifact.out" 2>"$BUILD_DIR/artifact.err"
+
+overall_status=pass
+overall_reason=pass
+targets="hello widget_matrix builder_matrix"
+
+run_probe() {
+    name="$1"
+    wasm_path="$2"
+    proof_path="$BUILD_DIR/${name}_browser_proof.json"
+    electron_out="$BUILD_DIR/${name}.electron.out"
+    electron_err="$BUILD_DIR/${name}.electron.err"
+
+    if [ ! -s "$wasm_path" ]; then
+        echo "${name}|fail|missing-wasm-artifact|$wasm_path|$proof_path|0|false|false||missing|missing|missing|1"
+        return
+    fi
+
+    case "$wasm_path" in
+        /*) abs_wasm_path="$wasm_path" ;;
+        *) abs_wasm_path="$ROOT_DIR/$wasm_path" ;;
+    esac
+    case "$proof_path" in
+        /*) abs_proof_path="$proof_path" ;;
+        *) abs_proof_path="$ROOT_DIR/$proof_path" ;;
+    esac
+
+    set +e
+    if have timeout; then
+        timeout "$TIMEOUT_SECS" env GUI_WASM_EXEC_WASM_PATH="$abs_wasm_path" GUI_WASM_EXEC_PROOF_PATH="$abs_proof_path" \
+            xvfb-run -a --server-args="-screen 0 1280x720x24" \
+            npm --prefix tools/electron-shell exec -- electron --no-sandbox "$ELECTRON_APP_PATH" >"$electron_out" 2>"$electron_err"
+    else
+        GUI_WASM_EXEC_WASM_PATH="$abs_wasm_path" GUI_WASM_EXEC_PROOF_PATH="$abs_proof_path" \
+            xvfb-run -a --server-args="-screen 0 1280x720x24" \
+            npm --prefix tools/electron-shell exec -- electron --no-sandbox "$ELECTRON_APP_PATH" >"$electron_out" 2>"$electron_err"
+    fi
+    electron_code=$?
+    set -e
+
+    if [ ! -s "$proof_path" ]; then
+        echo "${name}|fail|missing-electron-proof|$wasm_path|$proof_path|0|false|false||missing|missing|missing|$electron_code"
+        return
+    fi
+
+    item_status="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const req=['simple_app_init','simple_app_render','simple_app_event']; const ok=p.browser_ready===true&&p.validate_result===true&&p.instantiate_result===true&&req.every(n=>(p.export_names||[]).includes(n)&&p.call_results&&p.call_results[n]==='called'); console.log(ok?'pass':'fail')" "$proof_path")"
+    item_reason=pass
+    if [ "$item_status" != "pass" ]; then
+        item_reason=browser-wasm-execution-failed
+    elif [ "$electron_code" -ne 0 ]; then
+        item_status=fail
+        item_reason="electron-exit-$electron_code"
+    fi
+
+    byte_size="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.byte_size||0))" "$proof_path")"
+    validate_result="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.validate_result))" "$proof_path")"
+    instantiate_result="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.instantiate_result))" "$proof_path")"
+    export_names="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log((p.export_names||[]).join(','))" "$proof_path")"
+    call_init="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.call_results&&p.call_results.simple_app_init||'')" "$proof_path")"
+    call_render="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.call_results&&p.call_results.simple_app_render||'')" "$proof_path")"
+    call_event="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.call_results&&p.call_results.simple_app_event||'')" "$proof_path")"
+
+    echo "${name}|${item_status}|${item_reason}|${wasm_path}|${proof_path}|${byte_size}|${validate_result}|${instantiate_result}|${export_names}|${call_init}|${call_render}|${call_event}|${electron_code}"
+}
+
+results=""
+results="${results}$(run_probe "hello" "$ARTIFACT_BUILD_DIR/hello_wasm_gui.wasm")
+"
+results="${results}$(run_probe "widget_matrix" "$ARTIFACT_BUILD_DIR/widget_matrix_wasm_gui.wasm")
+"
+results="${results}$(run_probe "builder_matrix" "$ARTIFACT_BUILD_DIR/builder_matrix_wasm_gui.wasm")
+"
+
+failure_reason="$(printf '%s' "$results" | awk -F'|' '$2=="fail"{print $1 "-" $3; exit}')"
+if [ -n "$failure_reason" ]; then
+    overall_status=fail
+    overall_reason="$failure_reason"
+fi
+
+{
+    echo "gui_wasm_browser_execution_status=$overall_status"
+    echo "gui_wasm_browser_execution_reason=$overall_reason"
+    echo "gui_wasm_browser_execution_targets=hello,widget_matrix,builder_matrix"
+    printf '%s' "$results" | while IFS='|' read -r name item_status item_reason wasm_path proof_path byte_size validate_result instantiate_result export_names call_init call_render call_event electron_code; do
+        [ -n "$name" ] || continue
+        echo "gui_wasm_browser_execution_${name}_status=$item_status"
+        echo "gui_wasm_browser_execution_${name}_reason=$item_reason"
+        echo "gui_wasm_browser_execution_${name}_wasm_path=$wasm_path"
+        echo "gui_wasm_browser_execution_${name}_proof_path=$proof_path"
+        echo "gui_wasm_browser_execution_${name}_byte_size=$byte_size"
+        echo "gui_wasm_browser_execution_${name}_validate=$validate_result"
+        echo "gui_wasm_browser_execution_${name}_instantiate=$instantiate_result"
+        echo "gui_wasm_browser_execution_${name}_exports=$export_names"
+        echo "gui_wasm_browser_execution_${name}_call_simple_app_init=$call_init"
+        echo "gui_wasm_browser_execution_${name}_call_simple_app_render=$call_render"
+        echo "gui_wasm_browser_execution_${name}_call_simple_app_event=$call_event"
+        echo "gui_wasm_browser_execution_${name}_electron_exit_code=$electron_code"
+    done
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# GUI WASM Browser Execution Evidence"
+    echo
+    echo "- status: $overall_status"
+    echo "- reason: $overall_reason"
+    echo "- targets: hello, widget_matrix, builder_matrix"
+    printf '%s' "$results" | while IFS='|' read -r name item_status item_reason wasm_path proof_path byte_size validate_result instantiate_result export_names call_init call_render call_event electron_code; do
+        [ -n "$name" ] || continue
+        echo
+        echo "## $name"
+        echo "- status: $item_status"
+        echo "- reason: $item_reason"
+        echo "- wasm path: $wasm_path"
+        echo "- proof path: $proof_path"
+        echo "- byte size: $byte_size"
+        echo "- WebAssembly.validate: $validate_result"
+        echo "- WebAssembly.instantiate: $instantiate_result"
+        echo "- exports: $export_names"
+        echo "- simple_app_init call: $call_init"
+        echo "- simple_app_render call: $call_render"
+        echo "- simple_app_event call: $call_event"
+        echo "- Electron exit code: $electron_code"
+    done
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    echo
+    echo "## Electron Output"
+    for out in "$BUILD_DIR"/*.electron.out; do
+        [ -f "$out" ] || continue
+        echo
+        echo "### $(basename "$out")"
+        sed 's/^/- /' "$out" 2>/dev/null || true
+    done
+    echo
+    echo "## Electron Error"
+    for err in "$BUILD_DIR"/*.electron.err; do
+        [ -f "$err" ] || continue
+        echo
+        echo "### $(basename "$err")"
+        sed 's/^/- /' "$err" 2>/dev/null || true
+    done
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+[ "$overall_status" = "pass" ]

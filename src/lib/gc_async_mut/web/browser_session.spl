@@ -23,7 +23,7 @@
 
 use common.string_builder.{StringBuilder}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
-use std.js.engine.runtime.{JsRuntime, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
+use std.js.engine.runtime.{JsRuntime, NATIVE_ARRAY_BUFFER_CONSTRUCTOR, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_UINT8_ARRAY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER, NATIVE_NODE_REQUIRE, NATIVE_NODE_BUFFER_BYTE_LENGTH, NATIVE_NODE_BUFFER_CONCAT, NATIVE_NODE_BUFFER_FROM, NATIVE_NODE_PROCESS_CWD, NATIVE_NODE_PROCESS_NEXT_TICK}
 use std.js.engine.js_error.{Logger, LogLevel}
 use std.js.types.js_types.{JsValue}
 use std.js.types.pair.{Pair}
@@ -219,7 +219,7 @@ class BrowserRuntimeState:
         local_storage: [Pair<text, text>],
         cookie_text: text
     ) -> BrowserRuntimeState:
-        val logger = Logger.new("browser-session-js", LogLevel.Error)
+        val logger = Logger.new(LogLevel.Error)
         var runtime = JsRuntime.new(logger)
         val global_env = runtime.interpreter.global_env
         val is_guest_runtime = url.starts_with("https://guest.runtime/")
@@ -339,6 +339,7 @@ class BrowserRuntimeState:
         runtime.set_host_property(window_id, "window", JsValue.Object(id: window_id))
         runtime.set_host_property(window_id, "self", JsValue.Object(id: window_id))
         runtime.set_host_property(window_id, "top", JsValue.Object(id: window_id))
+        runtime.set_host_property(window_id, "globalThis", JsValue.Object(id: window_id))
         runtime.set_host_property(window_id, "document", JsValue.Object(id: document_id))
         runtime.set_host_property(window_id, "location", JsValue.Object(id: location_id))
         runtime.set_host_property(window_id, "history", JsValue.Object(id: history_id))
@@ -351,33 +352,68 @@ class BrowserRuntimeState:
         runtime.set_host_property(window_id, "__simple_base_url", JsValue.String(v: url))
         runtime.set_host_property(window_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
         runtime.set_host_property(window_id, "__simple_modules", JsValue.Object(id: modules_id))
+        runtime._define_global_native("ArrayBuffer", NATIVE_ARRAY_BUFFER_CONSTRUCTOR)
+        runtime._define_global_native("Uint8Array", NATIVE_UINT8_ARRAY_CONSTRUCTOR)
+        runtime._define_global_native("require", NATIVE_NODE_REQUIRE)
+        match runtime.interpreter.lookup_global_value("ArrayBuffer"):
+            Some(v):
+                runtime.set_host_property(window_id, "ArrayBuffer", v)
+            _:
+                pass_dn
+        match runtime.interpreter.lookup_global_value("Uint8Array"):
+            Some(v):
+                runtime.set_host_property(window_id, "Uint8Array", v)
+            _:
+                pass_dn
+        match runtime.interpreter.lookup_global_value("require"):
+            Some(v):
+                runtime.set_host_property(window_id, "require", v)
+            _:
+                pass_dn
+        val node_process_id = runtime.create_host_object()
+        val node_versions_id = runtime.create_host_object()
+        val node_release_id = runtime.create_host_object()
+        val node_argv_id = runtime.create_host_object()
+        runtime.set_host_property(node_process_id, "platform", JsValue.String(v: "linux"))
+        runtime.set_host_property(node_process_id, "arch", JsValue.String(v: "x64"))
+        runtime.set_host_property(node_process_id, "version", JsValue.String(v: "v0.0.0-simple"))
+        runtime._define_method_on(node_process_id, "cwd", NATIVE_NODE_PROCESS_CWD)
+        runtime._define_method_on(node_process_id, "nextTick", NATIVE_NODE_PROCESS_NEXT_TICK)
+        val node_env_id = runtime.create_host_object()
+        runtime.set_host_property(node_process_id, "env", JsValue.Object(id: node_env_id))
+        runtime.set_host_property(node_argv_id, "0", JsValue.String(v: "simple"))
+        runtime.set_host_property(node_argv_id, "1", JsValue.String(v: ""))
+        runtime.set_host_property(node_argv_id, "0.0", JsValue.String(v: "simple"))
+        runtime.set_host_property(node_argv_id, "1.0", JsValue.String(v: ""))
+        runtime.set_host_property(node_argv_id, "length", JsValue.Number(v: 2.0))
+        runtime.set_host_property(node_process_id, "argv", JsValue.Array(id: node_argv_id))
+        runtime.set_host_property(node_versions_id, "node", JsValue.String(v: "0.0.0-simple"))
+        runtime.set_host_property(node_versions_id, "v8", JsValue.String(v: "simple-js"))
+        runtime.set_host_property(node_versions_id, "uv", JsValue.String(v: "unavailable"))
+        runtime.set_host_property(node_process_id, "versions", JsValue.Object(id: node_versions_id))
+        runtime.set_host_property(node_release_id, "name", JsValue.String(v: "node"))
+        runtime.set_host_property(node_release_id, "lts", JsValue.Boolean(v: false))
+        runtime.set_host_property(node_process_id, "release", JsValue.Object(id: node_release_id))
+        val node_buffer_id = runtime.create_host_object()
+        runtime._define_method_on(node_buffer_id, "byteLength", NATIVE_NODE_BUFFER_BYTE_LENGTH)
+        runtime._define_method_on(node_buffer_id, "from", NATIVE_NODE_BUFFER_FROM)
+        runtime._define_method_on(node_buffer_id, "concat", NATIVE_NODE_BUFFER_CONCAT)
+        runtime.set_host_property(window_id, "process", JsValue.Object(id: node_process_id))
+        runtime.set_host_property(window_id, "Buffer", JsValue.Object(id: node_buffer_id))
 
         val webassembly_id = runtime.create_host_object()
         runtime.set_host_property(webassembly_id, "__simple_wasm_host", JsValue.Boolean(v: true))
         runtime.set_host_property(webassembly_id, "instantiateStatus", JsValue.String(v: "available"))
         runtime.set_host_property(webassembly_id, "supportedTarget", JsValue.String(v: "wasm32"))
-        runtime._define_method_on(webassembly_id, "validate", -80)
-        runtime._define_method_on(webassembly_id, "instantiate", -81)
+        runtime._define_method_on(webassembly_id, "validate", NATIVE_WEBASSEMBLY_VALIDATE)
+        runtime._define_method_on(webassembly_id, "instantiate", NATIVE_WEBASSEMBLY_INSTANTIATE)
+        runtime._define_method_on(webassembly_id, "Module", NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR)
+        runtime._define_method_on(webassembly_id, "Instance", NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR)
         runtime.set_host_property(window_id, "WebAssembly", JsValue.Object(id: webassembly_id))
-
-        if not is_guest_runtime:
-            if val Some(console_val) = runtime.interpreter.lookup_global_value("console"):
-                runtime.set_host_property(window_id, "console", console_val)
-            if val Some(math_val) = runtime.interpreter.lookup_global_value("Math"):
-                runtime.set_host_property(window_id, "Math", math_val)
-            if val Some(json_val) = runtime.interpreter.lookup_global_value("JSON"):
-                runtime.set_host_property(window_id, "JSON", json_val)
-            if val Some(promise_val) = runtime.interpreter.lookup_global_value("Promise"):
-                runtime.set_host_property(window_id, "Promise", promise_val)
-            if val Some(fetch_val) = runtime.interpreter.lookup_global_value("fetch"):
-                runtime.set_host_property(window_id, "fetch", fetch_val)
-            if val Some(timeout_val) = runtime.interpreter.lookup_global_value("setTimeout"):
-                runtime.set_host_property(window_id, "setTimeout", timeout_val)
-            if val Some(interval_val) = runtime.interpreter.lookup_global_value("setInterval"):
-                runtime.set_host_property(window_id, "setInterval", interval_val)
 
         runtime.interpreter.define_global_value("window", JsValue.Object(id: window_id))
         runtime.interpreter.define_global_value("self", JsValue.Object(id: window_id))
+        runtime.interpreter.define_global_value("globalThis", JsValue.Object(id: window_id))
         runtime.interpreter.define_global_value("document", JsValue.Object(id: document_id))
         runtime.interpreter.define_global_value("location", JsValue.Object(id: location_id))
         runtime.interpreter.define_global_value("history", JsValue.Object(id: history_id))
@@ -386,6 +422,8 @@ class BrowserRuntimeState:
         runtime.interpreter.define_global_value("sessionStorage", JsValue.Object(id: session_storage_id))
         runtime.interpreter.define_global_value("localStorage", JsValue.Object(id: local_storage_id))
         runtime.interpreter.define_global_value("WebAssembly", JsValue.Object(id: webassembly_id))
+        runtime.interpreter.define_global_value("process", JsValue.Object(id: node_process_id))
+        runtime.interpreter.define_global_value("Buffer", JsValue.Object(id: node_buffer_id))
         runtime.interpreter.define_global_value("__simple_modules", JsValue.Object(id: modules_id))
         var interpreter = runtime.interpreter
         interpreter.host_window_id = window_id

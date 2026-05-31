@@ -1,0 +1,805 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/vector_font_compute_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/vector_font_compute_evidence_$(date -u +%F).md}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+SIMPLE_SRC="$BUILD_DIR/vector_font_compute_evidence.spl"
+SIMPLE_OUT="$BUILD_DIR/simple.out"
+TEXT_RUN="${VECTOR_FONT_TEXT_RUN:-HARDENED}"
+FONT_SIZE="${VECTOR_FONT_SIZE:-24}"
+ITERATIONS="${VECTOR_FONT_ITERATIONS:-4}"
+
+CUDA_STATUS="${CUDA_VECTOR_FONT_STATUS:-unavailable}"
+CUDA_REASON="${CUDA_VECTOR_FONT_REASON:-missing-vector-font-cuda-kernel}"
+CUDA_CHECKSUM="${CUDA_VECTOR_FONT_CHECKSUM:-0}"
+CUDA_INK_PIXELS="${CUDA_VECTOR_FONT_INK_PIXELS:-0}"
+OPENCL_STATUS="${OPENCL_VECTOR_FONT_STATUS:-unavailable}"
+OPENCL_REASON="${OPENCL_VECTOR_FONT_REASON:-missing-vector-font-opencl-kernel}"
+OPENCL_CHECKSUM="${OPENCL_VECTOR_FONT_CHECKSUM:-0}"
+OPENCL_INK_PIXELS="${OPENCL_VECTOR_FONT_INK_PIXELS:-0}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$REPORT_PATH"
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "vector_font_compute_status=unavailable"
+        echo "vector_font_compute_reason=$reason"
+        echo "vector_font_compute_cpu_checksum=0"
+        echo "vector_font_compute_cpu_ink_pixels=0"
+        echo "vector_font_compute_cuda_status=$CUDA_STATUS"
+        echo "vector_font_compute_cuda_reason=$CUDA_REASON"
+        echo "vector_font_compute_opencl_status=$OPENCL_STATUS"
+        echo "vector_font_compute_opencl_reason=$OPENCL_REASON"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# Vector Font Compute Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    emit_unavailable "missing-simple-bin"
+    exit 1
+fi
+
+cat >"$SIMPLE_SRC" <<SIMPLE_EOF
+extern fn rt_time_now_nanos() -> i64
+extern fn rt_env_get(key: text) -> text?
+
+use common.ui.web_render_api.{web_render_vector_font_compute_evidence}
+use std.gc_sync_mut.text_layout.font_renderer.{FontRenderer}
+use std.gc_sync_mut.text_layout.font_rasterizer.{rasterize_vector, reset_vector_font_raster_stats, vector_font_raster_stats, vector_font_accelerator_stats}
+use std.gc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands}
+
+val TEXT_RUN: text = "$TEXT_RUN"
+val FONT_SIZE: i32 = $FONT_SIZE
+val ITERATIONS: i64 = $ITERATIONS
+
+fn env_text(key: text, fallback: text) -> text:
+    rt_env_get(key) ?? fallback
+
+fn env_i64(key: text, fallback: i64) -> i64:
+    (rt_env_get(key) ?? fallback.to_text()).parse_i64() ?? fallback
+
+fn glyph_checksum(codepoint: i32) -> i64:
+    val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, FONT_SIZE)
+    var sum: i64 = 0
+    var i = 0
+    while i < glyph.pixels.len():
+        val alpha = glyph.pixels[i].to_i64()
+        if alpha > 0:
+            sum = sum + alpha * ((i + 1) as i64)
+        i = i + 1
+    sum + (glyph.width.to_i64() * 31) + (glyph.height.to_i64() * 17) + glyph.advance.to_i64()
+
+fn glyph_ink_pixels(codepoint: i32) -> i64:
+    val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, FONT_SIZE)
+    var ink_pixels: i64 = 0
+    var p = 0
+    while p < glyph.pixels.len():
+        if glyph.pixels[p].to_i64() > 0:
+            ink_pixels = ink_pixels + 1
+        p = p + 1
+    ink_pixels
+
+fn glyph_command_count(codepoint: i32) -> i32:
+    vf_glyph_commands(codepoint).len()
+
+fn glyph_command_at(codepoint: i32, index: i32) -> i32:
+    val commands = vf_glyph_commands(codepoint)
+    if index >= 0 and index < commands.len():
+        return commands[index]
+    0
+
+fn glyph_width(codepoint: i32) -> i32:
+    val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, FONT_SIZE)
+    glyph.width
+
+fn run_checksum() -> (i64, i64):
+    var checksum: i64 = 0
+    var ink_pixels: i64 = 0
+    var i = 0
+    while i < TEXT_RUN.len():
+        val codepoint = TEXT_RUN.char_code_at(i) as i32
+        val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, FONT_SIZE)
+        checksum = checksum + glyph_checksum(codepoint) * ((i + 1) as i64)
+        var p = 0
+        while p < glyph.pixels.len():
+            if glyph.pixels[p].to_i64() > 0:
+                ink_pixels = ink_pixels + 1
+            p = p + 1
+        i = i + 1
+    (checksum, ink_pixels)
+
+fn production_text_render_checksum_for(run: text, size: i32) -> (i64, i64, i64, i64, i64, i64, i64, i64, text):
+    reset_vector_font_raster_stats()
+    var renderer = FontRenderer.new()
+    val width = 256
+    val height = 64
+    val bg = 0xFF000000u32
+    var buffer: [u32] = [bg; width * height]
+    val pixels = renderer.render_text(buffer, width, height, 4, 8, run, 0xFFFFFFFFu32, size)
+    val stats = vector_font_raster_stats()
+    val accel = vector_font_accelerator_stats()
+    var checksum: i64 = 0
+    var ink_pixels: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        val pixel = pixels[i]
+        if pixel != bg:
+            ink_pixels = ink_pixels + 1
+            checksum = checksum + pixel.to_i64() * ((i + 1) as i64)
+        i = i + 1
+    (checksum, ink_pixels, stats.glyph_rasterizations, stats.output_pixels, accel.attempts, accel.cuda_hits, accel.opencl_hits, accel.cpu_fallback_hits, accel.unavailable_reason)
+
+fn production_text_render_checksum() -> (i64, i64, i64, i64, i64, i64, i64, i64, text):
+    production_text_render_checksum_for(TEXT_RUN, FONT_SIZE)
+
+fn main():
+    val warm = run_checksum()
+    val production = production_text_render_checksum()
+    var checksum: i64 = 0
+    var ink_pixels: i64 = 0
+    val start = rt_time_now_nanos()
+    var iter: i64 = 0
+    while iter < ITERATIONS:
+        val result = run_checksum()
+        checksum = result.0
+        ink_pixels = result.1
+        iter = iter + 1
+    val elapsed = rt_time_now_nanos() - start
+    var frame_us = elapsed / ITERATIONS / 1000
+    if frame_us <= 0:
+        frame_us = 1
+    val cuda_status = env_text("CUDA_VECTOR_FONT_STATUS", "$CUDA_STATUS")
+    val cuda_reason = env_text("CUDA_VECTOR_FONT_REASON", "$CUDA_REASON")
+    val cuda_checksum = env_i64("CUDA_VECTOR_FONT_CHECKSUM", $CUDA_CHECKSUM)
+    val opencl_status = env_text("OPENCL_VECTOR_FONT_STATUS", "$OPENCL_STATUS")
+    val opencl_reason = env_text("OPENCL_VECTOR_FONT_REASON", "$OPENCL_REASON")
+    val opencl_checksum = env_i64("OPENCL_VECTOR_FONT_CHECKSUM", $OPENCL_CHECKSUM)
+    val evidence = web_render_vector_font_compute_evidence("wm-vector-text-grid", checksum, ink_pixels, cuda_status, cuda_reason, cuda_checksum, opencl_status, opencl_reason, opencl_checksum, false)
+    print "vector_font_compute_status={evidence.status}"
+    print "vector_font_compute_reason={evidence.reason}"
+    print "vector_font_compute_scene=wm-vector-text-grid"
+    print "vector_font_compute_text_run={TEXT_RUN}"
+    print "vector_font_compute_font_size={FONT_SIZE}"
+    print "vector_font_compute_iterations={ITERATIONS}"
+    print "vector_font_compute_cpu_warm_checksum={warm.0}"
+    print "vector_font_compute_cpu_checksum={checksum}"
+    print "vector_font_compute_cpu_ink_pixels={ink_pixels}"
+    print "vector_font_compute_cpu_frame_us={frame_us}"
+    print "vector_font_compute_production_render_checksum={production.0}"
+    print "vector_font_compute_production_render_ink_pixels={production.1}"
+    print "vector_font_compute_production_vector_raster_hits={production.2}"
+    print "vector_font_compute_production_vector_output_pixels={production.3}"
+    print "vector_font_compute_production_accelerator_attempts={production.4}"
+    print "vector_font_compute_production_cuda_hits={production.5}"
+    print "vector_font_compute_production_opencl_hits={production.6}"
+    print "vector_font_compute_production_cpu_fallback_hits={production.7}"
+    print "vector_font_compute_production_accelerator_unavailable_reason={production.8}"
+    val matrix_a = production_text_render_checksum_for("CUDAOPENCL", 16)
+    val matrix_b = production_text_render_checksum_for("GUIWM", 24)
+    val matrix_c = production_text_render_checksum_for("FontRender", 32)
+    print "vector_font_compute_matrix_0_text=CUDAOPENCL"
+    print "vector_font_compute_matrix_0_font_size=16"
+    print "vector_font_compute_matrix_0_checksum={matrix_a.0}"
+    print "vector_font_compute_matrix_0_ink_pixels={matrix_a.1}"
+    print "vector_font_compute_matrix_0_vector_raster_hits={matrix_a.2}"
+    print "vector_font_compute_matrix_0_cpu_fallback_hits={matrix_a.7}"
+    print "vector_font_compute_matrix_1_text=GUIWM"
+    print "vector_font_compute_matrix_1_font_size=24"
+    print "vector_font_compute_matrix_1_checksum={matrix_b.0}"
+    print "vector_font_compute_matrix_1_ink_pixels={matrix_b.1}"
+    print "vector_font_compute_matrix_1_vector_raster_hits={matrix_b.2}"
+    print "vector_font_compute_matrix_1_cpu_fallback_hits={matrix_b.7}"
+    print "vector_font_compute_matrix_2_text=FontRender"
+    print "vector_font_compute_matrix_2_font_size=32"
+    print "vector_font_compute_matrix_2_checksum={matrix_c.0}"
+    print "vector_font_compute_matrix_2_ink_pixels={matrix_c.1}"
+    print "vector_font_compute_matrix_2_vector_raster_hits={matrix_c.2}"
+    print "vector_font_compute_matrix_2_cpu_fallback_hits={matrix_c.7}"
+    var glyph_idx = 0
+    while glyph_idx < TEXT_RUN.len():
+        val codepoint = TEXT_RUN.char_code_at(glyph_idx) as i32
+        print "vector_font_compute_glyph_{glyph_idx}_checksum={glyph_checksum(codepoint)}"
+        print "vector_font_compute_glyph_{glyph_idx}_ink_pixels={glyph_ink_pixels(codepoint)}"
+        print "vector_font_compute_glyph_{glyph_idx}_codepoint={codepoint}"
+        print "vector_font_compute_glyph_{glyph_idx}_width={glyph_width(codepoint)}"
+        val command_count = glyph_command_count(codepoint)
+        print "vector_font_compute_glyph_{glyph_idx}_command_count={command_count}"
+        var command_idx = 0
+        while command_idx < command_count:
+            print "vector_font_compute_glyph_{glyph_idx}_command_{command_idx}={glyph_command_at(codepoint, command_idx)}"
+            command_idx = command_idx + 1
+        glyph_idx = glyph_idx + 1
+    print "vector_font_compute_cuda_status={cuda_status}"
+    print "vector_font_compute_cuda_reason={cuda_reason}"
+    print "vector_font_compute_cuda_checksum={cuda_checksum}"
+    print "vector_font_compute_opencl_status={opencl_status}"
+    print "vector_font_compute_opencl_reason={opencl_reason}"
+    print "vector_font_compute_opencl_checksum={opencl_checksum}"
+    print "vector_font_compute_blur_or_tolerance_used=false"
+    print "vector_font_compute_summary={evidence.summary()}"
+
+main()
+SIMPLE_EOF
+
+set +e
+CUDA_VECTOR_FONT_STATUS="$CUDA_STATUS" \
+CUDA_VECTOR_FONT_REASON="$CUDA_REASON" \
+CUDA_VECTOR_FONT_CHECKSUM="$CUDA_CHECKSUM" \
+OPENCL_VECTOR_FONT_STATUS="$OPENCL_STATUS" \
+OPENCL_VECTOR_FONT_REASON="$OPENCL_REASON" \
+OPENCL_VECTOR_FONT_CHECKSUM="$OPENCL_CHECKSUM" \
+SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_OUT" 2>&1
+simple_code=$?
+set -e
+
+if [ "$simple_code" -ne 0 ]; then
+    emit_unavailable "simple-vector-font-evidence-failed"
+    {
+        echo
+        echo "## Simple Output"
+        sed 's/^/- /' "$SIMPLE_OUT" 2>/dev/null || true
+    } >>"$REPORT_PATH"
+    exit 1
+fi
+
+value_of() {
+    key="$1"
+    sed -n "s/^${key}=//p" "$SIMPLE_OUT" | tail -n 1
+}
+
+cpu_checksum="$(value_of vector_font_compute_cpu_checksum)"
+cpu_ink_pixels="$(value_of vector_font_compute_cpu_ink_pixels)"
+
+write_vector_font_arrays_h() {
+    out="$1"
+    {
+        echo "#ifndef VECTOR_FONT_EVIDENCE_ARRAYS_H"
+        echo "#define VECTOR_FONT_EVIDENCE_ARRAYS_H"
+        echo "#define VECTOR_FONT_GLYPH_COUNT ${#TEXT_RUN}"
+        echo "#define VECTOR_FONT_FONT_SIZE $FONT_SIZE"
+        echo "#ifdef __CUDACC__"
+        echo "#define VECTOR_FONT_TABLE __constant__"
+        echo "#else"
+        echo "#define VECTOR_FONT_TABLE static const"
+        echo "#endif"
+        total_commands=0
+        i=0
+        while [ "$i" -lt "${#TEXT_RUN}" ]; do
+            command_count="$(value_of "vector_font_compute_glyph_${i}_command_count")"
+            total_commands=$((total_commands + command_count))
+            i=$((i + 1))
+        done
+        echo "#define VECTOR_FONT_COMMAND_COUNT $total_commands"
+        printf "VECTOR_FONT_TABLE int glyph_widths[VECTOR_FONT_GLYPH_COUNT] = {"
+        i=0
+        while [ "$i" -lt "${#TEXT_RUN}" ]; do
+            if [ "$i" -gt 0 ]; then
+                printf ", "
+            fi
+            printf "%s" "$(value_of "vector_font_compute_glyph_${i}_width")"
+            i=$((i + 1))
+        done
+        echo "};"
+        printf "VECTOR_FONT_TABLE int glyph_command_offsets[VECTOR_FONT_GLYPH_COUNT] = {"
+        offset=0
+        i=0
+        while [ "$i" -lt "${#TEXT_RUN}" ]; do
+            if [ "$i" -gt 0 ]; then
+                printf ", "
+            fi
+            printf "%s" "$offset"
+            command_count="$(value_of "vector_font_compute_glyph_${i}_command_count")"
+            offset=$((offset + command_count))
+            i=$((i + 1))
+        done
+        echo "};"
+        printf "VECTOR_FONT_TABLE int glyph_command_counts[VECTOR_FONT_GLYPH_COUNT] = {"
+        i=0
+        while [ "$i" -lt "${#TEXT_RUN}" ]; do
+            if [ "$i" -gt 0 ]; then
+                printf ", "
+            fi
+            printf "%s" "$(value_of "vector_font_compute_glyph_${i}_command_count")"
+            i=$((i + 1))
+        done
+        echo "};"
+        printf "VECTOR_FONT_TABLE int glyph_commands[VECTOR_FONT_COMMAND_COUNT] = {"
+        first=1
+        i=0
+        while [ "$i" -lt "${#TEXT_RUN}" ]; do
+            command_count="$(value_of "vector_font_compute_glyph_${i}_command_count")"
+            j=0
+            while [ "$j" -lt "$command_count" ]; do
+                if [ "$first" -eq 0 ]; then
+                    printf ", "
+                fi
+                printf "%s" "$(value_of "vector_font_compute_glyph_${i}_command_${j}")"
+                first=0
+                j=$((j + 1))
+            done
+            i=$((i + 1))
+        done
+        echo "};"
+        echo "#endif"
+    } >"$out"
+}
+
+run_cuda_vector_font_kernel() {
+    if ! command -v nvcc >/dev/null 2>&1; then
+        CUDA_STATUS="unavailable"
+        CUDA_REASON="missing-nvcc"
+        CUDA_CHECKSUM=0
+        CUDA_INK_PIXELS=0
+        return
+    fi
+    if ! command -v nvidia-smi >/dev/null 2>&1 || ! nvidia-smi -L >"$BUILD_DIR/cuda_devices.out" 2>"$BUILD_DIR/cuda_devices.err"; then
+        CUDA_STATUS="unavailable"
+        CUDA_REASON="missing-cuda-device"
+        CUDA_CHECKSUM=0
+        CUDA_INK_PIXELS=0
+        return
+    fi
+    arrays_h="$BUILD_DIR/vector_font_arrays.h"
+    write_vector_font_arrays_h "$arrays_h"
+    cuda_src="$BUILD_DIR/vector_font_cuda_kernel.cu"
+    cuda_bin="$BUILD_DIR/vector_font_cuda_kernel"
+    cat >"$cuda_src" <<'CUDA_EOF'
+#include <cstdio>
+#include <cuda_runtime.h>
+#include "vector_font_arrays.h"
+
+__device__ int vf_point_inside(const int *commands, int count, int px, int py, int scale_n, int scale_d) {
+    int crossings = 0;
+    int move_x = 0, move_y = 0, cur_x = 0, cur_y = 0;
+    for (int i = 0; i + 2 < count; i += 3) {
+        int cmd = commands[i];
+        int cx = commands[i + 1] * scale_n / scale_d;
+        int cy = commands[i + 2] * scale_n / scale_d;
+        if (cmd == 0) {
+            move_x = cx; move_y = cy; cur_x = cx; cur_y = cy;
+        } else if (cmd == 1) {
+            int y1 = cur_y, y2 = cy;
+            if ((y1 <= py && py < y2) || (y2 <= py && py < y1)) {
+                int dy = y2 - y1;
+                if (dy != 0) {
+                    int ix = cur_x + (py - y1) * (cx - cur_x) / dy;
+                    if (px < ix) crossings++;
+                }
+            }
+            cur_x = cx; cur_y = cy;
+        } else if (cmd == 2) {
+            int y1 = cur_y, y2 = move_y;
+            if ((y1 <= py && py < y2) || (y2 <= py && py < y1)) {
+                int dy = y2 - y1;
+                if (dy != 0) {
+                    int ix = cur_x + (py - y1) * (move_x - cur_x) / dy;
+                    if (px < ix) crossings++;
+                }
+            }
+            cur_x = move_x; cur_y = move_y;
+        } else if (cmd == 3) {
+            return crossings % 2 == 1;
+        }
+    }
+    return crossings % 2 == 1;
+}
+
+__global__ void vector_font_rasterize(unsigned long long *out) {
+    unsigned long long text_checksum = 0;
+    unsigned long long text_ink = 0;
+    for (int glyph = 0; glyph < VECTOR_FONT_GLYPH_COUNT; ++glyph) {
+        int width = glyph_widths[glyph];
+        int height = VECTOR_FONT_FONT_SIZE;
+        int advance = width + 1;
+        const int *commands = glyph_commands + glyph_command_offsets[glyph];
+        int command_count = glyph_command_counts[glyph];
+        int scale_n = VECTOR_FONT_FONT_SIZE * 2;
+        int scale_d = 48;
+        unsigned long long glyph_checksum = 0;
+        unsigned long long glyph_ink = 0;
+        for (int row = 0; row < height; ++row) {
+            for (int col = 0; col < width; ++col) {
+                int coverage = 0;
+                coverage += vf_point_inside(commands, command_count, col * 2, row * 2, scale_n, scale_d);
+                coverage += vf_point_inside(commands, command_count, col * 2 + 1, row * 2, scale_n, scale_d);
+                coverage += vf_point_inside(commands, command_count, col * 2, row * 2 + 1, scale_n, scale_d);
+                coverage += vf_point_inside(commands, command_count, col * 2 + 1, row * 2 + 1, scale_n, scale_d);
+                int alpha = coverage * 255 / 4;
+                if (alpha > 0) {
+                    int pixel_index = row * width + col;
+                    glyph_checksum += (unsigned long long)alpha * (unsigned long long)(pixel_index + 1);
+                    glyph_ink++;
+                }
+            }
+        }
+        glyph_checksum += (unsigned long long)width * 31ULL + (unsigned long long)height * 17ULL + (unsigned long long)advance;
+        text_checksum += glyph_checksum * (unsigned long long)(glyph + 1);
+        text_ink += glyph_ink;
+    }
+    out[0] = text_checksum;
+    out[1] = text_ink;
+}
+
+int main() {
+    unsigned long long *d_out = nullptr;
+    unsigned long long host_out[2] = {0, 0};
+    cudaError_t rc = cudaMalloc(&d_out, sizeof(host_out));
+    if (rc != cudaSuccess) { std::printf("status=fail\nreason=cuda-malloc-out:%s\n", cudaGetErrorString(rc)); return 2; }
+    vector_font_rasterize<<<1, 1>>>(d_out);
+    rc = cudaDeviceSynchronize();
+    if (rc != cudaSuccess) { std::printf("status=fail\nreason=cuda-kernel:%s\n", cudaGetErrorString(rc)); return 2; }
+    cudaMemcpy(host_out, d_out, sizeof(host_out), cudaMemcpyDeviceToHost);
+    std::printf("status=pass\nreason=cuda-vector-font-rasterize-kernel-matched-cpu\nchecksum=%llu\nink_pixels=%llu\n", host_out[0], host_out[1]);
+    cudaFree(d_out);
+    return 0;
+}
+CUDA_EOF
+    if ! nvcc -O2 -std=c++17 -I"$BUILD_DIR" -o "$cuda_bin" "$cuda_src" >"$BUILD_DIR/cuda_build.out" 2>"$BUILD_DIR/cuda_build.err"; then
+        CUDA_STATUS="unavailable"
+        CUDA_REASON="cuda-kernel-build-failed"
+        CUDA_CHECKSUM=0
+        CUDA_INK_PIXELS=0
+        return
+    fi
+    if "$cuda_bin" >"$BUILD_DIR/cuda_run.out" 2>"$BUILD_DIR/cuda_run.err"; then
+        CUDA_STATUS="$(sed -n 's/^status=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
+        CUDA_REASON="$(sed -n 's/^reason=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
+        CUDA_CHECKSUM="$(sed -n 's/^checksum=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
+        CUDA_INK_PIXELS="$(sed -n 's/^ink_pixels=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
+        if [ "$CUDA_STATUS" = "pass" ] && { [ "$CUDA_CHECKSUM" != "$cpu_checksum" ] || [ "$CUDA_INK_PIXELS" != "$cpu_ink_pixels" ]; }; then
+            CUDA_STATUS="fail"
+            CUDA_REASON="cuda-vector-font-kernel-mismatch"
+        fi
+    else
+        CUDA_STATUS="unavailable"
+        CUDA_REASON="$(sed -n 's/^reason=//p' "$BUILD_DIR/cuda_run.out" | tail -n 1)"
+        if [ -z "$CUDA_REASON" ]; then
+            CUDA_REASON="cuda-kernel-run-failed"
+        fi
+        CUDA_CHECKSUM=0
+        CUDA_INK_PIXELS=0
+    fi
+}
+
+run_opencl_vector_font_kernel() {
+    if ! command -v clinfo >/dev/null 2>&1; then
+        OPENCL_STATUS="unavailable"
+        OPENCL_REASON="missing-clinfo"
+        OPENCL_CHECKSUM=0
+        OPENCL_INK_PIXELS=0
+        return
+    fi
+    if ! clinfo >"$BUILD_DIR/opencl_devices.out" 2>"$BUILD_DIR/opencl_devices.err"; then
+        OPENCL_STATUS="unavailable"
+        OPENCL_REASON="opencl-runtime-probe-failed"
+        OPENCL_CHECKSUM=0
+        OPENCL_INK_PIXELS=0
+        return
+    fi
+    arrays_h="$BUILD_DIR/vector_font_arrays.h"
+    write_vector_font_arrays_h "$arrays_h"
+    opencl_src="$BUILD_DIR/vector_font_opencl_kernel.c"
+    opencl_bin="$BUILD_DIR/vector_font_opencl_kernel"
+    cat >"$opencl_src" <<'OPENCL_EOF'
+#include <CL/cl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "vector_font_arrays.h"
+
+static const char *kernel_source =
+"int vf_point_inside(__constant const int *commands, int count, int px, int py, int scale_n, int scale_d) {"
+"  int crossings = 0, move_x = 0, move_y = 0, cur_x = 0, cur_y = 0;"
+"  for (int i = 0; i + 2 < count; i += 3) {"
+"    int cmd = commands[i]; int cx = commands[i + 1] * scale_n / scale_d; int cy = commands[i + 2] * scale_n / scale_d;"
+"    if (cmd == 0) { move_x = cx; move_y = cy; cur_x = cx; cur_y = cy; }"
+"    else if (cmd == 1) { int y1 = cur_y, y2 = cy; if ((y1 <= py && py < y2) || (y2 <= py && py < y1)) { int dy = y2 - y1; if (dy != 0) { int ix = cur_x + (py - y1) * (cx - cur_x) / dy; if (px < ix) crossings++; }} cur_x = cx; cur_y = cy; }"
+"    else if (cmd == 2) { int y1 = cur_y, y2 = move_y; if ((y1 <= py && py < y2) || (y2 <= py && py < y1)) { int dy = y2 - y1; if (dy != 0) { int ix = cur_x + (py - y1) * (move_x - cur_x) / dy; if (px < ix) crossings++; }} cur_x = move_x; cur_y = move_y; }"
+"    else if (cmd == 3) { return crossings % 2 == 1; }"
+"  }"
+"  return crossings % 2 == 1;"
+"}"
+"__kernel void vector_font_rasterize(__constant const int *widths, __constant const int *offsets, __constant const int *counts, __constant const int *commands, __global ulong *out) {"
+"  ulong text_checksum = 0; ulong text_ink = 0;"
+"  for (int glyph = 0; glyph < VECTOR_FONT_GLYPH_COUNT; ++glyph) {"
+"    int width = widths[glyph]; int height = VECTOR_FONT_FONT_SIZE; int advance = width + 1;"
+"    __constant const int *glyph_commands = commands + offsets[glyph]; int command_count = counts[glyph];"
+"    int scale_n = VECTOR_FONT_FONT_SIZE * 2; int scale_d = 48; ulong glyph_checksum = 0; ulong glyph_ink = 0;"
+"    for (int row = 0; row < height; ++row) { for (int col = 0; col < width; ++col) {"
+"      int coverage = 0;"
+"      coverage += vf_point_inside(glyph_commands, command_count, col * 2, row * 2, scale_n, scale_d);"
+"      coverage += vf_point_inside(glyph_commands, command_count, col * 2 + 1, row * 2, scale_n, scale_d);"
+"      coverage += vf_point_inside(glyph_commands, command_count, col * 2, row * 2 + 1, scale_n, scale_d);"
+"      coverage += vf_point_inside(glyph_commands, command_count, col * 2 + 1, row * 2 + 1, scale_n, scale_d);"
+"      int alpha = coverage * 255 / 4;"
+"      if (alpha > 0) { int pixel_index = row * width + col; glyph_checksum += (ulong)alpha * (ulong)(pixel_index + 1); glyph_ink++; }"
+"    }}"
+"    glyph_checksum += (ulong)width * 31UL + (ulong)height * 17UL + (ulong)advance;"
+"    text_checksum += glyph_checksum * (ulong)(glyph + 1); text_ink += glyph_ink;"
+"  }"
+"  out[0] = text_checksum; out[1] = text_ink;"
+"}";
+
+int main() {
+    cl_int err = 0;
+    cl_uint platform_count = 0;
+    err = clGetPlatformIDs(0, NULL, &platform_count);
+    if (err != CL_SUCCESS || platform_count == 0) { printf("status=unavailable\nreason=opencl-no-platform\n"); return 2; }
+    cl_platform_id platform = NULL;
+    clGetPlatformIDs(1, &platform, NULL);
+    cl_device_id device = NULL;
+    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
+    if (err != CL_SUCCESS) err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_DEFAULT, 1, &device, NULL);
+    if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-no-device\n"); return 2; }
+    cl_context context = clCreateContext(NULL, 1, &device, NULL, NULL, &err);
+    if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-create-context\n"); return 2; }
+    cl_command_queue queue = clCreateCommandQueueWithProperties(context, device, NULL, &err);
+    if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-create-queue\n"); return 2; }
+    cl_program program = clCreateProgramWithSource(context, 1, &kernel_source, NULL, &err);
+    if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-create-program\n"); return 2; }
+    char opts[96];
+    snprintf(opts, sizeof(opts), "-D VECTOR_FONT_GLYPH_COUNT=%d -D VECTOR_FONT_FONT_SIZE=%d", VECTOR_FONT_GLYPH_COUNT, VECTOR_FONT_FONT_SIZE);
+    err = clBuildProgram(program, 1, &device, opts, NULL, NULL);
+    if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-build-program\n"); return 2; }
+    cl_kernel kernel = clCreateKernel(program, "vector_font_rasterize", &err);
+    if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-create-kernel\n"); return 2; }
+    unsigned long long out[2] = {0, 0};
+    cl_mem d_widths = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(glyph_widths), (void*)glyph_widths, &err);
+    if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-buffer-widths\n"); return 2; }
+    cl_mem d_offsets = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(glyph_command_offsets), (void*)glyph_command_offsets, &err);
+    if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-buffer-offsets\n"); return 2; }
+    cl_mem d_counts = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(glyph_command_counts), (void*)glyph_command_counts, &err);
+    if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-buffer-counts\n"); return 2; }
+    cl_mem d_commands = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(glyph_commands), (void*)glyph_commands, &err);
+    if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-buffer-commands\n"); return 2; }
+    cl_mem d_out = clCreateBuffer(context, CL_MEM_WRITE_ONLY, sizeof(out), NULL, &err);
+    if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-buffer-out\n"); return 2; }
+    clSetKernelArg(kernel, 0, sizeof(cl_mem), &d_widths);
+    clSetKernelArg(kernel, 1, sizeof(cl_mem), &d_offsets);
+    clSetKernelArg(kernel, 2, sizeof(cl_mem), &d_counts);
+    clSetKernelArg(kernel, 3, sizeof(cl_mem), &d_commands);
+    clSetKernelArg(kernel, 4, sizeof(cl_mem), &d_out);
+    size_t global = 1;
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &global, NULL, 0, NULL, NULL);
+    if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-enqueue-kernel\n"); return 2; }
+    clFinish(queue);
+    err = clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0, sizeof(out), out, 0, NULL, NULL);
+    if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-readback\n"); return 2; }
+    printf("status=pass\nreason=opencl-vector-font-rasterize-kernel-matched-cpu\nchecksum=%llu\nink_pixels=%llu\n", out[0], out[1]);
+    return 0;
+}
+OPENCL_EOF
+    if ! cc -O2 -I"$BUILD_DIR" -o "$opencl_bin" "$opencl_src" -lOpenCL >"$BUILD_DIR/opencl_build.out" 2>"$BUILD_DIR/opencl_build.err"; then
+        OPENCL_STATUS="unavailable"
+        OPENCL_REASON="opencl-kernel-build-failed"
+        OPENCL_CHECKSUM=0
+        OPENCL_INK_PIXELS=0
+        return
+    fi
+    if "$opencl_bin" >"$BUILD_DIR/opencl_run.out" 2>"$BUILD_DIR/opencl_run.err"; then
+        OPENCL_STATUS="$(sed -n 's/^status=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+        OPENCL_REASON="$(sed -n 's/^reason=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+        OPENCL_CHECKSUM="$(sed -n 's/^checksum=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+        OPENCL_INK_PIXELS="$(sed -n 's/^ink_pixels=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+        if [ "$OPENCL_STATUS" = "pass" ] && { [ "$OPENCL_CHECKSUM" != "$cpu_checksum" ] || [ "$OPENCL_INK_PIXELS" != "$cpu_ink_pixels" ]; }; then
+            OPENCL_STATUS="fail"
+            OPENCL_REASON="opencl-vector-font-kernel-mismatch"
+        fi
+    else
+        OPENCL_STATUS="$(sed -n 's/^status=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+        OPENCL_REASON="$(sed -n 's/^reason=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
+        if [ -z "$OPENCL_STATUS" ]; then
+            OPENCL_STATUS="unavailable"
+        fi
+        if [ -z "$OPENCL_REASON" ]; then
+            OPENCL_REASON="opencl-kernel-run-failed"
+        fi
+        OPENCL_CHECKSUM=0
+        OPENCL_INK_PIXELS=0
+    fi
+}
+
+if [ "${CUDA_VECTOR_FONT_STATUS:-}" = "" ] && [ "${CUDA_VECTOR_FONT_REASON:-}" = "" ]; then
+    run_cuda_vector_font_kernel
+fi
+
+if [ "${OPENCL_VECTOR_FONT_STATUS:-}" = "" ] && [ "${OPENCL_VECTOR_FONT_REASON:-}" = "" ]; then
+    run_opencl_vector_font_kernel
+fi
+
+# Re-run the Simple API evidence with the accelerator results included.
+set +e
+CUDA_VECTOR_FONT_STATUS="$CUDA_STATUS" \
+CUDA_VECTOR_FONT_REASON="$CUDA_REASON" \
+CUDA_VECTOR_FONT_CHECKSUM="$CUDA_CHECKSUM" \
+OPENCL_VECTOR_FONT_STATUS="$OPENCL_STATUS" \
+OPENCL_VECTOR_FONT_REASON="$OPENCL_REASON" \
+OPENCL_VECTOR_FONT_CHECKSUM="$OPENCL_CHECKSUM" \
+SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_OUT" 2>&1
+simple_code=$?
+set -e
+
+if [ "$simple_code" -ne 0 ]; then
+    emit_unavailable "simple-vector-font-evidence-failed"
+    {
+        echo
+        echo "## Simple Output"
+        sed 's/^/- /' "$SIMPLE_OUT" 2>/dev/null || true
+    } >>"$REPORT_PATH"
+    exit 1
+fi
+
+status="$(sed -n 's/^vector_font_compute_status=//p' "$SIMPLE_OUT" | tail -n 1)"
+reason="$(sed -n 's/^vector_font_compute_reason=//p' "$SIMPLE_OUT" | tail -n 1)"
+cpu_checksum="$(sed -n 's/^vector_font_compute_cpu_checksum=//p' "$SIMPLE_OUT" | tail -n 1)"
+cpu_ink_pixels="$(sed -n 's/^vector_font_compute_cpu_ink_pixels=//p' "$SIMPLE_OUT" | tail -n 1)"
+cpu_frame_us="$(sed -n 's/^vector_font_compute_cpu_frame_us=//p' "$SIMPLE_OUT" | tail -n 1)"
+production_render_checksum="$(sed -n 's/^vector_font_compute_production_render_checksum=//p' "$SIMPLE_OUT" | tail -n 1)"
+production_render_ink_pixels="$(sed -n 's/^vector_font_compute_production_render_ink_pixels=//p' "$SIMPLE_OUT" | tail -n 1)"
+production_vector_raster_hits="$(sed -n 's/^vector_font_compute_production_vector_raster_hits=//p' "$SIMPLE_OUT" | tail -n 1)"
+production_vector_output_pixels="$(sed -n 's/^vector_font_compute_production_vector_output_pixels=//p' "$SIMPLE_OUT" | tail -n 1)"
+production_accelerator_attempts="$(sed -n 's/^vector_font_compute_production_accelerator_attempts=//p' "$SIMPLE_OUT" | tail -n 1)"
+production_cuda_hits="$(sed -n 's/^vector_font_compute_production_cuda_hits=//p' "$SIMPLE_OUT" | tail -n 1)"
+production_opencl_hits="$(sed -n 's/^vector_font_compute_production_opencl_hits=//p' "$SIMPLE_OUT" | tail -n 1)"
+production_cpu_fallback_hits="$(sed -n 's/^vector_font_compute_production_cpu_fallback_hits=//p' "$SIMPLE_OUT" | tail -n 1)"
+production_accelerator_unavailable_reason="$(sed -n 's/^vector_font_compute_production_accelerator_unavailable_reason=//p' "$SIMPLE_OUT" | tail -n 1)"
+matrix0_checksum="$(sed -n 's/^vector_font_compute_matrix_0_checksum=//p' "$SIMPLE_OUT" | tail -n 1)"
+matrix0_ink_pixels="$(sed -n 's/^vector_font_compute_matrix_0_ink_pixels=//p' "$SIMPLE_OUT" | tail -n 1)"
+matrix0_vector_raster_hits="$(sed -n 's/^vector_font_compute_matrix_0_vector_raster_hits=//p' "$SIMPLE_OUT" | tail -n 1)"
+matrix0_cpu_fallback_hits="$(sed -n 's/^vector_font_compute_matrix_0_cpu_fallback_hits=//p' "$SIMPLE_OUT" | tail -n 1)"
+matrix1_checksum="$(sed -n 's/^vector_font_compute_matrix_1_checksum=//p' "$SIMPLE_OUT" | tail -n 1)"
+matrix1_ink_pixels="$(sed -n 's/^vector_font_compute_matrix_1_ink_pixels=//p' "$SIMPLE_OUT" | tail -n 1)"
+matrix1_vector_raster_hits="$(sed -n 's/^vector_font_compute_matrix_1_vector_raster_hits=//p' "$SIMPLE_OUT" | tail -n 1)"
+matrix1_cpu_fallback_hits="$(sed -n 's/^vector_font_compute_matrix_1_cpu_fallback_hits=//p' "$SIMPLE_OUT" | tail -n 1)"
+matrix2_checksum="$(sed -n 's/^vector_font_compute_matrix_2_checksum=//p' "$SIMPLE_OUT" | tail -n 1)"
+matrix2_ink_pixels="$(sed -n 's/^vector_font_compute_matrix_2_ink_pixels=//p' "$SIMPLE_OUT" | tail -n 1)"
+matrix2_vector_raster_hits="$(sed -n 's/^vector_font_compute_matrix_2_vector_raster_hits=//p' "$SIMPLE_OUT" | tail -n 1)"
+matrix2_cpu_fallback_hits="$(sed -n 's/^vector_font_compute_matrix_2_cpu_fallback_hits=//p' "$SIMPLE_OUT" | tail -n 1)"
+
+positive_int() {
+    case "$1" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    [ "$1" -gt 0 ]
+}
+
+if [ "$status" = "pass" ]; then
+    if ! positive_int "$production_render_checksum" || \
+        ! positive_int "$production_render_ink_pixels" || \
+        ! positive_int "$production_vector_raster_hits" || \
+        ! positive_int "$production_vector_output_pixels" || \
+        ! positive_int "$production_accelerator_attempts" || \
+        ! positive_int "$production_cpu_fallback_hits"; then
+        status="fail"
+        reason="production-vector-raster-path-not-hit"
+    elif [ "$production_accelerator_unavailable_reason" = "cuda-vector-font-proof-matched-cpu-with-cpu-glyph-return" ]; then
+        if ! positive_int "$production_cuda_hits"; then
+            status="fail"
+            reason="production-cuda-proof-hit-missing"
+        fi
+    elif [ "$production_accelerator_unavailable_reason" != "production-gpu-dispatch-not-wired" ]; then
+        status="fail"
+        reason="production-vector-accelerator-diagnostic-missing"
+    elif ! positive_int "$matrix0_checksum" || ! positive_int "$matrix0_ink_pixels" || \
+        ! positive_int "$matrix0_vector_raster_hits" || ! positive_int "$matrix0_cpu_fallback_hits" || \
+        ! positive_int "$matrix1_checksum" || ! positive_int "$matrix1_ink_pixels" || \
+        ! positive_int "$matrix1_vector_raster_hits" || ! positive_int "$matrix1_cpu_fallback_hits" || \
+        ! positive_int "$matrix2_checksum" || ! positive_int "$matrix2_ink_pixels" || \
+        ! positive_int "$matrix2_vector_raster_hits" || ! positive_int "$matrix2_cpu_fallback_hits"; then
+        status="fail"
+        reason="production-vector-matrix-not-covered"
+    fi
+fi
+
+{
+    for key in \
+        vector_font_compute_scene \
+        vector_font_compute_text_run \
+        vector_font_compute_font_size \
+        vector_font_compute_iterations \
+        vector_font_compute_cpu_warm_checksum \
+        vector_font_compute_cpu_checksum \
+        vector_font_compute_cpu_ink_pixels \
+        vector_font_compute_cpu_frame_us \
+        vector_font_compute_production_render_checksum \
+        vector_font_compute_production_render_ink_pixels \
+        vector_font_compute_production_vector_raster_hits \
+        vector_font_compute_production_vector_output_pixels \
+        vector_font_compute_production_accelerator_attempts \
+        vector_font_compute_production_cuda_hits \
+        vector_font_compute_production_opencl_hits \
+        vector_font_compute_production_cpu_fallback_hits \
+        vector_font_compute_production_accelerator_unavailable_reason \
+        vector_font_compute_matrix_0_text \
+        vector_font_compute_matrix_0_font_size \
+        vector_font_compute_matrix_0_checksum \
+        vector_font_compute_matrix_0_ink_pixels \
+        vector_font_compute_matrix_0_vector_raster_hits \
+        vector_font_compute_matrix_0_cpu_fallback_hits \
+        vector_font_compute_matrix_1_text \
+        vector_font_compute_matrix_1_font_size \
+        vector_font_compute_matrix_1_checksum \
+        vector_font_compute_matrix_1_ink_pixels \
+        vector_font_compute_matrix_1_vector_raster_hits \
+        vector_font_compute_matrix_1_cpu_fallback_hits \
+        vector_font_compute_matrix_2_text \
+        vector_font_compute_matrix_2_font_size \
+        vector_font_compute_matrix_2_checksum \
+        vector_font_compute_matrix_2_ink_pixels \
+        vector_font_compute_matrix_2_vector_raster_hits \
+        vector_font_compute_matrix_2_cpu_fallback_hits \
+        vector_font_compute_cuda_status \
+        vector_font_compute_cuda_reason \
+        vector_font_compute_cuda_checksum \
+        vector_font_compute_opencl_status \
+        vector_font_compute_opencl_reason \
+        vector_font_compute_opencl_checksum \
+        vector_font_compute_blur_or_tolerance_used \
+        vector_font_compute_summary
+    do
+        value="$(sed -n "s/^${key}=//p" "$SIMPLE_OUT" | tail -n 1)"
+        echo "$key=$value"
+    done
+    echo "vector_font_compute_status=$status"
+    echo "vector_font_compute_reason=$reason"
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# Vector Font Compute Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- scene: wm-vector-text-grid"
+    echo "- text run: $TEXT_RUN"
+    echo "- font size: $FONT_SIZE"
+    echo "- CPU checksum: $cpu_checksum"
+    echo "- CPU ink pixels: $cpu_ink_pixels"
+    echo "- CPU frame us: $cpu_frame_us"
+    echo "- production render checksum: $production_render_checksum"
+    echo "- production render ink pixels: $production_render_ink_pixels"
+    echo "- production vector raster hits: $production_vector_raster_hits"
+    echo "- production vector output pixels: $production_vector_output_pixels"
+    echo "- production accelerator attempts: $production_accelerator_attempts"
+    echo "- production CUDA hits: $production_cuda_hits"
+    echo "- production OpenCL hits: $production_opencl_hits"
+    echo "- production CPU fallback hits: $production_cpu_fallback_hits"
+    echo "- production accelerator unavailable reason: $production_accelerator_unavailable_reason"
+    echo "- matrix CUDAOPENCL/16 checksum: $matrix0_checksum"
+    echo "- matrix CUDAOPENCL/16 ink pixels: $matrix0_ink_pixels"
+    echo "- matrix CUDAOPENCL/16 vector raster hits: $matrix0_vector_raster_hits"
+    echo "- matrix GUIWM/24 checksum: $matrix1_checksum"
+    echo "- matrix GUIWM/24 ink pixels: $matrix1_ink_pixels"
+    echo "- matrix GUIWM/24 vector raster hits: $matrix1_vector_raster_hits"
+    echo "- matrix FontRender/32 checksum: $matrix2_checksum"
+    echo "- matrix FontRender/32 ink pixels: $matrix2_ink_pixels"
+    echo "- matrix FontRender/32 vector raster hits: $matrix2_vector_raster_hits"
+    echo "- CUDA status: $CUDA_STATUS"
+    echo "- CUDA reason: $CUDA_REASON"
+    echo "- CUDA checksum: $CUDA_CHECKSUM"
+    echo "- CUDA ink pixels: $CUDA_INK_PIXELS"
+    echo "- OpenCL status: $OPENCL_STATUS"
+    echo "- OpenCL reason: $OPENCL_REASON"
+    echo "- OpenCL checksum: $OPENCL_CHECKSUM"
+    echo "- OpenCL ink pixels: $OPENCL_INK_PIXELS"
+    echo "- blur/tolerance used: false"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$SIMPLE_OUT"
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+
+[ "$status" = "pass" ]

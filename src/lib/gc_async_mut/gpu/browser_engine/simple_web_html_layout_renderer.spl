@@ -564,7 +564,8 @@ fn fb_clear(fb: [u32], color: u32):
         i = i + 1
 
 # clipped filled rectangle
-fn fb_rect(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32):
+fn fb_rect(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32) -> [u32]:
+    var out = fb
     var x0 = x
     var y0 = y
     var x1 = x + w
@@ -582,12 +583,14 @@ fn fb_rect(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color:
         val row = py * fbw
         var px = x0
         while px < x1:
-            fb[row + px] = color
+            out[row + px] = color
             px = px + 1
         py = py + 1
+    out
 
 # draw one glyph at (x,y) scaled by `scale`
-fn fb_glyph(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, scale: i32):
+fn fb_glyph(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, scale: i32) -> [u32]:
+    var out = fb
     val rows = glyph_rows(gi)
     var ry = 0
     while ry < 7:
@@ -608,14 +611,16 @@ fn fb_glyph(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, 
                         while dx < scale:
                             val xx = bx0 + dx
                             if xx >= 0 and xx < fbw:
-                                fb[row + xx] = color
+                                out[row + xx] = color
                             dx = dx + 1
                     dy = dy + 1
             rx = rx + 1
         ry = ry + 1
+    out
 
 # draw a string; advances 6*scale px per char (5px glyph + 1px gap)
-fn fb_text(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color: u32, scale: i32):
+fn fb_text(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color: u32, scale: i32) -> [u32]:
+    var out = fb
     var i = 0
     val n = s.len()
     var cx = x
@@ -625,14 +630,21 @@ fn fb_text(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color: u32, s
         if cx < fbw:
             val gi = FONT_CHARSET.index_of(ch)
             if gi >= 0 and gi != 36:
-                fb_glyph(fb, fbw, fbh, cx, y, gi, color, scale)
+                out = fb_glyph(out, fbw, fbh, cx, y, gi, color, scale)
         cx = cx + adv
         i = i + 1
+    out
 
 # ---------------------------------------------------------------------------
 # Block layout (parallel arrays; recursion returns box height)
 # ---------------------------------------------------------------------------
 # Geometry derived from glyph_scale so wrapping matches fb_text exactly.
+
+class LayoutBoxes:
+    bx: [i32]
+    by: [i32]
+    bw: [i32]
+    bh: [i32]
 
 fn char_w(fs: i32) -> i32:
     6 * glyph_scale(fs)
@@ -640,10 +652,10 @@ fn char_w(fs: i32) -> i32:
 fn line_h(fs: i32) -> i32:
     9 * glyph_scale(fs)
 
-fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32]) -> i32:
-    bx[i] = x
-    by[i] = y
-    bw[i] = w
+fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, boxes: LayoutBoxes) -> i32:
+    boxes.bx[i] = x
+    boxes.by[i] = y
+    boxes.bw[i] = w
     val st = styles[i]
     if nodes[i].tag == "#text":
         val txt = nodes[i].text_data.trim()
@@ -655,7 +667,7 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, bx: [
         if lines < 1:
             lines = 1
         val h = lines * line_h(st.font_size)
-        bh[i] = h
+        boxes.bh[i] = h
         return h
     val ix = x + st.pad_l
     var iw = w - st.pad_l - st.pad_r
@@ -667,26 +679,27 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, bx: [
         if nodes[c].parent == i:
             val cst = styles[c]
             cy = cy + cst.margin_t
-            val ch = layout(nodes, styles, c, ix, cy, iw, bx, by, bw, bh)
+            val ch = layout(nodes, styles, c, ix, cy, iw, boxes)
             cy = cy + ch + cst.margin_b
         c = c + 1
     var h = (cy - y) + st.pad_b
     if h < 1:
         h = 1
-    bh[i] = h
+    boxes.bh[i] = h
     h
 
 # ---------------------------------------------------------------------------
 # Paint directly into a [u32] framebuffer (no Engine2D)
 # ---------------------------------------------------------------------------
 
-fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], fb: [u32], fbw: i32, fbh: i32):
+fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], fb: [u32], fbw: i32, fbh: i32) -> [u32]:
+    var out = fb
     # backgrounds first (document order = back to front)
     var i = 0
     while i < nodes.len():
         val st = styles[i]
         if nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
-            fb_rect(fb, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg)
+            out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg)
         i = i + 1
     # text on top
     i = 0
@@ -708,10 +721,11 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                     if endc > txt.len():
                         endc = txt.len()
                     val line = txt.substring(off, endc)
-                    fb_text(fb, fbw, fbh, bx[i], ly, line, st.fg, scale)
+                    out = fb_text(out, fbw, fbh, bx[i], ly, line, st.fg, scale)
                     off = endc
                     ly = ly + lh
         i = i + 1
+    out
 
 # ---------------------------------------------------------------------------
 # Render entry
@@ -723,12 +737,13 @@ pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32,
     val nodes = parse_html(html)
     val rules = extract_css(html)
     val styles = compute_styles(nodes, rules)
-    var bx: [i32] = [0; nodes.len()]
-    var by: [i32] = [0; nodes.len()]
-    var bw: [i32] = [0; nodes.len()]
-    var bh: [i32] = [0; nodes.len()]
-    layout(nodes, styles, 0, 0, 0, width, bx, by, bw, bh)
+    val boxes = LayoutBoxes(
+        bx: [0; nodes.len()],
+        by: [0; nodes.len()],
+        bw: [0; nodes.len()],
+        bh: [0; nodes.len()]
+    )
+    layout(nodes, styles, 0, 0, 0, width, boxes)
     val white = argb(255, 255, 255)
     var fb: [u32] = [white; width * height]
-    paint(nodes, styles, bx, by, bw, bh, fb, width, height)
-    fb
+    paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, fb, width, height)

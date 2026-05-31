@@ -1,0 +1,151 @@
+use std.spec.*
+
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_native.*
+use std.nogc_sync_mut.js.engine.interpreter_object.*
+use std.js.types.js_types.{JsValue}
+
+fn _display_js(v: JsValue) -> text:
+    match v:
+        JsValue.Undefined: "undefined"
+        JsValue.Null: "null"
+        JsValue.Boolean(b): if b: "true" else: "false"
+        JsValue.Number(n):
+            var s = "{n}"
+            if s.ends_with(".0"):
+                s = s.slice(0, s.len() - 2)
+            s
+        JsValue.String(s): s
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[object Array]"
+        JsValue.Function(id): "[Function]"
+
+fn _new_interpreter() -> JsInterpreter:
+    JsInterpreter.new(Logger.new(LogLevel.Error))
+
+fn _object_property_text(interp: JsInterpreter, value: JsValue, key: text) -> text:
+    match value:
+        JsValue.Object(id): _display_js(interp.get_object_property(id, key))
+        _: ""
+
+fn _object_child_property_text(interp: JsInterpreter, value: JsValue, child_key: text, key: text) -> text:
+    match value:
+        JsValue.Object(id):
+            val child = interp.get_object_property(id, child_key)
+            match child:
+                JsValue.Object(child_id): _display_js(interp.get_object_property(child_id, key))
+                _: ""
+        _: ""
+
+describe "WebAssembly native host validation":
+    it "requires WASM magic and version bytes before validation succeeds":
+        var interp = _new_interpreter()
+
+        expect(_display_js(interp._native_webassembly_validate([JsValue.String(v: "0061736d01000000")]))).to_equal("true")
+        expect(_display_js(interp._native_webassembly_validate([JsValue.String(v: "0061736d")]))).to_equal("false")
+        expect(_display_js(interp._native_webassembly_validate([JsValue.String(v: "0061736d00000000")]))).to_equal("false")
+        expect(_display_js(interp._native_webassembly_validate([JsValue.String(v: "not-wasm")]))).to_equal("false")
+
+    it "instantiates only validated WASM byte payloads":
+        var interp = _new_interpreter()
+
+        val valid = interp._native_webassembly_instantiate(JsValue.Undefined, [JsValue.String(v: "0061736d01000000")])
+        expect(_object_property_text(interp, valid, "status")).to_equal("instantiated")
+
+        val invalid = interp._native_webassembly_instantiate(JsValue.Undefined, [JsValue.String(v: "0061736d00000000")])
+        expect(_object_property_text(interp, invalid, "status")).to_equal("invalid")
+        expect(_object_property_text(interp, invalid, "error")).to_equal("invalid-wasm-header")
+
+    it "accepts byte-array shaped WASM inputs":
+        var interp = _new_interpreter()
+        val valid_arr_id = interp.create_object()
+        interp.set_object_property(valid_arr_id, "0", JsValue.Number(v: 0.0))
+        interp.set_object_property(valid_arr_id, "1", JsValue.Number(v: 97.0))
+        interp.set_object_property(valid_arr_id, "2", JsValue.Number(v: 115.0))
+        interp.set_object_property(valid_arr_id, "3", JsValue.Number(v: 109.0))
+        interp.set_object_property(valid_arr_id, "4", JsValue.Number(v: 1.0))
+        interp.set_object_property(valid_arr_id, "5", JsValue.Number(v: 0.0))
+        interp.set_object_property(valid_arr_id, "6", JsValue.Number(v: 0.0))
+        interp.set_object_property(valid_arr_id, "7", JsValue.Number(v: 0.0))
+        interp.set_object_property(valid_arr_id, "length", JsValue.Number(v: 8.0))
+        val invalid_arr_id = interp.create_object()
+        interp.set_object_property(invalid_arr_id, "0", JsValue.Number(v: 0.0))
+        interp.set_object_property(invalid_arr_id, "1", JsValue.Number(v: 97.0))
+        interp.set_object_property(invalid_arr_id, "2", JsValue.Number(v: 115.0))
+        interp.set_object_property(invalid_arr_id, "3", JsValue.Number(v: 109.0))
+        interp.set_object_property(invalid_arr_id, "4", JsValue.Number(v: 0.0))
+        interp.set_object_property(invalid_arr_id, "5", JsValue.Number(v: 0.0))
+        interp.set_object_property(invalid_arr_id, "6", JsValue.Number(v: 0.0))
+        interp.set_object_property(invalid_arr_id, "7", JsValue.Number(v: 0.0))
+        interp.set_object_property(invalid_arr_id, "length", JsValue.Number(v: 8.0))
+
+        expect(_display_js(interp._native_webassembly_validate([JsValue.Array(id: valid_arr_id)]))).to_equal("true")
+        expect(_display_js(interp._native_webassembly_validate([JsValue.Array(id: invalid_arr_id)]))).to_equal("false")
+
+        val valid = interp._native_webassembly_instantiate(JsValue.Undefined, [JsValue.Array(id: valid_arr_id)])
+        expect(_object_property_text(interp, valid, "status")).to_equal("instantiated")
+        expect(_object_property_text(interp, valid, "module")).to_equal("[object Object]")
+
+        val invalid = interp._native_webassembly_instantiate(JsValue.Undefined, [JsValue.Array(id: invalid_arr_id)])
+        expect(_object_property_text(interp, invalid, "status")).to_equal("invalid")
+
+    it "accepts Uint8Array-shaped WASM inputs":
+        var interp = _new_interpreter()
+        val bytes_id = interp.create_object()
+        interp.set_object_property(bytes_id, "0", JsValue.Number(v: 0.0))
+        interp.set_object_property(bytes_id, "1", JsValue.Number(v: 97.0))
+        interp.set_object_property(bytes_id, "2", JsValue.Number(v: 115.0))
+        interp.set_object_property(bytes_id, "3", JsValue.Number(v: 109.0))
+        interp.set_object_property(bytes_id, "4", JsValue.Number(v: 1.0))
+        interp.set_object_property(bytes_id, "5", JsValue.Number(v: 0.0))
+        interp.set_object_property(bytes_id, "6", JsValue.Number(v: 0.0))
+        interp.set_object_property(bytes_id, "7", JsValue.Number(v: 0.0))
+        interp.set_object_property(bytes_id, "length", JsValue.Number(v: 8.0))
+
+        val typed = interp._native_uint8_array([JsValue.Array(id: bytes_id)])
+        expect(_object_property_text(interp, typed, "byteLength")).to_equal("8")
+        expect(_display_js(interp._native_webassembly_validate([typed]))).to_equal("true")
+
+        val buffer = interp._native_array_buffer([JsValue.Number(v: 8.0)])
+        expect(_object_property_text(interp, buffer, "byteLength")).to_equal("8")
+        expect(_display_js(interp._native_webassembly_validate([buffer]))).to_equal("false")
+
+    it "parses bounded WASM section metadata and rejects truncated sections":
+        var interp = _new_interpreter()
+
+        val empty = interp._native_webassembly_instantiate(JsValue.Undefined, [JsValue.String(v: "0061736d01000000")])
+        expect(_object_property_text(interp, empty, "status")).to_equal("instantiated")
+        expect(_object_child_property_text(interp, empty, "module", "sectionCount")).to_equal("0")
+        expect(_object_child_property_text(interp, empty, "module", "hasTypeSection")).to_equal("false")
+
+        val with_type = interp._native_webassembly_instantiate(JsValue.Undefined, [JsValue.String(v: "0061736d01000000010100")])
+        expect(_object_property_text(interp, with_type, "status")).to_equal("instantiated")
+        expect(_object_child_property_text(interp, with_type, "module", "sectionCount")).to_equal("1")
+        expect(_object_child_property_text(interp, with_type, "module", "hasTypeSection")).to_equal("true")
+        expect(_object_child_property_text(interp, with_type, "module", "hasImportSection")).to_equal("false")
+
+        val truncated = interp._native_webassembly_instantiate(JsValue.Undefined, [JsValue.String(v: "0061736d010000000105")])
+        expect(_display_js(interp._native_webassembly_validate([JsValue.String(v: "0061736d010000000105")]))).to_equal("false")
+        expect(_object_property_text(interp, truncated, "status")).to_equal("invalid")
+        expect(_object_property_text(interp, truncated, "error")).to_equal("invalid-wasm-section")
+
+    it "exposes bounded Module and Instance constructor shapes":
+        var interp = _new_interpreter()
+
+        val module = interp._native_webassembly_module([JsValue.String(v: "0061736d01000000010100")])
+        expect(_object_property_text(interp, module, "validated")).to_equal("true")
+        expect(_object_property_text(interp, module, "sectionCount")).to_equal("1")
+        expect(_object_property_text(interp, module, "hasTypeSection")).to_equal("true")
+
+        val instance = interp._native_webassembly_instance([module])
+        expect(_object_property_text(interp, instance, "status")).to_equal("instantiated")
+        expect(_object_property_text(interp, instance, "moduleValid")).to_equal("true")
+        expect(_object_property_text(interp, instance, "exports")).to_equal("[object Object]")
+
+        val invalid_module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000105")])
+        val invalid_instance = interp._native_webassembly_instance([invalid_module])
+        expect(_object_property_text(interp, invalid_module, "validated")).to_equal("false")
+        expect(_object_property_text(interp, invalid_module, "error")).to_equal("invalid-wasm-section")
+        expect(_object_property_text(interp, invalid_instance, "status")).to_equal("invalid")
+        expect(_object_property_text(interp, invalid_instance, "error")).to_equal("invalid-wasm-module")

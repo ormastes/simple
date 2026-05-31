@@ -22,6 +22,7 @@ use common.ui.web_render_api.{
     web_render_body_html,
     web_render_full_html,
     web_render_generated_wasm_artifact,
+    web_render_exact_bitmap_comparison_evidence,
     web_render_gtk_benchmark_evidence,
     web_render_gtk_benchmark_evidence_with_trials,
     web_render_host_window_command_to_json,
@@ -34,6 +35,7 @@ use common.ui.web_render_api.{
     web_render_transport_bundle,
     web_render_to_artifact,
     web_render_vector_font_benchmark_evidence,
+    web_render_vector_font_compute_evidence,
     web_render_wasm_abi_for_target,
     web_render_wasm_no_js_is_valid,
     web_render_wasm_no_js_target,
@@ -269,3 +271,43 @@ describe "shared web render API":
         expect(missing_checksum.reason).to_equal("missing-checksum")
         expect(nondeterministic.reason).to_equal("nondeterministic-render-output")
         expect(missing_timing.reason).to_equal("missing-timing")
+
+    it "records vector font compute evidence without claiming unavailable accelerators":
+        val unavailable_ok = web_render_vector_font_compute_evidence("wm-vector-text-grid", 8800, 1200, "unavailable", "missing-vector-font-cuda-kernel", 0, "unavailable", "missing-vector-font-opencl-kernel", 0, false)
+        val cuda_ok = web_render_vector_font_compute_evidence("wm-vector-text-grid", 8800, 1200, "pass", "matched-cpu", 8800, "unavailable", "missing-vector-font-opencl-kernel", 0, false)
+        val blurred = web_render_vector_font_compute_evidence("wm-vector-text-grid", 8800, 1200, "unavailable", "missing-vector-font-cuda-kernel", 0, "unavailable", "missing-vector-font-opencl-kernel", 0, true)
+        val missing_unavailable_reason = web_render_vector_font_compute_evidence("wm-vector-text-grid", 8800, 1200, "unavailable", "", 0, "unavailable", "missing-vector-font-opencl-kernel", 0, false)
+        val cuda_mismatch = web_render_vector_font_compute_evidence("wm-vector-text-grid", 8800, 1200, "pass", "matched-cpu", 8799, "unavailable", "missing-vector-font-opencl-kernel", 0, false)
+        val opencl_bad_status = web_render_vector_font_compute_evidence("wm-vector-text-grid", 8800, 1200, "unavailable", "missing-vector-font-cuda-kernel", 0, "pending", "not-run", 0, false)
+
+        expect(unavailable_ok.status).to_equal("pass")
+        expect(unavailable_ok.summary()).to_contain("cuda_status=unavailable")
+        expect(unavailable_ok.summary()).to_contain("opencl_reason=missing-vector-font-opencl-kernel")
+        expect(cuda_ok.status).to_equal("pass")
+        expect(cuda_ok.summary()).to_contain("cuda_checksum=8800")
+        expect(blurred.reason).to_equal("blur-or-tolerance-not-allowed")
+        expect(missing_unavailable_reason.reason).to_equal("missing-cuda-unavailable-reason")
+        expect(cuda_mismatch.reason).to_equal("cuda-checksum-mismatch")
+        expect(opencl_bad_status.reason).to_equal("opencl-not-proven")
+
+    it "requires exact bitmap evidence without blur or tolerance for node and electron baselines":
+        val node_pass = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "nodejs-canvas", 320, 200, 771200, 771200, 0, false, 90, 140, 4, 4, 3, 3)
+        val electron_pass = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "simple-web-renderer", "electron-compositor", 320, 200, 771200, 771200, 0, false, 95, 160, 4, 4, 3, 3)
+        val blurred = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "nodejs-canvas", 320, 200, 771200, 771200, 0, true, 90, 140, 4, 4, 3, 3)
+        val checksum_mismatch = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "nodejs-canvas", 320, 200, 771200, 771199, 0, false, 90, 140, 4, 4, 3, 3)
+        val pixel_mismatch = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "nodejs-canvas", 320, 200, 771200, 771200, 1, false, 90, 140, 4, 4, 3, 3)
+        val equal_perf = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "bun", 320, 200, 771200, 771200, 0, false, 140, 140, 4, 4, 3, 3)
+        val slower = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "bun", 320, 200, 771200, 771200, 0, false, 141, 140, 4, 4, 3, 3)
+        val low_trial = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "nodejs-canvas", 320, 200, 771200, 771200, 0, false, 90, 140, 4, 4, 1, 3)
+
+        expect(node_pass.status).to_equal("pass")
+        expect(node_pass.reason).to_equal("pass")
+        expect(electron_pass.status).to_equal("pass")
+        expect(electron_pass.summary()).to_contain("baseline_renderer=electron-compositor")
+        expect(electron_pass.summary()).to_contain("blur_or_tolerance_used=false")
+        expect(blurred.reason).to_equal("blur-or-tolerance-not-allowed")
+        expect(checksum_mismatch.reason).to_equal("checksum-mismatch")
+        expect(pixel_mismatch.reason).to_equal("pixel-mismatch")
+        expect(equal_perf.status).to_equal("pass")
+        expect(slower.reason).to_equal("simple-slower-than-baseline")
+        expect(low_trial.reason).to_equal("trial-count-too-low")

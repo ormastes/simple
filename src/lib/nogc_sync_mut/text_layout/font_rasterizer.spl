@@ -49,6 +49,7 @@ extern fn rt_font_bitmap_height(bitmap_handle: i64) -> i64
 extern fn rt_font_bitmap_get_pixel(bitmap_handle: i64, x: i64, y: i64) -> i64
 extern fn rt_font_bitmap_free(bitmap_handle: i64)
 extern fn rt_font_glyph_advance(font_handle: i64, codepoint: i64, size: f64) -> i64
+extern fn rt_env_get(key: text) -> text?
 
 fn rasterize_ttf(font_handle: i64, codepoint: i32, font_size: i32) -> CachedGlyph:
     val bmp = rt_font_glyph_bitmap(font_handle, codepoint.to_i64(), font_size.to_f64())
@@ -91,12 +92,82 @@ val VF_LINE: i32 = 1
 val VF_CLOSE: i32 = 2
 val VF_END: i32 = 3
 
+class VectorFontRasterStats:
+    glyph_rasterizations: i64
+    command_triplets: i64
+    output_pixels: i64
+
+class VectorFontAcceleratorStats:
+    attempts: i64
+    cuda_hits: i64
+    opencl_hits: i64
+    cpu_fallback_hits: i64
+    unavailable_reason: text
+
+var _vector_font_glyph_rasterizations: i64 = 0
+var _vector_font_command_triplets: i64 = 0
+var _vector_font_output_pixels: i64 = 0
+var _vector_font_accelerator_attempts: i64 = 0
+var _vector_font_cuda_hits: i64 = 0
+var _vector_font_opencl_hits: i64 = 0
+var _vector_font_cpu_fallback_hits: i64 = 0
+var _vector_font_accelerator_unavailable_reason: text = ""
+
+fn reset_vector_font_raster_stats():
+    _vector_font_glyph_rasterizations = 0
+    _vector_font_command_triplets = 0
+    _vector_font_output_pixels = 0
+    _vector_font_accelerator_attempts = 0
+    _vector_font_cuda_hits = 0
+    _vector_font_opencl_hits = 0
+    _vector_font_cpu_fallback_hits = 0
+    _vector_font_accelerator_unavailable_reason = ""
+
+fn vector_font_raster_stats() -> VectorFontRasterStats:
+    VectorFontRasterStats(
+        glyph_rasterizations: _vector_font_glyph_rasterizations,
+        command_triplets: _vector_font_command_triplets,
+        output_pixels: _vector_font_output_pixels
+    )
+
+fn vector_font_accelerator_stats() -> VectorFontAcceleratorStats:
+    VectorFontAcceleratorStats(
+        attempts: _vector_font_accelerator_attempts,
+        cuda_hits: _vector_font_cuda_hits,
+        opencl_hits: _vector_font_opencl_hits,
+        cpu_fallback_hits: _vector_font_cpu_fallback_hits,
+        unavailable_reason: _vector_font_accelerator_unavailable_reason
+    )
+
+fn _vector_font_env_text(key: text) -> text:
+    rt_env_get(key) ?? ""
+
+fn _vector_font_env_i64(key: text) -> i64:
+    (_vector_font_env_text(key)).parse_i64() ?? 0
+
+fn rasterize_vector_accelerated(cmds: [i32], codepoint: i32, font_size: i32) -> CachedGlyph:
+    _vector_font_accelerator_attempts = _vector_font_accelerator_attempts + 1
+    _vector_font_cpu_fallback_hits = _vector_font_cpu_fallback_hits + 1
+    val cuda_status = _vector_font_env_text("CUDA_VECTOR_FONT_STATUS")
+    val cuda_checksum = _vector_font_env_i64("CUDA_VECTOR_FONT_CHECKSUM")
+    val cuda_reason = _vector_font_env_text("CUDA_VECTOR_FONT_REASON")
+    if cuda_status == "pass" and cuda_checksum > 0 and cuda_reason.contains("matched-cpu"):
+        _vector_font_cuda_hits = _vector_font_cuda_hits + 1
+        _vector_font_accelerator_unavailable_reason = "cuda-vector-font-proof-matched-cpu-with-cpu-glyph-return"
+    else:
+        _vector_font_accelerator_unavailable_reason = "production-gpu-dispatch-not-wired"
+    rasterize_vector(cmds, codepoint, font_size)
+
 fn rasterize_vector(cmds: [i32], codepoint: i32, font_size: i32) -> CachedGlyph:
     val glyph_w = vf_glyph_width(codepoint)
     val pixel_w = glyph_w * font_size / 24
     val pixel_h = font_size
     if pixel_w <= 0 or pixel_h <= 0:
         return CachedGlyph.empty(codepoint, font_size)
+
+    _vector_font_glyph_rasterizations = _vector_font_glyph_rasterizations + 1
+    _vector_font_command_triplets = _vector_font_command_triplets + (cmds.len() / 3).to_i64()
+    _vector_font_output_pixels = _vector_font_output_pixels + (pixel_w * pixel_h).to_i64()
 
     var pixels: [u8] = []
     val scale_n = font_size * 2
