@@ -553,6 +553,20 @@ expect(_str(os_tmpdir([]))).to_equal("/tmp")
 
 </details>
 
+#### reports deterministic little-endian byte order
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(os_endianness([]))).to_equal("LE")
+```
+
+</details>
+
 ### Node.js Buffer module
 
 ### Buffer.byteLength
@@ -830,7 +844,7 @@ expect(_eval_str("require('fs').status")).to_equal("denied")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -843,6 +857,8 @@ expect(_eval_str("require('node:os').release()")).to_equal("0.0.0-simple")
 expect(_eval_str("require('os').homedir()")).to_equal("/")
 expect(_eval_str("require('node:os').homedir()")).to_equal("/")
 expect(_eval_str("require('node:os').tmpdir()")).to_equal("/tmp")
+expect(_eval_str("require('os').endianness()")).to_equal("LE")
+expect(_eval_str("require('node:os').endianness()")).to_equal("LE")
 ```
 
 </details>
@@ -1473,8 +1489,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 97 |
-| Active scenarios | 97 |
+| Total scenarios | 98 |
+| Active scenarios | 98 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

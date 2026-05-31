@@ -81,6 +81,21 @@ expect(_runtime_eval_text("require('node:os').tmpdir()")).to_equal("/tmp")
 
 </details>
 
+#### fast paths deterministic os endianness probes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_runtime_eval_text("require('os').endianness()")).to_equal("LE")
+expect(_runtime_eval_text("require('node:os').endianness()")).to_equal("LE")
+```
+
+</details>
+
 #### fast paths os and node:os aliases consistently
 
 <details>
@@ -116,8 +131,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
