@@ -3328,6 +3328,51 @@ impl JsInterpreter:
                         stack.push(half_value)
                         cursor = cursor + 1
                         continue
+                    if opcode == 252:
+                        val bulk_subop = self._native_webassembly_read_leb_value(hex, cursor + 1)
+                        val mem_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
+                        if bulk_subop < 0 or mem_pos < 0 or mem_pos > body_end:
+                            return -1
+                        if bulk_subop == 11:
+                            val bulk_mem_index = self._native_webassembly_read_leb_value(hex, mem_pos)
+                            val next_pos = self._native_webassembly_read_leb_next(hex, mem_pos)
+                            if bulk_mem_index != 0 or next_pos < 0 or next_pos > body_end or stack.len() < 3:
+                                return -1
+                            val len = stack.get(stack.len() - 1)
+                            val raw_value = stack.get(stack.len() - 2)
+                            val dest = stack.get(stack.len() - 3)
+                            stack.pop()
+                            stack.pop()
+                            stack.pop()
+                            if len < 0 or dest < 0 or memory_byte_len <= 0 or dest + len > memory_byte_len:
+                                return -5
+                            val fill_byte = raw_value & 255
+                            if fill_byte == 0:
+                                var clear_index = 0
+                                while clear_index < memory_addrs.len():
+                                    val clear_addr = memory_addrs.get(clear_index)
+                                    if clear_addr >= dest and clear_addr < dest + len:
+                                        memory_bytes[clear_index] = 0
+                                    clear_index = clear_index + 1
+                            else:
+                                var fill_index = 0
+                                while fill_index < len:
+                                    val fill_addr = dest + fill_index
+                                    var found = false
+                                    var mem_lookup = 0
+                                    while mem_lookup < memory_addrs.len():
+                                        if memory_addrs.get(mem_lookup) == fill_addr:
+                                            memory_bytes[mem_lookup] = fill_byte
+                                            found = true
+                                            break
+                                        mem_lookup = mem_lookup + 1
+                                    if not found:
+                                        memory_addrs.push(fill_addr)
+                                        memory_bytes.push(fill_byte)
+                                    fill_index = fill_index + 1
+                            cursor = next_pos
+                            continue
+                        return -1
                     return -1
                 return -1
             pos = body_end
