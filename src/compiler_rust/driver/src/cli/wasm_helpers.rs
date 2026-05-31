@@ -77,16 +77,17 @@ fn generated_gui_wasm_fallback(source_path: &Path) -> Result<Option<Vec<u8>>, St
     module.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
     push_custom_section(&mut module, "simple.gui", source.as_bytes());
     push_type_section(&mut module);
-    push_function_section(&mut module, 3);
+    push_function_section(&mut module, 4);
     push_export_section(
         &mut module,
         &[
-            ("simple_app_init", 0),
-            ("simple_app_render", 1),
-            ("simple_app_event", 2),
+            ("spl_main", 0),
+            ("simple_app_init", 1),
+            ("simple_app_render", 2),
+            ("simple_app_event", 3),
         ],
     );
-    push_code_section(&mut module, 3);
+    push_code_section(&mut module, 4);
     Ok(Some(module))
 }
 
@@ -280,6 +281,7 @@ fn main() -> i64:
         assert!(bytes.starts_with(b"\0asm\x01\0\0\0"));
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("simple.gui"));
+        assert!(text.contains("spl_main"));
         assert!(text.contains("simple_app_init"));
         assert!(text.contains("simple_app_render"));
         assert!(text.contains("simple_app_event"));

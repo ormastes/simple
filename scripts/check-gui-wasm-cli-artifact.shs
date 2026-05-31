@@ -33,6 +33,8 @@ compile_and_check() {
     item_size=0
     item_magic=""
     item_version=""
+    item_import_count=0
+    item_imports=""
 
     if [ ! -f "$source" ]; then
         item_status=fail
@@ -53,12 +55,37 @@ compile_and_check() {
             item_version="$(od -An -tx1 -j4 -N4 "$output" | tr -d ' \n')"
             strings "$output" >"$strings_out"
             item_size="$(wc -c <"$output")"
+            if command -v node >/dev/null 2>&1; then
+                item_imports="$(node - "$output" <<'NODE'
+const fs = require('fs');
+const path = process.argv[2];
+const bytes = fs.readFileSync(path);
+const imports = WebAssembly.Module.imports(new WebAssembly.Module(bytes))
+  .map((entry) => `${entry.module}.${entry.name}`);
+process.stdout.write(imports.join(','));
+NODE
+)"
+                if [ -n "$item_imports" ]; then
+                    item_import_count="$(printf '%s' "$item_imports" | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ')"
+                else
+                    item_import_count=0
+                fi
+            else
+                item_status=fail
+                item_reason=missing-node-import-proof
+            fi
             if [ "$item_magic" != "0061736d" ]; then
                 item_status=fail
                 item_reason=invalid-wasm-magic
             elif [ "$item_version" != "01000000" ]; then
                 item_status=fail
                 item_reason=invalid-wasm-version
+            elif [ "$item_import_count" != "0" ]; then
+                item_status=fail
+                item_reason="unexpected-wasm-imports-$item_imports"
+            elif ! rg -q 'spl_main' "$strings_out"; then
+                item_status=fail
+                item_reason=missing-spl-main-export
             elif ! rg -q 'simple_app_init' "$strings_out"; then
                 item_status=fail
                 item_reason=missing-simple-app-init-export
@@ -192,7 +219,7 @@ compile_and_check() {
         reason="$name-$item_reason"
     fi
 
-    results="${results}${name}|${item_status}|${item_reason}|${source}|${output}|${item_size}|${item_magic}|${item_version}
+    results="${results}${name}|${item_status}|${item_reason}|${source}|${output}|${item_size}|${item_magic}|${item_version}|${item_import_count}|${item_imports}
 "
 }
 
@@ -208,7 +235,7 @@ fi
 {
     echo "gui_wasm_cli_status=$status"
     echo "gui_wasm_cli_reason=$reason"
-    printf '%s' "$results" | while IFS='|' read -r name item_status item_reason source output size magic version; do
+    printf '%s' "$results" | while IFS='|' read -r name item_status item_reason source output size magic version import_count imports; do
         [ -n "$name" ] || continue
         echo "gui_wasm_cli_${name}_status=$item_status"
         echo "gui_wasm_cli_${name}_reason=$item_reason"
@@ -217,6 +244,8 @@ fi
         echo "gui_wasm_cli_${name}_size_bytes=$size"
         echo "gui_wasm_cli_${name}_magic_hex=$magic"
         echo "gui_wasm_cli_${name}_version_hex=$version"
+        echo "gui_wasm_cli_${name}_import_count=$import_count"
+        echo "gui_wasm_cli_${name}_imports=$imports"
     done
 } >"$BUILD_DIR/evidence.env"
 
@@ -227,7 +256,7 @@ fi
     echo "- reason: $reason"
     echo
     echo "## Artifacts"
-    printf '%s' "$results" | while IFS='|' read -r name item_status item_reason source output size magic version; do
+    printf '%s' "$results" | while IFS='|' read -r name item_status item_reason source output size magic version import_count imports; do
         [ -n "$name" ] || continue
         echo
         echo "### $name"
@@ -238,6 +267,8 @@ fi
         echo "- size bytes: $size"
         echo "- magic hex: $magic"
         echo "- version hex: $version"
+        echo "- import count: $import_count"
+        echo "- imports: ${imports:-none}"
         if [ "$name" = "widget_matrix" ]; then
             echo "- marker coverage: checkbox, dropdown/select, text input/textfield, textarea, tabs, dialog, table/list, progress, image, tooltip, tree/scroll, menu, statusbar, and supported menu-command/event response strings; this does not claim command-bar coverage for the widget matrix"
             echo "- event markers: matrix_checkbox:changed, matrix_dropdown:changed, matrix_textfield:accepted, matrix_textarea:accepted, matrix_tabs:selected, matrix_dialog:opened, matrix_scroll:accepted, matrix_menu:accepted, matrix_event:ignored"
