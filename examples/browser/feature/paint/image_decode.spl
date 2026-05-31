@@ -983,13 +983,13 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         return nil
     if samples_per_pixel != 1 and samples_per_pixel != 3 and samples_per_pixel != 4:
         return nil
-    if photometric != 0 and photometric != 1 and photometric != 2 and photometric != 3 and photometric != 8:
+    if photometric != 0 and photometric != 1 and photometric != 2 and photometric != 3 and photometric != 8 and photometric != 9:
         return nil
     if samples_per_pixel == 1 and photometric != 0 and photometric != 1 and photometric != 3:
         return nil
-    if samples_per_pixel > 1 and photometric != 2 and photometric != 8:
+    if samples_per_pixel > 1 and photometric != 2 and photometric != 8 and photometric != 9:
         return nil
-    if photometric == 8 and samples_per_pixel != 3:
+    if (photometric == 8 or photometric == 9) and samples_per_pixel != 3:
         return nil
     if photometric == 3 and (samples_per_pixel != 1 or not _tiff_colormap_is_supported(raw_data, color_map_entry, color_map_count, little)):
         return nil
@@ -1093,11 +1093,15 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
             rgba.push(gray)
             rgba.push(gray)
             rgba.push(255)
-        else if photometric == 8:
-            val argb = _tiff_cielab_pixel_to_argb(
-                _tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset, compression == 32773),
-                _tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset + 1, compression == 32773),
-                _tiff_pixel_byte(raw_data, packbits_pixels, pixel_offset + 2, compression == 32773)
+        else if photometric == 8 or photometric == 9:
+            val argb = _tiff_lab_pixel_to_argb(
+                raw_data,
+                packbits_pixels,
+                pixel_offset,
+                sample_bits,
+                compression == 32773,
+                little,
+                photometric == 9
             )
             rgba.push((argb / 65536) & 255)
             rgba.push((argb / 256) & 255)
@@ -1246,10 +1250,47 @@ fn _tiff_strip_lookup_index(strip_index: i64, value_count: i64) -> i64:
         return 0
     strip_index
 
-fn _tiff_cielab_pixel_to_argb(l_byte: i64, a_byte: i64, b_byte: i64) -> i64:
-    val l = (l_byte as f64) * 100.0 / 255.0
-    val a = (a_byte - 128) as f64
-    val b = (b_byte - 128) as f64
+fn _tiff_signed_byte(value: i64) -> i64:
+    if value >= 128:
+        return value - 256
+    value
+
+fn _tiff_signed_u16(value: i64) -> i64:
+    if value >= 32768:
+        return value - 65536
+    value
+
+fn _tiff_lab_component(raw_data: text, decoded_pixels: [i64], offset: i64, sample_bits: i64, compressed: bool, little: bool) -> i64:
+    if sample_bits == 16:
+        if compressed:
+            return decoded_pixels[offset] + decoded_pixels[offset + 1] * 256
+        return _read_u16(raw_data, offset, little)
+    _tiff_pixel_byte(raw_data, decoded_pixels, offset, compressed)
+
+fn _tiff_lab_pixel_to_argb(raw_data: text, decoded_pixels: [i64], pixel_offset: i64, sample_bits: i64, compressed: bool, little: bool, icc_lab: bool) -> i64:
+    val l_encoded = _tiff_lab_component(raw_data, decoded_pixels, pixel_offset, sample_bits, compressed, little)
+    val a_encoded = _tiff_lab_component(raw_data, decoded_pixels, pixel_offset + _tiff_bytes_per_sample(sample_bits), sample_bits, compressed, little)
+    val b_encoded = _tiff_lab_component(raw_data, decoded_pixels, pixel_offset + _tiff_bytes_per_sample(sample_bits) * 2, sample_bits, compressed, little)
+    var l = 0.0
+    var a = 0.0
+    var b = 0.0
+    if sample_bits == 16:
+        if icc_lab:
+            l = (l_encoded as f64) * 100.0 / 65280.0
+            a = ((a_encoded - 32768) as f64) / 256.0
+            b = ((b_encoded - 32768) as f64) / 256.0
+        else:
+            l = (l_encoded as f64) * 100.0 / 65535.0
+            a = (_tiff_signed_u16(a_encoded) as f64) / 256.0
+            b = (_tiff_signed_u16(b_encoded) as f64) / 256.0
+    else if icc_lab:
+        l = (l_encoded as f64) * 100.0 / 255.0
+        a = (a_encoded - 128) as f64
+        b = (b_encoded - 128) as f64
+    else:
+        l = (l_encoded as f64) * 100.0 / 255.0
+        a = _tiff_signed_byte(a_encoded) as f64
+        b = _tiff_signed_byte(b_encoded) as f64
     cie_lab_d50_to_srgb_packed_argb(CieLab(l: l, a: a, b: b, white_point: "D50"), 255)
 
 fn _tiff_entry_first_value(data: text, entry: i64, little: bool) -> i64:
@@ -1293,7 +1334,7 @@ fn _tiff_bits_are_supported(data: text, value_count: i64, inline_value: i64, off
     if sample_bits == 16:
         if compression != 1 and compression != 32773:
             return false
-        if photometric != 0 and photometric != 1 and photometric != 2:
+        if photometric != 0 and photometric != 1 and photometric != 2 and photometric != 8 and photometric != 9:
             return false
         if compression == 32773 and planar_config != 1:
             return false
