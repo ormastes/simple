@@ -152,6 +152,10 @@ Progress 2026-05-30:
 1. Create `RocmSession` implementing `ComputeSession`
    - Pattern: mirror `CudaSession` — context init, HIP module cache, kernel launch
    - Pixel ops: compile HIP kernels from `backend_rocm_kernels.spl` source via `hipModuleLoadData`
+   - In progress: `RocmSession` exists as a fail-closed shared-session
+     boundary with generated 2D launch wrappers and explicit unavailable
+     behavior when no HIP FFI is injected.
+   - Covered by `test/unit/lib/gpu/engine2d/rocm_session_contract_spec.spl`.
 2. Fix `sffi_rocm.launch_kernel` — currently passes `0` as kernel handle; must load module + get function first
 3. Verify and fix test `C-3: hipLaunchKernel dispatches compute kernel`
 
