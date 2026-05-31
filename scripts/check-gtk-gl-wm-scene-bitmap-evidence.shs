@@ -44,6 +44,8 @@ fi
 
 SIMPLE_SRC="$BUILD_DIR/simple_wm_scene_reference.spl"
 SIMPLE_OUT="$BUILD_DIR/simple.out"
+EXPECTED_RGBA="$BUILD_DIR/simple-expected-rgba.json"
+GTK_RGBA="$BUILD_DIR/gtk-captured-rgba.json"
 GTK_SRC="$BUILD_DIR/gtk_gl_wm_scene.c"
 GTK_BIN="$BUILD_DIR/gtk_gl_wm_scene"
 GTK_OUT="$BUILD_DIR/gtk.out"
@@ -145,6 +147,7 @@ static int iterations = 200;
 static uint64_t checksum_value = 0;
 static gint64 total_us = 0;
 static gboolean rendered = FALSE;
+static const char *captured_rgba_path = NULL;
 
 static void rect_rgba(int x, int y, int w, int h, float r, float g, float b, float a) {
     glScissor(x, H - y - h, w, h);
@@ -191,6 +194,36 @@ static uint64_t checksum_pixels(const unsigned char *pixels) {
     return sum;
 }
 
+static gboolean write_rgba_bitmap(const unsigned char *pixels) {
+    if (captured_rgba_path == NULL || captured_rgba_path[0] == '\0') {
+        return FALSE;
+    }
+    FILE *f = fopen(captured_rgba_path, "w");
+    if (f == NULL) {
+        return FALSE;
+    }
+    fprintf(f, "{\"width\":%d,\"height\":%d,\"format\":\"rgba-u32\",\"producer\":\"gtk-glarea-opengl\",\"pixels\":[", W, H);
+    for (int y = 0; y < H; ++y) {
+        int src_y = H - 1 - y;
+        for (int x = 0; x < W; ++x) {
+            int src = (src_y * W + x) * 4;
+            int dst = y * W + x;
+            uint32_t r = pixels[src + 0];
+            uint32_t g = pixels[src + 1];
+            uint32_t b = pixels[src + 2];
+            uint32_t a = pixels[src + 3];
+            uint32_t rgba = (r << 24) | (g << 16) | (b << 8) | a;
+            if (dst > 0) {
+                fputc(',', f);
+            }
+            fprintf(f, "%u", rgba);
+        }
+    }
+    fprintf(f, "]}");
+    fclose(f);
+    return TRUE;
+}
+
 static gboolean on_render(GtkGLArea *area, GdkGLContext *context, gpointer user_data) {
     (void)area;
     (void)context;
@@ -209,8 +242,11 @@ static gboolean on_render(GtkGLArea *area, GdkGLContext *context, gpointer user_
     }
     glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     checksum_value = checksum_pixels(pixels);
+    gboolean wrote_rgba = write_rgba_bitmap(pixels);
     free(pixels);
     rendered = TRUE;
+    printf("gtk_captured_rgba_path=%s\n", captured_rgba_path != NULL ? captured_rgba_path : "");
+    printf("gtk_captured_rgba_written=%s\n", wrote_rgba ? "true" : "false");
     gtk_main_quit();
     return TRUE;
 }
@@ -225,6 +261,9 @@ int main(int argc, char **argv) {
     if (argc > 1) {
         iterations = atoi(argv[1]);
         if (iterations <= 0) iterations = 1;
+    }
+    if (argc > 2) {
+        captured_rgba_path = argv[2];
     }
     if (!gtk_init_check(&argc, &argv)) {
         printf("gtk_status=unavailable\n");
@@ -278,7 +317,7 @@ if command -v xvfb-run >/dev/null 2>&1 && [ -z "${DISPLAY:-}" ]; then
     gtk_runner="xvfb-run -a $GTK_BIN"
 fi
 set +e
-GDK_GL=always GDK_RENDERING=gl sh -c "$gtk_runner '$ITERATIONS'" >"$GTK_OUT" 2>&1
+GDK_GL=always GDK_RENDERING=gl sh -c "$gtk_runner '$ITERATIONS' '$GTK_RGBA'" >"$GTK_OUT" 2>&1
 gtk_code=$?
 set -e
 if [ "$gtk_code" -ne 0 ]; then
@@ -304,21 +343,81 @@ gtk_status="$(field_of gtk_status "$GTK_OUT")"
 gtk_checksum="$(field_of gtk_checksum "$GTK_OUT")"
 gtk_frame_us="$(field_of gtk_frame_us "$GTK_OUT")"
 gtk_gl_context="$(field_of gtk_gl_context "$GTK_OUT")"
+gtk_rgba_written="$(field_of gtk_captured_rgba_written "$GTK_OUT")"
+node -e '
+const fs = require("fs");
+const width = 320;
+const height = 200;
+function rgba(r,g,b,a){ return (((r << 24) >>> 0) | (g << 16) | (b << 8) | a) >>> 0; }
+function rect(pixels,x,y,w,h,color){
+  for(let yy=y; yy<y+h; yy+=1) {
+    if (yy < 0 || yy >= height) continue;
+    for(let xx=x; xx<x+w; xx+=1) {
+      if (xx < 0 || xx >= width) continue;
+      pixels[yy * width + xx] = color;
+    }
+  }
+}
+const pixels = new Uint32Array(width * height);
+pixels.fill(rgba(24,32,42,255));
+rect(pixels,28,24,264,124,rgba(244,247,251,255));
+rect(pixels,28,24,264,20,rgba(36,52,71,255));
+rect(pixels,36,32,64,4,rgba(226,232,240,255));
+rect(pixels,44,58,52,38,rgba(14,165,233,255));
+rect(pixels,104,58,112,8,rgba(15,23,42,255));
+rect(pixels,104,74,136,8,rgba(71,85,105,255));
+rect(pixels,104,90,92,8,rgba(71,85,105,255));
+rect(pixels,42,116,92,18,rgba(34,197,94,255));
+rect(pixels,144,116,114,18,rgba(99,102,241,255));
+rect(pixels,0,168,320,32,rgba(17,24,39,255));
+rect(pixels,12,176,44,12,rgba(14,165,233,255));
+rect(pixels,68,176,68,12,rgba(31,41,55,255));
+rect(pixels,206,174,96,18,rgba(34,197,94,255));
+let sum = 0n;
+for (let i=0; i<pixels.length; i+=1) {
+  const p = pixels[i] >>> 0;
+  const r = (p >>> 24) & 255;
+  const g = (p >>> 16) & 255;
+  const b = (p >>> 8) & 255;
+  const a = p & 255;
+  const idx = BigInt(i + 1);
+  sum += BigInt(r) * idx + BigInt(g) * (idx + 2n) + BigInt(b) * (idx + 4n) + BigInt(a) * (idx + 6n);
+}
+fs.writeFileSync(process.argv[1], JSON.stringify({
+  width,
+  height,
+  format: "rgba-u32",
+  producer: "wm-scene-reference",
+  checksum: sum.toString(),
+  pixels: Array.from(pixels, v => v >>> 0)
+}));
+' "$EXPECTED_RGBA"
+reference_checksum="$(node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); console.log(p.checksum || "");' "$EXPECTED_RGBA" 2>/dev/null || echo missing)"
+rgba_mismatch_count="$(node -e 'const fs=require("fs"); const a=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const b=JSON.parse(fs.readFileSync(process.argv[2],"utf8")); let n=0; if (a.width!==b.width || a.height!==b.height || a.pixels.length!==b.pixels.length) { n = Math.max(a.pixels.length, b.pixels.length); } else { for (let i=0;i<a.pixels.length;i+=1) if ((a.pixels[i]>>>0)!==(b.pixels[i]>>>0)) n+=1; } console.log(n);' "$EXPECTED_RGBA" "$GTK_RGBA" 2>/dev/null || echo missing)"
 
 status=pass
 reason=pass
 if [ "$simple_status" != "pass" ]; then
     status=fail
     reason=simple-reference-status-failed
+elif [ "$reference_checksum" != "$simple_checksum" ] || [ ! -s "$EXPECTED_RGBA" ]; then
+    status=fail
+    reason=reference-simple-checksum-mismatch
 elif [ "$gtk_status" != "pass" ]; then
     status=fail
     reason=gtk-gl-status-failed
 elif [ "$gtk_gl_context" != "true" ]; then
     status=fail
     reason=gtk-gl-context-missing
+elif [ "$gtk_rgba_written" != "true" ] || [ ! -s "$GTK_RGBA" ]; then
+    status=fail
+    reason=missing-gtk-rgba-artifact
 elif [ "$simple_checksum" != "$gtk_checksum" ]; then
     status=fail
     reason=bitmap-checksum-mismatch
+elif [ "$rgba_mismatch_count" != "0" ]; then
+    status=fail
+    reason=bitmap-pixel-mismatch
 elif [ "$simple_frame_us" -gt "$gtk_frame_us" ]; then
     status=fail
     reason=simple-retained-frame-slower-than-gtk-gl
@@ -329,6 +428,10 @@ fi
     echo "gtk_gl_wm_scene_reason=$reason"
     sed 's/^/gtk_gl_wm_scene_/' "$SIMPLE_OUT" | grep '^gtk_gl_wm_scene_simple_' || true
     sed 's/^/gtk_gl_wm_scene_/' "$GTK_OUT" | grep '^gtk_gl_wm_scene_gtk_' || true
+    echo "gtk_gl_wm_scene_reference_checksum=$reference_checksum"
+    echo "gtk_gl_wm_scene_rgba_mismatch_count=$rgba_mismatch_count"
+    echo "gtk_gl_wm_scene_expected_rgba_path=$EXPECTED_RGBA"
+    echo "gtk_gl_wm_scene_captured_rgba_path=$GTK_RGBA"
     echo "gtk_gl_wm_scene_blur_or_tolerance_used=false"
 } >"$BUILD_DIR/evidence.env"
 
@@ -346,6 +449,9 @@ fi
     echo "- gtk checksum: $gtk_checksum"
     echo "- simple frame us: $simple_frame_us"
     echo "- gtk frame us: $gtk_frame_us"
+    echo "- mismatch count: $rgba_mismatch_count"
+    echo "- expected RGBA path: $EXPECTED_RGBA"
+    echo "- captured RGBA path: $GTK_RGBA"
     echo "- blur/tolerance used: false"
     echo
     echo "## Raw Evidence"

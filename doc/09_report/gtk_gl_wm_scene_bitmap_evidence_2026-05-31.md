@@ -10,7 +10,10 @@
 - simple checksum: 1193966625284
 - gtk checksum: 1193966625284
 - simple frame us: 1
-- gtk frame us: 422
+- gtk frame us: 289
+- mismatch count: 0
+- expected RGBA path: build/gtk_gl_wm_scene_bitmap_evidence/simple-expected-rgba.json
+- captured RGBA path: build/gtk_gl_wm_scene_bitmap_evidence/gtk-captured-rgba.json
 - blur/tolerance used: false
 
 ## Raw Evidence
@@ -24,13 +27,19 @@
 - gtk_gl_wm_scene_simple_checksum=1193966625284
 - gtk_gl_wm_scene_simple_frame_us=1
 - gtk_gl_wm_scene_simple_blur_or_tolerance_used=false
+- gtk_gl_wm_scene_gtk_captured_rgba_path=build/gtk_gl_wm_scene_bitmap_evidence/gtk-captured-rgba.json
+- gtk_gl_wm_scene_gtk_captured_rgba_written=true
 - gtk_gl_wm_scene_gtk_status=pass
 - gtk_gl_wm_scene_gtk_reason=pass
 - gtk_gl_wm_scene_gtk_renderer=gtk-glarea-opengl
 - gtk_gl_wm_scene_gtk_gl_context=true
 - gtk_gl_wm_scene_gtk_iterations=200
 - gtk_gl_wm_scene_gtk_checksum=1193966625284
-- gtk_gl_wm_scene_gtk_total_us=84485
-- gtk_gl_wm_scene_gtk_frame_us=422
+- gtk_gl_wm_scene_gtk_total_us=57979
+- gtk_gl_wm_scene_gtk_frame_us=289
 - gtk_gl_wm_scene_gtk_blur_or_tolerance_used=false
+- gtk_gl_wm_scene_reference_checksum=1193966625284
+- gtk_gl_wm_scene_rgba_mismatch_count=0
+- gtk_gl_wm_scene_expected_rgba_path=build/gtk_gl_wm_scene_bitmap_evidence/simple-expected-rgba.json
+- gtk_gl_wm_scene_captured_rgba_path=build/gtk_gl_wm_scene_bitmap_evidence/gtk-captured-rgba.json
 - gtk_gl_wm_scene_blur_or_tolerance_used=false
