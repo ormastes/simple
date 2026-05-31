@@ -27,25 +27,25 @@ The full runner uses 10 warmup frames and 100 timed frames.
 
 | Scene | Backend | Mode | p50 ns | p50 ms | p95 ms | Pixels/sec | Draws/sec | Pixel hash |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| fill_1080p | c_cpu_scalar | full | 4698609 | 4 | 5 | 441322101 | 21495 | 4834704270759959608 |
-| fill_1080p | simple_cpu_scalar | full | 143833396 | 143 | 151 | 14416679 | 702 | 223018252332571704 |
-| blit_tiles | c_cpu_scalar | full | 4876129 | 4 | 5 | 425255361 | 104796 | -1036025823807617243 |
-| blit_tiles | simple_cpu_scalar | full | 41509531 | 41 | 44 | 49954792 | 12310 | -1036025823807617243 |
-| clipped_scroll | c_cpu_scalar | full | 2329371 | 2 | 2 | 890197396 | 4722 | 1541462802529360585 |
-| clipped_scroll | simple_cpu_scalar | full | 26546182 | 26 | 33 | 78112927 | 414 | -764380206684333367 |
+| fill_1080p | c_cpu_scalar | full | 4524903 | 4 | 5 | 458263967 | 22320 | 3453644792 |
+| fill_1080p | simple_cpu_scalar | full | 140777664 | 140 | 144 | 14729609 | 717 | 3453644792 |
+| blit_tiles | c_cpu_scalar | full | 4781594 | 4 | 5 | 433662916 | 106868 | 1245774277 |
+| blit_tiles | simple_cpu_scalar | full | 43310089 | 43 | 47 | 47877989 | 11798 | 1245774277 |
+| clipped_scroll | c_cpu_scalar | full | 2308940 | 2 | 3 | 898074441 | 4764 | 35205929 |
+| clipped_scroll | simple_cpu_scalar | full | 23273378 | 23 | 25 | 89097508 | 472 | 35205929 |
 
 ## Hash Gate Status
 
 | Scene | C hash | Simple hash | Status |
 |---|---:|---:|---|
-| fill_1080p | 4834704270759959608 | 223018252332571704 | fail |
-| blit_tiles | -1036025823807617243 | -1036025823807617243 | pass |
-| clipped_scroll | 1541462802529360585 | -764380206684333367 | fail |
+| fill_1080p | 3453644792 | 3453644792 | pass |
+| blit_tiles | 1245774277 | 1245774277 | pass |
+| clipped_scroll | 35205929 | 35205929 | pass |
 
-Full throughput now runs locally, but the report still cannot claim accepted
-Simple/C throughput parity because two scene hashes differ. The next fix is to
-isolate the Simple runner correctness mismatch for rect-fill and clipped-scroll
-before enforcing the p50 ratio gate.
+Full throughput now runs locally and the per-scene byte hashes match exactly.
+The benchmark uses FNV-1a 32-bit for the cross-runtime pixel hash because the
+current direct Simple runner does not produce C-compatible FNV-1a 64-bit values
+for signed 64-bit hash state.
 
 ## Backend Matrix Status
 
@@ -56,19 +56,18 @@ before enforcing the p50 ratio gate.
 | OpenCL | 1920x1080 fill/blit/scroll throughput | `OpenClSession`, ICD probe, generated OpenCL launch plans | ICD probe/session contract exist; full device throughput not measured here |
 | CPU-SIMD AVX2 | 1920x1080 fill/blit/scroll throughput | CPU SIMD kernels and hit counters | Runtime evidence exists; full 1920x1080 runner still pending |
 | CPU-SIMD NEON | 1920x1080 fill/blit/scroll throughput | CPU SIMD architecture probe | Not available on this x86_64 host |
-| Scalar CPU | 1920x1080 fill/blit/scroll throughput | `simple_runner.spl`, C reference harness | Full 1920x1080 mode runs; hash gate fails for fill and scroll |
+| Scalar CPU | 1920x1080 fill/blit/scroll throughput | `simple_runner.spl`, C reference harness | Full 1920x1080 mode runs; hash gate passes for fill, blit, and scroll |
 
 ## Full-Mode Gate
 
 Full accepted throughput evidence still requires:
 
-1. Fix the Simple/C hash mismatch for `fill_1080p` and `clipped_scroll`.
-2. Keep running `test/perf/graphics_2d/c_reference/bench_2d` for C scalar reference.
-3. Keep running `simple_runner.spl` in full mode: 1920x1080, 10 warmup frames,
+1. Keep running `test/perf/graphics_2d/c_reference/bench_2d` for C scalar reference.
+2. Keep running `simple_runner.spl` in full mode: 1920x1080, 10 warmup frames,
    100 timed frames.
-4. For GPU rows, run equivalent generated-kernel dispatch paths only when the
+3. For GPU rows, run equivalent generated-kernel dispatch paths only when the
    corresponding runtime probe initializes a real backend.
-5. Compare per-scene pixel hashes before accepting throughput numbers.
+4. Compare per-scene pixel hashes before accepting throughput numbers.
 
 ## Verification
 

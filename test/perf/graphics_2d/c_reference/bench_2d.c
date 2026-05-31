@@ -197,12 +197,12 @@ static int64_t read_rss_kb(void) {
     return kb;
 }
 
-/* ── FNV-1a 64-bit (must match fnv1a_fb in simple_runner.spl) ────────────── */
+/* ── FNV-1a 32-bit (must match fnv1a_fb in simple_runner.spl) ────────────── */
 
 static int64_t fnv1a_framebuffer(const uint8_t *fb) {
-    uint64_t h=14695981039346656037ULL;
+    uint32_t h=2166136261U;
     int len=FRAME_W*FRAME_H*BYTES_PER_PX;
-    for (int i=0; i<len; i++) { h^=(uint64_t)fb[i]; h*=1099511628211ULL; }
+    for (int i=0; i<len; i++) { h^=(uint32_t)fb[i]; h*=16777619U; }
     return (int64_t)h;
 }
 

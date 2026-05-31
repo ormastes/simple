@@ -52,7 +52,7 @@ SIMPLE_ENGINE2D_RUNNER_MODE=full bin/simple test/perf/graphics_2d/simple_runner.
 
 ## Pixel Format
 
-RGBA8888, byte order R,G,B,A per pixel, row-major. FNV-1a 64-bit hash over full framebuffer.
+RGBA8888, byte order R,G,B,A per pixel, row-major. FNV-1a 32-bit hash over full framebuffer.
 
 ## Warmup / Timing
 
