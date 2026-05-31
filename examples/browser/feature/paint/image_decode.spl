@@ -880,6 +880,12 @@ fn _read_i32_le(data: text, offset: i64) -> i64:
         return unsigned - 4294967296
     unsigned
 
+fn _read_i32(data: text, offset: i64, little: bool) -> i64:
+    val unsigned = _read_u32(data, offset, little)
+    if unsigned >= 2147483648:
+        return unsigned - 4294967296
+    unsigned
+
 fn _read_u16(data: text, offset: i64, little: bool) -> i64:
     if little:
         return _read_u16_le(data, offset)
@@ -920,6 +926,8 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
     var bits_per_sample_offset = 0
     var color_map_entry = 0
     var color_map_count = 0
+    var decode_entry = 0
+    var decode_count = 0
 
     var i = 0
     while i < count:
@@ -959,6 +967,9 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         else if tag == 320:
             color_map_entry = entry
             color_map_count = value_count
+        else if tag == 433:
+            decode_entry = entry
+            decode_count = value_count
         else if tag == 322:
             tile_width = first_value
         else if tag == 323:
@@ -997,6 +1008,8 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
     if is_tiled and (compression != 1 or planar_config != 1 or tile_width <= 0 or tile_length <= 0 or tile_byte_count_entry <= 0):
         return nil
     val sample_bits = _tiff_sample_bits(raw_data, bits_per_sample_count, bits_per_sample_value, bits_per_sample_offset, little)
+    if photometric == 10 and decode_entry > 0 and not _tiff_itulab_decode_is_supported(raw_data, decode_entry, decode_count, sample_bits, little):
+        return nil
     if not _tiff_bits_are_supported(raw_data, bits_per_sample_count, bits_per_sample_value, bits_per_sample_offset, samples_per_pixel, compression, photometric, planar_config, little):
         return nil
 
@@ -1101,7 +1114,8 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
                 sample_bits,
                 compression == 32773,
                 little,
-                photometric
+                photometric,
+                decode_entry
             )
             rgba.push((argb / 65536) & 255)
             rgba.push((argb / 256) & 255)
@@ -1267,7 +1281,35 @@ fn _tiff_lab_component(raw_data: text, decoded_pixels: [i64], offset: i64, sampl
         return _read_u16(raw_data, offset, little)
     _tiff_pixel_byte(raw_data, decoded_pixels, offset, compressed)
 
-fn _tiff_lab_pixel_to_argb(raw_data: text, decoded_pixels: [i64], pixel_offset: i64, sample_bits: i64, compressed: bool, little: bool, photometric: i64) -> i64:
+fn _tiff_itulab_decode_is_supported(data: text, entry: i64, value_count: i64, sample_bits: i64, little: bool) -> bool:
+    if sample_bits != 8:
+        return false
+    val typ = _read_u16(data, entry + 2, little)
+    if typ != 10 or value_count < 6:
+        return false
+    val offset = _read_u32(data, entry + 8, little)
+    if offset <= 0 or offset + value_count * 8 > data.len():
+        return false
+    var i = 0
+    while i < 6:
+        val denominator = _read_i32(data, offset + i * 8 + 4, little)
+        if denominator == 0:
+            return false
+        i = i + 1
+    true
+
+fn _tiff_srational_value_at(data: text, entry: i64, index: i64, little: bool) -> f64:
+    val offset = _read_u32(data, entry + 8, little)
+    val numerator = _read_i32(data, offset + index * 8, little)
+    val denominator = _read_i32(data, offset + index * 8 + 4, little)
+    (numerator as f64) / (denominator as f64)
+
+fn _tiff_itulab_decode_component(data: text, entry: i64, component: i64, encoded: i64, little: bool) -> f64:
+    val minimum = _tiff_srational_value_at(data, entry, component * 2, little)
+    val maximum = _tiff_srational_value_at(data, entry, component * 2 + 1, little)
+    minimum + (encoded as f64) * (maximum - minimum) / 255.0
+
+fn _tiff_lab_pixel_to_argb(raw_data: text, decoded_pixels: [i64], pixel_offset: i64, sample_bits: i64, compressed: bool, little: bool, photometric: i64, decode_entry: i64) -> i64:
     val l_encoded = _tiff_lab_component(raw_data, decoded_pixels, pixel_offset, sample_bits, compressed, little)
     val a_encoded = _tiff_lab_component(raw_data, decoded_pixels, pixel_offset + _tiff_bytes_per_sample(sample_bits), sample_bits, compressed, little)
     val b_encoded = _tiff_lab_component(raw_data, decoded_pixels, pixel_offset + _tiff_bytes_per_sample(sample_bits) * 2, sample_bits, compressed, little)
@@ -1288,9 +1330,14 @@ fn _tiff_lab_pixel_to_argb(raw_data: text, decoded_pixels: [i64], pixel_offset: 
         a = (a_encoded - 128) as f64
         b = (b_encoded - 128) as f64
     else if photometric == 10:
-        l = (l_encoded as f64) * 100.0 / 255.0
-        a = -21760.0 / 255.0 + (a_encoded as f64) * 170.0 / 255.0
-        b = -19200.0 / 255.0 + (b_encoded as f64) * 200.0 / 255.0
+        if decode_entry > 0:
+            l = _tiff_itulab_decode_component(raw_data, decode_entry, 0, l_encoded, little)
+            a = _tiff_itulab_decode_component(raw_data, decode_entry, 1, a_encoded, little)
+            b = _tiff_itulab_decode_component(raw_data, decode_entry, 2, b_encoded, little)
+        else:
+            l = (l_encoded as f64) * 100.0 / 255.0
+            a = -21760.0 / 255.0 + (a_encoded as f64) * 170.0 / 255.0
+            b = -19200.0 / 255.0 + (b_encoded as f64) * 200.0 / 255.0
     else:
         l = (l_encoded as f64) * 100.0 / 255.0
         a = _tiff_signed_byte(a_encoded) as f64
