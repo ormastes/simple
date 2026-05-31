@@ -125,6 +125,11 @@ Progress 2026-05-30:
 1. Retrofit `CpuSimdSession` to implement `ComputeSession`
    - Pixel ops delegate to existing `fill_span`/`copy_span`/`alpha_blend_span`/`blit_rect`/`scroll_region`
    - GPU-only ops return nil (no-op)
+   - Done: `CpuSimdSession` now reports `cpu_simd`, initializes from the
+     working SIMD detector, delegates fill/copy/alpha/blit/scroll to the
+     span/rect kernels, exposes hit counts, and treats module/kernel hooks as
+     CPU no-ops. Legacy geometry-shaped methods remain as `*_geometry` aliases.
+   - Covered by `test/unit/lib/gpu/engine2d/cpu_simd_session_contract_spec.spl`.
 2. Add native SIMD kernels behind the existing scalar functions:
    - x86: AVX2 `_mm256_set1_epi32` fill, `_mm256_loadu_si256`/`_mm256_storeu_si256` copy, Porter-Duff blend
    - ARM: NEON `vdupq_n_u32` fill, `vld1q_u32`/`vst1q_u32` copy, `vmulq_u32` blend
