@@ -12,9 +12,23 @@ FAKE_QMP_REPORT_PATH="${FAKE_QMP_REPORT_PATH:-$BUILD_DIR/fake-qmp-capture.md}"
 GTK_SCENE_REPORT_PATH="${GTK_SCENE_REPORT_PATH:-$BUILD_DIR/gtk-gl-wm-scene.md}"
 QEMU_ARCH="${QEMU_ARCH:-x86_64}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-$QEMU_ARCH}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+AUTO_QMP_LAUNCH="${QEMU_AUTO_LAUNCH_SIMPLEOS_DESKTOP:-0}"
+AUTO_QMP_OUT="$BUILD_DIR/auto-qmp.out"
+AUTO_QMP_PID=""
+AUTO_QMP_STATUS=not-run
+AUTO_QMP_REASON=not-run
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$REPORT_PATH" "$BUILD_DIR/evidence.env" "$BUILD_DIR/qemu-display-help.txt" "$BUILD_DIR/wm.out" "$BUILD_DIR/wm-host.out" "$BUILD_DIR/fake-qmp.out" "$BUILD_DIR/gtk-gl.out"
+rm -f "$REPORT_PATH" "$BUILD_DIR/evidence.env" "$BUILD_DIR/qemu-display-help.txt" "$BUILD_DIR/wm.out" "$BUILD_DIR/wm-host.out" "$BUILD_DIR/fake-qmp.out" "$BUILD_DIR/gtk-gl.out" "$AUTO_QMP_OUT"
+
+cleanup_auto_qmp() {
+    if [ -n "$AUTO_QMP_PID" ]; then
+        kill "$AUTO_QMP_PID" >/dev/null 2>&1 || true
+        wait "$AUTO_QMP_PID" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup_auto_qmp EXIT INT TERM
 
 qemu_display_gtk_supported=false
 qemu_display_reason=missing-qemu-bin
@@ -56,6 +70,27 @@ gtk_scene_rgba_mismatch_count=
 gtk_scene_expected_rgba_path=
 gtk_scene_captured_rgba_path=
 gtk_scene_blur_or_tolerance_used=
+
+if [ -z "${QEMU_QMP_SOCKET:-}" ] && [ "$AUTO_QMP_LAUNCH" = "1" ]; then
+    set +e
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run src/app/test/simpleos_desktop_qmp_launch.spl --mode=interpreter --clean >"$AUTO_QMP_OUT" 2>&1
+    auto_qmp_code=$?
+    set -e
+    AUTO_QMP_STATUS="$(sed -n 's/^simpleos_desktop_qmp_status=//p' "$AUTO_QMP_OUT" | tail -n 1)"
+    AUTO_QMP_REASON="$(sed -n 's/^simpleos_desktop_qmp_reason=//p' "$AUTO_QMP_OUT" | tail -n 1)"
+    AUTO_QMP_PID="$(sed -n 's/^simpleos_desktop_qmp_pid=//p' "$AUTO_QMP_OUT" | tail -n 1)"
+    auto_qmp_socket="$(sed -n 's/^simpleos_desktop_qmp_socket=//p' "$AUTO_QMP_OUT" | tail -n 1)"
+    if [ -z "$AUTO_QMP_STATUS" ]; then
+        AUTO_QMP_STATUS=unavailable
+    fi
+    if [ -z "$AUTO_QMP_REASON" ]; then
+        AUTO_QMP_REASON=auto-qmp-launch-failed
+    fi
+    if [ "$auto_qmp_code" -eq 0 ] && [ "$AUTO_QMP_STATUS" = "pass" ] && [ -S "$auto_qmp_socket" ]; then
+        QEMU_QMP_SOCKET="$auto_qmp_socket"
+        export QEMU_QMP_SOCKET
+    fi
+fi
 
 if [ -z "${QEMU_QMP_SOCKET:-}" ]; then
     set +e
@@ -150,6 +185,10 @@ fi
     echo "qemu_gtk_wm_capture_qemu_arch=$QEMU_ARCH"
     echo "qemu_gtk_wm_capture_display_gtk_supported=$qemu_display_gtk_supported"
     echo "qemu_gtk_wm_capture_display_reason=$qemu_display_reason"
+    echo "qemu_gtk_wm_capture_auto_qmp_launch=$AUTO_QMP_LAUNCH"
+    echo "qemu_gtk_wm_capture_auto_qmp_status=$AUTO_QMP_STATUS"
+    echo "qemu_gtk_wm_capture_auto_qmp_reason=$AUTO_QMP_REASON"
+    echo "qemu_gtk_wm_capture_auto_qmp_pid=$AUTO_QMP_PID"
     echo "qemu_gtk_wm_capture_qmp_socket=${QEMU_QMP_SOCKET:-}"
     echo "qemu_gtk_wm_capture_wm_exit_code=$wm_exit_code"
     echo "qemu_gtk_wm_capture_host_wm_status=$host_wm_status"
@@ -195,6 +234,10 @@ fi
     echo "- qemu arch: $QEMU_ARCH"
     echo "- qemu display gtk supported: $qemu_display_gtk_supported"
     echo "- qemu display reason: $qemu_display_reason"
+    echo "- auto QMP launch: $AUTO_QMP_LAUNCH"
+    echo "- auto QMP status: $AUTO_QMP_STATUS"
+    echo "- auto QMP reason: $AUTO_QMP_REASON"
+    echo "- auto QMP pid: $AUTO_QMP_PID"
     echo "- qmp socket: ${QEMU_QMP_SOCKET:-}"
     echo "- host WM smoke status: $host_wm_status"
     echo "- host WM smoke reason: $host_wm_reason"
@@ -221,6 +264,11 @@ fi
     echo
     echo "## Raw Evidence"
     sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    if [ -f "$AUTO_QMP_OUT" ]; then
+        echo
+        echo "## Auto QMP Launch Output"
+        sed 's/^/- /' "$AUTO_QMP_OUT"
+    fi
     if [ -f "$BUILD_DIR/fake-qmp.out" ]; then
         echo
         echo "## Fake QMP Capture Output"

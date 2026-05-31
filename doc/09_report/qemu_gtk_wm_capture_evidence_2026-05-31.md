@@ -6,6 +6,10 @@
 - qemu arch: x86_64
 - qemu display gtk supported: true
 - qemu display reason: pass
+- auto QMP launch: 0
+- auto QMP status: not-run
+- auto QMP reason: not-run
+- auto QMP pid: 
 - qmp socket: 
 - host WM smoke status: pass
 - host WM smoke reason: wm-launch-capture-contract-verified
@@ -20,6 +24,15 @@
 - fake QMP screendump report: build/qemu_gtk_wm_capture_evidence/fake-qmp-capture.md
 - fake QMP expected ARGB path: build/qemu_gtk_wm_capture_evidence/fake-qmp/expected-argb.json
 - fake QMP captured ARGB path: build/qemu_gtk_wm_capture_evidence/fake-qmp/captured-argb.json
+- host GTK GL WM scene status: pass
+- host GTK GL WM scene reason: pass
+- host GTK GL WM scene report: build/qemu_gtk_wm_capture_evidence/gtk-gl-wm-scene.md
+- host GTK GL WM scene simple frame us: 1
+- host GTK GL WM scene GTK frame us: 298
+- host GTK GL WM scene mismatch count: 0
+- host GTK GL WM scene expected RGBA path: build/qemu_gtk_wm_capture_evidence/gtk-gl/simple-expected-rgba.json
+- host GTK GL WM scene captured RGBA path: build/qemu_gtk_wm_capture_evidence/gtk-gl/gtk-captured-rgba.json
+- host GTK GL WM scene blur/tolerance used: false
 
 ## Raw Evidence
 - qemu_gtk_wm_capture_status=unavailable
@@ -28,6 +41,10 @@
 - qemu_gtk_wm_capture_qemu_arch=x86_64
 - qemu_gtk_wm_capture_display_gtk_supported=true
 - qemu_gtk_wm_capture_display_reason=pass
+- qemu_gtk_wm_capture_auto_qmp_launch=0
+- qemu_gtk_wm_capture_auto_qmp_status=not-run
+- qemu_gtk_wm_capture_auto_qmp_reason=not-run
+- qemu_gtk_wm_capture_auto_qmp_pid=
 - qemu_gtk_wm_capture_qmp_socket=
 - qemu_gtk_wm_capture_wm_exit_code=0
 - qemu_gtk_wm_capture_host_wm_status=pass
@@ -47,6 +64,15 @@
 - qemu_gtk_wm_capture_fake_qmp_report_path=build/qemu_gtk_wm_capture_evidence/fake-qmp-capture.md
 - qemu_gtk_wm_capture_fake_qmp_expected_argb_path=build/qemu_gtk_wm_capture_evidence/fake-qmp/expected-argb.json
 - qemu_gtk_wm_capture_fake_qmp_captured_argb_path=build/qemu_gtk_wm_capture_evidence/fake-qmp/captured-argb.json
+- qemu_gtk_wm_capture_gtk_scene_status=pass
+- qemu_gtk_wm_capture_gtk_scene_reason=pass
+- qemu_gtk_wm_capture_gtk_scene_report_path=build/qemu_gtk_wm_capture_evidence/gtk-gl-wm-scene.md
+- qemu_gtk_wm_capture_gtk_scene_simple_frame_us=1
+- qemu_gtk_wm_capture_gtk_scene_gtk_frame_us=298
+- qemu_gtk_wm_capture_gtk_scene_rgba_mismatch_count=0
+- qemu_gtk_wm_capture_gtk_scene_expected_rgba_path=build/qemu_gtk_wm_capture_evidence/gtk-gl/simple-expected-rgba.json
+- qemu_gtk_wm_capture_gtk_scene_captured_rgba_path=build/qemu_gtk_wm_capture_evidence/gtk-gl/gtk-captured-rgba.json
+- qemu_gtk_wm_capture_gtk_scene_blur_or_tolerance_used=false
 - qemu_gtk_wm_capture_host_evidence_status=pass
 - qemu_gtk_wm_capture_host_evidence_reason=wm-launch-capture-contract-verified
 - qemu_gtk_wm_capture_host_contract_status=pass
@@ -118,7 +144,7 @@
 - qemu_capture_fake_qmp_mismatch_count=0
 - qemu_capture_fake_qmp_first_mismatch=-1
 - qemu_capture_fake_qmp_blur_or_tolerance_used=false
-- qemu_capture_fake_qmp_capture_us=278750
+- qemu_capture_fake_qmp_capture_us=261789
 - qemu_capture_fake_qmp_pixel0=4280307872
 - qemu_capture_fake_qmp_pixel384=4279310375
 - qemu_capture_fake_qmp_pixel1000=4293257195
@@ -208,7 +234,7 @@
 - 
 - Running: test/unit/app/ui/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/app/ui/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (208ms)
+-   [32mPASSED[0m (221ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -216,12 +242,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 215ms
+- Duration: 227ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        208ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
+-        221ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -235,7 +261,7 @@
 - 
 - Running: test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - [1/1] test/unit/app/ui/host_wm_runtime_loop_spec.spl
--   [32mPASSED[0m (990ms)
+-   [32mPASSED[0m (1013ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -243,12 +269,12 @@
 - Files: 1
 - [32mPassed: 2[0m
 - Failed: 0
-- Duration: 995ms
+- Duration: 1018ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        990ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
+-       1013ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -262,7 +288,7 @@
 - 
 - Running: test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/os/desktop/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (221ms)
+-   [32mPASSED[0m (200ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -270,12 +296,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 226ms
+- Duration: 204ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        221ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
+-        200ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/qemu_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -289,7 +315,7 @@
 - 
 - Running: test/unit/os/compositor/qemu_capture_spec.spl
 - [1/1] test/unit/os/compositor/qemu_capture_spec.spl
--   [32mPASSED[0m (848ms)
+-   [32mPASSED[0m (886ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -297,12 +323,12 @@
 - Files: 1
 - [32mPassed: 11[0m
 - Failed: 0
-- Duration: 864ms
+- Duration: 892ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        848ms  test/unit/os/compositor/qemu_capture_spec.spl
+-        886ms  test/unit/os/compositor/qemu_capture_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/electron_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -316,7 +342,7 @@
 - 
 - Running: test/unit/os/compositor/electron_capture_spec.spl
 - [1/1] test/unit/os/compositor/electron_capture_spec.spl
--   [32mPASSED[0m (792ms)
+-   [32mPASSED[0m (783ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -324,12 +350,12 @@
 - Files: 1
 - [32mPassed: 7[0m
 - Failed: 0
-- Duration: 798ms
+- Duration: 790ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        792ms  test/unit/os/compositor/electron_capture_spec.spl
+-        783ms  test/unit/os/compositor/electron_capture_spec.spl
 - spec_exit_code=0
 - wm_launch_capture_evidence_status=pass
 - wm_launch_capture_evidence_reason=wm-launch-capture-contract-verified
@@ -341,3 +367,31 @@
 - wm_launch_capture_qemu_live_reason=RUN_QEMU_LIVE_CAPTURE=0
 - wm_launch_capture_qemu_live_pixels=0
 - wm_launch_capture_report_path=build/qemu_gtk_wm_capture_evidence/wm-host-launch-capture.md
+
+## Host GTK GL WM Scene Output
+- gtk_gl_wm_scene_status=pass
+- gtk_gl_wm_scene_reason=pass
+- gtk_gl_wm_scene_simple_status=pass
+- gtk_gl_wm_scene_simple_renderer=pure-simple-retained-wm-scene
+- gtk_gl_wm_scene_simple_width=320
+- gtk_gl_wm_scene_simple_height=200
+- gtk_gl_wm_scene_simple_iterations=200
+- gtk_gl_wm_scene_simple_checksum=1193966625284
+- gtk_gl_wm_scene_simple_frame_us=1
+- gtk_gl_wm_scene_simple_blur_or_tolerance_used=false
+- gtk_gl_wm_scene_gtk_captured_rgba_path=build/qemu_gtk_wm_capture_evidence/gtk-gl/gtk-captured-rgba.json
+- gtk_gl_wm_scene_gtk_captured_rgba_written=true
+- gtk_gl_wm_scene_gtk_status=pass
+- gtk_gl_wm_scene_gtk_reason=pass
+- gtk_gl_wm_scene_gtk_renderer=gtk-glarea-opengl
+- gtk_gl_wm_scene_gtk_gl_context=true
+- gtk_gl_wm_scene_gtk_iterations=200
+- gtk_gl_wm_scene_gtk_checksum=1193966625284
+- gtk_gl_wm_scene_gtk_total_us=59783
+- gtk_gl_wm_scene_gtk_frame_us=298
+- gtk_gl_wm_scene_gtk_blur_or_tolerance_used=false
+- gtk_gl_wm_scene_reference_checksum=1193966625284
+- gtk_gl_wm_scene_rgba_mismatch_count=0
+- gtk_gl_wm_scene_expected_rgba_path=build/qemu_gtk_wm_capture_evidence/gtk-gl/simple-expected-rgba.json
+- gtk_gl_wm_scene_captured_rgba_path=build/qemu_gtk_wm_capture_evidence/gtk-gl/gtk-captured-rgba.json
+- gtk_gl_wm_scene_blur_or_tolerance_used=false
