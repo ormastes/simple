@@ -711,6 +711,79 @@ expect(_object_property_text(interp, result, "error")).to_equal("unsupported-was
 
 </details>
 
+#### binds bounded WASM function imports and forwards synthetic exports
+
+1. var interp =  new interpreter
+
+2. [JsStatement Return
+
+3. interp set object property
+
+4. interp set object property
+   - Expected: _object_property_text(interp, result, "status") equals `instantiated`
+   - Expected: _object_child_property_text(interp, result, "module", "importCount") equals `1`
+   - Expected: _object_child_property_text(interp, result, "module", "firstImportModuleName") equals `env`
+   - Expected: _object_child_property_text(interp, result, "module", "firstImportFieldName") equals `foo`
+
+5. JsValue Object
+
+6. JsValue Object
+
+7. JsValue Object
+   - Expected: _display_js(interp.get_object_property(exports_id, "run")) equals `[Function]`
+   - Expected: _display_js(interp.get_object_property(exports_id, "__simple_wasm_single_bound_import")) equals `[Function]`
+   - Expected: "missing exports" equals ``
+   - Expected: "missing instance" equals ``
+   - Expected: "missing result" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 36 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+val imports_id = interp.create_object()
+val env_id = interp.create_object()
+var functions = interp.functions
+val import_fn_id = functions.len()
+functions.push(JsFunction.create(
+    "foo",
+    [],
+    [JsStatement.Return(value: JsExpression.Literal(value: JsValue.Number(v: 42.0)))],
+    interp.global_env
+))
+interp.functions = functions
+interp.set_object_property(env_id, "foo", JsValue.Function(id: import_fn_id))
+interp.set_object_property(imports_id, "env", JsValue.Object(id: env_id))
+
+val wasm = "0061736d0100000001060160017f017f020b0103656e7603666f6f0000030201000707010372756e00010a08010600200010000b"
+val result = interp._native_webassembly_instantiate(JsValue.Undefined, [JsValue.String(v: wasm), JsValue.Object(id: imports_id)])
+expect(_object_property_text(interp, result, "status")).to_equal("instantiated")
+expect(_object_child_property_text(interp, result, "module", "importCount")).to_equal("1")
+expect(_object_child_property_text(interp, result, "module", "firstImportModuleName")).to_equal("env")
+expect(_object_child_property_text(interp, result, "module", "firstImportFieldName")).to_equal("foo")
+
+match result:
+    JsValue.Object(result_id):
+        match interp.get_object_property(result_id, "instance"):
+            JsValue.Object(instance_id):
+                match interp.get_object_property(instance_id, "exports"):
+                    JsValue.Object(exports_id):
+                        expect(_display_js(interp.get_object_property(exports_id, "run"))).to_equal("[Function]")
+                        expect(_display_js(interp.get_object_property(exports_id, "__simple_wasm_single_bound_import"))).to_equal("[Function]")
+                    _:
+                        expect("missing exports").to_equal("")
+            _:
+                expect("missing instance").to_equal("")
+    _:
+        expect("missing result").to_equal("")
+```
+
+</details>
+
 #### constructs bounded WebAssembly.Memory values and grows within maximum
 
 1. var interp =  new interpreter
@@ -827,8 +900,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

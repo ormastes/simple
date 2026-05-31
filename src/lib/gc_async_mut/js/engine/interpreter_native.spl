@@ -440,22 +440,69 @@ impl JsInterpreter:
         val instance_id = self.create_object()
         val exports_id = self.create_object()
         var valid_module = false
+        var module_id = -1
         if arg_vals.len() > 0:
             match arg_vals.get(0):
-                JsValue.Object(module_id):
-                    match self.get_object_property(module_id, "__simple_wasm_module"):
+                JsValue.Object(id):
+                    module_id = id
+                    match self.get_object_property(id, "__simple_wasm_module"):
                         JsValue.Boolean(v):
                             valid_module = v
                         _:
                             pass_dn
                 _:
                     pass_dn
+        val imports_value = if arg_vals.len() > 1: arg_vals.get(1) else: JsValue.Undefined
+        val imports_satisfied = valid_module and module_id >= 0 and self._native_webassembly_imports_satisfied(module_id, imports_value)
         self.set_object_property(instance_id, "exports", JsValue.Object(id: exports_id))
-        self.set_object_property(instance_id, "status", JsValue.String(v: if valid_module: "instantiated" else: "invalid"))
+        self.set_object_property(instance_id, "status", JsValue.String(v: if imports_satisfied: "instantiated" else: "invalid"))
         self.set_object_property(instance_id, "moduleValid", JsValue.Boolean(v: valid_module))
-        if not valid_module:
+        if valid_module and not imports_satisfied:
+            self.set_object_property(instance_id, "error", JsValue.String(v: "unsupported-wasm-imports"))
+        else if not valid_module:
             self.set_object_property(instance_id, "error", JsValue.String(v: "invalid-wasm-module"))
         JsValue.Object(id: instance_id)
+
+    me _native_webassembly_requires_imports(module_id: i64) -> bool:
+        if module_id < 0:
+            return false
+        match self.get_object_property(module_id, "hasImportSection"):
+            JsValue.Boolean(v): v
+            _: false
+
+    me _native_webassembly_imports_satisfied(module_id: i64, imports_value: JsValue) -> bool:
+        if not self._native_webassembly_requires_imports(module_id):
+            return true
+        var import_count = 0
+        match self.get_object_property(module_id, "importCount"):
+            JsValue.Number(v): import_count = f64_to_i64(v)
+            _: pass_dn
+        if import_count != 1:
+            return false
+        var import_kind = ""
+        var module_name = ""
+        var field_name = ""
+        match self.get_object_property(module_id, "firstImportKind"):
+            JsValue.String(v): import_kind = v
+            _: pass_dn
+        match self.get_object_property(module_id, "firstImportModuleName"):
+            JsValue.String(v): module_name = v
+            _: pass_dn
+        match self.get_object_property(module_id, "firstImportFieldName"):
+            JsValue.String(v): field_name = v
+            _: pass_dn
+        if import_kind != "function" or module_name == "" or field_name == "":
+            return false
+        val imports_id = _get_obj_id(imports_value)
+        if imports_id < 0:
+            return false
+        val module_key = "" + module_name
+        val field_key = "" + field_name
+        val import_module_id = _get_obj_id(self.get_object_property(imports_id, module_key))
+        if import_module_id >= 0:
+            if _get_fn_id(self.get_object_property(import_module_id, field_key)) >= 0:
+                return true
+        false
 
     me _native_webassembly_instantiate(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         val payload_hex = self._native_webassembly_payload_hex(arg_vals)
@@ -472,18 +519,23 @@ impl JsInterpreter:
             _:
                 pass_dn
         self.set_object_property(result_id, "module", JsValue.Object(id: module_id))
-        if validated:
+        val imports_value = if arg_vals.len() > 1: arg_vals.get(1) else: JsValue.Undefined
+        val imports_satisfied = validated and self._native_webassembly_imports_satisfied(module_id, imports_value)
+        if validated and imports_satisfied:
             self.set_object_property(instance_id, "exports", JsValue.Object(id: exports_id))
             self.set_object_property(result_id, "instance", JsValue.Object(id: instance_id))
             self.set_object_property(result_id, "status", JsValue.String(v: "instantiated"))
         else:
             self.set_object_property(result_id, "instance", JsValue.Null)
             self.set_object_property(result_id, "status", JsValue.String(v: "invalid"))
-            match self.get_object_property(module_id, "error"):
-                JsValue.String(v):
-                    self.set_object_property(result_id, "error", JsValue.String(v: v))
-                _:
-                    self.set_object_property(result_id, "error", JsValue.String(v: "invalid-wasm-header"))
+            if validated and not imports_satisfied:
+                self.set_object_property(result_id, "error", JsValue.String(v: "unsupported-wasm-imports"))
+            else:
+                match self.get_object_property(module_id, "error"):
+                    JsValue.String(v):
+                        self.set_object_property(result_id, "error", JsValue.String(v: v))
+                    _:
+                        self.set_object_property(result_id, "error", JsValue.String(v: "invalid-wasm-header"))
         JsValue.Object(id: result_id)
 
     me _native_webassembly_instantiate_then(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
@@ -594,6 +646,10 @@ impl JsInterpreter:
         self.set_object_property(module_id, "hasImportSection", JsValue.Boolean(v: false))
         self.set_object_property(module_id, "hasMemorySection", JsValue.Boolean(v: false))
         self.set_object_property(module_id, "hasExportSection", JsValue.Boolean(v: false))
+        self.set_object_property(module_id, "importCount", JsValue.Number(v: 0.0))
+        self.set_object_property(module_id, "firstImportModuleName", JsValue.String(v: ""))
+        self.set_object_property(module_id, "firstImportFieldName", JsValue.String(v: ""))
+        self.set_object_property(module_id, "firstImportKind", JsValue.String(v: ""))
         if not validated:
             return
         self.set_object_property(module_id, "sectionCount", JsValue.Number(v: self._native_webassembly_section_count(hex).to_f64()))
@@ -601,6 +657,10 @@ impl JsInterpreter:
         self.set_object_property(module_id, "hasImportSection", JsValue.Boolean(v: self._native_webassembly_has_section(hex, 2)))
         self.set_object_property(module_id, "hasMemorySection", JsValue.Boolean(v: self._native_webassembly_has_section(hex, 5)))
         self.set_object_property(module_id, "hasExportSection", JsValue.Boolean(v: self._native_webassembly_has_section(hex, 7)))
+        self.set_object_property(module_id, "importCount", JsValue.Number(v: self._native_webassembly_import_count(hex).to_f64()))
+        self.set_object_property(module_id, "firstImportModuleName", JsValue.String(v: self._native_webassembly_import_module_name_at(hex, 0)))
+        self.set_object_property(module_id, "firstImportFieldName", JsValue.String(v: self._native_webassembly_import_field_name_at(hex, 0)))
+        self.set_object_property(module_id, "firstImportKind", JsValue.String(v: self._native_webassembly_import_kind_at(hex, 0)))
 
     me _native_webassembly_sections_valid(hex: text) -> bool:
         if not self._native_webassembly_valid_header(hex):
@@ -649,6 +709,148 @@ impl JsInterpreter:
                 return true
             pos = next_pos + payload_len
         false
+
+    me _native_webassembly_section_payload_start(hex: text, wanted_id: i64) -> i64:
+        if not self._native_webassembly_sections_valid(hex):
+            return -1
+        val byte_len = hex.len() / 2
+        var pos = 8
+        while pos < byte_len:
+            val section_id = self._native_webassembly_hex_byte_at(hex, pos)
+            pos = pos + 1
+            val payload_len = self._native_webassembly_read_leb_value(hex, pos)
+            val next_pos = self._native_webassembly_read_leb_next(hex, pos)
+            if payload_len < 0 or next_pos < 0:
+                return -1
+            if section_id == wanted_id:
+                return next_pos
+            pos = next_pos + payload_len
+        -1
+
+    me _native_webassembly_section_payload_end(hex: text, wanted_id: i64) -> i64:
+        if not self._native_webassembly_sections_valid(hex):
+            return -1
+        val byte_len = hex.len() / 2
+        var pos = 8
+        while pos < byte_len:
+            val section_id = self._native_webassembly_hex_byte_at(hex, pos)
+            pos = pos + 1
+            val payload_len = self._native_webassembly_read_leb_value(hex, pos)
+            val next_pos = self._native_webassembly_read_leb_next(hex, pos)
+            if payload_len < 0 or next_pos < 0:
+                return -1
+            if section_id == wanted_id:
+                return next_pos + payload_len
+            pos = next_pos + payload_len
+        -1
+
+    me _native_webassembly_import_count(hex: text) -> i64:
+        val start = self._native_webassembly_section_payload_start(hex, 2)
+        if start < 0:
+            return 0
+        val count = self._native_webassembly_read_leb_value(hex, start)
+        if count < 0:
+            return 0
+        count
+
+    me _native_webassembly_import_module_name_at(hex: text, wanted_index: i64) -> text:
+        val pos = self._native_webassembly_import_entry_pos(hex, wanted_index)
+        val end = self._native_webassembly_section_payload_end(hex, 2)
+        if pos < 0 or end <= pos:
+            return ""
+        self._native_webassembly_name_at(hex, pos, end)
+
+    me _native_webassembly_import_field_name_at(hex: text, wanted_index: i64) -> text:
+        val pos = self._native_webassembly_import_entry_pos(hex, wanted_index)
+        val end = self._native_webassembly_section_payload_end(hex, 2)
+        if pos < 0 or end <= pos:
+            return ""
+        val module_len = self._native_webassembly_read_leb_value(hex, pos)
+        val module_start = self._native_webassembly_read_leb_next(hex, pos)
+        if module_len < 0 or module_start < 0:
+            return ""
+        self._native_webassembly_name_at(hex, module_start + module_len, end)
+
+    me _native_webassembly_import_kind_at(hex: text, wanted_index: i64) -> text:
+        val pos = self._native_webassembly_import_entry_pos(hex, wanted_index)
+        val end = self._native_webassembly_section_payload_end(hex, 2)
+        if pos < 0 or end <= pos:
+            return ""
+        val module_len = self._native_webassembly_read_leb_value(hex, pos)
+        val module_start = self._native_webassembly_read_leb_next(hex, pos)
+        if module_len < 0 or module_start < 0:
+            return ""
+        val field_pos = module_start + module_len
+        val field_len = self._native_webassembly_read_leb_value(hex, field_pos)
+        val field_start = self._native_webassembly_read_leb_next(hex, field_pos)
+        if field_len < 0 or field_start < 0:
+            return ""
+        val kind_pos = field_start + field_len
+        if kind_pos >= end:
+            return ""
+        val kind = self._native_webassembly_hex_byte_at(hex, kind_pos)
+        if kind == 0:
+            return "function"
+        if kind == 1:
+            return "table"
+        if kind == 2:
+            return "memory"
+        if kind == 3:
+            return "global"
+        ""
+
+    me _native_webassembly_import_entry_pos(hex: text, wanted_index: i64) -> i64:
+        val start = self._native_webassembly_section_payload_start(hex, 2)
+        val end = self._native_webassembly_section_payload_end(hex, 2)
+        if start < 0 or end <= start:
+            return -1
+        val count = self._native_webassembly_read_leb_value(hex, start)
+        var pos = self._native_webassembly_read_leb_next(hex, start)
+        if count < 0 or pos < 0:
+            return -1
+        var index = 0
+        while index < count and pos < end:
+            if index == wanted_index:
+                return pos
+            pos = self._native_webassembly_import_entry_next(hex, pos, end)
+            if pos < 0:
+                return -1
+            index = index + 1
+        -1
+
+    me _native_webassembly_import_entry_next(hex: text, pos: i64, end: i64) -> i64:
+        val module_len = self._native_webassembly_read_leb_value(hex, pos)
+        val module_start = self._native_webassembly_read_leb_next(hex, pos)
+        if module_len < 0 or module_start < 0:
+            return -1
+        val field_pos = module_start + module_len
+        val field_len = self._native_webassembly_read_leb_value(hex, field_pos)
+        val field_start = self._native_webassembly_read_leb_next(hex, field_pos)
+        if field_len < 0 or field_start < 0:
+            return -1
+        val kind_pos = field_start + field_len
+        if kind_pos >= end:
+            return -1
+        val kind = self._native_webassembly_hex_byte_at(hex, kind_pos)
+        val desc_pos = kind_pos + 1
+        if kind == 0:
+            return self._native_webassembly_read_leb_next(hex, desc_pos)
+        -1
+
+    me _native_webassembly_name_at(hex: text, pos: i64, end: i64) -> text:
+        val name_len = self._native_webassembly_read_leb_value(hex, pos)
+        val name_start = self._native_webassembly_read_leb_next(hex, pos)
+        if name_len < 0 or name_start < 0 or name_start + name_len > end:
+            return ""
+        var out = ""
+        var i = 0
+        while i < name_len:
+            val byte = self._native_webassembly_hex_byte_at(hex, name_start + i)
+            if byte < 0:
+                return ""
+            out = out + byte.chr()
+            i = i + 1
+        out
 
     me _native_webassembly_read_leb_value(hex: text, pos: i64) -> i64:
         val byte_len = hex.len() / 2
