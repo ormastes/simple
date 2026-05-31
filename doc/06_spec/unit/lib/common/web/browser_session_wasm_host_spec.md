@@ -668,6 +668,60 @@ expect(_object_property_text(interp, memory, "pages")).to_equal("2")
 
 </details>
 
+#### shares WebAssembly.Memory buffer bytes through Uint8Array views
+
+1. var interp =  new interpreter
+
+2. JsValue Object
+
+3. JsValue Object
+
+4. JsValue Object
+   - Expected: _display_js(interp.get_object_property(view_id, "0")) equals `0`
+
+5. interp set object property
+
+6. interp set object property
+   - Expected: _display_js(interp.get_object_property(buffer_id, "0")) equals `4`
+   - Expected: _display_js(interp.get_object_property(view_id, "0")) equals `4`
+   - Expected: _display_js(interp.get_object_property(view_id, "1")) equals `0`
+   - Expected: "missing view" equals ``
+   - Expected: "missing buffer" equals ``
+   - Expected: "missing memory" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+val memory = interp._native_webassembly_memory([JsValue.Undefined])
+match memory:
+    JsValue.Object(memory_id):
+        match interp.get_object_property(memory_id, "buffer"):
+            JsValue.Object(buffer_id):
+                val view = interp._native_uint8_array([JsValue.Object(id: buffer_id)])
+                match view:
+                    JsValue.Object(view_id):
+                        expect(_display_js(interp.get_object_property(view_id, "0"))).to_equal("0")
+                        interp.set_object_property(view_id, "0", JsValue.Number(v: 260.0))
+                        interp.set_object_property(view_id, "1", JsValue.Number(v: -1.0))
+                        expect(_display_js(interp.get_object_property(buffer_id, "0"))).to_equal("4")
+                        expect(_display_js(interp.get_object_property(view_id, "0"))).to_equal("4")
+                        expect(_display_js(interp.get_object_property(view_id, "1"))).to_equal("0")
+                    _:
+                        expect("missing view").to_equal("")
+            _:
+                expect("missing buffer").to_equal("")
+    _:
+        expect("missing memory").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -687,8 +741,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

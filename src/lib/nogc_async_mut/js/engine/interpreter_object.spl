@@ -50,6 +50,31 @@ impl JsInterpreter:
             self.logger.debug("Ignoring write to frozen object {obj_id}.{key}")
             return
 
+        var stored_value = value
+        val indexed_key = key.parse_int() ?? -1
+        if indexed_key >= 0:
+            match self.get_object_property(obj_id, "__simple_typed_array_buffer"):
+                JsValue.Number(buffer_id_value):
+                    var byte = f64_to_i64(to_number(value))
+                    if byte < 0:
+                        byte = 0
+                    if byte > 255:
+                        byte = byte & 255
+                    self.set_object_property(f64_to_i64(buffer_id_value), key, JsValue.Number(v: byte.to_f64()))
+                    stored_value = JsValue.Number(v: byte.to_f64())
+                _:
+                    match self.get_object_property(obj_id, "__simple_array_buffer"):
+                        JsValue.Boolean(is_buffer):
+                            if is_buffer:
+                                var byte = f64_to_i64(to_number(value))
+                                if byte < 0:
+                                    byte = 0
+                                if byte > 255:
+                                    byte = byte & 255
+                                stored_value = JsValue.Number(v: byte.to_f64())
+                        _:
+                            pass_dn
+
         var object_store = self.object_store
         var prop_obj_ids: [i64] = object_store.prop_obj_ids
         var prop_keys: [text] = object_store.prop_keys
@@ -60,7 +85,7 @@ impl JsInterpreter:
         var prop_configurables: [bool] = object_store.prop_configurables
         prop_obj_ids.push(obj_id)
         prop_keys.push(key)
-        prop_values.push(value)
+        prop_values.push(stored_value)
         prop_ref_tags.push("")
         prop_ref_ids.push("")
         prop_enumerables.push(true)
@@ -81,6 +106,24 @@ impl JsInterpreter:
             if store.prop_obj_ids.get(i) == obj_id and store.prop_keys.get(i) == key:
                 return store.prop_values.get(i)
             i = i - 1
+        val indexed_key = key.parse_int() ?? -1
+        if indexed_key >= 0:
+            match self.get_object_property(obj_id, "__simple_typed_array_buffer"):
+                JsValue.Number(buffer_id_value):
+                    return self.get_object_property(f64_to_i64(buffer_id_value), key)
+                _:
+                    pass_dn
+            match self.get_object_property(obj_id, "__simple_array_buffer"):
+                JsValue.Boolean(is_buffer):
+                    if is_buffer:
+                        match self.get_object_property(obj_id, "byteLength"):
+                            JsValue.Number(byte_length):
+                                if indexed_key < f64_to_i64(byte_length):
+                                    return JsValue.Number(v: 0.0)
+                            _:
+                                pass_dn
+                _:
+                    pass_dn
         JsValue.Undefined
 
     me set_object_property_direct(obj_id: i64, key: text, value: JsValue):
