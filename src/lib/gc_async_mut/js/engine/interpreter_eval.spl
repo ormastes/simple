@@ -9,6 +9,7 @@ use std.js.types.ast_types.JsExpression
 use std.js.types.ast_types.JsStatement
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
+use std.js.engine.runtime.{NATIVE_WEBASSEMBLY_INSTANTIATE_THEN}
 use std.gc_async_mut.js.engine.interpreter.{JsInterpreter}
 use std.gc_async_mut.js.engine.interpreter_object.{JsInterpreter}
 use std.js.builtins.array.{array_isArray, array_from_values}
@@ -702,6 +703,44 @@ impl JsInterpreter:
                             var this_val = JsValue.Undefined
                             if is_member:
                                 this_val = this_val_for_call
+                            if mapping.second == NATIVE_WEBASSEMBLY_INSTANTIATE_THEN:
+                                var wasm_status = ""
+                                val wasm_result_id = _get_obj_id(this_val)
+                                if wasm_result_id >= 0:
+                                    match self.get_object_property(wasm_result_id, "status"):
+                                        JsValue.String(v): wasm_status = v
+                                        _: pass_dn
+                                var wasm_callback_id = -1
+                                if wasm_status == "instantiated" and arg_vals.len() > 0:
+                                    wasm_callback_id = _get_fn_id(arg_vals.get(0))
+                                if wasm_status != "instantiated" and arg_vals.len() > 1:
+                                    wasm_callback_id = _get_fn_id(arg_vals.get(1))
+                                if wasm_callback_id >= 0 and wasm_callback_id < self.functions.len():
+                                    val wasm_fn = self.functions.get(wasm_callback_id)
+                                    val wasm_env = self.env_stack.create_env(wasm_fn.closure_env)
+                                    var wpi = 0
+                                    while wpi < wasm_fn.params.len():
+                                        var wpv = JsValue.Undefined
+                                        if wpi == 0:
+                                            wpv = this_val
+                                        self.env_stack.define_var(wasm_env, wasm_fn.params.get(wpi), wpv)
+                                        wpi = wpi + 1
+                                    self.env_stack.define_var(wasm_env, "this", JsValue.Undefined)
+                                    val wasm_frame = CallFrame(function_name: wasm_fn.name, env_id: wasm_env, line: 0, this_value: JsValue.Undefined)
+                                    self.call_stack.push(wasm_frame)
+                                    val wasm_saved_return = self.control_return
+                                    self.control_return = false
+                                    var wasm_result = JsValue.Undefined
+                                    var wbi = 0
+                                    while wbi < wasm_fn.body.len():
+                                        wasm_result = self.exec_statement(wasm_fn.body.get(wbi), wasm_env)?
+                                        if self.control_return:
+                                            wasm_result = self.return_value
+                                            break
+                                        wbi = wbi + 1
+                                    self.call_stack.pop()
+                                    self.control_return = wasm_saved_return
+                                    return Ok(wasm_result)
                             return Ok(self._dispatch_native_with_receiver(mapping.second, this_val, arg_vals, env))
                         ni = ni + 1
                     val js_fn = self.functions.get(fn_id)
