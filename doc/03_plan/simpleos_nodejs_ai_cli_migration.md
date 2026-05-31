@@ -164,8 +164,8 @@ Following SerenityOS model:
 ### Phase 3: Node.js Compat Layer (4 weeks)
 
 Build minimal Node.js API compatibility on QuickJS + libuv:
-- [ ] `fs.readFileSync`, `fs.writeFileSync`, `fs.existsSync`, `fs.statSync`
-- [ ] `fs.promises.readFile`, `fs.promises.writeFile`
+- [x] `fs.readFileSync`, `fs.writeFileSync`, `fs.existsSync`, `fs.statSync` fail-closed file-grant subset
+- [x] `fs.promises.readFile`, `fs.promises.writeFile` fail-closed file-grant subset
 - [x] `path.join`, `path.resolve`, `path.dirname`, `path.basename` deterministic POSIX subset
 - [x] `process.env`, `process.argv`, `process.cwd()`, `process.exit()` deterministic embedded subset
 - [x] `Buffer` bounded string, array, Uint8Array, and ArrayBuffer subset

@@ -1031,16 +1031,49 @@ expect(_eval_str("require('node:path').resolve('/usr', 'local', '..', 'bin')")).
 
 </details>
 
-#### marks unsupported builtin modules denied
+#### resolves fs sync APIs as fail-closed file API
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_eval_str("require('fs').status")).to_equal("denied")
+expect(_eval_str("typeof require('fs').readFileSync")).to_equal("function")
+expect(_eval_str("typeof require('node:fs').readFileSync")).to_equal("function")
+```
+
+</details>
+
+#### denies fs sync APIs without file grants
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('fs').readFileSync('/etc/passwd', 'utf8').status")).to_equal("denied")
+expect(_eval_str("require('node:fs').writeFileSync('/tmp/simple.txt', 'data').error")).to_equal("file-denied")
+expect(_eval_str("require('fs').existsSync('/tmp/simple.txt').operation")).to_equal("existsSync")
+expect(_eval_str("require('fs').statSync('/tmp/simple.txt').path")).to_equal("/tmp/simple.txt")
+```
+
+</details>
+
+#### denies fs promises APIs without file grants
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('fs').promises.readFile('/tmp/simple.txt', 'utf8').status")).to_equal("denied")
+expect(_eval_str("require('node:fs').promises.writeFile('/tmp/simple.txt', 'data').error")).to_equal("file-denied")
 ```
 
 </details>
@@ -1978,8 +2011,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 131 |
-| Active scenarios | 131 |
+| Total scenarios | 133 |
+| Active scenarios | 133 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
