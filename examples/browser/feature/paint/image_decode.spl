@@ -7,6 +7,7 @@
 use examples.browser.entity.media.image_types.{ImageData, ImageFormat}
 use examples.browser.shared.logging.{Logger, LogLevel}
 use examples.browser.shared.error.{BrowserError, BrowserResult, paint_error}
+use std.common.color.lab_xyz.{CieLab, cie_lab_d50_to_srgb_packed_argb}
 use std.common.image.image_info.{detect_image_info, image_is_jpeg_xl, image_is_tiff, jpeg_xl_image_info, tiff_image_info}
 
 # ---------------------------------------------------------------------------
@@ -950,11 +951,13 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         return nil
     if samples_per_pixel != 1 and samples_per_pixel != 3 and samples_per_pixel != 4:
         return nil
-    if photometric != 0 and photometric != 1 and photometric != 2:
+    if photometric != 0 and photometric != 1 and photometric != 2 and photometric != 8:
         return nil
     if samples_per_pixel == 1 and photometric != 0 and photometric != 1:
         return nil
-    if samples_per_pixel > 1 and photometric != 2:
+    if samples_per_pixel > 1 and photometric != 2 and photometric != 8:
+        return nil
+    if photometric == 8 and samples_per_pixel != 3:
         return nil
     if rows_per_strip > 0 and rows_per_strip < height:
         return nil
@@ -980,6 +983,16 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
             rgba.push(gray)
             rgba.push(gray)
             rgba.push(255)
+        else if photometric == 8:
+            val argb = _tiff_cielab_pixel_to_argb(
+                _byte_at(raw_data, pixel_offset),
+                _byte_at(raw_data, pixel_offset + 1),
+                _byte_at(raw_data, pixel_offset + 2)
+            )
+            rgba.push((argb / 65536) & 255)
+            rgba.push((argb / 256) & 255)
+            rgba.push(argb & 255)
+            rgba.push(255)
         else:
             rgba.push(_byte_at(raw_data, pixel_offset))
             rgba.push(_byte_at(raw_data, pixel_offset + 1))
@@ -991,6 +1004,12 @@ fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
         pixel_index = pixel_index + 1
 
     Some(ImageData(width: width, height: height, format: ImageFormat.Tiff, data: rgba))
+
+fn _tiff_cielab_pixel_to_argb(l_byte: i64, a_byte: i64, b_byte: i64) -> i64:
+    val l = (l_byte as f64) * 100.0 / 255.0
+    val a = (a_byte - 128) as f64
+    val b = (b_byte - 128) as f64
+    cie_lab_d50_to_srgb_packed_argb(CieLab(l: l, a: a, b: b, white_point: "D50"), 255)
 
 fn _tiff_entry_first_value(data: text, entry: i64, little: bool) -> i64:
     val typ = _read_u16(data, entry + 2, little)

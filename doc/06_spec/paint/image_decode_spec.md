@@ -511,6 +511,72 @@ expect(image.data).to_equal([70, 80, 90, 100])
 
 </details>
 
+#### decodes little-endian 8-bit grayscale BlackIsZero TIFF to RGBA
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val image = decode_tiff(_tiff_le_2x1_gray_black_is_zero())
+
+expect(image.width).to_equal(2)
+expect(image.height).to_equal(1)
+expect(image.format).to_equal(ImageFormat.Tiff)
+expect(image.data).to_equal([
+    10, 10, 10, 255,
+    200, 200, 200, 255
+])
+```
+
+</details>
+
+#### decodes little-endian 8-bit grayscale WhiteIsZero TIFF by inverting samples
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val image = decode_tiff(_tiff_le_2x1_gray_white_is_zero())
+
+expect(image.width).to_equal(2)
+expect(image.height).to_equal(1)
+expect(image.format).to_equal(ImageFormat.Tiff)
+expect(image.data).to_equal([
+    245, 245, 245, 255,
+    55, 55, 55, 255
+])
+```
+
+</details>
+
+#### decodes little-endian 8-bit CIELAB neutral TIFF through XYZ to RGBA
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val image = decode_tiff(_tiff_le_2x1_cielab_neutral())
+
+expect(image.width).to_equal(2)
+expect(image.height).to_equal(1)
+expect(image.format).to_equal(ImageFormat.Tiff)
+expect(image.data).to_equal([
+    0, 0, 0, 255,
+    255, 255, 255, 255
+])
+```
+
+</details>
+
 #### decodes big-endian uncompressed RGB strips to RGBA pixels
 
 <details>
@@ -627,12 +693,94 @@ Reproduction: this block contains the complete executable scenario source.
 val info = detect_image_info(_jpegxl_container())
 expect(info.format).to_equal("jpegxl")
 expect(info.supported).to_equal(false)
-expect(info.reason).to_equal("jpegxl-signature-detected-decoder-pending")
+expect(info.reason).to_equal("jpegxl-container-missing-codestream")
 
 val image = decode_jpegxl(_jpegxl_container())
 expect(image.width).to_equal(1)
 expect(image.height).to_equal(1)
 expect(image.format).to_equal(ImageFormat.JpegXl)
+```
+
+</details>
+
+#### parses JPEG XL small codestream intrinsic dimensions lazily
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val info = detect_image_info(_jpegxl_small_codestream_16x24())
+expect(info.format).to_equal("jpegxl")
+expect(info.width).to_equal(16)
+expect(info.height).to_equal(24)
+expect(info.supported).to_equal(true)
+expect(info.reason).to_equal("jpegxl-small-codestream-metadata")
+
+val image = decode_jpegxl(_jpegxl_small_codestream_16x24())
+expect(image.width).to_equal(16)
+expect(image.height).to_equal(24)
+expect(image.format).to_equal(ImageFormat.JpegXl)
+```
+
+</details>
+
+#### parses JPEG XL container boxes and finds full codestream dimensions lazily
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val info = detect_image_info(_jpegxl_container_with_small_codestream_16x24())
+expect(info.format).to_equal("jpegxl")
+expect(info.width).to_equal(16)
+expect(info.height).to_equal(24)
+expect(info.supported).to_equal(true)
+expect(info.reason).to_equal("jpegxl-small-codestream-metadata")
+
+val image = decode_jpegxl(_jpegxl_container_with_small_codestream_16x24())
+expect(image.width).to_equal(16)
+expect(image.height).to_equal(24)
+expect(image.format).to_equal(ImageFormat.JpegXl)
+```
+
+</details>
+
+#### detects JPEG XL partial codestream boxes as a staged stitching path
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val info = detect_image_info(_jpegxl_container_with_partial_codestream())
+expect(info.format).to_equal("jpegxl")
+expect(info.supported).to_equal(false)
+expect(info.reason).to_equal("jpegxl-container-partial-codestream-stitching-pending")
+```
+
+</details>
+
+#### fails closed on truncated JPEG XL container boxes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val info = detect_image_info(_jpegxl_container_truncated_box())
+expect(info.format).to_equal("jpegxl")
+expect(info.supported).to_equal(false)
+expect(info.reason).to_equal("jpegxl-truncated-box")
 ```
 
 </details>
@@ -705,8 +853,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 35 |
-| Active scenarios | 35 |
+| Total scenarios | 42 |
+| Active scenarios | 42 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
