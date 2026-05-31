@@ -2,7 +2,7 @@
 
 use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError, js_nan, js_infinity, js_neg_infinity, is_nan}
 use std.js.types.js_types.JsValue
-use std.js.types.ast_types.JsExpression
+use std.js.types.ast_types.{JsExpression, JsStatement}
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
 use std.js.engine.runtime.{dispatch_native, NATIVE_ARRAY_BUFFER_CONSTRUCTOR, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_NODE_BUFFER_ALLOC, NATIVE_NODE_BUFFER_BYTE_LENGTH, NATIVE_NODE_BUFFER_COMPARE, NATIVE_NODE_BUFFER_CONCAT, NATIVE_NODE_BUFFER_EQUALS, NATIVE_NODE_BUFFER_FROM, NATIVE_NODE_BUFFER_IS_BUFFER, NATIVE_NODE_BUFFER_READ_UINT16_BE, NATIVE_NODE_BUFFER_READ_UINT16_LE, NATIVE_NODE_BUFFER_READ_UINT32_BE, NATIVE_NODE_BUFFER_READ_UINT32_LE, NATIVE_NODE_BUFFER_READ_UINT8, NATIVE_NODE_BUFFER_SLICE, NATIVE_NODE_BUFFER_SUBARRAY, NATIVE_NODE_BUFFER_TO_STRING, NATIVE_NODE_BUFFER_WRITE_UINT16_BE, NATIVE_NODE_BUFFER_WRITE_UINT16_LE, NATIVE_NODE_BUFFER_WRITE_UINT32_BE, NATIVE_NODE_BUFFER_WRITE_UINT32_LE, NATIVE_NODE_BUFFER_WRITE_UINT8, NATIVE_NODE_OS_ARCH, NATIVE_NODE_OS_HOMEDIR, NATIVE_NODE_OS_PLATFORM, NATIVE_NODE_OS_RELEASE, NATIVE_NODE_OS_TYPE, NATIVE_NODE_PATH_BASENAME, NATIVE_NODE_PATH_DIRNAME, NATIVE_NODE_PATH_EXTNAME, NATIVE_NODE_PATH_IS_ABSOLUTE, NATIVE_NODE_PATH_JOIN, NATIVE_NODE_PATH_NORMALIZE, NATIVE_NODE_PROCESS_CWD, NATIVE_NODE_PROCESS_NEXT_TICK, NATIVE_NODE_REQUIRE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_TEXT_DECODER_CONSTRUCTOR, NATIVE_TEXT_DECODER_DECODE, NATIVE_TEXT_ENCODER_CONSTRUCTOR, NATIVE_TEXT_ENCODER_ENCODE, NATIVE_UINT8_ARRAY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANTIATE_CATCH, NATIVE_WEBASSEMBLY_INSTANTIATE_THEN, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MEMORY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MEMORY_GROW, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
@@ -82,7 +82,7 @@ impl JsInterpreter:
         if native_id == NATIVE_WEBASSEMBLY_MEMORY_GROW:
             return self._native_webassembly_memory_grow(this_val, arg_vals)
         if native_id == NATIVE_WEBASSEMBLY_EXPORT_FUNCTION:
-            return self._native_webassembly_export_function(this_val, arg_vals)
+            return self._native_webassembly_export_function(this_val, arg_vals, -1)
         if native_id == NATIVE_WEBASSEMBLY_INSTANTIATE_THEN:
             return self._native_webassembly_instantiate_then(this_val, arg_vals)
         if native_id == NATIVE_WEBASSEMBLY_INSTANTIATE_CATCH:
@@ -895,22 +895,86 @@ impl JsInterpreter:
                 self.set_object_property(exports_id, function_name, JsValue.Function(id: fn_id))
                 val bound_import = self._native_webassembly_bound_single_import_function(module_id, imports_value)
                 match bound_import:
-                    JsValue.Function(id): self.set_object_property(exports_id, "__simple_wasm_single_bound_import", bound_import)
+                    JsValue.Function(id):
+                        self.set_object_property(exports_id, "__simple_wasm_single_bound_import", bound_import)
+                        var fn_ids = self.wasm_export_fn_ids
+                        var bound_imports = self.wasm_export_bound_imports
+                        fn_ids.push(fn_id)
+                        bound_imports.push(bound_import)
+                        self.wasm_export_fn_ids = fn_ids
+                        self.wasm_export_bound_imports = bound_imports
                     _: pass_dn
             index = index + 1
         exports_id
 
-    me _native_webassembly_export_function(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
-        val exports_id = _get_obj_id(this_val)
+    me _native_webassembly_export_function(this_val: JsValue, arg_vals: [JsValue], dispatched_fn_id: i64) -> JsValue:
+        var bound_import = JsValue.Undefined
+        val direct_fn_id = _get_fn_id(this_val)
+        var lookup_fn_id = dispatched_fn_id
+        if lookup_fn_id < 0:
+            lookup_fn_id = direct_fn_id
+        if lookup_fn_id >= 0:
+            var wi = 0
+            while wi < self.wasm_export_fn_ids.len():
+                if self.wasm_export_fn_ids.get(wi) == lookup_fn_id:
+                    bound_import = self.wasm_export_bound_imports.get(wi)
+                    break
+                wi = wi + 1
+        val exports_id = match this_val:
+            JsValue.Object(id): id
+            _: -1
         if exports_id >= 0:
             match self.get_object_property(exports_id, "__simple_wasm_single_bound_import"):
-                JsValue.Function(fn_id):
-                    val callback_result = self._invoke_function(fn_id, arg_vals, self.global_env)
-                    match callback_result:
-                        Ok(v): return v
-                        Err(e): return JsValue.String(v: e.message)
+                JsValue.Function(fn_id): bound_import = JsValue.Function(id: fn_id)
                 _:
                     pass_dn
+        val fn_id = _get_fn_id(bound_import)
+        if fn_id >= 0 and fn_id < self.functions.len():
+            val import_fn = self.functions.get(fn_id)
+            val import_env = self.env_stack.create_env(import_fn.closure_env)
+            var pi = 0
+            while pi < import_fn.params.len():
+                var pv = JsValue.Undefined
+                if pi < arg_vals.len():
+                    pv = arg_vals.get(pi)
+                self.env_stack.define_var(import_env, import_fn.params.get(pi), pv)
+                pi = pi + 1
+            self.env_stack.define_var(import_env, "this", JsValue.Undefined)
+            val frame = CallFrame(function_name: import_fn.name, env_id: import_env, line: 0, this_value: JsValue.Undefined)
+            self.call_stack.push(frame)
+            val saved_return = self.control_return
+            self.control_return = false
+            var result = JsValue.Undefined
+            var bi = 0
+            while bi < import_fn.body.len():
+                val stmt = import_fn.body.get(bi)
+                match stmt:
+                    JsStatement.Return(value):
+                        val return_result = self.eval_expression(value, import_env)
+                        match return_result:
+                            Ok(v):
+                                result = v
+                            Err(e):
+                                self.call_stack.pop()
+                                self.control_return = saved_return
+                                return JsValue.String(v: e.message)
+                        break
+                    _:
+                        val statement_result = self.exec_statement(stmt, import_env)
+                        match statement_result:
+                            Ok(v):
+                                result = v
+                            Err(e):
+                                self.call_stack.pop()
+                                self.control_return = saved_return
+                                return JsValue.String(v: e.message)
+                if self.control_return:
+                    result = self.return_value
+                    break
+                bi = bi + 1
+            self.call_stack.pop()
+            self.control_return = saved_return
+            return result
         JsValue.Undefined
 
     me _native_webassembly_table_placeholder(module_id: i64) -> JsValue:

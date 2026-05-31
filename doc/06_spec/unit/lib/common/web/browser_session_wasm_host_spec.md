@@ -491,7 +491,7 @@ match instance:
 
 3. JsValue Object
    - Expected: _display_js(run_value) equals `[Function]`
-   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [])) equals `undefined`
+   - Expected: _display_js(interp._native_webassembly_export_function(run_value, [], -1)) equals `undefined`
    - Expected: "missing exports" equals ``
    - Expected: "missing instance" equals ``
 
@@ -523,7 +523,7 @@ match instance:
             JsValue.Object(exports_id):
                 val run_value = interp.get_object_property(exports_id, "run")
                 expect(_display_js(run_value)).to_equal("[Function]")
-                expect(_display_js(interp._native_webassembly_export_function(run_value, []))).to_equal("undefined")
+                expect(_display_js(interp._native_webassembly_export_function(run_value, [], -1))).to_equal("undefined")
             _:
                 expect("missing exports").to_equal("")
     _:
@@ -546,8 +546,8 @@ match instance:
 3. JsValue Object
    - Expected: _display_js(init_value) equals `[Function]`
    - Expected: _display_js(render_value) equals `[Function]`
-   - Expected: _display_js(interp._native_webassembly_export_function(init_value, [])) equals `undefined`
-   - Expected: _display_js(interp._native_webassembly_export_function(render_value, [])) equals `undefined`
+   - Expected: _display_js(interp._native_webassembly_export_function(init_value, [], -1)) equals `undefined`
+   - Expected: _display_js(interp._native_webassembly_export_function(render_value, [], -1)) equals `undefined`
    - Expected: "missing exports" equals ``
    - Expected: "missing instance" equals ``
 
@@ -577,8 +577,8 @@ match instance:
                 val render_value = interp.get_object_property(exports_id, "render")
                 expect(_display_js(init_value)).to_equal("[Function]")
                 expect(_display_js(render_value)).to_equal("[Function]")
-                expect(_display_js(interp._native_webassembly_export_function(init_value, []))).to_equal("undefined")
-                expect(_display_js(interp._native_webassembly_export_function(render_value, []))).to_equal("undefined")
+                expect(_display_js(interp._native_webassembly_export_function(init_value, [], -1))).to_equal("undefined")
+                expect(_display_js(interp._native_webassembly_export_function(render_value, [], -1))).to_equal("undefined")
             _:
                 expect("missing exports").to_equal("")
     _:
@@ -715,7 +715,7 @@ expect(_object_property_text(interp, result, "error")).to_equal("unsupported-was
 
 1. var interp =  new interpreter
 
-2. [JsStatement Return
+2. js parse program subset
 
 3. interp set object property
 
@@ -732,6 +732,7 @@ expect(_object_property_text(interp, result, "error")).to_equal("unsupported-was
 7. JsValue Object
    - Expected: _display_js(interp.get_object_property(exports_id, "run")) equals `[Function]`
    - Expected: _display_js(interp.get_object_property(exports_id, "__simple_wasm_single_bound_import")) equals `[Function]`
+   - Expected: _display_js(interp._native_webassembly_export_function(JsValue.Object(id: exports_id), [JsValue.Number(v: 41.0)], -1)) equals `42`
    - Expected: "missing exports" equals ``
    - Expected: "missing instance" equals ``
    - Expected: "missing result" equals ``
@@ -740,7 +741,7 @@ expect(_object_property_text(interp, result, "error")).to_equal("unsupported-was
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -752,7 +753,7 @@ val import_fn_id = functions.len()
 functions.push(JsFunction.create(
     "foo",
     [],
-    [JsStatement.Return(value: JsExpression.Literal(value: JsValue.Number(v: 42.0)))],
+    js_parse_program_subset("return 42"),
     interp.global_env
 ))
 interp.functions = functions
@@ -774,6 +775,7 @@ match result:
                     JsValue.Object(exports_id):
                         expect(_display_js(interp.get_object_property(exports_id, "run"))).to_equal("[Function]")
                         expect(_display_js(interp.get_object_property(exports_id, "__simple_wasm_single_bound_import"))).to_equal("[Function]")
+                        expect(_display_js(interp._native_webassembly_export_function(JsValue.Object(id: exports_id), [JsValue.Number(v: 41.0)], -1))).to_equal("42")
                     _:
                         expect("missing exports").to_equal("")
             _:
