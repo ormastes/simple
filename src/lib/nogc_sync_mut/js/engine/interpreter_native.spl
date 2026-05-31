@@ -1908,27 +1908,38 @@ impl JsInterpreter:
         min_elements
 
     me _native_webassembly_global_i32_const_value(hex: text) -> i64:
+        self._native_webassembly_global_i32_const_value_at(hex, 0)
+
+    me _native_webassembly_global_i32_const_value_at(hex: text, wanted_index: i64) -> i64:
         val start = self._native_webassembly_section_payload_start(hex, 6)
         val end = self._native_webassembly_section_payload_end(hex, 6)
         if start < 0 or end <= start:
             return -1
         val count = self._native_webassembly_read_leb_value(hex, start)
         var pos = self._native_webassembly_read_leb_next(hex, start)
-        if count <= 0 or pos < 0 or pos + 3 >= end:
+        if count <= 0 or pos < 0 or wanted_index < 0 or wanted_index >= count:
             return -1
-        val value_type = self._native_webassembly_hex_byte_at(hex, pos)
-        val mutability = self._native_webassembly_hex_byte_at(hex, pos + 1)
-        val opcode = self._native_webassembly_hex_byte_at(hex, pos + 2)
-        if value_type != 127 or mutability < 0 or opcode != 65:
-            return -1
-        val value = self._native_webassembly_read_leb_value(hex, pos + 3)
-        val next_pos = self._native_webassembly_read_leb_next(hex, pos + 3)
-        if value < 0 or next_pos < 0 or next_pos >= end:
-            return -1
-        val terminator = self._native_webassembly_hex_byte_at(hex, next_pos)
-        if terminator != 11:
-            return -1
-        value
+        var index = 0
+        while index < count and pos < end:
+            if pos + 3 >= end:
+                return -1
+            val value_type = self._native_webassembly_hex_byte_at(hex, pos)
+            val mutability = self._native_webassembly_hex_byte_at(hex, pos + 1)
+            val opcode = self._native_webassembly_hex_byte_at(hex, pos + 2)
+            if value_type != 127 or mutability < 0 or opcode != 65:
+                return -1
+            val value = self._native_webassembly_read_leb_value(hex, pos + 3)
+            val next_pos = self._native_webassembly_read_leb_next(hex, pos + 3)
+            if value < 0 or next_pos < 0 or next_pos >= end:
+                return -1
+            val terminator = self._native_webassembly_hex_byte_at(hex, next_pos)
+            if terminator != 11:
+                return -1
+            if index == wanted_index:
+                return value
+            pos = next_pos + 1
+            index = index + 1
+        -1
 
     me _native_webassembly_export_count(hex: text) -> i64:
         val start = self._native_webassembly_section_payload_start(hex, 7)
@@ -2296,6 +2307,17 @@ impl JsInterpreter:
                         if local_index < 0 or next_pos < 0 or next_pos > body_end or local_index >= local_vals.len() or stack.len() < 1:
                             return -1
                         local_vals[local_index] = stack.get(stack.len() - 1)
+                        cursor = next_pos
+                        continue
+                    if opcode == 35:
+                        val global_index = self._native_webassembly_read_leb_value(hex, cursor + 1)
+                        val next_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
+                        if global_index < 0 or next_pos < 0 or next_pos > body_end:
+                            return -1
+                        val global_value = self._native_webassembly_global_i32_const_value_at(hex, global_index)
+                        if global_value < 0:
+                            return -1
+                        stack.push(global_value)
                         cursor = next_pos
                         continue
                     if opcode == 106:
