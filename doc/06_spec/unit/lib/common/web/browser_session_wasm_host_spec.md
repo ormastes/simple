@@ -4437,6 +4437,72 @@ match memory:
 
 </details>
 
+#### windows WebAssembly.Memory buffer bytes through Uint8Array subarray views
+
+1. var interp =  new interpreter
+
+2. interp set object property
+
+3. JsValue Object
+
+4. JsValue Object
+
+5. JsValue Object
+
+6. interp set object property
+
+7. JsValue Object
+   - Expected: _object_property_text(interp, sub, "byteOffset") equals `1`
+   - Expected: _object_property_text(interp, sub, "length") equals `2`
+   - Expected: _display_js(interp.get_object_property(sub_id, "0")) equals `42`
+
+8. interp set object property
+   - Expected: _display_js(interp.get_object_property(view_id, "2")) equals `77`
+   - Expected: "missing subview" equals ``
+   - Expected: "missing view" equals ``
+   - Expected: "missing buffer" equals ``
+   - Expected: "missing memory" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+val options_id = interp.create_object()
+interp.set_object_property(options_id, "initial", JsValue.Number(v: 1.0))
+val memory = interp._native_webassembly_memory([JsValue.Object(id: options_id)])
+match memory:
+    JsValue.Object(memory_id):
+        match interp.get_object_property(memory_id, "buffer"):
+            JsValue.Object(buffer_id):
+                val view = interp._native_uint8_array([JsValue.Object(id: buffer_id)])
+                match view:
+                    JsValue.Object(view_id):
+                        interp.set_object_property(view_id, "1", JsValue.Number(v: 42.0))
+                        val sub = interp._native_uint8_array_subarray(view, [JsValue.Number(v: 1.0), JsValue.Number(v: 3.0)])
+                        match sub:
+                            JsValue.Object(sub_id):
+                                expect(_object_property_text(interp, sub, "byteOffset")).to_equal("1")
+                                expect(_object_property_text(interp, sub, "length")).to_equal("2")
+                                expect(_display_js(interp.get_object_property(sub_id, "0"))).to_equal("42")
+                                interp.set_object_property(sub_id, "1", JsValue.Number(v: 77.0))
+                                expect(_display_js(interp.get_object_property(view_id, "2"))).to_equal("77")
+                            _:
+                                expect("missing subview").to_equal("")
+                    _:
+                        expect("missing view").to_equal("")
+            _:
+                expect("missing buffer").to_equal("")
+    _:
+        expect("missing memory").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -4456,8 +4522,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 93 |
-| Active scenarios | 93 |
+| Total scenarios | 94 |
+| Active scenarios | 94 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
