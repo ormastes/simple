@@ -3333,6 +3333,45 @@ impl JsInterpreter:
                         val mem_pos = self._native_webassembly_read_leb_next(hex, cursor + 1)
                         if bulk_subop < 0 or mem_pos < 0 or mem_pos > body_end:
                             return -1
+                        if bulk_subop == 8:
+                            val data_index = self._native_webassembly_read_leb_value(hex, mem_pos)
+                            val init_mem_pos = self._native_webassembly_read_leb_next(hex, mem_pos)
+                            if data_index < 0 or init_mem_pos < 0 or init_mem_pos > body_end:
+                                return -1
+                            val init_mem_index = self._native_webassembly_read_leb_value(hex, init_mem_pos)
+                            val next_pos = self._native_webassembly_read_leb_next(hex, init_mem_pos)
+                            if init_mem_index != 0 or next_pos < 0 or next_pos > body_end or stack.len() < 3:
+                                return -1
+                            val len = stack.get(stack.len() - 1)
+                            val src = stack.get(stack.len() - 2)
+                            val dest = stack.get(stack.len() - 3)
+                            stack.pop()
+                            stack.pop()
+                            stack.pop()
+                            val data_len = self._native_webassembly_data_segment_len_at(hex, data_index)
+                            val passive = self._native_webassembly_data_segment_is_passive(hex, data_index)
+                            if not passive or data_len < 0 or len < 0 or src < 0 or dest < 0 or memory_byte_len <= 0 or src + len > data_len or dest + len > memory_byte_len:
+                                return -5
+                            var init_index = 0
+                            while init_index < len:
+                                val init_byte = self._native_webassembly_data_segment_byte_at(hex, data_index, src + init_index)
+                                if init_byte < 0:
+                                    return -5
+                                val init_addr = dest + init_index
+                                var found = false
+                                var init_lookup = 0
+                                while init_lookup < memory_addrs.len():
+                                    if memory_addrs.get(init_lookup) == init_addr:
+                                        memory_bytes[init_lookup] = init_byte
+                                        found = true
+                                        break
+                                    init_lookup = init_lookup + 1
+                                if not found:
+                                    memory_addrs.push(init_addr)
+                                    memory_bytes.push(init_byte)
+                                init_index = init_index + 1
+                            cursor = next_pos
+                            continue
                         if bulk_subop == 10:
                             val copy_dest_mem_index = self._native_webassembly_read_leb_value(hex, mem_pos)
                             val copy_src_mem_pos = self._native_webassembly_read_leb_next(hex, mem_pos)
@@ -3453,6 +3492,127 @@ impl JsInterpreter:
             pos = export_index_next
             index = index + 1
         -1
+
+    me _native_webassembly_data_segment_is_passive(hex: text, wanted_index: i64) -> bool:
+        val pos = self._native_webassembly_data_segment_entry_pos(hex, wanted_index)
+        val end = self._native_webassembly_section_payload_end(hex, 11)
+        if pos < 0 or end <= pos:
+            return false
+        val flags = self._native_webassembly_read_leb_value(hex, pos)
+        flags == 1
+
+    me _native_webassembly_data_segment_len_at(hex: text, wanted_index: i64) -> i64:
+        val byte_vec_pos = self._native_webassembly_data_segment_byte_vec_pos(hex, wanted_index)
+        val end = self._native_webassembly_section_payload_end(hex, 11)
+        if byte_vec_pos < 0 or end <= byte_vec_pos:
+            return -1
+        val byte_len = self._native_webassembly_read_leb_value(hex, byte_vec_pos)
+        if byte_len < 0:
+            return -1
+        val byte_start = self._native_webassembly_read_leb_next(hex, byte_vec_pos)
+        if byte_start < 0 or byte_start + byte_len > end:
+            return -1
+        byte_len
+
+    me _native_webassembly_data_segment_byte_at(hex: text, wanted_index: i64, byte_index: i64) -> i64:
+        val byte_vec_pos = self._native_webassembly_data_segment_byte_vec_pos(hex, wanted_index)
+        val end = self._native_webassembly_section_payload_end(hex, 11)
+        if byte_vec_pos < 0 or end <= byte_vec_pos or byte_index < 0:
+            return -1
+        val byte_len = self._native_webassembly_read_leb_value(hex, byte_vec_pos)
+        val byte_start = self._native_webassembly_read_leb_next(hex, byte_vec_pos)
+        if byte_len < 0 or byte_start < 0 or byte_start + byte_len > end or byte_index >= byte_len:
+            return -1
+        self._native_webassembly_hex_byte_at(hex, byte_start + byte_index)
+
+    me _native_webassembly_data_segment_byte_vec_pos(hex: text, wanted_index: i64) -> i64:
+        val pos = self._native_webassembly_data_segment_entry_pos(hex, wanted_index)
+        val end = self._native_webassembly_section_payload_end(hex, 11)
+        if pos < 0 or end <= pos:
+            return -1
+        val flags = self._native_webassembly_read_leb_value(hex, pos)
+        var cursor = self._native_webassembly_read_leb_next(hex, pos)
+        if flags < 0 or cursor < 0 or cursor > end:
+            return -1
+        if flags == 0:
+            cursor = self._native_webassembly_data_segment_skip_const_expr(hex, cursor, end)
+        else if flags == 1:
+            pass_dn
+        else if flags == 2:
+            val mem_index = self._native_webassembly_read_leb_value(hex, cursor)
+            cursor = self._native_webassembly_read_leb_next(hex, cursor)
+            if mem_index < 0 or cursor < 0:
+                return -1
+            cursor = self._native_webassembly_data_segment_skip_const_expr(hex, cursor, end)
+        else:
+            return -1
+        if cursor < 0 or cursor >= end:
+            return -1
+        cursor
+
+    me _native_webassembly_data_segment_entry_pos(hex: text, wanted_index: i64) -> i64:
+        val start = self._native_webassembly_section_payload_start(hex, 11)
+        val end = self._native_webassembly_section_payload_end(hex, 11)
+        if start < 0 or end <= start:
+            return -1
+        val count = self._native_webassembly_read_leb_value(hex, start)
+        var pos = self._native_webassembly_read_leb_next(hex, start)
+        if count < 0 or pos < 0:
+            return -1
+        var index = 0
+        while index < count and pos < end:
+            if index == wanted_index:
+                return pos
+            pos = self._native_webassembly_data_segment_entry_next(hex, pos, end)
+            if pos < 0:
+                return -1
+            index = index + 1
+        -1
+
+    me _native_webassembly_data_segment_entry_next(hex: text, pos: i64, end: i64) -> i64:
+        val byte_vec_pos = self._native_webassembly_data_segment_byte_vec_pos_at_entry(hex, pos, end)
+        if byte_vec_pos < 0:
+            return -1
+        val byte_len = self._native_webassembly_read_leb_value(hex, byte_vec_pos)
+        val byte_start = self._native_webassembly_read_leb_next(hex, byte_vec_pos)
+        if byte_len < 0 or byte_start < 0 or byte_start + byte_len > end:
+            return -1
+        byte_start + byte_len
+
+    me _native_webassembly_data_segment_byte_vec_pos_at_entry(hex: text, pos: i64, end: i64) -> i64:
+        if pos < 0 or pos >= end:
+            return -1
+        val flags = self._native_webassembly_read_leb_value(hex, pos)
+        var cursor = self._native_webassembly_read_leb_next(hex, pos)
+        if flags < 0 or cursor < 0 or cursor > end:
+            return -1
+        if flags == 0:
+            cursor = self._native_webassembly_data_segment_skip_const_expr(hex, cursor, end)
+        else if flags == 1:
+            pass_dn
+        else if flags == 2:
+            val mem_index = self._native_webassembly_read_leb_value(hex, cursor)
+            cursor = self._native_webassembly_read_leb_next(hex, cursor)
+            if mem_index < 0 or cursor < 0:
+                return -1
+            cursor = self._native_webassembly_data_segment_skip_const_expr(hex, cursor, end)
+        else:
+            return -1
+        cursor
+
+    me _native_webassembly_data_segment_skip_const_expr(hex: text, pos: i64, end: i64) -> i64:
+        if pos < 0 or pos >= end:
+            return -1
+        val opcode = self._native_webassembly_hex_byte_at(hex, pos)
+        if opcode != 65:
+            return -1
+        val next_pos = self._native_webassembly_read_leb_next(hex, pos + 1)
+        if next_pos < 0 or next_pos >= end:
+            return -1
+        val terminator = self._native_webassembly_hex_byte_at(hex, next_pos)
+        if terminator != 11:
+            return -1
+        next_pos + 1
 
     me _native_webassembly_control_else_pos(hex: text, start: i64, body_end: i64) -> i64:
         var cursor = start
