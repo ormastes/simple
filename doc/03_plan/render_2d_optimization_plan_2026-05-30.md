@@ -236,10 +236,10 @@ Progress 2026-05-30:
    - Measure per-backend: CUDA, HIP, OpenCL, AVX2, NEON, scalar
    - In progress: benchmark evidence is recorded in
      `doc/09_report/engine2d_compute_dispatch_benchmark_2026-05-31.md`.
-     Current runnable evidence covers the existing smoke-mode scalar runner and
-     report structure. Full 1920x1080 native evidence is blocked by a concrete
-     mutable-framebuffer lowering error in `simple_runner.spl`, which the report
-     records as the next full-mode gate rather than fabricating throughput.
+     Current runnable evidence covers the existing native/JIT smoke-mode scalar
+     runner and report structure. Full 1920x1080 evidence still requires the C
+     reference run, full-mode Simple runner, and real hardware-backed GPU rows
+     where local probes initialize those backends.
 3. Update `BackendProber.probe_all_summary` with runtime evidence from real session init
    - Done: `probe_all_summary()` now appends a `runtime_evidence` record using
      the same CUDA, ROCm, OpenCL, CPU-SIMD, and scalar CPU probe order as the

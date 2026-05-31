@@ -1,4 +1,4 @@
-# Bug: graphics_2d full runner cannot JIT/native lower framebuffer mutation
+# Bug: graphics_2d full runner could not JIT/native lower framebuffer mutation
 
 ## Date
 
@@ -45,3 +45,22 @@ bin/simple test/perf/graphics_2d/simple_runner.spl
 ```
 
 The fallback warning appears before the three `SCENE_RESULT` lines.
+
+## Resolution
+
+Resolved on 2026-05-31 by marking the framebuffer-mutating helper parameters
+with `mut` capability in `test/perf/graphics_2d/simple_runner.spl`.
+
+The native/JIT path then exposed a separate compiled interpolation issue for
+top-level `text` constants. The runner now uses `runner_mode_text()` instead of
+interpolating a top-level `RUNNER_MODE` value.
+
+Verification:
+
+```sh
+bin/simple check test/perf/graphics_2d/simple_runner.spl
+SIMPLE_NO_STUB_FALLBACK=1 bin/simple test/perf/graphics_2d/simple_runner.spl
+```
+
+The second command emits the header and three `SCENE_RESULT` lines without the
+JIT fallback warning.
