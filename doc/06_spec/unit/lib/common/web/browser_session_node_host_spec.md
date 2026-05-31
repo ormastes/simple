@@ -8,6 +8,7 @@
 
 1. var interp =  new interpreter
    - Expected: _display_js(process_platform([])) equals `linux`
+   - Expected: _display_js(os_platform([])) equals `linux`
    - Expected: _display_js(process_versions_node([])) equals `0.0.0-simple`
    - Expected: _display_js(process_env_get([JsValue.String(v: "PATH")])) equals `undefined`
    - Expected: _display_js(interp._native_node_buffer_global()) equals `[object Object]`
@@ -17,13 +18,14 @@
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var interp = _new_interpreter()
 
 expect(_display_js(process_platform([]))).to_equal("linux")
+expect(_display_js(os_platform([]))).to_equal("linux")
 expect(_display_js(process_versions_node([]))).to_equal("0.0.0-simple")
 expect(_display_js(process_env_get([JsValue.String(v: "PATH")]))).to_equal("undefined")
 expect(_display_js(interp._native_node_buffer_global())).to_equal("[object Object]")
@@ -78,6 +80,37 @@ match buffer_module:
     _: expect("missing buffer module").to_equal("object")
 val buffer = interp._native_node_buffer_from([JsValue.String(v: "hello"), JsValue.String(v: "utf8")])
 expect(_display_js(interp._native_node_buffer_to_string(buffer, [JsValue.String(v: "hex")]))).to_equal("68656c6c6f")
+```
+
+</details>
+
+#### loads deterministic os modules through require dispatch
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, os, "platform") equals `[Function]`
+   - Expected: _display_js(interp._dispatch_native_with_receiver(-132, JsValue.Undefined, [], 0)) equals `linux`
+   - Expected: _display_js(interp._dispatch_native_with_receiver(-133, JsValue.Undefined, [], 0)) equals `x64`
+   - Expected: _display_js(interp._dispatch_native_with_receiver(-134, JsValue.Undefined, [], 0)) equals `Linux`
+   - Expected: _display_js(interp._dispatch_native_with_receiver(-135, JsValue.Undefined, [], 0)) equals `0.0.0-simple`
+   - Expected: _display_js(interp._dispatch_native_with_receiver(-136, JsValue.Undefined, [], 0)) equals `/`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val os = interp._native_node_require([JsValue.String(v: "node:os")])
+expect(_object_property_text(interp, os, "platform")).to_equal("[Function]")
+expect(_display_js(interp._dispatch_native_with_receiver(-132, JsValue.Undefined, [], 0))).to_equal("linux")
+expect(_display_js(interp._dispatch_native_with_receiver(-133, JsValue.Undefined, [], 0))).to_equal("x64")
+expect(_display_js(interp._dispatch_native_with_receiver(-134, JsValue.Undefined, [], 0))).to_equal("Linux")
+expect(_display_js(interp._dispatch_native_with_receiver(-135, JsValue.Undefined, [], 0))).to_equal("0.0.0-simple")
+expect(_display_js(interp._dispatch_native_with_receiver(-136, JsValue.Undefined, [], 0))).to_equal("/")
 ```
 
 </details>
@@ -143,8 +176,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

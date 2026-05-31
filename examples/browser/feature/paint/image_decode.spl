@@ -287,6 +287,12 @@ fn format_name(format: ImageFormat) -> text:
 
 fn decode_tiff(raw_data: text) -> ImageData:
     val info = tiff_image_info(raw_data)
+    val decoded = _decode_tiff_baseline_pixels(raw_data)
+    match decoded:
+        Some(image):
+            return image
+        nil:
+            pass_dn
     if info.width > 0 and info.height > 0:
         return create_placeholder_format(info.width, info.height, ImageFormat.Tiff)
     create_placeholder_format(1, 1, ImageFormat.Tiff)
@@ -872,6 +878,142 @@ fn _read_i32_le(data: text, offset: i64) -> i64:
     if unsigned >= 2147483648:
         return unsigned - 4294967296
     unsigned
+
+fn _read_u16(data: text, offset: i64, little: bool) -> i64:
+    if little:
+        return _read_u16_le(data, offset)
+    _read_u16_be(data, offset)
+
+fn _read_u32(data: text, offset: i64, little: bool) -> i64:
+    if little:
+        return _read_u32_le(data, offset)
+    _read_u32_be(data, offset)
+
+fn _decode_tiff_baseline_pixels(raw_data: text) -> ImageData?:
+    if not image_is_tiff(raw_data):
+        return nil
+    val little = _byte_at(raw_data, 0) == 73
+    val ifd = _read_u32(raw_data, 4, little)
+    if ifd <= 0 or ifd + 2 > raw_data.len():
+        return nil
+    val count = _read_u16(raw_data, ifd, little)
+    var width = 0
+    var height = 0
+    var compression = 1
+    var photometric = 1
+    var samples_per_pixel = 1
+    var rows_per_strip = 0
+    var strip_offset = 0
+    var strip_byte_count = 0
+    var bits_per_sample_count = 1
+    var bits_per_sample_value = 8
+    var bits_per_sample_offset = 0
+
+    var i = 0
+    while i < count:
+        val entry = ifd + 2 + i * 12
+        if entry + 12 > raw_data.len():
+            return nil
+        val tag = _read_u16(raw_data, entry, little)
+        val typ = _read_u16(raw_data, entry + 2, little)
+        val value_count = _read_u32(raw_data, entry + 4, little)
+        val first_value = _tiff_entry_first_value(raw_data, entry, little)
+        if tag == 256:
+            width = first_value
+        else if tag == 257:
+            height = first_value
+        else if tag == 258:
+            bits_per_sample_count = value_count
+            if value_count == 1:
+                bits_per_sample_value = first_value
+            else:
+                bits_per_sample_offset = _read_u32(raw_data, entry + 8, little)
+        else if tag == 259:
+            compression = first_value
+        else if tag == 262:
+            photometric = first_value
+        else if tag == 273:
+            strip_offset = first_value
+        else if tag == 277:
+            samples_per_pixel = first_value
+        else if tag == 278:
+            rows_per_strip = first_value
+        else if tag == 279:
+            strip_byte_count = first_value
+        else:
+            pass_dn
+        i = i + 1
+
+    if width <= 0 or height <= 0:
+        return nil
+    if compression != 1:
+        return nil
+    if samples_per_pixel != 1 and samples_per_pixel != 3 and samples_per_pixel != 4:
+        return nil
+    if photometric != 1 and photometric != 2:
+        return nil
+    if samples_per_pixel == 1 and photometric != 1:
+        return nil
+    if samples_per_pixel > 1 and photometric != 2:
+        return nil
+    if rows_per_strip > 0 and rows_per_strip < height:
+        return nil
+    if not _tiff_bits_are_8(raw_data, bits_per_sample_count, bits_per_sample_value, bits_per_sample_offset, samples_per_pixel, little):
+        return nil
+
+    val bytes_per_pixel = samples_per_pixel
+    val needed = width * height * bytes_per_pixel
+    if strip_offset <= 0 or strip_offset + needed > raw_data.len():
+        return nil
+    if strip_byte_count > 0 and strip_byte_count < needed:
+        return nil
+
+    var rgba = []
+    var pixel_index = 0
+    while pixel_index < width * height:
+        val pixel_offset = strip_offset + pixel_index * bytes_per_pixel
+        if samples_per_pixel == 1:
+            val gray = _byte_at(raw_data, pixel_offset)
+            rgba.push(gray)
+            rgba.push(gray)
+            rgba.push(gray)
+            rgba.push(255)
+        else:
+            rgba.push(_byte_at(raw_data, pixel_offset))
+            rgba.push(_byte_at(raw_data, pixel_offset + 1))
+            rgba.push(_byte_at(raw_data, pixel_offset + 2))
+            if samples_per_pixel == 4:
+                rgba.push(_byte_at(raw_data, pixel_offset + 3))
+            else:
+                rgba.push(255)
+        pixel_index = pixel_index + 1
+
+    Some(ImageData(width: width, height: height, format: ImageFormat.Tiff, data: rgba))
+
+fn _tiff_entry_first_value(data: text, entry: i64, little: bool) -> i64:
+    val typ = _read_u16(data, entry + 2, little)
+    val value_count = _read_u32(data, entry + 4, little)
+    if value_count <= 0:
+        return 0
+    if typ == 3:
+        return _read_u16(data, entry + 8, little)
+    if typ == 4:
+        return _read_u32(data, entry + 8, little)
+    0
+
+fn _tiff_bits_are_8(data: text, value_count: i64, inline_value: i64, offset: i64, samples_per_pixel: i64, little: bool) -> bool:
+    if value_count == 1:
+        return inline_value == 8
+    if value_count != samples_per_pixel:
+        return false
+    if offset <= 0 or offset + value_count * 2 > data.len():
+        return false
+    var i = 0
+    while i < value_count:
+        if _read_u16(data, offset + i * 2, little) != 8:
+            return false
+        i = i + 1
+    true
 
 # Read a 4-byte ASCII chunk type.
 fn _read_chunk_type(data: text, offset: i64) -> text:

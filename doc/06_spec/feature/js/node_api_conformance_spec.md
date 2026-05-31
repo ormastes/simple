@@ -465,6 +465,80 @@ expect(_kind(process_nextTick([]))).to_equal("undefined")
 
 </details>
 
+### Node.js os module
+
+### deterministic os identity
+
+#### returns stable os.platform
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(os_platform([]))).to_equal("linux")
+```
+
+</details>
+
+#### returns stable os.arch
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(os_arch([]))).to_equal("x64")
+```
+
+</details>
+
+#### returns stable os.type
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(os_type([]))).to_equal("Linux")
+```
+
+</details>
+
+#### returns stable os.release
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(os_release([]))).to_equal("0.0.0-simple")
+```
+
+</details>
+
+#### keeps homedir deterministic without leaking host users
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_str(os_homedir([]))).to_equal("/")
+```
+
+</details>
+
 ### Node.js Buffer module
 
 ### Buffer.byteLength
@@ -733,6 +807,24 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("require('fs').status")).to_equal("denied")
+```
+
+</details>
+
+#### resolves os and node:os through deterministic require
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('os').platform()")).to_equal("linux")
+expect(_eval_str("require('node:os').arch()")).to_equal("x64")
+expect(_eval_str("require('node:os').type()")).to_equal("Linux")
+expect(_eval_str("require('os').release()")).to_equal("0.0.0-simple")
+expect(_eval_str("require('os').homedir()")).to_equal("/")
 ```
 
 </details>
@@ -1299,6 +1391,8 @@ Tests covering:
 - process working directory and argv
 - process env
 - process.nextTick
+- Node.js os module
+- deterministic os identity
 - Node.js Buffer module
 - Buffer.byteLength
 - Buffer.from(...).toString(...)
@@ -1314,8 +1408,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 87 |
-| Active scenarios | 87 |
+| Total scenarios | 93 |
+| Active scenarios | 93 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

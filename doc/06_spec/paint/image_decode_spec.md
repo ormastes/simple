@@ -430,6 +430,47 @@ expect(info.supported).to_equal(true)
 
 </details>
 
+#### decodes little-endian uncompressed RGB strips to RGBA pixels
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val image = decode_tiff(_tiff_le_2x1_rgb())
+
+expect(image.width).to_equal(2)
+expect(image.height).to_equal(1)
+expect(image.format).to_equal(ImageFormat.Tiff)
+expect(image.data).to_equal([
+    10, 20, 30, 255,
+    40, 50, 60, 255
+])
+```
+
+</details>
+
+#### decodes little-endian uncompressed RGBA strips with alpha
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val image = decode_tiff(_tiff_le_1x1_rgba())
+
+expect(image.width).to_equal(1)
+expect(image.height).to_equal(1)
+expect(image.format).to_equal(ImageFormat.Tiff)
+expect(image.data).to_equal([70, 80, 90, 100])
+```
+
+</details>
+
 ### JPEG XL
 
 #### detects JPEG XL signatures but keeps decode fail-closed
@@ -521,8 +562,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 26 |
-| Active scenarios | 26 |
+| Total scenarios | 28 |
+| Active scenarios | 28 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
