@@ -1,7 +1,13 @@
 # Pure GUI SMF dynlib artifact tests
 
 use std.spipe.*
-use app.gui_perf.smf_dynlib_artifact.{gui_smf_dynlib_arch_code, gui_smf_wrap_native_library}
+use app.gui_perf.smf_dynlib_artifact.{
+    gui_smf_dynlib_arch_code,
+    gui_smf_wrap_native_library,
+    gui_smf_artifact_contract,
+    gui_smf_artifact_contract_missing,
+    gui_smf_artifact_contract_row
+}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.smf.{smf_parse_header, smf_extract_library_stub_for_arch, SMF_HEADER_TRAILER_SIZE}
 
@@ -37,6 +43,24 @@ describe "pure GUI SMF dynlib artifact":
         val stub = smf_extract_library_stub_for_arch(smf, Architecture.Arm64)
         expect(stub.is_ok()).to_equal(true)
         expect(stub.unwrap()[0]).to_equal(0xCFu8)
+
+    it "emits a contract-only row without claiming QEMU or macOS execution":
+        val smf = gui_smf_wrap_native_library([0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8], 1u8)
+        val contract = gui_smf_artifact_contract("build/gui/pure_gui_hot.smf", smf, "gui_dynlib_hot_probe_tick")
+        expect(contract.status).to_equal("pass")
+        expect(contract.smf_role).to_equal(2i64)
+        expect(contract.embedded_dynlib).to_equal(true)
+        expect(contract.qemu_status).to_equal("not-run")
+        expect(contract.macos_status).to_equal("not-run")
+        val row = gui_smf_artifact_contract_row(contract)
+        expect(row).to_start_with("GUI_SMF_ARTIFACT_CONTRACT status=pass")
+        expect(row).to_contain(" qemu_status=not-run ")
+        expect(row).to_contain(" macos_status=not-run ")
+
+    it "emits a missing artifact contract row":
+        val row = gui_smf_artifact_contract_row(gui_smf_artifact_contract_missing("", "gui_dynlib_hot_probe_tick"))
+        expect(row).to_start_with("GUI_SMF_ARTIFACT_CONTRACT status=missing")
+        expect(row).to_contain(" qemu_reason=live-qemu-not-executed ")
 
     it "wraps and extracts a role-2 SMF dynlib through runtime file SFFI":
         val dynlib_path = "/tmp/simple_gui_smf_dynlib_fixture.so"

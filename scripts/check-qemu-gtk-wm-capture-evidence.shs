@@ -85,6 +85,9 @@ host_perf_simple_frame_us=0
 host_perf_gtk_frame_us=0
 host_perf_iterations=0
 host_perf_comparison_available=false
+gui_smf_artifact_contract_out="$BUILD_DIR/gui-smf-artifact-contract.out"
+gui_smf_artifact_contract_row="GUI_SMF_ARTIFACT_CONTRACT status=missing artifact=${SIMPLE_GUI_DYNLIB_ARTIFACT:-} sha256= size=0 smf_role=-1 arch=0 embedded_dynlib=false symbol=${SIMPLE_GUI_DYNLIB_SYMBOL:-gui_dynlib_hot_probe_tick} qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64"
+gui_smf_artifact_contract_status=missing
 
 run_gtk_scene_evidence() {
     set +e
@@ -217,6 +220,21 @@ if [ "$gtk_scene_status" = "not-run" ] && [ "${QEMU_HOST_GTK_SCENE_EVIDENCE:-1}"
     run_gtk_scene_evidence
 fi
 
+if [ -n "${SIMPLE_GUI_DYNLIB_ARTIFACT:-}" ]; then
+    set +e
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run src/app/gui_perf/smf_artifact_contract.spl --mode=interpreter --clean >"$gui_smf_artifact_contract_out" 2>&1
+    gui_smf_artifact_contract_exit_code=$?
+    set -e
+    gui_smf_artifact_contract_row="$(sed -n '/^GUI_SMF_ARTIFACT_CONTRACT /p' "$gui_smf_artifact_contract_out" | tail -n 1)"
+    if [ -z "$gui_smf_artifact_contract_row" ]; then
+        gui_smf_artifact_contract_row="GUI_SMF_ARTIFACT_CONTRACT status=fail artifact=${SIMPLE_GUI_DYNLIB_ARTIFACT:-} sha256= size=0 smf_role=-1 arch=0 embedded_dynlib=false symbol=${SIMPLE_GUI_DYNLIB_SYMBOL:-gui_dynlib_hot_probe_tick} qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64"
+    fi
+    gui_smf_artifact_contract_status="$(printf '%s\n' "$gui_smf_artifact_contract_row" | sed -n 's/^GUI_SMF_ARTIFACT_CONTRACT status=\([^ ]*\).*/\1/p' | tail -n 1)"
+    if [ -z "$gui_smf_artifact_contract_status" ]; then
+        gui_smf_artifact_contract_status=fail
+    fi
+fi
+
 {
     echo "qemu_gtk_wm_capture_status=$status"
     echo "qemu_gtk_wm_capture_reason=$reason"
@@ -271,6 +289,8 @@ fi
     echo "qemu_gtk_wm_capture_gtk_scene_expected_rgba_path=$gtk_scene_expected_rgba_path"
     echo "qemu_gtk_wm_capture_gtk_scene_captured_rgba_path=$gtk_scene_captured_rgba_path"
     echo "qemu_gtk_wm_capture_gtk_scene_blur_or_tolerance_used=$gtk_scene_blur_or_tolerance_used"
+    echo "qemu_gtk_wm_capture_gui_smf_artifact_contract_status=$gui_smf_artifact_contract_status"
+    echo "qemu_gtk_wm_capture_gui_smf_artifact_contract_row=$gui_smf_artifact_contract_row"
     if [ -f "$BUILD_DIR/wm.out" ]; then
         sed -n 's/^wm_launch_capture_/qemu_gtk_wm_capture_wm_/p' "$BUILD_DIR/wm.out"
     fi
@@ -342,6 +362,9 @@ fi
     echo "- host GTK GL WM scene expected RGBA path: $gtk_scene_expected_rgba_path"
     echo "- host GTK GL WM scene captured RGBA path: $gtk_scene_captured_rgba_path"
     echo "- host GTK GL WM scene blur/tolerance used: $gtk_scene_blur_or_tolerance_used"
+    echo "- GUI SMF artifact contract status: $gui_smf_artifact_contract_status"
+    echo "- GUI SMF artifact contract row: $gui_smf_artifact_contract_row"
+    echo "- GUI SMF artifact contract scope: contract-only; does not promote live QEMU capture"
     echo
     echo "## Raw Evidence"
     sed 's/^/- /' "$BUILD_DIR/evidence.env"
@@ -369,6 +392,11 @@ fi
         echo
         echo "## Host GTK GL WM Scene Output"
         sed 's/^/- /' "$BUILD_DIR/gtk-gl.out"
+    fi
+    if [ -f "$gui_smf_artifact_contract_out" ]; then
+        echo
+        echo "## GUI SMF Artifact Contract Output"
+        sed 's/^/- /' "$gui_smf_artifact_contract_out"
     fi
 } >"$REPORT_PATH"
 

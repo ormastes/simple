@@ -64,6 +64,46 @@ expect(stub.unwrap()[0]).to_equal(0xCFu8)
 
 </details>
 
+#### emits a contract-only row without claiming QEMU or macOS execution
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val smf = gui_smf_wrap_native_library([0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8], 1u8)
+val contract = gui_smf_artifact_contract("build/gui/pure_gui_hot.smf", smf, "gui_dynlib_hot_probe_tick")
+expect(contract.status).to_equal("pass")
+expect(contract.smf_role).to_equal(2i64)
+expect(contract.embedded_dynlib).to_equal(true)
+expect(contract.qemu_status).to_equal("not-run")
+expect(contract.macos_status).to_equal("not-run")
+val row = gui_smf_artifact_contract_row(contract)
+expect(row).to_start_with("GUI_SMF_ARTIFACT_CONTRACT status=pass")
+expect(row).to_contain(" qemu_status=not-run ")
+expect(row).to_contain(" macos_status=not-run ")
+```
+
+</details>
+
+#### emits a missing artifact contract row
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val row = gui_smf_artifact_contract_row(gui_smf_artifact_contract_missing("", "gui_dynlib_hot_probe_tick"))
+expect(row).to_start_with("GUI_SMF_ARTIFACT_CONTRACT status=missing")
+expect(row).to_contain(" qemu_reason=live-qemu-not-executed ")
+```
+
+</details>
+
 #### wraps and extracts a role-2 SMF dynlib through runtime file SFFI
 
 <details>
@@ -106,8 +146,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
