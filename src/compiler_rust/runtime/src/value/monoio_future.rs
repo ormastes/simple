@@ -4,7 +4,7 @@
 
 #![cfg(feature = "monoio-direct")]
 
-use crate::value::heap::{HeapHeader, HeapObjectType};
+use crate::value::heap::{get_typed_ptr, get_typed_ptr_mut, unregister_heap_ptr, HeapHeader, HeapObjectType};
 use crate::value::RuntimeValue;
 use std::alloc::{alloc, dealloc, Layout};
 use std::ptr;
@@ -130,6 +130,16 @@ impl MonoioFuture {
     }
 }
 
+#[inline]
+fn monoio_future_ptr(future: RuntimeValue) -> Option<*const MonoioFuture> {
+    get_typed_ptr::<MonoioFuture>(future, HeapObjectType::MonoioFuture)
+}
+
+#[inline]
+fn monoio_future_ptr_mut(future: RuntimeValue) -> Option<*mut MonoioFuture> {
+    get_typed_ptr_mut::<MonoioFuture>(future, HeapObjectType::MonoioFuture)
+}
+
 // ============================================================================
 // SFFI Functions
 // ============================================================================
@@ -176,53 +186,28 @@ pub extern "C" fn rt_monoio_future_new(io_handle: i64, operation_type: i64, ctx:
 /// Check if a MonoioFuture is ready
 #[no_mangle]
 pub extern "C" fn rt_monoio_future_is_ready(future: RuntimeValue) -> RuntimeValue {
-    if !future.is_heap() {
+    let Some(future_ptr) = monoio_future_ptr(future) else {
         return RuntimeValue::FALSE;
-    }
-
-    let ptr = future.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::MonoioFuture {
-            return RuntimeValue::FALSE;
-        }
-
-        let future_ptr = ptr as *const MonoioFuture;
-        RuntimeValue::from_bool((*future_ptr).is_ready())
-    }
+    };
+    unsafe { RuntimeValue::from_bool((*future_ptr).is_ready()) }
 }
 
 /// Check if a MonoioFuture is pending
 #[no_mangle]
 pub extern "C" fn rt_monoio_future_is_pending(future: RuntimeValue) -> RuntimeValue {
-    if !future.is_heap() {
+    let Some(future_ptr) = monoio_future_ptr(future) else {
         return RuntimeValue::FALSE;
-    }
-
-    let ptr = future.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::MonoioFuture {
-            return RuntimeValue::FALSE;
-        }
-
-        let future_ptr = ptr as *const MonoioFuture;
-        RuntimeValue::from_bool((*future_ptr).is_pending())
-    }
+    };
+    unsafe { RuntimeValue::from_bool((*future_ptr).is_pending()) }
 }
 
 /// Get the result of a ready MonoioFuture
 #[no_mangle]
 pub extern "C" fn rt_monoio_future_get_result(future: RuntimeValue) -> RuntimeValue {
-    if !future.is_heap() {
+    let Some(future_ptr) = monoio_future_ptr(future) else {
         return RuntimeValue::NIL;
-    }
-
-    let ptr = future.as_heap_ptr();
+    };
     unsafe {
-        if (*ptr).object_type != HeapObjectType::MonoioFuture {
-            return RuntimeValue::NIL;
-        }
-
-        let future_ptr = ptr as *const MonoioFuture;
         if (*future_ptr).is_ready() || (*future_ptr).is_error() {
             (*future_ptr).result
         } else {
@@ -234,35 +219,19 @@ pub extern "C" fn rt_monoio_future_get_result(future: RuntimeValue) -> RuntimeVa
 /// Get the state of a MonoioFuture (0=pending, 1=ready, 2=error)
 #[no_mangle]
 pub extern "C" fn rt_monoio_future_get_state(future: RuntimeValue) -> RuntimeValue {
-    if !future.is_heap() {
+    let Some(future_ptr) = monoio_future_ptr(future) else {
         return RuntimeValue::from_int(-1);
-    }
-
-    let ptr = future.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::MonoioFuture {
-            return RuntimeValue::from_int(-1);
-        }
-
-        let future_ptr = ptr as *const MonoioFuture;
-        RuntimeValue::from_int((*future_ptr).state as i64)
-    }
+    };
+    unsafe { RuntimeValue::from_int((*future_ptr).state as i64) }
 }
 
 /// Set the result of a MonoioFuture (marks it as ready)
 #[no_mangle]
 pub extern "C" fn rt_monoio_future_set_result(future: RuntimeValue, result: RuntimeValue) -> RuntimeValue {
-    if !future.is_heap() {
+    let Some(future_ptr) = monoio_future_ptr_mut(future) else {
         return RuntimeValue::FALSE;
-    }
-
-    let ptr = future.as_heap_ptr();
+    };
     unsafe {
-        if (*ptr).object_type != HeapObjectType::MonoioFuture {
-            return RuntimeValue::FALSE;
-        }
-
-        let future_ptr = ptr as *mut MonoioFuture;
         (*future_ptr).set_result(result);
         RuntimeValue::TRUE
     }
@@ -271,17 +240,10 @@ pub extern "C" fn rt_monoio_future_set_result(future: RuntimeValue, result: Runt
 /// Set error state on a MonoioFuture
 #[no_mangle]
 pub extern "C" fn rt_monoio_future_set_error(future: RuntimeValue, error: RuntimeValue) -> RuntimeValue {
-    if !future.is_heap() {
+    let Some(future_ptr) = monoio_future_ptr_mut(future) else {
         return RuntimeValue::FALSE;
-    }
-
-    let ptr = future.as_heap_ptr();
+    };
     unsafe {
-        if (*ptr).object_type != HeapObjectType::MonoioFuture {
-            return RuntimeValue::FALSE;
-        }
-
-        let future_ptr = ptr as *mut MonoioFuture;
         (*future_ptr).set_error(error);
         RuntimeValue::TRUE
     }
@@ -290,35 +252,19 @@ pub extern "C" fn rt_monoio_future_set_error(future: RuntimeValue, error: Runtim
 /// Get the async state (for state machine resumption)
 #[no_mangle]
 pub extern "C" fn rt_monoio_future_get_async_state(future: RuntimeValue) -> RuntimeValue {
-    if !future.is_heap() {
+    let Some(future_ptr) = monoio_future_ptr(future) else {
         return RuntimeValue::from_int(-1);
-    }
-
-    let ptr = future.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::MonoioFuture {
-            return RuntimeValue::from_int(-1);
-        }
-
-        let future_ptr = ptr as *const MonoioFuture;
-        RuntimeValue::from_int((*future_ptr).async_state as i64)
-    }
+    };
+    unsafe { RuntimeValue::from_int((*future_ptr).async_state as i64) }
 }
 
 /// Set the async state (for state machine resumption)
 #[no_mangle]
 pub extern "C" fn rt_monoio_future_set_async_state(future: RuntimeValue, state: i64) -> RuntimeValue {
-    if !future.is_heap() {
+    let Some(future_ptr) = monoio_future_ptr_mut(future) else {
         return RuntimeValue::FALSE;
-    }
-
-    let ptr = future.as_heap_ptr();
+    };
     unsafe {
-        if (*ptr).object_type != HeapObjectType::MonoioFuture {
-            return RuntimeValue::FALSE;
-        }
-
-        let future_ptr = ptr as *mut MonoioFuture;
         (*future_ptr).async_state = state as u64;
         RuntimeValue::TRUE
     }
@@ -327,72 +273,37 @@ pub extern "C" fn rt_monoio_future_set_async_state(future: RuntimeValue, state: 
 /// Get the captured context
 #[no_mangle]
 pub extern "C" fn rt_monoio_future_get_ctx(future: RuntimeValue) -> RuntimeValue {
-    if !future.is_heap() {
+    let Some(future_ptr) = monoio_future_ptr(future) else {
         return RuntimeValue::NIL;
-    }
-
-    let ptr = future.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::MonoioFuture {
-            return RuntimeValue::NIL;
-        }
-
-        let future_ptr = ptr as *const MonoioFuture;
-        (*future_ptr).ctx
-    }
+    };
+    unsafe { (*future_ptr).ctx }
 }
 
 /// Get the I/O handle
 #[no_mangle]
 pub extern "C" fn rt_monoio_future_get_io_handle(future: RuntimeValue) -> RuntimeValue {
-    if !future.is_heap() {
+    let Some(future_ptr) = monoio_future_ptr(future) else {
         return RuntimeValue::from_int(-1);
-    }
-
-    let ptr = future.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::MonoioFuture {
-            return RuntimeValue::from_int(-1);
-        }
-
-        let future_ptr = ptr as *const MonoioFuture;
-        RuntimeValue::from_int((*future_ptr).io_handle)
-    }
+    };
+    unsafe { RuntimeValue::from_int((*future_ptr).io_handle) }
 }
 
 /// Get the operation type
 #[no_mangle]
 pub extern "C" fn rt_monoio_future_get_operation_type(future: RuntimeValue) -> RuntimeValue {
-    if !future.is_heap() {
+    let Some(future_ptr) = monoio_future_ptr(future) else {
         return RuntimeValue::from_int(-1);
-    }
-
-    let ptr = future.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::MonoioFuture {
-            return RuntimeValue::from_int(-1);
-        }
-
-        let future_ptr = ptr as *const MonoioFuture;
-        RuntimeValue::from_int((*future_ptr).operation_type as i64)
-    }
+    };
+    unsafe { RuntimeValue::from_int((*future_ptr).operation_type as i64) }
 }
 
 /// Free a MonoioFuture
 #[no_mangle]
 pub extern "C" fn rt_monoio_future_free(future: RuntimeValue) -> RuntimeValue {
-    if !future.is_heap() {
+    let Some(future_ptr) = monoio_future_ptr_mut(future) else {
         return RuntimeValue::FALSE;
-    }
-
-    let ptr = future.as_heap_ptr();
+    };
     unsafe {
-        if (*ptr).object_type != HeapObjectType::MonoioFuture {
-            return RuntimeValue::FALSE;
-        }
-
-        let future_ptr = ptr as *mut MonoioFuture;
-
         // Clean up inner future if present
         if (*future_ptr).inner_future != 0 {
             // The inner future cleanup depends on the operation type
@@ -407,7 +318,8 @@ pub extern "C" fn rt_monoio_future_free(future: RuntimeValue) -> RuntimeValue {
         }
 
         let layout = Layout::new::<MonoioFuture>();
-        dealloc(ptr as *mut u8, layout);
+        unregister_heap_ptr(future_ptr as *mut HeapHeader);
+        dealloc(future_ptr as *mut u8, layout);
         RuntimeValue::TRUE
     }
 }
@@ -468,5 +380,17 @@ mod tests {
         assert_eq!(state.as_int(), 5);
 
         rt_monoio_future_free(future);
+    }
+
+    #[test]
+    fn test_monoio_future_rejects_forged_heap_value() {
+        let forged_heap = RuntimeValue::from_raw(0x1001);
+
+        assert!(!rt_monoio_future_is_ready(forged_heap).as_bool());
+        assert!(!rt_monoio_future_is_pending(forged_heap).as_bool());
+        assert!(rt_monoio_future_get_result(forged_heap).is_nil());
+        assert_eq!(rt_monoio_future_get_state(forged_heap).as_int(), -1);
+        assert!(!rt_monoio_future_set_result(forged_heap, RuntimeValue::from_int(1)).as_bool());
+        assert!(!rt_monoio_future_free(forged_heap).as_bool());
     }
 }

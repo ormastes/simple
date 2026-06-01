@@ -81,10 +81,7 @@ impl<'a> MirLowerer<'a> {
             let capacity_reg = self.with_func(|func, current_block| {
                 let reg = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
-                block.instructions.push(MirInst::ConstInt {
-                    dest: reg,
-                    value: 16,
-                });
+                block.instructions.push(MirInst::ConstInt { dest: reg, value: 16 });
                 reg
             })?;
             let target = if outer_is_u8_array {

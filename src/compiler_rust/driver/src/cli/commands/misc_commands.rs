@@ -484,7 +484,7 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             .arg("--source")
             .arg("src/app")
             .arg("--entry")
-            .arg("src/app/cli/main.spl")
+            .arg("src/app/cli/bootstrap_main.spl")
             .arg("--entry-closure")
             .arg("--strip")
             .arg("--threads")
@@ -494,22 +494,23 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             .arg("-o")
             .arg(output);
         cmd.env("SIMPLE_BOOTSTRAP", "1");
+        cmd.env("SIMPLE_NO_STUB_FALLBACK", "1");
         if let Ok(rtp) = std::env::var("SIMPLE_RUNTIME_PATH") {
             cmd.env("SIMPLE_RUNTIME_PATH", rtp);
         }
         println!(
-            "  Running: {} native-build --entry-closure --strip --threads 1 --timeout 180 --entry src/app/cli/main.spl -o {}",
+            "  Running: {} native-build --entry-closure --strip --threads 1 --timeout 180 --entry src/app/cli/bootstrap_main.spl -o {}",
             compiler, output
         );
     } else {
         cmd.arg("src/app/compile/native.spl")
-            .arg("src/app/cli/main.spl")
+            .arg("src/app/cli/bootstrap_main.spl")
             .arg(output);
         if backend != "auto" {
             cmd.arg(format!("--backend={}", backend));
         }
         println!(
-            "  Running: {} src/app/compile/native.spl src/app/cli/main.spl {} {}",
+            "  Running: {} src/app/compile/native.spl src/app/cli/bootstrap_main.spl {} {}",
             compiler,
             output,
             if backend != "auto" {

@@ -1880,3 +1880,17 @@ fn test_rt_contains_invalid() {
     let not_a_collection = RuntimeValue::from_int(42);
     assert_eq!(rt_contains(not_a_collection, RuntimeValue::from_int(1)), 0);
 }
+
+#[test]
+fn test_generic_collection_ops_reject_forged_heap_values() {
+    let forged_heap = RuntimeValue::from_raw(0x1001);
+
+    assert!(rt_index_get(forged_heap, RuntimeValue::from_int(0)).is_nil());
+    assert!(!rt_index_set(
+        forged_heap,
+        RuntimeValue::from_int(0),
+        RuntimeValue::from_int(1)
+    ));
+    assert!(rt_slice(forged_heap, 0, 1, 1).is_nil());
+    assert_eq!(rt_contains(forged_heap, RuntimeValue::from_int(1)), 0);
+}

@@ -2165,43 +2165,36 @@ pub extern "C" fn rt_to_string(value: RuntimeValue) -> RuntimeValue {
 /// Returns NIL if out of bounds or wrong type
 #[no_mangle]
 pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) -> RuntimeValue {
-    if !collection.is_heap() {
-        return RuntimeValue::NIL;
-    }
-
-    let ptr = collection.as_heap_ptr();
-    unsafe {
-        match (*ptr).object_type {
-            HeapObjectType::Array => {
-                if index.is_int() {
-                    rt_array_get(collection, index.as_int())
-                } else {
-                    RuntimeValue::NIL
-                }
+    match collection.heap_type() {
+        Some(HeapObjectType::Array) => {
+            if index.is_int() {
+                rt_array_get(collection, index.as_int())
+            } else {
+                RuntimeValue::NIL
             }
-            HeapObjectType::Tuple => {
-                if index.is_int() {
-                    let idx = index.as_int();
-                    if idx < 0 {
-                        RuntimeValue::NIL
-                    } else {
-                        rt_tuple_get(collection, idx as u64)
-                    }
-                } else {
-                    RuntimeValue::NIL
-                }
-            }
-            HeapObjectType::String => {
-                // String indexing returns a single-char string (consistent with char_at)
-                if index.is_int() {
-                    rt_string_char_at(collection, index.as_int())
-                } else {
-                    RuntimeValue::NIL
-                }
-            }
-            HeapObjectType::Dict => super::dict::rt_dict_get(collection, index),
-            _ => RuntimeValue::NIL,
         }
+        Some(HeapObjectType::Tuple) => {
+            if index.is_int() {
+                let idx = index.as_int();
+                if idx < 0 {
+                    RuntimeValue::NIL
+                } else {
+                    rt_tuple_get(collection, idx as u64)
+                }
+            } else {
+                RuntimeValue::NIL
+            }
+        }
+        Some(HeapObjectType::String) => {
+            // String indexing returns a single-char string (consistent with char_at)
+            if index.is_int() {
+                rt_string_char_at(collection, index.as_int())
+            } else {
+                RuntimeValue::NIL
+            }
+        }
+        Some(HeapObjectType::Dict) => super::dict::rt_dict_get(collection, index),
+        _ => RuntimeValue::NIL,
     }
 }
 
@@ -2209,23 +2202,16 @@ pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) ->
 /// Returns true on success, false on error
 #[no_mangle]
 pub extern "C" fn rt_index_set(collection: RuntimeValue, index: RuntimeValue, value: RuntimeValue) -> bool {
-    if !collection.is_heap() {
-        return false;
-    }
-
-    let ptr = collection.as_heap_ptr();
-    unsafe {
-        match (*ptr).object_type {
-            HeapObjectType::Array => {
-                if index.is_int() {
-                    rt_array_set(collection, index.as_int(), value)
-                } else {
-                    false
-                }
+    match collection.heap_type() {
+        Some(HeapObjectType::Array) => {
+            if index.is_int() {
+                rt_array_set(collection, index.as_int(), value)
+            } else {
+                false
             }
-            HeapObjectType::Dict => super::dict::rt_dict_set(collection, index, value),
-            _ => false,
         }
+        Some(HeapObjectType::Dict) => super::dict::rt_dict_set(collection, index, value),
+        _ => false,
     }
 }
 
@@ -2233,15 +2219,16 @@ pub extern "C" fn rt_index_set(collection: RuntimeValue, index: RuntimeValue, va
 /// Returns a new collection with elements from start to end (exclusive)
 #[no_mangle]
 pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step: i64) -> RuntimeValue {
-    if !collection.is_heap() || step == 0 {
+    if step == 0 {
         return RuntimeValue::NIL;
     }
 
-    let ptr = collection.as_heap_ptr();
-    unsafe {
-        match (*ptr).object_type {
-            HeapObjectType::Array => {
-                let arr = ptr as *const RuntimeArray;
+    match collection.heap_type() {
+        Some(HeapObjectType::Array) => {
+            let Some(arr) = get_typed_ptr::<RuntimeArray>(collection, HeapObjectType::Array) else {
+                return RuntimeValue::NIL;
+            };
+            unsafe {
                 let len = (*arr).len as i64;
 
                 // Normalize start and end
@@ -2280,8 +2267,12 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
 
                 result
             }
-            HeapObjectType::String => {
-                let str_ptr = ptr as *const RuntimeString;
+        }
+        Some(HeapObjectType::String) => {
+            let Some(str_ptr) = get_typed_ptr::<RuntimeString>(collection, HeapObjectType::String) else {
+                return RuntimeValue::NIL;
+            };
+            unsafe {
                 let len = (*str_ptr).len as i64;
                 let start = normalize_index(start, len).max(0).min(len);
                 let end = normalize_index(end, len).max(0).min(len);
@@ -2299,8 +2290,8 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
                 let data = str_ptr.add(1) as *const u8;
                 rt_string_new(data.add(start as usize), (end - start) as u64)
             }
-            _ => RuntimeValue::NIL,
         }
+        _ => RuntimeValue::NIL,
     }
 }
 
@@ -2708,13 +2699,9 @@ pub extern "C" fn rt_array_flatten(array: RuntimeValue) -> RuntimeValue {
         // First pass: count total elements
         let mut total_len = 0u64;
         for item in slice {
-            if item.is_heap() {
-                let ptr = item.as_heap_ptr();
-                if (*ptr).object_type == HeapObjectType::Array {
-                    let inner = ptr as *const RuntimeArray;
-                    total_len += (*inner).len;
-                    continue;
-                }
+            if let Some(inner) = get_typed_ptr::<RuntimeArray>(*item, HeapObjectType::Array) {
+                total_len += (*inner).len;
+                continue;
             }
             total_len += 1;
         }
@@ -2726,15 +2713,11 @@ pub extern "C" fn rt_array_flatten(array: RuntimeValue) -> RuntimeValue {
 
         // Second pass: copy elements
         for item in slice {
-            if item.is_heap() {
-                let ptr = item.as_heap_ptr();
-                if (*ptr).object_type == HeapObjectType::Array {
-                    let inner = ptr as *const RuntimeArray;
-                    for inner_item in (*inner).as_slice() {
-                        rt_array_push(result, *inner_item);
-                    }
-                    continue;
+            if let Some(inner) = get_typed_ptr::<RuntimeArray>(*item, HeapObjectType::Array) {
+                for inner_item in (*inner).as_slice() {
+                    rt_array_push(result, *inner_item);
                 }
+                continue;
             }
             rt_array_push(result, *item);
         }

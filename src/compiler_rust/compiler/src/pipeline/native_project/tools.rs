@@ -590,9 +590,13 @@ pub(crate) fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<Pat
 
     let mut cmd = std::process::Command::new(&objcopy);
     cmd.arg("--remove-section=.init_array")
+        .arg("--remove-section=.init_array.*")
         .arg("--remove-section=.ctors")
+        .arg("--remove-section=.ctors.*")
         .arg("--remove-section=.fini_array")
-        .arg("--remove-section=.dtors");
+        .arg("--remove-section=.fini_array.*")
+        .arg("--remove-section=.dtors")
+        .arg("--remove-section=.dtors.*");
     // NOTE(2026-04-15): we deliberately do NOT strip __DATA,__mod_init_func /
     // __mod_term_func on macOS even though LIM-010 (LLVM static constructor
     // segfault) used to require it. ObjC class registration also lives in
