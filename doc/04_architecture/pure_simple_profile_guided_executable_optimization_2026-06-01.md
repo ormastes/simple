@@ -68,12 +68,19 @@ Current adapter slice:
 ```
 instrumented interpreter/native/bare-metal run
     -> counters
+    -> native snapshot import when using native counters
     -> .sprof merge
     -> profile validation/migration
     -> optimizer plan
     -> native/executable layout transform
     -> verified executable
 ```
+
+Native profile builds emit metadata sidecars and runtime counter snapshots only
+behind the explicit profile-counter path. Normal native builds remain clean by
+audit. Snapshot import is fail-closed: missing headers, duplicate slots, missing
+slot values, metadata/count mismatches, and missing output paths prevent `.sprof`
+write planning.
 
 ## Pure-Simple BOLT-Like Optimizer
 

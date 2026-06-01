@@ -343,18 +343,21 @@ explicit profile-build enablement, stable identity checks, and bounded call-path
 policy. Contract coverage exists at
 `test/system/app/compile/feature/native_profile_counter_spec.spl`. Command-level
 `llvm_direct.spl --simple-profile-counters` smoke now emits a native binary and
-durable sidecar metadata.
+durable sidecar metadata. The native counter helper now also parses runtime
+counter snapshots, rejects malformed or incomplete readback, and creates a
+write-gated `.sprof` import plan from metadata plus final counter values.
 
 Deliverables:
 - native function/block/edge counter ABI;
 - counter emission behind explicit profile build flag;
-- `.sprof` writer hook;
+- runtime snapshot readback parser and `.sprof` import plan;
 - call-path summary with bounded memory.
 
 Exit gates:
 - instrumentation overhead under target budget;
 - disabled counters compile out or remain cold;
-- interpreter/JIT and native counter names share stable identity.
+- interpreter/JIT and native counter names share stable identity;
+- executable runner emits the snapshot text consumed by the import plan.
 
 ## Phase 3: Pure-Simple Executable Optimizer
 

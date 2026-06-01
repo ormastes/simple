@@ -244,17 +244,18 @@ the path is known, hot sites switch to timer/hardware/sample counters.
 1. `.sprof` loader and merge summary.
 2. Native function entry counters.
 3. Native block/edge counters.
-4. Pure-Simple executable layout planner over metadata only.
-5. Layout artifact writer with manifest.
-6. Bare-metal breakpoint site table and patch ledger.
-7. Bare-metal auto-disarm and sampled fallback.
-8. Architecture-specific breakpoint patch profile for x86, ARM/Thumb/AArch64,
+4. Native runtime counter snapshot readback and `.sprof` import planning.
+5. Pure-Simple executable layout planner over metadata only.
+6. Layout artifact writer with manifest.
+7. Bare-metal breakpoint site table and patch ledger.
+8. Bare-metal auto-disarm and sampled fallback.
+9. Architecture-specific breakpoint patch profile for x86, ARM/Thumb/AArch64,
    RISC-V 32/64, and compressed RISC-V.
-9. Target adapter resume plans and QEMU evidence normalization for x86,
+10. Target adapter resume plans and QEMU evidence normalization for x86,
    ARM/Thumb/AArch64, and RISC-V/RVC families.
-10. QEMU runner integration that produces adapter evidence from real target
+11. QEMU runner integration that produces adapter evidence from real target
    execution.
-11. Cross-mode report and verification harness.
+12. Cross-mode report and verification harness.
 
 ## Open Risks
 

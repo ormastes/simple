@@ -42,7 +42,11 @@ use app.compile.native_profile_counter.{
     native_profile_counter_sprof_record_from_metadata_line,
     native_profile_counter_extract_sprof_records,
     native_profile_counter_extract_sprof_lines,
-    native_profile_counter_metadata_path
+    native_profile_counter_metadata_path,
+    native_profile_counter_snapshot_header,
+    native_profile_counter_snapshot_line,
+    native_profile_counter_runtime_snapshot_from_text,
+    native_profile_counter_sprof_import_plan
 }
 
 describe "Native Profile Counter Contract":
@@ -246,9 +250,15 @@ describe "Native Profile Counter Contract":
             expect(prelude.slot_count).to_equal(3)
             expect(prelude.c_source).to_contain("/* simple-profile-counter-prelude-v1 */")
             expect(prelude.c_source).to_contain("#include <stdint.h>")
+            expect(prelude.c_source).to_contain("#include <stdio.h>")
+            expect(prelude.c_source).to_contain("#include <stdlib.h>")
             expect(prelude.c_source).to_contain("static uint64_t __simple_profile_counters[3] = {0, 7, 2};")
             expect(prelude.c_source).to_contain("static const size_t __simple_profile_counters_count = 3u;")
             expect(prelude.c_source).to_contain("static const char * const __simple_profile_counter_metadata[3] = {0};")
+            expect(prelude.c_source).to_contain("SIMPLE_PROFILE_COUNTER_SNAPSHOT")
+            expect(prelude.c_source).to_contain("simple-profile-counter-snapshot-v1\\n")
+            expect(prelude.c_source).to_contain("count|slot=%zu|value=%llu\\n")
+            expect(prelude.c_source).to_contain("atexit(__simple_profile_write_counter_snapshot);")
             expect(prelude.c_source).to_contain("/* simple-profile-counter slot=0 kind=function_entry key=mir:main:entry initial=0 */")
             expect(prelude.c_source).to_contain("/* simple-profile-counter slot=1 kind=basic_block key=mir:main:bb0 initial=7 */")
             expect(prelude.c_source).to_contain("/* simple-profile-counter slot=2 kind=edge key=mir:main:bb0->bb1 initial=2 */")
@@ -306,6 +316,7 @@ describe "Native Profile Counter Contract":
             expect(instrumented.slot_count).to_equal(2)
             expect(instrumented.c_source).to_contain("/* simple-profile-counter-prelude-v1 */")
             expect(instrumented.c_source).to_contain("static uint64_t __simple_profile_counters[2] = {0, 0};")
+            expect(instrumented.c_source).to_contain("__simple_profile_write_counter_snapshot")
             expect(instrumented.c_source).to_contain("__simple_profile_counters[0] += 1u;")
             expect(instrumented.c_source).to_contain("__simple_profile_counters[1] += 1u;")
             expect(instrumented.metadata_lines).to_contain("counter|section=simple_profile_counter_section__simple_profile_counters|slot=0|kind=function_entry|key=c:main:entry|initial=0|symbol=__simple_profile_counter_0_function_entry")
@@ -316,6 +327,7 @@ describe "Native Profile Counter Contract":
             expect(instrumented.enabled).to_equal(false)
             expect(instrumented.slot_count).to_equal(0)
             expect(instrumented.c_source).to_equal(source)
+            expect(instrumented.c_source.contains("SIMPLE_PROFILE_COUNTER_SNAPSHOT")).to_equal(false)
 
         it "should fail the build audit if counters leak into non-profile builds":
             val source = "int main(void) {\n  return 0;\n}\n"
@@ -397,3 +409,59 @@ describe "Native Profile Counter Contract":
             val missing = native_profile_counter_extract_sprof_records(metadata_lines, [8])
             expect(missing.record_count).to_equal(1)
             expect(missing.diagnostics).to_contain("missing_count:1")
+
+        it "should parse runtime counter snapshots into ordered final counts":
+            val snapshot = native_profile_counter_runtime_snapshot_from_text(
+                native_profile_counter_snapshot_header() + "\n" +
+                native_profile_counter_snapshot_line(0, 11) + "\n" +
+                native_profile_counter_snapshot_line(1, 7) + "\n"
+            )
+            expect(snapshot.status).to_equal("valid")
+            expect(snapshot.counter_count).to_equal(2)
+            expect(snapshot.counters[0]).to_equal(11)
+            expect(snapshot.counters[1]).to_equal(7)
+            expect(snapshot.diagnostic_count).to_equal(0)
+
+        it "should reject incomplete or malformed runtime counter snapshots":
+            val snapshot = native_profile_counter_runtime_snapshot_from_text(
+                native_profile_counter_snapshot_header() + "\n" +
+                native_profile_counter_snapshot_line(1, 7) + "\n" +
+                "count|slot=1|value=8\n" +
+                "noise\n"
+            )
+            expect(snapshot.status).to_equal("invalid")
+            expect(snapshot.diagnostics).to_contain("missing_snapshot_slot:0")
+            expect(snapshot.diagnostics).to_contain("duplicate_snapshot_slot:1")
+            expect(snapshot.diagnostics).to_contain("invalid_snapshot_line:3")
+
+            val missing_header = native_profile_counter_runtime_snapshot_from_text(
+                native_profile_counter_snapshot_line(0, 1)
+            )
+            expect(missing_header.diagnostics).to_contain("missing_snapshot_header")
+
+        it "should create a write-gated sprof import plan from runtime snapshots":
+            val metadata_lines = native_profile_counter_section_serialization_lines(
+                ".simple.profile.counters",
+                [
+                    native_profile_counter_slot(0, "function_entry", "mir:main:entry", 0),
+                    native_profile_counter_slot(1, "basic_block", "mir:main:bb0", 0)
+                ]
+            )
+            val snapshot_text = native_profile_counter_snapshot_header() + "\n" +
+                native_profile_counter_snapshot_line(0, 11) + "\n" +
+                native_profile_counter_snapshot_line(1, 7) + "\n"
+            val plan = native_profile_counter_sprof_import_plan("build/app.sprof", metadata_lines, snapshot_text)
+            expect(plan.status).to_equal("ready")
+            expect(plan.write_allowed).to_equal(true)
+            expect(plan.record_count).to_equal(2)
+            expect(plan.lines[0]).to_equal("function;key=mir:main:entry;count=11")
+            expect(plan.lines[1]).to_equal("block;function=main;key=mir:main:bb0;count=7")
+
+            val no_output = native_profile_counter_sprof_import_plan("", metadata_lines, snapshot_text)
+            expect(no_output.status).to_equal("missing_output_path")
+            expect(no_output.write_allowed).to_equal(false)
+            expect(no_output.diagnostics).to_contain("missing_output_path")
+
+            val bad_snapshot = native_profile_counter_sprof_import_plan("build/app.sprof", metadata_lines, "count|slot=0|value=1")
+            expect(bad_snapshot.status).to_equal("invalid_snapshot")
+            expect(bad_snapshot.write_allowed).to_equal(false)

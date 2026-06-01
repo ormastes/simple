@@ -72,6 +72,25 @@ struct NativeProfileCounterSprofExtraction:
     lines: [text]
     diagnostics: [text]
 
+struct NativeProfileCounterRuntimeSnapshot:
+    status: text
+    counter_count: i64
+    counters: [i64]
+    diagnostic_count: i64
+    diagnostics: [text]
+
+struct NativeProfileCounterSprofImportPlan:
+    status: text
+    output_path: text
+    metadata_count: i64
+    counter_count: i64
+    record_count: i64
+    line_count: i64
+    diagnostic_count: i64
+    write_allowed: bool
+    lines: [text]
+    diagnostics: [text]
+
 struct NativeProfileCounterBuildAudit:
     profile_build: bool
     counter_symbols_found: bool
@@ -296,9 +315,26 @@ fn native_profile_counter_c_prelude(slots: [NativeProfileCounterSlot]) -> Native
         "/* simple-profile-counter-prelude-v1 */",
         "#include <stdint.h>",
         "#include <stddef.h>",
+        "#include <stdio.h>",
+        "#include <stdlib.h>",
         "static uint64_t " + counter_symbol + "[" + slots.len().to_string() + "] = {" + initializer + "};",
         "static const size_t " + counter_symbol + "_count = " + slots.len().to_string() + "u;",
-        "static const char * const " + metadata_symbol + "[" + slots.len().to_string() + "] = {" + "0" + "};"
+        "static const char * const " + metadata_symbol + "[" + slots.len().to_string() + "] = {" + "0" + "};",
+        "static void __simple_profile_write_counter_snapshot(void) {",
+        "    const char *path = getenv(\"SIMPLE_PROFILE_COUNTER_SNAPSHOT\");",
+        "    if (path == 0 || path[0] == 0) return;",
+        "    FILE *f = fopen(path, \"w\");",
+        "    if (f == 0) return;",
+        "    fprintf(f, \"simple-profile-counter-snapshot-v1\\n\");",
+        "    for (size_t i = 0; i < " + counter_symbol + "_count; ++i) {",
+        "        fprintf(f, \"count|slot=%zu|value=%llu\\n\", i, (unsigned long long)" + counter_symbol + "[i]);",
+        "    }",
+        "    fclose(f);",
+        "}",
+        "static void __simple_profile_register_counter_snapshot(void) __attribute__((constructor));",
+        "static void __simple_profile_register_counter_snapshot(void) {",
+        "    atexit(__simple_profile_write_counter_snapshot);",
+        "}"
     ]
     for slot in slots:
         lines.push(native_profile_counter_metadata_line(slot))
@@ -608,3 +644,122 @@ fn native_profile_counter_extract_sprof_records(metadata_lines: [text], final_co
 
 fn native_profile_counter_extract_sprof_lines(metadata_lines: [text], final_counter_values: [i64]) -> [text]:
     native_profile_counter_extract_sprof_records(metadata_lines, final_counter_values).lines
+
+fn native_profile_counter_snapshot_header() -> text:
+    "simple-profile-counter-snapshot-v1"
+
+fn native_profile_counter_snapshot_line(slot_index: i64, value: i64) -> text:
+    "count|slot=" + slot_index.to_string() + "|value=" + value.to_string()
+
+fn _native_profile_counter_snapshot_slot(line: text) -> i64:
+    _native_profile_counter_parse_i64(_native_profile_counter_pipe_value(line, "slot"))
+
+fn _native_profile_counter_snapshot_value(line: text) -> i64:
+    _native_profile_counter_parse_i64(_native_profile_counter_pipe_value(line, "value"))
+
+fn native_profile_counter_runtime_snapshot_from_text(snapshot_text: text) -> NativeProfileCounterRuntimeSnapshot:
+    var diagnostics: [text] = []
+    var max_slot: i64 = -1
+    var saw_header = false
+    val lines = snapshot_text.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line == native_profile_counter_snapshot_header():
+            saw_header = true
+        elif line.starts_with("count|"):
+            val slot = _native_profile_counter_snapshot_slot(line)
+            val value = _native_profile_counter_snapshot_value(line)
+            if slot < 0:
+                diagnostics.push("invalid_snapshot_slot:" + i.to_string())
+            elif value < 0:
+                diagnostics.push("invalid_snapshot_value:" + slot.to_string())
+            elif slot > max_slot:
+                max_slot = slot
+        elif line != "":
+            diagnostics.push("invalid_snapshot_line:" + i.to_string())
+        i = i + 1
+
+    if not saw_header:
+        diagnostics.push("missing_snapshot_header")
+
+    var counters: [i64] = []
+    var slot_index: i64 = 0
+    while slot_index <= max_slot:
+        counters.push(-1)
+        slot_index = slot_index + 1
+
+    i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line.starts_with("count|"):
+            val slot = _native_profile_counter_snapshot_slot(line)
+            val value = _native_profile_counter_snapshot_value(line)
+            if slot >= 0 and value >= 0 and slot < counters.len():
+                if counters[slot] >= 0:
+                    diagnostics.push("duplicate_snapshot_slot:" + slot.to_string())
+                else:
+                    counters[slot] = value
+        i = i + 1
+
+    slot_index = 0
+    while slot_index < counters.len():
+        if counters[slot_index] < 0:
+            diagnostics.push("missing_snapshot_slot:" + slot_index.to_string())
+        slot_index = slot_index + 1
+
+    NativeProfileCounterRuntimeSnapshot(
+        status: if diagnostics.len() == 0: "valid" else: "invalid",
+        counter_count: counters.len(),
+        counters: counters,
+        diagnostic_count: diagnostics.len(),
+        diagnostics: diagnostics
+    )
+
+fn native_profile_counter_sprof_import_plan(
+    output_path: text,
+    metadata_lines: [text],
+    snapshot_text: text
+) -> NativeProfileCounterSprofImportPlan:
+    val snapshot = native_profile_counter_runtime_snapshot_from_text(snapshot_text)
+    if snapshot.diagnostic_count > 0:
+        return NativeProfileCounterSprofImportPlan(
+            status: "invalid_snapshot",
+            output_path: output_path,
+            metadata_count: metadata_lines.len(),
+            counter_count: snapshot.counter_count,
+            record_count: 0,
+            line_count: 0,
+            diagnostic_count: snapshot.diagnostic_count,
+            write_allowed: false,
+            lines: [],
+            diagnostics: snapshot.diagnostics
+        )
+
+    val extraction = native_profile_counter_extract_sprof_records(metadata_lines, snapshot.counters)
+    if extraction.diagnostic_count > 0:
+        return NativeProfileCounterSprofImportPlan(
+            status: "invalid_import",
+            output_path: output_path,
+            metadata_count: metadata_lines.len(),
+            counter_count: snapshot.counter_count,
+            record_count: extraction.record_count,
+            line_count: extraction.line_count,
+            diagnostic_count: extraction.diagnostic_count,
+            write_allowed: false,
+            lines: extraction.lines,
+            diagnostics: extraction.diagnostics
+        )
+
+    NativeProfileCounterSprofImportPlan(
+        status: if output_path == "": "missing_output_path" else: "ready",
+        output_path: output_path,
+        metadata_count: metadata_lines.len(),
+        counter_count: snapshot.counter_count,
+        record_count: extraction.record_count,
+        line_count: extraction.line_count,
+        diagnostic_count: if output_path == "": 1 else: 0,
+        write_allowed: output_path != "",
+        lines: extraction.lines,
+        diagnostics: if output_path == "": ["missing_output_path"] else: []
+    )
