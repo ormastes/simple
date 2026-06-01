@@ -147,15 +147,17 @@ expect(gui_representative_hot_probe_command_count(7)).to_equal(batch.commands.le
 
 </details>
 
-#### exposes an allocation-light i64-only dynlib hot probe symbol
+#### exposes an allocation-light event-field dynlib hot probe symbol
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+expect(gui_representative_hot_probe_event_tick(7, 19, 24, 65)).to_equal(4)
+expect(gui_representative_hot_probe_event_tick(7, -1, 24, 65)).to_equal(1)
 expect(gui_dynlib_hot_probe_tick(7)).to_equal(4)
 ```
 

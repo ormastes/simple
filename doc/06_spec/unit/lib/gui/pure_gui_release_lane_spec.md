@@ -245,7 +245,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = _existing_source("src/app/gui_perf/pure_gui_hot_dynlib_export.spl")
-expect(source).to_contain("gui_representative_hot_probe_command_count(iteration)")
+expect(source).to_contain("gui_representative_hot_probe_event_tick(iteration, pointer_x, pointer_y, key_code)")
 expect(_text_has(source, "_pure_gui_hot_command_count")).to_equal(false)
 ```
 

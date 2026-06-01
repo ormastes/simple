@@ -267,20 +267,22 @@ else:
 </details>
 
 <details>
-<summary>Advanced: reuses a stable dynlib call argument buffer in the measured hot loop</summary>
+<summary>Advanced: reuses a stable event argument buffer in the measured hot loop</summary>
 
-#### reuses a stable dynlib call argument buffer in the measured hot loop
+#### reuses a stable event argument buffer in the measured hot loop
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("src/app/gui_perf/smf_dynlib_probe_core.spl")
-expect(source.contains("var args: [i64] = [0]")).to_equal(true)
-expect(source.contains("args[0] = i.to_i64()")).to_equal(false)
+expect(source.contains("var args: [i64] = [0, 12, 24, 65]")).to_equal(true)
+expect(source.contains("args[0] = i.to_i64()")).to_equal(true)
+expect(source.contains("args[1] = 12 + i.to_i64()")).to_equal(true)
+expect(source.contains("spl_wffi_call_i64(sym, args, 4)")).to_equal(true)
 expect(source.contains("var args: [i64] = []")).to_equal(false)
 expect(source.contains("args.push(i.to_i64())")).to_equal(false)
 ```
