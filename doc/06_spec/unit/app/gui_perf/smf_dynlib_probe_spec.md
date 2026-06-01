@@ -110,6 +110,52 @@ expect(report.error).to_equal("missing-artifact-path")
 
 </details>
 
+#### recognizes host dynamic libraries as diagnostic artifacts only
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(gui_dynlib_probe_is_host_dynlib_path("build/gui/libpure_gui_hot.so")).to_equal(true)
+expect(gui_dynlib_probe_is_host_dynlib_path("build/gui/libpure_gui_hot.dylib")).to_equal(true)
+expect(gui_dynlib_probe_is_host_dynlib_path("build/gui/pure_gui.smf")).to_equal(false)
+```
+
+</details>
+
+#### rejects callable host dynlib samples as not SMF dynlib acceptance
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val config = GuiDynlibProbeConfig(
+    artifact_path: "build/gui/libpure_gui_hot.so",
+    symbol_name: "gui_dynlib_hot_probe_tick",
+    iterations: 4,
+    warmup_count: 1,
+    threshold_us: 1000
+)
+val evidence = GuiDynlibProbeLoadEvidence(
+    loader_mode: "host_dynlib",
+    call_source: "dynlib_symbol_call",
+    symbol_resolved: true,
+    fallback_used: false
+)
+val report = gui_dynlib_probe_report(config, evidence, [10, 11, 12, 13])
+expect(report.pass).to_equal(false)
+expect(report.error).to_equal("not-smf-dynlib")
+expect(report.call_source).to_equal("dynlib_symbol_call")
+```
+
+</details>
+
 #### can report a real dynlib symbol hot-call sample set
 
 <details>
@@ -158,8 +204,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

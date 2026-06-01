@@ -75,6 +75,22 @@ implementation returns false because it has byte storage plus ELF virtual
 addresses, not executable host mappings. `src/app/gui_perf/smf_dynlib_probe_core.spl`
 uses that query before it can report `call_source=dynlib_symbol_call`.
 
+## Update: 2026-06-01 host dynlib diagnostic
+
+`src/app/gui_perf/pure_gui_hot_dynlib_export.spl` builds as a host shared
+library and exports `gui_dynlib_hot_probe_tick`. On the current Linux host:
+
+```bash
+mkdir -p build/gui
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple compile src/app/gui_perf/pure_gui_hot_dynlib_export.spl --native --shared --strip -o build/gui/libpure_gui_hot.so
+SIMPLE_LIB=src SIMPLE_GUI_DYNLIB_ARTIFACT=build/gui/libpure_gui_hot.so src/compiler_rust/target/debug/simple run src/app/gui_perf/smf_dynlib_probe.spl
+```
+
+The probe measured `loader=host_dynlib call_source=dynlib_symbol_call
+p99_us=26`, then correctly rejected the row with `error=not-smf-dynlib`. This
+proves the hot symbol ABI and dynlib call overhead; it does not close the SMF
+artifact requirement.
+
 The default hot symbol is now `gui_dynlib_hot_probe_tick`, an i64-only pure GUI
 entry in `src/lib/gui/pure_core.spl`.
 

@@ -61,6 +61,9 @@ SimpleOS QEMU ARM64
 - `src/app/gui_perf/smf_dynlib_probe.spl` now emits the machine-readable
   `GUI_DYNLIB_PERF` row. It deliberately fails closed for direct Simple fallback
   samples until real dynlib symbol invocation is wired.
+- `src/app/gui_perf/pure_gui_hot_dynlib_export.spl` now provides a pure Simple
+  exported hot symbol for host `.so`/`.dylib` diagnostics. This lane has proven
+  callable dynlib overhead, but it is still rejected as `not-smf-dynlib`.
 - `src/compiler_rust/runtime/src/value/sffi/dyncall.rs` now implements the
   i64-only `rt_dyncall_*` runtime bridge used by `dynlib_call_1`.
 - `doc/08_tracking/bug/gui_smf_dynlib_hot_call_runtime_missing_2026-06-01.md`
@@ -90,6 +93,9 @@ SimpleOS QEMU ARM64
 rg -n "rt_gui|rt_winit|rt_sdl|rt_cocoa|SimpleWebRenderer|WebRenderRequest" src/os src/lib examples/simple_os -g '*.spl'
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/os/smf src/os/posix src/lib/gui
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gui/pure_smf_dynlib_perf_spec.spl --mode=interpreter --no-cache
+mkdir -p build/gui
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple compile src/app/gui_perf/pure_gui_hot_dynlib_export.spl --native --shared --strip -o build/gui/libpure_gui_hot.so
+SIMPLE_LIB=src SIMPLE_GUI_DYNLIB_ARTIFACT=build/gui/libpure_gui_hot.so src/compiler_rust/target/debug/simple run src/app/gui_perf/smf_dynlib_probe.spl
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple run src/app/gui_perf/smf_dynlib_probe.spl
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/posix/dynlib_spec.spl --mode=interpreter --no-cache
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/smf_runtime_spec.spl --mode=interpreter --no-cache

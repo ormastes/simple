@@ -66,6 +66,10 @@ the evidence.
 - `src/app/gui_perf/smf_dynlib_probe.spl` is the CLI evidence probe. It emits a
   `GUI_DYNLIB_PERF` row and fails closed for direct Simple fallback samples
   until runtime dynlib symbol invocation is real.
+- `src/app/gui_perf/pure_gui_hot_dynlib_export.spl` provides a pure Simple,
+  i64-only exported hot symbol that can be built as a host `.so`/`.dylib` for
+  callable ABI diagnostics. This proves dynlib call overhead separately, but
+  `loader=host_dynlib` remains non-acceptance evidence for the SMF goal.
 - `src/compiler_rust/runtime/src/value/sffi/dyncall.rs` implements the
   i64-only `rt_dyncall_*` bridge. The remaining gap is producing/configuring the
   macOS arm64 SMF/dynlib artifact so the probe can report
@@ -109,6 +113,8 @@ the evidence.
 
 - Add a macOS arm64 loader wrapper that opens the compiled GUI dynlib/SMF
   artifact, resolves the hot entry symbol once, and reuses it.
+- Use the host `.so`/`.dylib` diagnostic lane only to prove callable symbol ABI
+  and timing. Do not treat it as acceptance unless the loader is `smf_dynlib`.
 - Use the `rt_dyncall_*` bridge through `dynlib_call_1` to invoke the resolved
   i64 hot-probe symbol in the measured path.
 - Keep loader errors explicit: missing artifact, unsupported architecture,
@@ -168,6 +174,10 @@ the evidence.
 - `SIMPLE_LIB=src bin/simple check src/os/posix`
 - `SIMPLE_LIB=src bin/simple test test/unit/os/posix/dynlib_spec.spl --mode=interpreter`
 - `SIMPLE_LIB=src bin/simple test test/unit/os/smf_runtime_spec.spl --mode=interpreter`
+- Diagnostic only:
+  `SIMPLE_LIB=src bin/simple compile src/app/gui_perf/pure_gui_hot_dynlib_export.spl --native --shared --strip -o build/gui/libpure_gui_hot.dylib`
+  on macOS or `... -o build/gui/libpure_gui_hot.so` on Linux, followed by
+  `SIMPLE_GUI_DYNLIB_ARTIFACT=<artifact> SIMPLE_LIB=src bin/simple run src/app/gui_perf/smf_dynlib_probe.spl`.
 - Pure GUI release-lane dependency guard: no WM, Simple Web, or `rt_gui`/hosted
   runtime imports.
 - macOS arm64 dynlib/SMF hot response probe: p99 < 1000 us after warmup.

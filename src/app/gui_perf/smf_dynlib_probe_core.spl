@@ -7,6 +7,7 @@
 # memory; this prevents timing an unsafe raw ELF/SMF virtual address call.
 
 use os.posix.dynlib.{dynlib_open, dynlib_symbol, dynlib_symbol_is_process_callable, dynlib_close, dynlib_is_valid}
+use std.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}
 use std.gui.pure_core.{GuiInputEvent, gui_pointer_event, gui_key_event, gui_dispatch_events}
 use std.gui.pure_smf_dynlib_perf.{GuiDynlibPerfReport, gui_dynlib_perf_report}
 
@@ -51,9 +52,24 @@ fn gui_dynlib_probe_config_from_env() -> GuiDynlibProbeConfig:
         threshold_us: base.threshold_us
     )
 
+fn gui_dynlib_probe_is_host_dynlib_path(path: text) -> bool:
+    path.ends_with(".so") or path.ends_with(".dylib")
+
+fn gui_dynlib_probe_load_host_evidence(config: GuiDynlibProbeConfig) -> GuiDynlibProbeLoadEvidence:
+    val handle = spl_dlopen(config.artifact_path)
+    if handle == 0:
+        return GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
+    val sym = spl_dlsym(handle, config.symbol_name)
+    spl_dlclose(handle)
+    if sym == 0:
+        return GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
+    GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "dynlib_symbol_call", symbol_resolved: true, fallback_used: false)
+
 fn gui_dynlib_probe_load_evidence(config: GuiDynlibProbeConfig) -> GuiDynlibProbeLoadEvidence:
     if config.artifact_path == "":
         return GuiDynlibProbeLoadEvidence(loader_mode: "direct_simple", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
+    if gui_dynlib_probe_is_host_dynlib_path(config.artifact_path):
+        return gui_dynlib_probe_load_host_evidence(config)
     val lib = dynlib_open(config.artifact_path, 0)
     if not dynlib_is_valid(lib):
         return GuiDynlibProbeLoadEvidence(loader_mode: "direct_simple", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
@@ -92,6 +108,32 @@ fn gui_dynlib_probe_direct_samples(iterations: i32, warmup_count: i32) -> [i64]:
         i = i + 1
     samples
 
+fn gui_dynlib_probe_host_dynlib_samples(config: GuiDynlibProbeConfig) -> [i64]:
+    var samples: [i64] = []
+    val handle = spl_dlopen(config.artifact_path)
+    if handle == 0:
+        return samples
+    val sym = spl_dlsym(handle, config.symbol_name)
+    if sym == 0:
+        spl_dlclose(handle)
+        return samples
+    var i = 0
+    val total = config.iterations + config.warmup_count
+    while i < total:
+        var args: [i64] = []
+        args.push(i.to_i64())
+        val t0 = rt_time_now_unix_micros()
+        val command_count = spl_wffi_call_i64(sym, args, 1)
+        val t1 = rt_time_now_unix_micros()
+        if command_count > 0 and i >= config.warmup_count:
+            var elapsed = t1 - t0
+            if elapsed < 0:
+                elapsed = 0
+            samples.push(elapsed)
+        i = i + 1
+    spl_dlclose(handle)
+    samples
+
 fn gui_dynlib_probe_report(config: GuiDynlibProbeConfig, evidence: GuiDynlibProbeLoadEvidence, samples_us: [i64]) -> GuiDynlibPerfReport:
     gui_dynlib_perf_report(
         config.artifact_path,
@@ -107,5 +149,8 @@ fn gui_dynlib_probe_report(config: GuiDynlibProbeConfig, evidence: GuiDynlibProb
 
 fn gui_dynlib_probe_run(config: GuiDynlibProbeConfig) -> GuiDynlibPerfReport:
     val evidence = gui_dynlib_probe_load_evidence(config)
+    if evidence.loader_mode == "host_dynlib" and evidence.call_source == "dynlib_symbol_call":
+        val host_samples = gui_dynlib_probe_host_dynlib_samples(config)
+        return gui_dynlib_probe_report(config, evidence, host_samples)
     val samples = gui_dynlib_probe_direct_samples(config.iterations, config.warmup_count)
     gui_dynlib_probe_report(config, evidence, samples)

@@ -1,7 +1,7 @@
 # Pure GUI SMF/dynlib probe tests
 
 use std.spipe.*
-use app.gui_perf.smf_dynlib_probe_core.{GuiDynlibProbeConfig, GuiDynlibProbeLoadEvidence, gui_dynlib_probe_report, gui_dynlib_probe_workload}
+use app.gui_perf.smf_dynlib_probe_core.{GuiDynlibProbeConfig, GuiDynlibProbeLoadEvidence, gui_dynlib_probe_is_host_dynlib_path, gui_dynlib_probe_report, gui_dynlib_probe_workload}
 
 describe "pure GUI SMF dynlib probe":
     it "builds a representative pure GUI workload without pixels":
@@ -65,6 +65,30 @@ describe "pure GUI SMF dynlib probe":
         val report = gui_dynlib_probe_report(config, evidence, [10])
         expect(report.pass).to_equal(false)
         expect(report.error).to_equal("missing-artifact-path")
+
+    it "recognizes host dynamic libraries as diagnostic artifacts only":
+        expect(gui_dynlib_probe_is_host_dynlib_path("build/gui/libpure_gui_hot.so")).to_equal(true)
+        expect(gui_dynlib_probe_is_host_dynlib_path("build/gui/libpure_gui_hot.dylib")).to_equal(true)
+        expect(gui_dynlib_probe_is_host_dynlib_path("build/gui/pure_gui.smf")).to_equal(false)
+
+    it "rejects callable host dynlib samples as not SMF dynlib acceptance":
+        val config = GuiDynlibProbeConfig(
+            artifact_path: "build/gui/libpure_gui_hot.so",
+            symbol_name: "gui_dynlib_hot_probe_tick",
+            iterations: 4,
+            warmup_count: 1,
+            threshold_us: 1000
+        )
+        val evidence = GuiDynlibProbeLoadEvidence(
+            loader_mode: "host_dynlib",
+            call_source: "dynlib_symbol_call",
+            symbol_resolved: true,
+            fallback_used: false
+        )
+        val report = gui_dynlib_probe_report(config, evidence, [10, 11, 12, 13])
+        expect(report.pass).to_equal(false)
+        expect(report.error).to_equal("not-smf-dynlib")
+        expect(report.call_source).to_equal("dynlib_symbol_call")
 
     it "can report a real dynlib symbol hot-call sample set":
         val config = GuiDynlibProbeConfig(
