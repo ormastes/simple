@@ -25,6 +25,7 @@ extern fn rt_getpid() -> i64
 
 use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
 use app.compile.native_profile_counter.{native_profile_counter_instrument_c_source, native_profile_counter_metadata_path}
+use app.compile.native_layout_section_map.{native_layout_apply_c_section_map}
 use std.cli.cli_util.{get_cli_args}
 use std.log.{error, info, debug}
 use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
@@ -97,6 +98,7 @@ struct CompileOpts:
     verbose: bool
     emit_ir_only: bool
     simple_profile_counters: bool
+    simple_layout_section_map_path: text
 
 fn default_compile_opts() -> CompileOpts:
     CompileOpts(
@@ -107,7 +109,8 @@ fn default_compile_opts() -> CompileOpts:
         march_target: "",
         verbose: false,
         emit_ir_only: false,
-        simple_profile_counters: false
+        simple_profile_counters: false,
+        simple_layout_section_map_path: ""
     )
 
 # ============================================================================
@@ -190,6 +193,7 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
 
     if opts.simple_profile_counters:
         val instrumented = native_profile_counter_instrument_c_source(generated_source, true)
+        generated_source = instrumented.c_source
         if not file_write(temp_cpp, instrumented.c_source):
             error("compile", "failed to write Simple profile-counter instrumented C source")
             file_delete(temp_cpp)
@@ -201,6 +205,25 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
             return 1
         if opts.verbose:
             debug("compile", "Simple profile counters injected: " + str(instrumented.slot_count) + " slot(s), metadata=" + metadata_path)
+
+    if opts.simple_layout_section_map_path != "":
+        if not rt_file_exists(opts.simple_layout_section_map_path):
+            error("compile", "Simple layout section map not found: " + opts.simple_layout_section_map_path)
+            file_delete(temp_cpp)
+            return 1
+        val section_map_text = rt_file_read_text(opts.simple_layout_section_map_path) ?? ""
+        val applied = native_layout_apply_c_section_map(generated_source, section_map_text, true)
+        if applied.diagnostic_count > 0:
+            error("compile", "Simple layout section map failed: " + applied.diagnostics.join(","))
+            file_delete(temp_cpp)
+            return 1
+        if not file_write(temp_cpp, applied.c_source):
+            error("compile", "failed to write Simple layout section mapped C source")
+            file_delete(temp_cpp)
+            return 1
+        generated_source = applied.c_source
+        if opts.verbose:
+            debug("compile", "Simple layout section map applied: " + str(applied.applied_count) + " function(s)")
 
     val rt_sources = ""
 
@@ -302,6 +325,7 @@ fn main() -> i64:
         print "  --pgo-use=<path>     Use PGO profile for optimization (+5-20% speed)"
         print "  --pgo-merge          Merge raw profiles: --pgo-merge <dir> <output.profdata>"
         print "  --simple-profile-counters  Inject Simple-owned native counter section"
+        print "  --simple-layout-section-map=PATH  Apply generated-C section map from simple optimize"
         print "  --release-optimized  Shorthand for: -O3 --march=x86-64-v3 --lto"
         print ""
         print "PGO workflow:"
@@ -371,6 +395,8 @@ fn main() -> i64:
             opts.march_target = arg.substring(8, arg.len())
         if arg == "--simple-profile-counters":
             opts.simple_profile_counters = true
+        if arg.starts_with("--simple-layout-section-map="):
+            opts.simple_layout_section_map_path = arg.substring(28, arg.len())
         if arg == "--release-optimized":
             opts.opt_level = "-O3"
             opts.march_target = "x86-64-v3"

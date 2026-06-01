@@ -211,8 +211,39 @@ All explicit audit bullets are satisfied by current evidence:
 
 ## Next Restart Plan
 
-No implementation gap remains for this plan. If resumed for release/sync, run
-the focused gates below and commit only the scoped files.
+The completion audit above was superseded by the native-ownership correction:
+Rust is seed/runtime infrastructure only. The real optimizer implementation
+must stay in Simple and generated C. The next concrete gap was consuming the
+generated-C section map in the Simple native compile path.
+
+## Restart Checkpoint: 2026-06-01 Native Section Map Consumption
+
+Implemented in the current slice:
+- `src/app/compile/native_layout_section_map.spl`
+  - parses `SIMPLE_LAYOUT_SECTION_*` macros emitted by the optimizer;
+  - rejects empty, malformed, unsafe, or unused section maps;
+  - prefixes matching generated-C function definitions with section macros.
+- `src/app/compile/llvm_direct.spl`
+  - adds `--simple-layout-section-map=PATH`;
+  - reads the generated-C section map;
+  - applies it after optional Simple native profile-counter instrumentation;
+  - fails closed on map diagnostics before invoking the C compiler.
+- `test/system/app/compile/feature/native_layout_section_map_spec.spl`
+  - covers parsing, fail-closed validation, disabled behavior, and function
+    mapping.
+
+This is a Simple/C implementation slice, not a Rust linker seed change.
+
+Remaining larger gaps:
+- actual QEMU/live target runners for x86/i386/x86_64, ARM/Thumb/AArch64, and
+  RISC-V/RVC breakpoint evidence;
+- native basic-block, edge, and call-path counter insertion beyond the current
+  function-entry metadata/snapshot path;
+- measured before/after executable performance evidence for the full
+  profile-counter -> `.sprof` -> layout-map -> native build flow.
+
+If resumed for release/sync, run the focused gates below and commit only the
+scoped files.
 
 Final requirement artifacts now exist at:
 - `doc/02_requirements/feature/pure_simple_profile_guided_executable_optimization_2026-06-01.md`

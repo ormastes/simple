@@ -129,6 +129,28 @@ Reject a layout transform when:
 - profile is stale or workload label mismatches;
 - improvement is below threshold or measurement noise.
 
+### Generated-C Section Map Consumption
+
+`src/app/compile/native_layout_section_map.spl` owns the Simple-side C text
+transform for native layout. It accepts only optimizer-generated macros of the
+form:
+
+```c
+#define SIMPLE_LAYOUT_SECTION_name __attribute__((section(".text.simple.hot.0.name"), used))
+```
+
+The transform:
+- ignores non-section-map preprocessor lines;
+- rejects maps with no valid entries;
+- rejects section names outside `.text.simple.*`;
+- prefixes matching generated-C function definitions with the macro name;
+- rejects unused valid map entries so stale optimizer output cannot silently
+  compile.
+
+`llvm_direct.spl` wires this behind `--simple-layout-section-map=PATH` after
+optional Simple native profile-counter instrumentation. The pass rewrites only
+the temporary generated C file and does not require Rust linker changes.
+
 ## Bare-Metal Software-Breakpoint Counters
 
 ### State Machine

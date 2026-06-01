@@ -18,6 +18,7 @@ Design verification for:
 | `test/system/app/optimize/feature/sprof_loader_spec.spl` | validate/load/merge profile summaries |
 | `test/system/app/compile/feature/native_profile_counter_spec.spl` | native counter ABI and disabled-counter behavior |
 | `test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl` | layout planner and rejection rules |
+| `test/system/app/compile/feature/native_layout_section_map_spec.spl` | generated-C section-map parsing and compile-path transform contracts |
 | `test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl` | patch/trap/count/restore/auto-disarm state machine |
 | `test/system/os/baremetal/feature/breakpoint_counter_target_adapter_spec.spl` | x86, ARM/Thumb/AArch64, RISC-V/RVC target adapter resume and QEMU evidence normalization |
 
@@ -27,9 +28,10 @@ Executable specs must live under `test/`; generated/manual docs mirror under
 Current status: the executable contract specs above exist and pass. Production
 helper slices exist for `.sprof` text/file loading, native counter metadata and
 runtime snapshot import, executable layout eligibility and manifest planning,
-and bare-metal breakpoint state/ledger policy. The current executable optimizer
-slice writes deterministic Simple-owned layout, native symbol-order, and
-generated-C section-map artifacts rather than rewriting arbitrary ELF bytes.
+generated-C section-map emission and consumption, and bare-metal breakpoint
+state/ledger policy. The current executable optimizer slice writes deterministic
+Simple-owned layout, native symbol-order, and generated-C section-map artifacts
+rather than rewriting arbitrary ELF bytes.
 
 ## Requirement Traceability
 
@@ -38,6 +40,7 @@ generated-C section-map artifacts rather than rewriting arbitrary ELF bytes.
 | Persistent profile loader | corrupt/stale/exact profile load tests; startup overhead report |
 | Simple native optimize | native O-level plus profile-counter ABI tests |
 | Pure Simple BOLT-like optimizer | metadata-only layout planning tests; native symbol-order/C section-map artifact tests; no external BOLT command dependency |
+| Generated-C layout consumption | section-map parser/transform tests; fail-closed unused symbol and unsafe section tests |
 | Native counter feature | function/block/edge/call-path counter contract tests |
 | Bare-metal counter impl | breakpoint site table and patch ledger tests |
 | Prevent slow breakpoint overhead | auto-disarm and sampled-only fallback tests |
@@ -71,6 +74,7 @@ SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/app/compile
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check test/system/app/optimize/feature/sprof_loader_spec.spl test/system/app/compile/feature/native_profile_counter_spec.spl test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/app/optimize/feature/sprof_loader_spec.spl --mode=interpreter --clean
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/app/compile/feature/native_profile_counter_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/app/compile/feature/native_layout_section_map_spec.spl --mode=interpreter --clean
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/app/optimize/feature/profile_layout_cli_spec.spl --mode=interpreter --clean
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl --mode=interpreter --clean
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl --mode=interpreter --clean

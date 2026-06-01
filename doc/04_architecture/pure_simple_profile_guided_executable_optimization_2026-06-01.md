@@ -100,6 +100,14 @@ offset manifest, native symbol-order text, and a generated-C section map header
 from the same validated plan. Rust linker code is treated as seed/runtime
 infrastructure, not the feature implementation surface.
 
+The native compile integration consumes the generated-C section map through
+`llvm_direct.spl --simple-layout-section-map=PATH`. The compile path reads the
+Simple-emitted header, validates that all section directives target
+`.text.simple.*`, injects the corresponding attributes into generated C, and
+fails closed when a requested symbol is not present. This keeps layout
+optimization in the Simple/C boundary while still allowing the platform C
+toolchain to place functions into optimizer-selected text sections.
+
 ## Bare-Metal Breakpoint Counter Policy
 
 Software-breakpoint counters are allowed only under a profiling session:
