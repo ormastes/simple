@@ -1,0 +1,64 @@
+# RV32I RVFI unit tests.
+
+use std.hardware.rv32i_rtl.rvfi.{
+    RvfiCoreSnapshot,
+    rvfi_enabled_config, rvfi_disabled_config,
+    rvfi_port_manifest, rvfi_mask_for_width,
+    rvfi_trace_from_snapshot, rvfi_formal_wrapper_ports
+}
+
+fn check(condition: bool):
+    expect condition == true
+
+fn snapshot_sample() -> RvfiCoreSnapshot:
+    RvfiCoreSnapshot(
+        halted: false,
+        suppress: false,
+        pc: 0x1000,
+        pc_next: 0x1004,
+        insn: 0x00108293,
+        rs1_addr: 1,
+        rs2_addr: 2,
+        rs1_rdata: 10,
+        rs2_rdata: 20,
+        rd_addr: 5,
+        rd_wdata: 14,
+        dmem_addr: 0x2000,
+        dmem_width: 2,
+        dmem_re: false,
+        dmem_we: false,
+        dmem_rdata: 0,
+        dmem_wdata: 20
+    )
+
+describe "RV32I RVFI manifest":
+    it "lists standard RVFI output ports":
+        val ports = rvfi_port_manifest()
+        expect ports.len() == 17
+        expect ports[0].name == "rvfi_valid"
+        expect ports[2].name == "rvfi_insn"
+
+    it "renders formal wrapper port comments":
+        val text = rvfi_formal_wrapper_ports("rv32i_core")
+        check(text.contains("rvfi_valid"))
+        check(text.contains("rvfi_mem_wdata"))
+
+describe "RV32I RVFI trace":
+    it "captures one retired instruction when RVFI is enabled":
+        val trace = rvfi_trace_from_snapshot(rvfi_enabled_config(7), 3, snapshot_sample())
+        check(trace.rvfi_valid)
+        expect trace.rvfi_order == 10
+        expect trace.rvfi_insn == 0x00108293
+        expect trace.rvfi_pc_rdata == 0x1000
+        expect trace.rvfi_pc_wdata == 0x1004
+        expect trace.rvfi_rd_addr == 5
+        expect trace.rvfi_rd_wdata == 14
+
+    it "suppresses valid when RVFI is disabled":
+        val trace = rvfi_trace_from_snapshot(rvfi_disabled_config(), 0, snapshot_sample())
+        check(not trace.rvfi_valid)
+
+    it "computes byte masks from memory width":
+        expect rvfi_mask_for_width(0) == 0x1
+        expect rvfi_mask_for_width(1) == 0x3
+        expect rvfi_mask_for_width(2) == 0xF
