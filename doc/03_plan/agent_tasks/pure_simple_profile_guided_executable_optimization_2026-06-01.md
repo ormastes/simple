@@ -214,6 +214,13 @@ All explicit audit bullets are satisfied by current evidence:
 No implementation gap remains for this plan. If resumed for release/sync, run
 the focused gates below and commit only the scoped files.
 
+Final requirement artifacts now exist at:
+- `doc/02_requirements/feature/pure_simple_profile_guided_executable_optimization_2026-06-01.md`
+- `doc/02_requirements/nfr/pure_simple_profile_guided_executable_optimization_2026-06-01.md`
+
+Current verification evidence is summarized in
+`doc/09_report/pure_simple_profile_guided_executable_optimization_2026-06-01.md`.
+
 1. Re-check feature cleanliness without touching unrelated dirty files:
 
 ```bash
@@ -397,10 +404,10 @@ Exit gates:
 Commands to design/run per slice:
 
 ```bash
-SIMPLE_LIB=src bin/simple check src/app/optimize
-SIMPLE_LIB=src bin/simple check src/app/compile
-SIMPLE_LIB=src bin/simple check test/system/app/optimize/feature/sprof_loader_spec.spl test/system/app/compile/feature/native_profile_counter_spec.spl test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl
-SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/app/optimize
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/app/compile
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check test/system/app/optimize/feature/sprof_loader_spec.spl test/system/app/compile/feature/native_profile_counter_spec.spl test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean
 find doc/06_spec -name '*_spec.spl' | wc -l
 git diff --check
 ```

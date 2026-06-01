@@ -23,12 +23,12 @@ Design verification for:
 Executable specs must live under `test/`; generated/manual docs mirror under
 `doc/06_spec/`.
 
-Current status: the four executable contract specs above exist. First
-production helper slices also exist for `.sprof` text loading, native counter
-policy, executable layout eligibility, and bare-metal breakpoint state/ledger
-policy. Runtime native counter emission, executable rewriting, binary `.sprof`
-container I/O, and architecture-specific bare-metal patch/trap/restore remain
-future implementation work.
+Current status: the executable contract specs above exist and pass. Production
+helper slices exist for `.sprof` text/file loading, native counter metadata and
+runtime snapshot import, executable layout eligibility and manifest planning,
+and bare-metal breakpoint state/ledger policy. The current executable optimizer
+slice writes a deterministic Simple-owned layout manifest rather than rewriting
+arbitrary ELF bytes.
 
 ## Requirement Traceability
 
@@ -65,20 +65,21 @@ find doc/06_spec -name '*_spec.spl' | wc -l
 Initial code-slice gates:
 
 ```bash
-SIMPLE_LIB=src bin/simple check src/app/optimize
-SIMPLE_LIB=src bin/simple check src/app/compile
-SIMPLE_LIB=src bin/simple check test/system/app/optimize/feature/sprof_loader_spec.spl test/system/app/compile/feature/native_profile_counter_spec.spl test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl
-SIMPLE_LIB=src bin/simple test test/system/app/optimize/feature/sprof_loader_spec.spl --mode=interpreter --clean
-SIMPLE_LIB=src bin/simple test test/system/app/compile/feature/native_profile_counter_spec.spl --mode=interpreter --clean
-SIMPLE_LIB=src bin/simple test test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl --mode=interpreter --clean
-SIMPLE_LIB=src bin/simple test test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl --mode=interpreter --clean
-SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/app/optimize
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/app/compile
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check test/system/app/optimize/feature/sprof_loader_spec.spl test/system/app/compile/feature/native_profile_counter_spec.spl test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/app/optimize/feature/sprof_loader_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/app/compile/feature/native_profile_counter_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/app/optimize/feature/profile_layout_cli_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean
 ```
 
 Native executable slices add:
 
 ```bash
-SIMPLE_LIB=src bin/simple check src/compiler
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/compiler
 cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml
 ```
 

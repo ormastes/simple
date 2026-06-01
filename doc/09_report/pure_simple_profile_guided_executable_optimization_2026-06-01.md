@@ -1,0 +1,53 @@
+# Pure Simple Profile-Guided Executable Optimization Verification Report
+
+Date: 2026-06-01
+
+## Command Evidence
+
+- Native smoke:
+  `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple src/app/compile/llvm_direct.spl /tmp/simple_pgo_goal_smoke.spl /tmp/simple_pgo_goal_smoke --simple-profile-counters --verbose --clean`
+- Result: exit `0`, native binary size `16176` bytes, run exit `0`,
+  sidecar line count `6`, native `__simple_profile_counters` symbols `4`.
+- Sidecar records: `make_text`, `make_obj`, `make_gpu`, and `main` function
+  entry counters.
+- `.sprof` conversion:
+  `sprof_write_native_counter_profile_file("/tmp/simple_pgo_goal_smoke.sprof",
+  "goal-smoke", "smoke", metadata, [11, 3, 2, 19])`
+- Result: wrote `4` reloadable profile records.
+- Layout bridge:
+  `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple src/app/optimize/main.spl /tmp/simple_pgo_goal_smoke --layout-plan --profile=/tmp/simple_pgo_goal_smoke.sprof --manifest=/tmp/simple_pgo_goal_smoke.layout --out=/tmp/simple_pgo_goal_smoke.optimized.layout`
+- Result: exit `0`; manifest places `main`, `make_text`, and `make_obj` hot,
+  and `make_gpu` cold.
+
+## Performance Evidence
+
+- Profile-load startup baseline with `sprof_loader` imported: `75ms`.
+- Profile-load startup with one valid `.sprof` load: `77ms`.
+- Profile-load overhead: `2.6%`, under the 5% target.
+- Native baseline, best of 1000 process runs: `2252ms`.
+- Native profile-counter binary, best of 1000 process runs: `2300ms`.
+- Native counter overhead: `2.1%`, under the 3% target.
+- Native baseline size: `15952` bytes.
+- Native profile-counter size: `16176` bytes.
+- Metadata-only layout planning does not rewrite the executable in this slice;
+  the semantic smoke is the native binary run exit `0`, and the after artifact
+  is the deterministic layout manifest.
+
+## Verification Commands
+
+- `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/app/optimize`
+  passed `7` files.
+- `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/app/compile`
+  passed `9` files.
+- `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check
+  test/system/app/optimize/feature/sprof_loader_spec.spl
+  test/system/app/compile/feature/native_profile_counter_spec.spl
+  test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl
+  test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl`
+  passed `4` files.
+- `sprof_loader_spec.spl`: `23` passed.
+- `native_profile_counter_spec.spl`: `30` passed.
+- `profile_layout_cli_spec.spl`: `8` passed.
+- `pure_simple_executable_layout_spec.spl`: `15` passed.
+- `breakpoint_counter_profile_spec.spl`: `22` passed.
+- `tiered_jit_hotspot_spec.spl`: `51` passed.
