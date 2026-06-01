@@ -85,6 +85,15 @@
   - Blocker file: absent after pass.
   - Rendering assertion: the screendump spec now validates dock icon artwork contrast and detail in the QMP framebuffer capture, not just a valid PPM header.
   - Visual result: the dock renders procedural Terminal, Files, Calculator, Clock, Settings, Browser, and Editor icons through the ARM64 ramfb framebuffer path.
+- Hosted compositor real-rendering follow-up:
+  - Added a compositor `blit_pixels` contract so Simple Web window artifacts are copied as real pixel buffers instead of decomposed into one `fill_rect` per pixel.
+  - The winit hosted backend now calls `rt_winit_buffer_blit_pixels`; SDL2, Cocoa, Win32, Engine2D, browser, baremetal, and headless backends keep Simple fallback loops for compatibility.
+  - Shared MDI seed data now drives the hosted entry and tests, keeping the canonical Terminal, Editor, Browser, File Manager, and Calculator surfaces in one pure Simple module.
+  - Verification: `src/compiler_rust/target/debug/simple check ...` passed for 17 edited Simple files.
+  - Verification: `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/compositor/shared_mdi_setup_spec.spl --mode=interpreter --no-cache` passed, 1 test in 2,764 ms.
+  - Verification: `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/compositor/engine2d_glass_spec.spl --mode=interpreter --no-cache` passed, 8 tests in 10,998 ms.
+  - Verification: `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/compositor/host_compositor_entry_spec.spl --mode=interpreter --no-cache` passed, 29 tests in 36,939 ms.
+  - Rust SFFI validation note: `cargo test -j1 -p simple-compiler blit_pixels_extern_copies_and_clips_pixels --lib` was attempted twice after adding direct unit coverage. Both attempts were terminated during dependency compilation without a Rust diagnostic, so this host did not produce Rust unit-test evidence for the new SFFI path.
 
 ## Open Evidence Gaps
 

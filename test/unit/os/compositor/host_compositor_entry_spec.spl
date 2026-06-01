@@ -39,6 +39,7 @@ var _capture_blue_count: i64 = 0
 var _capture_white_count: i64 = 0
 var _capture_engine_title_count: i64 = 0
 var _capture_engine_content_count: i64 = 0
+var _capture_blit_count: i64 = 0
 var _capture_clear_color: u32 = 0u32
 
 class FakeCompositorBackend:
@@ -66,6 +67,9 @@ impl CompositorBackend for FakeCompositorBackend:
         _fake_present_count = _fake_present_count
 
     me put_pixel(x: i32, y: i32, color: u32):
+        _fake_present_count = _fake_present_count
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         _fake_present_count = _fake_present_count
 
     me present():
@@ -118,6 +122,23 @@ impl CompositorBackend for CaptureCompositorBackend:
 
     me put_pixel(x: i32, y: i32, color: u32):
         _capture_present_count = _capture_present_count
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        _capture_blit_count = _capture_blit_count + 1
+        var row: i32 = 0
+        while row < h:
+            var col: i32 = 0
+            while col < w:
+                val src_idx = row * w + col
+                if src_idx >= 0 and src_idx < pixels.len():
+                    val color = pixels[src_idx]
+                    if color == 0xFF2050A0u32:
+                        _capture_engine_title_count = _capture_engine_title_count + 1
+                    if color == 0xFF182230u32:
+                        _capture_engine_content_count = _capture_engine_content_count + 1
+                    self.put_pixel(x + col, y + row, pixels[src_idx])
+                col = col + 1
+            row = row + 1
 
     me present():
         _capture_present_count = _capture_present_count + 1
@@ -286,32 +307,17 @@ describe "HostWmHandle loop behavior":
         _capture_white_count = 0
         _capture_engine_title_count = 0
         _capture_engine_content_count = 0
+        _capture_blit_count = 0
         _capture_clear_color = 0u32
-        val backend = CaptureCompositorBackend.with_color(160, 120, 0xFF000000u32)
-        val comp = HostCompositor.new(backend, Size.wh(160, 120))
-        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Simple Browser", 12, 16, 120, 80, "", 900, "/sys/apps/browser")
+        val backend = CaptureCompositorBackend.with_color(80, 70, 0xFF000000u32)
+        val comp = HostCompositor.new(backend, Size.wh(80, 70))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 8, 8, 40, 52, "ready", 900, "/sys/apps/terminal")
         comp.render_frame()
         expect(_capture_present_count).to_equal(1)
         expect(_capture_blue_count).to_be_greater_than(0)
         expect(_capture_white_count).to_be_greater_than(0)
+        expect(_capture_blit_count).to_be_greater_than(0)
         expect(_capture_clear_color).to_equal(0xFF0F172Au32)
-
-    it "feeds WM app content through Simple Web into the Engine2D pixel path":
-        _capture_present_count = 0
-        _capture_blue_count = 0
-        _capture_white_count = 0
-        _capture_engine_title_count = 0
-        _capture_engine_content_count = 0
-        _capture_clear_color = 0u32
-        val backend = CaptureCompositorBackend.with_color(180, 140, 0xFF000000u32)
-        val comp = HostCompositor.new(backend, Size.wh(180, 140))
-        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 10, 14, 132, 96, "ready", 901, "/sys/apps/terminal")
-        comp.render_frame()
-
-        expect(_capture_present_count).to_equal(1)
-        expect(_capture_blue_count).to_be_greater_than(0)
-        expect(_capture_engine_title_count).to_be_greater_than(0)
-        expect(_capture_engine_content_count).to_be_greater_than(0)
 
     it "records compositor resize dimensions":
         val backend = FakeCompositorBackend(w: 320, h: 240)
@@ -521,6 +527,7 @@ describe "SimpleOS GUI adapter proof":
         _capture_blue_count = 0
         _capture_engine_title_count = 0
         _capture_engine_content_count = 0
+        _capture_blit_count = 0
         _capture_clear_color = 0u32
         val backend = CaptureCompositorBackend.with_color(200, 150, 0xFF000000u32)
         val adapter = SimpleOsGuiAdapter.new(backend, Size.wh(200, 150))

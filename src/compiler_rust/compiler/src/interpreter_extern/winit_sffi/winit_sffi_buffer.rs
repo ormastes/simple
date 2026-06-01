@@ -60,6 +60,41 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
                 Ok(bool_value(false))
             }
         }
+        "rt_winit_buffer_blit_pixels" => {
+            // rt_winit_buffer_blit_pixels(buffer_id, x, y, w, h, pixels) -> bool
+            let buf_id = get_i64(args, 0, name)?;
+            let x = get_i64(args, 1, name)?;
+            let y = get_i64(args, 2, name)?;
+            let w = get_i64(args, 3, name)?;
+            let h = get_i64(args, 4, name)?;
+            let pixels = get_pixels(args, 5, name)?;
+            let mut bufs = PIXEL_BUFFERS.lock();
+            if let Some(buf) = bufs.get_mut(&buf_id) {
+                let sw = buf.width as i64;
+                let sh = buf.height as i64;
+                let src_w = w.max(0) as usize;
+                let src_h = h.max(0) as usize;
+                let copy_h = src_h.min(pixels.len().saturating_div(src_w.max(1)));
+                for row in 0..copy_h {
+                    let py = y + row as i64;
+                    if py < 0 || py >= sh {
+                        continue;
+                    }
+                    for col in 0..src_w {
+                        let px = x + col as i64;
+                        if px < 0 || px >= sw {
+                            continue;
+                        }
+                        let src_idx = row * src_w + col;
+                        buf.pixels[(py as usize) * (sw as usize) + (px as usize)] = pixels[src_idx];
+                    }
+                }
+                Ok(bool_value(true))
+            } else {
+                set_last_error(format!("invalid buffer handle: {buf_id}"));
+                Ok(bool_value(false))
+            }
+        }
         "rt_winit_buffer_draw_text" => {
             // rt_winit_buffer_draw_text(buffer_id, x, y, text, fg, bg) -> bool
             let buf_id = get_i64(args, 0, name)?;
@@ -534,6 +569,51 @@ mod tests {
             let buf = bufs.get(&id).expect("buffer should exist");
             assert!(buf.pixels.iter().any(|&p| p == 0xFFFFFFFF));
             assert!(buf.pixels.iter().any(|&p| p == 0xFF000000));
+        }
+
+        let _ = dispatch_buffer("rt_winit_buffer_free", &[Value::Int(id)]).unwrap();
+    }
+
+    #[test]
+    fn blit_pixels_extern_copies_and_clips_pixels() {
+        let id = match dispatch_buffer(
+            "rt_winit_buffer_create",
+            &[Value::Int(4), Value::Int(3), Value::Int(0xFF000000u32 as i64)],
+        )
+        .unwrap()
+        {
+            Value::Int(id) => id,
+            other => panic!("expected buffer id, got {other:?}"),
+        };
+
+        let pixels = Value::Array(Arc::new(vec![
+            Value::Int(0xFF112233u32 as i64),
+            Value::Int(0xFF445566u32 as i64),
+            Value::Int(0xFF778899u32 as i64),
+            Value::Int(0xFF99AABBu32 as i64),
+        ]));
+        let ok = dispatch_buffer(
+            "rt_winit_buffer_blit_pixels",
+            &[
+                Value::Int(id),
+                Value::Int(2),
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(2),
+                pixels,
+            ],
+        )
+        .unwrap();
+        assert_eq!(ok, Value::Bool(true));
+
+        {
+            let bufs = PIXEL_BUFFERS.lock();
+            let buf = bufs.get(&id).expect("buffer should exist");
+            assert_eq!(buf.pixels[1 * 4 + 2], 0xFF112233);
+            assert_eq!(buf.pixels[1 * 4 + 3], 0xFF445566);
+            assert_eq!(buf.pixels[2 * 4 + 2], 0xFF778899);
+            assert_eq!(buf.pixels[2 * 4 + 3], 0xFF99AABB);
+            assert_eq!(buf.pixels[0], 0xFF000000);
         }
 
         let _ = dispatch_buffer("rt_winit_buffer_free", &[Value::Int(id)]).unwrap();
