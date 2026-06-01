@@ -11,9 +11,13 @@ Date: 2026-06-01
 
 ## Phase 1: Persistent Profile Loader
 
-Status: contract spec exists at
-`test/system/app/optimize/feature/sprof_loader_spec.spl`; implementation remains
-future work.
+Status: first implementation slice exists at `src/app/optimize/sprof_loader.spl`
+with persisted profile text loading, file-load wrapper, validation status,
+counter merge summaries, bounded diagnostics, and hot-path policy helpers.
+Contract coverage exists at
+`test/system/app/optimize/feature/sprof_loader_spec.spl`. Binary `.sprof`
+container parsing, writer integration, and startup-loader wiring remain future
+work.
 
 Deliverables:
 - `.sprof` reader/validator in optimize/profile common surface;
@@ -28,9 +32,12 @@ Exit gates:
 
 ## Phase 2: Native Counter Feature
 
-Status: contract spec exists at
-`test/system/app/compile/feature/native_profile_counter_spec.spl`;
-implementation remains future work.
+Status: first implementation slice exists at
+`src/app/compile/native_profile_counter.spl` with native counter kinds,
+explicit profile-build enablement, stable identity checks, and bounded call-path
+policy. Contract coverage exists at
+`test/system/app/compile/feature/native_profile_counter_spec.spl`. Actual
+native code emission and `.sprof` writer flushing remain future work.
 
 Deliverables:
 - native function/block/edge counter ABI;
@@ -45,9 +52,12 @@ Exit gates:
 
 ## Phase 3: Pure-Simple Executable Optimizer
 
-Status: contract spec exists at
-`test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl`;
-implementation remains future work.
+Status: first implementation slice exists at
+`src/app/optimize/executable_layout.spl` with layout steps, transform
+eligibility, external-BOLT rejection, and manifest-entry validation. Contract
+coverage exists at
+`test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl`.
+Actual settlement/native artifact rewriting remains future work.
 
 Deliverables:
 - layout planner over Simple settlement/native metadata;
@@ -62,9 +72,13 @@ Exit gates:
 
 ## Phase 4: Bare-Metal Breakpoint Counter Capsule
 
-Status: contract spec exists at
-`test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl`;
-implementation remains future work.
+Status: first implementation slice exists at
+`src/os/baremetal/profile/breakpoint_counter.spl` with breakpoint state
+transitions, over-budget auto-disarm, sampled-only fallback, cleanup-event
+coverage, and patch-ledger validation. Contract coverage exists at
+`test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl`. Actual
+architecture-specific instruction patch/trap/restore integration remains future
+work.
 
 Deliverables:
 - software-breakpoint site table;

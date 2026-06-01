@@ -23,9 +23,12 @@ Design verification for:
 Executable specs must live under `test/`; generated/manual docs mirror under
 `doc/06_spec/`.
 
-Current status: the four executable contract specs above exist and cover the
-planned interfaces before runtime loader, native counter emission, executable
-rewriting, or bare-metal patching code is implemented.
+Current status: the four executable contract specs above exist. First
+production helper slices also exist for `.sprof` text loading, native counter
+policy, executable layout eligibility, and bare-metal breakpoint state/ledger
+policy. Runtime native counter emission, executable rewriting, binary `.sprof`
+container I/O, and architecture-specific bare-metal patch/trap/restore remain
+future implementation work.
 
 ## Requirement Traceability
 
