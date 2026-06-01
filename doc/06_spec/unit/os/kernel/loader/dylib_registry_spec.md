@@ -50,6 +50,37 @@ expect(dylib_registry_symbol(handle, "_start")).to_equal(0x400000)
 
 </details>
 
+#### registers a role-2 SMF library wrapper and resolves dynload symbols
+
+1. dylib registry reset for test
+   - Expected: dylib_registry_open("/lib/gui_hot.smf") equals `handle`
+   - Expected: dylib_registry_symbol(handle, "_start") equals `0x400000`
+   - Expected: dylib_registry_symbol(handle, "hello") equals `0xBEEF`
+   - Expected: dylib_registry_symbol_is_process_callable(handle, "hello") is false
+   - Expected: dylib_registry_close(handle) equals `0`
+   - Expected: dylib_registry_close(handle) equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+dylib_registry_reset_for_test()
+val handle = dylib_registry_register("/lib/gui_hot.smf", make_smf_wrapped_elf64_library_with_dynsym())
+expect(handle).to_be_greater_than(0)
+expect(dylib_registry_open("/lib/gui_hot.smf")).to_equal(handle)
+expect(dylib_registry_symbol(handle, "_start")).to_equal(0x400000)
+expect(dylib_registry_symbol(handle, "hello")).to_equal(0xBEEF)
+expect(dylib_registry_symbol_is_process_callable(handle, "hello")).to_equal(false)
+expect(dylib_registry_close(handle)).to_equal(0)
+expect(dylib_registry_close(handle)).to_equal(0)
+```
+
+</details>
+
 #### reuses the same handle for path-backed opens and closes by refcount
 
 1. dylib registry reset for test
@@ -224,8 +255,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

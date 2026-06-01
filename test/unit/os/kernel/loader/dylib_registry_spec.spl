@@ -87,6 +87,25 @@ fn make_smf_wrapped_elf64_exec() -> [u8]:
         bytes.push(0.to_u8())
     bytes
 
+fn make_smf_wrapped_elf64_library_with_dynsym() -> [u8]:
+    var bytes = make_elf64_with_dynsym()
+    val stub_size = bytes.len()
+    bytes.push(83.to_u8())
+    bytes.push(77.to_u8())
+    bytes.push(70.to_u8())
+    bytes.push(0.to_u8())
+    var i = 4
+    while i < 44:
+        bytes.push(0.to_u8())
+        i = i + 1
+    bytes = push_u64_le(bytes, 0x400000)
+    bytes = push_u32_le(bytes, stub_size)
+    bytes = push_u32_le(bytes, stub_size)
+    bytes.push(2.to_u8())
+    while bytes.len() < stub_size + 128:
+        bytes.push(0.to_u8())
+    bytes
+
 fn _pad_to(buf: [u8], target: i64) -> [u8]:
     while buf.len() < target:
         buf.push(0.to_u8())
@@ -203,6 +222,17 @@ describe "dylib_registry":
         val handle = dylib_registry_register("/lib/demo.smf", make_smf_wrapped_elf64_exec())
         expect(handle).to_be_greater_than(0)
         expect(dylib_registry_symbol(handle, "_start")).to_equal(0x400000)
+
+    it "registers a role-2 SMF library wrapper and resolves dynload symbols":
+        dylib_registry_reset_for_test()
+        val handle = dylib_registry_register("/lib/gui_hot.smf", make_smf_wrapped_elf64_library_with_dynsym())
+        expect(handle).to_be_greater_than(0)
+        expect(dylib_registry_open("/lib/gui_hot.smf")).to_equal(handle)
+        expect(dylib_registry_symbol(handle, "_start")).to_equal(0x400000)
+        expect(dylib_registry_symbol(handle, "hello")).to_equal(0xBEEF)
+        expect(dylib_registry_symbol_is_process_callable(handle, "hello")).to_equal(false)
+        expect(dylib_registry_close(handle)).to_equal(0)
+        expect(dylib_registry_close(handle)).to_equal(0)
 
     it "reuses the same handle for path-backed opens and closes by refcount":
         dylib_registry_reset_for_test()

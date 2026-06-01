@@ -7,6 +7,13 @@
 
 use os.kernel.loader.elf64.{elf64_parse_header, elf64_load, elf64_has_magic}
 use os.kernel.loader.smf.{smf_has_header, smf_load}
+use os.kernel.loader.dylib_registry.{
+    dylib_registry_register,
+    dylib_registry_open,
+    dylib_registry_symbol,
+    dylib_registry_symbol_is_process_callable,
+    dylib_registry_close
+}
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
@@ -34,6 +41,33 @@ fn loader_dispatch(bytes: [u8], space: ProcessVmSpace) -> i64:
     if smf_has_header(bytes):
         return smf_load(bytes, space)
     -8  # -ENOEXEC — unknown format
+
+fn loader_dynopen_bytes(path: text, bytes: [u8]) -> i64:
+    """Register a dynamic library image and return a kernel dynload handle.
+
+    This is the public kernel-loader dynload entrypoint for callers that have
+    already resolved the path to bytes. ELF shared objects and role-2 SMF
+    library envelopes are validated by the registry.
+    """
+    if bytes.len() == 0:
+        return -2
+    dylib_registry_register(path, bytes)
+
+fn loader_dynopen_registered(path: text) -> i64:
+    """Retain an already-registered dynamic library by path."""
+    dylib_registry_open(path)
+
+fn loader_dynsym(handle: i64, name: text) -> i64:
+    """Resolve a symbol from a kernel dynload handle."""
+    dylib_registry_symbol(handle, name)
+
+fn loader_dynsym_is_process_callable(handle: i64, name: text) -> bool:
+    """Return whether a resolved dynload symbol is process-callable."""
+    dylib_registry_symbol_is_process_callable(handle, name)
+
+fn loader_dynclose(handle: i64) -> i64:
+    """Close one reference to a kernel dynload handle."""
+    dylib_registry_close(handle)
 
 # ============================================================================
 # Exported C-ABI entry-point

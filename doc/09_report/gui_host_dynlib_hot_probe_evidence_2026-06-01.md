@@ -63,3 +63,27 @@ role-2 native library stub from the SMF envelope outside the measured loop,
 opens the extracted dynlib once, resolves the symbol, and times direct symbol
 calls. The remaining acceptance evidence still needs the same row from a macOS
 arm64 `.dylib` wrapped in SMF.
+
+## SimpleOS Dynload Support
+
+The SimpleOS kernel dynload registry now accepts role-2 SMF library envelopes
+as first-class dynamic-library inputs. `dylib_registry_register()` unwraps the
+native library stub from SMF, validates it as ELF for SimpleOS symbol lookup,
+and `dylib_registry_symbol()` resolves `.dynsym` names from that payload.
+
+Focused evidence:
+
+```bash
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/os/kernel/loader/dylib_registry.spl test/unit/os/kernel/loader/dylib_registry_spec.spl
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/os/kernel/loader/loader_api.spl src/os/kernel/loader/dylib_registry.spl src/os/kernel/ipc/syscall_process.spl test/unit/os/kernel/loader/loader_api_spec.spl test/unit/os/kernel/loader/dylib_registry_spec.spl
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/kernel/loader/loader_api_spec.spl --mode=interpreter --clean --format json
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/kernel/loader/dylib_registry_spec.spl --mode=interpreter --clean --format json
+```
+
+Result: `loader_api_spec` passed 5/5 and `dylib_registry_spec` passed 7/7,
+including role-2 SMF library dynload symbol resolution. The registry still
+reports these symbols as not process-callable because SimpleOS has not yet
+mapped the shared object into the current process with executable permissions.
+The broader `syscall_spec` timed out after 120 seconds in interpreter mode
+before listing scenarios; the syscall bridge typecheck passed in the focused
+check above.

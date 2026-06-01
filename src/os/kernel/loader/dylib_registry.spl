@@ -11,7 +11,7 @@ use os.kernel.loader.elf64.{
     elf64_dynsym_lookup,
     Elf64Header
 }
-use os.kernel.loader.smf.{smf_extract_executable_stub, smf_has_header}
+use os.kernel.loader.smf.{smf_extract_executable_stub, smf_extract_library_stub, smf_has_header}
 
 val DYLIB_ENTRY_START: text = "_start"
 val DYLIB_ENTRY_MAIN: text = "main"
@@ -59,10 +59,10 @@ fn _validate_library_entry_point(bytes: [u8]) -> i64?:
         return Some(elf.e_entry)
 
     if smf_has_header(bytes):
-        val stub = smf_extract_executable_stub(bytes)
-        if stub.is_err():
+        val stub = _get_native_library_bytes(bytes)
+        if stub.len() == 0:
             return nil
-        val stub_elf_opt = elf64_parse_header(stub.unwrap())
+        val stub_elf_opt = elf64_parse_header(stub)
         if stub_elf_opt == nil:
             return nil
         val stub_elf = stub_elf_opt.unwrap()
@@ -161,18 +161,23 @@ fn dylib_registry_close(handle: i64) -> i64:
     _remove_entry_at(idx)
     0
 
-fn _get_elf_bytes(entry: DylibRegistryEntry) -> [u8]:
-    """Extract the raw ELF bytes from a registry entry, unwrapping SMF if needed."""
-    val bytes = entry.bytes
+fn _get_native_library_bytes(bytes: [u8]) -> [u8]:
+    """Extract native library bytes, accepting ELF and SMF executable/library envelopes."""
     val hdr_opt = elf64_parse_header(bytes)
     if hdr_opt != nil:
         return bytes
     if smf_has_header(bytes):
-        val stub = smf_extract_executable_stub(bytes)
-        if stub.is_err():
-            return []
-        return stub.unwrap()
+        val lib_stub = smf_extract_library_stub(bytes)
+        if lib_stub.is_ok():
+            return lib_stub.unwrap()
+        val exec_stub = smf_extract_executable_stub(bytes)
+        if exec_stub.is_ok():
+            return exec_stub.unwrap()
     []
+
+fn _get_elf_bytes(entry: DylibRegistryEntry) -> [u8]:
+    """Extract raw ELF bytes from a registry entry, unwrapping SMF if needed."""
+    _get_native_library_bytes(entry.bytes)
 
 fn _dylib_lookup_symbol_slow(bytes: [u8], name: text) -> i64:
     """Slow path: parse section headers and search .dynsym/.symtab for `name`."""
