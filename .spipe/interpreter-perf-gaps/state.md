@@ -190,3 +190,17 @@ Verification:
 - PASS `cargo test -p simple-compiler watchdog --manifest-path src/compiler_rust/Cargo.toml -- --test-threads=1`
 - PASS `SIMPLE_LIB=src bin/simple test test/unit/app/interpreter/perf_spec.spl --mode=interpreter --clean` (10 scenarios)
 - PASS `SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean` (51 scenarios)
+
+## Wave 13 Progress — string concatenation allocation path (2026-06-01)
+
+The Rust interpreter binary `+` path now builds string concatenation results
+with capacity-sized `String` growth instead of `format!`. This preserves the
+existing display coercion behavior for `text + value` and `value + text`, while
+removing formatter setup from the hot string/string case called out in the
+Wave 10 audit.
+
+Verification:
+- PASS `cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml`
+- PASS `SIMPLE_LIB=src bin/simple test test/system/features/string_system_spec.spl --mode=interpreter --clean` (33 scenarios)
+- PASS `SIMPLE_LIB=src bin/simple test test/unit/app/interpreter/perf_spec.spl --mode=interpreter --clean` (10 scenarios)
+- PASS `SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean` (51 scenarios)

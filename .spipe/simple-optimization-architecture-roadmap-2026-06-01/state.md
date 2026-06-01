@@ -80,3 +80,5 @@ dev-done
 - implementation: Interpreter lane changed the shared timeout flag from `SeqCst` to `Release` stores plus `Acquire` reads in `fault_detection`, `watchdog`, and the compiler interpreter timeout test path.
 - verification: PASS `cargo check -p simple-compiler -p simple-common --manifest-path src/compiler_rust/Cargo.toml`; PASS `cargo test -p simple-common timeout --manifest-path src/compiler_rust/Cargo.toml`; PASS `cargo test -p simple-compiler watchdog --manifest-path src/compiler_rust/Cargo.toml -- --test-threads=1`.
 - verification: PASS interpreter perf and tiered JIT smoke specs after the timeout ordering change.
+- implementation: Interpreter lane replaced formatter-based string concatenation in `src/compiler_rust/compiler/src/interpreter/expr/ops.rs` with capacity-sized `String` growth.
+- verification: PASS `cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml`; PASS string system (33), interpreter perf (10), and tiered JIT hotspot (51) interpreter specs.

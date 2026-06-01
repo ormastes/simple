@@ -66,6 +66,13 @@ fn float_kind(left: &Value, right: &Value) -> Option<bool> {
     }
 }
 
+fn concat_text(left: &str, right: &str) -> String {
+    let mut text = String::with_capacity(left.len() + right.len());
+    text.push_str(left);
+    text.push_str(right);
+    text
+}
+
 /// Read a value as `f32`, widening from `Float32` natively or from int kinds.
 /// Used for `f32`-precision arithmetic; never widens through f64.
 fn as_f32(v: &Value) -> Result<f32, CompileError> {
@@ -629,9 +636,15 @@ pub(super) fn eval_op_expr(
 
             let result = match op {
                 BinOp::Add => match (&left_val, &right_val) {
-                    (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{a}{b}"))),
-                    (Value::Str(a), b) => Ok(Value::Str(format!("{a}{}", b.to_display_string()))),
-                    (a, Value::Str(b)) => Ok(Value::Str(format!("{}{}", a.to_display_string(), b))),
+                    (Value::Str(a), Value::Str(b)) => Ok(Value::Str(concat_text(a, b))),
+                    (Value::Str(a), b) => {
+                        let b = b.to_display_string();
+                        Ok(Value::Str(concat_text(a, &b)))
+                    }
+                    (a, Value::Str(b)) => {
+                        let a = a.to_display_string();
+                        Ok(Value::Str(concat_text(&a, b)))
+                    }
                     // Array concatenation: [a, b] + [c, d] => [a, b, c, d]
                     (Value::Array(a), Value::Array(b)) => {
                         let mut arc = Arc::clone(a);
