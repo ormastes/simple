@@ -161,6 +161,21 @@ expect(gui_dynlib_hot_probe_tick(7)).to_equal(4)
 
 </details>
 
+#### keeps representative hot count free of unused iteration conversion
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = rt_file_read_text("src/lib/gui/pure_core.spl")
+expect(source.contains("val _i = iteration.to_i32()")).to_equal(false)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -180,8 +195,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
