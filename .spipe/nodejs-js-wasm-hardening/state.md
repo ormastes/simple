@@ -44,3 +44,6 @@ dev-incomplete
 - dev: PASS `SIMPLE_LIB=src bin/simple check src/os/ai_cli_js_node_contract.spl`.
 - dev: PASS `SIMPLE_LIB=src bin/simple test test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter --clean` (20 scenarios).
 - dev: Regenerated `doc/06_spec/system/os/simpleos_ai_cli_js_node_port_spec.md` with permission-flag coverage; command completed with existing compiler/docgen warnings.
+- dev: PASS `SIMPLE_LIB=src bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean` (142 scenarios), covering executable Node-compatible positive APIs plus fail-closed file, process, network, credential/environment, crypto entropy, readline, HTTP/HTTPS, Buffer, EventEmitter, path, process, and OS behavior.
+- dev: Regenerated `doc/06_spec/feature/js/node_api_conformance_spec.md`; command completed with existing compiler/docgen warnings.
+- dev: Marked the Phase 5 denial-path test checklist item complete in `doc/03_plan/simpleos_nodejs_ai_cli_migration.md` based on the passing system OS contract and executable Node API conformance suites.

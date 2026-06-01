@@ -2111,7 +2111,7 @@ expect(_eval_str("new TextDecoder('utf8').encoding")).to_equal("utf-8")
 | Category | Other |
 | Status | Active |
 | Source | `test/feature/js/node_api_conformance_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

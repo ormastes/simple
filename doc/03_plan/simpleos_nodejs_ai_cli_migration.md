@@ -211,7 +211,7 @@ Leverage existing `AiCliManifest` capability system:
 - [ ] Credentials: enforce `credential_grants`, block ambient env var reads
 - [ ] Compare with Deno permissions model (`--allow-read`, `--allow-net`)
 - [x] Add Node.js `--experimental-permission`-style flags to QuickJS launcher contract
-- [ ] Test: all denial paths from existing `simpleos_ai_cli_js_node_port_spec.spl`
+- [x] Test: all denial paths from existing `simpleos_ai_cli_js_node_port_spec.spl` and executable Node API conformance coverage
 - [ ] Serial marker: `[ai-cli] hardening:ok app=<tool>`
 
 ### Phase 6: Full QEMU Validation (1 week)
