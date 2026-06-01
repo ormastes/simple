@@ -35,6 +35,7 @@ use app.compile.native_profile_counter.{
     native_profile_counter_increment_record,
     native_profile_counter_increment_records,
     native_profile_counter_array_symbol,
+    native_profile_counter_build_audit,
     native_profile_counter_metadata_symbol,
     native_profile_counter_function_entry_slots_from_c_source,
     native_profile_counter_instrument_c_source,
@@ -315,6 +316,23 @@ describe "Native Profile Counter Contract":
             expect(instrumented.enabled).to_equal(false)
             expect(instrumented.slot_count).to_equal(0)
             expect(instrumented.c_source).to_equal(source)
+
+        it "should fail the build audit if counters leak into non-profile builds":
+            val source = "int main(void) {\n  return 0;\n}\n"
+            val clean = native_profile_counter_build_audit(source, false)
+            expect(clean.allowed).to_equal(true)
+            expect(clean.reason).to_equal("non_profile_build_clean")
+
+            val instrumented = native_profile_counter_instrument_c_source(source, true)
+            val profile_audit = native_profile_counter_build_audit(instrumented.c_source, true)
+            expect(profile_audit.allowed).to_equal(true)
+            expect(profile_audit.counter_symbols_found).to_equal(true)
+            expect(profile_audit.counter_increments_found).to_equal(true)
+            expect(profile_audit.metadata_found).to_equal(true)
+
+            val leaked = native_profile_counter_build_audit(instrumented.c_source, false)
+            expect(leaked.allowed).to_equal(false)
+            expect(leaked.reason).to_equal("counter_artifacts_in_non_profile_build")
 
     describe "runtime sprof extraction":
         it "should map metadata and final counter values to sprof-compatible records":

@@ -383,13 +383,17 @@ Status: first implementation slice exists at
 `src/os/baremetal/profile/breakpoint_counter.spl` with breakpoint state
 transitions, over-budget auto-disarm, sampled-only fallback, cleanup-event
 coverage, and patch-ledger validation. Contract coverage exists at
-`test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl`. Actual
-architecture-specific instruction patch/trap/restore integration remains future
-work.
+`test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl`. The
+architecture patch profile contract now covers x86/i386/x86_64 INT3,
+ARM32 BKPT, Thumb/Thumb2 BKPT, AArch64 BRK, RV32/RV64 EBREAK, and compressed
+RV32C/RV64C EBREAK. Actual QEMU-backed target memory/trap-handler adapters are
+the next implementation slice.
 
 Deliverables:
 - software-breakpoint site table;
 - patch/trap/count/restore/rearm state machine;
+- architecture-specific trap opcode, patch-byte, PC-advance, alignment, and
+  icache policy matrix for x86, ARM/Thumb/AArch64, and RISC-V/RVC;
 - over-budget auto-disarm;
 - timer/sampling fallback;
 - QEMU evidence path and hardware-unavailable reporting.
@@ -398,6 +402,9 @@ Exit gates:
 - breakpoints are removed before release execution;
 - panic/watchdog cleanup restores patched code;
 - hot loop sites transition to sampled-only after calibration.
+- QEMU-backed specs prove real target patch, trap, count, restore,
+  PC-advance/single-step, rearm, and cleanup for at least one x86, one ARM, and
+  one RISC-V target before claiming target-backed support.
 
 ## Phase 5: Cross-Mode Verification
 

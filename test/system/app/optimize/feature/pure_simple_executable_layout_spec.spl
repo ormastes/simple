@@ -16,6 +16,7 @@ use app.optimize.executable_layout.{
     layout_mark_cold_candidate,
     layout_plan_entries_non_overlapping,
     layout_plan_manifest_text,
+    layout_rewrite_manifest_artifact,
     layout_plan_steps,
     layout_plan_valid,
     layout_profile_guided_plan,
@@ -354,3 +355,24 @@ describe "Pure Simple Executable Layout Optimizer Contract":
             expect(layout_plan_entries_non_overlapping(cold_overlap)).to_equal(false)
             expect(layout_plan_valid(cold_overlap)).to_equal(false)
             expect(layout_plan_manifest_text(cold_overlap)).to_equal("")
+
+        it "should apply the Simple-owned rewrite artifact and reject arbitrary ELF rewriting":
+            val entries = [
+                ExecutableLayoutManifestEntry(symbol_name: "rare", section_name: ".text", original_offset: 300, optimized_offset: 0, size_bytes: 64),
+                ExecutableLayoutManifestEntry(symbol_name: "dispatch", section_name: ".text", original_offset: 64, optimized_offset: 0, size_bytes: 80)
+            ]
+            val profiles = [
+                ExecutableLayoutFunctionProfile(symbol_name: "dispatch", sample_count: 8, call_count: 0, size_bytes: 80, original_index: 0),
+                ExecutableLayoutFunctionProfile(symbol_name: "rare", sample_count: 1, call_count: 0, size_bytes: 64, original_index: 1)
+            ]
+            val plan = layout_profile_guided_plan(entries, profiles, true, true, true, true, 4096, 8192, 500, 2)
+            val artifact = layout_rewrite_manifest_artifact(plan, "simple-native-layout-manifest", false)
+
+            expect(artifact.applied).to_equal(true)
+            expect(artifact.entry_count).to_equal(2)
+            expect(artifact.manifest_text).to_contain("hot\t.text\tdispatch")
+            expect(artifact.manifest_text).to_contain("cold\t.text\trare")
+
+            val elf = layout_rewrite_manifest_artifact(plan, "elf", false)
+            expect(elf.applied).to_equal(false)
+            expect(elf.diagnostics).to_contain("arbitrary_elf_rewrite_not_supported")

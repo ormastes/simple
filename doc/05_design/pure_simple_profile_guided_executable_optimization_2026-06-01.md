@@ -146,6 +146,41 @@ candidate -> armed -> hit -> counted -> restore_original -> single_step
 - `state`
 - `fallback`: `none`, `timer_sample`, `hardware_counter`, `manual_probe`
 
+### Architecture Patch Profile
+
+`BreakpointArchitecturePatchProfile` records the instruction-family contract
+that a target runner must satisfy before arming a site:
+
+- `arch`: normalized target name such as `x86`, `x86_64`, `arm32`, `thumb`,
+  `aarch64`, `riscv32`, `riscv64`, `riscv32c`, or `riscv64c`;
+- `instruction_set`: `x86`, `arm`, `thumb`, `aarch64`, `riscv`, or
+  `riscv-compressed`;
+- `trap_opcode_name`, `trap_opcode_hex`, and little-endian `patch_bytes`;
+- `patch_width_bytes` and `pc_advance_bytes`;
+- required alignment and icache-flush policy.
+
+The portable capsule treats these as production contracts, not QEMU proof. A
+target-backed runner must still prove that the trap handler increments the site
+counter, restores the original instruction, advances or single-steps past the
+original instruction, rearms below budget, and removes every patch during
+cleanup.
+
+### Target Hook Readiness
+
+`BreakpointTargetIntegrationPlan` fails closed until the target provides:
+
+1. original instruction read;
+2. trap instruction write;
+3. trap handler registration;
+4. instruction-cache flush when required by the architecture;
+5. single-step or equivalent PC-advance support;
+6. restore and rearm support;
+7. QEMU evidence for the selected architecture.
+
+Missing hooks surface deterministic statuses such as `missing_memory_writer`,
+`missing_trap_handler`, `missing_icache_flush`, `missing_single_step`, and
+`missing_qemu_evidence`.
+
 ### Overhead Protection
 
 The profiler removes or downgrades a breakpoint when any condition holds:
@@ -192,7 +227,11 @@ the path is known, hot sites switch to timer/hardware/sample counters.
 5. Layout artifact writer with manifest.
 6. Bare-metal breakpoint site table and patch ledger.
 7. Bare-metal auto-disarm and sampled fallback.
-8. Cross-mode report and verification harness.
+8. Architecture-specific breakpoint patch profile for x86, ARM/Thumb/AArch64,
+   RISC-V 32/64, and compressed RISC-V.
+9. QEMU-backed target hook adapters for x86, ARM/Thumb/AArch64, and RISC-V
+   families.
+10. Cross-mode report and verification harness.
 
 ## Open Risks
 

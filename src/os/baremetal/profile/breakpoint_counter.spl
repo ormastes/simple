@@ -60,13 +60,49 @@ pub class BreakpointMemoryPatchApplication:
     reason: text
     cleanup_evidence: text
 
+pub class BreakpointTargetIntegrationPlan:
+    arch: text
+    trap_opcode: text
+    patch_width_bytes: i64
+    requires_icache_flush: bool
+    requires_single_step: bool
+    qemu_evidence_required: bool
+    hardware_evidence_required: bool
+    can_arm: bool
+    status: text
+    required_hooks: [text]
+
+pub class BreakpointArchitecturePatchProfile:
+    arch: text
+    instruction_set: text
+    trap_opcode_name: text
+    trap_opcode_hex: text
+    patch_bytes: text
+    patch_width_bytes: i64
+    pc_advance_bytes: i64
+    requires_alignment: i64
+    requires_icache_flush: bool
+    valid: bool
+    reason: text
+
 fn breakpoint_arch_is_four_byte_aligned(address: u64, width_bytes: i64) -> bool:
     if width_bytes == 1:
         return true
+    if width_bytes == 2:
+        return address % 2 == 0
     return address % 4 == 0
 
 pub fn breakpoint_trap_opcode_for_arch(arch: text) -> BreakpointTrapOpcode:
-    if arch == "riscv32" or arch == "riscv64":
+    if arch == "riscv32" or arch == "riscv64" or arch == "riscv32c" or arch == "riscv64c":
+        if arch == "riscv32c" or arch == "riscv64c":
+            return BreakpointTrapOpcode(
+                arch: arch,
+                opcode_hex: "0x9002",
+                width_bytes: 2,
+                little_endian: true,
+                valid: true,
+                reason: "riscv-compressed-ebreak"
+            )
         return BreakpointTrapOpcode(
             arch: arch,
             opcode_hex: "0x00100073",
@@ -75,7 +111,7 @@ pub fn breakpoint_trap_opcode_for_arch(arch: text) -> BreakpointTrapOpcode:
             valid: true,
             reason: "riscv-ebreak"
         )
-    if arch == "x86_64":
+    if arch == "x86" or arch == "i386" or arch == "x86_64":
         return BreakpointTrapOpcode(
             arch: arch,
             opcode_hex: "0xcc",
@@ -83,6 +119,24 @@ pub fn breakpoint_trap_opcode_for_arch(arch: text) -> BreakpointTrapOpcode:
             little_endian: true,
             valid: true,
             reason: "x86-int3"
+        )
+    if arch == "arm32" or arch == "arm":
+        return BreakpointTrapOpcode(
+            arch: arch,
+            opcode_hex: "0xe1200070",
+            width_bytes: 4,
+            little_endian: true,
+            valid: true,
+            reason: "arm-bkpt"
+        )
+    if arch == "thumb" or arch == "thumb2":
+        return BreakpointTrapOpcode(
+            arch: arch,
+            opcode_hex: "0xbe00",
+            width_bytes: 2,
+            little_endian: true,
+            valid: true,
+            reason: "thumb-bkpt"
         )
     if arch == "aarch64":
         return BreakpointTrapOpcode(
@@ -100,6 +154,128 @@ pub fn breakpoint_trap_opcode_for_arch(arch: text) -> BreakpointTrapOpcode:
         little_endian: true,
         valid: false,
         reason: "unsupported_arch"
+    )
+
+fn breakpoint_required_target_hooks(arch: text) -> [text]:
+    val icache_arches = ["riscv32", "riscv64", "riscv32c", "riscv64c", "arm32", "arm", "thumb", "thumb2", "aarch64"]
+    if icache_arches.contains(arch):
+        return [
+            "read_original_instruction",
+            "write_trap_instruction",
+            "flush_instruction_cache",
+            "trap_handler",
+            "single_step",
+            "restore_original_instruction",
+            "rearm_trap_instruction",
+            "cleanup_on_exit"
+        ]
+    val x86_arches = ["x86", "i386", "x86_64"]
+    if x86_arches.contains(arch):
+        return [
+            "read_original_instruction",
+            "write_trap_instruction",
+            "trap_handler",
+            "single_step",
+            "restore_original_instruction",
+            "rearm_trap_instruction",
+            "cleanup_on_exit"
+        ]
+    return []
+
+fn breakpoint_requires_icache_flush(arch: text) -> bool:
+    ["riscv32", "riscv64", "riscv32c", "riscv64c", "arm32", "arm", "thumb", "thumb2", "aarch64"].contains(arch)
+
+fn breakpoint_instruction_set_for_arch(arch: text) -> text:
+    if arch == "x86" or arch == "i386" or arch == "x86_64":
+        return "x86"
+    if arch == "arm32" or arch == "arm":
+        return "arm"
+    if arch == "thumb" or arch == "thumb2":
+        return "thumb"
+    if arch == "aarch64":
+        return "aarch64"
+    if arch == "riscv32" or arch == "riscv64":
+        return "riscv"
+    if arch == "riscv32c" or arch == "riscv64c":
+        return "riscv-compressed"
+    ""
+
+fn breakpoint_trap_opcode_name_for_arch(arch: text) -> text:
+    if arch == "x86" or arch == "i386" or arch == "x86_64":
+        return "int3"
+    if arch == "arm32" or arch == "arm":
+        return "bkpt-arm"
+    if arch == "thumb" or arch == "thumb2":
+        return "bkpt-thumb"
+    if arch == "aarch64":
+        return "brk-imm0"
+    if arch == "riscv32" or arch == "riscv64":
+        return "ebreak"
+    if arch == "riscv32c" or arch == "riscv64c":
+        return "c.ebreak"
+    ""
+
+fn breakpoint_required_alignment_for_width(width_bytes: i64) -> i64:
+    if width_bytes <= 1:
+        return 1
+    if width_bytes == 2:
+        return 2
+    4
+
+pub fn breakpoint_architecture_patch_profile(arch: text) -> BreakpointArchitecturePatchProfile:
+    val trap = breakpoint_trap_opcode_for_arch(arch)
+    val opcode_name = breakpoint_trap_opcode_name_for_arch(arch)
+    val patch_bytes = breakpoint_trap_patch_bytes(arch, opcode_name)
+    BreakpointArchitecturePatchProfile(
+        arch: arch,
+        instruction_set: breakpoint_instruction_set_for_arch(arch),
+        trap_opcode_name: opcode_name,
+        trap_opcode_hex: trap.opcode_hex,
+        patch_bytes: patch_bytes,
+        patch_width_bytes: trap.width_bytes,
+        pc_advance_bytes: trap.width_bytes,
+        requires_alignment: breakpoint_required_alignment_for_width(trap.width_bytes),
+        requires_icache_flush: breakpoint_requires_icache_flush(arch),
+        valid: trap.valid and patch_bytes != "",
+        reason: if trap.valid: trap.reason else: "unsupported_arch"
+    )
+
+pub fn breakpoint_target_integration_plan(
+    arch: text,
+    qemu_available: bool,
+    trap_handler_registered: bool,
+    memory_writer_available: bool,
+    icache_flush_available: bool,
+    single_step_available: bool
+) -> BreakpointTargetIntegrationPlan:
+    val trap = breakpoint_trap_opcode_for_arch(arch)
+    val requires_icache = breakpoint_requires_icache_flush(arch)
+    val hooks = breakpoint_required_target_hooks(arch)
+    var status = "ready"
+    if not trap.valid:
+        status = "unsupported_arch"
+    elif not memory_writer_available:
+        status = "missing_memory_writer"
+    elif not trap_handler_registered:
+        status = "missing_trap_handler"
+    elif requires_icache and not icache_flush_available:
+        status = "missing_icache_flush"
+    elif not single_step_available:
+        status = "missing_single_step"
+    elif not qemu_available:
+        status = "missing_qemu_evidence"
+
+    BreakpointTargetIntegrationPlan(
+        arch: arch,
+        trap_opcode: trap.opcode_hex,
+        patch_width_bytes: trap.width_bytes,
+        requires_icache_flush: requires_icache,
+        requires_single_step: trap.valid,
+        qemu_evidence_required: not qemu_available,
+        hardware_evidence_required: false,
+        can_arm: status == "ready",
+        status: status,
+        required_hooks: hooks
     )
 
 pub fn breakpoint_patch_record_construct(address: u64, arch: text, original_opcode: text) -> BreakpointPatchRecord:
@@ -383,22 +559,31 @@ pub fn breakpoint_cleanup_ledger_summary(
 
 pub fn breakpoint_supported_trap_opcodes() -> [text]:
     [
+        "x86:int3",
+        "i386:int3",
         "x86_64:int3",
+        "arm32:bkpt-arm",
+        "thumb:bkpt-thumb",
+        "thumb2:bkpt-thumb",
         "aarch64:brk-imm0",
         "riscv32:ebreak",
         "riscv64:ebreak",
-        "riscv32:c.ebreak",
-        "riscv64:c.ebreak"
+        "riscv32c:c.ebreak",
+        "riscv64c:c.ebreak"
     ]
 
 pub fn breakpoint_trap_patch_bytes(architecture: text, trap_opcode: text) -> text:
-    if architecture == "x86_64" and trap_opcode == "int3":
+    if (architecture == "x86" or architecture == "i386" or architecture == "x86_64") and trap_opcode == "int3":
         return "cc"
+    if (architecture == "arm32" or architecture == "arm") and trap_opcode == "bkpt-arm":
+        return "70 00 20 e1"
+    if (architecture == "thumb" or architecture == "thumb2") and trap_opcode == "bkpt-thumb":
+        return "00 be"
     if architecture == "aarch64" and trap_opcode == "brk-imm0":
         return "00 00 20 d4"
     if (architecture == "riscv32" or architecture == "riscv64") and trap_opcode == "ebreak":
         return "73 00 10 00"
-    if (architecture == "riscv32" or architecture == "riscv64") and trap_opcode == "c.ebreak":
+    if (architecture == "riscv32c" or architecture == "riscv64c") and trap_opcode == "c.ebreak":
         return "02 90"
     ""
 
@@ -409,10 +594,18 @@ pub fn breakpoint_trap_patch_encoding(architecture: text, trap_opcode: text) -> 
     "patch-bytes:arch={architecture};trap={trap_opcode};bytes={bytes}"
 
 fn breakpoint_patch_bytes_arch_supported(architecture: text) -> bool:
-    architecture == "x86_64" or
+    architecture == "x86" or
+        architecture == "i386" or
+        architecture == "x86_64" or
+        architecture == "arm32" or
+        architecture == "arm" or
+        architecture == "thumb" or
+        architecture == "thumb2" or
         architecture == "aarch64" or
         architecture == "riscv32" or
-        architecture == "riscv64"
+        architecture == "riscv64" or
+        architecture == "riscv32c" or
+        architecture == "riscv64c"
 
 fn breakpoint_opcode_hex_payload(opcode_hex: text) -> text:
     val normalized = opcode_hex.lower()

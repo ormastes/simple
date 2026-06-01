@@ -19,6 +19,38 @@ bare-metal call paths without depending on external BOLT.
 | Bare-Metal Counter | OS/debug/bare-metal capsule | software-breakpoint counters, auto-disarm, sampling fallback |
 | Verification | SPipe + reports | overhead, correctness, reproducibility, hardware evidence |
 
+## Architecture-Specific Breakpoint Capsule
+
+The bare-metal counter capsule now separates the architecture contract from
+target execution. `src/os/baremetal/profile/breakpoint_counter.spl` owns the
+portable profile session state machine and the architecture patch profile:
+
+| Family | Variants | Trap | Width | PC advance | I-cache |
+|--------|----------|------|-------|------------|---------|
+| x86 | `x86`, `i386`, `x86_64` | `int3` / `0xcc` | 1 | 1 | no explicit target flush |
+| ARM | `arm`, `arm32` | ARM `bkpt` / `0xe1200070` | 4 | 4 | required |
+| Thumb | `thumb`, `thumb2` | Thumb `bkpt` / `0xbe00` | 2 | 2 | required |
+| AArch64 | `aarch64` | `brk #0` / `0xd4200000` | 4 | 4 | required |
+| RISC-V | `riscv32`, `riscv64` | `ebreak` / `0x00100073` | 4 | 4 | required (`fence.i`) |
+| RVC | `riscv32c`, `riscv64c` | `c.ebreak` / `0x9002` | 2 | 2 | required (`fence.i`) |
+
+The target-backed implementation must provide hooks for reading original
+instructions, writing trap instructions, dispatching traps, restoring original
+instructions, single-step or PC-advance behavior, rearming, and cleanup. ARM,
+Thumb, AArch64, and RISC-V additionally require instruction-cache maintenance
+before a site can be considered armed.
+
+Real QEMU/hardware runners belong in target capsules below
+`src/os/baremetal/profile/` rather than in the portable counter model:
+
+- `breakpoint_counter_x86.spl`: x86/i386/x86_64 INT3 frame normalization.
+- `breakpoint_counter_arm.spl`: ARM/Thumb/AArch64 BKPT/BRK syndrome and PC
+  handling plus cache maintenance.
+- `breakpoint_counter_riscv.spl`: RV32/RV64/RVC EBREAK cause handling,
+  compressed-instruction width detection, and `fence.i`.
+- `breakpoint_counter_qemu.spl`: QEMU evidence normalization for all supported
+  target families.
+
 ## Data Flow
 
 ```
@@ -61,6 +93,9 @@ Rules:
 - remove all breakpoints before optimized/release execution;
 - persist only counts and confidence into `.sprof`;
 - use timer or hardware counters when breakpoint trap cost is too high.
+- do not report an architecture as target-backed until QEMU evidence proves
+  patch, trap, count, restore, PC advance or single-step, rearm, cleanup, and
+  required icache flush behavior for that architecture family.
 
 ## Loader Strategy
 

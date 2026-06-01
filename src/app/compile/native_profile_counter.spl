@@ -72,6 +72,14 @@ struct NativeProfileCounterSprofExtraction:
     lines: [text]
     diagnostics: [text]
 
+struct NativeProfileCounterBuildAudit:
+    profile_build: bool
+    counter_symbols_found: bool
+    counter_increments_found: bool
+    metadata_found: bool
+    allowed: bool
+    reason: text
+
 fn native_profile_counter_kinds() -> [text]:
     ["function_entry", "basic_block", "edge", "call_path"]
 
@@ -412,6 +420,28 @@ fn native_profile_counter_instrument_c_source(c_source: text, enabled: bool) -> 
         slot_count: slots.len(),
         c_source: prelude.c_source + instrumented_lines.join("\n"),
         metadata_lines: metadata_lines
+    )
+
+fn native_profile_counter_build_audit(c_source: text, profile_build: bool) -> NativeProfileCounterBuildAudit:
+    val counter_symbols = c_source.contains("__simple_profile_counters")
+    val increments = c_source.contains("__simple_profile_counters[") and c_source.contains("+= 1u")
+    val metadata = c_source.contains("simple-profile-counter-prelude-v1") or c_source.contains("__simple_profile_counter_metadata")
+    if not profile_build and (counter_symbols or increments or metadata):
+        return NativeProfileCounterBuildAudit(
+            profile_build: profile_build,
+            counter_symbols_found: counter_symbols,
+            counter_increments_found: increments,
+            metadata_found: metadata,
+            allowed: false,
+            reason: "counter_artifacts_in_non_profile_build"
+        )
+    NativeProfileCounterBuildAudit(
+        profile_build: profile_build,
+        counter_symbols_found: counter_symbols,
+        counter_increments_found: increments,
+        metadata_found: metadata,
+        allowed: true,
+        reason: if profile_build: "profile_build_may_contain_counters" else: "non_profile_build_clean"
     )
 
 fn _native_profile_counter_pipe_value(line: text, key: text) -> text:

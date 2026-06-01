@@ -3,6 +3,7 @@
 
 use std.spec.{describe, it, expect}
 use os.baremetal.profile.breakpoint_counter.{
+    breakpoint_architecture_patch_profile,
     breakpoint_auto_disarm_state,
     breakpoint_apply_patch_record_to_memory,
     breakpoint_cleanup_ledger_summary,
@@ -26,6 +27,7 @@ use os.baremetal.profile.breakpoint_counter.{
     breakpoint_sampled_only_fallback_state,
     breakpoint_should_disarm,
     breakpoint_supported_trap_opcodes,
+    breakpoint_target_integration_plan,
     breakpoint_trap_opcode_for_arch,
     breakpoint_trap_patch_bytes,
     breakpoint_trap_patch_encoding,
@@ -103,6 +105,11 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
 
     describe "patch ledger":
         it "should select architecture-specific software trap opcodes":
+            val x86 = breakpoint_trap_opcode_for_arch("i386")
+            expect(x86.valid).to_equal(true)
+            expect(x86.opcode_hex).to_equal("0xcc")
+            expect(x86.width_bytes).to_equal(1)
+
             val rv32 = breakpoint_trap_opcode_for_arch("riscv32")
             expect(rv32.valid).to_equal(true)
             expect(rv32.opcode_hex).to_equal("0x00100073")
@@ -113,10 +120,25 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(rv64.opcode_hex).to_equal("0x00100073")
             expect(rv64.width_bytes).to_equal(4)
 
+            val rvc = breakpoint_trap_opcode_for_arch("riscv64c")
+            expect(rvc.valid).to_equal(true)
+            expect(rvc.opcode_hex).to_equal("0x9002")
+            expect(rvc.width_bytes).to_equal(2)
+
             val x64 = breakpoint_trap_opcode_for_arch("x86_64")
             expect(x64.valid).to_equal(true)
             expect(x64.opcode_hex).to_equal("0xcc")
             expect(x64.width_bytes).to_equal(1)
+
+            val arm32 = breakpoint_trap_opcode_for_arch("arm32")
+            expect(arm32.valid).to_equal(true)
+            expect(arm32.opcode_hex).to_equal("0xe1200070")
+            expect(arm32.width_bytes).to_equal(4)
+
+            val thumb = breakpoint_trap_opcode_for_arch("thumb")
+            expect(thumb.valid).to_equal(true)
+            expect(thumb.opcode_hex).to_equal("0xbe00")
+            expect(thumb.width_bytes).to_equal(2)
 
             val arm64 = breakpoint_trap_opcode_for_arch("aarch64")
             expect(arm64.valid).to_equal(true)
@@ -148,6 +170,64 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(already_trap.valid).to_equal(false)
             expect(already_trap.reason).to_equal("invalid_original_opcode")
 
+        it "should require real target hooks before ARM and RISC-V breakpoint counters can arm":
+            val ready = breakpoint_target_integration_plan("riscv64", true, true, true, true, true)
+            expect(ready.can_arm).to_equal(true)
+            expect(ready.status).to_equal("ready")
+            expect(ready.trap_opcode).to_equal("0x00100073")
+            expect(ready.requires_icache_flush).to_equal(true)
+            expect(ready.required_hooks).to_contain("flush_instruction_cache")
+            expect(ready.required_hooks).to_contain("trap_handler")
+
+            val missing_icache = breakpoint_target_integration_plan("aarch64", true, true, true, false, true)
+            expect(missing_icache.can_arm).to_equal(false)
+            expect(missing_icache.status).to_equal("missing_icache_flush")
+            expect(missing_icache.trap_opcode).to_equal("0xd4200000")
+
+            val missing_qemu = breakpoint_target_integration_plan("riscv32", false, true, true, true, true)
+            expect(missing_qemu.can_arm).to_equal(false)
+            expect(missing_qemu.qemu_evidence_required).to_equal(true)
+            expect(missing_qemu.status).to_equal("missing_qemu_evidence")
+
+            val unsupported = breakpoint_target_integration_plan("mips64", true, true, true, true, true)
+            expect(unsupported.can_arm).to_equal(false)
+            expect(unsupported.status).to_equal("unsupported_arch")
+
+        it "should describe architecture-specific PC advance alignment and icache policy":
+            val x86 = breakpoint_architecture_patch_profile("x86")
+            expect(x86.valid).to_equal(true)
+            expect(x86.instruction_set).to_equal("x86")
+            expect(x86.trap_opcode_name).to_equal("int3")
+            expect(x86.patch_bytes).to_equal("cc")
+            expect(x86.pc_advance_bytes).to_equal(1)
+            expect(x86.requires_alignment).to_equal(1)
+            expect(x86.requires_icache_flush).to_equal(false)
+
+            val arm = breakpoint_architecture_patch_profile("arm32")
+            expect(arm.valid).to_equal(true)
+            expect(arm.instruction_set).to_equal("arm")
+            expect(arm.trap_opcode_name).to_equal("bkpt-arm")
+            expect(arm.patch_bytes).to_equal("70 00 20 e1")
+            expect(arm.pc_advance_bytes).to_equal(4)
+            expect(arm.requires_alignment).to_equal(4)
+            expect(arm.requires_icache_flush).to_equal(true)
+
+            val thumb = breakpoint_architecture_patch_profile("thumb")
+            expect(thumb.valid).to_equal(true)
+            expect(thumb.instruction_set).to_equal("thumb")
+            expect(thumb.trap_opcode_name).to_equal("bkpt-thumb")
+            expect(thumb.patch_bytes).to_equal("00 be")
+            expect(thumb.pc_advance_bytes).to_equal(2)
+            expect(thumb.requires_alignment).to_equal(2)
+
+            val rvc = breakpoint_architecture_patch_profile("riscv32c")
+            expect(rvc.valid).to_equal(true)
+            expect(rvc.instruction_set).to_equal("riscv-compressed")
+            expect(rvc.trap_opcode_name).to_equal("c.ebreak")
+            expect(rvc.patch_bytes).to_equal("02 90")
+            expect(rvc.pc_advance_bytes).to_equal(2)
+            expect(rvc.requires_alignment).to_equal(2)
+
         it "should validate patch restore and trap opcode records":
             expect(breakpoint_patch_ledger_valid(4096, "0x00000013", "0x00100073", "0x00000013", "0x00100073")).to_equal(true)
             expect(breakpoint_patch_ledger_valid(4096, "0x00100073", "0x00100073", "0x00100073", "0x00100073")).to_equal(false)
@@ -164,19 +244,27 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
     describe "patch byte encoding":
         it "should encode every supported trap opcode deterministically":
             val supported = breakpoint_supported_trap_opcodes()
+            expect(supported).to_contain("x86:int3")
+            expect(supported).to_contain("i386:int3")
             expect(supported).to_contain("x86_64:int3")
+            expect(supported).to_contain("arm32:bkpt-arm")
+            expect(supported).to_contain("thumb:bkpt-thumb")
+            expect(supported).to_contain("thumb2:bkpt-thumb")
             expect(supported).to_contain("aarch64:brk-imm0")
             expect(supported).to_contain("riscv32:ebreak")
             expect(supported).to_contain("riscv64:ebreak")
-            expect(supported).to_contain("riscv32:c.ebreak")
-            expect(supported).to_contain("riscv64:c.ebreak")
+            expect(supported).to_contain("riscv32c:c.ebreak")
+            expect(supported).to_contain("riscv64c:c.ebreak")
 
+            expect(breakpoint_trap_patch_bytes("i386", "int3")).to_equal("cc")
             expect(breakpoint_trap_patch_bytes("x86_64", "int3")).to_equal("cc")
+            expect(breakpoint_trap_patch_bytes("arm32", "bkpt-arm")).to_equal("70 00 20 e1")
+            expect(breakpoint_trap_patch_bytes("thumb", "bkpt-thumb")).to_equal("00 be")
             expect(breakpoint_trap_patch_bytes("aarch64", "brk-imm0")).to_equal("00 00 20 d4")
             expect(breakpoint_trap_patch_bytes("riscv32", "ebreak")).to_equal("73 00 10 00")
             expect(breakpoint_trap_patch_bytes("riscv64", "ebreak")).to_equal("73 00 10 00")
-            expect(breakpoint_trap_patch_bytes("riscv32", "c.ebreak")).to_equal("02 90")
-            expect(breakpoint_trap_patch_bytes("riscv64", "c.ebreak")).to_equal("02 90")
+            expect(breakpoint_trap_patch_bytes("riscv32c", "c.ebreak")).to_equal("02 90")
+            expect(breakpoint_trap_patch_bytes("riscv64c", "c.ebreak")).to_equal("02 90")
             expect(breakpoint_trap_patch_bytes("aarch64", "int3")).to_equal("")
 
         it "should encode patch and restore bytes as ledger-ready production data":
