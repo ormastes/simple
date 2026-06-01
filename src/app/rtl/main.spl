@@ -1,0 +1,86 @@
+# Simple RTL command model.
+
+use std.cli.cli_util.{get_cli_args}
+use lib.nogc_sync_mut.hardware.qor.{RtlQorRun, rtl_qor_run_markdown}
+
+class RtlCommand:
+    """Parsed `simple rtl` command."""
+    action: text
+    suite: text
+    design: text
+    target: text
+    baseline: text
+    candidate: text
+    output: text
+
+    me is_bench() -> bool:
+        return self.action == "bench"
+
+    me is_compare() -> bool:
+        return self.action == "compare"
+
+    me is_report() -> bool:
+        return self.action == "report"
+
+fn rtl_default_command() -> RtlCommand:
+    return RtlCommand(action: "help", suite: "smoke", design: "", target: "generic", baseline: "", candidate: "", output: "markdown")
+
+fn rtl_parse_value(arg: text, prefix: text) -> text:
+    if arg.starts_with(prefix):
+        return arg[prefix.len():]
+    return ""
+
+fn parse_rtl_command(args: [text]) -> RtlCommand:
+    var command = rtl_default_command()
+    var i = if args.len() > 0 and args[0] == "rtl": 1 else: 0
+    if i < args.len():
+        val verb = args[i]
+        if verb == "bench" or verb == "compare":
+            command.action = verb
+            i = i + 1
+        elif verb == "qor":
+            if i + 1 < args.len() and args[i + 1] == "report":
+                command.action = "report"
+                i = i + 2
+    while i < args.len():
+        val arg = args[i]
+        val suite = rtl_parse_value(arg, "--suite=")
+        val design = rtl_parse_value(arg, "--design=")
+        val target = rtl_parse_value(arg, "--target=")
+        val baseline = rtl_parse_value(arg, "--baseline=")
+        val candidate = rtl_parse_value(arg, "--candidate=")
+        val output = rtl_parse_value(arg, "--output=")
+        if suite != "":
+            command.suite = suite
+        elif design != "":
+            command.design = design
+        elif target != "":
+            command.target = target
+        elif baseline != "":
+            command.baseline = baseline
+        elif candidate != "":
+            command.candidate = candidate
+        elif output != "":
+            command.output = output
+        i = i + 1
+    return command
+
+fn render_rtl_bench_preview(command: RtlCommand) -> text:
+    val design = if command.design == "": command.suite else: command.design
+    val run = RtlQorRun.create("preview", design, command.target, "ghdl-yosys")
+    return rtl_qor_run_markdown(run)
+
+fn print_rtl_help():
+    print "Usage: simple rtl <bench|compare|qor report> [options]"
+    print "  simple rtl bench --suite=smoke"
+    print "  simple rtl compare --baseline=old --candidate=new"
+    print "  simple rtl qor report --design=rv32i_core"
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val command = parse_rtl_command(args)
+    if command.is_bench():
+        print render_rtl_bench_preview(command)
+        return 0
+    print_rtl_help()
+    return 0
