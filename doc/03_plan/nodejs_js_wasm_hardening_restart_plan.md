@@ -1,34 +1,58 @@
 # NodeJS JS/WASM Hardening Restart Plan
 
-## Goal
+Last updated: 2026-06-01
 
-Active SPipe goal:
+## Active Goal
 
 `$sp_dev nodejs level js engine and web browser js, wasm hardening`
 
-Harden the Simple JavaScript runtime so NodeJS-compatible APIs, browser JavaScript, fetch-driven WebAssembly loading, and WebGPU-adjacent WASM execution have explicit capability boundaries and verified positive and denial behavior.
+Harden the Simple JavaScript runtime, Node-compatible API surface, browser
+JavaScript, fetch-driven WebAssembly loading, and WebGPU-adjacent WASM behavior
+so capability boundaries are explicit, denial paths are verified, and positive
+runtime paths are covered by executable tests.
 
-## Current Remote Head
+This goal is not complete. Do not mark the active goal complete until Phase 5
+runtime boundaries, Phase 6 QEMU validation, and the documented WebGPU/WASM
+scope decisions are all either implemented or explicitly split into follow-up
+goals.
 
-As of 2026-06-01, GitHub `origin/main` is:
+## Crash Restart Summary
 
-- `24182092ea11 feat: enforce node credential env grants`
+GitHub `origin/main` is currently:
 
-Do not assume the dirty worktree belongs to this goal. There are unrelated GUI/vector/image/perf evidence changes in the working copy. Commit only explicit JS/WASM hardening files for this goal.
+- `64ababc735f5 docs: mark credential env slice pushed`
 
-## Authoritative State Files
+Use clean worktrees from `origin/main` for pushable JS/WASM slices. The main
+workspace may contain unrelated GUI/perf/local changes. Do not revert unrelated
+dirty files and do not commit them into this goal.
+
+Current in-flight worktree:
+
+- Path: `/tmp/simple-js-wasm-file-grants`
+- Base: `origin/main` at `64ababc735f5`
+- Slice: Node-compatible runtime file grants for `fs` APIs.
+- Status: not pushed; focused conformance currently fails one scenario.
+- Dirty files: `src/lib/nogc_sync_mut/js/engine/runtime.spl`,
+  `src/lib/nogc_sync_mut/js/engine/interpreter_native.spl`,
+  `test/feature/js/node_api_conformance_spec.spl`,
+  generated `docs/test-spec.*`, and temp `tmp_node_file_debug.spl`.
+- Before commit: delete `tmp_node_file_debug.spl` and drop generated doc noise
+  unless intentionally regenerated.
+
+## Authoritative Files
 
 - `.spipe/nodejs-js-wasm-hardening/state.md`
 - `doc/03_plan/simpleos_nodejs_ai_cli_migration.md`
-- `doc/03_plan/sys_test/webgpu_js_wasm_simple.md`
 - `doc/03_plan/sys_test/simpleos_ai_cli_js_node_port.md`
+- `doc/03_plan/sys_test/webgpu_js_wasm_simple.md`
+- `doc/03_plan/nodejs_js_wasm_hardening_restart_plan.md`
 - `test/system/os/simpleos_ai_cli_js_node_port_spec.spl`
 - `test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl`
 - `test/feature/js/node_api_conformance_spec.spl`
 
-## Completed And Pushed Slices
+## Pushed Progress
 
-Pushed commits for this goal:
+Pushed JS/WASM hardening commits include:
 
 - `c6d4387b900d test: harden js wasm browser promise chain`
 - `9b59072c1535 test: harden ai cli node capability denials`
@@ -43,132 +67,121 @@ Pushed commits for this goal:
 - `8433c511c560 test: tighten ai cli credential grant boundary`
 - `2a400b9eb510 test: harden webgpu wasm promise assimilation`
 - `24182092ea11 feat: enforce node credential env grants`
+- `64ababc735f5 docs: mark credential env slice pushed`
 
-1. Browser WASM promise chain and WebAssembly hardening.
-   - Fixed BrowserSession `fetch` -> `arrayBuffer` -> `WebAssembly.instantiate`.
-   - Hardened Promise metadata/state handling and promise-safe callback invocation.
-   - Mirrored host Promise and `Response.arrayBuffer` behavior across runtime families.
+Completed evidence:
 
-2. Node-compatible denial coverage.
-   - Strengthened hardening detection for file, network, process, and credential/environment escape signatures.
-   - Executable Node API conformance covers deterministic positive APIs and fail-closed denials.
+- Browser `fetch` -> `arrayBuffer` -> `WebAssembly.instantiate` promise chain is
+  covered, including nested host Promise assimilation from WebGPU callbacks.
+- BrowserSession exposes deterministic WebGPU metadata and the software adapter
+  through the same WASM-fetch session.
+- Minimal declared WASM host import `webgpu.requestAdapter` is covered and
+  unsafe direct imports remain denied.
+- Node-compatible conformance covers deterministic API subsets and fail-closed
+  file, network, process, credential, crypto entropy, and terminal denials.
+- Manifest contract emits Node-style `--experimental-permission` flags.
+- Deno comparison flags and hardening serial marker fragments are documented.
+- Credential env grants are wired into actual JS runtime `process.env` and
+  `require("process").env`; ambient env reads remain undefined.
 
-3. Permission flags.
-   - `AiCliManifest` now emits Node-style `--experimental-permission` flags for file, child process, network, and credential/env grants.
-   - Deny-all manifests emit only the base permission flag.
+## Remaining Goal Plan
 
-4. Browser JS/WASM/WebGPU bridge.
-   - System spec proves `fetch` -> `arrayBuffer` -> `WebAssembly.instantiate` reaches WebGPU global metadata.
-   - Same BrowserSession resolves deterministic `navigator.gpu.requestAdapter()` software-adapter metadata.
-   - WASM can invoke a bounded declared host import `webgpu.requestAdapter`.
-   - `simple_browser_wasm_gui_contract()` allows only the narrow `webgpu.requestAdapter` bridge token and denies direct device/queue/global imports.
+1. Finish runtime file grants.
+   - Make `require("fs")` and `require("node:fs")` read/write APIs return
+     `allowed` only for explicitly granted absolute paths.
+   - Preserve denial for sibling-prefix escapes and relative paths.
+   - Pass `test/feature/js/node_api_conformance_spec.spl`.
+   - Sync to GitHub immediately after the focused slice passes.
 
-5. Deno comparison and hardening OK markers.
-   - `AiCliManifest` now emits Deno-style comparison flags: `--allow-read`, `--allow-write`, `--allow-net`, `--allow-run`, `--allow-env`.
-   - QEMU marker fragments and staged launchers explicitly include `[ai-cli] hardening:ok app=<tool>`.
+2. Enforce network grants at the socket/runtime boundary.
+   - Wire allowlisted endpoint grants into `net`, `http`, and `https` runtime
+     behavior.
+   - Keep malformed and undeclared endpoints fail-closed.
+   - Add focused positive and denial conformance tests.
+   - Sync after passing.
 
-6. Boundary decision helpers.
-   - File grant helpers now reject sibling-prefix escapes like `/home/user/workspace` when only `/home/user/work` is granted.
-   - Network grant helpers normalize and deny malformed or undeclared socket endpoints.
-   - Process grant helpers normalize path-qualified commands and deny shell-style command strings.
-   - Credential decision helpers deny ambient env and inline API-key token shapes.
+3. Enforce process grants at spawn boundary.
+   - Wire command allowlists into `child_process.spawn`.
+   - Deny undeclared commands, shell strings, and path escape forms.
+   - Add focused positive and denial conformance tests.
+   - Sync after passing.
 
-7. WebGPU nested Promise assimilation.
-   - BrowserSession WASM fetch chains now assimilate nested host promises returned by WebGPU callbacks.
-   - `webgpu_js_wasm_simple_spec.spl` covers the `fetch` -> `arrayBuffer` -> `WebAssembly.instantiate` -> `Promise.resolve(navigator.gpu.requestAdapter())` path.
+4. Reconcile Phase 5 OS/VFS wording.
+   - Only check `File access: enforce file_grants at VFS layer` in
+     `simpleos_nodejs_ai_cli_migration.md` if evidence reaches the OS VFS
+     boundary.
+   - If current work only covers Node-compatible runtime `fs`, record that as
+     runtime complete and leave OS VFS enforcement pending.
 
-8. Node-compatible credential/env runtime grants.
-   - `JsRuntime.grant_node_credential(handle, value)` maps handles such as `openai-api-key` to env keys such as `OPENAI_API_KEY`.
-   - `process.env.OPENAI_API_KEY` and `require('process').env.OPENAI_API_KEY` return only explicitly granted values.
-   - Ambient values such as `process.env.PATH` and undeclared provider keys remain `undefined`.
-   - The Phase 5 credential checklist is checked in `doc/03_plan/simpleos_nodejs_ai_cli_migration.md`.
+5. Run full focused verification.
+   - Node conformance spec.
+   - SimpleOS AI CLI manifest/spec contract.
+   - Browser WebGPU JS/WASM system spec.
+   - `find doc/06_spec -name '*_spec.spl' | wc -l` must print `0`.
 
-Last recorded verification for the credential/env runtime slice:
+6. Phase 6 QEMU validation.
+   - Provision Node-compatible runtime artifact and CLI bundles.
+   - Boot x86_64, RISC-V, and AArch64 lanes.
+   - Capture serial markers for runtime, CLI smoke, and hardening OK.
+   - Update `ai_cli_qemu_lane` from `blocked-runtime-artifact` only after real
+     guest evidence exists.
+
+7. WebGPU/WASM final scope decision.
+   - Current browser-side asset loading, instantiation, nested Promise
+     assimilation, and minimal declared host import callback are covered.
+   - Full WASM-originated WebGPU ABI and hardware/driver-backed WebGPU execution
+     remain incomplete unless intentionally split into a later goal.
+
+## Immediate Next Commands
+
+Use the active runner from the main workspace when testing the clean worktree:
 
 ```sh
-SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval_member.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/runtime.spl test/feature/js/node_api_conformance_spec.spl
-SIMPLE_LIB=src bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean
-SIMPLE_LIB=src bin/simple test test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter --clean
-find doc/06_spec -name '*_spec.spl' | wc -l
+cd /tmp/simple-js-wasm-file-grants
+SIMPLE_LIB=/tmp/simple-js-wasm-file-grants/src /home/ormastes/dev/pub/simple/bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/runtime.spl test/feature/js/node_api_conformance_spec.spl
+SIMPLE_LIB=/tmp/simple-js-wasm-file-grants/src /home/ormastes/dev/pub/simple/bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean
 ```
 
-Expected current local evidence:
+Known current failure:
 
-- `node_api_conformance_spec.spl`: 143 scenarios passing.
-- `simpleos_ai_cli_js_node_port_spec.spl`: 25 scenarios passing.
-- `doc/06_spec` stray `.spl` count: `0`.
+- `runtime.grant_node_file(...)` creates visible JS globals, but native `fs`
+  grant checks still return `file-grant-denied` for the granted path.
+- Likely fix: store file grant prefix/path/content directly on `JsInterpreter`
+  fields and have native `fs` helpers read those fields instead of looking up
+  JS globals.
 
-## Last Known Passing Commands
+## Verification Checklist Per Slice
 
-Run these first after a crash to confirm the pushed baseline:
+Run the narrowest relevant checks first, then expand:
 
 ```sh
-SIMPLE_LIB=src bin/simple check src/os/ai_cli_js_node_contract.spl
+SIMPLE_LIB=src bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean
 SIMPLE_LIB=src bin/simple test test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter --clean
 SIMPLE_LIB=src bin/simple test test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --clean
-SIMPLE_LIB=src bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean
 find doc/06_spec -name '*_spec.spl' | wc -l
+git diff --check
+git status --short
 ```
 
-Expected evidence from the latest slices:
+Expected layout result:
 
-- `simpleos_ai_cli_js_node_port_spec.spl`: 25 scenarios passing on the current local slice.
-- `webgpu_js_wasm_simple_spec.spl`: 106 scenarios passing at the pushed WebGPU promise-assimilation baseline.
-- `node_api_conformance_spec.spl`: 143 scenarios passing on the current local credential/env slice.
-- `doc/06_spec` stray `.spl` count: `0`.
-
-## Remaining Work
-
-Phase 5 unchecked hardening items in `doc/03_plan/simpleos_nodejs_ai_cli_migration.md`:
-
-- File access: enforce `file_grants` at the VFS boundary and deny undeclared paths.
-- Network: enforce `network_grants` at the socket boundary and allowlist endpoints only.
-- Process: enforce `process_grants` and deny undeclared spawns.
-
-Phase 6 remains unchecked:
-
-- Full QEMU validation for x86_64, RISC-V, and AArch64.
-- FAT32 disk image provisioning with runtime + CLI bundles.
-- Automated serial capture and marker verification.
-- Update `ai_cli_qemu_lane` runtime status from `blocked-runtime-artifact` to `ready` only when the runtime artifact exists and the QEMU smoke passes.
-
-WebGPU/WASM remaining gap:
-
-- Nested returned-Promise assimilation for WebGPU callbacks is now covered by `webgpu_js_wasm_simple_spec.spl`.
-- Complete WASM-originated WebGPU ABI and real hardware/driver WebGPU execution are not implemented.
-
-## Recommended Next Slice
-
-Implement one enforcement boundary at a time and sync after each passing slice.
-
-1. File grant boundary.
-   - Add a small contract/API that models VFS open/read/write decisions from `AiCliManifest.file_grants`.
-   - Cover exact allowed prefixes, prefix escape cases, empty grants, and deny reason strings.
-   - Update `simpleos_ai_cli_js_node_port_spec.spl`, generated `doc/06_spec`, `.spipe` state, and the Phase 5 checklist only if the evidence truly proves the VFS boundary claim.
-
-2. Network grant boundary.
-   - Add socket endpoint decision helpers for host:port allowlists.
-   - Cover undeclared endpoints, wildcard behavior if supported, and malformed endpoint denial.
-
-3. Process grant boundary.
-   - Add process spawn decision helpers for command allowlists.
-   - Cover path-qualified commands, shell escape denial, and undeclared spawn denial.
-
-4. Re-run Node conformance and OS contract specs.
-   - Regenerate SPipe manuals after every spec change.
-   - Keep `find doc/06_spec -name '*_spec.spl' | wc -l` at `0`.
+- `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`.
 
 ## Sync Rule
 
-After each small completed slice:
+After each small completed slice, commit and push only that slice.
+
+Preferred clean-worktree Git flow:
 
 ```sh
-jj commit <explicit files> -m "<message>"
-jj git fetch
-jj rebase -d main@origin
-jj bookmark set main -r @-
-env -u GITHUB_TOKEN jj git push --bookmark main
+git fetch origin
+git rebase origin/main
+git status --short
+git add <explicit files>
+git commit -m "<message>"
+env -u GITHUB_TOKEN git push origin HEAD:main
 git ls-remote origin refs/heads/main
 ```
 
-If unrelated commits appear between `main@origin` and `@-`, do not use `@-` blindly. Move `main` only to the intended JS/WASM hardening commit.
+If push is rejected, fetch/rebase, resolve only files owned by the slice, rerun
+the focused checks, and push again.
