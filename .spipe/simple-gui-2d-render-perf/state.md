@@ -40,8 +40,10 @@ implementation-evidence-in-progress
 - implementation: Added a lightweight vector-font unavailable fallback probe to `scripts/check-gtk-gui-size-speed-baseline.shs` and wired `scripts/check-gtk-gui-repeat-evidence.shs` to require it by default.
 - verification: `scripts/check-gtk-gui-repeat-evidence.shs` passed with Simple open 203 us vs GTK open 68904 us, Simple frame 1 us vs GTK frame 25 us, vector checksum 212444, and fallback probe `forced-vector-font-unavailable`.
 - report: Added `doc/09_report/gtk_gui_repeat_fallback_evidence_2026-06-01.md` with tracked fail-closed fallback evidence.
+- implementation: Static-shell plan cache memory hits now reuse retained decoded metadata and prepared primitive commands instead of decoding the SWBC payload and regenerating the fill-rect command list.
+- verification: `SIMPLE_LIB=src bin/simple check src/app/ui.web/render_cache.spl test/system/app/ui/feature/html_css_binary_caching_spec.spl` passed; `SIMPLE_LIB=src bin/simple test test/system/app/ui/feature/html_css_binary_caching_spec.spl --mode=interpreter --clean` passed 10/10; `scripts/check-gtk-gui-repeat-evidence.shs` passed with Simple open 222 us, GTK open 70284 us, Simple frame 1 us, GTK frame 27 us, vector checksum 212444.
 
 ## Remaining Work
-- AC-3 is only partially satisfied by retained framebuffer/cache and static pixel hot paths; broader primitive-level fill/copy/blit/text optimization across dynamic GUI scenes still needs implementation and evidence.
+- AC-3 is advanced by retained framebuffer/cache, static pixel hot paths, and retained static-shell primitive command plans; broader fill/copy/blit/text optimization across dynamic GUI scenes still needs implementation and evidence.
 - AC-6 now has focused vector-font unavailable fallback evidence in the repeat script and tracked report; additional GPU/native unavailable combinations can extend the same probe pattern.
 - Native Simple executable size/speed evidence is intentionally skipped in the fast smoke run (`SKIP_SIMPLE_NATIVE=1`); a release-grade run should capture native artifact bytes or record an explicit native-build blocker.

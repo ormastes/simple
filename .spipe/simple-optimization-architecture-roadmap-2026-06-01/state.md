@@ -84,3 +84,5 @@ dev-done
 - verification: PASS `cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml`; PASS string system (33), interpreter perf (10), and tiered JIT hotspot (51) interpreter specs.
 - implementation: Interpreter lane removed boxed iterator allocation from merged `CowEnv` environment scans by reusing the concrete `CowEnvIter` for `iter()`, `keys()`, and `values()`.
 - verification: PASS `cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml`; PASS interpreter perf (10), tiered JIT hotspot (51), string system (33), Node API conformance (145), WebGPU JS/WASM Simple (106), and GTK GUI repeat evidence.
+- implementation: GUI lane optimized the static-shell plan cache hot path so memory hits reuse retained decoded SWBC metadata and prepared primitive commands instead of regenerating command lists.
+- verification: PASS render-cache check and HTML/CSS binary caching spec (10); PASS GTK GUI repeat evidence; PASS WebGPU JS/WASM Simple (106); PASS interpreter perf (10).
