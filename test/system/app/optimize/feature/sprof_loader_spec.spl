@@ -14,11 +14,16 @@ use app.optimize.sprof_loader.{
     sprof_counter_record,
     sprof_counter_record_valid,
     sprof_counter_record_from_native_counter_line,
+    sprof_counter_record_from_native_counter_line_with_count,
+    sprof_counter_record_from_profile_line,
+    sprof_counter_records_from_profile_text,
     sprof_counter_records_from_native_section_lines,
+    sprof_records_from_native_counter_values,
     sprof_serialize_record,
     sprof_serialize_profile,
     sprof_profile_write_diagnostics,
-    sprof_write_profile_file
+    sprof_write_profile_file,
+    sprof_write_native_counter_profile_file
 }
 
 describe "Persistent .sprof Loader Contract":
@@ -154,6 +159,52 @@ describe "Persistent .sprof Loader Contract":
             expect(edge_record.record_kind).to_equal("edge")
             expect(edge_record.key).to_equal("main:entry")
             expect(edge_record.secondary_key).to_equal("main:exit")
+
+        it "should convert native metadata with final counter values into persistent records":
+            val metadata = [
+                "section|label=simple_profile_counter_section__simple_profile_counters|name=.simple.profile.counters|records=2",
+                "counter|section=simple_profile_counter_section__simple_profile_counters|slot=0|kind=function_entry|key=c:main:entry|initial=0|symbol=__simple_profile_counter_0_function_entry",
+                "counter|section=simple_profile_counter_section__simple_profile_counters|slot=1|kind=basic_block|key=c:main:bb0|initial=0|symbol=__simple_profile_counter_1_basic_block"
+            ]
+            val direct = sprof_counter_record_from_native_counter_line_with_count(metadata[1], 17)
+            val imported = sprof_records_from_native_counter_values(metadata, [17, 5])
+
+            expect(direct.record_kind).to_equal("function")
+            expect(direct.count).to_equal(17)
+            expect(imported.record_count).to_equal(2)
+            expect(imported.diagnostic_count).to_equal(0)
+            expect(imported.records[0].key).to_equal("c:main:entry")
+            expect(imported.records[0].count).to_equal(17)
+            expect(imported.records[1].record_kind).to_equal("block")
+            expect(imported.records[1].count).to_equal(5)
+
+        it "should diagnose native count snapshots that do not match metadata slots":
+            val metadata = [
+                "counter|section=simple_profile_counter_section__simple_profile_counters|slot=0|kind=function_entry|key=c:main:entry|initial=0|symbol=__simple_profile_counter_0_function_entry",
+                "counter|section=simple_profile_counter_section__simple_profile_counters|slot=2|kind=function_entry|key=c:helper:entry|initial=0|symbol=__simple_profile_counter_2_function_entry"
+            ]
+            val imported = sprof_records_from_native_counter_values(metadata, [9, 99])
+
+            expect(imported.record_count).to_equal(1)
+            expect(imported.diagnostics).to_contain("missing_count:2")
+            expect(imported.diagnostics).to_contain("count_without_metadata:1")
+
+        it "should write native counter snapshots as reloadable persistent profile files":
+            val path = "/tmp/simple_sprof_native_counter_import.sprof"
+            val metadata = [
+                "counter|section=simple_profile_counter_section__simple_profile_counters|slot=0|kind=function_entry|key=c:main:entry|initial=0|symbol=__simple_profile_counter_0_function_entry",
+                "counter|section=simple_profile_counter_section__simple_profile_counters|slot=1|kind=edge|key=c:main:entry->exit|initial=0|symbol=__simple_profile_counter_1_edge"
+            ]
+            val write = sprof_write_native_counter_profile_file(path, "native-mod", "run-a", metadata, [13, 4])
+            val loaded = sprof_load_profile_file(path, "native-mod", "run-a")
+
+            expect(write.wrote).to_equal(true)
+            expect(write.record_count).to_equal(2)
+            expect(write.diagnostic_count).to_equal(0)
+            expect(loaded.status).to_equal("loaded")
+            expect(loaded.record_count).to_equal(2)
+            expect(loaded.function_merged_count).to_equal(13)
+            expect(loaded.edge_merged_count).to_equal(4)
 
         it "should build reloadable sprof text from native counter section lines":
             val records = sprof_counter_records_from_native_section_lines([
