@@ -126,6 +126,14 @@ dev-done
   splits persistent `.sprof` work into schema, writer, loader/merge, and
   migration slices; `doc/03_plan/sys_test/simple_optimization_architecture_roadmap_2026-06-01.md`
   records the cross-lane smoke command list.
+- requirements: Added feature and NFR options for the persistent `.sprof` lane
+  at `doc/02_requirements/feature/simple_optimization_architecture_roadmap_2026-06-01_options.md`
+  and `doc/02_requirements/nfr/simple_optimization_architecture_roadmap_2026-06-01_options.md`;
+  final requirements require user selection before implementation.
+- research: Added domain research for the persistent profile lane at
+  `doc/01_research/domain/simple_optimization_architecture_roadmap_2026-06-01.md`,
+  using LLVM PGO/BOLT primary sources and recording the unavailable OpenJDK
+  HotSpot fetch.
 - implementation: GUI rendering lane added an exact `report-table-command`
   fixture to the Simple Engine2D heuristic renderer plus Node, Bun, and Electron
   bitmap baselines. The scene covers command chips, table rows, filter/summary
