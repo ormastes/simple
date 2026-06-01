@@ -20,7 +20,7 @@ goals.
 
 GitHub `origin/main` is currently:
 
-- `034942e82a feat: enforce node network grants`
+- `29d326438a feat: enforce node process grants`
 
 Use clean worktrees from `origin/main` for pushable JS/WASM slices. The main
 workspace may contain unrelated GUI/perf/local changes. Do not revert unrelated
@@ -28,14 +28,14 @@ dirty files and do not commit them into this goal.
 
 Current in-flight worktree:
 
-- Path: `/tmp/simple-js-wasm-process-grants`
-- Base: `origin/main` at `034942e82a`
-- Slice: Node-compatible runtime process grants for `child_process.spawn`.
-- Status: focused conformance passes locally; push the current
-  `feat: enforce node process grants` commit if it is not already on GitHub.
-- Evidence: `node_api_conformance_spec.spl` passes 149 scenarios,
-  `simpleos_ai_cli_js_node_port_spec.spl` passes 25 scenarios, and
-  `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`.
+- Path: `/tmp/simple-js-wasm-reconcile`
+- Base: `origin/main` at `29d326438a`
+- Slice: documentation/status reconciliation after file, network, process, and
+  credential runtime grant slices were pushed.
+- Status: docs-only reconciliation in progress.
+- Evidence from pushed runtime grant slices: `node_api_conformance_spec.spl`
+  passes 149 scenarios, `simpleos_ai_cli_js_node_port_spec.spl` passes 25
+  scenarios, and `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`.
 
 ## Authoritative Files
 
@@ -68,7 +68,7 @@ Pushed JS/WASM hardening commits include:
 - `64ababc735f5 docs: mark credential env slice pushed`
 - `18f866f497 feat: enforce node file grants`
 - `034942e82a feat: enforce node network grants`
-- `feat: enforce node process grants` is the current process-grant slice being synced
+- `29d326438a feat: enforce node process grants`
 
 Completed evidence:
 
@@ -94,10 +94,11 @@ Completed evidence:
 
 ## Remaining Goal Plan
 
-1. Push runtime process grants if needed.
-   - The current `feat: enforce node process grants` commit is locally verified.
-   - If GitHub already contains it, start the focused Phase 5/6 reconciliation
-     and QEMU/runtime provisioning audit next.
+1. Finish Phase 5 boundary reconciliation.
+   - Runtime grant conformance is complete for Node-compatible `fs`,
+     `net`/`http`/`https`, `child_process.spawn`, and credential env access.
+   - OS VFS layer, socket layer, and process-spawn boundary enforcement remain
+     open unless later evidence verifies those exact layers.
 
 2. Reconcile Phase 5 OS/VFS wording.
    - Only check `File access: enforce file_grants at VFS layer` in
@@ -127,19 +128,20 @@ Completed evidence:
 
 ## Immediate Next Commands
 
-Use the active runner from the main workspace when testing the clean worktree:
+Use the active runner from the main workspace when testing a clean worktree:
 
 ```sh
-cd /tmp/simple-js-wasm-file-grants
-SIMPLE_LIB=/tmp/simple-js-wasm-file-grants/src /home/ormastes/dev/pub/simple/bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/runtime.spl test/feature/js/node_api_conformance_spec.spl
-SIMPLE_LIB=/tmp/simple-js-wasm-file-grants/src /home/ormastes/dev/pub/simple/bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=<worktree>/src /home/ormastes/dev/pub/simple/bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=<worktree>/src /home/ormastes/dev/pub/simple/bin/simple test test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=<worktree>/src /home/ormastes/dev/pub/simple/bin/simple test test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --clean
 ```
 
 Known current caveat:
 
-- The focused Node-compatible `fs` runtime conformance passes, but this does
-  not prove OS VFS-layer enforcement. Keep the Phase 5 VFS checklist item open
-  unless a later slice verifies the actual VFS boundary.
+- The focused Node-compatible runtime grant conformance passes, but this does
+  not prove OS VFS-layer, socket-layer, or kernel process-spawn enforcement.
+  Keep those Phase 5 checklist items open unless a later slice verifies the
+  actual OS boundary.
 
 ## Verification Checklist Per Slice
 

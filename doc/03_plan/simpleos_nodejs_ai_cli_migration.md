@@ -1,7 +1,7 @@
 # SimpleOS Node.js AI CLI Migration Plan
 
 **Created:** 2026-05-30
-**Status:** Research complete, implementation pending
+**Status:** Runtime conformance hardening in progress; QEMU/runtime provisioning pending
 **Priority:** P1
 **Depends on:** serial_sigsegv_and_test_hardening.md (P0)
 
@@ -164,17 +164,17 @@ Following SerenityOS model:
 ### Phase 3: Node.js Compat Layer (4 weeks)
 
 Build minimal Node.js API compatibility on QuickJS + libuv:
-- [x] `fs.readFileSync`, `fs.writeFileSync`, `fs.existsSync`, `fs.statSync` fail-closed file-grant subset
-- [x] `fs.promises.readFile`, `fs.promises.writeFile` fail-closed file-grant subset
+- [x] `fs.readFileSync`, `fs.writeFileSync`, `fs.existsSync`, `fs.statSync` fail-closed file-grant subset with explicit granted-file positive conformance
+- [x] `fs.promises.readFile`, `fs.promises.writeFile` fail-closed file-grant subset with explicit granted-file positive conformance
 - [x] `path.join`, `path.resolve`, `path.dirname`, `path.basename` deterministic POSIX subset
 - [x] `process.env`, `process.argv`, `process.cwd()`, `process.exit()` deterministic embedded subset
 - [x] `Buffer` bounded string, array, Uint8Array, and ArrayBuffer subset
 - [x] `EventEmitter` deterministic listener bookkeeping subset
-- [x] `net.Socket`, `net.createConnection` fail-closed network-grant subset
-- [x] `http.request`, `https.request` fail-closed network-grant subset
+- [x] `net.Socket`, `net.createConnection` fail-closed network-grant subset with explicit granted-endpoint positive conformance
+- [x] `http.request`, `https.request` fail-closed network-grant subset with explicit granted-endpoint positive conformance
 - [x] `crypto.createHash` (sha256/sha1 deterministic subset)
 - [x] `crypto.randomBytes` fail-closed subset until secure entropy is wired
-- [x] `child_process.spawn` fail-closed process-grant subset
+- [x] `child_process.spawn` fail-closed process-grant subset with explicit granted-command positive conformance
 - [x] `os.platform()`, `os.arch()`, `os.tmpdir()` deterministic subset
 - [x] `readline` fail-closed terminal-grant subset
 - [x] Test: run a simple Express-like HTTP server fail-closed without network grants
@@ -209,6 +209,7 @@ Leverage existing `AiCliManifest` capability system:
 - [ ] Network: enforce `network_grants` at socket layer, allowlist endpoints only
 - [ ] Process: enforce `process_grants`, deny undeclared spawns
 - [x] Credentials: enforce `credential_grants`, block ambient env var reads
+- [x] Runtime conformance: explicit Node-compatible `fs`, `net`/`http`/`https`, and `child_process.spawn` positive grants plus denial cases
 - [x] Compare with Deno permissions model (`--allow-read`, `--allow-net`)
 - [x] Add Node.js `--experimental-permission`-style flags to QuickJS launcher contract
 - [x] Test: all denial paths from existing `simpleos_ai_cli_js_node_port_spec.spl` and executable Node API conformance coverage

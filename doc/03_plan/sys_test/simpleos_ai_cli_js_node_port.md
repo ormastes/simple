@@ -1,8 +1,10 @@
 <!-- codex-plan -->
 # System Test Plan: SimpleOS AI CLI JS/Node Port
 
-Status: selected contract-first slice implemented for manifest hardening. Full
-QEMU runtime smoke remains pending Node-compatible runtime provisioning.
+Status: selected contract-first slice implemented for manifest hardening, and
+Node-compatible runtime grant conformance is covered by
+`test/feature/js/node_api_conformance_spec.spl`. Full QEMU runtime smoke remains
+pending Node-compatible runtime provisioning.
 
 ## Scenario Families
 
@@ -60,3 +62,7 @@ Mirrored manual: `doc/06_spec/system/os/simpleos_ai_cli_js_node_port_spec.md`
 - REQ-004 and REQ-005: invalid manifests and undeclared grant denials.
 - REQ-006: `x85` target normalization to x86.
 - REQ-007: explicit full Node/V8/libuv later-layer blocker.
+- Runtime conformance: `node_api_conformance_spec.spl` covers explicit positive
+  and denial behavior for credential env, file, network, and process grants.
+- Still pending: guest QEMU runtime smoke and kernel/OS-layer VFS, socket, and
+  process boundary evidence.
