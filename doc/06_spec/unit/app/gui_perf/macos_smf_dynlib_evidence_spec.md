@@ -263,7 +263,7 @@ expect(gui_mac_smf_dynlib_accepts_pass_row(row + " status=skip")).to_equal(false
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -281,6 +281,24 @@ expect(gui_mac_smf_dynlib_accepts_transcript(contract + "\n" + loader + "\n" + q
 expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("call_source=dynlib_symbol_call", "call_source=direct_simple"))).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_transcript(contract + "\nGUI_DYNLIB_PERF pass=false error=p99-over-threshold\n" + qemu + "\n" + loader + "\n" + probe + "\n" + pass_row)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_transcript(full + "\nGUI_DYNLIB_PERF pass=false error=p99-over-threshold")).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_transcript("Compiled src/app/gui_perf/pure_gui_hot_dynlib_export.spl\n" + full)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_transcript("GUI_SMF_WRAP ok=true input=build/gui/libpure_gui_hot.dylib output=build/gui/pure_gui_hot.smf\n" + full)).to_equal(false)
+```
+
+</details>
+
+#### keeps cold orchestration stdout out of the strict release transcript
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = rt_file_read_text("src/app/gui_perf/macos_smf_dynlib_evidence.spl")
+expect(source.contains("print stdout.trim()")).to_equal(false)
+expect(source.contains("val (_stdout, stderr, code) = _shell(command, timeout_ms)")).to_equal(true)
 ```
 
 </details>
@@ -321,8 +339,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
