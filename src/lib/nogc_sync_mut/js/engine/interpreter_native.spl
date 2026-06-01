@@ -196,7 +196,7 @@ impl JsInterpreter:
         if native_id == NATIVE_NODE_EVENT_EMITTER_REMOVE_ALL_LISTENERS:
             return self._native_node_event_emitter_remove_all_listeners(this_val, arg_vals)
         if native_id == NATIVE_NODE_CHILD_PROCESS_SPAWN:
-            return self._native_node_child_process_spawn(arg_vals)
+            return self._native_node_child_process_spawn_result(arg_vals)
         if native_id == NATIVE_NODE_FS_READ_FILE_SYNC:
             return self._native_node_fs_result("readFileSync", arg_vals)
         if native_id == NATIVE_NODE_FS_WRITE_FILE_SYNC:
@@ -400,6 +400,45 @@ impl JsInterpreter:
         self.set_object_property(result_id, "argvLength", JsValue.Number(v: argv_len.to_f64()))
         self.set_object_property(result_id, "pid", JsValue.Number(v: -1.0))
         JsValue.Object(id: result_id)
+
+    me _native_node_child_process_spawn_result(arg_vals: [JsValue]) -> JsValue:
+        val result_id = self.create_object()
+        var command = ""
+        if arg_vals.len() > 0:
+            command = js_to_string(arg_vals[0])
+        var argv_len = 0
+        if arg_vals.len() > 1:
+            match arg_vals[1]:
+                JsValue.Array(arr_id): argv_len = self.object_store.array_length(arr_id)
+                JsValue.Object(obj_id): argv_len = self.object_store.array_length(obj_id)
+                _: pass_dn
+        val reason = self._native_node_process_denial_reason(command)
+        if reason == "":
+            self.set_object_property(result_id, "status", JsValue.String(v: "allowed"))
+            self.set_object_property(result_id, "error", JsValue.String(v: ""))
+            self.set_object_property(result_id, "reason", JsValue.String(v: ""))
+            self.set_object_property(result_id, "pid", JsValue.Number(v: 1.0))
+        else:
+            self.set_object_property(result_id, "status", JsValue.String(v: "denied"))
+            self.set_object_property(result_id, "error", JsValue.String(v: "process-denied"))
+            self.set_object_property(result_id, "reason", JsValue.String(v: reason))
+            self.set_object_property(result_id, "pid", JsValue.Number(v: -1.0))
+        self.set_object_property(result_id, "command", JsValue.String(v: command))
+        self.set_object_property(result_id, "argvLength", JsValue.Number(v: argv_len.to_f64()))
+        JsValue.Object(id: result_id)
+
+    me _native_node_process_denial_reason(command: text) -> text:
+        if command == "" or command.contains(" ") or command.contains("/") or command.contains("\\"):
+            return "invalid-command"
+        if command == "node":
+            if val Some(marker) = self.lookup_global_value("__simple_node_process_grant_node"):
+                match marker:
+                    JsValue.Boolean(v):
+                        if v:
+                            return ""
+                    _:
+                        pass_dn
+        "process-grant-denied"
 
     me _native_node_fs_module() -> JsValue:
         val module_id = self.create_object()

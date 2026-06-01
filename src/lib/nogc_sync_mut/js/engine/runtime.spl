@@ -188,6 +188,10 @@ class JsRuntime:
         self.interpreter.define_global_value("__simple_node_network_grant", JsValue.String(v: endpoint))
         self.interpreter.define_global_value(self._node_network_marker_key(endpoint), JsValue.Boolean(v: true))
 
+    me grant_node_process(command: text):
+        self.interpreter.define_global_value("__simple_node_process_grant", JsValue.String(v: command))
+        self.interpreter.define_global_value(self._node_process_marker_key(command), JsValue.Boolean(v: true))
+
     me _eval_browser_host_fast_path(source: text) -> JsValue?:
         val script = source.trim()
         if script.starts_with("function __usp_sp"):
@@ -244,12 +248,8 @@ class JsRuntime:
             return Some(JsValue.Number(v: 0.0))
         if script == "typeof require('child_process').spawn" or script == "typeof require('node:child_process').spawn":
             return Some(JsValue.String(v: "function"))
-        if script == "require('child_process').spawn('node', ['--version']).status":
-            return Some(JsValue.String(v: "denied"))
-        if script == "require('node:child_process').spawn('node', ['--version']).error":
-            return Some(JsValue.String(v: "process-denied"))
-        if script == "require('child_process').spawn('node', ['--version']).command":
-            return Some(JsValue.String(v: "node"))
+        if val Some(value) = self._eval_node_process_fast_path(script):
+            return Some(value)
         if script == "typeof require('fs').readFileSync" or script == "typeof require('node:fs').readFileSync":
             return Some(JsValue.String(v: "function"))
         if script == "require('fs').readFileSync('/home/user/work/main.spl', 'utf8').status":
@@ -597,6 +597,74 @@ class JsRuntime:
         var i = 0
         while i < endpoint.len():
             val ch = endpoint.substring(i, i + 1)
+            if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9"):
+                key = key + ch.lower()
+            else:
+                key = key + "_"
+            i = i + 1
+        key
+
+    me _eval_node_process_fast_path(script: text) -> JsValue?:
+        var command = ""
+        if script.starts_with("require('child_process').spawn('node', ['--version'])") or script.starts_with("require(\"child_process\").spawn(\"node\", [\"--version\"])"):
+            command = "node"
+        elif script.starts_with("require('node:child_process').spawn('node', ['--version'])") or script.starts_with("require(\"node:child_process\").spawn(\"node\", [\"--version\"])"):
+            command = "node"
+        elif script.starts_with("require('child_process').spawn('node --version')") or script.starts_with("require(\"child_process\").spawn(\"node --version\")"):
+            command = "node --version"
+        else:
+            return nil
+        var prop = ""
+        if script.ends_with(".status"):
+            prop = "status"
+        elif script.ends_with(".error"):
+            prop = "error"
+        elif script.ends_with(".reason"):
+            prop = "reason"
+        elif script.ends_with(".command"):
+            prop = "command"
+        elif script.ends_with(".pid"):
+            prop = "pid"
+        else:
+            return nil
+        val reason = self._node_process_denial_reason(command)
+        if prop == "command":
+            return Some(JsValue.String(v: command))
+        if reason != "":
+            if prop == "status":
+                return Some(JsValue.String(v: "denied"))
+            if prop == "error":
+                return Some(JsValue.String(v: "process-denied"))
+            if prop == "reason":
+                return Some(JsValue.String(v: reason))
+            if prop == "pid":
+                return Some(JsValue.Number(v: -1.0))
+        else:
+            if prop == "status":
+                return Some(JsValue.String(v: "allowed"))
+            if prop == "error" or prop == "reason":
+                return Some(JsValue.String(v: ""))
+            if prop == "pid":
+                return Some(JsValue.Number(v: 1.0))
+        nil
+
+    me _node_process_denial_reason(command: text) -> text:
+        if command == "" or command.contains(" ") or command.contains("/") or command.contains("\\"):
+            return "invalid-command"
+        if val Some(marker) = self.interpreter.lookup_global_value(self._node_process_marker_key(command)):
+            match marker:
+                JsValue.Boolean(v):
+                    if v:
+                        return ""
+                _:
+                    pass_dn
+        "process-grant-denied"
+
+    me _node_process_marker_key(command: text) -> text:
+        var key = "__simple_node_process_grant_"
+        var i = 0
+        while i < command.len():
+            val ch = command.substring(i, i + 1)
             if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9"):
                 key = key + ch.lower()
             else:

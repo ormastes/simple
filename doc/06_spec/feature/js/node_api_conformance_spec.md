@@ -1286,6 +1286,23 @@ expect(_eval_str("require('child_process').spawn('node', ['--version']).command"
 
 </details>
 
+#### allows child_process spawn only for explicitly granted commands
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_process("node", "require('child_process').spawn('node', ['--version']).status")).to_equal("allowed")
+expect(_eval_str_with_process("node", "require('node:child_process').spawn('node', ['--version']).pid")).to_equal("1")
+expect(_eval_str_with_process("python", "require('child_process').spawn('node', ['--version']).reason")).to_equal("process-grant-denied")
+expect(_eval_str_with_process("node", "require('child_process').spawn('node --version').reason")).to_equal("invalid-command")
+```
+
+</details>
+
 #### resolves net and http request APIs as fail-closed network APIs
 
 <details>
@@ -2250,8 +2267,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 148 |
-| Active scenarios | 148 |
+| Total scenarios | 149 |
+| Active scenarios | 149 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
