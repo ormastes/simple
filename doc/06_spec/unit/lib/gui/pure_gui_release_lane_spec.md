@@ -150,7 +150,7 @@ _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_release_gate.spl")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -158,6 +158,8 @@ val source = _existing_source("src/app/gui_perf/macos_smf_dynlib_release_gate.sp
 expect(source).to_contain("reason=transcript-dir-create-failed")
 expect(source).to_contain("gui_mac_smf_dynlib_transcript_check_row(stdout)")
 expect(source).to_contain("reason=transcript-check-failed")
+expect(source).to_contain("check_row == \"GUI_MAC_SMF_DYNLIB_TRANSCRIPT status=pass\"")
+expect(source.contains("check_row.contains(\"status=pass\")")).to_equal(false)
 expect(source).to_contain("GUI_MAC_SMF_DYNLIB_RELEASE_GATE status=pass")
 ```
 
