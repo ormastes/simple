@@ -309,3 +309,25 @@ The repo already has enough capture, comparison, backend, and system-test scaffo
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl --mode=interpreter --clean`: 1 file, 8 tests, 0 failures; runner duration 1420ms.
   - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
   - Placeholder scan over changed executable comparison/backend source and specs found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+
+## Requirement Selection And Final Design Promotion: 2026-06-01
+
+- User replied `go` after being asked to select feature and NFR options with Feature Option 3 and NFR Option C recommended. This was treated as approval of the recommended 3/C path.
+- Wrote final selected requirements:
+  - `doc/02_requirements/feature/harden_tui_gui_layout_comparison.md`
+  - `doc/02_requirements/nfr/harden_tui_gui_layout_comparison.md`
+- Removed unchosen option artifacts per workflow:
+  - `doc/02_requirements/feature/harden_tui_gui_layout_comparison_options.md`
+  - `doc/02_requirements/nfr/harden_tui_gui_layout_comparison_options.md`
+- Promoted these selected-scope design artifacts from preselection draft:
+  - `doc/04_architecture/harden_tui_gui_layout_comparison.md`
+  - `doc/05_design/harden_tui_gui_layout_comparison.md`
+  - `doc/03_plan/sys_test/harden_tui_gui_layout_comparison.md`
+  - `doc/03_plan/agent_tasks/harden_tui_gui_layout_comparison.md`
+- Focused verification:
+  - option files removed: passed.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl --mode=interpreter --clean`: 1 file, 8 tests, 0 failures; runner duration 1377ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 17 tests, 0 failures; runner duration 8535ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter --clean`: 1 file, 9 tests, 0 failures; runner duration 2120ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/site_corpus_pair_spec.spl --mode=interpreter --clean`: 1 file, 1 test, 0 failures; runner duration 3854ms.
