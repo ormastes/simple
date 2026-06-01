@@ -238,6 +238,15 @@ staging path shape can be mirrored into a formatted FAT32 image. This is not
 checked off as FAT32 disk image provisioning because it has not yet been
 integrated into the boot image flow or validated through guest serial markers.
 
+2026-06-01 follow-up: `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package
+--populate-fat32-image <img>` now connects the staged AI CLI tree to an
+existing formatted FAT32 image through the host populator and reports
+`fat32_populate_status=host-image-populated` on success. The FAT32 driver also
+resolves its own 8.3 aliases for long names such as `node-compatible` after
+image reloads. The Phase 6 FAT32 provisioning checkbox remains open because
+this still has not been integrated into the boot image flow or proven by guest
+serial markers.
+
 ## Minimum Syscall Surface Required
 
 ```

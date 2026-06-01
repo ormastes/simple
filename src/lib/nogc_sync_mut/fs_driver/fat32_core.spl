@@ -877,14 +877,43 @@ impl Fat32Core:
         dni[dir_cluster] = idx
         self.dir_name_index = dni
 
+    me fn _short_alias_for_lookup(name: text) -> text:
+        var base_part = name
+        var ext_part = ""
+        var di: i64 = 0
+        while di < name.len():
+            var db: u8 = name.char_at(di) as u8
+            if db == 0x2E:
+                base_part = name.slice(0, di)
+                ext_part = name.slice(di + 1, name.len())
+            di = di + 1
+
+        var result = ""
+        var ci: i64 = 0
+        while ci < base_part.len() and ci < 8:
+            result = result + base_part.char_at(ci)
+            ci = ci + 1
+        if ext_part.len() > 0:
+            result = result + "."
+            var exi: i64 = 0
+            while exi < ext_part.len() and exi < 3:
+                result = result + ext_part.char_at(exi)
+                exi = exi + 1
+        _lower_text(result)
+
     me fn find_entry_in_dir(dir_cluster: u32, target_name: text) -> Result<DirEntry, text>:
         val lower_target = _lower_text(target_name)
+        val short_alias = self._short_alias_for_lookup(target_name)
         val cached_idx = self.dir_name_index.get(dir_cluster)
         if cached_idx != nil:
             val idx = cached_idx.unwrap()
             val found = idx.get(lower_target)
             if found != nil:
                 return Ok(found.unwrap())
+            if short_alias != lower_target:
+                val alias_found = idx.get(short_alias)
+                if alias_found != nil:
+                    return Ok(alias_found.unwrap())
             return Err("file not found")
         val entries_rc = self.read_dir_entries(dir_cluster)
         if entries_rc.is_err():
@@ -892,7 +921,8 @@ impl Fat32Core:
         val entries = entries_rc.unwrap()
         var i = 0
         while i < entries.len():
-            if _lower_text(entries[i].name) == lower_target:
+            val entry_name = _lower_text(entries[i].name)
+            if entry_name == lower_target or entry_name == short_alias:
                 return Ok(entries[i])
             i = i + 1
         Err("file not found")

@@ -20,6 +20,11 @@ Current QEMU harness:
   `build/ai-cli-qemu-lanes/reports/ai-cli-disk-import.tsv` by default. Each row
   records app, target, guest path, host path, byte count, and digest for later
   FAT32 image ingestion.
+- `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package
+  --populate-fat32-image <img>` mirrors the selected staged tree into an
+  existing formatted FAT32 image and reports
+  `fat32_populate_status=host-image-populated` only when the host populator
+  succeeds. This is host-side image evidence, not guest serial validation.
 - Default mode checks staged runtime artifacts under
   `build/os/ai-cli-runtime-staging/sys/runtime/node-compatible/<target>/runtime.smf`,
   CLI bundles under `build/os/ai-cli-runtime-staging/sys/apps/<app>/<app>.js`,
@@ -100,5 +105,8 @@ Mirrored manual: `doc/06_spec/system/os/simpleos_ai_cli_js_node_port_spec.md`
   host tree populator can mirror the AI CLI staging layout, including
   `sys/runtime/node-compatible/x86/runtime.smf` and `sys/apps/codex/codex.js`,
   into a formatted FAT32 image and preserve payload bytes.
+- Harness image population: `--populate-fat32-image <img>` connects the staged
+  AI CLI tree to the host FAT32 populator and fails the harness if the image
+  mirror fails.
 - Still pending: guest QEMU runtime smoke and kernel/OS-layer VFS, socket, and
   process boundary evidence.

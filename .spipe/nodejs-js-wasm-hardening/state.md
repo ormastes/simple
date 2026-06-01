@@ -116,3 +116,10 @@ dev-incomplete
 - dev: Regenerated `doc/06_spec/feature/js/node_api_conformance_spec.md`;
   docgen completed with existing compiler/docgen warnings and emitted a
   stub-style manual.
+- dev: Added a restartable Phase 6 host-image population slice. The AI CLI QEMU
+  harness now accepts `--stage-smoke-package --populate-fat32-image <img>` to
+  materialize the selected smoke package and mirror it into an existing
+  formatted FAT32 image, reporting `fat32_populate_status=host-image-populated`
+  only when the populator succeeds. The FAT32 path lookup now resolves its own
+  8.3 aliases for long directory names such as `node-compatible` after image
+  reloads. This is still host-side image evidence, not QEMU guest validation.

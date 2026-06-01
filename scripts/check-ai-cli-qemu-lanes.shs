@@ -12,6 +12,7 @@ set -eu
 # Usage:
 #   sh scripts/check-ai-cli-qemu-lanes.shs --contract-only
 #   sh scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package --target x86 --app codex
+#   sh scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package --populate-fat32-image build/os/fat32-x86_64.img --target x86 --app codex
 #   sh scripts/check-ai-cli-qemu-lanes.shs --target x86 --app codex --validate-log-only
 #   sh scripts/check-ai-cli-qemu-lanes.shs --target all --app all
 #
@@ -35,6 +36,7 @@ APP_FILTER="all"
 CONTRACT_ONLY=0
 VALIDATE_LOG_ONLY=0
 STAGE_SMOKE_PACKAGE=0
+POPULATE_FAT32_IMAGE=""
 
 usage() {
     sed -n '3,18p' "$0"
@@ -64,6 +66,15 @@ while [ "$#" -gt 0 ]; do
             ;;
         --contract-only) CONTRACT_ONLY=1 ;;
         --stage-smoke-package) STAGE_SMOKE_PACKAGE=1 ;;
+        --populate-fat32-image=*) POPULATE_FAT32_IMAGE="${arg#--populate-fat32-image=}" ;;
+        --populate-fat32-image)
+            if [ "$#" -eq 0 ]; then
+                echo "[ai-cli-qemu] --populate-fat32-image requires a path" >&2
+                exit 2
+            fi
+            POPULATE_FAT32_IMAGE="$1"
+            shift
+            ;;
         --validate-log-only) VALIDATE_LOG_ONLY=1 ;;
         --help|-h) usage; exit 0 ;;
         *) echo "[ai-cli-qemu] unknown argument: $arg" >&2; usage >&2; exit 2 ;;
@@ -240,6 +251,45 @@ append_import_entry() {
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$app" "$target" "$guest_path" "$host_path" "$bytes" "$digest" >>"$IMPORT_MANIFEST"
 }
 
+populate_fat32_image() {
+    image_path="$1"
+    populate_src="$BUILD_DIR/populate-fat32-image.spl"
+    populate_log="$BUILD_DIR/populate-fat32-image.log"
+
+    case "$image_path:$STAGING_ROOT" in
+        *\"*|*\$*|*\`*|*\\*|*"
+"*)
+            echo "[ai-cli-qemu] unsupported shell-sensitive character in image or staging path" >&2
+            return 2
+            ;;
+    esac
+    if [ ! -s "$image_path" ]; then
+        echo "[ai-cli-qemu] missing FAT32 image: $image_path" >&2
+        return 1
+    fi
+    if [ ! -d "$STAGING_ROOT" ]; then
+        echo "[ai-cli-qemu] missing staging root: $STAGING_ROOT" >&2
+        return 1
+    fi
+
+    cat >"$populate_src" <<SIMPLE
+use os.port.host_fat32_tree_populator.{populate_host_tree_into_fat32_image}
+
+fn main() -> i64:
+    val result = populate_host_tree_into_fat32_image("$image_path", "$STAGING_ROOT")
+    if result.is_err():
+        print "fat32_image_populate_error=" + result.unwrap_err()
+        return 1
+    print "fat32_image_populate_status=host-image-populated"
+    return 0
+SIMPLE
+
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$populate_src" --mode=interpreter --clean >"$populate_log"
+    populate_code=$?
+    cat "$populate_log"
+    return "$populate_code"
+}
+
 stage_smoke_package() {
     app="$1"
     target="$2"
@@ -327,6 +377,9 @@ echo "validate_log_only=$VALIDATE_LOG_ONLY" | tee -a "$report_path"
 echo "stage_smoke_package=$STAGE_SMOKE_PACKAGE" | tee -a "$report_path"
 echo "staging_root=$STAGING_ROOT" | tee -a "$report_path"
 echo "serial_root=$SERIAL_ROOT" | tee -a "$report_path"
+if [ -n "$POPULATE_FAT32_IMAGE" ]; then
+    echo "populate_fat32_image=$POPULATE_FAT32_IMAGE" | tee -a "$report_path"
+fi
 
 if [ "$STAGE_SMOKE_PACKAGE" -eq 1 ]; then
     mkdir -p "$(dirname -- "$IMPORT_MANIFEST")"
@@ -339,6 +392,7 @@ contract_count=0
 runtime_failures=0
 serial_failures=0
 stage_count=0
+populate_status="not-run"
 
 for app in codex claude gemini; do
     app_selected "$app" || continue
@@ -383,9 +437,27 @@ fi
     echo "stage_count=$stage_count"
 } | tee -a "$report_path"
 
+if [ -n "$POPULATE_FAT32_IMAGE" ]; then
+    if populate_fat32_image "$POPULATE_FAT32_IMAGE"; then
+        populate_status="host-image-populated"
+    else
+        populate_status="host-image-populate-failed"
+    fi
+fi
+
 if [ "$STAGE_SMOKE_PACKAGE" -eq 1 ]; then
+    echo "fat32_populate_status=$populate_status" | tee -a "$report_path"
+    if [ "$populate_status" = "host-image-populate-failed" ]; then
+        echo "ai_cli_qemu_lanes_status=fail" | tee -a "$report_path"
+        echo "ai_cli_qemu_lanes_reason=host-fat32-image-populate-failed" | tee -a "$report_path"
+        exit 1
+    fi
     echo "ai_cli_qemu_lanes_status=stage-smoke-package" | tee -a "$report_path"
-    echo "ai_cli_qemu_lanes_reason=host-package-materialized-no-guest-validation" | tee -a "$report_path"
+    if [ "$populate_status" = "host-image-populated" ]; then
+        echo "ai_cli_qemu_lanes_reason=host-package-materialized-and-image-populated-no-guest-validation" | tee -a "$report_path"
+    else
+        echo "ai_cli_qemu_lanes_reason=host-package-materialized-no-guest-validation" | tee -a "$report_path"
+    fi
     exit 0
 fi
 

@@ -18,13 +18,13 @@ follow-up goals.
 
 ## Crash Restart Summary
 
-GitHub `origin/main` at this checkpoint:
+GitHub `origin/main` observed during this checkpoint:
 
-- `0cecd52afb doc: add RTL backend optimization research and agent plan`
+- `4fac6ea1dd feat: add rv32i rvfi trace foundation`
 
 Latest pushed JS/WASM hardening commit:
 
-- `ba84554e3a docs: reconcile js wasm hardening status`
+- `68e80d281b test: prove ai cli fat32 staging ingestion`
 
 Use clean worktrees from `origin/main` for pushable JS/WASM slices. The main
 workspace may contain unrelated GUI/perf/local changes. Do not revert unrelated
@@ -33,9 +33,9 @@ dirty files and do not commit them into this goal.
 Current in-flight worktree:
 
 - Path: `/tmp/simple-js-wasm-qemu-audit`
-- Base: `origin/main` at `0cecd52afb`
-- Slice: restartable goal/progress plan, then QEMU runtime provisioning audit.
-- Status: plan checkpoint in progress.
+- Base: clean worktree from `origin/main`; rebase before pushing if remote moved.
+- Slice: host-side AI CLI smoke package FAT32 image population.
+- Status: implementation and focused verification in progress.
 - Evidence from pushed runtime grant slices: `node_api_conformance_spec.spl`
   passed 149 scenarios, `simpleos_ai_cli_js_node_port_spec.spl` passed 25
   scenarios, and `find doc/06_spec -name '*_spec.spl' | wc -l` printed `0`.
@@ -77,6 +77,9 @@ Pushed JS/WASM hardening commits include:
 - `034942e82a feat: enforce node network grants`
 - `29d326438a feat: enforce node process grants`
 - `ba84554e3a docs: reconcile js wasm hardening status`
+- `c4966a310a test: add ai cli qemu lane harness`
+- `ecbc0c9db8 test: stage ai cli qemu smoke package`
+- `68e80d281b test: prove ai cli fat32 staging ingestion`
 
 Completed evidence:
 
@@ -101,6 +104,9 @@ Completed evidence:
   mismatched command denial, and shell-style command string rejection.
 - Status docs now explicitly distinguish runtime grant conformance from
   still-pending OS VFS, socket, and process boundary enforcement.
+- Phase 6 now has a contract-first QEMU lane harness, host-side smoke package
+  staging, a disk-import manifest, and a host FAT32 tree-populator test proving
+  staged AI CLI payload bytes can be mirrored into a formatted image.
 
 ## Remaining Goal Plan
 
@@ -130,6 +136,15 @@ Completed evidence:
      (`sys/runtime/node-compatible/x86/runtime.smf` plus `sys/apps/codex/*`)
      into a formatted image. This is still host-side readiness, not guest boot
      evidence.
+   - Current in-progress slice adds
+     `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package
+     --populate-fat32-image <img>` so the harness can materialize the selected
+     smoke package and mirror it into an existing formatted FAT32 image. The
+     expected success marker is `fat32_populate_status=host-image-populated`.
+     This remains host-side image evidence, not guest/QEMU serial evidence.
+   - The FAT32 driver must resolve its own 8.3 aliases for long names such as
+     `node-compatible`; otherwise the host populator can create the directory,
+     reload the image, and fail to traverse the original long path.
    - Audit `ai_cli_qemu_lane`, staged package generation, launcher marker
      output, and runtime artifact assumptions.
    - Provision a Node-compatible runtime artifact and CLI bundles into the
@@ -190,7 +205,21 @@ SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=<worktree>/src \
 
 The staging command should report `ai_cli_qemu_lanes_status=stage-smoke-package`
 and an `import_manifest=.../ai-cli-disk-import.tsv` line. Treat that manifest as
-input to the later FAT32 image-builder work, not as QEMU evidence.
+input to the FAT32 image population work, not as QEMU evidence.
+
+Host-side FAT32 image population command:
+
+```sh
+SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=<worktree>/src \
+  sh scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package \
+  --populate-fat32-image <formatted-fat32.img> --target x86 --app codex
+```
+
+The image-population command should report
+`fat32_populate_status=host-image-populated` and
+`ai_cli_qemu_lanes_status=stage-smoke-package`. It proves host image ingestion
+only; do not check off full QEMU validation until a booted guest emits the
+required serial markers.
 
 Promotion commands after runtime provisioning exists:
 
