@@ -79,6 +79,17 @@ Run these lanes in parallel only when their file scopes are disjoint. Shared com
 | P1 | E | Split persistent profile work into schema, writer, loader, and migration steps | Requirements/design artifacts exist before implementation. |
 | P1 | F | Build a cross-lane smoke command list | Commands cover JS/WASM, GUI, interpreter, compiler/lib checks, and doc layout. |
 
+Current queue status:
+
+| Item | Status | Evidence |
+|------|--------|----------|
+| P0 A/F | Done | Roadmap state exists and the progress log records verification and sync checkpoints. |
+| P0 B | Done for the latest recorded slice | Node API, WebGPU JS/WASM, and generated manual evidence are recorded below; future JS/WASM changes reopen the lane. |
+| P0 C | Done for the latest recorded slice | GUI fallback evidence, static-shell cache work, image color routing, and text corpus calibration are recorded below. |
+| P1 D | Done for the latest recorded slice | Watchdog ordering, string concatenation, `CowEnv`, and text-index hot-path checks are recorded below. |
+| P1 E | Planned | Split into schema, writer, loader/merge, and migration work in `doc/03_plan/agent_tasks/simple_optimization_architecture_roadmap_2026-06-01.md`. |
+| P1 F | Done for the current roadmap checkpoint | Smoke command list exists at `doc/03_plan/sys_test/simple_optimization_architecture_roadmap_2026-06-01.md`. |
+
 #### Progress Log
 
 | Date | Lane | Progress | Evidence |
@@ -655,3 +666,4 @@ From `doc/08_tracking/bug/`:
 |------|------|----------|----------|
 | 2026-06-01 | D/F | Optimized Rust interpreter `text[index]` so ASCII remains O(1), positive in-bounds Unicode indexing avoids the up-front char-count walk, and error previews allocate only on diagnostics. | PASS string spec check; PASS string spec 47; PASS cargo check simple-compiler; PASS string system 33; PASS interpreter perf 10; PASS Node API 151; PASS WebGPU JS/WASM 106; PASS GTK evidence Simple open 227 us / GTK open 69171 us / checksum 212444. |
 | 2026-06-01 | B/E | Added exact `report-table-command` GUI fixture across Simple Engine2D, Node, Bun, and Electron bitmap baselines so table/command UI rendering stays zero-tolerance and cache-backed. | PASS renderer check; PASS renderer spec 10; PASS Node exact bitmap 0 mismatches / 5 us Simple / 81 us baseline; PASS Bun exact bitmap 0 mismatches / 5 us Simple / 403 us baseline; PASS Electron exact bitmap 0 mismatches / 13026 us frame; PASS interpreter perf 10; PASS Node API 151; PASS WebGPU JS/WASM 106; PASS GTK evidence Simple open 239 us / GTK open 75690 us / checksum 212444. |
+| 2026-06-01 | E/F | Split the remaining persistent `.sprof` profile work into schema, writer, loader/merge, and migration handoff slices, and added the focused cross-lane smoke command list for future checkpoints. | `doc/03_plan/agent_tasks/simple_optimization_architecture_roadmap_2026-06-01.md`; `doc/03_plan/sys_test/simple_optimization_architecture_roadmap_2026-06-01.md`. |

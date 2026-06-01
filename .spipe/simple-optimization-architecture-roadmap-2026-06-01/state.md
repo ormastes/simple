@@ -121,6 +121,11 @@ dev-done
   perf (10); PASS Node API conformance (151); PASS WebGPU JS/WASM Simple (106);
   PASS GTK GUI repeat evidence with Simple open 227 us, GTK open 69171 us,
   Simple frame 1 us, GTK frame 26 us, vector checksum 212444 deterministic true.
+- planning: Added the exact roadmap follow-up artifacts for the next plan:
+  `doc/03_plan/agent_tasks/simple_optimization_architecture_roadmap_2026-06-01.md`
+  splits persistent `.sprof` work into schema, writer, loader/merge, and
+  migration slices; `doc/03_plan/sys_test/simple_optimization_architecture_roadmap_2026-06-01.md`
+  records the cross-lane smoke command list.
 - implementation: GUI rendering lane added an exact `report-table-command`
   fixture to the Simple Engine2D heuristic renderer plus Node, Bun, and Electron
   bitmap baselines. The scene covers command chips, table rows, filter/summary
