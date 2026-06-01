@@ -216,6 +216,26 @@ expect(row).to_contain("requires-macos-arm64")
 
 </details>
 
+#### reports mac pass evidence with host profile and CPU details
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val row = gui_mac_smf_dynlib_pass_row("macos", "arm64", "macos-arm64", "Apple_M3", "build/gui/pure_gui_hot.smf")
+expect(row).to_contain("status=pass")
+expect(row).to_contain("host_os=macos")
+expect(row).to_contain("arch=arm64")
+expect(row).to_contain("host_profile=macos-arm64")
+expect(row).to_contain("host_cpu=Apple_M3")
+expect(row).to_contain("artifact=build/gui/pure_gui_hot.smf")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -235,8 +255,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

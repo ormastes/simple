@@ -87,15 +87,18 @@ _expect_release_clean("src/lib/gui/pure_smf_dynlib_perf.spl")
 
 1.  expect release clean
 
+2.  expect release clean
+
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 _expect_release_clean("src/app/gui_perf/smf_dynlib_probe_core.spl")
+_expect_release_clean("src/app/gui_perf/smf_dynlib_probe.spl")
 ```
 
 </details>
@@ -116,6 +119,26 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_evidence_core.spl")
 _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_evidence.spl")
+```
+
+</details>
+
+#### keeps SMF artifact contract helpers free of WM, web renderer, and native GUI runtime deps
+
+1.  expect release clean
+
+2.  expect release clean
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+_expect_release_clean("src/app/gui_perf/smf_dynlib_artifact.spl")
+_expect_release_clean("src/app/gui_perf/smf_artifact_contract.spl")
 ```
 
 </details>
@@ -259,8 +282,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
