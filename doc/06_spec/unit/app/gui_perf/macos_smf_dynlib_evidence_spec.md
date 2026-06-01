@@ -79,7 +79,7 @@ expect(gui_mac_smf_dynlib_probe_command_with_host(paths, "macos-arm64", "Apple M
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -97,6 +97,8 @@ expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_arch)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_contract_row(no_dynlib)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_symbol)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_contract_row(duplicate_status)).to_equal(false)
+expect(gui_mac_smf_dynlib_select_stdout_row("warning before row\n" + good + "\n", "GUI_SMF_ARTIFACT_CONTRACT")).to_equal(good)
+expect(gui_mac_smf_dynlib_select_stdout_row(good + "\n" + good, "GUI_SMF_ARTIFACT_CONTRACT")).to_equal("")
 ```
 
 </details>
@@ -292,13 +294,15 @@ expect(gui_mac_smf_dynlib_accepts_transcript("GUI_SMF_WRAP ok=true input=build/g
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("src/app/gui_perf/macos_smf_dynlib_evidence.spl")
 expect(source.contains("print stdout.trim()")).to_equal(false)
 expect(source.contains("val (_stdout, stderr, code) = _shell(command, timeout_ms)")).to_equal(true)
+expect(source).to_contain("gui_mac_smf_dynlib_select_stdout_row(contract_out, \"GUI_SMF_ARTIFACT_CONTRACT\")")
+expect(source).to_contain("gui_mac_smf_dynlib_select_stdout_row(probe_out, \"GUI_DYNLIB_PERF\")")
 ```
 
 </details>
