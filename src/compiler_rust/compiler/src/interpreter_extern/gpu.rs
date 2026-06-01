@@ -34,7 +34,7 @@ mod opencl_dlopen {
     #[cfg(windows)]
     fn load_symbol(handle: *mut c_void, name: &[u8]) -> Option<*mut c_void> {
         use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
-        let symbol = unsafe { GetProcAddress(handle as _, name.as_ptr()) };
+        let symbol = unsafe { GetProcAddress(handle, name.as_ptr()) };
         symbol.map(|f| f as *mut c_void)
     }
 
@@ -52,9 +52,7 @@ mod opencl_dlopen {
                     continue;
                 }
                 if let Some(symbol) = load_symbol(handle, b"clGetPlatformIDs\0") {
-                    return Some(OpenClFns {
-                        cl_get_platform_ids: symbol_to_cl_get_platform_ids(symbol),
-                    });
+                    return Some(OpenClFns { cl_get_platform_ids: symbol_to_cl_get_platform_ids(symbol) });
                 }
             }
         }
@@ -68,10 +66,8 @@ mod opencl_dlopen {
                 if handle.is_null() {
                     continue;
                 }
-                if let Some(symbol) = load_symbol(handle as *mut c_void, b"clGetPlatformIDs\0") {
-                    return Some(OpenClFns {
-                        cl_get_platform_ids: symbol_to_cl_get_platform_ids(symbol),
-                    });
+                if let Some(symbol) = load_symbol(handle, b"clGetPlatformIDs\0") {
+                    return Some(OpenClFns { cl_get_platform_ids: symbol_to_cl_get_platform_ids(symbol) });
                 }
             }
         }
@@ -266,7 +262,7 @@ use simple_runtime::metal_graphics_runtime::{
     rt_metal_set_viewport, rt_metal_present, rt_metal_wait_completed,
 };
 
-pub(super) fn arg_i64(args: &[Value], index: usize, name: &str, expected: usize) -> Result<i64, CompileError> {
+fn arg_i64(args: &[Value], index: usize, name: &str, expected: usize) -> Result<i64, CompileError> {
     args.get(index)
         .ok_or_else(|| {
             let ctx = ErrorContext::new()
@@ -277,7 +273,7 @@ pub(super) fn arg_i64(args: &[Value], index: usize, name: &str, expected: usize)
         .as_int()
 }
 
-pub(super) fn arg_text(args: &[Value], index: usize, name: &str, expected: usize) -> Result<String, CompileError> {
+fn arg_text(args: &[Value], index: usize, name: &str, expected: usize) -> Result<String, CompileError> {
     match args.get(index) {
         Some(Value::Str(s)) => Ok(s.clone()),
         Some(other) => Err(CompileError::semantic(format!(
@@ -296,7 +292,7 @@ pub(super) fn arg_text(args: &[Value], index: usize, name: &str, expected: usize
     }
 }
 
-pub(super) fn c_string_or_error(text: String, name: &str) -> Result<CString, CompileError> {
+fn c_string_or_error(text: String, name: &str) -> Result<CString, CompileError> {
     CString::new(text).map_err(|_| CompileError::semantic(format!("{name} does not accept embedded NUL bytes")))
 }
 
@@ -308,12 +304,7 @@ fn c_ptr_to_string(ptr: *const std::os::raw::c_char) -> String {
     }
 }
 
-pub(super) fn arg_bytes_ptr(
-    args: &[Value],
-    index: usize,
-    name: &str,
-    expected: usize,
-) -> Result<(Vec<u8>, i64), CompileError> {
+fn arg_bytes_ptr(args: &[Value], index: usize, name: &str, expected: usize) -> Result<(Vec<u8>, i64), CompileError> {
     let value = args.get(index).ok_or_else(|| {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -340,43 +331,6 @@ pub(super) fn arg_bytes_ptr(
         Value::Int(ptr) => Ok((Vec::new(), *ptr)),
         other => Err(CompileError::semantic(format!(
             "{name} argument {index} must be [u8] or raw pointer, got {}",
-            other.type_name()
-        ))),
-    }
-}
-
-pub(super) fn arg_u32_bytes_ptr(
-    args: &[Value],
-    index: usize,
-    name: &str,
-    expected: usize,
-) -> Result<(Vec<u8>, i64), CompileError> {
-    let value = args.get(index).ok_or_else(|| {
-        let ctx = ErrorContext::new()
-            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
-            .with_help(format!("{name} requires exactly {expected} argument(s)"));
-        CompileError::semantic_with_context(format!("{name} expects {expected} arguments"), ctx)
-    })?;
-    match value {
-        Value::Array(items) | Value::FrozenArray(items) => {
-            let mut bytes = Vec::with_capacity(items.len() * 4);
-            for item in items.iter() {
-                bytes.extend_from_slice(&(item.as_int()? as u32).to_ne_bytes());
-            }
-            let ptr = bytes.as_ptr() as i64;
-            Ok((bytes, ptr))
-        }
-        Value::FixedSizeArray { data, .. } => {
-            let mut bytes = Vec::with_capacity(data.len() * 4);
-            for item in data.iter() {
-                bytes.extend_from_slice(&(item.as_int()? as u32).to_ne_bytes());
-            }
-            let ptr = bytes.as_ptr() as i64;
-            Ok((bytes, ptr))
-        }
-        Value::Int(ptr) => Ok((Vec::new(), *ptr)),
-        other => Err(CompileError::semantic(format!(
-            "{name} argument {index} must be [u32] or raw pointer, got {}",
             other.type_name()
         ))),
     }
@@ -1206,9 +1160,8 @@ pub fn rt_cuda_module_get_function_fn(args: &[Value]) -> Result<Value, CompileEr
         if let Some(fns) = get_cuda_dl() {
             let c_name = c_string_or_error(func_name, "rt_cuda_module_get_function")?;
             let mut func: *mut std::os::raw::c_void = std::ptr::null_mut();
-            let r = unsafe {
-                (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr().cast())
-            };
+            let r =
+                unsafe { (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr()) };
             if r == 0 {
                 return Ok(Value::Int(func as i64));
             }
@@ -1248,9 +1201,8 @@ pub fn rt_cuda_launch_kernel_fn(args: &[Value]) -> Result<Value, CompileError> {
         if let Some(fns) = get_cuda_dl() {
             let c_name = c_string_or_error(func_name, "rt_cuda_launch_kernel")?;
             let mut func: *mut std::os::raw::c_void = std::ptr::null_mut();
-            let r = unsafe {
-                (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr().cast())
-            };
+            let r =
+                unsafe { (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr()) };
             if r != 0 {
                 return Ok(Value::Int(-(r as i64)));
             }
@@ -1683,128 +1635,6 @@ pub fn rt_opencl_is_available_fn(_args: &[Value]) -> Result<Value, CompileError>
 /// `rt_opencl_platform_count() -> i64`
 pub fn rt_opencl_platform_count_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(opencl_dlopen::platform_count()))
-}
-
-/// `rt_opencl_create_context(platform: i64) -> i64`
-pub fn rt_opencl_create_context_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _platform = arg_i64(args, 0, "rt_opencl_create_context", 1)?;
-    Ok(Value::Int(0))
-}
-
-/// `rt_opencl_create_queue(context: i64) -> i64`
-pub fn rt_opencl_create_queue_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _context = arg_i64(args, 0, "rt_opencl_create_queue", 1)?;
-    Ok(Value::Int(0))
-}
-
-/// `rt_opencl_create_program(context: i64, source: text) -> i64`
-pub fn rt_opencl_create_program_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _context = arg_i64(args, 0, "rt_opencl_create_program", 2)?;
-    let _source = arg_text(args, 1, "rt_opencl_create_program", 2)?;
-    Ok(Value::Int(0))
-}
-
-/// `rt_opencl_build_program(program: i64) -> bool`
-pub fn rt_opencl_build_program_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _program = arg_i64(args, 0, "rt_opencl_build_program", 1)?;
-    Ok(Value::Bool(false))
-}
-
-/// `rt_opencl_create_kernel(program: i64, name: text) -> i64`
-pub fn rt_opencl_create_kernel_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _program = arg_i64(args, 0, "rt_opencl_create_kernel", 2)?;
-    let _name = arg_text(args, 1, "rt_opencl_create_kernel", 2)?;
-    Ok(Value::Int(0))
-}
-
-/// `rt_opencl_mem_alloc(context: i64, size: i64) -> i64`
-pub fn rt_opencl_mem_alloc_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _context = arg_i64(args, 0, "rt_opencl_mem_alloc", 2)?;
-    let _size = arg_i64(args, 1, "rt_opencl_mem_alloc", 2)?;
-    Ok(Value::Int(0))
-}
-
-/// `rt_opencl_mem_free(buffer: i64) -> bool`
-pub fn rt_opencl_mem_free_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _buffer = arg_i64(args, 0, "rt_opencl_mem_free", 1)?;
-    Ok(Value::Bool(false))
-}
-
-/// `rt_opencl_write_buffer(queue: i64, buffer: i64, host_ptr: i64, size: i64) -> bool`
-pub fn rt_opencl_write_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _queue = arg_i64(args, 0, "rt_opencl_write_buffer", 4)?;
-    let _buffer = arg_i64(args, 1, "rt_opencl_write_buffer", 4)?;
-    let _host_ptr = arg_i64(args, 2, "rt_opencl_write_buffer", 4)?;
-    let _size = arg_i64(args, 3, "rt_opencl_write_buffer", 4)?;
-    Ok(Value::Bool(false))
-}
-
-/// `rt_opencl_read_buffer(queue: i64, buffer: i64, host_ptr: i64, size: i64) -> bool`
-pub fn rt_opencl_read_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _queue = arg_i64(args, 0, "rt_opencl_read_buffer", 4)?;
-    let _buffer = arg_i64(args, 1, "rt_opencl_read_buffer", 4)?;
-    let _host_ptr = arg_i64(args, 2, "rt_opencl_read_buffer", 4)?;
-    let _size = arg_i64(args, 3, "rt_opencl_read_buffer", 4)?;
-    Ok(Value::Bool(false))
-}
-
-/// `rt_opencl_set_kernel_arg_i64(kernel: i64, index: i64, value: i64) -> bool`
-pub fn rt_opencl_set_kernel_arg_i64_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _kernel = arg_i64(args, 0, "rt_opencl_set_kernel_arg_i64", 3)?;
-    let _index = arg_i64(args, 1, "rt_opencl_set_kernel_arg_i64", 3)?;
-    let _value = arg_i64(args, 2, "rt_opencl_set_kernel_arg_i64", 3)?;
-    Ok(Value::Bool(false))
-}
-
-/// `rt_opencl_set_kernel_arg_buffer(kernel: i64, index: i64, buffer: i64) -> bool`
-pub fn rt_opencl_set_kernel_arg_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _kernel = arg_i64(args, 0, "rt_opencl_set_kernel_arg_buffer", 3)?;
-    let _index = arg_i64(args, 1, "rt_opencl_set_kernel_arg_buffer", 3)?;
-    let _buffer = arg_i64(args, 2, "rt_opencl_set_kernel_arg_buffer", 3)?;
-    Ok(Value::Bool(false))
-}
-
-/// `rt_opencl_enqueue_ndrange(queue, kernel, gx, gy, gz, lx, ly, lz) -> bool`
-pub fn rt_opencl_enqueue_ndrange_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _queue = arg_i64(args, 0, "rt_opencl_enqueue_ndrange", 8)?;
-    let _kernel = arg_i64(args, 1, "rt_opencl_enqueue_ndrange", 8)?;
-    let _gx = arg_i64(args, 2, "rt_opencl_enqueue_ndrange", 8)?;
-    let _gy = arg_i64(args, 3, "rt_opencl_enqueue_ndrange", 8)?;
-    let _gz = arg_i64(args, 4, "rt_opencl_enqueue_ndrange", 8)?;
-    let _lx = arg_i64(args, 5, "rt_opencl_enqueue_ndrange", 8)?;
-    let _ly = arg_i64(args, 6, "rt_opencl_enqueue_ndrange", 8)?;
-    let _lz = arg_i64(args, 7, "rt_opencl_enqueue_ndrange", 8)?;
-    Ok(Value::Bool(false))
-}
-
-/// `rt_opencl_finish(queue: i64) -> bool`
-pub fn rt_opencl_finish_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _queue = arg_i64(args, 0, "rt_opencl_finish", 1)?;
-    Ok(Value::Bool(false))
-}
-
-/// `rt_opencl_release_kernel(kernel: i64) -> bool`
-pub fn rt_opencl_release_kernel_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _kernel = arg_i64(args, 0, "rt_opencl_release_kernel", 1)?;
-    Ok(Value::Bool(false))
-}
-
-/// `rt_opencl_release_program(program: i64) -> bool`
-pub fn rt_opencl_release_program_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _program = arg_i64(args, 0, "rt_opencl_release_program", 1)?;
-    Ok(Value::Bool(false))
-}
-
-/// `rt_opencl_release_queue(queue: i64) -> bool`
-pub fn rt_opencl_release_queue_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _queue = arg_i64(args, 0, "rt_opencl_release_queue", 1)?;
-    Ok(Value::Bool(false))
-}
-
-/// `rt_opencl_release_context(context: i64) -> bool`
-pub fn rt_opencl_release_context_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _context = arg_i64(args, 0, "rt_opencl_release_context", 1)?;
-    Ok(Value::Bool(false))
 }
 
 /// WebGPU surface stubs — no surface is available in interpreter mode.
