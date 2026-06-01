@@ -114,7 +114,7 @@ expect(ai_cli_allows_credential(manifest, "openai-api-key")).to_equal(false)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -128,6 +128,8 @@ expect(ai_cli_allows_process(manifest, "git --version")).to_equal(false)
 expect(ai_cli_allows_network(manifest, "api.openai.com:443")).to_equal(true)
 expect(ai_cli_allows_network(manifest, "API.OPENAI.COM:0443")).to_equal(true)
 expect(ai_cli_allows_credential(manifest, "openai-api-key")).to_equal(true)
+expect(ai_cli_allows_credential(manifest, "OPENAI-API-KEY")).to_equal(true)
+expect(ai_cli_allows_credential(manifest, "process.env.OPENAI_API_KEY")).to_equal(false)
 expect(ai_cli_allows_network(manifest, "example.com:443")).to_equal(false)
 expect(ai_cli_allows_network(manifest, "api.openai.com")).to_equal(false)
 ```
@@ -210,6 +212,36 @@ expect(denied.reason).to_equal("process-grant-denied")
 expect(shell_escape.allowed).to_equal(false)
 expect(shell_escape.reason).to_equal("invalid-command")
 expect(ai_cli_process_spawn_denial_reason(deny_all_manifest(), "spawn", "/usr/bin/git")).to_equal("process-grant-denied")
+```
+
+</details>
+
+#### returns credential read boundary decisions with fail-closed denial reasons
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = codex_cli_smoke_manifest()
+val allowed = ai_cli_credential_read_decision(manifest, "read", "OPENAI-API-KEY")
+val denied = ai_cli_credential_read_decision(manifest, "read", "anthropic-api-key")
+val ambient = ai_cli_credential_read_decision(manifest, "read", "process.env.OPENAI_API_KEY")
+val token = ai_cli_credential_read_decision(manifest, "read", "sk-inline-secret")
+
+expect(allowed.layer).to_equal("credential")
+expect(allowed.subject).to_equal("openai-api-key")
+expect(allowed.allowed).to_equal(true)
+expect(allowed.reason).to_equal("allowed")
+expect(denied.allowed).to_equal(false)
+expect(denied.reason).to_equal("credential-grant-denied")
+expect(ambient.allowed).to_equal(false)
+expect(ambient.reason).to_equal("ambient-env-denied")
+expect(token.allowed).to_equal(false)
+expect(token.reason).to_equal("credential-token-denied")
+expect(ai_cli_credential_read_denial_reason(deny_all_manifest(), "read", "openai-api-key")).to_equal("credential-grant-denied")
 ```
 
 </details>
@@ -639,8 +671,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 25 |
+| Active scenarios | 25 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

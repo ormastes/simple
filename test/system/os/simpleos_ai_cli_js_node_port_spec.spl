@@ -10,6 +10,8 @@ use os.ai_cli_js_node_contract.{
     ai_cli_allows_network,
     ai_cli_allows_process,
     ai_cli_capability_summary,
+    ai_cli_credential_read_decision,
+    ai_cli_credential_read_denial_reason,
     ai_cli_deno_permission_flag_summary,
     ai_cli_deno_permission_flags,
     ai_cli_full_node_blocker,
@@ -154,6 +156,8 @@ describe "SimpleOS AI CLI JS/Node port manifest contract":
             expect(ai_cli_allows_network(manifest, "api.openai.com:443")).to_equal(true)
             expect(ai_cli_allows_network(manifest, "API.OPENAI.COM:0443")).to_equal(true)
             expect(ai_cli_allows_credential(manifest, "openai-api-key")).to_equal(true)
+            expect(ai_cli_allows_credential(manifest, "OPENAI-API-KEY")).to_equal(true)
+            expect(ai_cli_allows_credential(manifest, "process.env.OPENAI_API_KEY")).to_equal(false)
             expect(ai_cli_allows_network(manifest, "example.com:443")).to_equal(false)
             expect(ai_cli_allows_network(manifest, "api.openai.com")).to_equal(false)
 
@@ -203,6 +207,25 @@ describe "SimpleOS AI CLI JS/Node port manifest contract":
             expect(shell_escape.allowed).to_equal(false)
             expect(shell_escape.reason).to_equal("invalid-command")
             expect(ai_cli_process_spawn_denial_reason(deny_all_manifest(), "spawn", "/usr/bin/git")).to_equal("process-grant-denied")
+
+        it "returns credential read boundary decisions with fail-closed denial reasons":
+            val manifest = codex_cli_smoke_manifest()
+            val allowed = ai_cli_credential_read_decision(manifest, "read", "OPENAI-API-KEY")
+            val denied = ai_cli_credential_read_decision(manifest, "read", "anthropic-api-key")
+            val ambient = ai_cli_credential_read_decision(manifest, "read", "process.env.OPENAI_API_KEY")
+            val token = ai_cli_credential_read_decision(manifest, "read", "sk-inline-secret")
+
+            expect(allowed.layer).to_equal("credential")
+            expect(allowed.subject).to_equal("openai-api-key")
+            expect(allowed.allowed).to_equal(true)
+            expect(allowed.reason).to_equal("allowed")
+            expect(denied.allowed).to_equal(false)
+            expect(denied.reason).to_equal("credential-grant-denied")
+            expect(ambient.allowed).to_equal(false)
+            expect(ambient.reason).to_equal("ambient-env-denied")
+            expect(token.allowed).to_equal(false)
+            expect(token.reason).to_equal("credential-token-denied")
+            expect(ai_cli_credential_read_denial_reason(deny_all_manifest(), "read", "openai-api-key")).to_equal("credential-grant-denied")
 
         it "builds deterministic permission flags from manifest grants":
             val manifest = codex_cli_smoke_manifest()

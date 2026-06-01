@@ -392,7 +392,42 @@ pub fn ai_cli_socket_network_denial_reason(manifest: AiCliManifest, operation: t
     decision.reason
 
 pub fn ai_cli_allows_credential(manifest: AiCliManifest, handle: text) -> bool:
-    _text_list_allows(manifest.credential_grants, handle)
+    val normalized_handle = _normalize_credential_handle(handle)
+    if normalized_handle == "":
+        return false
+    _text_list_allows(manifest.credential_grants, normalized_handle)
+
+pub fn ai_cli_credential_read_decision(manifest: AiCliManifest, operation: text, handle: text) -> AiCliBoundaryDecision:
+    val normalized_handle = _normalize_credential_handle(handle)
+    if normalized_handle == "":
+        return AiCliBoundaryDecision(
+            layer: "credential",
+            operation: operation,
+            subject: handle,
+            allowed: false,
+            reason: _invalid_credential_reason(handle)
+        )
+    if ai_cli_allows_credential(manifest, normalized_handle):
+        return AiCliBoundaryDecision(
+            layer: "credential",
+            operation: operation,
+            subject: normalized_handle,
+            allowed: true,
+            reason: "allowed"
+        )
+    AiCliBoundaryDecision(
+        layer: "credential",
+        operation: operation,
+        subject: normalized_handle,
+        allowed: false,
+        reason: "credential-grant-denied"
+    )
+
+pub fn ai_cli_credential_read_denial_reason(manifest: AiCliManifest, operation: text, handle: text) -> text:
+    val decision = ai_cli_credential_read_decision(manifest, operation, handle)
+    if decision.allowed:
+        return ""
+    decision.reason
 
 pub fn ai_cli_permission_flags(manifest: AiCliManifest) -> [text]:
     var flags = ["--experimental-permission"]
@@ -803,6 +838,38 @@ fn _contains_shell_command_syntax(command: text) -> bool:
     command.contains("$") or
     command.contains("`") or
     command.contains("\\")
+
+fn _normalize_credential_handle(handle: text) -> text:
+    val raw = handle.trim()
+    val lowered = raw.lower()
+    if lowered == "" or lowered == "*":
+        return lowered
+    if _is_ambient_env_credential_request(lowered) or _looks_like_inline_secret_token(lowered):
+        return ""
+    lowered
+
+fn _invalid_credential_reason(handle: text) -> text:
+    val lowered = handle.trim().lower()
+    if _looks_like_inline_secret_token(lowered):
+        return "credential-token-denied"
+    if _is_ambient_env_credential_request(lowered):
+        return "ambient-env-denied"
+    "invalid-credential"
+
+fn _is_ambient_env_credential_request(handle: text) -> bool:
+    handle.contains("process.env") or
+    handle.contains("deno.env") or
+    handle.starts_with("env:") or
+    handle.ends_with("_api_key") or
+    handle.ends_with("_token") or
+    handle.ends_with("_secret")
+
+fn _looks_like_inline_secret_token(handle: text) -> bool:
+    handle.contains("api_key=") or
+    handle.contains("apikey=") or
+    handle.contains("bearer ") or
+    handle.starts_with("sk-") or
+    handle.starts_with("xoxb-")
 
 fn _normalize_network_endpoint(endpoint: text) -> text:
     val raw = endpoint.trim().lower()
