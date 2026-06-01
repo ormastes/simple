@@ -98,7 +98,7 @@ expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_symbol)).to_equal(false)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -108,12 +108,18 @@ val direct = good.replace("call_source=dynlib_symbol_call", "call_source=direct_
 val fail = good.replace("pass=true error=", "pass=false error=not-smf-dynlib")
 val missing_p99 = good.replace("p99_us=1 ", "")
 val loose_threshold = good.replace("threshold_us=1000", "threshold_us=5000")
+val over_threshold = good.replace("p99_us=1", "p99_us=1000")
+val inconsistent_pass = good.replace("p99_us=1", "p99_us=2500")
+expect(gui_mac_smf_dynlib_row_value(good, "loader")).to_equal("smf_dynlib")
+expect(gui_mac_smf_dynlib_row_i64(good, "p99_us")).to_equal(1i64)
 expect(gui_mac_smf_dynlib_accepts_probe_row(good)).to_equal(true)
 expect(gui_mac_smf_dynlib_accepts_probe_row(host)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(direct)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(fail)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(missing_p99)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(loose_threshold)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(over_threshold)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(inconsistent_pass)).to_equal(false)
 ```
 
 </details>
