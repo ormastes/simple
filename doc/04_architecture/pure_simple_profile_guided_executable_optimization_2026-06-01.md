@@ -144,7 +144,10 @@ speedup or regression. The current native smoke feeds the Simple-generated
 symbol-order artifact to `lld --symbol-ordering-file`, so the evidence proves
 native link placement rather than only C-source annotation. This keeps layout
 optimization in the Simple/C boundary while still allowing the platform C
-toolchain to place functions into optimizer-selected text sections.
+toolchain to place functions into optimizer-selected text sections. The
+representative evidence path now drives the full chain from generated-C
+profile-counter instrumentation and runtime snapshot to `.sprof`, layout map,
+native rebuild, final symbol-order proof, and before/after measurement.
 
 ## Bare-Metal Breakpoint Counter Policy
 

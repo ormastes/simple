@@ -133,6 +133,10 @@ diagnostic-only.
    optimized runtime, baseline size, optimized size, and successful generated-C
    section-map application before accepting a speedup claim. Non-profile
    baseline binaries must also prove zero `__simple_profile*` counter symbols.
+10. For representative evidence, compile and run the generated-C
+    profile-counter build, import its snapshot into `.sprof`, generate the
+    layout map and symbol-order file from that `.sprof`, rebuild natively, and
+    measure before/after runtime and size.
 
 ### Output
 

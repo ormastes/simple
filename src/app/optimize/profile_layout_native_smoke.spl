@@ -2,15 +2,41 @@
 
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_file_read_text(path: text) -> text
 
 use app.compile.llvm_direct.{llvm_direct_minimal_c_source_from_simple}
 use app.compile.native_layout_section_map.{native_layout_apply_c_section_map}
+use app.compile.native_profile_counter.{
+    native_profile_counter_instrument_c_source,
+    native_profile_counter_runtime_snapshot_from_text
+}
 use app.io.file_shell.{file_size, file_write, shell}
 use app.optimize.profile_layout_cli.{
     ProfileLayoutNativeEvidence,
     profile_layout_build_artifact,
     profile_layout_native_evidence_report
 }
+use app.optimize.sprof_loader.{sprof_load_profile_text, sprof_write_native_counter_profile_file}
+
+struct ProfileLayoutRepresentativeEvidence:
+    status: text
+    profile_exit_code: i64
+    snapshot_status: text
+    sprof_wrote: bool
+    sprof_record_count: i64
+    loaded_profile_status: text
+    loaded_function_merged_count: i64
+    layout_status: text
+    applied_count: i64
+    optimized_symbol_order_verified: bool
+    non_profile_counter_symbol_count: i64
+    baseline_ms: i64
+    optimized_ms: i64
+    speedup_pct: i64
+    baseline_size_bytes: i64
+    optimized_size_bytes: i64
+    diagnostic_count: i64
+    diagnostics: [text]
 
 pub fn profile_layout_native_smoke_source_text() -> text:
     [
@@ -86,6 +112,43 @@ fn _profile_layout_native_smoke_profile_counter_symbol_count(binary_path: text) 
     val (out, _, _) = shell("nm -an " + binary_path + " 2>/dev/null | grep -c '__simple_profile' || true")
     out.trim().to_i64() ?? -1
 
+pub fn profile_layout_representative_c_source_text() -> text:
+    [
+        "#include <stdint.h>",
+        "static volatile int simple_profile_sink = 0;",
+        "static int rare(void) __attribute__((noinline));",
+        "static int parse(void) __attribute__((noinline));",
+        "static int dispatch(void) __attribute__((noinline));",
+        "static int rare(void) {",
+        "  simple_profile_sink += 1;",
+        "  return simple_profile_sink;",
+        "}",
+        "static int parse(void) {",
+        "  simple_profile_sink += 3;",
+        "  return simple_profile_sink;",
+        "}",
+        "static int dispatch(void) {",
+        "  simple_profile_sink += 7;",
+        "  return simple_profile_sink;",
+        "}",
+        "int main(void) {",
+        "  int acc = 0;",
+        "  for (int i = 0; i < 200; ++i) {",
+        "    acc += dispatch();",
+        "  }",
+        "  for (int i = 0; i < 20; ++i) {",
+        "    acc += parse();",
+        "  }",
+        "  if (acc == -1) {",
+        "    acc += rare();",
+        "  }",
+        "  return acc == 0;",
+        "}"
+    ].join("\n") + "\n"
+
+pub fn profile_layout_representative_manifest_text() -> text:
+    profile_layout_native_smoke_manifest_text()
+
 pub fn profile_layout_native_smoke_run(work_dir: text, iterations: i64) -> ProfileLayoutNativeEvidence:
     val root = if work_dir == "": "/tmp/simple_profile_layout_native_smoke_" + rt_getpid().to_string() else: work_dir
     val (_, _, _) = shell("mkdir -p " + root)
@@ -137,4 +200,112 @@ pub fn profile_layout_native_smoke_run(work_dir: text, iterations: i64) -> Profi
         8192,
         500,
         2
+    )
+
+pub fn profile_layout_representative_full_flow_run(work_dir: text, iterations: i64) -> ProfileLayoutRepresentativeEvidence:
+    val root = if work_dir == "": "/tmp/simple_profile_layout_representative_" + rt_getpid().to_string() else: work_dir
+    val (_, _, _) = shell("mkdir -p " + root)
+    val manifest_text = profile_layout_representative_manifest_text()
+    val generated_c = profile_layout_representative_c_source_text()
+    val baseline_c_path = root + "/representative.baseline.cpp"
+    val profile_c_path = root + "/representative.profile.cpp"
+    val optimized_c_path = root + "/representative.optimized.cpp"
+    val baseline_path = root + "/representative.baseline"
+    val profile_path = root + "/representative.profile"
+    val optimized_path = root + "/representative.optimized"
+    val snapshot_path = root + "/representative.snapshot"
+    val sprof_path = root + "/representative.sprof"
+    val section_map_path = root + "/representative.layout.h"
+    val symbol_order_path = root + "/representative.symbol-order"
+
+    file_write(baseline_c_path, generated_c)
+    val instrumented = native_profile_counter_instrument_c_source(generated_c, true)
+    file_write(profile_c_path, instrumented.c_source)
+    val profile_compile_exit = _profile_layout_native_smoke_compile_c(profile_c_path, profile_path, "")
+    val (_, _, profile_run_exit) = if profile_compile_exit == 0:
+        shell("SIMPLE_PROFILE_COUNTER_SNAPSHOT=" + snapshot_path + " " + profile_path + " >/dev/null 2>&1")
+    else:
+        ("", "", 1)
+
+    val snapshot_text = if profile_run_exit == 0: rt_file_read_text(snapshot_path) ?? "" else: ""
+    val snapshot = native_profile_counter_runtime_snapshot_from_text(snapshot_text)
+    val sprof_write = if snapshot.status == "valid":
+        sprof_write_native_counter_profile_file(
+            sprof_path,
+            "representative-native",
+            "layout-full-flow",
+            instrumented.metadata_lines,
+            snapshot.counters
+        )
+    else:
+        sprof_write_native_counter_profile_file(sprof_path, "representative-native", "layout-full-flow", [], [])
+    val profile_text = if sprof_write.wrote: rt_file_read_text(sprof_path) ?? "" else: ""
+    val loaded_profile = sprof_load_profile_text(profile_text, "representative-native", "layout-full-flow")
+
+    val section_map = profile_layout_build_artifact(manifest_text, profile_text, "simple-c-section-map", 4096, 8192, 500, 2)
+    if section_map.status == "ok":
+        file_write(section_map_path, section_map.manifest_text)
+    val symbol_order = profile_layout_build_artifact(manifest_text, profile_text, "native-symbol-order", 4096, 8192, 500, 2)
+    if symbol_order.status == "ok":
+        file_write(symbol_order_path, _profile_layout_native_smoke_mangled_symbol_order(symbol_order.manifest_text))
+
+    val mapped = native_layout_apply_c_section_map(generated_c, section_map.manifest_text, section_map.status == "ok")
+    file_write(optimized_c_path, mapped.c_source)
+    val baseline_exit = _profile_layout_native_smoke_compile_c(baseline_c_path, baseline_path, "")
+    val optimized_exit = _profile_layout_native_smoke_compile_c(optimized_c_path, optimized_path, symbol_order_path)
+    val baseline_ms = if baseline_exit == 0: _profile_layout_native_smoke_measure_ms(baseline_path, iterations) else: 0
+    val optimized_ms = if optimized_exit == 0: _profile_layout_native_smoke_measure_ms(optimized_path, iterations) else: 0
+    val baseline_size = if baseline_exit == 0: file_size(baseline_path) else: 0
+    val optimized_size = if optimized_exit == 0: file_size(optimized_path) else: 0
+    val optimized_symbol_order_text = if optimized_exit == 0: _profile_layout_native_smoke_matching_symbols(optimized_path) else: ""
+    val non_profile_counter_symbol_count = if baseline_exit == 0: _profile_layout_native_smoke_profile_counter_symbol_count(baseline_path) else: -1
+    val native_evidence = profile_layout_native_evidence_report(
+        manifest_text,
+        profile_text,
+        generated_c,
+        optimized_symbol_order_text,
+        non_profile_counter_symbol_count,
+        baseline_ms,
+        optimized_ms,
+        baseline_size,
+        optimized_size,
+        4096,
+        8192,
+        500,
+        2
+    )
+
+    var diagnostics: [text] = []
+    if profile_compile_exit != 0:
+        diagnostics.push("profile_compile_failed")
+    if profile_run_exit != 0:
+        diagnostics.push("profile_run_failed")
+    if snapshot.status != "valid":
+        diagnostics = diagnostics + snapshot.diagnostics
+    if not sprof_write.wrote:
+        diagnostics = diagnostics + sprof_write.diagnostics
+    if loaded_profile.status != "loaded":
+        diagnostics = diagnostics + loaded_profile.diagnostics
+    if native_evidence.diagnostic_count > 0:
+        diagnostics = diagnostics + native_evidence.diagnostics
+
+    ProfileLayoutRepresentativeEvidence(
+        status: if diagnostics.len() == 0: native_evidence.status else: "invalid",
+        profile_exit_code: profile_run_exit,
+        snapshot_status: snapshot.status,
+        sprof_wrote: sprof_write.wrote,
+        sprof_record_count: sprof_write.record_count,
+        loaded_profile_status: loaded_profile.status,
+        loaded_function_merged_count: loaded_profile.function_merged_count,
+        layout_status: native_evidence.status,
+        applied_count: native_evidence.applied_count,
+        optimized_symbol_order_verified: native_evidence.optimized_symbol_order_verified,
+        non_profile_counter_symbol_count: native_evidence.non_profile_counter_symbol_count,
+        baseline_ms: native_evidence.baseline_ms,
+        optimized_ms: native_evidence.optimized_ms,
+        speedup_pct: native_evidence.speedup_pct,
+        baseline_size_bytes: native_evidence.baseline_size_bytes,
+        optimized_size_bytes: native_evidence.optimized_size_bytes,
+        diagnostic_count: diagnostics.len(),
+        diagnostics: diagnostics
     )

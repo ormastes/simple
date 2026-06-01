@@ -528,12 +528,19 @@ Simple-owned native symbol order files and generated-C section map headers for
 the same hot/cold plan, so the BOLT-like path produces consumable Simple/C
 artifacts without Rust seed linker changes or external BOLT. It also now has a
 checked native evidence report that ties `.sprof` input, manifest generation,
-section-map application to generated C, measured before/after runtime, and
-binary size deltas into one fail-closed result. A live native smoke now exists
-at `test/system/app/optimize/feature/profile_layout_native_smoke_spec.spl` and
+section-map application to generated C, final native symbol order, measured
+before/after runtime, binary size deltas, and non-profile counter cleanliness
+into one fail-closed result. A live native smoke now exists at
+`test/system/app/optimize/feature/profile_layout_native_smoke_spec.spl` and
 `doc/09_report/profile_layout_native_smoke_evidence_2026-06-01.md`; it builds
 baseline and section-mapped native binaries from generated C and records runtime
 and size evidence.
+
+The representative full-flow evidence path now compiles an instrumented
+generated-C workload, runs it with `SIMPLE_PROFILE_COUNTER_SNAPSHOT`, imports
+the snapshot plus metadata into `.sprof`, emits the layout map and native symbol
+order from that `.sprof`, rebuilds the optimized binary, verifies the final
+`nm -an` order, and measures before/after native execution.
 
 Deliverables:
 - layout planner over Simple settlement/native metadata;
@@ -542,8 +549,8 @@ Deliverables:
 - reproducibility manifest with symbol/relocation mapping;
 - native symbol order and generated-C section map artifacts.
 - checked before/after evidence report over measured native runtime and size.
-- live generated-C native smoke for the `.sprof -> section map -> rebuild ->
-  runtime/size evidence` path.
+- live generated-C native smoke for the `profile counters -> .sprof -> section
+  map -> rebuild -> runtime/size evidence` path.
 
 Exit gates:
 - optimized executable passes semantic smoke;

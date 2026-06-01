@@ -60,5 +60,55 @@ Interpretation:
 - The non-profile baseline binary was inspected with `nm` and contains zero
   `__simple_profile*` counter symbols, preserving the explicit profile-build
   boundary.
-- This is a smoke workload, not a release speedup claim. The remaining gate is a
-  representative workload report using the same evidence path.
+
+## Representative Full-Flow Evidence
+
+Scope: generated-C representative workload with real Simple-owned native
+counters, runtime snapshot import, `.sprof` generation, layout-map generation,
+native rebuild, final symbol-order proof, and before/after measurement.
+
+Representative profile artifact directory:
+`/tmp/simple_profile_layout_representative_spec_2619277`.
+
+Profile snapshot and `.sprof` import:
+
+```text
+snapshot_status=valid
+sprof_records=15
+function;key=c:rare:entry;count=0
+function;key=c:parse:entry;count=20
+function;key=c:dispatch:entry;count=200
+function;key=c:main:entry;count=1
+```
+
+Native layout and non-profile boundary:
+
+```text
+generated order file:
+_ZL8dispatchv
+_ZL5parsev
+_ZL4rarev
+
+optimized nm -an order:
+_ZL8dispatchv>_ZL5parsev>_ZL4rarev
+
+non_profile_counter_symbol_count=0
+```
+
+Before/after native measurement:
+
+```text
+baseline_ms_50=146
+optimized_ms_50=147
+baseline_size=16112
+optimized_size=6608
+```
+
+Interpretation:
+
+- The representative path now proves the full requested chain from native
+  profile counters through `.sprof`, layout map, native rebuild, final symbol
+  order, and measured before/after runtime/size.
+- Runtime is effectively neutral on this small process-launch workload, so this
+  report is evidence of the full flow and not a speedup claim. The size delta is
+  favorable because the optimized rebuild uses the `lld` symbol-order lane.
