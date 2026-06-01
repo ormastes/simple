@@ -18,6 +18,16 @@ inside this repository.
 6. `ui_access_observe`
 7. `ui_access_state`
 
+## Common Window Text
+
+Use `std.common.ui.win_text_access` when a task needs the same text/query/action
+logic across TRACE32 MDI windows, Simple UI snapshots, and host WM windows.
+It normalizes those sources into the canonical UI access node model, then uses
+`win_text_find_nodes`, `win_text_route_action`, and `win_text_merge_snapshots`.
+
+The Simple MCP status probe is `play_wm_text_status`; it reports whether the
+common adapter contract is available. Live refresh remains adapter-owned.
+
 ## Procedure
 
 ### Phase 1: Snapshot

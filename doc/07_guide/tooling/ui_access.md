@@ -71,6 +71,26 @@ This matches the repo-local agent skill at [.codex/skills/simple-ui/SKILL.md](..
 
 ---
 
+## Common Window Text Access
+
+`std.common.ui.win_text_access` extends the canonical UI access model to
+non-Simple window sources. It currently normalizes:
+
+- TRACE32 text or MDI windows captured by catalog/open/capture metadata
+- Simple UI access snapshots
+- host WM top-level windows
+
+The shared layer provides snapshot construction, staleness metadata, filtered
+text lookup, snapshot merging, and action routing through
+`win_text_find_nodes`, `win_text_route_action`, and `win_text_merge_snapshots`.
+Backends still own live refresh and privileged input; the common module keeps
+the query/action contract consistent across CLI, service, and MCP callers.
+
+The Simple MCP probe `play_wm_text_status` reports whether the common adapter
+contract is available.
+
+---
+
 ## MCP Tools
 
 The MCP OS server exposes twelve tools:
