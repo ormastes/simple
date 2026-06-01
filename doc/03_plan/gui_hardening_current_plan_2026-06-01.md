@@ -30,7 +30,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   and compositing blocker. Direct bitmap glyph paint routes were probed and
   fail closed because they regress the strict different-pixel bound; the next
   implementation slice needs Chrome-like antialias/proportional glyph paint
-  before replacing the rectangle-only production corpus path.
+  before replacing the rectangle-only production corpus path. The text painter
+  now exposes calibrated famous-site paint runs so production paint can consume
+  the shared wrapping/width/y-position model without duplicating font metrics.
 - 8K color/image Option A is selected and documented: lazy packed 8K surfaces,
   CIELAB as the semantic color space, XYZ as the connection space, and fail-
   closed unsupported codec/profile paths. The JPEG XL stage now distinguishes
@@ -79,6 +81,11 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - `doc/09_report/chrome_production_glyph_paint_probe_2026-06-01.md`:
   fail-closed production glyph paint probe showing generic layout and Engine2D
   bitmap glyph routes regress the strict `site_0_google` different-pixel bound.
+- `doc/09_report/chrome_text_paint_run_helper_2026-06-01.md`: focused
+  text-painter bridge evidence showing calibrated famous-site paint runs for
+  the next gated production glyph compositing slice.
+- `doc/06_spec/unit/browser_engine/text_painter_spec.md`: generated scenario
+  manual for the text painter, including the calibrated paint-run scenario.
 - `doc/09_report/gui_color_image_pipeline_8k_current_2026-06-01.md`: current
   packed 8K surface and lazy codec/profile evidence.
 - `doc/09_report/gui_color_image_pipeline_8k_evidence_2026-06-01.md`: 8K lane
@@ -205,6 +212,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-bun-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs`
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-electron-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs`
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_full REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_full_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/gc_async_mut/gpu/browser_engine/text_painter.spl test/unit/browser_engine/text_painter_spec.spl`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --format json`
 - `SIMPLE_LIB=src bin/simple check src/app/wm_compare/site_corpus_layout_report.spl test/system/wm_compare/famous_site_corpus_spec.spl test/unit/browser_engine/text_painter_spec.spl`
 - `SIMPLE_LIB=src bin/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --format json`
 - `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`
