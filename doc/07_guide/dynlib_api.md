@@ -45,6 +45,8 @@ if dynlib_is_valid(lib):
 
 - `dynlib_open(path: text, mode: u32) -> DynLibKind` — open by extension sniffing
 - `dynlib_symbol(lib: DynLibKind, name: text) -> i64` — resolve named symbol
+- `dynlib_symbol_is_process_callable(lib: DynLibKind, name: text) -> bool` —
+  true only when the resolved symbol is safe to call as a host-process pointer
 - `dynlib_close(lib: DynLibKind) -> i64` — close and release handle
 - `dynlib_is_valid(lib: DynLibKind) -> bool` — check if loaded successfully
 - `dynlib_path(lib: DynLibKind) -> text` — get filesystem path
@@ -63,7 +65,9 @@ if dynlib_is_valid(lib):
   resolve ELF/SMF symbol values from registered bytes, but that does not prove
   the address is mapped into the host process with executable permissions. Hot
   perf probes must report this as `call_source=registry_symbol_only` and fail
-  closed until true SMF executable mapping exists.
+  closed until true SMF executable mapping exists. Use
+  `dynlib_symbol_is_process_callable` before dispatching through
+  `dynlib_call_0..6`.
 - **Runtime dyncall bridge exists**: `rt_dyncall_0..6` are implemented in the
   Rust runtime for `i64` arguments and `i64` return values. They are valid only
   for process-callable function pointers.

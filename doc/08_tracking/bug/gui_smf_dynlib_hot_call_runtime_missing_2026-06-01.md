@@ -66,6 +66,15 @@ probe intentionally does not call the SMF registry address yet; resolved SMF
 registry symbols are classified as `call_source=registry_symbol_only` and fail
 closed.
 
+## Update: 2026-06-01 loader evidence API
+
+`src/os/kernel/loader/dylib_registry.spl`,
+`src/os/posix/dylib_async.spl`, and `src/os/posix/dynlib.spl` now expose a
+process-callability query for resolved symbols. The current registry
+implementation returns false because it has byte storage plus ELF virtual
+addresses, not executable host mappings. `src/app/gui_perf/smf_dynlib_probe_core.spl`
+uses that query before it can report `call_source=dynlib_symbol_call`.
+
 The default hot symbol is now `gui_dynlib_hot_probe_tick`, an i64-only pure GUI
 entry in `src/lib/gui/pure_core.spl`.
 
