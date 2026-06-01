@@ -1,0 +1,74 @@
+# macOS arm64 SMF/dynlib evidence runner.
+
+use app.gui_perf.macos_smf_dynlib_evidence_core.{
+    gui_mac_smf_dynlib_default_paths,
+    gui_mac_smf_dynlib_host_supported,
+    gui_mac_smf_dynlib_skip_row,
+    gui_mac_smf_dynlib_compile_dynlib_command,
+    gui_mac_smf_dynlib_compile_wrapper_command,
+    gui_mac_smf_dynlib_compile_probe_command,
+    gui_mac_smf_dynlib_wrap_command,
+    gui_mac_smf_dynlib_probe_command,
+    gui_mac_smf_dynlib_accepts_probe_row
+}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_platform_name() -> text
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _env_or(key: text, fallback: text) -> text:
+    val value = rt_env_get(key) ?? ""
+    if value == "":
+        return fallback
+    value
+
+fn _shell(command: text, timeout_ms: i64) -> (text, text, i32):
+    rt_process_run_timeout("/bin/sh", ["-c", command], timeout_ms)
+
+fn _host_arch() -> text:
+    val env_arch = _env_or("SIMPLE_GUI_DYNLIB_ARCH", "")
+    if env_arch != "":
+        return env_arch
+    val (stdout, _stderr, code) = rt_process_run_timeout("uname", ["-m"], 5000)
+    if code != 0:
+        return ""
+    stdout.trim()
+
+fn _run_step(name: text, command: text, timeout_ms: i64) -> bool:
+    val (stdout, stderr, code) = _shell(command, timeout_ms)
+    if stdout.trim() != "":
+        print stdout.trim()
+    if code != 0:
+        print "GUI_MAC_SMF_DYNLIB_EVIDENCE status=fail step=" + name + " exit_code=" + code.to_text() + " stderr=" + stderr.replace("\n", " ").trim()
+        return false
+    true
+
+fn main() -> i64:
+    val host_os = rt_platform_name()
+    val arch = _host_arch()
+    if not gui_mac_smf_dynlib_host_supported(host_os, arch):
+        print gui_mac_smf_dynlib_skip_row(host_os, arch)
+        return 0
+
+    val simple_bin = _env_or("SIMPLE_BIN", "src/compiler_rust/target/debug/simple")
+    val paths = gui_mac_smf_dynlib_default_paths(simple_bin)
+    if not _run_step("mkdir", "mkdir -p build/gui", 5000):
+        return 1
+    if not _run_step("compile-dynlib", gui_mac_smf_dynlib_compile_dynlib_command(paths), 120000):
+        return 1
+    if not _run_step("compile-wrapper", gui_mac_smf_dynlib_compile_wrapper_command(paths), 120000):
+        return 1
+    if not _run_step("compile-probe", gui_mac_smf_dynlib_compile_probe_command(paths), 120000):
+        return 1
+    if not _run_step("wrap-smf", gui_mac_smf_dynlib_wrap_command(paths), 30000):
+        return 1
+
+    val (probe_out, probe_err, probe_code) = _shell(gui_mac_smf_dynlib_probe_command(paths), 30000)
+    val row = probe_out.trim()
+    if row != "":
+        print row
+    if probe_code != 0 or not gui_mac_smf_dynlib_accepts_probe_row(row):
+        print "GUI_MAC_SMF_DYNLIB_EVIDENCE status=fail step=probe exit_code=" + probe_code.to_text() + " stderr=" + probe_err.replace("\n", " ").trim()
+        return 1
+    print "GUI_MAC_SMF_DYNLIB_EVIDENCE status=pass host_os=" + host_os + " arch=" + arch + " artifact=" + paths.smf_path
+    0

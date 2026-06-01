@@ -1,0 +1,72 @@
+# macOS arm64 SMF/dynlib evidence runner helpers.
+
+class GuiMacSmfDynlibEvidencePaths:
+    simple_bin: text
+    build_dir: text
+    dynlib_path: text
+    smf_path: text
+    wrapper_path: text
+    probe_path: text
+
+fn gui_mac_smf_dynlib_is_arm64(arch: text) -> bool:
+    val normalized = arch.trim().lower()
+    normalized == "arm64" or normalized == "aarch64"
+
+fn gui_mac_smf_dynlib_host_supported(host_os: text, arch: text) -> bool:
+    host_os == "macos" and gui_mac_smf_dynlib_is_arm64(arch)
+
+fn gui_mac_smf_dynlib_default_paths(simple_bin: text) -> GuiMacSmfDynlibEvidencePaths:
+    GuiMacSmfDynlibEvidencePaths(
+        simple_bin: simple_bin,
+        build_dir: "build/gui",
+        dynlib_path: "build/gui/libpure_gui_hot.dylib",
+        smf_path: "build/gui/pure_gui_hot.smf",
+        wrapper_path: "build/gui/smf_wrap_host_dynlib",
+        probe_path: "build/gui/smf_dynlib_probe"
+    )
+
+fn gui_mac_smf_dynlib_shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\\''") + "'"
+
+fn gui_mac_smf_dynlib_env_assign(name: text, value: text) -> text:
+    name + "=" + gui_mac_smf_dynlib_shell_quote(value)
+
+fn gui_mac_smf_dynlib_compile_dynlib_command(paths: GuiMacSmfDynlibEvidencePaths) -> text:
+    "SIMPLE_LIB=src " + gui_mac_smf_dynlib_shell_quote(paths.simple_bin) +
+    " compile src/app/gui_perf/pure_gui_hot_dynlib_export.spl --native --shared --strip -o " +
+    gui_mac_smf_dynlib_shell_quote(paths.dynlib_path)
+
+fn gui_mac_smf_dynlib_compile_wrapper_command(paths: GuiMacSmfDynlibEvidencePaths) -> text:
+    "SIMPLE_LIB=src " + gui_mac_smf_dynlib_shell_quote(paths.simple_bin) +
+    " compile src/app/gui_perf/smf_wrap_host_dynlib.spl --native --strip -o " +
+    gui_mac_smf_dynlib_shell_quote(paths.wrapper_path)
+
+fn gui_mac_smf_dynlib_compile_probe_command(paths: GuiMacSmfDynlibEvidencePaths) -> text:
+    "SIMPLE_LIB=src " + gui_mac_smf_dynlib_shell_quote(paths.simple_bin) +
+    " compile src/app/gui_perf/smf_dynlib_probe.spl --native --strip -o " +
+    gui_mac_smf_dynlib_shell_quote(paths.probe_path)
+
+fn gui_mac_smf_dynlib_wrap_command(paths: GuiMacSmfDynlibEvidencePaths) -> text:
+    gui_mac_smf_dynlib_env_assign("SIMPLE_GUI_DYNLIB_ARCH", "arm64") + " " +
+    gui_mac_smf_dynlib_env_assign("SIMPLE_GUI_DYNLIB_INPUT", paths.dynlib_path) + " " +
+    gui_mac_smf_dynlib_env_assign("SIMPLE_GUI_SMF_OUTPUT", paths.smf_path) + " " +
+    gui_mac_smf_dynlib_shell_quote(paths.wrapper_path)
+
+fn gui_mac_smf_dynlib_probe_command(paths: GuiMacSmfDynlibEvidencePaths) -> text:
+    gui_mac_smf_dynlib_env_assign("SIMPLE_GUI_DYNLIB_ARTIFACT", paths.smf_path) + " " +
+    gui_mac_smf_dynlib_shell_quote(paths.probe_path)
+
+fn gui_mac_smf_dynlib_accepts_probe_row(row: text) -> bool:
+    row.contains("GUI_DYNLIB_PERF ") and
+    row.contains("loader=smf_dynlib") and
+    row.contains("call_source=dynlib_symbol_call") and
+    row.contains("p99_us=") and
+    row.contains("threshold_us=1000") and
+    row.contains("pass=true") and
+    row.contains("error=") and
+    not row.contains("error=not-smf-dynlib") and
+    not row.contains("loader=host_dynlib") and
+    not row.contains("call_source=direct_simple")
+
+fn gui_mac_smf_dynlib_skip_row(host_os: text, arch: text) -> text:
+    "GUI_MAC_SMF_DYNLIB_EVIDENCE status=skip host_os=" + host_os + " arch=" + arch + " reason=requires-macos-arm64"

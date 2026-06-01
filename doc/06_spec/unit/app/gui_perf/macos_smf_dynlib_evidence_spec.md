@@ -1,0 +1,134 @@
+# Macos Smf Dynlib Evidence Specification
+
+## Scenarios
+
+### macOS SMF dynlib evidence helpers
+
+#### accepts only macOS arm64 hosts
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(gui_mac_smf_dynlib_is_arm64("arm64")).to_equal(true)
+expect(gui_mac_smf_dynlib_is_arm64("aarch64")).to_equal(true)
+expect(gui_mac_smf_dynlib_host_supported("macos", "arm64")).to_equal(true)
+expect(gui_mac_smf_dynlib_host_supported("linux", "arm64")).to_equal(false)
+expect(gui_mac_smf_dynlib_host_supported("macos", "x86_64")).to_equal(false)
+```
+
+</details>
+
+#### uses stable macOS dylib and SMF artifact paths
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val paths = gui_mac_smf_dynlib_default_paths("bin/simple")
+expect(paths.dynlib_path).to_equal("build/gui/libpure_gui_hot.dylib")
+expect(paths.smf_path).to_equal("build/gui/pure_gui_hot.smf")
+expect(paths.wrapper_path).to_equal("build/gui/smf_wrap_host_dynlib")
+expect(paths.probe_path).to_equal("build/gui/smf_dynlib_probe")
+```
+
+</details>
+
+<details>
+<summary>Advanced: builds shell commands for cold orchestration outside the hot loop</summary>
+
+#### builds shell commands for cold orchestration outside the hot loop
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val paths = gui_mac_smf_dynlib_default_paths("bin/simple")
+expect(gui_mac_smf_dynlib_shell_quote("a'b")).to_equal("'a'\\''b'")
+expect(gui_mac_smf_dynlib_compile_dynlib_command(paths)).to_contain("--shared")
+expect(gui_mac_smf_dynlib_compile_dynlib_command(paths)).to_contain("libpure_gui_hot.dylib")
+expect(gui_mac_smf_dynlib_wrap_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARCH='arm64'")
+expect(gui_mac_smf_dynlib_wrap_command(paths)).to_contain("SIMPLE_GUI_SMF_OUTPUT='build/gui/pure_gui_hot.smf'")
+expect(gui_mac_smf_dynlib_probe_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARTIFACT='build/gui/pure_gui_hot.smf'")
+```
+
+</details>
+
+
+</details>
+
+#### accepts only real SMF dynlib hot-call probe rows
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val good = "GUI_DYNLIB_PERF artifact=build/gui/pure_gui_hot.smf loader=smf_dynlib symbol=gui_dynlib_hot_probe_tick call_source=dynlib_symbol_call samples=128 warmup=16 p50_us=1 p95_us=1 p99_us=1 max_us=1 threshold_us=1000 pass=true error="
+val host = good.replace("loader=smf_dynlib", "loader=host_dynlib")
+val direct = good.replace("call_source=dynlib_symbol_call", "call_source=direct_simple")
+val fail = good.replace("pass=true error=", "pass=false error=not-smf-dynlib")
+val missing_p99 = good.replace("p99_us=1 ", "")
+val loose_threshold = good.replace("threshold_us=1000", "threshold_us=5000")
+expect(gui_mac_smf_dynlib_accepts_probe_row(good)).to_equal(true)
+expect(gui_mac_smf_dynlib_accepts_probe_row(host)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(direct)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(fail)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(missing_p99)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(loose_threshold)).to_equal(false)
+```
+
+</details>
+
+#### reports non-mac hosts as explicit skips
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val row = gui_mac_smf_dynlib_skip_row("linux", "x86_64")
+expect(row).to_contain("status=skip")
+expect(row).to_contain("requires-macos-arm64")
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- macOS SMF dynlib evidence helpers
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 5 |
+| Active scenarios | 5 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+

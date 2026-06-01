@@ -87,3 +87,33 @@ mapped the shared object into the current process with executable permissions.
 The broader `syscall_spec` timed out after 120 seconds in interpreter mode
 before listing scenarios; the syscall bridge typecheck passed in the focused
 check above.
+
+## macOS Arm64 Evidence Runner
+
+The macOS evidence runner is now implemented in Simple:
+
+```bash
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple run src/app/gui_perf/macos_smf_dynlib_evidence.spl
+```
+
+On non-macOS hosts it emits an explicit skip row:
+
+```text
+GUI_MAC_SMF_DYNLIB_EVIDENCE status=skip host_os=linux arch=x86_64 reason=requires-macos-arm64
+```
+
+On macOS arm64 the same runner compiles the pure Simple GUI hot symbol as a
+`.dylib`, compiles the SMF wrapper and probe as native executables, wraps the
+`.dylib` into a role-2 SMF artifact, runs the probe, and accepts only a
+`GUI_DYNLIB_PERF` row with `loader=smf_dynlib`,
+`call_source=dynlib_symbol_call`, and `pass=true`.
+
+Focused evidence:
+
+```bash
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/app/gui_perf/macos_smf_dynlib_evidence_core.spl src/app/gui_perf/macos_smf_dynlib_evidence.spl test/unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl --mode=interpreter --clean --format json
+```
+
+Result: `macos_smf_dynlib_evidence_spec` passed 5/5. This Linux run does not
+claim macOS arm64 acceptance; it only proves the runner gates and policy.
