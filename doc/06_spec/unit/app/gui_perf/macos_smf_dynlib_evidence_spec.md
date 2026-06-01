@@ -264,6 +264,23 @@ expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("call_source=dynlib_sy
 
 </details>
 
+#### creates the selected transcript path parent directory
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(gui_mac_smf_dynlib_transcript_parent_dir("build/gui/macos_smf_dynlib_transcript.log")).to_equal("build/gui")
+expect(gui_mac_smf_dynlib_transcript_parent_dir("macos_smf_dynlib_transcript.log")).to_equal(".")
+expect(gui_mac_smf_dynlib_transcript_parent_dir("/tmp/gui/transcript.log")).to_equal("/tmp/gui")
+expect(gui_mac_smf_dynlib_transcript_mkdir_command("build/gui run/a'b/transcript.log")).to_equal("mkdir -p 'build/gui run/a'\\''b'")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -283,8 +300,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
