@@ -158,7 +158,7 @@ expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(wrong_adapter)).to_equa
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -178,6 +178,7 @@ val missing_p99 = good.replace("p99_us=1 ", "")
 val loose_threshold = good.replace("threshold_us=1000", "threshold_us=5000")
 val over_threshold = good.replace("p99_us=1", "p99_us=1000")
 val inconsistent_pass = good.replace("p99_us=1", "p99_us=2500")
+val non_empty_error = good.replace("error=", "error=p99-over-threshold")
 expect(gui_mac_smf_dynlib_row_value(good, "loader")).to_equal("smf_dynlib")
 expect(gui_mac_smf_dynlib_row_i64(good, "p99_us")).to_equal(1i64)
 expect(gui_mac_smf_dynlib_accepts_probe_row(good)).to_equal(true)
@@ -196,6 +197,7 @@ expect(gui_mac_smf_dynlib_accepts_probe_row(missing_p99)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(loose_threshold)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(over_threshold)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(inconsistent_pass)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(non_empty_error)).to_equal(false)
 ```
 
 </details>
@@ -244,7 +246,7 @@ expect(gui_mac_smf_dynlib_accepts_pass_row(row.replace("status=pass", "status=sk
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -260,6 +262,8 @@ expect(gui_mac_smf_dynlib_accepts_transcript(contract + "\n" + qemu + "\n" + pro
 expect(gui_mac_smf_dynlib_transcript_check_row(contract + "\n" + qemu + "\n" + probe + "\n" + pass_row)).to_contain("status=fail")
 expect(gui_mac_smf_dynlib_accepts_transcript(contract + "\n" + loader + "\n" + qemu + "\n" + probe + "\n" + pass_row)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("call_source=dynlib_symbol_call", "call_source=direct_simple"))).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_transcript(contract + "\nGUI_DYNLIB_PERF pass=false error=p99-over-threshold\n" + qemu + "\n" + loader + "\n" + probe + "\n" + pass_row)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_transcript(full + "\nGUI_DYNLIB_PERF pass=false error=p99-over-threshold")).to_equal(false)
 ```
 
 </details>
