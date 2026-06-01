@@ -71,3 +71,6 @@ dev-done
 - spec: Restored the manual-purpose section in `doc/06_spec/system/wm_compare/site_corpus_pair_spec.md` after doc generation and reverified the site corpus pair spec plus doc layout/placeholder gates.
 - design: Added preselection architecture, detail design, system-test plan, and agent-task docs for the option-independent comparison/backend evidence contract while leaving final requirements/design selection pending user choice.
 - verify: Re-ran focused site corpus pair, HTML compatibility, emulated capture, backend screenshot comparison, and backend probe strict specs; all pass, `doc/06_spec` executable spec count is zero, and changed executable artifacts have no placeholder/TODO blockers.
+- requirements: Treated user "go" as approval of the previously recommended Feature Option 3 and NFR Option C; wrote final feature/NFR requirements and removed the option files per workflow.
+- design: Promoted architecture, detail design, system-test plan, and agent tasks from preselection draft to selected 3/C scope, including structural layout and backend-qualified measurement completion items.
+- verify: Requirement option files are removed, `doc/06_spec` executable spec count is zero, backend probe strict passes 8 scenarios, HTML compatibility passes 17, backend screenshot comparison passes 9, and site corpus pair passes 1.
