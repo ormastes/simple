@@ -49,7 +49,7 @@ rather than rewriting arbitrary ELF bytes.
 | Generated-C layout consumption | section-map parser/transform tests; fail-closed unused symbol and unsafe section tests |
 | Native counter feature | function/block/edge/call-path counter contract tests; generated-C insertion checks for all four counter classes; native compile-lane audit that rejects leaked counter artifacts in non-profile builds |
 | Bare-metal counter impl | breakpoint site table and patch ledger tests |
-| Bare-metal probe images | per-arch source/output/linker/compiler/QEMU plan tests; serial evidence field contract tests; generated C source/linker artifact tests for patch/restore/rearm/cleanup/icache/serial evidence; all-arch staging idempotence; live i386, x86-family x86_64, RV32/RVC32/RV64/RVC64 QEMU serial capture evidence |
+| Bare-metal probe images | per-arch source/output/linker/compiler/QEMU plan tests; serial evidence field contract tests; generated C source/linker artifact tests for patch/restore/rearm/cleanup/icache/serial evidence; all-arch staging idempotence; live i386, x86-family x86_64, ARM32, Thumb, AArch64, RV32/RVC32/RV64/RVC64 QEMU serial capture evidence |
 | Prevent slow breakpoint overhead | auto-disarm and sampled-only fallback tests |
 | Analyze call path | bounded call-path hash and promotion tests |
 | Remove breakpoint when profiled | cleanup-on-stop/panic/watchdog tests |
@@ -99,10 +99,8 @@ cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml
 
 Bare-metal slices add QEMU smoke and explicit hardware-unavailable records when
 real hardware is not present. The live-evidence gate now has serial capture for
-i386, the x86-family x86_64 QEMU target, RV32, RVC32, RV64, and RVC64 images
-that emit `simple-breakpoint-evidence;...` serial lines. ARM/Thumb/AArch64
-remain pending until this host has a suitable cross compiler or clang lowering
-path and can run those images through `breakpoint_qemu_run_serial_evidence`.
+i386, the x86-family x86_64 QEMU target, ARM32, Thumb, AArch64, RV32, RVC32,
+RV64, and RVC64 images that emit `simple-breakpoint-evidence;...` serial lines.
 
 ## Manual Review Policy
 

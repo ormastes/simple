@@ -78,10 +78,12 @@ Current adapter slice:
   entry shims isolate breakpoint evidence from full-kernel linker symbols.
   Target proof remains fail-closed per architecture until the compiler creates
   bootable ELFs, QEMU runs them, and serial evidence is captured. Current live
-  proof exists for i386, the x86-family x86_64 QEMU target, RV32, RVC32,
-  RV64, and RVC64. x86 uses a Xen PVH `XEN_ELFNOTE_PHYS32_ENTRY` note so
-  QEMU `-kernel` transfers to `_entry32`; RV32 uses direct `-bios none` boot
-  at `0x80000000` so the proof does not depend on host OpenSBI firmware.
+  proof exists for i386, the x86-family x86_64 QEMU target, ARM32, Thumb,
+  AArch64, RV32, RVC32, RV64, and RVC64. x86 uses a Xen PVH
+  `XEN_ELFNOTE_PHYS32_ENTRY` note so QEMU `-kernel` transfers to `_entry32`;
+  Thumb uses an ARM-state entry shim that branches to the Thumb-marked
+  `probe_main`; RV32 uses direct `-bios none` boot at `0x80000000` so the
+  proof does not depend on host OpenSBI firmware.
 
 ## Data Flow
 

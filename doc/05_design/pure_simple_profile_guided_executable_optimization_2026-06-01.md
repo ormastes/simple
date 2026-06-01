@@ -280,11 +280,13 @@ It writes `build/baremetal/breakpoint_probe/<arch>/breakpoint_probe.ld` with a
 minimal entry and stack layout, so probe ELFs do not depend on full-kernel
 SimpleOS linker symbols. The generated C includes `_entry32` for x86-family
 multiboot-style probes and `_start` shims for RISC-V and ARM-family probes.
-On the current host this is enough to build x86-family and RISC-V probe ELFs
-and to capture live i386, x86-family x86_64, RV32/RVC32/RV64/RVC64 serial
-evidence. x86 probes include a Xen PVH entry note for QEMU `-kernel`;
-RV32/RVC32 use a direct `-bios none` QEMU path and a `0x80000000` link
-address; RV64/RVC64 use the default OpenSBI-loaded `0x80200000` path.
+On the current host this is enough to build x86-family, ARM-family, and RISC-V
+probe ELFs and to capture live i386, x86-family x86_64, ARM32, Thumb,
+AArch64, RV32/RVC32/RV64/RVC64 serial evidence. ARM-family probes use Clang
+cross targets, and Thumb uses an ARM-state entry shim that branches to the
+Thumb-marked `probe_main`. x86 probes include a Xen PVH entry note for QEMU
+`-kernel`; RV32/RVC32 use a direct `-bios none` QEMU path and a `0x80000000`
+link address; RV64/RVC64 use the default OpenSBI-loaded `0x80200000` path.
 
 ### Overhead Protection
 

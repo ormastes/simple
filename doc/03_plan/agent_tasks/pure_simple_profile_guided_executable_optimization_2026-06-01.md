@@ -298,20 +298,17 @@ Implemented in the current slice:
 
 Build evidence from this host:
 - Built: `i386`, `x86_64` as the x86-family 32-bit multiboot probe under the
-  x86_64 QEMU target, `riscv32`, `riscv32c`, `riscv64`, `riscv64c`.
-- Not built: `arm32` and `thumb` because `arm-none-eabi-gcc` is missing;
-  `aarch64` because `aarch64-none-elf-gcc` is missing.
-- Live QEMU serial evidence captured: `i386`, x86-family `x86_64`, `riscv32`,
-  `riscv32c`, `riscv64`, and `riscv64c`. x86 probes now include a Xen PVH
-  `XEN_ELFNOTE_PHYS32_ENTRY` note so QEMU `-kernel` enters `_entry32`.
-  RV32/RVC32 direct-boot with `-bios none` at `0x80000000`, avoiding the
-  missing host OpenSBI RV32 firmware.
+  x86_64 QEMU target, `arm32`, `thumb`, `aarch64`, `riscv32`, `riscv32c`,
+  `riscv64`, `riscv64c`. ARM-family probes use host Clang cross targets rather
+  than missing GCC cross toolchains.
+- Live QEMU serial evidence captured: `i386`, x86-family `x86_64`, `arm32`,
+  `thumb`, `aarch64`, `riscv32`, `riscv32c`, `riscv64`, and `riscv64c`.
+  x86 probes include a Xen PVH `XEN_ELFNOTE_PHYS32_ENTRY` note so QEMU
+  `-kernel` enters `_entry32`; Thumb probes enter in ARM state and branch to
+  the Thumb-marked `probe_main`; RV32/RVC32 direct-boot with `-bios none` at
+  `0x80000000`, avoiding the missing host OpenSBI RV32 firmware.
 
 Remaining larger gaps:
-- compile the ARM/Thumb/AArch64 probe ELF images once cross compilers exist or
-  the repo provides a supported clang cross path;
-- run those images under QEMU and capture live patch/trap/count/restore/rearm/
-  cleanup/icache evidence;
 - measured before/after executable performance evidence for the full
   profile-counter -> `.sprof` -> layout-map -> native build flow.
 
