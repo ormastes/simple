@@ -1,5 +1,8 @@
 # codex-system-test
 # Contract tests for native profile counter ABI planning.
+"""
+System coverage for native profile counter planning, instrumentation, and extraction.
+"""
 
 use std.spec.{describe, it, expect}
 use app.compile.native_profile_counter.{
@@ -34,10 +37,16 @@ use app.compile.native_profile_counter.{
     native_profile_counter_array_symbol,
     native_profile_counter_metadata_symbol,
     native_profile_counter_function_entry_slots_from_c_source,
-    native_profile_counter_instrument_c_source
+    native_profile_counter_instrument_c_source,
+    native_profile_counter_sprof_record_from_metadata_line,
+    native_profile_counter_extract_sprof_records,
+    native_profile_counter_extract_sprof_lines
 }
 
 describe "Native Profile Counter Contract":
+    """
+    Verifies that native profile counter artifacts can round-trip into optimizer profile input.
+    """
     describe "counter ABI":
         it "should expose function block edge and call path counter kinds":
             val kinds = native_profile_counter_kinds()
@@ -305,3 +314,63 @@ describe "Native Profile Counter Contract":
             expect(instrumented.enabled).to_equal(false)
             expect(instrumented.slot_count).to_equal(0)
             expect(instrumented.c_source).to_equal(source)
+
+    describe "runtime sprof extraction":
+        it "should map metadata and final counter values to sprof-compatible records":
+            val metadata_lines = native_profile_counter_section_serialization_lines(
+                ".simple.profile.counters",
+                [
+                    native_profile_counter_slot(0, "function_entry", "mir:main:entry", 0),
+                    native_profile_counter_slot(1, "basic_block", "mir:main:bb0", 0),
+                    native_profile_counter_slot(2, "edge", "mir:main:bb0->bb1", 0),
+                    native_profile_counter_slot(3, "call_path", "mir:main:call:helper", 0)
+                ]
+            )
+            val extraction = native_profile_counter_extract_sprof_records(metadata_lines, [11, 7, 5, 3])
+            expect(extraction.record_count).to_equal(4)
+            expect(extraction.line_count).to_equal(4)
+            expect(extraction.diagnostic_count).to_equal(0)
+            expect(extraction.lines[0]).to_equal("function;key=mir:main:entry;count=11")
+            expect(extraction.lines[1]).to_equal("block;function=main;key=mir:main:bb0;count=7")
+            expect(extraction.lines[2]).to_equal("edge;from=mir:main:bb0;to=bb1;count=5")
+            expect(extraction.lines[3]).to_equal("edge;from=mir:main:call:helper;to=call_path;count=3")
+            expect(extraction.records[0].record_kind).to_equal("function")
+            expect(extraction.records[1].record_kind).to_equal("block")
+            expect(extraction.records[2].record_kind).to_equal("edge")
+            expect(extraction.records[3].counter_kind).to_equal("call_path")
+
+        it "should expose direct sprof line extraction for profile writers":
+            val metadata_lines = [
+                "section|label=simple_profile_counter_section__simple_profile_counters|name=.simple.profile.counters|records=1",
+                "counter|section=simple_profile_counter_section__simple_profile_counters|slot=0|kind=function_entry|key=c:main:entry|initial=0|symbol=__simple_profile_counter_0_function_entry"
+            ]
+            val lines = native_profile_counter_extract_sprof_lines(metadata_lines, [9])
+            expect(lines.len()).to_equal(1)
+            expect(lines[0]).to_equal("function;key=c:main:entry;count=9")
+
+        it "should unescape native metadata keys while preserving sprof token safety":
+            val record = native_profile_counter_sprof_record_from_metadata_line(
+                "counter|section=simple_profile_counter_section__simple_profile_counters|slot=4|kind=call_path|key=mir:main:callee\\pleaf|initial=0|symbol=__simple_profile_counter_4_call_path",
+                6
+            )
+            expect(record.slot_index).to_equal(4)
+            expect(record.stable_key).to_equal("mir:main:callee|leaf")
+            expect(record.line).to_equal("edge;from=mir:main:callee|leaf;to=call_path;count=6")
+
+        it "should diagnose missing and mismatched runtime counter values":
+            val metadata_lines = native_profile_counter_section_serialization_lines(
+                ".simple.profile.counters",
+                [
+                    native_profile_counter_slot(0, "function_entry", "mir:main:entry", 0),
+                    native_profile_counter_slot(1, "basic_block", "mir:main:bb0", 4)
+                ]
+            )
+            val extraction = native_profile_counter_extract_sprof_records(metadata_lines, [8, 2, 99])
+            expect(extraction.record_count).to_equal(1)
+            expect(extraction.lines[0]).to_equal("function;key=mir:main:entry;count=8")
+            expect(extraction.diagnostics).to_contain("counter_below_initial:1")
+            expect(extraction.diagnostics).to_contain("count_without_metadata:2")
+
+            val missing = native_profile_counter_extract_sprof_records(metadata_lines, [8])
+            expect(missing.record_count).to_equal(1)
+            expect(missing.diagnostics).to_contain("missing_count:1")

@@ -2,10 +2,11 @@
 # General-purpose optimizer: MIR passes, DB query patterns, and general optimizations.
 
 use std.cli.cli_util.{get_cli_args}
-use std.io.{file_exists}
+use std.io.{file_exists, file_read, file_write}
 use app.optimize.analyze.{optimize_analyze, optimize_db_analyze, optimize_full_analyze}
 use app.optimize.compare.{optimize_compare}
 use app.optimize.apply.{optimize_apply}
+use app.optimize.profile_layout_cli.{profile_layout_build_manifest}
 
 fn print_optimize_help():
     print "Usage: simple optimize <file.spl> [options]"
@@ -17,6 +18,10 @@ fn print_optimize_help():
     print "  --apply               Auto-apply safe optimization passes"
     print "  --db-analyze          Analyze DB query patterns (linear scans, missing indexes)"
     print "  --full                Full analysis: MIR + DB + general patterns combined"
+    print "  --layout-plan         Build pure-Simple profile-guided executable layout manifest"
+    print "  --profile=PATH        .sprof profile input for --layout-plan"
+    print "  --manifest=PATH       Native/settlement executable metadata input for --layout-plan"
+    print "  --out=PATH            Output manifest path for --layout-plan"
     print "  --passes=P1,P2,...    Comma-separated list of MIR passes to run"
     print "  --level=O0|O1|O2|O3  MIR optimization level (default: O2)"
     print "  -h, --help            Show this help"
@@ -33,6 +38,7 @@ fn print_optimize_help():
     print "  simple optimize src/app/web/server.spl --db-analyze"
     print "  simple optimize src/app/web/server.spl --full --level=O3"
     print "  simple optimize src/app/web/server.spl --apply --level=O3"
+    print "  simple optimize app.bin --layout-plan --profile=run.sprof --manifest=app.layout --out=app.opt.layout"
 
 struct OptimizeArgs:
     file_path:    text
@@ -40,6 +46,10 @@ struct OptimizeArgs:
     do_apply:     bool
     do_db_analyze: bool
     do_full:      bool
+    do_layout_plan: bool
+    profile_path:  text
+    manifest_path: text
+    out_path:      text
     passes:       [text]
     level:        text    # "O0"|"O1"|"O2"|"O3"
 
@@ -88,9 +98,47 @@ fn parse_optimize_args(args: [text]) -> OptimizeArgs:
         do_apply:     has_flag(args, "--apply"),
         do_db_analyze: has_flag(args, "--db-analyze"),
         do_full:      has_flag(args, "--full"),
+        do_layout_plan: has_flag(args, "--layout-plan"),
+        profile_path:  parse_flag_value(args, "--profile="),
+        manifest_path: parse_flag_value(args, "--manifest="),
+        out_path:      parse_flag_value(args, "--out="),
         passes:       passes,
         level:        level
     )
+
+fn run_profile_layout_command(opt_args: OptimizeArgs) -> i64:
+    if opt_args.profile_path == "":
+        print "Error: --layout-plan requires --profile=PATH"
+        return 1
+    if opt_args.manifest_path == "":
+        print "Error: --layout-plan requires --manifest=PATH"
+        return 1
+    if opt_args.out_path == "":
+        print "Error: --layout-plan requires --out=PATH"
+        return 1
+    if not file_exists(opt_args.profile_path):
+        print "Error: profile not found: {opt_args.profile_path}"
+        return 1
+    if not file_exists(opt_args.manifest_path):
+        print "Error: manifest not found: {opt_args.manifest_path}"
+        return 1
+
+    val result = profile_layout_build_manifest(
+        file_read(opt_args.manifest_path),
+        file_read(opt_args.profile_path),
+        4096,
+        8192,
+        500,
+        2
+    )
+    if result.status != "ok":
+        print "Error: layout plan failed: {result.diagnostics.join(\",\")}"
+        return 1
+    if not file_write(opt_args.out_path, result.manifest_text):
+        print "Error: failed to write layout manifest: {opt_args.out_path}"
+        return 1
+    print "Wrote layout manifest: {opt_args.out_path}"
+    0
 
 fn run_optimize_command(opt_args: OptimizeArgs) -> i64:
     if not file_exists(opt_args.file_path):
@@ -99,7 +147,9 @@ fn run_optimize_command(opt_args: OptimizeArgs) -> i64:
 
     var exit_code = 0
 
-    if opt_args.do_compare:
+    if opt_args.do_layout_plan:
+        exit_code = run_profile_layout_command(opt_args)
+    elif opt_args.do_compare:
         exit_code = optimize_compare(opt_args.file_path)
     elif opt_args.do_apply:
         exit_code = optimize_apply(opt_args.file_path, opt_args.passes, opt_args.level)

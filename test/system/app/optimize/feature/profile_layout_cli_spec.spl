@@ -1,0 +1,84 @@
+# codex-system-test
+# Contract tests for profile-guided executable layout CLI bridge.
+
+use std.spec.{describe, it, expect}
+use app.optimize.profile_layout_cli.{
+    profile_layout_build_manifest,
+    profile_layout_parse_manifest_text,
+    profile_layout_parse_sprof_functions
+}
+
+describe "Profile Layout CLI Bridge":
+    it "should parse semicolon executable metadata into layout entries":
+        val manifest = [
+            "symbol=dispatch;section=.text;offset=64;size=80",
+            "symbol=unused;section=.text;offset=200;size=40"
+        ].join("\n")
+        val entries = profile_layout_parse_manifest_text(manifest)
+
+        expect(entries.len()).to_equal(2)
+        expect(entries[0].symbol_name).to_equal("dispatch")
+        expect(entries[0].section_name).to_equal(".text")
+        expect(entries[0].original_offset).to_equal(64)
+        expect(entries[0].size_bytes).to_equal(80)
+
+    it "should parse tab executable metadata into layout entries":
+        val manifest = [
+            "entry\t.text\tparse\t160\t96",
+            "helper\t.text\t256\t32"
+        ].join("\n")
+        val entries = profile_layout_parse_manifest_text(manifest)
+
+        expect(entries.len()).to_equal(2)
+        expect(entries[0].symbol_name).to_equal("parse")
+        expect(entries[1].symbol_name).to_equal("helper")
+        expect(entries[1].original_offset).to_equal(256)
+
+    it "should derive function profiles from native stable sprof keys":
+        val manifest = "symbol=dispatch;section=.text;offset=64;size=80\nsymbol=rare;section=.text;offset=200;size=40"
+        val entries = profile_layout_parse_manifest_text(manifest)
+        val profile = [
+            "header;schema=sprof-v1;module=demo;workload=smoke",
+            "function;key=c:dispatch:entry;count=8",
+            "function;key=c:rare:entry;count=1"
+        ].join("\n")
+        val profiles = profile_layout_parse_sprof_functions(profile, entries)
+
+        expect(profiles.len()).to_equal(2)
+        expect(profiles[0].symbol_name).to_equal("dispatch")
+        expect(profiles[0].sample_count).to_equal(8)
+        expect(profiles[0].size_bytes).to_equal(80)
+
+    it "should build a deterministic hot and cold layout manifest":
+        val manifest = [
+            "symbol=unused;section=.text;offset=500;size=40",
+            "symbol=rare;section=.text;offset=300;size=64",
+            "symbol=dispatch;section=.text;offset=64;size=80",
+            "symbol=parse;section=.text;offset=160;size=96"
+        ].join("\n")
+        val profile = [
+            "header;schema=sprof-v1;module=demo;workload=smoke",
+            "function;key=c:rare:entry;count=2",
+            "function;key=c:dispatch:entry;count=8",
+            "function;key=c:unused:entry;count=0",
+            "function;key=c:parse:entry;count=6"
+        ].join("\n")
+
+        val result = profile_layout_build_manifest(manifest, profile, 4096, 8192, 500, 2)
+
+        expect(result.status).to_equal("ok")
+        expect(result.diagnostic_count).to_equal(0)
+        expect(result.manifest_text).to_contain("simple-executable-layout-manifest-v1")
+        expect(result.manifest_text).to_contain("hot\t.text\tdispatch\t64\t4096\t80")
+        expect(result.manifest_text).to_contain("hot\t.text\tparse\t160\t4176\t96")
+        expect(result.manifest_text).to_contain("cold\t.text\trare\t300\t8192\t64")
+        expect(result.manifest_text).to_contain("cold\t.text\tunused\t500\t8256\t40")
+
+    it "should reject empty executable metadata and missing profile functions":
+        val empty_manifest = profile_layout_build_manifest("", "function;key=c:main:entry;count=1", 4096, 8192, 500, 2)
+        expect(empty_manifest.status).to_equal("invalid")
+        expect(empty_manifest.diagnostics[0]).to_equal("empty_executable_manifest")
+
+        val missing_profile = profile_layout_build_manifest("symbol=main;section=.text;offset=0;size=32", "", 4096, 8192, 500, 2)
+        expect(missing_profile.status).to_equal("invalid")
+        expect(missing_profile.diagnostics[0]).to_equal("empty_function_profile")

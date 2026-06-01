@@ -41,6 +41,25 @@ pub class BreakpointCleanupLedgerSummary:
     cleanup_complete: bool
     summary: text
 
+pub class BreakpointMemoryPatchApplication:
+    address: u64
+    image_base_address: u64
+    patch_offset: i64
+    old_bytes: [text]
+    trap_bytes: [text]
+    restored_bytes: [text]
+    before_image: [text]
+    patched_image: [text]
+    restored_image: [text]
+    rearmed_image: [text]
+    actions: [text]
+    icache_flush_required: bool
+    icache_flushed: bool
+    cleanup_complete: bool
+    valid: bool
+    reason: text
+    cleanup_evidence: text
+
 fn breakpoint_arch_is_four_byte_aligned(address: u64, width_bytes: i64) -> bool:
     if width_bytes == 1:
         return true
@@ -463,3 +482,114 @@ pub fn breakpoint_patch_action_sequence(rearm: bool, sampled_only: bool) -> [tex
 
 pub fn breakpoint_patch_action_sequence_valid(actions: [text], rearm: bool, sampled_only: bool) -> bool:
     actions == breakpoint_patch_action_sequence(rearm, sampled_only)
+
+fn breakpoint_memory_copy(image: [text]) -> [text]:
+    var copied: [text] = []
+    for byte in image:
+        copied.push(byte)
+    copied
+
+fn breakpoint_memory_read(image: [text], offset: i64, width_bytes: i64) -> [text]:
+    var bytes: [text] = []
+    var i = 0
+    while i < width_bytes:
+        bytes.push(image[offset + i])
+        i = i + 1
+    bytes
+
+fn breakpoint_memory_write(image: [text], offset: i64, bytes: [text]) -> [text]:
+    var patched = breakpoint_memory_copy(image)
+    var i = 0
+    while i < bytes.len() as i64:
+        patched[offset + i] = bytes[i]
+        i = i + 1
+    patched
+
+fn breakpoint_memory_patch_failure(
+    record: BreakpointPatchRecord,
+    image_base_address: u64,
+    image: [text],
+    reason: text
+) -> BreakpointMemoryPatchApplication:
+    BreakpointMemoryPatchApplication(
+        address: record.address,
+        image_base_address: image_base_address,
+        patch_offset: -1,
+        old_bytes: [],
+        trap_bytes: [],
+        restored_bytes: [],
+        before_image: breakpoint_memory_copy(image),
+        patched_image: breakpoint_memory_copy(image),
+        restored_image: breakpoint_memory_copy(image),
+        rearmed_image: breakpoint_memory_copy(image),
+        actions: [],
+        icache_flush_required: false,
+        icache_flushed: false,
+        cleanup_complete: false,
+        valid: false,
+        reason: reason,
+        cleanup_evidence: "cleanup:address={record.address};patched=0;restored=0;rearmed=0;status=not_applied;reason={reason}"
+    )
+
+pub fn breakpoint_apply_patch_record_to_memory(
+    record: BreakpointPatchRecord,
+    image_base_address: u64,
+    image: [text],
+    rearm: bool,
+    sampled_only: bool,
+    icache_flushed: bool
+) -> BreakpointMemoryPatchApplication:
+    if not record.valid:
+        return breakpoint_memory_patch_failure(record, image_base_address, image, record.reason)
+    if record.address < image_base_address:
+        return breakpoint_memory_patch_failure(record, image_base_address, image, "address_before_image")
+
+    val patch_offset = (record.address - image_base_address) as i64
+    if patch_offset < 0 or patch_offset + record.patch_width_bytes > image.len() as i64:
+        return breakpoint_memory_patch_failure(record, image_base_address, image, "patch_out_of_bounds")
+
+    val trap_bytes = breakpoint_original_opcode_restore_bytes(record.trap_opcode).split(" ")
+    val expected_old_bytes = breakpoint_original_opcode_restore_bytes(record.original_opcode).split(" ")
+    if trap_bytes.len() as i64 != record.patch_width_bytes or expected_old_bytes.len() as i64 != record.patch_width_bytes:
+        return breakpoint_memory_patch_failure(record, image_base_address, image, "opcode_width_mismatch")
+
+    val before_image = breakpoint_memory_copy(image)
+    val old_bytes = breakpoint_memory_read(before_image, patch_offset, record.patch_width_bytes)
+    if old_bytes != expected_old_bytes:
+        return breakpoint_memory_patch_failure(record, image_base_address, image, "memory_original_mismatch")
+
+    val patched_image = breakpoint_memory_write(before_image, patch_offset, trap_bytes)
+    val restored_image = breakpoint_memory_write(patched_image, patch_offset, old_bytes)
+    var final_image = breakpoint_memory_copy(restored_image)
+    if rearm and not sampled_only and icache_flushed:
+        final_image = breakpoint_memory_write(restored_image, patch_offset, trap_bytes)
+
+    val actions = breakpoint_patch_action_sequence(rearm, sampled_only or not icache_flushed)
+    val cleanup_complete = breakpoint_memory_read(restored_image, patch_offset, record.patch_width_bytes) == old_bytes
+    var reason = "applied"
+    if not icache_flushed:
+        reason = "icache_flush_required"
+    elif sampled_only:
+        reason = "sampled_only_cleanup"
+    elif rearm:
+        reason = "rearmed"
+
+    BreakpointMemoryPatchApplication(
+        address: record.address,
+        image_base_address: image_base_address,
+        patch_offset: patch_offset,
+        old_bytes: old_bytes,
+        trap_bytes: trap_bytes,
+        restored_bytes: breakpoint_memory_read(restored_image, patch_offset, record.patch_width_bytes),
+        before_image: before_image,
+        patched_image: patched_image,
+        restored_image: restored_image,
+        rearmed_image: final_image,
+        actions: actions,
+        icache_flush_required: true,
+        icache_flushed: icache_flushed,
+        cleanup_complete: cleanup_complete,
+        valid: icache_flushed and cleanup_complete,
+        reason: reason,
+        cleanup_evidence: "cleanup:address={record.address};offset={patch_offset};old={old_bytes.join(\" \")};trap={trap_bytes.join(\" \")};restored={cleanup_complete};rearmed={rearm and not sampled_only and icache_flushed};icache={icache_flushed};status={reason}"
+    )

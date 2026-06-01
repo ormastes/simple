@@ -4,6 +4,7 @@
 use std.spec.{describe, it, expect}
 use os.baremetal.profile.breakpoint_counter.{
     breakpoint_auto_disarm_state,
+    breakpoint_apply_patch_record_to_memory,
     breakpoint_cleanup_ledger_summary,
     breakpoint_cleanup_events,
     breakpoint_cleanup_events_cover,
@@ -211,6 +212,42 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(actions[4]).to_equal("single_step")
             expect(actions[5]).to_equal("sampled_only")
             expect(breakpoint_patch_action_sequence_valid(actions, true, true)).to_equal(true)
+
+        it "should apply patch restore and rearm bytes to a deterministic memory image":
+            val record = breakpoint_patch_record_construct(4100, "riscv64", "0x00000013")
+            val image = ["aa", "bb", "cc", "dd", "13", "00", "00", "00", "ee", "ff"]
+            val applied = breakpoint_apply_patch_record_to_memory(record, 4096, image, true, false, true)
+
+            expect(applied.valid).to_equal(true)
+            expect(applied.patch_offset).to_equal(4)
+            expect(applied.old_bytes).to_equal(["13", "00", "00", "00"])
+            expect(applied.trap_bytes).to_equal(["73", "00", "10", "00"])
+            expect(applied.patched_image).to_equal(["aa", "bb", "cc", "dd", "73", "00", "10", "00", "ee", "ff"])
+            expect(applied.restored_image).to_equal(image)
+            expect(applied.rearmed_image).to_equal(["aa", "bb", "cc", "dd", "73", "00", "10", "00", "ee", "ff"])
+            expect(applied.icache_flush_required).to_equal(true)
+            expect(applied.icache_flushed).to_equal(true)
+            expect(applied.cleanup_complete).to_equal(true)
+            expect(applied.reason).to_equal("rearmed")
+            expect(applied.cleanup_evidence).to_equal("cleanup:address=4100;offset=4;old=13 00 00 00;trap=73 00 10 00;restored=true;rearmed=true;icache=true;status=rearmed")
+
+        it "should restore original bytes and report invalid evidence when icache flush is missing":
+            val record = breakpoint_patch_record_construct(4096, "x86_64", "0x90")
+            val image = ["90", "48", "89", "e5"]
+            val applied = breakpoint_apply_patch_record_to_memory(record, 4096, image, true, false, false)
+
+            expect(applied.valid).to_equal(false)
+            expect(applied.old_bytes).to_equal(["90"])
+            expect(applied.trap_bytes).to_equal(["cc"])
+            expect(applied.patched_image).to_equal(["cc", "48", "89", "e5"])
+            expect(applied.restored_image).to_equal(image)
+            expect(applied.rearmed_image).to_equal(image)
+            expect(applied.actions[5]).to_equal("sampled_only")
+            expect(applied.icache_flush_required).to_equal(true)
+            expect(applied.icache_flushed).to_equal(false)
+            expect(applied.cleanup_complete).to_equal(true)
+            expect(applied.reason).to_equal("icache_flush_required")
+            expect(applied.cleanup_evidence).to_equal("cleanup:address=4096;offset=0;old=90;trap=cc;restored=true;rearmed=false;icache=false;status=icache_flush_required")
 
     describe "trap hit accounting":
         it "should update hit totals and keep rearming below budget":
