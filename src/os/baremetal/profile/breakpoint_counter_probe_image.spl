@@ -1,0 +1,169 @@
+# Breakpoint probe image planning for QEMU-backed software-breakpoint evidence.
+
+use os.baremetal.profile.breakpoint_counter.{breakpoint_architecture_patch_profile}
+use os.baremetal.profile.breakpoint_counter_qemu.{breakpoint_qemu_binary_for_arch, breakpoint_qemu_evidence_prefix}
+
+pub class BreakpointProbeImagePlan:
+    arch: text
+    source_path: text
+    output_elf_path: text
+    linker_script_path: text
+    compiler: text
+    serial_driver: text
+    qemu_binary: text
+    evidence_prefix: text
+    required_evidence_fields: [text]
+    source_exists: bool
+    output_exists: bool
+    can_build: bool
+    can_run: bool
+    status: text
+
+pub fn breakpoint_probe_image_arches() -> [text]:
+    ["i386", "x86_64", "arm32", "thumb", "aarch64", "riscv32", "riscv32c", "riscv64", "riscv64c"]
+
+pub fn breakpoint_probe_image_source_path(arch: text) -> text:
+    "build/baremetal/breakpoint_probe/" + arch + "/breakpoint_probe.c"
+
+pub fn breakpoint_probe_image_output_path(arch: text) -> text:
+    "build/baremetal/breakpoint_probe/" + arch + "/breakpoint_probe.elf"
+
+pub fn breakpoint_probe_image_linker_script_path(arch: text) -> text:
+    if arch == "i386":
+        return "examples/simple_os/arch/x86_32/linker.ld"
+    if arch == "x86_64":
+        return "examples/simple_os/arch/x86_64/linker.ld"
+    if arch == "arm32" or arch == "thumb":
+        return "examples/simple_os/arch/arm32/linker.ld"
+    if arch == "aarch64":
+        return "examples/simple_os/arch/arm64/linker.ld"
+    if arch == "riscv32" or arch == "riscv32c":
+        return "examples/simple_os/arch/riscv32/linker.ld"
+    if arch == "riscv64" or arch == "riscv64c":
+        return "examples/simple_os/arch/riscv64/linker.ld"
+    ""
+
+pub fn breakpoint_probe_image_compiler(arch: text) -> text:
+    if arch == "i386" or arch == "x86_64":
+        return "clang"
+    if arch == "arm32" or arch == "thumb":
+        return "arm-none-eabi-gcc"
+    if arch == "aarch64":
+        return "aarch64-none-elf-gcc"
+    if arch == "riscv32" or arch == "riscv32c":
+        return "riscv64-unknown-elf-gcc"
+    if arch == "riscv64" or arch == "riscv64c":
+        return "riscv64-unknown-elf-gcc"
+    ""
+
+pub fn breakpoint_probe_image_serial_driver(arch: text) -> text:
+    if arch == "i386" or arch == "x86_64":
+        return "com1"
+    if arch == "arm32" or arch == "thumb" or arch == "aarch64":
+        return "pl011"
+    if arch == "riscv32" or arch == "riscv32c" or arch == "riscv64" or arch == "riscv64c":
+        return "ns16550"
+    ""
+
+pub fn breakpoint_probe_required_evidence_fields() -> [text]:
+    [
+        "arch",
+        "qemu",
+        "address",
+        "original",
+        "trap",
+        "hits",
+        "latency_us",
+        "restored",
+        "rearmed",
+        "cleanup",
+        "icache",
+        "sampled"
+    ]
+
+pub fn breakpoint_probe_image_build_args(arch: text) -> [text]:
+    val source = breakpoint_probe_image_source_path(arch)
+    val output = breakpoint_probe_image_output_path(arch)
+    val linker = breakpoint_probe_image_linker_script_path(arch)
+    if linker == "":
+        return []
+    if arch == "i386":
+        return ["-m32", "-ffreestanding", "-fno-pic", "-nostdlib", "-Wl,-T," + linker, source, "-o", output]
+    if arch == "x86_64":
+        return ["-m64", "-ffreestanding", "-fno-pic", "-nostdlib", "-Wl,-T," + linker, source, "-o", output]
+    if arch == "thumb":
+        return ["-mthumb", "-ffreestanding", "-nostdlib", "-T", linker, source, "-o", output]
+    if arch == "arm32":
+        return ["-marm", "-ffreestanding", "-nostdlib", "-T", linker, source, "-o", output]
+    if arch == "aarch64":
+        return ["-ffreestanding", "-nostdlib", "-T", linker, source, "-o", output]
+    if arch == "riscv32" or arch == "riscv32c":
+        return ["-march=rv32imac", "-mabi=ilp32", "-ffreestanding", "-nostdlib", "-T", linker, source, "-o", output]
+    if arch == "riscv64" or arch == "riscv64c":
+        return ["-march=rv64imac", "-mabi=lp64", "-ffreestanding", "-nostdlib", "-T", linker, source, "-o", output]
+    []
+
+pub fn breakpoint_probe_image_plan(arch: text, source_exists: bool, output_exists: bool, compiler_available: bool) -> BreakpointProbeImagePlan:
+    val profile = breakpoint_architecture_patch_profile(arch)
+    val source = breakpoint_probe_image_source_path(arch)
+    val output = breakpoint_probe_image_output_path(arch)
+    val linker = breakpoint_probe_image_linker_script_path(arch)
+    val compiler = breakpoint_probe_image_compiler(arch)
+    val serial = breakpoint_probe_image_serial_driver(arch)
+    val qemu = breakpoint_qemu_binary_for_arch(arch)
+    var status = "ready"
+    if not profile.valid:
+        status = "unsupported_arch"
+    elif source == "" or linker == "" or compiler == "" or serial == "" or qemu == "":
+        status = "missing_probe_contract"
+    elif not source_exists:
+        status = "missing_probe_source"
+    elif not compiler_available:
+        status = "compiler_unavailable"
+    elif not output_exists:
+        status = "missing_probe_elf"
+    BreakpointProbeImagePlan(
+        arch: arch,
+        source_path: source,
+        output_elf_path: output,
+        linker_script_path: linker,
+        compiler: compiler,
+        serial_driver: serial,
+        qemu_binary: qemu,
+        evidence_prefix: breakpoint_qemu_evidence_prefix(),
+        required_evidence_fields: breakpoint_probe_required_evidence_fields(),
+        source_exists: source_exists,
+        output_exists: output_exists,
+        can_build: status == "missing_probe_elf" or status == "ready",
+        can_run: status == "ready",
+        status: status
+    )
+
+pub fn breakpoint_probe_serial_evidence_contract_line(arch: text) -> text:
+    val profile = breakpoint_architecture_patch_profile(arch)
+    breakpoint_qemu_evidence_prefix() +
+        "arch=" + arch +
+        ";qemu=" + breakpoint_qemu_binary_for_arch(arch) +
+        ";address=<patched-address>" +
+        ";original=<original-bytes>" +
+        ";trap=" + profile.patch_bytes +
+        ";hits=<hit-count>" +
+        ";latency_us=<trap-latency-us>" +
+        ";restored=true" +
+        ";rearmed=true" +
+        ";cleanup=true" +
+        ";icache=" + if profile.requires_icache_flush: "true" else: "false" +
+        ";sampled=none"
+
+pub fn breakpoint_probe_source_contract_text(arch: text) -> text:
+    val profile = breakpoint_architecture_patch_profile(arch)
+    if not profile.valid:
+        return ""
+    [
+        "/* simple-breakpoint-probe-source-v1 */",
+        "/* arch=" + arch + " instruction_set=" + profile.instruction_set + " */",
+        "/* trap=" + profile.trap_opcode_name + " bytes=" + profile.patch_bytes + " width=" + profile.patch_width_bytes.to_string() + " */",
+        "/* required serial evidence:",
+        breakpoint_probe_serial_evidence_contract_line(arch),
+        " */"
+    ].join("\n")

@@ -67,6 +67,11 @@ Current adapter slice:
   present, and parses `simple-breakpoint-evidence;...` serial output into the
   same fail-closed validator. Missing image, missing QEMU, and missing serial
   evidence are explicit non-proof statuses.
+- Breakpoint probe image planning now defines the per-architecture source path,
+  ELF output, linker script, compiler, serial driver, build arguments, and
+  required evidence fields for x86/i386/x86_64, ARM/Thumb/AArch64, and
+  RISC-V/RVC. Probe plans are non-proof until the source, compiler, ELF, QEMU,
+  and serial evidence all exist.
 
 ## Data Flow
 

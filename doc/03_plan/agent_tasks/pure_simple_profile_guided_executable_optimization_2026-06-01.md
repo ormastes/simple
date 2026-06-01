@@ -264,6 +264,31 @@ Remaining larger gaps:
 - measured before/after executable performance evidence for the full
   profile-counter -> `.sprof` -> layout-map -> native build flow.
 
+## Restart Checkpoint: 2026-06-01 Breakpoint Probe Image Contract
+
+Implemented in the current slice:
+- `src/os/baremetal/profile/breakpoint_counter_probe_image.spl`
+  - defines the supported probe-image arch matrix: `i386`, `x86_64`,
+    `arm32`, `thumb`, `aarch64`, `riscv32`, `riscv32c`, `riscv64`,
+    `riscv64c`;
+  - maps each arch to deterministic source/output paths, linker script,
+    compiler, serial driver, QEMU binary, and build arguments;
+  - defines the required serial evidence fields consumed by the QEMU evidence
+    parser;
+  - fails closed with `missing_probe_source`, `compiler_unavailable`, or
+    `missing_probe_elf` until real build artifacts exist.
+- `test/system/os/baremetal/feature/breakpoint_counter_probe_image_spec.spl`
+  - covers the arch matrix, build/run readiness statuses, compiler arguments,
+    and serial evidence contract.
+
+Remaining larger gaps:
+- generate/write the actual per-arch probe C sources at the planned paths;
+- compile the probe ELF images with the planned compilers/linker scripts;
+- run those images under QEMU and capture live patch/trap/count/restore/rearm/
+  cleanup/icache evidence;
+- measured before/after executable performance evidence for the full
+  profile-counter -> `.sprof` -> layout-map -> native build flow.
+
 ## Restart Checkpoint: 2026-06-01 Native Counter Insertion
 
 Implemented in the current slice:

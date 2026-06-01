@@ -1,0 +1,116 @@
+# codex-system-test
+# Contract tests for breakpoint probe images that feed QEMU serial evidence.
+
+use std.spec.{describe, it, expect}
+use os.baremetal.profile.breakpoint_counter_probe_image.{
+    breakpoint_probe_image_arches,
+    breakpoint_probe_image_source_path,
+    breakpoint_probe_image_output_path,
+    breakpoint_probe_image_linker_script_path,
+    breakpoint_probe_image_compiler,
+    breakpoint_probe_image_serial_driver,
+    breakpoint_probe_required_evidence_fields,
+    breakpoint_probe_image_build_args,
+    breakpoint_probe_image_plan,
+    breakpoint_probe_serial_evidence_contract_line,
+    breakpoint_probe_source_contract_text
+}
+
+describe "Bare-metal Breakpoint Probe Image Contract":
+    describe "architecture matrix":
+        it "should plan probe images for x86 ARM Thumb AArch64 and RISC-V compressed targets":
+            val arches = breakpoint_probe_image_arches()
+            expect(arches).to_contain("i386")
+            expect(arches).to_contain("x86_64")
+            expect(arches).to_contain("arm32")
+            expect(arches).to_contain("thumb")
+            expect(arches).to_contain("aarch64")
+            expect(arches).to_contain("riscv32")
+            expect(arches).to_contain("riscv32c")
+            expect(arches).to_contain("riscv64")
+            expect(arches).to_contain("riscv64c")
+
+        it "should derive deterministic source output linker compiler and serial driver paths":
+            expect(breakpoint_probe_image_source_path("x86_64")).to_equal("build/baremetal/breakpoint_probe/x86_64/breakpoint_probe.c")
+            expect(breakpoint_probe_image_output_path("riscv64c")).to_equal("build/baremetal/breakpoint_probe/riscv64c/breakpoint_probe.elf")
+            expect(breakpoint_probe_image_linker_script_path("i386")).to_equal("examples/simple_os/arch/x86_32/linker.ld")
+            expect(breakpoint_probe_image_linker_script_path("aarch64")).to_equal("examples/simple_os/arch/arm64/linker.ld")
+            expect(breakpoint_probe_image_linker_script_path("riscv32c")).to_equal("examples/simple_os/arch/riscv32/linker.ld")
+            expect(breakpoint_probe_image_compiler("thumb")).to_equal("arm-none-eabi-gcc")
+            expect(breakpoint_probe_image_compiler("riscv64")).to_equal("riscv64-unknown-elf-gcc")
+            expect(breakpoint_probe_image_serial_driver("x86_64")).to_equal("com1")
+            expect(breakpoint_probe_image_serial_driver("arm32")).to_equal("pl011")
+            expect(breakpoint_probe_image_serial_driver("riscv64c")).to_equal("ns16550")
+
+    describe "build and run readiness":
+        it "should fail closed until source compiler and ELF evidence are present":
+            val missing_source = breakpoint_probe_image_plan("riscv64", false, false, true)
+            expect(missing_source.can_run).to_equal(false)
+            expect(missing_source.status).to_equal("missing_probe_source")
+
+            val missing_compiler = breakpoint_probe_image_plan("riscv64", true, false, false)
+            expect(missing_compiler.can_run).to_equal(false)
+            expect(missing_compiler.status).to_equal("compiler_unavailable")
+
+            val missing_elf = breakpoint_probe_image_plan("riscv64", true, false, true)
+            expect(missing_elf.can_build).to_equal(true)
+            expect(missing_elf.can_run).to_equal(false)
+            expect(missing_elf.status).to_equal("missing_probe_elf")
+
+            val ready = breakpoint_probe_image_plan("riscv64c", true, true, true)
+            expect(ready.can_run).to_equal(true)
+            expect(ready.status).to_equal("ready")
+            expect(ready.qemu_binary).to_equal("qemu-system-riscv64")
+            expect(ready.required_evidence_fields).to_contain("icache")
+
+        it "should emit compiler arguments with the expected linker and output paths":
+            val x86 = breakpoint_probe_image_build_args("x86_64")
+            expect(x86).to_contain("-m64")
+            expect(x86).to_contain("-nostdlib")
+            expect(x86).to_contain("build/baremetal/breakpoint_probe/x86_64/breakpoint_probe.c")
+            expect(x86).to_contain("-o")
+            expect(x86).to_contain("build/baremetal/breakpoint_probe/x86_64/breakpoint_probe.elf")
+
+            val thumb = breakpoint_probe_image_build_args("thumb")
+            expect(thumb).to_contain("-mthumb")
+            expect(thumb).to_contain("examples/simple_os/arch/arm32/linker.ld")
+
+            val rv32c = breakpoint_probe_image_build_args("riscv32c")
+            expect(rv32c).to_contain("-march=rv32imac")
+            expect(rv32c).to_contain("-mabi=ilp32")
+
+    describe "serial evidence contract":
+        it "should require every field consumed by the QEMU evidence parser":
+            val fields = breakpoint_probe_required_evidence_fields()
+            expect(fields).to_contain("arch")
+            expect(fields).to_contain("qemu")
+            expect(fields).to_contain("address")
+            expect(fields).to_contain("original")
+            expect(fields).to_contain("trap")
+            expect(fields).to_contain("hits")
+            expect(fields).to_contain("latency_us")
+            expect(fields).to_contain("restored")
+            expect(fields).to_contain("rearmed")
+            expect(fields).to_contain("cleanup")
+            expect(fields).to_contain("icache")
+            expect(fields).to_contain("sampled")
+
+        it "should generate architecture-specific serial evidence templates":
+            val x86 = breakpoint_probe_serial_evidence_contract_line("x86_64")
+            expect(x86).to_start_with("simple-breakpoint-evidence;")
+            expect(x86).to_contain("arch=x86_64")
+            expect(x86).to_contain("trap=cc")
+            expect(x86).to_contain("icache=false")
+
+            val rvc = breakpoint_probe_serial_evidence_contract_line("riscv64c")
+            expect(rvc).to_contain("arch=riscv64c")
+            expect(rvc).to_contain("trap=02 90")
+            expect(rvc).to_contain("icache=true")
+
+        it "should produce source contract text that records trap and evidence requirements":
+            val source = breakpoint_probe_source_contract_text("aarch64")
+            expect(source).to_contain("simple-breakpoint-probe-source-v1")
+            expect(source).to_contain("arch=aarch64")
+            expect(source).to_contain("trap=brk-imm0")
+            expect(source).to_contain("bytes=00 00 20 d4")
+            expect(source).to_contain("simple-breakpoint-evidence;arch=aarch64")

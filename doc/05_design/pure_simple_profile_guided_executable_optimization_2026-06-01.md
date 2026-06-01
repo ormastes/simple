@@ -254,6 +254,14 @@ when both the host binary and supplied image exist; it then parses
 evidence record. This still requires per-arch probe images before an
 architecture can be called target-backed.
 
+`BreakpointProbeImagePlan` owns the next layer of that proof. It records the
+planned source path, output ELF, linker script, compiler, serial driver, QEMU
+binary, required evidence fields, and build/run readiness status for each
+supported breakpoint architecture. The plan intentionally reports
+`missing_probe_source`, `compiler_unavailable`, or `missing_probe_elf` until
+the real image artifacts exist, so a target cannot be upgraded from contract
+coverage to target-backed proof by documentation alone.
+
 ### Overhead Protection
 
 The profiler removes or downgrades a breakpoint when any condition holds:

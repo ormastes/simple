@@ -21,6 +21,7 @@ Design verification for:
 | `test/system/app/compile/feature/native_layout_section_map_spec.spl` | generated-C section-map parsing and compile-path transform contracts |
 | `test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl` | patch/trap/count/restore/auto-disarm state machine |
 | `test/system/os/baremetal/feature/breakpoint_counter_target_adapter_spec.spl` | x86, ARM/Thumb/AArch64, RISC-V/RVC target adapter resume, QEMU runner planning, and evidence normalization |
+| `test/system/os/baremetal/feature/breakpoint_counter_probe_image_spec.spl` | per-arch breakpoint probe image planning and serial evidence field contract |
 
 Executable specs must live under `test/`; generated/manual docs mirror under
 `doc/06_spec/`.
@@ -31,10 +32,12 @@ runtime snapshot import, generated-C function/block/edge/call-path insertion,
 executable layout eligibility and manifest planning, generated-C section-map
 emission and consumption, and bare-metal breakpoint state/ledger policy. The
 QEMU breakpoint bridge now plans host QEMU commands and parses serial evidence
-without claiming proof when images or binaries are missing. The current
-executable optimizer slice writes deterministic Simple-owned layout, native
-symbol-order, and generated-C section-map artifacts rather than rewriting
-arbitrary ELF bytes.
+without claiming proof when images or binaries are missing. The breakpoint
+probe-image contract now defines per-arch source/output/linker/compiler plans
+and required serial evidence fields, but still fails closed until real ELF
+artifacts exist. The current executable optimizer slice writes deterministic
+Simple-owned layout, native symbol-order, and generated-C section-map artifacts
+rather than rewriting arbitrary ELF bytes.
 
 ## Requirement Traceability
 
@@ -46,6 +49,7 @@ arbitrary ELF bytes.
 | Generated-C layout consumption | section-map parser/transform tests; fail-closed unused symbol and unsafe section tests |
 | Native counter feature | function/block/edge/call-path counter contract tests; generated-C insertion checks for all four counter classes |
 | Bare-metal counter impl | breakpoint site table and patch ledger tests |
+| Bare-metal probe images | per-arch source/output/linker/compiler/QEMU plan tests; serial evidence field contract tests |
 | Prevent slow breakpoint overhead | auto-disarm and sampled-only fallback tests |
 | Analyze call path | bounded call-path hash and promotion tests |
 | Remove breakpoint when profiled | cleanup-on-stop/panic/watchdog tests |
@@ -82,6 +86,7 @@ SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/app/op
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl --mode=interpreter --clean
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl --mode=interpreter --clean
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/os/baremetal/feature/breakpoint_counter_target_adapter_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/os/baremetal/feature/breakpoint_counter_probe_image_spec.spl --mode=interpreter --clean
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean
 ```
 
