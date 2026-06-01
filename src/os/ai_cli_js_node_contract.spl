@@ -69,6 +69,13 @@ struct AiCliRuntimeSmokeMatrixEvidence:
     status: text
     diagnostic: text
 
+struct AiCliBoundaryDecision:
+    layer: text
+    operation: text
+    subject: text
+    allowed: bool
+    reason: text
+
 struct AiCliRuntimeProfile:
     profile_id: text
     js_engine_strategy: text
@@ -271,6 +278,37 @@ pub fn ai_cli_allows_file(manifest: AiCliManifest, path: text) -> bool:
         if _path_prefix_allows(prefix, path):
             return true
     false
+
+pub fn ai_cli_vfs_file_decision(manifest: AiCliManifest, operation: text, path: text) -> AiCliBoundaryDecision:
+    if path == "" or not path.starts_with("/"):
+        return AiCliBoundaryDecision(
+            layer: "vfs",
+            operation: operation,
+            subject: path,
+            allowed: false,
+            reason: "invalid-path"
+        )
+    if ai_cli_allows_file(manifest, path):
+        return AiCliBoundaryDecision(
+            layer: "vfs",
+            operation: operation,
+            subject: path,
+            allowed: true,
+            reason: "allowed"
+        )
+    AiCliBoundaryDecision(
+        layer: "vfs",
+        operation: operation,
+        subject: path,
+        allowed: false,
+        reason: "file-grant-denied"
+    )
+
+pub fn ai_cli_vfs_file_denial_reason(manifest: AiCliManifest, operation: text, path: text) -> text:
+    val decision = ai_cli_vfs_file_decision(manifest, operation, path)
+    if decision.allowed:
+        return ""
+    decision.reason
 
 pub fn ai_cli_allows_process(manifest: AiCliManifest, command: text) -> bool:
     _text_list_allows(manifest.process_grants, command)
@@ -672,4 +710,10 @@ fn _path_prefix_allows(prefix: text, path: text) -> bool:
         return false
     if path.len() < prefix.len():
         return false
-    path[0:prefix.len()] == prefix
+    if not path.starts_with(prefix):
+        return false
+    if path.len() == prefix.len():
+        return true
+    if prefix.ends_with("/"):
+        return true
+    path.slice(prefix.len(), prefix.len() + 1) == "/"

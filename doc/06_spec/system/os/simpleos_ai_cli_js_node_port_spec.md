@@ -114,16 +114,44 @@ expect(ai_cli_allows_credential(manifest, "openai-api-key")).to_equal(false)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val manifest = codex_cli_smoke_manifest()
 expect(ai_cli_allows_file(manifest, "/home/user/work/main.spl")).to_equal(true)
+expect(ai_cli_allows_file(manifest, "/home/user/work")).to_equal(true)
+expect(ai_cli_allows_file(manifest, "/home/user/workspace/secret.txt")).to_equal(false)
 expect(ai_cli_allows_process(manifest, "git")).to_equal(true)
 expect(ai_cli_allows_network(manifest, "api.openai.com:443")).to_equal(true)
 expect(ai_cli_allows_credential(manifest, "openai-api-key")).to_equal(true)
 expect(ai_cli_allows_network(manifest, "example.com:443")).to_equal(false)
+```
+
+</details>
+
+#### returns VFS file boundary decisions with fail-closed denial reasons
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = codex_cli_smoke_manifest()
+val allowed = ai_cli_vfs_file_decision(manifest, "read", "/home/user/work/main.spl")
+val escaped = ai_cli_vfs_file_decision(manifest, "read", "/home/user/workspace/secret.txt")
+val relative = ai_cli_vfs_file_decision(manifest, "read", "relative.txt")
+
+expect(allowed.layer).to_equal("vfs")
+expect(allowed.allowed).to_equal(true)
+expect(allowed.reason).to_equal("allowed")
+expect(escaped.allowed).to_equal(false)
+expect(escaped.reason).to_equal("file-grant-denied")
+expect(relative.allowed).to_equal(false)
+expect(relative.reason).to_equal("invalid-path")
+expect(ai_cli_vfs_file_denial_reason(deny_all_manifest(), "write", "/home/user/work/main.spl")).to_equal("file-grant-denied")
 ```
 
 </details>
@@ -553,8 +581,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
