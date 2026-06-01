@@ -1,0 +1,46 @@
+# Pure Simple GUI command boundary tests
+
+use std.spipe.*
+use std.gui.pure_core.{gui_pointer_event, gui_key_event, gui_empty_batch, gui_dispatch_events, gui_batch_meets_hot_response_target, gui_dynlib_hot_probe_tick}
+
+describe "pure GUI command boundary":
+    it "dispatches pointer and key events into command and dirty-region batches":
+        val events = [
+            gui_pointer_event("pointer_move", "button.save", 12, 24),
+            gui_pointer_event("pointer_down", "button.save", 12, 24),
+            gui_key_event("input.name", "A", "a")
+        ]
+        val batch = gui_dispatch_events(events, 700)
+        expect(batch.commands.len()).to_equal(3)
+        expect(batch.dirty_regions.len()).to_equal(3)
+        expect(batch.counters.event_count).to_equal(3)
+        expect(batch.counters.command_count).to_equal(3)
+        expect(batch.counters.dirty_region_count).to_equal(3)
+
+    it "records command kinds without touching pixel output":
+        val events = [
+            gui_pointer_event("pointer_move", "button.save", 12, 24),
+            gui_pointer_event("pointer_up", "button.save", 12, 24)
+        ]
+        val batch = gui_dispatch_events(events, 800)
+        expect(batch.commands[0].kind).to_equal("hover")
+        expect(batch.commands[1].kind).to_equal("commit")
+
+    it "checks the sub millisecond hot response target from counters":
+        val events = [gui_pointer_event("pointer_down", "button.save", 12, 24)]
+        val batch = gui_dispatch_events(events, 999)
+        expect(gui_batch_meets_hot_response_target(batch, 1000)).to_equal(true)
+
+    it "fails the hot response target at one millisecond or above":
+        val events = [gui_pointer_event("pointer_down", "button.save", 12, 24)]
+        val batch = gui_dispatch_events(events, 1000)
+        expect(gui_batch_meets_hot_response_target(batch, 1000)).to_equal(false)
+
+    it "creates an empty batch with zero counters":
+        val batch = gui_empty_batch()
+        expect(batch.commands.len()).to_equal(0)
+        expect(batch.dirty_regions.len()).to_equal(0)
+        expect(batch.counters.elapsed_us).to_equal(0)
+
+    it "exposes an i64-only dynlib hot probe symbol":
+        expect(gui_dynlib_hot_probe_tick(7)).to_equal(4)

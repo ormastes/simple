@@ -82,6 +82,9 @@ pub mod file_io;
 // Phase 7: Environment & process operations
 pub mod env_process;
 
+// Phase 7B: Dynamic function pointer calls
+pub mod dyncall;
+
 // Phase 8: Atomic operations
 pub mod atomic;
 
@@ -158,6 +161,9 @@ pub use file_io::*;
 
 // Phase 7
 pub use env_process::*;
+
+// Phase 7B
+pub use dyncall::*;
 
 // Phase 8
 pub use atomic::*;

@@ -1,0 +1,128 @@
+# Pure GUI SMF/dynlib hot-response probe core.
+#
+# Side-effect-free functions for unit tests and CLI wrappers. Direct Simple
+# fallback measurements are reported as call_source=direct_simple and cannot
+# satisfy the acceptance gate.
+
+use os.posix.dynlib.{DynLibKind, dynlib_open, dynlib_symbol, dynlib_close, dynlib_is_valid}
+use os.posix.dynlib_sffi.{dynlib_call_1}
+use std.gui.pure_core.{GuiInputEvent, gui_pointer_event, gui_key_event, gui_dispatch_events}
+use std.gui.pure_smf_dynlib_perf.{GuiDynlibPerfReport, gui_dynlib_perf_report}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_time_now_unix_micros() -> i64
+
+class GuiDynlibProbeConfig:
+    artifact_path: text
+    symbol_name: text
+    iterations: i32
+    warmup_count: i32
+    threshold_us: i64
+
+class GuiDynlibProbeLoadEvidence:
+    loader_mode: text
+    call_source: text
+    symbol_resolved: bool
+    fallback_used: bool
+
+fn gui_dynlib_probe_default_config() -> GuiDynlibProbeConfig:
+    GuiDynlibProbeConfig(
+        artifact_path: "",
+        symbol_name: "gui_dynlib_hot_probe_tick",
+        iterations: 128,
+        warmup_count: 16,
+        threshold_us: 1000
+    )
+
+fn _env_or(key: text, fallback: text) -> text:
+    val value = rt_env_get(key) ?? ""
+    if value == "":
+        return fallback
+    value
+
+fn gui_dynlib_probe_config_from_env() -> GuiDynlibProbeConfig:
+    val base = gui_dynlib_probe_default_config()
+    GuiDynlibProbeConfig(
+        artifact_path: _env_or("SIMPLE_GUI_DYNLIB_ARTIFACT", base.artifact_path),
+        symbol_name: _env_or("SIMPLE_GUI_DYNLIB_SYMBOL", base.symbol_name),
+        iterations: base.iterations,
+        warmup_count: base.warmup_count,
+        threshold_us: base.threshold_us
+    )
+
+fn gui_dynlib_probe_load_evidence(config: GuiDynlibProbeConfig) -> GuiDynlibProbeLoadEvidence:
+    if config.artifact_path == "":
+        return GuiDynlibProbeLoadEvidence(loader_mode: "direct_simple", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
+    val lib = dynlib_open(config.artifact_path, 0)
+    if not dynlib_is_valid(lib):
+        return GuiDynlibProbeLoadEvidence(loader_mode: "direct_simple", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
+    val sym = dynlib_symbol(lib, config.symbol_name)
+    dynlib_close(lib)
+    if sym < 0:
+        return GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
+    GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "dynlib_symbol_call", symbol_resolved: true, fallback_used: false)
+
+fn gui_dynlib_probe_workload(iteration: i32) -> [GuiInputEvent]:
+    [
+        gui_pointer_event("pointer_move", "button.save", 12 + iteration, 24),
+        gui_pointer_event("pointer_down", "button.save", 12, 24),
+        gui_pointer_event("pointer_up", "button.save", 12, 24),
+        gui_key_event("input.name", "A", "a")
+    ]
+
+fn gui_dynlib_probe_direct_samples(iterations: i32, warmup_count: i32) -> [i64]:
+    var samples: [i64] = []
+    var i = 0
+    val total = iterations + warmup_count
+    while i < total:
+        val events = gui_dynlib_probe_workload(i)
+        val t0 = rt_time_now_unix_micros()
+        val batch = gui_dispatch_events(events, 0)
+        val t1 = rt_time_now_unix_micros()
+        if batch.commands.len() > 0 and i >= warmup_count:
+            var elapsed = t1 - t0
+            if elapsed < 0:
+                elapsed = 0
+            samples.push(elapsed)
+        i = i + 1
+    samples
+
+fn gui_dynlib_probe_dynlib_samples(lib: DynLibKind, symbol_name: text, iterations: i32, warmup_count: i32) -> [i64]:
+    var samples: [i64] = []
+    var i = 0
+    val total = iterations + warmup_count
+    while i < total:
+        val t0 = rt_time_now_unix_micros()
+        val command_count = dynlib_call_1(lib, symbol_name, i.to_i64())
+        val t1 = rt_time_now_unix_micros()
+        if command_count > 0 and i >= warmup_count:
+            var elapsed = t1 - t0
+            if elapsed < 0:
+                elapsed = 0
+            samples.push(elapsed)
+        i = i + 1
+    samples
+
+fn gui_dynlib_probe_report(config: GuiDynlibProbeConfig, evidence: GuiDynlibProbeLoadEvidence, samples_us: [i64]) -> GuiDynlibPerfReport:
+    gui_dynlib_perf_report(
+        config.artifact_path,
+        evidence.loader_mode,
+        config.symbol_name,
+        evidence.call_source,
+        evidence.symbol_resolved,
+        evidence.fallback_used,
+        config.warmup_count,
+        samples_us,
+        config.threshold_us
+    )
+
+fn gui_dynlib_probe_run(config: GuiDynlibProbeConfig) -> GuiDynlibPerfReport:
+    val evidence = gui_dynlib_probe_load_evidence(config)
+    if evidence.call_source == "dynlib_symbol_call":
+        val lib = dynlib_open(config.artifact_path, 0)
+        if dynlib_is_valid(lib):
+            val dyn_samples = gui_dynlib_probe_dynlib_samples(lib, config.symbol_name, config.iterations, config.warmup_count)
+            dynlib_close(lib)
+            return gui_dynlib_probe_report(config, evidence, dyn_samples)
+    val samples = gui_dynlib_probe_direct_samples(config.iterations, config.warmup_count)
+    gui_dynlib_probe_report(config, evidence, samples)
