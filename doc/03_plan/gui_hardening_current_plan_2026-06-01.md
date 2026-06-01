@@ -51,6 +51,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   toolbar/modal/grid, dashboard/command/list, form/sidebar/validation,
   settings/inspector/tree, media/gallery/command, report/table/command, and
   image/taskbar/command scenes across Node, Bun, and live Electron captures.
+  The consolidated full matrix now passes all ten scenes with zero mismatches
+  and no blur/tolerance path.
 - Generic Simple Web layout evidence covers colored CSS surfaces, selector and
   inline precedence, descendant scope, and child-scope behavior, but not full
   Chromium DOM/CSS/text parity.
@@ -107,6 +109,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - `doc/09_report/budgeted_simple_web_engine2d_scene_matrix_report_table_2026-06-01.md`:
   current Engine2D Node/Bun/Electron budgeted exact-bitmap matrix including
   report-table-command.
+- `doc/09_report/budgeted_simple_web_engine2d_scene_matrix_full_2026-06-01.md`:
+  consolidated Engine2D Node/Bun/Electron budgeted exact-bitmap matrix for all
+  ten current scenes, including `image-taskbar-command`, with every runtime
+  passing at zero mismatches and no blur/tolerance path.
 - `doc/09_report/node_simple_web_engine2d_image_taskbar_command_bitmap_evidence_2026-06-01.md`,
   `doc/09_report/bun_simple_web_engine2d_image_taskbar_command_bitmap_evidence_2026-06-01.md`,
   and `doc/09_report/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence_2026-06-01.md`:
@@ -168,8 +174,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   networking, and sandboxed `fs` capability design.
 - Generated GUI WASM: move widget-matrix-specific state patterns into shared
   per-widget state helpers and cover additional generated apps.
-- Live Electron: extend exact live capture to the broader Node/Bun scene matrix
-  while keeping Chromium DOM/CSS bit-parity claims blocked until font/layout
+- Live Electron: maintain the passing ten-scene Node/Bun/Electron exact-bitmap
+  matrix and extend it into deeper HTML/CSS/image/text/taskbar scenes while
+  keeping Chromium DOM/CSS bit-parity claims blocked until font/layout
   divergence is solved.
 - QEMU/GTK: add a guest-side GTK/Simple performance harness and broaden strict
   live QEMU WM capture to representative app windows, text glyph content, and
@@ -197,6 +204,7 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-node-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs`
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-bun-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs`
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-electron-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_full REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_full_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
 - `SIMPLE_LIB=src bin/simple check src/app/wm_compare/site_corpus_layout_report.spl test/system/wm_compare/famous_site_corpus_spec.spl test/unit/browser_engine/text_painter_spec.spl`
 - `SIMPLE_LIB=src bin/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --format json`
 - `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`
