@@ -32,7 +32,7 @@ dev-done
 - verify: PASS `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
 - verify: PASS `SIMPLE_LIB=src bin/simple check src/os/ai_cli_js_node_contract.spl`.
 - verify: PASS `SIMPLE_LIB=src bin/simple test test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter --clean` (23 scenarios).
-- verify: PASS `scripts/check-gtk-gui-repeat-evidence.shs`; Simple open 210 us, GTK open 67082 us, Simple frame 1 us, GTK frame 26 us, vector checksum 212444 deterministic true.
+- verify: PASS `scripts/check-gtk-gui-repeat-evidence.shs`; Simple open 203 us, GTK open 68904 us, Simple frame 1 us, GTK frame 26 us, vector checksum 212444 deterministic true.
 - verify: PASS `SIMPLE_LIB=src bin/simple test test/unit/app/interpreter/perf_spec.spl --mode=interpreter --clean` (10 scenarios).
 - verify: PASS `SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean` (51 scenarios).
 - implementation: Interpreter/runtime speed lane changed `DIAGRAM_ENABLED` loads/stores in `src/compiler_rust/runtime/src/value/diagram_sffi.rs` from `Ordering::SeqCst` to `Ordering::Relaxed`; the flag only gates recording and recorded diagram data remains protected by locks.
@@ -69,7 +69,11 @@ dev-done
 - verify: PASS `SIMPLE_LIB=src bin/simple test test/unit/app/interpreter/perf_spec.spl --mode=interpreter --clean` (10 scenarios).
 - verify: PASS `SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean` (51 scenarios).
 - verify: PASS `cargo test -p simple-runtime diagram_sffi --manifest-path src/compiler_rust/Cargo.toml` (3 tests).
-- verify: PASS `scripts/check-gtk-gui-repeat-evidence.shs`; Simple open 181 us, GTK open 66084 us, Simple frame 1 us, GTK frame 25 us, Simple text 10 us, GTK text 25 us, vector checksum 212444 deterministic true.
+- verify: PASS `scripts/check-gtk-gui-repeat-evidence.shs`; Simple open 203 us, GTK open 68904 us, Simple frame 1 us, GTK frame 25 us, Simple text 10 us, GTK text 25 us, vector checksum 212444 deterministic true.
 - verify: PASS `git diff --check`.
 - verify: PASS `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
 - sync: PASS committed and pushed `d826cf69e0f4 perf: advance simple optimization checkpoint` to GitHub `main`; post-push fetch confirmed `main`/`main@origin` at the checkpoint, working copy clean, `git diff --check` PASS, `doc/06_spec` stray `.spl` count `0`, tracked file count `77107`.
+- implementation: GUI lane added a fast vector-font unavailable fallback probe to the GTK size/speed baseline and made the repeat evidence wrapper require that fail-closed probe by default.
+- verification: PASS fallback probe mode (`GTK_EVIDENCE_FALLBACK_PROBE_ONLY=1 GTK_EVIDENCE_FORCE_VECTOR_FONT_UNAVAILABLE=1`) reported `gtk_benchmark_fallback_probe_status=pass`, reason `forced-vector-font-unavailable`, zero vector-font ink pixels, deterministic true.
+- verification: PASS `scripts/check-gtk-gui-repeat-evidence.shs` with fallback probe `forced-vector-font-unavailable`, Simple open 203 us, GTK open 68904 us, Simple frame 1 us, GTK frame 25 us, vector checksum 212444.
+- docs: Added `doc/09_report/gtk_gui_repeat_fallback_evidence_2026-06-01.md` and updated GUI/roadmap state for AC-6 fallback evidence.

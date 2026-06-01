@@ -26,7 +26,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - Vector-font GPU evidence is expanded beyond the original nine-scene matrix.
   Current evidence proves GPU-returned glyphs with zero CPU fallback for the
   expanded `PIPELINESTATUSOK/24`, `VECTORFONTGPU/36`, and `GPUREADBACKWM/12`
-  scenes, plus the broader baseline matrix.
+  scenes, plus the broader baseline matrix. The GTK repeat gate now also
+  records a fail-closed vector-font-unavailable fallback probe.
 - Generated GUI WASM widget-matrix evidence covers source-level and retained
   browser state transitions for dropdowns, dialogs, tables, lists, progress,
   image load/error state, menus, and statusbar state.
@@ -58,6 +59,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   current vector-font matrix report.
 - `doc/09_report/vector_font_compute_matrix_expanded_current_2026-06-01.md`:
   expanded vector-font GPU matrix with `cpu_fallback=0` for all expanded scenes.
+- `doc/09_report/gtk_gui_repeat_fallback_evidence_2026-06-01.md`: repeat
+  open/render evidence with an explicit vector-font unavailable fallback probe.
 - `doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md`:
   current Engine2D Node/Bun/Electron budgeted exact-bitmap matrix including
   settings-inspector-tree.
