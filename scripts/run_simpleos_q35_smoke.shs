@@ -18,6 +18,7 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
+SIMPLEOS_Q35_ELF_WAS_SET="${SIMPLEOS_Q35_ELF+x}"
 SIMPLEOS_Q35_ELF="${SIMPLEOS_Q35_ELF:-${ROOT_DIR}/build/os/simpleos_x86_64.elf}"
 SIMPLEOS_Q35_DISK="${SIMPLEOS_Q35_DISK:-${ROOT_DIR}/build/os/fat32-x86_64.img}"
 SIMPLEOS_Q35_LOG="${SIMPLEOS_Q35_LOG:-${ROOT_DIR}/build/test-artifacts/simpleos-q35-smoke/q35_smoke.log}"
@@ -44,6 +45,19 @@ case "$SIMPLEOS_Q35_PROFILE" in
     *) echo "[q35-smoke] profile must be c-boot-bridge or pure-simple" >&2; exit 2 ;;
 esac
 
+if [ "$SIMPLEOS_Q35_PROFILE" = "pure-simple" ] && [ -z "$SIMPLEOS_Q35_ELF_WAS_SET" ]; then
+    SIMPLEOS_Q35_ELF="${ROOT_DIR}/build/os/simpleos_x86_64_pure_nvme_perf.elf"
+fi
+
+if [ "$SIMPLEOS_Q35_PROFILE" = "pure-simple" ]; then
+    SIMPLEOS_Q35_DRIVE_ID="pureperf"
+    SIMPLEOS_Q35_NVME_SERIAL="pure-simple-perf"
+    SIMPLEOS_Q35_USER_NS_DISK="${SIMPLEOS_Q35_USER_NS_DISK:-${ROOT_DIR}/build/test-artifacts/simpleos-q35-smoke/q35_user_namespace.img}"
+else
+    SIMPLEOS_Q35_DRIVE_ID="nvme0"
+    SIMPLEOS_Q35_NVME_SERIAL="simpleos0"
+fi
+
 if [ "$SIMPLEOS_Q35_VALIDATE_LOG_ONLY" -eq 0 ] && [ ! -f "$SIMPLEOS_Q35_ELF" ]; then
     echo "[q35-smoke] ERROR: kernel ELF not found: $SIMPLEOS_Q35_ELF" >&2
     exit 3
@@ -64,21 +78,43 @@ if [ "$SIMPLEOS_Q35_VALIDATE_LOG_ONLY" -eq 0 ]; then
     rm -f "$SIMPLEOS_Q35_LOG"
 
     set +e
-    timeout "${SIMPLEOS_Q35_TIMEOUT}s" qemu-system-x86_64 \
-        -machine q35 \
-        -cpu qemu64 \
-        -m 512M \
-        -kernel "$SIMPLEOS_Q35_ELF" \
-        -serial stdio \
-        -monitor none \
-        -display none \
-        -no-reboot \
-        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-        -drive "file=${SIMPLEOS_Q35_DISK},if=none,id=nvme0,format=raw" \
-        -device nvme,drive=nvme0,serial=simpleos0 \
-        -netdev user,id=net0 \
-        -device virtio-net-pci,netdev=net0 \
-        > "$SIMPLEOS_Q35_LOG" 2>&1
+    if [ "$SIMPLEOS_Q35_PROFILE" = "pure-simple" ]; then
+        cp "$SIMPLEOS_Q35_DISK" "$SIMPLEOS_Q35_USER_NS_DISK"
+        timeout "${SIMPLEOS_Q35_TIMEOUT}s" qemu-system-x86_64 \
+            -machine q35 \
+            -cpu qemu64 \
+            -m 512M \
+            -kernel "$SIMPLEOS_Q35_ELF" \
+            -serial stdio \
+            -monitor none \
+            -display none \
+            -no-reboot \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+            -device "nvme,id=${SIMPLEOS_Q35_DRIVE_ID},serial=${SIMPLEOS_Q35_NVME_SERIAL}" \
+            -drive "file=${SIMPLEOS_Q35_DISK},if=none,id=${SIMPLEOS_Q35_DRIVE_ID}ns1,format=raw" \
+            -device "nvme-ns,drive=${SIMPLEOS_Q35_DRIVE_ID}ns1,bus=${SIMPLEOS_Q35_DRIVE_ID},nsid=1" \
+            -drive "file=${SIMPLEOS_Q35_USER_NS_DISK},if=none,id=${SIMPLEOS_Q35_DRIVE_ID}ns2,format=raw" \
+            -device "nvme-ns,drive=${SIMPLEOS_Q35_DRIVE_ID}ns2,bus=${SIMPLEOS_Q35_DRIVE_ID},nsid=2" \
+            -netdev user,id=net0 \
+            -device virtio-net-pci,netdev=net0 \
+            > "$SIMPLEOS_Q35_LOG" 2>&1
+    else
+        timeout "${SIMPLEOS_Q35_TIMEOUT}s" qemu-system-x86_64 \
+            -machine q35 \
+            -cpu qemu64 \
+            -m 512M \
+            -kernel "$SIMPLEOS_Q35_ELF" \
+            -serial stdio \
+            -monitor none \
+            -display none \
+            -no-reboot \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+            -drive "file=${SIMPLEOS_Q35_DISK},if=none,id=${SIMPLEOS_Q35_DRIVE_ID},format=raw" \
+            -device nvme,drive="${SIMPLEOS_Q35_DRIVE_ID}",serial="${SIMPLEOS_Q35_NVME_SERIAL}" \
+            -netdev user,id=net0 \
+            -device virtio-net-pci,netdev=net0 \
+            > "$SIMPLEOS_Q35_LOG" 2>&1
+    fi
     code=$?
     set -e
 

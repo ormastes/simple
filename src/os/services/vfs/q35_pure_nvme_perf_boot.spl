@@ -26,11 +26,30 @@ use os.kernel.types.device_mem_types.{DeviceGrant, device_grant_is_isolated, dev
 use os.kernel.boot.mmio.{mmio_read8}
 use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, SharedDmaBuffer, dma_alloc, dma_free}
 use std.fs_driver.direct_io.{direct_io_read_batch_request, direct_io_write_batch_request}
+use std.fs_driver.error.{FsError}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn simpleos_nvme_init() -> i64
 extern fn simpleos_nvme_read_sector(device_idx: u64, lba: u64, buf_addr: u64) -> i64
 extern fn simpleos_nvme_write_sector(device_idx: u64, lba: u64, buf_addr: u64) -> i64
+
+fn _q35_fs_error_name(err: FsError) -> text:
+    match err:
+        case FsError.Unsupported: "unsupported"
+        case FsError.Transient(_): "transient"
+        case FsError.Corrupt: "corrupt"
+        case FsError.NoSpace: "no-space"
+        case FsError.Permission: "permission"
+        case FsError.NotFound: "not-found"
+        case FsError.AlreadyExists: "already-exists"
+        case FsError.Busy: "busy"
+        case FsError.IoError(code): "io-error:" + code.to_u64().to_text()
+        case FsError.Interrupted: "interrupted"
+        case FsError.TooLarge: "too-large"
+        case FsError.ReadOnly: "read-only"
+        case FsError.InvalidArg: "invalid-arg"
+        case FsError.StaleHandle: "stale-handle"
+        case FsError.PathTraversal: "path-traversal"
 
 class Q35NvmePerfCounters:
     read_iops: u64
@@ -155,18 +174,33 @@ fn _q35_user_namespace_assignment_marker(
     val max_depth = 64u16
     val previous_nsid = nvme.get_namespace_id()
     val user_namespace = nvme.identify_first_assignable_user_namespace(system_nsid)
+    var user_nsid: u32 = 0u32
+    var user_sector_size: u32 = 0u32
+    var user_sector_count: u64 = 0u64
     if user_namespace.is_err():
-        return Err("user-namespace-identify:" + user_namespace.unwrap_err())
-    val user_facts = user_namespace.unwrap()
-    val user_nsid = user_facts.nsid
-    val user_sector_size = user_facts.formatted_lba_size
-    val user_sector_count = user_facts.lba_count
+        val fallback_identify = nvme.identify_namespace_id(2u32)
+        if fallback_identify.is_err():
+            return Err("user-namespace-identify:" + user_namespace.unwrap_err() + " fallback_nsid=2 detail=" + fallback_identify.unwrap_err())
+        user_nsid = 2u32
+        user_sector_size = nvme.get_sector_size()
+        user_sector_count = nvme.get_sector_count()
+    else:
+        val user_facts = user_namespace.unwrap()
+        user_nsid = user_facts.nsid
+        user_sector_size = user_facts.formatted_lba_size
+        user_sector_count = user_facts.lba_count
+    if previous_nsid != user_nsid:
+        val restore_before_probe = nvme.identify_namespace_id(previous_nsid)
+        if restore_before_probe.is_err():
+            return Err("user-namespace-restore:" + restore_before_probe.unwrap_err())
     if user_sector_count < 8u64:
         if previous_nsid != user_nsid:
             val restore_after_capacity = nvme.identify_namespace_id(previous_nsid)
             if restore_after_capacity.is_err():
                 return Err("user-namespace-restore:" + restore_after_capacity.unwrap_err())
         return Err("user-namespace-too-small")
+    if user_sector_size < 512u32:
+        return Err("user-namespace-lba-size-invalid nsid=" + user_nsid.to_text() + " lba_size=" + user_sector_size.to_text() + " lba_count=" + user_sector_count.to_text())
     val proof_offset = 0 as i64
     val grant_label = device_grant_resource_set_label(grant)
     val evidence_result = nvme.transfer_evidence_from_reversible_probe(
@@ -219,30 +253,54 @@ fn _q35_user_namespace_assignment_marker(
             if restore_after_shared.is_err():
                 return Err("user-namespace-restore:" + restore_after_shared.unwrap_err())
         return Err("user-shared-interface:" + shared_interface.unwrap_err())
-    val direct_read_probe = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_lease(
-        nvme,
-        lease,
-        NvmeFilesystemConsumer.Fat32,
-        direct_io_read_batch_request(1u64, [proof_offset], shared, 200000u32)
+    val user_shared = SharedDmaBuffer(
+        cpu_virt_addr: shared.cpu_virt_addr,
+        host_phys_addr: shared.host_phys_addr,
+        device_addr: shared.device_addr,
+        byte_len: 4096u64,
+        cache_policy: shared.cache_policy,
+        owner: shared.owner,
+        allocation_id: shared.allocation_id
     )
-    if direct_read_probe.is_err():
+    val direct_read_probe = nvme.read_4k_shared_dma_batch_in_namespace_on_queue(
+        user_nsid,
+        queue_id,
+        [0u64],
+        user_sector_size,
+        user_sector_count,
+        user_shared
+    )
+    if val Err(e) = direct_read_probe:
         if previous_nsid != user_nsid:
             val restore_after_read = nvme.identify_namespace_id(previous_nsid)
             if restore_after_read.is_err():
                 return Err("user-namespace-restore:" + restore_after_read.unwrap_err())
-        return Err("user-direct-read")
-    val direct_write_probe = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_write_through_for_lease(
-        nvme,
-        lease,
-        NvmeFilesystemConsumer.Fat32,
-        direct_io_write_batch_request(1u64, [proof_offset], shared, 200000u32)
+        return Err("user-direct-read:" + e)
+    val write_probe = nvme.write_4k_shared_dma_batch_in_namespace_on_queue(
+        user_nsid,
+        queue_id,
+        [0u64],
+        user_sector_size,
+        user_sector_count,
+        user_shared
     )
-    if direct_write_probe.is_err():
+    if write_probe.is_err():
         if previous_nsid != user_nsid:
             val restore_after_write = nvme.identify_namespace_id(previous_nsid)
             if restore_after_write.is_err():
                 return Err("user-namespace-restore:" + restore_after_write.unwrap_err())
-        return Err("user-direct-write")
+        return Err("user-direct-write:" + write_probe.unwrap_err())
+    if previous_nsid != user_nsid:
+        val identify_before_flush = nvme.identify_namespace_id(user_nsid)
+        if identify_before_flush.is_err():
+            return Err("user-namespace-identify-before-flush:" + identify_before_flush.unwrap_err())
+    val flush_probe = nvme.flush_in_namespace_on_queue(user_nsid, queue_id)
+    if flush_probe.is_err():
+        if previous_nsid != user_nsid:
+            val restore_after_flush = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_flush.is_err():
+                return Err("user-namespace-restore:" + restore_after_flush.unwrap_err())
+        return Err("user-direct-flush:" + flush_probe.unwrap_err())
     if previous_nsid != user_nsid:
         val restore_after_probe = nvme.identify_namespace_id(previous_nsid)
         if restore_after_probe.is_err():
@@ -530,7 +588,7 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
 
             val write_req = direct_io_write_batch_request(1u64, offsets, shared, 200000u32)
             val write_start = rt_time_now_unix_micros()
-            val write_result = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_write_through_for_lease_window(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, consumer, 0u64, sector_count, sector_size, write_req)
+            val write_result = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_lease_window(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, consumer, 0u64, sector_count, sector_size, write_req)
             val write_elapsed = _elapsed_us(write_start, rt_time_now_unix_micros())
             if write_result.is_err():
                 dma_free(dma)
