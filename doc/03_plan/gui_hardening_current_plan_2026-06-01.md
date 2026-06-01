@@ -557,3 +557,21 @@ SMF/dynlib perf contract, SMF dynlib probe core, macOS SMF evidence runner,
 SMF wrapper, exported hot symbol, and GUI entities. The focused release-lane
 spec passed `10/10`, the adjacent SMF dynlib probe spec passed `9/9`, the
 generated manual has 10 active scenarios, and the doc layout guard returned `0`.
+
+Pure GUI release-lane guard correction:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check test/unit/lib/gui/pure_gui_release_lane_spec.spl src/lib/gui/pure_release.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/gui/pure_gui_release_lane_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/gui_perf/smf_dynlib_probe_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/gui/pure_gui_release_lane_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The guard now separates strict release-surface rules from hosted entity rules:
+`pure_release`, pure command/perf modules, SMF probe, macOS evidence, wrapper,
+and exported hot symbol must reject WM, web-renderer, Skia, BrowserWindow, and
+native GUI runtime dependencies, while hosted GUI entity files are checked for
+native GUI runtime calls only. This avoids treating intentional entity model
+dependencies on WebContents or Skia as release-lane failures. The corrected
+release-lane spec passed `12/12`, the adjacent SMF dynlib probe spec passed
+`9/9`, the generated manual has 12 active scenarios, and the doc layout guard
+returned `0`.
