@@ -210,7 +210,7 @@ Leverage existing `AiCliManifest` capability system:
 - [ ] Process: enforce `process_grants`, deny undeclared spawns
 - [ ] Credentials: enforce `credential_grants`, block ambient env var reads
 - [ ] Compare with Deno permissions model (`--allow-read`, `--allow-net`)
-- [ ] Add Node.js `--experimental-permission`-style flags to QuickJS launcher
+- [x] Add Node.js `--experimental-permission`-style flags to QuickJS launcher contract
 - [ ] Test: all denial paths from existing `simpleos_ai_cli_js_node_port_spec.spl`
 - [ ] Serial marker: `[ai-cli] hardening:ok app=<tool>`
 

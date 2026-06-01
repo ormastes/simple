@@ -128,6 +128,45 @@ expect(ai_cli_allows_network(manifest, "example.com:443")).to_equal(false)
 
 </details>
 
+#### builds deterministic permission flags from manifest grants
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = codex_cli_smoke_manifest()
+val flags = ai_cli_permission_flags(manifest)
+val summary = ai_cli_permission_flag_summary(manifest)
+
+expect(flags[0]).to_equal("--experimental-permission")
+expect(summary).to_contain("--allow-fs-read=/home/user/work,/home/user/.codex,/var/cache/codex,/tmp")
+expect(summary).to_contain("--allow-fs-write=/home/user/work,/home/user/.codex,/var/cache/codex,/tmp")
+expect(summary).to_contain("--allow-child-process=simple,git")
+expect(summary).to_contain("--allow-net=api.openai.com:443")
+expect(summary).to_contain("--allow-env=openai-api-key")
+```
+
+</details>
+
+#### keeps deny-all permission flags fail-closed
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val flags = ai_cli_permission_flags(deny_all_manifest())
+expect(flags.len()).to_equal(1)
+expect(flags[0]).to_equal("--experimental-permission")
+```
+
+</details>
+
 ### REQ-006 NFR-003: QEMU target and marker data
 
 #### normalizes x85 to x86 and declares guest-side marker fragments
@@ -284,7 +323,7 @@ expect(ai_cli_provisioning_plan_summary(plan)).to_contain("disk-manifest=CLAUDE.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -300,7 +339,9 @@ expect(package.manifest_sdn).to_contain("app_id = \"codex\"")
 expect(package.manifest_sdn).to_contain("runtime_kind = \"node-compatible\"")
 expect(package.manifest_sdn).to_contain("package_version = \"0.1.0-smoke.20260530\"")
 expect(package.manifest_sdn).to_contain("runtime_artifact = \"simple-js-agent-smoke-stub@20260530\"")
+expect(package.manifest_sdn).to_contain("permission_flags = \"--experimental-permission --allow-fs-read=/home/user/work,/home/user/.codex,/var/cache/codex,/tmp")
 expect(package.launcher_source).to_contain("[ai-cli] runtime:start app=codex")
+expect(package.launcher_source).to_contain("[ai-cli] permission-flags --experimental-permission")
 expect(package.launcher_source).to_contain("[ai-cli] cli-smoke:start app=codex")
 expect(package.launcher_source).to_contain("[ai-cli] hardening:deny app=codex reason=undeclared-capability")
 expect(package.runtime_stub_source).to_contain("simple-js-agent target=x86")
@@ -483,8 +524,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

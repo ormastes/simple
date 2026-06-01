@@ -14,6 +14,8 @@ use os.ai_cli_js_node_contract.{
     ai_cli_manifest_is_valid,
     ai_cli_manifest_validation_error,
     ai_cli_marker_payload,
+    ai_cli_permission_flag_summary,
+    ai_cli_permission_flags,
     ai_cli_provisioning_plan,
     ai_cli_provisioning_plan_summary,
     ai_cli_runtime_smoke_package,
@@ -141,6 +143,23 @@ describe "SimpleOS AI CLI JS/Node port manifest contract":
             expect(ai_cli_allows_credential(manifest, "openai-api-key")).to_equal(true)
             expect(ai_cli_allows_network(manifest, "example.com:443")).to_equal(false)
 
+        it "builds deterministic permission flags from manifest grants":
+            val manifest = codex_cli_smoke_manifest()
+            val flags = ai_cli_permission_flags(manifest)
+            val summary = ai_cli_permission_flag_summary(manifest)
+
+            expect(flags[0]).to_equal("--experimental-permission")
+            expect(summary).to_contain("--allow-fs-read=/home/user/work,/home/user/.codex,/var/cache/codex,/tmp")
+            expect(summary).to_contain("--allow-fs-write=/home/user/work,/home/user/.codex,/var/cache/codex,/tmp")
+            expect(summary).to_contain("--allow-child-process=simple,git")
+            expect(summary).to_contain("--allow-net=api.openai.com:443")
+            expect(summary).to_contain("--allow-env=openai-api-key")
+
+        it "keeps deny-all permission flags fail-closed":
+            val flags = ai_cli_permission_flags(deny_all_manifest())
+            expect(flags.len()).to_equal(1)
+            expect(flags[0]).to_equal("--experimental-permission")
+
     describe "REQ-006 NFR-003: QEMU target and marker data":
         it "normalizes x85 to x86 and declares guest-side marker fragments":
             val manifest = codex_cli_smoke_manifest()
@@ -225,7 +244,9 @@ describe "SimpleOS AI CLI JS/Node port manifest contract":
             expect(package.manifest_sdn).to_contain("runtime_kind = \"node-compatible\"")
             expect(package.manifest_sdn).to_contain("package_version = \"0.1.0-smoke.20260530\"")
             expect(package.manifest_sdn).to_contain("runtime_artifact = \"simple-js-agent-smoke-stub@20260530\"")
+            expect(package.manifest_sdn).to_contain("permission_flags = \"--experimental-permission --allow-fs-read=/home/user/work,/home/user/.codex,/var/cache/codex,/tmp")
             expect(package.launcher_source).to_contain("[ai-cli] runtime:start app=codex")
+            expect(package.launcher_source).to_contain("[ai-cli] permission-flags --experimental-permission")
             expect(package.launcher_source).to_contain("[ai-cli] cli-smoke:start app=codex")
             expect(package.launcher_source).to_contain("[ai-cli] hardening:deny app=codex reason=undeclared-capability")
             expect(package.runtime_stub_source).to_contain("simple-js-agent target=x86")

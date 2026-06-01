@@ -40,3 +40,7 @@ dev-incomplete
 - dev: PASS `SIMPLE_LIB=src bin/simple test test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter --clean` (18 scenarios).
 - dev: Regenerated `doc/06_spec/system/os/simpleos_ai_cli_js_node_port_spec.md` with `bin/simple spipe-docgen --no-index`; command completed with existing compiler/docgen warnings.
 - dev: Updated `doc/03_plan/sys_test/webgpu_js_wasm_simple.md` so REQ-WGPU-006/007 reflect the implemented BrowserSession `fetch` -> `arrayBuffer` -> `WebAssembly.instantiate` path and keep direct WASM-to-WebGPU host bindings as the remaining bridge layer.
+- dev: Added deterministic Node-style permission flags from `AiCliManifest` grants (`--experimental-permission`, fs read/write, child process, network, env/credential handles) and embedded them in staged package manifest/launcher marker output. Deny-all manifests now emit only the base permission flag.
+- dev: PASS `SIMPLE_LIB=src bin/simple check src/os/ai_cli_js_node_contract.spl`.
+- dev: PASS `SIMPLE_LIB=src bin/simple test test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter --clean` (20 scenarios).
+- dev: Regenerated `doc/06_spec/system/os/simpleos_ai_cli_js_node_port_spec.md` with permission-flag coverage; command completed with existing compiler/docgen warnings.
