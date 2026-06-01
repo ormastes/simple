@@ -9,6 +9,8 @@ use std.spec.*
 use os.kernel.loader.loader_api.{
     loader_dispatch,
     loader_dynopen_bytes,
+    loader_dynopen_mapped_bytes,
+    loader_dynopen_mapped_path,
     loader_dynopen_path,
     loader_dynopen_registered,
     loader_dynsym,
@@ -142,6 +144,24 @@ fn _elf64_with_dynsym() -> [u8]:
     b = _push_u64_le(b, 0)
     b
 
+fn _elf64_no_load_segments() -> [u8]:
+    var b: [u8] = [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8, 1u8]
+    b = _pad_to(b, 16)
+    b = _push_u16_le(b, 2)
+    b = _push_u16_le(b, 62)
+    b = _push_u32_le(b, 1)
+    b = _push_u64_le(b, 0x400000)
+    b = _push_u64_le(b, 64)
+    b = _push_u64_le(b, 0)
+    b = _push_u32_le(b, 0)
+    b = _push_u16_le(b, 64)
+    b = _push_u16_le(b, 56)
+    b = _push_u16_le(b, 0)
+    b = _push_u16_le(b, 0)
+    b = _push_u16_le(b, 0)
+    b = _push_u16_le(b, 0)
+    b
+
 fn _smf_role2_library() -> [u8]:
     var b = _elf64_with_dynsym()
     val stub_size = b.len()
@@ -191,6 +211,7 @@ describe "loader dynload API":
     it "rejects empty path dynopen before file IO":
         dylib_registry_reset_for_test()
         expect(loader_dynopen_path("")).to_equal(-22i64)
+        expect(loader_dynopen_mapped_path("", _empty_space())).to_equal(-22i64)
 
     it "opens role-2 SMF library bytes and resolves symbols through the loader":
         dylib_registry_reset_for_test()
@@ -201,3 +222,16 @@ describe "loader dynload API":
         expect(loader_dynsym_is_process_callable(handle, "hot")).to_equal(false)
         expect(loader_dynclose(handle)).to_equal(0)
         expect(loader_dynclose(handle)).to_equal(0)
+
+    it "rolls back mapped dynopen when ELF segment mapping fails":
+        dylib_registry_reset_for_test()
+        val rc = loader_dynopen_mapped_bytes("/lib/no_load.so", _elf64_no_load_segments(), _empty_space())
+        expect(rc).to_equal(-8i64)
+        expect(loader_dynopen_registered("/lib/no_load.so")).to_equal(-2i64)
+        expect(loader_dynopen_registered("/lib/no_load.so")).to_be_less_than(0)
+
+    it "rolls back mapped dynopen when bytes are not native library code":
+        dylib_registry_reset_for_test()
+        val rc = loader_dynopen_mapped_bytes("/lib/not_native.smf", _smf_trailer_bytes(), _empty_space())
+        expect(rc).to_be_less_than(0)
+        expect(loader_dynopen_registered("/lib/not_native.smf")).to_be_less_than(0)

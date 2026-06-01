@@ -5,8 +5,8 @@
 # binary magic and dispatches to elf64_load or smf_load.
 # argv/envp setup is handled by stack_builder → process_image.
 
-use os.kernel.loader.elf64.{elf64_parse_header, elf64_load, elf64_has_magic}
-use os.kernel.loader.smf.{smf_has_header, smf_load}
+use os.kernel.loader.elf64.{elf64_parse_header, elf64_program_headers, elf64_load, elf64_has_magic, PT_LOAD64}
+use os.kernel.loader.smf.{smf_has_header, smf_load, smf_extract_library_stub}
 use os.kernel.loader.dylib_registry.{
     dylib_registry_register,
     dylib_registry_open,
@@ -61,6 +61,60 @@ fn loader_dynopen_path(path: text) -> i64:
     if bytes.len() == 0:
         return -2
     loader_dynopen_bytes(path, bytes)
+
+fn _loader_dynlib_native_bytes(bytes: [u8]) -> [u8]:
+    if elf64_has_magic(bytes):
+        return bytes
+    if smf_has_header(bytes):
+        val stub = smf_extract_library_stub(bytes)
+        if stub.is_ok():
+            return stub.unwrap()
+    []
+
+fn _loader_dynlib_load_segment_count(bytes: [u8]) -> i64:
+    val hdr_opt = elf64_parse_header(bytes)
+    if hdr_opt == nil:
+        return 0
+    val phdrs = elf64_program_headers(bytes, hdr_opt.unwrap())
+    var count = 0
+    var i = 0
+    while i < phdrs.len():
+        if phdrs[i].p_type == PT_LOAD64:
+            count = count + 1
+        i = i + 1
+    count
+
+fn loader_dynopen_mapped_bytes(path: text, bytes: [u8], space: ProcessVmSpace) -> i64:
+    """Register and map a dynamic library image into a process VM space.
+
+    The returned handle supports symbol lookup. Symbols remain non-callable
+    until relocation/import binding and executable-call verification land.
+    """
+    val native = _loader_dynlib_native_bytes(bytes)
+    if native.len() == 0:
+        return -8
+    if _loader_dynlib_load_segment_count(native) == 0:
+        return -8
+
+    val handle = loader_dynopen_bytes(path, bytes)
+    if handle < 0:
+        return handle
+
+    val mapped = elf64_load(native, space)
+    if mapped < 0:
+        loader_dynclose(handle)
+        return mapped
+
+    handle
+
+fn loader_dynopen_mapped_path(path: text, space: ProcessVmSpace) -> i64:
+    """Read, register, and map a dynamic library image by path."""
+    if path == "":
+        return -22
+    val bytes = rt_file_read_bytes(path)
+    if bytes.len() == 0:
+        return -2
+    loader_dynopen_mapped_bytes(path, bytes, space)
 
 fn loader_dynopen_registered(path: text) -> i64:
     """Retain an already-registered dynamic library by path."""

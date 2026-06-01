@@ -95,6 +95,27 @@ expect rc.to_equal(-38i64)
 
 ### loader dynload API
 
+#### rejects empty path dynopen before file IO
+
+1. dylib registry reset for test
+   - Expected: loader_dynopen_path("") equals `-22i64`
+   - Expected: loader_dynopen_mapped_path("", _empty_space()) equals `-22i64`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+dylib_registry_reset_for_test()
+expect(loader_dynopen_path("")).to_equal(-22i64)
+expect(loader_dynopen_mapped_path("", _empty_space())).to_equal(-22i64)
+```
+
+</details>
+
 #### opens role-2 SMF library bytes and resolves symbols through the loader
 
 1. dylib registry reset for test
@@ -124,12 +145,55 @@ expect(loader_dynclose(handle)).to_equal(0)
 
 </details>
 
+#### rolls back mapped dynopen when ELF segment mapping fails
+
+1. dylib registry reset for test
+   - Expected: rc equals `-8i64`
+   - Expected: loader_dynopen_registered("/lib/no_load.so") equals `-2i64`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+dylib_registry_reset_for_test()
+val rc = loader_dynopen_mapped_bytes("/lib/no_load.so", _elf64_no_load_segments(), _empty_space())
+expect(rc).to_equal(-8i64)
+expect(loader_dynopen_registered("/lib/no_load.so")).to_equal(-2i64)
+expect(loader_dynopen_registered("/lib/no_load.so")).to_be_less_than(0)
+```
+
+</details>
+
+#### rolls back mapped dynopen when bytes are not native library code
+
+1. dylib registry reset for test
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+dylib_registry_reset_for_test()
+val rc = loader_dynopen_mapped_bytes("/lib/not_native.smf", _smf_trailer_bytes(), _empty_space())
+expect(rc).to_be_less_than(0)
+expect(loader_dynopen_registered("/lib/not_native.smf")).to_be_less_than(0)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
