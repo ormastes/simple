@@ -2,8 +2,8 @@
 # WebGPU JS/WASM/Simple end-to-end example specifications.
 #
 # These examples intentionally use only built-in SPipe matchers and current
-# repo APIs. Direct WASM-to-WebGPU host calls remain out of scope; the browser
-# bridge path covers fetched WASM bytes plus JS WebGPU APIs in one session.
+# repo APIs. The browser bridge path covers fetched WASM bytes, JS WebGPU APIs,
+# and a bounded declared WebGPU host import callback in one session.
 
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.script.canvas_api.{
@@ -340,6 +340,57 @@ describe "WebGPU JS WASM Simple system examples":
                                     expect(_display_js(value)).to_equal("fetch>arrayBuffer:11>instantiate:instantiated:11:1:object")
                                 Err(err):
                                     expect("unexpected js error: {err}").to_equal("")
+                        Err(err):
+                            expect("unexpected commit error: {err}").to_equal("")
+                nil:
+                    expect("missing fetch request").to_equal("")
+
+        it "should chain fetched WASM instantiation into JS WebGPU globals through BrowserSession":
+            var session = BrowserSession.new()
+            session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+            val queued = session.eval_script("var out = ''; var adapterName = ''; window.fetch('/mod.wasm').then(function(r) { return r.arrayBuffer(); }).then(function(bytes) { return WebAssembly.instantiate(bytes); }).then(function(wasm) { out = wasm.status + ':' + wasm.module.byteLength + ':' + navigator.gpu.softwareFallback + ':' + navigator.gpu.preferredCanvasFormat + ':' + typeof navigator.gpu.requestAdapter; }); 'queued'")
+            match queued:
+                Ok(value):
+                    expect(_display_js(value)).to_equal("queued")
+                Err(err):
+                    expect("unexpected queue error: {err}").to_equal("")
+            match session.eval_script("out"):
+                Ok(value):
+                    expect(_display_js(value)).to_equal("")
+                Err(err):
+                    expect("unexpected pre-commit js error: {err}").to_equal("")
+
+            match session.take_pending_request():
+                Some(request):
+                    expect(request.kind).to_equal("fetch")
+                    expect(request.url).to_equal("https://example.com/mod.wasm")
+                    val committed = session.commit_network_response(BrowserResponse.create(
+                        request_id: request.id,
+                        kind: "fetch",
+                        url: request.url,
+                        status: 200,
+                        headers: "Content-Type: application/wasm\n",
+                        body: "0061736d01000000010100",
+                        error: ""
+                    ))
+                    match committed:
+                        Ok(_):
+                            val result = session.eval_script("out")
+                            match result:
+                                Ok(value):
+                                    expect(_display_js(value)).to_equal("instantiated:11:true:bgra8unorm:function")
+                                Err(err):
+                                    expect("unexpected js error: {err}").to_equal("")
+                            match session.eval_script("navigator.gpu.requestAdapter().then(function(adapter) { adapterName = adapter.name + ':' + adapter.isFallbackAdapter; }); adapterName"):
+                                Ok(value):
+                                    expect(_display_js(value)).to_equal("")
+                                Err(err):
+                                    expect("unexpected adapter queue error: {err}").to_equal("")
+                            match session.eval_script("adapterName"):
+                                Ok(value):
+                                    expect(_display_js(value)).to_equal("Simple WebGPU Software Adapter:true")
+                                Err(err):
+                                    expect("unexpected adapter js error: {err}").to_equal("")
                         Err(err):
                             expect("unexpected commit error: {err}").to_equal("")
                 nil:
@@ -1052,6 +1103,16 @@ describe "WebGPU JS WASM Simple system examples":
             match result:
                 Ok(value):
                     expect(_display_js(value)).to_equal("true:invalid:unsupported-wasm-imports:invalid:unsupported-wasm-imports")
+                Err(err):
+                    expect("unexpected js error: {err}").to_equal("")
+
+        it "should invoke a declared WebGPU host import from WASM through BrowserSession":
+            var session = BrowserSession.new()
+            session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+            val result = session.eval_script("var calls = 0; var imports = { webgpu: { requestAdapter: function() { calls = calls + 1; return 7; } } }; var m = new WebAssembly.Module('0061736d010000000105016000017f021901067765626770750e72657175657374416461707465720000030201000707010372756e00010a0601040010000b'); var i = new WebAssembly.Instance(m, imports); m.hasImportSection + ':' + m.firstImportModuleName + ':' + m.firstImportFieldName + ':' + m.firstImportKind + ':' + i.status + ':' + calls + ':' + i.exports.run() + ':' + calls")
+            match result:
+                Ok(value):
+                    expect(_display_js(value)).to_equal("true:webgpu:requestAdapter:function:instantiated:0:7:1")
                 Err(err):
                     expect("unexpected js error: {err}").to_equal("")
 

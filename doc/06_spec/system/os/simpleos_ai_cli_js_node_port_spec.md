@@ -462,7 +462,7 @@ expect(ai_cli_runtime_profile_supports_manifest(profile, codex_cli_smoke_manifes
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -472,6 +472,10 @@ val summary = ai_cli_wasm_browser_contract_summary(contract)
 expect(contract.contract_id).to_equal("simple-browser-wasm-gui-contract")
 expect(summary).to_contain("targets=simple-browser,host-wm,simpleos-wm,android,ios")
 expect(ai_cli_wasm_import_allowed(contract, "simple_ui.present")).to_equal(true)
+expect(ai_cli_wasm_import_allowed(contract, "webgpu.requestAdapter")).to_equal(true)
+expect(ai_cli_wasm_import_denied(contract, "webgpu.requestDevice")).to_equal(true)
+expect(ai_cli_wasm_import_denied(contract, "webgpu.queue.submit")).to_equal(true)
+expect(ai_cli_wasm_import_denied(contract, "navigator.gpu")).to_equal(true)
 expect(ai_cli_wasm_import_denied(contract, "fs.readFile")).to_equal(true)
 expect(ai_cli_wasm_import_denied(contract, "host.shell")).to_equal(true)
 expect(ai_cli_wasm_import_denied(contract, "random.unlisted")).to_equal(true)
