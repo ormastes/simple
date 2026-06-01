@@ -49,7 +49,8 @@ Date: 2026-06-01
 - `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/app/compile`
   passed `9` files.
 - `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/app/optimize src/app/compile src/os/baremetal/profile`
-  passed `26` files.
+  passed `27` files after splitting native counter runtime snapshot helpers
+  into `src/app/compile/native_profile_counter_runtime.spl`.
 - `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check
   test/system/app/optimize/feature/sprof_loader_spec.spl
   test/system/app/compile/feature/native_profile_counter_spec.spl
@@ -70,3 +71,6 @@ Date: 2026-06-01
 - `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
 - `sh scripts/install-spipe-dev-command.shs --check` returned `STATUS: PASS
   spipe-dev-command wiring`.
+- Maintainability file-size scan: all scoped implementation files are below
+  `800` lines; `native_profile_counter.spl` is `567` lines and
+  `native_profile_counter_runtime.spl` is `326` lines.

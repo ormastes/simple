@@ -491,10 +491,12 @@ Exit gates:
 
 ## Phase 2: Native Counter Feature
 
-Status: first implementation slice exists at
-`src/app/compile/native_profile_counter.spl` with native counter kinds,
-explicit profile-build enablement, stable identity checks, and bounded call-path
-policy. Contract coverage exists at
+Status: implementation exists across
+`src/app/compile/native_profile_counter.spl` and
+`src/app/compile/native_profile_counter_runtime.spl` with native counter kinds,
+explicit profile-build enablement, stable identity checks, bounded call-path
+policy, runtime snapshot parsing, and `.sprof` extraction/import planning.
+Contract coverage exists at
 `test/system/app/compile/feature/native_profile_counter_spec.spl`. Command-level
 `llvm_direct.spl --simple-profile-counters` smoke now emits a native binary and
 durable sidecar metadata. The native counter helper now also parses runtime
@@ -504,6 +506,9 @@ write-gated `.sprof` import plan from metadata plus final counter values.
 native compile lane and fails normal native builds if generated C contains
 profile-counter symbols, increments, or metadata without
 `--simple-profile-counters`.
+The runtime snapshot and `.sprof` extraction helpers were split into
+`native_profile_counter_runtime.spl` so both compile modules remain below the
+800-line maintainability gate.
 
 Deliverables:
 - native function/block/edge counter ABI;
