@@ -237,6 +237,23 @@ expect(result.max_channel_diff).to_equal(255)
 
 </details>
 
+#### does not report invalid dimensions as exact
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = compare_exact([], [], 0, 1)
+expect(result.different_pixels).to_be_greater_than(0)
+expect(result.match_percentage).to_equal(0)
+expect(result.max_channel_diff).to_equal(255)
+```
+
+</details>
+
 #### does not accept perceptual-only pixel matches
 
 <details>
@@ -326,8 +343,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

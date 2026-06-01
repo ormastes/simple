@@ -15,7 +15,7 @@
 # Architecture spec: .sstack/log-lib-drivers/state.md sections 3-arch §A-H.
 # ============================================================================
 
-@allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
+# allow unnamed_duplicate_typed_args: positional API arg order is conventional
 
 # ---------------------------------------------------------------------------
 # Externs - raw-pointer memory + stderr fallback
@@ -226,7 +226,9 @@ fn log_init_from_config(cfg: text):
     val n = cfg.len()
     var i = 0
     while i <= n:
-        val ch: text = if i < n: cfg.char_at(i) else "?"
+        var ch: text = "?"
+        if i < n:
+            ch = cfg.char_at(i)
         val end_token: bool = (i == n) or (ch == ",")
         if end_token:
             if key.len() > 0:
@@ -353,7 +355,9 @@ fn ring_backend_seq_at(rb: RingBackend, idx: i64) -> i64:
 
 fn ring_backend_first_at_subsys(rb: RingBackend, subsys: i64) -> _RingBackendRecord:
     val backend_idx = _ring_backend_index(rb.ops.self_ptr)
-    val entries = if backend_idx >= 0: _g_ring_registry[backend_idx].entries else rb.entries
+    var entries = rb.entries
+    if backend_idx >= 0:
+        entries = _g_ring_registry[backend_idx].entries
     var i = 0
     while i < entries.len():
         if entries[i].subsys == subsys:
@@ -404,13 +408,21 @@ var _g_ring_dropped_addr: i64 = 0
 
 fn _ring_alloc_cell() -> i64:
     val a = rt_alloc(8)
+    if a == 0:
+        return 0
     _ring_store_u64(a, 0)
     a
 
 fn log_ring_init(cap_log2: i64):
     val cap: i64 = 1 << cap_log2
     if _g_ring_buf == 0 or _g_ring_capacity != cap:
-        _g_ring_buf      = rt_alloc(cap * LOG_RECORD_SIZE)
+        val new_buf = rt_alloc(cap * LOG_RECORD_SIZE)
+        if new_buf == 0:
+            _g_ring_buf = 0
+            _g_ring_capacity = 0
+            _g_ring_mask = 0
+            return
+        _g_ring_buf      = new_buf
         _g_ring_capacity = cap
         _g_ring_mask     = cap - 1
         if _g_ring_head_addr == 0:
@@ -419,6 +431,11 @@ fn log_ring_init(cap_log2: i64):
             _g_ring_tail_addr = _ring_alloc_cell()
         if _g_ring_dropped_addr == 0:
             _g_ring_dropped_addr = _ring_alloc_cell()
+        if _g_ring_head_addr == 0 or _g_ring_tail_addr == 0 or _g_ring_dropped_addr == 0:
+            _g_ring_buf = 0
+            _g_ring_capacity = 0
+            _g_ring_mask = 0
+            return
     _ring_store_u64(_g_ring_head_addr, 0)
     _ring_store_u64(_g_ring_tail_addr, 0)
     _ring_store_u64(_g_ring_dropped_addr, 0)
@@ -427,15 +444,21 @@ fn log_ring_capacity() -> i64:
     _g_ring_capacity
 
 fn log_ring_pending() -> i64:
+    if _g_ring_head_addr == 0 or _g_ring_tail_addr == 0:
+        return 0
     val h = _ring_load_u64(_g_ring_head_addr)
     val t = _ring_load_u64(_g_ring_tail_addr)
     h - t
 
 fn log_ring_dropped() -> i64:
+    if _g_ring_dropped_addr == 0:
+        return 0
     _ring_load_u64(_g_ring_dropped_addr)
 
 fn log_ring_push(level: i64, subsys: i64, fmt_handle: i64, p0: i64, p1: i64, flags: i64) -> bool:
     if _g_ring_buf == 0:
+        return false
+    if _g_ring_head_addr == 0 or _g_ring_tail_addr == 0 or _g_ring_dropped_addr == 0:
         return false
     val h = _ring_load_u64(_g_ring_head_addr)
     val t = _ring_load_u64(_g_ring_tail_addr)
@@ -458,6 +481,8 @@ fn log_ring_push(level: i64, subsys: i64, fmt_handle: i64, p0: i64, p1: i64, fla
 fn log_ring_drain(max: i64) -> i64:
     if _g_ring_buf == 0:
         return 0
+    if _g_ring_head_addr == 0 or _g_ring_tail_addr == 0:
+        return 0
     val h = _ring_load_u64(_g_ring_head_addr)
     var t = _ring_load_u64(_g_ring_tail_addr)
     var drained: i64 = 0
@@ -470,6 +495,8 @@ fn log_ring_drain(max: i64) -> i64:
 fn drain_to_list(max: i64) -> [_RingBackendRecord]:
     var records_out: [_RingBackendRecord] = []
     if _g_ring_buf == 0:
+        return records_out
+    if _g_ring_head_addr == 0 or _g_ring_tail_addr == 0:
         return records_out
     val h = _ring_load_u64(_g_ring_head_addr)
     var t = _ring_load_u64(_g_ring_tail_addr)
@@ -493,7 +520,7 @@ var _g_panic_mode: bool = false
 
 fn log_panic_flush():
     _g_panic_mode = true
-    if _g_ring_buf != 0:
+    if _g_ring_buf != 0 and _g_ring_head_addr != 0 and _g_ring_tail_addr != 0:
         _ring_store_u64(_g_ring_tail_addr, _ring_load_u64(_g_ring_head_addr))
 
 fn panic_mode_active() -> bool:

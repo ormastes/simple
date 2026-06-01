@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::core::RuntimeValue;
-use super::heap::{HeapHeader, HeapObjectType};
+use super::heap::{get_typed_ptr_mut, register_heap_ptr, unregister_heap_ptr, HeapHeader, HeapObjectType};
 
 // ============================================================================
 // Channel Types
@@ -87,22 +87,14 @@ pub extern "C" fn rt_channel_new() -> RuntimeValue {
         (*ptr).channel_id = channel_id;
         (*ptr).closed = 0;
 
+        register_heap_ptr(ptr as *mut HeapHeader);
         RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
     }
 }
 
 /// Helper to validate channel pointer
 fn as_channel_ptr(value: RuntimeValue) -> Option<*mut RuntimeChannel> {
-    if !value.is_heap() {
-        return None;
-    }
-    let ptr = value.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::Channel {
-            return None;
-        }
-        Some(ptr as *mut RuntimeChannel)
-    }
+    get_typed_ptr_mut::<RuntimeChannel>(value, HeapObjectType::Channel)
 }
 
 /// Send a value through the channel.
@@ -277,6 +269,7 @@ pub extern "C" fn rt_channel_free(channel: RuntimeValue) {
 
         let size = std::mem::size_of::<RuntimeChannel>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        unregister_heap_ptr(ch_ptr as *mut HeapHeader);
         std::alloc::dealloc(ch_ptr as *mut u8, layout);
     }
 }
@@ -360,5 +353,19 @@ mod tests {
         }
 
         rt_channel_free(ch);
+    }
+
+    #[test]
+    fn test_channel_rejects_forged_heap_value() {
+        let forged_heap = RuntimeValue::from_raw(0x1001);
+
+        assert_eq!(rt_channel_send(forged_heap, RuntimeValue::from_int(1)), 0);
+        assert_eq!(rt_channel_recv(forged_heap), RuntimeValue::NIL);
+        assert_eq!(rt_channel_try_recv(forged_heap), RuntimeValue::NIL);
+        assert_eq!(rt_channel_recv_timeout(forged_heap, 1), RuntimeValue::NIL);
+        assert_eq!(rt_channel_is_closed(forged_heap), 1);
+        assert_eq!(rt_channel_id(forged_heap), 0);
+        rt_channel_close(forged_heap);
+        rt_channel_free(forged_heap);
     }
 }

@@ -54,10 +54,10 @@ fn compute_c_layout(fields: [HirField], attr: LayoutAttr) -> TypeLayout:
         if field.has_bits_attr:
             val bits_width = field.bits_width
             val storage_bits = size * 8
-            val needs_new_unit = not active_bitfield or
-                size != bitfield_unit_size or
-                align != bitfield_unit_align or
-                bitfield_used_bits + bits_width > bitfield_unit_bits
+            val size_changed = size != bitfield_unit_size
+            val align_changed = align != bitfield_unit_align
+            val bitfield_overflow = bitfield_used_bits + bits_width > bitfield_unit_bits
+            val needs_new_unit = not active_bitfield or size_changed or align_changed or bitfield_overflow
 
             if needs_new_unit:
                 if active_bitfield:
@@ -135,6 +135,9 @@ fn compute_transparent_layout(fields: [HirField]) -> TypeLayout:
     val field = fields[0]
     val size = size_of_type(field.type_)
     val align = align_of_type(field.type_)
+    var field_bits_width: i64 = 0
+    if field.has_bits_attr:
+        field_bits_width = field.bits_width
 
     TypeLayout(
         size: size,
@@ -146,7 +149,7 @@ fn compute_transparent_layout(fields: [HirField]) -> TypeLayout:
             size: size,
             align: align,
             has_bits: field.has_bits_attr,
-            bits_width: if field.has_bits_attr: field.bits_width else: 0,
+            bits_width: field_bits_width,
             bit_offset: 0
         )],
         stride: size
@@ -217,10 +220,11 @@ fn primitive_size_for_arch(type_name: text, arch: TargetArch) -> has_i64:
             arch_pointer_bytes(arch)
 
         # Pointer types
-        case _ if type_name.ends_with("*") or type_name.starts_with("&"):
-            arch_pointer_bytes(arch)
-
-        case _: nil
+        case _:
+            if type_name.ends_with("*") or type_name.starts_with("&"):
+                arch_pointer_bytes(arch)
+            else:
+                nil
 
 # Primitive type alignment for a specific architecture
 fn primitive_align_for_arch(type_name: text, arch: TargetArch) -> has_i64:
@@ -297,20 +301,29 @@ fn primitive_align_for_arch(type_name: text, arch: TargetArch) -> has_i64:
             arch_pointer_bytes(arch)
 
         # Pointer types
-        case _ if type_name.ends_with("*") or type_name.starts_with("&"):
-            arch_pointer_bytes(arch)
-
-        case _: nil
+        case _:
+            if type_name.ends_with("*") or type_name.starts_with("&"):
+                arch_pointer_bytes(arch)
+            else:
+                nil
 
 # Get size of a type for a specific architecture
 fn size_of_type_for_arch(type_: HirType, arch: TargetArch) -> i64:
     val name = type__to_text(type_)
-    primitive_size_for_arch(name, arch) ?? arch_pointer_bytes(arch)
+    val primitive_size = primitive_size_for_arch(name, arch)
+    if primitive_size != nil:
+        primitive_size.unwrap()
+    else:
+        arch_pointer_bytes(arch)
 
 # Get alignment of a type for a specific architecture
 fn align_of_type_for_arch(type_: HirType, arch: TargetArch) -> i64:
     val name = type__to_text(type_)
-    primitive_align_for_arch(name, arch) ?? arch_pointer_bytes(arch)
+    val primitive_align = primitive_align_for_arch(name, arch)
+    if primitive_align != nil:
+        primitive_align.unwrap()
+    else:
+        arch_pointer_bytes(arch)
 
 # --- Architecture-Aware Struct Layout ---
 
@@ -350,7 +363,10 @@ fn compute_struct_layout_for_arch(fields: [HirField], attr: LayoutAttr, arch: Ta
             compute_transparent_layout_for_arch(fields, arch)
         case LayoutKind.Simple:
             if attr.is_compactq:
-                compute_packed_layout_for_arch(if attr.is_preserve_order: fields else: reorder_fields_by_size_for_arch(fields, arch), arch)
+                var compact_fields = fields
+                if not attr.is_preserve_order:
+                    compact_fields = reorder_fields_by_size_for_arch(fields, arch)
+                compute_packed_layout_for_arch(compact_fields, arch)
             elif attr.is_preserve_order:
                 compute_c_layout_for_arch(fields, attr, arch)
             else:
@@ -362,6 +378,9 @@ fn compute_packed_layout_for_arch(fields: [HirField], arch: TargetArch) -> TypeL
 
     for field in fields:
         val size = size_of_type_for_arch(field.type_, arch)
+        var field_bits_width: i64 = 0
+        if field.has_bits_attr:
+            field_bits_width = field.bits_width
         field_layouts.push(FieldLayout(
             name: field.name,
             type_: field.type_,
@@ -369,7 +388,7 @@ fn compute_packed_layout_for_arch(fields: [HirField], arch: TargetArch) -> TypeL
             size: size,
             align: 1,
             has_bits: field.has_bits_attr,
-            bits_width: if field.has_bits_attr: field.bits_width else: 0,
+            bits_width: field_bits_width,
             bit_offset: 0
         ))
         offset = offset + size
@@ -402,10 +421,10 @@ fn compute_c_layout_for_arch(fields: [HirField], attr: LayoutAttr, arch: TargetA
         if field.has_bits_attr:
             val bits_width = field.bits_width
             val storage_bits = size * 8
-            val needs_new_unit = not active_bitfield or
-                size != bitfield_unit_size or
-                align != bitfield_unit_align or
-                bitfield_used_bits + bits_width > bitfield_unit_bits
+            val size_changed = size != bitfield_unit_size
+            val align_changed = align != bitfield_unit_align
+            val bitfield_overflow = bitfield_used_bits + bits_width > bitfield_unit_bits
+            val needs_new_unit = not active_bitfield or size_changed or align_changed or bitfield_overflow
 
             if needs_new_unit:
                 if active_bitfield:
@@ -476,6 +495,9 @@ fn compute_transparent_layout_for_arch(fields: [HirField], arch: TargetArch) -> 
     val field = fields[0]
     val size = size_of_type_for_arch(field.type_, arch)
     val align = align_of_type_for_arch(field.type_, arch)
+    var field_bits_width: i64 = 0
+    if field.has_bits_attr:
+        field_bits_width = field.bits_width
 
     TypeLayout(
         size: size,
@@ -487,7 +509,7 @@ fn compute_transparent_layout_for_arch(fields: [HirField], arch: TargetArch) -> 
             size: size,
             align: align,
             has_bits: field.has_bits_attr,
-            bits_width: if field.has_bits_attr: field.bits_width else: 0,
+            bits_width: field_bits_width,
             bit_offset: 0
         )],
         stride: size
@@ -508,16 +530,56 @@ struct TypeSizeSummary:
     align_64bit: i64
 
 fn get_type_size_summary(type_name: text) -> TypeSizeSummary:
+    var size_8bit: i64 = 1
+    val size_8bit_value = primitive_size_for_arch(type_name, TargetArch.AVR)
+    if size_8bit_value != nil:
+        size_8bit = size_8bit_value.unwrap()
+
+    var size_16bit: i64 = 2
+    val size_16bit_value = primitive_size_for_arch(type_name, TargetArch.MSP430)
+    if size_16bit_value != nil:
+        size_16bit = size_16bit_value.unwrap()
+
+    var size_32bit: i64 = 4
+    val size_32bit_value = primitive_size_for_arch(type_name, TargetArch.X86)
+    if size_32bit_value != nil:
+        size_32bit = size_32bit_value.unwrap()
+
+    var size_64bit: i64 = 8
+    val size_64bit_value = primitive_size_for_arch(type_name, TargetArch.X86_64)
+    if size_64bit_value != nil:
+        size_64bit = size_64bit_value.unwrap()
+
+    var align_8bit: i64 = 1
+    val align_8bit_value = primitive_align_for_arch(type_name, TargetArch.AVR)
+    if align_8bit_value != nil:
+        align_8bit = align_8bit_value.unwrap()
+
+    var align_16bit: i64 = 2
+    val align_16bit_value = primitive_align_for_arch(type_name, TargetArch.MSP430)
+    if align_16bit_value != nil:
+        align_16bit = align_16bit_value.unwrap()
+
+    var align_32bit: i64 = 4
+    val align_32bit_value = primitive_align_for_arch(type_name, TargetArch.X86)
+    if align_32bit_value != nil:
+        align_32bit = align_32bit_value.unwrap()
+
+    var align_64bit: i64 = 8
+    val align_64bit_value = primitive_align_for_arch(type_name, TargetArch.X86_64)
+    if align_64bit_value != nil:
+        align_64bit = align_64bit_value.unwrap()
+
     TypeSizeSummary(
         type_name: type_name,
-        size_8bit: primitive_size_for_arch(type_name, TargetArch.AVR) ?? 1,
-        size_16bit: primitive_size_for_arch(type_name, TargetArch.MSP430) ?? 2,
-        size_32bit: primitive_size_for_arch(type_name, TargetArch.X86) ?? 4,
-        size_64bit: primitive_size_for_arch(type_name, TargetArch.X86_64) ?? 8,
-        align_8bit: primitive_align_for_arch(type_name, TargetArch.AVR) ?? 1,
-        align_16bit: primitive_align_for_arch(type_name, TargetArch.MSP430) ?? 2,
-        align_32bit: primitive_align_for_arch(type_name, TargetArch.X86) ?? 4,
-        align_64bit: primitive_align_for_arch(type_name, TargetArch.X86_64) ?? 8
+        size_8bit: size_8bit,
+        size_16bit: size_16bit,
+        size_32bit: size_32bit,
+        size_64bit: size_64bit,
+        align_8bit: align_8bit,
+        align_16bit: align_16bit,
+        align_32bit: align_32bit,
+        align_64bit: align_64bit
     )
 
 

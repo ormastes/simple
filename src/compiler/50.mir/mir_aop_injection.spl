@@ -45,7 +45,7 @@ fn inject_after_success_advice(func: MirFunction, advice_fn_name: text) -> MirFu
     var new_blocks: [MirBlock] = []
     for block in func.blocks:
         match block.terminator:
-            case Return(_):
+            case Ret(_):
                 val call_inst = make_advice_call_inst(advice_fn_name)
                 var new_insts: [MirInst] = []
                 for inst in block.instructions:
@@ -84,6 +84,31 @@ fn inject_after_error_advice(func: MirFunction, advice_fn_name: text) -> MirFunc
                 ))
             case _:
                 new_blocks.push(block)
+    MirFunction(..func, blocks: new_blocks)
+
+fn inject_advice_at_instruction(func: MirFunction, block_id: i64, instruction_index: i64, advice_fn_name: text, before: bool) -> MirFunction:
+    """Insert an advice call before or after a specific MIR instruction."""
+    var new_blocks: [MirBlock] = []
+    for block in func.blocks:
+        if block.id.id != block_id:
+            new_blocks.push(block)
+        else:
+            val call_inst = make_advice_call_inst(advice_fn_name)
+            var new_insts: [MirInst] = []
+            var idx = 0
+            for inst in block.instructions:
+                if before and idx == instruction_index:
+                    new_insts.push(call_inst)
+                new_insts.push(inst)
+                if not before and idx == instruction_index:
+                    new_insts.push(call_inst)
+                idx = idx + 1
+            new_blocks.push(MirBlock(
+                id: block.id,
+                label: block.label,
+                instructions: new_insts,
+                terminator: block.terminator
+            ))
     MirFunction(..func, blocks: new_blocks)
 
 # ============================================================================
@@ -147,6 +172,11 @@ fn classify_mir_inst_kind(kind: MirInstKind) -> text:
         case Call(_, _, _): "call"
         case CallIndirect(_, _, _, _): "call"
         case Intrinsic(_, _, _): "intrinsic"
+        case Store(_, _): "assignment"
+        case SetField(_, _, _): "assignment"
+        case VhdlSignalAssign(_, _, _): "assignment"
+        case VhdlVarAssign(_, _): "assignment"
+        case MirSimdStore(_, _, _): "assignment"
         case _: "other"
 
 fn apply_weaving_result(func: MirFunction, result: WeavingResult) -> MirFunction:
@@ -156,6 +186,10 @@ fn apply_weaving_result(func: MirFunction, result: WeavingResult) -> MirFunction
         match call_info.join_point_kind:
             case Execution:
                 woven = inject_before_advice(woven, call_info.advice_function)
+            case FunctionCall:
+                woven = inject_advice_at_instruction(woven, call_info.block_id, call_info.instruction_index, call_info.advice_function, true)
+            case VariableAssignment:
+                woven = inject_advice_at_instruction(woven, call_info.block_id, call_info.instruction_index, call_info.advice_function, false)
             case Error:
                 woven = inject_after_error_advice(woven, call_info.advice_function)
             case _:

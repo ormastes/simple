@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-01 05:30:49*
+*Generated: 2026-06-01 09:46:27*
 
-## test/system/hardware
+## test/unit/compiler/loader
 
-❌ **rv32_external_formal_harness_spec.spl** (205ms)
-  - Source: `test/system/hardware/rv32_external_formal_harness_spec.spl`
-  - Generated doc: `spec/rv32_external_formal_harness_spec.md`
+❌ **module_loader_relocation_spec.spl** (15390ms)
+  - Source: `test/unit/compiler/loader/module_loader_relocation_spec.spl`
+  - Generated doc: `spec/module_loader_relocation_spec.md`
 
 
 ---
@@ -16,4 +16,4 @@
 - **Total:** 1 tests
 - **Passed:** 0 ✅
 - **Failed:** 1 ❌
-- **Duration:** 209ms
+- **Duration:** 15401ms

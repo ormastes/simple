@@ -94,7 +94,7 @@ fn bits_needed(n: i64) -> i64:
 struct BitfieldField:
     name: text              # Field name ("_" for reserved/padding)
     type_: HirType          # Field type
-    repr: BitLayout           # Bit representation
+    bit_layout: BitLayout           # Bit representation
     bit_offset: i64         # Offset from LSB (computed)
     span: Span
 
@@ -103,11 +103,11 @@ impl BitfieldField:
         self.name == "_"
 
     fn bit_end() -> i64:
-        self.bit_offset + self.repr.bit_width
+        self.bit_offset + self.bit_layout.bit_width
 
     # Generate getter mask
     fn getter_mask() -> i64:
-        self.repr.mask() << self.bit_offset
+        self.bit_layout.mask() << self.bit_offset
 
     # Generate setter mask (inverted)
     fn setter_mask() -> i64:
@@ -126,7 +126,7 @@ impl Bitfield:
     fn used_bits() -> i64:
         var total: i64 = 0
         for field in self.fields:
-            total = total + field.repr.bit_width
+            total = total + field.bit_layout.bit_width
         total
 
     # Get unused bits (padding)
@@ -261,11 +261,11 @@ fn compile_bitfield(
                 return Err(BitfieldError.DuplicateField(field_name, field_span))
             seen_names[field_name] = true
 
-        val repr = type_bit_width(field_type)
-        if not repr.?:
+        val layout_value = type_bit_width(field_type)
+        if not layout_value.?:
             return Err(BitfieldError.UnknownFieldType(field_name, field_type.to_text(), field_span))
 
-        val field_repr = repr.unwrap()
+        val field_repr = layout_value.unwrap()
         if field_repr.bit_width <= 0 or field_repr.bit_width > 64:
             return Err(BitfieldError.InvalidBitWidth(field_name, field_repr.bit_width, field_span))
 
@@ -289,7 +289,7 @@ fn compile_bitfield(
         compiled_fields.push(BitfieldField(
             name: field_name,
             type_: field_type,
-            repr: field_repr,
+            bit_layout: field_repr,
             bit_offset: current_offset,
             span: field_span
         ))
@@ -326,7 +326,7 @@ fn generate_getter(bitfield: Bitfield, field_name: text, value_expr: text) -> te
         return nil
 
     val f = field.unwrap()
-    val mask = f.repr.mask()
+    val mask = f.bit_layout.mask()
     val shift = f.bit_offset
 
     # (value >> shift) & mask
@@ -342,7 +342,7 @@ fn generate_setter(bitfield: Bitfield, field_name: text, value_expr: text, new_v
         return nil
 
     val f = field.unwrap()
-    val mask = f.repr.mask()
+    val mask = f.bit_layout.mask()
     val shift = f.bit_offset
     val clear_mask = ~(mask << shift)
 

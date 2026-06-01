@@ -38,6 +38,7 @@
 //! - Object creation/destruction functions
 
 use super::core::RuntimeValue;
+use super::heap::{get_typed_ptr, HeapObjectType};
 use super::sffi_object::{fnv1a_hash_str, method_flags, FfiMethodEntry, FfiVtable};
 use super::sffi_registry::{get_registry, FfiObjectStorage};
 
@@ -229,18 +230,8 @@ impl IntoRuntimeValue for String {
 
 impl FromRuntimeValue for String {
     fn from_runtime_value(value: RuntimeValue) -> Option<Self> {
-        if !value.is_heap() {
-            return None;
-        }
-        let ptr = value.as_heap_ptr();
-        if ptr.is_null() {
-            return None;
-        }
+        let str_ptr = get_typed_ptr::<super::collections::RuntimeString>(value, HeapObjectType::String)?;
         unsafe {
-            if (*ptr).object_type != super::heap::HeapObjectType::String {
-                return None;
-            }
-            let str_ptr = ptr as *const super::collections::RuntimeString;
             let data = (*str_ptr).as_bytes();
             Some(std::str::from_utf8_unchecked(data).to_string())
         }
@@ -602,6 +593,13 @@ mod tests {
         let v = RuntimeValue::from_float(2.5);
         let f = f64::from_runtime_value(v).unwrap();
         assert!((f - 2.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_string_from_runtime_value_rejects_forged_heap_value() {
+        let forged_heap = RuntimeValue::from_raw(0x1001);
+
+        assert_eq!(String::from_runtime_value(forged_heap), None);
     }
 
     #[test]

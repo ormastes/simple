@@ -9,7 +9,8 @@
 
 use crate::coverage::{rt_coverage_condition_probe, rt_coverage_decision_probe, rt_coverage_path_probe};
 use crate::value::collections::{rt_array_get, rt_array_len, rt_string_new, rt_tuple_new, rt_tuple_set};
-use crate::value::{HeapObjectType, RuntimeString, RuntimeValue};
+use crate::value::heap::{get_typed_ptr, HeapObjectType};
+use crate::value::{RuntimeString, RuntimeValue};
 
 unsafe fn ptr_bytes<'a>(ptr: *const u8, len: u64, max_len: usize) -> Option<&'a [u8]> {
     if ptr.is_null() || len == 0 || len as usize > max_len {
@@ -284,14 +285,7 @@ pub unsafe extern "C" fn rt_env_temp() -> RuntimeValue {
 
 /// Helper to extract string from RuntimeValue
 unsafe fn extract_string(val: RuntimeValue) -> Option<String> {
-    if !val.is_heap() {
-        return None;
-    }
-    let ptr = val.as_heap_ptr();
-    if (*ptr).object_type != HeapObjectType::String {
-        return None;
-    }
-    let str_obj = ptr as *const RuntimeString;
+    let str_obj = get_typed_ptr::<RuntimeString>(val, HeapObjectType::String)?;
     let data = (str_obj.add(1)) as *const u8;
     let slice = std::slice::from_raw_parts(data, (*str_obj).len as usize);
     Some(String::from_utf8_lossy(slice).into_owned())

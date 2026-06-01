@@ -7,6 +7,7 @@
 //! - Thread pool for concurrent file operations
 
 use crate::value::RuntimeValue;
+use crate::value::heap::{get_typed_ptr, HeapObjectType};
 use parking_lot::RwLock;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
@@ -212,23 +213,9 @@ static NEXT_HANDLE_ID: AtomicI64 = AtomicI64::new(1);
 
 /// Extract a string from a RuntimeValue
 fn runtime_value_to_string(value: RuntimeValue) -> Option<String> {
-    if !value.is_heap() {
-        return None;
-    }
-
+    let string_ptr = get_typed_ptr::<crate::value::RuntimeString>(value, HeapObjectType::String)?;
     unsafe {
-        let ptr = value.as_heap_ptr();
-        use crate::value::heap::HeapObjectType;
-
-        if (*ptr).object_type != HeapObjectType::String {
-            return None;
-        }
-
-        // RuntimeString has an as_bytes() method
-        use crate::value::RuntimeString;
-        let string_ptr = ptr as *const RuntimeString;
         let bytes = (*string_ptr).as_bytes();
-
         String::from_utf8(bytes.to_vec()).ok()
     }
 }

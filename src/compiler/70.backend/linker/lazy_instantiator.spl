@@ -5,14 +5,24 @@
 #
 # Phase 4: Link-Time Lazy Instantiation
 
-use ..monomorphize.note_sdn.*
-use ..monomorphize.note_sdn.{PossibleInstantiationEntry, NoteSdnMetadata, InstantiationEntry}
-use compiler.mono.monomorphize.note_sdn.{PossibleInstantiationEntry, NoteSdnMetadata, InstantiationEntry}
-use ..compilation_context.{GenericTemplate, ConcreteType}
-use ..instantiation.{TemplateInstantiator, mangle}
-use linker_context.LinkerCompilationContext
-use .smf_reader.SmfReaderImpl
-use .obj_taker.{SmfSymbol, parse_template}
+use compiler.mono.monomorphize.note_sdn.*
+use compiler.common.compilation_context (GenericTemplate, ConcreteType)
+use compiler.mono.instantiation (TemplateInstantiator, mangle)
+use compiler.backend.linker.linker_context (LinkerCompilationContext)
+use compiler.backend.linker.smf_reader (SmfReaderImpl)
+use compiler.backend.linker.obj_taker (SmfSymbol, parse_template)
+
+fn _lazy_split_type_params(raw: text) -> [text]:
+    var params: [text] = []
+    for part in raw.split(","):
+        params = params.push(part.trim())
+    params
+
+fn _lazy_concrete_type_args(raw: text) -> [ConcreteType]:
+    var args: [ConcreteType] = []
+    for part in raw.split(","):
+        args = args.push(ConcreteType(part.trim()))
+    args
 
 # ============================================================================
 # Result Types
@@ -48,11 +58,7 @@ struct LazyInstantiatorConfig:
 
 impl LazyInstantiatorConfig:
     static fn default() -> LazyInstantiatorConfig:
-        LazyInstantiatorConfig(
-            allow_defer: true,
-            max_depth: 100,
-            verbose: false
-        )
+        LazyInstantiatorConfig(true, 100, false)
 
 fn lazyinstantiatorconfig_default() -> LazyInstantiatorConfig:
         LazyInstantiatorConfig.default()
@@ -79,14 +85,7 @@ struct LazyInstantiator:
 impl LazyInstantiator:
     static fn new(config: LazyInstantiatorConfig) -> LazyInstantiator:
         """Create a new lazy instantiator."""
-        LazyInstantiator(
-            config: config,
-            input_metadata: {},
-            output_metadata: notesdnmetadata_new(),
-            in_progress: {},
-            depth: 0,
-            instantiated: {}
-        )
+        LazyInstantiator(config, {}, notesdnmetadata_new(), {}, 0, {})
 
 fn lazyinstantiator_new(config: LazyInstantiatorConfig) -> LazyInstantiator:
         """Create a new lazy instantiator."""
@@ -104,9 +103,9 @@ fn lazyinstantiator_try_instantiate(self: LazyInstantiator, symbol: text) -> Laz
         # Check if already instantiated
         if self.instantiated_contains_key(instantiated, symbol):
             return LazyInstantiationResult.Success(
-                code: self.instantiated[symbol],
-                symbol: symbol,
-                metadata: self.output_metadata
+                self.instantiated[symbol],
+                symbol,
+                self.output_metadata
             )
 
         # Check for cycle
@@ -126,7 +125,7 @@ fn lazyinstantiator_try_instantiate(self: LazyInstantiator, symbol: text) -> Laz
         # Check if can defer
         if entry.can_defer:
             if self.config.allow_defer:
-            return lazyinstantiationresult_Deferred(symbol)
+                return lazyinstantiationresult_Deferred(symbol)
 
         # Start instantiation
         self.in_progress = self.in_progress_insert(in_progress, symbol)
@@ -149,24 +148,20 @@ fn lazyinstantiator_do_instantiate(self: LazyInstantiator, entry: PossibleInstan
         """Perform the actual instantiation through unified CompilationContext pipeline."""
         # Create instantiation entry for metadata tracking
         val inst_entry = InstantiationEntry(
-            template_name: entry.template_name,
-            type_args: entry.type_args,
-            mangled_name: entry.mangled_name,
-            from_file: source_path,
-            from_loc: "{source_path}:0:0",
-            to_obj: "link_output.o",
-            status: InstantiationStatus.Compiled
+            entry.template_name,
+            entry.type_args,
+            entry.mangled_name,
+            source_path,
+            "{source_path}:0:0",
+            "link_output.o",
+            InstantiationStatus.Compiled
         )
 
         # Add to output metadata
         self.output_metadata = self.output_metadata_add_instantiation(output_metadata, inst_entry)
 
         # Add dependency edge
-        val dep = DependencyEdge(
-            from_inst: entry.required_by,
-            to_inst: entry.mangled_name,
-            dep_kind: DependencyKind.TypeParam
-        )
+        val dep = DependencyEdge(entry.required_by, entry.mangled_name, DependencyKind.TypeParam)
         self.output_metadata = self.output_metadata_add_dependency(output_metadata, dep)
 
         # Build linker compilation context from input metadata.
@@ -188,61 +183,37 @@ fn lazyinstantiator_do_instantiate(self: LazyInstantiator, entry: PossibleInstan
                     if tpl_result.is_ok():
                         val tpl_bytes = tpl_result.unwrap()
                         val tpl = parse_template(tpl_bytes, sym)
-                        object_templates[entry.template_name] = GenericTemplate(
-                            name: tpl.name,
-                            type_params: tpl.type_params,
-                            ast_data: tpl.body
-                        )
+                        object_templates[entry.template_name] = GenericTemplate(tpl.name, tpl.type_params, tpl.body)
                     else:
                         # TemplateCode section read failed -- fall back to placeholder
-                        object_templates[entry.template_name] = GenericTemplate(
-                            name: entry.template_name,
-                            type_params: entry.type_args.split(",").map(&:trim),
-                            ast_data: nil
-                        )
+                        object_templates[entry.template_name] = GenericTemplate(entry.template_name, _lazy_split_type_params(entry.type_args), nil)
                 else:
                     # Symbol exists but not a generic template
-                    object_templates[entry.template_name] = GenericTemplate(
-                        name: entry.template_name,
-                        type_params: entry.type_args.split(",").map(&:trim),
-                        ast_data: nil
-                    )
+                    object_templates[entry.template_name] = GenericTemplate(entry.template_name, _lazy_split_type_params(entry.type_args), nil)
             else:
                 # Symbol not found in SMF -- fall back to placeholder
-                object_templates[entry.template_name] = GenericTemplate(
-                    name: entry.template_name,
-                    type_params: entry.type_args.split(",").map(&:trim),
-                    ast_data: nil
-                )
+                object_templates[entry.template_name] = GenericTemplate(entry.template_name, _lazy_split_type_params(entry.type_args), nil)
             reader.close()
         else:
             # Cannot open SMF file -- fall back to placeholder
-            object_templates[entry.template_name] = GenericTemplate(
-                name: entry.template_name,
-                type_params: entry.type_args.split(",").map(&:trim),
-                ast_data: nil
-            )
+            object_templates[entry.template_name] = GenericTemplate(entry.template_name, _lazy_split_type_params(entry.type_args), nil)
 
         val linker_ctx = linkercompilationcontext_from_objects(object_templates, nil, nil)
-        var instantiator = TemplateInstantiator(
-            context: linker_ctx,
-            in_progress: {},
-            cache: {}
-        )
+        var instantiator = TemplateInstantiator(linker_ctx, {}, {})
 
         # Parse type args from the entry
-        val type_args = entry.type_args.split(",").map(ConcreteType(name: _.trim()))
+        val type_args = _lazy_concrete_type_args(entry.type_args)
 
         # Compile through unified pipeline
         match instantiator_instantiate(instantiator, entry.template_name, type_args):
-            case Ok(unit):
-                val compiled_code = unit.code
+            case Ok(compiled_unit):
+                val compiled_code = compiled_unit.code
                 self.instantiated[entry.mangled_name] = compiled_code
 
                 LazyInstantiationResult.Success(
-                    code: compiled_code,
-                    symbol: entry.mangled_name,
-                    metadata: self.output_metadata
+                    compiled_code,
+                    entry.mangled_name,
+                    self.output_metadata
                 )
 
             case Err(msg):
@@ -266,12 +237,7 @@ struct LazyInstantiationStats:
 # ============================================================================
 
 fn lazyinstantiationstats_default() -> LazyInstantiationStats:
-        LazyInstantiationStats(
-            instantiated: 0,
-            deferred: 0,
-            not_found: 0,
-            errors: 0
-        )
+        LazyInstantiationStats(0, 0, 0, 0)
 
 
 fn lazyinstantiationstats_from_results(results: [LazyInstantiationResult]) -> LazyInstantiationStats:

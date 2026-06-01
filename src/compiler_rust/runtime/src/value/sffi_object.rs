@@ -36,7 +36,10 @@
 //! with excellent cache performance.
 
 use super::core::RuntimeValue;
-use super::heap::{HeapHeader, HeapObjectType};
+use super::heap::{
+    get_typed_ptr, get_typed_ptr_mut, register_heap_ptr, unregister_heap_ptr, validate_heap_obj, HeapHeader,
+    HeapObjectType,
+};
 
 /// FNV-1a hash function for method name lookup.
 ///
@@ -317,6 +320,7 @@ pub unsafe extern "C" fn rt_sffi_object_new(type_id: u32, handle: u32, vtable: *
     // Initialize the object
     std::ptr::write(ptr, RuntimeFfiObject::new(type_id, handle, vtable));
 
+    register_heap_ptr(ptr as *mut HeapHeader);
     RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
 }
 
@@ -329,20 +333,12 @@ pub unsafe extern "C" fn rt_sffi_object_new(type_id: u32, handle: u32, vtable: *
 /// The value must be a valid SFFI object.
 #[no_mangle]
 pub unsafe extern "C" fn rt_sffi_object_free(value: RuntimeValue) {
-    if !value.is_heap() {
+    let Some(ptr) = validate_heap_obj(value, HeapObjectType::FfiObject) else {
         return;
-    }
-
-    let ptr = value.as_heap_ptr();
-    if ptr.is_null() {
-        return;
-    }
-
-    if (*ptr).object_type != HeapObjectType::FfiObject {
-        return;
-    }
+    };
 
     let layout = Layout::from_size_align(RuntimeFfiObject::SIZE, 8).unwrap();
+    unregister_heap_ptr(ptr);
     dealloc(ptr as *mut u8, layout);
 }
 
@@ -475,41 +471,13 @@ pub unsafe extern "C" fn rt_sffi_object_call_method(
 
 /// Get a reference to the RuntimeFfiObject from a RuntimeValue.
 fn get_sffi_object(value: RuntimeValue) -> Option<&'static RuntimeFfiObject> {
-    if !value.is_heap() {
-        return None;
-    }
-
-    let ptr = value.as_heap_ptr();
-    if ptr.is_null() {
-        return None;
-    }
-
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::FfiObject {
-            return None;
-        }
-        Some(&*(ptr as *const RuntimeFfiObject))
-    }
+    get_typed_ptr::<RuntimeFfiObject>(value, HeapObjectType::FfiObject).map(|ptr| unsafe { &*ptr })
 }
 
 /// Get a mutable reference to the RuntimeFfiObject from a RuntimeValue.
 #[allow(dead_code)]
 fn get_sffi_object_mut(value: RuntimeValue) -> Option<&'static mut RuntimeFfiObject> {
-    if !value.is_heap() {
-        return None;
-    }
-
-    let ptr = value.as_heap_ptr();
-    if ptr.is_null() {
-        return None;
-    }
-
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::FfiObject {
-            return None;
-        }
-        Some(&mut *(ptr as *mut RuntimeFfiObject))
-    }
+    get_typed_ptr_mut::<RuntimeFfiObject>(value, HeapObjectType::FfiObject).map(|ptr| unsafe { &mut *ptr })
 }
 
 // ============================================================================
@@ -590,5 +558,16 @@ mod tests {
     fn test_runtime_sffi_object_size() {
         // Verify size is as expected (8 + 4 + 4 + 8 = 24 bytes)
         assert_eq!(RuntimeFfiObject::SIZE, 24);
+    }
+
+    #[test]
+    fn test_sffi_object_rejects_forged_heap_value() {
+        let forged_heap = RuntimeValue::from_raw(0x1001);
+
+        assert_eq!(rt_sffi_object_type_id(forged_heap), 0);
+        assert_eq!(rt_sffi_object_handle(forged_heap), 0);
+        assert!(rt_sffi_object_vtable(forged_heap).is_null());
+        assert!(!rt_sffi_object_is_ffi(forged_heap));
+        assert_eq!(rt_sffi_object_type_name(forged_heap), RuntimeValue::NIL);
     }
 }

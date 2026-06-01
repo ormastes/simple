@@ -211,15 +211,15 @@ enum MirInstKind:
     # =========================================================================
 
     # Splat scalar to all lanes
-    MirSimdSplat(dest: LocalId, val: MirOperand, vec_type: MirType)
+    MirSimdSplat(dest: LocalId, value: MirOperand, vec_type: MirType)
 
     # Aligned/unaligned vector load and store
     MirSimdLoad(dest: LocalId, ptr: MirOperand, aligned: bool, vec_type: MirType)
-    MirSimdStore(val: MirOperand, ptr: MirOperand, aligned: bool)
+    MirSimdStore(value: MirOperand, ptr: MirOperand, aligned: bool)
 
     # Gather (indexed load) and scatter (indexed store)
     MirSimdGather(dest: LocalId, base: MirOperand, indices: MirOperand, vec_type: MirType)
-    MirSimdScatter(val: MirOperand, base: MirOperand, indices: MirOperand)
+    MirSimdScatter(value: MirOperand, base: MirOperand, indices: MirOperand)
 
     # Binary SIMD ops — op enum from simd_types.spl SimdBinop
     MirSimdBinop(dest: LocalId, lhs: MirOperand, rhs: MirOperand, op: text)
@@ -346,7 +346,7 @@ enum VhdlClockEdge:
     Falling
 
 fn vhdl_clock_domain_name_from_metadata(clocked: VhdlClockedMetadata) -> text:
-    """Return the preserved logical clock-domain name for structured metadata."""
+    # Preserved logical clock-domain name for structured metadata.
     val domain = clocked.domain.trim()
     if domain != "":
         domain
@@ -546,7 +546,7 @@ struct MirAsmOperand:
 enum MirTerminator:
     # Unconditional
     Goto(target: BlockId)
-    Return(value: MirOperand?)
+    Ret(value: MirOperand?)
 
     # Conditional
     If(cond: MirOperand, then_: BlockId, else_: BlockId)
@@ -670,35 +670,55 @@ impl MirBody:
 fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> MirConstValue?:
     match (left, right):
         case (Int(l), Int(r)):
-            val result = match op:
-                case Add: l + r
-                case Sub: l - r
-                case Mul: l * r
-                case Div: if r != 0: l / r else: return nil
-                case Rem: if r != 0: l % r else: return nil
-                case Pow: l ** r
-                case BitAnd: l & r
-                case BitOr: l | r
-                case BitXor: l xor r
-                case Shl: l << (r & 63)
-                case Shr: l >> (r & 63)
-                case Eq: if l == r: 1 else: 0
-                case Ne: if l != r: 1 else: 0
-                case Lt: if l < r: 1 else: 0
-                case Le: if l <= r: 1 else: 0
-                case Gt: if l > r: 1 else: 0
-                case Ge: if l >= r: 1 else: 0
-                case _: return nil
+            var has_result = true
+            var result = 0
+            match op:
+                case Add: result = l + r
+                case Sub: result = l - r
+                case Mul: result = l * r
+                case Div:
+                    if r != 0:
+                        result = l / r
+                    else:
+                        has_result = false
+                case Rem:
+                    if r != 0:
+                        result = l % r
+                    else:
+                        has_result = false
+                case Pow: result = l ** r
+                case BitAnd: result = l & r
+                case BitOr: result = l | r
+                case BitXor: result = l xor r
+                case Shl: result = l << (r & 63)
+                case Shr: result = l >> (r & 63)
+                case Eq: result = if l == r: 1 else: 0
+                case Ne: result = if l != r: 1 else: 0
+                case Lt: result = if l < r: 1 else: 0
+                case Le: result = if l <= r: 1 else: 0
+                case Gt: result = if l > r: 1 else: 0
+                case Ge: result = if l >= r: 1 else: 0
+                case _: has_result = false
+            if not has_result:
+                return nil
             Some(MirConstValue.Int(result))
 
         case (Float(l), Float(r)):
-            val result = match op:
-                case Add: l + r
-                case Sub: l - r
-                case Mul: l * r
-                case Div: if r != 0.0: l / r else: return nil
-                case Pow: l ** r
-                case _: return nil
+            var has_result = true
+            var result = 0.0
+            match op:
+                case Add: result = l + r
+                case Sub: result = l - r
+                case Mul: result = l * r
+                case Div:
+                    if r != 0.0:
+                        result = l / r
+                    else:
+                        has_result = false
+                case Pow: result = l ** r
+                case _: has_result = false
+            if not has_result:
+                return nil
             Some(MirConstValue.Float(result))
 
         case _:

@@ -43,8 +43,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use super::core::RuntimeValue;
+use super::heap::{get_typed_ptr, HeapHeader, HeapObjectType};
 use super::sffi_object::{FfiVtable, RuntimeFfiObject};
-use super::heap::HeapHeader;
 
 // ============================================================================
 // Global Registry Singleton
@@ -327,20 +327,11 @@ impl FfiTypeRegistry {
     /// # Safety
     /// The value must be a valid SFFI object.
     pub unsafe fn drop_object(&self, value: RuntimeValue) -> bool {
-        if !value.is_heap() {
+        let Some(ptr) = get_typed_ptr::<RuntimeFfiObject>(value, HeapObjectType::FfiObject) else {
             return false;
-        }
+        };
 
-        let ptr = value.as_heap_ptr();
-        if ptr.is_null() {
-            return false;
-        }
-
-        if (*ptr).object_type != super::heap::HeapObjectType::FfiObject {
-            return false;
-        }
-
-        let sffi_obj = &*(ptr as *const RuntimeFfiObject);
+        let sffi_obj = &*ptr;
         let type_id = sffi_obj.type_id;
         let handle = sffi_obj.handle;
 
@@ -372,20 +363,11 @@ impl FfiTypeRegistry {
     /// # Returns
     /// A new RuntimeValue containing the cloned object, or NIL if cloning is not supported.
     pub unsafe fn clone_object(&self, value: RuntimeValue) -> RuntimeValue {
-        if !value.is_heap() {
+        let Some(ptr) = get_typed_ptr::<RuntimeFfiObject>(value, HeapObjectType::FfiObject) else {
             return RuntimeValue::NIL;
-        }
+        };
 
-        let ptr = value.as_heap_ptr();
-        if ptr.is_null() {
-            return RuntimeValue::NIL;
-        }
-
-        if (*ptr).object_type != super::heap::HeapObjectType::FfiObject {
-            return RuntimeValue::NIL;
-        }
-
-        let sffi_obj = &*(ptr as *const RuntimeFfiObject);
+        let sffi_obj = &*ptr;
 
         // Check if clone is supported
         if sffi_obj.vtable.is_null() {
@@ -594,8 +576,8 @@ pub extern "C" fn rt_sffi_clear_registry() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::sffi_object::{FfiMethodEntry, fnv1a_hash_str};
+    use super::*;
 
     // Create a test vtable
     static TEST_TYPE_NAME: &[u8] = b"TestType";
@@ -683,5 +665,14 @@ mod tests {
 
         assert_eq!(storage.len(), 0);
         assert!(storage.is_empty());
+    }
+
+    #[test]
+    fn test_registry_rejects_forged_heap_value() {
+        let registry = FfiTypeRegistry::new();
+        let forged_heap = RuntimeValue::from_raw(0x1001);
+
+        assert!(!unsafe { registry.drop_object(forged_heap) });
+        assert_eq!(unsafe { registry.clone_object(forged_heap) }, RuntimeValue::NIL);
     }
 }

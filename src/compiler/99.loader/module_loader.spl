@@ -9,6 +9,9 @@ use compiler.loader.jit_instantiator.{JitInstantiator}
 use compiler.loader.compiler_sffi.{TypeInfo, type_to_string}
 use compiler.loader.metadata_symbols.{loaded_metadata_instantiation_symbol_names, loaded_metadata_remove_path}
 use compiler.loader.unload_ownership.{owned_global_symbol_names, global_symbols_without_names}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64}
+use std.io_runtime.{file_read_bytes}
 
 fn _path_tag(path: text) -> text:
     val base = path.split("/").last() ?? path
@@ -155,6 +158,96 @@ struct ModuleLoader:
     global_symbols: Dict<text, (text, LoadedSymbol)>
     jit: JitInstantiator
 
+fn _compat_load_smf(self: ModuleLoader, path: text) -> LoadResult:
+    if self.modules.has(path):
+        return LoadResult.AlreadyLoaded(module: self.modules[path])
+    if not rt_file_exists(path):
+        return LoadResult.Error(message: "module not found: " + path)
+
+    val smf_bytes_result = file_read_bytes(path)
+    if not smf_bytes_result.?:
+        return LoadResult.Error(message: "failed to read module bytes: " + path)
+    val smf_bytes = smf_bytes_result.unwrap()
+    val reader_result = SmfReaderMemory.from_data(smf_bytes)
+    if reader_result.is_err():
+        return LoadResult.Error(message: reader_result.unwrap_err())
+    val reader = reader_result.unwrap()
+
+    var symbols: Dict<text, LoadedSymbol> = {}
+    for smf_sym in reader.exported_symbols():
+        val code_result = reader.read_code(smf_sym)
+        if code_result.is_err():
+            return LoadResult.Error(message: code_result.unwrap_err())
+        val code = code_result.unwrap()
+        val addr = native_alloc_exec_memory(code.len() as i64)
+        if addr == 0:
+            return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+        val written = native_write_exec_memory(addr, code, 0)
+        if written != code.len() as i64:
+            return LoadResult.Error(message: "Failed to copy executable bytes for {smf_sym.name}")
+        if not native_make_executable(addr, code.len() as i64):
+            return LoadResult.Error(message: "Failed to mark executable memory for {smf_sym.name}")
+        native_flush_icache(addr, code.len() as i64)
+        val loaded_sym = LoadedSymbol(
+            name: smf_sym.name,
+            address: addr,
+            size: smf_sym.size,
+            ty: smf_sym.ty,
+            is_jit: false,
+            file_offset: smf_sym.offset
+        )
+        symbols[smf_sym.name] = loaded_sym
+        self.global_symbols[smf_sym.name] = (path, loaded_sym)
+
+    val ordered_symbols_result = reader.symbols_in_table_order()
+    if ordered_symbols_result.is_err():
+        return LoadResult.Error(message: ordered_symbols_result.unwrap_err())
+    val ordered_symbols = ordered_symbols_result.unwrap()
+    val relocs_result = reader.read_relocations()
+    if relocs_result.is_err():
+        return LoadResult.Error(message: relocs_result.unwrap_err())
+    val relocs = relocs_result.unwrap()
+    if relocs.len() > 0:
+        for sym_name in symbols.keys():
+            val loaded_sym = symbols[sym_name]
+            if not native_make_rw(loaded_sym.address, loaded_sym.size):
+                return LoadResult.Error(message: "Failed to make memory writable for relocation at {sym_name}")
+            for reloc in relocs:
+                if reloc.offset < 0 or reloc.offset >= loaded_sym.size:
+                    return LoadResult.Error(message: "Relocation offset {reloc.offset} out of bounds")
+                var target_addr = 0i64
+                if reloc.symbol_index >= 0 and reloc.symbol_index < ordered_symbols.len():
+                    val target_name = ordered_symbols[reloc.symbol_index].name
+                    if symbols.has(target_name):
+                        target_addr = symbols[target_name].address
+                    else:
+                        if self.global_symbols.has(target_name):
+                            target_addr = self.global_symbols[target_name][1].address
+                if target_addr == 0:
+                    return LoadResult.Error(message: "Unresolved symbol at index {reloc.symbol_index}")
+                match reloc.reloc_type:
+                    1:
+                        native_reloc_write_i64(loaded_sym.address, reloc.offset, target_addr + reloc.addend)
+                    2:
+                        native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
+                    3:
+                        native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
+                    4:
+                        native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
+                    _:
+                        return LoadResult.Error(message: "Unknown relocation type: {reloc.reloc_type}")
+            if not native_make_executable(loaded_sym.address, loaded_sym.size):
+                return LoadResult.Error(message: "Failed to restore executable memory for {sym_name}")
+            native_flush_icache(loaded_sym.address, loaded_sym.size)
+
+    val metadata_result = self.jit.load_smf_metadata(path)
+    if metadata_result.is_err() and symbols.len() == 0:
+        return LoadResult.Error(message: metadata_result.unwrap_err())
+
+    val m = LoadedModule(path: path, reader: "", symbols: symbols, load_time: 0, version: 1)
+    self.modules[path] = m
+    LoadResult.Success(module: m)
+
 impl ModuleLoader:
     static fn new(config: ModuleLoaderConfig) -> ModuleLoader:
         moduleloader_new(config)
@@ -180,17 +273,7 @@ impl ModuleLoader:
         out
 
     me load(path: text) -> LoadResult:
-        if self.modules.has(path):
-            return LoadResult.AlreadyLoaded(module: self.modules[path])
-        if not rt_file_exists(path):
-            return LoadResult.Error(message: "module not found: " + path)
-        val metadata_result = self.jit.load_smf_metadata(path)
-        if metadata_result.is_err():
-            return LoadResult.Error(message: metadata_result.unwrap_err())
-
-        val m = LoadedModule(path: path, reader: "", symbols: {}, load_time: 0, version: 1)
-        self.modules[path] = m
-        LoadResult.Success(module: m)
+        _compat_load_smf(self, path)
 
     me reload(path: text) -> LoadResult:
         self.unload(path)
@@ -298,17 +381,7 @@ fn moduleloader_with_defaults() -> ModuleLoader:
     moduleloader_new(moduleloaderconfig_default())
 
 fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
-    if self.modules.has(path):
-        return LoadResult.AlreadyLoaded(module: self.modules[path])
-    if not rt_file_exists(path):
-        return LoadResult.Error(message: "module not found: " + path)
-    val metadata_result = self.jit.load_smf_metadata(path)
-    if metadata_result.is_err():
-        return LoadResult.Error(message: metadata_result.unwrap_err())
-
-    val m = LoadedModule(path: path, reader: "", symbols: {}, load_time: 0, version: 1)
-    self.modules[path] = m
-    LoadResult.Success(module: m)
+    _compat_load_smf(self, path)
 
 fn moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
     moduleloader_unload(self, path)

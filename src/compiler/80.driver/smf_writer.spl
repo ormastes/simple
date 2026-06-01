@@ -264,7 +264,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     val section_table_offset = driver_manifest_offset + options.driver_manifest_bytes.len()
     val section_table_size = section_count * section_entry_size
     val symbol_table_offset = section_table_offset + section_table_size
-    val string_table_offset = symbol_table_offset + 72  # One symbol
+    val string_table_offset = symbol_table_offset + 56  # One symbol
     val header_offset = string_table_offset + 5  # "main\0"
 
     # Write code section
@@ -355,7 +355,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     buf = buf.concat(build_symbol_entry("main", 0, code_bytes.len()))
 
     # 4. Write string table
-    buf = buf.concat("main\0".to_bytes())
+    buf = buf.concat([109, 97, 105, 110, 0])
 
     # 5. Write HEADER at END (TRAILER) v1.1 design
     # This enables executable SMF files (prepend shebang/stub)
@@ -383,6 +383,25 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     buf = buf.concat(header.to_bytes())
 
     buf
+
+fn smf_name_bytes(name: text) -> [u8]:
+    match name:
+        "main": [109, 97, 105, 110]
+        "code": [99, 111, 100, 101]
+        "rela": [114, 101, 108, 97]
+        "template_code": [116, 101, 109, 112, 108, 97, 116, 101, 95, 99, 111, 100, 101]
+        "template_meta": [116, 101, 109, 112, 108, 97, 116, 101, 95, 109, 101, 116, 97]
+        "note.sdn": [110, 111, 116, 101, 46, 115, 100, 110]
+        "note.deps": [110, 111, 116, 101, 46, 100, 101, 112, 115]
+        ".drv_manifest": [46, 100, 114, 118, 95, 109, 97, 110, 105, 102, 101, 115, 116]
+        _: []
+
+fn smf_name_hash(name: text) -> i32:
+    var hash = 2166136261
+    for byte in smf_name_bytes(name):
+        hash = hash xor byte.to_i32()
+        hash = hash * 16777619
+    hash
 
 # Build a section table entry
 fn build_section_entry(
@@ -416,7 +435,7 @@ fn build_section_entry(
     buf = buf.concat(u32_to_bytes(16))
 
     # Name (16 bytes)
-    var name_bytes = name.to_bytes()
+    var name_bytes = smf_name_bytes(name)
     if name_bytes.len() > 16:
         name_bytes = name_bytes[0:16]
     buf = buf.concat(name_bytes)
@@ -432,11 +451,11 @@ fn build_symbol_entry(name: text, value: i32, size: i32) -> [u8]:
     # Name offset (u32)
     buf = buf.concat(u32_to_bytes(0))
 
-    # Name hash (u64)
-    buf = buf.concat(u64_to_bytes(hash_name(name)))
+    # Name hash (u32)
+    buf = buf.concat(u32_to_bytes(smf_name_hash(name)))
 
     # Symbol type (u8) - Function
-    buf = buf.push(1)
+    buf = buf.push(0)
 
     # Binding (u8) - Global
     buf = buf.push(1)
@@ -446,6 +465,9 @@ fn build_symbol_entry(name: text, value: i32, size: i32) -> [u8]:
 
     # Flags (u8)
     buf = buf.push(0)
+
+    # Padding to align value to the canonical symbol layout.
+    buf = buf.concat([0, 0, 0, 0])
 
     # Value (u64)
     buf = buf.concat(u64_to_bytes(value))
@@ -464,6 +486,9 @@ fn build_symbol_entry(name: text, value: i32, size: i32) -> [u8]:
 
     # Reserved (3 bytes)
     buf = buf.concat([0, 0, 0])
+
+    # Padding to align template offset to the canonical 56-byte symbol layout.
+    buf = buf.concat([0, 0, 0, 0])
 
     # Template offset (u64)
     buf = buf.concat(u64_to_bytes(0))
@@ -523,7 +548,7 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     val section_entry_size = 64
     val section_table_size = section_count * section_entry_size
     val symbol_table_offset = section_table_offset + section_table_size
-    val string_table_offset = symbol_table_offset + 72
+    val string_table_offset = symbol_table_offset + 56
     val header_offset = string_table_offset + 5
 
     # Write code
@@ -554,7 +579,7 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     buf = buf + (build_symbol_entry("main", 0, code_bytes.len()))
 
     # Write string table
-    buf = buf + ("main\0".to_bytes())
+    buf = buf + [109, 97, 105, 110, 0]
 
     # Write HEADER as trailer
     val platform = text_to_platform(options.target.os)
@@ -595,7 +620,7 @@ fn build_smf_with_elf_embedded(object_code: [u8], target: Target) -> [u8]:
     val section_entry_size = 64
     val section_table_size = section_count * section_entry_size
     val symbol_table_offset = section_table_offset + section_table_size
-    val string_table_offset = symbol_table_offset + 72
+    val string_table_offset = symbol_table_offset + 56
     val header_offset = string_table_offset + 5
 
     # Write full ELF .o as Code section
@@ -614,7 +639,7 @@ fn build_smf_with_elf_embedded(object_code: [u8], target: Target) -> [u8]:
     buf = buf + (build_symbol_entry("main", 0, object_code.len()))
 
     # Write string table
-    buf = buf + ("main\0".to_bytes())
+    buf = buf + [109, 97, 105, 110, 0]
 
     # Write HEADER as trailer
     val platform = text_to_platform(target.os)

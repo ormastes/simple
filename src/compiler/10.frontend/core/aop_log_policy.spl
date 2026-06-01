@@ -4,6 +4,104 @@
 # production. Debug/trace joins are optional instrumentation and should be
 # omitted from production output unless the build explicitly enables them.
 
+use compiler.frontend.core.aop.{AdviceForm, WeavingConfig, WeavingRule}
+
+const AOP_LOG_LEVEL_TRACE = "trace"
+const AOP_LOG_LEVEL_DEBUG = "debug"
+const AOP_LOG_LEVEL_INFO = "info"
+const AOP_LOG_LEVEL_WARN = "warn"
+const AOP_LOG_LEVEL_ERROR = "error"
+const AOP_LOG_LEVEL_OFF = "off"
+
+struct AopLogInstrumentationConfig:
+    enabled: bool
+    log_function_calls: bool
+    log_variable_assignments: bool
+    compile_log_level: text
+    runtime_log_level: text
+
+impl AopLogInstrumentationConfig:
+    static fn disabled() -> AopLogInstrumentationConfig:
+        AopLogInstrumentationConfig(
+            enabled: false,
+            log_function_calls: false,
+            log_variable_assignments: false,
+            compile_log_level: "debug",
+            runtime_log_level: "info"
+        )
+
+    static fn for_debug(function_calls: bool, variable_assignments: bool) -> AopLogInstrumentationConfig:
+        AopLogInstrumentationConfig(
+            enabled: function_calls or variable_assignments,
+            log_function_calls: function_calls,
+            log_variable_assignments: variable_assignments,
+            compile_log_level: "debug",
+            runtime_log_level: "debug"
+        )
+
+fn aop_log_normalize_level(level: text) -> text:
+    val lowered = (level ?? "").to_lower()
+    if lowered == "trace": return "trace"
+    if lowered == "debug": return "debug"
+    if lowered == "info": return "info"
+    if lowered == "warn" or lowered == "warning": return "warn"
+    if lowered == "error": return "error"
+    if lowered == "off" or lowered == "none": return "off"
+    "debug"
+
+fn aop_log_with_compile_level(config: AopLogInstrumentationConfig, level: text) -> AopLogInstrumentationConfig:
+    AopLogInstrumentationConfig(
+        enabled: config.enabled,
+        log_function_calls: config.log_function_calls,
+        log_variable_assignments: config.log_variable_assignments,
+        compile_log_level: aop_log_normalize_level(level),
+        runtime_log_level: config.runtime_log_level
+    )
+
+fn aop_log_with_runtime_level(config: AopLogInstrumentationConfig, level: text) -> AopLogInstrumentationConfig:
+    AopLogInstrumentationConfig(
+        enabled: config.enabled,
+        log_function_calls: config.log_function_calls,
+        log_variable_assignments: config.log_variable_assignments,
+        compile_log_level: config.compile_log_level,
+        runtime_log_level: aop_log_normalize_level(level)
+    )
+
+fn aop_log_should_instrument_function_call(config: AopLogInstrumentationConfig) -> bool:
+    if not config.enabled:
+        return false
+    if config.compile_log_level == "off":
+        return false
+    config.log_function_calls
+
+fn aop_log_should_instrument_variable_assignment(config: AopLogInstrumentationConfig) -> bool:
+    if not config.enabled:
+        return false
+    if config.compile_log_level == "off":
+        return false
+    config.log_variable_assignments
+
+fn aop_log_weaving_rules(config: AopLogInstrumentationConfig) -> [WeavingRule]:
+    var rules: [WeavingRule] = []
+    if aop_log_should_instrument_function_call(config):
+        rules.push(WeavingRule(
+            predicate_text: "join:call",
+            advice_function: "__spl_aop_log_function_call",
+            form: AdviceForm.Before,
+            priority: 100
+        ))
+    if aop_log_should_instrument_variable_assignment(config):
+        rules.push(WeavingRule(
+            predicate_text: "join:assignment",
+            advice_function: "__spl_aop_log_variable_assignment",
+            form: AdviceForm.AfterSuccess,
+            priority: 100
+        ))
+    rules
+
+fn aop_log_weaving_config(config: AopLogInstrumentationConfig) -> WeavingConfig:
+    WeavingConfig.from_rules(aop_log_weaving_rules(config))
+
 fn _contains_any(value: text, needles: [text]) -> bool:
     val lowered = value.to_lower()
     var i: i32 = 0

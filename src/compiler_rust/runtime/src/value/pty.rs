@@ -1,5 +1,6 @@
 //! PTY (Pseudo-Terminal) SFFI functions for console I/O testing
 
+use crate::value::heap::{get_typed_ptr, HeapObjectType};
 use crate::value::RuntimeValue;
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -224,15 +225,7 @@ pub extern "C" fn native_pty_write(fd: i64, data: RuntimeValue) -> RuntimeValue 
 /// Helper to extract string from RuntimeValue
 #[cfg(unix)]
 unsafe fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
-    if !val.is_heap() {
-        return None;
-    }
-
-    let ptr = val.as_heap_ptr() as *const super::collections::RuntimeString;
-    if ptr.is_null() {
-        return None;
-    }
-
+    let ptr = get_typed_ptr::<super::collections::RuntimeString>(val, HeapObjectType::String)?;
     let s = &*ptr;
     let bytes = s.as_bytes();
     String::from_utf8(bytes.to_vec()).ok()
@@ -343,5 +336,14 @@ mod tests {
             assert_eq!(rt_pty_spawn(-1, c"/bin/sh".as_ptr()), -1);
             assert_eq!(rt_pty_spawn(-1, c"".as_ptr()), -1);
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rt_pty_write_rejects_forged_heap_data() {
+        let forged_heap = RuntimeValue::from_raw(0x1001);
+
+        assert_eq!(unsafe { runtime_value_to_string(forged_heap) }, None);
+        assert_eq!(rt_pty_write(-1, forged_heap), RuntimeValue::FALSE);
     }
 }

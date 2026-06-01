@@ -4,6 +4,7 @@
 //! discovery module until the full `std.io` library is implemented.
 
 use super::core::RuntimeValue;
+use super::heap::{get_typed_ptr, HeapObjectType};
 use glob::Pattern;
 use std::fs;
 use std::path::Path;
@@ -14,16 +15,7 @@ use std::path::Path;
 
 /// Extract string from RuntimeValue (heap pointer to RuntimeString)
 unsafe fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
-    if !val.is_heap() {
-        return None;
-    }
-
-    let ptr = val.as_heap_ptr() as *const super::collections::RuntimeString;
-    if ptr.is_null() {
-        return None;
-    }
-
-    // Get bytes from RuntimeString
+    let ptr = get_typed_ptr::<super::collections::RuntimeString>(val, HeapObjectType::String)?;
     let s = &*ptr;
     let bytes = s.as_bytes();
     String::from_utf8(bytes.to_vec()).ok()
@@ -315,5 +307,16 @@ mod tests {
         let result = doctest_read_file(path);
         assert!(!result.is_nil());
         assert!(result.is_heap());
+    }
+
+    #[test]
+    fn test_doctest_io_rejects_forged_heap_path() {
+        let forged_heap = RuntimeValue::from_raw(0x1001);
+
+        assert_eq!(unsafe { runtime_value_to_string(forged_heap) }, None);
+        assert_eq!(doctest_path_exists(forged_heap), RuntimeValue::FALSE);
+        assert_eq!(doctest_is_file(forged_heap), RuntimeValue::FALSE);
+        assert_eq!(doctest_is_dir(forged_heap), RuntimeValue::FALSE);
+        assert_eq!(doctest_read_file(forged_heap), RuntimeValue::NIL);
     }
 }

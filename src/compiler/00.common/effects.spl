@@ -6,11 +6,11 @@ All other 00.common/effects_*.spl files import from here.
 
 The HIR layer (20.hir/hir_types.spl) defines the richer Effect/EffectKind types
 used in the compiler pipeline. This module provides a lightweight EffectTag enum
-for standalone effect inference that maps to EffectKind.Async / default.
+for standalone effect inference that maps to EffectKind.Asynchronous / default.
 
 ## Algorithm
 
-1. Initialize all functions as Sync
+1. Initialize all functions as Synchronous
 2. Mark built-in async functions (SFFI)
 3. Fixed-point iteration:
    - Scan function bodies for suspension operators (~, ~=, if~, while~, for~)
@@ -24,7 +24,7 @@ for standalone effect inference that maps to EffectKind.Async / default.
 type Symbol = text
 
 # ============================================================================
-# Effect Tag (lightweight, maps to HIR EffectKind.Async / default)
+# Effect Tag (lightweight, maps to HIR EffectKind.Asynchronous / default)
 # ============================================================================
 
 enum EffectTag:
@@ -32,46 +32,46 @@ enum EffectTag:
     Lightweight effect tag for standalone inference in 00.common layer.
 
     Maps to HIR EffectKind:
-    - Sync -> no Async in EffectKind list (default/pure)
-    - Async -> EffectKind.Async present
+    - Synchronous -> no Asynchronous in EffectKind list (default/pure)
+    - Asynchronous -> EffectKind.Asynchronous present
 
     The full Effect/EffectKind types live in 20.hir/hir_types.spl.
     """
-    Sync
-    Async
+    PureTag
+    SuspendingTag
 
     fn to_string() -> text:
         match self:
-            case Sync: "sync"
-            case Async: "async"
+            case EffectTag.PureTag: "sync"
+            case EffectTag.SuspendingTag: "async"
 
     fn is_async() -> bool:
-        """Check if effect is Async"""
+        """Check if effect is Asynchronous"""
         match self:
-            case Async: true
-            case Sync: false
+            case EffectTag.SuspendingTag: true
+            case EffectTag.PureTag: false
 
     fn is_sync() -> bool:
-        """Check if effect is Sync"""
+        """Check if effect is Synchronous"""
         match self:
-            case Sync: true
-            case Async: false
+            case EffectTag.PureTag: true
+            case EffectTag.SuspendingTag: false
 
     fn combine(other: EffectTag) -> EffectTag:
         """
-        Combine two effects: if either is Async, result is Async
+        Combine two effects: if either is Asynchronous, result is Asynchronous
         """
         match (self, other):
-            case (Async, _): Async
-            case (_, Async): Async
-            case (Sync, Sync): Sync
+            case (EffectTag.SuspendingTag, _): EffectTag.SuspendingTag
+            case (_, EffectTag.SuspendingTag): EffectTag.SuspendingTag
+            case (EffectTag.PureTag, EffectTag.PureTag): EffectTag.PureTag
 
 impl EffectTag:
     static fn combine_all(effects: [EffectTag]) -> EffectTag:
         """
-        Combine multiple effects: if any is Async, result is Async
+        Combine multiple effects: if any is Asynchronous, result is Asynchronous
         """
-        var result = EffectTag.Sync
+        var result = EffectTag.PureTag
         for eff in effects:
             result = result.combine(eff)
         result
@@ -109,7 +109,7 @@ impl EffectEnv:
         Priority:
         1. Local effects (inferred)
         2. Built-ins (SFFI annotations)
-        3. Default to Sync
+        3. Default to Synchronous
         """
         # Check local effects first
         if val Some(eff) = self.effects.get(sym):
@@ -119,8 +119,8 @@ impl EffectEnv:
         if val Some(eff) = self.builtins.get(sym):
             return eff
 
-        # Default to Sync
-        EffectTag.Sync
+        # Default to Synchronous
+        EffectTag.PureTag
 
     me set_effect(sym: Symbol, eff: EffectTag):
         """
@@ -174,54 +174,54 @@ fn init_builtins() -> Dict<text, EffectTag>:
 
     Categories:
     - HTTP: All async (network I/O)
-    - File: Async variants marked
-    - Sleep/Timer: Async
-    - Sync I/O: Marked sync explicitly
+    - File: Asynchronous variants marked
+    - Sleep/Timer: Asynchronous
+    - Synchronous I/O: Marked sync explicitly
     """
     var builtins: Dict<text, EffectTag> = {}
 
     # HTTP module - all async
-    builtins["http.get"] = EffectTag.Async
-    builtins["http.post"] = EffectTag.Async
-    builtins["http.put"] = EffectTag.Async
-    builtins["http.delete"] = EffectTag.Async
-    builtins["http.patch"] = EffectTag.Async
-    builtins["http.request"] = EffectTag.Async
+    builtins["http.get"] = EffectTag.SuspendingTag
+    builtins["http.post"] = EffectTag.SuspendingTag
+    builtins["http.put"] = EffectTag.SuspendingTag
+    builtins["http.delete"] = EffectTag.SuspendingTag
+    builtins["http.patch"] = EffectTag.SuspendingTag
+    builtins["http.request"] = EffectTag.SuspendingTag
 
     # WebSocket - async
-    builtins["websocket.connect"] = EffectTag.Async
-    builtins["websocket.send"] = EffectTag.Async
-    builtins["websocket.receive"] = EffectTag.Async
+    builtins["websocket.connect"] = EffectTag.SuspendingTag
+    builtins["websocket.send"] = EffectTag.SuspendingTag
+    builtins["websocket.receive"] = EffectTag.SuspendingTag
 
     # File I/O - async variants
-    builtins["file.read_async"] = EffectTag.Async
-    builtins["file.write_async"] = EffectTag.Async
-    builtins["file.append_async"] = EffectTag.Async
-    builtins["file.read"] = EffectTag.Sync      # Blocking sync variant
-    builtins["file.write"] = EffectTag.Sync     # Blocking sync variant
+    builtins["file.read_async"] = EffectTag.SuspendingTag
+    builtins["file.write_async"] = EffectTag.SuspendingTag
+    builtins["file.append_async"] = EffectTag.SuspendingTag
+    builtins["file.read"] = EffectTag.PureTag      # Blocking sync variant
+    builtins["file.write"] = EffectTag.PureTag     # Blocking sync variant
 
     # Timer/Sleep - async
-    builtins["sleep"] = EffectTag.Async
-    builtins["timer.wait"] = EffectTag.Async
-    builtins["timeout"] = EffectTag.Async
+    builtins["sleep"] = EffectTag.SuspendingTag
+    builtins["timer.wait"] = EffectTag.SuspendingTag
+    builtins["timeout"] = EffectTag.SuspendingTag
 
     # Database - async
-    builtins["db.query"] = EffectTag.Async
-    builtins["db.execute"] = EffectTag.Async
-    builtins["db.transaction"] = EffectTag.Async
+    builtins["db.query"] = EffectTag.SuspendingTag
+    builtins["db.execute"] = EffectTag.SuspendingTag
+    builtins["db.transaction"] = EffectTag.SuspendingTag
 
     # Process - async
-    builtins["process.spawn"] = EffectTag.Async
-    builtins["process.wait"] = EffectTag.Async
+    builtins["process.spawn"] = EffectTag.SuspendingTag
+    builtins["process.wait"] = EffectTag.SuspendingTag
 
     # Console/stdio - sync (buffered)
-    builtins["print"] = EffectTag.Sync
-    builtins["println"] = EffectTag.Sync
-    builtins["eprint"] = EffectTag.Sync
-    builtins["eprintln"] = EffectTag.Sync
+    builtins["print"] = EffectTag.PureTag
+    builtins["println"] = EffectTag.PureTag
+    builtins["eprint"] = EffectTag.PureTag
+    builtins["eprintln"] = EffectTag.PureTag
 
     # Math/String/Collection ops - all sync
-    # (No need to list, default is Sync)
+    # (No need to list, default is Synchronous)
 
     builtins
 
@@ -263,8 +263,8 @@ class EffectStats:
         """
         Effect Inference Statistics:
         - Total functions: 150
-        - Async functions: 42 (28%)
-        - Sync functions: 108 (72%)
+        - Asynchronous functions: 42 (28%)
+        - Synchronous functions: 108 (72%)
         - Fixed-point iterations: 3
         - Built-in annotations: 30
         """
@@ -281,8 +281,8 @@ class EffectStats:
         """
 Effect Inference Statistics:
 - Total functions: {self.total_functions}
-- Async functions: {self.async_functions} ({async_pct}%)
-- Sync functions: {self.sync_functions} ({sync_pct}%)
+- Asynchronous functions: {self.async_functions} ({async_pct}%)
+- Synchronous functions: {self.sync_functions} ({sync_pct}%)
 - Fixed-point iterations: {self.iterations}
 - Built-in annotations: {self.builtins_count}
         """
@@ -330,35 +330,35 @@ fn tag_is_sync(eff: EffectTag) -> bool:
 
 fn test_effect_basic():
     """Test basic effect operations"""
-    val sync = EffectTag.Sync
-    val async_ = EffectTag.Async
+    val pure_eff = EffectTag.PureTag
+    val async_ = EffectTag.SuspendingTag
 
     # to_string
-    assert effect_tag_to_string(sync) == "sync"
+    assert effect_tag_to_string(pure_eff) == "sync"
     assert effect_tag_to_string(async_) == "async"
 
     # is_async / is_sync
-    assert sync.is_sync()
-    assert not sync.is_async()
+    assert pure_eff.is_sync()
+    assert not pure_eff.is_async()
     assert async_.is_async()
     assert not async_.is_sync()
 
 fn test_effect_combine():
     """Test effect combination"""
-    val sync = EffectTag.Sync
-    val async_ = EffectTag.Async
+    val pure_eff = EffectTag.PureTag
+    val async_ = EffectTag.SuspendingTag
 
-    assert sync.combine(sync) == EffectTag.Sync
-    assert sync.combine(async_) == EffectTag.Async
-    assert async_.combine(sync) == EffectTag.Async
-    assert async_.combine(async_) == EffectTag.Async
+    assert pure_eff.combine(pure_eff) == EffectTag.PureTag
+    assert pure_eff.combine(async_) == EffectTag.SuspendingTag
+    assert async_.combine(pure_eff) == EffectTag.SuspendingTag
+    assert async_.combine(async_) == EffectTag.SuspendingTag
 
 fn test_effect_combine_all():
     """Test combining multiple effects"""
-    assert EffectTag.combine_all([]) == EffectTag.Sync
-    assert EffectTag.combine_all([EffectTag.Sync, EffectTag.Sync]) == EffectTag.Sync
-    assert EffectTag.combine_all([EffectTag.Sync, EffectTag.Async]) == EffectTag.Async
-    assert EffectTag.combine_all([EffectTag.Async, EffectTag.Sync, EffectTag.Sync]) == EffectTag.Async
+    assert EffectTag.combine_all([]) == EffectTag.PureTag
+    assert EffectTag.combine_all([EffectTag.PureTag, EffectTag.PureTag]) == EffectTag.PureTag
+    assert EffectTag.combine_all([EffectTag.PureTag, EffectTag.SuspendingTag]) == EffectTag.SuspendingTag
+    assert EffectTag.combine_all([EffectTag.SuspendingTag, EffectTag.PureTag, EffectTag.PureTag]) == EffectTag.SuspendingTag
 
 fn test_effect_env_basic():
     """Test EffectEnv creation and basic operations"""
@@ -368,21 +368,21 @@ fn test_effect_env_basic():
     assert env.builtins.len() > 0
 
     # Check specific built-ins
-    assert env.get_effect("http.get") == EffectTag.Async
-    assert env.get_effect("print") == EffectTag.Sync
-    assert env.get_effect("unknown_function") == EffectTag.Sync  # Default
+    assert env.get_effect("http.get") == EffectTag.SuspendingTag
+    assert env.get_effect("print") == EffectTag.PureTag
+    assert env.get_effect("unknown_function") == EffectTag.PureTag  # Default
 
 fn test_effect_env_set_get():
     """Test setting and getting effects"""
     val env = EffectEnv.new()
     val sym = "my_function"
 
-    # Initially Sync (default)
-    assert env.get_effect(sym) == EffectTag.Sync
+    # Initially Synchronous (default)
+    assert env.get_effect(sym) == EffectTag.PureTag
 
-    # Set to Async
-    env.set_effect(sym, EffectTag.Async)
-    assert env.get_effect(sym) == EffectTag.Async
+    # Set to Asynchronous
+    env.set_effect(sym, EffectTag.SuspendingTag)
+    assert env.get_effect(sym) == EffectTag.SuspendingTag
 
     # Should be marked dirty
     assert env.is_dirty()
@@ -396,13 +396,13 @@ fn test_effect_env_dirty():
     assert not env.is_dirty()
 
     # Setting same effect shouldn't mark dirty
-    env.set_effect(sym, EffectTag.Sync)
+    env.set_effect(sym, EffectTag.PureTag)
     env.clear_dirty()
-    env.set_effect(sym, EffectTag.Sync)
+    env.set_effect(sym, EffectTag.PureTag)
     assert not env.is_dirty()
 
     # Changing effect should mark dirty
-    env.set_effect(sym, EffectTag.Async)
+    env.set_effect(sym, EffectTag.SuspendingTag)
     assert env.is_dirty()
 
 fn test_builtins():
@@ -410,16 +410,16 @@ fn test_builtins():
     val builtins = init_builtins()
 
     # Check HTTP functions are async
-    assert builtins["http.get"] == EffectTag.Async
-    assert builtins["http.post"] == EffectTag.Async
+    assert builtins["http.get"] == EffectTag.SuspendingTag
+    assert builtins["http.post"] == EffectTag.SuspendingTag
 
     # Check sync I/O
-    assert builtins["print"] == EffectTag.Sync
-    assert builtins["file.read"] == EffectTag.Sync
+    assert builtins["print"] == EffectTag.PureTag
+    assert builtins["file.read"] == EffectTag.PureTag
 
     # Check async I/O
-    assert builtins["file.read_async"] == EffectTag.Async
-    assert builtins["sleep"] == EffectTag.Async
+    assert builtins["file.read_async"] == EffectTag.SuspendingTag
+    assert builtins["sleep"] == EffectTag.SuspendingTag
 
 # Run tests if executed directly
 fn main():

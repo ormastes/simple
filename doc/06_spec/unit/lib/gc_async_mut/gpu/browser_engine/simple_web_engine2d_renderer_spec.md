@@ -199,24 +199,6 @@ expect(pixels[68 + 58 * 96]).to_equal(0xFF7C3AEDu32)
 
 </details>
 
-#### paints wrapped famous-site corpus text in the production renderer
-
-<details>
-<summary>Executable SPipe</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<html><body><div data-font-corpus=\"known-site-fonts\" style='width: 120px; height: 40px; background-color: #2563eb; font-family: Arial, sans-serif'>Google search deterministic compatibility fixture</div></body></html>"
-val pixels = simple_web_engine2d_render_html_pixels(html, 160, 120, "software")
-expect(pixels.len()).to_equal(160 * 120)
-expect(pixels[8 + 8 * 160]).to_equal(0xFF2563EBu32)
-expect(_count_color(pixels, 0xFF000000u32)).to_be_greater_than(0)
-```
-
-</details>
-
 #### matches direct child :has selector for first block
 
 <details>
@@ -252,8 +234,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

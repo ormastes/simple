@@ -43,6 +43,8 @@ enum DiagnosticLevel:
 
 enum JoinPointKind:
     Execution
+    FunctionCall
+    VariableAssignment
     Decision
     Condition
     Error
@@ -58,6 +60,8 @@ struct InstructionInfo:
 struct AdviceCallInfo:
     join_point_kind: JoinPointKind
     advice_function: text
+    block_id: i64
+    instruction_index: i64
 
 struct AdviceMatchResult:
     matched: [MatchedAdvice]
@@ -255,10 +259,20 @@ impl WeavingDiagnostic:
                           predicate: "", location: "")
 
     fn with_predicate(pred: text) -> WeavingDiagnostic:
-        WeavingDiagnostic(..self, predicate: pred)
+        WeavingDiagnostic(
+            level: self.level,
+            message: self.message,
+            predicate: pred,
+            location: self.location
+        )
 
     fn with_location(loc: text) -> WeavingDiagnostic:
-        WeavingDiagnostic(..self, location: loc)
+        WeavingDiagnostic(
+            level: self.level,
+            message: self.message,
+            predicate: self.predicate,
+            location: loc
+        )
 
     fn is_error() -> bool:
         match self.level:
@@ -327,6 +341,16 @@ fn matches_predicate(predicate_text: text, ctx: JoinPointContext) -> bool:
         return ctx.effects.contains(pred[7:])
     glob_match(pred, ctx.function_name)
 
+fn matches_join_point_predicate(predicate_text: text, join_point: JoinPoint) -> bool:
+    val pred = predicate_text.trim()
+    if pred == "join:call":
+        return join_point.kind == JoinPointKind.FunctionCall
+    if pred == "join:assignment":
+        return join_point.kind == JoinPointKind.VariableAssignment
+    if pred == "join:execution":
+        return join_point.kind == JoinPointKind.Execution
+    false
+
 fn predicate_specificity(predicate_text: text) -> i64:
     val pred = predicate_text.trim()
     if pred == "*":
@@ -384,27 +408,17 @@ fn sort_matched_by_priority(items: [MatchedAdvice]) -> [MatchedAdvice]:
 # MIR-level Weaving (free functions, take config as parameter)
 # ============================================================================
 
-fn detect_join_points(config: WeavingConfig, func_name: text, module_path: text,
-                      attributes: [text], effects: [text],
-                      blocks: [MirBlockInfo]) -> [JoinPoint]:
+fn detect_join_points(config: WeavingConfig, func_name: text, module_path: text, attributes: [text], effects: [text], blocks: [MirBlockInfo]) -> [JoinPoint]:
     if not config.enabled:
         return []
 
-    val context = JoinPointContext(
-        function_name: func_name, module_path: module_path,
-        signature: "* {func_name}(...)",
-        attributes: attributes, effects: effects)
+    val context = JoinPointContext(function_name: func_name, module_path: module_path, signature: "* {func_name}(...)", attributes: attributes, effects: effects)
 
     var join_points: [JoinPoint] = []
 
     # Function execution join point (at entry)
-    join_points.push(JoinPoint(
-        kind: JoinPointKind.Execution,
-        kind_function_name: func_name,
-        kind_signature: context.signature,
-        kind_location: "",
-        kind_error_type: "",
-        block_id: 0, instruction_index: 0, context: context))
+    val execution_join = JoinPoint(JoinPointKind.Execution, func_name, context.signature, "", "", 0, 0, context)
+    join_points.push(execution_join)
 
     # Scan blocks for decision/condition/error join points
     for block in blocks:
@@ -413,28 +427,24 @@ fn detect_join_points(config: WeavingConfig, func_name: text, module_path: text,
             val inst_kind = info.kind_tag
             if inst_kind == "comparison":
                 val loc = "{func_name}:block{block.id}:inst{idx}"
-                join_points.push(JoinPoint(
-                    kind: JoinPointKind.Condition,
-                    kind_function_name: "", kind_signature: "",
-                    kind_location: loc, kind_error_type: "",
-                    block_id: block.id, instruction_index: idx,
-                    context: context))
+                val condition_join = JoinPoint(JoinPointKind.Condition, "", "", loc, "", block.id, idx, context)
+                join_points.push(condition_join)
+            elif inst_kind == "call":
+                val loc = "{func_name}:block{block.id}:inst{idx}"
+                val call_join = JoinPoint(JoinPointKind.FunctionCall, "", "", loc, "", block.id, idx, context)
+                join_points.push(call_join)
+            elif inst_kind == "assignment":
+                val loc = "{func_name}:block{block.id}:inst{idx}"
+                val assignment_join = JoinPoint(JoinPointKind.VariableAssignment, "", "", loc, "", block.id, idx, context)
+                join_points.push(assignment_join)
             elif inst_kind == "branch" or inst_kind == "pattern_test":
                 val loc = "{func_name}:block{block.id}:inst{idx}"
-                join_points.push(JoinPoint(
-                    kind: JoinPointKind.Decision,
-                    kind_function_name: "", kind_signature: "",
-                    kind_location: loc, kind_error_type: "",
-                    block_id: block.id, instruction_index: idx,
-                    context: context))
+                val decision_join = JoinPoint(JoinPointKind.Decision, "", "", loc, "", block.id, idx, context)
+                join_points.push(decision_join)
             elif inst_kind == "error" or inst_kind == "try_unwrap":
                 val loc = "{func_name}:block{block.id}:inst{idx}"
-                join_points.push(JoinPoint(
-                    kind: JoinPointKind.Error,
-                    kind_function_name: "", kind_signature: "",
-                    kind_location: loc, kind_error_type: "Result",
-                    block_id: block.id, instruction_index: idx,
-                    context: context))
+                val error_join = JoinPoint(JoinPointKind.Error, "", "", loc, "Result", block.id, idx, context)
+                join_points.push(error_join)
 
     join_points
 
@@ -447,7 +457,7 @@ fn match_advice_for_join_point(config: WeavingConfig, join_point: JoinPoint) -> 
 
     val all_rules = weavingconfig_all_rules(config)
     for rule in all_rules:
-        if matches_predicate(rule.predicate_text, join_point.context):
+        if matches_predicate(rule.predicate_text, join_point.context) or matches_join_point_predicate(rule.predicate_text, join_point):
             matched.push(MatchedAdvice(
                 advice_function: rule.advice_function,
                 form: rule.form, priority: rule.priority,
@@ -473,9 +483,7 @@ fn match_advice_for_join_point(config: WeavingConfig, join_point: JoinPoint) -> 
 
     AdviceMatchResult(matched: matched, diagnostics: diagnostics)
 
-fn weave_function(config: WeavingConfig, func_name: text, module_path: text,
-                  attributes: [text], effects: [text],
-                  blocks: [MirBlockInfo]) -> WeavingResult:
+fn weave_function(config: WeavingConfig, func_name: text, module_path: text, attributes: [text], effects: [text], blocks: [MirBlockInfo]) -> WeavingResult:
     if not config.enabled:
         return WeavingResult.empty()
 
@@ -495,7 +503,10 @@ fn weave_function(config: WeavingConfig, func_name: text, module_path: text,
 
         for a in advices:
             all_calls.push(AdviceCallInfo(
-                join_point_kind: jp.kind, advice_function: a.advice_function))
+                join_point_kind: jp.kind,
+                advice_function: a.advice_function,
+                block_id: jp.block_id,
+                instruction_index: jp.instruction_index))
 
         for d in diags:
             all_diags.push(d)

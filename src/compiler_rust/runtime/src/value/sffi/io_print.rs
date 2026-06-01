@@ -31,14 +31,14 @@
 //! When I/O capture is enabled (via rt_capture_stdout_start()), print functions
 //! append to the capture buffer instead of writing to stdout/stderr.
 
-use crate::value::collections::RuntimeString;
-use crate::value::core::RuntimeValue;
-use crate::value::heap::HeapObjectType;
-use crate::value::tags;
 use super::io_capture::{
-    append_stdout, append_stderr, is_stdout_capturing, is_stderr_capturing, read_stdin_line_internal,
+    append_stderr, append_stdout, is_stderr_capturing, is_stdout_capturing, read_stdin_line_internal,
     rt_read_stdin_char,
 };
+use crate::value::collections::RuntimeString;
+use crate::value::core::RuntimeValue;
+use crate::value::heap::{get_typed_ptr, HeapObjectType};
+use crate::value::tags;
 use std::io::Write;
 
 #[derive(Clone, Copy)]
@@ -360,20 +360,25 @@ fn value_to_display_string(v: RuntimeValue) -> String {
         },
         tags::TAG_INT => v.as_int().to_string(),
         tags::TAG_FLOAT => format_float_display(v.as_float()),
-        tags::TAG_HEAP => unsafe { heap_value_to_display_string(v) },
+        tags::TAG_HEAP => heap_value_to_display_string(v),
         _ => format!("<value:0x{:x}>", v.to_raw()),
     }
 }
 
-unsafe fn heap_value_to_display_string(v: RuntimeValue) -> String {
+fn heap_value_to_display_string(v: RuntimeValue) -> String {
     let ptr = v.as_heap_ptr();
     if ptr.is_null() {
         return "nil".to_string();
     }
-    match (*ptr).object_type {
+    let Some(object_type) = v.heap_type() else {
+        return format!("<invalid-heap:0x{:x}>", v.to_raw());
+    };
+    match object_type {
         HeapObjectType::String => {
-            let s = ptr as *const RuntimeString;
-            String::from_utf8_lossy((*s).as_bytes()).into_owned()
+            let Some(s) = get_typed_ptr::<RuntimeString>(v, HeapObjectType::String) else {
+                return format!("<invalid-heap:0x{:x}>", v.to_raw());
+            };
+            unsafe { String::from_utf8_lossy((*s).as_bytes()).into_owned() }
         }
         HeapObjectType::Array => format!("<array@{ptr:p}>"),
         HeapObjectType::Dict => format!("<dict@{ptr:p}>"),
@@ -789,6 +794,25 @@ mod tests {
         assert!(float_str.starts_with("3.25") || float_str == "3.139999999999997");
         assert_eq!(value_to_display_string(RuntimeValue::from_bool(true)), "true");
         assert_eq!(value_to_display_string(RuntimeValue::from_bool(false)), "false");
+    }
+
+    #[test]
+    fn test_value_to_display_string_rejects_forged_heap_value() {
+        let forged_heap = RuntimeValue::from_raw(0x1001);
+        let text = value_to_display_string(forged_heap);
+
+        assert!(text.starts_with("<invalid-heap:0x"));
+    }
+
+    #[test]
+    fn test_print_value_rejects_forged_heap_value() {
+        let forged_heap = RuntimeValue::from_raw(0x1001);
+
+        rt_capture_stdout_start();
+        rt_print_value(forged_heap);
+        let output = rt_capture_stdout_stop();
+
+        assert!(output.starts_with("<invalid-heap:0x"));
     }
 
     #[test]

@@ -13,6 +13,7 @@ use nix::sys::termios::{
 #[cfg(unix)]
 use std::os::unix::io::{BorrowedFd, FromRawFd, OwnedFd};
 use crate::value::RuntimeValue;
+use crate::value::heap::{get_typed_ptr, HeapObjectType};
 
 /// Open a serial device at the given baud rate in raw mode.
 /// Returns fd (> 0) on success, 0 on failure.
@@ -325,13 +326,7 @@ fn string_to_runtime_value(s: &str) -> RuntimeValue {
 }
 
 fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
-    if !val.is_heap() {
-        return None;
-    }
-    let ptr = val.as_heap_ptr() as *const super::collections::RuntimeString;
-    if ptr.is_null() {
-        return None;
-    }
+    let ptr = get_typed_ptr::<super::collections::RuntimeString>(val, HeapObjectType::String)?;
     unsafe {
         let s = &*ptr;
         let bytes = s.as_bytes();
@@ -396,4 +391,18 @@ fn configure_serial(fd: &OwnedFd, baud: BaudRate) -> nix::Result<()> {
     cfsetospeed(&mut tios, baud)?;
     tcsetattr(fd, SetArg::TCSANOW, &tios)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_serial_rejects_forged_heap_string() {
+        let forged_heap = RuntimeValue::from_raw(0x1001);
+
+        assert_eq!(runtime_value_to_string(forged_heap), None);
+        assert_eq!(rt_serial_open(forged_heap, 9600), 0);
+        assert_eq!(rt_serial_write(-1, forged_heap), -1);
+    }
 }

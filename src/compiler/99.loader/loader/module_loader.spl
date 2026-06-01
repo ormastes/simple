@@ -206,32 +206,82 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
 
         val reader = reader_result_value
 
-        # Build loaded module
+        # Build loaded module. Prefer the regular reader, but fall back to the
+        # pure Simple in-memory reader when the seed-backed reader cannot expose
+        # symbols from a Simple-written SMF.
         var symbols: Dict<text, LoadedSymbol> = {}
-        for smf_sym in reader.exported_symbols():
-            # Read code bytes for symbol
-            val code_result = reader.read_code(smf_sym)
-            if code_result_is_err(code_result):
-                return loadresult_Error(message: code_result.unwrap_err())
-
-            val code = code_result_value
-            # Allocate executable memory and write code
-            val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: smf_sym.name, code: code, allow_replace: false)
-            if exec_addr == 0:
-                return loadresult_Error(message: "Failed to allocate executable memory for {smf_sym.name}")
-
-            val loaded_sym = LoadedSymbol(
-                name: smf_sym.name,
-                address: exec_addr,
-                size: smf_sym.size,
-                ty: smf_sym.ty,
-                is_jit: false,
-                file_offset: smf_sym.offset
-            )
-            symbols[smf_sym.name] = loaded_sym
-            self.global_symbols[smf_sym.name] = (path, loaded_sym)
-            # Track symbol in lifecycle manager.
-            lifecycle_on_symbol_mapped(self.lifecycle, path, smf_sym.name)
+        val memory_load_bytes_result = self.provider.get_module_bytes(path)
+        if memory_load_bytes_result.is_ok():
+            val memory_reader_result = SmfReaderMemory.from_data(memory_load_bytes_result.unwrap())
+            if memory_reader_result.is_ok():
+                val memory_reader = memory_reader_result.unwrap()
+                for smf_sym in memory_reader.exported_symbols():
+                    val code_result = memory_reader.read_code(smf_sym)
+                    if code_result.is_err():
+                        return loadresult_Error(message: code_result.unwrap_err())
+                    val code = code_result.unwrap()
+                    val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: smf_sym.name, code: code, allow_replace: false)
+                    if exec_addr == 0:
+                        return loadresult_Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+                    val loaded_sym = LoadedSymbol(
+                        name: smf_sym.name,
+                        address: exec_addr,
+                        size: smf_sym.size,
+                        ty: smf_sym.ty,
+                        is_jit: false,
+                        file_offset: smf_sym.offset
+                    )
+                    symbols[smf_sym.name] = loaded_sym
+                    self.global_symbols[smf_sym.name] = (path, loaded_sym)
+                    lifecycle_on_symbol_mapped(self.lifecycle, path, smf_sym.name)
+        val reader_exports = reader.exported_symbols()
+        if symbols.len() == 0 and reader_exports.len() > 0:
+            for smf_sym in reader_exports:
+                val code_result = reader.read_code(smf_sym)
+                if code_result_is_err(code_result):
+                    return loadresult_Error(message: code_result.unwrap_err())
+                val code = code_result_value
+                val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: smf_sym.name, code: code, allow_replace: false)
+                if exec_addr == 0:
+                    return loadresult_Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+                val loaded_sym = LoadedSymbol(
+                    name: smf_sym.name,
+                    address: exec_addr,
+                    size: smf_sym.size,
+                    ty: smf_sym.ty,
+                    is_jit: false,
+                    file_offset: smf_sym.offset
+                )
+                symbols[smf_sym.name] = loaded_sym
+                self.global_symbols[smf_sym.name] = (path, loaded_sym)
+                lifecycle_on_symbol_mapped(self.lifecycle, path, smf_sym.name)
+        if symbols.len() == 0:
+            val load_bytes_result = self.provider.get_module_bytes(path)
+            if load_bytes_result.is_err():
+                return loadresult_Error(message: load_bytes_result.unwrap_err())
+            val memory_reader_result = SmfReaderMemory.from_data(load_bytes_result.unwrap())
+            if memory_reader_result.is_err():
+                return loadresult_Error(message: memory_reader_result.unwrap_err())
+            val memory_reader = memory_reader_result.unwrap()
+            for smf_sym in memory_reader.exported_symbols():
+                val code_result = memory_reader.read_code(smf_sym)
+                if code_result.is_err():
+                    return loadresult_Error(message: code_result.unwrap_err())
+                val code = code_result.unwrap()
+                val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: smf_sym.name, code: code, allow_replace: false)
+                if exec_addr == 0:
+                    return loadresult_Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+                val loaded_sym = LoadedSymbol(
+                    name: smf_sym.name,
+                    address: exec_addr,
+                    size: smf_sym.size,
+                    ty: smf_sym.ty,
+                    is_jit: false,
+                    file_offset: smf_sym.offset
+                )
+                symbols[smf_sym.name] = loaded_sym
+                self.global_symbols[smf_sym.name] = (path, loaded_sym)
+                lifecycle_on_symbol_mapped(self.lifecycle, path, smf_sym.name)
 
         val module = LoadedModule(
             path: path,
@@ -291,8 +341,11 @@ fn moduleloader_apply_relocations(self: ModuleLoader, path: text, smf_data: [u8]
         # Build symbol resolution table in symbol-index order from the parsed
         # SMF symbol table, then map those names to the loaded module addresses.
         var resolved: [ResolvedSymbol] = []
-        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-        for sym_name in mem_reader.symbols.keys():
+        val ordered_symbols_result = mem_reader.symbols_in_table_order()
+        if ordered_symbols_result.is_err():
+            return Err(ordered_symbols_result.unwrap_err())
+        for smf_sym in ordered_symbols_result.unwrap():
+            val sym_name = smf_sym.name
             var addr = 0i64
             if self.modules.has(path):
                 val module = self.modules[path]

@@ -11,6 +11,19 @@ bin/simple --emit-hir=hir.json file.spl             # HIR (type-checked)
 bin/simple --emit-mir=mir.json file.spl             # MIR (lowered)
 ```
 
+## Instrumentation Policy
+
+Use compiler AOP logging for temporary function-call and variable-assignment
+debug traces instead of editing source with ad hoc debug log calls. Enable only
+the join points needed for the investigation, and set compile-time and runtime
+log levels separately when the scenario needs different filtering.
+
+Manual `log()` calls are still appropriate for state that AOP cannot observe
+cleanly, such as cross-process context, external protocol frames, hardware
+status, or intentionally summarized values. Do not delete those calls when the
+immediate debugging session ends; lower their log level when they are no longer
+needed at the previous verbosity.
+
 ## Query Engine Diagnostics
 
 ```bash

@@ -6,6 +6,7 @@
 //! - Path resolution utilities
 
 use super::super::RuntimeValue;
+use crate::value::heap::{get_typed_ptr, HeapObjectType};
 
 /// Spawn worker process with inherited mmap regions
 ///
@@ -155,16 +156,7 @@ pub extern "C" fn native_process_kill(pid: i64) -> RuntimeValue {
 
 /// Extract string from RuntimeValue (heap pointer to RuntimeString)
 unsafe fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
-    if !val.is_heap() {
-        return None;
-    }
-
-    let ptr = val.as_heap_ptr() as *const super::super::collections::RuntimeString;
-    if ptr.is_null() {
-        return None;
-    }
-
-    // Get bytes from RuntimeString
+    let ptr = get_typed_ptr::<super::super::collections::RuntimeString>(val, HeapObjectType::String)?;
     let s = &*ptr;
     let bytes = s.as_bytes();
     String::from_utf8(bytes.to_vec()).ok()
@@ -214,4 +206,17 @@ pub extern "C" fn native_path_resolve(path: RuntimeValue) -> RuntimeValue {
     };
 
     string_to_runtime_value(&resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_process_path_rejects_forged_heap_path() {
+        let forged_heap = RuntimeValue::from_raw(0x1001);
+
+        assert_eq!(unsafe { runtime_value_to_string(forged_heap) }, None);
+        assert_eq!(native_path_resolve(forged_heap), forged_heap);
+    }
 }

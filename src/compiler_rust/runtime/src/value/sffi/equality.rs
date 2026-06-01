@@ -1,11 +1,9 @@
 //! Value equality comparison implemented directly in Rust.
 
 use crate::value::core::RuntimeValue;
-use crate::value::heap::HeapObjectType;
+use crate::value::heap::{get_typed_ptr, HeapObjectType};
 use crate::value::objects::RuntimeEnum;
 use crate::value::{tags, RuntimeString};
-
-const MIN_HEAP_ADDR: usize = 0x100000;
 
 #[no_mangle]
 pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
@@ -28,11 +26,7 @@ pub extern "C" fn rt_native_eq(a: i64, b: i64) -> i64 {
     let au = a as u64;
     let bu = b as u64;
     if (au & tags::TAG_MASK) == tags::TAG_HEAP && (bu & tags::TAG_MASK) == tags::TAG_HEAP {
-        let ptr_a = (au & !tags::TAG_MASK) as usize;
-        let ptr_b = (bu & !tags::TAG_MASK) as usize;
-        if ptr_a >= MIN_HEAP_ADDR && ptr_b >= MIN_HEAP_ADDR {
-            return rt_value_eq(RuntimeValue::from_raw(au), RuntimeValue::from_raw(bu)) as i64;
-        }
+        return rt_value_eq(RuntimeValue::from_raw(au), RuntimeValue::from_raw(bu)) as i64;
     }
     0
 }
@@ -54,28 +48,30 @@ fn value_eq(a: RuntimeValue, b: RuntimeValue) -> bool {
         (tags::TAG_INT, tags::TAG_INT) => a.as_int() == b.as_int(),
         (tags::TAG_FLOAT, tags::TAG_FLOAT) => a.as_float() == b.as_float(),
         (tags::TAG_SPECIAL, tags::TAG_SPECIAL) => false,
-        (tags::TAG_HEAP, tags::TAG_HEAP) => unsafe { heap_value_eq(a, b) },
+        (tags::TAG_HEAP, tags::TAG_HEAP) => heap_value_eq(a, b),
         _ => false,
     }
 }
 
-unsafe fn heap_value_eq(a: RuntimeValue, b: RuntimeValue) -> bool {
-    let ptr_a = a.as_heap_ptr();
-    let ptr_b = b.as_heap_ptr();
-    if ptr_a.is_null() || ptr_b.is_null() || (ptr_a as usize) < MIN_HEAP_ADDR || (ptr_b as usize) < MIN_HEAP_ADDR {
-        return false;
-    }
-
-    match ((*ptr_a).object_type, (*ptr_b).object_type) {
-        (HeapObjectType::String, HeapObjectType::String) => {
-            let sa = ptr_a as *const RuntimeString;
-            let sb = ptr_b as *const RuntimeString;
-            (*sa).as_bytes() == (*sb).as_bytes()
+fn heap_value_eq(a: RuntimeValue, b: RuntimeValue) -> bool {
+    match (a.heap_type(), b.heap_type()) {
+        (Some(HeapObjectType::String), Some(HeapObjectType::String)) => {
+            let Some(sa) = get_typed_ptr::<RuntimeString>(a, HeapObjectType::String) else {
+                return false;
+            };
+            let Some(sb) = get_typed_ptr::<RuntimeString>(b, HeapObjectType::String) else {
+                return false;
+            };
+            unsafe { (*sa).as_bytes() == (*sb).as_bytes() }
         }
-        (HeapObjectType::Enum, HeapObjectType::Enum) => {
-            let ea = ptr_a as *const RuntimeEnum;
-            let eb = ptr_b as *const RuntimeEnum;
-            (*ea).discriminant == (*eb).discriminant && value_eq((*ea).payload, (*eb).payload)
+        (Some(HeapObjectType::Enum), Some(HeapObjectType::Enum)) => {
+            let Some(ea) = get_typed_ptr::<RuntimeEnum>(a, HeapObjectType::Enum) else {
+                return false;
+            };
+            let Some(eb) = get_typed_ptr::<RuntimeEnum>(b, HeapObjectType::Enum) else {
+                return false;
+            };
+            unsafe { (*ea).discriminant == (*eb).discriminant && value_eq((*ea).payload, (*eb).payload) }
         }
         _ => false,
     }
@@ -89,9 +85,9 @@ fn value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
     match (a.tag(), b.tag()) {
         (tags::TAG_INT, tags::TAG_INT) => compare_i64(a.as_int(), b.as_int()),
         (tags::TAG_FLOAT, tags::TAG_FLOAT) => compare_f64(a.as_float(), b.as_float()),
-        (tags::TAG_HEAP, tags::TAG_HEAP) => unsafe {
+        (tags::TAG_HEAP, tags::TAG_HEAP) => {
             compare_heap_strings(a, b).unwrap_or_else(|| compare_i64(a.to_raw() as i64, b.to_raw() as i64))
-        },
+        }
         (tags::TAG_INT, tags::TAG_FLOAT) => {
             let bf = b.as_float();
             if bf.classify() == std::num::FpCategory::Subnormal {
@@ -113,22 +109,10 @@ fn value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
     }
 }
 
-unsafe fn compare_heap_strings(a: RuntimeValue, b: RuntimeValue) -> Option<i64> {
-    let ptr_a = a.as_heap_ptr();
-    let ptr_b = b.as_heap_ptr();
-    if ptr_a.is_null()
-        || ptr_b.is_null()
-        || (ptr_a as usize) < MIN_HEAP_ADDR
-        || (ptr_b as usize) < MIN_HEAP_ADDR
-        || (*ptr_a).object_type != HeapObjectType::String
-        || (*ptr_b).object_type != HeapObjectType::String
-    {
-        return None;
-    }
-
-    let sa = ptr_a as *const RuntimeString;
-    let sb = ptr_b as *const RuntimeString;
-    Some(compare_bytes((*sa).as_bytes(), (*sb).as_bytes()))
+fn compare_heap_strings(a: RuntimeValue, b: RuntimeValue) -> Option<i64> {
+    let sa = get_typed_ptr::<RuntimeString>(a, HeapObjectType::String)?;
+    let sb = get_typed_ptr::<RuntimeString>(b, HeapObjectType::String)?;
+    unsafe { Some(compare_bytes((*sa).as_bytes(), (*sb).as_bytes())) }
 }
 
 fn compare_bytes(a: &[u8], b: &[u8]) -> i64 {
@@ -261,6 +245,23 @@ mod tests {
 
         assert_eq!(rt_value_eq(a, b), 1, "same disc should be equal");
         assert_eq!(rt_value_eq(a, c), 0, "diff disc should not be equal");
+    }
+
+    #[test]
+    fn test_value_equality_rejects_forged_heap_values() {
+        let forged_heap = RuntimeValue::from_raw(0x1001);
+        let other_forged_heap = RuntimeValue::from_raw(0x2001);
+        let int_value = RuntimeValue::from_int(1);
+
+        assert_eq!(rt_value_eq(forged_heap, int_value), 0);
+        assert_eq!(rt_value_eq(forged_heap, other_forged_heap), 0);
+        assert_ne!(rt_value_compare(forged_heap, int_value), 0);
+        assert_ne!(rt_value_compare(forged_heap, other_forged_heap), 0);
+        assert_eq!(rt_native_eq(forged_heap.to_raw() as i64, int_value.to_raw() as i64), 0);
+        assert_eq!(
+            rt_native_eq(forged_heap.to_raw() as i64, other_forged_heap.to_raw() as i64),
+            0
+        );
     }
 
     #[test]
