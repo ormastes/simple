@@ -315,14 +315,16 @@ expect(ai_cli_deno_permission_flags(deny_all_manifest()).len()).to_equal(0)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val manifest = codex_cli_smoke_manifest()
 val markers = ai_cli_qemu_marker_fragments(manifest, "x85")
 expect(ai_cli_normalize_target("x85")).to_equal("x86")
+expect(markers.len()).to_equal(6)
 expect(markers[0]).to_equal("[ai-cli] qemu-target=x86")
+expect(markers[1]).to_equal("[ai-cli] manifest app=codex runtime=node-compatible")
 expect(markers).to_contain("[ai-cli] guest-evidence-required")
 expect(markers).to_contain("[ai-cli] runtime:start app=codex")
 expect(markers).to_contain("[ai-cli] hardening:ok app=codex")

@@ -115,6 +115,9 @@ Completed evidence:
      evidence reach those exact layers.
 
 2. Phase 6 QEMU runtime provisioning.
+   - `scripts/check-ai-cli-qemu-lanes.shs --contract-only` now derives required
+     marker files from `src/os/ai_cli_js_node_contract.spl` and records the
+     selected app/target lane contract without claiming guest evidence.
    - Audit `ai_cli_qemu_lane`, staged package generation, launcher marker
      output, and runtime artifact assumptions.
    - Provision a Node-compatible runtime artifact and CLI bundles into the
@@ -158,6 +161,21 @@ docs/test-plan slice that records:
 
 Do not mark Phase 6 complete from host-side package generation alone. It needs
 guest serial evidence.
+
+Initial harness command:
+
+```sh
+SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=<worktree>/src \
+  sh scripts/check-ai-cli-qemu-lanes.shs --contract-only
+```
+
+Promotion commands after runtime provisioning exists:
+
+```sh
+sh scripts/check-ai-cli-qemu-lanes.shs --target x86 --app all
+sh scripts/check-ai-cli-qemu-lanes.shs --target riscv --app all
+sh scripts/check-ai-cli-qemu-lanes.shs --target arm --app all
+```
 
 ## Immediate Next Commands
 

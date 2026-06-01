@@ -1,0 +1,266 @@
+#!/bin/sh
+set -eu
+
+# Validate the AI CLI JS/Node-compatible QEMU lane contract.
+#
+# This script intentionally does not mark Phase 6 complete by generating host
+# files alone. Default mode requires staged runtime artifacts and real serial
+# logs. Use --contract-only for a CI-safe contract/materialization check while
+# runtime provisioning is still blocked.
+#
+# Usage:
+#   sh scripts/check-ai-cli-qemu-lanes.shs --contract-only
+#   sh scripts/check-ai-cli-qemu-lanes.shs --target x86 --app codex --validate-log-only
+#   sh scripts/check-ai-cli-qemu-lanes.shs --target all --app all
+#
+# Env knobs:
+#   AI_CLI_QEMU_BUILD_DIR       default: build/ai-cli-qemu-lanes
+#   AI_CLI_QEMU_STAGING_ROOT    default: build/os/ai-cli-runtime-staging
+#   AI_CLI_QEMU_SERIAL_ROOT     default: build/os
+#   SIMPLE_BIN                  default: bin/simple
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${AI_CLI_QEMU_BUILD_DIR:-build/ai-cli-qemu-lanes}"
+STAGING_ROOT="${AI_CLI_QEMU_STAGING_ROOT:-build/os/ai-cli-runtime-staging}"
+SERIAL_ROOT="${AI_CLI_QEMU_SERIAL_ROOT:-build/os}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+TARGET_FILTER="all"
+APP_FILTER="all"
+CONTRACT_ONLY=0
+VALIDATE_LOG_ONLY=0
+
+usage() {
+    sed -n '3,18p' "$0"
+}
+
+while [ "$#" -gt 0 ]; do
+    arg="$1"
+    shift
+    case "$arg" in
+        --target=*) TARGET_FILTER="${arg#--target=}" ;;
+        --target)
+            if [ "$#" -eq 0 ]; then
+                echo "[ai-cli-qemu] --target requires a value" >&2
+                exit 2
+            fi
+            TARGET_FILTER="$1"
+            shift
+            ;;
+        --app=*) APP_FILTER="${arg#--app=}" ;;
+        --app)
+            if [ "$#" -eq 0 ]; then
+                echo "[ai-cli-qemu] --app requires a value" >&2
+                exit 2
+            fi
+            APP_FILTER="$1"
+            shift
+            ;;
+        --contract-only) CONTRACT_ONLY=1 ;;
+        --validate-log-only) VALIDATE_LOG_ONLY=1 ;;
+        --help|-h) usage; exit 0 ;;
+        *) echo "[ai-cli-qemu] unknown argument: $arg" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+case "$TARGET_FILTER" in
+    x86|x86_64) TARGET_FILTER="x86" ;;
+    riscv|riscv64) TARGET_FILTER="riscv" ;;
+    arm|arm64) TARGET_FILTER="arm" ;;
+    all) ;;
+    *) echo "[ai-cli-qemu] invalid target: $TARGET_FILTER" >&2; exit 2 ;;
+esac
+
+case "$APP_FILTER" in
+    codex|claude|gemini|all) ;;
+    *) echo "[ai-cli-qemu] invalid app: $APP_FILTER" >&2; exit 2 ;;
+esac
+
+mkdir -p "$BUILD_DIR/expected-markers" "$BUILD_DIR/reports"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "[ai-cli-qemu] missing Simple runner: $SIMPLE_BIN" >&2
+    exit 3
+fi
+
+target_selected() {
+    [ "$TARGET_FILTER" = "all" ] || [ "$TARGET_FILTER" = "$1" ]
+}
+
+app_selected() {
+    [ "$APP_FILTER" = "all" ] || [ "$APP_FILTER" = "$1" ]
+}
+
+scenario_for_target() {
+    case "$1" in
+        riscv) printf '%s\n' "riscv64-hosted" ;;
+        arm) printf '%s\n' "arm64-virtio-fat32-smf" ;;
+        *) printf '%s\n' "x64-desktop-disk" ;;
+    esac
+}
+
+serial_for_target() {
+    case "$1" in
+        riscv) printf '%s\n' "$SERIAL_ROOT/ai-cli-riscv64.serial.log" ;;
+        arm) printf '%s\n' "$SERIAL_ROOT/ai-cli-arm64.serial.log" ;;
+        *) printf '%s\n' "$SERIAL_ROOT/ai-cli-x86_64.serial.log" ;;
+    esac
+}
+
+qemu_for_target() {
+    case "$1" in
+        riscv) printf '%s\n' "qemu-system-riscv64" ;;
+        arm) printf '%s\n' "qemu-system-aarch64" ;;
+        *) printf '%s\n' "qemu-system-x86_64" ;;
+    esac
+}
+
+machine_for_target() {
+    case "$1" in
+        riscv|arm) printf '%s\n' "virt" ;;
+        *) printf '%s\n' "q35" ;;
+    esac
+}
+
+runtime_path_for_target() {
+    printf '%s\n' "$STAGING_ROOT/sys/runtime/node-compatible/$1/runtime.smf"
+}
+
+app_entry_for_app() {
+    printf '%s\n' "$STAGING_ROOT/sys/apps/$1/$1.js"
+}
+
+marker_file_for() {
+    printf '%s\n' "$BUILD_DIR/expected-markers/$1-$2.markers"
+}
+
+write_expected_markers() {
+    app="$1"
+    target="$2"
+    marker_file="$(marker_file_for "$app" "$target")"
+    marker_src="$BUILD_DIR/expected-markers/$app-$target-markers.spl"
+
+    case "$app" in
+        claude) manifest_fn="claude_cli_smoke_manifest" ;;
+        gemini) manifest_fn="gemini_cli_smoke_manifest" ;;
+        *) manifest_fn="codex_cli_smoke_manifest" ;;
+    esac
+
+    cat >"$marker_src" <<SIMPLE
+use os.ai_cli_js_node_contract.{ai_cli_qemu_lane, codex_cli_smoke_manifest, claude_cli_smoke_manifest, gemini_cli_smoke_manifest}
+
+fn main() -> i64:
+    val lane = ai_cli_qemu_lane(${manifest_fn}(), "$target")
+    for marker in lane.marker_fragments:
+        print marker
+    return 0
+SIMPLE
+
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$marker_src" --mode=interpreter --clean >"$marker_file"
+    printf '%s\n' "$marker_file"
+}
+
+validate_serial_markers() {
+    app="$1"
+    target="$2"
+    serial_log="$(serial_for_target "$target")"
+    marker_file="$(write_expected_markers "$app" "$target")"
+
+    if [ ! -s "$serial_log" ]; then
+        echo "[ai-cli-qemu] missing serial log app=$app target=$target path=$serial_log"
+        return 1
+    fi
+
+    missing=0
+    while IFS= read -r marker; do
+        [ -n "$marker" ] || continue
+        if ! grep -a -F -q "$marker" "$serial_log"; then
+            echo "[ai-cli-qemu] missing marker app=$app target=$target marker=$marker"
+            missing=1
+        fi
+    done <"$marker_file"
+    return "$missing"
+}
+
+validate_runtime_artifacts() {
+    app="$1"
+    target="$2"
+    runtime_path="$(runtime_path_for_target "$target")"
+    entry_path="$(app_entry_for_app "$app")"
+    missing=0
+
+    if [ ! -s "$runtime_path" ]; then
+        echo "[ai-cli-qemu] missing runtime artifact target=$target path=$runtime_path"
+        missing=1
+    fi
+    if [ ! -s "$entry_path" ]; then
+        echo "[ai-cli-qemu] missing CLI bundle app=$app path=$entry_path"
+        missing=1
+    fi
+    return "$missing"
+}
+
+report_path="$BUILD_DIR/reports/ai-cli-qemu-lanes.env"
+rm -f "$report_path"
+
+echo "check=ai_cli_qemu_lanes" | tee -a "$report_path"
+echo "contract_only=$CONTRACT_ONLY" | tee -a "$report_path"
+echo "validate_log_only=$VALIDATE_LOG_ONLY" | tee -a "$report_path"
+echo "staging_root=$STAGING_ROOT" | tee -a "$report_path"
+echo "serial_root=$SERIAL_ROOT" | tee -a "$report_path"
+
+total=0
+contract_count=0
+runtime_failures=0
+serial_failures=0
+
+for app in codex claude gemini; do
+    app_selected "$app" || continue
+    for target in riscv x86 arm; do
+        target_selected "$target" || continue
+        total=$((total + 1))
+        marker_file="$(write_expected_markers "$app" "$target")"
+        contract_count=$((contract_count + 1))
+        echo "lane=$app/$target qemu=$(qemu_for_target "$target") machine=$(machine_for_target "$target") scenario=$(scenario_for_target "$target") serial=$(serial_for_target "$target") markers=$marker_file runtime=$(runtime_path_for_target "$target")"
+
+        if [ "$CONTRACT_ONLY" -eq 1 ]; then
+            continue
+        fi
+        if [ "$VALIDATE_LOG_ONLY" -eq 0 ]; then
+            if ! validate_runtime_artifacts "$app" "$target"; then
+                runtime_failures=$((runtime_failures + 1))
+            fi
+        fi
+        if ! validate_serial_markers "$app" "$target"; then
+            serial_failures=$((serial_failures + 1))
+        fi
+    done
+done
+
+if [ "$total" -eq 0 ]; then
+    echo "[ai-cli-qemu] no lanes selected" >&2
+    exit 2
+fi
+
+{
+    echo "lane_count=$total"
+    echo "contract_count=$contract_count"
+    echo "runtime_failures=$runtime_failures"
+    echo "serial_failures=$serial_failures"
+} | tee -a "$report_path"
+
+if [ "$CONTRACT_ONLY" -eq 1 ]; then
+    echo "ai_cli_qemu_lanes_status=contract-only" | tee -a "$report_path"
+    echo "ai_cli_qemu_lanes_reason=guest-runtime-provisioning-still-required" | tee -a "$report_path"
+    exit 0
+fi
+
+if [ "$runtime_failures" -ne 0 ] || [ "$serial_failures" -ne 0 ]; then
+    echo "ai_cli_qemu_lanes_status=fail" | tee -a "$report_path"
+    echo "ai_cli_qemu_lanes_reason=missing-runtime-or-guest-serial-evidence" | tee -a "$report_path"
+    exit 1
+fi
+
+echo "ai_cli_qemu_lanes_status=pass" | tee -a "$report_path"
+echo "ai_cli_qemu_lanes_reason=all-selected-lanes-have-runtime-and-serial-markers" | tee -a "$report_path"

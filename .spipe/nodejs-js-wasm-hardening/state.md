@@ -74,3 +74,9 @@ dev-incomplete
 - dev: PASS `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/runtime.spl test/feature/js/node_api_conformance_spec.spl`.
 - dev: PASS `SIMPLE_LIB=src bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean` (149 scenarios), including positive `git` spawn only when `git` is explicitly granted and denial when only `node` is granted.
 - dev: PASS cross-lane smoke checks: WebGPU JS/WASM Simple (106 scenarios), interpreter perf (10 scenarios), and `scripts/check-gtk-gui-repeat-evidence.shs` with deterministic vector checksum 212444.
+- dev: Added `scripts/check-ai-cli-qemu-lanes.shs`, a contract-first Phase 6
+  harness that derives required QEMU serial markers from
+  `src/os/ai_cli_js_node_contract.spl`, supports a CI-safe `--contract-only`
+  mode, and fails default validation until staged runtime artifacts and real
+  guest serial logs exist. Fixed the AI CLI QEMU marker contract so manifest,
+  blocker, and blocker-report markers are non-empty in generated lane evidence.

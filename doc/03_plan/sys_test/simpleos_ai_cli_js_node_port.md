@@ -6,6 +6,19 @@ Node-compatible runtime grant conformance is covered by
 `test/feature/js/node_api_conformance_spec.spl`. Full QEMU runtime smoke remains
 pending Node-compatible runtime provisioning.
 
+Current QEMU harness:
+
+- `scripts/check-ai-cli-qemu-lanes.shs --contract-only` materializes the
+  selected Codex/Claude/Gemini by x86/RISC-V/ARM lane marker contract and exits
+  successfully without claiming guest evidence.
+- Default mode checks staged runtime artifacts under
+  `build/os/ai-cli-runtime-staging/sys/runtime/node-compatible/<target>/runtime.smf`,
+  CLI bundles under `build/os/ai-cli-runtime-staging/sys/apps/<app>/<app>.js`,
+  and guest serial logs under `build/os/ai-cli-*.serial.log`.
+- The harness must fail until real guest serial logs contain every required
+  marker. This preserves the Phase 6 blocker instead of treating host-side
+  package generation as QEMU validation.
+
 ## Scenario Families
 
 1. Manifest hardening:
@@ -64,5 +77,8 @@ Mirrored manual: `doc/06_spec/system/os/simpleos_ai_cli_js_node_port_spec.md`
 - REQ-007: explicit full Node/V8/libuv later-layer blocker.
 - Runtime conformance: `node_api_conformance_spec.spl` covers explicit positive
   and denial behavior for credential env, file, network, and process grants.
+- QEMU lane harness: `scripts/check-ai-cli-qemu-lanes.shs` records expected
+  runtime artifact paths, serial log paths, lane scenarios, and required marker
+  files for the 3x3 app/target matrix.
 - Still pending: guest QEMU runtime smoke and kernel/OS-layer VFS, socket, and
   process boundary evidence.
