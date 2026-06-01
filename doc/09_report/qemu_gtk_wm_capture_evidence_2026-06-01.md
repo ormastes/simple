@@ -1,0 +1,503 @@
+# QEMU GTK WM Capture Evidence
+
+- status: fail
+- reason: contract-program-failed
+- qemu bin: qemu-system-x86_64
+- qemu arch: x86_64
+- qemu display gtk supported: true
+- qemu display reason: pass
+- auto QMP launch: 1
+- auto QMP status: pass
+- auto QMP reason: pass
+- auto QMP exit code: 0
+- auto QMP pid: 2129663
+- auto QMP socket: /tmp/simpleos_desktop_qmp_2114920_1780303632052818.sock
+- auto QMP serial log: build/os/simpleos_desktop_qmp_2114920_1780303632052818.log
+- auto QMP stderr log: build/os/simpleos_desktop_qmp_2114920_1780303632052818.log.stderr
+- auto QMP missing marker: 
+- auto QMP marker timeout ms: 
+- auto QMP qemu running at failure: 
+- auto QMP serial bytes: 
+- auto QMP stderr bytes: 
+- qmp socket: /tmp/simpleos_desktop_qmp_2114920_1780303632052818.sock
+- host WM smoke status: unavailable
+- host WM smoke reason: not-run
+- host WM smoke report: build/qemu_gtk_wm_capture_evidence/wm-host-launch-capture.md
+- live capture status: fail
+- live capture reason: contract-program-failed
+- live capture pixels: 0
+- live capture non-black pixels: 0
+- live capture sample matches: 0
+- live capture sample mismatches: 0
+- live capture full-scene mismatches: 0
+- qemu-side perf status: fail
+- qemu-side perf reason: contract-program-failed
+- qemu-side perf comparison available: false
+- fake QMP screendump status: not-run
+- fake QMP screendump reason: not-run
+- fake QMP screendump report: build/qemu_gtk_wm_capture_evidence/fake-qmp-capture.md
+- fake QMP expected ARGB path: 
+- fake QMP captured ARGB path: 
+- host GTK GL WM scene status: not-run
+- host GTK GL WM scene reason: not-run
+- host GTK GL WM scene report: build/qemu_gtk_wm_capture_evidence/gtk-gl-wm-scene.md
+- host GTK GL WM scene simple frame us: 0
+- host GTK GL WM scene GTK frame us: 0
+- host GTK GL WM scene mismatch count: 
+- host GTK GL WM scene expected RGBA path: 
+- host GTK GL WM scene captured RGBA path: 
+- host GTK GL WM scene blur/tolerance used: 
+
+## Raw Evidence
+- qemu_gtk_wm_capture_status=fail
+- qemu_gtk_wm_capture_reason=contract-program-failed
+- qemu_gtk_wm_capture_qemu_bin=qemu-system-x86_64
+- qemu_gtk_wm_capture_qemu_arch=x86_64
+- qemu_gtk_wm_capture_display_gtk_supported=true
+- qemu_gtk_wm_capture_display_reason=pass
+- qemu_gtk_wm_capture_auto_qmp_launch=1
+- qemu_gtk_wm_capture_auto_qmp_status=pass
+- qemu_gtk_wm_capture_auto_qmp_reason=pass
+- qemu_gtk_wm_capture_auto_qmp_exit_code=0
+- qemu_gtk_wm_capture_auto_qmp_pid=2129663
+- qemu_gtk_wm_capture_auto_qmp_socket=/tmp/simpleos_desktop_qmp_2114920_1780303632052818.sock
+- qemu_gtk_wm_capture_auto_qmp_serial_log=build/os/simpleos_desktop_qmp_2114920_1780303632052818.log
+- qemu_gtk_wm_capture_auto_qmp_stderr_log=build/os/simpleos_desktop_qmp_2114920_1780303632052818.log.stderr
+- qemu_gtk_wm_capture_auto_qmp_missing_marker=
+- qemu_gtk_wm_capture_auto_qmp_marker_timeout_ms=
+- qemu_gtk_wm_capture_auto_qmp_qemu_running=
+- qemu_gtk_wm_capture_auto_qmp_serial_bytes=
+- qemu_gtk_wm_capture_auto_qmp_stderr_bytes=
+- qemu_gtk_wm_capture_qmp_socket=/tmp/simpleos_desktop_qmp_2114920_1780303632052818.sock
+- qemu_gtk_wm_capture_wm_exit_code=1
+- qemu_gtk_wm_capture_host_wm_status=unavailable
+- qemu_gtk_wm_capture_host_wm_reason=not-run
+- qemu_gtk_wm_capture_host_wm_exit_code=0
+- qemu_gtk_wm_capture_host_wm_report_path=build/qemu_gtk_wm_capture_evidence/wm-host-launch-capture.md
+- qemu_gtk_wm_capture_live_capture_status=fail
+- qemu_gtk_wm_capture_live_capture_reason=contract-program-failed
+- qemu_gtk_wm_capture_perf_status=fail
+- qemu_gtk_wm_capture_perf_reason=contract-program-failed
+- qemu_gtk_wm_capture_perf_simple_frame_us=0
+- qemu_gtk_wm_capture_perf_gtk_frame_us=0
+- qemu_gtk_wm_capture_perf_iterations=0
+- qemu_gtk_wm_capture_perf_comparison_available=false
+- qemu_gtk_wm_capture_fake_qmp_status=not-run
+- qemu_gtk_wm_capture_fake_qmp_reason=not-run
+- qemu_gtk_wm_capture_fake_qmp_report_path=build/qemu_gtk_wm_capture_evidence/fake-qmp-capture.md
+- qemu_gtk_wm_capture_fake_qmp_expected_argb_path=
+- qemu_gtk_wm_capture_fake_qmp_captured_argb_path=
+- qemu_gtk_wm_capture_gtk_scene_status=not-run
+- qemu_gtk_wm_capture_gtk_scene_reason=not-run
+- qemu_gtk_wm_capture_gtk_scene_report_path=build/qemu_gtk_wm_capture_evidence/gtk-gl-wm-scene.md
+- qemu_gtk_wm_capture_gtk_scene_simple_frame_us=0
+- qemu_gtk_wm_capture_gtk_scene_gtk_frame_us=0
+- qemu_gtk_wm_capture_gtk_scene_rgba_mismatch_count=
+- qemu_gtk_wm_capture_gtk_scene_expected_rgba_path=
+- qemu_gtk_wm_capture_gtk_scene_captured_rgba_path=
+- qemu_gtk_wm_capture_gtk_scene_blur_or_tolerance_used=
+- qemu_gtk_wm_capture_wm_evidence_status=fail
+- qemu_gtk_wm_capture_wm_evidence_reason=contract-program-failed
+- qemu_gtk_wm_capture_wm_contract_status=fail
+- qemu_gtk_wm_capture_wm_spec_status=fail
+- qemu_gtk_wm_capture_wm_electron_live_status=skipped
+- qemu_gtk_wm_capture_wm_electron_live_reason=RUN_ELECTRON_LIVE_SMOKE=0
+- qemu_gtk_wm_capture_wm_qemu_live_status=fail
+- qemu_gtk_wm_capture_wm_qemu_live_reason=qmp-screendump-failed
+- qemu_gtk_wm_capture_wm_qemu_live_pixels=0
+- qemu_gtk_wm_capture_wm_qemu_live_non_black_pixels=0
+- qemu_gtk_wm_capture_wm_qemu_live_sample_matches=0
+- qemu_gtk_wm_capture_wm_qemu_live_sample_mismatches=0
+- qemu_gtk_wm_capture_wm_qemu_live_sample_checksum=0
+- qemu_gtk_wm_capture_wm_qemu_live_scene_mismatches=0
+- qemu_gtk_wm_capture_wm_qemu_live_first_mismatch_x=-1
+- qemu_gtk_wm_capture_wm_qemu_live_first_mismatch_y=-1
+- qemu_gtk_wm_capture_wm_report_path=build/qemu_gtk_wm_capture_evidence/wm-launch-capture.md
+
+## Auto QMP Launch Output
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unsupported feature: unknown static member 'Result.Err'; wrapper-type static-member sugar only resolves to existing static methods (tried: Result.err)
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.test_runner.resource_governor' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.test_runner.system_monitor' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.process_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.sysinfo_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [build][x86_64] phase=plan entry=examples/simple_os/arch/x86_64/desktop_e2e_entry.spl target=x86_64-unknown-none backend=cranelift log=on
+- [build][x86_64] phase=spawn timeout_ms=900000
+- [build][x86_64] env: SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$(pwd)/src" SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_OS_LOG_MODE=on PATH="/usr/bin:$PATH"
+- [build][x86_64] cmd: src/compiler_rust/target/debug/simple native-build --source build/os/generated --source src/os --source src/lib --source examples/simple_os --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log on --entry-closure --entry examples/simple_os/arch/x86_64/desktop_e2e_entry.spl --target x86_64-unknown-none -o build/os/simpleos_desktop_e2e_32.elf --linker-script examples/simple_os/arch/x86_64/linker.ld
+- [build][x86_64] phase=native-build OK elapsed_ms=241005
+- simpleos_desktop_qmp_status=pass
+- simpleos_desktop_qmp_reason=pass
+- simpleos_desktop_qmp_pid=2129663
+- simpleos_desktop_qmp_socket=/tmp/simpleos_desktop_qmp_2114920_1780303632052818.sock
+- simpleos_desktop_qmp_serial_log=build/os/simpleos_desktop_qmp_2114920_1780303632052818.log
+- simpleos_desktop_qmp_stderr_log=build/os/simpleos_desktop_qmp_2114920_1780303632052818.log.stderr
+
+## WM Capture Output
+- check=wm_launch_capture_evidence
+- strict_live_capture=0
+- strict_qemu_capture=1
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl:282:45
+-    |
+- 282 |                 if idx < data.len() and data[idx] != 0:
+-    |                                             ^
+- 
+- Use angle brackets: data<...> instead of data[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/common/image/ppm_decode.spl:33:33
+-    |
+-  33 |             while p < n and data[p] != 10:
+-    |                                 ^
+- 
+- Use angle brackets: data<...> instead of data[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl:282:45
+-    |
+- 282 |                 if idx < data.len() and data[idx] != 0:
+-    |                                             ^
+- 
+- Use angle brackets: data<...> instead of data[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/common/image/ppm_decode.spl:33:33
+-    |
+-  33 |             while p < n and data[p] != 10:
+-    |                                 ^
+- 
+- Use angle brackets: data<...> instead of data[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- error: semantic: type `BrowserCompositorBackend` does not implement required method `blit_pixels` from trait `CompositorBackend`
+- spec_path=test/unit/app/ui/wm_runtime_bridge_spec.spl
+- Simple Test Runner v1.0.0-beta
+- 
+- ───────────────────────────────────────────────────────────────
+- Test Discovery
+- ───────────────────────────────────────────────────────────────
+-   Spec files (*_spec.spl):  1
+-   Test files (*_test.spl):  0
+- ───────────────────────────────────────────────────────────────
+- 
+- Running: test/unit/app/ui/wm_runtime_bridge_spec.spl
+- [1/1] test/unit/app/ui/wm_runtime_bridge_spec.spl
+-   [32mPASSED[0m (215ms)
+- 
+- ═══════════════════════════════════════════════════════════════
+- Test Summary
+- ═══════════════════════════════════════════════════════════════
+- Files: 1
+- [32mPassed: 5[0m
+- Failed: 0
+- Duration: 219ms
+- 
+- [32m✓ All tests passed![0m
+- 
+- Slowest tests:
+-        215ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
+- spec_exit_code=0
+- spec_path=test/unit/app/ui/host_wm_runtime_loop_spec.spl
+- Simple Test Runner v1.0.0-beta
+- 
+- ───────────────────────────────────────────────────────────────
+- Test Discovery
+- ───────────────────────────────────────────────────────────────
+-   Spec files (*_spec.spl):  1
+-   Test files (*_test.spl):  0
+- ───────────────────────────────────────────────────────────────
+- 
+- Running: test/unit/app/ui/host_wm_runtime_loop_spec.spl
+- [1/1] test/unit/app/ui/host_wm_runtime_loop_spec.spl
+-   [32mPASSED[0m (1105ms)
+- 
+- ═══════════════════════════════════════════════════════════════
+- Test Summary
+- ═══════════════════════════════════════════════════════════════
+- Files: 1
+- [32mPassed: 2[0m
+- Failed: 0
+- Duration: 1111ms
+- 
+- [32m✓ All tests passed![0m
+- 
+- Slowest tests:
+-       1105ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
+- spec_exit_code=0
+- spec_path=test/unit/os/desktop/wm_runtime_bridge_spec.spl
+- Simple Test Runner v1.0.0-beta
+- 
+- ───────────────────────────────────────────────────────────────
+- Test Discovery
+- ───────────────────────────────────────────────────────────────
+-   Spec files (*_spec.spl):  1
+-   Test files (*_test.spl):  0
+- ───────────────────────────────────────────────────────────────
+- 
+- Running: test/unit/os/desktop/wm_runtime_bridge_spec.spl
+- [1/1] test/unit/os/desktop/wm_runtime_bridge_spec.spl
+-   [32mPASSED[0m (227ms)
+- 
+- ═══════════════════════════════════════════════════════════════
+- Test Summary
+- ═══════════════════════════════════════════════════════════════
+- Files: 1
+- [32mPassed: 5[0m
+- Failed: 0
+- Duration: 232ms
+- 
+- [32m✓ All tests passed![0m
+- 
+- Slowest tests:
+-        227ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
+- spec_exit_code=0
+- spec_path=test/unit/os/compositor/qemu_capture_spec.spl
+- Simple Test Runner v1.0.0-beta
+- 
+- ───────────────────────────────────────────────────────────────
+- Test Discovery
+- ───────────────────────────────────────────────────────────────
+-   Spec files (*_spec.spl):  1
+-   Test files (*_test.spl):  0
+- ───────────────────────────────────────────────────────────────
+- 
+- Running: test/unit/os/compositor/qemu_capture_spec.spl
+- [1/1] test/unit/os/compositor/qemu_capture_spec.spl
+-   [31mFAILED[0m (486ms)
+- 
+- ═══════════════════════════════════════════════════════════════
+- Test Summary
+- ═══════════════════════════════════════════════════════════════
+- Files: 1
+- [32mPassed: 0[0m
+- [31mFailed: 1[0m
+- Duration: 491ms
+- 
+- [31m✗ Some tests failed[0m
+- 
+- Failed files:
+-   - test/unit/os/compositor/qemu_capture_spec.spl
+- 
+- Slowest tests:
+-        486ms  test/unit/os/compositor/qemu_capture_spec.spl
+- spec_exit_code=1
+- spec_path=test/unit/os/compositor/electron_capture_spec.spl
+- Simple Test Runner v1.0.0-beta
+- 
+- ───────────────────────────────────────────────────────────────
+- Test Discovery
+- ───────────────────────────────────────────────────────────────
+-   Spec files (*_spec.spl):  1
+-   Test files (*_test.spl):  0
+- ───────────────────────────────────────────────────────────────
+- 
+- Running: test/unit/os/compositor/electron_capture_spec.spl
+- [1/1] test/unit/os/compositor/electron_capture_spec.spl
+-   [31mFAILED[0m (477ms)
+- 
+- ═══════════════════════════════════════════════════════════════
+- Test Summary
+- ═══════════════════════════════════════════════════════════════
+- Files: 1
+- [32mPassed: 0[0m
+- [31mFailed: 1[0m
+- Duration: 480ms
+- 
+- [31m✗ Some tests failed[0m
+- 
+- Failed files:
+-   - test/unit/os/compositor/electron_capture_spec.spl
+- 
+- Slowest tests:
+-        477ms  test/unit/os/compositor/electron_capture_spec.spl
+- spec_exit_code=1
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl:282:45
+-    |
+- 282 |                 if idx < data.len() and data[idx] != 0:
+-    |                                             ^
+- 
+- Use angle brackets: data<...> instead of data[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/common/image/ppm_decode.spl:33:33
+-    |
+-  33 |             while p < n and data[p] != 10:
+-    |                                 ^
+- 
+- Use angle brackets: data<...> instead of data[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl:282:45
+-    |
+- 282 |                 if idx < data.len() and data[idx] != 0:
+-    |                                             ^
+- 
+- Use angle brackets: data<...> instead of data[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/common/image/ppm_decode.spl:33:33
+-    |
+-  33 |             while p < n and data[p] != 10:
+-    |                                 ^
+- 
+- Use angle brackets: data<...> instead of data[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- error: semantic: type `BrowserCompositorBackend` does not implement required method `blit_pixels` from trait `CompositorBackend`
+- wm_launch_capture_evidence_status=fail
+- wm_launch_capture_evidence_reason=contract-program-failed
+- wm_launch_capture_contract_status=fail
+- wm_launch_capture_spec_status=fail
+- wm_launch_capture_electron_live_status=skipped
+- wm_launch_capture_electron_live_reason=RUN_ELECTRON_LIVE_SMOKE=0
+- wm_launch_capture_qemu_live_status=fail
+- wm_launch_capture_qemu_live_reason=qmp-screendump-failed
+- wm_launch_capture_qemu_live_pixels=0
+- wm_launch_capture_qemu_live_non_black_pixels=0
+- wm_launch_capture_qemu_live_sample_matches=0
+- wm_launch_capture_qemu_live_sample_mismatches=0
+- wm_launch_capture_qemu_live_sample_checksum=0
+- wm_launch_capture_qemu_live_scene_mismatches=0
+- wm_launch_capture_qemu_live_first_mismatch_x=-1
+- wm_launch_capture_qemu_live_first_mismatch_y=-1
+- wm_launch_capture_report_path=build/qemu_gtk_wm_capture_evidence/wm-launch-capture.md

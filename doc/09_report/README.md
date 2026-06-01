@@ -11,6 +11,12 @@ Implementation reports, completion logs, and session transcripts from developmen
 | session/ | Raw session logs from development sessions | 31 |
 | misc/ | Miscellaneous reports and analyses | 792 |
 
+## Current Root Reports
+
+| Report | Status | Notes |
+|--------|--------|-------|
+| [qemu_gtk_wm_capture_evidence_2026-06-01.md](qemu_gtk_wm_capture_evidence_2026-06-01.md) | Fail | QEMU GTK WM capture evidence. Auto QMP launch passed, but the live capture contract failed with `contract-program-failed` and QMP screendump failure evidence. |
+
 ## Related
 
 - [Tracking](../08_tracking/) — bug, test, and todo databases
