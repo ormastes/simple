@@ -788,6 +788,68 @@ pub fn rt_file_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+pub fn rt_file_wrap_smf_dynlib(args: &[Value]) -> Result<Value, CompileError> {
+    let input_path = extract_path(args, 0)?;
+    let output_path = extract_path(args, 1)?;
+    let arch_code = match args.get(2) {
+        Some(Value::Int(n)) => (*n).clamp(0, 255) as u8,
+        Some(Value::UInt { value, .. }) => (*value).min(255) as u8,
+        _ => 0,
+    };
+    let mut out = match fs::read(&input_path) {
+        Ok(bytes) if !bytes.is_empty() => bytes,
+        _ => return Ok(Value::Bool(false)),
+    };
+    let stub_len = out.len() as u32;
+    out.reserve(128);
+    out.extend_from_slice(&[83, 77, 70, 0]);
+    while out.len() < stub_len as usize + 52 {
+        out.push(0);
+    }
+    out.extend_from_slice(&stub_len.to_le_bytes());
+    out.extend_from_slice(&stub_len.to_le_bytes());
+    out.push(2);
+    out.push(arch_code);
+    out.push(0);
+    while out.len() < stub_len as usize + 128 {
+        out.push(0);
+    }
+    Ok(Value::Bool(fs::write(&output_path, out).is_ok()))
+}
+
+pub fn rt_file_extract_smf_dynlib(args: &[Value]) -> Result<Value, CompileError> {
+    let input_path = extract_path(args, 0)?;
+    let output_path = extract_path(args, 1)?;
+    let bytes = match fs::read(&input_path) {
+        Ok(bytes) if bytes.len() >= 128 => bytes,
+        _ => return Ok(Value::Bool(false)),
+    };
+    let header_offset = bytes.len() - 128;
+    if bytes[header_offset..header_offset + 4] != [83, 77, 70, 0] {
+        return Ok(Value::Bool(false));
+    }
+    let stub_size = u32::from_le_bytes([
+        bytes[header_offset + 52],
+        bytes[header_offset + 53],
+        bytes[header_offset + 54],
+        bytes[header_offset + 55],
+    ]) as usize;
+    if bytes[header_offset + 60] != 2 || stub_size == 0 || stub_size > header_offset {
+        return Ok(Value::Bool(false));
+    }
+    let stub = &bytes[..stub_size];
+    let has_elf = stub.len() >= 4 && stub[0..4] == [0x7F, 0x45, 0x4C, 0x46];
+    let has_macho = stub.len() >= 4
+        && ((stub[0] == 0xFE && stub[1] == 0xED && stub[2] == 0xFA && (stub[3] == 0xCE || stub[3] == 0xCF))
+            || ((stub[0] == 0xCE || stub[0] == 0xCF) && stub[1] == 0xFA && stub[2] == 0xED && stub[3] == 0xFE)
+            || (stub[0] == 0xCA && stub[1] == 0xFE && stub[2] == 0xBA && stub[3] == 0xBE)
+            || (stub[0] == 0xBE && stub[1] == 0xBA && stub[2] == 0xFE && stub[3] == 0xCA));
+    if !has_elf && !has_macho {
+        return Ok(Value::Bool(false));
+    }
+    Ok(Value::Bool(fs::write(&output_path, stub).is_ok()))
+}
+
 /// Truncate (or zero-extend) file at `path` to exactly `size` bytes.
 ///
 /// IF-13 wave-4d: the interpreter cannot build a multi-MiB byte buffer in

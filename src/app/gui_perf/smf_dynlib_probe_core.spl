@@ -6,8 +6,6 @@
 # registry_symbol_only until the loader maps executable SMF code into process
 # memory; this prevents timing an unsafe raw ELF/SMF virtual address call.
 
-use os.posix.dynlib.{dynlib_open, dynlib_symbol, dynlib_symbol_is_process_callable, dynlib_close, dynlib_is_valid}
-use os.kernel.loader.smf.{smf_extract_library_stub}
 use std.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}
 use std.gui.pure_core.{GuiInputEvent, gui_pointer_event, gui_key_event, gui_dispatch_events}
 use std.gui.pure_smf_dynlib_perf.{GuiDynlibPerfReport, gui_dynlib_perf_report}
@@ -15,8 +13,7 @@ use std.gui.pure_smf_dynlib_perf.{GuiDynlibPerfReport, gui_dynlib_perf_report}
 extern fn rt_env_get(key: text) -> text
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_platform_name() -> text
-extern fn rt_file_read_bytes(path: text) -> [u8]?
-extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_extract_smf_dynlib(input_path: text, output_path: text) -> bool
 
 class GuiDynlibProbeConfig:
     artifact_path: text
@@ -81,14 +78,8 @@ fn gui_dynlib_probe_load_host_evidence(config: GuiDynlibProbeConfig) -> GuiDynli
     GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "dynlib_symbol_call", symbol_resolved: true, fallback_used: false)
 
 fn gui_dynlib_probe_extract_smf_library_to_cache(artifact_path: text) -> text:
-    val package_bytes = rt_file_read_bytes(artifact_path) ?? []
-    if package_bytes.len() == 0:
-        return ""
-    val stub = smf_extract_library_stub(package_bytes)
-    if stub.is_err():
-        return ""
     val cache_path = gui_dynlib_probe_smf_cache_path(artifact_path, rt_platform_name())
-    if not rt_file_write_bytes(cache_path, stub.unwrap()):
+    if not rt_file_extract_smf_dynlib(artifact_path, cache_path):
         return ""
     cache_path
 
@@ -114,18 +105,8 @@ fn gui_dynlib_probe_load_evidence(config: GuiDynlibProbeConfig) -> GuiDynlibProb
         val smf_host = gui_dynlib_probe_load_smf_host_evidence(config)
         if smf_host.call_source == "dynlib_symbol_call":
             return smf_host
-    val lib = dynlib_open(config.artifact_path, 0)
-    if not dynlib_is_valid(lib):
-        return GuiDynlibProbeLoadEvidence(loader_mode: "direct_simple", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
-    val sym = dynlib_symbol(lib, config.symbol_name)
-    if sym < 0:
-        dynlib_close(lib)
-        return GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
-    if dynlib_symbol_is_process_callable(lib, config.symbol_name):
-        dynlib_close(lib)
-        return GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "dynlib_symbol_call", symbol_resolved: true, fallback_used: false)
-    dynlib_close(lib)
-    GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "registry_symbol_only", symbol_resolved: true, fallback_used: true)
+        return smf_host
+    GuiDynlibProbeLoadEvidence(loader_mode: "direct_simple", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
 
 fn gui_dynlib_probe_workload(iteration: i32) -> [GuiInputEvent]:
     [

@@ -961,6 +961,101 @@ pub unsafe extern "C" fn rt_file_write_bytes(
     std::fs::write(path_str, data).is_ok()
 }
 
+/// Wrap a host native shared library in a role-2 SMF envelope.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_wrap_smf_dynlib(
+    input_path_ptr: *const u8,
+    input_path_len: u64,
+    output_path_ptr: *const u8,
+    output_path_len: u64,
+    arch_code: i64,
+) -> bool {
+    if input_path_ptr.is_null() || output_path_ptr.is_null() {
+        return false;
+    }
+    let input_path_bytes = std::slice::from_raw_parts(input_path_ptr, input_path_len as usize);
+    let output_path_bytes = std::slice::from_raw_parts(output_path_ptr, output_path_len as usize);
+    let input_path = match std::str::from_utf8(input_path_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let output_path = match std::str::from_utf8(output_path_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let mut out = match std::fs::read(input_path) {
+        Ok(bytes) if !bytes.is_empty() => bytes,
+        _ => return false,
+    };
+    let stub_len = out.len() as u32;
+    out.reserve(128);
+    out.extend_from_slice(&[83, 77, 70, 0]);
+    while out.len() < stub_len as usize + 52 {
+        out.push(0);
+    }
+    out.extend_from_slice(&stub_len.to_le_bytes());
+    out.extend_from_slice(&stub_len.to_le_bytes());
+    out.push(2);
+    out.push(arch_code.clamp(0, 255) as u8);
+    out.push(0);
+    while out.len() < stub_len as usize + 128 {
+        out.push(0);
+    }
+    std::fs::write(output_path, out).is_ok()
+}
+
+/// Extract the native shared-library stub from a role-2 SMF envelope.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_extract_smf_dynlib(
+    input_path_ptr: *const u8,
+    input_path_len: u64,
+    output_path_ptr: *const u8,
+    output_path_len: u64,
+) -> bool {
+    if input_path_ptr.is_null() || output_path_ptr.is_null() {
+        return false;
+    }
+    let input_path_bytes = std::slice::from_raw_parts(input_path_ptr, input_path_len as usize);
+    let output_path_bytes = std::slice::from_raw_parts(output_path_ptr, output_path_len as usize);
+    let input_path = match std::str::from_utf8(input_path_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let output_path = match std::str::from_utf8(output_path_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let bytes = match std::fs::read(input_path) {
+        Ok(bytes) if bytes.len() >= 128 => bytes,
+        _ => return false,
+    };
+    let header_offset = bytes.len() - 128;
+    if bytes[header_offset..header_offset + 4] != [83, 77, 70, 0] {
+        return false;
+    }
+    let stub_size = u32::from_le_bytes([
+        bytes[header_offset + 52],
+        bytes[header_offset + 53],
+        bytes[header_offset + 54],
+        bytes[header_offset + 55],
+    ]) as usize;
+    let role = bytes[header_offset + 60];
+    if role != 2 || stub_size == 0 || stub_size > header_offset {
+        return false;
+    }
+    let stub = &bytes[..stub_size];
+    let has_elf = stub.len() >= 4 && stub[0..4] == [0x7F, 0x45, 0x4C, 0x46];
+    let has_macho = stub.len() >= 4
+        && ((stub[0] == 0xFE && stub[1] == 0xED && stub[2] == 0xFA && (stub[3] == 0xCE || stub[3] == 0xCF))
+            || ((stub[0] == 0xCE || stub[0] == 0xCF) && stub[1] == 0xFA && stub[2] == 0xED && stub[3] == 0xFE)
+            || (stub[0] == 0xCA && stub[1] == 0xFE && stub[2] == 0xBA && stub[3] == 0xBE)
+            || (stub[0] == 0xBE && stub[1] == 0xBA && stub[2] == 0xFE && stub[3] == 0xCA));
+    if !has_elf && !has_macho {
+        return false;
+    }
+    std::fs::write(output_path, stub).is_ok()
+}
+
 /// Move file from source to destination
 /// Unlike rename, this works across filesystems by copying then deleting
 #[no_mangle]

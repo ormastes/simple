@@ -950,6 +950,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_truncate", file_io::rt_file_truncate);
     insert_simple!("rt_file_unlock", file_io::rt_file_unlock);
     insert_simple!("rt_file_write_bytes", file_io::rt_file_write_bytes);
+    insert_simple!("rt_file_wrap_smf_dynlib", file_io::rt_file_wrap_smf_dynlib);
+    insert_simple!("rt_file_extract_smf_dynlib", file_io::rt_file_extract_smf_dynlib);
     insert_simple!("rt_file_write_text_at", file_io::rt_file_write_text_at);
     insert_simple!("rt_file_write_text", file_io::rt_file_write_text);
     insert_simple!("rt_free", memory::rt_free);

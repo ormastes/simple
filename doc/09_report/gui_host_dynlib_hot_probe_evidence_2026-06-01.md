@@ -37,3 +37,29 @@ GUI_DYNLIB_PERF artifact=build/gui/libpure_gui_hot.so loader=host_dynlib symbol=
 The pure GUI i64 hot symbol is callable through a real host dynlib and is well
 below the 1000 us p99 target. The row correctly fails because the requested
 acceptance loader is `smf_dynlib`, not `host_dynlib`.
+
+## SMF-Wrapped Host Dynlib Evidence
+
+After adding the role-2 SMF wrapper/extractor path, the current Linux host can
+wrap the same pure GUI shared library into an SMF envelope and measure the hot
+symbol from the SMF artifact:
+
+```bash
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple compile src/app/gui_perf/smf_wrap_host_dynlib.spl --native --strip -o build/gui/smf_wrap_host_dynlib
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple compile src/app/gui_perf/smf_dynlib_probe.spl --native --strip -o build/gui/smf_dynlib_probe
+SIMPLE_GUI_DYNLIB_INPUT=build/gui/libpure_gui_hot.so SIMPLE_GUI_SMF_OUTPUT=build/gui/pure_gui_hot.smf ./build/gui/smf_wrap_host_dynlib
+SIMPLE_GUI_DYNLIB_ARTIFACT=build/gui/pure_gui_hot.smf ./build/gui/smf_dynlib_probe
+```
+
+Result:
+
+```text
+GUI_SMF_WRAP ok=true input=build/gui/libpure_gui_hot.so output=build/gui/pure_gui_hot.smf
+GUI_DYNLIB_PERF artifact=build/gui/pure_gui_hot.smf loader=smf_dynlib symbol=gui_dynlib_hot_probe_tick call_source=dynlib_symbol_call samples=128 warmup=16 p50_us=1 p95_us=1 p99_us=1 max_us=1 threshold_us=1000 pass=true error=
+```
+
+This is real SMF artifact evidence on the Linux host: the probe extracts the
+role-2 native library stub from the SMF envelope outside the measured loop,
+opens the extracted dynlib once, resolves the symbol, and times direct symbol
+calls. The remaining acceptance evidence still needs the same row from a macOS
+arm64 `.dylib` wrapped in SMF.

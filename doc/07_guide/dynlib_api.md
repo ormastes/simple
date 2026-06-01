@@ -75,6 +75,12 @@ if dynlib_is_valid(lib):
   `src/lib/nogc_sync_mut/sffi/dynamic.spl` wraps `spl_dlopen`, `spl_dlsym`, and
   `spl_wffi_call_i64` for `.so`/`.dylib` host libraries. That proves host dynlib
   calls, not SMF dynlib acceptance.
+- **Host SMF dynlib envelopes are supported for perf probes**:
+  `rt_file_wrap_smf_dynlib` writes a role-2 SMF envelope around a host native
+  shared library, and `rt_file_extract_smf_dynlib` extracts the embedded native
+  library before `spl_dlopen`. The GUI probe accepts this only when the measured
+  row reports `loader=smf_dynlib`, `call_source=dynlib_symbol_call`, no
+  fallback, and p99 below the configured threshold.
 
 ## Testing
 

@@ -88,6 +88,8 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_append_text"
         | "rt_file_write_bytes"
         | "rt_file_move"
+        | "rt_file_wrap_smf_dynlib"
+        | "rt_file_extract_smf_dynlib"
         | "rt_file_create_excl" => Some(&[0, 1]),
 
         // Directory operations

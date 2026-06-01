@@ -1,14 +1,15 @@
-# GUI SMF dynlib executable mapping missing
+# GUI macOS SMF dynlib hot-call evidence missing
 
 Date: 2026-06-01
 
 ## Summary
 
-The pure GUI SMF/dynlib performance probe can open and resolve dynamic-library
-symbols through the existing `DynLibKind` facade, and the Rust runtime now has
-the declared `rt_dyncall_*` externs. The remaining blocker is that current SMF
-registry symbol resolution does not prove the resolved address is mapped into
-the host process as executable code.
+The pure GUI SMF/dynlib performance probe now has a host SMF envelope path:
+wrap a native shared library as a role-2 SMF artifact, extract the embedded
+native library outside the hot loop, open it with the host dynlib loader, and
+measure direct symbol calls. Linux host evidence passes below the 1 ms target.
+The remaining blocker is macOS arm64 evidence for the same path with a `.dylib`
+artifact.
 
 ## Evidence
 
@@ -29,34 +30,31 @@ pointers safely.
 ## Current Probe Behavior
 
 `src/app/gui_perf/smf_dynlib_probe.spl` emits a machine-readable
-`GUI_DYNLIB_PERF` row, but it fails closed while SMF executable mapping is
-missing.
+`GUI_DYNLIB_PERF` row. It fails closed without an artifact or when extraction /
+symbol resolution fails.
 Without an artifact configured, the current host reports:
 
 ```text
 GUI_DYNLIB_PERF artifact= loader=direct_simple symbol=gui_dynlib_hot_probe_tick call_source=direct_simple samples=128 warmup=16 p50_us=738 p95_us=1007 p99_us=1134 max_us=1233 threshold_us=1000 pass=false error=missing-artifact-path
 ```
 
-When SMF registry symbol resolution succeeds without executable mapping
-evidence, the probe must report `call_source=registry_symbol_only` and remain
-`pass=false` until the measured path uses `call_source=dynlib_symbol_call`.
+The accepted row must report `loader=smf_dynlib`,
+`call_source=dynlib_symbol_call`, `fallback_used=false`, and `p99_us < 1000`.
 
 ## Impact
 
-This blocks completion of the macOS arm64 acceptance gate:
+This still blocks completion of the macOS arm64 acceptance gate:
 
 - load pure GUI as SMF/dynlib,
-- resolve `gui_dispatch_events`,
+- resolve the pure GUI hot ABI symbol,
 - call the resolved symbol in the measured hot path,
 - prove p99 response is below 1000 us without fallback.
 
 ## Required Fix
 
-Implement and verify true SMF executable mapping for the pure GUI SMF artifact,
-or replace the registry path with an equivalent SMF dynlib symbol invocation API
-that returns process-callable function pointers. Then update
-`src/app/gui_perf/smf_dynlib_probe_core.spl` to collect samples from the real
-dynlib call path and report `call_source=dynlib_symbol_call`.
+Run the new host SMF wrapper/probe flow on macOS arm64 with a `.dylib` built
+from `src/app/gui_perf/pure_gui_hot_dynlib_export.spl`, then record the
+`GUI_DYNLIB_PERF` row as macOS evidence.
 
 ## Update: 2026-06-01
 
@@ -104,9 +102,24 @@ SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gui/pure
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gui/pure_smf_dynlib_perf_spec.spl --mode=interpreter --no-cache
 ```
 
-Remaining gap: there is still no configured macOS arm64 SMF/dynlib artifact in
-the current evidence run, so the CLI correctly reports `pass=false` with
-`error=missing-artifact-path`.
+## Update: 2026-06-01 SMF-wrapped host dynlib path
+
+The probe now supports a real SMF artifact path on the host:
+
+- `src/app/gui_perf/smf_wrap_host_dynlib.spl` wraps a host `.so`/`.dylib` in a
+  role-2 SMF envelope through `rt_file_wrap_smf_dynlib`.
+- `src/app/gui_perf/smf_dynlib_probe_core.spl` extracts the native library stub
+  through `rt_file_extract_smf_dynlib`, opens it with `spl_dlopen`, resolves
+  `gui_dynlib_hot_probe_tick`, and samples `spl_wffi_call_i64` in the hot loop.
+
+Current Linux host evidence:
+
+```text
+GUI_DYNLIB_PERF artifact=build/gui/pure_gui_hot.smf loader=smf_dynlib symbol=gui_dynlib_hot_probe_tick call_source=dynlib_symbol_call samples=128 warmup=16 p50_us=1 p95_us=1 p99_us=1 max_us=1 threshold_us=1000 pass=true error=
+```
+
+Remaining gap: there is still no macOS arm64 `.dylib`-backed SMF evidence row
+from a mac host.
 
 Attempted Rust unit-test command:
 

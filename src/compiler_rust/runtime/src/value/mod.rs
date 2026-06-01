@@ -400,6 +400,8 @@ pub use sffi::{
     rt_bytes_to_text,
     rt_text_to_bytes,
     rt_file_write_bytes,
+    rt_file_wrap_smf_dynlib,
+    rt_file_extract_smf_dynlib,
     rt_file_move,
     // Directory ops
     rt_dir_create,
