@@ -208,7 +208,7 @@ Leverage existing `AiCliManifest` capability system:
 - [ ] File access: enforce `file_grants` at VFS layer, deny undeclared paths
 - [ ] Network: enforce `network_grants` at socket layer, allowlist endpoints only
 - [ ] Process: enforce `process_grants`, deny undeclared spawns
-- [ ] Credentials: enforce `credential_grants`, block ambient env var reads
+- [x] Credentials: enforce `credential_grants`, block ambient env var reads
 - [x] Compare with Deno permissions model (`--allow-read`, `--allow-net`)
 - [x] Add Node.js `--experimental-permission`-style flags to QuickJS launcher contract
 - [x] Test: all denial paths from existing `simpleos_ai_cli_js_node_port_spec.spl` and executable Node API conformance coverage
