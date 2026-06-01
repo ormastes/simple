@@ -22,7 +22,25 @@ entity rv32i_core is
         -- Semihosting interface
         semi_trigger : out std_logic;
         semi_op      : out std_logic_vector(31 downto 0);
-        semi_param   : out std_logic_vector(31 downto 0)
+        semi_param   : out std_logic_vector(31 downto 0);
+        -- RISC-V Formal Interface
+        rvfi_valid     : out std_logic;
+        rvfi_order     : out std_logic_vector(63 downto 0);
+        rvfi_insn      : out std_logic_vector(31 downto 0);
+        rvfi_trap      : out std_logic;
+        rvfi_rs1_addr  : out std_logic_vector(4 downto 0);
+        rvfi_rs2_addr  : out std_logic_vector(4 downto 0);
+        rvfi_rs1_rdata : out std_logic_vector(31 downto 0);
+        rvfi_rs2_rdata : out std_logic_vector(31 downto 0);
+        rvfi_rd_addr   : out std_logic_vector(4 downto 0);
+        rvfi_rd_wdata  : out std_logic_vector(31 downto 0);
+        rvfi_pc_rdata  : out std_logic_vector(31 downto 0);
+        rvfi_pc_wdata  : out std_logic_vector(31 downto 0);
+        rvfi_mem_addr  : out std_logic_vector(31 downto 0);
+        rvfi_mem_rmask : out std_logic_vector(3 downto 0);
+        rvfi_mem_wmask : out std_logic_vector(3 downto 0);
+        rvfi_mem_rdata : out std_logic_vector(31 downto 0);
+        rvfi_mem_wdata : out std_logic_vector(31 downto 0)
     );
 end entity rv32i_core;
 
@@ -51,6 +69,8 @@ architecture rtl of rv32i_core is
     signal semi_param_r : std_logic_vector(31 downto 0) := (others => '0');
     -- Suppress normal execution during semihost sequence
     signal semi_suppress : std_logic := '0';
+    signal rvfi_order_r : unsigned(63 downto 0) := (others => '0');
+    signal dmem_mask_w : std_logic_vector(3 downto 0);
 begin
     imem_addr <= pc;
     pc_plus4  <= std_logic_vector(unsigned(pc) + 4);
@@ -107,9 +127,32 @@ begin
     dmem_re    <= mem_read_w;
     dmem_width <= funct3_w(1 downto 0);
 
+    with funct3_w(1 downto 0) select dmem_mask_w <=
+        "0001" when "00",
+        "0011" when "01",
+        "1111" when others;
+
     semi_trigger <= semi_trig_r;
     semi_op      <= semi_op_r;
     semi_param   <= semi_param_r;
+
+    rvfi_valid     <= '1' when (halt_r = '0' and semi_suppress = '0') else '0';
+    rvfi_order     <= std_logic_vector(rvfi_order_r);
+    rvfi_insn      <= imem_data;
+    rvfi_trap      <= halt_r;
+    rvfi_rs1_addr  <= rs1_addr;
+    rvfi_rs2_addr  <= rs2_addr;
+    rvfi_rs1_rdata <= rs1_data;
+    rvfi_rs2_rdata <= rs2_data;
+    rvfi_rd_addr   <= rd_addr;
+    rvfi_rd_wdata  <= rd_data when (reg_write_w = '1' and rd_addr /= "00000" and semi_suppress = '0') else (others => '0');
+    rvfi_pc_rdata  <= pc;
+    rvfi_pc_wdata  <= pc_next;
+    rvfi_mem_addr  <= alu_result;
+    rvfi_mem_rmask <= dmem_mask_w when mem_read_w = '1' else (others => '0');
+    rvfi_mem_wmask <= dmem_mask_w when (mem_write_w = '1' and semi_suppress = '0') else (others => '0');
+    rvfi_mem_rdata <= dmem_rdata;
+    rvfi_mem_wdata <= rs2_data;
 
     -- PC update + semihosting detection + halt
     process(clk, reset_n)
@@ -120,10 +163,14 @@ begin
             semi_phase <= 0;
             semi_trig_r <= '0';
             semi_suppress <= '0';
+            rvfi_order_r <= (others => '0');
         elsif rising_edge(clk) then
             semi_trig_r <= '0';  -- pulse
 
             if halt_r = '0' then
+                if semi_suppress = '0' then
+                    rvfi_order_r <= rvfi_order_r + 1;
+                end if;
                 -- Semihosting magic sequence detection
                 if imem_data = SEMI_ENTRY and semi_phase = 0 then
                     -- Phase 1: slli zero,zero,0x1f detected

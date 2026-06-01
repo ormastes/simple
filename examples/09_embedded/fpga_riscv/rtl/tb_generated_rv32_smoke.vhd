@@ -60,7 +60,24 @@ begin
             halted => halted,
             semi_trigger => semi_trigger,
             semi_op => semi_op,
-            semi_param => semi_param
+            semi_param => semi_param,
+            rvfi_valid => open,
+            rvfi_order => open,
+            rvfi_insn => open,
+            rvfi_trap => open,
+            rvfi_rs1_addr => open,
+            rvfi_rs2_addr => open,
+            rvfi_rs1_rdata => open,
+            rvfi_rs2_rdata => open,
+            rvfi_rd_addr => open,
+            rvfi_rd_wdata => open,
+            rvfi_pc_rdata => open,
+            rvfi_pc_wdata => open,
+            rvfi_mem_addr => open,
+            rvfi_mem_rmask => open,
+            rvfi_mem_wmask => open,
+            rvfi_mem_rdata => open,
+            rvfi_mem_wdata => open
         );
 
     clk <= not clk after CLK_PERIOD / 2 when not done else '0';
