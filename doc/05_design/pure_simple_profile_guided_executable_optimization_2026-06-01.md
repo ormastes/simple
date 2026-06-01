@@ -265,10 +265,11 @@ coverage to target-backed proof by documentation alone.
 `BreakpointProbeSourceArtifact` is the generated-source companion to that plan.
 It derives the staged build directory and C source path, emits freestanding C
 with arch-specific original bytes and trap bytes, performs patch, restore,
-rearm, cleanup, and icache flush calls, and embeds the exact
-`simple-breakpoint-evidence;...` line the QEMU parser consumes. The staging API
-writes only generated build output; the implementation remains Simple-owned and
-Rust remains seed/bootstrap only.
+rearm, cleanup, icache flush calls, and QEMU serial writes, and embeds the
+parser-valid `simple-breakpoint-evidence;...` line the QEMU parser consumes.
+The staging API writes only generated build output and deletes the old source
+before rewriting so repeated staging cannot leave stale tail bytes. The
+implementation remains Simple-owned and Rust remains seed/bootstrap only.
 
 ### Overhead Protection
 

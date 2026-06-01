@@ -73,9 +73,10 @@ Current adapter slice:
   RISC-V/RVC. The same Simple module now generates freestanding per-arch C
   probe sources that patch a trap, restore the original instruction, rearm the
   trap, restore for cleanup, flush icache where the architecture requires it,
-  and emit the serial evidence contract. Probe plans are non-proof until the
-  source is staged, the compiler creates an ELF, QEMU runs it, and serial
-  evidence is captured.
+  write to the QEMU serial device, and emit parser-valid serial evidence. Probe
+  source staging is now a Simple entrypoint, while target proof remains
+  fail-closed until the compiler creates bootable ELFs, QEMU runs them, and
+  serial evidence is captured.
 
 ## Data Flow
 

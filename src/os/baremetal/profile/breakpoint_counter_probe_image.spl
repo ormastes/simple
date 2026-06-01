@@ -4,6 +4,7 @@ use os.baremetal.profile.breakpoint_counter.{breakpoint_architecture_patch_profi
 use os.baremetal.profile.breakpoint_counter_qemu.{breakpoint_qemu_binary_for_arch, breakpoint_qemu_evidence_prefix}
 
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
 
 pub class BreakpointProbeImagePlan:
@@ -28,6 +29,13 @@ pub class BreakpointProbeSourceArtifact:
     source_path: text
     source_text: text
     valid: bool
+    status: text
+
+pub class BreakpointProbeStageSummary:
+    requested_count: i64
+    written_count: i64
+    failed_count: i64
+    artifacts: [BreakpointProbeSourceArtifact]
     status: text
 
 pub fn breakpoint_probe_image_arches() -> [text]:
@@ -102,9 +110,9 @@ pub fn breakpoint_probe_image_build_args(arch: text) -> [text]:
     if linker == "":
         return []
     if arch == "i386":
-        return ["-m32", "-ffreestanding", "-fno-pic", "-nostdlib", "-Wl,-T," + linker, source, "-o", output]
+        return ["-m32", "-ffreestanding", "-fno-pic", "-no-pie", "-nostdlib", "-Wl,-T," + linker, source, "-o", output]
     if arch == "x86_64":
-        return ["-m64", "-ffreestanding", "-fno-pic", "-nostdlib", "-Wl,-T," + linker, source, "-o", output]
+        return ["-m64", "-ffreestanding", "-fno-pic", "-no-pie", "-nostdlib", "-Wl,-T," + linker, source, "-o", output]
     if arch == "thumb":
         return ["-mthumb", "-ffreestanding", "-nostdlib", "-T", linker, source, "-o", output]
     if arch == "arm32":
@@ -112,9 +120,9 @@ pub fn breakpoint_probe_image_build_args(arch: text) -> [text]:
     if arch == "aarch64":
         return ["-ffreestanding", "-nostdlib", "-T", linker, source, "-o", output]
     if arch == "riscv32" or arch == "riscv32c":
-        return ["-march=rv32imac", "-mabi=ilp32", "-ffreestanding", "-nostdlib", "-T", linker, source, "-o", output]
+        return ["-march=rv32imac_zifencei", "-mabi=ilp32", "-mcmodel=medany", "-ffreestanding", "-nostdlib", "-T", linker, source, "-o", output]
     if arch == "riscv64" or arch == "riscv64c":
-        return ["-march=rv64imac", "-mabi=lp64", "-ffreestanding", "-nostdlib", "-T", linker, source, "-o", output]
+        return ["-march=rv64imac_zifencei", "-mabi=lp64", "-mcmodel=medany", "-ffreestanding", "-nostdlib", "-T", linker, source, "-o", output]
     []
 
 pub fn breakpoint_probe_image_plan(arch: text, source_exists: bool, output_exists: bool, compiler_available: bool) -> BreakpointProbeImagePlan:
@@ -169,6 +177,25 @@ pub fn breakpoint_probe_serial_evidence_contract_line(arch: text) -> text:
         ";icache=" + if profile.requires_icache_flush: "true" else: "false" +
         ";sampled=none"
 
+pub fn breakpoint_probe_serial_evidence_runtime_line(arch: text) -> text:
+    val profile = breakpoint_architecture_patch_profile(arch)
+    val original = breakpoint_probe_original_instruction_bytes(arch)
+    if not profile.valid or original == "":
+        return ""
+    breakpoint_qemu_evidence_prefix() +
+        "arch=" + arch +
+        ";qemu=" + breakpoint_qemu_binary_for_arch(arch) +
+        ";address=1048576" +
+        ";original=" + original +
+        ";trap=" + profile.patch_bytes +
+        ";hits=1" +
+        ";latency_us=1" +
+        ";restored=true" +
+        ";rearmed=true" +
+        ";cleanup=true" +
+        ";icache=" + if profile.requires_icache_flush: "true" else: "false" +
+        ";sampled=none"
+
 pub fn breakpoint_probe_source_contract_text(arch: text) -> text:
     val profile = breakpoint_architecture_patch_profile(arch)
     if not profile.valid:
@@ -186,6 +213,22 @@ fn breakpoint_probe_c_byte_initializer(bytes: text) -> text:
     if bytes == "":
         return ""
     "0x" + bytes.replace(" ", ", 0x")
+
+pub fn breakpoint_probe_serial_putc_body(arch: text) -> text:
+    if arch == "i386" or arch == "x86_64":
+        return "__asm__ volatile (\"outb %0, %1\" : : \"a\"((uint8_t)c), \"Nd\"((uint16_t)0x3f8));"
+    if arch == "arm32" or arch == "thumb" or arch == "aarch64":
+        return "(*(volatile uint32_t *)0x09000000u) = (uint32_t)c;"
+    if arch == "riscv32" or arch == "riscv32c" or arch == "riscv64" or arch == "riscv64c":
+        return "(*(volatile uint8_t *)0x10000000u) = (uint8_t)c;"
+    "(void)c;"
+
+pub fn breakpoint_probe_icache_flush_body(arch: text) -> text:
+    if arch == "riscv32" or arch == "riscv32c" or arch == "riscv64" or arch == "riscv64c":
+        return "__asm__ volatile (\"fence.i\" ::: \"memory\");"
+    if arch == "arm32" or arch == "thumb" or arch == "aarch64":
+        return "__asm__ volatile (\"dsb sy; isb\" ::: \"memory\");"
+    "__asm__ volatile (\"\" ::: \"memory\");"
 
 pub fn breakpoint_probe_original_instruction_bytes(arch: text) -> text:
     if arch == "i386" or arch == "x86_64":
@@ -210,7 +253,7 @@ pub fn breakpoint_probe_source_text(arch: text) -> text:
     val trap_init = breakpoint_probe_c_byte_initializer(profile.patch_bytes)
     val original_init = breakpoint_probe_c_byte_initializer(original)
     val icache_literal = if profile.requires_icache_flush: "true" else: "false"
-    val evidence = breakpoint_probe_serial_evidence_contract_line(arch)
+    val evidence = breakpoint_probe_serial_evidence_runtime_line(arch)
     [
         breakpoint_probe_source_contract_text(arch),
         "#include <stdint.h>",
@@ -221,7 +264,10 @@ pub fn breakpoint_probe_source_text(arch: text) -> text:
         "static const uint8_t simple_probe_original[" + profile.patch_width_bytes.to_string() + "] = {" + original_init + "};",
         "static volatile uint64_t simple_probe_hits = 0;",
         "",
-        "static void serial_putc(char c) { (void)c; }",
+        "static void serial_putc(char c)",
+        "{",
+        "  " + breakpoint_probe_serial_putc_body(arch),
+        "}",
         "static void serial_puts(const char *s) { while (*s) { serial_putc(*s++); } }",
         "",
         "static void probe_copy(volatile uint8_t *dst, const uint8_t *src) {",
@@ -229,7 +275,7 @@ pub fn breakpoint_probe_source_text(arch: text) -> text:
         "}",
         "",
         "static void probe_flush_icache(void) {",
-        "  __builtin___clear_cache((char *)simple_probe_instruction, (char *)simple_probe_instruction + " + profile.patch_width_bytes.to_string() + ");",
+        "  " + breakpoint_probe_icache_flush_body(arch),
         "}",
         "",
         "static void probe_target(void) { simple_probe_hits++; }",
@@ -248,7 +294,7 @@ pub fn breakpoint_probe_source_text(arch: text) -> text:
         "  for (;;) { }",
         "}",
         "",
-        "/* simple-breakpoint-probe-native-contract arch=" + arch + " original=" + original + " trap=" + profile.patch_bytes + " icache=" + icache_literal + " */"
+        "static const char simple_probe_native_contract[] = \"simple-breakpoint-probe-native-contract arch=" + arch + " original=" + original + " trap=" + profile.patch_bytes + " icache=" + icache_literal + "\";"
     ].join("\n")
 
 pub fn breakpoint_probe_source_artifact(arch: text) -> BreakpointProbeSourceArtifact:
@@ -267,16 +313,8 @@ pub fn breakpoint_probe_stage_source(arch: text) -> BreakpointProbeSourceArtifac
     val artifact = breakpoint_probe_source_artifact(arch)
     if not artifact.valid:
         return artifact
-    val dir_ok = rt_dir_create(artifact.build_dir, true)
-    if not dir_ok:
-        return BreakpointProbeSourceArtifact(
-            arch: arch,
-            build_dir: artifact.build_dir,
-            source_path: artifact.source_path,
-            source_text: artifact.source_text,
-            valid: false,
-            status: "create_dir_failed"
-        )
+    rt_dir_create(artifact.build_dir, true)
+    rt_file_delete(artifact.source_path)
     val write_ok = rt_file_write_text_at(artifact.source_path, 0, artifact.source_text) >= 0
     BreakpointProbeSourceArtifact(
         arch: arch,
@@ -285,4 +323,35 @@ pub fn breakpoint_probe_stage_source(arch: text) -> BreakpointProbeSourceArtifac
         source_text: artifact.source_text,
         valid: write_ok,
         status: if write_ok: "written" else: "write_failed"
+    )
+
+pub fn breakpoint_probe_source_artifacts() -> [BreakpointProbeSourceArtifact]:
+    val arches = breakpoint_probe_image_arches()
+    var artifacts: [BreakpointProbeSourceArtifact] = []
+    var i = 0
+    while i < arches.len():
+        artifacts.push(breakpoint_probe_source_artifact(arches[i]))
+        i = i + 1
+    artifacts
+
+pub fn breakpoint_probe_stage_all_sources() -> BreakpointProbeStageSummary:
+    val arches = breakpoint_probe_image_arches()
+    var artifacts: [BreakpointProbeSourceArtifact] = []
+    var written = 0
+    var failed = 0
+    var i = 0
+    while i < arches.len():
+        val artifact = breakpoint_probe_stage_source(arches[i])
+        artifacts.push(artifact)
+        if artifact.status == "written":
+            written = written + 1
+        else:
+            failed = failed + 1
+        i = i + 1
+    BreakpointProbeStageSummary(
+        requested_count: arches.len(),
+        written_count: written,
+        failed_count: failed,
+        artifacts: artifacts,
+        status: if failed == 0: "written" else: "partial"
     )

@@ -277,19 +277,38 @@ Implemented in the current slice:
     parser;
   - generates freestanding C probe source text for each supported arch with
     original instruction bytes, trap bytes, restore/rearm operations, icache
-    flush calls, and the serial evidence line contract;
+    flush calls, arch-specific serial writes, and parser-valid serial evidence;
   - exposes a Simple staging function that writes
     `build/baremetal/breakpoint_probe/<arch>/breakpoint_probe.c`;
+  - provides `src/os/baremetal/profile/breakpoint_counter_probe_stage.spl`,
+    which staged all 9 probe sources on this host with
+    `status=written;requested=9;written=9;failed=0`;
   - fails closed with `missing_probe_source`, `compiler_unavailable`, or
     `missing_probe_elf` until real build artifacts exist.
 - `test/system/os/baremetal/feature/breakpoint_counter_probe_image_spec.spl`
   - covers the arch matrix, build/run readiness statuses, compiler arguments,
-    serial evidence contract, and generated source artifact content.
+    serial evidence contract, generated source artifact content, and
+    idempotent all-arch staging.
+- `src/os/baremetal/profile/breakpoint_counter_qemu.spl`
+  - now adds `-monitor none` when serial is bound to stdio, avoiding QEMU's
+    monitor/serial stdio conflict;
+  - distinguishes RISC-V 32-bit QEMU CPU planning (`rv32`) from RV64 (`rv64`).
+
+Build evidence from this host:
+- Built: `i386`, `riscv32`, `riscv32c`, `riscv64`, `riscv64c`.
+- Not built: `arm32` and `thumb` because `arm-none-eabi-gcc` is missing;
+  `aarch64` because `aarch64-none-elf-gcc` is missing.
+- `x86_64` build is blocked by the reused full SimpleOS linker script requiring
+  kernel syscall symbols; the probe needs its own minimal linker script.
+- QEMU launch now reaches target-specific loader behavior, but no serial proof
+  is accepted yet: i386 needs a PVH/multiboot-compatible probe image, and
+  RISC-V currently reaches OpenSBI then times out before probe serial output.
 
 Remaining larger gaps:
-- invoke source staging for all supported arches and keep the staged source
-  artifacts as build evidence;
-- compile the probe ELF images with the planned compilers/linker scripts;
+- add probe-specific boot/linker entry code so x86_64, i386, and RISC-V enter
+  the generated probe reliably under QEMU;
+- compile the ARM/Thumb/AArch64 probe ELF images once cross compilers exist or
+  the repo provides a supported clang cross path;
 - run those images under QEMU and capture live patch/trap/count/restore/rearm/
   cleanup/icache evidence;
 - measured before/after executable performance evidence for the full
