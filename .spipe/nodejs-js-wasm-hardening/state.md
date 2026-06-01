@@ -70,3 +70,7 @@ dev-incomplete
 - dev: PASS `SIMPLE_LIB=src bin/simple test test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter --clean` (25 scenarios).
 - dev: Regenerated `doc/06_spec/feature/js/node_api_conformance_spec.md`; docgen completed with existing compiler/docgen warnings and emitted a stub-style manual.
 - dev: Marked the Phase 5 credential hardening checklist item complete for the Node-compatible JS runtime credential/env boundary.
+- dev: Wired native Node-compatible `child_process.spawn` enforcement to generic sanitized per-command process grant markers, matching `JsRuntime.grant_node_process(...)` instead of hardcoding only the `node` command.
+- dev: PASS `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/runtime.spl test/feature/js/node_api_conformance_spec.spl`.
+- dev: PASS `SIMPLE_LIB=src bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean` (149 scenarios), including positive `git` spawn only when `git` is explicitly granted and denial when only `node` is granted.
+- dev: PASS cross-lane smoke checks: WebGPU JS/WASM Simple (106 scenarios), interpreter perf (10 scenarios), and `scripts/check-gtk-gui-repeat-evidence.shs` with deterministic vector checksum 212444.

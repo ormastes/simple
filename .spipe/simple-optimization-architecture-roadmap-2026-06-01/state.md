@@ -86,3 +86,5 @@ dev-done
 - verification: PASS `cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml`; PASS interpreter perf (10), tiered JIT hotspot (51), string system (33), Node API conformance (145), WebGPU JS/WASM Simple (106), and GTK GUI repeat evidence.
 - implementation: GUI lane optimized the static-shell plan cache hot path so memory hits reuse retained decoded SWBC metadata and prepared primitive commands instead of regenerating command lists.
 - verification: PASS render-cache check and HTML/CSS binary caching spec (10); PASS GTK GUI repeat evidence; PASS WebGPU JS/WASM Simple (106); PASS interpreter perf (10).
+- implementation: JS/WASM hardening lane generalized native Node-compatible `child_process.spawn` process grant lookup to sanitized per-command marker keys, so non-Node commands like `git` are allowed only by explicit grant.
+- verification: PASS native/runtime/spec check; PASS Node API conformance (149); PASS WebGPU JS/WASM Simple (106); PASS interpreter perf (10); PASS GTK GUI repeat evidence with Simple open 231 us, GTK open 71279 us, Simple frame 1 us, GTK frame 27 us, vector checksum 212444 deterministic true.

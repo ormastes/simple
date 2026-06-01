@@ -1291,7 +1291,7 @@ expect(_eval_str("require('child_process').spawn('node', ['--version']).command"
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1299,6 +1299,8 @@ expect(_eval_str_with_process("node", "require('child_process').spawn('node', ['
 expect(_eval_str_with_process("node", "require('node:child_process').spawn('node', ['--version']).pid")).to_equal("1")
 expect(_eval_str_with_process("python", "require('child_process').spawn('node', ['--version']).reason")).to_equal("process-grant-denied")
 expect(_eval_str_with_process("node", "require('child_process').spawn('node --version').reason")).to_equal("invalid-command")
+expect(_eval_str_with_process("git", "require('child_process').spawn('git', ['status']).status")).to_equal("allowed")
+expect(_eval_str_with_process("node", "require('child_process').spawn('git', ['status']).reason")).to_equal("process-grant-denied")
 ```
 
 </details>
