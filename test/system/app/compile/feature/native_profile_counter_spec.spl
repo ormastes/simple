@@ -32,7 +32,9 @@ use app.compile.native_profile_counter.{
     native_profile_counter_increment_record,
     native_profile_counter_increment_records,
     native_profile_counter_array_symbol,
-    native_profile_counter_metadata_symbol
+    native_profile_counter_metadata_symbol,
+    native_profile_counter_function_entry_slots_from_c_source,
+    native_profile_counter_instrument_c_source
 }
 
 describe "Native Profile Counter Contract":
@@ -274,3 +276,32 @@ describe "Native Profile Counter Contract":
             expect(records[0].c_statement).to_equal("__simple_profile_counters[0] += 1u;")
             expect(records[1].slot_index).to_equal(1)
             expect(records[1].placement_label).to_equal("function=main|block=bb0|edge=|call_path=")
+
+    describe "native C source instrumentation":
+        it "should derive function entry slots from generated C source":
+            val slots = native_profile_counter_function_entry_slots_from_c_source(
+                "int main(void) {\n  return 0;\n}\nstatic RtVal helper(void) {\n  return rt_nil();\n}\nif (ready) {\n}\n"
+            )
+            expect(slots.len()).to_equal(2)
+            expect(slots[0].stable_key).to_equal("c:main:entry")
+            expect(slots[1].stable_key).to_equal("c:helper:entry")
+
+        it "should inject counter prelude and function entry increments into C source":
+            val instrumented = native_profile_counter_instrument_c_source(
+                "int main(void) {\n  return 0;\n}\nvoid helper(void) {\n}\n",
+                true
+            )
+            expect(instrumented.enabled).to_equal(true)
+            expect(instrumented.slot_count).to_equal(2)
+            expect(instrumented.c_source).to_contain("/* simple-profile-counter-prelude-v1 */")
+            expect(instrumented.c_source).to_contain("static uint64_t __simple_profile_counters[2] = {0, 0};")
+            expect(instrumented.c_source).to_contain("__simple_profile_counters[0] += 1u;")
+            expect(instrumented.c_source).to_contain("__simple_profile_counters[1] += 1u;")
+            expect(instrumented.metadata_lines).to_contain("counter|section=simple_profile_counter_section__simple_profile_counters|slot=0|kind=function_entry|key=c:main:entry|initial=0|symbol=__simple_profile_counter_0_function_entry")
+
+        it "should leave C source unchanged when profile counters are disabled":
+            val source = "int main(void) {\n  return 0;\n}\n"
+            val instrumented = native_profile_counter_instrument_c_source(source, false)
+            expect(instrumented.enabled).to_equal(false)
+            expect(instrumented.slot_count).to_equal(0)
+            expect(instrumented.c_source).to_equal(source)

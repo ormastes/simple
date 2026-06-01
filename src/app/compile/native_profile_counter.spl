@@ -48,6 +48,12 @@ struct NativeProfileCounterIncrementRecord:
     placement_label: text
     c_statement: text
 
+struct NativeProfileCounterInstrumentedC:
+    enabled: bool
+    slot_count: i64
+    c_source: text
+    metadata_lines: [text]
+
 fn native_profile_counter_kinds() -> [text]:
     ["function_entry", "basic_block", "edge", "call_path"]
 
@@ -312,3 +318,77 @@ fn native_profile_counter_increment_records(
     for slot in slots:
         records.push(native_profile_counter_increment_record(slot, function_label, block_label, edge_label, call_path_label))
     records
+
+fn _native_profile_c_line_is_function_entry(line: text) -> bool:
+    val trimmed = line.trim()
+    if not trimmed.contains("(") or not trimmed.contains(")") or not trimmed.contains("{"):
+        return false
+    if trimmed.starts_with("if ") or trimmed.starts_with("if("):
+        return false
+    if trimmed.starts_with("for ") or trimmed.starts_with("for("):
+        return false
+    if trimmed.starts_with("while ") or trimmed.starts_with("while("):
+        return false
+    if trimmed.starts_with("switch ") or trimmed.starts_with("switch("):
+        return false
+    if trimmed.starts_with("typedef "):
+        return false
+    if trimmed.ends_with(";"):
+        return false
+    trimmed.starts_with("int ") or trimmed.starts_with("void ") or trimmed.starts_with("static ") or trimmed.starts_with("RtVal ")
+
+fn _native_profile_c_function_name(line: text) -> text:
+    val before_paren_end = line.index_of("(") ?? -1
+    if before_paren_end < 0:
+        return ""
+    val before_paren = line[0:before_paren_end].trim()
+    val parts = before_paren.split(" ")
+    if parts.len() == 0:
+        return ""
+    var name = parts[parts.len() - 1].trim()
+    name = name.replace("*", "")
+    name
+
+fn native_profile_counter_function_entry_slots_from_c_source(c_source: text) -> [NativeProfileCounterSlot]:
+    var slots: [NativeProfileCounterSlot] = []
+    val lines = c_source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if _native_profile_c_line_is_function_entry(line):
+            val function_name = _native_profile_c_function_name(line)
+            if function_name != "":
+                slots.push(native_profile_counter_slot(slots.len(), "function_entry", "c:{function_name}:entry", 0))
+        i = i + 1
+    slots
+
+fn native_profile_counter_instrument_c_source(c_source: text, enabled: bool) -> NativeProfileCounterInstrumentedC:
+    if not enabled:
+        return NativeProfileCounterInstrumentedC(
+            enabled: false,
+            slot_count: 0,
+            c_source: c_source,
+            metadata_lines: []
+        )
+
+    val slots = native_profile_counter_function_entry_slots_from_c_source(c_source)
+    val prelude = native_profile_counter_c_prelude(slots)
+    val metadata_lines = native_profile_counter_section_serialization_lines(native_profile_counter_default_section_name(), slots)
+    var instrumented_lines: [text] = []
+    val lines = c_source.split("\n")
+    var slot_index = 0
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        instrumented_lines.push(line)
+        if _native_profile_c_line_is_function_entry(line) and slot_index < slots.len():
+            instrumented_lines.push("    " + native_profile_counter_array_symbol() + "[" + slot_index.to_string() + "] += 1u;")
+            slot_index = slot_index + 1
+        i = i + 1
+
+    NativeProfileCounterInstrumentedC(
+        enabled: true,
+        slot_count: slots.len(),
+        c_source: prelude.c_source + instrumented_lines.join("\n"),
+        metadata_lines: metadata_lines
+    )

@@ -26,6 +26,7 @@ extern fn rt_getpid() -> i64
 
 use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
 use app.compile.native.{find_cpp_compiler}
+use app.compile.native_profile_counter.{native_profile_counter_instrument_c_source}
 use std.log.{error, info, debug}
 use compiler.driver.driver.{aot_c_file}
 use compiler.driver.driver_types.{CompileResult}
@@ -98,6 +99,7 @@ struct CompileOpts:
     march_target: text
     verbose: bool
     emit_ir_only: bool
+    simple_profile_counters: bool
 
 fn default_compile_opts() -> CompileOpts:
     CompileOpts(
@@ -107,7 +109,8 @@ fn default_compile_opts() -> CompileOpts:
         pgo_use_path: "",
         march_target: "",
         verbose: false,
-        emit_ir_only: false
+        emit_ir_only: false,
+        simple_profile_counters: false
     )
 
 # ============================================================================
@@ -142,6 +145,18 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
     if opts.verbose:
         val cpp_size = file_size(temp_cpp)
         debug("compile", "Generated C++ (" + str(cpp_size) + " bytes)")
+
+    if opts.simple_profile_counters:
+        val generated_source = rt_file_read_text(temp_cpp) ?? ""
+        val instrumented = native_profile_counter_instrument_c_source(generated_source, true)
+        if not file_write(temp_cpp, instrumented.c_source):
+            error("compile", "failed to write Simple profile-counter instrumented C source")
+            file_delete(temp_cpp)
+            return 1
+        val metadata_path = temp_cpp + ".simple-profile-counters"
+        file_write(metadata_path, instrumented.metadata_lines.join("\n") + "\n")
+        if opts.verbose:
+            debug("compile", "Simple profile counters injected: " + str(instrumented.slot_count) + " slot(s), metadata=" + metadata_path)
 
     val rt_sources = "src/runtime/runtime.c src/runtime/runtime_thread.c src/runtime/runtime_memtrack.c src/runtime/runtime_fork.c"
 
@@ -242,6 +257,7 @@ fn main() -> i64:
         print "  --pgo-generate       Build instrumented binary for PGO"
         print "  --pgo-use=<path>     Use PGO profile for optimization (+5-20% speed)"
         print "  --pgo-merge          Merge raw profiles: --pgo-merge <dir> <output.profdata>"
+        print "  --simple-profile-counters  Inject Simple-owned native counter section"
         print "  --release-optimized  Shorthand for: -O3 --march=x86-64-v3 --lto"
         print ""
         print "PGO workflow:"
@@ -303,6 +319,8 @@ fn main() -> i64:
             opts.pgo_use_path = arg.substring(10, arg.len())
         if arg.starts_with("--march="):
             opts.march_target = arg.substring(8, arg.len())
+        if arg == "--simple-profile-counters":
+            opts.simple_profile_counters = true
         if arg == "--release-optimized":
             opts.opt_level = "-O3"
             opts.march_target = "x86-64-v3"
