@@ -434,12 +434,20 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     if stage1.hash == stage2.hash && stage2.hash == stage3.hash {
         println!("Bootstrap VERIFIED: All 3 stages produce identical output");
         println!("  Hash: {}", stage1.hash);
+        if let Err(e) = deploy_verified_bootstrap_stage(&stage3_path, &output_dir) {
+            eprintln!("Bootstrap deploy FAILED: {}", e);
+            return 1;
+        }
         0
     } else if stage2.hash == stage3.hash {
         println!("Bootstrap PARTIAL: Stage 2 and Stage 3 match (Stage 1 differs)");
         println!("  Stage 1: {}", stage1.hash);
         println!("  Stage 2: {}", stage2.hash);
         println!("  Stage 3: {}", stage3.hash);
+        if let Err(e) = deploy_verified_bootstrap_stage(&stage3_path, &output_dir) {
+            eprintln!("Bootstrap deploy FAILED: {}", e);
+            return 1;
+        }
         0
     } else {
         println!("Bootstrap MISMATCH: outputs differ between stages");
@@ -499,14 +507,24 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             compiler, output
         );
     } else {
-        cmd.arg("src/app/compile/native.spl")
+        cmd.arg("native-build")
+            .arg("--source")
+            .arg("src/app")
+            .arg("--entry")
             .arg("src/app/cli/bootstrap_main.spl")
+            .arg("--entry-closure")
+            .arg("--strip")
+            .arg("--threads")
+            .arg("1")
+            .arg("--timeout")
+            .arg("180")
+            .arg("-o")
             .arg(output);
         if backend != "auto" {
             cmd.arg(format!("--backend={}", backend));
         }
         println!(
-            "  Running: {} src/app/compile/native.spl src/app/cli/bootstrap_main.spl {} {}",
+            "  Running: {} native-build --source src/app --entry-closure --strip --threads 1 --timeout 180 --entry src/app/cli/bootstrap_main.spl -o {} {}",
             compiler,
             output,
             if backend != "auto" {
@@ -562,6 +580,47 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
     }
 }
 
+fn deploy_verified_bootstrap_stage(stage3_path: &str, output_dir: &str) -> Result<(), String> {
+    let deploy_path = bootstrap_stage3_deploy_path(output_dir);
+    if let Some(parent) = deploy_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    std::fs::copy(stage3_path, &deploy_path)
+        .map_err(|e| format!("copy {stage3_path} -> {}: {e}", deploy_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&deploy_path)
+            .map_err(|e| format!("stat {}: {e}", deploy_path.display()))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&deploy_path, perms).map_err(|e| format!("chmod {}: {e}", deploy_path.display()))?;
+    }
+    println!("Bootstrap deployed: {}", deploy_path.display());
+    Ok(())
+}
+
+fn bootstrap_stage3_deploy_path(output_dir: &str) -> PathBuf {
+    let triple = if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+        "x86_64-unknown-linux-gnu"
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
+        "aarch64-unknown-linux-gnu"
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+        "aarch64-apple-darwin-macho"
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") {
+        "x86_64-apple-darwin-macho"
+    } else if cfg!(target_os = "freebsd") && cfg!(target_arch = "x86_64") {
+        "x86_64-unknown-freebsd"
+    } else {
+        "unknown-host"
+    };
+    let mut path = PathBuf::from(output_dir).join("stage3").join(triple).join("simple");
+    if cfg!(target_os = "windows") {
+        path.set_extension("exe");
+    }
+    path
+}
+
 fn sha256_file(path: &str) -> Result<String, String> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
@@ -580,12 +639,11 @@ fn sha256_file(path: &str) -> Result<String, String> {
 }
 
 fn resolve_preferred_simple_binary() -> Option<PathBuf> {
-    let mut candidates = platform_release_binary_candidates();
-    candidates.extend([
-        PathBuf::from("build/bootstrap/full/x86_64-unknown-linux-gnu/simple"),
-        PathBuf::from("build/bootstrap/full/aarch64-unknown-linux-gnu/simple"),
+    let mut candidates = vec![
         PathBuf::from("build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple"),
         PathBuf::from("build/bootstrap/stage3/aarch64-unknown-linux-gnu/simple"),
+        PathBuf::from("build/bootstrap/full/x86_64-unknown-linux-gnu/simple"),
+        PathBuf::from("build/bootstrap/full/aarch64-unknown-linux-gnu/simple"),
         PathBuf::from("build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple"),
         PathBuf::from("build/bootstrap/stage2/aarch64-unknown-linux-gnu/simple"),
         PathBuf::from("build/bootstrap/stage2_fullcli/simple"),
@@ -593,7 +651,8 @@ fn resolve_preferred_simple_binary() -> Option<PathBuf> {
         PathBuf::from("bin/simple"),
         PathBuf::from("src/compiler_rust/target/release/simple"),
         PathBuf::from("src/compiler_rust/target/bootstrap/simple"),
-    ]);
+    ];
+    candidates.extend(platform_release_binary_candidates());
 
     candidates.into_iter().find(|candidate| candidate.is_file())
 }

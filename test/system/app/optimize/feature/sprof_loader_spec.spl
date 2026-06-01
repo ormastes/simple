@@ -36,6 +36,22 @@ describe "Persistent .sprof Loader Contract":
             expect(profile.function_count).to_equal(2)
             expect(profile.merged_count).to_equal(12)
 
+        it "should load function, block, and edge records separately":
+            val profile = sprof_load_profile_text(
+                "header;schema=sprof-v1;module=mod-a;workload=boot\nfunction;key=main;count=7\nblock;function=main;key=entry;count=3\nedge;from=entry;to=exit;count=2",
+                "mod-a",
+                "boot"
+            )
+            expect(profile.status).to_equal("loaded")
+            expect(profile.schema_version).to_equal("sprof-v1")
+            expect(profile.function_count).to_equal(1)
+            expect(profile.block_count).to_equal(1)
+            expect(profile.edge_count).to_equal(1)
+            expect(profile.function_merged_count).to_equal(7)
+            expect(profile.block_merged_count).to_equal(3)
+            expect(profile.edge_merged_count).to_equal(2)
+            expect(profile.merged_count).to_equal(12)
+
         it "should ignore persisted profile text for mismatched workload":
             val profile = sprof_load_profile_text(
                 "header;module=mod-a;workload=test\nfunction;key=main;count=7",
@@ -43,6 +59,18 @@ describe "Persistent .sprof Loader Contract":
                 "boot"
             )
             expect(profile.status).to_equal("ignored")
+            expect(profile.diagnostics).to_contain("workload_mismatch:test")
+
+        it "should report module and schema diagnostics":
+            val profile = sprof_load_profile_text(
+                "header;schema=sprof-v2;module=mod-b;workload=boot\nfunction;key=main;count=7",
+                "mod-a",
+                "boot"
+            )
+            expect(profile.status).to_equal("incompatible")
+            expect(profile.diagnostic_count).to_equal(2)
+            expect(profile.diagnostics).to_contain("schema_mismatch:sprof-v2")
+            expect(profile.diagnostics).to_contain("module_mismatch:mod-b")
 
     describe "hot path policy":
         it "should forbid profile file operations in hot paths":
@@ -68,6 +96,9 @@ describe "Persistent .sprof Loader Contract":
             val invalid = sprof_merge_summary(-1, 7)
             expect(invalid.merged_count).to_equal(0)
             expect(invalid.diagnostic_count).to_equal(1)
+            expect(invalid.function_count).to_equal(0)
+            expect(invalid.block_count).to_equal(0)
+            expect(invalid.edge_count).to_equal(0)
 
             val saturated = sprof_merge_summary(9223372036854775806, 7)
             expect(saturated.merged_count).to_equal(9223372036854775807)

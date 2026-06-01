@@ -5,19 +5,33 @@
 use std.io (file_read)
 
 val SPROF_COUNTER_MAX: i64 = 9223372036854775807
+val SPROF_SCHEMA_VERSION: text = "sprof-v1"
 
 struct SprofMergeSummary:
     merged_count: i64
+    function_count: i64
+    block_count: i64
+    edge_count: i64
+    function_merged_count: i64
+    block_merged_count: i64
+    edge_merged_count: i64
     diagnostic_count: i64
     saturated: bool
 
 struct SprofLoadedProfile:
     status: text
+    schema_version: text
     module_identity: text
     workload_label: text
     function_count: i64
+    block_count: i64
+    edge_count: i64
     merged_count: i64
+    function_merged_count: i64
+    block_merged_count: i64
+    edge_merged_count: i64
     diagnostic_count: i64
+    diagnostics: [text]
     saturated: bool
 
 fn sprof_profile_record_status(record_kind: text, module_matches: bool, workload_matches: bool) -> text:
@@ -56,6 +70,12 @@ fn sprof_merge_summary(left: i64, right: i64) -> SprofMergeSummary:
     if left < 0 or right < 0:
         return SprofMergeSummary(
             merged_count: 0,
+            function_count: 0,
+            block_count: 0,
+            edge_count: 0,
+            function_merged_count: 0,
+            block_merged_count: 0,
+            edge_merged_count: 0,
             diagnostic_count: 1,
             saturated: false
         )
@@ -63,6 +83,12 @@ fn sprof_merge_summary(left: i64, right: i64) -> SprofMergeSummary:
     val merged = sprof_merge_count(left, right)
     SprofMergeSummary(
         merged_count: merged,
+        function_count: 0,
+        block_count: 0,
+        edge_count: 0,
+        function_merged_count: 0,
+        block_merged_count: 0,
+        edge_merged_count: 0,
         diagnostic_count: 0,
         saturated: merged == SPROF_COUNTER_MAX and (left != SPROF_COUNTER_MAX or right != 0)
     )
@@ -96,23 +122,94 @@ fn _sprof_line_value(line: text, key: text) -> text:
 fn _sprof_parse_count(value: text) -> i64:
     value.trim().to_i64() ?? -1
 
+fn _sprof_schema_is_compatible(schema_version: text) -> bool:
+    schema_version == "" or schema_version == "1" or schema_version == SPROF_SCHEMA_VERSION
+
+fn _sprof_merge_record_summary(record_kind: text, left: i64, right: i64) -> SprofMergeSummary:
+    val summary = sprof_merge_summary(left, right)
+    if summary.diagnostic_count > 0:
+        return summary
+
+    if record_kind == "function":
+        return SprofMergeSummary(
+            merged_count: summary.merged_count,
+            function_count: 1,
+            block_count: 0,
+            edge_count: 0,
+            function_merged_count: summary.merged_count,
+            block_merged_count: 0,
+            edge_merged_count: 0,
+            diagnostic_count: 0,
+            saturated: summary.saturated
+        )
+    if record_kind == "block":
+        return SprofMergeSummary(
+            merged_count: summary.merged_count,
+            function_count: 0,
+            block_count: 1,
+            edge_count: 0,
+            function_merged_count: 0,
+            block_merged_count: summary.merged_count,
+            edge_merged_count: 0,
+            diagnostic_count: 0,
+            saturated: summary.saturated
+        )
+    if record_kind == "edge":
+        return SprofMergeSummary(
+            merged_count: summary.merged_count,
+            function_count: 0,
+            block_count: 0,
+            edge_count: 1,
+            function_merged_count: 0,
+            block_merged_count: 0,
+            edge_merged_count: summary.merged_count,
+            diagnostic_count: 0,
+            saturated: summary.saturated
+        )
+
+    SprofMergeSummary(
+        merged_count: 0,
+        function_count: 0,
+        block_count: 0,
+        edge_count: 0,
+        function_merged_count: 0,
+        block_merged_count: 0,
+        edge_merged_count: 0,
+        diagnostic_count: 1,
+        saturated: false
+    )
+
 fn sprof_load_profile_text(profile_text: text, expected_module: text, expected_workload: text) -> SprofLoadedProfile:
     if profile_text.trim() == "":
         return SprofLoadedProfile(
             status: "invalid",
+            schema_version: "",
             module_identity: "",
             workload_label: "",
             function_count: 0,
+            block_count: 0,
+            edge_count: 0,
             merged_count: 0,
+            function_merged_count: 0,
+            block_merged_count: 0,
+            edge_merged_count: 0,
             diagnostic_count: 1,
+            diagnostics: ["empty_profile"],
             saturated: false
         )
 
+    var schema_version = ""
     var module_identity = ""
     var workload_label = ""
     var function_count: i64 = 0
+    var block_count: i64 = 0
+    var edge_count: i64 = 0
     var merged_count: i64 = 0
+    var function_merged_count: i64 = 0
+    var block_merged_count: i64 = 0
+    var edge_merged_count: i64 = 0
     var diagnostic_count: i64 = 0
+    var diagnostics: [text] = []
     var saturated = false
 
     val lines = profile_text.split("\n")
@@ -120,26 +217,63 @@ fn sprof_load_profile_text(profile_text: text, expected_module: text, expected_w
     while i < lines.len():
         val line = lines[i].trim()
         if line.starts_with("header;"):
+            schema_version = _sprof_line_value(line, "schema")
             module_identity = _sprof_line_value(line, "module")
             workload_label = _sprof_line_value(line, "workload")
-        elif line.starts_with("function;"):
+        elif line.starts_with("function;") or line.starts_with("block;") or line.starts_with("edge;"):
+            var record_kind = "function"
+            if line.starts_with("block;"):
+                record_kind = "block"
+            elif line.starts_with("edge;"):
+                record_kind = "edge"
             val count = _sprof_parse_count(_sprof_line_value(line, "count"))
-            val summary = sprof_merge_summary(merged_count, count)
-            merged_count = summary.merged_count
+            val summary = _sprof_merge_record_summary(record_kind, merged_count, count)
+            if summary.diagnostic_count == 0:
+                merged_count = sprof_merge_count(merged_count, count)
+            elif count < 0:
+                diagnostics.push("invalid_{record_kind}_count")
             diagnostic_count = diagnostic_count + summary.diagnostic_count
             saturated = saturated or summary.saturated
             if count >= 0:
-                function_count = function_count + 1
+                if record_kind == "function":
+                    function_count = function_count + summary.function_count
+                    function_merged_count = sprof_merge_count(function_merged_count, count)
+                elif record_kind == "block":
+                    block_count = block_count + summary.block_count
+                    block_merged_count = sprof_merge_count(block_merged_count, count)
+                elif record_kind == "edge":
+                    edge_count = edge_count + summary.edge_count
+                    edge_merged_count = sprof_merge_count(edge_merged_count, count)
         i = i + 1
 
-    val status = sprof_profile_record_status("exact", module_identity == expected_module, workload_label == expected_workload)
+    if not _sprof_schema_is_compatible(schema_version):
+        diagnostic_count = diagnostic_count + 1
+        diagnostics.push("schema_mismatch:{schema_version}")
+    if module_identity != expected_module:
+        diagnostic_count = diagnostic_count + 1
+        diagnostics.push("module_mismatch:{module_identity}")
+    if workload_label != expected_workload:
+        diagnostic_count = diagnostic_count + 1
+        diagnostics.push("workload_mismatch:{workload_label}")
+
+    var record_kind = "exact"
+    if not _sprof_schema_is_compatible(schema_version):
+        record_kind = "schema_mismatch"
+    val status = sprof_profile_record_status(record_kind, module_identity == expected_module, workload_label == expected_workload)
     SprofLoadedProfile(
         status: status,
+        schema_version: schema_version,
         module_identity: module_identity,
         workload_label: workload_label,
         function_count: function_count,
+        block_count: block_count,
+        edge_count: edge_count,
         merged_count: merged_count,
+        function_merged_count: function_merged_count,
+        block_merged_count: block_merged_count,
+        edge_merged_count: edge_merged_count,
         diagnostic_count: diagnostic_count,
+        diagnostics: sprof_bounded_diagnostics(diagnostics, 8),
         saturated: saturated
     )
 

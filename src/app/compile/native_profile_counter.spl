@@ -1,5 +1,19 @@
 # Native profile counter contract helpers.
 
+struct NativeProfileCounterSlot:
+    slot_index: i64
+    counter_kind: text
+    stable_key: text
+    initial_value: i64
+
+struct NativeProfileSectionSummary:
+    section_name: text
+    enabled: bool
+    slot_count: i64
+    valid_slot_count: i64
+    invalid_slot_count: i64
+    cold_path_policy: text
+
 fn native_profile_counter_kinds() -> [text]:
     ["function_entry", "basic_block", "edge", "call_path"]
 
@@ -14,6 +28,50 @@ fn native_profile_counter_enabled(profile_build: bool, counter_kind: text) -> bo
 
 fn native_profile_counter_identity_matches(interpreter_key: text, native_key: text) -> bool:
     interpreter_key != "" and interpreter_key == native_key
+
+fn native_profile_counter_slot(slot_index: i64, counter_kind: text, stable_key: text, initial_value: i64) -> NativeProfileCounterSlot:
+    NativeProfileCounterSlot(
+        slot_index: slot_index,
+        counter_kind: counter_kind,
+        stable_key: stable_key,
+        initial_value: initial_value
+    )
+
+fn native_profile_counter_slot_valid(slot: NativeProfileCounterSlot) -> bool:
+    slot.slot_index >= 0 and
+        native_profile_counter_kind_valid(slot.counter_kind) and
+        slot.stable_key != "" and
+        slot.initial_value >= 0
+
+fn native_profile_counter_slots_valid(slots: [NativeProfileCounterSlot]) -> bool:
+    for slot in slots:
+        if not native_profile_counter_slot_valid(slot):
+            return false
+    true
+
+fn native_profile_disabled_counter_cold_path_policy() -> text:
+    "compile_out_counter_increment"
+
+fn native_profile_counter_cold_path_policy(profile_build: bool, counter_kind: text) -> text:
+    if native_profile_counter_enabled(profile_build, counter_kind):
+        "emit_counter_increment"
+    else:
+        native_profile_disabled_counter_cold_path_policy()
+
+fn native_profile_section_summary(section_name: text, profile_build: bool, slots: [NativeProfileCounterSlot]) -> NativeProfileSectionSummary:
+    var valid_count = 0
+    for slot in slots:
+        if native_profile_counter_slot_valid(slot):
+            valid_count = valid_count + 1
+
+    NativeProfileSectionSummary(
+        section_name: section_name,
+        enabled: native_profile_counters_enabled(profile_build),
+        slot_count: slots.len(),
+        valid_slot_count: valid_count,
+        invalid_slot_count: slots.len() - valid_count,
+        cold_path_policy: if native_profile_counters_enabled(profile_build): "emit_counter_increment" else: native_profile_disabled_counter_cold_path_policy()
+    )
 
 fn native_profile_call_path_counter_max_depth() -> i64:
     64

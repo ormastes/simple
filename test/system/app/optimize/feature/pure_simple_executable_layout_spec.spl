@@ -1,13 +1,21 @@
 # codex-system-test
 # Contract tests for pure-Simple BOLT-like executable layout planning.
 
-use std.spec.SPipe
+use std.spec.{describe, it, expect}
 use app.optimize.executable_layout.{
+    ExecutableLayoutFunctionProfile,
     ExecutableLayoutManifestEntry,
+    ExecutableLayoutManifestSummary,
     layout_external_bolt_allowed,
+    layout_hot_weight,
+    layout_manifest_summary,
+    layout_manifest_summary_valid,
     layout_manifest_entry_valid,
+    layout_mark_cold_candidate,
     layout_plan_steps,
     layout_transform_allowed,
+    layout_transform_skip_reason,
+    layout_weighted_hot_function_order,
     layout_uses_external_bolt
 }
 
@@ -26,6 +34,91 @@ describe "Pure Simple Executable Layout Optimizer Contract":
             expect(layout_transform_allowed(true, false, true, true)).to_equal(false)
             expect(layout_transform_allowed(true, true, false, true)).to_equal(false)
             expect(layout_transform_allowed(true, true, true, false)).to_equal(false)
+
+        it "should expose deterministic skip reasons":
+            expect(layout_transform_skip_reason(true, true, true, true)).to_equal("ok")
+            expect(layout_transform_skip_reason(false, true, true, true)).to_equal("unsafe_relocations")
+            expect(layout_transform_skip_reason(true, false, true, true)).to_equal("entry_not_preserved")
+            expect(layout_transform_skip_reason(true, true, false, true)).to_equal("symbols_not_preserved")
+            expect(layout_transform_skip_reason(true, true, true, false)).to_equal("workload_mismatch")
+
+    describe "weighted hot function ordering":
+        it "should order functions by weighted samples and calls":
+            val profiles = [
+                ExecutableLayoutFunctionProfile(symbol_name: "cold_init", sample_count: 1, call_count: 1, size_bytes: 40, original_index: 0),
+                ExecutableLayoutFunctionProfile(symbol_name: "dispatch", sample_count: 5, call_count: 10, size_bytes: 80, original_index: 1),
+                ExecutableLayoutFunctionProfile(symbol_name: "parse", sample_count: 6, call_count: 1, size_bytes: 96, original_index: 2),
+                ExecutableLayoutFunctionProfile(symbol_name: "tie_first", sample_count: 2, call_count: 0, size_bytes: 32, original_index: 3),
+                ExecutableLayoutFunctionProfile(symbol_name: "tie_second", sample_count: 2, call_count: 0, size_bytes: 32, original_index: 4)
+            ]
+            val ordered = layout_weighted_hot_function_order(profiles)
+            expect(layout_hot_weight(profiles[1])).to_equal(600)
+            expect(ordered[0]).to_equal("dispatch")
+            expect(ordered[1]).to_equal("parse")
+            expect(ordered[2]).to_equal("tie_first")
+            expect(ordered[3]).to_equal("tie_second")
+            expect(ordered[4]).to_equal("cold_init")
+
+        it "should omit invalid profiles from the hot order":
+            val profiles = [
+                ExecutableLayoutFunctionProfile(symbol_name: "", sample_count: 100, call_count: 0, size_bytes: 10, original_index: 0),
+                ExecutableLayoutFunctionProfile(symbol_name: "bad_size", sample_count: 10, call_count: 0, size_bytes: 0, original_index: 1),
+                ExecutableLayoutFunctionProfile(symbol_name: "valid", sample_count: 1, call_count: 0, size_bytes: 10, original_index: 2)
+            ]
+            val ordered = layout_weighted_hot_function_order(profiles)
+            expect(ordered.len()).to_equal(1)
+            expect(ordered[0]).to_equal("valid")
+
+    describe "cold candidate marking":
+        it "should mark never-hit and below-threshold functions as cold":
+            val never_hit = layout_mark_cold_candidate(
+                ExecutableLayoutFunctionProfile(symbol_name: "unused", sample_count: 0, call_count: 0, size_bytes: 64, original_index: 0),
+                500,
+                2
+            )
+            expect(never_hit.is_cold).to_equal(true)
+            expect(never_hit.reason).to_equal("no_profile_hits")
+
+            val below_threshold = layout_mark_cold_candidate(
+                ExecutableLayoutFunctionProfile(symbol_name: "rare", sample_count: 2, call_count: 1, size_bytes: 64, original_index: 1),
+                500,
+                2
+            )
+            expect(below_threshold.is_cold).to_equal(true)
+            expect(below_threshold.reason).to_equal("below_hot_threshold")
+
+            val hot = layout_mark_cold_candidate(
+                ExecutableLayoutFunctionProfile(symbol_name: "hot", sample_count: 6, call_count: 0, size_bytes: 64, original_index: 2),
+                500,
+                2
+            )
+            expect(hot.is_cold).to_equal(false)
+            expect(hot.reason).to_equal("hot_enough")
+
+        it "should keep invalid cold candidates skipped with reasons":
+            val missing = layout_mark_cold_candidate(
+                ExecutableLayoutFunctionProfile(symbol_name: "", sample_count: 0, call_count: 0, size_bytes: 64, original_index: 0),
+                500,
+                2
+            )
+            expect(missing.is_cold).to_equal(false)
+            expect(missing.reason).to_equal("missing_symbol")
+
+            val invalid_profile = layout_mark_cold_candidate(
+                ExecutableLayoutFunctionProfile(symbol_name: "bad", sample_count: -1, call_count: 0, size_bytes: 64, original_index: 1),
+                500,
+                2
+            )
+            expect(invalid_profile.is_cold).to_equal(false)
+            expect(invalid_profile.reason).to_equal("invalid_profile")
+
+            val invalid_size = layout_mark_cold_candidate(
+                ExecutableLayoutFunctionProfile(symbol_name: "empty", sample_count: 0, call_count: 0, size_bytes: 0, original_index: 2),
+                500,
+                2
+            )
+            expect(invalid_size.is_cold).to_equal(false)
+            expect(invalid_size.reason).to_equal("invalid_size")
 
     describe "external dependency policy":
         it "should not depend on external BOLT commands":
@@ -74,3 +167,33 @@ describe "Pure Simple Executable Layout Optimizer Contract":
                 optimized_offset: 32,
                 size_bytes: 0
             ))).to_equal(false)
+
+        it "should validate manifest summaries against entry totals and extents":
+            val entries = [
+                ExecutableLayoutManifestEntry(symbol_name: "main", section_name: ".text", original_offset: 64, optimized_offset: 32, size_bytes: 128),
+                ExecutableLayoutManifestEntry(symbol_name: "helper", section_name: ".text", original_offset: 256, optimized_offset: 160, size_bytes: 32)
+            ]
+            val summary = layout_manifest_summary(entries)
+            expect(summary.entry_count).to_equal(2)
+            expect(summary.total_size_bytes).to_equal(160)
+            expect(summary.first_optimized_offset).to_equal(32)
+            expect(summary.last_optimized_end).to_equal(192)
+            expect(layout_manifest_summary_valid(entries, summary)).to_equal(true)
+
+            expect(layout_manifest_summary_valid(entries, ExecutableLayoutManifestSummary(
+                entry_count: 2,
+                total_size_bytes: 159,
+                first_optimized_offset: 32,
+                last_optimized_end: 192
+            ))).to_equal(false)
+            expect(layout_manifest_summary_valid(entries, ExecutableLayoutManifestSummary(
+                entry_count: 1,
+                total_size_bytes: 160,
+                first_optimized_offset: 32,
+                last_optimized_end: 192
+            ))).to_equal(false)
+
+            val invalid_entries = [
+                ExecutableLayoutManifestEntry(symbol_name: "", section_name: ".text", original_offset: 0, optimized_offset: 0, size_bytes: 16)
+            ]
+            expect(layout_manifest_summary_valid(invalid_entries, layout_manifest_summary(invalid_entries))).to_equal(false)

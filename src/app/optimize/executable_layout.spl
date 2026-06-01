@@ -11,6 +11,24 @@ struct ExecutableLayoutManifestEntry:
     optimized_offset: i64
     size_bytes: i64
 
+struct ExecutableLayoutFunctionProfile:
+    symbol_name: text
+    sample_count: i64
+    call_count: i64
+    size_bytes: i64
+    original_index: i64
+
+struct ExecutableLayoutColdCandidate:
+    symbol_name: text
+    is_cold: bool
+    reason: text
+
+struct ExecutableLayoutManifestSummary:
+    entry_count: i64
+    total_size_bytes: i64
+    first_optimized_offset: i64
+    last_optimized_end: i64
+
 pub fn layout_plan_steps() -> [text]:
     [
         "hot_function_cluster",
@@ -26,6 +44,22 @@ pub fn layout_transform_allowed(
     workload_matches: bool
 ) -> bool:
     relocations_safe and entry_preserved and symbols_preserved and workload_matches
+
+pub fn layout_transform_skip_reason(
+    relocations_safe: bool,
+    entry_preserved: bool,
+    symbols_preserved: bool,
+    workload_matches: bool
+) -> text:
+    if not relocations_safe:
+        return "unsafe_relocations"
+    if not entry_preserved:
+        return "entry_not_preserved"
+    if not symbols_preserved:
+        return "symbols_not_preserved"
+    if not workload_matches:
+        return "workload_mismatch"
+    "ok"
 
 fn _is_command_separator(ch: text) -> bool:
     ch == " " or ch == "\t" or ch == "\n" or ch == "/" or ch == "\\" or
@@ -68,6 +102,61 @@ pub fn layout_uses_external_bolt(command: text) -> bool:
 pub fn layout_external_bolt_allowed(command: text) -> bool:
     not layout_uses_external_bolt(command)
 
+pub fn layout_hot_weight(profile: ExecutableLayoutFunctionProfile) -> i64:
+    if profile.symbol_name.trim() == "":
+        return 0
+    if profile.sample_count < 0 or profile.call_count < 0 or profile.size_bytes <= 0:
+        return 0
+    (profile.sample_count * 100) + (profile.call_count * 10)
+
+fn _profile_precedes(left: ExecutableLayoutFunctionProfile, right: ExecutableLayoutFunctionProfile) -> bool:
+    val left_weight = layout_hot_weight(left)
+    val right_weight = layout_hot_weight(right)
+    if left_weight > right_weight:
+        return true
+    if left_weight < right_weight:
+        return false
+    left.original_index < right.original_index
+
+pub fn layout_weighted_hot_function_order(profiles: [ExecutableLayoutFunctionProfile]) -> [text]:
+    var sorted = profiles
+    var i = 1
+    while i < sorted.len():
+        var j = i
+        while j > 0 and _profile_precedes(sorted[j], sorted[j - 1]):
+            val tmp = sorted[j]
+            sorted[j] = sorted[j - 1]
+            sorted[j - 1] = tmp
+            j = j - 1
+        i = i + 1
+
+    var names: [text] = []
+    var ni = 0
+    while ni < sorted.len():
+        if layout_hot_weight(sorted[ni]) > 0:
+            names.push(sorted[ni].symbol_name)
+        ni = ni + 1
+    names
+
+pub fn layout_mark_cold_candidate(
+    profile: ExecutableLayoutFunctionProfile,
+    min_hot_weight: i64,
+    max_cold_samples: i64
+) -> ExecutableLayoutColdCandidate:
+    if profile.symbol_name.trim() == "":
+        return ExecutableLayoutColdCandidate(symbol_name: profile.symbol_name, is_cold: false, reason: "missing_symbol")
+    if profile.size_bytes <= 0:
+        return ExecutableLayoutColdCandidate(symbol_name: profile.symbol_name, is_cold: false, reason: "invalid_size")
+    if profile.sample_count < 0 or profile.call_count < 0:
+        return ExecutableLayoutColdCandidate(symbol_name: profile.symbol_name, is_cold: false, reason: "invalid_profile")
+
+    val weight = layout_hot_weight(profile)
+    if profile.sample_count == 0 and profile.call_count == 0:
+        return ExecutableLayoutColdCandidate(symbol_name: profile.symbol_name, is_cold: true, reason: "no_profile_hits")
+    if profile.sample_count <= max_cold_samples and weight < min_hot_weight:
+        return ExecutableLayoutColdCandidate(symbol_name: profile.symbol_name, is_cold: true, reason: "below_hot_threshold")
+    ExecutableLayoutColdCandidate(symbol_name: profile.symbol_name, is_cold: false, reason: "hot_enough")
+
 pub fn layout_manifest_entry_valid(entry: ExecutableLayoutManifestEntry) -> bool:
     if entry.symbol_name.trim() == "":
         return false
@@ -80,3 +169,40 @@ pub fn layout_manifest_entry_valid(entry: ExecutableLayoutManifestEntry) -> bool
     if entry.optimized_offset < 0:
         return false
     entry.size_bytes > 0
+
+pub fn layout_manifest_summary(entries: [ExecutableLayoutManifestEntry]) -> ExecutableLayoutManifestSummary:
+    var total_size: i64 = 0
+    var first_offset: i64 = 0
+    var last_end: i64 = 0
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        val end_offset = entry.optimized_offset + entry.size_bytes
+        total_size = total_size + entry.size_bytes
+        if i == 0 or entry.optimized_offset < first_offset:
+            first_offset = entry.optimized_offset
+        if end_offset > last_end:
+            last_end = end_offset
+        i = i + 1
+    ExecutableLayoutManifestSummary(
+        entry_count: entries.len() as i64,
+        total_size_bytes: total_size,
+        first_optimized_offset: first_offset,
+        last_optimized_end: last_end
+    )
+
+pub fn layout_manifest_summary_valid(
+    entries: [ExecutableLayoutManifestEntry],
+    summary: ExecutableLayoutManifestSummary
+) -> bool:
+    if summary.entry_count != entries.len() as i64:
+        return false
+    var i = 0
+    while i < entries.len():
+        if not layout_manifest_entry_valid(entries[i]):
+            return false
+        i = i + 1
+    val expected = layout_manifest_summary(entries)
+    summary.total_size_bytes == expected.total_size_bytes and
+        summary.first_optimized_offset == expected.first_optimized_offset and
+        summary.last_optimized_end == expected.last_optimized_end

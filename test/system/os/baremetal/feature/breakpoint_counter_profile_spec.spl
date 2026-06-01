@@ -7,9 +7,14 @@ use os.baremetal.profile.breakpoint_counter.{
     breakpoint_cleanup_events,
     breakpoint_cleanup_events_cover,
     breakpoint_next_state,
+    breakpoint_patch_ledger_cleanup_complete,
     breakpoint_patch_ledger_valid,
+    breakpoint_profile_session_record_valid,
+    breakpoint_sampled_fallback_reason,
     breakpoint_sampled_only_fallback_state,
-    breakpoint_should_disarm
+    breakpoint_should_disarm,
+    breakpoint_trap_budget_total_over_budget,
+    breakpoint_trap_budget_total_us
 }
 
 describe "Bare-metal Breakpoint Counter Profile Contract":
@@ -38,6 +43,27 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(breakpoint_sampled_only_fallback_state("sampled_only", "hit")).to_equal("sampled_only")
             expect(breakpoint_sampled_only_fallback_state("sampled_only", "rearm")).to_equal("sampled_only")
 
+        it "should total trap handling cost before comparing against budget":
+            expect(breakpoint_trap_budget_total_us(3, 5, 7, 11, 13)).to_equal(39)
+            expect(breakpoint_trap_budget_total_over_budget(3, 5, 7, 11, 13, 38)).to_equal(true)
+            expect(breakpoint_trap_budget_total_over_budget(3, 5, 7, 11, 13, 39)).to_equal(false)
+
+        it "should select a deterministic sampled-only fallback reason":
+            expect(breakpoint_sampled_fallback_reason(10, 10, 100, 50, false, true)).to_equal("failed_single_step")
+            expect(breakpoint_sampled_fallback_reason(10, 10, 100, 50, true, false)).to_equal("hot_loop")
+            expect(breakpoint_sampled_fallback_reason(101, 60, 100, 50, false, false)).to_equal("hit_limit")
+            expect(breakpoint_sampled_fallback_reason(10, 60, 100, 50, false, false)).to_equal("trap_budget")
+            expect(breakpoint_sampled_fallback_reason(10, 10, 100, 50, false, false)).to_equal("none")
+
+    describe "profiling session records":
+        it "should validate complete profiling session accounting records":
+            expect(breakpoint_profile_session_record_valid("session-1", "kernel_tick", 100, 160, 2, 1, true)).to_equal(true)
+            expect(breakpoint_profile_session_record_valid("", "kernel_tick", 100, 160, 2, 1, true)).to_equal(false)
+            expect(breakpoint_profile_session_record_valid("session-1", "", 100, 160, 2, 1, true)).to_equal(false)
+            expect(breakpoint_profile_session_record_valid("session-1", "kernel_tick", 160, 100, 2, 1, true)).to_equal(false)
+            expect(breakpoint_profile_session_record_valid("session-1", "kernel_tick", 100, 160, 0, 0, true)).to_equal(false)
+            expect(breakpoint_profile_session_record_valid("session-1", "kernel_tick", 100, 160, 2, 1, false)).to_equal(false)
+
     describe "cleanup ledger":
         it "should define cleanup events for every exit path":
             val events = breakpoint_cleanup_events()
@@ -54,3 +80,10 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(breakpoint_patch_ledger_valid(4096, "0x00100073", "0x00100073", "0x00100073", "0x00100073")).to_equal(false)
             expect(breakpoint_patch_ledger_valid(4096, "0x00000013", "0x00100073", "0x00000000", "0x00100073")).to_equal(false)
             expect(breakpoint_patch_ledger_valid(0, "0x00000013", "0x00100073", "0x00000013", "0x00100073")).to_equal(false)
+
+        it "should report cleanup completeness only when every patch entry is restored":
+            expect(breakpoint_patch_ledger_cleanup_complete(3, 3, 0, 0)).to_equal(true)
+            expect(breakpoint_patch_ledger_cleanup_complete(3, 2, 1, 0)).to_equal(false)
+            expect(breakpoint_patch_ledger_cleanup_complete(3, 3, 0, 1)).to_equal(false)
+            expect(breakpoint_patch_ledger_cleanup_complete(3, 4, 0, 0)).to_equal(false)
+            expect(breakpoint_patch_ledger_cleanup_complete(-1, -1, 0, 0)).to_equal(false)
