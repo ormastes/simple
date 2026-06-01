@@ -195,6 +195,25 @@ _expect_release_clean("src/app/gui_perf/pure_gui_hot_dynlib_export.spl")
 
 </details>
 
+#### documents legacy Rust SMF helpers as outside GUI release evidence
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val guide = _existing_source("doc/07_guide/dynlib_api.md")
+expect(guide).to_contain("Legacy runtime SMF file helpers are not the GUI release lane")
+expect(guide).to_contain("not accepted GUI release-lane evidence")
+expect(guide).to_contain("src/app/gui_perf/smf_dynlib_artifact.spl")
+expect(guide).to_contain("src/app/gui_perf/simpleos_smf_dynload.spl")
+expect(guide).to_contain("src/app/gui_perf/smf_dynlib_probe.spl")
+```
+
+</details>
+
 #### keeps BrowserWindow entity free of native GUI runtime deps
 
 1.  expect no native gui runtime
@@ -282,8 +301,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

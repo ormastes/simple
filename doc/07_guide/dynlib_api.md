@@ -75,12 +75,15 @@ if dynlib_is_valid(lib):
   `src/lib/nogc_sync_mut/sffi/dynamic.spl` wraps `spl_dlopen`, `spl_dlsym`, and
   `spl_wffi_call_i64` for `.so`/`.dylib` host libraries. That proves host dynlib
   calls, not SMF dynlib acceptance.
-- **Host SMF dynlib envelopes are supported for perf probes**:
-  `rt_file_wrap_smf_dynlib` writes a role-2 SMF envelope around a host native
-  shared library, and `rt_file_extract_smf_dynlib` extracts the embedded native
-  library before `spl_dlopen`. The GUI probe accepts this only when the measured
-  row reports `loader=smf_dynlib`, `call_source=dynlib_symbol_call`, no
-  fallback, and p99 below the configured threshold.
+- **Legacy runtime SMF file helpers are not the GUI release lane**:
+  `rt_file_wrap_smf_dynlib` and `rt_file_extract_smf_dynlib` still exist as
+  generic runtime helpers, but they are not accepted GUI release-lane evidence.
+  The pure GUI SMF path wraps and validates the role-2 artifact in Simple via
+  `src/app/gui_perf/smf_dynlib_artifact.spl`, resolves loader parity through
+  `src/app/gui_perf/simpleos_smf_dynload.spl`, and measures hot response with
+  `src/app/gui_perf/smf_dynlib_probe.spl`. Acceptance still requires
+  `loader=smf_dynlib`, `call_source=dynlib_symbol_call`, no fallback, the full
+  expected sample count, and p99 below the configured threshold.
 
 ## Testing
 
