@@ -92,3 +92,13 @@ dev-done
 - verification: PASS JS engine check; PASS Node API conformance (150); PASS regenerated Node API manual; PASS WebGPU JS/WASM Simple (106); PASS interpreter perf (10); PASS GTK GUI repeat evidence with Simple open 224 us, GTK open 75025 us, Simple frame 1 us, GTK frame 27 us, vector checksum 212444 deterministic true.
 - implementation: GUI/color-image lane now fails closed for bounded JPEG XL non-default structured color metadata instead of accepting it as default sRGB; the parser uses explicit available/required bit counts to avoid treating absent padded fixture bits as color metadata.
 - verification: PASS image info/decode check; PASS image decode spec (75); PASS regenerated image decode manual; PASS Node API conformance (150); PASS WebGPU JS/WASM Simple (106); PASS interpreter perf (10); PASS GTK GUI repeat evidence with Simple open 220 us, GTK open 72130 us, Simple frame 1 us, GTK frame 28 us, vector checksum 212444 deterministic true.
+- implementation: JS/WASM optimization lane routed `String.startsWith` and
+  `String.endsWith` through runtime text primitives across sync, GC async, and
+  no-GC async interpreter string-method families, removing duplicated
+  interpreter byte loops.
+- verification: PASS string-method family check; PASS Node API conformance
+  (151); PASS regenerated Node API manual; PASS WebGPU JS/WASM Simple (106);
+  PASS interpreter perf (10); PASS GTK GUI repeat evidence with Simple open
+  210 us, GTK open 77889 us, Simple frame 1 us, GTK frame 27 us, vector
+  checksum 212444 deterministic true. ES5 conformance remains a pre-existing
+  harness failure at 54/54 scenarios returning `nil`.

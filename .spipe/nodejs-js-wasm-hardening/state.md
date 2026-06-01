@@ -103,3 +103,16 @@ dev-incomplete
   formatted image and verifies the staged runtime, JS entry, manifest, and QEMU
   marker payload bytes are present in the image. This remains host-side
   readiness, not guest serial evidence.
+- dev: Optimized JS `String.startsWith` and `String.endsWith` across the
+  sync, GC async, and no-GC async interpreter string-method families by routing
+  directly through runtime text primitives instead of manual per-character
+  loops.
+- dev: PASS `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter_string_methods.spl src/lib/gc_async_mut/js/engine/interpreter_string_methods.spl src/lib/nogc_async_mut/js/engine/interpreter_string_methods.spl test/feature/js/node_api_conformance_spec.spl test/feature/js/es5_conformance_spec.spl`.
+- dev: PASS `SIMPLE_LIB=src bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean` (151 scenarios), including prefix/suffix coverage through the runtime helper. ES5 conformance remains a pre-existing interpreter-harness failure at 54/54 scenarios returning `nil`.
+- dev: PASS cross-lane smoke checks: WebGPU JS/WASM Simple (106 scenarios),
+  interpreter perf (10 scenarios), and `scripts/check-gtk-gui-repeat-evidence.shs`
+  with Simple open 210 us, GTK open 77889 us, Simple frame 1 us, GTK frame
+  27 us, vector checksum 212444 deterministic true.
+- dev: Regenerated `doc/06_spec/feature/js/node_api_conformance_spec.md`;
+  docgen completed with existing compiler/docgen warnings and emitted a
+  stub-style manual.

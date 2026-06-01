@@ -898,6 +898,25 @@ expect(_str(crypto_randomBytes_status([JsValue.Number(v: 16.0)]))).to_equal("den
 
 ### Node.js runtime shape
 
+### String primitives
+
+#### checks prefixes and suffixes through runtime text primitives
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("'simple-runtime'.startsWith('simple')")).to_equal("true")
+expect(_eval_str("'simple-runtime'.startsWith('runtime')")).to_equal("false")
+expect(_eval_str("'simple-runtime'.endsWith('runtime')")).to_equal("true")
+expect(_eval_str("'simple-runtime'.endsWith('simple')")).to_equal("false")
+```
+
+</details>
+
 ### JSON.parse host path
 
 #### parses JSON objects through the runtime allocator
@@ -2273,6 +2292,7 @@ Tests covering:
 - Node.js crypto module
 - createHash digest
 - Node.js runtime shape
+- String primitives
 - JSON.parse host path
 - require builtins
 - Buffer global and module shape
@@ -2283,8 +2303,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 150 |
-| Active scenarios | 150 |
+| Total scenarios | 151 |
+| Active scenarios | 151 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
