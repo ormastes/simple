@@ -244,7 +244,7 @@ expect(gui_mac_smf_dynlib_accepts_pass_row(row.replace("status=pass", "status=sk
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -255,7 +255,9 @@ val probe = "GUI_DYNLIB_PERF artifact=build/gui/pure_gui_hot.smf dynlib_path=bui
 val pass_row = gui_mac_smf_dynlib_pass_row("macos", "arm64", "macos-arm64", "Apple_M3", "build/gui/pure_gui_hot.smf")
 val full = contract + "\n" + qemu + "\n" + loader + "\n" + probe + "\n" + pass_row
 expect(gui_mac_smf_dynlib_accepts_transcript(full)).to_equal(true)
+expect(gui_mac_smf_dynlib_transcript_check_row(full)).to_equal("GUI_MAC_SMF_DYNLIB_TRANSCRIPT status=pass")
 expect(gui_mac_smf_dynlib_accepts_transcript(contract + "\n" + qemu + "\n" + probe + "\n" + pass_row)).to_equal(false)
+expect(gui_mac_smf_dynlib_transcript_check_row(contract + "\n" + qemu + "\n" + probe + "\n" + pass_row)).to_contain("status=fail")
 expect(gui_mac_smf_dynlib_accepts_transcript(contract + "\n" + loader + "\n" + qemu + "\n" + probe + "\n" + pass_row)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("call_source=dynlib_symbol_call", "call_source=direct_simple"))).to_equal(false)
 ```

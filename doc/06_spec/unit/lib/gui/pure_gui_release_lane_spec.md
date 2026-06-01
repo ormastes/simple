@@ -109,16 +109,19 @@ _expect_release_clean("src/app/gui_perf/smf_dynlib_probe.spl")
 
 2.  expect release clean
 
+3.  expect release clean
+
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_evidence_core.spl")
 _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_evidence.spl")
+_expect_release_clean("src/app/gui_perf/macos_smf_dynlib_transcript_check.spl")
 ```
 
 </details>
