@@ -82,6 +82,13 @@ audit. Snapshot import is fail-closed: missing headers, duplicate slots, missing
 slot values, metadata/count mismatches, and missing output paths prevent `.sprof`
 write planning.
 
+The generated-C profile build path now derives and inserts four native counter
+classes in Simple-owned code: function-entry counters, entry basic-block
+counters, return-edge counters, and bounded direct-call path counters. These
+sites are emitted only after `--simple-profile-counters` selects the profile
+build path; non-profile builds continue to reject leaked counter artifacts in
+the build audit.
+
 ## Pure-Simple BOLT-Like Optimizer
 
 The optimizer does not invoke BOLT. It consumes `.sprof` and Simple executable

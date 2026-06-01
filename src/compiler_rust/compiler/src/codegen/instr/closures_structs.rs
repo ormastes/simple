@@ -964,6 +964,8 @@ fn try_compile_builtin_method_call<M: Module>(
         "all" => "rt_array_all",
         // String extra methods
         "trim" => "rt_string_trim",
+        "trim_start" => "rt_string_trim_start",
+        "trim_end" => "rt_string_trim_end",
         "split" => "rt_string_split",
         "replace" => "rt_string_replace",
         "to_upper" | "upper" => "rt_string_to_upper",

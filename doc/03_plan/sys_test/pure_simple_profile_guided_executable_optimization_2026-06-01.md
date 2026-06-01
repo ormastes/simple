@@ -16,7 +16,7 @@ Design verification for:
 | Spec | Purpose |
 |------|---------|
 | `test/system/app/optimize/feature/sprof_loader_spec.spl` | validate/load/merge profile summaries |
-| `test/system/app/compile/feature/native_profile_counter_spec.spl` | native counter ABI and disabled-counter behavior |
+| `test/system/app/compile/feature/native_profile_counter_spec.spl` | native counter ABI, disabled-counter behavior, and generated-C function/block/edge/call-path insertion |
 | `test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl` | layout planner and rejection rules |
 | `test/system/app/compile/feature/native_layout_section_map_spec.spl` | generated-C section-map parsing and compile-path transform contracts |
 | `test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl` | patch/trap/count/restore/auto-disarm state machine |
@@ -27,11 +27,12 @@ Executable specs must live under `test/`; generated/manual docs mirror under
 
 Current status: the executable contract specs above exist and pass. Production
 helper slices exist for `.sprof` text/file loading, native counter metadata and
-runtime snapshot import, executable layout eligibility and manifest planning,
-generated-C section-map emission and consumption, and bare-metal breakpoint
-state/ledger policy. The current executable optimizer slice writes deterministic
-Simple-owned layout, native symbol-order, and generated-C section-map artifacts
-rather than rewriting arbitrary ELF bytes.
+runtime snapshot import, generated-C function/block/edge/call-path insertion,
+executable layout eligibility and manifest planning, generated-C section-map
+emission and consumption, and bare-metal breakpoint state/ledger policy. The
+current executable optimizer slice writes deterministic Simple-owned layout,
+native symbol-order, and generated-C section-map artifacts rather than rewriting
+arbitrary ELF bytes.
 
 ## Requirement Traceability
 
@@ -41,7 +42,7 @@ rather than rewriting arbitrary ELF bytes.
 | Simple native optimize | native O-level plus profile-counter ABI tests |
 | Pure Simple BOLT-like optimizer | metadata-only layout planning tests; native symbol-order/C section-map artifact tests; no external BOLT command dependency |
 | Generated-C layout consumption | section-map parser/transform tests; fail-closed unused symbol and unsafe section tests |
-| Native counter feature | function/block/edge/call-path counter contract tests |
+| Native counter feature | function/block/edge/call-path counter contract tests; generated-C insertion checks for all four counter classes |
 | Bare-metal counter impl | breakpoint site table and patch ledger tests |
 | Prevent slow breakpoint overhead | auto-disarm and sampled-only fallback tests |
 | Analyze call path | bounded call-path hash and promotion tests |

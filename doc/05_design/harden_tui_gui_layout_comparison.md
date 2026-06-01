@@ -89,6 +89,8 @@ Add a structural comparison report type that can hold:
 
 The structural comparison path runs before pixel comparison. Its result should be attached to HTML/corpus reports and future TUI reports as diagnostic evidence. Pixel exactness remains the current acceptance gate until a later requirement explicitly accepts structural-only parity.
 
+`StructuralLayoutBox` is the GUI/browser adapter shape for this selected scope. It carries a stable node label, geometry, and text value, and `structural_box_layout_compare` compares box lists before pixel acceptance so geometry shifts are visible even when later pixel diagnostics are unavailable or backend-qualified evidence marks a lane unavailable.
+
 ## Measurement Design
 
 Add measurement records with:
@@ -108,6 +110,12 @@ Measurement records must be backend-qualified. A software fallback measurement c
 
 `BackendMeasurementRecord` implements this selected contract for `wm_compare`. Initialized accelerated records require command, host, warmup/sample counts, p50/p95, max RSS, binary-size fields, render/readback scope, and scalar baseline comparison. Unavailable or failed backend records are valid host evidence only when they carry an explicit reason and do not masquerade as fallback success.
 
+`backend_measurement_binary_size_delta_bytes` derives the binary-size delta from current and baseline binary-size fields, and `backend_measurement_binary_size_delta_valid` requires both sizes for initialized measurement evidence. The SDN record includes the derived delta so size evidence is reviewable without recomputing it from prose.
+
 `HostCommandMeasurement` parses repeated `/usr/bin/time` evidence into the measurement record fields. The first host evidence artifact records the focused backend measurement spec on Linux with p50/p95 timing, max RSS, and active Simple binary size.
 
 `current_host_backend_measurement_matrix` combines strict backend probes with host measurement samples. It emits explicit unavailable GPU records for this Linux host and initialized CPU SIMD timing evidence without using CPU fallback to satisfy Metal, Vulkan, or CUDA lanes.
+
+## Failure Triage Design
+
+`ComparisonFailureReport` is the shared status summary for comparison reports. It keeps capture, metadata, structural layout, exact pixel, and backend statuses as separate fields with a derived `primary_status`. Capture failure stops metadata/layout/pixel evaluation. Metadata mismatch stops layout/pixel evaluation. Structural geometry mismatch stops pixel acceptance. Exact pixel mismatch is only reported after capture, metadata, and layout are valid. Backend status is reported independently so unavailable Metal/Vulkan/CUDA hardware does not masquerade as either successful pixel evidence or failed comparison evidence.

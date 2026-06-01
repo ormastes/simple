@@ -128,11 +128,16 @@ impl Lowerer {
             if self.is_shared_pointer(receiver.ty) {
                 let type_name = self.get_type_name(receiver.ty);
                 let field_name = format!("field_{}", field_index);
+                let context = self
+                    .current_function_name
+                    .as_ref()
+                    .map(|name| format!("shared pointers (*T) are read-only while lowering {name}; use COW pattern"))
+                    .unwrap_or_else(|| "shared pointers (*T) are read-only; use COW pattern".to_string());
                 self.memory_warnings.warn(
                     MemoryWarning::new(MemoryWarningCode::W1001, span)
                         .with_type(&type_name)
                         .with_name(&field_name)
-                        .with_context("shared pointers (*T) are read-only; use COW pattern"),
+                        .with_context(&context),
                 );
             }
         }
@@ -261,6 +266,11 @@ impl Lowerer {
                 if let Some(local) = ctx.get_local(*idx) {
                     if local.mutability == Mutability::Mutable {
                         return true;
+                    }
+                    if let Some(HirType::Pointer { capability, .. }) = self.module.types.get(local.ty) {
+                        if capability.allows_mutation() {
+                            return true;
+                        }
                     }
                 }
                 // Also check if it has a mutable capability

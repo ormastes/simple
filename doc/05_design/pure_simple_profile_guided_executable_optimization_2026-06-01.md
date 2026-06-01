@@ -79,6 +79,21 @@ Counters are enabled only under an explicit profile build flag. Non-profile
 native builds should either omit counters or keep them behind cold disabled
 guards.
 
+### Generated-C Counter Insertion
+
+`src/app/compile/native_profile_counter.spl` derives counter slots directly
+from generated C when a profile build is requested:
+- `function_entry`: one slot at each generated C function entry;
+- `basic_block`: one entry-block slot per generated C function;
+- `edge`: one return-edge slot per generated C return statement;
+- `call_path`: one direct-call-path slot per direct call statement, bounded by
+  the existing call-path depth policy.
+
+The instrumenter emits the counter prelude, metadata sidecar rows, and C
+increments in the same deterministic slot order. Disabled profile counters leave
+the C source unchanged, and the build audit rejects counter symbols in
+non-profile builds.
+
 ### Merge Path
 
 Runtime counters are flushed into `.sprof` through the profile writer. Crashes

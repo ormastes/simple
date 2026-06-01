@@ -411,3 +411,37 @@ The repo already has enough capture, comparison, backend, and system-test scaffo
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/app/spipe_docgen/spipe_docgen/generator.spl`: passed.
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple spipe-docgen test/system/wm_compare/backend_measurement_capture_spec.spl --output doc/06_spec`: succeeded and generated the 3-scenario manual.
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/backend_measurement_capture_spec.spl --mode=interpreter`: 1 file, 3 tests, 0 failures; no post-test `unknown extern function: shell` failure.
+
+## GUI/Browser Structural Layout Adapter: 2026-06-01
+
+- Extended `src/app/wm_compare/structural_layout_report.spl` with `StructuralLayoutBox`, `structural_layout_box(...)`, `structural_layout_boxes_sdn(...)`, and `structural_box_layout_compare(...)`.
+- The adapter records stable GUI/browser node labels, geometry, and text values, then compares box lists before pixel acceptance so layout shifts are diagnosed separately from pixel diffing.
+- Extended `test/system/wm_compare/structural_layout_report_spec.spl` from 5 to 7 scenarios with GUI box SDN output and GUI geometry mismatch coverage.
+- Regenerated `doc/06_spec/system/wm_compare/structural_layout_report_spec.md` and restored the manual-purpose section with TUI cells, GUI boxes, backend evidence, pixel links, and corpus attachment.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/app/wm_compare/structural_layout_report.spl test/system/wm_compare/structural_layout_report_spec.spl`: passed.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/structural_layout_report_spec.spl --mode=interpreter --clean`: 1 file, 7 tests, 0 failures; runner duration 1381ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over touched structural source/spec/manual/design/state artifacts found only historical prose references in `.spipe` state, not live source or spec placeholders.
+
+## Comparison Failure-Triage Report: 2026-06-01
+
+- Added `src/app/wm_compare/comparison_failure_report.spl` with `ComparisonFailureReport`, `comparison_failure_report(...)`, and `comparison_failure_report_sdn(...)`.
+- The report exposes independent capture, metadata, structural layout, exact pixel, and backend status fields plus a derived primary status.
+- Added `test/system/wm_compare/comparison_failure_report_spec.spl` with 5 scenarios covering capture failure, metadata mismatch, structural geometry mismatch, exact pixel mismatch, and backend unavailability as separate statuses.
+- Added `doc/06_spec/system/wm_compare/comparison_failure_report_spec.md` with manual-purpose text for the failure-triage contract.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/app/wm_compare/comparison_failure_report.spl test/system/wm_compare/comparison_failure_report_spec.spl`: passed.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/comparison_failure_report_spec.spl --mode=interpreter --clean`: 1 file, 5 tests, 0 failures; runner duration 561ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple spipe-docgen test/system/wm_compare/comparison_failure_report_spec.spl --output doc/06_spec`: succeeded and generated the scenario manual.
+
+## Backend Measurement Binary-Size Delta: 2026-06-01
+
+- Extended `src/app/wm_compare/backend_measurement_report.spl` with `backend_measurement_binary_size_delta_bytes(...)` and `backend_measurement_binary_size_delta_valid(...)`.
+- `backend_measurement_record_sdn(...)` now emits `binary_size_delta_bytes`, making size delta evidence explicit in measurement records and generated reports.
+- Extended `test/system/wm_compare/backend_measurement_report_spec.spl` from 5 to 6 scenarios with initialized CPU SIMD binary-size delta validation.
+- Updated `doc/09_report/harden_tui_gui_layout_backend_measurement_2026-06-01.md` to include a zero-byte delta for the current representative measurement, where current and baseline debug Simple binaries are the same artifact.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/app/wm_compare/backend_measurement_report.spl test/system/wm_compare/backend_measurement_report_spec.spl`: passed.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/backend_measurement_report_spec.spl --mode=interpreter --clean`: 1 file, 6 tests, 0 failures; runner duration 1288ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple spipe-docgen test/system/wm_compare/backend_measurement_report_spec.spl --output doc/06_spec`: succeeded and generated the 6-scenario manual.

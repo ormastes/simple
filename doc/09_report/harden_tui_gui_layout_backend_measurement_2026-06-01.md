@@ -38,6 +38,7 @@ simple_binary_size_bytes=454623792
   max_rss_kb: 930308
   binary_size_bytes: 454623792
   baseline_binary_size_bytes: 454623792
+  binary_size_delta_bytes: 0
   render_readback_scope: "backend-measurement-spec-startup"
   scalar_baseline_compared: true
   fallback_used: false
@@ -56,7 +57,7 @@ simple_binary_size_bytes=454623792
   (backend_measurement requested: "metal" selected: "metal" status: "Unavailable" reason: "Metal requires macOS")
   (backend_measurement requested: "vulkan" selected: "vulkan" status: "Unavailable" reason: "vulkan probe unavailable in interpreter")
   (backend_measurement requested: "cuda" selected: "cuda" status: "Unavailable" reason: "CUDA runtime unavailable")
-  (backend_measurement requested: "cpu_simd" selected: "cpu_simd" status: "Initialized" p50_us: 38580000 p95_us: 38890000 max_rss_kb: 930308 binary_size_bytes: 454623792 scalar_baseline_compared: true fallback_used: false)
+  (backend_measurement requested: "cpu_simd" selected: "cpu_simd" status: "Initialized" p50_us: 38580000 p95_us: 38890000 max_rss_kb: 930308 binary_size_bytes: 454623792 baseline_binary_size_bytes: 454623792 binary_size_delta_bytes: 0 scalar_baseline_compared: true fallback_used: false)
 )
 ```
 

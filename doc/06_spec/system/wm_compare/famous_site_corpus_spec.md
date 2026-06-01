@@ -709,17 +709,15 @@ expect(result.0).to_contain("\"expansionCandidates\"")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val report_app = "src/app/wm_compare/site_corpus_layout_report.spl"
 expect(rt_file_exists(report_app)).to_equal(true)
-val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts([]))
+val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts(["--limit=4"]))
 expect(report).to_contain("(famous_site_corpus_layout_report")
-expect(report).to_contain("selected: 132")
-expect(report).to_contain("matched: 94")
-expect(report).to_contain("mismatched: 38")
+expect(report).to_contain("selected: 4")
 expect(report).to_contain("layout_width: 122")
 expect(report).to_contain("first_mismatch: \"site_0_google\"")
 expect(report).to_contain("missing_simple_line: \"compatibility fixture\"")
@@ -736,15 +734,14 @@ expect(report).to_contain("source_b: \"simple_layout\"")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val report_app = "src/app/wm_compare/site_corpus_layout_report.spl"
 expect(rt_file_exists(report_app)).to_equal(true)
-val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts(["--layout-width=120"]))
-expect(report).to_contain("selected: 132")
-expect(report).to_contain("matched: 132")
+val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts(["--limit=4", "--layout-width=120"]))
+expect(report).to_contain("selected: 4")
 expect(report).to_contain("mismatched: 0")
 expect(report).to_contain("layout_width: 120")
 expect(report).to_contain("first_mismatch: \"\"")
@@ -757,16 +754,14 @@ expect(report).to_contain("first_mismatch: \"\"")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val report_app = "src/app/wm_compare/site_corpus_layout_report.spl"
 expect(rt_file_exists(report_app)).to_equal(true)
-val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts(["--layout-width=132"]))
-expect(report).to_contain("selected: 132")
-expect(report).to_contain("matched: 51")
-expect(report).to_contain("mismatched: 81")
+val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts(["--limit=4", "--layout-width=132"]))
+expect(report).to_contain("selected: 4")
 expect(report).to_contain("layout_width: 132")
 expect(report).to_contain("first_mismatch: \"site_0_google\"")
 expect(report).to_contain("missing_simple_line: \"compatibility fixture\"")

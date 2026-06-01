@@ -422,6 +422,26 @@ SMF acceptance separate from host-dynlib diagnostics. Placeholder scan matches
 were legitimate SMF `stub` terminology, not placeholder pass markers. The doc
 layout guard returned `0`.
 
+Pure Simple focused verification checkpoint:
+
+- `jj git fetch`
+- `src/compiler_rust/target/release/simple test test/unit/os/kernel/loader/smf_spec.spl --mode=interpreter`
+- `src/compiler_rust/target/release/simple test test/unit/app/gui_perf/smf_dynlib_probe_spec.spl --mode=interpreter`
+- `src/compiler_rust/target/release/simple test test/feature/js/node_process_next_tick_spec.spl --mode=interpreter`
+- `src/compiler_rust/target/release/simple test test/system/wm_compare/backend_measurement_report_spec.spl --mode=interpreter`
+- `src/compiler_rust/target/release/simple test test/system/wm_compare/backend_measurement_capture_spec.spl --mode=interpreter`
+- `src/compiler_rust/target/release/simple test test/system/wm_compare/structural_layout_report_spec.spl --mode=interpreter`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The GitHub fetch checkpoint reported `Nothing changed`. The `bin/simple`
+wrapper currently resolves to a bootstrap compiler without the `test` command,
+so this checkpoint used the full release CLI directly. The focused pure Simple
+spec pass succeeded for SMF core, SMF dynlib probe, Node `process.nextTick`,
+backend measurement report, backend measurement capture, and structural layout
+report; the doc layout guard returned `0`. This refreshes evidence only and
+does not close the remaining Chrome parity, broader app-matrix, or guest-side
+performance blockers.
+
 Production Chrome parity refresh:
 
 - `jj git fetch`
@@ -439,3 +459,101 @@ system spec passed `37/37`, and the doc layout guard returned `0`. This is
 current evidence for the Chrome text/font/compositing blocker; the blocker
 remains open because the production renderer is still divergent rather than
 Chrome-exact.
+
+Famous-site corpus full-spec refresh:
+
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `jj git fetch`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The full famous-site corpus spec passed with `37` passed and `0` failed in the
+release CLI. The GitHub fetch checkpoint reported `Nothing changed`, and the
+doc layout guard returned `0`. This is a corpus regression refresh only; it does
+not change the open `site_0_google` production pixel-difference blocker.
+
+Structural GUI box geometry continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/structural_layout_report.spl test/system/wm_compare/structural_layout_report_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/structural_layout_report_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/system/wm_compare/structural_layout_report_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The structural layout helper now emits `structural_box_layout_report` SDN for
+GUI box comparisons, including source counts, backend evidence, pixel link, and
+both labeled box lists. The focused structural spec passed `7/7`, the generated
+manual has 7 active scenarios and includes the GUI box report flow, the broader
+famous-site corpus spec still passed `37/37`, and the doc layout guard returned
+`0`. This advances pre-pixel geometry evidence for Chrome/layout hardening; it
+does not close the remaining production glyph/compositing divergence.
+
+Comparison failure and no-tolerance policy continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/comparison_failure_report.spl test/system/wm_compare/comparison_failure_report_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/comparison_failure_report_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/system/wm_compare/comparison_failure_report_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/html_compat_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/structural_layout_report_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The shared comparison failure report now serializes the exact-only acceptance
+policy: `exact_required: true`, `perceptual_diagnostic_only: true`, and
+`tolerance_acceptance_allowed: false`. The focused comparison failure spec
+passed `5/5`, its manual has 5 active scenarios with the policy visible, the
+neighboring no-tolerance HTML compatibility spec passed `17/17`, the structural
+layout report spec passed `7/7`, and the doc layout guard returned `0`. This
+strengthens failure triage for capture, metadata, structural, exact-pixel, and
+backend evidence without allowing perceptual/tolerance acceptance.
+
+macOS SMF/dynlib evidence orchestration continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/gui_perf/macos_smf_dynlib_evidence_core.spl src/app/gui_perf/macos_smf_dynlib_evidence.spl test/unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple run src/app/gui_perf/macos_smf_dynlib_evidence.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/gui_perf/smf_dynlib_probe_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `git diff -- src/compiler_rust src/runtime | grep -E '^\\+.*rt_(file_wrap_smf_dynlib|file_extract_smf_dynlib|dyncall|gui_dynlib|smf_dynlib)'`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The macOS arm64 SMF/dynlib runner is now bounded as cold orchestration around
+the pure Simple wrapper/probe binaries, not a hot-loop path. Its acceptance
+predicate requires `loader=smf_dynlib`, `call_source=dynlib_symbol_call`,
+`p99_us=...`, `threshold_us=1000`, `pass=true`, and `error=` while rejecting
+host-dynlib, direct-Simple, missing-p99, loose-threshold, and
+`not-smf-dynlib` rows. The focused evidence spec passed `5/5`, the adjacent
+`smf_dynlib_probe_spec` passed `9/9`, the generated manual has 5 active
+scenarios, the Linux host run emitted an explicit `requires-macos-arm64` skip
+row, no dirty Rust/runtime `rt_*` SMF dynlib helpers were added, and the doc
+layout guard returned `0`. This gives the macOS lane a strict runnable evidence
+entrypoint but does not claim final macOS acceptance on this Linux host.
+
+Native generated-C layout section-map continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/compile/native_layout_section_map.spl src/app/compile/llvm_direct.spl test/system/app/compile/feature/native_layout_section_map_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/app/compile/feature/native_layout_section_map_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/system/app/compile/feature/native_layout_section_map_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The generated-C layout section-map application now preserves the section macro
+definitions it inserts before matching functions, so `--simple-layout-section-map`
+produces compilable C instead of references to undefined macros. The focused
+system spec passed `6/6`, covering map parsing, unsafe-section rejection,
+disabled mode, empty-map and unused-symbol fail-closed diagnostics, and macro
+definition preservation. The generated manual has 6 active scenarios, and the
+doc layout guard returned `0`.
+
+Pure GUI release-lane dependency guard continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check test/unit/lib/gui/pure_gui_release_lane_spec.spl src/app/gui_perf/smf_dynlib_probe_core.spl src/app/gui_perf/macos_smf_dynlib_evidence_core.spl src/app/gui_perf/macos_smf_dynlib_evidence.spl src/app/gui_perf/smf_wrap_host_dynlib.spl src/app/gui_perf/pure_gui_hot_dynlib_export.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/gui/pure_gui_release_lane_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/gui_perf/smf_dynlib_probe_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/gui/pure_gui_release_lane_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The release-lane guard now fails closed if a guarded source file is missing or
+empty before checking for forbidden WM, web-renderer, Skia, or native GUI
+runtime dependencies. It covers the pure GUI release surface, command boundary,
+SMF/dynlib perf contract, SMF dynlib probe core, macOS SMF evidence runner,
+SMF wrapper, exported hot symbol, and GUI entities. The focused release-lane
+spec passed `10/10`, the adjacent SMF dynlib probe spec passed `9/9`, the
+generated manual has 10 active scenarios, and the doc layout guard returned `0`.

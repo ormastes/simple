@@ -179,6 +179,8 @@ impl LlvmEmitter<'_> {
             "char_code_at" => Some("rt_string_char_code_at"),
             "join" => Some("rt_string_join"),
             "trim" => Some("rt_string_trim"),
+            "trim_start" => Some("rt_string_trim_start"),
+            "trim_end" => Some("rt_string_trim_end"),
             "split" => Some("rt_string_split"),
             "replace" => Some("rt_string_replace"),
             "to_upper" | "upper" => Some("rt_string_to_upper"),

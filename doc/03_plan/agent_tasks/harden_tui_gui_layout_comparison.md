@@ -15,21 +15,22 @@ Status: selected scope. User approved Feature Option 3 and NFR Option C on 2026-
 
 ## Remaining Implementation Tasks
 
-- Add a shared structural layout report type.
-- Add TUI grid and GUI/browser layout adapters.
-- Add mismatch-report system specs.
-- Add backend-qualified measurement manifests and report validators for Metal, Vulkan, CUDA, and CPU SIMD.
-- Track unavailable hardware lanes explicitly where this host cannot prove them.
+- No selected-scope implementation task remains open in the focused TUI/GUI comparison and backend-evidence slice.
+- Keep the full famous-site corpus timeout tracked as follow-up verification work until its harness/performance issue is fixed.
+- Treat Metal, Vulkan, and CUDA as unavailable on this host unless a future target machine produces initialized lane evidence.
 
 ## Completed After Selection
 
 - Added `src/app/wm_compare/structural_layout_report.spl` as the shared structural layout report surface.
 - Added focused coverage in `test/system/wm_compare/structural_layout_report_spec.spl`.
 - Wired structural evidence into the famous-site corpus layout-report mismatch path.
+- Added explicit GUI/browser layout boxes with stable node labels and geometry comparison before pixel acceptance.
+- Added a shared comparison failure-triage report and SPipe coverage for capture failure, metadata drift, geometry drift, pixel drift, and backend unavailability as separate statuses.
 - Recorded the full famous-site corpus spec timeout as a performance/test-harness bug.
 - Added backend-qualified measurement record validation and matrix reporting for Metal, Vulkan, CUDA, and CPU SIMD lanes.
 - Added host `/usr/bin/time` measurement parsing and recorded a representative local backend-measurement evidence report.
 - Added executable current-host matrix construction so Metal, Vulkan, CUDA, and CPU SIMD lane statuses are represented as backend measurement records.
+- Added explicit binary-size delta calculation, validation, SDN output, and SPipe coverage for initialized backend measurement records.
 
 ## NFR Task Split
 
@@ -51,4 +52,4 @@ NFR D:
 
 ## Current Blocker
 
-No selection blocker remains. Remaining work is implementation and verification for the selected 3/C scope.
+No selection blocker remains. The only broad verification caveat is the tracked full famous-site corpus spec timeout; focused comparison, structural, and backend evidence gates cover the selected 3/C work.

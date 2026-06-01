@@ -1805,6 +1805,36 @@ pub extern "C" fn rt_string_trim(string: RuntimeValue) -> RuntimeValue {
     }
 }
 
+/// Trim whitespace from the start of a string
+#[no_mangle]
+pub extern "C" fn rt_string_trim_start(string: RuntimeValue) -> RuntimeValue {
+    let len = rt_string_len(string);
+    if len <= 0 {
+        return string;
+    }
+    let data = rt_string_data(string);
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize));
+        let trimmed = s.trim_start();
+        rt_string_new(trimmed.as_ptr(), trimmed.len() as u64)
+    }
+}
+
+/// Trim whitespace from the end of a string
+#[no_mangle]
+pub extern "C" fn rt_string_trim_end(string: RuntimeValue) -> RuntimeValue {
+    let len = rt_string_len(string);
+    if len <= 0 {
+        return string;
+    }
+    let data = rt_string_data(string);
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize));
+        let trimmed = s.trim_end();
+        rt_string_new(trimmed.as_ptr(), trimmed.len() as u64)
+    }
+}
+
 /// Join an array of strings with a separator
 /// Called as array.join(separator) so array is first arg
 #[no_mangle]

@@ -13,6 +13,20 @@ This plan replaces the earlier hosted WM and Simple Web Renderer direction.
 Those paths remain smoke/regression coverage only and are not release evidence
 for this goal.
 
+## Notice: Pure Simple Constraint
+
+This plan must be implemented in pure Simple wherever the repository can express
+the behavior in `.spl`. Do not add new Rust runtime `rt_*` externs, Rust SFFI
+helpers, or Rust-hosted GUI logic to satisfy this goal. If a native escape hatch
+is unavoidable after the Simple path is proven insufficient, implement the
+smallest possible C bridge rather than Rust, and keep it outside the measured
+GUI library logic.
+
+The 2D engine should also prefer pure Simple. Any C fallback for platform or
+pixel-adjacent primitives must preserve existing rendering pixel logic and must
+not change raster output, glyph metrics, colors, placement, or comparison
+thresholds.
+
 ## Target Stack
 
 ```text
@@ -70,10 +84,10 @@ the evidence.
   i64-only exported hot symbol that can be built as a host `.so`/`.dylib` for
   callable ABI diagnostics. This proves dynlib call overhead separately, but
   `loader=host_dynlib` remains non-acceptance evidence for the SMF goal.
-- `src/compiler_rust/runtime/src/value/sffi/dyncall.rs` implements the
-  i64-only `rt_dyncall_*` bridge. The remaining gap is producing/configuring the
-  macOS arm64 SMF/dynlib artifact so the probe can report
-  `call_source=dynlib_symbol_call`.
+- Do not solve the remaining SMF/dynlib gap by adding Rust runtime helpers.
+  Prefer pure Simple SMF envelope, symbol, and probe code. If direct native
+  symbol invocation cannot be expressed in Simple, use a minimal C bridge at the
+  adapter boundary and keep the GUI library pure Simple.
 - Existing WM and hosted examples still contain direct `rt_gui_*` and
   `rt_winit_*` extern calls. They must not be imported by the release lane.
 - Existing Simple Web renderer files are renderer/browser feature code, not the
@@ -115,8 +129,12 @@ the evidence.
   artifact, resolves the hot entry symbol once, and reuses it.
 - Use the host `.so`/`.dylib` diagnostic lane only to prove callable symbol ABI
   and timing. Do not treat it as acceptance unless the loader is `smf_dynlib`.
-- Use the `rt_dyncall_*` bridge through `dynlib_call_1` to invoke the resolved
-  i64 hot-probe symbol in the measured path.
+- Implement wrapper, envelope, extraction, and probe orchestration in pure
+  Simple. Do not introduce new Rust `rt_*` functions for SMF wrapping,
+  extraction, or hot-call dispatch.
+- If Simple cannot directly invoke the resolved native symbol, add a narrow C
+  adapter that performs only the process-callable symbol call. Keep this C
+  adapter outside the pure GUI library and outside pixel/rendering logic.
 - Keep loader errors explicit: missing artifact, unsupported architecture,
   unresolved symbol, settlement failure, and fallback mode.
 - Add a SimpleOS/QEMU loader adapter that uses the same artifact contract and
@@ -151,8 +169,8 @@ the evidence.
 - Feed probe rows through `gui_dynlib_perf_report()` so interpreter/JIT/fallback
   measurements cannot satisfy the dynlib acceptance gate.
 - Replace the probe's current `call_source=direct_simple` fallback with measured
-  `call_source=dynlib_symbol_call` only after `rt_dyncall_*` or an equivalent
-  SMF dynlib invocation path is implemented and verified.
+  `call_source=dynlib_symbol_call` only after a pure Simple path or minimal C
+  native-call adapter is implemented and verified.
 - Record whether the probe used real dynlib, SMF loader, JIT, interpreter, or
   fallback. Fallback cannot satisfy the dynlib acceptance gate.
 - Add an evidence report under `doc/09_report/` only after the probe has run.
@@ -174,6 +192,11 @@ the evidence.
 - `SIMPLE_LIB=src bin/simple check src/os/posix`
 - `SIMPLE_LIB=src bin/simple test test/unit/os/posix/dynlib_spec.spl --mode=interpreter`
 - `SIMPLE_LIB=src bin/simple test test/unit/os/smf_runtime_spec.spl --mode=interpreter`
+- Source guard: no new Rust runtime `rt_*` implementation files or Rust SFFI
+  helpers are introduced for GUI SMF dynlib wrapping, extraction, or hot-call
+  dispatch.
+- Native fallback guard: if a native helper is unavoidable, it is C, isolated at
+  the adapter boundary, and has tests proving pixel/rendering logic is unchanged.
 - Diagnostic only:
   `SIMPLE_LIB=src bin/simple compile src/app/gui_perf/pure_gui_hot_dynlib_export.spl --native --shared --strip -o build/gui/libpure_gui_hot.dylib`
   on macOS or `... -o build/gui/libpure_gui_hot.so` on Linux, followed by

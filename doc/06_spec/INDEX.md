@@ -12,9 +12,9 @@
 
 ---
 
-## Baremetal (1 features)
+## Standard Library (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Breakpoint Counter Target Adapter Specification](system/os/baremetal/feature/breakpoint_counter_target_adapter_spec.md) | Auto-generated | N/A | 5 | 0% | 0 lines |
+| [Pure Gui Release Lane Specification](unit/lib/gui/pure_gui_release_lane_spec.md) | Auto-generated | N/A | 12 | 0% | 0 lines |
 

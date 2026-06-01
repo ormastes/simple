@@ -8,6 +8,21 @@ response target. This restart explicitly removes WM and web-renderer runtime
 extern dependencies from the production path and does not change rendering pixel
 logic.
 
+## Notice: Pure Simple Constraint
+
+All feature implementation for this restart must be pure Simple unless the
+repository cannot express the required low-level operation in `.spl`. Do not add
+new Rust runtime `rt_*` externs, Rust SFFI functions, or Rust-hosted GUI helper
+paths for this goal. If a native escape hatch is unavoidable, use the smallest
+possible C bridge rather than Rust, keep it at the adapter boundary, and do not
+place GUI state, event routing, layout, command batching, or SMF orchestration in
+native code.
+
+The 2D engine should also use pure Simple where feasible. Any C fallback must
+preserve existing rendering pixel logic exactly; this performance work must not
+change raster output, glyph metrics, color math, pixel placement, or comparison
+thresholds.
+
 ## Superseded Direction
 
 Earlier notes treated hosted WM capture, `HostCompositor`, and
@@ -64,11 +79,10 @@ SimpleOS QEMU ARM64
 - `src/app/gui_perf/pure_gui_hot_dynlib_export.spl` now provides a pure Simple
   exported hot symbol for host `.so`/`.dylib` diagnostics. This lane has proven
   callable dynlib overhead, but it is still rejected as `not-smf-dynlib`.
-- `src/compiler_rust/runtime/src/value/sffi/dyncall.rs` now implements the
-  i64-only `rt_dyncall_*` runtime bridge used by `dynlib_call_1`.
 - `doc/08_tracking/bug/gui_smf_dynlib_hot_call_runtime_missing_2026-06-01.md`
-  now tracks the remaining artifact/evidence gap after the runtime bridge was
-  added.
+  tracks the remaining artifact/evidence gap. Its follow-up implementation must
+  avoid new Rust `rt_*` runtime work; use pure Simple first, then minimal C only
+  if strictly required.
 
 ## Implementation Restart Tasks
 
@@ -82,7 +96,9 @@ SimpleOS QEMU ARM64
    representative GUI events, and records p50/p95/p99 response in microseconds.
 5. Gate success on p99 less than 1000 us for the hot response path on the named
    macOS arm64 host profile, with machine details recorded in the evidence.
-6. Implement or replace `rt_dyncall_*` so the measured path can report
+6. Implement the SMF wrapping, extraction, and probe path in pure Simple. Do not
+   add Rust runtime `rt_*` helpers. If direct native symbol invocation is not
+   expressible in Simple, use a minimal C adapter so the measured path can report
    `call_source=dynlib_symbol_call` instead of `direct_simple`.
 7. Add QEMU ARM64 parity evidence that the same SMF GUI artifact can drive the
    SimpleOS adapter without importing WM or web renderer runtime paths.
@@ -100,15 +116,19 @@ SIMPLE_LIB=src src/compiler_rust/target/debug/simple run src/app/gui_perf/smf_dy
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/posix/dynlib_spec.spl --mode=interpreter --no-cache
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/smf_runtime_spec.spl --mode=interpreter --no-cache
 find doc/06_spec -name '*_spec.spl' | wc -l
+rg -n "rt_file_wrap_smf_dynlib|rt_file_extract_smf_dynlib|rt_dyncall|src/compiler_rust/runtime/src/value/sffi" src doc test -g '*.spl' -g '*.md' -g '*.rs'
 ```
 
 ## Open Evidence Gaps
 
 - No current evidence proves a pure Simple GUI SMF/dynlib hot event response
   below 1 ms.
-- The runtime can now call a resolved dynlib symbol, but no macOS arm64
-  SMF/dynlib artifact is configured in current evidence, so the probe still
-  reports `pass=false error=missing-artifact-path`.
+- The remaining implementation must not depend on newly added Rust runtime
+  `rt_*` helpers. If current experimental work introduced such helpers, replace
+  that direction with pure Simple or a minimal C adapter before treating the
+  plan as aligned.
+- No macOS arm64 SMF/dynlib artifact is configured in current evidence, so the
+  probe still reports `pass=false error=missing-artifact-path`.
 - Current hosted and QEMU WM paths still contain direct runtime GUI externs and
   therefore cannot close this goal.
 - Final requirements are still option files; the user selection step must be

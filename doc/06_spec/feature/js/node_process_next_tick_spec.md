@@ -76,3 +76,4 @@ Tests covering:
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+

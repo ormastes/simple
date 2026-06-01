@@ -7,40 +7,121 @@ extern fn rt_file_read_text(path: text) -> text
 fn _source(path: text) -> text:
     rt_file_read_text(path)
 
+fn _existing_source(path: text) -> text:
+    val source = _source(path)
+    expect(source.len()).to_be_greater_than(0)
+    source
+
+fn _text_has(source: text, needle: text) -> bool:
+    source.split(needle).len() > 1
+
+fn _is_forbidden_import_line(line: text) -> bool:
+    val trimmed = line.trim()
+    if not trimmed.starts_with("use "):
+        return false
+    _text_has(trimmed, "std.os.services.wm") or
+        _text_has(trimmed, ".wm.") or
+        _text_has(trimmed, "std.content.") or
+        _text_has(trimmed, "std.skia.") or
+        _text_has(trimmed, "std.gui.entity.browser_window") or
+        _text_has(trimmed, "simple_web") or
+        _text_has(trimmed, "SimpleWeb") or
+        _text_has(trimmed, "WebContents") or
+        _text_has(trimmed, "RenderWidgetHostView")
+
 fn _has_forbidden_release_dependency(source: text) -> bool:
-    source.contains("rt_gui") or
-        source.contains("rt_winit") or
-        source.contains("rt_sdl") or
-        source.contains("rt_cocoa") or
-        source.contains("HostCompositor") or
-        source.contains("SimpleWebRenderer") or
-        source.contains("WebRenderRequest")
+    if _text_has(source, "rt_gui"):
+        return true
+    if _text_has(source, "rt_winit"):
+        return true
+    if _text_has(source, "rt_sdl"):
+        return true
+    if _text_has(source, "rt_cocoa"):
+        return true
+    if _text_has(source, "HostCompositor"):
+        return true
+    if _text_has(source, "SimpleWebRenderer"):
+        return true
+    if _text_has(source, "WebRenderRequest"):
+        return true
+    if _text_has(source, "std.os.services.wm"):
+        return true
+    if _text_has(source, "std.content."):
+        return true
+    if _text_has(source, "std.skia."):
+        return true
+    if _text_has(source, "std.gui.entity.browser_window"):
+        return true
+    if _text_has(source, "simple_web"):
+        return true
+    if _text_has(source, "SimpleWeb"):
+        return true
+    if _text_has(source, "WebContents"):
+        return true
+    if _text_has(source, "RenderWidgetHostView"):
+        return true
+    val lines = source.split("\n")
+    for line in lines:
+        if _is_forbidden_import_line(line):
+            return true
+    false
+
+fn _expect_release_clean(path: text):
+    val source = _existing_source(path)
+    val dirty = _has_forbidden_release_dependency(source)
+    if dirty:
+        print "forbidden release dependency in " + path
+    expect(dirty).to_equal(false)
+
+fn _has_native_gui_runtime_dependency(source: text) -> bool:
+    _text_has(source, "rt_gui") or
+        _text_has(source, "rt_winit") or
+        _text_has(source, "rt_sdl") or
+        _text_has(source, "rt_cocoa") or
+        _text_has(source, "HostCompositor")
+
+fn _expect_no_native_gui_runtime(path: text):
+    val source = _existing_source(path)
+    val dirty = _has_native_gui_runtime_dependency(source)
+    if dirty:
+        print "native GUI runtime dependency in " + path
+    expect(dirty).to_equal(false)
 
 describe "pure GUI release lane":
-    it "keeps std.gui public surface free of WM, web renderer, and native GUI runtime deps":
-        val source = _source("src/lib/gui/__init__.spl")
-        expect(_has_forbidden_release_dependency(source)).to_equal(false)
+    it "rejects hosted BrowserWindow and content web sources":
+        expect(_has_forbidden_release_dependency(_existing_source("src/lib/gui/entity/browser_window.spl"))).to_equal(true)
+
+    it "rejects Skia-backed hosted presentation sources":
+        expect(_has_forbidden_release_dependency(_existing_source("src/lib/gui/entity/printing.spl"))).to_equal(true)
+
+    it "keeps pure GUI release entry surface free of WM, web renderer, Skia, and native GUI runtime deps":
+        _expect_release_clean("src/lib/gui/pure_release.spl")
 
     it "keeps pure GUI command boundary free of WM, web renderer, and native GUI runtime deps":
-        val source = _source("src/lib/gui/pure_core.spl")
-        expect(_has_forbidden_release_dependency(source)).to_equal(false)
+        _expect_release_clean("src/lib/gui/pure_core.spl")
 
     it "keeps pure GUI SMF dynlib perf contract free of WM, web renderer, and native GUI runtime deps":
-        val source = _source("src/lib/gui/pure_smf_dynlib_perf.spl")
-        expect(_has_forbidden_release_dependency(source)).to_equal(false)
+        _expect_release_clean("src/lib/gui/pure_smf_dynlib_perf.spl")
+
+    it "keeps GUI SMF dynlib probe free of WM, web renderer, and native GUI runtime deps":
+        _expect_release_clean("src/app/gui_perf/smf_dynlib_probe_core.spl")
+
+    it "keeps macOS SMF evidence runner free of WM, web renderer, and native GUI runtime deps":
+        _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_evidence_core.spl")
+        _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_evidence.spl")
+
+    it "keeps SMF wrapper and exported hot symbol free of WM, web renderer, and native GUI runtime deps":
+        _expect_release_clean("src/app/gui_perf/smf_wrap_host_dynlib.spl")
+        _expect_release_clean("src/app/gui_perf/pure_gui_hot_dynlib_export.spl")
 
     it "keeps BrowserWindow entity free of native GUI runtime deps":
-        val source = _source("src/lib/gui/entity/browser_window.spl")
-        expect(_has_forbidden_release_dependency(source)).to_equal(false)
+        _expect_no_native_gui_runtime("src/lib/gui/entity/browser_window.spl")
 
     it "keeps Menu entity free of native GUI runtime deps":
-        val source = _source("src/lib/gui/entity/menu.spl")
-        expect(_has_forbidden_release_dependency(source)).to_equal(false)
+        _expect_no_native_gui_runtime("src/lib/gui/entity/menu.spl")
 
     it "keeps IME entity free of native GUI runtime deps":
-        val source = _source("src/lib/gui/entity/ime.spl")
-        expect(_has_forbidden_release_dependency(source)).to_equal(false)
+        _expect_no_native_gui_runtime("src/lib/gui/entity/ime.spl")
 
     it "keeps Printing entity free of native GUI runtime deps":
-        val source = _source("src/lib/gui/entity/printing.spl")
-        expect(_has_forbidden_release_dependency(source)).to_equal(false)
+        _expect_no_native_gui_runtime("src/lib/gui/entity/printing.spl")

@@ -237,8 +237,24 @@ This is a Simple/C implementation slice, not a Rust linker seed change.
 Remaining larger gaps:
 - actual QEMU/live target runners for x86/i386/x86_64, ARM/Thumb/AArch64, and
   RISC-V/RVC breakpoint evidence;
-- native basic-block, edge, and call-path counter insertion beyond the current
-  function-entry metadata/snapshot path;
+- measured before/after executable performance evidence for the full
+  profile-counter -> `.sprof` -> layout-map -> native build flow.
+
+## Restart Checkpoint: 2026-06-01 Native Counter Insertion
+
+Implemented in the current slice:
+- `src/app/compile/native_profile_counter.spl`
+  - derives generated-C counter slots for `function_entry`, entry
+    `basic_block`, return `edge`, and direct-call `call_path` sites;
+  - inserts all four counter classes behind the explicit profile build path;
+  - keeps disabled/non-profile builds clean through the existing build audit.
+- `test/system/app/compile/feature/native_profile_counter_spec.spl`
+  - covers full C slot derivation;
+  - verifies emitted C contains all planned counter increments and metadata.
+
+Remaining larger gaps:
+- actual QEMU/live target runners for x86/i386/x86_64, ARM/Thumb/AArch64, and
+  RISC-V/RVC breakpoint evidence;
 - measured before/after executable performance evidence for the full
   profile-counter -> `.sprof` -> layout-map -> native build flow.
 

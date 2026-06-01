@@ -38,6 +38,8 @@ use app.compile.native_profile_counter.{
     native_profile_counter_build_audit,
     native_profile_counter_metadata_symbol,
     native_profile_counter_function_entry_slots_from_c_source,
+    native_profile_counter_c_slots_from_source,
+    native_profile_counter_all_c_instrumentation_kinds,
     native_profile_counter_instrument_c_source,
     native_profile_counter_sprof_record_from_metadata_line,
     native_profile_counter_extract_sprof_records,
@@ -307,19 +309,52 @@ describe "Native Profile Counter Contract":
             expect(slots[0].stable_key).to_equal("c:main:entry")
             expect(slots[1].stable_key).to_equal("c:helper:entry")
 
+        it "should derive function block edge and call path slots from generated C source":
+            val slots = native_profile_counter_c_slots_from_source(
+                [
+                    "int main(void) {",
+                    "  helper();",
+                    "  return 0;",
+                    "}",
+                    "void helper(void) {",
+                    "  return;",
+                    "}"
+                ].join("\n"),
+                native_profile_counter_all_c_instrumentation_kinds()
+            )
+            expect(slots.len()).to_equal(7)
+            expect(slots[0].counter_kind).to_equal("function_entry")
+            expect(slots[0].stable_key).to_equal("c:main:entry")
+            expect(slots[1].counter_kind).to_equal("basic_block")
+            expect(slots[1].stable_key).to_equal("c:main:bb0")
+            expect(slots[2].counter_kind).to_equal("call_path")
+            expect(slots[2].stable_key).to_equal("c:main:call:helper:0")
+            expect(slots[3].counter_kind).to_equal("edge")
+            expect(slots[3].stable_key).to_equal("c:main:return->main:exit0")
+            expect(slots[4].stable_key).to_equal("c:helper:entry")
+            expect(slots[5].stable_key).to_equal("c:helper:bb0")
+            expect(slots[6].stable_key).to_equal("c:helper:return->helper:exit0")
+
         it "should inject counter prelude and function entry increments into C source":
             val instrumented = native_profile_counter_instrument_c_source(
-                "int main(void) {\n  return 0;\n}\nvoid helper(void) {\n}\n",
+                "int main(void) {\n  helper();\n  return 0;\n}\nvoid helper(void) {\n}\n",
                 true
             )
             expect(instrumented.enabled).to_equal(true)
-            expect(instrumented.slot_count).to_equal(2)
+            expect(instrumented.slot_count).to_equal(6)
             expect(instrumented.c_source).to_contain("/* simple-profile-counter-prelude-v1 */")
-            expect(instrumented.c_source).to_contain("static uint64_t __simple_profile_counters[2] = {0, 0};")
+            expect(instrumented.c_source).to_contain("static uint64_t __simple_profile_counters[6] = {0, 0, 0, 0, 0, 0};")
             expect(instrumented.c_source).to_contain("__simple_profile_write_counter_snapshot")
             expect(instrumented.c_source).to_contain("__simple_profile_counters[0] += 1u;")
             expect(instrumented.c_source).to_contain("__simple_profile_counters[1] += 1u;")
+            expect(instrumented.c_source).to_contain("__simple_profile_counters[2] += 1u;")
+            expect(instrumented.c_source).to_contain("  helper();")
+            expect(instrumented.c_source).to_contain("__simple_profile_counters[3] += 1u;")
+            expect(instrumented.c_source).to_contain("  return 0;")
             expect(instrumented.metadata_lines).to_contain("counter|section=simple_profile_counter_section__simple_profile_counters|slot=0|kind=function_entry|key=c:main:entry|initial=0|symbol=__simple_profile_counter_0_function_entry")
+            expect(instrumented.metadata_lines).to_contain("counter|section=simple_profile_counter_section__simple_profile_counters|slot=1|kind=basic_block|key=c:main:bb0|initial=0|symbol=__simple_profile_counter_1_basic_block")
+            expect(instrumented.metadata_lines).to_contain("counter|section=simple_profile_counter_section__simple_profile_counters|slot=2|kind=call_path|key=c:main:call:helper:0|initial=0|symbol=__simple_profile_counter_2_call_path")
+            expect(instrumented.metadata_lines).to_contain("counter|section=simple_profile_counter_section__simple_profile_counters|slot=3|kind=edge|key=c:main:return->main:exit0|initial=0|symbol=__simple_profile_counter_3_edge")
 
         it "should leave C source unchanged when profile counters are disabled":
             val source = "int main(void) {\n  return 0;\n}\n"

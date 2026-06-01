@@ -414,6 +414,61 @@ fn _native_profile_c_function_name(line: text) -> text:
     name = name.replace("*", "")
     name
 
+fn _native_profile_c_brace_delta(line: text) -> i64:
+    var delta: i64 = 0
+    var i = 0
+    while i < line.len():
+        val ch = line[i:i + 1]
+        if ch == "{":
+            delta = delta + 1
+        elif ch == "}":
+            delta = delta - 1
+        i = i + 1
+    delta
+
+fn _native_profile_c_line_is_return_edge(line: text) -> bool:
+    val trimmed = line.trim()
+    trimmed.starts_with("return ") or trimmed == "return;" or trimmed.starts_with("return(")
+
+fn _native_profile_c_line_is_direct_call(line: text) -> bool:
+    val trimmed = line.trim()
+    if not trimmed.contains("(") or not trimmed.contains(")") or not trimmed.ends_with(";"):
+        return false
+    if _native_profile_c_line_is_return_edge(trimmed):
+        return false
+    if trimmed.starts_with("if ") or trimmed.starts_with("if("):
+        return false
+    if trimmed.starts_with("for ") or trimmed.starts_with("for("):
+        return false
+    if trimmed.starts_with("while ") or trimmed.starts_with("while("):
+        return false
+    if trimmed.starts_with("switch ") or trimmed.starts_with("switch("):
+        return false
+    if trimmed.starts_with("#"):
+        return false
+    true
+
+fn _native_profile_c_direct_call_name(line: text) -> text:
+    val before_paren_end = line.index_of("(") ?? -1
+    if before_paren_end < 0:
+        return "call"
+    var before_paren = line[0:before_paren_end].trim()
+    before_paren = before_paren.replace("=", " ")
+    before_paren = before_paren.replace("*", " ")
+    before_paren = before_paren.replace("&", " ")
+    before_paren = before_paren.replace("(", " ")
+    before_paren = before_paren.replace(")", " ")
+    val parts = before_paren.split(" ")
+    if parts.len() == 0:
+        return "call"
+    var i = parts.len() - 1
+    while i >= 0:
+        val name = parts[i].trim()
+        if name != "":
+            return name
+        i = i - 1
+    "call"
+
 fn native_profile_counter_function_entry_slots_from_c_source(c_source: text) -> [NativeProfileCounterSlot]:
     var slots: [NativeProfileCounterSlot] = []
     val lines = c_source.split("\n")
@@ -427,6 +482,48 @@ fn native_profile_counter_function_entry_slots_from_c_source(c_source: text) -> 
         i = i + 1
     slots
 
+fn native_profile_counter_c_slots_from_source(c_source: text, enabled_kinds: [text]) -> [NativeProfileCounterSlot]:
+    var slots: [NativeProfileCounterSlot] = []
+    val lines = c_source.split("\n")
+    var current_function = ""
+    var brace_depth: i64 = 0
+    var return_index: i64 = 0
+    var call_index: i64 = 0
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if _native_profile_c_line_is_function_entry(line):
+            current_function = _native_profile_c_function_name(line)
+            brace_depth = _native_profile_c_brace_delta(line)
+            return_index = 0
+            call_index = 0
+            if current_function != "":
+                if enabled_kinds.contains("function_entry"):
+                    slots.push(native_profile_counter_slot(slots.len(), "function_entry", "c:{current_function}:entry", 0))
+                if enabled_kinds.contains("basic_block"):
+                    slots.push(native_profile_counter_slot(slots.len(), "basic_block", "c:{current_function}:bb0", 0))
+            if brace_depth <= 0:
+                current_function = ""
+            i = i + 1
+            continue
+
+        if current_function != "":
+            if enabled_kinds.contains("call_path") and _native_profile_c_line_is_direct_call(line):
+                val callee = _native_profile_c_direct_call_name(line)
+                slots.push(native_profile_counter_slot(slots.len(), "call_path", "c:{current_function}:call:{callee}:{call_index}", 0))
+                call_index = call_index + 1
+            if enabled_kinds.contains("edge") and _native_profile_c_line_is_return_edge(line):
+                slots.push(native_profile_counter_slot(slots.len(), "edge", "c:{current_function}:return->{current_function}:exit{return_index}", 0))
+                return_index = return_index + 1
+            brace_depth = brace_depth + _native_profile_c_brace_delta(line)
+            if brace_depth <= 0:
+                current_function = ""
+        i = i + 1
+    slots
+
+fn native_profile_counter_all_c_instrumentation_kinds() -> [text]:
+    ["function_entry", "basic_block", "edge", "call_path"]
+
 fn native_profile_counter_instrument_c_source(c_source: text, enabled: bool) -> NativeProfileCounterInstrumentedC:
     if not enabled:
         return NativeProfileCounterInstrumentedC(
@@ -436,19 +533,45 @@ fn native_profile_counter_instrument_c_source(c_source: text, enabled: bool) -> 
             metadata_lines: []
         )
 
-    val slots = native_profile_counter_function_entry_slots_from_c_source(c_source)
+    val slots = native_profile_counter_c_slots_from_source(c_source, native_profile_counter_all_c_instrumentation_kinds())
     val prelude = native_profile_counter_c_prelude(slots)
     val metadata_lines = native_profile_counter_section_serialization_lines(native_profile_counter_default_section_name(), slots)
     var instrumented_lines: [text] = []
     val lines = c_source.split("\n")
     var slot_index = 0
+    var current_function = ""
+    var brace_depth: i64 = 0
     var i = 0
     while i < lines.len():
         val line = lines[i]
+        if _native_profile_c_line_is_function_entry(line):
+            instrumented_lines.push(line)
+            current_function = _native_profile_c_function_name(line)
+            brace_depth = _native_profile_c_brace_delta(line)
+            while slot_index < slots.len():
+                val slot = slots.get(slot_index) ?? native_profile_counter_slot(-1, "invalid", "", 0)
+                if slot.counter_kind != "function_entry" and slot.counter_kind != "basic_block":
+                    break
+                instrumented_lines.push("    " + native_profile_counter_array_symbol() + "[" + slot_index.to_string() + "] += 1u;")
+                slot_index = slot_index + 1
+            if brace_depth <= 0:
+                current_function = ""
+            i = i + 1
+            continue
+
+        if current_function != "":
+            val active_slot = slots.get(slot_index) ?? native_profile_counter_slot(-1, "invalid", "", 0)
+            if slot_index < slots.len() and active_slot.counter_kind == "call_path" and _native_profile_c_line_is_direct_call(line):
+                instrumented_lines.push("    " + native_profile_counter_array_symbol() + "[" + slot_index.to_string() + "] += 1u;")
+                slot_index = slot_index + 1
+            val next_slot = slots.get(slot_index) ?? native_profile_counter_slot(-1, "invalid", "", 0)
+            if slot_index < slots.len() and next_slot.counter_kind == "edge" and _native_profile_c_line_is_return_edge(line):
+                instrumented_lines.push("    " + native_profile_counter_array_symbol() + "[" + slot_index.to_string() + "] += 1u;")
+                slot_index = slot_index + 1
+            brace_depth = brace_depth + _native_profile_c_brace_delta(line)
+            if brace_depth <= 0:
+                current_function = ""
         instrumented_lines.push(line)
-        if _native_profile_c_line_is_function_entry(line) and slot_index < slots.len():
-            instrumented_lines.push("    " + native_profile_counter_array_symbol() + "[" + slot_index.to_string() + "] += 1u;")
-            slot_index = slot_index + 1
         i = i + 1
 
     NativeProfileCounterInstrumentedC(

@@ -353,6 +353,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_split", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_replace", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_trim", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_trim_start", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_trim_end", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_join", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_to_upper", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_to_lower", &[I64], &[I64]),
