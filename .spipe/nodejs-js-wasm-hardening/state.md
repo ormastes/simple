@@ -53,3 +53,5 @@ dev-incomplete
 - dev: PASS `SIMPLE_LIB=src bin/simple test test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter --clean` (20 scenarios).
 - dev: PASS `SIMPLE_LIB=src bin/simple check src/os/ai_cli_js_node_contract.spl`.
 - dev: Regenerated `doc/06_spec/system/app/browser/feature/webgpu_js_wasm_simple_spec.md` and `doc/06_spec/system/os/simpleos_ai_cli_js_node_port_spec.md`; command completed with existing compiler/docgen warnings/stub summaries.
+- dev: Added executable Deno permission model comparison flags from `AiCliManifest` grants (`--allow-read`, `--allow-write`, `--allow-net`, `--allow-run`, `--allow-env`) and fail-closed deny-all behavior.
+- dev: Added explicit serial-marker assertions that QEMU marker fragments and staged launchers include `[ai-cli] hardening:ok app=<tool>`, then marked the Deno comparison and hardening OK marker Phase 5 checklist items complete.

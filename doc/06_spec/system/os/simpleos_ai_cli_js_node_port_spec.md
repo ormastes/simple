@@ -167,6 +167,29 @@ expect(flags[0]).to_equal("--experimental-permission")
 
 </details>
 
+#### maps manifest grants to Deno-style permission flags for comparison
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = codex_cli_smoke_manifest()
+val flags = ai_cli_deno_permission_flags(manifest)
+val summary = ai_cli_deno_permission_flag_summary(manifest)
+
+expect(flags[0]).to_equal("--allow-read=/home/user/work,/home/user/.codex,/var/cache/codex,/tmp")
+expect(summary).to_contain("--allow-write=/home/user/work,/home/user/.codex,/var/cache/codex,/tmp")
+expect(summary).to_contain("--allow-net=api.openai.com:443")
+expect(summary).to_contain("--allow-run=simple,git")
+expect(summary).to_contain("--allow-env=openai-api-key")
+expect(ai_cli_deno_permission_flags(deny_all_manifest()).len()).to_equal(0)
+```
+
+</details>
+
 ### REQ-006 NFR-003: QEMU target and marker data
 
 #### normalizes x85 to x86 and declares guest-side marker fragments
@@ -174,7 +197,7 @@ expect(flags[0]).to_equal("--experimental-permission")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -184,6 +207,7 @@ expect(ai_cli_normalize_target("x85")).to_equal("x86")
 expect(markers[0]).to_equal("[ai-cli] qemu-target=x86")
 expect(markers).to_contain("[ai-cli] guest-evidence-required")
 expect(markers).to_contain("[ai-cli] runtime:start app=codex")
+expect(markers).to_contain("[ai-cli] hardening:ok app=codex")
 ```
 
 </details>
@@ -323,7 +347,7 @@ expect(ai_cli_provisioning_plan_summary(plan)).to_contain("disk-manifest=CLAUDE.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -344,6 +368,7 @@ expect(package.launcher_source).to_contain("[ai-cli] runtime:start app=codex")
 expect(package.launcher_source).to_contain("[ai-cli] permission-flags --experimental-permission")
 expect(package.launcher_source).to_contain("[ai-cli] cli-smoke:start app=codex")
 expect(package.launcher_source).to_contain("[ai-cli] hardening:deny app=codex reason=undeclared-capability")
+expect(package.launcher_source).to_contain("[ai-cli] hardening:ok app=codex")
 expect(package.runtime_stub_source).to_contain("simple-js-agent target=x86")
 expect(package.runtime_stub_source).to_contain("node-compat-surface=fs,process,stdio-tty,timers,net,tls,module-resolution,webassembly")
 expect(package.runtime_stub_source).to_contain("runtime-artifact=simple-js-agent-smoke-stub@20260530")
@@ -528,8 +553,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

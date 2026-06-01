@@ -209,10 +209,10 @@ Leverage existing `AiCliManifest` capability system:
 - [ ] Network: enforce `network_grants` at socket layer, allowlist endpoints only
 - [ ] Process: enforce `process_grants`, deny undeclared spawns
 - [ ] Credentials: enforce `credential_grants`, block ambient env var reads
-- [ ] Compare with Deno permissions model (`--allow-read`, `--allow-net`)
+- [x] Compare with Deno permissions model (`--allow-read`, `--allow-net`)
 - [x] Add Node.js `--experimental-permission`-style flags to QuickJS launcher contract
 - [x] Test: all denial paths from existing `simpleos_ai_cli_js_node_port_spec.spl` and executable Node API conformance coverage
-- [ ] Serial marker: `[ai-cli] hardening:ok app=<tool>`
+- [x] Serial marker: `[ai-cli] hardening:ok app=<tool>`
 
 ### Phase 6: Full QEMU Validation (1 week)
 
