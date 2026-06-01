@@ -24,7 +24,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   and compositing blocker.
 - 8K color/image Option A is selected and documented: lazy packed 8K surfaces,
   CIELAB as the semantic color space, XYZ as the connection space, and fail-
-  closed unsupported codec/profile paths.
+  closed unsupported codec/profile paths. The JPEG XL stage now distinguishes
+  default structured sRGB metadata from non-default structured color headers,
+  which fail closed as transform-pending instead of being treated as sRGB.
 - Vector-font GPU evidence is expanded beyond the original nine-scene matrix.
   Current evidence proves GPU-returned glyphs with zero CPU fallback for the
   expanded `PIPELINESTATUSOK/24`, `VECTORFONTGPU/36`, and `GPUREADBACKWM/12`
@@ -61,7 +63,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - `doc/09_report/gui_color_image_pipeline_8k_current_2026-06-01.md`: current
   packed 8K surface and lazy codec/profile evidence.
 - `doc/09_report/gui_color_image_pipeline_8k_evidence_2026-06-01.md`: 8K lane
-  canonical evidence with non-identity ICC fail-closed behavior.
+  canonical evidence with non-identity ICC and JPEG XL non-default structured
+  color fail-closed behavior.
 - `doc/09_report/vector_font_compute_current_2026-06-01.md`: focused
   vector-font GPU glyph readback evidence.
 - `doc/09_report/vector_font_compute_matrix_current_2026-06-01.md`: full
@@ -107,8 +110,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   slice should move the matched line metrics into production glyph paint and
   compositing rather than adding more corpus fixture shortcuts.
 - 8K color/image: broaden high-bit-depth compressed raster coverage, JPEG XL
-  codestream color parsing and pixel decoding, real non-identity ICC/profile
-  transforms, and web/browser/WM image integration.
+  codestream pixel decoding, real non-identity ICC/profile transforms, broader
+  JPEG XL structured/ICC color parser coverage, and web/browser/WM image
+  integration.
 - Vector-font GPU: turn current evidence-kernel glyph return into reusable
   production buffer ownership/readback across arbitrary text runs, more font
   sizes, and broader kernel parameter combinations.

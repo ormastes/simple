@@ -307,6 +307,32 @@ fn _jpeg_xl_codestream_info_at(data: text, start: i64, length: i64) -> ImageInfo
         width = width_header.value + 1
     ImageInfo(format: "jpegxl", width: width, height: height, supported: true, reason: "jpegxl-large-codestream-metadata")
 
+fn _jpeg_xl_codestream_size_header_next_bit(data: text, start: i64, length: i64) -> (supported: bool, next_bit: i64):
+    if length < 4 or start < 0 or start + length > data.len():
+        return (supported: false, next_bit: 0)
+    if _byte_at(data, start) != 255 or _byte_at(data, start + 1) != 10:
+        return (supported: false, next_bit: 0)
+    val bits_start = start + 2
+    val bits_length = length - 2
+    val small = _jpeg_xl_read_bit(data, bits_start, bits_length, 0)
+    if small == 1:
+        val ratio = _jpeg_xl_read_bits(data, bits_start, bits_length, 6, 3)
+        if ratio == 0:
+            if bits_length * 8 < 14:
+                return (supported: false, next_bit: 0)
+            return (supported: true, next_bit: 14)
+        return (supported: true, next_bit: 9)
+    val height_header = _jpeg_xl_read_u32_choice(data, bits_start, bits_length, 1, 0, 0, 0, 0, 9, 13, 18, 30)
+    if bits_length * 8 < height_header.next_bit + 3:
+        return (supported: false, next_bit: 0)
+    val ratio = _jpeg_xl_read_bits(data, bits_start, bits_length, height_header.next_bit, 3)
+    if ratio == 0:
+        val width_header = _jpeg_xl_read_u32_choice(data, bits_start, bits_length, height_header.next_bit + 3, 0, 0, 0, 0, 9, 13, 18, 30)
+        if bits_length * 8 < width_header.next_bit:
+            return (supported: false, next_bit: 0)
+        return (supported: true, next_bit: width_header.next_bit)
+    (supported: true, next_bit: height_header.next_bit + 3)
+
 fn _profile_result(format: text, kind: text, length: i64, offset: i64, reason: text) -> ImageColorProfileInfo:
     ImageColorProfileInfo(
         format: format,
@@ -437,9 +463,34 @@ fn _jpeg_xl_structured_color_result(reason: text) -> ImageColorProfileInfo:
         reason: reason
     )
 
+fn _jpeg_xl_structured_color_pending(reason: text) -> ImageColorProfileInfo:
+    ImageColorProfileInfo(
+        format: "jpegxl",
+        has_profile: true,
+        profile_kind: "structured-color-nondefault-pending",
+        profile_length: 0,
+        profile_offset: 0,
+        requires_color_transform: true,
+        initializes_transform_now: false,
+        reason: reason
+    )
+
 fn _jpeg_xl_color_profile_info_at(data: text, start: i64, length: i64) -> ImageColorProfileInfo:
     val info = _jpeg_xl_codestream_info_at(data, start, length)
     if info.supported:
+        val size_header = _jpeg_xl_codestream_size_header_next_bit(data, start, length)
+        val bits_start = start + 2
+        val bits_length = length - 2
+        # Bounded fixtures use one extra UTF-8 byte for 0xFF; require at least
+        # two bytes beyond the minimal codestream fixture before treating
+        # following bits as an explicit color header.
+        val has_explicit_color_header = length >= 6
+        val available_bits = bits_length * 8
+        val required_color_bits = size_header.next_bit + 8
+        if size_header.supported and has_explicit_color_header and available_bits >= required_color_bits:
+            val all_default = _jpeg_xl_read_bit(data, bits_start, bits_length, size_header.next_bit)
+            if all_default == 0:
+                return _jpeg_xl_structured_color_pending("jpegxl-structured-nondefault-color-pending")
         return _jpeg_xl_structured_color_result("jpegxl-structured-default-srgb-lazy")
     ImageColorProfileInfo(
         format: "jpegxl",
@@ -580,6 +631,8 @@ pub fn apply_detected_image_color_profile_to_rgba(raw_data: text, pixels: [i64])
     val profile = detect_image_color_profile_info(raw_data)
     if not profile.has_profile:
         return image_color_transform_result(pixels, false, true, "no-profile")
+    if profile.format == "jpegxl" and profile.profile_kind == "structured-color-nondefault-pending":
+        return image_color_transform_result(pixels, false, false, "jpegxl-structured-color-transform-pending")
     if profile.profile_kind == "icc-compressed":
         return image_color_transform_result(pixels, false, false, "compressed-icc-transform-pending")
     if not _icc_header_is_rgb(raw_data, profile):

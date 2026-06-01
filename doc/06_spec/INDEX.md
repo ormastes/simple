@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Text Painter Specification](unit/browser_engine/text_painter_spec.md) | Auto-generated | N/A | 3 | 0% | 0 lines |
+| [Image Decode Specification](paint/image_decode_spec.md) | Auto-generated | N/A | 75 | 0% | 0 lines |
 

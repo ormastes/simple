@@ -10,8 +10,9 @@
 - lazy_startup: color transforms, TIFF decoder, and JPEG XL decoder are not initialized by the 8K surface plan
 - red_lab_xyz_argb_roundtrip: true
 - pure_simple_tiff_pixels: covered by focused raster spec for strips, tiles, PackBits, planar, high-bit-depth, palette, gray, RGB/RGBA, and Lab-like paths
-- pure_simple_jpegxl_stage: metadata parsing, sparse 8K placeholder allocation, and exact raster tiling are covered; full JPEG XL pixel decode remains a follow-up
+- pure_simple_jpegxl_stage: metadata parsing, sparse 8K placeholder allocation, structured default-sRGB color metadata, non-default structured color fail-closed routing, and exact raster tiling are covered; full JPEG XL pixel decode remains a follow-up
 - non_identity_icc_fail_closed: focused image decode spec requires RGB ICC profiles with Lab PCS to return icc-rgb-lab-transform-pending rather than identity pixels
+- jpegxl_nondefault_color_fail_closed: focused image decode spec requires non-default JPEG XL structured color headers to return jpegxl-structured-color-transform-pending rather than silently accepting default sRGB
 
 ## Evidence
 

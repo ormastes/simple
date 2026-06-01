@@ -1282,6 +1282,32 @@ expect(profile.reason).to_equal("jpegxl-structured-default-srgb-lazy")
 
 </details>
 
+#### fails closed for JPEG XL non-default structured color metadata
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val profile = detect_image_color_profile_info(_jpegxl_small_codestream_16x24_nondefault_color())
+
+expect(profile.format).to_equal("jpegxl")
+expect(profile.has_profile).to_equal(true)
+expect(profile.profile_kind).to_equal("structured-color-nondefault-pending")
+expect(profile.requires_color_transform).to_equal(true)
+expect(profile.initializes_transform_now).to_equal(false)
+expect(profile.reason).to_equal("jpegxl-structured-nondefault-color-pending")
+
+val result = apply_detected_image_color_profile_to_rgba(_jpegxl_small_codestream_16x24_nondefault_color(), [10, 20, 30, 255])
+expect(result.supported).to_equal(false)
+expect(result.applied).to_equal(false)
+expect(result.reason).to_equal("jpegxl-structured-color-transform-pending")
+```
+
+</details>
+
 #### parses JPEG XL large explicit codestream dimensions lazily
 
 <details>
@@ -1571,8 +1597,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 74 |
-| Active scenarios | 74 |
+| Total scenarios | 75 |
+| Active scenarios | 75 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
