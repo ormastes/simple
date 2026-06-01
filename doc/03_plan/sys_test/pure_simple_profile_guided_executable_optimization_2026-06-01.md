@@ -20,7 +20,7 @@ Design verification for:
 | `test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl` | layout planner and rejection rules |
 | `test/system/app/compile/feature/native_layout_section_map_spec.spl` | generated-C section-map parsing and compile-path transform contracts |
 | `test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl` | patch/trap/count/restore/auto-disarm state machine |
-| `test/system/os/baremetal/feature/breakpoint_counter_target_adapter_spec.spl` | x86, ARM/Thumb/AArch64, RISC-V/RVC target adapter resume and QEMU evidence normalization |
+| `test/system/os/baremetal/feature/breakpoint_counter_target_adapter_spec.spl` | x86, ARM/Thumb/AArch64, RISC-V/RVC target adapter resume, QEMU runner planning, and evidence normalization |
 
 Executable specs must live under `test/`; generated/manual docs mirror under
 `doc/06_spec/`.
@@ -30,8 +30,10 @@ helper slices exist for `.sprof` text/file loading, native counter metadata and
 runtime snapshot import, generated-C function/block/edge/call-path insertion,
 executable layout eligibility and manifest planning, generated-C section-map
 emission and consumption, and bare-metal breakpoint state/ledger policy. The
-current executable optimizer slice writes deterministic Simple-owned layout,
-native symbol-order, and generated-C section-map artifacts rather than rewriting
+QEMU breakpoint bridge now plans host QEMU commands and parses serial evidence
+without claiming proof when images or binaries are missing. The current
+executable optimizer slice writes deterministic Simple-owned layout, native
+symbol-order, and generated-C section-map artifacts rather than rewriting
 arbitrary ELF bytes.
 
 ## Requirement Traceability
@@ -91,7 +93,9 @@ cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml
 ```
 
 Bare-metal slices add QEMU smoke and explicit hardware-unavailable records when
-real hardware is not present.
+real hardware is not present. The next live-evidence gate must provide per-arch
+images that emit `simple-breakpoint-evidence;...` serial lines and then run
+those images through `breakpoint_qemu_run_serial_evidence`.
 
 ## Manual Review Policy
 

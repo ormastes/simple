@@ -245,6 +245,15 @@ The next implementation slice should replace normalized evidence lines with
 actual QEMU runner output, while preserving the same validation fields so
 hardware-unavailable runs and real target-backed runs are distinguishable.
 
+The runner bridge is now represented by `BreakpointQemuRunnerPlan` and
+`BreakpointQemuRunResult`. A plan records the arch, image path, QEMU binary,
+machine, CPU, command arguments, evidence prefix, availability booleans, and
+fail-closed status. `breakpoint_qemu_run_serial_evidence()` only attempts QEMU
+when both the host binary and supplied image exist; it then parses
+`simple-breakpoint-evidence;...` from serial output and returns the normalized
+evidence record. This still requires per-arch probe images before an
+architecture can be called target-backed.
+
 ### Overhead Protection
 
 The profiler removes or downgrades a breakpoint when any condition holds:

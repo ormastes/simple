@@ -62,6 +62,11 @@ Current adapter slice:
   original/trap bytes, hit count, trap latency, restore, rearm, cleanup, and
   icache evidence. It fails closed for unsupported arch, trap-byte mismatch,
   missing hits, missing restore, incomplete cleanup, or missing icache flush.
+- QEMU runner bridging now maps supported target families to QEMU binaries and
+  command arguments, probes host availability, runs a supplied image when
+  present, and parses `simple-breakpoint-evidence;...` serial output into the
+  same fail-closed validator. Missing image, missing QEMU, and missing serial
+  evidence are explicit non-proof statuses.
 
 ## Data Flow
 

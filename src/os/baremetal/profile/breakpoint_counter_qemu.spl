@@ -2,6 +2,10 @@
 
 use os.baremetal.profile.breakpoint_counter.{breakpoint_architecture_patch_profile}
 
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
 pub class BreakpointQemuEvidence:
     arch: text
     qemu_command: text
@@ -17,6 +21,29 @@ pub class BreakpointQemuEvidence:
     sampled_only_reason: text
     valid: bool
     status: text
+
+pub class BreakpointQemuRunnerPlan:
+    arch: text
+    image_path: text
+    qemu_binary: text
+    machine: text
+    cpu: text
+    args: [text]
+    evidence_prefix: text
+    qemu_available: bool
+    image_exists: bool
+    can_run: bool
+    status: text
+
+pub class BreakpointQemuRunResult:
+    arch: text
+    image_path: text
+    qemu_binary: text
+    status: text
+    exit_code: i64
+    serial_text: text
+    evidence_line: text
+    evidence: BreakpointQemuEvidence
 
 fn breakpoint_qemu_field(line: text, key: text) -> text:
     val prefix = key + "="
@@ -40,6 +67,125 @@ fn breakpoint_qemu_u64(value: text) -> u64:
     if parsed < 0:
         return 0
     parsed as u64
+
+pub fn breakpoint_qemu_binary_for_arch(arch: text) -> text:
+    if arch == "x86" or arch == "i386":
+        return "qemu-system-i386"
+    if arch == "x86_64":
+        return "qemu-system-x86_64"
+    if arch == "arm" or arch == "arm32" or arch == "thumb" or arch == "thumb2":
+        return "qemu-system-arm"
+    if arch == "aarch64":
+        return "qemu-system-aarch64"
+    if arch == "riscv32" or arch == "riscv32c":
+        return "qemu-system-riscv32"
+    if arch == "riscv64" or arch == "riscv64c":
+        return "qemu-system-riscv64"
+    ""
+
+pub fn breakpoint_qemu_machine_for_arch(arch: text) -> text:
+    if arch == "x86" or arch == "i386" or arch == "x86_64":
+        return "pc"
+    if arch == "arm" or arch == "arm32" or arch == "thumb" or arch == "thumb2":
+        return "virt"
+    if arch == "aarch64":
+        return "virt"
+    if arch == "riscv32" or arch == "riscv32c" or arch == "riscv64" or arch == "riscv64c":
+        return "virt"
+    ""
+
+pub fn breakpoint_qemu_cpu_for_arch(arch: text) -> text:
+    if arch == "x86" or arch == "i386":
+        return "qemu32"
+    if arch == "x86_64":
+        return "qemu64"
+    if arch == "arm" or arch == "arm32":
+        return "cortex-a15"
+    if arch == "thumb" or arch == "thumb2":
+        return "cortex-m3"
+    if arch == "aarch64":
+        return "cortex-a53"
+    if arch == "riscv32" or arch == "riscv32c" or arch == "riscv64" or arch == "riscv64c":
+        return "rv64"
+    ""
+
+pub fn breakpoint_qemu_evidence_prefix() -> text:
+    "simple-breakpoint-evidence;"
+
+pub fn breakpoint_qemu_command_args(arch: text, image_path: text) -> [text]:
+    val machine = breakpoint_qemu_machine_for_arch(arch)
+    val cpu = breakpoint_qemu_cpu_for_arch(arch)
+    if machine == "":
+        return []
+    var args = ["-M", machine, "-nographic", "-no-reboot", "-serial", "stdio", "-kernel", image_path]
+    if cpu != "":
+        args = ["-M", machine, "-cpu", cpu, "-nographic", "-no-reboot", "-serial", "stdio", "-kernel", image_path]
+    args
+
+pub fn breakpoint_qemu_runner_plan(arch: text, image_path: text, qemu_available: bool, image_exists: bool) -> BreakpointQemuRunnerPlan:
+    val profile = breakpoint_architecture_patch_profile(arch)
+    val qemu = breakpoint_qemu_binary_for_arch(arch)
+    val machine = breakpoint_qemu_machine_for_arch(arch)
+    val cpu = breakpoint_qemu_cpu_for_arch(arch)
+    val args = breakpoint_qemu_command_args(arch, image_path)
+    var status = "ready"
+    if not profile.valid:
+        status = "unsupported_arch"
+    elif image_path == "" or not image_exists:
+        status = "missing_image"
+    elif qemu == "" or not qemu_available:
+        status = "qemu_unavailable"
+    elif args.len() == 0:
+        status = "missing_qemu_args"
+    BreakpointQemuRunnerPlan(
+        arch: arch,
+        image_path: image_path,
+        qemu_binary: qemu,
+        machine: machine,
+        cpu: cpu,
+        args: args,
+        evidence_prefix: breakpoint_qemu_evidence_prefix(),
+        qemu_available: qemu_available,
+        image_exists: image_exists,
+        can_run: status == "ready",
+        status: status
+    )
+
+pub fn breakpoint_qemu_serial_evidence_line(serial_text: text) -> text:
+    val lines = serial_text.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line.starts_with(breakpoint_qemu_evidence_prefix()):
+            return line[breakpoint_qemu_evidence_prefix().len():]
+        if line.starts_with("arch=") and line.contains(";trap=") and line.contains(";hits="):
+            return line
+        i = i + 1
+    ""
+
+pub fn breakpoint_qemu_host_binary_available(qemu_binary: text) -> bool:
+    if qemu_binary == "":
+        return false
+    val (_out, _err, code) = rt_process_run("which", [qemu_binary])
+    code == 0
+
+fn breakpoint_qemu_empty_evidence(arch: text, qemu_binary: text, status: text) -> BreakpointQemuEvidence:
+    BreakpointQemuEvidence(
+        arch: arch,
+        qemu_command: qemu_binary,
+        patched_address: 0,
+        original_bytes: "",
+        trap_bytes: "",
+        hit_count: 0,
+        trap_latency_us: 0,
+        restored: false,
+        rearmed: false,
+        cleanup_complete: false,
+        icache_flushed: false,
+        sampled_only_reason: "",
+        valid: false,
+        status: status
+    )
 
 pub fn breakpoint_qemu_evidence_from_line(line: text) -> BreakpointQemuEvidence:
     val arch = breakpoint_qemu_field(line, "arch")
@@ -79,4 +225,52 @@ pub fn breakpoint_qemu_evidence_from_line(line: text) -> BreakpointQemuEvidence:
         sampled_only_reason: breakpoint_qemu_field(line, "sampled"),
         valid: status == "valid",
         status: status
+    )
+
+pub fn breakpoint_qemu_evidence_from_serial(serial_text: text) -> BreakpointQemuEvidence:
+    val line = breakpoint_qemu_serial_evidence_line(serial_text)
+    if line == "":
+        return breakpoint_qemu_empty_evidence("", "", "missing_serial_evidence")
+    breakpoint_qemu_evidence_from_line(line)
+
+pub fn breakpoint_qemu_run_serial_evidence(arch: text, image_path: text, timeout_ms: i64) -> BreakpointQemuRunResult:
+    val qemu = breakpoint_qemu_binary_for_arch(arch)
+    val qemu_available = breakpoint_qemu_host_binary_available(qemu)
+    val image_exists = image_path != "" and rt_file_exists(image_path)
+    val plan = breakpoint_qemu_runner_plan(arch, image_path, qemu_available, image_exists)
+    if not plan.can_run:
+        return BreakpointQemuRunResult(
+            arch: arch,
+            image_path: image_path,
+            qemu_binary: qemu,
+            status: plan.status,
+            exit_code: -1,
+            serial_text: "",
+            evidence_line: "",
+            evidence: breakpoint_qemu_empty_evidence(arch, qemu, plan.status)
+        )
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu, plan.args, timeout_ms)
+    val serial = stdout + "\n" + stderr
+    val evidence_line = breakpoint_qemu_serial_evidence_line(serial)
+    if evidence_line == "":
+        return BreakpointQemuRunResult(
+            arch: arch,
+            image_path: image_path,
+            qemu_binary: qemu,
+            status: "missing_serial_evidence",
+            exit_code: exit_code as i64,
+            serial_text: serial,
+            evidence_line: evidence_line,
+            evidence: breakpoint_qemu_empty_evidence(arch, qemu, "missing_serial_evidence")
+        )
+    val evidence = breakpoint_qemu_evidence_from_line(evidence_line)
+    BreakpointQemuRunResult(
+        arch: arch,
+        image_path: image_path,
+        qemu_binary: qemu,
+        status: if evidence.valid: "valid" else: evidence.status,
+        exit_code: exit_code as i64,
+        serial_text: serial,
+        evidence_line: evidence_line,
+        evidence: evidence
     )

@@ -5,7 +5,16 @@ use std.spec.{describe, it, expect}
 use os.baremetal.profile.breakpoint_counter_x86.{breakpoint_x86_resume_plan, breakpoint_x86_qemu_target}
 use os.baremetal.profile.breakpoint_counter_arm.{breakpoint_arm_resume_plan, breakpoint_arm_qemu_target}
 use os.baremetal.profile.breakpoint_counter_riscv.{breakpoint_riscv_resume_plan, breakpoint_riscv_qemu_target}
-use os.baremetal.profile.breakpoint_counter_qemu.{breakpoint_qemu_evidence_from_line}
+use os.baremetal.profile.breakpoint_counter_qemu.{
+    breakpoint_qemu_binary_for_arch,
+    breakpoint_qemu_machine_for_arch,
+    breakpoint_qemu_command_args,
+    breakpoint_qemu_runner_plan,
+    breakpoint_qemu_evidence_prefix,
+    breakpoint_qemu_serial_evidence_line,
+    breakpoint_qemu_evidence_from_line,
+    breakpoint_qemu_evidence_from_serial
+}
 
 describe "Bare-metal Breakpoint Target Adapter Contract":
     describe "x86 trap frame normalization":
@@ -56,6 +65,50 @@ describe "Bare-metal Breakpoint Target Adapter Contract":
             expect(breakpoint_riscv_qemu_target("riscv64c")).to_equal("qemu-system-riscv64")
 
     describe "QEMU evidence normalization":
+        it "should build fail-closed QEMU runner plans for supported target families":
+            val x86 = breakpoint_qemu_runner_plan("x86_64", "build/bp-x86.elf", true, true)
+            expect(x86.can_run).to_equal(true)
+            expect(x86.qemu_binary).to_equal("qemu-system-x86_64")
+            expect(x86.machine).to_equal("pc")
+            expect(x86.args).to_contain("-kernel")
+            expect(x86.args).to_contain("build/bp-x86.elf")
+
+            val thumb = breakpoint_qemu_runner_plan("thumb", "build/bp-thumb.elf", true, true)
+            expect(thumb.can_run).to_equal(true)
+            expect(thumb.qemu_binary).to_equal("qemu-system-arm")
+            expect(thumb.machine).to_equal("virt")
+            expect(thumb.cpu).to_equal("cortex-m3")
+
+            val rvc = breakpoint_qemu_runner_plan("riscv64c", "build/bp-rvc.elf", true, true)
+            expect(rvc.can_run).to_equal(true)
+            expect(rvc.qemu_binary).to_equal("qemu-system-riscv64")
+            expect(rvc.machine).to_equal("virt")
+
+            val missing_image = breakpoint_qemu_runner_plan("aarch64", "", true, false)
+            expect(missing_image.can_run).to_equal(false)
+            expect(missing_image.status).to_equal("missing_image")
+
+            val missing_qemu = breakpoint_qemu_runner_plan("riscv32", "build/bp-rv32.elf", false, true)
+            expect(missing_qemu.can_run).to_equal(false)
+            expect(missing_qemu.status).to_equal("qemu_unavailable")
+
+            val unsupported = breakpoint_qemu_runner_plan("mips64", "build/bp-mips.elf", true, true)
+            expect(unsupported.can_run).to_equal(false)
+            expect(unsupported.status).to_equal("unsupported_arch")
+
+        it "should expose deterministic QEMU command fragments for runner integration":
+            expect(breakpoint_qemu_binary_for_arch("i386")).to_equal("qemu-system-i386")
+            expect(breakpoint_qemu_binary_for_arch("aarch64")).to_equal("qemu-system-aarch64")
+            expect(breakpoint_qemu_binary_for_arch("riscv32c")).to_equal("qemu-system-riscv32")
+            expect(breakpoint_qemu_machine_for_arch("riscv64")).to_equal("virt")
+            val args = breakpoint_qemu_command_args("riscv64c", "build/bp-rvc.elf")
+            expect(args).to_contain("-M")
+            expect(args).to_contain("virt")
+            expect(args).to_contain("-serial")
+            expect(args).to_contain("stdio")
+            expect(args).to_contain("-kernel")
+            expect(args).to_contain("build/bp-rvc.elf")
+
         it "should accept complete target-backed evidence":
             val evidence = breakpoint_qemu_evidence_from_line(
                 "arch=riscv64c;qemu=qemu-system-riscv64;address=16400;original=02 90;trap=02 90;hits=2;latency_us=40;restored=true;rearmed=true;cleanup=true;icache=true;sampled=none"
@@ -77,3 +130,19 @@ describe "Bare-metal Breakpoint Target Adapter Contract":
             )
             expect(wrong_trap.valid).to_equal(false)
             expect(wrong_trap.status).to_equal("trap_bytes_mismatch")
+
+        it "should parse serial runner evidence lines without accepting missing proof":
+            val serial = [
+                "booting",
+                breakpoint_qemu_evidence_prefix() + "arch=x86_64;qemu=qemu-system-x86_64;address=4096;original=90;trap=cc;hits=1;latency_us=8;restored=true;rearmed=true;cleanup=true;icache=false;sampled=none",
+                "halted"
+            ].join("\n")
+            val line = breakpoint_qemu_serial_evidence_line(serial)
+            expect(line).to_contain("arch=x86_64")
+            val evidence = breakpoint_qemu_evidence_from_serial(serial)
+            expect(evidence.valid).to_equal(true)
+            expect(evidence.status).to_equal("valid")
+
+            val missing = breakpoint_qemu_evidence_from_serial("booting\nhalted\n")
+            expect(missing.valid).to_equal(false)
+            expect(missing.status).to_equal("missing_serial_evidence")

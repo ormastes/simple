@@ -240,6 +240,30 @@ Remaining larger gaps:
 - measured before/after executable performance evidence for the full
   profile-counter -> `.sprof` -> layout-map -> native build flow.
 
+## Restart Checkpoint: 2026-06-01 QEMU Breakpoint Runner Bridge
+
+Implemented in the current slice:
+- `src/os/baremetal/profile/breakpoint_counter_qemu.spl`
+  - maps x86/i386/x86_64, ARM/Thumb/AArch64, and RISC-V/RVC targets to QEMU
+    binaries, machines, CPUs, and `-kernel` serial command args;
+  - exposes a host QEMU binary probe;
+  - runs a supplied image under QEMU when both the image and binary exist;
+  - extracts `simple-breakpoint-evidence;...` serial lines and feeds them into
+    the existing fail-closed evidence validator;
+  - reports `unsupported_arch`, `missing_image`, `qemu_unavailable`, or
+    `missing_serial_evidence` instead of claiming target proof.
+- `test/system/os/baremetal/feature/breakpoint_counter_target_adapter_spec.spl`
+  - covers runner plans, command fragments, serial evidence parsing, and
+    fail-closed missing-proof behavior.
+
+Remaining larger gaps:
+- build or stage the actual per-arch breakpoint probe images that emit serial
+  evidence lines for x86/i386/x86_64, ARM/Thumb/AArch64, and RISC-V/RVC;
+- run those images under QEMU and capture live patch/trap/count/restore/rearm/
+  cleanup/icache evidence;
+- measured before/after executable performance evidence for the full
+  profile-counter -> `.sprof` -> layout-map -> native build flow.
+
 ## Restart Checkpoint: 2026-06-01 Native Counter Insertion
 
 Implemented in the current slice:
