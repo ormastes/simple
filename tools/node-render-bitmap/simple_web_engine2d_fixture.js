@@ -66,6 +66,9 @@ function renderHtmlToPixels() {
   if (scene === "simple-web-engine2d-media-gallery-command") {
     return renderMediaGalleryCommand();
   }
+  if (scene === "simple-web-engine2d-report-table-command") {
+    return renderReportTableCommand();
+  }
   const pixels = new Uint32Array(width * height);
 
   // Match the Simple web renderer's recognized Engine2D heuristic for this
@@ -223,6 +226,37 @@ function renderMediaGalleryCommand() {
   rect(pixels, 0, height - 8, width, 8, 0xFF334155);
   rect(pixels, 6, height - 6, 22, 4, 0xFF10B981);
   rect(pixels, 70, height - 6, 20, 4, 0xFFEF4444);
+  return pixels;
+}
+
+function renderReportTableCommand() {
+  const pixels = new Uint32Array(width * height);
+  pixels.fill(0xFFF8FAFC >>> 0);
+  rect(pixels, 0, 0, width, 10, 0xFF0F172A);
+  rect(pixels, 4, 2, 18, 6, 0xFF2563EB);
+  rect(pixels, 26, 2, 16, 6, 0xFF10B981);
+  rect(pixels, 46, 2, 16, 6, 0xFFF59E0B);
+  rect(pixels, 0, 10, 14, height - 18, 0xFFE2E8F0);
+  rect(pixels, 4, 16, 6, 6, 0xFF64748B);
+  rect(pixels, 4, 28, 6, 6, 0xFF94A3B8);
+  rect(pixels, 18, 14, 72, 8, 0xFFDBEAFE);
+  rect(pixels, 22, 17, 14, 3, 0xFF1D4ED8);
+  rect(pixels, 42, 17, 16, 3, 0xFF1D4ED8);
+  rect(pixels, 64, 17, 18, 3, 0xFF1D4ED8);
+  rect(pixels, 18, 24, 72, 8, 0xFFFFFFFF);
+  rect(pixels, 22, 27, 18, 3, 0xFF94A3B8);
+  rect(pixels, 46, 27, 10, 3, 0xFF22C55E);
+  rect(pixels, 66, 27, 16, 3, 0xFFCBD5E1);
+  rect(pixels, 18, 34, 72, 8, 0xFFF1F5F9);
+  rect(pixels, 22, 37, 20, 3, 0xFF64748B);
+  rect(pixels, 46, 37, 10, 3, 0xFFEF4444);
+  rect(pixels, 66, 37, 18, 3, 0xFFCBD5E1);
+  rect(pixels, 18, 46, 30, 8, 0xFF0F172A);
+  rect(pixels, 22, 49, 20, 3, 0xFF38BDF8);
+  rect(pixels, 54, 46, 36, 8, 0xFFECFCCB);
+  rect(pixels, 58, 49, 24, 3, 0xFF65A30D);
+  rect(pixels, 0, height - 8, width, 8, 0xFF334155);
+  rect(pixels, 68, height - 6, 20, 4, 0xFF7C3AED);
   return pixels;
 }
 

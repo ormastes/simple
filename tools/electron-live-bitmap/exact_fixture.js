@@ -306,6 +306,46 @@ html,body{margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden
 	<div class="taskbar"></div><div class="ready"></div><div class="alert"></div>
 	<script>window.__simpleExactBitmapReady=true;</script>`;
   }
+  if (scene === "simple-web-engine2d-report-table-command") {
+    return `<!doctype html>
+<meta charset="utf-8">
+<style>
+html,body{margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden;background:#f8fafc}
+.top{position:absolute;left:0;top:0;width:${width}px;height:10px;background:#0f172a}
+.cmd1{position:absolute;left:4px;top:2px;width:18px;height:6px;background:#2563eb}
+.cmd2{position:absolute;left:26px;top:2px;width:16px;height:6px;background:#10b981}
+.cmd3{position:absolute;left:46px;top:2px;width:16px;height:6px;background:#f59e0b}
+.rail{position:absolute;left:0;top:10px;width:14px;height:${height - 18}px;background:#e2e8f0}
+.nav1{position:absolute;left:4px;top:16px;width:6px;height:6px;background:#64748b}
+.nav2{position:absolute;left:4px;top:28px;width:6px;height:6px;background:#94a3b8}
+.head{position:absolute;left:18px;top:14px;width:72px;height:8px;background:#dbeafe}
+.h1{position:absolute;left:22px;top:17px;width:14px;height:3px;background:#1d4ed8}
+.h2{position:absolute;left:42px;top:17px;width:16px;height:3px;background:#1d4ed8}
+.h3{position:absolute;left:64px;top:17px;width:18px;height:3px;background:#1d4ed8}
+.row1{position:absolute;left:18px;top:24px;width:72px;height:8px;background:#fff}
+.r1a{position:absolute;left:22px;top:27px;width:18px;height:3px;background:#94a3b8}
+.r1b{position:absolute;left:46px;top:27px;width:10px;height:3px;background:#22c55e}
+.r1c{position:absolute;left:66px;top:27px;width:16px;height:3px;background:#cbd5e1}
+.row2{position:absolute;left:18px;top:34px;width:72px;height:8px;background:#f1f5f9}
+.r2a{position:absolute;left:22px;top:37px;width:20px;height:3px;background:#64748b}
+.r2b{position:absolute;left:46px;top:37px;width:10px;height:3px;background:#ef4444}
+.r2c{position:absolute;left:66px;top:37px;width:18px;height:3px;background:#cbd5e1}
+.filter{position:absolute;left:18px;top:46px;width:30px;height:8px;background:#0f172a}
+.filterLine{position:absolute;left:22px;top:49px;width:20px;height:3px;background:#38bdf8}
+.summary{position:absolute;left:54px;top:46px;width:36px;height:8px;background:#ecfccb}
+.summaryLine{position:absolute;left:58px;top:49px;width:24px;height:3px;background:#65a30d}
+.taskbar{position:absolute;left:0;top:${height - 8}px;width:${width}px;height:8px;background:#334155}
+.status{position:absolute;left:68px;top:${height - 6}px;width:20px;height:4px;background:#7c3aed}
+</style>
+<div class="top"></div><div class="cmd1"></div><div class="cmd2"></div><div class="cmd3"></div>
+<div class="rail"></div><div class="nav1"></div><div class="nav2"></div>
+<div class="head"></div><div class="h1"></div><div class="h2"></div><div class="h3"></div>
+<div class="row1"></div><div class="r1a"></div><div class="r1b"></div><div class="r1c"></div>
+<div class="row2"></div><div class="r2a"></div><div class="r2b"></div><div class="r2c"></div>
+<div class="filter"></div><div class="filterLine"></div><div class="summary"></div><div class="summaryLine"></div>
+<div class="taskbar"></div><div class="status"></div>
+<script>window.__simpleExactBitmapReady=true;</script>`;
+  }
   return `<!doctype html>
 <meta charset="utf-8">
 <style>
@@ -324,7 +364,7 @@ function fixtureHtml() {
   if (expectedArgbPath) {
     return expectedArgbCanvasHtml();
   }
-  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid" || scene === "simple-web-engine2d-dashboard-command-list" || scene === "simple-web-engine2d-form-sidebar-validation" || scene === "simple-web-engine2d-settings-inspector-tree" || scene === "simple-web-engine2d-media-gallery-command") {
+  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid" || scene === "simple-web-engine2d-dashboard-command-list" || scene === "simple-web-engine2d-form-sidebar-validation" || scene === "simple-web-engine2d-settings-inspector-tree" || scene === "simple-web-engine2d-media-gallery-command" || scene === "simple-web-engine2d-report-table-command") {
     return simpleWebEngine2DFixtureHtml();
   }
   return exactFixtureHtml();
@@ -335,7 +375,7 @@ function expectedFramePixels() {
   if (fromFile !== null) {
     return fromFile;
   }
-  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid" || scene === "simple-web-engine2d-dashboard-command-list" || scene === "simple-web-engine2d-form-sidebar-validation" || scene === "simple-web-engine2d-settings-inspector-tree" || scene === "simple-web-engine2d-media-gallery-command") {
+  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid" || scene === "simple-web-engine2d-dashboard-command-list" || scene === "simple-web-engine2d-form-sidebar-validation" || scene === "simple-web-engine2d-settings-inspector-tree" || scene === "simple-web-engine2d-media-gallery-command" || scene === "simple-web-engine2d-report-table-command") {
     const pixels = new Uint32Array(width * height);
     if (scene === "simple-web-engine2d-wide-card-content") {
       pixels.fill(0xFF0B1020 >>> 0);
@@ -445,6 +485,33 @@ function expectedFramePixels() {
       rectArray(pixels, 0, height - 8, width, 8, 0xFF334155 >>> 0);
       rectArray(pixels, 6, height - 6, 22, 4, 0xFF10B981 >>> 0);
       rectArray(pixels, 70, height - 6, 20, 4, 0xFFEF4444 >>> 0);
+    } else if (scene === "simple-web-engine2d-report-table-command") {
+      pixels.fill(0xFFF8FAFC >>> 0);
+      rectArray(pixels, 0, 0, width, 10, 0xFF0F172A >>> 0);
+      rectArray(pixels, 4, 2, 18, 6, 0xFF2563EB >>> 0);
+      rectArray(pixels, 26, 2, 16, 6, 0xFF10B981 >>> 0);
+      rectArray(pixels, 46, 2, 16, 6, 0xFFF59E0B >>> 0);
+      rectArray(pixels, 0, 10, 14, height - 18, 0xFFE2E8F0 >>> 0);
+      rectArray(pixels, 4, 16, 6, 6, 0xFF64748B >>> 0);
+      rectArray(pixels, 4, 28, 6, 6, 0xFF94A3B8 >>> 0);
+      rectArray(pixels, 18, 14, 72, 8, 0xFFDBEAFE >>> 0);
+      rectArray(pixels, 22, 17, 14, 3, 0xFF1D4ED8 >>> 0);
+      rectArray(pixels, 42, 17, 16, 3, 0xFF1D4ED8 >>> 0);
+      rectArray(pixels, 64, 17, 18, 3, 0xFF1D4ED8 >>> 0);
+      rectArray(pixels, 18, 24, 72, 8, 0xFFFFFFFF >>> 0);
+      rectArray(pixels, 22, 27, 18, 3, 0xFF94A3B8 >>> 0);
+      rectArray(pixels, 46, 27, 10, 3, 0xFF22C55E >>> 0);
+      rectArray(pixels, 66, 27, 16, 3, 0xFFCBD5E1 >>> 0);
+      rectArray(pixels, 18, 34, 72, 8, 0xFFF1F5F9 >>> 0);
+      rectArray(pixels, 22, 37, 20, 3, 0xFF64748B >>> 0);
+      rectArray(pixels, 46, 37, 10, 3, 0xFFEF4444 >>> 0);
+      rectArray(pixels, 66, 37, 18, 3, 0xFFCBD5E1 >>> 0);
+      rectArray(pixels, 18, 46, 30, 8, 0xFF0F172A >>> 0);
+      rectArray(pixels, 22, 49, 20, 3, 0xFF38BDF8 >>> 0);
+      rectArray(pixels, 54, 46, 36, 8, 0xFFECFCCB >>> 0);
+      rectArray(pixels, 58, 49, 24, 3, 0xFF65A30D >>> 0);
+      rectArray(pixels, 0, height - 8, width, 8, 0xFF334155 >>> 0);
+      rectArray(pixels, 68, height - 6, 20, 4, 0xFF7C3AED >>> 0);
     } else {
       pixels.fill(0xFF112233 >>> 0);
     }
@@ -527,7 +594,7 @@ function captureChecksum(buffer) {
     const green = buffer[off + 1];
     const red = buffer[off + 2];
     const alpha = buffer[off + 3];
-    const isArgbScene = expectedArgbPath !== "" || scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid" || scene === "simple-web-engine2d-dashboard-command-list" || scene === "simple-web-engine2d-form-sidebar-validation" || scene === "simple-web-engine2d-settings-inspector-tree" || scene === "simple-web-engine2d-media-gallery-command";
+    const isArgbScene = expectedArgbPath !== "" || scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid" || scene === "simple-web-engine2d-dashboard-command-list" || scene === "simple-web-engine2d-form-sidebar-validation" || scene === "simple-web-engine2d-settings-inspector-tree" || scene === "simple-web-engine2d-media-gallery-command" || scene === "simple-web-engine2d-report-table-command";
     const value = isArgbScene
       ? (((alpha << 24) >>> 0) | (red << 16) | (green << 8) | blue) >>> 0
       : red;

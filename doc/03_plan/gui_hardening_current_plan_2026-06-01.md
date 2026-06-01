@@ -40,8 +40,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   image load/error state, menus, and statusbar state.
 - Engine2D exact-bitmap coverage now includes split-pane, two-block, wide-card,
   toolbar/modal/grid, dashboard/command/list, form/sidebar/validation,
-  settings/inspector/tree, media/gallery/command, and image/taskbar/command
-  scenes across Node, Bun, and live Electron captures.
+  settings/inspector/tree, media/gallery/command, report/table/command, and
+  image/taskbar/command scenes across Node, Bun, and live Electron captures.
 - Generic Simple Web layout evidence covers colored CSS surfaces, selector and
   inline precedence, descendant scope, and child-scope behavior, but not full
   Chromium DOM/CSS/text parity.
@@ -86,6 +86,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - `doc/09_report/budgeted_simple_web_engine2d_scene_matrix_media_gallery_2026-06-01.md`:
   current Engine2D Node/Bun/Electron budgeted exact-bitmap matrix including
   media-gallery-command.
+- `doc/09_report/budgeted_simple_web_engine2d_scene_matrix_report_table_2026-06-01.md`:
+  current Engine2D Node/Bun/Electron budgeted exact-bitmap matrix including
+  report-table-command.
 - `doc/09_report/gui_wasm_browser_execution_widget_state_machine_debug_2026-06-01.md`:
   generated GUI WASM retained-browser state-machine evidence.
 - `doc/09_report/gui_wasm_cli_artifact_widget_state_machine_debug_2026-06-01.md`,
@@ -159,8 +162,12 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - `sh scripts/check-node-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
 - `sh scripts/check-bun-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
 - `sh scripts/check-electron-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
+- `NODE_BITMAP_ITERATIONS=20 sh scripts/check-node-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
+- `NODE_BITMAP_ITERATIONS=20 sh scripts/check-bun-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
+- `ELECTRON_BITMAP_ITERATIONS=1 sh scripts/check-electron-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
 - `BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_settings_inspector REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
 - `BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_media_gallery REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_media_gallery_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
+- `BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_report_table REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_report_table_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
 - `SIMPLE_LIB=src bin/simple check src/app/wm_compare/site_corpus_layout_report.spl test/system/wm_compare/famous_site_corpus_spec.spl test/unit/browser_engine/text_painter_spec.spl`
 - `SIMPLE_LIB=src bin/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --format json`
 - `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`

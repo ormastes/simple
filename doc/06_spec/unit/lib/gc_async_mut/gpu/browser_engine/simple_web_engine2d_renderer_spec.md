@@ -176,6 +176,29 @@ expect(pixels[70 + 58 * 96]).to_equal(0xFFEF4444u32)
 
 </details>
 
+#### renders report table command fixture with exact table and command colors
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body class='simple-web-engine2d-report-table-command' style='margin:0; background-color: #f8fafc'><main>report table command</main></body></html>"
+val pixels = simple_web_engine2d_render_html_pixels(html, 96, 64, "software")
+expect(pixels.len()).to_equal(96 * 64)
+expect(pixels[0]).to_equal(0xFF0F172Au32)
+expect(pixels[4 + 2 * 96]).to_equal(0xFF2563EBu32)
+expect(pixels[18 + 14 * 96]).to_equal(0xFFDBEAFEu32)
+expect(pixels[46 + 27 * 96]).to_equal(0xFF22C55Eu32)
+expect(pixels[46 + 37 * 96]).to_equal(0xFFEF4444u32)
+expect(pixels[58 + 49 * 96]).to_equal(0xFF65A30Du32)
+expect(pixels[68 + 58 * 96]).to_equal(0xFF7C3AEDu32)
+```
+
+</details>
+
 #### matches direct child :has selector for first block
 
 <details>
@@ -211,8 +234,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
