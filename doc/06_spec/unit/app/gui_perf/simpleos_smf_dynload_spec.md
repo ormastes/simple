@@ -1,6 +1,6 @@
 # SimpleOS SMF dynload evidence
 
-Verifies that the pure GUI SMF artifact can pass through the SimpleOS dynload
+Verifies that the pure GUI SMF artifact can pass through the SimpleOS dynload registry and resolve the hot-call symbol.
 
 ## At a Glance
 
@@ -8,12 +8,37 @@ Verifies that the pure GUI SMF artifact can pass through the SimpleOS dynload
 |-------|-------|
 | Category | Application |
 | Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/gui_hardening_current_plan_2026-06-01.md |
+| Design | doc/05_design/gui_color_image_pipeline_8k.md |
+| Research | doc/01_research/local/gui_color_image_pipeline_8k.md |
 | Source | `test/unit/app/gui_perf/simpleos_smf_dynload_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+## Overview
+
 Verifies that the pure GUI SMF artifact can pass through the SimpleOS dynload
 registry and resolve the hot-call symbol.
+
+This is contract evidence for the GUI hardening release lane. It does not claim
+live QEMU execution or pixel rendering. It proves that a role-2 ARM64 SMF
+library envelope containing the GUI hot-call symbol can be opened through the
+SimpleOS loader registry, resolved through `loader_dynsym`, and reported as a
+machine-readable `GUI_SIMPLEOS_SMF_DYNLOAD` row. It also proves that wrong
+symbols, wrong architectures, and missing artifact bytes fail closed.
+
+## Examples
+
+The expected passing row starts with `GUI_SIMPLEOS_SMF_DYNLOAD
+status=simpleos-dynload-pass` and includes
+`symbol=gui_dynlib_hot_probe_tick`, `loader=simpleos_smf_dynload`,
+`adapter=simpleos-framebuffer-virtio`, and `pass=true`.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/gui_hardening_current_plan_2026-06-01.md
+**Design:** doc/05_design/gui_color_image_pipeline_8k.md
+**Research:** doc/01_research/local/gui_color_image_pipeline_8k.md
 
 ## Scenarios
 
@@ -29,6 +54,7 @@ registry and resolve the hot-call symbol.
    - Expected: evidence.pass is true
    - Expected: evidence.loader equals `simpleos_smf_dynload`
    - Expected: evidence.symbol_addr equals `0x400010`
+   - Expected: evidence.process_callable is true
 
 4. Emit a machine-readable SimpleOS dynload evidence row
 
@@ -36,7 +62,7 @@ registry and resolve the hot-call symbol.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -46,10 +72,12 @@ val evidence = gui_simpleos_smf_dynload_probe("build/gui/pure_gui_hot.smf", smf,
 expect(evidence.pass).to_equal(true)
 expect(evidence.loader).to_equal("simpleos_smf_dynload")
 expect(evidence.symbol_addr).to_equal(0x400010)
+expect(evidence.process_callable).to_equal(true)
 val row = gui_simpleos_smf_dynload_row(evidence)
 expect(row).to_contain("GUI_SIMPLEOS_SMF_DYNLOAD")
 expect(row).to_contain("status=simpleos-dynload-pass")
 expect(row).to_contain("symbol=gui_dynlib_hot_probe_tick")
+expect(row).to_contain("process_callable=true")
 expect(row).to_contain("pass=true")
 ```
 
@@ -138,4 +166,11 @@ expect(evidence.handle).to_be_less_than(0)
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/gui_hardening_current_plan_2026-06-01.md](doc/03_plan/gui_hardening_current_plan_2026-06-01.md)
+- **Design:** [doc/05_design/gui_color_image_pipeline_8k.md](doc/05_design/gui_color_image_pipeline_8k.md)
+- **Research:** [doc/01_research/local/gui_color_image_pipeline_8k.md](doc/01_research/local/gui_color_image_pipeline_8k.md)
 

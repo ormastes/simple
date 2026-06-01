@@ -96,11 +96,14 @@ expect(parity.dynload_pass).to_equal(false)
 2. Keep pass=true but point the evidence at a non-SimpleOS adapter
    - Expected: gui_qemu_arm64_smf_loader_parity(wrong_adapter, _representative_batch()).status equals `loader-contract-fail`
 
+3. Keep pass=true but remove the process-callable mapped symbol proof
+   - Expected: gui_qemu_arm64_smf_loader_parity(not_callable, _representative_batch()).status equals `loader-contract-fail`
+
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -115,6 +118,7 @@ val wrong_status = GuiSimpleOsSmfDynloadEvidence(
     adapter: "simpleos-framebuffer-virtio",
     handle: 1,
     symbol_addr: 0x400010,
+    process_callable: true,
     pass: true,
     error: ""
 )
@@ -130,10 +134,27 @@ val wrong_adapter = GuiSimpleOsSmfDynloadEvidence(
     adapter: "host-dynlib",
     handle: 1,
     symbol_addr: 0x400010,
+    process_callable: true,
     pass: true,
     error: ""
 )
 expect(gui_qemu_arm64_smf_loader_parity(wrong_adapter, _representative_batch()).status).to_equal("loader-contract-fail")
+val not_callable = GuiSimpleOsSmfDynloadEvidence(
+    status: "simpleos-dynload-pass",
+    artifact_path: "build/gui/pure_gui_hot.smf",
+    smf_role: 2,
+    arch_code: 3,
+    embedded_dynlib: true,
+    symbol_name: "gui_dynlib_hot_probe_tick",
+    loader: "simpleos_smf_dynload",
+    adapter: "simpleos-framebuffer-virtio",
+    handle: 1,
+    symbol_addr: 0x400010,
+    process_callable: false,
+    pass: true,
+    error: ""
+)
+expect(gui_qemu_arm64_smf_loader_parity(not_callable, _representative_batch()).status).to_equal("loader-contract-fail")
 ```
 
 </details>
