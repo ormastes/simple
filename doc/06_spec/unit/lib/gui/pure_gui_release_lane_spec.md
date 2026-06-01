@@ -120,6 +120,23 @@ _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_evidence.spl")
 
 </details>
 
+#### keeps QEMU ARM64 SMF parity evidence free of WM, web renderer, and native GUI runtime deps
+
+1.  expect release clean
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+_expect_release_clean("src/app/gui_perf/qemu_arm64_smf_parity.spl")
+```
+
+</details>
+
 #### keeps SMF wrapper and exported hot symbol free of WM, web renderer, and native GUI runtime deps
 
 1.  expect release clean
@@ -227,8 +244,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
