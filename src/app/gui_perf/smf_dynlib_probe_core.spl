@@ -29,6 +29,7 @@ class GuiDynlibProbeLoadEvidence:
     call_source: text
     symbol_resolved: bool
     fallback_used: bool
+    dynlib_path: text
 
 fn gui_dynlib_probe_default_config() -> GuiDynlibProbeConfig:
     GuiDynlibProbeConfig(
@@ -72,12 +73,12 @@ fn gui_dynlib_probe_smf_cache_path(path: text, host_os: text) -> text:
 fn gui_dynlib_probe_load_host_evidence(config: GuiDynlibProbeConfig) -> GuiDynlibProbeLoadEvidence:
     val handle = spl_dlopen(config.artifact_path)
     if handle == 0:
-        return GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
+        return GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true, dynlib_path: "")
     val sym = spl_dlsym(handle, config.symbol_name)
     spl_dlclose(handle)
     if sym == 0:
-        return GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
-    GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "dynlib_symbol_call", symbol_resolved: true, fallback_used: false)
+        return GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true, dynlib_path: "")
+    GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "dynlib_symbol_call", symbol_resolved: true, fallback_used: false, dynlib_path: config.artifact_path)
 
 fn gui_dynlib_probe_extract_smf_library_to_cache(artifact_path: text) -> text:
     val cache_path = gui_dynlib_probe_smf_cache_path(artifact_path, rt_platform_name())
@@ -94,19 +95,19 @@ fn gui_dynlib_probe_extract_smf_library_to_cache(artifact_path: text) -> text:
 fn gui_dynlib_probe_load_smf_host_evidence(config: GuiDynlibProbeConfig) -> GuiDynlibProbeLoadEvidence:
     val cache_path = gui_dynlib_probe_extract_smf_library_to_cache(config.artifact_path)
     if cache_path == "":
-        return GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
+        return GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true, dynlib_path: "")
     val handle = spl_dlopen(cache_path)
     if handle == 0:
-        return GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
+        return GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true, dynlib_path: "")
     val sym = spl_dlsym(handle, config.symbol_name)
     spl_dlclose(handle)
     if sym == 0:
-        return GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
-    GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "dynlib_symbol_call", symbol_resolved: true, fallback_used: false)
+        return GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true, dynlib_path: "")
+    GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "dynlib_symbol_call", symbol_resolved: true, fallback_used: false, dynlib_path: cache_path)
 
 fn gui_dynlib_probe_load_evidence(config: GuiDynlibProbeConfig) -> GuiDynlibProbeLoadEvidence:
     if config.artifact_path == "":
-        return GuiDynlibProbeLoadEvidence(loader_mode: "direct_simple", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
+        return GuiDynlibProbeLoadEvidence(loader_mode: "direct_simple", call_source: "direct_simple", symbol_resolved: false, fallback_used: true, dynlib_path: "")
     if gui_dynlib_probe_is_host_dynlib_path(config.artifact_path):
         return gui_dynlib_probe_load_host_evidence(config)
     if gui_dynlib_probe_is_smf_dynlib_path(config.artifact_path):
@@ -114,7 +115,7 @@ fn gui_dynlib_probe_load_evidence(config: GuiDynlibProbeConfig) -> GuiDynlibProb
         if smf_host.call_source == "dynlib_symbol_call":
             return smf_host
         return smf_host
-    GuiDynlibProbeLoadEvidence(loader_mode: "direct_simple", call_source: "direct_simple", symbol_resolved: false, fallback_used: true)
+    GuiDynlibProbeLoadEvidence(loader_mode: "direct_simple", call_source: "direct_simple", symbol_resolved: false, fallback_used: true, dynlib_path: "")
 
 fn gui_dynlib_probe_workload(iteration: i32) -> [GuiInputEvent]:
     [
@@ -141,53 +142,26 @@ fn gui_dynlib_probe_direct_samples(iterations: i32, warmup_count: i32) -> [i64]:
         i = i + 1
     samples
 
-fn gui_dynlib_probe_host_dynlib_samples(config: GuiDynlibProbeConfig) -> [i64]:
+fn gui_dynlib_probe_dynlib_samples(dynlib_path: text, symbol_name: text, iterations: i32, warmup_count: i32) -> [i64]:
     var samples: [i64] = []
-    val handle = spl_dlopen(config.artifact_path)
+    if dynlib_path == "":
+        return samples
+    val handle = spl_dlopen(dynlib_path)
     if handle == 0:
         return samples
-    val sym = spl_dlsym(handle, config.symbol_name)
+    val sym = spl_dlsym(handle, symbol_name)
     if sym == 0:
         spl_dlclose(handle)
         return samples
     var i = 0
-    val total = config.iterations + config.warmup_count
+    val total = iterations + warmup_count
     while i < total:
         var args: [i64] = []
         args.push(i.to_i64())
         val t0 = rt_time_now_unix_micros()
         val command_count = spl_wffi_call_i64(sym, args, 1)
         val t1 = rt_time_now_unix_micros()
-        if command_count > 0 and i >= config.warmup_count:
-            var elapsed = t1 - t0
-            if elapsed < 0:
-                elapsed = 0
-            samples.push(elapsed)
-        i = i + 1
-    spl_dlclose(handle)
-    samples
-
-fn gui_dynlib_probe_smf_dynlib_samples(config: GuiDynlibProbeConfig) -> [i64]:
-    var samples: [i64] = []
-    val cache_path = gui_dynlib_probe_extract_smf_library_to_cache(config.artifact_path)
-    if cache_path == "":
-        return samples
-    val handle = spl_dlopen(cache_path)
-    if handle == 0:
-        return samples
-    val sym = spl_dlsym(handle, config.symbol_name)
-    if sym == 0:
-        spl_dlclose(handle)
-        return samples
-    var i = 0
-    val total = config.iterations + config.warmup_count
-    while i < total:
-        var args: [i64] = []
-        args.push(i.to_i64())
-        val t0 = rt_time_now_unix_micros()
-        val command_count = spl_wffi_call_i64(sym, args, 1)
-        val t1 = rt_time_now_unix_micros()
-        if command_count > 0 and i >= config.warmup_count:
+        if command_count > 0 and i >= warmup_count:
             var elapsed = t1 - t0
             if elapsed < 0:
                 elapsed = 0
@@ -212,10 +186,10 @@ fn gui_dynlib_probe_report(config: GuiDynlibProbeConfig, evidence: GuiDynlibProb
 fn gui_dynlib_probe_run(config: GuiDynlibProbeConfig) -> GuiDynlibPerfReport:
     val evidence = gui_dynlib_probe_load_evidence(config)
     if evidence.loader_mode == "host_dynlib" and evidence.call_source == "dynlib_symbol_call":
-        val host_samples = gui_dynlib_probe_host_dynlib_samples(config)
+        val host_samples = gui_dynlib_probe_dynlib_samples(evidence.dynlib_path, config.symbol_name, config.iterations, config.warmup_count)
         return gui_dynlib_probe_report(config, evidence, host_samples)
     if evidence.loader_mode == "smf_dynlib" and evidence.call_source == "dynlib_symbol_call" and gui_dynlib_probe_is_smf_dynlib_path(config.artifact_path):
-        val smf_samples = gui_dynlib_probe_smf_dynlib_samples(config)
+        val smf_samples = gui_dynlib_probe_dynlib_samples(evidence.dynlib_path, config.symbol_name, config.iterations, config.warmup_count)
         return gui_dynlib_probe_report(config, evidence, smf_samples)
     val samples = gui_dynlib_probe_direct_samples(config.iterations, config.warmup_count)
     gui_dynlib_probe_report(config, evidence, samples)

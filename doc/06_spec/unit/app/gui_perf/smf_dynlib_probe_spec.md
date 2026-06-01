@@ -26,7 +26,7 @@ expect(events[3].kind).to_equal("key")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -41,7 +41,8 @@ val evidence = GuiDynlibProbeLoadEvidence(
     loader_mode: "smf_dynlib",
     call_source: "direct_simple",
     symbol_resolved: true,
-    fallback_used: true
+    fallback_used: true,
+    dynlib_path: ""
 )
 val report = gui_dynlib_probe_report(config, evidence, [10, 11, 12, 13])
 expect(report.pass).to_equal(false)
@@ -56,7 +57,7 @@ expect(report.call_source).to_equal("direct_simple")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -71,7 +72,8 @@ val evidence = GuiDynlibProbeLoadEvidence(
     loader_mode: "smf_dynlib",
     call_source: "registry_symbol_only",
     symbol_resolved: true,
-    fallback_used: true
+    fallback_used: true,
+    dynlib_path: ""
 )
 val report = gui_dynlib_probe_report(config, evidence, [10, 11, 12, 13])
 expect(report.pass).to_equal(false)
@@ -86,7 +88,7 @@ expect(report.call_source).to_equal("registry_symbol_only")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -101,7 +103,8 @@ val evidence = GuiDynlibProbeLoadEvidence(
     loader_mode: "direct_simple",
     call_source: "direct_simple",
     symbol_resolved: false,
-    fallback_used: true
+    fallback_used: true,
+    dynlib_path: ""
 )
 val report = gui_dynlib_probe_report(config, evidence, [10])
 expect(report.pass).to_equal(false)
@@ -163,7 +166,7 @@ expect(gui_dynlib_probe_smf_cache_path("build/gui/pure_gui.smf", "linux")).to_eq
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -178,7 +181,8 @@ val evidence = GuiDynlibProbeLoadEvidence(
     loader_mode: "host_dynlib",
     call_source: "dynlib_symbol_call",
     symbol_resolved: true,
-    fallback_used: false
+    fallback_used: false,
+    dynlib_path: "build/gui/libpure_gui_hot.so"
 )
 val report = gui_dynlib_probe_report(config, evidence, [10, 11, 12, 13])
 expect(report.pass).to_equal(false)
@@ -193,7 +197,7 @@ expect(report.call_source).to_equal("dynlib_symbol_call")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -208,11 +212,37 @@ val evidence = GuiDynlibProbeLoadEvidence(
     loader_mode: "smf_dynlib",
     call_source: "dynlib_symbol_call",
     symbol_resolved: true,
-    fallback_used: false
+    fallback_used: false,
+    dynlib_path: "build/gui/pure_gui.smf.extracted.so"
 )
 val report = gui_dynlib_probe_report(config, evidence, [10, 11, 12, 13])
 expect(report.pass).to_equal(true)
 expect(report.call_source).to_equal("dynlib_symbol_call")
+```
+
+</details>
+
+#### records the settled dynlib path for a callable host artifact
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val config = GuiDynlibProbeConfig(
+    artifact_path: "build/gui/missing.so",
+    symbol_name: "gui_dynlib_hot_probe_tick",
+    iterations: 4,
+    warmup_count: 1,
+    threshold_us: 1000
+)
+val evidence = gui_dynlib_probe_load_host_evidence(config)
+if evidence.call_source == "dynlib_symbol_call":
+    expect(evidence.dynlib_path).to_equal(config.artifact_path)
+else:
+    expect(evidence.dynlib_path).to_equal("")
 ```
 
 </details>
@@ -236,8 +266,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
