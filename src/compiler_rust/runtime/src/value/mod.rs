@@ -1074,6 +1074,9 @@ pub fn clear_all_runtime_registries() {
     // Clear actor registry
     actors::clear_actor_registry();
 
+    // Clear heap allocation registry
+    heap::clear_heap_allocation_registry();
+
     // Clear memory-mapped file registry
     file_io::clear_mmap_registry();
 

@@ -92,7 +92,8 @@ use super::{
 };
 // Dict functions are in a sibling module, import via crate path
 use crate::value::{
-    clear_all_runtime_registries, rt_dict_clear, rt_dict_get, rt_dict_len, rt_dict_new, rt_dict_set, RuntimeValue,
+    clear_all_runtime_registries, rt_dict_clear, rt_dict_get, rt_dict_len, rt_dict_new, rt_dict_remove, rt_dict_set,
+    RuntimeValue,
 };
 use simple_simd::SimdTier;
 use std::sync::{Mutex, OnceLock};
@@ -125,6 +126,41 @@ fn test_array_new() {
     let array = rt_array_new(10);
     assert!(array.is_heap());
     assert_eq!(rt_array_len(array), 0);
+}
+
+#[test]
+fn test_low_heap_tagged_values_do_not_crash_collection_runtime() {
+    let null_heap = RuntimeValue::from_raw(0x1);
+    let low_heap = RuntimeValue::from_raw(0x9);
+    let unregistered_heap = RuntimeValue::from_raw(0x10001);
+    let key = RuntimeValue::from_int(7);
+
+    assert_eq!(rt_array_len(null_heap), -1);
+    assert_eq!(rt_array_len(unregistered_heap), -1);
+    assert!(!rt_array_push(null_heap, RuntimeValue::from_int(1)));
+    assert!(!rt_array_push(unregistered_heap, RuntimeValue::from_int(1)));
+    assert!(rt_array_get(null_heap, 0).is_nil());
+    assert!(rt_array_get(unregistered_heap, 0).is_nil());
+
+    assert_eq!(rt_dict_len(null_heap), -1);
+    assert_eq!(rt_dict_len(unregistered_heap), -1);
+    assert!(rt_dict_get(null_heap, key).is_nil());
+    assert!(rt_dict_get(unregistered_heap, key).is_nil());
+    assert!(!rt_dict_set(null_heap, key, RuntimeValue::from_int(1)));
+    assert!(!rt_dict_set(unregistered_heap, key, RuntimeValue::from_int(1)));
+    assert!(rt_dict_remove(null_heap, key).is_nil());
+    assert!(rt_dict_remove(unregistered_heap, key).is_nil());
+
+    let dict = rt_dict_new(4);
+    assert!(rt_dict_get(dict, low_heap).is_nil());
+    assert!(rt_dict_get(dict, null_heap).is_nil());
+    assert!(rt_dict_get(dict, unregistered_heap).is_nil());
+    assert!(rt_dict_remove(low_heap, key).is_nil());
+
+    assert_eq!(rt_len(low_heap), -1);
+    assert_eq!(rt_len(unregistered_heap), -1);
+    assert_eq!(rt_contains(low_heap, key), 0);
+    assert_eq!(rt_contains(unregistered_heap, key), 0);
 }
 
 #[test]

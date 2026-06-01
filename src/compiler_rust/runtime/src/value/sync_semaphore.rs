@@ -50,10 +50,7 @@ pub extern "C" fn rt_semaphore_new(initial_count: i64) -> RuntimeValue {
 }
 
 fn as_semaphore_ptr(value: RuntimeValue) -> Option<*mut RuntimeSemaphore> {
-    if !value.is_heap() {
-        return None;
-    }
-    let ptr = value.as_heap_ptr() as *mut RuntimeSemaphore;
+    let ptr = get_typed_ptr_mut::<RuntimeSemaphore>(value, HeapObjectType::Semaphore)?;
     unsafe {
         if (*ptr).inner.is_null() {
             return None;
@@ -71,9 +68,15 @@ pub extern "C" fn rt_semaphore_acquire(sem: RuntimeValue) -> i64 {
 
     unsafe {
         let inner = &*(*sem_ptr).inner;
-        let mut count = inner.count.lock().unwrap();
+        let mut count = match inner.count.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         while *count <= 0 {
-            count = inner.condvar.wait(count).unwrap();
+            count = match inner.condvar.wait(count) {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
         }
         *count -= 1;
         1
@@ -115,7 +118,10 @@ pub extern "C" fn rt_semaphore_acquire_timeout(sem: RuntimeValue, timeout_ms: i6
 
     unsafe {
         let inner = &*(*sem_ptr).inner;
-        let mut count = inner.count.lock().unwrap();
+        let mut count = match inner.count.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let deadline = std::time::Instant::now() + timeout;
 
         while *count <= 0 {
@@ -123,9 +129,12 @@ pub extern "C" fn rt_semaphore_acquire_timeout(sem: RuntimeValue, timeout_ms: i6
             if remaining.is_zero() {
                 return 0;
             }
-            let (new_count, result) = inner.condvar.wait_timeout(count, remaining).unwrap();
-            count = new_count;
-            if result.timed_out() && *count <= 0 {
+            let wait_result = match inner.condvar.wait_timeout(count, remaining) {
+                Ok(result) => result,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            count = wait_result.0;
+            if wait_result.1.timed_out() && *count <= 0 {
                 return 0;
             }
         }
@@ -143,7 +152,10 @@ pub extern "C" fn rt_semaphore_release(sem: RuntimeValue) -> i64 {
 
     unsafe {
         let inner = &*(*sem_ptr).inner;
-        let mut count = inner.count.lock().unwrap();
+        let mut count = match inner.count.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         *count += 1;
         inner.condvar.notify_one();
         1
@@ -159,7 +171,10 @@ pub extern "C" fn rt_semaphore_count(sem: RuntimeValue) -> i64 {
 
     unsafe {
         let inner = &*(*sem_ptr).inner;
-        *inner.count.lock().unwrap()
+        match inner.count.lock() {
+            Ok(guard) => *guard,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
     }
 }
 
@@ -176,6 +191,7 @@ pub extern "C" fn rt_semaphore_free(sem: RuntimeValue) {
         }
         let size = std::mem::size_of::<RuntimeSemaphore>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        unregister_heap_ptr(sem_ptr as *mut HeapHeader);
         std::alloc::dealloc(sem_ptr as *mut u8, layout);
     }
 }

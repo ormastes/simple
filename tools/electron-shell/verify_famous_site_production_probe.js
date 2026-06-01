@@ -157,6 +157,15 @@ let result = {
   simpleGeometryLineCount: 0,
   textLineCountDelta: 0,
   layoutTextMatch: false,
+  hasTextInkDelta: false,
+  textInkDelta: {
+    divBoxDifferentPixels: 0,
+    divBoxChromeExactBlackPixels: 0,
+    divBoxSimpleBackgroundMismatchPixels: 0,
+    overflowDifferentPixels: 0,
+    overflowChromeExactBlackPixels: 0,
+    overflowSimpleBackgroundMismatchPixels: 0
+  },
   textRegionDelta: null,
   failures
 };
@@ -186,6 +195,13 @@ if (!fs.existsSync(reportPath)) {
   result.simpleGeometryLineCount = parseIntField(text, /simple_line_count:\s*([0-9]+)/);
   result.textLineCountDelta = Number.parseInt(matchText(text, /text_line_count_delta:\s*(-?[0-9]+)/, "0"), 10);
   result.layoutTextMatch = parseBool(text, /layout_text_match:\s*(true|false)/);
+  result.hasTextInkDelta = text.includes("text_ink_delta:");
+  result.textInkDelta.divBoxDifferentPixels = parseIntField(text, /div_box:\s*\(region[^\)]*different_pixels:\s*([0-9]+)/);
+  result.textInkDelta.divBoxChromeExactBlackPixels = parseIntField(text, /div_box:\s*\(region[^\)]*chrome_exact_black_pixels:\s*([0-9]+)/);
+  result.textInkDelta.divBoxSimpleBackgroundMismatchPixels = parseIntField(text, /div_box:\s*\(region[^\)]*simple_background_mismatch_pixels:\s*([0-9]+)/);
+  result.textInkDelta.overflowDifferentPixels = parseIntField(text, /overflow_text:\s*\(region[^\)]*different_pixels:\s*([0-9]+)/);
+  result.textInkDelta.overflowChromeExactBlackPixels = parseIntField(text, /overflow_text:\s*\(region[^\)]*chrome_exact_black_pixels:\s*([0-9]+)/);
+  result.textInkDelta.overflowSimpleBackgroundMismatchPixels = parseIntField(text, /overflow_text:\s*\(region[^\)]*simple_background_mismatch_pixels:\s*([0-9]+)/);
   if (result.rendererMode !== "production") failures.push("report is not renderer_mode production");
   if (!simpleRel.endsWith("/simple.production.ppm")) failures.push("simple_ppm does not use production artifact path");
   if (!result.divergent) failures.push("production probe is not divergent");
@@ -202,6 +218,11 @@ if (!fs.existsSync(reportPath)) {
   if (!result.textRegionDelta) failures.push("missing production text region delta diagnostics");
   if (result.textRegionDelta && result.textRegionDelta.divBox.differentPixels <= 0) failures.push("production div-box text delta did not report differences");
   if (result.textRegionDelta && (!result.textRegionDelta.overflowText || result.textRegionDelta.overflowText.differentPixels <= 0)) failures.push("production overflow text delta did not report differences");
+  if (!result.hasTextInkDelta) failures.push("missing production text ink delta diagnostics");
+  if (result.hasTextInkDelta && result.textInkDelta.divBoxChromeExactBlackPixels <= 0) failures.push("text ink delta did not report div-box exact black glyph pixels");
+  if (result.hasTextInkDelta && result.textInkDelta.overflowChromeExactBlackPixels <= 0) failures.push("text ink delta did not report overflow exact black glyph pixels");
+  if (result.hasTextInkDelta && result.textInkDelta.divBoxSimpleBackgroundMismatchPixels <= 0) failures.push("text ink delta did not report div-box background mismatches");
+  if (result.hasTextInkDelta && result.textInkDelta.overflowSimpleBackgroundMismatchPixels <= 0) failures.push("text ink delta did not report overflow background mismatches");
 }
 
 result.status = failures.length === 0 ? "PASS" : "FAIL";

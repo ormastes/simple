@@ -583,14 +583,22 @@ fn sha256_file(path: &str) -> Result<String, String> {
 }
 
 fn resolve_preferred_simple_binary() -> Option<PathBuf> {
-    let mut candidates = vec![
+    let mut candidates = platform_release_binary_candidates();
+    candidates.extend([
+        PathBuf::from("build/bootstrap/full/x86_64-unknown-linux-gnu/simple"),
+        PathBuf::from("build/bootstrap/full/aarch64-unknown-linux-gnu/simple"),
+        PathBuf::from("build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple"),
+        PathBuf::from("build/bootstrap/stage3/aarch64-unknown-linux-gnu/simple"),
+        PathBuf::from("build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple"),
+        PathBuf::from("build/bootstrap/stage2/aarch64-unknown-linux-gnu/simple"),
+        PathBuf::from("build/bootstrap/stage2_fullcli/simple"),
+        PathBuf::from("bin/release/simple"),
+        PathBuf::from("bin/simple"),
         PathBuf::from("src/compiler_rust/target/release/simple"),
         PathBuf::from("src/compiler_rust/target/bootstrap/simple"),
-        PathBuf::from("bin/simple"),
-    ];
-    candidates.extend(platform_release_binary_candidates());
+    ]);
 
-    candidates.into_iter().find(|candidate| candidate.exists())
+    candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
 fn platform_release_binary_candidates() -> Vec<PathBuf> {

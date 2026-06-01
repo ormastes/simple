@@ -202,8 +202,7 @@ mod cuda_driver {
 
         macro_rules! sym {
             ($name:literal, $ty:ty) => {{
-                let symbol = unsafe { lib.get::<$ty>($name) }
-                    .map_err(|_| CudaError::SharedObjectSymbolNotFound)?;
+                let symbol = unsafe { lib.get::<$ty>($name) }.map_err(|_| CudaError::SharedObjectSymbolNotFound)?;
                 *symbol
             }};
         }

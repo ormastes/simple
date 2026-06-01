@@ -1,6 +1,8 @@
 //! Process spawning and management SFFI functions
 
 use crate::value::RuntimeValue;
+use crate::value::collections::{RuntimeArray, RuntimeString};
+use crate::value::heap::{get_typed_ptr, HeapObjectType};
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
 
@@ -121,15 +123,7 @@ pub extern "C" fn native_process_terminate(pid: i64) -> RuntimeValue {
 
 /// Helper to extract string from RuntimeValue
 unsafe fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
-    if !val.is_heap() {
-        return None;
-    }
-
-    let ptr = val.as_heap_ptr() as *const super::collections::RuntimeString;
-    if ptr.is_null() {
-        return None;
-    }
-
+    let ptr = get_typed_ptr::<RuntimeString>(val, HeapObjectType::String)?;
     let s = &*ptr;
     let bytes = s.as_bytes();
     String::from_utf8(bytes.to_vec()).ok()
@@ -137,15 +131,7 @@ unsafe fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
 
 /// Helper to convert RuntimeValue array to Vec<String>
 unsafe fn runtime_value_to_string_array(val: RuntimeValue) -> Option<Vec<String>> {
-    if !val.is_heap() {
-        return None;
-    }
-
-    let ptr = val.as_heap_ptr() as *const super::collections::RuntimeArray;
-    if ptr.is_null() {
-        return None;
-    }
-
+    let ptr = get_typed_ptr::<RuntimeArray>(val, HeapObjectType::Array)?;
     let arr = &*ptr;
     let slice = arr.as_slice();
     let mut result = Vec::with_capacity(slice.len());

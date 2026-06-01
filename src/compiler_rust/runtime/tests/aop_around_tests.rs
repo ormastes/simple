@@ -66,6 +66,21 @@ fn around_requires_proceed() {
 }
 
 #[test]
+fn exported_around_converts_advice_contract_panic_to_nil() {
+    let args = [RuntimeValue::from_int(5)];
+    let advices = [advice_no_proceed as _];
+    let result = rt_aop_invoke_around(
+        target_sum,
+        advices.as_ptr(),
+        advices.len() as u64,
+        args.len() as u64,
+        args.as_ptr(),
+    );
+
+    assert!(result.is_nil());
+}
+
+#[test]
 #[should_panic(expected = "around advice called proceed() more than once")]
 fn around_rejects_double_proceed() {
     let args = [RuntimeValue::from_int(5)];

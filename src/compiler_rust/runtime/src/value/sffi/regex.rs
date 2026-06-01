@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use super::super::RuntimeValue;
 use super::super::collections::{rt_array_new, rt_array_push, rt_string_new, RuntimeString};
-use super::super::heap::HeapObjectType;
+use super::super::heap::{get_typed_ptr, HeapObjectType};
 
 /// Global regex cache to avoid recompiling patterns
 lazy_static::lazy_static! {
@@ -38,16 +38,8 @@ pub fn clear_regex_cache() {
 
 /// Get a string from a RuntimeValue (returns None if not a string)
 fn get_string(val: &RuntimeValue) -> Option<String> {
-    if !val.is_heap() {
-        return None;
-    }
-
-    let ptr = val.as_heap_ptr();
+    let str_ptr = get_typed_ptr::<RuntimeString>(*val, HeapObjectType::String)?;
     unsafe {
-        if (*ptr).object_type != HeapObjectType::String {
-            return None;
-        }
-        let str_ptr = ptr as *const RuntimeString;
         let bytes = (*str_ptr).as_bytes();
         String::from_utf8(bytes.to_vec()).ok()
     }

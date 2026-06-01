@@ -42,10 +42,7 @@ pub extern "C" fn rt_rwlock_new(value: RuntimeValue) -> RuntimeValue {
 }
 
 fn as_rwlock_ptr(value: RuntimeValue) -> Option<*mut RuntimeRwLock> {
-    if !value.is_heap() {
-        return None;
-    }
-    let ptr = value.as_heap_ptr() as *mut RuntimeRwLock;
+    let ptr = get_typed_ptr_mut::<RuntimeRwLock>(value, HeapObjectType::RwLock)?;
     unsafe {
         if (*ptr).inner.is_null() {
             return None;
@@ -150,6 +147,7 @@ pub extern "C" fn rt_rwlock_free(lock: RuntimeValue) {
         }
         let size = std::mem::size_of::<RuntimeRwLock>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        unregister_heap_ptr(rw_ptr as *mut HeapHeader);
         std::alloc::dealloc(rw_ptr as *mut u8, layout);
     }
 }

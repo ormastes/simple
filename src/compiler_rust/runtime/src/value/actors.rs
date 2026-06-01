@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use super::collections::rt_string_new;
 use super::core::RuntimeValue;
-use super::heap::{HeapHeader, HeapObjectType};
+use super::heap::{get_typed_ptr_mut, HeapHeader, HeapObjectType};
 use crate::concurrency::{spawn_actor, ActorHandle, Message};
 
 thread_local! {
@@ -46,17 +46,7 @@ fn alloc_actor(actor_id: usize) -> RuntimeValue {
 }
 
 fn as_actor_ptr(value: RuntimeValue) -> Option<*mut RuntimeActor> {
-    if !value.is_heap() {
-        return None;
-    }
-
-    let ptr = value.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::Actor {
-            return None;
-        }
-        Some(ptr as *mut RuntimeActor)
-    }
+    get_typed_ptr_mut::<RuntimeActor>(value, HeapObjectType::Actor)
 }
 
 fn get_actor_handle(actor_id: usize) -> Option<ActorHandle> {

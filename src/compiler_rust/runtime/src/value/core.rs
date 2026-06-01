@@ -287,6 +287,7 @@ impl RuntimeValue {
     #[inline]
     pub unsafe fn from_heap_ptr(ptr: *mut HeapHeader) -> Self {
         debug_assert!(!ptr.is_null());
+        super::heap::register_heap_ptr(ptr);
         let ptr_bits = Self::ptr_to_u64(ptr);
         debug_assert!(ptr_bits & tags::TAG_MASK == 0, "pointer not aligned");
         Self(ptr_bits | tags::TAG_HEAP)
@@ -313,7 +314,8 @@ impl RuntimeValue {
     pub fn heap_type(self) -> Option<HeapObjectType> {
         if self.is_heap() {
             let ptr = self.as_heap_ptr();
-            if !ptr.is_null() {
+            let addr = ptr as usize;
+            if !ptr.is_null() && addr >= 4096 && addr & 0x7 == 0 && super::heap::is_registered_heap_ptr(ptr) {
                 Some(unsafe { (*ptr).object_type })
             } else {
                 None
@@ -362,19 +364,20 @@ impl RuntimeValue {
                 if ptr.is_null() {
                     return Self::NIL;
                 }
+                let Some(object_type) = self.heap_type() else {
+                    return Self::NIL;
+                };
 
                 // For now, heap objects that are thread-safe (channels) are shared
                 // Other heap objects need deep copy - this is a placeholder that
                 // returns the original for thread-safe types, NIL for others
-                unsafe {
-                    match (*ptr).object_type {
-                        // Channels are thread-safe, can be shared
-                        HeapObjectType::Channel => self,
-                        // For other types, we'd need to implement deep copy
-                        // For now, return self (shallow copy) and rely on
-                        // the language's type system to enforce copy semantics
-                        _ => self,
-                    }
+                match object_type {
+                    // Channels are thread-safe, can be shared
+                    HeapObjectType::Channel => self,
+                    // For other types, we'd need to implement deep copy
+                    // For now, return self (shallow copy) and rely on
+                    // the language's type system to enforce copy semantics
+                    _ => self,
                 }
             }
             _ => self,

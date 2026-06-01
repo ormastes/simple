@@ -147,6 +147,48 @@ impl HeapHeader {
 // ============================================================================
 
 use super::core::RuntimeValue;
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+
+const MIN_VALID_HEAP_ADDR: usize = 4096;
+
+static HEAP_ALLOCATION_REGISTRY: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
+
+fn heap_allocation_registry() -> &'static Mutex<HashSet<usize>> {
+    HEAP_ALLOCATION_REGISTRY.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[inline]
+pub fn register_heap_ptr(ptr: *mut HeapHeader) {
+    if !ptr.is_null() {
+        let _ = heap_allocation_registry()
+            .lock()
+            .map(|mut registry| registry.insert(ptr as usize));
+    }
+}
+
+#[inline]
+pub fn unregister_heap_ptr(ptr: *mut HeapHeader) {
+    if !ptr.is_null() {
+        let _ = heap_allocation_registry()
+            .lock()
+            .map(|mut registry| registry.remove(&(ptr as usize)));
+    }
+}
+
+#[inline]
+pub fn is_registered_heap_ptr(ptr: *mut HeapHeader) -> bool {
+    heap_allocation_registry()
+        .lock()
+        .map(|registry| registry.contains(&(ptr as usize)))
+        .unwrap_or(false)
+}
+
+pub fn clear_heap_allocation_registry() {
+    if let Some(registry) = HEAP_ALLOCATION_REGISTRY.get() {
+        let _ = registry.lock().map(|mut registry| registry.clear());
+    }
+}
 
 /// Validate heap object type, returns None if invalid
 ///
@@ -157,6 +199,13 @@ pub fn validate_heap_obj(val: RuntimeValue, expected: HeapObjectType) -> Option<
         return None;
     }
     let ptr = val.as_heap_ptr();
+    let addr = ptr as usize;
+    if ptr.is_null() || addr < MIN_VALID_HEAP_ADDR || addr & 0x7 != 0 {
+        return None;
+    }
+    if !is_registered_heap_ptr(ptr) {
+        return None;
+    }
     if unsafe { (*ptr).object_type != expected } {
         return None;
     }

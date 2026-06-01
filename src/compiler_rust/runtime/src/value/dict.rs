@@ -2,7 +2,7 @@
 
 use super::collections::{rt_array_new, rt_array_push, RuntimeString};
 use super::core::RuntimeValue;
-use super::heap::{get_typed_ptr, get_typed_ptr_mut, HeapHeader, HeapObjectType};
+use super::heap::{get_typed_ptr, get_typed_ptr_mut, unregister_heap_ptr, HeapHeader, HeapObjectType};
 
 /// Get typed pointer from heap object with validation, returning early if invalid
 macro_rules! as_typed_ptr {
@@ -67,6 +67,7 @@ pub extern "C" fn rt_dict_free(dict: RuntimeValue) {
         let size =
             std::mem::size_of::<RuntimeDict>() + (*ptr).capacity as usize * 2 * std::mem::size_of::<RuntimeValue>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        unregister_heap_ptr(ptr as *mut HeapHeader);
         std::alloc::dealloc(ptr as *mut u8, layout);
     }
 }
@@ -81,13 +82,9 @@ pub extern "C" fn rt_dict_len(dict: RuntimeValue) -> i64 {
 /// Hash function for RuntimeValue (handles strings specially)
 pub(super) fn hash_value(v: RuntimeValue) -> u64 {
     // For strings, use the pre-computed hash
-    if v.is_heap() {
+    if let Some(str_ptr) = get_typed_ptr::<RuntimeString>(v, HeapObjectType::String) {
         unsafe {
-            let ptr = v.as_heap_ptr();
-            if (*ptr).object_type == HeapObjectType::String {
-                let str_ptr = ptr as *const RuntimeString;
-                return (*str_ptr).hash;
-            }
+            return (*str_ptr).hash;
         }
     }
 
@@ -109,33 +106,28 @@ pub(super) fn keys_equal(a: RuntimeValue, b: RuntimeValue) -> bool {
     }
 
     // String comparison by content
-    if a.is_heap() && b.is_heap() {
+    if let (Some(str_a), Some(str_b)) = (
+        get_typed_ptr::<RuntimeString>(a, HeapObjectType::String),
+        get_typed_ptr::<RuntimeString>(b, HeapObjectType::String),
+    ) {
         unsafe {
-            let ptr_a = a.as_heap_ptr();
-            let ptr_b = b.as_heap_ptr();
-
-            if (*ptr_a).object_type == HeapObjectType::String && (*ptr_b).object_type == HeapObjectType::String {
-                let str_a = ptr_a as *const RuntimeString;
-                let str_b = ptr_b as *const RuntimeString;
-
-                // First check hash (fast reject)
-                if (*str_a).hash != (*str_b).hash {
-                    return false;
-                }
-
-                // Check length
-                let len_a = (*str_a).len;
-                let len_b = (*str_b).len;
-                if len_a != len_b {
-                    return false;
-                }
-
-                // Compare bytes
-                let data_a = (str_a as *const u8).add(std::mem::size_of::<RuntimeString>());
-                let data_b = (str_b as *const u8).add(std::mem::size_of::<RuntimeString>());
-                return std::slice::from_raw_parts(data_a, len_a as usize)
-                    == std::slice::from_raw_parts(data_b, len_b as usize);
+            // First check hash (fast reject)
+            if (*str_a).hash != (*str_b).hash {
+                return false;
             }
+
+            // Check length
+            let len_a = (*str_a).len;
+            let len_b = (*str_b).len;
+            if len_a != len_b {
+                return false;
+            }
+
+            // Compare bytes
+            let data_a = (str_a as *const u8).add(std::mem::size_of::<RuntimeString>());
+            let data_b = (str_b as *const u8).add(std::mem::size_of::<RuntimeString>());
+            return std::slice::from_raw_parts(data_a, len_a as usize)
+                == std::slice::from_raw_parts(data_b, len_b as usize);
         }
     }
 
@@ -173,15 +165,11 @@ pub extern "C" fn rt_dict_get(dict: RuntimeValue, key: RuntimeValue) -> RuntimeV
 /// Set a value in a dictionary
 #[no_mangle]
 pub extern "C" fn rt_dict_set(dict: RuntimeValue, key: RuntimeValue, value: RuntimeValue) -> bool {
-    if !dict.is_heap() || key.is_nil() {
+    if key.is_nil() {
         return false;
     }
-    let ptr = dict.as_heap_ptr();
+    let d = as_typed_ptr!(mut dict, HeapObjectType::Dict, RuntimeDict, false);
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Dict {
-            return false;
-        }
-        let d = ptr as *mut RuntimeDict;
         let capacity = (*d).capacity;
         if capacity == 0 {
             return false;
@@ -261,15 +249,11 @@ pub extern "C" fn rt_dict_values(dict: RuntimeValue) -> RuntimeValue {
 /// Remove a key from a dictionary and return its value
 #[no_mangle]
 pub extern "C" fn rt_dict_remove(dict: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
-    if !dict.is_heap() || key.is_nil() {
+    if key.is_nil() {
         return RuntimeValue::NIL;
     }
-    let ptr = dict.as_heap_ptr();
+    let d = as_typed_ptr!(mut dict, HeapObjectType::Dict, RuntimeDict, RuntimeValue::NIL);
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Dict {
-            return RuntimeValue::NIL;
-        }
-        let d = ptr as *mut RuntimeDict;
         let capacity = (*d).capacity;
         if capacity == 0 {
             return RuntimeValue::NIL;

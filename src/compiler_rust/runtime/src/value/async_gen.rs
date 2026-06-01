@@ -2,21 +2,15 @@
 #![allow(clippy::unused_unit)]
 
 use super::core::RuntimeValue;
-use super::heap::{HeapHeader, HeapObjectType};
+use super::heap::{get_typed_ptr_mut, unregister_heap_ptr, HeapHeader, HeapObjectType};
 
 /// Helper macro to validate a heap object type and get a typed pointer.
 /// Returns the specified default if validation fails.
 macro_rules! validate_heap_type {
     ($val:expr, $expected:expr, $ty:ty, $default:expr) => {{
-        if !$val.is_heap() {
-            return $default;
-        }
-        let ptr = $val.as_heap_ptr();
-        unsafe {
-            if (*ptr).object_type != $expected {
-                return $default;
-            }
-            ptr as *mut $ty
+        match get_typed_ptr_mut::<$ty>($val, $expected) {
+            Some(ptr) => ptr,
+            None => return $default,
         }
     }};
 }
@@ -82,17 +76,10 @@ pub extern "C" fn rt_future_new(body_func: u64, ctx: RuntimeValue) -> RuntimeVal
 /// - **Eager mode**: If body_func was already executed in rt_future_new, returns result immediately.
 #[no_mangle]
 pub extern "C" fn rt_future_await(future: RuntimeValue) -> RuntimeValue {
-    if !future.is_heap() {
+    let Some(f) = get_typed_ptr_mut::<RuntimeFuture>(future, HeapObjectType::Future) else {
         return RuntimeValue::NIL;
-    }
-
-    let ptr = future.as_heap_ptr();
+    };
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Future {
-            return RuntimeValue::NIL;
-        }
-        let f = ptr as *mut RuntimeFuture;
-
         // If already ready, return the result immediately
         if (*f).state == 1 {
             return (*f).result;
@@ -182,6 +169,7 @@ pub extern "C" fn rt_future_free(future: RuntimeValue) {
     unsafe {
         let size = std::mem::size_of::<RuntimeFuture>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        unregister_heap_ptr(f as *mut HeapHeader);
         std::alloc::dealloc(f as *mut u8, layout);
     }
 }
@@ -341,6 +329,7 @@ pub extern "C" fn rt_generator_free(generator: RuntimeValue) {
         }
         let size = std::mem::size_of::<RuntimeGenerator>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        unregister_heap_ptr(gen as *mut HeapHeader);
         std::alloc::dealloc(gen as *mut u8, layout);
     }
 }

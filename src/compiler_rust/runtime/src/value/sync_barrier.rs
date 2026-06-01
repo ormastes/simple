@@ -49,10 +49,7 @@ pub extern "C" fn rt_barrier_new(thread_count: i64) -> RuntimeValue {
 }
 
 fn as_barrier_ptr(value: RuntimeValue) -> Option<*mut RuntimeBarrier> {
-    if !value.is_heap() {
-        return None;
-    }
-    let ptr = value.as_heap_ptr() as *mut RuntimeBarrier;
+    let ptr = get_typed_ptr_mut::<RuntimeBarrier>(value, HeapObjectType::Barrier)?;
     unsafe {
         if (*ptr).inner.is_null() {
             return None;
@@ -99,6 +96,7 @@ pub extern "C" fn rt_barrier_free(barrier: RuntimeValue) {
         }
         let size = std::mem::size_of::<RuntimeBarrier>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        unregister_heap_ptr(bar_ptr as *mut HeapHeader);
         std::alloc::dealloc(bar_ptr as *mut u8, layout);
     }
 }

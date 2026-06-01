@@ -93,8 +93,8 @@ fn invoke_around_inner(
 ///
 /// Advice order is outermost-first (advices[0] wraps advices[1], etc.).
 ///
-/// This is the SFFI-safe version that catches panics and re-throws them
-/// after leaving the extern "C" boundary.
+/// This is the SFFI-safe version that catches panics and converts them to NIL.
+/// Panics must not unwind out of this `extern "C"` entry point.
 #[no_mangle]
 pub extern "C" fn rt_aop_invoke_around(
     target: AopTargetFn,
@@ -110,10 +110,7 @@ pub extern "C" fn rt_aop_invoke_around(
 
     match result {
         Ok(val) => val,
-        Err(payload) => {
-            // Re-throw the panic now that we're returning to Rust code
-            resume_unwind(payload);
-        }
+        Err(_) => RuntimeValue::NIL,
     }
 }
 

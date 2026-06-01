@@ -52,7 +52,9 @@ mod opencl_dlopen {
                     continue;
                 }
                 if let Some(symbol) = load_symbol(handle, b"clGetPlatformIDs\0") {
-                    return Some(OpenClFns { cl_get_platform_ids: symbol_to_cl_get_platform_ids(symbol) });
+                    return Some(OpenClFns {
+                        cl_get_platform_ids: symbol_to_cl_get_platform_ids(symbol),
+                    });
                 }
             }
         }
@@ -67,7 +69,9 @@ mod opencl_dlopen {
                     continue;
                 }
                 if let Some(symbol) = load_symbol(handle as isize, b"clGetPlatformIDs\0") {
-                    return Some(OpenClFns { cl_get_platform_ids: symbol_to_cl_get_platform_ids(symbol) });
+                    return Some(OpenClFns {
+                        cl_get_platform_ids: symbol_to_cl_get_platform_ids(symbol),
+                    });
                 }
             }
         }

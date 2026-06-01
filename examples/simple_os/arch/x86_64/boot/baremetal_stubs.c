@@ -13133,21 +13133,25 @@ __attribute__((naked)) RuntimeValue rt_debug_naked_show_return_hang(void)
 
 RuntimeValue rt_mmio_read_u8_real(RuntimeValue addr)
 {
+    if ((uint64_t)addr < 0x1000u) return 0;
     return (RuntimeValue)(uint64_t)*(volatile uint8_t *)(uintptr_t)(uint64_t)addr;
 }
 
 RuntimeValue rt_mmio_read_u16_real(RuntimeValue addr)
 {
+    if ((uint64_t)addr < 0x1000u || (((uint64_t)addr) & 0x1u)) return 0;
     return (RuntimeValue)(uint64_t)*(volatile uint16_t *)(uintptr_t)(uint64_t)addr;
 }
 
 RuntimeValue rt_mmio_read_u32_real(RuntimeValue addr)
 {
+    if ((uint64_t)addr < 0x1000u || (((uint64_t)addr) & 0x3u)) return 0;
     return (RuntimeValue)(uint64_t)*(volatile uint32_t *)(uintptr_t)(uint64_t)addr;
 }
 
 RuntimeValue rt_mmio_read_u64_real(RuntimeValue addr)
 {
+    if ((uint64_t)addr < 0x1000u || (((uint64_t)addr) & 0x7u)) return 0;
     return (RuntimeValue)*(volatile uint64_t *)(uintptr_t)(uint64_t)addr;
 }
 

@@ -1448,7 +1448,17 @@ pub(super) fn eval_op_expr(
                             width: *width,
                         }
                     } else {
-                        Value::Int(-val.as_int()?)
+                        let int_value = val.as_int()?;
+                        let Some(negated) = int_value.checked_neg() else {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_OPERATION)
+                                .with_help("integer negation overflow is reported as an error instead of panicking");
+                            return Err(CompileError::semantic_with_context(
+                                format!("integer negation overflow for `{}`", int_value),
+                                ctx,
+                            ));
+                        };
+                        Value::Int(negated)
                     }
                 }
                 UnaryOp::Not => Value::Bool(!val.truthy()),

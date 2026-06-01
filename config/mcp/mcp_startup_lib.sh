@@ -102,6 +102,65 @@ mcp_debug_init() {
 # Reads: REPO_ROOT, SIMPLE_BINARY (optional)
 # Sets: MCP_RUNTIME, MCP_RUNTIME_KIND
 
+mcp_find_self_hosted_bootstrap_runtime() {
+  _mcp_os="$(uname -s 2>/dev/null || echo unknown)"
+  _mcp_arch="$(uname -m 2>/dev/null || echo unknown)"
+  case "$_mcp_arch" in
+    arm64|aarch64) _mcp_arch="aarch64" ;;
+    x86_64|amd64) _mcp_arch="x86_64" ;;
+  esac
+
+  case "$_mcp_os:$_mcp_arch" in
+    Linux:x86_64)
+      set -- \
+        "${REPO_ROOT}/build/bootstrap/full/x86_64-unknown-linux-gnu/simple:self-hosted-bootstrap-full" \
+        "${REPO_ROOT}/build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple:self-hosted-bootstrap-stage3" \
+        "${REPO_ROOT}/build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple:self-hosted-bootstrap-stage2" \
+        "${REPO_ROOT}/build/bootstrap/stage2_fullcli/simple:self-hosted-bootstrap-stage2-fullcli"
+      ;;
+    Linux:aarch64)
+      set -- \
+        "${REPO_ROOT}/build/bootstrap/full/aarch64-unknown-linux-gnu/simple:self-hosted-bootstrap-full" \
+        "${REPO_ROOT}/build/bootstrap/stage3/aarch64-unknown-linux-gnu/simple:self-hosted-bootstrap-stage3" \
+        "${REPO_ROOT}/build/bootstrap/stage2/aarch64-unknown-linux-gnu/simple:self-hosted-bootstrap-stage2"
+      ;;
+    FreeBSD:x86_64)
+      set -- \
+        "${REPO_ROOT}/build/bootstrap/full/x86_64-unknown-freebsd/simple:self-hosted-bootstrap-full" \
+        "${REPO_ROOT}/build/bootstrap/stage3/x86_64-unknown-freebsd/simple:self-hosted-bootstrap-stage3" \
+        "${REPO_ROOT}/build/bootstrap/stage2/x86_64-unknown-freebsd/simple:self-hosted-bootstrap-stage2"
+      ;;
+    Darwin:aarch64)
+      set -- \
+        "${REPO_ROOT}/build/bootstrap/full/aarch64-apple-darwin-macho/simple:self-hosted-bootstrap-full" \
+        "${REPO_ROOT}/build/bootstrap/full/aarch64-apple-darwin/simple:self-hosted-bootstrap-full" \
+        "${REPO_ROOT}/build/bootstrap/stage3/aarch64-apple-darwin-macho/simple:self-hosted-bootstrap-stage3" \
+        "${REPO_ROOT}/build/bootstrap/stage3/aarch64-apple-darwin/simple:self-hosted-bootstrap-stage3"
+      ;;
+    Darwin:x86_64)
+      set -- \
+        "${REPO_ROOT}/build/bootstrap/full/x86_64-apple-darwin-macho/simple:self-hosted-bootstrap-full" \
+        "${REPO_ROOT}/build/bootstrap/full/x86_64-apple-darwin/simple:self-hosted-bootstrap-full" \
+        "${REPO_ROOT}/build/bootstrap/stage3/x86_64-apple-darwin-macho/simple:self-hosted-bootstrap-stage3" \
+        "${REPO_ROOT}/build/bootstrap/stage3/x86_64-apple-darwin/simple:self-hosted-bootstrap-stage3"
+      ;;
+    *)
+      set --
+      ;;
+  esac
+
+  for _mcp_candidate in "$@"; do
+    _mcp_path="${_mcp_candidate%:*}"
+    _mcp_kind="${_mcp_candidate##*:}"
+    if [ -x "$_mcp_path" ]; then
+      MCP_RUNTIME="$_mcp_path"
+      MCP_RUNTIME_KIND="$_mcp_kind"
+      return 0
+    fi
+  done
+  return 1
+}
+
 mcp_find_runtime() {
   MCP_RUNTIME="${SIMPLE_BINARY:-}"
   MCP_RUNTIME_KIND=""
@@ -113,6 +172,8 @@ mcp_find_runtime() {
   if [ -n "${MCP_SCRIPT_DIR:-}" ] && [ -x "${MCP_SCRIPT_DIR}/simple" ]; then
     MCP_RUNTIME="${MCP_SCRIPT_DIR}/simple"
     MCP_RUNTIME_KIND="platform-release"
+  elif mcp_find_self_hosted_bootstrap_runtime; then
+    :
   elif [ -x "${REPO_ROOT}/bin/simple" ]; then
     MCP_RUNTIME="${REPO_ROOT}/bin/simple"
     MCP_RUNTIME_KIND="bin-simple"

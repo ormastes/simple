@@ -9,7 +9,7 @@ use super::byte_kernels::{
 };
 use super::core::RuntimeValue;
 use super::dict::RuntimeDict;
-use super::heap::{gc_flags, get_typed_ptr, get_typed_ptr_mut, HeapHeader, HeapObjectType};
+use super::heap::{gc_flags, get_typed_ptr, get_typed_ptr_mut, unregister_heap_ptr, HeapHeader, HeapObjectType};
 use super::primitive_sort;
 use simple_simd::{active_simd_tier, SimdTier};
 
@@ -1323,6 +1323,7 @@ pub extern "C" fn rt_array_free(array: RuntimeValue) {
             (*ptr).data = std::ptr::null_mut();
         }
         let header_layout = std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeArray>(), 8).unwrap();
+        unregister_heap_ptr(ptr as *mut HeapHeader);
         std::alloc::dealloc(ptr as *mut u8, header_layout);
     }
 }
@@ -1391,6 +1392,7 @@ pub extern "C" fn rt_tuple_free(tuple: RuntimeValue) {
     unsafe {
         let size = std::mem::size_of::<RuntimeTuple>() + (*ptr).len as usize * std::mem::size_of::<RuntimeValue>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        unregister_heap_ptr(ptr as *mut HeapHeader);
         std::alloc::dealloc(ptr as *mut u8, layout);
     }
 }
@@ -1458,25 +1460,12 @@ pub extern "C" fn rt_string_len(string: RuntimeValue) -> i64 {
 /// Returns -1 for non-collection types
 #[no_mangle]
 pub extern "C" fn rt_len(value: RuntimeValue) -> i64 {
-    // Check if it's a heap object
-    if !value.is_heap() {
-        return -1;
-    }
-
-    // Get the header to determine the type
-    let header = value.as_heap_ptr();
-    if header.is_null() {
-        return -1;
-    }
-
-    unsafe {
-        match (*header).object_type {
-            HeapObjectType::Array => rt_array_len(value),
-            HeapObjectType::String => rt_string_len(value),
-            HeapObjectType::Tuple => rt_tuple_len(value),
-            HeapObjectType::Dict => super::dict::rt_dict_len(value),
-            _ => -1,
-        }
+    match value.heap_type() {
+        Some(HeapObjectType::Array) => rt_array_len(value),
+        Some(HeapObjectType::String) => rt_string_len(value),
+        Some(HeapObjectType::Tuple) => rt_tuple_len(value),
+        Some(HeapObjectType::Dict) => super::dict::rt_dict_len(value),
+        _ => -1,
     }
 }
 
@@ -2996,48 +2985,46 @@ pub extern "C" fn rt_array_range(start: i64, end: i64, step: i64) -> RuntimeValu
 pub extern "C" fn rt_contains(collection: RuntimeValue, value: RuntimeValue) -> u8 {
     use super::sffi::rt_value_eq;
 
-    if !collection.is_heap() {
-        return 0;
-    }
-
-    let ptr = collection.as_heap_ptr();
-    unsafe {
-        match (*ptr).object_type {
-            HeapObjectType::Array => {
-                let arr = ptr as *const RuntimeArray;
+    match collection.heap_type() {
+        Some(HeapObjectType::Array) => {
+            let Some(arr) = get_typed_ptr::<RuntimeArray>(collection, HeapObjectType::Array) else {
+                return 0;
+            };
+            unsafe {
                 let slice = (*arr).as_slice();
                 for item in slice {
                     if rt_value_eq(*item, value) != 0 {
                         return 1;
                     }
                 }
+            }
+            0
+        }
+        Some(HeapObjectType::Dict) => {
+            // For dicts, 'in' checks if the key exists using hash lookup
+            let result = super::dict::rt_dict_get(collection, value);
+            if result.is_nil() {
                 0
+            } else {
+                1
             }
-            HeapObjectType::Dict => {
-                // For dicts, 'in' checks if the key exists using hash lookup
-                let result = super::dict::rt_dict_get(collection, value);
-                if result.is_nil() {
-                    0
-                } else {
-                    1
-                }
-            }
-            HeapObjectType::String => {
-                let str_ptr = ptr as *const RuntimeString;
+        }
+        Some(HeapObjectType::String) => {
+            let Some(str_ptr) = get_typed_ptr::<RuntimeString>(collection, HeapObjectType::String) else {
+                return 0;
+            };
+            unsafe {
                 let haystack = (*str_ptr).as_bytes();
 
-                if value.is_heap() {
-                    let needle_ptr = value.as_heap_ptr();
-                    if !needle_ptr.is_null() && (*needle_ptr).object_type == HeapObjectType::String {
-                        let needle = (*(needle_ptr as *const RuntimeString)).as_bytes();
-                        if needle.is_empty() {
-                            return 1;
-                        }
-                        if needle.len() > haystack.len() {
-                            return 0;
-                        }
-                        return haystack.windows(needle.len()).any(|window| window == needle) as u8;
+                if let Some(needle_ptr) = get_typed_ptr::<RuntimeString>(value, HeapObjectType::String) {
+                    let needle = (*needle_ptr).as_bytes();
+                    if needle.is_empty() {
+                        return 1;
                     }
+                    if needle.len() > haystack.len() {
+                        return 0;
+                    }
+                    return haystack.windows(needle.len()).any(|window| window == needle) as u8;
                 }
 
                 if value.is_int() {
@@ -3050,8 +3037,8 @@ pub extern "C" fn rt_contains(collection: RuntimeValue, value: RuntimeValue) -> 
                 }
                 0
             }
-            _ => 0,
         }
+        _ => 0,
     }
 }
 

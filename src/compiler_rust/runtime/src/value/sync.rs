@@ -12,7 +12,7 @@ use std::sync::{Arc, Barrier, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
 use super::core::RuntimeValue;
-use super::heap::{HeapHeader, HeapObjectType};
+use super::heap::{get_typed_ptr_mut, unregister_heap_ptr, HeapHeader, HeapObjectType};
 
 // ============================================================================
 // Atomic Implementation (#1101)
@@ -53,10 +53,7 @@ pub extern "C" fn rt_atomic_new(initial: i64) -> RuntimeValue {
 }
 
 fn as_atomic_ptr(value: RuntimeValue) -> Option<*mut RuntimeAtomic> {
-    if !value.is_heap() {
-        return None;
-    }
-    Some(value.as_heap_ptr() as *mut RuntimeAtomic)
+    get_typed_ptr_mut::<RuntimeAtomic>(value, HeapObjectType::Atomic)
 }
 
 /// Atomically load value with Acquire ordering.
@@ -166,6 +163,7 @@ pub extern "C" fn rt_atomic_free(atomic: RuntimeValue) {
     unsafe {
         let size = std::mem::size_of::<RuntimeAtomic>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        unregister_heap_ptr(atomic_ptr as *mut HeapHeader);
         std::alloc::dealloc(atomic_ptr as *mut u8, layout);
     }
 }
@@ -211,10 +209,7 @@ pub extern "C" fn rt_mutex_new(value: RuntimeValue) -> RuntimeValue {
 }
 
 fn as_mutex_ptr(value: RuntimeValue) -> Option<*mut RuntimeMutex> {
-    if !value.is_heap() {
-        return None;
-    }
-    let ptr = value.as_heap_ptr() as *mut RuntimeMutex;
+    let ptr = get_typed_ptr_mut::<RuntimeMutex>(value, HeapObjectType::Mutex)?;
     unsafe {
         if (*ptr).inner.is_null() {
             return None;
@@ -299,6 +294,7 @@ pub extern "C" fn rt_mutex_free(mutex: RuntimeValue) {
         }
         let size = std::mem::size_of::<RuntimeMutex>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        unregister_heap_ptr(mx_ptr as *mut HeapHeader);
         std::alloc::dealloc(mx_ptr as *mut u8, layout);
     }
 }
@@ -391,6 +387,36 @@ mod tests {
         assert_eq!(locked2.as_int(), 100);
 
         rt_mutex_free(mx);
+    }
+
+    #[test]
+    fn test_low_heap_tagged_values_do_not_crash_mutex_runtime() {
+        let null_heap = RuntimeValue::from_raw(0x1);
+        let low_heap = RuntimeValue::from_raw(0x9);
+        let unregistered_heap = RuntimeValue::from_raw(0x10001);
+        let not_mutex = rt_atomic_new(7);
+
+        assert!(rt_mutex_lock(null_heap).is_nil());
+        assert!(rt_mutex_try_lock(null_heap).is_nil());
+        assert_eq!(rt_mutex_unlock(null_heap, RuntimeValue::from_int(1)), 0);
+        assert_eq!(rt_mutex_id(null_heap), 0);
+
+        assert!(rt_mutex_lock(low_heap).is_nil());
+        assert!(rt_mutex_lock(unregistered_heap).is_nil());
+        assert!(rt_mutex_try_lock(unregistered_heap).is_nil());
+        assert_eq!(rt_mutex_unlock(unregistered_heap, RuntimeValue::from_int(1)), 0);
+        assert_eq!(rt_mutex_id(unregistered_heap), 0);
+        assert!(rt_mutex_try_lock(not_mutex).is_nil());
+        assert_eq!(rt_mutex_unlock(not_mutex, RuntimeValue::from_int(1)), 0);
+        assert!(rt_rwlock_read(unregistered_heap).is_nil());
+        assert!(rt_rwlock_try_read(unregistered_heap).is_nil());
+        assert_eq!(rt_rwlock_set(unregistered_heap, RuntimeValue::from_int(1)), 0);
+        assert_eq!(rt_semaphore_try_acquire(unregistered_heap), 0);
+        assert_eq!(rt_semaphore_release(unregistered_heap), 0);
+        assert_eq!(rt_semaphore_count(unregistered_heap), 0);
+        assert_eq!(rt_barrier_thread_count(unregistered_heap), 0);
+
+        rt_atomic_free(not_mutex);
     }
 
     #[test]

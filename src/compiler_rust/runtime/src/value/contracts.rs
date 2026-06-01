@@ -10,7 +10,7 @@
 //! - CTR-054: `ContractViolation::InvariantExit` - Invariant failure at exit
 
 use super::core::RuntimeValue;
-use super::heap::{HeapHeader, HeapObjectType};
+use super::heap::{get_typed_ptr, get_typed_ptr_mut, unregister_heap_ptr, HeapHeader, HeapObjectType};
 use std::alloc::{alloc, dealloc, Layout};
 use std::ptr;
 
@@ -248,17 +248,10 @@ pub unsafe extern "C" fn rt_contract_violation_new(
 /// The violation kind as an integer (0-4), or -1 if the value is not a violation
 #[no_mangle]
 pub extern "C" fn rt_contract_violation_kind(violation: RuntimeValue) -> i64 {
-    if !violation.is_heap() {
+    let Some(ptr) = get_typed_ptr::<RuntimeContractViolation>(violation, HeapObjectType::ContractViolation) else {
         return -1;
-    }
-
-    let ptr = violation.as_heap_ptr() as *const RuntimeContractViolation;
-    unsafe {
-        if (*ptr).header.object_type != HeapObjectType::ContractViolation {
-            return -1;
-        }
-        (*ptr).kind as i64
-    }
+    };
+    unsafe { (*ptr).kind as i64 }
 }
 
 /// Get the function name from a contract violation.
@@ -270,16 +263,10 @@ pub extern "C" fn rt_contract_violation_kind(violation: RuntimeValue) -> i64 {
 /// A RuntimeValue containing a string with the function name, or NIL if invalid
 #[no_mangle]
 pub extern "C" fn rt_contract_violation_func_name(violation: RuntimeValue) -> RuntimeValue {
-    if !violation.is_heap() {
+    let Some(ptr) = get_typed_ptr::<RuntimeContractViolation>(violation, HeapObjectType::ContractViolation) else {
         return RuntimeValue::NIL;
-    }
-
-    let ptr = violation.as_heap_ptr() as *const RuntimeContractViolation;
+    };
     unsafe {
-        if (*ptr).header.object_type != HeapObjectType::ContractViolation {
-            return RuntimeValue::NIL;
-        }
-
         let func_name = (*ptr).func_name();
         super::collections::rt_string_new(func_name.as_ptr(), func_name.len() as u64)
     }
@@ -294,16 +281,10 @@ pub extern "C" fn rt_contract_violation_func_name(violation: RuntimeValue) -> Ru
 /// A RuntimeValue containing a string with the message, or NIL if no message
 #[no_mangle]
 pub extern "C" fn rt_contract_violation_message(violation: RuntimeValue) -> RuntimeValue {
-    if !violation.is_heap() {
+    let Some(ptr) = get_typed_ptr::<RuntimeContractViolation>(violation, HeapObjectType::ContractViolation) else {
         return RuntimeValue::NIL;
-    }
-
-    let ptr = violation.as_heap_ptr() as *const RuntimeContractViolation;
+    };
     unsafe {
-        if (*ptr).header.object_type != HeapObjectType::ContractViolation {
-            return RuntimeValue::NIL;
-        }
-
         match (*ptr).message() {
             Some(msg) => super::collections::rt_string_new(msg.as_ptr(), msg.len() as u64),
             None => RuntimeValue::NIL,
@@ -320,17 +301,10 @@ pub extern "C" fn rt_contract_violation_message(violation: RuntimeValue) -> Runt
 /// 1 if the value is a contract violation, 0 otherwise
 #[no_mangle]
 pub extern "C" fn rt_is_contract_violation(value: RuntimeValue) -> i64 {
-    if !value.is_heap() {
-        return 0;
-    }
-
-    let ptr = value.as_heap_ptr() as *const RuntimeContractViolation;
-    unsafe {
-        if (*ptr).header.object_type == HeapObjectType::ContractViolation {
-            1
-        } else {
-            0
-        }
+    if get_typed_ptr::<RuntimeContractViolation>(value, HeapObjectType::ContractViolation).is_some() {
+        1
+    } else {
+        0
     }
 }
 
@@ -340,15 +314,11 @@ pub extern "C" fn rt_is_contract_violation(value: RuntimeValue) -> i64 {
 /// The value must be a valid contract violation object.
 #[no_mangle]
 pub unsafe extern "C" fn rt_contract_violation_free(violation: RuntimeValue) {
-    if !violation.is_heap() {
+    let Some(ptr) = get_typed_ptr_mut::<RuntimeContractViolation>(violation, HeapObjectType::ContractViolation) else {
         return;
-    }
+    };
 
-    let ptr = violation.as_heap_ptr() as *mut RuntimeContractViolation;
-    if (*ptr).header.object_type != HeapObjectType::ContractViolation {
-        return;
-    }
-
+    unregister_heap_ptr(ptr as *mut HeapHeader);
     RuntimeContractViolation::free(ptr);
 }
 
