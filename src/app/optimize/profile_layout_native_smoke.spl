@@ -1,0 +1,107 @@
+# Live native smoke for the pure-Simple profile-layout pipeline.
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+use app.compile.llvm_direct.{llvm_direct_minimal_c_source_from_simple}
+use app.compile.native_layout_section_map.{native_layout_apply_c_section_map}
+use app.io.file_shell.{file_size, file_write, shell}
+use app.optimize.profile_layout_cli.{
+    ProfileLayoutNativeEvidence,
+    profile_layout_build_artifact,
+    profile_layout_native_evidence_report
+}
+
+pub fn profile_layout_native_smoke_source_text() -> text:
+    [
+        "fn dispatch() -> i64:",
+        "    7",
+        "",
+        "fn parse() -> i64:",
+        "    dispatch()",
+        "",
+        "fn rare() -> i64:",
+        "    0",
+        "",
+        "fn main() -> i64:",
+        "    parse()"
+    ].join("\n") + "\n"
+
+pub fn profile_layout_native_smoke_manifest_text() -> text:
+    [
+        "symbol=rare;section=.text;offset=300;size=64",
+        "symbol=dispatch;section=.text;offset=64;size=80",
+        "symbol=parse;section=.text;offset=160;size=96"
+    ].join("\n") + "\n"
+
+pub fn profile_layout_native_smoke_profile_text() -> text:
+    [
+        "header;schema=sprof-v1;module=demo;workload=live-native-smoke",
+        "function;key=c:rare:entry;count=0",
+        "function;key=c:dispatch:entry;count=8",
+        "function;key=c:parse:entry;count=6"
+    ].join("\n") + "\n"
+
+fn _profile_layout_native_smoke_measure_ms(binary_path: text, iterations: i64) -> i64:
+    if binary_path == "" or iterations <= 0:
+        return 0
+    val start = rt_time_now_unix_micros()
+    var i = 0
+    while i < iterations:
+        val (_, _, exit_code) = shell(binary_path + " >/dev/null 2>&1")
+        if exit_code != 0:
+            return 0
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - start
+    if elapsed <= 0:
+        return 0
+    elapsed / 1000
+
+fn _profile_layout_native_smoke_compile_c(c_path: text, binary_path: text) -> i64:
+    val (_, _, exit_code) = shell("clang++ -std=c++20 -O2 " + c_path + " -o " + binary_path + " -lpthread -ldl -lm >/dev/null 2>&1")
+    exit_code
+
+pub fn profile_layout_native_smoke_run(work_dir: text, iterations: i64) -> ProfileLayoutNativeEvidence:
+    val root = if work_dir == "": "/tmp/simple_profile_layout_native_smoke_" + rt_getpid().to_string() else: work_dir
+    val (_, _, _) = shell("mkdir -p " + root)
+    val source_path = root + "/demo.spl"
+    val baseline_c_path = root + "/baseline.cpp"
+    val optimized_c_path = root + "/optimized.cpp"
+    val baseline_path = root + "/baseline"
+    val optimized_path = root + "/optimized"
+    val section_map_path = root + "/demo.layout.h"
+
+    val source_text = profile_layout_native_smoke_source_text()
+    val manifest_text = profile_layout_native_smoke_manifest_text()
+    val profile_text = profile_layout_native_smoke_profile_text()
+    file_write(source_path, source_text)
+
+    val section_map = profile_layout_build_artifact(manifest_text, profile_text, "simple-c-section-map", 4096, 8192, 500, 2)
+    if section_map.status == "ok":
+        file_write(section_map_path, section_map.manifest_text)
+
+    val generated_c = llvm_direct_minimal_c_source_from_simple(source_path)
+    file_write(baseline_c_path, generated_c)
+    val mapped = native_layout_apply_c_section_map(generated_c, section_map.manifest_text, section_map.status == "ok")
+    file_write(optimized_c_path, mapped.c_source)
+    val baseline_exit = _profile_layout_native_smoke_compile_c(baseline_c_path, baseline_path)
+    val optimized_exit = _profile_layout_native_smoke_compile_c(optimized_c_path, optimized_path)
+
+    val baseline_ms = if baseline_exit == 0: _profile_layout_native_smoke_measure_ms(baseline_path, iterations) else: 0
+    val optimized_ms = if optimized_exit == 0: _profile_layout_native_smoke_measure_ms(optimized_path, iterations) else: 0
+    val baseline_size = if baseline_exit == 0: file_size(baseline_path) else: 0
+    val optimized_size = if optimized_exit == 0: file_size(optimized_path) else: 0
+
+    profile_layout_native_evidence_report(
+        manifest_text,
+        profile_text,
+        generated_c,
+        baseline_ms,
+        optimized_ms,
+        baseline_size,
+        optimized_size,
+        4096,
+        8192,
+        500,
+        2
+    )
