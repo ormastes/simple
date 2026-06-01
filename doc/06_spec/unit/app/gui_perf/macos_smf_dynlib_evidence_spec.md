@@ -48,7 +48,7 @@ expect(paths.probe_path).to_equal("build/gui/smf_dynlib_probe")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -58,11 +58,38 @@ expect(gui_mac_smf_dynlib_compile_dynlib_command(paths)).to_contain("--shared")
 expect(gui_mac_smf_dynlib_compile_dynlib_command(paths)).to_contain("libpure_gui_hot.dylib")
 expect(gui_mac_smf_dynlib_wrap_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARCH='arm64'")
 expect(gui_mac_smf_dynlib_wrap_command(paths)).to_contain("SIMPLE_GUI_SMF_OUTPUT='build/gui/pure_gui_hot.smf'")
+expect(gui_mac_smf_dynlib_contract_command(paths)).to_contain("run src/app/gui_perf/smf_artifact_contract.spl")
+expect(gui_mac_smf_dynlib_contract_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARTIFACT='build/gui/pure_gui_hot.smf'")
 expect(gui_mac_smf_dynlib_probe_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARTIFACT='build/gui/pure_gui_hot.smf'")
 ```
 
 </details>
 
+
+</details>
+
+#### accepts only role-2 arm64 SMF artifact contract rows
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val good = "GUI_SMF_ARTIFACT_CONTRACT status=pass artifact=build/gui/pure_gui_hot.smf sha256=abc size=4096 smf_role=2 arch=3 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64"
+val missing = good.replace("status=pass", "status=missing")
+val wrong_role = good.replace("smf_role=2", "smf_role=1")
+val wrong_arch = good.replace("arch=3", "arch=1")
+val no_dynlib = good.replace("embedded_dynlib=true", "embedded_dynlib=false")
+val wrong_symbol = good.replace("symbol=gui_dynlib_hot_probe_tick", "symbol=other")
+expect(gui_mac_smf_dynlib_accepts_contract_row(good)).to_equal(true)
+expect(gui_mac_smf_dynlib_accepts_contract_row(missing)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_role)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_arch)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_contract_row(no_dynlib)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_symbol)).to_equal(false)
+```
 
 </details>
 
@@ -126,8 +153,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
