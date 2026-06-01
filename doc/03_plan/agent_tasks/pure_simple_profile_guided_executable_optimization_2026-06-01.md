@@ -468,10 +468,15 @@ policy. Contract coverage exists at
 durable sidecar metadata. The native counter helper now also parses runtime
 counter snapshots, rejects malformed or incomplete readback, and creates a
 write-gated `.sprof` import plan from metadata plus final counter values.
+`llvm_direct.spl` now runs the same Simple-owned counter artifact audit in the
+native compile lane and fails normal native builds if generated C contains
+profile-counter symbols, increments, or metadata without
+`--simple-profile-counters`.
 
 Deliverables:
 - native function/block/edge counter ABI;
 - counter emission behind explicit profile build flag;
+- compile-path audit proving normal native builds do not add counter artifacts;
 - runtime snapshot readback parser and `.sprof` import plan;
 - call-path summary with bounded memory.
 

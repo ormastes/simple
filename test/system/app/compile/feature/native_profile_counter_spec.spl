@@ -50,6 +50,7 @@ use app.compile.native_profile_counter.{
     native_profile_counter_runtime_snapshot_from_text,
     native_profile_counter_sprof_import_plan
 }
+use app.compile.llvm_direct.{default_compile_opts, llvm_direct_native_counter_artifact_audit}
 
 describe "Native Profile Counter Contract":
     """
@@ -380,6 +381,24 @@ describe "Native Profile Counter Contract":
             val leaked = native_profile_counter_build_audit(instrumented.c_source, false)
             expect(leaked.allowed).to_equal(false)
             expect(leaked.reason).to_equal("counter_artifacts_in_non_profile_build")
+
+        it "should wire the native compile path audit so normal builds cannot contain counters":
+            val source = "int main(void) {\n  return 0;\n}\n"
+            val clean_opts = default_compile_opts()
+            val clean = llvm_direct_native_counter_artifact_audit(source, clean_opts)
+            expect(clean.allowed).to_equal(true)
+            expect(clean.reason).to_equal("non_profile_build_clean")
+
+            val profile_source = native_profile_counter_instrument_c_source(source, true).c_source
+            val leaked = llvm_direct_native_counter_artifact_audit(profile_source, clean_opts)
+            expect(leaked.allowed).to_equal(false)
+            expect(leaked.reason).to_equal("counter_artifacts_in_non_profile_build")
+
+            var profile_opts = default_compile_opts()
+            profile_opts.simple_profile_counters = true
+            val profile_allowed = llvm_direct_native_counter_artifact_audit(profile_source, profile_opts)
+            expect(profile_allowed.allowed).to_equal(true)
+            expect(profile_allowed.reason).to_equal("profile_build_may_contain_counters")
 
     describe "runtime sprof extraction":
         it "should map metadata and final counter values to sprof-compatible records":

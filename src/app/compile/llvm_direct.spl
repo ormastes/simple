@@ -24,7 +24,12 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_getpid() -> i64
 
 use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
-use app.compile.native_profile_counter.{native_profile_counter_instrument_c_source, native_profile_counter_metadata_path}
+use app.compile.native_profile_counter.{
+    NativeProfileCounterBuildAudit,
+    native_profile_counter_build_audit,
+    native_profile_counter_instrument_c_source,
+    native_profile_counter_metadata_path
+}
 use app.compile.native_layout_section_map.{native_layout_apply_c_section_map}
 use std.cli.cli_util.{get_cli_args}
 use std.log.{error, info, debug}
@@ -159,6 +164,9 @@ fn llvm_direct_minimal_c_source_from_simple(source_file: text) -> text:
 fn llvm_direct_generated_c_is_textual(c_source: text) -> bool:
     c_source.contains("int main") or c_source.contains("void main") or c_source.contains("#include")
 
+fn llvm_direct_native_counter_artifact_audit(c_source: text, opts: CompileOpts) -> NativeProfileCounterBuildAudit:
+    native_profile_counter_build_audit(c_source, opts.simple_profile_counters)
+
 fn compile_llvm_direct(source_file: text, output_file: text, verbose: bool, emit_ir_only: bool, opt_level: text) -> i64:
     var opts = default_compile_opts()
     opts.opt_level = opt_level
@@ -224,6 +232,12 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
         generated_source = applied.c_source
         if opts.verbose:
             debug("compile", "Simple layout section map applied: " + str(applied.applied_count) + " function(s)")
+
+    val counter_audit = llvm_direct_native_counter_artifact_audit(generated_source, opts)
+    if not counter_audit.allowed:
+        error("compile", "Simple profile-counter audit failed: " + counter_audit.reason)
+        file_delete(temp_cpp)
+        return 1
 
     val rt_sources = ""
 

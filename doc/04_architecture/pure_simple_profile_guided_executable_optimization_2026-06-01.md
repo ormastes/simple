@@ -97,8 +97,10 @@ instrumented interpreter/native/bare-metal run
 ```
 
 Native profile builds emit metadata sidecars and runtime counter snapshots only
-behind the explicit profile-counter path. Normal native builds remain clean by
-audit. Snapshot import is fail-closed: missing headers, duplicate slots, missing
+behind the explicit profile-counter path. The LLVM direct native compile lane
+runs the Simple-owned counter artifact audit before invoking clang, so normal
+native builds fail closed if counter symbols, increments, or metadata leak into
+generated C. Snapshot import is fail-closed: missing headers, duplicate slots, missing
 slot values, metadata/count mismatches, and missing output paths prevent `.sprof`
 write planning.
 

@@ -91,8 +91,9 @@ from generated C when a profile build is requested:
 
 The instrumenter emits the counter prelude, metadata sidecar rows, and C
 increments in the same deterministic slot order. Disabled profile counters leave
-the C source unchanged, and the build audit rejects counter symbols in
-non-profile builds.
+the C source unchanged. `llvm_direct.spl` runs the build audit on the generated
+C before native compilation, so non-profile builds fail closed if counter
+symbols, increments, or metadata leak into the build.
 
 ### Merge Path
 

@@ -47,7 +47,7 @@ rather than rewriting arbitrary ELF bytes.
 | Simple native optimize | native O-level plus profile-counter ABI tests |
 | Pure Simple BOLT-like optimizer | metadata-only layout planning tests; native symbol-order/C section-map artifact tests; no external BOLT command dependency |
 | Generated-C layout consumption | section-map parser/transform tests; fail-closed unused symbol and unsafe section tests |
-| Native counter feature | function/block/edge/call-path counter contract tests; generated-C insertion checks for all four counter classes |
+| Native counter feature | function/block/edge/call-path counter contract tests; generated-C insertion checks for all four counter classes; native compile-lane audit that rejects leaked counter artifacts in non-profile builds |
 | Bare-metal counter impl | breakpoint site table and patch ledger tests |
 | Bare-metal probe images | per-arch source/output/linker/compiler/QEMU plan tests; serial evidence field contract tests; generated C source/linker artifact tests for patch/restore/rearm/cleanup/icache/serial evidence; all-arch staging idempotence; live i386, x86-family x86_64, RV32/RVC32/RV64/RVC64 QEMU serial capture evidence |
 | Prevent slow breakpoint overhead | auto-disarm and sampled-only fallback tests |
