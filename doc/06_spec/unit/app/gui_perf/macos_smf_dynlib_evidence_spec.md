@@ -48,7 +48,7 @@ expect(paths.probe_path).to_equal("build/gui/smf_dynlib_probe")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -60,6 +60,8 @@ expect(gui_mac_smf_dynlib_wrap_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARC
 expect(gui_mac_smf_dynlib_wrap_command(paths)).to_contain("SIMPLE_GUI_SMF_OUTPUT='build/gui/pure_gui_hot.smf'")
 expect(gui_mac_smf_dynlib_contract_command(paths)).to_contain("run src/app/gui_perf/smf_artifact_contract.spl")
 expect(gui_mac_smf_dynlib_contract_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARTIFACT='build/gui/pure_gui_hot.smf'")
+expect(gui_mac_smf_dynlib_qemu_parity_command(paths)).to_contain("run src/app/gui_perf/qemu_arm64_smf_parity_evidence.spl")
+expect(gui_mac_smf_dynlib_qemu_parity_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARTIFACT='build/gui/pure_gui_hot.smf'")
 expect(gui_mac_smf_dynlib_probe_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARTIFACT='build/gui/pure_gui_hot.smf'")
 ```
 
@@ -89,6 +91,29 @@ expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_role)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_arch)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_contract_row(no_dynlib)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_symbol)).to_equal(false)
+```
+
+</details>
+
+#### accepts only contract-only QEMU ARM64 SMF parity rows
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val good = "GUI_QEMU_ARM64_SMF_PARITY status=contract-pass artifact=build/gui/pure_gui_hot.smf smf_role=2 arch=3 embedded_dynlib=true adapter=simpleos-framebuffer-virtio command_count=4 dirty_regions=4 same_artifact_contract=true live_qemu=false reason=same-smf-artifact-reaches-pure-gui-adapter"
+val fail = good.replace("status=contract-pass", "status=contract-fail")
+val wrong_arch = good.replace("arch=3", "arch=1")
+val live = good.replace("live_qemu=false", "live_qemu=true")
+val wrong_adapter = good.replace("adapter=simpleos-framebuffer-virtio", "adapter=web-renderer")
+expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(good)).to_equal(true)
+expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(fail)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(wrong_arch)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(live)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(wrong_adapter)).to_equal(false)
 ```
 
 </details>
@@ -165,8 +190,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -124,15 +124,18 @@ _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_evidence.spl")
 
 1.  expect release clean
 
+2.  expect release clean
+
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 _expect_release_clean("src/app/gui_perf/qemu_arm64_smf_parity.spl")
+_expect_release_clean("src/app/gui_perf/qemu_arm64_smf_parity_evidence.spl")
 ```
 
 </details>
