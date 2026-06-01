@@ -96,9 +96,9 @@ while len(tokens) < 4 and i < len(data):
 while i < len(data) and data[i] in b" \t\r\n":
     i += 1
 
-if len(tokens) < 4 or tokens[0] != b"P6":
+if len(tokens) < 4 or tokens[0] not in (b"P6", b"P3"):
     status = "fail"
-    reason = "not-p6-ppm"
+    reason = "not-supported-ppm"
     width = height = non_bg = bright = accent = checksum = 0
 else:
     width = int(tokens[1])
@@ -108,14 +108,35 @@ else:
     bg = (0x0F, 0x17, 0x2A)
     non_bg = bright = accent = 0
     checksum = 2166136261
-    if width != 270 or height != 150 or maxv != 255 or len(pixels) < width * height * 3:
+    if width != 270 or height != 150 or maxv != 255:
         status = "fail"
         reason = "unexpected-ppm-shape"
     else:
+        if tokens[0] == b"P6":
+            if len(pixels) < width * height * 3:
+                status = "fail"
+                reason = "unexpected-ppm-shape"
+            else:
+                values = None
+        else:
+            try:
+                values = [int(part) for part in pixels.split()]
+            except ValueError:
+                status = "fail"
+                reason = "invalid-p3-pixels"
+                values = []
+            if status == "pass" and len(values) < width * height * 3:
+                status = "fail"
+                reason = "unexpected-ppm-shape"
         for y in range(height):
             for x in range(width):
                 off = (y * width + x) * 3
-                r, g, b = pixels[off], pixels[off + 1], pixels[off + 2]
+                if status != "pass":
+                    r = g = b = 0
+                elif tokens[0] == b"P6":
+                    r, g, b = pixels[off], pixels[off + 1], pixels[off + 2]
+                else:
+                    r, g, b = values[off], values[off + 1], values[off + 2]
                 if (r, g, b) != bg:
                     non_bg += 1
                 if r > 210 and g > 210 and b > 210:
