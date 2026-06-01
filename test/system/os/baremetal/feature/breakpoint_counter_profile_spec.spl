@@ -4,15 +4,20 @@
 use std.spec.{describe, it, expect}
 use os.baremetal.profile.breakpoint_counter.{
     breakpoint_auto_disarm_state,
+    breakpoint_cleanup_ledger_summary,
     breakpoint_cleanup_events,
     breakpoint_cleanup_events_cover,
+    breakpoint_hit_accounting_update,
     breakpoint_next_state,
+    breakpoint_patch_record_construct,
     breakpoint_patch_ledger_cleanup_complete,
     breakpoint_patch_ledger_valid,
     breakpoint_profile_session_record_valid,
+    breakpoint_restore_rearm_transition,
     breakpoint_sampled_fallback_reason,
     breakpoint_sampled_only_fallback_state,
     breakpoint_should_disarm,
+    breakpoint_trap_opcode_for_arch,
     breakpoint_trap_budget_total_over_budget,
     breakpoint_trap_budget_total_us
 }
@@ -74,7 +79,64 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(events).to_contain("target_reset")
             expect(breakpoint_cleanup_events_cover(events)).to_equal(true)
 
+        it "should summarize cleanup ledger state deterministically":
+            val complete = breakpoint_cleanup_ledger_summary(3, 3, 0)
+            expect(complete.pending_entries).to_equal(0)
+            expect(complete.cleanup_complete).to_equal(true)
+            expect(complete.summary).to_equal("patched=3 restored=3 pending=0 failed=0 status=complete")
+
+            val incomplete = breakpoint_cleanup_ledger_summary(3, 1, 1)
+            expect(incomplete.pending_entries).to_equal(1)
+            expect(incomplete.cleanup_complete).to_equal(false)
+            expect(incomplete.summary).to_equal("patched=3 restored=1 pending=1 failed=1 status=incomplete")
+
     describe "patch ledger":
+        it "should select architecture-specific software trap opcodes":
+            val rv32 = breakpoint_trap_opcode_for_arch("riscv32")
+            expect(rv32.valid).to_equal(true)
+            expect(rv32.opcode_hex).to_equal("0x00100073")
+            expect(rv32.width_bytes).to_equal(4)
+
+            val rv64 = breakpoint_trap_opcode_for_arch("riscv64")
+            expect(rv64.valid).to_equal(true)
+            expect(rv64.opcode_hex).to_equal("0x00100073")
+            expect(rv64.width_bytes).to_equal(4)
+
+            val x64 = breakpoint_trap_opcode_for_arch("x86_64")
+            expect(x64.valid).to_equal(true)
+            expect(x64.opcode_hex).to_equal("0xcc")
+            expect(x64.width_bytes).to_equal(1)
+
+            val arm64 = breakpoint_trap_opcode_for_arch("aarch64")
+            expect(arm64.valid).to_equal(true)
+            expect(arm64.opcode_hex).to_equal("0xd4200000")
+            expect(arm64.width_bytes).to_equal(4)
+
+            val unknown = breakpoint_trap_opcode_for_arch("mips64")
+            expect(unknown.valid).to_equal(false)
+            expect(unknown.reason).to_equal("unsupported_arch")
+
+        it "should construct architecture-safe patch records":
+            val armed = breakpoint_patch_record_construct(4096, "riscv64", "0x00000013")
+            expect(armed.valid).to_equal(true)
+            expect(armed.armed).to_equal(true)
+            expect(armed.trap_opcode).to_equal("0x00100073")
+            expect(armed.patch_width_bytes).to_equal(4)
+            expect(armed.reason).to_equal("armed")
+
+            val int3 = breakpoint_patch_record_construct(4097, "x86_64", "0x90")
+            expect(int3.valid).to_equal(true)
+            expect(int3.trap_opcode).to_equal("0xcc")
+            expect(int3.patch_width_bytes).to_equal(1)
+
+            val unaligned = breakpoint_patch_record_construct(4097, "aarch64", "0xd503201f")
+            expect(unaligned.valid).to_equal(false)
+            expect(unaligned.reason).to_equal("unaligned_patch_address")
+
+            val already_trap = breakpoint_patch_record_construct(4096, "riscv32", "0x00100073")
+            expect(already_trap.valid).to_equal(false)
+            expect(already_trap.reason).to_equal("invalid_original_opcode")
+
         it "should validate patch restore and trap opcode records":
             expect(breakpoint_patch_ledger_valid(4096, "0x00000013", "0x00100073", "0x00000013", "0x00100073")).to_equal(true)
             expect(breakpoint_patch_ledger_valid(4096, "0x00100073", "0x00100073", "0x00100073", "0x00100073")).to_equal(false)
@@ -87,3 +149,36 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(breakpoint_patch_ledger_cleanup_complete(3, 3, 0, 1)).to_equal(false)
             expect(breakpoint_patch_ledger_cleanup_complete(3, 4, 0, 0)).to_equal(false)
             expect(breakpoint_patch_ledger_cleanup_complete(-1, -1, 0, 0)).to_equal(false)
+
+    describe "trap hit accounting":
+        it "should update hit totals and keep rearming below budget":
+            val record = breakpoint_patch_record_construct(4096, "riscv64", "0x00000013")
+            val accounting = breakpoint_hit_accounting_update(2, 20, 7, 10, 100, false, false)
+            expect(accounting.hit_count).to_equal(3)
+            expect(accounting.trap_time_us).to_equal(27)
+            expect(accounting.state).to_equal("counted")
+            expect(accounting.should_disarm).to_equal(false)
+
+            val transition = breakpoint_restore_rearm_transition(record, accounting)
+            expect(transition.restored_opcode).to_equal("0x00000013")
+            expect(transition.rearmed_opcode).to_equal("0x00100073")
+            expect(transition.state).to_equal("armed")
+            expect(transition.rearmed).to_equal(true)
+            expect(transition.sampled_only).to_equal(false)
+
+        it "should restore without rearming when accounting exceeds budget":
+            val record = breakpoint_patch_record_construct(4096, "aarch64", "0xd503201f")
+            val accounting = breakpoint_hit_accounting_update(10, 95, 10, 10, 100, false, false)
+            expect(accounting.hit_count).to_equal(11)
+            expect(accounting.trap_time_us).to_equal(105)
+            expect(accounting.state).to_equal("sampled_only")
+            expect(accounting.fallback_reason).to_equal("hit_limit")
+            expect(accounting.should_disarm).to_equal(true)
+
+            val transition = breakpoint_restore_rearm_transition(record, accounting)
+            expect(transition.restored_opcode).to_equal("0xd503201f")
+            expect(transition.rearmed_opcode).to_equal("")
+            expect(transition.state).to_equal("sampled_only")
+            expect(transition.rearmed).to_equal(false)
+            expect(transition.sampled_only).to_equal(true)
+            expect(transition.reason).to_equal("hit_limit")

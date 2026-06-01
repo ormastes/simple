@@ -4,6 +4,8 @@
 
 use std.io (file_read)
 
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
 val SPROF_COUNTER_MAX: i64 = 9223372036854775807
 val SPROF_SCHEMA_VERSION: text = "sprof-v1"
 
@@ -33,6 +35,19 @@ struct SprofLoadedProfile:
     diagnostic_count: i64
     diagnostics: [text]
     saturated: bool
+
+struct SprofCounterRecord:
+    record_kind: text
+    key: text
+    secondary_key: text
+    count: i64
+
+struct SprofWriteResult:
+    wrote: bool
+    byte_count: i64
+    record_count: i64
+    diagnostic_count: i64
+    diagnostics: [text]
 
 fn sprof_profile_record_status(record_kind: text, module_matches: bool, workload_matches: bool) -> text:
     if record_kind == "corrupt":
@@ -122,8 +137,90 @@ fn _sprof_line_value(line: text, key: text) -> text:
 fn _sprof_parse_count(value: text) -> i64:
     value.trim().to_i64() ?? -1
 
+fn _sprof_token_safe(value: text) -> bool:
+    value != "" and not value.contains(";") and not value.contains("\n")
+
 fn _sprof_schema_is_compatible(schema_version: text) -> bool:
     schema_version == "" or schema_version == "1" or schema_version == SPROF_SCHEMA_VERSION
+
+fn sprof_counter_record(record_kind: text, key: text, secondary_key: text, count: i64) -> SprofCounterRecord:
+    SprofCounterRecord(
+        record_kind: record_kind,
+        key: key,
+        secondary_key: secondary_key,
+        count: count
+    )
+
+fn sprof_counter_record_valid(record: SprofCounterRecord) -> bool:
+    if record.count < 0:
+        return false
+    if record.record_kind == "function":
+        return _sprof_token_safe(record.key) and record.secondary_key == ""
+    if record.record_kind == "block":
+        return _sprof_token_safe(record.key) and _sprof_token_safe(record.secondary_key)
+    if record.record_kind == "edge":
+        return _sprof_token_safe(record.key) and _sprof_token_safe(record.secondary_key)
+    false
+
+fn sprof_serialize_record(record: SprofCounterRecord) -> text:
+    if record.record_kind == "function":
+        return "function;key={record.key};count={record.count}"
+    if record.record_kind == "block":
+        return "block;function={record.secondary_key};key={record.key};count={record.count}"
+    if record.record_kind == "edge":
+        return "edge;from={record.key};to={record.secondary_key};count={record.count}"
+    "invalid;kind={record.record_kind};count={record.count}"
+
+fn sprof_serialize_profile(module_identity: text, workload_label: text, records: [SprofCounterRecord]) -> text:
+    var lines: [text] = ["header;schema={SPROF_SCHEMA_VERSION};module={module_identity};workload={workload_label}"]
+    var i = 0
+    while i < records.len():
+        if sprof_counter_record_valid(records[i]):
+            lines.push(sprof_serialize_record(records[i]))
+        i = i + 1
+    lines.join("\n")
+
+fn sprof_profile_write_diagnostics(module_identity: text, workload_label: text, records: [SprofCounterRecord]) -> [text]:
+    var diagnostics: [text] = []
+    if not _sprof_token_safe(module_identity):
+        diagnostics.push("invalid_module_identity")
+    if not _sprof_token_safe(workload_label):
+        diagnostics.push("invalid_workload_label")
+    var i = 0
+    while i < records.len():
+        if not sprof_counter_record_valid(records[i]):
+            diagnostics.push("invalid_record:{i}")
+        i = i + 1
+    sprof_bounded_diagnostics(diagnostics, 8)
+
+fn sprof_write_profile_file(path: text, module_identity: text, workload_label: text, records: [SprofCounterRecord]) -> SprofWriteResult:
+    val diagnostics = sprof_profile_write_diagnostics(module_identity, workload_label, records)
+    if path == "":
+        return SprofWriteResult(
+            wrote: false,
+            byte_count: 0,
+            record_count: 0,
+            diagnostic_count: diagnostics.len() + 1,
+            diagnostics: sprof_bounded_diagnostics(diagnostics + ["invalid_path"], 8)
+        )
+    if diagnostics.len() > 0:
+        return SprofWriteResult(
+            wrote: false,
+            byte_count: 0,
+            record_count: 0,
+            diagnostic_count: diagnostics.len(),
+            diagnostics: diagnostics
+        )
+
+    val body = sprof_serialize_profile(module_identity, workload_label, records)
+    val wrote = rt_file_write_text(path, body)
+    SprofWriteResult(
+        wrote: wrote,
+        byte_count: if wrote: body.len() else: 0,
+        record_count: if wrote: records.len() else: 0,
+        diagnostic_count: if wrote: 0 else: 1,
+        diagnostics: if wrote: [] else: ["write_failed"]
+    )
 
 fn _sprof_merge_record_summary(record_kind: text, left: i64, right: i64) -> SprofMergeSummary:
     val summary = sprof_merge_summary(left, right)

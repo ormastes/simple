@@ -7,9 +7,16 @@ use app.optimize.sprof_loader.{
     sprof_hot_path_policy,
     sprof_hot_path_allows_operation,
     sprof_load_profile_text,
+    sprof_load_profile_file,
     sprof_merge_count,
     sprof_merge_summary,
-    sprof_bounded_diagnostics
+    sprof_bounded_diagnostics,
+    sprof_counter_record,
+    sprof_counter_record_valid,
+    sprof_serialize_record,
+    sprof_serialize_profile,
+    sprof_profile_write_diagnostics,
+    sprof_write_profile_file
 }
 
 describe "Persistent .sprof Loader Contract":
@@ -71,6 +78,62 @@ describe "Persistent .sprof Loader Contract":
             expect(profile.diagnostic_count).to_equal(2)
             expect(profile.diagnostics).to_contain("schema_mismatch:sprof-v2")
             expect(profile.diagnostics).to_contain("module_mismatch:mod-b")
+
+        it "should serialize typed counter records for persistent profiles":
+            val function_record = sprof_counter_record("function", "main", "", 7)
+            val block_record = sprof_counter_record("block", "entry", "main", 3)
+            val edge_record = sprof_counter_record("edge", "entry", "exit", 2)
+            expect(sprof_counter_record_valid(function_record)).to_equal(true)
+            expect(sprof_counter_record_valid(block_record)).to_equal(true)
+            expect(sprof_counter_record_valid(edge_record)).to_equal(true)
+            expect(sprof_serialize_record(function_record)).to_equal("function;key=main;count=7")
+            expect(sprof_serialize_record(block_record)).to_equal("block;function=main;key=entry;count=3")
+            expect(sprof_serialize_record(edge_record)).to_equal("edge;from=entry;to=exit;count=2")
+
+        it "should round trip serialized persistent profile text":
+            val body = sprof_serialize_profile(
+                "mod-a",
+                "boot",
+                [
+                    sprof_counter_record("function", "main", "", 7),
+                    sprof_counter_record("block", "entry", "main", 3),
+                    sprof_counter_record("edge", "entry", "exit", 2)
+                ]
+            )
+            val profile = sprof_load_profile_text(body, "mod-a", "boot")
+            expect(body).to_contain("header;schema=sprof-v1;module=mod-a;workload=boot")
+            expect(profile.status).to_equal("loaded")
+            expect(profile.function_merged_count).to_equal(7)
+            expect(profile.block_merged_count).to_equal(3)
+            expect(profile.edge_merged_count).to_equal(2)
+
+        it "should reject unsafe profile writer tokens and invalid records":
+            val diagnostics = sprof_profile_write_diagnostics(
+                "mod;a",
+                "boot",
+                [sprof_counter_record("function", "bad;key", "", 1)]
+            )
+            expect(diagnostics).to_contain("invalid_module_identity")
+            expect(diagnostics).to_contain("invalid_record:0")
+
+        it "should write and reload persistent profile files":
+            val path = "/tmp/simple_sprof_loader_spec_roundtrip.sprof"
+            val write = sprof_write_profile_file(
+                path,
+                "mod-a",
+                "boot",
+                [
+                    sprof_counter_record("function", "main", "", 11),
+                    sprof_counter_record("edge", "entry", "exit", 5)
+                ]
+            )
+            val profile = sprof_load_profile_file(path, "mod-a", "boot")
+            expect(write.wrote).to_equal(true)
+            expect(write.record_count).to_equal(2)
+            expect(write.diagnostic_count).to_equal(0)
+            expect(profile.status).to_equal("loaded")
+            expect(profile.function_merged_count).to_equal(11)
+            expect(profile.edge_merged_count).to_equal(5)
 
     describe "hot path policy":
         it "should forbid profile file operations in hot paths":

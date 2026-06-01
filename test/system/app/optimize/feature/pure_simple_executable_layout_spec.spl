@@ -13,6 +13,7 @@ use app.optimize.executable_layout.{
     layout_manifest_entry_valid,
     layout_mark_cold_candidate,
     layout_plan_steps,
+    layout_profile_guided_plan,
     layout_transform_allowed,
     layout_transform_skip_reason,
     layout_weighted_hot_function_order,
@@ -197,3 +198,86 @@ describe "Pure Simple Executable Layout Optimizer Contract":
                 ExecutableLayoutManifestEntry(symbol_name: "", section_name: ".text", original_offset: 0, optimized_offset: 0, size_bytes: 16)
             ]
             expect(layout_manifest_summary_valid(invalid_entries, layout_manifest_summary(invalid_entries))).to_equal(false)
+
+    describe "profile guided layout plan":
+        it "should build deterministic hot and cold section offsets from manifest and profile records":
+            val entries = [
+                ExecutableLayoutManifestEntry(symbol_name: "unused", section_name: ".text", original_offset: 500, optimized_offset: 0, size_bytes: 40),
+                ExecutableLayoutManifestEntry(symbol_name: "rare", section_name: ".text", original_offset: 300, optimized_offset: 0, size_bytes: 64),
+                ExecutableLayoutManifestEntry(symbol_name: "dispatch", section_name: ".text", original_offset: 64, optimized_offset: 0, size_bytes: 80),
+                ExecutableLayoutManifestEntry(symbol_name: "parse", section_name: ".text", original_offset: 160, optimized_offset: 0, size_bytes: 96)
+            ]
+            val profiles = [
+                ExecutableLayoutFunctionProfile(symbol_name: "rare", sample_count: 2, call_count: 1, size_bytes: 64, original_index: 0),
+                ExecutableLayoutFunctionProfile(symbol_name: "dispatch", sample_count: 8, call_count: 0, size_bytes: 80, original_index: 1),
+                ExecutableLayoutFunctionProfile(symbol_name: "unused", sample_count: 0, call_count: 0, size_bytes: 40, original_index: 2),
+                ExecutableLayoutFunctionProfile(symbol_name: "parse", sample_count: 6, call_count: 1, size_bytes: 96, original_index: 3)
+            ]
+
+            val plan = layout_profile_guided_plan(entries, profiles, true, true, true, true, 4096, 8192, 500, 2)
+
+            expect(plan.validation_status).to_equal("valid")
+            expect(plan.skip_reason).to_equal("ok")
+            expect(plan.hot_order.len()).to_equal(2)
+            expect(plan.hot_order[0]).to_equal("dispatch")
+            expect(plan.hot_order[1]).to_equal("parse")
+            expect(plan.entries[0].symbol_name).to_equal("dispatch")
+            expect(plan.entries[0].original_offset).to_equal(64)
+            expect(plan.entries[0].new_offset).to_equal(4096)
+            expect(plan.entries[0].placement).to_equal("hot")
+            expect(plan.entries[1].symbol_name).to_equal("parse")
+            expect(plan.entries[1].new_offset).to_equal(4176)
+            expect(plan.cold_section_entries.len()).to_equal(2)
+            expect(plan.cold_section_entries[0].symbol_name).to_equal("rare")
+            expect(plan.cold_section_entries[0].original_offset).to_equal(300)
+            expect(plan.cold_section_entries[0].new_offset).to_equal(8192)
+            expect(plan.cold_section_entries[0].placement).to_equal("cold")
+            expect(plan.cold_section_entries[1].symbol_name).to_equal("unused")
+            expect(plan.cold_section_entries[1].new_offset).to_equal(8256)
+
+        it "should keep unsafe or incomplete entries in the plan with skip reasons":
+            val entries = [
+                ExecutableLayoutManifestEntry(symbol_name: "hot", section_name: ".text", original_offset: 10, optimized_offset: 0, size_bytes: 50),
+                ExecutableLayoutManifestEntry(symbol_name: "orphan", section_name: ".text", original_offset: 90, optimized_offset: 0, size_bytes: 25),
+                ExecutableLayoutManifestEntry(symbol_name: "bad_manifest", section_name: "text", original_offset: 120, optimized_offset: 0, size_bytes: 10)
+            ]
+            val profiles = [
+                ExecutableLayoutFunctionProfile(symbol_name: "hot", sample_count: 10, call_count: 0, size_bytes: 50, original_index: 0),
+                ExecutableLayoutFunctionProfile(symbol_name: "bad_manifest", sample_count: 1, call_count: 0, size_bytes: 10, original_index: 1)
+            ]
+
+            val plan = layout_profile_guided_plan(entries, profiles, true, true, true, true, 1000, 2000, 500, 2)
+
+            expect(plan.validation_status).to_equal("partial")
+            expect(plan.skip_reason).to_equal("entry_skipped")
+            expect(plan.entries[0].symbol_name).to_equal("hot")
+            expect(plan.entries[0].validation_status).to_equal("valid")
+            expect(plan.entries[1].symbol_name).to_equal("orphan")
+            expect(plan.entries[1].validation_status).to_equal("skipped")
+            expect(plan.entries[1].skip_reason).to_equal("missing_profile")
+            expect(plan.entries[2].symbol_name).to_equal("bad_manifest")
+            expect(plan.entries[2].validation_status).to_equal("skipped")
+            expect(plan.entries[2].skip_reason).to_equal("invalid_manifest_entry")
+
+        it "should skip the whole plan when executable metadata gates are unsafe":
+            val entries = [
+                ExecutableLayoutManifestEntry(symbol_name: "later", section_name: ".text", original_offset: 80, optimized_offset: 0, size_bytes: 20),
+                ExecutableLayoutManifestEntry(symbol_name: "first", section_name: ".text", original_offset: 10, optimized_offset: 0, size_bytes: 20)
+            ]
+            val profiles = [
+                ExecutableLayoutFunctionProfile(symbol_name: "first", sample_count: 10, call_count: 0, size_bytes: 20, original_index: 0),
+                ExecutableLayoutFunctionProfile(symbol_name: "later", sample_count: 9, call_count: 0, size_bytes: 20, original_index: 1)
+            ]
+
+            val plan = layout_profile_guided_plan(entries, profiles, false, true, true, true, 1000, 2000, 500, 2)
+
+            expect(plan.validation_status).to_equal("skipped")
+            expect(plan.skip_reason).to_equal("unsafe_relocations")
+            expect(plan.hot_order.len()).to_equal(0)
+            expect(plan.cold_section_entries.len()).to_equal(0)
+            expect(plan.entries.len()).to_equal(2)
+            expect(plan.entries[0].symbol_name).to_equal("first")
+            expect(plan.entries[0].new_offset).to_equal(10)
+            expect(plan.entries[0].skip_reason).to_equal("unsafe_relocations")
+            expect(plan.entries[1].symbol_name).to_equal("later")
+            expect(plan.entries[1].new_offset).to_equal(80)

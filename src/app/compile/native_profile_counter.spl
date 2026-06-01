@@ -14,8 +14,28 @@ struct NativeProfileSectionSummary:
     invalid_slot_count: i64
     cold_path_policy: text
 
+struct NativeProfileCounterEmissionRecord:
+    slot_index: i64
+    counter_kind: text
+    stable_key: text
+    initial_value: i64
+    section_label: text
+    counter_symbol: text
+    serialization_line: text
+
+struct NativeProfileCounterIncrementOperation:
+    slot_index: i64
+    counter_kind: text
+    stable_key: text
+    emitted: bool
+    operation: text
+    reason: text
+
 fn native_profile_counter_kinds() -> [text]:
     ["function_entry", "basic_block", "edge", "call_path"]
+
+fn native_profile_counter_default_section_name() -> text:
+    ".simple.profile.counters"
 
 fn native_profile_counter_kind_valid(counter_kind: text) -> bool:
     native_profile_counter_kinds().contains(counter_kind)
@@ -49,6 +69,79 @@ fn native_profile_counter_slots_valid(slots: [NativeProfileCounterSlot]) -> bool
             return false
     true
 
+fn native_profile_counter_section_label(section_name: text) -> text:
+    val base = if section_name == "": native_profile_counter_default_section_name() else: section_name
+    var normalized = base.replace(".", "_")
+    normalized = normalized.replace("-", "_")
+    normalized = normalized.replace("/", "_")
+    normalized = normalized.replace(" ", "_")
+    "simple_profile_counter_section_{normalized}"
+
+fn _native_profile_counter_escape(value: text) -> text:
+    var escaped = value.replace("\\", "\\\\")
+    escaped = escaped.replace("\n", "\\n")
+    escaped = escaped.replace("|", "\\p")
+    escaped
+
+fn native_profile_counter_symbol(slot: NativeProfileCounterSlot) -> text:
+    "__simple_profile_counter_{slot.slot_index}_{slot.counter_kind}"
+
+fn native_profile_counter_serialization_line(section_name: text, slot: NativeProfileCounterSlot) -> text:
+    val label = native_profile_counter_section_label(section_name)
+    val key = _native_profile_counter_escape(slot.stable_key)
+    val symbol = native_profile_counter_symbol(slot)
+    "counter|section={label}|slot={slot.slot_index}|kind={slot.counter_kind}|key={key}|initial={slot.initial_value}|symbol={symbol}"
+
+fn native_profile_counter_emission_record(section_name: text, slot: NativeProfileCounterSlot) -> NativeProfileCounterEmissionRecord:
+    NativeProfileCounterEmissionRecord(
+        slot_index: slot.slot_index,
+        counter_kind: slot.counter_kind,
+        stable_key: slot.stable_key,
+        initial_value: slot.initial_value,
+        section_label: native_profile_counter_section_label(section_name),
+        counter_symbol: native_profile_counter_symbol(slot),
+        serialization_line: native_profile_counter_serialization_line(section_name, slot)
+    )
+
+fn _native_profile_counter_slot_precedes(left: NativeProfileCounterSlot, right: NativeProfileCounterSlot) -> bool:
+    if left.slot_index != right.slot_index:
+        return left.slot_index < right.slot_index
+    if left.counter_kind != right.counter_kind:
+        return left.counter_kind < right.counter_kind
+    left.stable_key < right.stable_key
+
+fn native_profile_counter_sorted_valid_slots(slots: [NativeProfileCounterSlot]) -> [NativeProfileCounterSlot]:
+    var sorted: [NativeProfileCounterSlot] = []
+    for slot in slots:
+        if native_profile_counter_slot_valid(slot):
+            sorted.push(slot)
+
+    var i = 1
+    while i < sorted.len():
+        var j = i
+        while j > 0 and _native_profile_counter_slot_precedes(sorted[j], sorted[j - 1]):
+            val tmp = sorted[j]
+            sorted[j] = sorted[j - 1]
+            sorted[j - 1] = tmp
+            j = j - 1
+        i = i + 1
+    sorted
+
+fn native_profile_counter_emission_records(section_name: text, slots: [NativeProfileCounterSlot]) -> [NativeProfileCounterEmissionRecord]:
+    val sorted = native_profile_counter_sorted_valid_slots(slots)
+    var records: [NativeProfileCounterEmissionRecord] = []
+    for slot in sorted:
+        records.push(native_profile_counter_emission_record(section_name, slot))
+    records
+
+fn native_profile_counter_section_serialization_lines(section_name: text, slots: [NativeProfileCounterSlot]) -> [text]:
+    val records = native_profile_counter_emission_records(section_name, slots)
+    var lines: [text] = []
+    lines.push("section|label={native_profile_counter_section_label(section_name)}|name={_native_profile_counter_escape(if section_name == \"\": native_profile_counter_default_section_name() else: section_name)}|records={records.len()}")
+    for record in records:
+        lines.push(record.serialization_line)
+    lines
+
 fn native_profile_disabled_counter_cold_path_policy() -> text:
     "compile_out_counter_increment"
 
@@ -57,6 +150,44 @@ fn native_profile_counter_cold_path_policy(profile_build: bool, counter_kind: te
         "emit_counter_increment"
     else:
         native_profile_disabled_counter_cold_path_policy()
+
+fn native_profile_counter_increment_operation(profile_build: bool, slot: NativeProfileCounterSlot) -> NativeProfileCounterIncrementOperation:
+    val valid = native_profile_counter_slot_valid(slot)
+    val emitted = profile_build and valid
+    NativeProfileCounterIncrementOperation(
+        slot_index: slot.slot_index,
+        counter_kind: slot.counter_kind,
+        stable_key: slot.stable_key,
+        emitted: emitted,
+        operation: if emitted: "emit_counter_increment" else: native_profile_disabled_counter_cold_path_policy(),
+        reason: if emitted: "profile_build_enabled" else: if profile_build: "invalid_counter_slot" else: "profile_build_disabled"
+    )
+
+fn native_profile_counter_increment_operations(profile_build: bool, slots: [NativeProfileCounterSlot]) -> [NativeProfileCounterIncrementOperation]:
+    var operations: [NativeProfileCounterIncrementOperation] = []
+    for slot in slots:
+        operations.push(native_profile_counter_increment_operation(profile_build, slot))
+    operations
+
+fn native_profile_counter_c_declaration(section_name: text, slot: NativeProfileCounterSlot) -> text:
+    if not native_profile_counter_slot_valid(slot):
+        return ""
+    val section = if section_name == "": native_profile_counter_default_section_name() else: section_name
+    val symbol = native_profile_counter_symbol(slot)
+    "static unsigned long long {symbol} __attribute__((section(\"{section}\"), used)) = {slot.initial_value};"
+
+fn native_profile_counter_c_declarations(section_name: text, slots: [NativeProfileCounterSlot]) -> [text]:
+    val sorted = native_profile_counter_sorted_valid_slots(slots)
+    var declarations: [text] = []
+    for slot in sorted:
+        declarations.push(native_profile_counter_c_declaration(section_name, slot))
+    declarations
+
+fn native_profile_counter_increment_statement(profile_build: bool, slot: NativeProfileCounterSlot) -> text:
+    val operation = native_profile_counter_increment_operation(profile_build, slot)
+    if not operation.emitted:
+        return ""
+    "{native_profile_counter_symbol(slot)} += 1;"
 
 fn native_profile_section_summary(section_name: text, profile_build: bool, slots: [NativeProfileCounterSlot]) -> NativeProfileSectionSummary:
     var valid_count = 0

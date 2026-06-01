@@ -29,6 +29,23 @@ struct ExecutableLayoutManifestSummary:
     first_optimized_offset: i64
     last_optimized_end: i64
 
+struct ExecutableLayoutPlanEntry:
+    symbol_name: text
+    section_name: text
+    original_offset: i64
+    new_offset: i64
+    size_bytes: i64
+    placement: text
+    validation_status: text
+    skip_reason: text
+
+struct ExecutableLayoutPlan:
+    hot_order: [text]
+    cold_section_entries: [ExecutableLayoutPlanEntry]
+    entries: [ExecutableLayoutPlanEntry]
+    validation_status: text
+    skip_reason: text
+
 pub fn layout_plan_steps() -> [text]:
     [
         "hot_function_cluster",
@@ -206,3 +223,186 @@ pub fn layout_manifest_summary_valid(
     summary.total_size_bytes == expected.total_size_bytes and
         summary.first_optimized_offset == expected.first_optimized_offset and
         summary.last_optimized_end == expected.last_optimized_end
+
+fn _manifest_entry_precedes(left: ExecutableLayoutManifestEntry, right: ExecutableLayoutManifestEntry) -> bool:
+    if left.original_offset < right.original_offset:
+        return true
+    if left.original_offset > right.original_offset:
+        return false
+    left.symbol_name < right.symbol_name
+
+fn _manifest_entries_by_original_offset(entries: [ExecutableLayoutManifestEntry]) -> [ExecutableLayoutManifestEntry]:
+    var sorted = entries
+    var i = 1
+    while i < sorted.len():
+        var j = i
+        while j > 0 and _manifest_entry_precedes(sorted[j], sorted[j - 1]):
+            val tmp = sorted[j]
+            sorted[j] = sorted[j - 1]
+            sorted[j - 1] = tmp
+            j = j - 1
+        i = i + 1
+    sorted
+
+fn _profile_index_for_symbol(profiles: [ExecutableLayoutFunctionProfile], symbol_name: text) -> i64:
+    var i = 0
+    while i < profiles.len():
+        if profiles[i].symbol_name == symbol_name:
+            return i as i64
+        i = i + 1
+    -1
+
+fn _entry_index_for_symbol(entries: [ExecutableLayoutManifestEntry], symbol_name: text) -> i64:
+    var i = 0
+    while i < entries.len():
+        if entries[i].symbol_name == symbol_name:
+            return i as i64
+        i = i + 1
+    -1
+
+fn _plan_entry_index_for_symbol(entries: [ExecutableLayoutPlanEntry], symbol_name: text) -> i64:
+    var i = 0
+    while i < entries.len():
+        if entries[i].symbol_name == symbol_name:
+            return i as i64
+        i = i + 1
+    -1
+
+fn _profile_valid(profile: ExecutableLayoutFunctionProfile) -> bool:
+    profile.symbol_name.trim() != "" and
+        profile.sample_count >= 0 and
+        profile.call_count >= 0 and
+        profile.size_bytes > 0
+
+fn _profile_skip_reason(profile: ExecutableLayoutFunctionProfile) -> text:
+    if profile.symbol_name.trim() == "":
+        return "missing_symbol"
+    if profile.size_bytes <= 0:
+        return "invalid_size"
+    if profile.sample_count < 0 or profile.call_count < 0:
+        return "invalid_profile"
+    "ok"
+
+fn _make_plan_entry(
+    entry: ExecutableLayoutManifestEntry,
+    new_offset: i64,
+    placement: text,
+    validation_status: text,
+    skip_reason: text
+) -> ExecutableLayoutPlanEntry:
+    ExecutableLayoutPlanEntry(
+        symbol_name: entry.symbol_name,
+        section_name: entry.section_name,
+        original_offset: entry.original_offset,
+        new_offset: new_offset,
+        size_bytes: entry.size_bytes,
+        placement: placement,
+        validation_status: validation_status,
+        skip_reason: skip_reason
+    )
+
+pub fn layout_profile_guided_plan(
+    manifest_entries: [ExecutableLayoutManifestEntry],
+    profiles: [ExecutableLayoutFunctionProfile],
+    relocations_safe: bool,
+    entry_preserved: bool,
+    symbols_preserved: bool,
+    workload_matches: bool,
+    hot_section_start: i64,
+    cold_section_start: i64,
+    min_hot_weight: i64,
+    max_cold_samples: i64
+) -> ExecutableLayoutPlan:
+    val global_skip = layout_transform_skip_reason(
+        relocations_safe: relocations_safe,
+        entry_preserved: entry_preserved,
+        symbols_preserved: symbols_preserved,
+        workload_matches: workload_matches
+    )
+    val ordered_entries = _manifest_entries_by_original_offset(manifest_entries)
+    var plan_entries: [ExecutableLayoutPlanEntry] = []
+    var cold_entries: [ExecutableLayoutPlanEntry] = []
+    var hot_order: [text] = []
+
+    if global_skip != "ok":
+        var unsafe_i = 0
+        while unsafe_i < ordered_entries.len():
+            val entry = ordered_entries[unsafe_i]
+            plan_entries.push(_make_plan_entry(entry, entry.original_offset, "skipped", "skipped", global_skip))
+            unsafe_i = unsafe_i + 1
+        return ExecutableLayoutPlan(
+            hot_order: hot_order,
+            cold_section_entries: cold_entries,
+            entries: plan_entries,
+            validation_status: "skipped",
+            skip_reason: global_skip
+        )
+
+    val ordered_hot_symbols = layout_weighted_hot_function_order(profiles)
+    var hot_offset = hot_section_start
+    var hot_i = 0
+    while hot_i < ordered_hot_symbols.len():
+        val symbol_name = ordered_hot_symbols[hot_i]
+        val entry_index = _entry_index_for_symbol(ordered_entries, symbol_name)
+        val profile_index = _profile_index_for_symbol(profiles, symbol_name)
+        if entry_index >= 0 and profile_index >= 0:
+            val entry = ordered_entries[entry_index]
+            val profile = profiles[profile_index]
+            val cold = layout_mark_cold_candidate(
+                profile,
+                min_hot_weight: min_hot_weight,
+                max_cold_samples: max_cold_samples
+            )
+            if layout_manifest_entry_valid(entry) and _profile_valid(profile) and not cold.is_cold:
+                plan_entries.push(_make_plan_entry(entry, hot_offset, "hot", "valid", "ok"))
+                hot_order.push(entry.symbol_name)
+                hot_offset = hot_offset + entry.size_bytes
+        hot_i = hot_i + 1
+
+    var cold_offset = cold_section_start
+    var entry_i = 0
+    while entry_i < ordered_entries.len():
+        val entry = ordered_entries[entry_i]
+        if _plan_entry_index_for_symbol(plan_entries, entry.symbol_name) < 0:
+            val profile_index = _profile_index_for_symbol(profiles, entry.symbol_name)
+            if not layout_manifest_entry_valid(entry):
+                plan_entries.push(_make_plan_entry(entry, entry.original_offset, "skipped", "skipped", "invalid_manifest_entry"))
+            elif profile_index < 0:
+                plan_entries.push(_make_plan_entry(entry, entry.original_offset, "skipped", "skipped", "missing_profile"))
+            else:
+                val profile = profiles[profile_index]
+                if not _profile_valid(profile):
+                    plan_entries.push(_make_plan_entry(entry, entry.original_offset, "skipped", "skipped", _profile_skip_reason(profile)))
+                else:
+                    val cold = layout_mark_cold_candidate(
+                        profile,
+                        min_hot_weight: min_hot_weight,
+                        max_cold_samples: max_cold_samples
+                    )
+                    if cold.is_cold:
+                        val cold_entry = _make_plan_entry(entry, cold_offset, "cold", "valid", "ok")
+                        plan_entries.push(cold_entry)
+                        cold_entries.push(cold_entry)
+                        cold_offset = cold_offset + entry.size_bytes
+                    else:
+                        plan_entries.push(_make_plan_entry(entry, hot_offset, "hot", "valid", "ok"))
+                        hot_order.push(entry.symbol_name)
+                        hot_offset = hot_offset + entry.size_bytes
+        entry_i = entry_i + 1
+
+    var status = "valid"
+    var reason = "ok"
+    var status_i = 0
+    while status_i < plan_entries.len():
+        if plan_entries[status_i].validation_status != "valid":
+            status = "partial"
+            reason = "entry_skipped"
+        status_i = status_i + 1
+
+    ExecutableLayoutPlan(
+        hot_order: hot_order,
+        cold_section_entries: cold_entries,
+        entries: plan_entries,
+        validation_status: status,
+        skip_reason: reason
+    )

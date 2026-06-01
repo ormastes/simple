@@ -10,6 +10,19 @@ use app.compile.native_profile_counter.{
     native_profile_counter_slot,
     native_profile_counter_slot_valid,
     native_profile_counter_slots_valid,
+    native_profile_counter_default_section_name,
+    native_profile_counter_section_label,
+    native_profile_counter_symbol,
+    native_profile_counter_serialization_line,
+    native_profile_counter_emission_record,
+    native_profile_counter_sorted_valid_slots,
+    native_profile_counter_emission_records,
+    native_profile_counter_section_serialization_lines,
+    native_profile_counter_increment_operation,
+    native_profile_counter_increment_operations,
+    native_profile_counter_c_declaration,
+    native_profile_counter_c_declarations,
+    native_profile_counter_increment_statement,
     native_profile_section_summary,
     native_profile_disabled_counter_cold_path_policy,
     native_profile_counter_cold_path_policy,
@@ -67,6 +80,72 @@ describe "Native Profile Counter Contract":
             expect(native_profile_counter_slots_valid(valid_slots)).to_equal(true)
             expect(native_profile_counter_slots_valid(invalid_slots)).to_equal(false)
 
+    describe "emission planning":
+        it "should compute stable section labels and counter symbols":
+            val slot = native_profile_counter_slot(4, "call_path", "mir:main:callee|leaf", 3)
+            expect(native_profile_counter_default_section_name()).to_equal(".simple.profile.counters")
+            expect(native_profile_counter_section_label(".simple.profile.counters")).to_equal("simple_profile_counter_section__simple_profile_counters")
+            expect(native_profile_counter_section_label("")).to_equal("simple_profile_counter_section__simple_profile_counters")
+            expect(native_profile_counter_symbol(slot)).to_equal("__simple_profile_counter_4_call_path")
+
+        it "should serialize counter records with escaped stable keys":
+            val slot = native_profile_counter_slot(4, "call_path", "mir:main:callee|leaf", 3)
+            val line = native_profile_counter_serialization_line(".simple.profile.counters", slot)
+            expect(line).to_equal("counter|section=simple_profile_counter_section__simple_profile_counters|slot=4|kind=call_path|key=mir:main:callee\\pleaf|initial=3|symbol=__simple_profile_counter_4_call_path")
+
+            val record = native_profile_counter_emission_record(".simple.profile.counters", slot)
+            expect(record.slot_index).to_equal(4)
+            expect(record.counter_kind).to_equal("call_path")
+            expect(record.section_label).to_equal("simple_profile_counter_section__simple_profile_counters")
+            expect(record.counter_symbol).to_equal("__simple_profile_counter_4_call_path")
+            expect(record.serialization_line).to_equal(line)
+
+        it "should build deterministic valid emission records":
+            val slots = [
+                native_profile_counter_slot(2, "edge", "mir:main:edge1", 0),
+                native_profile_counter_slot(0, "function_entry", "mir:main:entry", 0),
+                native_profile_counter_slot(1, "trace", "mir:main:trace", 0),
+                native_profile_counter_slot(1, "basic_block", "mir:main:bb0", 7)
+            ]
+            val sorted = native_profile_counter_sorted_valid_slots(slots)
+            expect(sorted.len()).to_equal(3)
+            expect(sorted[0].stable_key).to_equal("mir:main:entry")
+            expect(sorted[1].stable_key).to_equal("mir:main:bb0")
+            expect(sorted[2].stable_key).to_equal("mir:main:edge1")
+
+            val records = native_profile_counter_emission_records(".simple.profile.counters", slots)
+            expect(records.len()).to_equal(3)
+            expect(records[0].serialization_line).to_contain("slot=0|kind=function_entry")
+            expect(records[1].serialization_line).to_contain("slot=1|kind=basic_block")
+            expect(records[2].serialization_line).to_contain("slot=2|kind=edge")
+
+        it "should produce stable profile section serialization lines":
+            val slots = [
+                native_profile_counter_slot(1, "basic_block", "mir:main:bb0", 0),
+                native_profile_counter_slot(0, "function_entry", "mir:main:entry", 0)
+            ]
+            val lines = native_profile_counter_section_serialization_lines(".simple.profile.counters", slots)
+            expect(lines.len()).to_equal(3)
+            expect(lines[0]).to_equal("section|label=simple_profile_counter_section__simple_profile_counters|name=.simple.profile.counters|records=2")
+            expect(lines[1]).to_contain("slot=0|kind=function_entry")
+            expect(lines[2]).to_contain("slot=1|kind=basic_block")
+
+        it "should emit concrete C counter declarations and increment statements":
+            val valid = native_profile_counter_slot(2, "edge", "mir:main:edge1", 7)
+            val invalid = native_profile_counter_slot(3, "trace", "mir:main:trace", 0)
+            expect(native_profile_counter_c_declaration(".simple.profile.counters", valid)).to_equal("static unsigned long long __simple_profile_counter_2_edge __attribute__((section(\".simple.profile.counters\"), used)) = 7;")
+            expect(native_profile_counter_c_declaration(".simple.profile.counters", invalid)).to_equal("")
+            expect(native_profile_counter_increment_statement(true, valid)).to_equal("__simple_profile_counter_2_edge += 1;")
+            expect(native_profile_counter_increment_statement(false, valid)).to_equal("")
+
+            val declarations = native_profile_counter_c_declarations(
+                ".simple.profile.counters",
+                [valid, native_profile_counter_slot(0, "function_entry", "mir:main:entry", 0)]
+            )
+            expect(declarations.len()).to_equal(2)
+            expect(declarations[0]).to_contain("__simple_profile_counter_0_function_entry")
+            expect(declarations[1]).to_contain("__simple_profile_counter_2_edge")
+
     describe "profile section summary":
         it "should summarize profile sections with slot validity counts":
             val slots = [
@@ -102,6 +181,27 @@ describe "Native Profile Counter Contract":
             expect(native_profile_counter_cold_path_policy(false, "function_entry")).to_equal("compile_out_counter_increment")
             expect(native_profile_counter_cold_path_policy(true, "unknown")).to_equal("compile_out_counter_increment")
             expect(native_profile_counter_cold_path_policy(true, "function_entry")).to_equal("emit_counter_increment")
+
+        it "should select emitted and compiled-out increment operations":
+            val valid = native_profile_counter_slot(0, "function_entry", "mir:main:entry", 0)
+            val invalid = native_profile_counter_slot(1, "unknown", "mir:main:unknown", 0)
+            val emitted = native_profile_counter_increment_operation(true, valid)
+            val disabled = native_profile_counter_increment_operation(false, valid)
+            val compiled_out_invalid = native_profile_counter_increment_operation(true, invalid)
+
+            expect(emitted.emitted).to_equal(true)
+            expect(emitted.operation).to_equal("emit_counter_increment")
+            expect(emitted.reason).to_equal("profile_build_enabled")
+            expect(disabled.emitted).to_equal(false)
+            expect(disabled.operation).to_equal("compile_out_counter_increment")
+            expect(disabled.reason).to_equal("profile_build_disabled")
+            expect(compiled_out_invalid.emitted).to_equal(false)
+            expect(compiled_out_invalid.reason).to_equal("invalid_counter_slot")
+
+            val operations = native_profile_counter_increment_operations(true, [valid, invalid])
+            expect(operations.len()).to_equal(2)
+            expect(operations[0].emitted).to_equal(true)
+            expect(operations[1].emitted).to_equal(false)
 
     describe "call path policy":
         it "should bound call path counters for profile builds":

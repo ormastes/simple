@@ -1,4 +1,144 @@
-# Bare-metal software-breakpoint counter contract helpers.
+# Bare-metal software-breakpoint counter helpers.
+
+pub class BreakpointTrapOpcode:
+    arch: text
+    opcode_hex: text
+    width_bytes: i64
+    little_endian: bool
+    valid: bool
+    reason: text
+
+pub class BreakpointPatchRecord:
+    address: u64
+    arch: text
+    original_opcode: text
+    trap_opcode: text
+    patch_width_bytes: i64
+    armed: bool
+    valid: bool
+    reason: text
+
+pub class BreakpointHitAccounting:
+    hit_count: i64
+    trap_time_us: i64
+    state: text
+    fallback_reason: text
+    should_disarm: bool
+
+pub class BreakpointTransitionResult:
+    restored_opcode: text
+    rearmed_opcode: text
+    state: text
+    rearmed: bool
+    sampled_only: bool
+    reason: text
+
+pub class BreakpointCleanupLedgerSummary:
+    patched_entries: i64
+    restored_entries: i64
+    pending_entries: i64
+    failed_restore_entries: i64
+    cleanup_complete: bool
+    summary: text
+
+fn breakpoint_arch_is_four_byte_aligned(address: u64, width_bytes: i64) -> bool:
+    if width_bytes == 1:
+        return true
+    return address % 4 == 0
+
+pub fn breakpoint_trap_opcode_for_arch(arch: text) -> BreakpointTrapOpcode:
+    if arch == "riscv32" or arch == "riscv64":
+        return BreakpointTrapOpcode(
+            arch: arch,
+            opcode_hex: "0x00100073",
+            width_bytes: 4,
+            little_endian: true,
+            valid: true,
+            reason: "riscv-ebreak"
+        )
+    if arch == "x86_64":
+        return BreakpointTrapOpcode(
+            arch: arch,
+            opcode_hex: "0xcc",
+            width_bytes: 1,
+            little_endian: true,
+            valid: true,
+            reason: "x86-int3"
+        )
+    if arch == "aarch64":
+        return BreakpointTrapOpcode(
+            arch: arch,
+            opcode_hex: "0xd4200000",
+            width_bytes: 4,
+            little_endian: true,
+            valid: true,
+            reason: "aarch64-brk-0"
+        )
+    return BreakpointTrapOpcode(
+        arch: arch,
+        opcode_hex: "",
+        width_bytes: 0,
+        little_endian: true,
+        valid: false,
+        reason: "unsupported_arch"
+    )
+
+pub fn breakpoint_patch_record_construct(address: u64, arch: text, original_opcode: text) -> BreakpointPatchRecord:
+    val trap = breakpoint_trap_opcode_for_arch(arch)
+    if not trap.valid:
+        return BreakpointPatchRecord(
+            address: address,
+            arch: arch,
+            original_opcode: original_opcode,
+            trap_opcode: "",
+            patch_width_bytes: 0,
+            armed: false,
+            valid: false,
+            reason: trap.reason
+        )
+    if address == 0:
+        return BreakpointPatchRecord(
+            address: address,
+            arch: arch,
+            original_opcode: original_opcode,
+            trap_opcode: trap.opcode_hex,
+            patch_width_bytes: trap.width_bytes,
+            armed: false,
+            valid: false,
+            reason: "zero_address"
+        )
+    if not breakpoint_arch_is_four_byte_aligned(address, trap.width_bytes):
+        return BreakpointPatchRecord(
+            address: address,
+            arch: arch,
+            original_opcode: original_opcode,
+            trap_opcode: trap.opcode_hex,
+            patch_width_bytes: trap.width_bytes,
+            armed: false,
+            valid: false,
+            reason: "unaligned_patch_address"
+        )
+    if original_opcode == "" or original_opcode == trap.opcode_hex:
+        return BreakpointPatchRecord(
+            address: address,
+            arch: arch,
+            original_opcode: original_opcode,
+            trap_opcode: trap.opcode_hex,
+            patch_width_bytes: trap.width_bytes,
+            armed: false,
+            valid: false,
+            reason: "invalid_original_opcode"
+        )
+    return BreakpointPatchRecord(
+        address: address,
+        arch: arch,
+        original_opcode: original_opcode,
+        trap_opcode: trap.opcode_hex,
+        patch_width_bytes: trap.width_bytes,
+        armed: true,
+        valid: true,
+        reason: "armed"
+    )
 
 pub fn breakpoint_next_state(state: text, event: text) -> text:
     if event == "stop_profile":
@@ -100,6 +240,68 @@ pub fn breakpoint_sampled_only_fallback_state(state: text, event: text) -> text:
         return "sampled_only"
     breakpoint_next_state(state, event)
 
+pub fn breakpoint_hit_accounting_update(
+    current_hit_count: i64,
+    current_trap_time_us: i64,
+    hit_trap_time_us: i64,
+    hit_limit: i64,
+    trap_budget_us: i64,
+    hot_loop: bool,
+    failed_single_step: bool
+) -> BreakpointHitAccounting:
+    val next_hits = current_hit_count + 1
+    val next_trap_time = current_trap_time_us + hit_trap_time_us
+    val reason = breakpoint_sampled_fallback_reason(
+        next_hits,
+        next_trap_time,
+        hit_limit,
+        trap_budget_us,
+        hot_loop,
+        failed_single_step
+    )
+    val disarm = reason != "none"
+    var next_state = "counted"
+    if disarm:
+        next_state = "sampled_only"
+    return BreakpointHitAccounting(
+        hit_count: next_hits,
+        trap_time_us: next_trap_time,
+        state: next_state,
+        fallback_reason: reason,
+        should_disarm: disarm
+    )
+
+pub fn breakpoint_restore_rearm_transition(
+    record: BreakpointPatchRecord,
+    accounting: BreakpointHitAccounting
+) -> BreakpointTransitionResult:
+    if not record.valid:
+        return BreakpointTransitionResult(
+            restored_opcode: record.original_opcode,
+            rearmed_opcode: "",
+            state: "sampled_only",
+            rearmed: false,
+            sampled_only: true,
+            reason: record.reason
+        )
+    if accounting.should_disarm:
+        return BreakpointTransitionResult(
+            restored_opcode: record.original_opcode,
+            rearmed_opcode: "",
+            state: "sampled_only",
+            rearmed: false,
+            sampled_only: true,
+            reason: accounting.fallback_reason
+        )
+    return BreakpointTransitionResult(
+        restored_opcode: record.original_opcode,
+        rearmed_opcode: record.trap_opcode,
+        state: "armed",
+        rearmed: true,
+        sampled_only: false,
+        reason: "rearmed"
+    )
+
 pub fn breakpoint_cleanup_events() -> [text]:
     ["normal_stop", "panic", "watchdog_timeout", "failed_single_step", "target_reset"]
 
@@ -135,3 +337,27 @@ pub fn breakpoint_patch_ledger_cleanup_complete(
         pending_entries == 0 and
         failed_restore_entries == 0 and
         restored_entries == patched_entries
+
+pub fn breakpoint_cleanup_ledger_summary(
+    patched_entries: i64,
+    restored_entries: i64,
+    failed_restore_entries: i64
+) -> BreakpointCleanupLedgerSummary:
+    val pending_entries = patched_entries - restored_entries - failed_restore_entries
+    val complete = breakpoint_patch_ledger_cleanup_complete(
+        patched_entries,
+        restored_entries,
+        pending_entries,
+        failed_restore_entries
+    )
+    var status = "incomplete"
+    if complete:
+        status = "complete"
+    return BreakpointCleanupLedgerSummary(
+        patched_entries: patched_entries,
+        restored_entries: restored_entries,
+        pending_entries: pending_entries,
+        failed_restore_entries: failed_restore_entries,
+        cleanup_complete: complete,
+        summary: "patched={patched_entries} restored={restored_entries} pending={pending_entries} failed={failed_restore_entries} status={status}"
+    )
