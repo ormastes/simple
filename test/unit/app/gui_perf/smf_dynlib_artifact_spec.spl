@@ -13,8 +13,6 @@ use os.kernel.loader.smf.{smf_parse_header, smf_extract_library_stub_for_arch, S
 
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]?
-extern fn rt_file_wrap_smf_dynlib(input_path: text, output_path: text, arch_code: i64) -> bool
-extern fn rt_file_extract_smf_dynlib(input_path: text, output_path: text) -> bool
 
 describe "pure GUI SMF dynlib artifact":
     it "maps common host architecture names to SMF arch codes":
@@ -55,20 +53,49 @@ describe "pure GUI SMF dynlib artifact":
         val row = gui_smf_artifact_contract_row(contract)
         expect(row).to_start_with("GUI_SMF_ARTIFACT_CONTRACT status=pass")
         expect(row).to_contain(" qemu_status=not-run ")
+        expect(row).to_contain(" qemu_reason=live-qemu-not-executed ")
         expect(row).to_contain(" macos_status=not-run ")
+        expect(row).to_contain(" macos_reason=requires-macos-arm64")
+
+    it "fails closed for non-SMF artifact bytes":
+        val contract = gui_smf_artifact_contract("build/gui/not_a_dynlib.smf", [1u8, 2u8, 3u8, 4u8], "gui_dynlib_hot_probe_tick")
+        expect(contract.status).to_equal("fail")
+        expect(contract.smf_role).to_equal(-1i64)
+        expect(contract.embedded_dynlib).to_equal(false)
+        expect(contract.qemu_status).to_equal("not-run")
+        expect(contract.qemu_reason).to_equal("live-qemu-not-executed")
+        expect(contract.macos_status).to_equal("not-run")
+        expect(contract.macos_reason).to_equal("requires-macos-arm64")
+
+    it "fails closed for an empty SMF library envelope":
+        val smf = gui_smf_wrap_native_library([], 1u8)
+        val contract = gui_smf_artifact_contract("build/gui/empty_dynlib.smf", smf, "gui_dynlib_hot_probe_tick")
+        expect(contract.status).to_equal("fail")
+        expect(contract.embedded_dynlib).to_equal(false)
+        expect(contract.qemu_status).to_equal("not-run")
+        expect(contract.qemu_reason).to_equal("live-qemu-not-executed")
+        expect(contract.macos_status).to_equal("not-run")
+        expect(contract.macos_reason).to_equal("requires-macos-arm64")
 
     it "emits a missing artifact contract row":
         val row = gui_smf_artifact_contract_row(gui_smf_artifact_contract_missing("", "gui_dynlib_hot_probe_tick"))
         expect(row).to_start_with("GUI_SMF_ARTIFACT_CONTRACT status=missing")
         expect(row).to_contain(" qemu_reason=live-qemu-not-executed ")
+        expect(row).to_contain(" macos_reason=requires-macos-arm64")
 
-    it "wraps and extracts a role-2 SMF dynlib through runtime file SFFI":
+    it "wraps and extracts a role-2 SMF dynlib through pure Simple helpers and file IO":
         val dynlib_path = "/tmp/simple_gui_smf_dynlib_fixture.so"
         val smf_path = "/tmp/simple_gui_smf_dynlib_fixture.smf"
         val extracted_path = "/tmp/simple_gui_smf_dynlib_fixture.extracted.so"
-        expect(rt_file_write_bytes(dynlib_path, [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8])).to_equal(true)
-        expect(rt_file_wrap_smf_dynlib(dynlib_path, smf_path, 1)).to_equal(true)
-        expect(rt_file_extract_smf_dynlib(smf_path, extracted_path)).to_equal(true)
+        val dynlib_bytes = [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8]
+        expect(rt_file_write_bytes(dynlib_path, dynlib_bytes)).to_equal(true)
+        val loaded = rt_file_read_bytes(dynlib_path) ?? []
+        val smf = gui_smf_wrap_native_library(loaded, 1u8)
+        expect(rt_file_write_bytes(smf_path, smf)).to_equal(true)
+        val smf_loaded = rt_file_read_bytes(smf_path) ?? []
+        val stub = smf_extract_library_stub_for_arch(smf_loaded, Architecture.X86_64)
+        expect(stub.is_ok()).to_equal(true)
+        expect(rt_file_write_bytes(extracted_path, stub.unwrap())).to_equal(true)
         val extracted = rt_file_read_bytes(extracted_path) ?? []
         expect(extracted.len()).to_equal(6)
         expect(extracted[0]).to_equal(0x7Fu8)
