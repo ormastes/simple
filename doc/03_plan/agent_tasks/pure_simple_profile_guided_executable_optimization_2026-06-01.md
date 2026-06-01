@@ -234,10 +234,10 @@ Implemented in the current slice:
 
 This is a Simple/C implementation slice, not a Rust linker seed change.
 
-Remaining larger gaps:
-- actual QEMU/live target runners for x86/i386/x86_64, ARM/Thumb/AArch64, and
-  RISC-V/RVC breakpoint evidence;
-- measured before/after executable performance evidence for the full
+Closed by later checkpoint:
+- Live QEMU breakpoint evidence now covers i386, x86-family x86_64,
+  ARM32/Thumb/AArch64, and RV32/RVC32/RV64/RVC64.
+- Representative before/after executable evidence now covers the full
   profile-counter -> `.sprof` -> layout-map -> native build flow.
 
 ## Restart Checkpoint: 2026-06-01 Native Symbol-Order Evidence
@@ -268,9 +268,11 @@ Implemented in the current slice:
 This closes the prior smoke-only weakness where the generated-C section map was
 applied but the final native binary order was not inspected.
 
-Remaining larger gaps:
-- measured before/after executable performance evidence for the full
-  profile-counter -> `.sprof` -> layout-map -> native build flow.
+Closed by later checkpoint:
+- Representative before/after executable evidence for the full
+  profile-counter -> `.sprof` -> layout-map -> native build flow now exists in
+  `profile_layout_representative_full_flow_run` and
+  `doc/09_report/profile_layout_native_smoke_evidence_2026-06-01.md`.
 
 ## Restart Checkpoint: 2026-06-01 QEMU Breakpoint Runner Bridge
 
@@ -288,13 +290,12 @@ Implemented in the current slice:
   - covers runner plans, command fragments, serial evidence parsing, and
     fail-closed missing-proof behavior.
 
-Remaining larger gaps:
-- build or stage the actual per-arch breakpoint probe images that emit serial
-  evidence lines for x86/i386/x86_64, ARM/Thumb/AArch64, and RISC-V/RVC;
-- run those images under QEMU and capture live patch/trap/count/restore/rearm/
-  cleanup/icache evidence;
-- measured before/after executable performance evidence for the full
-  profile-counter -> `.sprof` -> layout-map -> native build flow.
+Closed by later checkpoint:
+- Per-arch breakpoint probe images were built/staged and live QEMU serial
+  evidence was captured for i386, x86-family x86_64, ARM32, Thumb, AArch64,
+  RV32/RVC32, and RV64/RVC64.
+- Representative before/after native optimization evidence now exists for the
+  full profile-counter -> `.sprof` -> layout-map -> native build flow.
 
 ## Restart Checkpoint: 2026-06-01 Breakpoint Probe Image Contract
 
@@ -340,8 +341,8 @@ Build evidence from this host:
   the Thumb-marked `probe_main`; RV32/RVC32 direct-boot with `-bios none` at
   `0x80000000`, avoiding the missing host OpenSBI RV32 firmware.
 
-Remaining larger gaps:
-- measured before/after executable performance evidence for the full
+Closed by later checkpoint:
+- Representative before/after executable evidence now covers the full
   profile-counter -> `.sprof` -> layout-map -> native build flow.
 
 ## Restart Checkpoint: 2026-06-01 Native Counter Insertion
@@ -356,10 +357,10 @@ Implemented in the current slice:
   - covers full C slot derivation;
   - verifies emitted C contains all planned counter increments and metadata.
 
-Remaining larger gaps:
-- actual QEMU/live target runners for x86/i386/x86_64, ARM/Thumb/AArch64, and
-  RISC-V/RVC breakpoint evidence;
-- measured before/after executable performance evidence for the full
+Closed by later checkpoint:
+- Live QEMU breakpoint evidence now covers i386, x86-family x86_64,
+  ARM32/Thumb/AArch64, and RV32/RVC32/RV64/RVC64.
+- Representative before/after executable evidence now covers the full
   profile-counter -> `.sprof` -> layout-map -> native build flow.
 
 If resumed for release/sync, run the focused gates below and commit only the
@@ -459,8 +460,10 @@ Evidence:
 - Observed native counter snapshots write reloadable `.sprof` files, and
   `src/app/optimize/main.spl --layout-plan` consumes the `.sprof` plus manifest
   input to produce a deterministic hot/cold layout manifest.
-- Focused SPipe specs passed: sprof loader 23, native profile counters 30,
-  profile layout CLI 8, executable layout 15, bare-metal breakpoint profile 22.
+- Focused SPipe specs passed in later verification: sprof loader 23, native
+  profile counters 36, profile layout CLI 11, profile layout native smoke 3,
+  native layout section map 6, executable layout 16, and bare-metal breakpoint
+  profile 24.
 - Required compiler/lib/MCP gates passed, `git diff --check` passed,
   placeholder-test scan found no matches, and `find doc/06_spec -name
   '*_spec.spl' | wc -l` returned `0`.
@@ -569,9 +572,10 @@ ARM32 BKPT, Thumb/Thumb2 BKPT, AArch64 BRK, RV32/RV64 EBREAK, and compressed
 RV32C/RV64C EBREAK. Target adapter contracts now exist in
 `breakpoint_counter_x86.spl`, `breakpoint_counter_arm.spl`,
 `breakpoint_counter_riscv.spl`, and `breakpoint_counter_qemu.spl` for
-trap-frame PC normalization and fail-closed QEMU evidence validation. Actual
-QEMU runner integration that produces the evidence lines remains the next
-implementation slice.
+trap-frame PC normalization and fail-closed QEMU evidence validation. Probe
+image generation and live QEMU evidence now cover i386, x86-family x86_64,
+ARM32, Thumb, AArch64, RV32/RVC32, and RV64/RVC64 with patch, trap, count,
+restore, rearm, cleanup, and icache evidence fields.
 
 Deliverables:
 - software-breakpoint site table;

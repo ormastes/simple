@@ -29,9 +29,18 @@ Date: 2026-06-01
 - Native counter overhead: `2.1%`, under the 3% target.
 - Native baseline size: `15952` bytes.
 - Native profile-counter size: `16176` bytes.
-- Metadata-only layout planning does not rewrite the executable in this slice;
-  the semantic smoke is the native binary run exit `0`, and the after artifact
-  is the deterministic layout manifest.
+- Representative full-flow native layout evidence now covers the end-to-end
+  chain from generated-C profile counters to runtime snapshot, `.sprof`, layout
+  map, native symbol-order file, optimized native rebuild, final `nm -an`
+  symbol order, and measured before/after runtime/size.
+- Representative evidence:
+  - `.sprof` records: `15`
+  - profile counts: `dispatch=200`, `parse=20`, `rare=0`
+  - final optimized order: `_ZL8dispatchv > _ZL5parsev > _ZL4rarev`
+  - non-profile counter symbols: `0`
+  - baseline size: `16112` bytes
+  - optimized size: `6608` bytes
+  - runtime sample: `baseline_ms_50=146`, `optimized_ms_50=147`
 
 ## Verification Commands
 
@@ -39,6 +48,8 @@ Date: 2026-06-01
   passed `7` files.
 - `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/app/compile`
   passed `9` files.
+- `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/app/optimize src/app/compile src/os/baremetal/profile`
+  passed `26` files.
 - `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check
   test/system/app/optimize/feature/sprof_loader_spec.spl
   test/system/app/compile/feature/native_profile_counter_spec.spl
@@ -46,10 +57,14 @@ Date: 2026-06-01
   test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl`
   passed `4` files.
 - `sprof_loader_spec.spl`: `23` passed.
-- `native_profile_counter_spec.spl`: `30` passed.
-- `profile_layout_cli_spec.spl`: `8` passed.
-- `pure_simple_executable_layout_spec.spl`: `15` passed.
-- `breakpoint_counter_profile_spec.spl`: `22` passed.
+- `native_profile_counter_spec.spl`: `36` passed.
+- `profile_layout_cli_spec.spl`: `11` passed.
+- `profile_layout_native_smoke_spec.spl`: `3` passed.
+- `native_layout_section_map_spec.spl`: `6` passed.
+- `pure_simple_executable_layout_spec.spl`: `16` passed.
+- `breakpoint_counter_profile_spec.spl`: `24` passed.
+- `breakpoint_counter_probe_image_spec.spl`: `17` passed.
+- `breakpoint_counter_target_adapter_spec.spl`: `8` passed.
 - `tiered_jit_hotspot_spec.spl`: `51` passed.
 - `git diff --check` passed after generated spec EOF cleanup.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
