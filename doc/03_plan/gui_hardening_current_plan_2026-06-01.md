@@ -31,7 +31,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   Current evidence proves GPU-returned glyphs with zero CPU fallback for the
   expanded `PIPELINESTATUSOK/24`, `VECTORFONTGPU/36`, and `GPUREADBACKWM/12`
   scenes, plus the broader baseline matrix. The GTK repeat gate now also
-  records a fail-closed vector-font-unavailable fallback probe.
+  records a fail-closed vector-font-unavailable fallback probe. Metal
+  Engine2D framebuffer readback is now explicitly fail-closed on this Linux
+  host; current Metal `read_pixels()` evidence remains CPU-mirror-only and does
+  not claim a GPU framebuffer download.
 - Generated GUI WASM widget-matrix evidence covers source-level and retained
   browser state transitions for dropdowns, dialogs, tables, lists, progress,
   image load/error state, menus, and statusbar state.
@@ -71,6 +74,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   current vector-font matrix report.
 - `doc/09_report/vector_font_compute_matrix_expanded_current_2026-06-01.md`:
   expanded vector-font GPU matrix with `cpu_fallback=0` for all expanded scenes.
+- `doc/09_report/metal_engine2d_framebuffer_readback_2026-06-01.md`:
+  fail-closed Metal framebuffer readback evidence; Linux reports
+  `metal-requires-macos`, `gpu_readback_available=false`, and
+  `exact_gpu_claimed=false`.
 - `doc/09_report/gtk_gui_repeat_fallback_evidence_2026-06-01.md`: repeat
   open/render evidence with an explicit vector-font unavailable fallback probe.
 - `doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md`:
@@ -115,7 +122,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   integration.
 - Vector-font GPU: turn current evidence-kernel glyph return into reusable
   production buffer ownership/readback across arbitrary text runs, more font
-  sizes, and broader kernel parameter combinations.
+  sizes, and broader kernel parameter combinations. Add the Apple-host native
+  compiled Metal proof that downloads the GPU framebuffer and compares it to the
+  CPU mirror for `clear`, `rect_filled`, and one vector-text scene before
+  claiming Engine2D/Metal framebuffer readback parity.
 - Engine2D/Simple Web exact bitmap: keep expanding Node/Bun/Electron scene
   coverage into broader HTML/CSS/image/text/taskbar/command-bar scenes and
   deeper layout/style features before claiming text-flow parity.
