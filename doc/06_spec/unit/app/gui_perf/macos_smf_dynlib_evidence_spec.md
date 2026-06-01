@@ -48,7 +48,7 @@ expect(paths.probe_path).to_equal("build/gui/smf_dynlib_probe")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -62,6 +62,8 @@ expect(gui_mac_smf_dynlib_contract_command(paths)).to_contain("run src/app/gui_p
 expect(gui_mac_smf_dynlib_contract_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARTIFACT='build/gui/pure_gui_hot.smf'")
 expect(gui_mac_smf_dynlib_qemu_parity_command(paths)).to_contain("run src/app/gui_perf/qemu_arm64_smf_parity_evidence.spl")
 expect(gui_mac_smf_dynlib_qemu_parity_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARTIFACT='build/gui/pure_gui_hot.smf'")
+expect(gui_mac_smf_dynlib_qemu_loader_parity_command(paths)).to_contain("run src/app/gui_perf/qemu_arm64_smf_loader_parity_evidence.spl")
+expect(gui_mac_smf_dynlib_qemu_loader_parity_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARTIFACT='build/gui/pure_gui_hot.smf'")
 expect(gui_mac_smf_dynlib_probe_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARTIFACT='build/gui/pure_gui_hot.smf'")
 ```
 
@@ -120,12 +122,41 @@ expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(wrong_adapter)).to_equal(false
 
 </details>
 
+#### accepts only SimpleOS loader-backed QEMU ARM64 SMF parity rows
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val good = "GUI_QEMU_ARM64_SMF_LOADER_PARITY status=loader-contract-pass artifact=build/gui/pure_gui_hot.smf smf_role=2 arch=3 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick loader=simpleos_smf_dynload adapter=simpleos-framebuffer-virtio command_count=4 dirty_regions=4 dynload_pass=true live_qemu=false reason=simpleos-dynload-artifact-reaches-pure-gui-adapter"
+val fail = good.replace("status=loader-contract-pass", "status=loader-contract-fail")
+val wrong_arch = good.replace("arch=3", "arch=1")
+val wrong_symbol = good.replace("symbol=gui_dynlib_hot_probe_tick", "symbol=other_symbol")
+val wrong_loader = good.replace("loader=simpleos_smf_dynload", "loader=artifact_contract_only")
+val no_dynload = good.replace("dynload_pass=true", "dynload_pass=false")
+val live = good.replace("live_qemu=false", "live_qemu=true")
+val wrong_adapter = good.replace("adapter=simpleos-framebuffer-virtio", "adapter=web-renderer")
+expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(good)).to_equal(true)
+expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(fail)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(wrong_arch)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(wrong_symbol)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(wrong_loader)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(no_dynload)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(live)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(wrong_adapter)).to_equal(false)
+```
+
+</details>
+
 #### accepts only real SMF dynlib hot-call probe rows
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -136,6 +167,7 @@ val fail = good.replace("pass=true error=", "pass=false error=not-smf-dynlib")
 val wrong_cache = good.replace("dynlib_path=build/gui/pure_gui_hot.smf.extracted.dylib", "dynlib_path=")
 val wrong_host = good.replace("host_os=macos", "host_os=linux")
 val wrong_arch = good.replace("host_arch=arm64", "host_arch=x86_64")
+val wrong_symbol = good.replace("symbol=gui_dynlib_hot_probe_tick", "symbol=other_symbol")
 val partial_samples = good.replace("samples=128", "samples=64")
 val wrong_expected = good.replace("expected_samples=128", "expected_samples=64")
 val missing_p99 = good.replace("p99_us=1 ", "")
@@ -151,6 +183,7 @@ expect(gui_mac_smf_dynlib_accepts_probe_row(fail)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_cache)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_host)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_arch)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_symbol)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(partial_samples)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_expected)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(missing_p99)).to_equal(false)
@@ -196,8 +229,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
