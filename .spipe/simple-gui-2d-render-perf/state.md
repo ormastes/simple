@@ -33,6 +33,10 @@ implementation-evidence-in-progress
 - verification: `bin/simple test test/unit/lib/common/ui/web_render_api_spec.spl --mode=interpreter --clean` passed 15/15.
 - verification: `scripts/check-gtk-gui-repeat-evidence.shs` passed with Simple open 211 us vs GTK open 66875 us, Simple frame 1 us vs GTK frame 28 us, vector text 62 us, ink 5268, checksum 212444, deterministic true.
 - report: Updated `doc/09_report/gtk_gui_size_speed_baseline_2026-05-30.md` with the latest baseline run: Simple open 213 us vs GTK open 68639 us, Simple frame 1 us vs GTK frame 26 us, vector text 69 us, ink 5268, checksum 212444.
+- implementation: Browser text painter now estimates famous-site corpus wrapping with pixel-width glyph advances instead of treating layout width as character columns; restored the scanline y-coordinate probe used by the focused spec.
+- verification: `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/gpu/browser_engine/text_painter.spl test/unit/browser_engine/text_painter_spec.spl` passed.
+- verification: `SIMPLE_LIB=src bin/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --force-rebuild` passed 2/2 scenarios.
+- docs: Regenerated `doc/06_spec/unit/browser_engine/text_painter_spec.md`; docgen completed with existing compiler warnings and emitted a stub-style manual.
 
 ## Remaining Work
 - AC-3 is only partially satisfied by retained framebuffer/cache and static pixel hot paths; broader primitive-level fill/copy/blit/text optimization across dynamic GUI scenes still needs implementation and evidence.

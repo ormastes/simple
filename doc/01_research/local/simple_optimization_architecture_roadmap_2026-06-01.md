@@ -30,6 +30,75 @@ Unlike traditional compilers that optimize only during compilation, Simple shoul
 7. Safe deoptimization with interpreter fallback.
 8. Long-term learning across releases.
 
+### 1.1 Active SPipe Roadmap Control Plane
+
+This roadmap is the live coordination document for the 2026-06-01 optimization push requested through `$sp_dev`: sync with GitHub often, optimize Simple across JS/WASM, GUI rendering, and interpreter mode, and keep progress visible here.
+
+Current SPipe state: `.spipe/simple-optimization-architecture-roadmap-2026-06-01/state.md`.
+
+#### Acceptance Gates
+
+| Gate | Pass Evidence |
+|------|---------------|
+| Roadmap control | This file has dated progress, lane owners, deliverables, and current blockers. |
+| Sync hygiene | `git status --short`, jj fetch/rebase evidence, file-count guard, and no push without explicit approval where release flow requires it. |
+| JS/WASM | Focused JS, BrowserSession, WASM, WebGPU bridge, and generated `doc/06_spec` manuals pass or name release-blocking defects. |
+| GUI rendering | Repeatable open/render/vector-font benchmark output with Simple and native-baseline fields, plus fallback evidence. |
+| Interpreter speed | Focused interpreter hot-path checks, benchmark deltas, and no silent normalization of compiler/interpreter grammar workarounds. |
+| Cross-lane regression | `bin/simple check`/`test` commands for touched compiler, lib, MCP/LSP, app, and system surfaces match the repo verify gates. |
+
+#### Parallel Agent Plan
+
+Run these lanes in parallel only when their file scopes are disjoint. Shared compiler/runtime edits require a lead integrator to serialize merges and rerun the cross-lane gates.
+
+| Agent | Scope | Existing Evidence | Primary Deliverables | Metrics |
+|-------|-------|-------------------|----------------------|---------|
+| A: Sync/Integration | jj/git state, GitHub sync cadence, changelog handoff | `.codex/skills/sync/SKILL.md`, release rules in `AGENTS.md` | Keep main linear, fetch/rebase before major verification, record file-count guard results, prepare commit slices without bundling unrelated dirty files | zero unexpected file loss; no orphan commits; no unapproved push |
+| B: JS/WASM Engine | Node-compatible JS, browser JS, WASM asset loading, WebGPU bridge | `.spipe/nodejs-js-wasm-hardening/state.md`, `test/feature/js/node_api_conformance_spec.spl`, `test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl`, `test/system/os/simpleos_ai_cli_js_node_port_spec.spl` | Harden positive and denial paths, optimize promise/native byte extraction, reduce redundant JS/WASM bridge work, regenerate manuals | scenario count stable or higher; deny paths explicit; bridge latency benchmark added before perf claims |
+| C: GUI Rendering | Simple GUI 2D render, vector fonts, web/HTML-backed GUI render surfaces | `.spipe/simple-gui-2d-render-perf/state.md`, `scripts/check-gtk-gui-repeat-evidence.shs`, `doc/09_report/gtk_gui_size_speed_baseline_2026-05-30.md`, `doc/08_tracking/bug/simple_web_layout_corpus_perf_2026-05-31.md` | Broaden primitive fast paths for fill/copy/blit/text, capture fallback evidence, add render-corpus perf guard | open latency, frame latency, glyph throughput, non-empty deterministic output |
+| D: Interpreter Runtime | Rust interpreter hot paths, Simple MIR interpreter, tiered JIT facts | `.spipe/interpreter-perf-gaps/state.md`, `doc/08_tracking/bug/interpreter_1460x_c_perf_gap_2026-05-18.md`, `src/compiler/95.interp/`, `src/compiler_rust/compiler/src/interpreter/` | Land low-risk hot-path fixes, evaluate bytecode VM connection path, keep safe deopt facts intact | before/after wall time; alloc count when available; no semantic divergence |
+| E: Compiler/MIR/JIT | MIR optimization passes, hotspot planning, `.sprof`, PGO/BOLT | `src/compiler/60.mir_opt/`, `src/compiler/95.interp/execution/tiered_jit.spl`, `doc/07_guide/compiler_optimization_plugin.md` | Define `.sprof` schema slice, fact-gated profile migration, LLVM tier-2 cost evidence, pass ordering invariants | compile time, selected tier, deopt count, hot function speedup |
+| F: Verification/Docs | SPipe specs, generated manuals, bug/feature tracking, perf reports | `doc/06_spec`, `doc/03_plan/sys_test`, `doc/08_tracking`, verify skill gates | Regenerate manuals for changed specs, reject stub tests, maintain traceability from requirements to implementation | `find doc/06_spec -name '*_spec.spl' | wc -l` remains `0`; no `pass_todo` evidence |
+
+#### Lane Handoffs
+
+1. Agents B, C, D, and E write benchmark or test evidence before claiming speedups.
+2. Agent F reviews every new spec for real assertions and regenerates the mirrored `doc/06_spec/...md` manual.
+3. Agent A syncs after a coherent verified slice, not after every speculative edit; "often" means after stable evidence, fetch/rebase, and file-count guard.
+4. Any lane that touches `src/compiler/**`, `src/lib/**`, MCP, LSP, package, or release paths inherits the additional verify commands from `AGENTS.md`.
+5. If a short grammar form, compact expression, or interpreter workaround fails, the owning agent fixes it or records a concrete bug before moving on.
+
+#### Immediate Work Queue
+
+| Priority | Lane | Task | Exit Criteria |
+|----------|------|------|---------------|
+| P0 | A/F | Establish roadmap state and progress log | `.spipe/.../state.md` exists and this section is updated. |
+| P0 | B | Finish current dirty JS/WASM hardening slice without touching unrelated files | Existing modified JS/WASM files are tested and manuals regenerated. |
+| P0 | C | Convert `simple-gui-2d-render-perf` remaining work into a primitive-level implementation plan | AC-3 and AC-6 blockers have exact files/tests or tracked bugs. |
+| P1 | D | Re-audit interpreter hot-path quick wins after the May 20 state | Candidate fixes have before/after benchmark commands and semantic tests. |
+| P1 | E | Split persistent profile work into schema, writer, loader, and migration steps | Requirements/design artifacts exist before implementation. |
+| P1 | F | Build a cross-lane smoke command list | Commands cover JS/WASM, GUI, interpreter, compiler/lib checks, and doc layout. |
+
+#### Progress Log
+
+| Date | Lane | Progress | Evidence |
+|------|------|----------|----------|
+| 2026-06-01 | A/F | Created SPipe control state and added parallel-agent execution plan to this roadmap. | `.spipe/simple-optimization-architecture-roadmap-2026-06-01/state.md`, this section. |
+| 2026-06-01 | B | Reused active JS/WASM hardening state rather than replacing it; current dirty files belong to `simpleos_ai_cli_js_node_port_spec` and `src/os/ai_cli_js_node_contract.spl`. | `.spipe/nodejs-js-wasm-hardening/state.md`, `git status --short`. |
+| 2026-06-01 | B/F | Verified the current JS/WASM OS contract slice in interpreter mode. | PASS `SIMPLE_LIB=src bin/simple check src/os/ai_cli_js_node_contract.spl`; PASS `SIMPLE_LIB=src bin/simple test test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter --clean` (23 scenarios). |
+| 2026-06-01 | B/F | Fixed nested host-promise assimilation for fetched WASM instantiation callbacks returning `Promise.resolve(navigator.gpu.requestAdapter())`, so downstream callbacks receive the WebGPU adapter object. | PASS `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/js/engine/interpreter_async.spl src/lib/nogc_sync_mut/js/engine/interpreter_async.spl src/lib/nogc_async_mut/js/engine/interpreter_async.spl`; PASS `SIMPLE_LIB=src bin/simple test test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --clean` (106 scenarios); regenerated `doc/06_spec/system/app/browser/feature/webgpu_js_wasm_simple_spec.md`. |
+| 2026-06-01 | B/F | Re-verified Node-compatible JS after in-flight credential-env work at the previous green baseline, before restoring public credential grant API coverage. | PASS `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval_member.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/runtime.spl test/feature/js/node_api_conformance_spec.spl`; PASS `SIMPLE_LIB=src bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean` (142 scenarios). |
+| 2026-06-01 | B/F | Restored Node-compatible credential env grant coverage through the public `JsRuntime.grant_node_credential(...)` API; the conformance helper no longer mutates interpreter internals directly. | PASS `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval_member.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/runtime.spl test/feature/js/node_api_conformance_spec.spl`; PASS `SIMPLE_LIB=src bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean` (143 scenarios); regenerated `doc/06_spec/feature/js/node_api_conformance_spec.md`. |
+| 2026-06-01 | C | Identified GUI perf state with remaining primitive fast-path and fallback-evidence work. | `.spipe/simple-gui-2d-render-perf/state.md`. |
+| 2026-06-01 | C/F | Verified current GUI repeat evidence: Simple open 210 us vs GTK open 67082 us, Simple frame 1 us vs GTK frame 26 us, Simple text 11 us vs GTK text 26 us, vector text checksum 212444 deterministic true. | PASS `scripts/check-gtk-gui-repeat-evidence.shs`; report `build/gtk_gui_repeat_evidence/report.md`. |
+| 2026-06-01 | C/F | Advanced the browser GUI rendering lane: text painter now wraps famous-site corpus text using pixel-width glyph estimates instead of character columns, and the existing scanline y-coordinate probe is restored. | PASS `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/gpu/browser_engine/text_painter.spl test/unit/browser_engine/text_painter_spec.spl`; PASS `SIMPLE_LIB=src bin/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --force-rebuild` (2 scenarios); generated `doc/06_spec/unit/browser_engine/text_painter_spec.md` as a stub-style manual. |
+| 2026-06-01 | D | Identified closed interpreter perf state plus remaining architectural candidates: string allocation, SeqCst extern checks, block-scope TLS, watchdog ordering, and bytecode VM connection. | `.spipe/interpreter-perf-gaps/state.md`. |
+| 2026-06-01 | D/F | Verified current interpreter perf and tiered hotspot smoke coverage before further optimization work. | PASS `SIMPLE_LIB=src bin/simple test test/unit/app/interpreter/perf_spec.spl --mode=interpreter --clean` (10 scenarios); PASS `SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean` (51 scenarios). |
+| 2026-06-01 | D/F | Removed `SeqCst` fences from the `DIAGRAM_ENABLED` trace-recording flag fast path in the Rust runtime; recorded data remains lock protected. | PASS `cargo check -p simple-runtime --manifest-path src/compiler_rust/Cargo.toml`; PASS `cargo test -p simple-runtime diagram_sffi --manifest-path src/compiler_rust/Cargo.toml` (3 tests); PASS interpreter perf and tiered JIT smoke specs. |
+| 2026-06-01 | A | Recorded non-mutating sync-safety state before any future sync: tracked file count is 77108, `jj status` has uncommitted working-copy changes on top of `main` parent `test: tighten ai cli credential grant boundary`; no fetch/rebase/push attempted in this slice. | `git ls-files | wc -l`, `jj status`, `jj log -r 'main@origin | @ | @-' --no-graph --limit 8`. |
+| 2026-06-01 | A/F | Updated sync guard after removing the local credential debug scratch file; current tracked file count is 77107, whitespace checks pass, generated spec layout is clean, and the broad multi-lane worktree remains uncommitted. | PASS `git diff --check`; PASS `find doc/06_spec -name '*_spec.spl' \| wc -l` = 0; `jj status`. |
+| 2026-06-01 | F | Re-ran the full focused checkpoint for the current optimization slice across SPipe routing, JS/WASM, GUI text rendering, interpreter perf, Rust runtime, and GUI repeat evidence. | PASS `sh scripts/install-spipe-dev-command.shs --check`; PASS Node API conformance (143); PASS WebGPU JS/WASM (106); PASS text painter (2); PASS interpreter perf (10); PASS tiered JIT hotspot (51); PASS `cargo check`; PASS `cargo test -p simple-runtime diagram_sffi` (3); PASS GUI repeat evidence (Simple open 181 us, GTK open 66084 us, vector checksum 212444); PASS `git diff --check`; PASS `doc/06_spec` stray `.spl` count 0. |
+
 ---
 
 ## 2. MDSOC+ Optimization Architecture

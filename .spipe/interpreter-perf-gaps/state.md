@@ -159,3 +159,18 @@ loop. Out of scope for this audit but noted as the architectural path forward.
 | D | `block_exec.rs:33` — per-block TLS scope counter | Medium | Low |
 | E | `interpreter_state.rs:738` — SeqCst watchdog | Medium | Trivial (1 word) |
 | F | `runtime/src/bytecode/vm.rs` — unused bytecode VM | Structural | High |
+
+## Wave 11 Progress — diagram_sffi hot-path flag ordering (2026-06-01)
+
+`src/compiler_rust/runtime/src/value/diagram_sffi.rs` now uses
+`Ordering::Relaxed` for `DIAGRAM_ENABLED` loads/stores. The atomic only gates
+whether diagram recording is active; recorded events and architectural entity
+state remain protected by the existing `RwLock` stores. This removes the
+`SeqCst` fence from disabled trace-call fast paths, including extern-call
+instrumentation probes.
+
+Verification:
+- PASS `cargo check -p simple-runtime --manifest-path src/compiler_rust/Cargo.toml`
+- PASS `cargo test -p simple-runtime diagram_sffi --manifest-path src/compiler_rust/Cargo.toml` (3 tests)
+- PASS `SIMPLE_LIB=src bin/simple test test/unit/app/interpreter/perf_spec.spl --mode=interpreter --clean` (10 scenarios)
+- PASS `SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean` (51 scenarios)

@@ -33,21 +33,51 @@ fn _normalize_whitespace(s: text) -> text:
         i = i + 1
     result.join("").trim()
 
-fn _estimate_char_width(font_size: i64) -> f64:
-    """Estimate average character width as 0.6 × font_size (monospace-ish)."""
-    font_size.to_f64() * 0.6
+pub fn browser_chrome_text_scanline_write_y_probe(write_y: i32) -> i32:
+    """Return the glyph scanline write y coordinate without compatibility shifting."""
+    write_y
+
+fn _scale_width(base_px: i64, font_size: i64) -> i64:
+    val scaled = base_px * font_size
+    (scaled + 8) / 16
+
+fn _estimate_char_width_px(ch_text: text, font_size: i64) -> i64:
+    """Estimate Chrome/Arial-like glyph advance for corpus text wrapping."""
+    if ch_text == " ":
+        return _scale_width(4, font_size)
+    val ch = ch_text.lower()
+    if ch == "i" or ch == "l" or ch == "j" or ch == "t":
+        return _scale_width(4, font_size)
+    if ch == "f" or ch == "r":
+        return _scale_width(5, font_size)
+    if ch == "m" or ch == "w":
+        return _scale_width(12, font_size)
+    val upper = ch_text.upper()
+    if upper == ch_text and ch_text != ch:
+        return _scale_width(10, font_size)
+    _scale_width(8, font_size)
+
+fn _estimate_text_width_px(value: text, font_size: i64) -> i64:
+    var width = 0
+    var i = 0
+    while i < value.len():
+        width = width + _estimate_char_width_px(value.substring(i, i + 1), font_size)
+        i = i + 1
+    width
 
 fn _wrap_text(text_content: text, font_size: i64, layout_width: i32) -> [text]:
-    """Wrap text_content into lines no wider than layout_width columns.
+    """Wrap text_content into lines no wider than layout_width pixels.
 
-    Uses a simple greedy word-wrap algorithm. layout_width is treated as
-    character columns (approximately), matching Chrome's metrics format.
+    Uses a simple greedy word-wrap algorithm with Arial-like proportional
+    advances so the famous-site corpus diagnostics track Chrome line breaks
+    instead of treating a 120px div as 120 character columns.
     """
     val words = text_content.split(" ")
     var lines: [text] = []
     var current: [text] = []
-    var current_len = 0
-    val max_cols = layout_width.to_i64()
+    var current_width = 0
+    val max_px = layout_width.to_i64()
+    val space_width = _estimate_char_width_px(" ", font_size)
 
     var i = 0
     while i < words.len():
@@ -55,15 +85,16 @@ fn _wrap_text(text_content: text, font_size: i64, layout_width: i32) -> [text]:
         if word.len() == 0:
             i = i + 1
             continue
-        val sep = if current_len > 0: 1 else: 0
-        if current_len + sep + word.len() <= max_cols:
+        val word_width = _estimate_text_width_px(word, font_size)
+        val sep_width = if current_width > 0: space_width else: 0
+        if current_width + sep_width + word_width <= max_px:
             current.push(word)
-            current_len = current_len + sep + word.len()
+            current_width = current_width + sep_width + word_width
         else:
             if current.len() > 0:
                 lines.push(current.join(" "))
             current = [word]
-            current_len = word.len()
+            current_width = word_width
         i = i + 1
 
     if current.len() > 0:
@@ -74,7 +105,7 @@ fn _wrap_text(text_content: text, font_size: i64, layout_width: i32) -> [text]:
 pub fn br_famous_site_corpus_layout_lines(html: text, font_size: i64, layout_width: i32) -> [text]:
     """Extract visible text from HTML and return wrapped lines.
 
-    Strips tags, normalises whitespace, then wraps to layout_width columns
+    Strips tags, normalises whitespace, then wraps to layout_width pixels
     at the given font_size. Returns an ordered list of line strings, matching
     the 'text' fields in Chrome's JSON metrics for corpus comparison.
     """
@@ -91,12 +122,11 @@ pub fn br_famous_site_corpus_layout_line_widths_sdn(html: text, font_size: i64, 
     pixel width for comparison with Chrome's layout metrics JSON.
     """
     val lines = br_famous_site_corpus_layout_lines(html, font_size, layout_width)
-    val char_w = _estimate_char_width(font_size)
     var entries: [text] = []
     var i = 0
     while i < lines.len():
         val line = lines[i]
-        val width_px = (line.len().to_f64() * char_w).to_i64()
+        val width_px = _estimate_text_width_px(line, font_size)
         entries.push("    (line text: \"{line}\" width: {width_px})")
         i = i + 1
     "(text_lines count: {lines.len()}\n" + entries.join("\n") + "\n)"

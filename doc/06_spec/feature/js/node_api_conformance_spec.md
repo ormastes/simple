@@ -1887,6 +1887,23 @@ expect(_eval_str("typeof process.env.PATH")).to_equal("undefined")
 
 </details>
 
+#### exposes only explicitly granted credential env values
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_credential("openai-api-key", "test-token", "process.env.OPENAI_API_KEY")).to_equal("test-token")
+expect(_eval_str_with_credential("openai-api-key", "test-token", "require('process').env.OPENAI_API_KEY")).to_equal("test-token")
+expect(_eval_str_with_credential("openai-api-key", "test-token", "typeof process.env.PATH")).to_equal("undefined")
+expect(_eval_str_with_credential("openai-api-key", "test-token", "typeof process.env.ANTHROPIC_API_KEY")).to_equal("undefined")
+```
+
+</details>
+
 #### exposes deterministic process versions
 
 <details>
@@ -2152,8 +2169,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 142 |
-| Active scenarios | 142 |
+| Total scenarios | 143 |
+| Active scenarios | 143 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

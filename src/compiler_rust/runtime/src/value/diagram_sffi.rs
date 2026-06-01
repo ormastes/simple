@@ -103,19 +103,19 @@ fn get_arch_entities() -> &'static RwLock<Vec<String>> {
 /// Enable diagram recording
 #[no_mangle]
 pub extern "C" fn rt_diagram_enable() {
-    DIAGRAM_ENABLED.store(true, Ordering::SeqCst);
+    DIAGRAM_ENABLED.store(true, Ordering::Relaxed);
 }
 
 /// Disable diagram recording
 #[no_mangle]
 pub extern "C" fn rt_diagram_disable() {
-    DIAGRAM_ENABLED.store(false, Ordering::SeqCst);
+    DIAGRAM_ENABLED.store(false, Ordering::Relaxed);
 }
 
 /// Check if diagram recording is enabled
 #[no_mangle]
 pub extern "C" fn rt_diagram_is_enabled() -> bool {
-    DIAGRAM_ENABLED.load(Ordering::SeqCst)
+    DIAGRAM_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Clear all recorded events
@@ -160,7 +160,7 @@ pub extern "C" fn rt_diagram_clear_context() {
 /// `name` must be a valid C string
 #[no_mangle]
 pub unsafe extern "C" fn rt_diagram_trace_call(name: *const c_char) {
-    if !DIAGRAM_ENABLED.load(Ordering::SeqCst) || name.is_null() {
+    if !DIAGRAM_ENABLED.load(Ordering::Relaxed) || name.is_null() {
         return;
     }
 
@@ -189,7 +189,7 @@ pub unsafe extern "C" fn rt_diagram_trace_call(name: *const c_char) {
 /// `class_name` and `method_name` must be valid C strings
 #[no_mangle]
 pub unsafe extern "C" fn rt_diagram_trace_method(class_name: *const c_char, method_name: *const c_char) {
-    if !DIAGRAM_ENABLED.load(Ordering::SeqCst) {
+    if !DIAGRAM_ENABLED.load(Ordering::Relaxed) {
         return;
     }
 
@@ -232,7 +232,7 @@ pub unsafe extern "C" fn rt_diagram_trace_method_with_args(
     method_name: *const c_char,
     args: *const c_char,
 ) {
-    if !DIAGRAM_ENABLED.load(Ordering::SeqCst) {
+    if !DIAGRAM_ENABLED.load(Ordering::Relaxed) {
         return;
     }
 
@@ -280,7 +280,7 @@ pub unsafe extern "C" fn rt_diagram_trace_method_with_args(
 /// `value` must be a valid C string or null
 #[no_mangle]
 pub unsafe extern "C" fn rt_diagram_trace_return(value: *const c_char) {
-    if !DIAGRAM_ENABLED.load(Ordering::SeqCst) {
+    if !DIAGRAM_ENABLED.load(Ordering::Relaxed) {
         return;
     }
 
@@ -582,17 +582,17 @@ fn generate_arch_mermaid(events: &[CallEvent], arch_entities: &[String]) -> Stri
 
 /// Enable diagram recording (Rust API)
 pub fn enable_diagrams() {
-    DIAGRAM_ENABLED.store(true, Ordering::SeqCst);
+    DIAGRAM_ENABLED.store(true, Ordering::Relaxed);
 }
 
 /// Disable diagram recording (Rust API)
 pub fn disable_diagrams() {
-    DIAGRAM_ENABLED.store(false, Ordering::SeqCst);
+    DIAGRAM_ENABLED.store(false, Ordering::Relaxed);
 }
 
 /// Check if diagrams are enabled (Rust API)
 pub fn is_diagram_enabled() -> bool {
-    DIAGRAM_ENABLED.load(Ordering::SeqCst)
+    DIAGRAM_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Get recorded events (Rust API)
@@ -613,7 +613,7 @@ pub fn clear_diagram_data() {
 
 /// Trace a function call (Rust API)
 pub fn trace_call(name: &str) {
-    if !DIAGRAM_ENABLED.load(Ordering::SeqCst) {
+    if !DIAGRAM_ENABLED.load(Ordering::Relaxed) {
         return;
     }
 
@@ -633,7 +633,7 @@ pub fn trace_call(name: &str) {
 
 /// Trace a method call (Rust API)
 pub fn trace_method(class_name: &str, method_name: &str) {
-    if !DIAGRAM_ENABLED.load(Ordering::SeqCst) {
+    if !DIAGRAM_ENABLED.load(Ordering::Relaxed) {
         return;
     }
 
@@ -653,7 +653,7 @@ pub fn trace_method(class_name: &str, method_name: &str) {
 
 /// Trace a method call with arguments (Rust API)
 pub fn trace_method_with_args(class_name: &str, method_name: &str, args: &[String]) {
-    if !DIAGRAM_ENABLED.load(Ordering::SeqCst) {
+    if !DIAGRAM_ENABLED.load(Ordering::Relaxed) {
         return;
     }
 
@@ -673,7 +673,7 @@ pub fn trace_method_with_args(class_name: &str, method_name: &str, args: &[Strin
 
 /// Trace a return value (Rust API)
 pub fn trace_return(value: Option<&str>) {
-    if !DIAGRAM_ENABLED.load(Ordering::SeqCst) {
+    if !DIAGRAM_ENABLED.load(Ordering::Relaxed) {
         return;
     }
 
