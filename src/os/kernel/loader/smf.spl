@@ -33,6 +33,7 @@ val SMF_ERR_WRONG_ROLE: text = "SMF_ERR_WRONG_ROLE"
 val SMF_ERR_WRONG_ARCH: text = "SMF_ERR_WRONG_ARCH"
 val SMF_ERR_ABI_MISMATCH: text = "SMF_ERR_ABI_MISMATCH"
 val SMF_ERR_MISSING_ELF: text = "SMF_ERR_MISSING_ELF"
+val SMF_ERR_MISSING_NATIVE_LIBRARY: text = "SMF_ERR_MISSING_NATIVE_LIBRARY"
 
 # ============================================================================
 # Structs
@@ -125,6 +126,22 @@ fn _smf_has_elf_magic(bytes: [u8]) -> bool:
         return false
     _smf_byte_at(bytes, 0) == 0x7F.to_u8() and _smf_byte_at(bytes, 1) == 0x45.to_u8() and _smf_byte_at(bytes, 2) == 0x4C.to_u8() and _smf_byte_at(bytes, 3) == 0x46.to_u8()
 
+fn _smf_has_macho_magic(bytes: [u8]) -> bool:
+    if bytes.len() < 4:
+        return false
+    val b0 = _smf_byte_at(bytes, 0)
+    val b1 = _smf_byte_at(bytes, 1)
+    val b2 = _smf_byte_at(bytes, 2)
+    val b3 = _smf_byte_at(bytes, 3)
+    # Mach-O 32/64-bit, reverse-byte-order variants, and universal/fat headers.
+    (b0 == 0xFE.to_u8() and b1 == 0xED.to_u8() and b2 == 0xFA.to_u8() and (b3 == 0xCE.to_u8() or b3 == 0xCF.to_u8())) or
+    ((b0 == 0xCE.to_u8() or b0 == 0xCF.to_u8()) and b1 == 0xFA.to_u8() and b2 == 0xED.to_u8() and b3 == 0xFE.to_u8()) or
+    (b0 == 0xCA.to_u8() and b1 == 0xFE.to_u8() and b2 == 0xBA.to_u8() and b3 == 0xBE.to_u8()) or
+    (b0 == 0xBE.to_u8() and b1 == 0xBA.to_u8() and b2 == 0xFE.to_u8() and b3 == 0xCA.to_u8())
+
+fn _smf_has_native_library_magic(bytes: [u8]) -> bool:
+    _smf_has_elf_magic(bytes) or _smf_has_macho_magic(bytes)
+
 fn _smf_copy_range(bytes: [u8], off: i64, size: i64) -> [u8]:
     var out: [u8] = rt_array_new_with_cap(size)
     var i: i64 = 0
@@ -196,6 +213,46 @@ fn smf_extract_executable_stub_for_arch(bytes: [u8], arch: Architecture) -> Resu
     val stub = _smf_copy_range(bytes, 0, hdr.stub_size)
     if not _smf_has_elf_magic(stub):
         return Err(SMF_ERR_MISSING_ELF)
+    Ok(stub)
+
+fn smf_extract_library_stub(bytes: [u8]) -> Result<[u8], text>:
+    """Return the embedded native shared-library stub from a role-2 SMF envelope."""
+    val hdr_opt = smf_parse_header(bytes)
+    if hdr_opt == nil:
+        return Err(SMF_ERR_MALFORMED)
+    val hdr = hdr_opt.unwrap()
+    if hdr.role != 2:
+        return Err(SMF_ERR_WRONG_ROLE)
+    if hdr.abi != 0 and hdr.abi != 1:
+        return Err(SMF_ERR_ABI_MISMATCH)
+    if hdr.stub_size <= 0:
+        return Err(SMF_ERR_MISSING_NATIVE_LIBRARY)
+    if hdr.stub_size > hdr.header_offset:
+        return Err(SMF_ERR_MALFORMED)
+    val stub = _smf_copy_range(bytes, 0, hdr.stub_size)
+    if not _smf_has_native_library_magic(stub):
+        return Err(SMF_ERR_MISSING_NATIVE_LIBRARY)
+    Ok(stub)
+
+fn smf_extract_library_stub_for_arch(bytes: [u8], arch: Architecture) -> Result<[u8], text>:
+    """Return the embedded native shared-library stub after validating SMF metadata."""
+    val hdr_opt = smf_parse_header(bytes)
+    if hdr_opt == nil:
+        return Err(SMF_ERR_MALFORMED)
+    val hdr = hdr_opt.unwrap()
+    if hdr.role != 2:
+        return Err(SMF_ERR_WRONG_ROLE)
+    if not _smf_header_accepts_arch(hdr, arch):
+        return Err(SMF_ERR_WRONG_ARCH)
+    if hdr.abi != 0 and hdr.abi != 1:
+        return Err(SMF_ERR_ABI_MISMATCH)
+    if hdr.stub_size <= 0:
+        return Err(SMF_ERR_MISSING_NATIVE_LIBRARY)
+    if hdr.stub_size > hdr.header_offset:
+        return Err(SMF_ERR_MALFORMED)
+    val stub = _smf_copy_range(bytes, 0, hdr.stub_size)
+    if not _smf_has_native_library_magic(stub):
+        return Err(SMF_ERR_MISSING_NATIVE_LIBRARY)
     Ok(stub)
 
 fn smf_executable_entry_point_for_arch(bytes: [u8], arch: Architecture) -> Result<i64, text>:

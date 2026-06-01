@@ -1,0 +1,58 @@
+# Pure GUI SMF dynlib artifact helpers.
+#
+# Builds a role-2 SMF envelope around a native host shared library. The
+# resulting artifact is loadable by the GUI perf probe through the SMF path; the
+# extracted shared library is opened once before the hot measurement loop.
+
+val GUI_SMF_MAGIC_0: u8 = 83
+val GUI_SMF_MAGIC_1: u8 = 77
+val GUI_SMF_MAGIC_2: u8 = 70
+val GUI_SMF_MAGIC_3: u8 = 0
+val GUI_SMF_HEADER_TRAILER_SIZE: i64 = 128
+
+fn gui_smf_dynlib_arch_code(host_arch: text) -> u8:
+    match host_arch:
+        case "x86_64":
+            1u8
+        case "amd64":
+            1u8
+        case "aarch64":
+            3u8
+        case "arm64":
+            3u8
+        case _:
+            0u8
+
+fn _push_u32_le(out: [u8], value: i64) -> [u8]:
+    var bytes = out
+    bytes.push((value % 256).to_u8())
+    bytes.push(((value / 256) % 256).to_u8())
+    bytes.push(((value / 65536) % 256).to_u8())
+    bytes.push(((value / 16777216) % 256).to_u8())
+    bytes
+
+fn _push_zeroes_until(out: [u8], target_len: i32) -> [u8]:
+    var bytes = out
+    while bytes.len() < target_len:
+        bytes.push(0u8)
+    bytes
+
+fn gui_smf_wrap_native_library(dynlib_bytes: [u8], arch_code: u8) -> [u8]:
+    """Wrap native shared-library bytes in a role-2 SMF trailer envelope."""
+    var out: [u8] = []
+    for value in dynlib_bytes:
+        out.push(value)
+    val stub_len = out.len() as i64
+    out.push(GUI_SMF_MAGIC_0)
+    out.push(GUI_SMF_MAGIC_1)
+    out.push(GUI_SMF_MAGIC_2)
+    out.push(GUI_SMF_MAGIC_3)
+    out = _push_zeroes_until(out, dynlib_bytes.len() + 44)
+    out = _push_zeroes_until(out, dynlib_bytes.len() + 52)
+    out = _push_u32_le(out, stub_len)
+    out = _push_u32_le(out, stub_len)
+    out.push(2u8)
+    out.push(arch_code)
+    out.push(0u8)
+    out = _push_zeroes_until(out, dynlib_bytes.len() + (GUI_SMF_HEADER_TRAILER_SIZE as i32))
+    out
