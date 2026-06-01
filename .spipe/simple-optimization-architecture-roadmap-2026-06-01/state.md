@@ -82,3 +82,5 @@ dev-done
 - verification: PASS interpreter perf and tiered JIT smoke specs after the timeout ordering change.
 - implementation: Interpreter lane replaced formatter-based string concatenation in `src/compiler_rust/compiler/src/interpreter/expr/ops.rs` with capacity-sized `String` growth.
 - verification: PASS `cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml`; PASS string system (33), interpreter perf (10), and tiered JIT hotspot (51) interpreter specs.
+- implementation: Interpreter lane removed boxed iterator allocation from merged `CowEnv` environment scans by reusing the concrete `CowEnvIter` for `iter()`, `keys()`, and `values()`.
+- verification: PASS `cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml`; PASS interpreter perf (10), tiered JIT hotspot (51), string system (33), Node API conformance (145), WebGPU JS/WASM Simple (106), and GTK GUI repeat evidence.

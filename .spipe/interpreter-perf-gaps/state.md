@@ -204,3 +204,19 @@ Verification:
 - PASS `SIMPLE_LIB=src bin/simple test test/system/features/string_system_spec.spl --mode=interpreter --clean` (33 scenarios)
 - PASS `SIMPLE_LIB=src bin/simple test test/unit/app/interpreter/perf_spec.spl --mode=interpreter --clean` (10 scenarios)
 - PASS `SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean` (51 scenarios)
+
+## Wave 14 Progress — CowEnv merged iterator allocation (2026-06-01)
+
+`CowEnv::iter()`, `keys()`, and `values()` now reuse the existing concrete
+`CowEnvIter` instead of allocating boxed base iterators for merged environment
+walks. This keeps overlay-first/base-second iteration semantics while removing
+per-call heap allocation from environment scans used by debug locals, macro
+expansion, module/export logic, and closure/call helpers.
+
+Verification:
+- PASS `cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml`
+- PASS `SIMPLE_LIB=src bin/simple test test/unit/app/interpreter/perf_spec.spl --mode=interpreter --clean` (10 scenarios)
+- PASS `SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean` (51 scenarios)
+- PASS `SIMPLE_LIB=src bin/simple test test/system/features/string_system_spec.spl --mode=interpreter --clean` (33 scenarios)
+- PASS JS/WASM smoke: Node API conformance (145 scenarios) and WebGPU JS/WASM Simple (106 scenarios)
+- PASS GUI repeat evidence: Simple open 244 us, GTK open 68925 us, vector checksum 212444 deterministic true

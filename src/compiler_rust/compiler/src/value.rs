@@ -397,42 +397,22 @@ impl CowEnv {
 
     /// Iterate over all keys (merged, deduplicated).
     pub fn keys(&self) -> impl Iterator<Item = &String> {
-        // Overlay keys + base keys not in overlay and not tombstoned
-        let overlay_keys = self.overlay.keys();
-        let base_keys: Box<dyn Iterator<Item = &String>> = match &self.base {
-            Some(b) => Box::new(
-                b.keys()
-                    .filter(|k| !self.overlay.contains_key(k.as_str()) && !self.tombstones.contains(k.as_str())),
-            ),
-            None => Box::new(std::iter::empty()),
-        };
-        overlay_keys.chain(base_keys)
+        self.iter().map(|(k, _)| k)
     }
 
     /// Iterate over all values (merged).
     pub fn values(&self) -> impl Iterator<Item = &Value> {
-        let overlay_vals = self.overlay.iter();
-        let base_vals: Box<dyn Iterator<Item = (&String, &Value)>> = match &self.base {
-            Some(b) => Box::new(
-                b.iter()
-                    .filter(|(k, _)| !self.overlay.contains_key(k.as_str()) && !self.tombstones.contains(k.as_str())),
-            ),
-            None => Box::new(std::iter::empty()),
-        };
-        overlay_vals.chain(base_vals).map(|(_, v)| v)
+        self.iter().map(|(_, v)| v)
     }
 
     /// Iterate over all (key, value) pairs (merged).
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &Value)> {
-        let overlay_iter = self.overlay.iter();
-        let base_iter: Box<dyn Iterator<Item = (&String, &Value)>> = match &self.base {
-            Some(b) => Box::new(
-                b.iter()
-                    .filter(|(k, _)| !self.overlay.contains_key(k.as_str()) && !self.tombstones.contains(k.as_str())),
-            ),
-            None => Box::new(std::iter::empty()),
-        };
-        overlay_iter.chain(base_iter)
+    pub fn iter(&self) -> CowEnvIter<'_> {
+        CowEnvIter {
+            overlay_iter: self.overlay.iter(),
+            base_iter: self.base.as_ref().map(|b| b.iter()),
+            overlay: &self.overlay,
+            tombstones: &self.tombstones,
+        }
     }
 
     /// Extend the overlay with entries from an iterator.
