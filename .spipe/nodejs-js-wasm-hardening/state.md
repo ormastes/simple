@@ -137,3 +137,7 @@ dev-incomplete
 - dev: Added POSIX socket-boundary AI CLI network grant enforcement for
   connect, bind, and listen. `socket_compat_spec.spl` proves ungranted
   endpoints are denied with `-EACCES` before netstack IPC.
+- dev: Reconciled WebGPU JS/WASM system-test planning with current executable
+  coverage. Full WASM-originated WebGPU ABI, hardware/driver WebGPU execution,
+  CTS conformance, and pixel-stable hardware rendering are explicitly follow-up
+  scope outside this hardening goal.

@@ -176,11 +176,13 @@ Completed evidence:
    - Current browser-side asset loading, `WebAssembly.instantiate`, nested
      Promise assimilation, software WebGPU metadata, and the minimal declared
      `webgpu.requestAdapter` host import are covered.
-   - Decide whether full WASM-originated WebGPU ABI and hardware/driver-backed
-     WebGPU execution belong in this goal or become a named follow-up.
-   - Clean up `doc/03_plan/sys_test/webgpu_js_wasm_simple.md`: REQ-WGPU-001
-     through REQ-WGPU-005 still list stale "add system spec example" gaps even
-     though the traceability table and system spec show current coverage.
+   - Full WASM-originated WebGPU ABI, hardware/driver-backed WebGPU execution,
+     WebGPU CTS conformance, and pixel-stable hardware rendering are split from
+     this goal as follow-up scope. This goal keeps the current software-backed
+     metadata/API coverage and minimal declared host import callback.
+   - `doc/03_plan/sys_test/webgpu_js_wasm_simple.md` now reconciles
+     REQ-WGPU-001 through REQ-WGPU-005 with the current system-spec coverage
+     instead of listing stale "add system spec example" gaps.
    - Capture release-grade evidence for
      `test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl`; the
      focused fetch/WASM and browser host specs pass, but the full system spec
