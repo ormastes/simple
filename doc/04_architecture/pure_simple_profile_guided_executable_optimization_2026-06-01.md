@@ -51,6 +51,18 @@ Real QEMU/hardware runners belong in target capsules below
 - `breakpoint_counter_qemu.spl`: QEMU evidence normalization for all supported
   target families.
 
+Current adapter slice:
+- x86 normalizes the INT3 reported PC back to the patched address and records
+  the post-single-step resume PC.
+- ARM, Thumb, and AArch64 normalize exception PCs at the breakpoint
+  instruction and require icache maintenance.
+- RISC-V normalizes `mepc`/`sepc` at the EBREAK instruction, accounts for
+  2-byte compressed EBREAK, and requires `fence.i`.
+- QEMU evidence normalization validates arch, command, patched address,
+  original/trap bytes, hit count, trap latency, restore, rearm, cleanup, and
+  icache evidence. It fails closed for unsupported arch, trap-byte mismatch,
+  missing hits, missing restore, incomplete cleanup, or missing icache flush.
+
 ## Data Flow
 
 ```

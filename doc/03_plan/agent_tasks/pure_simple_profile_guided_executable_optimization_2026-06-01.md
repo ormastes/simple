@@ -386,8 +386,12 @@ coverage, and patch-ledger validation. Contract coverage exists at
 `test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl`. The
 architecture patch profile contract now covers x86/i386/x86_64 INT3,
 ARM32 BKPT, Thumb/Thumb2 BKPT, AArch64 BRK, RV32/RV64 EBREAK, and compressed
-RV32C/RV64C EBREAK. Actual QEMU-backed target memory/trap-handler adapters are
-the next implementation slice.
+RV32C/RV64C EBREAK. Target adapter contracts now exist in
+`breakpoint_counter_x86.spl`, `breakpoint_counter_arm.spl`,
+`breakpoint_counter_riscv.spl`, and `breakpoint_counter_qemu.spl` for
+trap-frame PC normalization and fail-closed QEMU evidence validation. Actual
+QEMU runner integration that produces the evidence lines remains the next
+implementation slice.
 
 Deliverables:
 - software-breakpoint site table;
@@ -397,6 +401,9 @@ Deliverables:
 - over-budget auto-disarm;
 - timer/sampling fallback;
 - QEMU evidence path and hardware-unavailable reporting.
+- target adapter resume plans for x86, ARM/Thumb/AArch64, and RISC-V/RVC;
+- QEMU evidence normalization with arch, command, address, bytes, hits,
+  latency, restore, rearm, cleanup, icache, and sampled-only fields.
 
 Exit gates:
 - breakpoints are removed before release execution;
@@ -414,6 +421,7 @@ Commands to design/run per slice:
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/app/optimize
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/app/compile
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check test/system/app/optimize/feature/sprof_loader_spec.spl test/system/app/compile/feature/native_profile_counter_spec.spl test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/os/baremetal/feature/breakpoint_counter_target_adapter_spec.spl --fail-fast
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean
 find doc/06_spec -name '*_spec.spl' | wc -l
 git diff --check

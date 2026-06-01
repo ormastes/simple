@@ -181,6 +181,27 @@ Missing hooks surface deterministic statuses such as `missing_memory_writer`,
 `missing_trap_handler`, `missing_icache_flush`, `missing_single_step`, and
 `missing_qemu_evidence`.
 
+### Target Adapter Evidence
+
+Architecture-specific target adapters keep trap-frame semantics out of the
+portable counter model:
+
+- `breakpoint_counter_x86.spl` treats INT3 reports as PC-after-trap and derives
+  the patched address as `reported_pc - 1`.
+- `breakpoint_counter_arm.spl` treats ARM/Thumb/AArch64 exception PCs as
+  pointing at the breakpoint instruction and advances by the encoded width after
+  restore/single-step.
+- `breakpoint_counter_riscv.spl` treats RISC-V exception PCs as pointing at
+  EBREAK, advances by 4 for normal EBREAK and 2 for compressed EBREAK, and
+  requires `fence.i`.
+- `breakpoint_counter_qemu.spl` normalizes line-oriented QEMU evidence into a
+  fail-closed record that can be compared against the architecture patch
+  profile.
+
+The next implementation slice should replace normalized evidence lines with
+actual QEMU runner output, while preserving the same validation fields so
+hardware-unavailable runs and real target-backed runs are distinguishable.
+
 ### Overhead Protection
 
 The profiler removes or downgrades a breakpoint when any condition holds:
@@ -229,9 +250,11 @@ the path is known, hot sites switch to timer/hardware/sample counters.
 7. Bare-metal auto-disarm and sampled fallback.
 8. Architecture-specific breakpoint patch profile for x86, ARM/Thumb/AArch64,
    RISC-V 32/64, and compressed RISC-V.
-9. QEMU-backed target hook adapters for x86, ARM/Thumb/AArch64, and RISC-V
-   families.
-10. Cross-mode report and verification harness.
+9. Target adapter resume plans and QEMU evidence normalization for x86,
+   ARM/Thumb/AArch64, and RISC-V/RVC families.
+10. QEMU runner integration that produces adapter evidence from real target
+   execution.
+11. Cross-mode report and verification harness.
 
 ## Open Risks
 

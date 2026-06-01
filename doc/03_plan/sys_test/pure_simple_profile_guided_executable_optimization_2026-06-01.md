@@ -19,6 +19,7 @@ Design verification for:
 | `test/system/app/compile/feature/native_profile_counter_spec.spl` | native counter ABI and disabled-counter behavior |
 | `test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl` | layout planner and rejection rules |
 | `test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl` | patch/trap/count/restore/auto-disarm state machine |
+| `test/system/os/baremetal/feature/breakpoint_counter_target_adapter_spec.spl` | x86, ARM/Thumb/AArch64, RISC-V/RVC target adapter resume and QEMU evidence normalization |
 
 Executable specs must live under `test/`; generated/manual docs mirror under
 `doc/06_spec/`.
@@ -73,6 +74,7 @@ SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/app/co
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/app/optimize/feature/profile_layout_cli_spec.spl --mode=interpreter --clean
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl --mode=interpreter --clean
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/system/os/baremetal/feature/breakpoint_counter_target_adapter_spec.spl --mode=interpreter --clean
 SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean
 ```
 

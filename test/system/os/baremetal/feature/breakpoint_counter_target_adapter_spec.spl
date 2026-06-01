@@ -1,0 +1,79 @@
+# codex-system-test
+# Contract tests for target-backed software-breakpoint adapter evidence.
+
+use std.spec.{describe, it, expect}
+use os.baremetal.profile.breakpoint_counter_x86.{breakpoint_x86_resume_plan, breakpoint_x86_qemu_target}
+use os.baremetal.profile.breakpoint_counter_arm.{breakpoint_arm_resume_plan, breakpoint_arm_qemu_target}
+use os.baremetal.profile.breakpoint_counter_riscv.{breakpoint_riscv_resume_plan, breakpoint_riscv_qemu_target}
+use os.baremetal.profile.breakpoint_counter_qemu.{breakpoint_qemu_evidence_from_line}
+
+describe "Bare-metal Breakpoint Target Adapter Contract":
+    describe "x86 trap frame normalization":
+        it "should normalize x86 and x86_64 INT3 reported PCs":
+            val x86 = breakpoint_x86_resume_plan("i386", 4097)
+            expect(x86.valid).to_equal(true)
+            expect(x86.patched_address).to_equal(4096)
+            expect(x86.restore_pc).to_equal(4096)
+            expect(x86.resume_pc_after_single_step).to_equal(4097)
+            expect(x86.trap_width_bytes).to_equal(1)
+            expect(breakpoint_x86_qemu_target("i386")).to_equal("qemu-system-i386")
+            expect(breakpoint_x86_qemu_target("x86_64")).to_equal("qemu-system-x86_64")
+
+    describe "ARM and Thumb trap frame normalization":
+        it "should normalize ARM32, Thumb, and AArch64 resume PCs":
+            val arm = breakpoint_arm_resume_plan("arm32", 8192)
+            expect(arm.valid).to_equal(true)
+            expect(arm.restore_pc).to_equal(8192)
+            expect(arm.resume_pc_after_single_step).to_equal(8196)
+            expect(arm.patch_width_bytes).to_equal(4)
+            expect(arm.requires_icache_flush).to_equal(true)
+
+            val thumb = breakpoint_arm_resume_plan("thumb", 8200)
+            expect(thumb.valid).to_equal(true)
+            expect(thumb.resume_pc_after_single_step).to_equal(8202)
+            expect(thumb.patch_width_bytes).to_equal(2)
+
+            val arm64 = breakpoint_arm_resume_plan("aarch64", 12288)
+            expect(arm64.valid).to_equal(true)
+            expect(arm64.resume_pc_after_single_step).to_equal(12292)
+            expect(breakpoint_arm_qemu_target("aarch64")).to_equal("qemu-system-aarch64")
+
+    describe "RISC-V trap frame normalization":
+        it "should normalize RV32 RV64 and compressed RVC resume PCs":
+            val rv32 = breakpoint_riscv_resume_plan("riscv32", 16384)
+            expect(rv32.valid).to_equal(true)
+            expect(rv32.restore_pc).to_equal(16384)
+            expect(rv32.resume_pc_after_single_step).to_equal(16388)
+            expect(rv32.patch_width_bytes).to_equal(4)
+            expect(rv32.requires_fence_i).to_equal(true)
+            expect(rv32.compressed).to_equal(false)
+
+            val rvc = breakpoint_riscv_resume_plan("riscv64c", 16400)
+            expect(rvc.valid).to_equal(true)
+            expect(rvc.resume_pc_after_single_step).to_equal(16402)
+            expect(rvc.patch_width_bytes).to_equal(2)
+            expect(rvc.compressed).to_equal(true)
+            expect(breakpoint_riscv_qemu_target("riscv64c")).to_equal("qemu-system-riscv64")
+
+    describe "QEMU evidence normalization":
+        it "should accept complete target-backed evidence":
+            val evidence = breakpoint_qemu_evidence_from_line(
+                "arch=riscv64c;qemu=qemu-system-riscv64;address=16400;original=02 90;trap=02 90;hits=2;latency_us=40;restored=true;rearmed=true;cleanup=true;icache=true;sampled=none"
+            )
+            expect(evidence.valid).to_equal(true)
+            expect(evidence.arch).to_equal("riscv64c")
+            expect(evidence.hit_count).to_equal(2)
+            expect(evidence.status).to_equal("valid")
+
+        it "should fail closed for missing target evidence":
+            val missing_icache = breakpoint_qemu_evidence_from_line(
+                "arch=aarch64;qemu=qemu-system-aarch64;address=12288;original=1f 20 03 d5;trap=00 00 20 d4;hits=1;latency_us=60;restored=true;rearmed=true;cleanup=true;icache=false;sampled=none"
+            )
+            expect(missing_icache.valid).to_equal(false)
+            expect(missing_icache.status).to_equal("missing_icache_flush")
+
+            val wrong_trap = breakpoint_qemu_evidence_from_line(
+                "arch=x86_64;qemu=qemu-system-x86_64;address=4096;original=90;trap=00;hits=1;latency_us=10;restored=true;rearmed=true;cleanup=true;icache=false;sampled=none"
+            )
+            expect(wrong_trap.valid).to_equal(false)
+            expect(wrong_trap.status).to_equal("trap_bytes_mismatch")
