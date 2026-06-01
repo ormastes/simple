@@ -14,14 +14,14 @@ use app.optimize.profile_layout_cli.{
 
 pub fn profile_layout_native_smoke_source_text() -> text:
     [
-        "fn dispatch() -> i64:",
-        "    7",
+        "fn rare() -> i64:",
+        "    0",
         "",
         "fn parse() -> i64:",
         "    dispatch()",
         "",
-        "fn rare() -> i64:",
-        "    0",
+        "fn dispatch() -> i64:",
+        "    7",
         "",
         "fn main() -> i64:",
         "    parse()"
@@ -57,9 +57,34 @@ fn _profile_layout_native_smoke_measure_ms(binary_path: text, iterations: i64) -
         return 0
     elapsed / 1000
 
-fn _profile_layout_native_smoke_compile_c(c_path: text, binary_path: text) -> i64:
-    val (_, _, exit_code) = shell("clang++ -std=c++20 -O2 " + c_path + " -o " + binary_path + " -lpthread -ldl -lm >/dev/null 2>&1")
+fn _profile_layout_native_smoke_mangled_static_cpp_symbol(name: text) -> text:
+    "_ZL" + name.len().to_string() + name + "v"
+
+fn _profile_layout_native_smoke_mangled_symbol_order(symbol_order_text: text) -> text:
+    var lines: [text] = []
+    val symbols = symbol_order_text.split("\n")
+    var i = 0
+    while i < symbols.len():
+        val symbol = symbols[i].trim()
+        if symbol != "":
+            lines.push(_profile_layout_native_smoke_mangled_static_cpp_symbol(symbol))
+        i = i + 1
+    lines.join("\n") + "\n"
+
+fn _profile_layout_native_smoke_compile_c(c_path: text, binary_path: text, symbol_order_path: text) -> i64:
+    var order_flags = ""
+    if symbol_order_path != "":
+        order_flags = "-fuse-ld=lld -Wl,--symbol-ordering-file=" + symbol_order_path + " "
+    val (_, _, exit_code) = shell("clang++ -std=c++20 -O2 " + order_flags + c_path + " -o " + binary_path + " -lpthread -ldl -lm >/dev/null 2>&1")
     exit_code
+
+fn _profile_layout_native_smoke_matching_symbols(binary_path: text) -> text:
+    val (out, _, _) = shell("nm -an " + binary_path + " 2>/dev/null | grep -E '(_ZL8dispatchv|_ZL5parsev|_ZL4rarev)' || true")
+    out
+
+fn _profile_layout_native_smoke_profile_counter_symbol_count(binary_path: text) -> i64:
+    val (out, _, _) = shell("nm -an " + binary_path + " 2>/dev/null | grep -c '__simple_profile' || true")
+    out.trim().to_i64() ?? -1
 
 pub fn profile_layout_native_smoke_run(work_dir: text, iterations: i64) -> ProfileLayoutNativeEvidence:
     val root = if work_dir == "": "/tmp/simple_profile_layout_native_smoke_" + rt_getpid().to_string() else: work_dir
@@ -70,6 +95,7 @@ pub fn profile_layout_native_smoke_run(work_dir: text, iterations: i64) -> Profi
     val baseline_path = root + "/baseline"
     val optimized_path = root + "/optimized"
     val section_map_path = root + "/demo.layout.h"
+    val symbol_order_path = root + "/demo.symbol-order"
 
     val source_text = profile_layout_native_smoke_source_text()
     val manifest_text = profile_layout_native_smoke_manifest_text()
@@ -79,23 +105,30 @@ pub fn profile_layout_native_smoke_run(work_dir: text, iterations: i64) -> Profi
     val section_map = profile_layout_build_artifact(manifest_text, profile_text, "simple-c-section-map", 4096, 8192, 500, 2)
     if section_map.status == "ok":
         file_write(section_map_path, section_map.manifest_text)
+    val symbol_order = profile_layout_build_artifact(manifest_text, profile_text, "native-symbol-order", 4096, 8192, 500, 2)
+    if symbol_order.status == "ok":
+        file_write(symbol_order_path, _profile_layout_native_smoke_mangled_symbol_order(symbol_order.manifest_text))
 
     val generated_c = llvm_direct_minimal_c_source_from_simple(source_path)
     file_write(baseline_c_path, generated_c)
     val mapped = native_layout_apply_c_section_map(generated_c, section_map.manifest_text, section_map.status == "ok")
     file_write(optimized_c_path, mapped.c_source)
-    val baseline_exit = _profile_layout_native_smoke_compile_c(baseline_c_path, baseline_path)
-    val optimized_exit = _profile_layout_native_smoke_compile_c(optimized_c_path, optimized_path)
+    val baseline_exit = _profile_layout_native_smoke_compile_c(baseline_c_path, baseline_path, "")
+    val optimized_exit = _profile_layout_native_smoke_compile_c(optimized_c_path, optimized_path, symbol_order_path)
 
     val baseline_ms = if baseline_exit == 0: _profile_layout_native_smoke_measure_ms(baseline_path, iterations) else: 0
     val optimized_ms = if optimized_exit == 0: _profile_layout_native_smoke_measure_ms(optimized_path, iterations) else: 0
     val baseline_size = if baseline_exit == 0: file_size(baseline_path) else: 0
     val optimized_size = if optimized_exit == 0: file_size(optimized_path) else: 0
+    val optimized_symbol_order_text = if optimized_exit == 0: _profile_layout_native_smoke_matching_symbols(optimized_path) else: ""
+    val non_profile_counter_symbol_count = if baseline_exit == 0: _profile_layout_native_smoke_profile_counter_symbol_count(baseline_path) else: -1
 
     profile_layout_native_evidence_report(
         manifest_text,
         profile_text,
         generated_c,
+        optimized_symbol_order_text,
+        non_profile_counter_symbol_count,
         baseline_ms,
         optimized_ms,
         baseline_size,

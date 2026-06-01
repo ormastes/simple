@@ -125,10 +125,14 @@ diagnostic-only.
    be preserved or explicitly regenerated.
 7. Emit an optimization manifest mapping original offsets to optimized offsets.
 8. Emit native symbol-order text and a generated-C section map from the same
-   validated plan.
+   validated plan. The native evidence smoke writes the symbol-order file,
+   links the optimized generated-C binary with `lld
+   --symbol-ordering-file=<generated-order>`, and verifies final `nm -an`
+   symbol order before accepting layout evidence.
 9. Build a native evidence report that requires measured baseline runtime,
    optimized runtime, baseline size, optimized size, and successful generated-C
-   section-map application before accepting a speedup claim.
+   section-map application before accepting a speedup claim. Non-profile
+   baseline binaries must also prove zero `__simple_profile*` counter symbols.
 
 ### Output
 

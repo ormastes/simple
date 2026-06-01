@@ -240,6 +240,38 @@ Remaining larger gaps:
 - measured before/after executable performance evidence for the full
   profile-counter -> `.sprof` -> layout-map -> native build flow.
 
+## Restart Checkpoint: 2026-06-01 Native Symbol-Order Evidence
+
+Implemented in the current slice:
+- `src/app/optimize/profile_layout_native_smoke.spl`
+  - writes the Simple-generated `native-symbol-order` artifact beside the
+    generated-C section map;
+  - maps the Simple symbols to the generated C++ static symbol spelling used by
+    this native lane;
+  - links the optimized smoke binary with `lld` and
+    `--symbol-ordering-file=<generated-order>`;
+  - records `nm -an` evidence for the final optimized binary;
+  - records that the non-profile baseline binary has zero
+    `__simple_profile*` counter symbols.
+- `src/app/optimize/profile_layout_cli.spl`
+  - extends `ProfileLayoutNativeEvidence` with final native symbol-order text,
+    a verified order boolean, and the non-profile counter-symbol count;
+  - rejects native evidence when the optimized binary does not prove
+    `dispatch -> parse -> rare` order or when non-profile builds contain
+    counter symbols.
+- `test/system/app/optimize/feature/profile_layout_native_smoke_spec.spl`
+  - now asserts final optimized native symbol order and zero counter leakage in
+    the non-profile build.
+- `test/system/app/optimize/feature/profile_layout_cli_spec.spl`
+  - covers the stricter evidence contract and the missing-order rejection path.
+
+This closes the prior smoke-only weakness where the generated-C section map was
+applied but the final native binary order was not inspected.
+
+Remaining larger gaps:
+- measured before/after executable performance evidence for the full
+  profile-counter -> `.sprof` -> layout-map -> native build flow.
+
 ## Restart Checkpoint: 2026-06-01 QEMU Breakpoint Runner Bridge
 
 Implemented in the current slice:

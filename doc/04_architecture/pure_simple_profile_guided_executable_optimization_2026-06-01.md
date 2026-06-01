@@ -137,8 +137,12 @@ Simple-emitted header, validates that all section directives target
 `.text.simple.*`, injects the corresponding attributes into generated C, and
 fails closed when a requested symbol is not present. The optimizer bridge now
 also produces a native evidence report that requires successful section-map
-application plus measured baseline/optimized runtime and size before reporting
-speedup or regression. This keeps layout
+application, measured baseline/optimized runtime and size, final `nm -an`
+symbol-order proof from the linked optimized binary, and zero
+`__simple_profile*` symbols in the non-profile baseline before reporting
+speedup or regression. The current native smoke feeds the Simple-generated
+symbol-order artifact to `lld --symbol-ordering-file`, so the evidence proves
+native link placement rather than only C-source annotation. This keeps layout
 optimization in the Simple/C boundary while still allowing the platform C
 toolchain to place functions into optimizer-selected text sections.
 
