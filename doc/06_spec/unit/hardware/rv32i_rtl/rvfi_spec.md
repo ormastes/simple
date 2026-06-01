@@ -112,6 +112,67 @@ expect rvfi_mask_for_width(2) == 0xF
 
 </details>
 
+#### extracts RVFI snapshot from the actual core datapath
+
+1. check
+
+2. check
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val insn = 0x00108293  # addi x5, x1, 1
+val rf0 = regfile_create()
+val rf1 = regfile_write(rf0, 1, 41, true)
+val state = core_reset(0x1000)
+val comb = core_combinational(state, insn, 0, rf1)
+val snapshot = core_rvfi_snapshot(state, insn, 0, comb)
+expect snapshot.pc == 0x1000
+expect snapshot.pc_next == 0x1004
+expect snapshot.rs1_addr == 1
+expect snapshot.rs1_rdata == 41
+expect snapshot.rd_addr == 5
+expect snapshot.rd_wdata == 42
+check(not snapshot.dmem_re)
+check(not snapshot.dmem_we)
+```
+
+</details>
+
+#### builds optional RVFI output from core signals
+
+1. check
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val insn = 0x00108293  # addi x5, x1, 1
+val rf0 = regfile_create()
+val rf1 = regfile_write(rf0, 1, 6, true)
+val state = core_reset(0x2000)
+val comb = core_combinational(state, insn, 0, rf1)
+val trace = core_rvfi_trace(rvfi_enabled_config(100), 2, state, insn, 0, comb)
+check(trace.rvfi_valid)
+expect trace.rvfi_order == 102
+expect trace.rvfi_insn == insn
+expect trace.rvfi_pc_rdata == 0x2000
+expect trace.rvfi_pc_wdata == 0x2004
+expect trace.rvfi_rd_addr == 5
+expect trace.rvfi_rd_wdata == 7
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -132,8 +193,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

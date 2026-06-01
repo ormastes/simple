@@ -23,6 +23,7 @@ use std.hardware.rv32i_rtl.decode.{DecodeResult, decode_instruction}
 use std.hardware.rv32i_rtl.alu.{AluResult, alu_compute, u32_signed_lt}
 use std.hardware.rv32i_rtl.regfile.{RegFile, RegReadResult, regfile_read}
 use std.hardware.rv32i_rtl.lsu.lsu_load
+use std.hardware.rv32i_rtl.rvfi.{RvfiConfig, RvfiCoreSnapshot, RvfiTrace, rvfi_trace_from_snapshot}
 
 # ============================================================================
 # Core sequential state (clocked registers)
@@ -307,6 +308,41 @@ fn core_ports(state: CoreState, comb: CoreCombResult) -> CorePorts:
         semi_op: state.semi_op,
         semi_param: state.semi_param
     )
+
+# ============================================================================
+# RVFI extraction
+# ============================================================================
+
+fn core_rvfi_snapshot(state: CoreState, imem_data: u32, dmem_rdata: u32, comb: CoreCombResult) -> RvfiCoreSnapshot:
+    """Extract the current retired-instruction view for RVFI/formal wrappers."""
+    var rd_wdata: u32 = 0
+    if comb.dec.reg_write and comb.dec.rd != 0:
+        rd_wdata = comb.rd_data
+
+    RvfiCoreSnapshot(
+        halted: state.halt,
+        suppress: state.semi_suppress,
+        pc: state.pc,
+        pc_next: comb.pc_next,
+        insn: imem_data,
+        rs1_addr: comb.dec.rs1,
+        rs2_addr: comb.dec.rs2,
+        rs1_rdata: comb.rs1_data,
+        rs2_rdata: comb.rs2_data,
+        rd_addr: comb.dec.rd,
+        rd_wdata: rd_wdata,
+        dmem_addr: comb.dmem_addr,
+        dmem_width: comb.dmem_width,
+        dmem_re: comb.dmem_re,
+        dmem_we: comb.dmem_we,
+        dmem_rdata: dmem_rdata,
+        dmem_wdata: comb.dmem_wdata
+    )
+
+fn core_rvfi_trace(config: RvfiConfig, order: i64, state: CoreState, imem_data: u32, dmem_rdata: u32, comb: CoreCombResult) -> RvfiTrace:
+    """Build the optional RVFI output bundle for the current core cycle."""
+    val snapshot = core_rvfi_snapshot(state, imem_data, dmem_rdata, comb)
+    rvfi_trace_from_snapshot(config, order, snapshot)
 
 # ============================================================================
 # Reset state
