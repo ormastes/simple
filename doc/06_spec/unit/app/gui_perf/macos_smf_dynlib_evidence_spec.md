@@ -48,7 +48,7 @@ expect(paths.probe_path).to_equal("build/gui/smf_dynlib_probe")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -65,6 +65,8 @@ expect(gui_mac_smf_dynlib_qemu_parity_command(paths)).to_contain("SIMPLE_GUI_DYN
 expect(gui_mac_smf_dynlib_qemu_loader_parity_command(paths)).to_contain("run src/app/gui_perf/qemu_arm64_smf_loader_parity_evidence.spl")
 expect(gui_mac_smf_dynlib_qemu_loader_parity_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARTIFACT='build/gui/pure_gui_hot.smf'")
 expect(gui_mac_smf_dynlib_probe_command(paths)).to_contain("SIMPLE_GUI_DYNLIB_ARTIFACT='build/gui/pure_gui_hot.smf'")
+expect(gui_mac_smf_dynlib_probe_command_with_host(paths, "macos-arm64", "Apple M3")).to_contain("SIMPLE_GUI_DYNLIB_HOST_PROFILE='macos-arm64'")
+expect(gui_mac_smf_dynlib_probe_command_with_host(paths, "macos-arm64", "Apple M3")).to_contain("SIMPLE_GUI_DYNLIB_HOST_CPU='Apple M3'")
 ```
 
 </details>
@@ -156,17 +158,19 @@ expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(wrong_adapter)).to_equa
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val good = "GUI_DYNLIB_PERF artifact=build/gui/pure_gui_hot.smf dynlib_path=build/gui/pure_gui_hot.smf.extracted.dylib host_os=macos host_arch=arm64 loader=smf_dynlib symbol=gui_dynlib_hot_probe_tick call_source=dynlib_symbol_call samples=128 expected_samples=128 warmup=16 p50_us=1 p95_us=1 p99_us=1 max_us=1 threshold_us=1000 pass=true error="
+val good = "GUI_DYNLIB_PERF artifact=build/gui/pure_gui_hot.smf dynlib_path=build/gui/pure_gui_hot.smf.extracted.dylib host_os=macos host_arch=arm64 host_profile=macos-arm64 host_cpu=Apple_M3 loader=smf_dynlib symbol=gui_dynlib_hot_probe_tick call_source=dynlib_symbol_call samples=128 expected_samples=128 warmup=16 p50_us=1 p95_us=1 p99_us=1 max_us=1 threshold_us=1000 pass=true error="
 val host = good.replace("loader=smf_dynlib", "loader=host_dynlib")
 val direct = good.replace("call_source=dynlib_symbol_call", "call_source=direct_simple")
 val fail = good.replace("pass=true error=", "pass=false error=not-smf-dynlib")
 val wrong_cache = good.replace("dynlib_path=build/gui/pure_gui_hot.smf.extracted.dylib", "dynlib_path=")
 val wrong_host = good.replace("host_os=macos", "host_os=linux")
 val wrong_arch = good.replace("host_arch=arm64", "host_arch=x86_64")
+val wrong_profile = good.replace("host_profile=macos-arm64", "host_profile=linux-x86_64")
+val missing_cpu = good.replace("host_cpu=Apple_M3", "host_cpu=unknown")
 val wrong_symbol = good.replace("symbol=gui_dynlib_hot_probe_tick", "symbol=other_symbol")
 val partial_samples = good.replace("samples=128", "samples=64")
 val wrong_expected = good.replace("expected_samples=128", "expected_samples=64")
@@ -183,6 +187,8 @@ expect(gui_mac_smf_dynlib_accepts_probe_row(fail)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_cache)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_host)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_arch)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_profile)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(missing_cpu)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_symbol)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(partial_samples)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_expected)).to_equal(false)
