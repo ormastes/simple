@@ -27,12 +27,13 @@ expect(stats.max_us).to_equal(900)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val report = gui_dynlib_perf_report(
     "build/gui/pure_gui.smf",
+    "build/gui/pure_gui.smf.extracted.so",
     "smf_dynlib",
     "gui_dynlib_hot_probe_tick",
     "dynlib_symbol_call",
@@ -54,12 +55,13 @@ expect(report.stats.p99_us).to_equal(990)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val report = gui_dynlib_perf_report(
     "build/gui/pure_gui.smf",
+    "",
     "interpreter",
     "gui_dynlib_hot_probe_tick",
     "direct_simple",
@@ -80,12 +82,13 @@ expect(report.error).to_equal("not-smf-dynlib")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val report = gui_dynlib_perf_report(
     "build/gui/pure_gui.smf",
+    "",
     "smf_dynlib",
     "gui_dynlib_hot_probe_tick",
     "dynlib_symbol_call",
@@ -106,12 +109,13 @@ expect(report.error).to_equal("symbol-not-resolved")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val report = gui_dynlib_perf_report(
     "build/gui/pure_gui.smf",
+    "build/gui/pure_gui.smf.extracted.so",
     "smf_dynlib",
     "gui_dynlib_hot_probe_tick",
     "dynlib_symbol_call",
@@ -132,12 +136,13 @@ expect(report.error).to_equal("p99-over-threshold")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val report = gui_dynlib_perf_report(
     "build/gui/pure_gui.smf",
+    "build/gui/pure_gui.smf.extracted.so",
     "smf_dynlib",
     "gui_dynlib_hot_probe_tick",
     "dynlib_symbol_call",
@@ -149,6 +154,7 @@ val report = gui_dynlib_perf_report(
 )
 val row = gui_dynlib_perf_report_row(report)
 expect(row.contains("GUI_DYNLIB_PERF")).to_equal(true)
+expect(row.contains("dynlib_path=build/gui/pure_gui.smf.extracted.so")).to_equal(true)
 expect(row.contains("loader=smf_dynlib")).to_equal(true)
 expect(row.contains("call_source=dynlib_symbol_call")).to_equal(true)
 expect(row.contains("p99_us=100")).to_equal(true)
@@ -161,12 +167,13 @@ expect(row.contains("p99_us=100")).to_equal(true)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val report = gui_dynlib_perf_report(
     "build/gui/pure_gui.smf",
+    "",
     "smf_dynlib",
     "gui_dynlib_hot_probe_tick",
     "direct_simple",
@@ -187,12 +194,13 @@ expect(report.error).to_equal("not-dynlib-hot-call")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val report = gui_dynlib_perf_report(
     "build/gui/pure_gui.smf",
+    "",
     "smf_dynlib",
     "gui_dynlib_hot_probe_tick",
     "registry_symbol_only",
