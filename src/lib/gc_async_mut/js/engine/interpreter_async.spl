@@ -131,6 +131,9 @@ impl JsInterpreter:
         val handlers_id = self.create_object()
         self.set_object_property(handlers_id, "length", JsValue.Number(v: 0.0))
         self.set_object_property(promise_id, "__simple_handlers", JsValue.Array(id: handlers_id))
+        self._define_method_on(promise_id, "then", NATIVE_PROMISE_THEN)
+        self._define_method_on(promise_id, "catch", NATIVE_PROMISE_CATCH)
+        self._define_method_on(promise_id, "finally", NATIVE_PROMISE_FINALLY)
         promise_id
 
     me _create_settled_promise_object(value: JsValue, rejected: bool) -> i64:
@@ -166,7 +169,25 @@ impl JsInterpreter:
         handler_id
 
     me _append_handler(promise_id: i64, handler_id: i64):
-        self.promise_handler_registrations = self.promise_handler_registrations + [PromiseHandlerRegistration.create(promise_id, handler_id)]
+        var on_fulfilled = -1
+        var on_rejected = -1
+        var next_promise_id = -1
+        var kind = "then"
+        var hi = 0
+        while hi < self.promise_handlers.len():
+            val handler = self.promise_handlers[hi]
+            if handler.id == handler_id:
+                on_fulfilled = handler.on_fulfilled
+                on_rejected = handler.on_rejected
+                next_promise_id = handler.next_promise_id
+                kind = handler.kind
+                hi = self.promise_handlers.len()
+            hi = hi + 1
+        self.set_object_property(promise_id, "__simple_handler_on_fulfilled:{handler_id}", JsValue.Number(v: on_fulfilled.to_f64()))
+        self.set_object_property(promise_id, "__simple_handler_on_rejected:{handler_id}", JsValue.Number(v: on_rejected.to_f64()))
+        self.set_object_property(promise_id, "__simple_handler_next:{handler_id}", JsValue.Number(v: next_promise_id.to_f64()))
+        self.set_object_property(promise_id, "__simple_handler_kind:{handler_id}", JsValue.String(v: kind))
+        self.promise_handler_registrations = self.promise_handler_registrations + [PromiseHandlerRegistration.create(promise_id, handler_id, on_fulfilled, on_rejected, next_promise_id, kind)]
 
     me _promise_id_for_request_id(request_id: text) -> i64:
         var obj_id = 0
@@ -182,6 +203,39 @@ impl JsInterpreter:
 
     me _enqueue_promise_task(promise_id: i64, handler_id: i64):
         self.pending_promise_tasks = self.pending_promise_tasks + [PendingPromiseTask.create(promise_id, handler_id)]
+
+    me _invoke_promise_callback(fn_id: i64, arg_vals: [JsValue]) -> BrowserResult<JsValue>:
+        if fn_id < 0 or fn_id >= self.functions.len():
+            return Ok(JsValue.Undefined)
+        val js_fn = self.functions.get(fn_id)
+        val fn_env = self.env_stack.create_env(js_fn.closure_env)
+        var gi = 0
+        while gi < self.global_var_names.len():
+            self.env_stack.define_var(fn_env, self.global_var_names.get(gi), self.global_var_values.get(gi))
+            gi = gi + 1
+        var pi = 0
+        while pi < js_fn.params.len():
+            var pv = JsValue.Undefined
+            if pi < arg_vals.len():
+                pv = arg_vals.get(pi)
+            self.env_stack.define_var(fn_env, js_fn.params.get(pi), pv)
+            pi = pi + 1
+        self.env_stack.define_var(fn_env, "this", JsValue.Undefined)
+        val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: JsValue.Undefined)
+        self.call_stack.push(frame)
+        val saved = self.control_return
+        self.control_return = false
+        var result = JsValue.Undefined
+        var bi = 0
+        while bi < js_fn.body.len():
+            result = self.exec_statement(js_fn.body.get(bi), fn_env)?
+            if self.control_return:
+                result = self.return_value
+                break
+            bi = bi + 1
+        self.call_stack.pop()
+        self.control_return = saved
+        Ok(result)
 
     me _resolve_promise_from_callback_result(next_promise_id: i64, value: JsValue, rejected: bool) -> bool:
         var next_value = value
@@ -241,15 +295,28 @@ impl JsInterpreter:
                         var on_fulfilled = -1
                         var on_rejected = -1
                         var next_promise_id = -1
+                        match self.get_object_property(promise_id, "__simple_handler_on_fulfilled:{handler_id}"):
+                            JsValue.Number(v): on_fulfilled = f64_to_i64(v)
+                            _: pass_dn
+                        match self.get_object_property(promise_id, "__simple_handler_on_rejected:{handler_id}"):
+                            JsValue.Number(v): on_rejected = f64_to_i64(v)
+                            _: pass_dn
+                        match self.get_object_property(promise_id, "__simple_handler_next:{handler_id}"):
+                            JsValue.Number(v): next_promise_id = f64_to_i64(v)
+                            _: pass_dn
+                        match self.get_object_property(promise_id, "__simple_handler_kind:{handler_id}"):
+                            JsValue.String(v): handler_kind = v
+                            _: pass_dn
                         var hi = 0
-                        while hi < self.promise_handlers.len():
-                            val handler = self.promise_handlers[hi]
-                            if handler.id == handler_id:
-                                handler_kind = handler.kind
-                                on_fulfilled = handler.on_fulfilled
-                                on_rejected = handler.on_rejected
-                                next_promise_id = handler.next_promise_id
-                                hi = self.promise_handlers.len()
+                        while hi < self.promise_handler_registrations.len():
+                            val registration = self.promise_handler_registrations[hi]
+                            if registration.promise_id == promise_id and registration.handler_id == handler_id:
+                                if next_promise_id < 0:
+                                    handler_kind = registration.kind
+                                    on_fulfilled = registration.on_fulfilled
+                                    on_rejected = registration.on_rejected
+                                    next_promise_id = registration.next_promise_id
+                                hi = self.promise_handler_registrations.len()
                             hi = hi + 1
 
                         var callback_id = -1
@@ -265,7 +332,7 @@ impl JsInterpreter:
                             callback_id = if state == "fulfilled": on_fulfilled else: on_rejected
 
                         if callback_id >= 0:
-                            val result = self._invoke_function(callback_id, [settled_value], self.global_env)
+                            val result = self._invoke_promise_callback(callback_id, [settled_value])
                             match result:
                                 Ok(callback_result):
                                     if handler_kind == "finally":

@@ -2,9 +2,8 @@
 # WebGPU JS/WASM/Simple end-to-end example specifications.
 #
 # These examples intentionally use only built-in SPipe matchers and current
-# repo APIs. The final WASM-to-WebGPU browser bridge test is written as a
-# failing specification target until WebAssembly.instantiate is exposed through
-# BrowserSession.
+# repo APIs. Direct WASM-to-WebGPU host calls remain out of scope; the browser
+# bridge path covers fetched WASM bytes plus JS WebGPU APIs in one session.
 
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.script.canvas_api.{
@@ -21,7 +20,6 @@ use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserResponse}
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.js.types.js_types.{JsValue}
-use std.gc_async_mut.file_system.file_ops.{file_write_text}
 use compiler.backend.backend.backend_types.{CodegenTarget, CompileOptions, OptimizationLevel}
 use compiler.backend.backend.wasm_codegen_adapter.{WasmCodegenAdapter}
 use compiler.mir.mir_data.{MirModule}
@@ -309,20 +307,20 @@ describe "WebGPU JS WASM Simple system examples":
         it "should chain fetch arrayBuffer bytes into WebAssembly.instantiate through BrowserSession":
             var session = BrowserSession.new()
             session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
-            val queued = session.eval_script("var out = ''; window.fetch('/mod.wasm'); 'queued'")
+            val queued = session.eval_script("var out = ''; var stages = ''; window.fetch('/mod.wasm').then(function(r) { stages = stages + 'fetch>'; return r.arrayBuffer(); }).then(function(bytes) { stages = stages + 'arrayBuffer:' + bytes.byteLength + '>'; return WebAssembly.instantiate(bytes); }).then(function(result) { out = stages + 'instantiate:' + result.status + ':' + result.module.byteLength + ':' + result.module.sectionCount + ':' + typeof result.instance.exports; }); 'queued'")
             match queued:
                 Ok(value):
-                    val _dbg1 = file_write_text("build/tmp_webgpu_fetch_wasm_debug.txt", "queued=" + _display_js(value))
-                    print "queued-result={_display_js(value)}"
-                    expect(_display_js(value).len()).to_be_greater_than(0)
+                    expect(_display_js(value)).to_equal("queued")
                 Err(err):
-                    val _dbg2 = file_write_text("build/tmp_webgpu_fetch_wasm_debug.txt", "queue_err=" + err)
-                    print "queued-error={err}"
                     expect("unexpected queue error: {err}").to_equal("")
+            match session.eval_script("out"):
+                Ok(value):
+                    expect(_display_js(value)).to_equal("")
+                Err(err):
+                    expect("unexpected pre-commit js error: {err}").to_equal("")
 
             match session.take_pending_request():
                 Some(request):
-                    print "request-kind={request.kind} url={request.url}"
                     expect(request.kind).to_equal("fetch")
                     expect(request.url).to_equal("https://example.com/mod.wasm")
                     val committed = session.commit_network_response(BrowserResponse.create(
@@ -331,7 +329,7 @@ describe "WebGPU JS WASM Simple system examples":
                         url: request.url,
                         status: 200,
                         headers: "Content-Type: application/wasm\n",
-                        body: "0061736d01000000",
+                        body: "0061736d01000000010100",
                         error: ""
                     ))
                     match committed:
@@ -339,18 +337,12 @@ describe "WebGPU JS WASM Simple system examples":
                             val result = session.eval_script("out")
                             match result:
                                 Ok(value):
-                                    val _dbg3 = file_write_text("build/tmp_webgpu_fetch_wasm_debug.txt", "final=" + _display_js(value))
-                                    print "final-out={_display_js(value)}"
-                                    expect(_display_js(value)).to_equal("instantiated:8:object")
+                                    expect(_display_js(value)).to_equal("fetch>arrayBuffer:11>instantiate:instantiated:11:1:object")
                                 Err(err):
-                                    val _dbg4 = file_write_text("build/tmp_webgpu_fetch_wasm_debug.txt", "final_err=" + err)
-                                    print "final-error={err}"
                                     expect("unexpected js error: {err}").to_equal("")
                         Err(err):
-                            print "commit-error={err}"
                             expect("unexpected commit error: {err}").to_equal("")
                 nil:
-                    print "missing-request"
                     expect("missing fetch request").to_equal("")
 
         it "should expose thenable WebAssembly.compile result shape through BrowserSession":
