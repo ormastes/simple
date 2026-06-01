@@ -5,8 +5,15 @@
 # presents through the winit buffer backend.
 
 use common.window_protocol.geometry.{Size}
+use os.compositor.host_compositor_entry.{
+    HostCompositor,
+    host_compositor_cycle_focus,
+    host_compositor_focused_window_id,
+    host_compositor_minimize_focused,
+    host_compositor_restore_all
+}
 use os.compositor.hosted_backend_winit.{HostedWinitBufferBackend}
-use os.compositor.simple_gui_hosted_wm.{SimpleGuiHostedWm}
+use os.compositor.shared_mdi_host_seed.{seed_host_compositor_shared_mdi}
 
 extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
@@ -16,6 +23,8 @@ extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
 extern fn rt_winit_event_mouse_moved(ev: i64) -> (i32, i32)
 extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
 extern fn rt_winit_event_free(ev: i64)
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
 extern fn rt_time_now_unix_micros() -> i64
 
 val WINDOW_WIDTH: i32 = 1024
@@ -35,7 +44,7 @@ val KEY_W: i64 = 87
 
 fn main() -> i64:
     print "SimpleOS shared hosted WM ({WINDOW_WIDTH}x{WINDOW_HEIGHT})"
-    print "Renderer: Simple GUI lib MDI content + shared hosted WM + winit buffer backend"
+    print "Renderer: HostCompositor lifecycle + Simple Web app content + winit buffer backend"
     print "Controls: drag titlebars, click focus, close X, Tab cycle, W close, M minimize, R restore, Esc quit"
 
     val el = rt_winit_event_loop_new()
@@ -47,9 +56,12 @@ fn main() -> i64:
     val backend = HostedWinitBufferBackend.create(win, WINDOW_WIDTH, WINDOW_HEIGHT, 0xFF0F172Au32)
     if backend == nil:
         print "ERROR: hosted winit backend creation failed"
+        rt_winit_window_free(win)
+        rt_winit_event_loop_free(el)
         return 1
 
-    var comp = SimpleGuiHostedWm.create(backend, Size(width: WINDOW_WIDTH.to_u64(), height: WINDOW_HEIGHT.to_u64()))
+    var comp = HostCompositor.new(backend, Size(width: WINDOW_WIDTH.to_u64(), height: WINDOW_HEIGHT.to_u64()))
+    seed_host_compositor_shared_mdi(comp)
     comp.render_frame()
     print "Frame presented: shared lifecycle windows + Simple Web MDI content"
 
@@ -77,13 +89,15 @@ fn main() -> i64:
                     if keycode == KEY_ESCAPE:
                         running = false
                     elif keycode == KEY_TAB:
-                        comp.cycle_focus()
+                        comp = host_compositor_cycle_focus(comp)
                     elif keycode == KEY_W:
-                        comp.close_focused()
+                        val focused = host_compositor_focused_window_id(comp)
+                        if focused > 0:
+                            comp.destroy_window(focused)
                     elif keycode == KEY_M:
-                        comp.minimize_focused()
+                        comp = host_compositor_minimize_focused(comp)
                     elif keycode == KEY_R:
-                        comp.restore_all()
+                        comp = host_compositor_restore_all(comp)
                     dirty = true
             rt_winit_event_free(ev)
             ev = rt_winit_event_loop_poll_events(el, 1)
@@ -91,5 +105,7 @@ fn main() -> i64:
             comp.render_frame()
 
     backend.free()
+    rt_winit_window_free(win)
+    rt_winit_event_loop_free(el)
     print "SimpleOS shared hosted WM closed"
     return 0

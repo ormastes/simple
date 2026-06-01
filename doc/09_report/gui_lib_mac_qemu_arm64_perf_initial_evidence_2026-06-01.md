@@ -95,7 +95,8 @@
   - Verification: `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/compositor/host_compositor_entry_spec.spl --mode=interpreter --no-cache` passed, 29 tests in 36,939 ms.
   - Rust SFFI validation note: `cargo test -j1 -p simple-compiler blit_pixels_extern_copies_and_clips_pixels --lib` was attempted twice after adding direct unit coverage. Both attempts were terminated during dependency compilation without a Rust diagnostic, so this host did not produce Rust unit-test evidence for the new SFFI path.
 - Shared MDI and backend-evidence follow-up:
-  - Added a lightweight pure Simple GUI renderer for the hosted WM lane so the macOS inspection path can render real app content without pulling the full Simple Web renderer into every first-frame check.
+  - Restored the hosted WM target path to `HostCompositor` plus `simple_web_window_renderer.spl`; the lightweight Simple GUI renderer is now labeled smoke-only and is not accepted release evidence for this plan.
+  - Replaced block-placeholder text in the shared framebuffer evidence backend with real 8x16 glyph rendering for WM chrome/title text.
   - Added backend-evidence records so GUI/QEMU reports must name the requested backend, selected backend, fallback reason, frame timing, and readback status.
   - Added QEMU shared-MDI contract markers for ARM64 and x86_64 framebuffer lanes.
   - Verification: `backend_evidence_spec.spl` passed, 10 tests in 3,812 ms.
