@@ -11,16 +11,20 @@ JavaScript, fetch-driven WebAssembly loading, and WebGPU-adjacent WASM behavior
 so capability boundaries are explicit, denial paths are verified, and positive
 runtime paths are covered by executable tests.
 
-This goal is not complete. Do not mark the active goal complete until Phase 5
-runtime boundaries, Phase 6 QEMU validation, and the documented WebGPU/WASM
-scope decisions are all either implemented or explicitly split into follow-up
-goals.
+This goal is not complete. Do not mark the active goal complete until the
+remaining OS-boundary hardening, Phase 6 QEMU validation, and documented
+WebGPU/WASM scope decisions are all either implemented or explicitly split into
+follow-up goals.
 
 ## Crash Restart Summary
 
-GitHub `origin/main` is currently:
+GitHub `origin/main` at this checkpoint:
 
-- `29d326438a feat: enforce node process grants`
+- `0cecd52afb doc: add RTL backend optimization research and agent plan`
+
+Latest pushed JS/WASM hardening commit:
+
+- `ba84554e3a docs: reconcile js wasm hardening status`
 
 Use clean worktrees from `origin/main` for pushable JS/WASM slices. The main
 workspace may contain unrelated GUI/perf/local changes. Do not revert unrelated
@@ -28,14 +32,17 @@ dirty files and do not commit them into this goal.
 
 Current in-flight worktree:
 
-- Path: `/tmp/simple-js-wasm-reconcile`
-- Base: `origin/main` at `29d326438a`
-- Slice: documentation/status reconciliation after file, network, process, and
-  credential runtime grant slices were pushed.
-- Status: docs-only reconciliation in progress.
+- Path: `/tmp/simple-js-wasm-qemu-audit`
+- Base: `origin/main` at `0cecd52afb`
+- Slice: restartable goal/progress plan, then QEMU runtime provisioning audit.
+- Status: plan checkpoint in progress.
 - Evidence from pushed runtime grant slices: `node_api_conformance_spec.spl`
-  passes 149 scenarios, `simpleos_ai_cli_js_node_port_spec.spl` passes 25
-  scenarios, and `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`.
+  passed 149 scenarios, `simpleos_ai_cli_js_node_port_spec.spl` passed 25
+  scenarios, and `find doc/06_spec -name '*_spec.spl' | wc -l` printed `0`.
+
+If this session crashes, restart by fetching `origin/main`, creating a clean
+worktree, reading this file, then continuing at the first unchecked item in
+`Remaining Goal Plan`.
 
 ## Authoritative Files
 
@@ -69,6 +76,7 @@ Pushed JS/WASM hardening commits include:
 - `18f866f497 feat: enforce node file grants`
 - `034942e82a feat: enforce node network grants`
 - `29d326438a feat: enforce node process grants`
+- `ba84554e3a docs: reconcile js wasm hardening status`
 
 Completed evidence:
 
@@ -91,40 +99,65 @@ Completed evidence:
   `http.Server.listen` endpoints.
 - Node-compatible process grant conformance now covers allowed `node` spawn,
   mismatched command denial, and shell-style command string rejection.
+- Status docs now explicitly distinguish runtime grant conformance from
+  still-pending OS VFS, socket, and process boundary enforcement.
 
 ## Remaining Goal Plan
 
-1. Finish Phase 5 boundary reconciliation.
-   - Runtime grant conformance is complete for Node-compatible `fs`,
-     `net`/`http`/`https`, `child_process.spawn`, and credential env access.
-   - OS VFS layer, socket layer, and process-spawn boundary enforcement remain
-     open unless later evidence verifies those exact layers.
+1. Phase 5 OS-boundary hardening.
+   - Keep the Node-compatible runtime grant work marked complete.
+   - Implement or explicitly split OS VFS-layer `file_grants` enforcement.
+   - Implement or explicitly split socket-layer `network_grants` enforcement.
+   - Implement or explicitly split spawn/exec-layer `process_grants`
+     enforcement.
+   - Do not check the OS-layer boxes in
+     `doc/03_plan/simpleos_nodejs_ai_cli_migration.md` until tests or QEMU
+     evidence reach those exact layers.
 
-2. Reconcile Phase 5 OS/VFS wording.
-   - Only check `File access: enforce file_grants at VFS layer` in
-     `simpleos_nodejs_ai_cli_migration.md` if evidence reaches the OS VFS
-     boundary.
-   - If current work only covers Node-compatible runtime `fs`, record that as
-     runtime complete and leave OS VFS enforcement pending.
-
-3. Run full focused verification.
-   - Node conformance spec.
-   - SimpleOS AI CLI manifest/spec contract.
-   - Browser WebGPU JS/WASM system spec.
-   - `find doc/06_spec -name '*_spec.spl' | wc -l` must print `0`.
-
-4. Phase 6 QEMU validation.
-   - Provision Node-compatible runtime artifact and CLI bundles.
+2. Phase 6 QEMU runtime provisioning.
+   - Audit `ai_cli_qemu_lane`, staged package generation, launcher marker
+     output, and runtime artifact assumptions.
+   - Provision a Node-compatible runtime artifact and CLI bundles into the
+     guest-visible FAT32 image path.
    - Boot x86_64, RISC-V, and AArch64 lanes.
-   - Capture serial markers for runtime, CLI smoke, and hardening OK.
-   - Update `ai_cli_qemu_lane` from `blocked-runtime-artifact` only after real
-     guest evidence exists.
+   - Capture real guest serial markers for runtime start, CLI smoke, hardening
+     denials, and `[ai-cli] hardening:ok app=<tool>`.
+   - Update `ai_cli_qemu_lane` from `blocked-runtime-artifact` to `ready` only
+     after real guest evidence exists.
 
-5. WebGPU/WASM final scope decision.
-   - Current browser-side asset loading, instantiation, nested Promise
-     assimilation, and minimal declared host import callback are covered.
-   - Full WASM-originated WebGPU ABI and hardware/driver-backed WebGPU execution
-     remain incomplete unless intentionally split into a later goal.
+3. WebGPU/WASM scope closure.
+   - Current browser-side asset loading, `WebAssembly.instantiate`, nested
+     Promise assimilation, software WebGPU metadata, and the minimal declared
+     `webgpu.requestAdapter` host import are covered.
+   - Decide whether full WASM-originated WebGPU ABI and hardware/driver-backed
+     WebGPU execution belong in this goal or become a named follow-up.
+   - Update `doc/03_plan/sys_test/webgpu_js_wasm_simple.md` with the final
+     decision and evidence.
+
+4. Focused verification before any final completion claim.
+   - Run the Node conformance spec.
+   - Run the SimpleOS AI CLI manifest/spec contract.
+   - Run the browser WebGPU JS/WASM system spec.
+   - Run `find doc/06_spec -name '*_spec.spl' | wc -l` and require `0`.
+   - Run `git diff --check`.
+
+5. Release readiness.
+   - Only after the above is complete or explicitly split, run `$verify`.
+   - Do not run `$release` until verify reports `STATUS: PASS`.
+
+## Current Next Slice
+
+Start with the Phase 6 provisioning audit. The concrete output should be a small
+docs/test-plan slice that records:
+
+- the exact runtime artifact or bundle path that `ai_cli_qemu_lane` expects;
+- the current source of the `blocked-runtime-artifact` marker;
+- the commands required to build or stage the QuickJS/Node-compatible runtime;
+- the serial markers required to promote a lane to `ready`;
+- the x86_64, RISC-V, and AArch64 QEMU commands or wrappers to run next.
+
+Do not mark Phase 6 complete from host-side package generation alone. It needs
+guest serial evidence.
 
 ## Immediate Next Commands
 
