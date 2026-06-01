@@ -9,6 +9,7 @@ use app.optimize.executable_layout.{
     layout_plan_manifest_text,
     layout_profile_guided_plan
 }
+use app.optimize.sprof_loader.{SprofCounterRecord, sprof_load_profile_text}
 
 struct ProfileLayoutBridgeResult:
     status: text
@@ -117,30 +118,34 @@ pub fn profile_layout_parse_manifest_text(manifest_text: text) -> [ExecutableLay
         i = i + 1
     entries
 
-pub fn profile_layout_parse_sprof_functions(
-    profile_text: text,
+pub fn profile_layout_profiles_from_sprof_records(
+    records: [SprofCounterRecord],
     entries: [ExecutableLayoutManifestEntry]
 ) -> [ExecutableLayoutFunctionProfile]:
     var profiles: [ExecutableLayoutFunctionProfile] = []
-    val lines = profile_text.split("\n")
     var i = 0
-    while i < lines.len():
-        val line = lines[i].trim()
-        if line.starts_with("function;"):
-            val key = _profile_layout_value(line, "key")
-            val symbol = _profile_layout_function_from_key(key)
-            val count = _profile_layout_i64(_profile_layout_value(line, "count"))
+    while i < records.len():
+        val record = records[i]
+        if record.record_kind == "function":
+            val symbol = _profile_layout_function_from_key(record.key)
             val entry = _profile_layout_entry_for_symbol(entries, symbol)
-            if symbol != "" and count >= 0 and entry.size_bytes > 0:
+            if symbol != "" and record.count >= 0 and entry.size_bytes > 0:
                 profiles.push(ExecutableLayoutFunctionProfile(
                     symbol_name: symbol,
-                    sample_count: count,
+                    sample_count: record.count,
                     call_count: 0,
                     size_bytes: entry.size_bytes,
                     original_index: profiles.len() as i64
                 ))
         i = i + 1
     profiles
+
+pub fn profile_layout_parse_sprof_functions(
+    profile_text: text,
+    entries: [ExecutableLayoutManifestEntry]
+) -> [ExecutableLayoutFunctionProfile]:
+    val loaded = sprof_load_profile_text(profile_text, "", "")
+    profile_layout_profiles_from_sprof_records(loaded.records, entries)
 
 pub fn profile_layout_build_manifest(
     executable_manifest_text: text,
@@ -159,7 +164,8 @@ pub fn profile_layout_build_manifest(
             diagnostics: ["empty_executable_manifest"]
         )
 
-    val profiles = profile_layout_parse_sprof_functions(profile_text, entries)
+    val loaded_profile = sprof_load_profile_text(profile_text, "", "")
+    val profiles = profile_layout_profiles_from_sprof_records(loaded_profile.records, entries)
     if profiles.len() == 0:
         return ProfileLayoutBridgeResult(
             status: "invalid",

@@ -5,7 +5,12 @@ use std.spec.{describe, it, expect}
 use app.optimize.profile_layout_cli.{
     profile_layout_build_manifest,
     profile_layout_parse_manifest_text,
-    profile_layout_parse_sprof_functions
+    profile_layout_parse_sprof_functions,
+    profile_layout_profiles_from_sprof_records
+}
+use app.optimize.sprof_loader.{
+    sprof_counter_record,
+    sprof_load_profile_text
 }
 
 describe "Profile Layout CLI Bridge":
@@ -48,6 +53,34 @@ describe "Profile Layout CLI Bridge":
         expect(profiles[0].symbol_name).to_equal("dispatch")
         expect(profiles[0].sample_count).to_equal(8)
         expect(profiles[0].size_bytes).to_equal(80)
+
+    it "should consume reusable records from the persistent sprof loader":
+        val manifest = "symbol=dispatch;section=.text;offset=64;size=80\nsymbol=rare;section=.text;offset=200;size=40"
+        val entries = profile_layout_parse_manifest_text(manifest)
+        val loaded = sprof_load_profile_text([
+            "header;schema=sprof-v1;module=demo;workload=smoke",
+            "function;key=c:dispatch:entry;count=8",
+            "function;key=c:rare:entry;count=1",
+            "block;function=dispatch;key=entry;count=3"
+        ].join("\n"), "demo", "smoke")
+        val profiles = profile_layout_profiles_from_sprof_records(loaded.records, entries)
+
+        expect(loaded.status).to_equal("loaded")
+        expect(loaded.record_count).to_equal(3)
+        expect(profiles.len()).to_equal(2)
+        expect(profiles[0].symbol_name).to_equal("dispatch")
+        expect(profiles[1].symbol_name).to_equal("rare")
+
+    it "should accept already materialized loader records without profile text parsing":
+        val entries = profile_layout_parse_manifest_text("symbol=main;section=.text;offset=0;size=32")
+        val profiles = profile_layout_profiles_from_sprof_records(
+            [sprof_counter_record("function", "c:main:entry", "", 4)],
+            entries
+        )
+
+        expect(profiles.len()).to_equal(1)
+        expect(profiles[0].symbol_name).to_equal("main")
+        expect(profiles[0].sample_count).to_equal(4)
 
     it "should build a deterministic hot and cold layout manifest":
         val manifest = [
