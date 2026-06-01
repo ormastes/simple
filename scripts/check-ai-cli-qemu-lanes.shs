@@ -19,6 +19,7 @@ set -eu
 #   AI_CLI_QEMU_BUILD_DIR       default: build/ai-cli-qemu-lanes
 #   AI_CLI_QEMU_STAGING_ROOT    default: build/os/ai-cli-runtime-staging
 #   AI_CLI_QEMU_SERIAL_ROOT     default: build/os
+#   AI_CLI_QEMU_IMPORT_MANIFEST default: build/ai-cli-qemu-lanes/reports/ai-cli-disk-import.tsv
 #   SIMPLE_BIN                  default: bin/simple
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -27,6 +28,7 @@ cd "$ROOT_DIR"
 BUILD_DIR="${AI_CLI_QEMU_BUILD_DIR:-build/ai-cli-qemu-lanes}"
 STAGING_ROOT="${AI_CLI_QEMU_STAGING_ROOT:-build/os/ai-cli-runtime-staging}"
 SERIAL_ROOT="${AI_CLI_QEMU_SERIAL_ROOT:-build/os}"
+IMPORT_MANIFEST="${AI_CLI_QEMU_IMPORT_MANIFEST:-$BUILD_DIR/reports/ai-cli-disk-import.tsv}"
 SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 TARGET_FILTER="all"
 APP_FILTER="all"
@@ -214,6 +216,30 @@ validate_runtime_artifacts() {
     return "$missing"
 }
 
+file_digest() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        cksum "$1" | awk '{print "cksum:" $1 ":" $2}'
+    fi
+}
+
+append_import_entry() {
+    app="$1"
+    target="$2"
+    rel="$3"
+    host_path="$STAGING_ROOT/$rel"
+    guest_path="/$rel"
+
+    if [ ! -s "$host_path" ]; then
+        echo "[ai-cli-qemu] staged file missing for import manifest: $host_path" >&2
+        return 1
+    fi
+    bytes="$(wc -c <"$host_path" | tr -d ' ')"
+    digest="$(file_digest "$host_path")"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$app" "$target" "$guest_path" "$host_path" "$bytes" "$digest" >>"$IMPORT_MANIFEST"
+}
+
 stage_smoke_package() {
     app="$1"
     target="$2"
@@ -283,6 +309,13 @@ SIMPLE
         }
         END { close_current() }
     ' "$stage_out"
+
+    append_import_entry "$app" "$target" "sys/apps/$app/AI_MANIFEST.SDN"
+    append_import_entry "$app" "$target" "sys/apps/$app/launch.spl"
+    append_import_entry "$app" "$target" "sys/apps/$app/qemu_markers.txt"
+    append_import_entry "$app" "$target" "sys/apps/$app/$disk_manifest"
+    append_import_entry "$app" "$target" "sys/apps/$app/$app.js"
+    append_import_entry "$app" "$target" "sys/runtime/node-compatible/$target/runtime.smf"
 }
 
 report_path="$BUILD_DIR/reports/ai-cli-qemu-lanes.env"
@@ -294,6 +327,12 @@ echo "validate_log_only=$VALIDATE_LOG_ONLY" | tee -a "$report_path"
 echo "stage_smoke_package=$STAGE_SMOKE_PACKAGE" | tee -a "$report_path"
 echo "staging_root=$STAGING_ROOT" | tee -a "$report_path"
 echo "serial_root=$SERIAL_ROOT" | tee -a "$report_path"
+
+if [ "$STAGE_SMOKE_PACKAGE" -eq 1 ]; then
+    mkdir -p "$(dirname -- "$IMPORT_MANIFEST")"
+    printf 'app\ttarget\tguest_path\thost_path\tbytes\tdigest\n' >"$IMPORT_MANIFEST"
+    echo "import_manifest=$IMPORT_MANIFEST" | tee -a "$report_path"
+fi
 
 total=0
 contract_count=0

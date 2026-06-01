@@ -92,3 +92,14 @@ dev-incomplete
   FAT32-like staging tree while reporting
   `host-package-materialized-no-guest-validation`; default lane validation
   still requires real guest serial logs.
+- dev: Added a disk-image import manifest bridge to stage mode. The generated
+  `ai-cli-disk-import.tsv` records app, target, guest path, host path, byte
+  count, and digest for every staged smoke package file so the next slice can
+  ingest the tree into FAT32 tooling without mistaking host staging for QEMU
+  guest evidence.
+- dev: Added host-side FAT32 ingestion readiness coverage for the AI CLI
+  staging layout. `host_fat32_tree_populator_spec.spl` now mirrors
+  `sys/runtime/node-compatible/x86/runtime.smf` and `sys/apps/codex/*` into a
+  formatted image and verifies the staged runtime, JS entry, manifest, and QEMU
+  marker payload bytes are present in the image. This remains host-side
+  readiness, not guest serial evidence.

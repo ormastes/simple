@@ -229,9 +229,14 @@ All three architectures, all three tools:
 materializes a host-side FAT32-like staging tree for selected AI CLI smoke
 packages, including `AI_MANIFEST.SDN`, `launch.spl`, `qemu_markers.txt`,
 `<app>.js`, the short package manifest, and
-`sys/runtime/node-compatible/<target>/runtime.smf`. This is not checked off as
-FAT32 disk image provisioning because it has not yet been injected into a booted
-guest image or validated through guest serial markers.
+`sys/runtime/node-compatible/<target>/runtime.smf`. It also writes
+`build/ai-cli-qemu-lanes/reports/ai-cli-disk-import.tsv` with guest paths, host
+paths, byte counts, and digests for a later image-builder ingestion slice. This
+is paired with a host-side FAT32 ingestion readiness test in
+`test/unit/os/port/host_fat32_tree_populator_spec.spl`, which proves the AI CLI
+staging path shape can be mirrored into a formatted FAT32 image. This is not
+checked off as FAT32 disk image provisioning because it has not yet been
+integrated into the boot image flow or validated through guest serial markers.
 
 ## Minimum Syscall Surface Required
 

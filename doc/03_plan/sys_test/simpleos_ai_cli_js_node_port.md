@@ -16,6 +16,10 @@ Current QEMU harness:
   `ai_cli_qemu_lanes_status=stage-smoke-package` with reason
   `host-package-materialized-no-guest-validation`; it does not read serial logs
   or claim QEMU validation.
+- The same stage mode writes a disk-import manifest at
+  `build/ai-cli-qemu-lanes/reports/ai-cli-disk-import.tsv` by default. Each row
+  records app, target, guest path, host path, byte count, and digest for later
+  FAT32 image ingestion.
 - Default mode checks staged runtime artifacts under
   `build/os/ai-cli-runtime-staging/sys/runtime/node-compatible/<target>/runtime.smf`,
   CLI bundles under `build/os/ai-cli-runtime-staging/sys/apps/<app>/<app>.js`,
@@ -88,5 +92,13 @@ Mirrored manual: `doc/06_spec/system/os/simpleos_ai_cli_js_node_port_spec.md`
 - Host provisioning: `--stage-smoke-package` writes `AI_MANIFEST.SDN`,
   `launch.spl`, `qemu_markers.txt`, the short-name package manifest, generated
   `<app>.js` smoke entry, and `runtime.smf` under the FAT32-like staging tree.
+- Disk ingestion bridge: the generated TSV import manifest makes the staged
+  tree consumable by a later image-builder slice without treating manifest
+  generation as guest execution.
+- Host FAT32 ingestion readiness:
+  `test/unit/os/port/host_fat32_tree_populator_spec.spl` now proves the generic
+  host tree populator can mirror the AI CLI staging layout, including
+  `sys/runtime/node-compatible/x86/runtime.smf` and `sys/apps/codex/codex.js`,
+  into a formatted FAT32 image and preserve payload bytes.
 - Still pending: guest QEMU runtime smoke and kernel/OS-layer VFS, socket, and
   process boundary evidence.

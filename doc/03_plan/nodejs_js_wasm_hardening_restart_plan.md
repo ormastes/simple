@@ -122,6 +122,14 @@ Completed evidence:
      selected host-side smoke package files into the FAT32-like staging tree and
      exits with `stage-smoke-package`, not `pass`, because no guest serial
      evidence has been observed.
+   - Stage mode also writes `build/ai-cli-qemu-lanes/reports/ai-cli-disk-import.tsv`
+     with guest paths, host paths, byte counts, and digests for the next
+     disk-image ingestion slice.
+   - `test/unit/os/port/host_fat32_tree_populator_spec.spl` now proves the
+     existing FAT32 host-tree populator can ingest the AI CLI staging path shape
+     (`sys/runtime/node-compatible/x86/runtime.smf` plus `sys/apps/codex/*`)
+     into a formatted image. This is still host-side readiness, not guest boot
+     evidence.
    - Audit `ai_cli_qemu_lane`, staged package generation, launcher marker
      output, and runtime artifact assumptions.
    - Provision a Node-compatible runtime artifact and CLI bundles into the
@@ -179,6 +187,10 @@ Host-side staging command:
 SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=<worktree>/src \
   sh scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package --target x86 --app codex
 ```
+
+The staging command should report `ai_cli_qemu_lanes_status=stage-smoke-package`
+and an `import_manifest=.../ai-cli-disk-import.tsv` line. Treat that manifest as
+input to the later FAT32 image-builder work, not as QEMU evidence.
 
 Promotion commands after runtime provisioning exists:
 

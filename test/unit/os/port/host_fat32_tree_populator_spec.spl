@@ -62,6 +62,15 @@ fn _make_formatted_fat32_image() -> [u8]:
 fn _cleanup(path: text):
     _ = rt_process_run("/bin/sh", ["-c", "rm -rf '" + path + "'"])
 
+fn _write_text(path: text, payload: text):
+    val command = "cat > '" + path + "' <<'EOF'\n" + payload + "\nEOF"
+    val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    expect(code).to_equal(0)
+
+fn _image_contains(path: text, marker: text) -> bool:
+    val (_stdout, _stderr, code) = rt_process_run("grep", ["-a", "-F", "-q", marker, path])
+    code == 0
+
 describe "host_fat32_tree_populator":
     it "mirrors host directories and files into a formatted FAT32 image and flushes":
         val root = "/tmp/host_fat32_tree_populator_spec"
@@ -107,5 +116,29 @@ describe "host_fat32_tree_populator":
 
         expect(_od_hex(image_path, _cluster_offset(6), 9)).to_equal("68 65 6c 6c 6f 2d 61 70 70")
         expect(_od_hex(image_path, _cluster_offset(7), 12)).to_equal("6b 65 72 6e 65 6c 2d 69 6d 61 67 65")
+
+        _cleanup(root)
+
+    it "mirrors AI CLI staged package layout with node-compatible runtime paths":
+        val root = "/tmp/host_fat32_ai_cli_tree_populator_spec"
+        val image_path = root + "/disk.img"
+        val source_root = root + "/src"
+        _cleanup(root)
+
+        expect(rt_dir_create_all(source_root + "/sys/runtime/node-compatible/x86")).to_equal(true)
+        expect(rt_dir_create_all(source_root + "/sys/apps/codex")).to_equal(true)
+        expect(rt_file_write_bytes(image_path, _make_formatted_fat32_image())).to_equal(true)
+
+        _write_text(source_root + "/sys/runtime/node-compatible/x86/runtime.smf", "AI_CLI_RUNTIME_X86_NODE_COMPATIBLE")
+        _write_text(source_root + "/sys/apps/codex/codex.js", "globalThis.__simple_ai_cli_smoke = true;")
+        _write_text(source_root + "/sys/apps/codex/AI_MANIFEST.SDN", "manifest-package-smoke:codex:20260530")
+        _write_text(source_root + "/sys/apps/codex/qemu_markers.txt", "[ai-cli] runtime:start app=codex")
+
+        val populate_result = populate_host_tree_into_fat32_image(image_path, source_root)
+        expect(populate_result.is_ok()).to_equal(true)
+        expect(_image_contains(image_path, "AI_CLI_RUNTIME_X86_NODE_COMPATIBLE")).to_equal(true)
+        expect(_image_contains(image_path, "__simple_ai_cli_smoke")).to_equal(true)
+        expect(_image_contains(image_path, "manifest-package-smoke:codex:20260530")).to_equal(true)
+        expect(_image_contains(image_path, "[ai-cli] runtime:start app=codex")).to_equal(true)
 
         _cleanup(root)
