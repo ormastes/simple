@@ -95,6 +95,10 @@ metadata to perform:
 6. reproducibility checks against symbol/relocation tables.
 
 Initial target: Simple settlement/native metadata, not arbitrary ELF rewriting.
+The production artifact path is Simple/C-owned: the optimizer emits the
+offset manifest, native symbol-order text, and a generated-C section map header
+from the same validated plan. Rust linker code is treated as seed/runtime
+infrastructure, not the feature implementation surface.
 
 ## Bare-Metal Breakpoint Counter Policy
 

@@ -28,8 +28,8 @@ Current status: the executable contract specs above exist and pass. Production
 helper slices exist for `.sprof` text/file loading, native counter metadata and
 runtime snapshot import, executable layout eligibility and manifest planning,
 and bare-metal breakpoint state/ledger policy. The current executable optimizer
-slice writes a deterministic Simple-owned layout manifest rather than rewriting
-arbitrary ELF bytes.
+slice writes deterministic Simple-owned layout, native symbol-order, and
+generated-C section-map artifacts rather than rewriting arbitrary ELF bytes.
 
 ## Requirement Traceability
 
@@ -37,7 +37,7 @@ arbitrary ELF bytes.
 |----------------|------------------|
 | Persistent profile loader | corrupt/stale/exact profile load tests; startup overhead report |
 | Simple native optimize | native O-level plus profile-counter ABI tests |
-| Pure Simple BOLT-like optimizer | metadata-only layout planning tests; no external BOLT command dependency |
+| Pure Simple BOLT-like optimizer | metadata-only layout planning tests; native symbol-order/C section-map artifact tests; no external BOLT command dependency |
 | Native counter feature | function/block/edge/call-path counter contract tests |
 | Bare-metal counter impl | breakpoint site table and patch ledger tests |
 | Prevent slow breakpoint overhead | auto-disarm and sampled-only fallback tests |

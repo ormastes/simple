@@ -7,6 +7,8 @@ use app.optimize.executable_layout.{
     ExecutableLayoutFunctionProfile,
     ExecutableLayoutManifestEntry,
     layout_plan_manifest_text,
+    layout_plan_symbol_order_text,
+    layout_plan_c_section_map_text,
     layout_profile_guided_plan
 }
 use app.optimize.sprof_loader.{SprofCounterRecord, sprof_load_profile_text}
@@ -203,6 +205,76 @@ pub fn profile_layout_build_manifest(
         diagnostics: []
     )
 
+pub fn profile_layout_build_artifact(
+    executable_manifest_text: text,
+    profile_text: text,
+    artifact_format: text,
+    hot_section_start: i64,
+    cold_section_start: i64,
+    min_hot_weight: i64,
+    max_cold_samples: i64
+) -> ProfileLayoutBridgeResult:
+    val entries = profile_layout_parse_manifest_text(executable_manifest_text)
+    if entries.len() == 0:
+        return ProfileLayoutBridgeResult(
+            status: "invalid",
+            manifest_text: "",
+            diagnostic_count: 1,
+            diagnostics: ["empty_executable_manifest"]
+        )
+
+    val loaded_profile = sprof_load_profile_text(profile_text, "", "")
+    val profiles = profile_layout_profiles_from_sprof_records(loaded_profile.records, entries)
+    if profiles.len() == 0:
+        return ProfileLayoutBridgeResult(
+            status: "invalid",
+            manifest_text: "",
+            diagnostic_count: 1,
+            diagnostics: ["empty_function_profile"]
+        )
+
+    val plan = layout_profile_guided_plan(
+        entries,
+        profiles,
+        true,
+        true,
+        true,
+        true,
+        hot_section_start,
+        cold_section_start,
+        min_hot_weight,
+        max_cold_samples
+    )
+    if artifact_format == "manifest":
+        return profile_layout_build_manifest(executable_manifest_text, profile_text, hot_section_start, cold_section_start, min_hot_weight, max_cold_samples)
+    if not layout_plan_manifest_text(plan).starts_with("simple-executable-layout-manifest-v1"):
+        return ProfileLayoutBridgeResult(
+            status: "partial",
+            manifest_text: "",
+            diagnostic_count: 1,
+            diagnostics: ["layout_plan_invalid:{plan.skip_reason}"]
+        )
+
+    var text = ""
+    if artifact_format == "native-symbol-order":
+        text = layout_plan_symbol_order_text(plan)
+    elif artifact_format == "simple-c-section-map":
+        text = layout_plan_c_section_map_text(plan)
+    else:
+        return ProfileLayoutBridgeResult(
+            status: "invalid",
+            manifest_text: "",
+            diagnostic_count: 1,
+            diagnostics: ["unsupported_artifact_format:{artifact_format}"]
+        )
+
+    ProfileLayoutBridgeResult(
+        status: "ok",
+        manifest_text: text,
+        diagnostic_count: 0,
+        diagnostics: []
+    )
+
 pub fn profile_layout_write_manifest_file(
     executable_manifest_path: text,
     profile_path: text,
@@ -237,6 +309,58 @@ pub fn profile_layout_write_manifest_file(
     val result = profile_layout_build_manifest(
         file_read(executable_manifest_path),
         file_read(profile_path),
+        hot_section_start,
+        cold_section_start,
+        min_hot_weight,
+        max_cold_samples
+    )
+    if result.status != "ok":
+        return result
+    if not file_write(out_path, result.manifest_text):
+        return ProfileLayoutBridgeResult(
+            status: "invalid",
+            manifest_text: "",
+            diagnostic_count: 1,
+            diagnostics: ["write_failed"]
+        )
+    result
+
+pub fn profile_layout_write_artifact_file(
+    executable_manifest_path: text,
+    profile_path: text,
+    out_path: text,
+    artifact_format: text,
+    hot_section_start: i64,
+    cold_section_start: i64,
+    min_hot_weight: i64,
+    max_cold_samples: i64
+) -> ProfileLayoutBridgeResult:
+    if profile_path == "" or not file_exists(profile_path):
+        return ProfileLayoutBridgeResult(
+            status: "invalid",
+            manifest_text: "",
+            diagnostic_count: 1,
+            diagnostics: ["profile_not_found"]
+        )
+    if executable_manifest_path == "" or not file_exists(executable_manifest_path):
+        return ProfileLayoutBridgeResult(
+            status: "invalid",
+            manifest_text: "",
+            diagnostic_count: 1,
+            diagnostics: ["manifest_not_found"]
+        )
+    if out_path == "":
+        return ProfileLayoutBridgeResult(
+            status: "invalid",
+            manifest_text: "",
+            diagnostic_count: 1,
+            diagnostics: ["missing_output_path"]
+        )
+
+    val result = profile_layout_build_artifact(
+        file_read(executable_manifest_path),
+        file_read(profile_path),
+        artifact_format,
         hot_section_start,
         cold_section_start,
         min_hot_weight,

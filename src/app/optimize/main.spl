@@ -6,7 +6,7 @@ use std.io.{file_exists}
 use app.optimize.analyze.{optimize_analyze, optimize_db_analyze, optimize_full_analyze}
 use app.optimize.compare.{optimize_compare}
 use app.optimize.apply.{optimize_apply}
-use app.optimize.profile_layout_cli.{profile_layout_write_manifest_file}
+use app.optimize.profile_layout_cli.{profile_layout_write_manifest_file, profile_layout_write_artifact_file}
 
 fn print_optimize_help():
     print "Usage: simple optimize <file.spl> [options]"
@@ -22,6 +22,8 @@ fn print_optimize_help():
     print "  --profile=PATH        .sprof profile input for --layout-plan"
     print "  --manifest=PATH       Native/settlement executable metadata input for --layout-plan"
     print "  --out=PATH            Output manifest path for --layout-plan"
+    print "  --order-out=PATH      Optional native symbol order output for --layout-plan"
+    print "  --c-section-map-out=PATH  Optional generated-C section map output for --layout-plan"
     print "  --passes=P1,P2,...    Comma-separated list of MIR passes to run"
     print "  --level=O0|O1|O2|O3  MIR optimization level (default: O2)"
     print "  -h, --help            Show this help"
@@ -50,6 +52,8 @@ struct OptimizeArgs:
     profile_path:  text
     manifest_path: text
     out_path:      text
+    order_out_path: text
+    c_section_map_out_path: text
     passes:       [text]
     level:        text    # "O0"|"O1"|"O2"|"O3"
 
@@ -102,6 +106,8 @@ fn parse_optimize_args(args: [text]) -> OptimizeArgs:
         profile_path:  parse_flag_value(args, "--profile="),
         manifest_path: parse_flag_value(args, "--manifest="),
         out_path:      parse_flag_value(args, "--out="),
+        order_out_path: parse_flag_value(args, "--order-out="),
+        c_section_map_out_path: parse_flag_value(args, "--c-section-map-out="),
         passes:       passes,
         level:        level
     )
@@ -136,6 +142,36 @@ fn run_profile_layout_command(opt_args: OptimizeArgs) -> i64:
         print "Error: layout plan failed: {result.diagnostics.join(\",\")}"
         return 1
     print "Wrote layout manifest: {opt_args.out_path}"
+    if opt_args.order_out_path != "":
+        val order_result = profile_layout_write_artifact_file(
+            opt_args.manifest_path,
+            opt_args.profile_path,
+            opt_args.order_out_path,
+            "native-symbol-order",
+            4096,
+            8192,
+            500,
+            2
+        )
+        if order_result.status != "ok":
+            print "Error: symbol order failed: {order_result.diagnostics.join(\",\")}"
+            return 1
+        print "Wrote native symbol order: {opt_args.order_out_path}"
+    if opt_args.c_section_map_out_path != "":
+        val c_result = profile_layout_write_artifact_file(
+            opt_args.manifest_path,
+            opt_args.profile_path,
+            opt_args.c_section_map_out_path,
+            "simple-c-section-map",
+            4096,
+            8192,
+            500,
+            2
+        )
+        if c_result.status != "ok":
+            print "Error: C section map failed: {c_result.diagnostics.join(\",\")}"
+            return 1
+        print "Wrote C section map: {opt_args.c_section_map_out_path}"
     0
 
 fn run_optimize_command(opt_args: OptimizeArgs) -> i64:

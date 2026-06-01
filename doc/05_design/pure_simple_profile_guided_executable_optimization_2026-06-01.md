@@ -91,6 +91,8 @@ diagnostic-only.
 
 - `MergedProfileSummary`
 - executable layout manifest
+- native symbol-order file
+- generated-C section map header
 - symbol table
 - relocation table
 - function/block boundaries
@@ -106,11 +108,15 @@ diagnostic-only.
 6. Move cold blocks/functions to cold regions only when unwind/debug metadata can
    be preserved or explicitly regenerated.
 7. Emit an optimization manifest mapping original offsets to optimized offsets.
+8. Emit native symbol-order text and a generated-C section map from the same
+   validated plan.
 
 ### Output
 
 - optimized executable or settlement artifact;
 - layout manifest;
+- native symbol-order file;
+- generated-C section map header;
 - before/after report: size, startup, representative runtime, cache-locality
   proxy, changed symbols, skipped candidates and reasons.
 
@@ -246,7 +252,8 @@ the path is known, hot sites switch to timer/hardware/sample counters.
 3. Native block/edge counters.
 4. Native runtime counter snapshot readback and `.sprof` import planning.
 5. Pure-Simple executable layout planner over metadata only.
-6. Layout artifact writer with manifest.
+6. Layout artifact writer with manifest, native symbol order, and generated-C
+   section map.
 7. Bare-metal breakpoint site table and patch ledger.
 8. Bare-metal auto-disarm and sampled fallback.
 9. Architecture-specific breakpoint patch profile for x86, ARM/Thumb/AArch64,

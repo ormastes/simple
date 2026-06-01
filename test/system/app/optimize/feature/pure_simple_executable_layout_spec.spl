@@ -14,10 +14,12 @@ use app.optimize.executable_layout.{
     layout_manifest_summary_valid,
     layout_manifest_entry_valid,
     layout_mark_cold_candidate,
+    layout_plan_c_section_map_text,
     layout_plan_entries_non_overlapping,
     layout_plan_manifest_text,
     layout_rewrite_manifest_artifact,
     layout_plan_steps,
+    layout_plan_symbol_order_text,
     layout_plan_valid,
     layout_profile_guided_plan,
     layout_transform_allowed,
@@ -34,6 +36,8 @@ describe "Pure Simple Executable Layout Optimizer Contract":
             expect(steps).to_contain("hot_block_fallthrough")
             expect(steps).to_contain("cold_region_marking")
             expect(steps).to_contain("offset_manifest")
+            expect(steps).to_contain("native_symbol_order")
+            expect(steps).to_contain("c_section_map")
 
         it "should allow layout only when executable metadata remains valid":
             expect(layout_transform_allowed(true, true, true, true)).to_equal(true)
@@ -317,6 +321,10 @@ describe "Pure Simple Executable Layout Optimizer Contract":
             expect(layout_plan_valid(plan)).to_equal(true)
             expect(layout_plan_entries_non_overlapping(plan)).to_equal(true)
             expect(layout_plan_manifest_text(plan)).to_equal(expected)
+            expect(layout_plan_symbol_order_text(plan)).to_equal("dispatch\nparse\nrare\nunused\n")
+            expect(layout_plan_c_section_map_text(plan)).to_contain("/* simple-c-layout-section-map-v1 */")
+            expect(layout_plan_c_section_map_text(plan)).to_contain("#define SIMPLE_LAYOUT_SECTION_dispatch __attribute__((section(\".text.simple.hot.0.dispatch\"), used))")
+            expect(layout_plan_c_section_map_text(plan)).to_contain("#define SIMPLE_LAYOUT_SECTION_rare __attribute__((section(\".text.simple.cold.2.rare\"), used))")
 
         it "should reject manifests when hot or cold planned entries overlap":
             val hot_overlap = ExecutableLayoutPlan(
@@ -372,6 +380,15 @@ describe "Pure Simple Executable Layout Optimizer Contract":
             expect(artifact.entry_count).to_equal(2)
             expect(artifact.manifest_text).to_contain("hot\t.text\tdispatch")
             expect(artifact.manifest_text).to_contain("cold\t.text\trare")
+
+            val order = layout_rewrite_manifest_artifact(plan, "native-symbol-order", false)
+            expect(order.applied).to_equal(true)
+            expect(order.manifest_text).to_equal("dispatch\nrare\n")
+
+            val c_map = layout_rewrite_manifest_artifact(plan, "simple-c-section-map", false)
+            expect(c_map.applied).to_equal(true)
+            expect(c_map.manifest_text).to_contain("SIMPLE_LAYOUT_SECTION_dispatch")
+            expect(c_map.manifest_text).to_contain(".text.simple.hot.0.dispatch")
 
             val elf = layout_rewrite_manifest_artifact(plan, "elf", false)
             expect(elf.applied).to_equal(false)

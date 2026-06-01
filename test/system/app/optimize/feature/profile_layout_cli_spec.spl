@@ -3,10 +3,12 @@
 
 use std.spec.{describe, it, expect}
 use app.optimize.profile_layout_cli.{
+    profile_layout_build_artifact,
     profile_layout_build_manifest,
     profile_layout_parse_manifest_text,
     profile_layout_parse_sprof_functions,
     profile_layout_profiles_from_sprof_records,
+    profile_layout_write_artifact_file,
     profile_layout_write_manifest_file
 }
 use app.optimize.sprof_loader.{
@@ -114,6 +116,33 @@ describe "Profile Layout CLI Bridge":
         expect(result.manifest_text).to_contain("cold\t.text\trare\t300\t8192\t64")
         expect(result.manifest_text).to_contain("cold\t.text\tunused\t500\t8256\t40")
 
+    it "should build native symbol order and C section map artifacts":
+        val manifest = [
+            "symbol=rare;section=.text;offset=300;size=64",
+            "symbol=dispatch;section=.text;offset=64;size=80",
+            "symbol=parse;section=.text;offset=160;size=96"
+        ].join("\n")
+        val profile = [
+            "header;schema=sprof-v1;module=demo;workload=smoke",
+            "function;key=c:rare:entry;count=0",
+            "function;key=c:dispatch:entry;count=8",
+            "function;key=c:parse:entry;count=6"
+        ].join("\n")
+
+        val order = profile_layout_build_artifact(manifest, profile, "native-symbol-order", 4096, 8192, 500, 2)
+        expect(order.status).to_equal("ok")
+        expect(order.manifest_text).to_equal("dispatch\nparse\nrare\n")
+
+        val c_map = profile_layout_build_artifact(manifest, profile, "simple-c-section-map", 4096, 8192, 500, 2)
+        expect(c_map.status).to_equal("ok")
+        expect(c_map.manifest_text).to_contain("simple-c-layout-section-map-v1")
+        expect(c_map.manifest_text).to_contain("SIMPLE_LAYOUT_SECTION_dispatch")
+        expect(c_map.manifest_text).to_contain(".text.simple.hot.0.dispatch")
+
+        val unsupported = profile_layout_build_artifact(manifest, profile, "elf", 4096, 8192, 500, 2)
+        expect(unsupported.status).to_equal("invalid")
+        expect(unsupported.diagnostics).to_contain("unsupported_artifact_format:elf")
+
     it "should reject empty executable metadata and missing profile functions":
         val empty_manifest = profile_layout_build_manifest("", "function;key=c:main:entry;count=1", 4096, 8192, 500, 2)
         expect(empty_manifest.status).to_equal("invalid")
@@ -128,6 +157,8 @@ describe "Profile Layout CLI Bridge":
         val profile_path = base + ".sprof"
         val manifest_path = base + ".layout"
         val out_path = base + ".optimized-layout"
+        val order_path = base + ".order"
+        val c_map_path = base + ".layout.h"
         rt_file_write_text(profile_path, [
             "header;schema=sprof-v1;module=native-demo;workload=smoke",
             "function;key=c:dispatch:entry;count=1",
@@ -150,6 +181,16 @@ describe "Profile Layout CLI Bridge":
         expect(output).to_contain("cold\t.text\tdispatch\t64\t8192\t80")
         expect(output).to_contain("cold\t.text\trare\t300\t8272\t64")
 
+        val order_result = profile_layout_write_artifact_file(manifest_path, profile_path, order_path, "native-symbol-order", 4096, 8192, 500, 2)
+        val c_map_result = profile_layout_write_artifact_file(manifest_path, profile_path, c_map_path, "simple-c-section-map", 4096, 8192, 500, 2)
+
+        expect(order_result.status).to_equal("ok")
+        expect(rt_file_read_text(order_path)).to_equal("parse\ndispatch\nrare\n")
+        expect(c_map_result.status).to_equal("ok")
+        expect(rt_file_read_text(c_map_path)).to_contain("SIMPLE_LAYOUT_SECTION_parse")
+
         rt_file_delete(profile_path)
         rt_file_delete(manifest_path)
         rt_file_delete(out_path)
+        rt_file_delete(order_path)
+        rt_file_delete(c_map_path)

@@ -367,13 +367,17 @@ eligibility, external-BOLT rejection, and manifest-entry validation. Contract
 coverage exists at
 `test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl`.
 The file-level profile-layout bridge consumes executable metadata plus `.sprof`
-input and writes a deterministic layout manifest.
+input and writes a deterministic layout manifest. The bridge now also writes
+Simple-owned native symbol order files and generated-C section map headers for
+the same hot/cold plan, so the BOLT-like path produces consumable Simple/C
+artifacts without Rust seed linker changes or external BOLT.
 
 Deliverables:
 - layout planner over Simple settlement/native metadata;
 - hot function clustering and hot block fallthrough ordering;
 - cold section candidate marking;
-- reproducibility manifest with symbol/relocation mapping.
+- reproducibility manifest with symbol/relocation mapping;
+- native symbol order and generated-C section map artifacts.
 
 Exit gates:
 - optimized executable passes semantic smoke;
