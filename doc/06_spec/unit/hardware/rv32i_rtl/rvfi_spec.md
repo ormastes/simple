@@ -98,6 +98,58 @@ check(text.contains("rvfi_mem_wdata => rvfi_mem_wdata"))
 
 </details>
 
+#### reports missing RVFI ports before formal flow runs
+
+1. expect missing len
+
+2. check
+
+3. check
+
+4. check
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val entity = "entity rv32i_core is port (clk : in std_logic; reset_n : in std_logic); end entity;"
+val missing = rvfi_missing_vhdl_ports(entity)
+expect missing.len() == 17
+expect missing[0] == "rvfi_valid"
+val readiness = rvfi_formal_readiness("rv32i_core", entity)
+check(not readiness.ready)
+check(readiness.message.contains("missing 17 RVFI ports"))
+check(rvfi_render_formal_readiness(readiness).contains("- rvfi_mem_wdata"))
+```
+
+</details>
+
+#### accepts a VHDL entity with the full RVFI manifest
+
+1. check
+
+2. expect readiness missing ports len
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val wrapper = rvfi_formal_wrapper_vhdl("rv32i_core_rvfi", "rv32i_core")
+val readiness = rvfi_formal_readiness("rv32i_core_rvfi", wrapper)
+check(readiness.ready)
+expect readiness.missing_ports.len() == 0
+```
+
+</details>
+
 ### RV32I RVFI trace
 
 #### captures one retired instruction when RVFI is enabled
@@ -246,8 +298,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
