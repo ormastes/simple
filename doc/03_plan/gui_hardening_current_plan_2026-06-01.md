@@ -17,7 +17,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - Chrome/corpus open gates are green for the bounded offline corpus and current
   exact/no-tolerance harness. The broader production renderer still is not full
   Chrome parity; the known blocker is Chrome-compatible text/font/compositing,
-  not corpus generation.
+  not corpus generation. The focused `site_0_google` text-line diagnostic now
+  uses pixel-width font metrics and matches Chrome's four-line split, but the
+  broader famous-site corpus system spec still reports remaining failures.
 - 8K color/image Option A is selected and documented: lazy packed 8K surfaces,
   CIELAB as the semantic color space, XYZ as the connection space, and fail-
   closed unsupported codec/profile paths.
@@ -43,6 +45,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 
 - `doc/09_report/gui_hardening_open_gates_2026-06-01.md`: Chrome/corpus open
   gate report.
+- `test/unit/browser_engine/text_painter_spec.spl`: focused
+  `site_0_google` text wrapping proof for `Google search`, `deterministic`,
+  `compatibility`, and `fixture` line grouping.
 - `doc/09_report/gui_color_image_pipeline_8k_current_2026-06-01.md`: current
   packed 8K surface and lazy codec/profile evidence.
 - `doc/09_report/gui_color_image_pipeline_8k_evidence_2026-06-01.md`: 8K lane
@@ -86,7 +91,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 
 - Production Chrome parity: replace fixture/oracle-backed corpus shortcuts with
   real Chrome-compatible DOM/style/layout/font paint output. The current
-  production probe remains divergent for text-heavy corpus samples.
+  production probe remains divergent for text-heavy corpus samples; the next
+  slice should move the matched line metrics into production glyph paint and
+  compositing rather than adding more corpus fixture shortcuts.
 - 8K color/image: broaden high-bit-depth compressed raster coverage, JPEG XL
   codestream color parsing and pixel decoding, real non-identity ICC/profile
   transforms, and web/browser/WM image integration.
