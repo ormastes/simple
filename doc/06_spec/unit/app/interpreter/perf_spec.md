@@ -284,3 +284,4 @@ expect(acc).to_equal(100)
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+

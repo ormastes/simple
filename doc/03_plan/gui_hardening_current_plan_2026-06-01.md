@@ -18,7 +18,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   exact/no-tolerance harness. The broader production renderer still is not full
   Chrome parity; the known blocker is Chrome-compatible text/font/compositing,
   not corpus generation. The focused `site_0_google` text-line diagnostic now
-  uses calibrated pixel-width font metrics and matches Chrome's four-line split.
+  uses calibrated pixel-width font metrics, matches Chrome's four-line split,
+  and records a first-line width of `105`px versus Chrome canvas `104.0625`px.
   The famous-site corpus system spec passes 37/37; production pixels remain
   divergent (`differentPixels: 2717`) and are tracked as the next glyph paint
   and compositing blocker.
@@ -61,7 +62,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   explicit over-wide 122px/132px mismatch diagnostics.
 - `test/baselines/famous_site_corpus/site_0_google/report.production.sdn`:
   focused production artifact with four Simple layout lines and
-  `layout_text_match: true`; pixel output remains divergent for paint/composite
+  `layout_text_match: true`; the first-line width now records `105`px versus
+  Chrome `104.0625`px, while pixel output remains divergent for paint/composite
   work.
 - `doc/09_report/gui_color_image_pipeline_8k_current_2026-06-01.md`: current
   packed 8K surface and lazy codec/profile evidence.

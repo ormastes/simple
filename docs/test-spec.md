@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-01 02:15:45*
+*Generated: 2026-06-01 05:30:49*
 
-## examples/browser/test/gpu
+## test/system/hardware
 
-❌ **tiff_image_raster_spec.spl** (516ms)
-  - Source: `examples/browser/test/gpu/tiff_image_raster_spec.spl`
-  - Generated doc: `spec/tiff_image_raster_spec.md`
+❌ **rv32_external_formal_harness_spec.spl** (205ms)
+  - Source: `test/system/hardware/rv32_external_formal_harness_spec.spl`
+  - Generated doc: `spec/rv32_external_formal_harness_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 16 ✅
+- **Passed:** 0 ✅
 - **Failed:** 1 ❌
-- **Duration:** 522ms
+- **Duration:** 209ms

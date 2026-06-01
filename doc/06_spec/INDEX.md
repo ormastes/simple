@@ -5,16 +5,16 @@
 ## Quick Stats
 
 - **Total Features:** 1
-- **Complete Documentation:** 0 (0%)
-- **Stubs Remaining:** 1
-- **Total Lines:** 0
-- **Warnings:** 1
+- **Complete Documentation:** 1 (100%)
+- **Stubs Remaining:** 0
+- **Total Lines:** 6
+- **Warnings:** 7
 
 ---
 
-## Other (1 features)
+## Hardware & OS (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Image Decode Specification](paint/image_decode_spec.md) | Auto-generated | N/A | 75 | 0% | 0 lines |
+| [RV32 External Formal Harness Spec](system/hardware/rv32_external_formal_harness_spec.md) | Minimal | N/A | 10 | 20% | 6 lines |
 

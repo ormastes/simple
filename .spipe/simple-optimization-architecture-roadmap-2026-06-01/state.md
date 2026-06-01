@@ -121,3 +121,16 @@ dev-done
   perf (10); PASS Node API conformance (151); PASS WebGPU JS/WASM Simple (106);
   PASS GTK GUI repeat evidence with Simple open 227 us, GTK open 69171 us,
   Simple frame 1 us, GTK frame 26 us, vector checksum 212444 deterministic true.
+- implementation: GUI rendering lane added an exact `report-table-command`
+  fixture to the Simple Engine2D heuristic renderer plus Node, Bun, and Electron
+  bitmap baselines. The scene covers command chips, table rows, filter/summary
+  panels, and taskbar status pixels with zero-tolerance ARGB comparisons.
+- verification: PASS renderer check; PASS SimpleWebEngine2D renderer spec (10);
+  PASS Node exact bitmap evidence with 0 mismatches, static-pixel-cache,
+  1000 cache hits, 5 us Simple frame vs 81 us baseline; PASS Bun exact bitmap
+  evidence with 0 mismatches, 5 us Simple frame vs 403 us baseline; PASS
+  Electron exact bitmap evidence with 0 mismatches and 13026 us Electron frame;
+  PASS interpreter perf (10); PASS Node API conformance (151); PASS WebGPU
+  JS/WASM Simple (106); PASS GTK GUI repeat evidence with Simple open 239 us,
+  GTK open 75690 us, Simple frame 1 us, GTK frame 28 us, vector checksum
+  212444 deterministic true.
