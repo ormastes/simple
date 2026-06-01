@@ -27,7 +27,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   and records a first-line width of `105`px versus Chrome canvas `104.0625`px.
   The famous-site corpus system spec passes 37/37; production pixels remain
   divergent (`differentPixels: 2717`) and are tracked as the next glyph paint
-  and compositing blocker.
+  and compositing blocker. Direct bitmap glyph paint routes were probed and
+  fail closed because they regress the strict different-pixel bound; the next
+  implementation slice needs Chrome-like antialias/proportional glyph paint
+  before replacing the rectangle-only production corpus path.
 - 8K color/image Option A is selected and documented: lazy packed 8K surfaces,
   CIELAB as the semantic color space, XYZ as the connection space, and fail-
   closed unsupported codec/profile paths. The JPEG XL stage now distinguishes
@@ -71,6 +74,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `layout_text_match: true`; the first-line width now records `105`px versus
   Chrome `104.0625`px, while pixel output remains divergent for paint/composite
   work.
+- `doc/09_report/chrome_production_glyph_paint_probe_2026-06-01.md`:
+  fail-closed production glyph paint probe showing generic layout and Engine2D
+  bitmap glyph routes regress the strict `site_0_google` different-pixel bound.
 - `doc/09_report/gui_color_image_pipeline_8k_current_2026-06-01.md`: current
   packed 8K surface and lazy codec/profile evidence.
 - `doc/09_report/gui_color_image_pipeline_8k_evidence_2026-06-01.md`: 8K lane
@@ -134,8 +140,11 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - Production Chrome parity: replace fixture/oracle-backed corpus shortcuts with
   real Chrome-compatible DOM/style/layout/font paint output. The current
   production probe remains divergent for text-heavy corpus samples; the next
-  slice should move the matched line metrics into production glyph paint and
-  compositing rather than adding more corpus fixture shortcuts.
+  slice should implement Chrome-like antialias/proportional glyph paint and
+  compositing before moving the matched line metrics into production paint. Do
+  not replace the current rectangle-only production corpus path with binary
+  bitmap glyph text; the fail-closed probe shows that regresses the strict
+  different-pixel bound.
 - 8K color/image: broaden high-bit-depth compressed raster coverage, JPEG XL
   codestream pixel decoding, real non-identity ICC/profile transforms, broader
   JPEG XL structured/ICC color parser coverage, and web/browser/WM image
