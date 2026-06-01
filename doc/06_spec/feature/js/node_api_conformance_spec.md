@@ -1320,6 +1320,38 @@ expect(_eval_str("require('node:https').request('https://example.com').scheme"))
 
 </details>
 
+#### allows net APIs only for explicitly granted endpoints
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("tcp://example.com:80", "require('net').createConnection({host:'example.com',port:80}).status")).to_equal("allowed")
+expect(_eval_str_with_network("tcp://example.com:80", "require('node:net').createConnection(80, 'example.com').status")).to_equal("allowed")
+expect(_eval_str_with_network("tcp://api.example.com:443", "require('net').createConnection({host:'example.com',port:80}).reason")).to_equal("network-grant-denied")
+```
+
+</details>
+
+#### allows http APIs only for explicitly granted endpoints
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://example.com:80", "require('http').request('http://example.com').status")).to_equal("allowed")
+expect(_eval_str_with_network("https://example.com:443", "require('node:https').request('https://example.com').status")).to_equal("allowed")
+expect(_eval_str_with_network("https://example.com:443", "require('http').request('http://example.com').reason")).to_equal("network-grant-denied")
+```
+
+</details>
+
 #### resolves Express-like http server creation as fail-closed network API
 
 <details>
@@ -1348,6 +1380,22 @@ expect(_eval_str("require('http').createServer((req,res)=>{}).status")).to_equal
 expect(_eval_str("require('http').createServer((req,res)=>{}).listen(0).error")).to_equal("network-denied")
 expect(_eval_str("require('node:http').createServer((req,res)=>{}).listen(3000).operation")).to_equal("http.Server.listen")
 expect(_eval_str("require('http').createServer((req,res)=>{}).close().status")).to_equal("denied")
+```
+
+</details>
+
+#### allows http server listen only for explicitly granted listen endpoints
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("listen://0.0.0.0:3000", "require('http').createServer((req,res)=>{}).listen(3000).status")).to_equal("allowed")
+expect(_eval_str_with_network("listen://0.0.0.0:3000", "require('node:http').createServer((req,res)=>{}).listen(3000).port")).to_equal("3000")
+expect(_eval_str_with_network("listen://0.0.0.0:3000", "require('http').createServer((req,res)=>{}).listen(0).reason")).to_equal("network-grant-denied")
 ```
 
 </details>
@@ -2202,8 +2250,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 145 |
-| Active scenarios | 145 |
+| Total scenarios | 148 |
+| Active scenarios | 148 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

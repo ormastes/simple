@@ -60,6 +60,14 @@ fn _eval_str_with_file(path: text, content: text, source: text) -> text:
         Ok(value): js_to_string(value)
         Err(err): "error"
 
+fn _eval_str_with_network(endpoint: text, source: text) -> text:
+    var runtime = JsRuntime.new(Logger.new(LogLevel.Error))
+    runtime.grant_node_network(endpoint)
+    val result = runtime.eval(source)
+    match result:
+        Ok(value): js_to_string(value)
+        Err(err): "error"
+
 describe "Node.js path module":
     describe "path.dirname":
         it "gets directory name":
@@ -364,6 +372,16 @@ describe "Node.js runtime shape":
             expect(_eval_str("require('http').request('http://example.com').status")).to_equal("denied")
             expect(_eval_str("require('node:https').request('https://example.com').scheme")).to_equal("https")
 
+        it "allows net APIs only for explicitly granted endpoints":
+            expect(_eval_str_with_network("tcp://example.com:80", "require('net').createConnection({host:'example.com',port:80}).status")).to_equal("allowed")
+            expect(_eval_str_with_network("tcp://example.com:80", "require('node:net').createConnection(80, 'example.com').status")).to_equal("allowed")
+            expect(_eval_str_with_network("tcp://api.example.com:443", "require('net').createConnection({host:'example.com',port:80}).reason")).to_equal("network-grant-denied")
+
+        it "allows http APIs only for explicitly granted endpoints":
+            expect(_eval_str_with_network("http://example.com:80", "require('http').request('http://example.com').status")).to_equal("allowed")
+            expect(_eval_str_with_network("https://example.com:443", "require('node:https').request('https://example.com').status")).to_equal("allowed")
+            expect(_eval_str_with_network("https://example.com:443", "require('http').request('http://example.com').reason")).to_equal("network-grant-denied")
+
         it "resolves Express-like http server creation as fail-closed network API":
             expect(_eval_str("typeof require('http').createServer")).to_equal("function")
             expect(_eval_str("typeof require('node:http').createServer")).to_equal("function")
@@ -373,6 +391,11 @@ describe "Node.js runtime shape":
             expect(_eval_str("require('http').createServer((req,res)=>{}).listen(0).error")).to_equal("network-denied")
             expect(_eval_str("require('node:http').createServer((req,res)=>{}).listen(3000).operation")).to_equal("http.Server.listen")
             expect(_eval_str("require('http').createServer((req,res)=>{}).close().status")).to_equal("denied")
+
+        it "allows http server listen only for explicitly granted listen endpoints":
+            expect(_eval_str_with_network("listen://0.0.0.0:3000", "require('http').createServer((req,res)=>{}).listen(3000).status")).to_equal("allowed")
+            expect(_eval_str_with_network("listen://0.0.0.0:3000", "require('node:http').createServer((req,res)=>{}).listen(3000).port")).to_equal("3000")
+            expect(_eval_str_with_network("listen://0.0.0.0:3000", "require('http').createServer((req,res)=>{}).listen(0).reason")).to_equal("network-grant-denied")
 
         it "resolves readline createInterface as fail-closed terminal API":
             expect(_eval_str("typeof require('readline').createInterface")).to_equal("function")

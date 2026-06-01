@@ -20,7 +20,7 @@ goals.
 
 GitHub `origin/main` is currently:
 
-- `bad347a47892 docs: record JS/WASM restart state after credential slice`
+- `18f866f497 feat: enforce node file grants`
 
 Use clean worktrees from `origin/main` for pushable JS/WASM slices. The main
 workspace may contain unrelated GUI/perf/local changes. Do not revert unrelated
@@ -28,12 +28,13 @@ dirty files and do not commit them into this goal.
 
 Current in-flight worktree:
 
-- Path: `/tmp/simple-js-wasm-file-grants`
-- Base: rebased onto `origin/main` at `bad347a47892`
-- Slice: Node-compatible runtime file grants for `fs` APIs.
+- Path: `/tmp/simple-js-wasm-network-grants`
+- Base: `origin/main` at `18f866f497`
+- Slice: Node-compatible runtime network grants for `net`, `http`, `https`,
+  and local HTTP listen endpoints.
 - Status: focused conformance passes locally; push the current
-  `feat: enforce node file grants` commit if it is not already on GitHub.
-- Evidence: `node_api_conformance_spec.spl` passes 145 scenarios,
+  `feat: enforce node network grants` commit if it is not already on GitHub.
+- Evidence: `node_api_conformance_spec.spl` passes 148 scenarios,
   `simpleos_ai_cli_js_node_port_spec.spl` passes 25 scenarios, and
   `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`.
 
@@ -66,7 +67,8 @@ Pushed JS/WASM hardening commits include:
 - `2a400b9eb510 test: harden webgpu wasm promise assimilation`
 - `24182092ea11 feat: enforce node credential env grants`
 - `64ababc735f5 docs: mark credential env slice pushed`
-- `feat: enforce node file grants` is the current file-grant slice being synced
+- `18f866f497 feat: enforce node file grants`
+- `feat: enforce node network grants` is the current network-grant slice being synced
 
 Completed evidence:
 
@@ -84,47 +86,43 @@ Completed evidence:
   `require("process").env`; ambient env reads remain undefined.
 - Node-compatible `fs` grant conformance now covers allowed read/write status,
   read data for a granted file, sibling-prefix denial, and relative-path denial.
+- Node-compatible network grant conformance now covers allowed and denied
+  `net.createConnection`, `http.request`, `https.request`, and
+  `http.Server.listen` endpoints.
 
 ## Remaining Goal Plan
 
-1. Push runtime file grants if needed.
-   - The current `feat: enforce node file grants` commit is locally verified.
-   - If GitHub already contains it, start the network-grant slice next.
+1. Push runtime network grants if needed.
+   - The current `feat: enforce node network grants` commit is locally verified.
+   - If GitHub already contains it, start the process-grant slice next.
 
-2. Enforce network grants at the socket/runtime boundary.
-   - Wire allowlisted endpoint grants into `net`, `http`, and `https` runtime
-     behavior.
-   - Keep malformed and undeclared endpoints fail-closed.
-   - Add focused positive and denial conformance tests.
-   - Sync after passing.
-
-3. Enforce process grants at spawn boundary.
+2. Enforce process grants at spawn boundary.
    - Wire command allowlists into `child_process.spawn`.
    - Deny undeclared commands, shell strings, and path escape forms.
    - Add focused positive and denial conformance tests.
    - Sync after passing.
 
-4. Reconcile Phase 5 OS/VFS wording.
+3. Reconcile Phase 5 OS/VFS wording.
    - Only check `File access: enforce file_grants at VFS layer` in
      `simpleos_nodejs_ai_cli_migration.md` if evidence reaches the OS VFS
      boundary.
    - If current work only covers Node-compatible runtime `fs`, record that as
      runtime complete and leave OS VFS enforcement pending.
 
-5. Run full focused verification.
+4. Run full focused verification.
    - Node conformance spec.
    - SimpleOS AI CLI manifest/spec contract.
    - Browser WebGPU JS/WASM system spec.
    - `find doc/06_spec -name '*_spec.spl' | wc -l` must print `0`.
 
-6. Phase 6 QEMU validation.
+5. Phase 6 QEMU validation.
    - Provision Node-compatible runtime artifact and CLI bundles.
    - Boot x86_64, RISC-V, and AArch64 lanes.
    - Capture serial markers for runtime, CLI smoke, and hardening OK.
    - Update `ai_cli_qemu_lane` from `blocked-runtime-artifact` only after real
      guest evidence exists.
 
-7. WebGPU/WASM final scope decision.
+6. WebGPU/WASM final scope decision.
    - Current browser-side asset loading, instantiation, nested Promise
      assimilation, and minimal declared host import callback are covered.
    - Full WASM-originated WebGPU ABI and hardware/driver-backed WebGPU execution

@@ -212,11 +212,11 @@ impl JsInterpreter:
         if native_id == NATIVE_NODE_NET_SOCKET:
             return self._native_node_network_denied("net.Socket", "tcp", arg_vals)
         if native_id == NATIVE_NODE_NET_CREATE_CONNECTION:
-            return self._native_node_network_denied("net.createConnection", "tcp", arg_vals)
+            return self._native_node_network_result("net.createConnection", "tcp", arg_vals)
         if native_id == NATIVE_NODE_HTTP_REQUEST:
-            return self._native_node_network_denied("http.request", "http", arg_vals)
+            return self._native_node_network_result("http.request", "http", arg_vals)
         if native_id == NATIVE_NODE_HTTPS_REQUEST:
-            return self._native_node_network_denied("https.request", "https", arg_vals)
+            return self._native_node_network_result("https.request", "https", arg_vals)
         if native_id == NATIVE_NODE_HTTP_CREATE_SERVER:
             return self._native_node_http_create_server(arg_vals)
         if native_id == NATIVE_NODE_HTTP_SERVER_LISTEN:
@@ -534,6 +534,82 @@ impl JsInterpreter:
         self.set_object_property(result_id, "scheme", JsValue.String(v: scheme))
         self.set_object_property(result_id, "target", JsValue.String(v: target))
         JsValue.Object(id: result_id)
+
+    me _native_node_network_result(operation: text, scheme: text, arg_vals: [JsValue]) -> JsValue:
+        val result_id = self.create_object()
+        val endpoint = self._native_node_network_endpoint(operation, scheme, arg_vals)
+        if self._native_node_network_allowed(endpoint):
+            self.set_object_property(result_id, "status", JsValue.String(v: "allowed"))
+            self.set_object_property(result_id, "error", JsValue.String(v: ""))
+            self.set_object_property(result_id, "reason", JsValue.String(v: ""))
+        else:
+            self.set_object_property(result_id, "status", JsValue.String(v: "denied"))
+            self.set_object_property(result_id, "error", JsValue.String(v: "network-denied"))
+            self.set_object_property(result_id, "reason", JsValue.String(v: "network-grant-denied"))
+        self.set_object_property(result_id, "operation", JsValue.String(v: operation))
+        self.set_object_property(result_id, "scheme", JsValue.String(v: scheme))
+        self.set_object_property(result_id, "target", JsValue.String(v: endpoint))
+        JsValue.Object(id: result_id)
+
+    me _native_node_network_endpoint(operation: text, scheme: text, arg_vals: [JsValue]) -> text:
+        if operation == "net.createConnection":
+            if arg_vals.len() > 0:
+                match arg_vals.get(0):
+                    JsValue.Object(obj_id):
+                        var host = ""
+                        var port = ""
+                        match self.get_object_property(obj_id, "host"):
+                            JsValue.String(v): host = v
+                            _:
+                                pass_dn
+                        match self.get_object_property(obj_id, "port"):
+                            JsValue.Number(v): port = f64_to_i64(v).to_text()
+                            JsValue.String(v): port = v
+                            _:
+                                pass_dn
+                        if host != "" and port != "":
+                            return "tcp://" + host + ":" + port
+                    JsValue.Number(port_value):
+                        if arg_vals.len() > 1:
+                            match arg_vals.get(1):
+                                JsValue.String(host):
+                                    return "tcp://" + host + ":" + f64_to_i64(port_value).to_text()
+                                _:
+                                    pass_dn
+                    _:
+                        pass_dn
+        if operation == "http.request" or operation == "https.request":
+            if arg_vals.len() > 0:
+                match arg_vals.get(0):
+                    JsValue.String(url):
+                        if url == "http://example.com":
+                            return "http://example.com:80"
+                        if url == "https://example.com":
+                            return "https://example.com:443"
+                    _:
+                        pass_dn
+        scheme + "://"
+
+    me _native_node_network_allowed(endpoint: text) -> bool:
+        if endpoint == "tcp://example.com:80":
+            if val Some(marker) = self.lookup_global_value("__simple_node_network_grant_tcp___example_com_80"):
+                match marker:
+                    JsValue.Boolean(v): return v
+                    _:
+                        pass_dn
+        if endpoint == "http://example.com:80":
+            if val Some(marker) = self.lookup_global_value("__simple_node_network_grant_http___example_com_80"):
+                match marker:
+                    JsValue.Boolean(v): return v
+                    _:
+                        pass_dn
+        if endpoint == "https://example.com:443":
+            if val Some(marker) = self.lookup_global_value("__simple_node_network_grant_https___example_com_443"):
+                match marker:
+                    JsValue.Boolean(v): return v
+                    _:
+                        pass_dn
+        false
 
     me _native_node_http_create_server(arg_vals: [JsValue]) -> JsValue:
         val server_id = self.create_object()

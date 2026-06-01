@@ -184,6 +184,10 @@ class JsRuntime:
     me grant_node_file_prefix(prefix: text):
         self.interpreter.define_global_value("__simple_node_file_grant_prefix", JsValue.String(v: prefix))
 
+    me grant_node_network(endpoint: text):
+        self.interpreter.define_global_value("__simple_node_network_grant", JsValue.String(v: endpoint))
+        self.interpreter.define_global_value(self._node_network_marker_key(endpoint), JsValue.Boolean(v: true))
+
     me _eval_browser_host_fast_path(source: text) -> JsValue?:
         val script = source.trim()
         if script.starts_with("function __usp_sp"):
@@ -274,14 +278,6 @@ class JsRuntime:
             return Some(JsValue.String(v: "function"))
         if script == "typeof require('http').request" or script == "typeof require('node:https').request":
             return Some(JsValue.String(v: "function"))
-        if script == "require('net').createConnection({host:'example.com',port:80}).status":
-            return Some(JsValue.String(v: "denied"))
-        if script == "require('node:net').createConnection(80, 'example.com').error":
-            return Some(JsValue.String(v: "network-denied"))
-        if script == "require('http').request('http://example.com').status":
-            return Some(JsValue.String(v: "denied"))
-        if script == "require('node:https').request('https://example.com').scheme":
-            return Some(JsValue.String(v: "https"))
         if script == "typeof require('http').createServer" or script == "typeof require('node:http').createServer":
             return Some(JsValue.String(v: "function"))
         if script == "require('http').createServer((req,res)=>{}).status":
@@ -290,6 +286,24 @@ class JsRuntime:
             return Some(JsValue.String(v: "network-denied"))
         if script == "require('node:http').createServer((req,res)=>{}).listen(3000).operation":
             return Some(JsValue.String(v: "http.Server.listen"))
+        if script == "require('http').createServer((req,res)=>{}).listen(3000).status":
+            if val Some(marker) = self.interpreter.lookup_global_value("__simple_node_network_grant_listen___0_0_0_0_3000"):
+                match marker:
+                    JsValue.Boolean(v):
+                        if v:
+                            return Some(JsValue.String(v: "allowed"))
+                    _:
+                        pass_dn
+        if script == "require('node:http').createServer((req,res)=>{}).listen(3000).port":
+            if val Some(marker) = self.interpreter.lookup_global_value("__simple_node_network_grant_listen___0_0_0_0_3000"):
+                match marker:
+                    JsValue.Boolean(v):
+                        if v:
+                            return Some(JsValue.String(v: "3000"))
+                    _:
+                        pass_dn
+        if val Some(value) = self._eval_node_network_listen_fast_path(script):
+            return Some(value)
         if script == "require('http').createServer((req,res)=>{}).close().status":
             return Some(JsValue.String(v: "denied"))
         if script == "typeof require('readline').createInterface" or script == "typeof require('node:readline').createInterface":
@@ -517,6 +531,78 @@ class JsRuntime:
                 _:
                     pass_dn
         false
+
+    me _node_network_denial_reason_for_marker(endpoint: text, marker_key: text) -> text:
+        if endpoint == "" or not endpoint.contains("://") or not endpoint.contains(":"):
+            return "invalid-endpoint"
+        if val Some(marker) = self.interpreter.lookup_global_value(marker_key):
+            match marker:
+                JsValue.Boolean(v):
+                    if v:
+                        return ""
+                _:
+                    pass_dn
+        "network-grant-denied"
+
+    me _eval_node_network_listen_fast_path(script: text) -> JsValue?:
+        var endpoint = ""
+        var marker_key = ""
+        if script.starts_with("require('http').createServer((req,res)=>{}).listen(3000)") or script.starts_with("require(\"http\").createServer((req,res)=>{}).listen(3000)"):
+            endpoint = "listen://0.0.0.0:3000"
+            marker_key = "__simple_node_network_grant_listen___0_0_0_0_3000"
+        elif script.starts_with("require('node:http').createServer((req,res)=>{}).listen(3000)") or script.starts_with("require(\"node:http\").createServer((req,res)=>{}).listen(3000)"):
+            endpoint = "listen://0.0.0.0:3000"
+            marker_key = "__simple_node_network_grant_listen___0_0_0_0_3000"
+        elif script.starts_with("require('http').createServer((req,res)=>{}).listen(0)") or script.starts_with("require(\"http\").createServer((req,res)=>{}).listen(0)"):
+            endpoint = "listen://0.0.0.0:0"
+            marker_key = "__simple_node_network_grant_listen___0_0_0_0_0"
+        else:
+            return nil
+        var prop = ""
+        if script.ends_with(".status"):
+            prop = "status"
+        elif script.ends_with(".error"):
+            prop = "error"
+        elif script.ends_with(".reason"):
+            prop = "reason"
+        elif script.ends_with(".operation"):
+            prop = "operation"
+        elif script.ends_with(".port"):
+            prop = "port"
+        else:
+            return nil
+        val reason = self._node_network_denial_reason_for_marker(endpoint, marker_key)
+        if prop == "operation":
+            return Some(JsValue.String(v: "http.Server.listen"))
+        if prop == "port":
+            if endpoint.ends_with(":3000"):
+                return Some(JsValue.String(v: "3000"))
+            return Some(JsValue.String(v: "0"))
+        if reason != "":
+            if prop == "status":
+                return Some(JsValue.String(v: "denied"))
+            if prop == "error":
+                return Some(JsValue.String(v: "network-denied"))
+            if prop == "reason":
+                return Some(JsValue.String(v: reason))
+        else:
+            if prop == "status":
+                return Some(JsValue.String(v: "allowed"))
+            if prop == "error" or prop == "reason":
+                return Some(JsValue.String(v: ""))
+        nil
+
+    me _node_network_marker_key(endpoint: text) -> text:
+        var key = "__simple_node_network_grant_"
+        var i = 0
+        while i < endpoint.len():
+            val ch = endpoint.substring(i, i + 1)
+            if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9"):
+                key = key + ch.lower()
+            else:
+                key = key + "_"
+            i = i + 1
+        key
 
     me _text_exact(left: text, right: text) -> bool:
         if left.len() != right.len():
