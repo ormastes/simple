@@ -12,12 +12,7 @@ Harden the Simple JavaScript runtime so NodeJS-compatible APIs, browser JavaScri
 
 As of 2026-06-01, GitHub `origin/main` is:
 
-- `2a400b9eb510 test: harden webgpu wasm promise assimilation`
-
-Local jj state also has an unpushed credential/env slice:
-
-- `3aa4ad8ff47f feat: enforce node credential env grants`
-- current working copy `@` contains follow-up edits for the same slice.
+- `24182092ea11 feat: enforce node credential env grants`
 
 Do not assume the dirty worktree belongs to this goal. There are unrelated GUI/vector/image/perf evidence changes in the working copy. Commit only explicit JS/WASM hardening files for this goal.
 
@@ -47,6 +42,7 @@ Pushed commits for this goal:
 - `778af6370bb2 test: tighten ai cli process grant boundary`
 - `8433c511c560 test: tighten ai cli credential grant boundary`
 - `2a400b9eb510 test: harden webgpu wasm promise assimilation`
+- `24182092ea11 feat: enforce node credential env grants`
 
 1. Browser WASM promise chain and WebAssembly hardening.
    - Fixed BrowserSession `fetch` -> `arrayBuffer` -> `WebAssembly.instantiate`.
@@ -81,30 +77,13 @@ Pushed commits for this goal:
    - BrowserSession WASM fetch chains now assimilate nested host promises returned by WebGPU callbacks.
    - `webgpu_js_wasm_simple_spec.spl` covers the `fetch` -> `arrayBuffer` -> `WebAssembly.instantiate` -> `Promise.resolve(navigator.gpu.requestAdapter())` path.
 
-## Current In-Flight Slice
+8. Node-compatible credential/env runtime grants.
+   - `JsRuntime.grant_node_credential(handle, value)` maps handles such as `openai-api-key` to env keys such as `OPENAI_API_KEY`.
+   - `process.env.OPENAI_API_KEY` and `require('process').env.OPENAI_API_KEY` return only explicitly granted values.
+   - Ambient values such as `process.env.PATH` and undeclared provider keys remain `undefined`.
+   - The Phase 5 credential checklist is checked in `doc/03_plan/simpleos_nodejs_ai_cli_migration.md`.
 
-Goal: wire Node-compatible credential grants into the actual JS runtime `process.env` surface, not just the decision helper.
-
-Expected files for this slice:
-
-- `.spipe/nodejs-js-wasm-hardening/state.md`
-- `doc/03_plan/simpleos_nodejs_ai_cli_migration.md`
-- `doc/03_plan/nodejs_js_wasm_hardening_restart_plan.md`
-- `doc/06_spec/feature/js/node_api_conformance_spec.md`
-- `src/lib/nogc_sync_mut/js/engine/interpreter.spl`
-- `src/lib/nogc_sync_mut/js/engine/interpreter_eval_member.spl`
-- `src/lib/nogc_sync_mut/js/engine/interpreter_native.spl`
-- `src/lib/nogc_sync_mut/js/engine/runtime.spl`
-- `test/feature/js/node_api_conformance_spec.spl`
-
-Current intended behavior:
-
-- A granted credential handle such as `openai-api-key` maps to `OPENAI_API_KEY`.
-- `process.env.OPENAI_API_KEY` and `require('process').env.OPENAI_API_KEY` return the granted value.
-- Ambient values such as `process.env.PATH` and undeclared provider keys remain `undefined`.
-- The process env object is supplied through `__simple_node_env`; direct member lookup and `require('process')` must read the same object.
-
-Last recorded local verification for this slice:
+Last recorded verification for the credential/env runtime slice:
 
 ```sh
 SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval_member.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/runtime.spl test/feature/js/node_api_conformance_spec.spl
@@ -118,8 +97,6 @@ Expected current local evidence:
 - `node_api_conformance_spec.spl`: 143 scenarios passing.
 - `simpleos_ai_cli_js_node_port_spec.spl`: 25 scenarios passing.
 - `doc/06_spec` stray `.spl` count: `0`.
-
-Before pushing this slice, re-run the commands above, inspect `jj log -r '::@ & ~::main@origin'`, and push only if the only outgoing commits are this JS/WASM hardening work.
 
 ## Last Known Passing Commands
 
@@ -147,7 +124,6 @@ Phase 5 unchecked hardening items in `doc/03_plan/simpleos_nodejs_ai_cli_migrati
 - File access: enforce `file_grants` at the VFS boundary and deny undeclared paths.
 - Network: enforce `network_grants` at the socket boundary and allowlist endpoints only.
 - Process: enforce `process_grants` and deny undeclared spawns.
-- Credentials: checked locally after Node-compatible JS runtime env wiring; verify and push the current slice before treating it as remote-complete.
 
 Phase 6 remains unchecked:
 
@@ -165,11 +141,6 @@ WebGPU/WASM remaining gap:
 
 Implement one enforcement boundary at a time and sync after each passing slice.
 
-0. Finish and push current credential/env runtime slice.
-   - Re-run focused check, Node conformance, OS contract, and stray spec layout check.
-   - Commit only the expected files listed in `Current In-Flight Slice`.
-   - Push to GitHub with `env -u GITHUB_TOKEN jj git push --bookmark main`.
-
 1. File grant boundary.
    - Add a small contract/API that models VFS open/read/write decisions from `AiCliManifest.file_grants`.
    - Cover exact allowed prefixes, prefix escape cases, empty grants, and deny reason strings.
@@ -183,11 +154,7 @@ Implement one enforcement boundary at a time and sync after each passing slice.
    - Add process spawn decision helpers for command allowlists.
    - Cover path-qualified commands, shell escape denial, and undeclared spawn denial.
 
-4. Credential grant boundary.
-   - Add credential/env read decision helpers.
-   - Cover allowed handles, ambient `process.env`/`Deno.env` denial, and API key token signature denial.
-
-5. Re-run Node conformance and OS contract specs.
+4. Re-run Node conformance and OS contract specs.
    - Regenerate SPipe manuals after every spec change.
    - Keep `find doc/06_spec -name '*_spec.spl' | wc -l` at `0`.
 
