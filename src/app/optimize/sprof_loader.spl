@@ -2,9 +2,20 @@
 # This slice models validation, merge, hot-path policy, and diagnostic bounds
 # without opening profile files from hot request handlers.
 
+use std.io (file_read)
+
 val SPROF_COUNTER_MAX: i64 = 9223372036854775807
 
 struct SprofMergeSummary:
+    merged_count: i64
+    diagnostic_count: i64
+    saturated: bool
+
+struct SprofLoadedProfile:
+    status: text
+    module_identity: text
+    workload_label: text
+    function_count: i64
     merged_count: i64
     diagnostic_count: i64
     saturated: bool
@@ -70,3 +81,68 @@ fn sprof_bounded_diagnostics(diagnostics: [text], limit: i64) -> [text]:
         bounded.push("diagnostics_truncated:{diagnostics.len() - limit}")
 
     bounded
+
+fn _sprof_line_value(line: text, key: text) -> text:
+    val prefix = "{key}="
+    val parts = line.split(";")
+    var i = 0
+    while i < parts.len():
+        val part = parts[i].trim()
+        if part.starts_with(prefix):
+            return part[prefix.len():]
+        i = i + 1
+    ""
+
+fn _sprof_parse_count(value: text) -> i64:
+    value.trim().to_i64() ?? -1
+
+fn sprof_load_profile_text(profile_text: text, expected_module: text, expected_workload: text) -> SprofLoadedProfile:
+    if profile_text.trim() == "":
+        return SprofLoadedProfile(
+            status: "invalid",
+            module_identity: "",
+            workload_label: "",
+            function_count: 0,
+            merged_count: 0,
+            diagnostic_count: 1,
+            saturated: false
+        )
+
+    var module_identity = ""
+    var workload_label = ""
+    var function_count: i64 = 0
+    var merged_count: i64 = 0
+    var diagnostic_count: i64 = 0
+    var saturated = false
+
+    val lines = profile_text.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line.starts_with("header;"):
+            module_identity = _sprof_line_value(line, "module")
+            workload_label = _sprof_line_value(line, "workload")
+        elif line.starts_with("function;"):
+            val count = _sprof_parse_count(_sprof_line_value(line, "count"))
+            val summary = sprof_merge_summary(merged_count, count)
+            merged_count = summary.merged_count
+            diagnostic_count = diagnostic_count + summary.diagnostic_count
+            saturated = saturated or summary.saturated
+            if count >= 0:
+                function_count = function_count + 1
+        i = i + 1
+
+    val status = sprof_profile_record_status("exact", module_identity == expected_module, workload_label == expected_workload)
+    SprofLoadedProfile(
+        status: status,
+        module_identity: module_identity,
+        workload_label: workload_label,
+        function_count: function_count,
+        merged_count: merged_count,
+        diagnostic_count: diagnostic_count,
+        saturated: saturated
+    )
+
+fn sprof_load_profile_file(path: text, expected_module: text, expected_workload: text) -> SprofLoadedProfile:
+    val body = file_read(path)
+    sprof_load_profile_text(body, expected_module, expected_workload)
