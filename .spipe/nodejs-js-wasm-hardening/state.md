@@ -36,3 +36,7 @@ dev-incomplete
 - dev: PASS `SIMPLE_LIB=src bin/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --clean` (1 scenario).
 - dev: PASS `SIMPLE_LIB=src bin/simple test test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --clean` (103 scenarios).
 - dev: Regenerated `doc/06_spec/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md` and `doc/06_spec/system/app/browser/feature/webgpu_js_wasm_simple_spec.md` with `bin/simple spipe-docgen`; command completed with existing compiler/docgen warnings.
+- dev: Strengthened Node-compatible smoke package hardening detection for file (`fs.readFile`, `fs.writeFile`, `fs.promises`, `node:fs`), network (`net.connect`, `tls.connect`, `http.request`, `https.request`), process (`child_process.spawn`), and credential/environment (`process.env`, `Deno.env`, credential handles, API key tokens) escape signatures.
+- dev: PASS `SIMPLE_LIB=src bin/simple test test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter --clean` (18 scenarios).
+- dev: Regenerated `doc/06_spec/system/os/simpleos_ai_cli_js_node_port_spec.md` with `bin/simple spipe-docgen --no-index`; command completed with existing compiler/docgen warnings.
+- dev: Updated `doc/03_plan/sys_test/webgpu_js_wasm_simple.md` so REQ-WGPU-006/007 reflect the implemented BrowserSession `fetch` -> `arrayBuffer` -> `WebAssembly.instantiate` path and keep direct WASM-to-WebGPU host bindings as the remaining bridge layer.

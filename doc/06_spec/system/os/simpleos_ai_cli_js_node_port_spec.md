@@ -11,7 +11,7 @@
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -214,7 +214,7 @@ expect(blocker).to_contain("later layer")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -259,7 +259,7 @@ expect(plan.required_guest_paths).to_contain("/sys/runtime/node-compatible/x86/r
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -284,7 +284,7 @@ expect(ai_cli_provisioning_plan_summary(plan)).to_contain("disk-manifest=CLAUDE.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -318,7 +318,7 @@ expect(summary).to_contain("ready=true")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -326,6 +326,66 @@ expect(ai_cli_runtime_smoke_package_hardening_error("host.shell('id')")).to_equa
 expect(ai_cli_runtime_smoke_package_hardening_error("process.env.OPENAI_API_KEY")).to_equal("ambient environment access denied")
 expect(ai_cli_runtime_smoke_package_hardening_error("require('fs')")).to_equal("module loader access denied")
 expect(ai_cli_runtime_smoke_package_hardening_error("fetch('https://example.com')")).to_equal("network access denied")
+expect(ai_cli_runtime_smoke_package_hardening_error("fs.readFile('/etc/passwd')")).to_equal("file access denied")
+expect(ai_cli_runtime_smoke_package_hardening_error("fs.promises.writeFile('/tmp/x', 'x')")).to_equal("file access denied")
+expect(ai_cli_runtime_smoke_package_hardening_error("child_process.spawn('sh')")).to_equal("child process access denied")
+expect(ai_cli_runtime_smoke_package_hardening_error("net.connect(443, 'api.openai.com')")).to_equal("network access denied")
+expect(ai_cli_runtime_smoke_package_hardening_error("tls.connect({ host: 'api.openai.com' })")).to_equal("network access denied")
+expect(ai_cli_runtime_smoke_package_hardening_error("Deno.env.get('OPENAI_API_KEY')")).to_equal("ambient environment access denied")
+expect(ai_cli_runtime_smoke_package_hardening_error("credential:openai-api-key")).to_equal("ambient environment access denied")
+```
+
+</details>
+
+<details>
+<summary>Advanced: builds a full Codex Claude Gemini by RISC-V x86 ARM smoke package matrix</summary>
+
+#### builds a full Codex Claude Gemini by RISC-V x86 ARM smoke package matrix
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val packages = ai_cli_runtime_smoke_packages()
+val evidence = ai_cli_runtime_smoke_matrix_evidence()
+val summary = ai_cli_runtime_smoke_matrix_summary(evidence)
+
+expect(packages.len()).to_equal(9)
+expect(evidence.package_count).to_equal(9)
+expect(evidence.ready_count).to_equal(9)
+expect(evidence.serial_accept_count).to_equal(9)
+expect(evidence.app_ids).to_contain("codex")
+expect(evidence.app_ids).to_contain("claude")
+expect(evidence.app_ids).to_contain("gemini")
+expect(evidence.targets).to_contain("riscv")
+expect(evidence.targets).to_contain("x86")
+expect(evidence.targets).to_contain("arm")
+expect(evidence.status).to_equal("ai_cli_runtime_smoke_matrix_ready")
+expect(summary).to_contain("packages=9")
+```
+
+</details>
+
+
+</details>
+
+#### accepts each staged package marker payload as QEMU serial evidence
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val packages = ai_cli_runtime_smoke_packages()
+
+expect(ai_cli_runtime_smoke_package_serial_accepted(packages[0])).to_equal(true)
+expect(ai_cli_runtime_smoke_package_serial_accepted(packages[4])).to_equal(true)
+expect(ai_cli_runtime_smoke_package_serial_accepted(packages[8])).to_equal(true)
 ```
 
 </details>
@@ -403,7 +463,7 @@ expect(contract.qemu_marker_fragments).to_contain("[wasm-gui] browser-rendered")
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/system/os/simpleos_ai_cli_js_node_port_spec.spl` |
-| Updated | 2026-05-30 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -423,8 +483,9 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
