@@ -103,6 +103,22 @@ _expect_release_clean("src/app/gui_perf/smf_dynlib_probe.spl")
 
 </details>
 
+#### rejects legacy Rust SMF and dyncall runtime helpers in GUI release sources
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_has_forbidden_release_dependency("extern fn rt_file_wrap_smf_dynlib(input: text, output: text, arch: text) -> bool")).to_equal(true)
+expect(_has_forbidden_release_dependency("extern fn rt_file_extract_smf_dynlib(input: text, output: text) -> bool")).to_equal(true)
+expect(_has_forbidden_release_dependency("extern fn rt_dyncall_1(ptr: i64, arg0: i64) -> i64")).to_equal(true)
+```
+
+</details>
+
 #### keeps macOS SMF evidence runner free of WM, web renderer, and native GUI runtime deps
 
 1.  expect release clean
@@ -341,8 +357,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
