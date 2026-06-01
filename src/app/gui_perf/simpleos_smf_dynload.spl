@@ -1,0 +1,77 @@
+# SimpleOS SMF dynload evidence for the pure GUI hot-call artifact.
+#
+# This is intentionally a Simple-side loader probe: it validates a role-2 ARM64
+# SMF envelope through the kernel loader registry and resolves the requested
+# symbol without touching WM, web renderer, or native GUI runtime code.
+
+use app.gui_perf.smf_dynlib_artifact.{GuiSmfArtifactContract, gui_smf_artifact_contract}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.loader_api.{loader_dynopen_smf_library_bytes_for_arch, loader_dynsym, loader_dynclose}
+
+class GuiSimpleOsSmfDynloadEvidence:
+    status: text
+    artifact_path: text
+    smf_role: i64
+    arch_code: i64
+    embedded_dynlib: bool
+    symbol_name: text
+    loader: text
+    adapter: text
+    handle: i64
+    symbol_addr: i64
+    pass: bool
+    error: text
+
+fn _simpleos_dynload_error(contract: GuiSmfArtifactContract, symbol_name: text, handle: i64, symbol_addr: i64) -> text:
+    if contract.status != "pass":
+        return "bad-smf-contract"
+    if contract.smf_role != 2:
+        return "not-smf-library"
+    if contract.arch_code != 3:
+        return "not-arm64"
+    if not contract.embedded_dynlib:
+        return "missing-embedded-dynlib"
+    if symbol_name != "gui_dynlib_hot_probe_tick":
+        return "wrong-symbol"
+    if handle <= 0:
+        return "dynopen-failed"
+    if symbol_addr <= 0:
+        return "dynsym-failed"
+    ""
+
+fn gui_simpleos_smf_dynload_probe(path: text, bytes: [u8], symbol_name: text) -> GuiSimpleOsSmfDynloadEvidence:
+    val contract = gui_smf_artifact_contract(path, bytes, symbol_name)
+    val handle = loader_dynopen_smf_library_bytes_for_arch(path, bytes, Architecture.Arm64)
+    val symbol_addr = if handle > 0: loader_dynsym(handle, symbol_name) else: -1
+    if handle > 0:
+        loader_dynclose(handle)
+    val error = _simpleos_dynload_error(contract, symbol_name, handle, symbol_addr)
+    GuiSimpleOsSmfDynloadEvidence(
+        status: if error == "": "simpleos-dynload-pass" else: "simpleos-dynload-fail",
+        artifact_path: path,
+        smf_role: contract.smf_role,
+        arch_code: contract.arch_code,
+        embedded_dynlib: contract.embedded_dynlib,
+        symbol_name: symbol_name,
+        loader: "simpleos_smf_dynload",
+        adapter: "simpleos-framebuffer-virtio",
+        handle: handle,
+        symbol_addr: symbol_addr,
+        pass: error == "",
+        error: error
+    )
+
+fn gui_simpleos_smf_dynload_row(evidence: GuiSimpleOsSmfDynloadEvidence) -> text:
+    "GUI_SIMPLEOS_SMF_DYNLOAD " +
+    "status=" + evidence.status +
+    " artifact=" + evidence.artifact_path +
+    " smf_role=" + evidence.smf_role.to_text() +
+    " arch=" + evidence.arch_code.to_text() +
+    " embedded_dynlib=" + evidence.embedded_dynlib.to_text() +
+    " symbol=" + evidence.symbol_name +
+    " loader=" + evidence.loader +
+    " adapter=" + evidence.adapter +
+    " handle=" + evidence.handle.to_text() +
+    " symbol_addr=" + evidence.symbol_addr.to_text() +
+    " pass=" + evidence.pass.to_text() +
+    " error=" + evidence.error
