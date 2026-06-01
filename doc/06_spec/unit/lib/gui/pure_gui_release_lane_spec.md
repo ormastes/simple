@@ -129,6 +129,24 @@ _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_release_gate.spl")
 
 </details>
 
+#### keeps macOS release gate failing closed on setup and transcript validation
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = _existing_source("src/app/gui_perf/macos_smf_dynlib_release_gate.spl")
+expect(source).to_contain("reason=transcript-dir-create-failed")
+expect(source).to_contain("gui_mac_smf_dynlib_transcript_check_row(stdout)")
+expect(source).to_contain("reason=transcript-check-failed")
+expect(source).to_contain("GUI_MAC_SMF_DYNLIB_RELEASE_GATE status=pass")
+```
+
+</details>
+
 #### keeps SMF artifact contract helpers free of WM, web renderer, and native GUI runtime deps
 
 1.  expect release clean
@@ -323,8 +341,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
