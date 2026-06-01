@@ -70,8 +70,12 @@ Current adapter slice:
 - Breakpoint probe image planning now defines the per-architecture source path,
   ELF output, linker script, compiler, serial driver, build arguments, and
   required evidence fields for x86/i386/x86_64, ARM/Thumb/AArch64, and
-  RISC-V/RVC. Probe plans are non-proof until the source, compiler, ELF, QEMU,
-  and serial evidence all exist.
+  RISC-V/RVC. The same Simple module now generates freestanding per-arch C
+  probe sources that patch a trap, restore the original instruction, rearm the
+  trap, restore for cleanup, flush icache where the architecture requires it,
+  and emit the serial evidence contract. Probe plans are non-proof until the
+  source is staged, the compiler creates an ELF, QEMU runs it, and serial
+  evidence is captured.
 
 ## Data Flow
 

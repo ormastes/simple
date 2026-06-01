@@ -3,6 +3,9 @@
 use os.baremetal.profile.breakpoint_counter.{breakpoint_architecture_patch_profile}
 use os.baremetal.profile.breakpoint_counter_qemu.{breakpoint_qemu_binary_for_arch, breakpoint_qemu_evidence_prefix}
 
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
+
 pub class BreakpointProbeImagePlan:
     arch: text
     source_path: text
@@ -19,11 +22,22 @@ pub class BreakpointProbeImagePlan:
     can_run: bool
     status: text
 
+pub class BreakpointProbeSourceArtifact:
+    arch: text
+    build_dir: text
+    source_path: text
+    source_text: text
+    valid: bool
+    status: text
+
 pub fn breakpoint_probe_image_arches() -> [text]:
     ["i386", "x86_64", "arm32", "thumb", "aarch64", "riscv32", "riscv32c", "riscv64", "riscv64c"]
 
+pub fn breakpoint_probe_image_build_dir(arch: text) -> text:
+    "build/baremetal/breakpoint_probe/" + arch
+
 pub fn breakpoint_probe_image_source_path(arch: text) -> text:
-    "build/baremetal/breakpoint_probe/" + arch + "/breakpoint_probe.c"
+    breakpoint_probe_image_build_dir(arch) + "/breakpoint_probe.c"
 
 pub fn breakpoint_probe_image_output_path(arch: text) -> text:
     "build/baremetal/breakpoint_probe/" + arch + "/breakpoint_probe.elf"
@@ -167,3 +181,108 @@ pub fn breakpoint_probe_source_contract_text(arch: text) -> text:
         breakpoint_probe_serial_evidence_contract_line(arch),
         " */"
     ].join("\n")
+
+fn breakpoint_probe_c_byte_initializer(bytes: text) -> text:
+    if bytes == "":
+        return ""
+    "0x" + bytes.replace(" ", ", 0x")
+
+pub fn breakpoint_probe_original_instruction_bytes(arch: text) -> text:
+    if arch == "i386" or arch == "x86_64":
+        return "90"
+    if arch == "arm32":
+        return "00 00 a0 e1"
+    if arch == "thumb":
+        return "00 bf"
+    if arch == "aarch64":
+        return "1f 20 03 d5"
+    if arch == "riscv32" or arch == "riscv64":
+        return "13 00 00 00"
+    if arch == "riscv32c" or arch == "riscv64c":
+        return "01 00"
+    ""
+
+pub fn breakpoint_probe_source_text(arch: text) -> text:
+    val profile = breakpoint_architecture_patch_profile(arch)
+    val original = breakpoint_probe_original_instruction_bytes(arch)
+    if not profile.valid or original == "":
+        return ""
+    val trap_init = breakpoint_probe_c_byte_initializer(profile.patch_bytes)
+    val original_init = breakpoint_probe_c_byte_initializer(original)
+    val icache_literal = if profile.requires_icache_flush: "true" else: "false"
+    val evidence = breakpoint_probe_serial_evidence_contract_line(arch)
+    [
+        breakpoint_probe_source_contract_text(arch),
+        "#include <stdint.h>",
+        "#include <stddef.h>",
+        "",
+        "static volatile uint8_t simple_probe_instruction[" + profile.patch_width_bytes.to_string() + "] __attribute__((aligned(4), used)) = {" + original_init + "};",
+        "static const uint8_t simple_probe_trap[" + profile.patch_width_bytes.to_string() + "] = {" + trap_init + "};",
+        "static const uint8_t simple_probe_original[" + profile.patch_width_bytes.to_string() + "] = {" + original_init + "};",
+        "static volatile uint64_t simple_probe_hits = 0;",
+        "",
+        "static void serial_putc(char c) { (void)c; }",
+        "static void serial_puts(const char *s) { while (*s) { serial_putc(*s++); } }",
+        "",
+        "static void probe_copy(volatile uint8_t *dst, const uint8_t *src) {",
+        "  for (size_t i = 0; i < " + profile.patch_width_bytes.to_string() + "; i++) { dst[i] = src[i]; }",
+        "}",
+        "",
+        "static void probe_flush_icache(void) {",
+        "  __builtin___clear_cache((char *)simple_probe_instruction, (char *)simple_probe_instruction + " + profile.patch_width_bytes.to_string() + ");",
+        "}",
+        "",
+        "static void probe_target(void) { simple_probe_hits++; }",
+        "",
+        "void _start(void) {",
+        "  probe_copy(simple_probe_instruction, simple_probe_trap);",
+        "  probe_flush_icache();",
+        "  probe_target();",
+        "  probe_copy(simple_probe_instruction, simple_probe_original);",
+        "  probe_flush_icache();",
+        "  probe_copy(simple_probe_instruction, simple_probe_trap);",
+        "  probe_flush_icache();",
+        "  probe_copy(simple_probe_instruction, simple_probe_original);",
+        "  serial_puts(\"" + evidence + "\");",
+        "  serial_puts(\"\\n\");",
+        "  for (;;) { }",
+        "}",
+        "",
+        "/* simple-breakpoint-probe-native-contract arch=" + arch + " original=" + original + " trap=" + profile.patch_bytes + " icache=" + icache_literal + " */"
+    ].join("\n")
+
+pub fn breakpoint_probe_source_artifact(arch: text) -> BreakpointProbeSourceArtifact:
+    val source = breakpoint_probe_source_text(arch)
+    val valid = source != ""
+    BreakpointProbeSourceArtifact(
+        arch: arch,
+        build_dir: breakpoint_probe_image_build_dir(arch),
+        source_path: breakpoint_probe_image_source_path(arch),
+        source_text: source,
+        valid: valid,
+        status: if valid: "ready" else: "unsupported_arch"
+    )
+
+pub fn breakpoint_probe_stage_source(arch: text) -> BreakpointProbeSourceArtifact:
+    val artifact = breakpoint_probe_source_artifact(arch)
+    if not artifact.valid:
+        return artifact
+    val dir_ok = rt_dir_create(artifact.build_dir, true)
+    if not dir_ok:
+        return BreakpointProbeSourceArtifact(
+            arch: arch,
+            build_dir: artifact.build_dir,
+            source_path: artifact.source_path,
+            source_text: artifact.source_text,
+            valid: false,
+            status: "create_dir_failed"
+        )
+    val write_ok = rt_file_write_text_at(artifact.source_path, 0, artifact.source_text) >= 0
+    BreakpointProbeSourceArtifact(
+        arch: arch,
+        build_dir: artifact.build_dir,
+        source_path: artifact.source_path,
+        source_text: artifact.source_text,
+        valid: write_ok,
+        status: if write_ok: "written" else: "write_failed"
+    )

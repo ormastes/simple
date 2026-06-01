@@ -5,6 +5,7 @@ use std.spec.{describe, it, expect}
 use os.baremetal.profile.breakpoint_counter_probe_image.{
     breakpoint_probe_image_arches,
     breakpoint_probe_image_source_path,
+    breakpoint_probe_image_build_dir,
     breakpoint_probe_image_output_path,
     breakpoint_probe_image_linker_script_path,
     breakpoint_probe_image_compiler,
@@ -13,7 +14,10 @@ use os.baremetal.profile.breakpoint_counter_probe_image.{
     breakpoint_probe_image_build_args,
     breakpoint_probe_image_plan,
     breakpoint_probe_serial_evidence_contract_line,
-    breakpoint_probe_source_contract_text
+    breakpoint_probe_source_contract_text,
+    breakpoint_probe_original_instruction_bytes,
+    breakpoint_probe_source_text,
+    breakpoint_probe_source_artifact
 }
 
 describe "Bare-metal Breakpoint Probe Image Contract":
@@ -31,6 +35,7 @@ describe "Bare-metal Breakpoint Probe Image Contract":
             expect(arches).to_contain("riscv64c")
 
         it "should derive deterministic source output linker compiler and serial driver paths":
+            expect(breakpoint_probe_image_build_dir("x86_64")).to_equal("build/baremetal/breakpoint_probe/x86_64")
             expect(breakpoint_probe_image_source_path("x86_64")).to_equal("build/baremetal/breakpoint_probe/x86_64/breakpoint_probe.c")
             expect(breakpoint_probe_image_output_path("riscv64c")).to_equal("build/baremetal/breakpoint_probe/riscv64c/breakpoint_probe.elf")
             expect(breakpoint_probe_image_linker_script_path("i386")).to_equal("examples/simple_os/arch/x86_32/linker.ld")
@@ -114,3 +119,31 @@ describe "Bare-metal Breakpoint Probe Image Contract":
             expect(source).to_contain("trap=brk-imm0")
             expect(source).to_contain("bytes=00 00 20 d4")
             expect(source).to_contain("simple-breakpoint-evidence;arch=aarch64")
+
+    describe "generated probe source artifact":
+        it "should define original instruction bytes for native patch restore coverage":
+            expect(breakpoint_probe_original_instruction_bytes("x86_64")).to_equal("90")
+            expect(breakpoint_probe_original_instruction_bytes("thumb")).to_equal("00 bf")
+            expect(breakpoint_probe_original_instruction_bytes("aarch64")).to_equal("1f 20 03 d5")
+            expect(breakpoint_probe_original_instruction_bytes("riscv64c")).to_equal("01 00")
+
+        it "should generate freestanding C that patches traps restores rearms and emits evidence":
+            val source = breakpoint_probe_source_text("riscv64c")
+            expect(source).to_contain("simple-breakpoint-probe-source-v1")
+            expect(source).to_contain("static volatile uint8_t simple_probe_instruction[2]")
+            expect(source).to_contain("static const uint8_t simple_probe_trap[2] = {0x02, 0x90};")
+            expect(source).to_contain("static const uint8_t simple_probe_original[2] = {0x01, 0x00};")
+            expect(source).to_contain("__builtin___clear_cache")
+            expect(source).to_contain("probe_copy(simple_probe_instruction, simple_probe_trap);")
+            expect(source).to_contain("probe_copy(simple_probe_instruction, simple_probe_original);")
+            expect(source).to_contain("simple-breakpoint-evidence;arch=riscv64c")
+            expect(source).to_contain("simple-breakpoint-probe-native-contract arch=riscv64c")
+
+        it "should package source artifacts with deterministic build locations":
+            val artifact = breakpoint_probe_source_artifact("thumb")
+            expect(artifact.valid).to_equal(true)
+            expect(artifact.status).to_equal("ready")
+            expect(artifact.build_dir).to_equal("build/baremetal/breakpoint_probe/thumb")
+            expect(artifact.source_path).to_equal("build/baremetal/breakpoint_probe/thumb/breakpoint_probe.c")
+            expect(artifact.source_text).to_contain("arch=thumb")
+            expect(artifact.source_text).to_contain("static const uint8_t simple_probe_trap[2] = {0x00, 0xbe};")

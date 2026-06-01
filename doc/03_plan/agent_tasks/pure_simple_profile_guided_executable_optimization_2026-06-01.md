@@ -275,14 +275,20 @@ Implemented in the current slice:
     compiler, serial driver, QEMU binary, and build arguments;
   - defines the required serial evidence fields consumed by the QEMU evidence
     parser;
+  - generates freestanding C probe source text for each supported arch with
+    original instruction bytes, trap bytes, restore/rearm operations, icache
+    flush calls, and the serial evidence line contract;
+  - exposes a Simple staging function that writes
+    `build/baremetal/breakpoint_probe/<arch>/breakpoint_probe.c`;
   - fails closed with `missing_probe_source`, `compiler_unavailable`, or
     `missing_probe_elf` until real build artifacts exist.
 - `test/system/os/baremetal/feature/breakpoint_counter_probe_image_spec.spl`
   - covers the arch matrix, build/run readiness statuses, compiler arguments,
-    and serial evidence contract.
+    serial evidence contract, and generated source artifact content.
 
 Remaining larger gaps:
-- generate/write the actual per-arch probe C sources at the planned paths;
+- invoke source staging for all supported arches and keep the staged source
+  artifacts as build evidence;
 - compile the probe ELF images with the planned compilers/linker scripts;
 - run those images under QEMU and capture live patch/trap/count/restore/rearm/
   cleanup/icache evidence;

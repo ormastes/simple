@@ -262,6 +262,14 @@ supported breakpoint architecture. The plan intentionally reports
 the real image artifacts exist, so a target cannot be upgraded from contract
 coverage to target-backed proof by documentation alone.
 
+`BreakpointProbeSourceArtifact` is the generated-source companion to that plan.
+It derives the staged build directory and C source path, emits freestanding C
+with arch-specific original bytes and trap bytes, performs patch, restore,
+rearm, cleanup, and icache flush calls, and embeds the exact
+`simple-breakpoint-evidence;...` line the QEMU parser consumes. The staging API
+writes only generated build output; the implementation remains Simple-owned and
+Rust remains seed/bootstrap only.
+
 ### Overhead Protection
 
 The profiler removes or downgrades a breakpoint when any condition holds:

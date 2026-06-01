@@ -49,7 +49,7 @@ rather than rewriting arbitrary ELF bytes.
 | Generated-C layout consumption | section-map parser/transform tests; fail-closed unused symbol and unsafe section tests |
 | Native counter feature | function/block/edge/call-path counter contract tests; generated-C insertion checks for all four counter classes |
 | Bare-metal counter impl | breakpoint site table and patch ledger tests |
-| Bare-metal probe images | per-arch source/output/linker/compiler/QEMU plan tests; serial evidence field contract tests |
+| Bare-metal probe images | per-arch source/output/linker/compiler/QEMU plan tests; serial evidence field contract tests; generated C source artifact tests for patch/restore/rearm/cleanup/icache evidence |
 | Prevent slow breakpoint overhead | auto-disarm and sampled-only fallback tests |
 | Analyze call path | bounded call-path hash and promotion tests |
 | Remove breakpoint when profiled | cleanup-on-stop/panic/watchdog tests |
