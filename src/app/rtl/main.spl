@@ -2,6 +2,7 @@
 
 use std.cli.cli_util.{get_cli_args}
 use lib.nogc_sync_mut.hardware.qor.{RtlQorRun, rtl_qor_run_markdown}
+use compiler.driver.driver_compile_vhdl_source_map.{rtl_explain_vhdl_line_from_map}
 
 class RtlCommand:
     """Parsed `simple rtl` command."""
@@ -12,6 +13,8 @@ class RtlCommand:
     baseline: text
     candidate: text
     output: text
+    map_path: text
+    vhdl_line: i64
 
     me is_bench() -> bool:
         return self.action == "bench"
@@ -22,8 +25,11 @@ class RtlCommand:
     me is_report() -> bool:
         return self.action == "report"
 
+    me is_explain() -> bool:
+        return self.action == "explain"
+
 fn rtl_default_command() -> RtlCommand:
-    return RtlCommand(action: "help", suite: "smoke", design: "", target: "generic", baseline: "", candidate: "", output: "markdown")
+    return RtlCommand(action: "help", suite: "smoke", design: "", target: "generic", baseline: "", candidate: "", output: "markdown", map_path: "", vhdl_line: 0)
 
 fn rtl_parse_value(arg: text, prefix: text) -> text:
     if arg.starts_with(prefix):
@@ -38,6 +44,9 @@ fn parse_rtl_command(args: [text]) -> RtlCommand:
         if verb == "bench" or verb == "compare":
             command.action = verb
             i = i + 1
+        elif verb == "explain":
+            command.action = "explain"
+            i = i + 1
         elif verb == "qor":
             if i + 1 < args.len() and args[i + 1] == "report":
                 command.action = "report"
@@ -50,6 +59,8 @@ fn parse_rtl_command(args: [text]) -> RtlCommand:
         val baseline = rtl_parse_value(arg, "--baseline=")
         val candidate = rtl_parse_value(arg, "--candidate=")
         val output = rtl_parse_value(arg, "--output=")
+        val map_path = rtl_parse_value(arg, "--map=")
+        val vhdl_line = rtl_parse_value(arg, "--vhdl-line=")
         if suite != "":
             command.suite = suite
         elif design != "":
@@ -62,6 +73,10 @@ fn parse_rtl_command(args: [text]) -> RtlCommand:
             command.candidate = candidate
         elif output != "":
             command.output = output
+        elif map_path != "":
+            command.map_path = map_path
+        elif vhdl_line != "":
+            command.vhdl_line = _rtl_text_to_i64(vhdl_line)
         i = i + 1
     return command
 
@@ -70,11 +85,50 @@ fn render_rtl_bench_preview(command: RtlCommand) -> text:
     val run = RtlQorRun.create("preview", design, command.target, "ghdl-yosys")
     return rtl_qor_run_markdown(run)
 
+fn render_rtl_explain_preview(command: RtlCommand, map_json: text) -> text:
+    val result = rtl_explain_vhdl_line_from_map(map_json, command.vhdl_line)
+    result.to_text()
+
 fn print_rtl_help():
     print "Usage: simple rtl <bench|compare|qor report> [options]"
     print "  simple rtl bench --suite=smoke"
     print "  simple rtl compare --baseline=old --candidate=new"
     print "  simple rtl qor report --design=rv32i_core"
+    print "  simple rtl explain --map=core.vhd.map.json --vhdl-line=42"
+
+fn _rtl_text_to_i64(value: text) -> i64:
+    var out = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if _rtl_is_digit(ch):
+            out = out * 10 + _rtl_digit_value(ch)
+        i = i + 1
+    return out
+
+fn _rtl_digit_value(ch: text) -> i64:
+    if ch == "1":
+        return 1
+    if ch == "2":
+        return 2
+    if ch == "3":
+        return 3
+    if ch == "4":
+        return 4
+    if ch == "5":
+        return 5
+    if ch == "6":
+        return 6
+    if ch == "7":
+        return 7
+    if ch == "8":
+        return 8
+    if ch == "9":
+        return 9
+    return 0
+
+fn _rtl_is_digit(ch: text) -> bool:
+    ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9"
 
 fn main() -> i64:
     val args = get_cli_args()
