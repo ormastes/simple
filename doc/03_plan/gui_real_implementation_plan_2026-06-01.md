@@ -80,6 +80,11 @@ the evidence.
 - `src/app/gui_perf/smf_dynlib_probe.spl` is the CLI evidence probe. It emits a
   `GUI_DYNLIB_PERF` row and fails closed for direct Simple fallback samples
   until runtime dynlib symbol invocation is real.
+- `src/app/gui_perf/macos_smf_dynlib_release_gate.spl` is the macOS acceptance
+  command. It runs the evidence chain, writes a transcript, validates the full
+  ordered SMF artifact, QEMU parity, SimpleOS dynload parity, mac dynlib perf,
+  and mac pass rows, and fails closed unless the transcript proves the real SMF
+  dynlib hot-call path.
 - `src/app/gui_perf/pure_gui_hot_dynlib_export.spl` provides a pure Simple,
   i64-only exported hot symbol that can be built as a host `.so`/`.dylib` for
   callable ABI diagnostics. This proves dynlib call overhead separately, but
@@ -188,6 +193,7 @@ the evidence.
 - `SIMPLE_LIB=src bin/simple check src/lib/gui`
 - `SIMPLE_LIB=src bin/simple test test/unit/lib/gui/pure_smf_dynlib_perf_spec.spl --mode=interpreter`
 - `SIMPLE_LIB=src bin/simple run src/app/gui_perf/smf_dynlib_probe.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=bin/simple bin/simple run src/app/gui_perf/macos_smf_dynlib_release_gate.spl`
 - `SIMPLE_LIB=src bin/simple check src/os/smf`
 - `SIMPLE_LIB=src bin/simple check src/os/posix`
 - `SIMPLE_LIB=src bin/simple test test/unit/os/posix/dynlib_spec.spl --mode=interpreter`
@@ -206,6 +212,9 @@ the evidence.
 - macOS arm64 dynlib/SMF hot response probe: p99 < 1000 us after warmup.
 - `GUI_DYNLIB_PERF` must report `call_source=dynlib_symbol_call`,
   `loader=smf_dynlib`, `pass=true`, and `error=`.
+- The macOS release gate must emit `GUI_MAC_SMF_DYNLIB_RELEASE_GATE
+  status=pass`, and the saved transcript must validate through
+  `src/app/gui_perf/macos_smf_dynlib_transcript_check.spl`.
 - QEMU ARM64 parity evidence: same GUI artifact contract reaches the adapter.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`.
 

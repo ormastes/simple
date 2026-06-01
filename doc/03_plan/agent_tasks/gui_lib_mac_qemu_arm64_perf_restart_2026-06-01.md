@@ -76,6 +76,12 @@ SimpleOS QEMU ARM64
 - `src/app/gui_perf/smf_dynlib_probe.spl` now emits the machine-readable
   `GUI_DYNLIB_PERF` row. It deliberately fails closed for direct Simple fallback
   samples until real dynlib symbol invocation is wired.
+- `src/app/gui_perf/macos_smf_dynlib_release_gate.spl` is the current macOS
+  acceptance entrypoint. It runs the SMF evidence chain, writes the transcript,
+  validates the ordered artifact/QEMU/SimpleOS/macOS rows, and emits
+  `GUI_MAC_SMF_DYNLIB_RELEASE_GATE status=pass` only when the full transcript
+  proves `loader=smf_dynlib`, `call_source=dynlib_symbol_call`, and p99 below
+  1000 us.
 - `src/app/gui_perf/pure_gui_hot_dynlib_export.spl` now provides a pure Simple
   exported hot symbol for host `.so`/`.dylib` diagnostics. This lane has proven
   callable dynlib overhead, but it is still rejected as `not-smf-dynlib`.
@@ -113,6 +119,7 @@ mkdir -p build/gui
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple compile src/app/gui_perf/pure_gui_hot_dynlib_export.spl --native --shared --strip -o build/gui/libpure_gui_hot.so
 SIMPLE_LIB=src SIMPLE_GUI_DYNLIB_ARTIFACT=build/gui/libpure_gui_hot.so src/compiler_rust/target/debug/simple run src/app/gui_perf/smf_dynlib_probe.spl
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple run src/app/gui_perf/smf_dynlib_probe.spl
+SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/debug/simple src/compiler_rust/target/debug/simple run src/app/gui_perf/macos_smf_dynlib_release_gate.spl
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/posix/dynlib_spec.spl --mode=interpreter --no-cache
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/smf_runtime_spec.spl --mode=interpreter --no-cache
 find doc/06_spec -name '*_spec.spl' | wc -l
@@ -127,8 +134,10 @@ rg -n "rt_file_wrap_smf_dynlib|rt_file_extract_smf_dynlib|rt_dyncall|src/compile
   `rt_*` helpers. If current experimental work introduced such helpers, replace
   that direction with pure Simple or a minimal C adapter before treating the
   plan as aligned.
-- No macOS arm64 SMF/dynlib artifact is configured in current evidence, so the
-  probe still reports `pass=false error=missing-artifact-path`.
+- No live macOS arm64 release-gate transcript is checked in yet. The required
+  final evidence is `GUI_MAC_SMF_DYNLIB_RELEASE_GATE status=pass` with the
+  transcript containing `GUI_DYNLIB_PERF ... loader=smf_dynlib ...
+  call_source=dynlib_symbol_call ... pass=true ... p99_us=<1000`.
 - Current hosted and QEMU WM paths still contain direct runtime GUI externs and
   therefore cannot close this goal.
 - Final requirements are still option files; the user selection step must be
