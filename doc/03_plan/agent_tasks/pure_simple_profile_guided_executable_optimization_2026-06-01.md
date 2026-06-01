@@ -283,6 +283,8 @@ Implemented in the current slice:
   - provides `src/os/baremetal/profile/breakpoint_counter_probe_stage.spl`,
     which staged all 9 probe sources on this host with
     `status=written;requested=9;written=9;failed=0`;
+  - now generates probe-specific linker scripts and boot entry shims instead
+    of reusing full SimpleOS kernel linker scripts;
   - fails closed with `missing_probe_source`, `compiler_unavailable`, or
     `missing_probe_elf` until real build artifacts exist.
 - `test/system/os/baremetal/feature/breakpoint_counter_probe_image_spec.spl`
@@ -295,18 +297,21 @@ Implemented in the current slice:
   - distinguishes RISC-V 32-bit QEMU CPU planning (`rv32`) from RV64 (`rv64`).
 
 Build evidence from this host:
-- Built: `i386`, `riscv32`, `riscv32c`, `riscv64`, `riscv64c`.
+- Built: `i386`, `x86_64` as the x86-family 32-bit multiboot probe under the
+  x86_64 QEMU target, `riscv32`, `riscv32c`, `riscv64`, `riscv64c`.
 - Not built: `arm32` and `thumb` because `arm-none-eabi-gcc` is missing;
   `aarch64` because `aarch64-none-elf-gcc` is missing.
-- `x86_64` build is blocked by the reused full SimpleOS linker script requiring
-  kernel syscall symbols; the probe needs its own minimal linker script.
-- QEMU launch now reaches target-specific loader behavior, but no serial proof
-  is accepted yet: i386 needs a PVH/multiboot-compatible probe image, and
-  RISC-V currently reaches OpenSBI then times out before probe serial output.
+- Live QEMU serial evidence captured: `riscv64` and `riscv64c`.
+- QEMU launch blockers still open: `i386` and the x86-family `x86_64` probe
+  build, but `-kernel` rejects the ELF with "Error loading uncompressed kernel
+  without PVH ELF Note"; `-device loader` loads but does not transfer execution
+  to the probe entry. `riscv32` and `riscv32c` build, but host QEMU lacks
+  `opensbi-riscv32-generic-fw_dynamic.bin`.
 
 Remaining larger gaps:
-- add probe-specific boot/linker entry code so x86_64, i386, and RISC-V enter
-  the generated probe reliably under QEMU;
+- add an x86 QEMU boot route that transfers execution to the generated
+  `_entry32` probe, or add a valid PVH note/boot wrapper;
+- provide or locate RV32 OpenSBI firmware for `qemu-system-riscv32`;
 - compile the ARM/Thumb/AArch64 probe ELF images once cross compilers exist or
   the repo provides a supported clang cross path;
 - run those images under QEMU and capture live patch/trap/count/restore/rearm/

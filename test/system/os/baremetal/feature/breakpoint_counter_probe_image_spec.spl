@@ -18,9 +18,12 @@ use os.baremetal.profile.breakpoint_counter_probe_image.{
     breakpoint_probe_source_contract_text,
     breakpoint_probe_serial_putc_body,
     breakpoint_probe_icache_flush_body,
+    breakpoint_probe_entry_asm_text,
     breakpoint_probe_original_instruction_bytes,
     breakpoint_probe_source_text,
     breakpoint_probe_source_artifact,
+    breakpoint_probe_linker_script_text,
+    breakpoint_probe_linker_artifact,
     breakpoint_probe_source_artifacts,
     breakpoint_probe_stage_all_sources
 }
@@ -43,9 +46,9 @@ describe "Bare-metal Breakpoint Probe Image Contract":
             expect(breakpoint_probe_image_build_dir("x86_64")).to_equal("build/baremetal/breakpoint_probe/x86_64")
             expect(breakpoint_probe_image_source_path("x86_64")).to_equal("build/baremetal/breakpoint_probe/x86_64/breakpoint_probe.c")
             expect(breakpoint_probe_image_output_path("riscv64c")).to_equal("build/baremetal/breakpoint_probe/riscv64c/breakpoint_probe.elf")
-            expect(breakpoint_probe_image_linker_script_path("i386")).to_equal("examples/simple_os/arch/x86_32/linker.ld")
-            expect(breakpoint_probe_image_linker_script_path("aarch64")).to_equal("examples/simple_os/arch/arm64/linker.ld")
-            expect(breakpoint_probe_image_linker_script_path("riscv32c")).to_equal("examples/simple_os/arch/riscv32/linker.ld")
+            expect(breakpoint_probe_image_linker_script_path("i386")).to_equal("build/baremetal/breakpoint_probe/i386/breakpoint_probe.ld")
+            expect(breakpoint_probe_image_linker_script_path("aarch64")).to_equal("build/baremetal/breakpoint_probe/aarch64/breakpoint_probe.ld")
+            expect(breakpoint_probe_image_linker_script_path("riscv32c")).to_equal("build/baremetal/breakpoint_probe/riscv32c/breakpoint_probe.ld")
             expect(breakpoint_probe_image_compiler("thumb")).to_equal("arm-none-eabi-gcc")
             expect(breakpoint_probe_image_compiler("riscv64")).to_equal("riscv64-unknown-elf-gcc")
             expect(breakpoint_probe_image_serial_driver("x86_64")).to_equal("com1")
@@ -75,7 +78,7 @@ describe "Bare-metal Breakpoint Probe Image Contract":
 
         it "should emit compiler arguments with the expected linker and output paths":
             val x86 = breakpoint_probe_image_build_args("x86_64")
-            expect(x86).to_contain("-m64")
+            expect(x86).to_contain("-m32")
             expect(x86).to_contain("-no-pie")
             expect(x86).to_contain("-nostdlib")
             expect(x86).to_contain("build/baremetal/breakpoint_probe/x86_64/breakpoint_probe.c")
@@ -132,6 +135,7 @@ describe "Bare-metal Breakpoint Probe Image Contract":
             expect(runtime).to_contain("rearmed=true")
             expect(runtime).to_contain("cleanup=true")
             expect(runtime).to_contain("icache=true")
+            expect(runtime).to_contain("sampled=none")
 
         it "should produce source contract text that records trap and evidence requirements":
             val source = breakpoint_probe_source_contract_text("aarch64")
@@ -160,9 +164,16 @@ describe "Bare-metal Breakpoint Probe Image Contract":
             expect(breakpoint_probe_icache_flush_body("aarch64")).to_contain("isb")
             expect(breakpoint_probe_icache_flush_body("riscv64c")).to_contain("fence.i")
 
+        it "should define boot entry shims for QEMU-loaded probes":
+            expect(breakpoint_probe_entry_asm_text("i386")).to_contain(".multiboot")
+            expect(breakpoint_probe_entry_asm_text("x86_64")).to_contain("_entry32")
+            expect(breakpoint_probe_entry_asm_text("riscv64c")).to_contain("la sp, simple_probe_stack_top")
+            expect(breakpoint_probe_entry_asm_text("aarch64")).to_contain("mov sp, x0")
+
         it "should generate freestanding C that patches traps restores rearms and emits evidence":
             val source = breakpoint_probe_source_text("riscv64c")
             expect(source).to_contain("simple-breakpoint-probe-source-v1")
+            expect(source).to_contain(".section .text.entry")
             expect(source).to_contain("static volatile uint8_t simple_probe_instruction[2]")
             expect(source).to_contain("static const uint8_t simple_probe_trap[2] = {0x02, 0x90};")
             expect(source).to_contain("static const uint8_t simple_probe_original[2] = {0x01, 0x00};")
@@ -171,8 +182,10 @@ describe "Bare-metal Breakpoint Probe Image Contract":
             expect(source).to_contain("fence.i")
             expect(source).to_contain("probe_copy(simple_probe_instruction, simple_probe_trap);")
             expect(source).to_contain("probe_copy(simple_probe_instruction, simple_probe_original);")
+            expect(source).to_contain("void probe_main(void)")
             expect(source).to_contain("simple-breakpoint-evidence;arch=riscv64c")
             expect(source).to_contain(";hits=1;")
+            expect(source).to_contain(";sampled=none")
             expect(source).to_contain("simple-breakpoint-probe-native-contract arch=riscv64c")
 
         it "should package source artifacts with deterministic build locations":
@@ -183,6 +196,20 @@ describe "Bare-metal Breakpoint Probe Image Contract":
             expect(artifact.source_path).to_equal("build/baremetal/breakpoint_probe/thumb/breakpoint_probe.c")
             expect(artifact.source_text).to_contain("arch=thumb")
             expect(artifact.source_text).to_contain("static const uint8_t simple_probe_trap[2] = {0x00, 0xbe};")
+
+        it "should generate probe-specific linker scripts without full kernel symbols":
+            val x86_linker = breakpoint_probe_linker_script_text("x86_64")
+            expect(x86_linker).to_contain("ENTRY(_entry32)")
+            expect(x86_linker).to_contain("KEEP(*(.multiboot))")
+            expect(x86_linker).to_contain("simple_probe_stack_top")
+            expect(x86_linker.contains("kernel__arch__x86_64")).to_equal(false)
+
+            val riscv_linker = breakpoint_probe_linker_script_text("riscv64c")
+            expect(riscv_linker).to_contain("OUTPUT_FORMAT(\"elf64-littleriscv\")")
+            expect(riscv_linker).to_contain("ENTRY(_start)")
+            val artifact = breakpoint_probe_linker_artifact("riscv64c")
+            expect(artifact.valid).to_equal(true)
+            expect(artifact.linker_script_path).to_equal("build/baremetal/breakpoint_probe/riscv64c/breakpoint_probe.ld")
 
         it "should package every supported architecture for staging":
             val artifacts = breakpoint_probe_source_artifacts()

@@ -271,6 +271,14 @@ The staging API writes only generated build output and deletes the old source
 before rewriting so repeated staging cannot leave stale tail bytes. The
 implementation remains Simple-owned and Rust remains seed/bootstrap only.
 
+`BreakpointProbeLinkerArtifact` supplies the probe-specific linker companion.
+It writes `build/baremetal/breakpoint_probe/<arch>/breakpoint_probe.ld` with a
+minimal entry and stack layout, so probe ELFs do not depend on full-kernel
+SimpleOS linker symbols. The generated C includes `_entry32` for x86-family
+multiboot-style probes and `_start` shims for RISC-V and ARM-family probes.
+On the current host this is enough to build x86-family and RISC-V probe ELFs
+and to capture live RV64/RVC64 serial evidence.
+
 ### Overhead Protection
 
 The profiler removes or downgrades a breakpoint when any condition holds:

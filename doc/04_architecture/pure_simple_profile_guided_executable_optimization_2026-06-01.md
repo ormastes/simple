@@ -74,9 +74,12 @@ Current adapter slice:
   probe sources that patch a trap, restore the original instruction, rearm the
   trap, restore for cleanup, flush icache where the architecture requires it,
   write to the QEMU serial device, and emit parser-valid serial evidence. Probe
-  source staging is now a Simple entrypoint, while target proof remains
-  fail-closed until the compiler creates bootable ELFs, QEMU runs them, and
-  serial evidence is captured.
+  source and linker staging is now a Simple entrypoint, and probe-specific
+  entry shims isolate breakpoint evidence from full-kernel linker symbols.
+  Target proof remains fail-closed per architecture until the compiler creates
+  bootable ELFs, QEMU runs them, and serial evidence is captured. Current live
+  proof exists for RV64 and RVC64; x86 and RV32 still require boot-loader or
+  firmware follow-up.
 
 ## Data Flow
 
