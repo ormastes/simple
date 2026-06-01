@@ -247,6 +247,30 @@ else:
 
 </details>
 
+<details>
+<summary>Advanced: reuses the dynlib call argument buffer in the measured hot loop</summary>
+
+#### reuses the dynlib call argument buffer in the measured hot loop
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = rt_file_read_text("src/app/gui_perf/smf_dynlib_probe_core.spl")
+expect(source.contains("var args: [i64] = [0]")).to_equal(true)
+expect(source.contains("args[0] = i.to_i64()")).to_equal(true)
+expect(source.contains("var args: [i64] = []")).to_equal(false)
+expect(source.contains("args.push(i.to_i64())")).to_equal(false)
+```
+
+</details>
+
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -266,8 +290,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
