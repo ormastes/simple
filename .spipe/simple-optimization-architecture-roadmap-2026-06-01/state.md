@@ -72,3 +72,4 @@ dev-done
 - verify: PASS `scripts/check-gtk-gui-repeat-evidence.shs`; Simple open 181 us, GTK open 66084 us, Simple frame 1 us, GTK frame 25 us, Simple text 10 us, GTK text 25 us, vector checksum 212444 deterministic true.
 - verify: PASS `git diff --check`.
 - verify: PASS `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
+- sync: PASS committed and pushed `d826cf69e0f4 perf: advance simple optimization checkpoint` to GitHub `main`; post-push fetch confirmed `main`/`main@origin` at the checkpoint, working copy clean, `git diff --check` PASS, `doc/06_spec` stray `.spl` count `0`, tracked file count `77107`.
