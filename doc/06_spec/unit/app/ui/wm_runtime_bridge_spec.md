@@ -109,7 +109,7 @@ expect(marker).to_contain("target=surf2")
 | Category | Application |
 | Status | Active |
 | Source | `test/unit/app/ui/wm_runtime_bridge_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

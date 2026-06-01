@@ -5,6 +5,11 @@ SPipe lane. Use it as the first read for current status, related evidence, and
 remaining work. Older plan files remain historical lane notes unless linked
 here.
 
+For the real macOS WM implementation path, use
+`doc/03_plan/gui_real_implementation_plan_2026-06-01.md`. That plan supersedes
+direct-buffer hosted WM demos as release evidence and defines the required
+hosted macOS plus AArch64-HVF QEMU stack.
+
 ## Objective
 
 Complete the GUI hardening plan with Chrome/corpus work first, then finish the

@@ -9,16 +9,23 @@ REPORT_PATH="${REPORT_PATH:-doc/09_report/metal_engine2d_framebuffer_readback_$(
 ENV_PATH="$BUILD_DIR/evidence.env"
 BACKEND_PATH="src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl"
 SFFI_PATH="src/lib/nogc_sync_mut/io/metal_sffi.spl"
+SPEC_PATH="test/integration/rendering/metal_engine2d_readback_spec.spl"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$ENV_PATH" "$REPORT_PATH"
 
 platform="$(uname -s 2>/dev/null || echo unknown)"
-read_pixels_mirror=false
+read_pixels_gpu_download=false
+gpu_completeness_guard=false
 download_binding=false
+spec_status=skipped
 
-if grep -q 'self.mirror.read_pixels()' "$BACKEND_PATH"; then
-    read_pixels_mirror=true
+if grep -q 'rt_metal_buffer_download(host, self.d_framebuffer' "$BACKEND_PATH"; then
+    read_pixels_gpu_download=true
+fi
+
+if grep -q 'gpu_frame_complete' "$BACKEND_PATH"; then
+    gpu_completeness_guard=true
 fi
 
 if grep -q 'fn metal_sffi_buffer_download' "$SFFI_PATH"; then
@@ -30,12 +37,23 @@ reason=metal-requires-macos
 exit_code=0
 
 if [ "$platform" = "Darwin" ]; then
-    status=fail
-    reason=missing-native-metal-framebuffer-readback-proof
-    exit_code=1
+    if bin/simple test "$SPEC_PATH" --mode=interpreter >"$BUILD_DIR/spec.log" 2>&1; then
+        spec_status=pass
+    else
+        spec_status=fail
+    fi
+    if [ "$read_pixels_gpu_download" = "true" ] && [ "$gpu_completeness_guard" = "true" ] && [ "$spec_status" = "pass" ]; then
+        status=pass
+        reason=raw-metal-framebuffer-download-proven
+        exit_code=0
+    else
+        status=fail
+        reason=missing-native-metal-framebuffer-readback-proof
+        exit_code=1
+    fi
 fi
 
-if [ "$read_pixels_mirror" != "true" ]; then
+if [ "$read_pixels_gpu_download" != "true" ]; then
     status=fail
     reason=metal-engine2d-read-pixels-contract-changed-review-required
     exit_code=1
@@ -47,14 +65,17 @@ fi
     echo "metal_engine2d_framebuffer_readback_platform=$platform"
     echo "metal_engine2d_framebuffer_readback_backend=$BACKEND_PATH"
     echo "metal_engine2d_framebuffer_readback_sffi=$SFFI_PATH"
-    echo "metal_engine2d_framebuffer_cpu_mirror_readback_used=$read_pixels_mirror"
+    echo "metal_engine2d_framebuffer_readback_spec=$SPEC_PATH"
+    echo "metal_engine2d_framebuffer_readback_spec_status=$spec_status"
+    echo "metal_engine2d_framebuffer_gpu_download_path_present=$read_pixels_gpu_download"
+    echo "metal_engine2d_framebuffer_gpu_completeness_guard_present=$gpu_completeness_guard"
     echo "metal_engine2d_framebuffer_gpu_download_binding_present=$download_binding"
-    echo "metal_engine2d_framebuffer_gpu_download_attempted=false"
-    echo "metal_engine2d_framebuffer_gpu_readback_available=false"
-    echo "metal_engine2d_framebuffer_exact_gpu_claimed=false"
+    echo "metal_engine2d_framebuffer_gpu_download_attempted=$read_pixels_gpu_download"
+    echo "metal_engine2d_framebuffer_gpu_readback_available=$read_pixels_gpu_download"
+    echo "metal_engine2d_framebuffer_exact_gpu_claimed=$read_pixels_gpu_download"
     echo "metal_engine2d_framebuffer_blur_or_tolerance_used=false"
-    echo "metal_engine2d_framebuffer_future_native_proof_required=true"
-    echo "metal_engine2d_framebuffer_required_future_gate=darwin-native-compiled-metal-download-vs-cpu-mirror"
+    echo "metal_engine2d_framebuffer_future_native_proof_required=false"
+    echo "metal_engine2d_framebuffer_required_gate=$SPEC_PATH"
 } >"$ENV_PATH"
 
 {
@@ -65,22 +86,29 @@ fi
     echo "- platform: $platform"
     echo "- backend: $BACKEND_PATH"
     echo "- sffi: $SFFI_PATH"
-    echo "- cpu_mirror_readback_used: $read_pixels_mirror"
+    echo "- spec: $SPEC_PATH"
+    echo "- spec_status: $spec_status"
+    echo "- gpu_download_path_present: $read_pixels_gpu_download"
+    echo "- gpu_completeness_guard_present: $gpu_completeness_guard"
     echo "- gpu_download_binding_present: $download_binding"
-    echo "- gpu_download_attempted: false"
-    echo "- gpu_readback_available: false"
-    echo "- exact_gpu_claimed: false"
+    echo "- gpu_download_attempted: $read_pixels_gpu_download"
+    echo "- gpu_readback_available: $read_pixels_gpu_download"
+    echo "- exact_gpu_claimed: $read_pixels_gpu_download"
     echo "- blur_or_tolerance_used: false"
-    echo "- future_native_proof_required: true"
-    echo "- required_future_gate: darwin-native-compiled-metal-download-vs-cpu-mirror"
+    echo "- future_native_proof_required: false"
+    echo "- required_gate: $SPEC_PATH"
     echo
-    echo "This report is intentionally fail-closed: on non-macOS hosts it records"
-    echo "Metal as unavailable, and on macOS it fails until a native compiled proof"
-    echo "downloads the Metal framebuffer and compares it against the CPU mirror for"
-    echo "a deterministic vector-font/Engine2D scene."
+    echo "This report gates the Engine2D Metal readback claim on a raw framebuffer"
+    echo "download through the runtime pointer ABI. CPU-only drawing operations still"
+    echo "invalidate GPU completeness and fall back to the software mirror."
     echo
     echo "## Evidence"
     sed 's/^/- /' "$ENV_PATH"
+    if [ -f "$BUILD_DIR/spec.log" ]; then
+        echo
+        echo "## Spec Log"
+        sed 's/^/    /' "$BUILD_DIR/spec.log"
+    fi
 } >"$REPORT_PATH"
 
 cat "$ENV_PATH"

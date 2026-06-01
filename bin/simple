@@ -15,6 +15,66 @@ do
   fi
 done
 
+browser_launch_requested() {
+  case "${1:-}" in
+    browser)
+      return 0
+      ;;
+    run)
+      case "${2:-}" in
+        src/app/ui.browser/main.spl|"$repo_root/src/app/ui.browser/main.spl")
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+gui_runtime_requested() {
+  if [[ -n "${SIMPLE_GUI:-}" ]]; then
+    return 0
+  fi
+  case "${1:-}" in
+    examples/simple_os/hosted/*.spl|"$repo_root"/examples/simple_os/hosted/*.spl|src/os/hosted/*.spl|"$repo_root"/src/os/hosted/*.spl)
+      return 0
+      ;;
+    run)
+      case "${2:-}" in
+        examples/simple_os/hosted/*.spl|"$repo_root"/examples/simple_os/hosted/*.spl|src/os/hosted/*.spl|"$repo_root"/src/os/hosted/*.spl)
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+binary_has_winit_runtime() {
+  [[ -x "$1" ]] || return 1
+  LC_ALL=C grep -aq "rt_winit_event_loop_new" "$1"
+}
+
+if browser_launch_requested "$@" || gui_runtime_requested "$@"; then
+  for candidate in \
+    "$repo_root/src/compiler_rust/target/gui/debug/simple" \
+    "$repo_root/src/compiler_rust/target/gui/release/simple" \
+    "$repo_root/src/compiler_rust/target/debug/simple" \
+    "$repo_root/src/compiler_rust/target/release/simple" \
+    "$repo_root/src/compiler_rust/target/bootstrap/simple"
+  do
+    if binary_has_winit_runtime "$candidate"; then
+      if [[ "${1:-}" == "browser" ]]; then
+        exec "$candidate" run "$repo_root/src/app/ui.browser/main.spl" "${@:2}"
+      fi
+      exec "$candidate" "$@"
+    fi
+  done
+  echo "error: Simple GUI/browser entry requires a GUI-enabled driver." >&2
+  echo "hint: cd \"$repo_root/src/compiler_rust\" && CARGO_TARGET_DIR=target/gui cargo build -p simple-driver --features gui" >&2
+  exit 1
+fi
+
 release_bin=""
 
 ensure_executable() {

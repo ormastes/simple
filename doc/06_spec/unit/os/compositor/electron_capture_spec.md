@@ -148,7 +148,7 @@ expect(result.height).to_equal(H)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/unit/os/compositor/electron_capture_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

@@ -1,100 +1,121 @@
-# SimpleOS Hosted Desktop Entry Point
+# SimpleOS hosted shared WM entry.
 #
-# Runs the full SimpleOS desktop environment (compositor + shell + apps)
-# natively on macOS, Linux, Windows, and FreeBSD using winit+softbuffer.
-#
-# The hosted backend shares the same CompositorBackend trait as baremetal,
-# so all apps, widgets, and window management work identically.
-#
-# Run with:
-#   SIMPLE_GUI=1 bin/simple run src/os/hosted/hosted_entry.spl
-#
-# Or with timeout:
-#   SIMPLE_GUI=1 SIMPLE_TIMEOUT_SECONDS=300 bin/simple run src/os/hosted/hosted_entry.spl
+# This is the manual-inspection entry for the real hosted GUI path. It uses the
+# shared host compositor lifecycle state and Simple Web app renderer, then
+# presents through the winit buffer backend.
+
+use common.window_protocol.geometry.{Size}
+use os.compositor.host_compositor_entry.{
+    HostCompositor,
+    host_compositor_cycle_focus,
+    host_compositor_focused_window_id,
+    host_compositor_minimize_focused,
+    host_compositor_restore_all
+}
+use os.compositor.hosted_backend_winit.{HostedWinitBufferBackend}
+use os.userlib.ipc_protocol.{COMP_CREATE_WEB_WINDOW}
 
 extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
-extern fn rt_winit_buffer_create(w: i64, h: i64, fill_color: i64) -> i64
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
+extern fn rt_winit_event_mouse_moved(ev: i64) -> (i32, i32)
+extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
+extern fn rt_winit_event_free(ev: i64)
 extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
+extern fn rt_time_now_unix_micros() -> i64
 
-use os.compositor.hosted_backend.{HostedCompositorBackend}
-use os.compositor.hosted_input_backend.{HostedInputBackend}
-use os.compositor.compositor.{Compositor}
-use os.desktop.shell.{DesktopShell}
-use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
+val WINDOW_WIDTH: i32 = 1024
+val WINDOW_HEIGHT: i32 = 720
+val WINDOW_TITLE: text = "SimpleOS Shared Hosted WM"
 
+val EVT_CLOSE: i64 = 3
+val EVT_KEY: i64 = 10
+val EVT_MOUSE_BUTTON: i64 = 20
+val EVT_MOUSE_MOVE: i64 = 21
 
-# ============================================================================
-# Configuration
-# ============================================================================
+val KEY_ESCAPE: i64 = 27
+val KEY_TAB: i64 = 9
+val KEY_M: i64 = 77
+val KEY_R: i64 = 82
+val KEY_W: i64 = 87
 
-val WINDOW_WIDTH: i64 = 640
-val WINDOW_HEIGHT: i64 = 480
-val WINDOW_TITLE: text = "SimpleOS Desktop"
-val BG_COLOR: i64 = 0xFF1A1B2E   # Dark navy (ARGB)
+fn seed_web_window(comp: HostCompositor, title: text, app_id: text, content: text, x: i32, y: i32, w: i32, h: i32, pid: i64):
+    comp.apply_bridge_request(pid, pid, COMP_CREATE_WEB_WINDOW.to_i64(), 0, title, x, y, w, h, content, pid, app_id)
 
-# ============================================================================
-# Entry Point
-# ============================================================================
+fn seed_shared_mdi(comp: HostCompositor):
+    seed_web_window(comp, "Terminal", "terminal", "simple$ build check --live", 58, 76, 390, 230, 101)
+    seed_web_window(comp, "Editor", "editor", "src/main.spl   real Simple Web text", 308, 138, 430, 270, 102)
+    seed_web_window(comp, "Browser", "browser", "about:network", 150, 280, 460, 240, 103)
+    seed_web_window(comp, "File Manager", "file-manager", "home", 610, 245, 340, 245, 104)
+    seed_web_window(comp, "Calculator", "calculator", "0", 730, 82, 230, 210, 105)
 
 fn main() -> i64:
-    print "SimpleOS Hosted Desktop ({WINDOW_WIDTH}x{WINDOW_HEIGHT})"
-    print "Platform: macOS / Linux / Windows / FreeBSD (auto-detected by winit)"
-    print ""
+    print "SimpleOS shared hosted WM ({WINDOW_WIDTH}x{WINDOW_HEIGHT})"
+    print "Renderer: HostCompositor lifecycle + Simple Web app content + winit buffer backend"
+    print "Controls: drag titlebars, click focus, close X, Tab cycle, W close, M minimize, R restore, Esc quit"
 
-    # --- Step 1: Create winit event loop and window ---
-    print "[hosted] Creating event loop..."
     val el = rt_winit_event_loop_new()
-
-    print "[hosted] Creating window ({WINDOW_WIDTH}x{WINDOW_HEIGHT})..."
-    val win = rt_winit_window_new(el, WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE)
+    val win = rt_winit_window_new(el, WINDOW_WIDTH.to_i64(), WINDOW_HEIGHT.to_i64(), WINDOW_TITLE)
     if win == 0:
-        print "ERROR: Window creation failed"
-        print "Make sure SIMPLE_GUI=1 is set in your environment"
+        print "ERROR: winit window creation failed"
         return 1
 
-    # --- Step 2: Create native pixel buffer ---
-    print "[hosted] Creating pixel buffer..."
-    val buf = rt_winit_buffer_create(WINDOW_WIDTH, WINDOW_HEIGHT, BG_COLOR)
-    if buf == 0:
-        print "ERROR: Buffer creation failed"
+    val backend = HostedWinitBufferBackend.create(win, WINDOW_WIDTH, WINDOW_HEIGHT, 0xFF0F172Au32)
+    if backend == nil:
+        print "ERROR: hosted winit backend creation failed"
+        rt_winit_window_free(win)
+        rt_winit_event_loop_free(el)
         return 1
 
-    # --- Step 3: Create backends ---
-    print "[hosted] Initializing display backend..."
-    val w32: i32 = 640
-    val h32: i32 = 480
-    val bg_u32: u32 = 0xFF1A1B2E
-    var backend = HostedCompositorBackend.create(win, w32, h32, bg_u32)
+    var comp = HostCompositor.new(backend, Size(width: WINDOW_WIDTH.to_u64(), height: WINDOW_HEIGHT.to_u64()))
+    seed_shared_mdi(comp)
+    comp.render_frame()
+    print "Frame presented: shared lifecycle windows + Simple Web MDI content"
 
-    print "[hosted] Initializing input backend..."
-    var input = HostedInputBackend.create(el)
+    var running = true
+    val end_at = rt_time_now_unix_micros() + 300000000
+    while running and rt_time_now_unix_micros() < end_at:
+        var dirty = false
+        var ev = rt_winit_event_loop_poll_events(el, 1)
+        while ev != 0:
+            val kind = rt_winit_event_get_type(ev)
+            if kind == EVT_CLOSE:
+                running = false
+            elif kind == EVT_MOUSE_MOVE:
+                val (mx, my) = rt_winit_event_mouse_moved(ev)
+                comp.pointer_move(mx, my)
+                dirty = true
+            elif kind == EVT_MOUSE_BUTTON:
+                val (button, pressed) = rt_winit_event_mouse_button(ev)
+                if button == 0:
+                    comp.handle_left_button(pressed)
+                    dirty = true
+            elif kind == EVT_KEY:
+                val (_scan, keycode, pressed_key) = rt_winit_event_keyboard_input(ev)
+                if pressed_key:
+                    if keycode == KEY_ESCAPE:
+                        running = false
+                    elif keycode == KEY_TAB:
+                        comp = host_compositor_cycle_focus(comp)
+                    elif keycode == KEY_W:
+                        val focused = host_compositor_focused_window_id(comp)
+                        if focused > 0:
+                            comp.destroy_window(focused)
+                    elif keycode == KEY_M:
+                        comp = host_compositor_minimize_focused(comp)
+                    elif keycode == KEY_R:
+                        comp = host_compositor_restore_all(comp)
+                    dirty = true
+            rt_winit_event_free(ev)
+            ev = rt_winit_event_loop_poll_events(el, 1)
+        if dirty:
+            comp.render_frame()
 
-    # --- Step 4: Create compositor ---
-    print "[hosted] Creating compositor..."
-    var compositor = Compositor.with_backends(backend, input, w32, h32)
-
-    # --- Step 5: Launch apps directly on compositor ---
-    # (Skip DesktopShell for now — it requires WM IPC service which needs kernel syscalls)
-    print "[hosted] Launching Hello World window..."
-    compositor.create_window("Hello World", 50, 50, 300, 200)
-
-    print "[hosted] Launching Calculator window..."
-    compositor.create_window("Calculator", 200, 100, 250, 300)
-
-    # --- Step 6: Enter event loop ---
-    print "[hosted] Desktop ready!"
-    print "[hosted] Keyboard shortcuts:"
-    print "  Alt+Tab     = cycle windows"
-    print "  Alt+F4      = close focused window"
-    print "  Escape      = quit"
-    print ""
-
-    compositor.run_loop()
-
-    # --- Cleanup ---
-    print "[hosted] Desktop exited"
+    backend.free()
     rt_winit_window_free(win)
     rt_winit_event_loop_free(el)
+    print "SimpleOS shared hosted WM closed"
     return 0

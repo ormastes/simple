@@ -91,7 +91,7 @@ match result:
 | Category | Application |
 | Status | Active |
 | Source | `test/unit/app/ui/host_wm_runtime_loop_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

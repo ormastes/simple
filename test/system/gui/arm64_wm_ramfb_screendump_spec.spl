@@ -66,6 +66,41 @@ fn _ppm_header_valid(path: text) -> bool:
     val result = rt_process_run_timeout("python3", ["-c", script, path], 5000)
     result[2] == 0
 
+fn _ppm_has_dock_icon_artwork(path: text) -> bool:
+    val script =
+        "import sys\n" +
+        "from pathlib import Path\n" +
+        "data=Path(sys.argv[1]).read_bytes()\n" +
+        "i=0\n" +
+        "tokens=[]\n" +
+        "while len(tokens)<4:\n" +
+        "    while data[i] in b' \\t\\r\\n': i+=1\n" +
+        "    if data[i:i+1]==b'#':\n" +
+        "        while data[i] not in b'\\r\\n': i+=1\n" +
+        "        continue\n" +
+        "    j=i\n" +
+        "    while data[j] not in b' \\t\\r\\n': j+=1\n" +
+        "    tokens.append(data[i:j]); i=j\n" +
+        "while data[i] in b' \\t\\r\\n': i+=1\n" +
+        "if tokens[0]!=b'P6': sys.exit(2)\n" +
+        "w=int(tokens[1]); h=int(tokens[2]); maxv=int(tokens[3])\n" +
+        "pix=data[i:]\n" +
+        "lefts=[312,370,428,486,544,602,660]\n" +
+        "hits=0\n" +
+        "for left in lefts:\n" +
+        "    bright=dark=accent=0\n" +
+        "    for y in range(716,739):\n" +
+        "        for x in range(left+7,left+34):\n" +
+        "            o=(y*w+x)*3\n" +
+        "            r,g,b=pix[o],pix[o+1],pix[o+2]\n" +
+        "            if r>205 and g>205 and b>205: bright+=1\n" +
+        "            if r<55 and g<55 and b<80: dark+=1\n" +
+        "            if max(r,g,b)-min(r,g,b)>70: accent+=1\n" +
+        "    if dark>=100 and (bright+accent)>=15: hits+=1\n" +
+        "sys.exit(0 if hits>=6 else 5)\n"
+    val result = rt_process_run_timeout("python3", ["-c", script, path], 5000)
+    result[2] == 0
+
 fn _build_arm64_wm_once() -> bool:
     val target = scenario_target(scenario_arm64_wm_ramfb())
     if not file_exists(target.output):
@@ -85,6 +120,8 @@ fn _print_arm64_guest_diagnostics(prefix: text, serial: text, stderr: text):
 describe "SimpleOS ARM64 WM ramfb screendump":
 
     it "captures a real QMP screendump after the WM render marker":
+        if rt_file_exists(_arm64_wm_screendump_blocker_path()):
+            expect(rt_file_delete(_arm64_wm_screendump_blocker_path())).to_equal(true)
         val scenario = scenario_arm64_wm_ramfb()
         val target = scenario_target(scenario)
         val built = _build_arm64_wm_once()
@@ -124,9 +161,13 @@ describe "SimpleOS ARM64 WM ramfb screendump":
                             else:
                                 _cleanup_arm64_wm_guest(handle, qmp_socket, serial_log)
                                 val header_ok = _ppm_header_valid(capture_ppm)
-                                val capture_ok = file_exists(capture_ppm) and header_ok
+                                val artwork_ok = _ppm_has_dock_icon_artwork(capture_ppm)
+                                val capture_ok = file_exists(capture_ppm) and header_ok and artwork_ok
                                 if not capture_ok:
-                                    _write_arm64_wm_screendump_blocker("ppm-capture-assertion-failed", "ppm_path=\"{capture_ppm}\"\nexists={file_exists(capture_ppm)}\nheader_ok={header_ok}\n")
+                                    _write_arm64_wm_screendump_blocker("ppm-capture-assertion-failed", "ppm_path=\"{capture_ppm}\"\nexists={file_exists(capture_ppm)}\nheader_ok={header_ok}\nartwork_ok={artwork_ok}\n")
+                                else:
+                                    if rt_file_exists(_arm64_wm_screendump_blocker_path()):
+                                        expect(rt_file_delete(_arm64_wm_screendump_blocker_path())).to_equal(true)
                                 expect(capture_ok).to_equal(true)
                     Err(err):
                         print "[arm64_wm_ramfb_screendump_spec] failed to spawn guest: {err}"

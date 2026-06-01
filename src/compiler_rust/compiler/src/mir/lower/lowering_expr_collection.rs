@@ -73,6 +73,36 @@ impl<'a> MirLowerer<'a> {
             .type_registry
             .and_then(|tr| tr.get(outer_ty))
             .is_some_and(|t| matches!(t, HirType::Array { element, .. } if *element == TypeId::U8));
+        let outer_is_u64_array = self
+            .type_registry
+            .and_then(|tr| tr.get(outer_ty))
+            .is_some_and(|t| matches!(t, HirType::Array { element, .. } if *element == TypeId::U64));
+        if elements.is_empty() && (outer_is_u8_array || outer_is_u64_array) {
+            let capacity_reg = self.with_func(|func, current_block| {
+                let reg = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::ConstInt {
+                    dest: reg,
+                    value: 16,
+                });
+                reg
+            })?;
+            let target = if outer_is_u8_array {
+                CallTarget::from_name("rt_byte_array_new")
+            } else {
+                CallTarget::from_name("rt_array_new_with_cap_u64")
+            };
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target,
+                    args: vec![capacity_reg],
+                });
+                dest
+            });
+        }
         if !elements.is_empty() && (elements.iter().all(|elem| elem.ty == TypeId::U8) || outer_is_u8_array) {
             let capacity = elements.len() as i64;
             let capacity_reg = self.with_func(|func, current_block| {
@@ -110,7 +140,7 @@ impl<'a> MirLowerer<'a> {
             return Ok(array_reg);
         }
 
-        if !elements.is_empty() && elements.iter().all(|elem| elem.ty == TypeId::U64) {
+        if !elements.is_empty() && (elements.iter().all(|elem| elem.ty == TypeId::U64) || outer_is_u64_array) {
             let capacity = elements.len() as i64;
             let capacity_reg = self.with_func(|func, current_block| {
                 let reg = func.new_vreg();

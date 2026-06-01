@@ -67,7 +67,7 @@ builds/runs:
 ```text
 examples/simple_os/arch/arm64/wm_entry.spl
 build/os/simpleos_arm64_wm.elf
-qemu-system-aarch64 -machine virt -cpu max -m 384M -kernel build/os/simpleos_arm64_wm.elf -device ramfb
+qemu-system-aarch64 -machine virt -cpu host -accel hvf -m 384M -kernel build/os/simpleos_arm64_wm.elf -device ramfb
 ```
 
 This is a build/run command contract for the existing scenario machinery. It

@@ -8,6 +8,7 @@ use os.compositor.simple_web_window_renderer.{render_simple_web_app_content}
 use os.compositor.wm_action_applier.{WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 use os.services.wm.wm_service.{WmService}
 use os.services.wm.wm_world.{WmAction}
+use os.userlib.ipc_protocol.{COMP_MINIMIZE, COMP_RESTORE}
 
 extern fn rt_sleep_ms(ms: i64)
 
@@ -130,6 +131,8 @@ class HostCompositor:
     resize_start_y: i32
     resize_start_w: i32
     resize_start_h: i32
+    pointer_x: i32
+    pointer_y: i32
 
     static fn new(backend: CompositorBackend, size: Size) -> HostCompositor:
         HostCompositor(
@@ -148,7 +151,9 @@ class HostCompositor:
             resize_start_x: 0,
             resize_start_y: 0,
             resize_start_w: 0,
-            resize_start_h: 0
+            resize_start_h: 0,
+            pointer_x: 0,
+            pointer_y: 0
         )
 
     me resize(width: i32, height: i32):
@@ -163,6 +168,9 @@ class HostCompositor:
             if not win.minimized:
                 self.backend.fill_rect(win.x, win.y, win.w, win.h, 0xFF1E293Bu32)
                 self.backend.fill_rect(win.x, win.y, win.w, 24, 0xFF2563EBu32)
+                self.backend.draw_text(win.x + 8, win.y + 4, win.title, 0xFFFFFFFFu32, 0xFF2563EBu32)
+                self.backend.fill_rect(win.x + win.w - 24, win.y, 24, 24, 0xFFCC3333u32)
+                self.backend.draw_text(win.x + win.w - 17, win.y + 4, "X", 0xFFFFFFFFu32, 0xFFCC3333u32)
                 val cx = win.x + 4
                 val cy = win.y + 28
                 val cw = win.w - 8
@@ -198,6 +206,8 @@ class HostCompositor:
         wm_lifecycle_hit_taskbar(host_windows_to_lifecycle_state(self.windows), self.width, self.height, x, y)
 
     me pointer_move(x: i32, y: i32):
+        self.pointer_x = x
+        self.pointer_y = y
         val out = host_compositor_pointer_move(self, x, y)
         self.windows = out.windows
         self.next_window_id = out.next_window_id
@@ -216,9 +226,19 @@ class HostCompositor:
         self.pointer_move(x, y)
 
     me handle_left_button(down: bool):
-        val out = host_compositor_left_button(self, down)
+        val out = host_compositor_left_button_at(self, down, self.pointer_x, self.pointer_y)
+        self.windows = out.windows
+        self.next_window_id = out.next_window_id
+        self.dragging = out.dragging
+        self.drag_window_id = out.drag_window_id
+        self.drag_offset_x = out.drag_offset_x
+        self.drag_offset_y = out.drag_offset_y
         self.resizing = out.resizing
         self.resize_window_id = out.resize_window_id
+        self.resize_start_x = out.resize_start_x
+        self.resize_start_y = out.resize_start_y
+        self.resize_start_w = out.resize_start_w
+        self.resize_start_h = out.resize_start_h
 
     me record_launch_failure(index: i32):
         if index < 0 or index >= self.app_processes.len():
@@ -407,7 +427,32 @@ fn host_compositor_pointer_move(comp: HostCompositor, x: i32, y: i32) -> HostCom
     out
 
 fn host_compositor_left_button(comp: HostCompositor, down: bool) -> HostCompositor:
+    host_compositor_left_button_at(comp, down, comp.pointer_x, comp.pointer_y)
+
+fn host_compositor_left_button_at(comp: HostCompositor, down: bool, x: i32, y: i32) -> HostCompositor:
     var out = comp
+    out.pointer_x = x
+    out.pointer_y = y
+    if down:
+        var hit_idx = -1
+        var i = 0
+        while i < out.windows.len():
+            val win = out.windows[i]
+            if not win.minimized and x >= win.x and x < win.x + win.w and y >= win.y and y < win.y + win.h:
+                hit_idx = i
+            i = i + 1
+        if hit_idx >= 0:
+            val hit = out.windows[hit_idx]
+            if x >= hit.x + hit.w - 24 and y >= hit.y and y < hit.y + 24:
+                out.destroy_window(hit.id)
+                return out
+            out.focus_window(hit.id)
+            if y >= hit.y and y < hit.y + 24:
+                out.dragging = true
+                out.drag_window_id = hit.id
+                out.drag_offset_x = x - hit.x
+                out.drag_offset_y = y - hit.y
+                return out
     val interaction = wm_lifecycle_left_button(WmPointerInteractionState(dragging: out.dragging, drag_window_id: out.drag_window_id, drag_offset_x: out.drag_offset_x, drag_offset_y: out.drag_offset_y, resizing: out.resizing, resize_window_id: out.resize_window_id, resize_start_x: out.resize_start_x, resize_start_y: out.resize_start_y, resize_start_w: out.resize_start_w, resize_start_h: out.resize_start_h), down)
     out.dragging = interaction.dragging
     out.drag_window_id = interaction.drag_window_id
@@ -419,6 +464,48 @@ fn host_compositor_left_button(comp: HostCompositor, down: bool) -> HostComposit
     out.resize_start_y = interaction.resize_start_y
     out.resize_start_w = interaction.resize_start_w
     out.resize_start_h = interaction.resize_start_h
+    out
+
+fn host_compositor_cycle_focus(comp: HostCompositor) -> HostCompositor:
+    var out = comp
+    if out.windows.len() == 0:
+        return out
+    var focused_idx = -1
+    var i = 0
+    while i < out.windows.len():
+        if out.windows[i].focused:
+            focused_idx = i
+        i = i + 1
+    var next_idx = focused_idx + 1
+    if next_idx >= out.windows.len():
+        next_idx = 0
+    out.focus_window(out.windows[next_idx].id)
+    out
+
+fn host_compositor_focused_window_id(comp: HostCompositor) -> i64:
+    var i = 0
+    while i < comp.windows.len():
+        if comp.windows[i].focused:
+            return comp.windows[i].id
+        i = i + 1
+    if comp.windows.len() > 0:
+        return comp.windows[comp.windows.len() - 1].id
+    0
+
+fn host_compositor_minimize_focused(comp: HostCompositor) -> HostCompositor:
+    val id = host_compositor_focused_window_id(comp)
+    if id <= 0:
+        return comp
+    var out = comp
+    out.apply_bridge_request(0, 0, COMP_MINIMIZE.to_i64(), id, "", 0, 0, 0, 0, "", 0, "")
+    out
+
+fn host_compositor_restore_all(comp: HostCompositor) -> HostCompositor:
+    var out = comp
+    var i = 0
+    while i < out.windows.len():
+        out.apply_bridge_request(0, 0, COMP_RESTORE.to_i64(), out.windows[i].id, "", 0, 0, 0, 0, "", 0, "")
+        i = i + 1
     out
 
 fn host_taskbar_item_width(screen_width: i32, count: i32) -> i32:

@@ -17,13 +17,11 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
-spl="${1:-}"
-if [[ -z "$spl" ]]; then echo "usage: scripts/macos-gui-run.shs <file.spl> [program args...]" >&2; exit 1; fi
-shift
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+spl="${1:-$repo_root/src/os/hosted/hosted_entry.spl}"
+if [[ $# -gt 0 ]]; then shift; fi
 spl="$(cd "$(dirname "$spl")" && pwd)/$(basename "$spl")"
 if [[ ! -f "$spl" ]]; then echo "error: file not found: $spl" >&2; exit 1; fi
-
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 program_args=()
 for arg in "$@"; do
@@ -64,7 +62,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>SimpleGui</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>1</string>
-  <key>NSHighResolutionCapable</key><true/>
+  <key>NSHighResolutionCapable</key><false/>
   <key>LSEnvironment</key>
   <dict>
     <key>SIMPLE_GUI</key><string>1</string>
@@ -79,9 +77,24 @@ PLIST
 echo "launching $spl as $app ..."
 open "$app" --args run "$spl" "${program_args[@]}"
 
-# winit may place small windows off-screen; nudge the window on-screen once it appears.
+# winit may place small windows off-screen on multi-display macOS setups; nudge
+# the first real app window on-screen once it appears. LaunchServices may show a
+# transient process before the window-owning process, so select by window count.
 for _ in $(seq 1 60); do
-  if osascript -e 'tell application "System Events" to tell (first process whose name is "SimpleGui") to set position of front window to {200, 120}' >/dev/null 2>&1; then
+  if osascript <<'OSA' >/dev/null 2>&1; then
+tell application "SimpleGui" to activate
+tell application "System Events"
+  repeat with proc in (processes whose name is "SimpleGui")
+    tell proc
+      if (count of windows) > 0 then
+        set position of window 1 to {200, 120}
+        return true
+      end if
+    end tell
+  end repeat
+end tell
+error "SimpleGui window not ready"
+OSA
     break
   fi
   sleep 1

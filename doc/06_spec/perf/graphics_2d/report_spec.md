@@ -10,7 +10,7 @@ test/perf/graphics_2d/report_spec.spl
 | Category | Performance \| Graphics \| Benchmark |
 | Status | Active |
 | Source | `test/perf/graphics_2d/report_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 test/perf/graphics_2d/report_spec.spl

@@ -107,7 +107,7 @@ expect(state.last_command_kind).to_equal("ignored")
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/unit/os/desktop/wm_runtime_bridge_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

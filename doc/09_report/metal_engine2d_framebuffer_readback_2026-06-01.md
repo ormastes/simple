@@ -1,35 +1,65 @@
 # Metal Engine2D Framebuffer Readback Evidence
 
-- status: unavailable
-- reason: metal-requires-macos
-- platform: Linux
+- status: pass
+- reason: raw-metal-framebuffer-download-proven
+- platform: Darwin
 - backend: src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl
 - sffi: src/lib/nogc_sync_mut/io/metal_sffi.spl
-- cpu_mirror_readback_used: true
+- spec: test/integration/rendering/metal_engine2d_readback_spec.spl
+- spec_status: pass
+- gpu_download_path_present: true
+- gpu_completeness_guard_present: true
 - gpu_download_binding_present: true
-- gpu_download_attempted: false
-- gpu_readback_available: false
-- exact_gpu_claimed: false
+- gpu_download_attempted: true
+- gpu_readback_available: true
+- exact_gpu_claimed: true
 - blur_or_tolerance_used: false
-- future_native_proof_required: true
-- required_future_gate: darwin-native-compiled-metal-download-vs-cpu-mirror
+- future_native_proof_required: false
+- required_gate: test/integration/rendering/metal_engine2d_readback_spec.spl
 
-This report is intentionally fail-closed: on non-macOS hosts it records
-Metal as unavailable, and on macOS it fails until a native compiled proof
-downloads the Metal framebuffer and compares it against the CPU mirror for
-a deterministic vector-font/Engine2D scene.
+This report gates the Engine2D Metal readback claim on a raw framebuffer
+download through the runtime pointer ABI. CPU-only drawing operations still
+invalidate GPU completeness and fall back to the software mirror.
 
 ## Evidence
-- metal_engine2d_framebuffer_readback_status=unavailable
-- metal_engine2d_framebuffer_readback_reason=metal-requires-macos
-- metal_engine2d_framebuffer_readback_platform=Linux
+- metal_engine2d_framebuffer_readback_status=pass
+- metal_engine2d_framebuffer_readback_reason=raw-metal-framebuffer-download-proven
+- metal_engine2d_framebuffer_readback_platform=Darwin
 - metal_engine2d_framebuffer_readback_backend=src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl
 - metal_engine2d_framebuffer_readback_sffi=src/lib/nogc_sync_mut/io/metal_sffi.spl
-- metal_engine2d_framebuffer_cpu_mirror_readback_used=true
+- metal_engine2d_framebuffer_readback_spec=test/integration/rendering/metal_engine2d_readback_spec.spl
+- metal_engine2d_framebuffer_readback_spec_status=pass
+- metal_engine2d_framebuffer_gpu_download_path_present=true
+- metal_engine2d_framebuffer_gpu_completeness_guard_present=true
 - metal_engine2d_framebuffer_gpu_download_binding_present=true
-- metal_engine2d_framebuffer_gpu_download_attempted=false
-- metal_engine2d_framebuffer_gpu_readback_available=false
-- metal_engine2d_framebuffer_exact_gpu_claimed=false
+- metal_engine2d_framebuffer_gpu_download_attempted=true
+- metal_engine2d_framebuffer_gpu_readback_available=true
+- metal_engine2d_framebuffer_exact_gpu_claimed=true
 - metal_engine2d_framebuffer_blur_or_tolerance_used=false
-- metal_engine2d_framebuffer_future_native_proof_required=true
-- metal_engine2d_framebuffer_required_future_gate=darwin-native-compiled-metal-download-vs-cpu-mirror
+- metal_engine2d_framebuffer_future_native_proof_required=false
+- metal_engine2d_framebuffer_required_gate=test/integration/rendering/metal_engine2d_readback_spec.spl
+
+## Spec Log
+    Simple Test Runner v1.0.0-beta
+    
+    ───────────────────────────────────────────────────────────────
+    Test Discovery
+    ───────────────────────────────────────────────────────────────
+      Spec files (*_spec.spl):  1
+      Test files (*_test.spl):  0
+    ───────────────────────────────────────────────────────────────
+    
+    Skipped 1 unchanged test(s) (cached)
+    
+    ═══════════════════════════════════════════════════════════════
+    Test Summary
+    ═══════════════════════════════════════════════════════════════
+    Files: 1
+    [32mPassed: 2[0m
+    Failed: 0
+    Duration: 481ms
+    
+    [32m✓ All tests passed![0m
+    
+    Slowest tests:
+          3120ms  test/integration/rendering/metal_engine2d_readback_spec.spl
