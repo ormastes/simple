@@ -1,0 +1,82 @@
+# Pure-Simple executable layout optimizer contract helpers.
+#
+# This module owns the production-side contract slice for BOLT-like executable
+# layout planning. It only models deterministic eligibility and manifest rules;
+# it does not invoke external binary rewriters.
+
+struct ExecutableLayoutManifestEntry:
+    symbol_name: text
+    section_name: text
+    original_offset: i64
+    optimized_offset: i64
+    size_bytes: i64
+
+pub fn layout_plan_steps() -> [text]:
+    [
+        "hot_function_cluster",
+        "hot_block_fallthrough",
+        "cold_region_marking",
+        "offset_manifest"
+    ]
+
+pub fn layout_transform_allowed(
+    relocations_safe: bool,
+    entry_preserved: bool,
+    symbols_preserved: bool,
+    workload_matches: bool
+) -> bool:
+    relocations_safe and entry_preserved and symbols_preserved and workload_matches
+
+fn _is_command_separator(ch: text) -> bool:
+    ch == " " or ch == "\t" or ch == "\n" or ch == "/" or ch == "\\" or
+        ch == "'" or ch == "\"" or ch == "`" or ch == ";" or ch == "&" or
+        ch == "|" or ch == "(" or ch == ")"
+
+fn _command_tokens(command: text) -> [text]:
+    val input = command.lower()
+    var tokens: [text] = []
+    var current = ""
+    var i = 0
+    while i < input.len():
+        val ch = input[i:i + 1]
+        if _is_command_separator(ch):
+            if current != "":
+                tokens.push(current)
+                current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current != "":
+        tokens.push(current)
+    tokens
+
+fn _is_external_bolt_token(token: text) -> bool:
+    token == "bolt" or token.starts_with("bolt.") or
+        token == "llvm-bolt" or token.starts_with("llvm-bolt-") or token.starts_with("llvm-bolt.") or
+        token == "perf2bolt" or token.starts_with("perf2bolt.") or
+        token == "merge-fdata" or token.starts_with("merge-fdata.")
+
+pub fn layout_uses_external_bolt(command: text) -> bool:
+    val tokens = _command_tokens(command)
+    var i = 0
+    while i < tokens.len():
+        if _is_external_bolt_token(tokens[i]):
+            return true
+        i = i + 1
+    false
+
+pub fn layout_external_bolt_allowed(command: text) -> bool:
+    not layout_uses_external_bolt(command)
+
+pub fn layout_manifest_entry_valid(entry: ExecutableLayoutManifestEntry) -> bool:
+    if entry.symbol_name.trim() == "":
+        return false
+    if entry.section_name.trim() == "":
+        return false
+    if not entry.section_name.starts_with("."):
+        return false
+    if entry.original_offset < 0:
+        return false
+    if entry.optimized_offset < 0:
+        return false
+    entry.size_bytes > 0

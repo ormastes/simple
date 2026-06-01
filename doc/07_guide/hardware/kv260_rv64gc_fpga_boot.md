@@ -18,6 +18,7 @@ Verified on physical hardware:
 - OpenOCD/openFPGALoader confirmed incompatible with K26 FT4232H (proprietary Xilinx JTAG).
 - Merged USB UART sampling while programming checked `/dev/ttyUSB4`, `/dev/ttyUSB5`, and `/dev/ttyUSB6` for 30 seconds at 115200 8N1. All captures were zero bytes. Artifacts: `build/kv260_uart_program_20260529_124641/`.
 - Merged USB UART positive path verified with XSDB/JTAG write to ZynqMP PS UART1. The marker `KV260-PS-UART-JTAG` was captured from `/dev/ttyUSB4`. Artifacts: `build/kv260_ps_uart_jtag_probe_20260529_125214/`.
+- 2026-06-01 recheck loaded the current bitstream and passed the combined KV260 RV64 gate. Artifacts: `build/kv260_simple_rv64_linux_check_20260601_084520/`.
 
 Verified in test workspace:
 
@@ -26,6 +27,10 @@ Verified in test workspace:
 - Bounded interpreter and native test-runner probes complete without leaving `simple` child processes.
 - Generated RV64 Linux handoff smoke passes in GHDL:
   `[GHDL-GEN-RV64-LINUX-HANDOFF] PASS`.
+- The public generated RISC-V RTL smoke wrapper runs both generated lanes by default:
+  `sh scripts/check-riscv-rtl-linux-smoke.shs --timeout=30`.
+- Generated RV32 smoke passes in GHDL:
+  `[GHDL-GEN-RV32] PASS`.
 - QEMU RV64 SimpleOS logs show boot markers and HTTP bind/listen behavior when
   virtio networking is present, but this is not physical KV260 network proof.
 
@@ -167,7 +172,7 @@ CAPTURE_SECONDS=30 LINUX_TIMEOUT=60 \
   sh scripts/fpga/check_kv260_simple_rv64_linux.shs
 ```
 
-Verified result on 2026-05-29:
+Verified result on 2026-06-01:
 
 ```text
 PASS artifacts_present
@@ -176,15 +181,21 @@ PASS kv260_bitstream_loaded
 INFO pl_uart_on_merged_usb=no_output rc=1
 PASS merged_usb_ps_uart
 PASS generated_rv64_linux_handoff
+INFO network_physical_verification=not_covered
 PASS kv260_simple_rv64_linux_check
 ```
 
-Artifacts from the verified run are in `build/kv260_simple_rv64_linux_check_20260529_230422/`. The check records:
+Artifacts from the verified run are in `build/kv260_simple_rv64_linux_check_20260601_084520/`. The check records:
 
 - `simpleos_riscv64_fpga.readelf.txt` — confirms `build/os/simpleos_riscv64_fpga.elf` is ELF64 RISC-V with entry `0x80000000`.
 - `program_and_uart.log` — confirms the KV260 bitstream reached `End of startup status: HIGH`.
 - `ps_uart_probe.log` — confirms merged USB `/dev/ttyUSB4` receives the `KV260-PS-UART-JTAG` sanity marker from ZynqMP UART1.
 - `generated_rv64_linux_handoff.log` — confirms `[GHDL-GEN-RV64-LINUX-HANDOFF] PASS`.
+
+Important boundary: this combined check confirms board programming, the merged
+PS UART sanity path, and generated RV64 GHDL handoff. It does not prove physical
+PL UART output, physical network readiness, physical HTTP responses, SSH, or a
+Simple DB-backed web route on the FPGA softcore.
 
 ### 5.2 Network Verification Status
 

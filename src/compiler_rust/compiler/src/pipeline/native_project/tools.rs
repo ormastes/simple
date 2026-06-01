@@ -642,7 +642,13 @@ pub(crate) fn is_system_symbol(sym: &str) -> bool {
     #[cfg(not(target_os = "windows"))]
     {
         let name = sym.strip_prefix('_').unwrap_or(sym);
-        if is_known_system_name(sym) || is_known_system_name(name) {
+        let versionless = sym.split('@').next().unwrap_or(sym);
+        let versionless_name = name.split('@').next().unwrap_or(name);
+        if is_known_system_name(sym)
+            || is_known_system_name(name)
+            || is_known_system_name(versionless)
+            || is_known_system_name(versionless_name)
+        {
             return true;
         }
         if cfg!(target_os = "macos") {
@@ -708,6 +714,7 @@ fn is_windows_system_name(name: &str) -> bool {
     matches!(
         name,
         "malloc"
+            | "_GLOBAL_OFFSET_TABLE_"
             | "calloc"
             | "realloc"
             | "free"
@@ -1033,6 +1040,8 @@ fn is_known_system_name(name: &str) -> bool {
     matches!(
         name,
         "malloc"
+            | "_GLOBAL_OFFSET_TABLE_"
+            | "GLOBAL_OFFSET_TABLE_"
             | "calloc"
             | "realloc"
             | "free"
@@ -1141,6 +1150,7 @@ fn is_known_system_name(name: &str) -> bool {
             | "pthread_create"
             | "pthread_join"
             | "pthread_detach"
+            | "pthread_atfork"
             | "pthread_self"
             | "pthread_mutex_init"
             | "pthread_mutex_lock"
@@ -1266,6 +1276,21 @@ fn is_known_system_name(name: &str) -> bool {
             | "sched_getaffinity"
             | "getrandom"
             | "syscall"
+            | "__tls_get_addr"
+            | "_Unwind_Backtrace"
+            | "_Unwind_FindEnclosingFunction"
+            | "_Unwind_GetCFA"
+            | "_Unwind_GetDataRelBase"
+            | "_Unwind_GetIP"
+            | "_Unwind_GetIPInfo"
+            | "_Unwind_GetLanguageSpecificData"
+            | "_Unwind_GetRegionStart"
+            | "_Unwind_GetTextRelBase"
+            | "_Unwind_Resume"
+            | "_Unwind_SetGR"
+            | "_Unwind_SetIP"
+            | "cfsetispeed"
+            | "cfsetospeed"
             | "epoll_create1"
             | "epoll_ctl"
             | "epoll_wait"

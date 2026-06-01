@@ -1,0 +1,91 @@
+# Pure Simple Profile-Guided Executable Optimization System Test Plan
+
+Date: 2026-06-01
+
+## Scope
+
+Design verification for:
+- persistent `.sprof` loader and merge behavior;
+- native function/block/edge counters;
+- pure-Simple BOLT-like executable layout optimization;
+- bare-metal software-breakpoint counter lifecycle;
+- overhead protection and breakpoint removal.
+
+## Executable Specs
+
+| Spec | Purpose |
+|------|---------|
+| `test/system/app/optimize/feature/sprof_loader_spec.spl` | validate/load/merge profile summaries |
+| `test/system/app/compile/feature/native_profile_counter_spec.spl` | native counter ABI and disabled-counter behavior |
+| `test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl` | layout planner and rejection rules |
+| `test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl` | patch/trap/count/restore/auto-disarm state machine |
+
+Executable specs must live under `test/`; generated/manual docs mirror under
+`doc/06_spec/`.
+
+Current status: the four executable contract specs above exist and cover the
+planned interfaces before runtime loader, native counter emission, executable
+rewriting, or bare-metal patching code is implemented.
+
+## Requirement Traceability
+
+| Objective Item | Planned Evidence |
+|----------------|------------------|
+| Persistent profile loader | corrupt/stale/exact profile load tests; startup overhead report |
+| Simple native optimize | native O-level plus profile-counter ABI tests |
+| Pure Simple BOLT-like optimizer | metadata-only layout planning tests; no external BOLT command dependency |
+| Native counter feature | function/block/edge/call-path counter contract tests |
+| Bare-metal counter impl | breakpoint site table and patch ledger tests |
+| Prevent slow breakpoint overhead | auto-disarm and sampled-only fallback tests |
+| Analyze call path | bounded call-path hash and promotion tests |
+| Remove breakpoint when profiled | cleanup-on-stop/panic/watchdog tests |
+
+## Pass Criteria
+
+- Profile loader never performs hot-path file I/O.
+- Disabled native counters do not change non-profile builds.
+- Layout optimizer preserves entry, symbols, relocations, and manifest mapping.
+- Bare-metal breakpoint counters restore original instructions in every exit
+  path.
+- Hot loop breakpoints are removed or downgraded after calibration.
+- Every speedup claim has before/after workload evidence.
+
+## Verification Commands
+
+Baseline documentation gates:
+
+```bash
+git diff --check
+find doc/06_spec -name '*_spec.spl' | wc -l
+```
+
+Initial code-slice gates:
+
+```bash
+SIMPLE_LIB=src bin/simple check src/app/optimize
+SIMPLE_LIB=src bin/simple check src/app/compile
+SIMPLE_LIB=src bin/simple check test/system/app/optimize/feature/sprof_loader_spec.spl test/system/app/compile/feature/native_profile_counter_spec.spl test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl
+SIMPLE_LIB=src bin/simple test test/system/app/optimize/feature/sprof_loader_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src bin/simple test test/system/app/compile/feature/native_profile_counter_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src bin/simple test test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src bin/simple test test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean
+```
+
+Native executable slices add:
+
+```bash
+SIMPLE_LIB=src bin/simple check src/compiler
+cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml
+```
+
+Bare-metal slices add QEMU smoke and explicit hardware-unavailable records when
+real hardware is not present.
+
+## Manual Review Policy
+
+Generated specs must read as operator manuals:
+- show how a profile is loaded and rejected;
+- show how counters are enabled and disabled;
+- show how the executable layout manifest maps original to optimized offsets;
+- show how breakpoint counters are armed, auto-disarmed, and cleaned up.

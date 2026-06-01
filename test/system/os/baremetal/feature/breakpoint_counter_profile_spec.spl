@@ -1,0 +1,56 @@
+# codex-system-test
+# Contract tests for bare-metal software-breakpoint profiling.
+
+use std.spec.{describe, it, expect}
+use os.baremetal.profile.breakpoint_counter.{
+    breakpoint_auto_disarm_state,
+    breakpoint_cleanup_events,
+    breakpoint_cleanup_events_cover,
+    breakpoint_next_state,
+    breakpoint_patch_ledger_valid,
+    breakpoint_sampled_only_fallback_state,
+    breakpoint_should_disarm
+}
+
+describe "Bare-metal Breakpoint Counter Profile Contract":
+    describe "breakpoint state machine":
+        it "should arm count restore single-step and rearm a profiling breakpoint":
+            expect(breakpoint_next_state("candidate", "arm")).to_equal("armed")
+            expect(breakpoint_next_state("armed", "hit")).to_equal("counted")
+            expect(breakpoint_next_state("counted", "restore")).to_equal("single_step")
+            expect(breakpoint_next_state("single_step", "rearm")).to_equal("armed")
+
+        it "should remove breakpoints when profiling stops":
+            expect(breakpoint_next_state("armed", "stop_profile")).to_equal("removed")
+
+    describe "overhead protection":
+        it "should disarm breakpoint counters when overhead exceeds budget":
+            expect(breakpoint_should_disarm(101, 10, 100, 50, false)).to_equal(true)
+            expect(breakpoint_should_disarm(10, 60, 100, 50, false)).to_equal(true)
+            expect(breakpoint_should_disarm(10, 10, 100, 50, true)).to_equal(true)
+            expect(breakpoint_should_disarm(10, 10, 100, 50, false)).to_equal(false)
+
+        it "should downgrade over-budget breakpoints to sampled only":
+            expect(breakpoint_next_state("armed", "over_budget")).to_equal("sampled_only")
+            expect(breakpoint_auto_disarm_state("armed", 101, 10, 100, 50, false)).to_equal("sampled_only")
+
+        it "should keep sampled-only fallback disarmed until profiling stops":
+            expect(breakpoint_sampled_only_fallback_state("sampled_only", "hit")).to_equal("sampled_only")
+            expect(breakpoint_sampled_only_fallback_state("sampled_only", "rearm")).to_equal("sampled_only")
+
+    describe "cleanup ledger":
+        it "should define cleanup events for every exit path":
+            val events = breakpoint_cleanup_events()
+            expect(events).to_contain("normal_stop")
+            expect(events).to_contain("panic")
+            expect(events).to_contain("watchdog_timeout")
+            expect(events).to_contain("failed_single_step")
+            expect(events).to_contain("target_reset")
+            expect(breakpoint_cleanup_events_cover(events)).to_equal(true)
+
+    describe "patch ledger":
+        it "should validate patch restore and trap opcode records":
+            expect(breakpoint_patch_ledger_valid(4096, "0x00100073", "0x00100073", "0x00100073", "0x00100073")).to_equal(true)
+            expect(breakpoint_patch_ledger_valid(4096, "0x00000013", "0x00100073", "0x00000013", "0x00100073")).to_equal(true)
+            expect(breakpoint_patch_ledger_valid(4096, "0x00000013", "0x00100073", "0x00000000", "0x00100073")).to_equal(false)
+            expect(breakpoint_patch_ledger_valid(0, "0x00000013", "0x00100073", "0x00000013", "0x00100073")).to_equal(false)

@@ -1,0 +1,63 @@
+# codex-system-test
+# Contract tests for persistent .sprof loader planning.
+
+use std.spec.SPipe
+use app.optimize.sprof_loader.{
+    sprof_profile_record_status,
+    sprof_hot_path_policy,
+    sprof_hot_path_allows_operation,
+    sprof_merge_count,
+    sprof_merge_summary,
+    sprof_bounded_diagnostics
+}
+
+describe "Persistent .sprof Loader Contract":
+    describe "profile validation":
+        it "should load exact compatible profile records":
+            expect(sprof_profile_record_status("exact", true, true)).to_equal("loaded")
+
+        it "should reject corrupt profile records":
+            expect(sprof_profile_record_status("corrupt", true, true)).to_equal("invalid")
+
+        it "should ignore stale workload records":
+            expect(sprof_profile_record_status("exact", true, false)).to_equal("ignored")
+
+        it "should reject mismatched module identity":
+            expect(sprof_profile_record_status("exact", false, true)).to_equal("incompatible")
+
+    describe "hot path policy":
+        it "should forbid profile file operations in hot paths":
+            val policy = sprof_hot_path_policy()
+            expect(policy).to_contain("no_file_open")
+            expect(policy).to_contain("no_shell_out")
+            expect(policy).to_contain("no_repo_scan")
+
+        it "should allow already loaded summaries in hot paths":
+            expect(sprof_hot_path_allows_operation("file_open")).to_equal(false)
+            expect(sprof_hot_path_allows_operation("shell_out")).to_equal(false)
+            expect(sprof_hot_path_allows_operation("repo_scan")).to_equal(false)
+            expect(sprof_hot_path_allows_operation("use_loaded_summary")).to_equal(true)
+
+    describe "profile merge":
+        it "should merge valid counters with saturating-safe contract":
+            expect(sprof_merge_count(10, 7)).to_equal(17)
+
+        it "should treat invalid negative counters as diagnostic-only":
+            expect(sprof_merge_count(-1, 7)).to_equal(0)
+
+        it "should report merge diagnostic and saturation state":
+            val invalid = sprof_merge_summary(-1, 7)
+            expect(invalid.merged_count).to_equal(0)
+            expect(invalid.diagnostic_count).to_equal(1)
+
+            val saturated = sprof_merge_summary(9223372036854775806, 7)
+            expect(saturated.merged_count).to_equal(9223372036854775807)
+            expect(saturated.saturated).to_equal(true)
+
+    describe "diagnostics":
+        it "should bound diagnostics and report truncation":
+            val diagnostics = sprof_bounded_diagnostics(["bad_header", "bad_record", "bad_edge"], 2)
+            expect(diagnostics.len()).to_equal(3)
+            expect(diagnostics).to_contain("bad_header")
+            expect(diagnostics).to_contain("bad_record")
+            expect(diagnostics).to_contain("diagnostics_truncated:1")

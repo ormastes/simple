@@ -1,0 +1,75 @@
+# codex-system-test
+# Contract tests for pure-Simple BOLT-like executable layout planning.
+
+use std.spec.SPipe
+use app.optimize.executable_layout.{
+    ExecutableLayoutManifestEntry,
+    layout_external_bolt_allowed,
+    layout_manifest_entry_valid,
+    layout_plan_steps,
+    layout_transform_allowed,
+    layout_uses_external_bolt
+}
+
+describe "Pure Simple Executable Layout Optimizer Contract":
+    describe "layout planning":
+        it "should include hot clustering fallthrough cold marking and manifest steps":
+            val steps = layout_plan_steps()
+            expect(steps).to_contain("hot_function_cluster")
+            expect(steps).to_contain("hot_block_fallthrough")
+            expect(steps).to_contain("cold_region_marking")
+            expect(steps).to_contain("offset_manifest")
+
+        it "should allow layout only when executable metadata remains valid":
+            expect(layout_transform_allowed(true, true, true, true)).to_equal(true)
+            expect(layout_transform_allowed(false, true, true, true)).to_equal(false)
+            expect(layout_transform_allowed(true, false, true, true)).to_equal(false)
+            expect(layout_transform_allowed(true, true, false, true)).to_equal(false)
+            expect(layout_transform_allowed(true, true, true, false)).to_equal(false)
+
+    describe "external dependency policy":
+        it "should not depend on external BOLT commands":
+            expect(layout_uses_external_bolt("simple optimize --layout")).to_equal(false)
+            expect(layout_uses_external_bolt("simple optimize --layout thunderbolt_mode")).to_equal(false)
+            expect(layout_uses_external_bolt("llvm-bolt app -o app.opt")).to_equal(true)
+            expect(layout_external_bolt_allowed("perf2bolt app -p profile.fdata")).to_equal(false)
+
+    describe "manifest validation":
+        it "should require stable symbol section offsets and size":
+            val valid_entry = ExecutableLayoutManifestEntry(
+                symbol_name: "main",
+                section_name: ".text",
+                original_offset: 64,
+                optimized_offset: 32,
+                size_bytes: 128
+            )
+            expect(layout_manifest_entry_valid(valid_entry)).to_equal(true)
+
+            expect(layout_manifest_entry_valid(ExecutableLayoutManifestEntry(
+                symbol_name: "",
+                section_name: ".text",
+                original_offset: 64,
+                optimized_offset: 32,
+                size_bytes: 128
+            ))).to_equal(false)
+            expect(layout_manifest_entry_valid(ExecutableLayoutManifestEntry(
+                symbol_name: "main",
+                section_name: "text",
+                original_offset: 64,
+                optimized_offset: 32,
+                size_bytes: 128
+            ))).to_equal(false)
+            expect(layout_manifest_entry_valid(ExecutableLayoutManifestEntry(
+                symbol_name: "main",
+                section_name: ".text",
+                original_offset: -1,
+                optimized_offset: 32,
+                size_bytes: 128
+            ))).to_equal(false)
+            expect(layout_manifest_entry_valid(ExecutableLayoutManifestEntry(
+                symbol_name: "main",
+                section_name: ".text",
+                original_offset: 64,
+                optimized_offset: 32,
+                size_bytes: 0
+            ))).to_equal(false)

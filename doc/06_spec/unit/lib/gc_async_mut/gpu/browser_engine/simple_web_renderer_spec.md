@@ -586,7 +586,7 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

@@ -1,0 +1,63 @@
+# Bare-metal software-breakpoint counter contract helpers.
+
+pub fn breakpoint_next_state(state: text, event: text) -> text:
+    if event == "stop_profile":
+        return "removed"
+    if event == "over_budget":
+        return "sampled_only"
+    if state == "sampled_only":
+        return "sampled_only"
+    if state == "candidate" and event == "arm":
+        return "armed"
+    if state == "armed" and event == "hit":
+        return "counted"
+    if state == "counted" and event == "restore":
+        return "single_step"
+    if state == "single_step" and event == "rearm":
+        return "armed"
+    if event == "failed_single_step":
+        return "sampled_only"
+    state
+
+pub fn breakpoint_should_disarm(hit_count: i64, trap_time_us: i64, hit_limit: i64, trap_budget_us: i64, hot_loop: bool) -> bool:
+    hot_loop or hit_count > hit_limit or trap_time_us > trap_budget_us
+
+pub fn breakpoint_auto_disarm_state(
+    state: text,
+    hit_count: i64,
+    trap_time_us: i64,
+    hit_limit: i64,
+    trap_budget_us: i64,
+    hot_loop: bool
+) -> text:
+    if breakpoint_should_disarm(hit_count, trap_time_us, hit_limit, trap_budget_us, hot_loop):
+        return breakpoint_next_state(state, "over_budget")
+    state
+
+pub fn breakpoint_sampled_only_fallback_state(state: text, event: text) -> text:
+    if state == "sampled_only":
+        return "sampled_only"
+    breakpoint_next_state(state, event)
+
+pub fn breakpoint_cleanup_events() -> [text]:
+    ["normal_stop", "panic", "watchdog_timeout", "failed_single_step", "target_reset"]
+
+pub fn breakpoint_cleanup_events_cover(events: [text]) -> bool:
+    events.contains("normal_stop") and
+        events.contains("panic") and
+        events.contains("watchdog_timeout") and
+        events.contains("failed_single_step") and
+        events.contains("target_reset")
+
+pub fn breakpoint_patch_ledger_valid(
+    address: u64,
+    original_opcode: text,
+    patched_opcode: text,
+    restored_opcode: text,
+    trap_opcode: text
+) -> bool:
+    address > 0 and
+        original_opcode != "" and
+        trap_opcode != "" and
+        patched_opcode == trap_opcode and
+        restored_opcode == original_opcode

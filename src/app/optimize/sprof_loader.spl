@@ -1,0 +1,72 @@
+# Persistent .sprof loader helpers.
+# This slice models validation, merge, hot-path policy, and diagnostic bounds
+# without opening profile files from hot request handlers.
+
+val SPROF_COUNTER_MAX: i64 = 9223372036854775807
+
+struct SprofMergeSummary:
+    merged_count: i64
+    diagnostic_count: i64
+    saturated: bool
+
+fn sprof_profile_record_status(record_kind: text, module_matches: bool, workload_matches: bool) -> text:
+    if record_kind == "corrupt":
+        return "invalid"
+    if record_kind == "schema_mismatch":
+        return "incompatible"
+    if record_kind == "stale":
+        return "ignored"
+    if not module_matches:
+        return "incompatible"
+    if not workload_matches:
+        return "ignored"
+    "loaded"
+
+fn sprof_hot_path_policy() -> [text]:
+    ["no_file_open", "no_shell_out", "no_repo_scan", "use_loaded_summary"]
+
+fn sprof_hot_path_allows_operation(operation: text) -> bool:
+    if operation == "file_open":
+        return false
+    if operation == "shell_out":
+        return false
+    if operation == "repo_scan":
+        return false
+    operation == "use_loaded_summary"
+
+fn sprof_merge_count(left: i64, right: i64) -> i64:
+    if left < 0 or right < 0:
+        return 0
+    if left > SPROF_COUNTER_MAX - right:
+        return SPROF_COUNTER_MAX
+    left + right
+
+fn sprof_merge_summary(left: i64, right: i64) -> SprofMergeSummary:
+    if left < 0 or right < 0:
+        return SprofMergeSummary(
+            merged_count: 0,
+            diagnostic_count: 1,
+            saturated: false
+        )
+
+    val merged = sprof_merge_count(left, right)
+    SprofMergeSummary(
+        merged_count: merged,
+        diagnostic_count: 0,
+        saturated: merged == SPROF_COUNTER_MAX and (left != SPROF_COUNTER_MAX or right != 0)
+    )
+
+fn sprof_bounded_diagnostics(diagnostics: [text], limit: i64) -> [text]:
+    if limit <= 0:
+        return []
+
+    var bounded: [text] = []
+    var i: i64 = 0
+    while i < diagnostics.len() and i < limit:
+        bounded.push(diagnostics[i])
+        i = i + 1
+
+    if diagnostics.len() > limit:
+        bounded.push("diagnostics_truncated:{diagnostics.len() - limit}")
+
+    bounded

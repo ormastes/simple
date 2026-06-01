@@ -478,10 +478,6 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
     if is_rust_driver {
         cmd.arg("native-build")
             .arg("--source")
-            .arg("src/compiler")
-            .arg("--source")
-            .arg("src/lib")
-            .arg("--source")
             .arg("src/app")
             .arg("--entry")
             .arg("src/app/cli/bootstrap_main.spl")
@@ -499,7 +495,7 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             cmd.env("SIMPLE_RUNTIME_PATH", rtp);
         }
         println!(
-            "  Running: {} native-build --entry-closure --strip --threads 1 --timeout 180 --entry src/app/cli/bootstrap_main.spl -o {}",
+            "  Running: {} native-build --source src/app --entry-closure --strip --threads 1 --timeout 180 --entry src/app/cli/bootstrap_main.spl -o {}",
             compiler, output
         );
     } else {

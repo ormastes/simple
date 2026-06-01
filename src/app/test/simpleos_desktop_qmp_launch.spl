@@ -1,11 +1,13 @@
 use os.qemu_runner.{OsTarget, get_desktop_browser_target, _x64_nvme_disk_args, build_os, ensure_desktop_disk_image}
 use test.system.qemu.os.common.qemu_os_harness.{
-    can_run_target, spawn_guest_with_qmp, stop_guest, wait_for_serial_marker}
+    can_run_target, spawn_guest_with_qmp, stop_guest, wait_for_serial_marker,
+    read_serial_log, read_qemu_stderr_log, QemuGuestHandle}
 use std.nogc_sync_mut.sffi.io.{dir_create_all}
 
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_is_running(pid: i64) -> bool
 
 fn _desktop_qmp_capture_target() -> OsTarget:
     val base = get_desktop_browser_target()
@@ -26,6 +28,23 @@ fn _desktop_qmp_capture_target() -> OsTarget:
 
 fn _timeout_ms() -> i64:
     (rt_env_get("SIMPLEOS_DESKTOP_QMP_LAUNCH_TIMEOUT_MS") ?? "90000").parse_i64() ?? 90000
+
+fn _bool_text(value: bool) -> text:
+    if value: "true" else: "false"
+
+fn _print_launch_failure_context(handle_pid: i64, qmp_socket: text, serial_log: text, stderr_log: text, marker: text, timeout_ms: i64):
+    val handle = QemuGuestHandle.create(handle_pid, qmp_socket, serial_log, stderr_log, "")
+    val serial_text = if serial_log == "": "" else: read_serial_log(handle)
+    val stderr_text = if stderr_log == "": "" else: read_qemu_stderr_log(handle)
+    print "simpleos_desktop_qmp_pid={handle_pid}"
+    print "simpleos_desktop_qmp_socket={qmp_socket}"
+    print "simpleos_desktop_qmp_serial_log={serial_log}"
+    print "simpleos_desktop_qmp_stderr_log={stderr_log}"
+    print "simpleos_desktop_qmp_missing_marker={marker}"
+    print "simpleos_desktop_qmp_marker_timeout_ms={timeout_ms}"
+    print "simpleos_desktop_qmp_qemu_running={_bool_text(rt_process_is_running(handle_pid))}"
+    print "simpleos_desktop_qmp_serial_bytes={serial_text.len()}"
+    print "simpleos_desktop_qmp_stderr_bytes={stderr_text.len()}"
 
 fn main() -> i64:
     val build_target = get_desktop_browser_target()
@@ -52,17 +71,17 @@ fn main() -> i64:
         Ok(handle):
             val saw_launcher = wait_for_serial_marker(handle, "[desktop-e2e] launcher-ready", _timeout_ms())
             if not saw_launcher:
-                stop_guest(handle)
                 print "simpleos_desktop_qmp_status=unavailable"
                 print "simpleos_desktop_qmp_reason=launcher-ready-marker-missing"
-                print "simpleos_desktop_qmp_serial_log={serial_log}"
+                _print_launch_failure_context(handle.pid, handle.qmp_socket, handle.serial_log, handle.stderr_log, "[desktop-e2e] launcher-ready", _timeout_ms())
+                stop_guest(handle)
                 return 1
             val saw_paint = wait_for_serial_marker(handle, "[desktop-e2e] paint-settle:done", 30000)
             if not saw_paint:
-                stop_guest(handle)
                 print "simpleos_desktop_qmp_status=unavailable"
                 print "simpleos_desktop_qmp_reason=paint-settle-marker-missing"
-                print "simpleos_desktop_qmp_serial_log={serial_log}"
+                _print_launch_failure_context(handle.pid, handle.qmp_socket, handle.serial_log, handle.stderr_log, "[desktop-e2e] paint-settle:done", 30000)
+                stop_guest(handle)
                 return 1
             print "simpleos_desktop_qmp_status=pass"
             print "simpleos_desktop_qmp_reason=pass"

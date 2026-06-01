@@ -1382,6 +1382,11 @@ fn test_cxx_abi_symbols_are_not_stub_candidates() {
     assert!(super::tools::is_system_symbol("__Znwm"));
     assert!(super::tools::is_system_symbol("_Znwm"));
     assert!(super::tools::is_system_symbol("__ZN4llvm2cl6OptionE"));
+    assert!(super::tools::is_system_symbol("_GLOBAL_OFFSET_TABLE_"));
+    assert!(super::tools::is_system_symbol("__tls_get_addr"));
+    assert!(super::tools::is_system_symbol("_Unwind_Resume"));
+    assert!(super::tools::is_system_symbol("cfsetispeed@GLIBC_2.2.5"));
+    assert!(super::tools::is_system_symbol("pthread_atfork"));
     assert!(!super::tools::is_system_symbol("app__mcp__main"));
 }
 

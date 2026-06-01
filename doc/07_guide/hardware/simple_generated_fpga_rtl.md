@@ -2,6 +2,21 @@
 
 This guide shows the current repo-native path for generating FPGA RTL artifacts from Simple source.
 
+## Current Evidence - 2026-06-01
+
+The public generated RISC-V RTL smoke gate now runs both generated lanes by default:
+
+```bash
+sh scripts/check-riscv-rtl-linux-smoke.shs --timeout=30
+```
+
+Verified result:
+
+- RV32: `[GHDL-GEN-RV32] PASS`
+- RV64: `[GHDL-GEN-RV64-LINUX-HANDOFF] PASS`
+
+Use `--rv32-only` or `--rv64-only` when isolating one lane. The default must stay dual-lane so RV32 and RV64 provenance do not drift.
+
 ## What Gets Generated
 
 The generator emits both:
@@ -76,12 +91,14 @@ This generation path proves:
 - the VHDL package/core artifacts can be materialized
 - the board profile can be selected structurally
 - generated RV64 acceptance is stronger than bounded proof-only status: the current repo-native RV64 smoke flow also builds and runs the local generated Linux payload lane after its proof gates
+- generated RV32 and RV64 GHDL smoke lanes can be checked through one public wrapper
 
 This does not prove:
 - constraints are complete
 - synthesis passes
 - bitstream programming passes
 - hardware runtime behavior passes
+- SimpleOS web, network, or Simple DB behavior on physical FPGA hardware
 - the remaining runner/testbench surface is template-free end-to-end; some emitted benches are still transitional template-backed artifacts
 
 Use this as the source generation step before board-specific XDC, Vivado, and runtime validation.
