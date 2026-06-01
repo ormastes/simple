@@ -12,8 +12,9 @@
 # for the reply. The netstack service manages the actual TCP/UDP state.
 
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
-use os.kernel.errno.{ENOSYS, ECONNREFUSED, ENOTCONN, EAGAIN, EMFILE, EADDRINUSE}
+use os.kernel.errno.{EACCES, ENOSYS, ECONNREFUSED, ENOTCONN, EAGAIN, EMFILE, EADDRINUSE}
 use os.kernel.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_get_status_flags, fd_get_type, fd_get_backend_handle, fd_update_ready}
+use os.ai_cli_js_node_contract.{AiCliManifest, ai_cli_socket_network_decision}
 # Well-known netstack service IPC port
 val _NET_PORT: u64 = 2
 val NET_SOCKET: u32 = 1
@@ -33,6 +34,10 @@ val _EBADF: i32 = 9
 val _ENOTSOCK: i32 = 88
 val _POLLOUT: i16 = 4
 val _POLLERR: i16 = 8
+
+var g_ai_cli_socket_manifest: AiCliManifest? = nil
+var g_ai_cli_socket_bound_fds: [i32] = []
+var g_ai_cli_socket_bound_endpoints: [text] = []
 
 extern fn unsafe_addr_of(ref: any) -> u64
 extern fn mmio_write8(addr: u64, val_: u8)
@@ -63,6 +68,16 @@ fn sockaddr_in(port: u16, a: u8, b: u8, c: u8, d: u8) -> SockaddrIn:
 fn sockaddr_any(port: u16) -> SockaddrIn:
     """Create an INADDR_ANY socket address (bind to all interfaces)."""
     SockaddrIn(family: AF_INET, port: port, addr: 0)
+
+fn set_ai_cli_socket_manifest_for_test(manifest: AiCliManifest):
+    g_ai_cli_socket_manifest = manifest
+    g_ai_cli_socket_bound_fds = []
+    g_ai_cli_socket_bound_endpoints = []
+
+fn clear_ai_cli_socket_manifest_for_test():
+    g_ai_cli_socket_manifest = nil
+    g_ai_cli_socket_bound_fds = []
+    g_ai_cli_socket_bound_endpoints = []
 
 # ============================================================================
 # Socket Operations
@@ -112,12 +127,18 @@ fn posix_bind(fd: i32, addr: SockaddrIn) -> i64:
     val net_fd = _get_net_fd(fd)
     if net_fd < 0:
         return net_fd as i64
+    val endpoint = _sockaddr_endpoint(addr)
+    val grant_errno = _socket_grant_errno("bind", endpoint)
+    if grant_errno < 0:
+        return grant_errno
 
     var payload: [u8] = []
     _sock_push_i32(payload, net_fd)
     _sock_push_u32(payload, addr.addr)
     _sock_push_u16(payload, addr.port)
     val reply = _net_ipc_request(NET_BIND, payload)
+    if reply.status == 0:
+        _record_bound_endpoint(fd, endpoint)
     reply.status as i64
 
 fn posix_listen(fd: i32, backlog: i32) -> i64:
@@ -125,6 +146,11 @@ fn posix_listen(fd: i32, backlog: i32) -> i64:
     val net_fd = _get_net_fd(fd)
     if net_fd < 0:
         return net_fd as i64
+    val endpoint = _bound_endpoint_for_fd(fd)
+    val listen_endpoint = if endpoint == nil: "0.0.0.0:0" else: endpoint.unwrap()
+    val grant_errno = _socket_grant_errno("listen", listen_endpoint)
+    if grant_errno < 0:
+        return grant_errno
 
     var payload: [u8] = []
     _sock_push_i32(payload, net_fd)
@@ -141,6 +167,10 @@ fn posix_connect(fd: i32, addr: SockaddrIn) -> i64:
     val net_fd = _get_net_fd(fd)
     if net_fd < 0:
         return net_fd as i64
+    val endpoint = _sockaddr_endpoint(addr)
+    val grant_errno = _socket_grant_errno("connect", endpoint)
+    if grant_errno < 0:
+        return grant_errno
 
     val nonblocking = (fd_get_status_flags(fd) & 2048) != 0
     var payload: [u8] = []
@@ -263,6 +293,44 @@ fn _get_net_fd(fd: i32) -> i32:
     if fd_get_type(fd) != 4:
         return 0 - _ENOTSOCK
     fd_get_backend_handle(fd) as i32
+
+fn _socket_grant_errno(operation: text, endpoint: text) -> i64:
+    if not g_ai_cli_socket_manifest.?:
+        return 0
+    val manifest = g_ai_cli_socket_manifest
+    val decision = ai_cli_socket_network_decision(manifest, operation, endpoint)
+    if decision.allowed:
+        return 0
+    log_warn("[posix] " + "[socket_compat] network grant denied operation={operation} endpoint={endpoint} reason={decision.reason}")
+    0 - EACCES as i64
+
+fn _sockaddr_endpoint(addr: SockaddrIn) -> text:
+    "{_ipv4_addr_text(addr.addr)}:{addr.port as i64}"
+
+fn _ipv4_addr_text(addr: u32) -> text:
+    val a = (addr & 0xFF) as u32
+    val b = ((addr >> 8) & 0xFF) as u32
+    val c = ((addr >> 16) & 0xFF) as u32
+    val d = ((addr >> 24) & 0xFF) as u32
+    "{a}.{b}.{c}.{d}"
+
+fn _record_bound_endpoint(fd: i32, endpoint: text):
+    var i = 0
+    while i < g_ai_cli_socket_bound_fds.len():
+        if g_ai_cli_socket_bound_fds[i] == fd:
+            g_ai_cli_socket_bound_endpoints[i] = endpoint
+            return
+        i = i + 1
+    g_ai_cli_socket_bound_fds.push(fd)
+    g_ai_cli_socket_bound_endpoints.push(endpoint)
+
+fn _bound_endpoint_for_fd(fd: i32) -> text?:
+    var i = 0
+    while i < g_ai_cli_socket_bound_fds.len():
+        if g_ai_cli_socket_bound_fds[i] == fd:
+            return Some(g_ai_cli_socket_bound_endpoints[i])
+        i = i + 1
+    nil
 
 fn _array_data_ptr(data: [u8]) -> u64:
     val hdr = unsafe_addr_of(data)

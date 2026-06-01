@@ -206,8 +206,8 @@ Build minimal Node.js API compatibility on QuickJS + libuv:
 
 Leverage existing `AiCliManifest` capability system:
 - [x] File access: enforce `file_grants` at VFS manager path-routing layer, deny undeclared paths
-- [ ] Network: enforce `network_grants` at socket layer, allowlist endpoints only
-- [ ] Process: enforce `process_grants`, deny undeclared spawns
+- [x] Network: enforce `network_grants` at socket layer, allowlist endpoints only
+- [x] Process: enforce `process_grants`, deny undeclared spawns
 - [x] Credentials: enforce `credential_grants`, block ambient env var reads
 - [x] Runtime conformance: explicit Node-compatible `fs`, `net`/`http`/`https`, and `child_process.spawn` positive grants plus denial cases
 - [x] Compare with Deno permissions model (`--allow-read`, `--allow-net`)

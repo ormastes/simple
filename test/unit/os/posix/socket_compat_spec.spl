@@ -8,7 +8,9 @@ Covers the address helpers and constant contract. The IPC path
 and is exercised in system tests.
 """
 use std.spec.*
-use os.posix.socket_compat.{SockaddrIn, sockaddr_in, sockaddr_any, AF_INET, SOCK_STREAM, SOCK_DGRAM}
+use os.posix.socket_compat.{SockaddrIn, sockaddr_in, sockaddr_any, AF_INET, SOCK_STREAM, SOCK_DGRAM, posix_bind, posix_listen, posix_connect, set_ai_cli_socket_manifest_for_test, clear_ai_cli_socket_manifest_for_test}
+use os.posix.fd_table.{fd_table_init, fd_set}
+use os.ai_cli_js_node_contract.{codex_cli_smoke_manifest}
 
 describe "sockaddr_in":
     """IPv4 address packing matches little-endian wire order of octets."""
@@ -38,3 +40,30 @@ describe "socket constants":
 
     it "SOCK_DGRAM is 2":
         expect SOCK_DGRAM.to_equal(2)
+
+describe "AI CLI socket network grants":
+    """Socket boundary operations must deny ungranted endpoints before netstack IPC."""
+
+    it "denies connect endpoints outside the active manifest grants":
+        fd_table_init()
+        expect(fd_set(3, 4, 0, 42u64)).to_equal(0)
+        set_ai_cli_socket_manifest_for_test(codex_cli_smoke_manifest())
+        val denied = posix_connect(3, sockaddr_in(443u16, 127u8, 0u8, 0u8, 1u8))
+        expect(denied).to_equal(-13)
+        clear_ai_cli_socket_manifest_for_test()
+
+    it "denies bind endpoints outside the active manifest grants":
+        fd_table_init()
+        expect(fd_set(3, 4, 0, 42u64)).to_equal(0)
+        set_ai_cli_socket_manifest_for_test(codex_cli_smoke_manifest())
+        val denied = posix_bind(3, sockaddr_any(3000u16))
+        expect(denied).to_equal(-13)
+        clear_ai_cli_socket_manifest_for_test()
+
+    it "denies listen without a granted bound endpoint":
+        fd_table_init()
+        expect(fd_set(3, 4, 0, 42u64)).to_equal(0)
+        set_ai_cli_socket_manifest_for_test(codex_cli_smoke_manifest())
+        val denied = posix_listen(3, 16)
+        expect(denied).to_equal(-13)
+        clear_ai_cli_socket_manifest_for_test()

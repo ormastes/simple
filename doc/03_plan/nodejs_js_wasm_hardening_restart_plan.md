@@ -35,7 +35,8 @@ Current in-flight worktree:
 - Path: `/tmp/simple-js-wasm-qemu-audit`
 - Base: clean worktree from `origin/main`; rebase before pushing if remote moved.
 - Slice: Phase 5 VFS-manager file-grant enforcement.
-- Status: implementation and focused verification in progress.
+- Status: Phase 5 process-grant syscall enforcement implemented and focused
+  verification in progress.
 - Evidence from pushed runtime grant slices: `node_api_conformance_spec.spl`
   passed 149 scenarios, `simpleos_ai_cli_js_node_port_spec.spl` passed 25
   scenarios, and `find doc/06_spec -name '*_spec.spl' | wc -l` printed `0`.
@@ -111,6 +112,13 @@ Completed evidence:
   policy and denies ungranted paths before VFS path routing. Unit coverage
   proves allowed workspace access, sibling-prefix denial, invalid relative path
   denial, denied rename targets, and clearing the manifest.
+- Process syscall enforcement now gates exec, spawn_binary, and direct spawn
+  paths through `process_grants` before executable resolution. Unit coverage
+  proves allowed `/usr/bin/git`, denied `/bin/sh`, denied legacy sentinel spawn,
+  and denied exec image replacement.
+- POSIX socket enforcement now gates connect, bind, and listen paths through
+  `network_grants` before netstack IPC. Unit coverage proves ungranted connect,
+  bind, and listen endpoints return `-EACCES`.
 
 ## Remaining Goal Plan
 
@@ -119,9 +127,12 @@ Completed evidence:
    - VFS-manager `file_grants` enforcement is implemented and covered by
      `test/unit/os/services/vfs/vfs_spec.spl`; do not broaden this claim to
      socket/process boundaries.
-   - Implement or explicitly split socket-layer `network_grants` enforcement.
-   - Implement or explicitly split spawn/exec-layer `process_grants`
-     enforcement.
+   - Socket-layer `network_grants` enforcement is implemented and covered by
+     `test/unit/os/posix/socket_compat_spec.spl`; do not broaden this claim to
+     QEMU guest network evidence.
+   - Spawn/exec-layer `process_grants` enforcement is implemented and covered
+     by `test/unit/os/kernel/ipc/syscall_spec.spl`; do not broaden this claim
+     to socket boundaries.
    - Do not check the OS-layer boxes in
      `doc/03_plan/simpleos_nodejs_ai_cli_migration.md` until tests or QEMU
      evidence reach those exact layers.
@@ -197,10 +208,9 @@ slice is complete only after these checks pass and the commit is pushed:
 - `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`
 - `git diff --check`
 
-Recommended next implementation slice after this commit: process-grant syscall
-enforcement in `src/os/kernel/ipc/syscall_process.spl`, specifically `_handle_exec`,
-`_handle_spawn_binary`, and `dispatch_spawn_binary_direct`, reusing
-`ai_cli_process_spawn_decision`.
+Recommended next implementation slice after this commit: Phase 6 guest-visible
+runtime provisioning and real QEMU serial evidence. Keep host-side FAT32
+package/image readiness separate from guest validation.
 
 Phase 6 provisioning commands remain useful for the separate QEMU runtime slice.
 Do not mark Phase 6 complete from host-side package generation or image

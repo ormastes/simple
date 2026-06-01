@@ -27,18 +27,44 @@ use os.kernel.ipc.capability.{register_task_vmspace, task_vmspace_of}
 use os.kernel.pipe_compat.{posix_pipe}
 use os.kernel.fd_io.{posix_close, posix_dup, posix_dup2, posix_lseek}
 use os.kernel.fd_table.{fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS}
-use os.kernel.errno.{EFAULT, EINVAL, ENAMETOOLONG}
+use os.kernel.errno.{EACCES, EFAULT, EINVAL, ENAMETOOLONG}
 use os.kernel.ipc.syscall.{_u64_to_priority, g_scheduler_next_task_id, CURRENT_EXEC_ARCH, MAX_BINARY_PATH_LEN, MAX_EXEC_ARG_COUNT, MAX_EXEC_ENV_COUNT, MAX_EXEC_STRING_LEN, MAX_EXEC_TOTAL_STRING_BYTES, _is_userspace_ptr, _is_userspace_range, g_current_vmspace, _use_x86_64_direct_spawn_handoff, _alloc_x86_64_direct_spawn_pid}
 use os.kernel.ipc.syscall_device.{_dma_release_task_allocs}
 use os.kernel.lifecycle.task_cleanup.{task_cleanup}
 use os.kernel.ipc.capability.{_vma_range_readable}
 use os.kernel.types.task_types.{TaskState}
+use os.ai_cli_js_node_contract.{AiCliManifest, ai_cli_process_spawn_decision}
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_copy_user_byte(ptr_addr: u64) -> u8
 
 # ============================================================================
 # Process Syscall Handlers
 # ============================================================================
+
+var g_ai_cli_process_manifest: AiCliManifest? = nil
+
+fn set_ai_cli_process_manifest_for_test(manifest: AiCliManifest):
+    g_ai_cli_process_manifest = manifest
+
+fn clear_ai_cli_process_manifest_for_test():
+    g_ai_cli_process_manifest = nil
+
+fn _process_grant_denial_reason_for_path(path: text) -> text:
+    if not g_ai_cli_process_manifest.?:
+        return ""
+    val manifest = g_ai_cli_process_manifest
+    val decision = ai_cli_process_spawn_decision(manifest, "spawn", path)
+    if decision.allowed:
+        return ""
+    decision.reason
+
+fn _process_grant_errno_for_path(path: text, klog: KernelLog) -> i64:
+    val reason = _process_grant_denial_reason_for_path(path)
+    if reason == "":
+        return 0
+    var log = klog
+    klog_write(log, 3, 1, 0, "process grant denied path={path} reason={reason}")
+    0 - EACCES as i64
 
 fn _close_all_live_fds_with_backends() -> u32:
     """Close every live descriptor through the backend-aware POSIX path."""
@@ -165,6 +191,9 @@ fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
 
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
+    val grant_errno = _process_grant_errno_for_path(path, KernelLog.new(16))
+    if grant_errno < 0:
+        return SyscallResult(value: grant_errno)
     val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, CURRENT_EXEC_ARCH)
     if bytes_result.is_err():
         return SyscallResult(value: -2)
@@ -581,6 +610,9 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
     log_raw_println("[syscall13] path decoded")
+    val grant_errno = _process_grant_errno_for_path(path, klog)
+    if grant_errno < 0:
+        return SyscallResult(value: grant_errno)
     val arch = CURRENT_EXEC_ARCH
     val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, arch)
     log_raw_println("[syscall13] resolve_executable_bytes returned")
@@ -696,6 +728,9 @@ fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64,
         val sentinel_path = _direct_spawn_app_id_path(path_ptr)
         if sentinel_path != nil:
             val path = sentinel_path.unwrap()
+            val grant_errno = _process_grant_errno_for_path(path, klog)
+            if grant_errno < 0:
+                return grant_errno
             val bytes_result = resolve_executable_bytes(path, CURRENT_EXEC_ARCH)
             if bytes_result.is_ok():
                 return _spawn_from_resolved_bytes(path, [], bytes_result.unwrap(), priority_raw, scheduler, klog)
@@ -715,6 +750,9 @@ fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64,
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
     log_raw_println("[syscall13] dispatch_direct path-ready len={path_len} path={path}")
+    val grant_errno = _process_grant_errno_for_path(path, klog)
+    if grant_errno < 0:
+        return grant_errno
     val arch = CURRENT_EXEC_ARCH
     log_raw_println("[syscall13] dispatch_direct arch-ready")
 

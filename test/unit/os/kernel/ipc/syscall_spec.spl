@@ -1,5 +1,6 @@
 use std.spec
 use os.kernel.ipc.syscall.{syscall_handler, syscall_dispatch, dispatch_spawn_binary_direct, _spawn_from_resolved_bytes_for_arch}
+use os.kernel.ipc.syscall_process.{set_ai_cli_process_manifest_for_test, clear_ai_cli_process_manifest_for_test}
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallTrapDisposition}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
@@ -16,6 +17,7 @@ use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.dylib_registry.{dylib_registry_reset_for_test}
 use os.posix.fd_table.{fd_table_init, fd_activate_task, fd_set, fd_set_cloexec, fd_is_valid, fd_set_poll_notification, FD_TYPE_FILE, FD_TYPE_PIPE_READ, O_RDONLY, POLLIN}
 use os.kernel.boot.mmio.{mmio_read8, mmio_read32, mmio_read64, mmio_write8, mmio_write16, mmio_write32, mmio_write64}
+use os.ai_cli_js_node_contract.{codex_cli_smoke_manifest}
 
 """
 Syscall dispatcher tests for process launch and scheduler control paths.
@@ -634,6 +636,65 @@ describe "syscall_handler":
             expect(task.entry_point).to_equal(0x400000)
         _clear_synthetic_vfs_for_test()
 
+    it "spawn_binary enforces AI CLI process grants before executable resolution":
+        _clear_synthetic_vfs_for_test()
+        set_ai_cli_process_manifest_for_test(codex_cli_smoke_manifest())
+        val allowed_path = "/usr/bin/git"
+        val denied_path = "/bin/sh"
+        _set_synthetic_vfs_file_for_test(allowed_path, _make_x86_64_exec())
+        _set_synthetic_vfs_file_for_test(denied_path, _make_x86_64_exec())
+
+        var allowed_scheduler = Scheduler.new()
+        val allowed = syscall_handler(
+            SyscallArgs(
+                id: 13,
+                arg0: &allowed_path as u64,
+                arg1: allowed_path.len() as u64,
+                arg2: 2,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            allowed_scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(allowed.value).to_be_greater_than(0)
+
+        var denied_scheduler = Scheduler.new()
+        val denied = syscall_handler(
+            SyscallArgs(
+                id: 13,
+                arg0: &denied_path as u64,
+                arg1: denied_path.len() as u64,
+                arg2: 2,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            denied_scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(denied.value).to_equal(-13)
+        expect(denied_scheduler.get_task(TaskId(id: 1))).to_be_nil()
+
+        clear_ai_cli_process_manifest_for_test()
+        _clear_synthetic_vfs_for_test()
+
+    it "direct sentinel spawn enforces AI CLI process grants":
+        _clear_synthetic_vfs_for_test()
+        _set_synthetic_vfs_file_for_test("/sys/apps/hello_world", _make_x86_64_exec())
+        set_ai_cli_process_manifest_for_test(codex_cli_smoke_manifest())
+
+        var scheduler = Scheduler.new()
+        val denied = dispatch_spawn_binary_direct(3, 0, 2, scheduler, KernelLog.new(16))
+        expect(denied).to_equal(-13)
+        expect(scheduler.get_task(TaskId(id: 1))).to_be_nil()
+
+        clear_ai_cli_process_manifest_for_test()
+        _clear_synthetic_vfs_for_test()
+
     it "direct sentinel spawn rejects malformed filesystem bytes without resident fallback":
         _clear_synthetic_vfs_for_test()
         _set_synthetic_vfs_file_for_test("/sys/apps/hello_world", [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8])
@@ -1018,6 +1079,34 @@ describe "syscall_handler":
             val tcb = current
             expect(tcb.is_user).to_equal(true)
             expect(tcb.id.id).to_equal(task.id)
+
+    it "exec syscall enforces AI CLI process grants before image replacement":
+        set_ai_cli_process_manifest_for_test(codex_cli_smoke_manifest())
+        val path = "/sys/services/vfs"
+        var scheduler = Scheduler.new()
+        val task = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        scheduler.schedule()
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 59,
+                arg0: &path as u64,
+                arg1: path.len() as u64,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_equal(-13)
+        val current = scheduler.get_task(task)
+        if current != nil:
+            val tcb = current
+            expect(tcb.is_user).to_equal(false)
+            expect(tcb.entry_point).to_equal(0x1000)
+        clear_ai_cli_process_manifest_for_test()
 
     it "exec syscall copies argv and envp vectors from userspace":
         val path = "/sys/services/vfs"

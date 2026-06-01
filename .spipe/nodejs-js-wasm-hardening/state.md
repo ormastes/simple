@@ -130,3 +130,10 @@ dev-incomplete
   operations. `vfs_spec.spl` covers allowed workspace paths, denied
   `/home/user/workspace` sibling escape, invalid relative paths, rename target
   denial, and clearing the manifest back to unrestricted routing.
+- dev: Added OS process-boundary AI CLI process grant enforcement for exec,
+  spawn_binary, and direct spawn paths. `syscall_spec.spl` covers allowed
+  `/usr/bin/git`, denied `/bin/sh`, denied legacy sentinel spawn, and denied
+  exec image replacement before executable resolution.
+- dev: Added POSIX socket-boundary AI CLI network grant enforcement for
+  connect, bind, and listen. `socket_compat_spec.spl` proves ungranted
+  endpoints are denied with `-EACCES` before netstack IPC.
