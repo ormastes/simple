@@ -1046,6 +1046,20 @@ expect(_eval_str("var b = require('buffer'); b.cached = 'yes'; require('node:buf
 
 </details>
 
+#### keeps builtin require cache stable on a hot repeated module
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var p = require('path'); p.hot = 0; var q = require('node:path'); q.hot = p.hot + 1; var r = require('path'); r.hot = q.hot + 1; var s = require('node:path'); s.hot = r.hot + 1; require('path').hot")).to_equal("3")
+```
+
+</details>
+
 #### resolves fs sync APIs as fail-closed file API
 
 <details>
@@ -2269,8 +2283,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 149 |
-| Active scenarios | 149 |
+| Total scenarios | 150 |
+| Active scenarios | 150 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

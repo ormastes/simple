@@ -74,6 +74,11 @@ dev-incomplete
 - dev: PASS `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/runtime.spl test/feature/js/node_api_conformance_spec.spl`.
 - dev: PASS `SIMPLE_LIB=src bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean` (149 scenarios), including positive `git` spawn only when `git` is explicitly granted and denial when only `node` is granted.
 - dev: PASS cross-lane smoke checks: WebGPU JS/WASM Simple (106 scenarios), interpreter perf (10 scenarios), and `scripts/check-gtk-gui-repeat-evidence.shs` with deterministic vector checksum 212444.
+- dev: Optimized Node-compatible `require()` with a single-entry canonical last-hit cache before the reverse scan over cached module names. Repeated `require('path')`/`require('node:path')` calls now avoid the linear scan while preserving the shared module object.
+- dev: PASS `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`.
+- dev: PASS `SIMPLE_LIB=src bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean` (150 scenarios).
+- dev: Regenerated `doc/06_spec/feature/js/node_api_conformance_spec.md`; docgen completed with existing compiler/docgen warnings and emitted a stub-style manual.
+- dev: PASS cross-lane smoke checks: WebGPU JS/WASM Simple (106 scenarios), interpreter perf (10 scenarios), and `scripts/check-gtk-gui-repeat-evidence.shs` with Simple open 224 us, GTK open 75025 us, Simple frame 1 us, GTK frame 27 us, vector checksum 212444 deterministic true.
 - dev: Added `scripts/check-ai-cli-qemu-lanes.shs`, a contract-first Phase 6
   harness that derives required QEMU serial markers from
   `src/os/ai_cli_js_node_contract.spl`, supports a CI-safe `--contract-only`
