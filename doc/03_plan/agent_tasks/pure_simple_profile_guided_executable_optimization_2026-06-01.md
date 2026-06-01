@@ -301,17 +301,17 @@ Build evidence from this host:
   x86_64 QEMU target, `riscv32`, `riscv32c`, `riscv64`, `riscv64c`.
 - Not built: `arm32` and `thumb` because `arm-none-eabi-gcc` is missing;
   `aarch64` because `aarch64-none-elf-gcc` is missing.
-- Live QEMU serial evidence captured: `riscv64` and `riscv64c`.
+- Live QEMU serial evidence captured: `riscv32`, `riscv32c`, `riscv64`, and
+  `riscv64c`. RV32/RVC32 now direct-boot with `-bios none` at `0x80000000`,
+  avoiding the missing host OpenSBI RV32 firmware.
 - QEMU launch blockers still open: `i386` and the x86-family `x86_64` probe
   build, but `-kernel` rejects the ELF with "Error loading uncompressed kernel
   without PVH ELF Note"; `-device loader` loads but does not transfer execution
-  to the probe entry. `riscv32` and `riscv32c` build, but host QEMU lacks
-  `opensbi-riscv32-generic-fw_dynamic.bin`.
+  to the probe entry.
 
 Remaining larger gaps:
 - add an x86 QEMU boot route that transfers execution to the generated
   `_entry32` probe, or add a valid PVH note/boot wrapper;
-- provide or locate RV32 OpenSBI firmware for `qemu-system-riscv32`;
 - compile the ARM/Thumb/AArch64 probe ELF images once cross compilers exist or
   the repo provides a supported clang cross path;
 - run those images under QEMU and capture live patch/trap/count/restore/rearm/

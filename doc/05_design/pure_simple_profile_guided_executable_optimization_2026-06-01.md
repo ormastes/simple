@@ -277,7 +277,9 @@ minimal entry and stack layout, so probe ELFs do not depend on full-kernel
 SimpleOS linker symbols. The generated C includes `_entry32` for x86-family
 multiboot-style probes and `_start` shims for RISC-V and ARM-family probes.
 On the current host this is enough to build x86-family and RISC-V probe ELFs
-and to capture live RV64/RVC64 serial evidence.
+and to capture live RV32/RVC32/RV64/RVC64 serial evidence. RV32/RVC32 use a
+direct `-bios none` QEMU path and a `0x80000000` link address; RV64/RVC64 use
+the default OpenSBI-loaded `0x80200000` path.
 
 ### Overhead Protection
 

@@ -78,8 +78,9 @@ Current adapter slice:
   entry shims isolate breakpoint evidence from full-kernel linker symbols.
   Target proof remains fail-closed per architecture until the compiler creates
   bootable ELFs, QEMU runs them, and serial evidence is captured. Current live
-  proof exists for RV64 and RVC64; x86 and RV32 still require boot-loader or
-  firmware follow-up.
+  proof exists for RV32, RVC32, RV64, and RVC64. RV32 uses direct `-bios none`
+  boot at `0x80000000` so the proof does not depend on host OpenSBI firmware;
+  x86 still requires a boot-loader/PVH route follow-up.
 
 ## Data Flow
 
