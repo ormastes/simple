@@ -126,6 +126,9 @@ diagnostic-only.
 7. Emit an optimization manifest mapping original offsets to optimized offsets.
 8. Emit native symbol-order text and a generated-C section map from the same
    validated plan.
+9. Build a native evidence report that requires measured baseline runtime,
+   optimized runtime, baseline size, optimized size, and successful generated-C
+   section-map application before accepting a speedup claim.
 
 ### Output
 

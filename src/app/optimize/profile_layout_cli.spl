@@ -11,12 +11,29 @@ use app.optimize.executable_layout.{
     layout_plan_c_section_map_text,
     layout_profile_guided_plan
 }
+use app.compile.native_layout_section_map.{native_layout_apply_c_section_map}
 use app.optimize.sprof_loader.{SprofCounterRecord, sprof_load_profile_text}
 use std.io.{file_exists, file_read, file_write}
 
 struct ProfileLayoutBridgeResult:
     status: text
     manifest_text: text
+    diagnostic_count: i64
+    diagnostics: [text]
+
+struct ProfileLayoutNativeEvidence:
+    status: text
+    manifest_text: text
+    section_map_text: text
+    mapped_c_source: text
+    applied_count: i64
+    baseline_ms: i64
+    optimized_ms: i64
+    speedup_pct: i64
+    baseline_size_bytes: i64
+    optimized_size_bytes: i64
+    size_delta_bytes: i64
+    regression: bool
     diagnostic_count: i64
     diagnostics: [text]
 
@@ -273,6 +290,91 @@ pub fn profile_layout_build_artifact(
         manifest_text: text,
         diagnostic_count: 0,
         diagnostics: []
+    )
+
+pub fn profile_layout_native_evidence_report(
+    executable_manifest_text: text,
+    profile_text: text,
+    generated_c_source: text,
+    baseline_ms: i64,
+    optimized_ms: i64,
+    baseline_size_bytes: i64,
+    optimized_size_bytes: i64,
+    hot_section_start: i64,
+    cold_section_start: i64,
+    min_hot_weight: i64,
+    max_cold_samples: i64
+) -> ProfileLayoutNativeEvidence:
+    var diagnostics: [text] = []
+    if generated_c_source.trim() == "":
+        diagnostics.push("empty_generated_c_source")
+    if baseline_ms <= 0:
+        diagnostics.push("missing_baseline_runtime")
+    if optimized_ms <= 0:
+        diagnostics.push("missing_optimized_runtime")
+    if baseline_size_bytes <= 0:
+        diagnostics.push("missing_baseline_size")
+    if optimized_size_bytes <= 0:
+        diagnostics.push("missing_optimized_size")
+
+    val manifest = profile_layout_build_artifact(
+        executable_manifest_text,
+        profile_text,
+        "manifest",
+        hot_section_start,
+        cold_section_start,
+        min_hot_weight,
+        max_cold_samples
+    )
+    if manifest.status != "ok":
+        diagnostics = diagnostics + manifest.diagnostics
+
+    val section_map = profile_layout_build_artifact(
+        executable_manifest_text,
+        profile_text,
+        "simple-c-section-map",
+        hot_section_start,
+        cold_section_start,
+        min_hot_weight,
+        max_cold_samples
+    )
+    if section_map.status != "ok":
+        diagnostics = diagnostics + section_map.diagnostics
+
+    val mapped = native_layout_apply_c_section_map(generated_c_source, section_map.manifest_text, section_map.status == "ok")
+    if mapped.diagnostic_count > 0:
+        diagnostics = diagnostics + mapped.diagnostics
+    if section_map.status == "ok" and mapped.applied_count == 0:
+        diagnostics.push("layout_section_map_not_applied")
+
+    val speedup = if baseline_ms > 0 and optimized_ms > 0:
+        ((baseline_ms - optimized_ms) * 100) / baseline_ms
+    else:
+        0
+    val size_delta = optimized_size_bytes - baseline_size_bytes
+    val regression = baseline_ms > 0 and optimized_ms > baseline_ms
+    val status = if diagnostics.len() > 0:
+        "invalid"
+    elif regression:
+        "regression"
+    else:
+        "ok"
+
+    ProfileLayoutNativeEvidence(
+        status: status,
+        manifest_text: manifest.manifest_text,
+        section_map_text: section_map.manifest_text,
+        mapped_c_source: mapped.c_source,
+        applied_count: mapped.applied_count,
+        baseline_ms: baseline_ms,
+        optimized_ms: optimized_ms,
+        speedup_pct: speedup,
+        baseline_size_bytes: baseline_size_bytes,
+        optimized_size_bytes: optimized_size_bytes,
+        size_delta_bytes: size_delta,
+        regression: regression,
+        diagnostic_count: diagnostics.len(),
+        diagnostics: diagnostics
     )
 
 pub fn profile_layout_write_manifest_file(

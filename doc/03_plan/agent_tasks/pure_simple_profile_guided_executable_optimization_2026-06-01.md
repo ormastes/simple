@@ -497,7 +497,10 @@ The file-level profile-layout bridge consumes executable metadata plus `.sprof`
 input and writes a deterministic layout manifest. The bridge now also writes
 Simple-owned native symbol order files and generated-C section map headers for
 the same hot/cold plan, so the BOLT-like path produces consumable Simple/C
-artifacts without Rust seed linker changes or external BOLT.
+artifacts without Rust seed linker changes or external BOLT. It also now has a
+checked native evidence report that ties `.sprof` input, manifest generation,
+section-map application to generated C, measured before/after runtime, and
+binary size deltas into one fail-closed result.
 
 Deliverables:
 - layout planner over Simple settlement/native metadata;
@@ -505,6 +508,7 @@ Deliverables:
 - cold section candidate marking;
 - reproducibility manifest with symbol/relocation mapping;
 - native symbol order and generated-C section map artifacts.
+- checked before/after evidence report over measured native runtime and size.
 
 Exit gates:
 - optimized executable passes semantic smoke;

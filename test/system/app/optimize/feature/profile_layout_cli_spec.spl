@@ -5,6 +5,7 @@ use std.spec.{describe, it, expect}
 use app.optimize.profile_layout_cli.{
     profile_layout_build_artifact,
     profile_layout_build_manifest,
+    profile_layout_native_evidence_report,
     profile_layout_parse_manifest_text,
     profile_layout_parse_sprof_functions,
     profile_layout_profiles_from_sprof_records,
@@ -142,6 +143,74 @@ describe "Profile Layout CLI Bridge":
         val unsupported = profile_layout_build_artifact(manifest, profile, "elf", 4096, 8192, 500, 2)
         expect(unsupported.status).to_equal("invalid")
         expect(unsupported.diagnostics).to_contain("unsupported_artifact_format:elf")
+
+    it "should produce checked native layout evidence from sprof through mapped C and measured runtime":
+        val manifest = [
+            "symbol=rare;section=.text;offset=300;size=64",
+            "symbol=dispatch;section=.text;offset=64;size=80",
+            "symbol=parse;section=.text;offset=160;size=96"
+        ].join("\n")
+        val profile = [
+            "header;schema=sprof-v1;module=demo;workload=smoke",
+            "function;key=c:rare:entry;count=0",
+            "function;key=c:dispatch:entry;count=8",
+            "function;key=c:parse:entry;count=6"
+        ].join("\n")
+        val generated_c = [
+            "static int dispatch(void) {",
+            "  return 7;",
+            "}",
+            "int parse(void) {",
+            "  return dispatch();",
+            "}",
+            "int rare(void) {",
+            "  return 0;",
+            "}"
+        ].join("\n")
+
+        val evidence = profile_layout_native_evidence_report(
+            manifest,
+            profile,
+            generated_c,
+            100,
+            80,
+            4096,
+            4000,
+            4096,
+            8192,
+            500,
+            2
+        )
+
+        expect(evidence.status).to_equal("ok")
+        expect(evidence.diagnostic_count).to_equal(0)
+        expect(evidence.applied_count).to_equal(3)
+        expect(evidence.speedup_pct).to_equal(20)
+        expect(evidence.size_delta_bytes).to_equal(-96)
+        expect(evidence.regression).to_equal(false)
+        expect(evidence.manifest_text).to_contain("hot\t.text\tdispatch")
+        expect(evidence.section_map_text).to_contain("SIMPLE_LAYOUT_SECTION_dispatch")
+        expect(evidence.mapped_c_source).to_contain("SIMPLE_LAYOUT_SECTION_dispatch static int dispatch(void) {")
+
+    it "should reject native layout evidence without measured runtime or mapped symbols":
+        val evidence = profile_layout_native_evidence_report(
+            "symbol=dispatch;section=.text;offset=64;size=80",
+            "function;key=c:dispatch:entry;count=8",
+            "int other(void) {\n  return 1;\n}",
+            0,
+            70,
+            4096,
+            4000,
+            4096,
+            8192,
+            500,
+            2
+        )
+
+        expect(evidence.status).to_equal("invalid")
+        expect(evidence.diagnostics).to_contain("missing_baseline_runtime")
+        expect(evidence.diagnostics).to_contain("unused_section_map_entry:dispatch")
+        expect(evidence.diagnostics).to_contain("layout_section_map_not_applied")
 
     it "should reject empty executable metadata and missing profile functions":
         val empty_manifest = profile_layout_build_manifest("", "function;key=c:main:entry;count=1", 4096, 8192, 500, 2)

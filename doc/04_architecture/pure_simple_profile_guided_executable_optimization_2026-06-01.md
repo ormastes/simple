@@ -133,7 +133,10 @@ The native compile integration consumes the generated-C section map through
 `llvm_direct.spl --simple-layout-section-map=PATH`. The compile path reads the
 Simple-emitted header, validates that all section directives target
 `.text.simple.*`, injects the corresponding attributes into generated C, and
-fails closed when a requested symbol is not present. This keeps layout
+fails closed when a requested symbol is not present. The optimizer bridge now
+also produces a native evidence report that requires successful section-map
+application plus measured baseline/optimized runtime and size before reporting
+speedup or regression. This keeps layout
 optimization in the Simple/C boundary while still allowing the platform C
 toolchain to place functions into optimizer-selected text sections.
 

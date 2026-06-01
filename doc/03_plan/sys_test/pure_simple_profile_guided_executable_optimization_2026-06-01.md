@@ -45,7 +45,7 @@ rather than rewriting arbitrary ELF bytes.
 |----------------|------------------|
 | Persistent profile loader | corrupt/stale/exact profile load tests; startup overhead report |
 | Simple native optimize | native O-level plus profile-counter ABI tests |
-| Pure Simple BOLT-like optimizer | metadata-only layout planning tests; native symbol-order/C section-map artifact tests; no external BOLT command dependency |
+| Pure Simple BOLT-like optimizer | metadata-only layout planning tests; native symbol-order/C section-map artifact tests; no external BOLT command dependency; checked native evidence report from `.sprof` through mapped C and measured runtime/size |
 | Generated-C layout consumption | section-map parser/transform tests; fail-closed unused symbol and unsafe section tests |
 | Native counter feature | function/block/edge/call-path counter contract tests; generated-C insertion checks for all four counter classes; native compile-lane audit that rejects leaked counter artifacts in non-profile builds |
 | Bare-metal counter impl | breakpoint site table and patch ledger tests |
