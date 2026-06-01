@@ -21,6 +21,7 @@ class GuiDynlibPerfReport:
     call_source: text
     symbol_resolved: bool
     fallback_used: bool
+    expected_sample_count: i32
     warmup_count: i32
     stats: GuiDynlibPerfStats
     threshold_us: i64
@@ -64,11 +65,13 @@ fn gui_dynlib_perf_stats(samples_us: [i64]) -> GuiDynlibPerfStats:
         sample_count: samples_us.len()
     )
 
-fn gui_dynlib_perf_error(artifact_path: text, loader_mode: text, call_source: text, symbol_resolved: bool, fallback_used: bool, samples_us: [i64], threshold_us: i64) -> text:
+fn gui_dynlib_perf_error(artifact_path: text, loader_mode: text, symbol_name: text, call_source: text, symbol_resolved: bool, fallback_used: bool, expected_sample_count: i32, samples_us: [i64], threshold_us: i64) -> text:
     if artifact_path == "":
         return "missing-artifact-path"
     if loader_mode != "smf_dynlib":
         return "not-smf-dynlib"
+    if symbol_name != "gui_dynlib_hot_probe_tick":
+        return "wrong-symbol"
     if not symbol_resolved:
         return "symbol-not-resolved"
     if call_source != "dynlib_symbol_call":
@@ -77,14 +80,16 @@ fn gui_dynlib_perf_error(artifact_path: text, loader_mode: text, call_source: te
         return "fallback-used"
     if samples_us.len() == 0:
         return "missing-samples"
+    if samples_us.len() != expected_sample_count:
+        return "incomplete-samples"
     val stats = gui_dynlib_perf_stats(samples_us)
     if stats.p99_us >= threshold_us:
         return "p99-over-threshold"
     ""
 
-fn gui_dynlib_perf_report(artifact_path: text, dynlib_path: text, host_os: text, host_arch: text, loader_mode: text, symbol_name: text, call_source: text, symbol_resolved: bool, fallback_used: bool, warmup_count: i32, samples_us: [i64], threshold_us: i64) -> GuiDynlibPerfReport:
+fn gui_dynlib_perf_report(artifact_path: text, dynlib_path: text, host_os: text, host_arch: text, loader_mode: text, symbol_name: text, call_source: text, symbol_resolved: bool, fallback_used: bool, expected_sample_count: i32, warmup_count: i32, samples_us: [i64], threshold_us: i64) -> GuiDynlibPerfReport:
     val stats = gui_dynlib_perf_stats(samples_us)
-    val error = gui_dynlib_perf_error(artifact_path, loader_mode, call_source, symbol_resolved, fallback_used, samples_us, threshold_us)
+    val error = gui_dynlib_perf_error(artifact_path, loader_mode, symbol_name, call_source, symbol_resolved, fallback_used, expected_sample_count, samples_us, threshold_us)
     GuiDynlibPerfReport(
         artifact_path: artifact_path,
         dynlib_path: dynlib_path,
@@ -95,6 +100,7 @@ fn gui_dynlib_perf_report(artifact_path: text, dynlib_path: text, host_os: text,
         call_source: call_source,
         symbol_resolved: symbol_resolved,
         fallback_used: fallback_used,
+        expected_sample_count: expected_sample_count,
         warmup_count: warmup_count,
         stats: stats,
         threshold_us: threshold_us,
@@ -111,6 +117,7 @@ fn gui_dynlib_perf_report_row(report: GuiDynlibPerfReport) -> text:
         " symbol=" + report.symbol_name +
         " call_source=" + report.call_source +
         " samples=" + report.stats.sample_count.to_text() +
+        " expected_samples=" + report.expected_sample_count.to_text() +
         " warmup=" + report.warmup_count.to_text() +
         " p50_us=" + report.stats.p50_us.to_text() +
         " p95_us=" + report.stats.p95_us.to_text() +

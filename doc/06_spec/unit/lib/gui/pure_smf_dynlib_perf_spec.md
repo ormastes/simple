@@ -27,7 +27,7 @@ expect(stats.max_us).to_equal(900)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -41,6 +41,7 @@ val report = gui_dynlib_perf_report(
     "dynlib_symbol_call",
     true,
     false,
+    10,
     100,
     [180, 220, 240, 300, 410, 640, 720, 810, 900, 990],
     1000
@@ -57,7 +58,7 @@ expect(report.stats.p99_us).to_equal(990)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -71,6 +72,7 @@ val report = gui_dynlib_perf_report(
     "direct_simple",
     true,
     false,
+    1,
     100,
     [100],
     1000
@@ -86,7 +88,7 @@ expect(report.error).to_equal("not-smf-dynlib")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -100,6 +102,7 @@ val report = gui_dynlib_perf_report(
     "dynlib_symbol_call",
     false,
     false,
+    1,
     100,
     [100],
     1000
@@ -115,7 +118,7 @@ expect(report.error).to_equal("symbol-not-resolved")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -129,6 +132,7 @@ val report = gui_dynlib_perf_report(
     "dynlib_symbol_call",
     true,
     false,
+    2,
     100,
     [100, 1000],
     1000
@@ -144,7 +148,7 @@ expect(report.error).to_equal("p99-over-threshold")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -158,6 +162,7 @@ val report = gui_dynlib_perf_report(
     "dynlib_symbol_call",
     true,
     false,
+    1,
     100,
     [100],
     1000
@@ -169,7 +174,38 @@ expect(row.contains("host_os=linux")).to_equal(true)
 expect(row.contains("host_arch=x86_64")).to_equal(true)
 expect(row.contains("loader=smf_dynlib")).to_equal(true)
 expect(row.contains("call_source=dynlib_symbol_call")).to_equal(true)
+expect(row.contains("expected_samples=1")).to_equal(true)
 expect(row.contains("p99_us=100")).to_equal(true)
+```
+
+</details>
+
+#### rejects incomplete dynlib hot-call sample sets
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val report = gui_dynlib_perf_report(
+    "build/gui/pure_gui.smf",
+    "build/gui/pure_gui.smf.extracted.so",
+    "linux",
+    "x86_64",
+    "smf_dynlib",
+    "gui_dynlib_hot_probe_tick",
+    "dynlib_symbol_call",
+    true,
+    false,
+    4,
+    100,
+    [100, 110, 120],
+    1000
+)
+expect(report.pass).to_equal(false)
+expect(report.error).to_equal("incomplete-samples")
 ```
 
 </details>
@@ -179,7 +215,7 @@ expect(row.contains("p99_us=100")).to_equal(true)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -193,6 +229,7 @@ val report = gui_dynlib_perf_report(
     "direct_simple",
     true,
     false,
+    1,
     100,
     [100],
     1000
@@ -208,7 +245,7 @@ expect(report.error).to_equal("not-dynlib-hot-call")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -222,6 +259,7 @@ val report = gui_dynlib_perf_report(
     "registry_symbol_only",
     true,
     true,
+    1,
     100,
     [100],
     1000
@@ -251,8 +289,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

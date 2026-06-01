@@ -100,18 +100,20 @@ expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_symbol)).to_equal(false)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val good = "GUI_QEMU_ARM64_SMF_PARITY status=contract-pass artifact=build/gui/pure_gui_hot.smf smf_role=2 arch=3 embedded_dynlib=true adapter=simpleos-framebuffer-virtio command_count=4 dirty_regions=4 same_artifact_contract=true live_qemu=false reason=same-smf-artifact-reaches-pure-gui-adapter"
+val good = "GUI_QEMU_ARM64_SMF_PARITY status=contract-pass artifact=build/gui/pure_gui_hot.smf smf_role=2 arch=3 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick adapter=simpleos-framebuffer-virtio command_count=4 dirty_regions=4 same_artifact_contract=true live_qemu=false reason=same-smf-artifact-reaches-pure-gui-adapter"
 val fail = good.replace("status=contract-pass", "status=contract-fail")
 val wrong_arch = good.replace("arch=3", "arch=1")
+val wrong_symbol = good.replace("symbol=gui_dynlib_hot_probe_tick", "symbol=other_symbol")
 val live = good.replace("live_qemu=false", "live_qemu=true")
 val wrong_adapter = good.replace("adapter=simpleos-framebuffer-virtio", "adapter=web-renderer")
 expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(good)).to_equal(true)
 expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(fail)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(wrong_arch)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(wrong_symbol)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(live)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(wrong_adapter)).to_equal(false)
 ```
@@ -123,17 +125,19 @@ expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(wrong_adapter)).to_equal(false
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val good = "GUI_DYNLIB_PERF artifact=build/gui/pure_gui_hot.smf dynlib_path=build/gui/pure_gui_hot.smf.extracted.dylib host_os=macos host_arch=arm64 loader=smf_dynlib symbol=gui_dynlib_hot_probe_tick call_source=dynlib_symbol_call samples=128 warmup=16 p50_us=1 p95_us=1 p99_us=1 max_us=1 threshold_us=1000 pass=true error="
+val good = "GUI_DYNLIB_PERF artifact=build/gui/pure_gui_hot.smf dynlib_path=build/gui/pure_gui_hot.smf.extracted.dylib host_os=macos host_arch=arm64 loader=smf_dynlib symbol=gui_dynlib_hot_probe_tick call_source=dynlib_symbol_call samples=128 expected_samples=128 warmup=16 p50_us=1 p95_us=1 p99_us=1 max_us=1 threshold_us=1000 pass=true error="
 val host = good.replace("loader=smf_dynlib", "loader=host_dynlib")
 val direct = good.replace("call_source=dynlib_symbol_call", "call_source=direct_simple")
 val fail = good.replace("pass=true error=", "pass=false error=not-smf-dynlib")
 val wrong_cache = good.replace("dynlib_path=build/gui/pure_gui_hot.smf.extracted.dylib", "dynlib_path=")
 val wrong_host = good.replace("host_os=macos", "host_os=linux")
 val wrong_arch = good.replace("host_arch=arm64", "host_arch=x86_64")
+val partial_samples = good.replace("samples=128", "samples=64")
+val wrong_expected = good.replace("expected_samples=128", "expected_samples=64")
 val missing_p99 = good.replace("p99_us=1 ", "")
 val loose_threshold = good.replace("threshold_us=1000", "threshold_us=5000")
 val over_threshold = good.replace("p99_us=1", "p99_us=1000")
@@ -147,6 +151,8 @@ expect(gui_mac_smf_dynlib_accepts_probe_row(fail)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_cache)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_host)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_arch)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(partial_samples)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_expected)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(missing_p99)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(loose_threshold)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(over_threshold)).to_equal(false)
