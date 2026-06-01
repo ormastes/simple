@@ -1,7 +1,7 @@
 # QEMU GTK WM Capture Evidence
 
-- status: fail
-- reason: contract-program-failed
+- status: pass
+- reason: pass
 - qemu bin: qemu-system-x86_64
 - qemu arch: x86_64
 - qemu display gtk supported: true
@@ -10,28 +10,28 @@
 - auto QMP status: pass
 - auto QMP reason: pass
 - auto QMP exit code: 0
-- auto QMP pid: 2129663
-- auto QMP socket: /tmp/simpleos_desktop_qmp_2114920_1780303632052818.sock
-- auto QMP serial log: build/os/simpleos_desktop_qmp_2114920_1780303632052818.log
-- auto QMP stderr log: build/os/simpleos_desktop_qmp_2114920_1780303632052818.log.stderr
+- auto QMP pid: 2163500
+- auto QMP socket: /tmp/simpleos_desktop_qmp_2155874_1780304638312232.sock
+- auto QMP serial log: build/os/simpleos_desktop_qmp_2155874_1780304638312232.log
+- auto QMP stderr log: build/os/simpleos_desktop_qmp_2155874_1780304638312232.log.stderr
 - auto QMP missing marker: 
 - auto QMP marker timeout ms: 
 - auto QMP qemu running at failure: 
 - auto QMP serial bytes: 
 - auto QMP stderr bytes: 
-- qmp socket: /tmp/simpleos_desktop_qmp_2114920_1780303632052818.sock
+- qmp socket: /tmp/simpleos_desktop_qmp_2155874_1780304638312232.sock
 - host WM smoke status: unavailable
 - host WM smoke reason: not-run
 - host WM smoke report: build/qemu_gtk_wm_capture_evidence/wm-host-launch-capture.md
-- live capture status: fail
-- live capture reason: contract-program-failed
-- live capture pixels: 0
-- live capture non-black pixels: 0
-- live capture sample matches: 0
+- live capture status: pass
+- live capture reason: pass
+- live capture pixels: 786432
+- live capture non-black pixels: 786432
+- live capture sample matches: 10
 - live capture sample mismatches: 0
 - live capture full-scene mismatches: 0
-- qemu-side perf status: fail
-- qemu-side perf reason: contract-program-failed
+- qemu-side perf status: unavailable
+- qemu-side perf reason: qemu-side-gtk-simple-perf-harness-not-wired
 - qemu-side perf comparison available: false
 - fake QMP screendump status: not-run
 - fake QMP screendump reason: not-run
@@ -49,8 +49,8 @@
 - host GTK GL WM scene blur/tolerance used: 
 
 ## Raw Evidence
-- qemu_gtk_wm_capture_status=fail
-- qemu_gtk_wm_capture_reason=contract-program-failed
+- qemu_gtk_wm_capture_status=pass
+- qemu_gtk_wm_capture_reason=pass
 - qemu_gtk_wm_capture_qemu_bin=qemu-system-x86_64
 - qemu_gtk_wm_capture_qemu_arch=x86_64
 - qemu_gtk_wm_capture_display_gtk_supported=true
@@ -59,25 +59,25 @@
 - qemu_gtk_wm_capture_auto_qmp_status=pass
 - qemu_gtk_wm_capture_auto_qmp_reason=pass
 - qemu_gtk_wm_capture_auto_qmp_exit_code=0
-- qemu_gtk_wm_capture_auto_qmp_pid=2129663
-- qemu_gtk_wm_capture_auto_qmp_socket=/tmp/simpleos_desktop_qmp_2114920_1780303632052818.sock
-- qemu_gtk_wm_capture_auto_qmp_serial_log=build/os/simpleos_desktop_qmp_2114920_1780303632052818.log
-- qemu_gtk_wm_capture_auto_qmp_stderr_log=build/os/simpleos_desktop_qmp_2114920_1780303632052818.log.stderr
+- qemu_gtk_wm_capture_auto_qmp_pid=2163500
+- qemu_gtk_wm_capture_auto_qmp_socket=/tmp/simpleos_desktop_qmp_2155874_1780304638312232.sock
+- qemu_gtk_wm_capture_auto_qmp_serial_log=build/os/simpleos_desktop_qmp_2155874_1780304638312232.log
+- qemu_gtk_wm_capture_auto_qmp_stderr_log=build/os/simpleos_desktop_qmp_2155874_1780304638312232.log.stderr
 - qemu_gtk_wm_capture_auto_qmp_missing_marker=
 - qemu_gtk_wm_capture_auto_qmp_marker_timeout_ms=
 - qemu_gtk_wm_capture_auto_qmp_qemu_running=
 - qemu_gtk_wm_capture_auto_qmp_serial_bytes=
 - qemu_gtk_wm_capture_auto_qmp_stderr_bytes=
-- qemu_gtk_wm_capture_qmp_socket=/tmp/simpleos_desktop_qmp_2114920_1780303632052818.sock
-- qemu_gtk_wm_capture_wm_exit_code=1
+- qemu_gtk_wm_capture_qmp_socket=/tmp/simpleos_desktop_qmp_2155874_1780304638312232.sock
+- qemu_gtk_wm_capture_wm_exit_code=0
 - qemu_gtk_wm_capture_host_wm_status=unavailable
 - qemu_gtk_wm_capture_host_wm_reason=not-run
 - qemu_gtk_wm_capture_host_wm_exit_code=0
 - qemu_gtk_wm_capture_host_wm_report_path=build/qemu_gtk_wm_capture_evidence/wm-host-launch-capture.md
-- qemu_gtk_wm_capture_live_capture_status=fail
-- qemu_gtk_wm_capture_live_capture_reason=contract-program-failed
-- qemu_gtk_wm_capture_perf_status=fail
-- qemu_gtk_wm_capture_perf_reason=contract-program-failed
+- qemu_gtk_wm_capture_live_capture_status=pass
+- qemu_gtk_wm_capture_live_capture_reason=pass
+- qemu_gtk_wm_capture_perf_status=unavailable
+- qemu_gtk_wm_capture_perf_reason=qemu-side-gtk-simple-perf-harness-not-wired
 - qemu_gtk_wm_capture_perf_simple_frame_us=0
 - qemu_gtk_wm_capture_perf_gtk_frame_us=0
 - qemu_gtk_wm_capture_perf_iterations=0
@@ -96,19 +96,19 @@
 - qemu_gtk_wm_capture_gtk_scene_expected_rgba_path=
 - qemu_gtk_wm_capture_gtk_scene_captured_rgba_path=
 - qemu_gtk_wm_capture_gtk_scene_blur_or_tolerance_used=
-- qemu_gtk_wm_capture_wm_evidence_status=fail
-- qemu_gtk_wm_capture_wm_evidence_reason=contract-program-failed
-- qemu_gtk_wm_capture_wm_contract_status=fail
-- qemu_gtk_wm_capture_wm_spec_status=fail
+- qemu_gtk_wm_capture_wm_evidence_status=pass
+- qemu_gtk_wm_capture_wm_evidence_reason=wm-launch-capture-contract-verified
+- qemu_gtk_wm_capture_wm_contract_status=pass
+- qemu_gtk_wm_capture_wm_spec_status=pass
 - qemu_gtk_wm_capture_wm_electron_live_status=skipped
 - qemu_gtk_wm_capture_wm_electron_live_reason=RUN_ELECTRON_LIVE_SMOKE=0
-- qemu_gtk_wm_capture_wm_qemu_live_status=fail
-- qemu_gtk_wm_capture_wm_qemu_live_reason=qmp-screendump-failed
-- qemu_gtk_wm_capture_wm_qemu_live_pixels=0
-- qemu_gtk_wm_capture_wm_qemu_live_non_black_pixels=0
-- qemu_gtk_wm_capture_wm_qemu_live_sample_matches=0
+- qemu_gtk_wm_capture_wm_qemu_live_status=pass
+- qemu_gtk_wm_capture_wm_qemu_live_reason=live-qmp-screendump-pass
+- qemu_gtk_wm_capture_wm_qemu_live_pixels=786432
+- qemu_gtk_wm_capture_wm_qemu_live_non_black_pixels=786432
+- qemu_gtk_wm_capture_wm_qemu_live_sample_matches=10
 - qemu_gtk_wm_capture_wm_qemu_live_sample_mismatches=0
-- qemu_gtk_wm_capture_wm_qemu_live_sample_checksum=0
+- qemu_gtk_wm_capture_wm_qemu_live_sample_checksum=2806560364359906732
 - qemu_gtk_wm_capture_wm_qemu_live_scene_mismatches=0
 - qemu_gtk_wm_capture_wm_qemu_live_first_mismatch_x=-1
 - qemu_gtk_wm_capture_wm_qemu_live_first_mismatch_y=-1
@@ -125,13 +125,13 @@
 - [build][x86_64] phase=spawn timeout_ms=900000
 - [build][x86_64] env: SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$(pwd)/src" SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_OS_LOG_MODE=on PATH="/usr/bin:$PATH"
 - [build][x86_64] cmd: src/compiler_rust/target/debug/simple native-build --source build/os/generated --source src/os --source src/lib --source examples/simple_os --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log on --entry-closure --entry examples/simple_os/arch/x86_64/desktop_e2e_entry.spl --target x86_64-unknown-none -o build/os/simpleos_desktop_e2e_32.elf --linker-script examples/simple_os/arch/x86_64/linker.ld
-- [build][x86_64] phase=native-build OK elapsed_ms=241005
+- [build][x86_64] phase=native-build OK elapsed_ms=191488
 - simpleos_desktop_qmp_status=pass
 - simpleos_desktop_qmp_reason=pass
-- simpleos_desktop_qmp_pid=2129663
-- simpleos_desktop_qmp_socket=/tmp/simpleos_desktop_qmp_2114920_1780303632052818.sock
-- simpleos_desktop_qmp_serial_log=build/os/simpleos_desktop_qmp_2114920_1780303632052818.log
-- simpleos_desktop_qmp_stderr_log=build/os/simpleos_desktop_qmp_2114920_1780303632052818.log.stderr
+- simpleos_desktop_qmp_pid=2163500
+- simpleos_desktop_qmp_socket=/tmp/simpleos_desktop_qmp_2155874_1780304638312232.sock
+- simpleos_desktop_qmp_serial_log=build/os/simpleos_desktop_qmp_2155874_1780304638312232.log
+- simpleos_desktop_qmp_stderr_log=build/os/simpleos_desktop_qmp_2155874_1780304638312232.log.stderr
 
 ## WM Capture Output
 - check=wm_launch_capture_evidence
@@ -239,7 +239,27 @@
 - Run `simple migrate --fix-generics` to automatically update your code
 - 
 - [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
-- error: semantic: type `BrowserCompositorBackend` does not implement required method `blit_pixels` from trait `CompositorBackend`
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.oneapi_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- host_wm_package_ready=true
+- simpleos_wm_package_ready=true
+- host_wm_focused_window=win1
+- simpleos_wm_drag_surface=surf2
+- host_wm_loop_marker=[host-wm] loop-step command=window_drag_begin target=surf2 app=demo.two window=win2 handled=true
+- simpleos_wm_loop_marker=[simpleos-wm] loop-step command=command_lane_icon target=right_icon_1 app= window= handled=true
+- qemu_inprocess_success=true
+- qemu_inprocess_backend=browser_compositor
+- qemu_inprocess_pixels=64000
+- electron_scene_backend=browser_compositor
+- electron_scene_width=320
+- electron_scene_height=200
+- electron_scene_pixels=64000
 - spec_path=test/unit/app/ui/wm_runtime_bridge_spec.spl
 - Simple Test Runner v1.0.0-beta
 - 
@@ -252,7 +272,7 @@
 - 
 - Running: test/unit/app/ui/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/app/ui/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (215ms)
+-   [32mPASSED[0m (235ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -260,12 +280,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 219ms
+- Duration: 241ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        215ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
+-        235ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -279,7 +299,7 @@
 - 
 - Running: test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - [1/1] test/unit/app/ui/host_wm_runtime_loop_spec.spl
--   [32mPASSED[0m (1105ms)
+-   [32mPASSED[0m (1123ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -287,12 +307,12 @@
 - Files: 1
 - [32mPassed: 2[0m
 - Failed: 0
-- Duration: 1111ms
+- Duration: 1128ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--       1105ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
+-       1123ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -306,7 +326,7 @@
 - 
 - Running: test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/os/desktop/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (227ms)
+-   [32mPASSED[0m (220ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -314,12 +334,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 232ms
+- Duration: 225ms
 - 
 - [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        227ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
+-        220ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/qemu_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -333,24 +353,21 @@
 - 
 - Running: test/unit/os/compositor/qemu_capture_spec.spl
 - [1/1] test/unit/os/compositor/qemu_capture_spec.spl
--   [31mFAILED[0m (486ms)
+-   [32mPASSED[0m (904ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
 - ═══════════════════════════════════════════════════════════════
 - Files: 1
-- [32mPassed: 0[0m
-- [31mFailed: 1[0m
-- Duration: 491ms
+- [32mPassed: 11[0m
+- Failed: 0
+- Duration: 910ms
 - 
-- [31m✗ Some tests failed[0m
-- 
-- Failed files:
--   - test/unit/os/compositor/qemu_capture_spec.spl
+- [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        486ms  test/unit/os/compositor/qemu_capture_spec.spl
-- spec_exit_code=1
+-        904ms  test/unit/os/compositor/qemu_capture_spec.spl
+- spec_exit_code=0
 - spec_path=test/unit/os/compositor/electron_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
 - 
@@ -363,24 +380,21 @@
 - 
 - Running: test/unit/os/compositor/electron_capture_spec.spl
 - [1/1] test/unit/os/compositor/electron_capture_spec.spl
--   [31mFAILED[0m (477ms)
+-   [32mPASSED[0m (820ms)
 - 
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
 - ═══════════════════════════════════════════════════════════════
 - Files: 1
-- [32mPassed: 0[0m
-- [31mFailed: 1[0m
-- Duration: 480ms
+- [32mPassed: 7[0m
+- Failed: 0
+- Duration: 827ms
 - 
-- [31m✗ Some tests failed[0m
-- 
-- Failed files:
--   - test/unit/os/compositor/electron_capture_spec.spl
+- [32m✓ All tests passed![0m
 - 
 - Slowest tests:
--        477ms  test/unit/os/compositor/electron_capture_spec.spl
-- spec_exit_code=1
+-        820ms  test/unit/os/compositor/electron_capture_spec.spl
+- spec_exit_code=0
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl:282:45
 -    |
@@ -483,20 +497,40 @@
 - Run `simple migrate --fix-generics` to automatically update your code
 - 
 - [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
-- error: semantic: type `BrowserCompositorBackend` does not implement required method `blit_pixels` from trait `CompositorBackend`
-- wm_launch_capture_evidence_status=fail
-- wm_launch_capture_evidence_reason=contract-program-failed
-- wm_launch_capture_contract_status=fail
-- wm_launch_capture_spec_status=fail
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.oneapi_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- qemu_live_success=true
+- qemu_live_backend=qemu_vm
+- qemu_live_width=1024
+- qemu_live_height=768
+- qemu_live_pixels=786432
+- qemu_live_non_black_pixels=786432
+- qemu_live_sample_matches=10
+- qemu_live_sample_mismatches=0
+- qemu_live_sample_checksum=2806560364359906732
+- qemu_live_scene_mismatches=0
+- qemu_live_first_mismatch_x=-1
+- qemu_live_first_mismatch_y=-1
+- qemu_live_error=
+- wm_launch_capture_evidence_status=pass
+- wm_launch_capture_evidence_reason=wm-launch-capture-contract-verified
+- wm_launch_capture_contract_status=pass
+- wm_launch_capture_spec_status=pass
 - wm_launch_capture_electron_live_status=skipped
 - wm_launch_capture_electron_live_reason=RUN_ELECTRON_LIVE_SMOKE=0
-- wm_launch_capture_qemu_live_status=fail
-- wm_launch_capture_qemu_live_reason=qmp-screendump-failed
-- wm_launch_capture_qemu_live_pixels=0
-- wm_launch_capture_qemu_live_non_black_pixels=0
-- wm_launch_capture_qemu_live_sample_matches=0
+- wm_launch_capture_qemu_live_status=pass
+- wm_launch_capture_qemu_live_reason=live-qmp-screendump-pass
+- wm_launch_capture_qemu_live_pixels=786432
+- wm_launch_capture_qemu_live_non_black_pixels=786432
+- wm_launch_capture_qemu_live_sample_matches=10
 - wm_launch_capture_qemu_live_sample_mismatches=0
-- wm_launch_capture_qemu_live_sample_checksum=0
+- wm_launch_capture_qemu_live_sample_checksum=2806560364359906732
 - wm_launch_capture_qemu_live_scene_mismatches=0
 - wm_launch_capture_qemu_live_first_mismatch_x=-1
 - wm_launch_capture_qemu_live_first_mismatch_y=-1

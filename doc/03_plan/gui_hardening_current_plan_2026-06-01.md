@@ -52,10 +52,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   inline precedence, descendant scope, and child-scope behavior, but not full
   Chromium DOM/CSS/text parity.
 - QEMU/GTK evidence has host-side exact GTK scene checks and QMP wiring. The
-  live desktop auto-QMP launch now reaches `pass` and yields a real QMP socket;
-  the current fail-closed blocker has moved to live WM capture
-  `qmp-screendump-failed` / `contract-program-failed`. QEMU-side
-  Simple-vs-GTK performance remains unwired.
+  live desktop auto-QMP launch reaches `pass`, yields a real QMP socket, and
+  strict live QMP screendump capture now passes with zero sample/scene
+  mismatches. QEMU-side Simple-vs-GTK performance remains unwired.
 
 ## Current Evidence
 
@@ -90,8 +89,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - `doc/09_report/gtk_gui_repeat_fallback_evidence_2026-06-01.md`: repeat
   open/render evidence with an explicit vector-font unavailable fallback probe.
 - `doc/09_report/qemu_gtk_wm_capture_evidence_2026-06-01.md`: live QEMU/GTK
-  evidence showing auto-QMP launch reaches `pass` with a socket, then fails
-  closed at live QMP screendump/contract capture.
+  evidence showing auto-QMP launch reaches `pass` with a socket and strict
+  live QMP screendump capture passes with `786432` pixels, `10` sample matches,
+  and `0` scene mismatches.
 - `doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md`:
   current Engine2D Node/Bun/Electron budgeted exact-bitmap matrix including
   settings-inspector-tree.
@@ -162,10 +162,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - Live Electron: extend exact live capture to the broader Node/Bun scene matrix
   while keeping Chromium DOM/CSS bit-parity claims blocked until font/layout
   divergence is solved.
-- QEMU/GTK: fix live QMP screendump/contract capture now that auto-QMP launch
-  reaches a socket; then add a guest-side GTK/Simple performance harness and
-  broaden strict live QEMU WM capture to representative app windows, text glyph
-  content, and event-driven retained rendering.
+- QEMU/GTK: add a guest-side GTK/Simple performance harness and broaden strict
+  live QEMU WM capture to representative app windows, text glyph content, and
+  event-driven retained rendering.
 - Tolerance audit: continue removing or quarantining legacy perceptual/tolerance
   claims outside the audited GUI hardening paths. Exact pixels remain the
   acceptance rule; perceptual values are diagnostic only.

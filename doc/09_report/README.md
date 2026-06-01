@@ -15,7 +15,7 @@ Implementation reports, completion logs, and session transcripts from developmen
 
 | Report | Status | Notes |
 |--------|--------|-------|
-| [qemu_gtk_wm_capture_evidence_2026-06-01.md](qemu_gtk_wm_capture_evidence_2026-06-01.md) | Fail | QEMU GTK WM capture evidence. Auto QMP launch passed, but the live capture contract failed with `contract-program-failed` and QMP screendump failure evidence. |
+| [qemu_gtk_wm_capture_evidence_2026-06-01.md](qemu_gtk_wm_capture_evidence_2026-06-01.md) | Pass | QEMU GTK WM capture evidence. Auto QMP launch passed with a socket, and live QMP screendump capture passed with zero sample/scene mismatches. |
 
 ## Related
 
