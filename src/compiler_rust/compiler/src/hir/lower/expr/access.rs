@@ -279,6 +279,11 @@ impl Lowerer {
                 }
 
                 if !has_known_method {
+                    if let Some(func_name) = &self.current_function_name {
+                        return Err(LowerError::Unsupported(format!(
+                            "cannot infer field type while lowering {func_name}: struct '{struct_name}' field '{field}'"
+                        )));
+                    }
                     return Err(LowerError::CannotInferFieldType {
                         struct_name,
                         field: field.to_string(),

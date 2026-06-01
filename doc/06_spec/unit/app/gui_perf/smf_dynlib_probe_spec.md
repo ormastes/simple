@@ -126,6 +126,38 @@ expect(gui_dynlib_probe_is_host_dynlib_path("build/gui/pure_gui.smf")).to_equal(
 
 </details>
 
+#### recognizes SMF dynlib envelopes separately from host dynlibs
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(gui_dynlib_probe_is_smf_dynlib_path("build/gui/pure_gui.smf")).to_equal(true)
+expect(gui_dynlib_probe_is_smf_dynlib_path("build/gui/libpure_gui_hot.so")).to_equal(false)
+```
+
+</details>
+
+#### uses host-specific cache names for extracted SMF libraries
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(gui_dynlib_probe_host_dynlib_extension("macos")).to_equal(".dylib")
+expect(gui_dynlib_probe_host_dynlib_extension("linux")).to_equal(".so")
+expect(gui_dynlib_probe_smf_cache_path("build/gui/pure_gui.smf", "macos")).to_equal("build/gui/pure_gui.smf.extracted.dylib")
+expect(gui_dynlib_probe_smf_cache_path("build/gui/pure_gui.smf", "linux")).to_equal("build/gui/pure_gui.smf.extracted.so")
+```
+
+</details>
+
 #### rejects callable host dynlib samples as not SMF dynlib acceptance
 
 <details>
@@ -204,8 +236,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

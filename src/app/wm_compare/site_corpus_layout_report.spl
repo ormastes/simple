@@ -4,6 +4,9 @@ use std.cli.cli_util.{get_cli_args}
 use app.wm_compare.site_corpus.{
     SiteSample, build_famous_site_sample_corpus,
     famous_site_sample_chrome_metrics_path}
+use app.wm_compare.structural_layout_report.{
+    structural_layout_compare,
+    structural_layout_report_sdn}
 use std.gc_async_mut.gpu.browser_engine.text_painter.{
     br_famous_site_corpus_layout_lines,
     br_famous_site_corpus_layout_line_widths_sdn}
@@ -76,15 +79,23 @@ fn _first_missing_line(sample: SiteSample, metrics: text, layout_width: i32) -> 
     ""
 
 fn _chrome_text_lines_sdn(metrics: text) -> text:
+    val lines = _chrome_text_lines(metrics)
+    var out = "(chrome_lines"
+    var i = 0
+    while i < lines.len():
+        out = out + " (line index: " + i.to_string() + " text: \"" + lines[i] + "\")"
+        i = i + 1
+    out + " count: " + lines.len().to_string() + ")"
+
+fn _chrome_text_lines(metrics: text) -> [text]:
     val marker = "\"textLines\""
     val start = metrics.index_of(marker)
     if start == -1:
-        return "(chrome_lines count: 0)"
+        return []
     val metrics_tail = metrics.substring(start)
     val canvas_idx = metrics_tail.index_of("\"canvasTextMetrics\"")
     val section = if canvas_idx >= 0: metrics_tail.substring(0, canvas_idx) else: metrics_tail
-    var out = "(chrome_lines"
-    var count = 0
+    var lines: [text] = []
     var pos = 0
     val index_marker = "\"index\": "
     val text_marker = "\"text\": \""
@@ -104,10 +115,9 @@ fn _chrome_text_lines_sdn(metrics: text) -> text:
         if end_rel == -1:
             break
         val line = rest.substring(0, end_rel)
-        out = out + " (line index: " + count.to_string() + " text: \"" + line + "\")"
-        count = count + 1
+        lines.push(line)
         pos = value_start + end_rel + 1
-    out + " count: " + count.to_string() + ")"
+    lines
 
 fn _chrome_canvas_widths_sdn(metrics: text) -> text:
     val marker = "\"canvasTextMetrics\""
@@ -156,6 +166,17 @@ fn _chrome_canvas_widths_sdn(metrics: text) -> text:
         pos = width_start + width_end
     out + " count: " + count.to_string() + ")"
 
+pub fn build_site_corpus_structural_layout_report(sample: SiteSample, metrics: text, layout_width: i32) -> text:
+    val simple_lines = br_famous_site_corpus_layout_lines(sample.html, 16, layout_width)
+    val chrome_line_values = _chrome_text_lines(metrics)
+    val structural = structural_layout_compare(
+        "chrome_metrics", "simple_layout",
+        layout_width, 120,
+        chrome_line_values, simple_lines,
+        "chrome_metrics_sidecar", "famous_site_corpus_layout_report"
+    )
+    structural_layout_report_sdn(structural, chrome_line_values, simple_lines)
+
 pub fn build_site_corpus_layout_report(opts: SiteCorpusLayoutOpts) -> text:
     val samples = build_famous_site_sample_corpus()
     var selected = 0
@@ -188,8 +209,9 @@ pub fn build_site_corpus_layout_report(opts: SiteCorpusLayoutOpts) -> text:
                             val widths = br_famous_site_corpus_layout_line_widths_sdn(sample.html, 16, opts.layout_width)
                             val chrome_lines = _chrome_text_lines_sdn(metrics)
                             val chrome_widths = _chrome_canvas_widths_sdn(metrics)
+                            val structural = build_site_corpus_structural_layout_report(sample, metrics, opts.layout_width)
                             first_mismatch_widths = widths
-                            body = body + "  (sample id: \"" + sample.id + "\" status: mismatched missing_simple_line: \"" + missing_line + "\" chrome_lines: " + chrome_lines + " chrome_widths: " + chrome_widths + " simple_widths: " + widths + ")\n"
+                            body = body + "  (sample id: \"" + sample.id + "\" status: mismatched missing_simple_line: \"" + missing_line + "\" chrome_lines: " + chrome_lines + " chrome_widths: " + chrome_widths + " simple_widths: " + widths + " structural: " + structural + ")\n"
     body = body + "  summary: (selected: " + selected.to_string() + " matched: " + matched.to_string() + " mismatched: " + mismatched.to_string() + " missing_metrics: " + missing_metrics.to_string() + " layout_width: " + opts.layout_width.to_string() + " first_mismatch: \"" + first_mismatch + "\")\n"
     if first_mismatch_widths != "":
         body = body + "  first_mismatch_widths: " + first_mismatch_widths + "\n"

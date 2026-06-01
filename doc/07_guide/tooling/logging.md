@@ -11,6 +11,31 @@ Hardware and external-access joins are audit signals and remain weaveable in
 release builds. Debug and trace joins are optional instrumentation; release
 builds omit them unless debug logging is explicitly enabled.
 
+Compiler-inserted debug logging is controlled by global AOP knobs:
+
+| Variable | Meaning |
+|----------|---------|
+| `SIMPLE_AOP_LOG_CALLS=1` | Enable function-call join-point logging. |
+| `SIMPLE_AOP_LOG_ASSIGNMENTS=1` | Enable variable-assignment join-point logging. |
+| `SIMPLE_AOP_COMPILE_LOG_LEVEL=<level>` | Compile-time instrumentation level; defaults to `debug`. Use `off` to suppress compiler AOP debug instrumentation. |
+| `SIMPLE_AOP_RUNTIME_LOG_LEVEL=<level>` | Runtime level attached to generated log calls; independent from compile-time filtering. |
+
+The disabled/default path reads the effective policy and returns before MIR
+join-point scanning, so ordinary builds do not pay per-call or per-assignment
+compile-time instrumentation work. When only one join-point flag is enabled,
+the compiler builds only that rule set.
+
+For temporary debugging, prefer these AOP knobs over editing source with
+removable log calls. Keep manual `log()` calls for state AOP cannot observe
+cleanly, such as cross-process protocol frames, hardware status, or summarized
+domain values; lower their log level when they are no longer needed at the
+previous verbosity.
+
+Bare-metal builds use the no-host-service policy helpers in
+`src/os/baremetal/profile/log_policy.spl`. They expose separate compile/runtime
+levels plus independent function-call and variable-assignment AOP switches
+without environment lookup or hosted runtime dependencies.
+
 Shared CLI log option parsing lives in `std.cli.log_modes`. App entrypoints
 that expose structured startup, status, dry-run, or planning output should
 accept `--log-mode <human|llm|json>`, `--stdout`, `--tui`, and

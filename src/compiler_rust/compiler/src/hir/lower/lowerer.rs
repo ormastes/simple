@@ -34,6 +34,8 @@ pub struct Lowerer {
     pub(super) pure_functions: HashSet<String>,
     /// Current class/struct type being lowered (for Self resolution)
     pub(super) current_class_type: Option<TypeId>,
+    /// Current function/method name being lowered, used to enrich lowering diagnostics.
+    pub(super) current_function_name: Option<String>,
     /// Module resolver for loading types from imports (optional for backward compatibility)
     pub(super) module_resolver: Option<ModuleResolver>,
     /// Current file being compiled (for resolving relative imports)
@@ -107,6 +109,7 @@ impl Lowerer {
             immutable_globals: HashSet::new(),
             pure_functions: HashSet::new(),
             current_class_type: None,
+            current_function_name: None,
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
@@ -144,6 +147,7 @@ impl Lowerer {
             immutable_globals: HashSet::new(),
             pure_functions: HashSet::new(),
             current_class_type: None,
+            current_function_name: None,
             module_resolver: Some(module_resolver),
             current_file: Some(current_file),
             loaded_modules: HashSet::new(),
@@ -204,6 +208,7 @@ impl Lowerer {
             immutable_globals: HashSet::new(),
             pure_functions: HashSet::new(),
             current_class_type: None,
+            current_function_name: None,
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),

@@ -96,6 +96,10 @@ fn args_use_self(args: &[ast::Argument]) -> bool {
 fn expr_uses_self(expr: &ast::Expr) -> bool {
     match expr {
         ast::Expr::Identifier(name) => name == "self",
+        ast::Expr::FString { parts, .. } => fstring_parts_use_self(parts),
+        ast::Expr::I18nTemplate { parts, args, .. } => {
+            fstring_parts_use_self(parts) || args.iter().any(|(_, expr)| expr_uses_self(expr))
+        }
         ast::Expr::Binary { left, right, .. } => expr_uses_self(left) || expr_uses_self(right),
         ast::Expr::Unary { operand, .. } => expr_uses_self(operand),
         ast::Expr::Call { callee, args } => expr_uses_self(callee) || args_use_self(args),
@@ -138,6 +142,14 @@ fn expr_uses_self(expr: &ast::Expr) -> bool {
         ast::Expr::DoBlock(nodes) => nodes.iter().any(node_uses_self),
         _ => false,
     }
+}
+
+fn fstring_parts_use_self(parts: &[ast::FStringPart]) -> bool {
+    parts.iter().any(|part| match part {
+        ast::FStringPart::Literal(_) => false,
+        ast::FStringPart::Expr(expr) => expr_uses_self(expr),
+        ast::FStringPart::ExprWithFormat(expr, _) => expr_uses_self(expr),
+    })
 }
 
 fn driver_manifest_attr(attrs: &[ast::Attribute]) -> Option<&ast::Attribute> {
@@ -438,6 +450,8 @@ impl Lowerer {
         } else {
             f.name.clone()
         };
+        let previous_function_name = self.current_function_name.clone();
+        self.current_function_name = Some(func_name.clone());
         self.lifetime_context.set_function(&func_name);
 
         // Enter function scope for lifetime tracking
@@ -664,6 +678,7 @@ impl Lowerer {
 
         // Restore previous class type
         self.current_class_type = previous_class_type;
+        self.current_function_name = previous_function_name;
 
         // Use qualified name for methods (ClassName.method) for DI compatibility
         let name = if let Some(owner) = owner_type {

@@ -249,7 +249,12 @@ impl Lowerer {
                 if self.lenient_types {
                     Ok(TypeId::ANY)
                 } else {
-                    Err(LowerError::CannotInferTypeFor(format!("{:?}", expr)))
+                    let context = self
+                        .current_function_name
+                        .as_ref()
+                        .map(|name| format!("{:?} while lowering {}", expr, name))
+                        .unwrap_or_else(|| format!("{:?}", expr));
+                    Err(LowerError::CannotInferTypeFor(context))
                 }
             }
             // Cannot infer type for complex expressions - require annotation
@@ -257,7 +262,12 @@ impl Lowerer {
                 if self.lenient_types {
                     Ok(TypeId::ANY)
                 } else {
-                    Err(LowerError::CannotInferTypeFor(format!("{:?}", expr)))
+                    let context = self
+                        .current_function_name
+                        .as_ref()
+                        .map(|name| format!("{:?} while lowering {}", expr, name))
+                        .unwrap_or_else(|| format!("{:?}", expr));
+                    Err(LowerError::CannotInferTypeFor(context))
                 }
             }
         }

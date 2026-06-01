@@ -8,6 +8,9 @@ Status: selected scope. User approved Feature Option 3 and NFR Option C on 2026-
 - `test/system/wm_compare/html_compat_spec.spl`: HTML fixture manifest, Chrome golden loading, exact/perceptual policy, truncated buffers, and pair metadata mismatch.
 - `test/system/wm_compare/emulated_capture_spec.spl`: deterministic capture failure and invalid viewport behavior.
 - `test/system/wm_compare/site_corpus_pair_spec.spl`: famous-site pair metadata mismatch.
+- `test/system/wm_compare/structural_layout_report_spec.spl`: shared structural layout report contract, TUI cell geometry, and focused famous-site layout-report attachment.
+- `test/system/wm_compare/backend_measurement_report_spec.spl`: backend-qualified timing/RSS/size evidence contract and fallback rejection for accelerated lanes.
+- `test/system/wm_compare/backend_measurement_capture_spec.spl`: host `/usr/bin/time` sample parsing into p50/p95, max RSS, binary-size, and backend measurement records.
 - `test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl`: backend evidence contract.
 
 ## Required Gates

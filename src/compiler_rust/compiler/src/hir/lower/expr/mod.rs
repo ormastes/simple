@@ -280,6 +280,11 @@ impl Lowerer {
                     });
                 }
                 // We're in a class method but self is not in scope = static method
+                if let Some(func_name) = &self.current_function_name {
+                    return Err(LowerError::Unsupported(format!(
+                        "cannot use `self` in static method while lowering {func_name}"
+                    )));
+                }
                 return Err(LowerError::SelfInStatic);
             }
             if self.lenient_types {

@@ -21,6 +21,16 @@ Status: selected scope. User approved Feature Option 3 and NFR Option C on 2026-
 - Add backend-qualified measurement manifests and report validators for Metal, Vulkan, CUDA, and CPU SIMD.
 - Track unavailable hardware lanes explicitly where this host cannot prove them.
 
+## Completed After Selection
+
+- Added `src/app/wm_compare/structural_layout_report.spl` as the shared structural layout report surface.
+- Added focused coverage in `test/system/wm_compare/structural_layout_report_spec.spl`.
+- Wired structural evidence into the famous-site corpus layout-report mismatch path.
+- Recorded the full famous-site corpus spec timeout as a performance/test-harness bug.
+- Added backend-qualified measurement record validation and matrix reporting for Metal, Vulkan, CUDA, and CPU SIMD lanes.
+- Added host `/usr/bin/time` measurement parsing and recorded a representative local backend-measurement evidence report.
+- Added executable current-host matrix construction so Metal, Vulkan, CUDA, and CPU SIMD lane statuses are represented as backend measurement records.
+
 ## NFR Task Split
 
 NFR A:

@@ -28,6 +28,6 @@ REQ-010: Changed executable SPipe specs must use real assertions and generated/m
 ## Acceptance Mapping
 
 - REQ-001 to REQ-005 are currently covered by focused comparison specs and source changes.
-- REQ-006 is designed and planned; implementation depends on the structural comparison increment.
-- REQ-007 and REQ-008 are partially implemented by backend probe evidence summaries and strict backend probe specs; timing/size evidence remains in the NFR scope.
+- REQ-006 is partially implemented by `src/app/wm_compare/structural_layout_report.spl`, covered by `test/system/wm_compare/structural_layout_report_spec.spl`, and wired into famous-site corpus layout-report mismatch evidence.
+- REQ-007 and REQ-008 are implemented by backend probe evidence summaries, strict backend probe specs, backend measurement records, and the current-host backend measurement matrix report. Metal, Vulkan, and CUDA are explicitly unavailable on this host; CPU SIMD has initialized measurement evidence.
 - REQ-009 and REQ-010 are verified by focused regression and layout gates.

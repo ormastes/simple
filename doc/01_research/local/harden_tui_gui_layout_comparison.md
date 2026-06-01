@@ -331,3 +331,83 @@ The repo already has enough capture, comparison, backend, and system-test scaffo
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 17 tests, 0 failures; runner duration 8535ms.
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter --clean`: 1 file, 9 tests, 0 failures; runner duration 2120ms.
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/site_corpus_pair_spec.spl --mode=interpreter --clean`: 1 file, 1 test, 0 failures; runner duration 3854ms.
+
+## Structural Layout Report Implementation: 2026-06-01
+
+- Added `src/app/wm_compare/structural_layout_report.spl` with:
+  - `StructuralLayoutReport` status, mismatch count, source counts, backend evidence, and pixel artifact link fields.
+  - line-structure comparison for TUI/GUI or Chrome/Simple structural sources.
+  - deterministic TUI cell-grid SDN output.
+- Wired the shared report into `src/app/wm_compare/site_corpus_layout_report.spl` through `build_site_corpus_structural_layout_report(...)`, and attached that report to the first mismatch block in the famous-site corpus layout report.
+- Added `test/system/wm_compare/structural_layout_report_spec.spl` with 5 scenarios covering matching structure, geometry mismatch, invalid viewport failure, TUI cell geometry, and focused famous-site layout-report attachment.
+- Restored `doc/06_spec/system/wm_compare/structural_layout_report_spec.md` manually after automatic docgen missed the fifth scenario and, before the later docgen fix, reported unrelated `unknown extern function: shell` from the docgen path.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/app/wm_compare/site_corpus_layout_report.spl test/system/wm_compare/structural_layout_report_spec.spl test/system/wm_compare/famous_site_corpus_spec.spl`: passed.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/structural_layout_report_spec.spl --mode=interpreter --clean`: 1 file, 5 tests, 0 failures; runner duration 4357ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over structural layout source/spec/manual artifacts found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+- Broader verification caveat:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --clean` timed out after 120 seconds. This is recorded as `doc/08_tracking/bug/famous_site_corpus_full_spec_timeout_2026-06-01.md`.
+
+## Backend Measurement Evidence Contract: 2026-06-01
+
+- Added `src/app/wm_compare/backend_measurement_report.spl` with:
+  - `BackendMeasurementRecord` fields for requested/selected backend, status, command, host, warmup/sample counts, p50/p95, max RSS, binary-size fields, render/readback scope, scalar baseline comparison, fallback flag, and unavailable reason.
+  - initialized-lane validation that rejects missing timings, missing RSS/size fields, missing scalar baseline comparison, and fallback evidence for accelerated lanes.
+  - unavailable/failed-lane validation that accepts explicit unavailable reasons without hiding behind fallback success.
+  - matrix validation requiring Metal, Vulkan, CUDA, and CPU SIMD evidence lanes.
+- Added `test/system/wm_compare/backend_measurement_report_spec.spl` with 5 scenarios covering initialized lane evidence, scalar-baseline rejection, unavailable Metal evidence, fallback rejection for Vulkan, and required matrix statuses.
+- Added `doc/06_spec/system/wm_compare/backend_measurement_report_spec.md` as the manual scenario doc.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/app/wm_compare/backend_measurement_report.spl test/system/wm_compare/backend_measurement_report_spec.spl`: passed.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/backend_measurement_report_spec.spl --mode=interpreter --clean`: 1 file, 5 tests, 0 failures; runner duration 1346ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over backend measurement source/spec/manual artifacts found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+- Historical verification caveat:
+  - Before the later docgen fix, test execution still reported the unrelated `spipe-docgen` `unknown extern function: shell` issue after the executable spec passed.
+
+## Host Backend Measurement Capture: 2026-06-01
+
+- Added `src/app/wm_compare/backend_measurement_capture.spl` with:
+  - `/usr/bin/time` output parsing for `elapsed_s` and `max_rss_kb`.
+  - nearest-rank p50/p95 conversion to microseconds.
+  - host measurement conversion into `BackendMeasurementRecord`.
+- Added `test/system/wm_compare/backend_measurement_capture_spec.spl` with 2 scenarios covering the actual sample format and conversion into valid CPU SIMD measurement evidence.
+- Added `doc/06_spec/system/wm_compare/backend_measurement_capture_spec.md` as the manual scenario doc.
+- Recorded real host evidence in `doc/09_report/harden_tui_gui_layout_backend_measurement_2026-06-01.md` from:
+  - command: `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/backend_measurement_report_spec.spl --mode=interpreter --clean`
+  - samples: 37.71s / 929,240 KiB, 38.58s / 930,308 KiB, 38.89s / 930,160 KiB.
+  - parsed p50: 38,580,000 us.
+  - parsed p95: 38,890,000 us.
+  - max RSS: 930,308 KiB.
+  - active debug Simple binary size: 454,623,792 bytes.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/app/wm_compare/backend_measurement_capture.spl test/system/wm_compare/backend_measurement_capture_spec.spl`: passed.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/backend_measurement_capture_spec.spl --mode=interpreter --clean`: 1 file, 2 tests, 0 failures; runner duration 893ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/backend_measurement_report_spec.spl --mode=interpreter --clean`: 1 file, 5 tests, 0 failures; runner duration 1395ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over backend measurement capture/report source/spec/manual/report artifacts found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+
+## Current-Host Backend Matrix: 2026-06-01
+
+- Extended `src/app/wm_compare/backend_measurement_capture.spl` with `current_host_backend_measurement_matrix(...)`, which combines strict backend probes for Metal, Vulkan, and CUDA with the measured CPU SIMD host lane.
+- Extended `test/system/wm_compare/backend_measurement_capture_spec.spl` to 3 scenarios so the current-host matrix is executable evidence, not only prose.
+- Updated `doc/09_report/harden_tui_gui_layout_backend_measurement_2026-06-01.md` with the matrix:
+  - Metal: unavailable.
+  - Vulkan: unavailable.
+  - CUDA: unavailable.
+  - CPU SIMD: initialized with the recorded p50/p95/RSS/binary-size measurements.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/app/wm_compare/backend_measurement_capture.spl test/system/wm_compare/backend_measurement_capture_spec.spl`: passed.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/backend_measurement_capture_spec.spl --mode=interpreter --clean`: 1 file, 3 tests, 0 failures; runner duration 1586ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over backend measurement capture artifacts and host report found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+
+## SPipe Docgen Restricted-Context Fix: 2026-06-01
+
+- Root cause: `src/app/spipe_docgen/spipe_docgen/generator.spl` computed the metadata date through `app.io.shell_output_trimmed("date -u +%Y-%m-%d", ...)`, which pulled the `shell` extern into restricted interpreter documentation paths after otherwise passing specs.
+- Fix: `get_current_date()` now returns the deterministic run date in-process, removing the shell import from doc generation.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/app/spipe_docgen/spipe_docgen/generator.spl`: passed.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple spipe-docgen test/system/wm_compare/backend_measurement_capture_spec.spl --output doc/06_spec`: succeeded and generated the 3-scenario manual.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/backend_measurement_capture_spec.spl --mode=interpreter`: 1 file, 3 tests, 0 failures; no post-test `unknown extern function: shell` failure.

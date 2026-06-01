@@ -29,4 +29,7 @@ NFR-010: The verification report for this feature must state which backend lanes
 
 - Correctness gates currently pass for backend screenshot comparison, HTML compatibility comparison, emulated capture, famous-site corpus pair comparison, and strict backend probe coverage.
 - Backend status evidence exists for Metal, Vulkan, CUDA, and CPU SIMD lanes.
-- Full timing, RSS, binary-size delta, and initialized accelerated-lane correctness evidence remains to be implemented before final verify can claim NFR-005 through NFR-010 complete.
+- Backend-qualified measurement validation now exists in `src/app/wm_compare/backend_measurement_report.spl` and `test/system/wm_compare/backend_measurement_report_spec.spl`.
+- Host measurement capture now exists in `src/app/wm_compare/backend_measurement_capture.spl` and `test/system/wm_compare/backend_measurement_capture_spec.spl`.
+- A representative local CPU SIMD/backend-measurement evidence run is recorded in `doc/09_report/harden_tui_gui_layout_backend_measurement_2026-06-01.md` with 3 samples, p50 38,580,000 us, p95 38,890,000 us, max RSS 930,308 KiB, and debug Simple binary size 454,623,792 bytes.
+- The same report now includes a current-host backend matrix: Metal unavailable, Vulkan unavailable, CUDA unavailable, CPU SIMD initialized. It does not claim Metal, Vulkan, or CUDA acceleration on this host.

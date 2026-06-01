@@ -44,11 +44,11 @@
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir.*
-use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
-use compiler.mir_opt.mod.{MirPass}
-use compiler.mir_opt.mir_opt.loop_detect.{EdgePair, LoopInfo, LoopDetector}
-use compiler.mir_opt.mir_opt.loop_licm.{LoopInvariantMotion}
-use compiler.mir_opt.mir_opt.loop_strength.{StrengthReduction}
+use compiler.mir.mir_instructions (MirModule, MirFunction, MirBlock)
+use compiler.mir_opt.mod (MirPass)
+use compiler.mir_opt.mir_opt.loop_detect (EdgePair, LoopInfo, LoopDetector)
+use compiler.mir_opt.mir_opt.loop_licm (LoopInvariantMotion)
+use compiler.mir_opt.mir_opt.loop_strength (StrengthReduction)
 
 # ============================================================================
 # Loop Unrolling
@@ -93,23 +93,23 @@ impl LoopUnroller:
         # For each loop, try to unroll if beneficial
         var optimized_blocks = func.blocks
 
-        for loop in self.detector.loops:
-            val iter_count = loop.iteration_count()
+        for loop_info in self.detector.loops:
+            val iter_count = loop_info.iteration_count()
             if iter_count.?:
                 val count = iter_count.unwrap()
                 if count <= self.unroll_threshold:
-                    optimized_blocks = self.unroll_loop(optimized_blocks, loop, count)
+                    optimized_blocks = self.unroll_loop(optimized_blocks, loop_info, count)
                     self.unrolled_count = self.unrolled_count + 1
                 elif count <= 64 and count % 4 == 0:
-                    optimized_blocks = self.partial_unroll_loop(optimized_blocks, loop, 4)
+                    optimized_blocks = self.partial_unroll_loop(optimized_blocks, loop_info, 4)
                     self.unrolled_count = self.unrolled_count + 1
                 elif count <= 64 and count % 2 == 0:
-                    optimized_blocks = self.partial_unroll_loop(optimized_blocks, loop, 2)
+                    optimized_blocks = self.partial_unroll_loop(optimized_blocks, loop_info, 2)
                     self.unrolled_count = self.unrolled_count + 1
 
         MirFunction(..func, blocks: optimized_blocks)
 
-    me unroll_loop(blocks: [MirBlock], loop: LoopInfo, count: i64) -> [MirBlock]:
+    me unroll_loop(blocks: [MirBlock], loop_info: LoopInfo, count: i64) -> [MirBlock]:
         """Unroll loop by duplicating body instructions count times.
 
         Strategy: Replace loop body with count copies of the body instructions
@@ -118,15 +118,15 @@ impl LoopUnroller:
         """
         # Pre-compute loop block membership set for O(1) lookup
         var loop_block_set = {}
-        loop_block_set[loop.header.id] = true
-        for bid in loop.body:
+        loop_block_set[loop_info.header.id] = true
+        for bid in loop_info.body:
             loop_block_set[bid.id] = true
 
         # Collect body instructions from all loop body blocks
         var body_insts: [MirInst] = []
         for block in blocks:
             if loop_block_set.has(block.id.id):
-                if block.id.id != loop.header.id:
+                if block.id.id != loop_info.header.id:
                     for inst in block.instructions:
                         body_insts = body_insts.push(inst)
 
@@ -143,7 +143,7 @@ impl LoopUnroller:
         # Remove backedge (loop body blocks become empty)
         var new_blocks: [MirBlock] = []
         for block in blocks:
-            if block.id.id == loop.header.id:
+            if block.id.id == loop_info.header.id:
                 # Header gets original instructions + unrolled body
                 var combined: [MirInst] = []
                 for inst in block.instructions:
@@ -165,21 +165,21 @@ impl LoopUnroller:
 
         new_blocks
 
-    me partial_unroll_loop(blocks: [MirBlock], loop: LoopInfo, factor: i64) -> [MirBlock]:
+    me partial_unroll_loop(blocks: [MirBlock], loop_info: LoopInfo, factor: i64) -> [MirBlock]:
         """Partially unroll loop by duplicating body instructions factor times.
 
         The loop remains but each iteration executes factor copies of the body,
         reducing branch overhead by factor. Trip count must be divisible by factor.
         """
         var loop_block_set = {}
-        loop_block_set[loop.header.id] = true
-        for bid in loop.body:
+        loop_block_set[loop_info.header.id] = true
+        for bid in loop_info.body:
             loop_block_set[bid.id] = true
 
         var body_insts: [MirInst] = []
         for block in blocks:
             if loop_block_set.has(block.id.id):
-                if block.id.id != loop.header.id:
+                if block.id.id != loop_info.header.id:
                     for inst in block.instructions:
                         body_insts = body_insts.push(inst)
 
@@ -193,7 +193,7 @@ impl LoopUnroller:
 
         var new_blocks: [MirBlock] = []
         for block in blocks:
-            if loop_block_set.has(block.id.id) and block.id.id != loop.header.id:
+            if loop_block_set.has(block.id.id) and block.id.id != loop_info.header.id:
                 new_blocks = new_blocks.push(MirBlock(
                     id: block.id, label: block.label,
                     instructions: expanded, terminator: block.terminator

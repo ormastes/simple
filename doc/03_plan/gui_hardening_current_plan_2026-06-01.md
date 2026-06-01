@@ -61,6 +61,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - Generic Simple Web layout evidence covers colored CSS surfaces, selector and
   inline precedence, descendant scope, and child-scope behavior, but not full
   Chromium DOM/CSS/text parity.
+- CommonJS/Node runtime evidence now covers `process.nextTick` scheduling
+  through the runtime drain path. The callback path uses the same JS callback
+  invoker as promise microtasks, so queued callbacks can mutate runtime globals
+  instead of being counted without observable execution.
 - HTML compatibility reports now expose exact-pixel policy as structured SDN:
   `exact_required: true`, `perceptual_diagnostic_only: true`, and
   `tolerance_acceptance_allowed: false`. Perceptual percentages remain
@@ -152,6 +156,14 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `GUI_DYNLIB_PERF ... call_source=direct_simple ... pass=false
   error=missing-artifact-path`, proving fallback measurements cannot satisfy the
   release gate.
+- `src/lib/nogc_sync_mut/js/engine/interpreter_async.spl`,
+  `test/feature/js/node_process_next_tick_spec.spl`, and
+  `doc/06_spec/feature/js/node_process_next_tick_spec.md`: focused Node
+  event-loop evidence proving `process.nextTick` and
+  `require('process').nextTick` callbacks run on `drain_due_timers(0)` and
+  mutate runtime globals. The focused spec passes `2/2`; the broader
+  `node_api_conformance_spec.spl` still has an unrelated residual
+  `152 passed / 1 failed` gap.
 - `doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md`:
   current Engine2D Node/Bun/Electron budgeted exact-bitmap matrix including
   settings-inspector-tree.
@@ -334,3 +346,96 @@ The probe emitted a machine-readable fail-closed row with `pass=false` and
 `error=missing-artifact-path` because no real SMF/dynlib artifact was provided.
 The generated manuals exist under `doc/06_spec/unit/...`, and the doc layout
 guard returned `0`.
+
+Structural layout diagnostics continuation check:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/site_corpus_layout_report.spl src/app/wm_compare/structural_layout_report.spl test/system/wm_compare/structural_layout_report_spec.spl test/system/wm_compare/famous_site_corpus_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/structural_layout_report_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/system/wm_compare/structural_layout_report_spec.spl`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The structural diagnostics check passed compilation, the focused structural spec
+passed `5/5`, and the famous-site corpus spec passed `37/37` with the new
+structural report assertions. `doc/06_spec/system/wm_compare/structural_layout_report_spec.md`
+is maintained manually for this slice because `spipe-docgen` is currently
+blocked by the unrelated `unknown extern function: shell` semantic error. The
+doc layout guard returned `0`.
+
+Shared TUI/GUI structural and WM text-access continuation check:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/structural_layout_report.spl src/app/wm_compare/site_corpus_layout_report.spl src/lib/common/ui/win_text_access.spl test/system/wm_compare/structural_layout_report_spec.spl test/system/app/wm_text_access_mcp/feature/wm_text_access_mcp_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/structural_layout_report_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/app/wm_text_access_mcp/feature/wm_text_access_mcp_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The shared structural and WM text-access check passed compilation. The focused
+structural layout report spec passed `5/5`, the WM text-access MCP spec passed
+`10/10`, and the doc layout guard returned `0`. The placeholder scan over the
+touched executable artifacts found no live placeholder pass markers; matches
+were limited to historical state/plan prose.
+
+Backend-qualified measurement continuation check:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/backend_measurement_report.spl test/system/wm_compare/backend_measurement_report_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/backend_measurement_report_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/system/wm_compare/backend_measurement_report_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The backend measurement source/spec check passed and the executable spec passed
+`5/5`, proving the selected NFR C record contract for initialized accelerated
+lanes, explicit unavailable reasons, fallback rejection, and the Metal/Vulkan/
+CUDA/CPU SIMD matrix. The mirrored scenario manual already documents the same
+contract. `spipe-docgen` remains blocked by the unrelated
+`unknown extern function: shell` semantic error, and the doc layout guard
+returned `0`.
+
+GitHub sync checkpoint and backend measurement capture continuation:
+
+- `jj git fetch`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/backend_measurement_capture.spl src/app/wm_compare/backend_measurement_report.spl test/system/wm_compare/backend_measurement_capture_spec.spl test/system/wm_compare/backend_measurement_report_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/backend_measurement_capture_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/backend_measurement_report_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The GitHub fetch checkpoint reported `Nothing changed`; no rebase or push was
+attempted because the repository is still detached with dirty jj working-copy
+changes. Backend measurement capture/report typechecked together, the capture
+spec passed `3/3`, the report spec passed `5/5`, the capture manual lists 3
+active scenarios, and the doc layout guard returned `0`.
+
+SMF/dynlib release-lane continuation check:
+
+- `jj git fetch`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/gui_perf/smf_dynlib_artifact.spl src/app/gui_perf/smf_wrap_host_dynlib.spl src/app/gui_perf/smf_dynlib_probe_core.spl test/unit/app/gui_perf/smf_dynlib_artifact_spec.spl test/unit/app/gui_perf/smf_dynlib_probe_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/gui_perf/smf_dynlib_artifact_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/gui_perf/smf_dynlib_probe_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The GitHub fetch checkpoint again reported `Nothing changed`. The SMF/dynlib
+artifact and probe files typechecked, `smf_dynlib_artifact_spec` passed `3/3`,
+and `smf_dynlib_probe_spec` passed `9/9`. The mirrored manuals exist under
+`doc/06_spec/unit/app/gui_perf/`. The host dynlib evidence report proves the
+pure GUI hot symbol is callable through a real host dynlib at `p50_us=17` and
+`p95_us=19`, while still rejecting that sample as `not-smf-dynlib`; this keeps
+SMF acceptance separate from host-dynlib diagnostics. Placeholder scan matches
+were legitimate SMF `stub` terminology, not placeholder pass markers. The doc
+layout guard returned `0`.
+
+Production Chrome parity refresh:
+
+- `jj git fetch`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple run src/app/wm_compare/site_corpus_compat.spl --only=site_0_google --production-renderer --continue-on-fail --simple-timeout-ms=60000`
+- `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/site_corpus_compat.spl test/system/wm_compare/famous_site_corpus_spec.spl tools/electron-shell/verify_famous_site_production_probe.js`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The GitHub fetch checkpoint reported `Nothing changed`. The focused production
+report was regenerated and the verifier passed with `differentPixels=2717`,
+`computedDifferentPixels=2717`, `reportFresh=true`, `layoutTextMatch=true`,
+`hasTextLineInkDelta=true`, and `textLineInkDeltaCount=4`. The famous-site
+system spec passed `37/37`, and the doc layout guard returned `0`. This is
+current evidence for the Chrome text/font/compositing blocker; the blocker
+remains open because the production renderer is still divergent rather than
+Chrome-exact.

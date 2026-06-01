@@ -2,6 +2,8 @@ use std.spec
 use compiler.frontend.core.aop.{InstructionInfo, MirBlockInfo, JoinPointKind, weave_function}
 use compiler.frontend.core.aop_log_policy.{AopLogInstrumentationConfig, aop_log_join_kind, aop_log_should_weave, aop_log_pointcut_for_kind, aop_log_should_instrument_function_call, aop_log_should_instrument_variable_assignment, aop_log_weaving_config, aop_log_with_compile_level, aop_log_with_runtime_level}
 
+extern fn rt_file_read_text(path: text) -> text
+
 describe "AOP Log Policy":
     it "classifies hardware joins for audit logging":
         val kind = aop_log_join_kind("lib.hardware.uart", "write_register", [], [])
@@ -70,3 +72,12 @@ describe "AOP Log Policy":
         expect(result.advice_calls[0].join_point_kind).to_equal(JoinPointKind.VariableAssignment)
         expect(result.advice_calls[0].block_id).to_equal(1)
         expect(result.advice_calls[0].instruction_index).to_equal(4)
+
+    it "wires global log rules before the no-advice skip":
+        val driver = rt_file_read_text("src/compiler/80.driver/driver_pipeline.spl") ?? ""
+        val log_rules_idx = driver.find("val log_rules = aop_log_weaving_rules(log_config)")
+        val skip_idx = driver.find("no advice declarations or enabled log instrumentation found")
+        expect(log_rules_idx.?).to_equal(true)
+        expect(skip_idx.?).to_equal(true)
+        expect(skip_idx.unwrap() > log_rules_idx.unwrap()).to_equal(true)
+        expect(driver.contains("all_advices.len() == 0")).to_equal(false)

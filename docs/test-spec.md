@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-01 10:12:42*
+*Generated: 2026-06-01 12:05:37*
 
-## test/unit/app/office
+## test/feature/js
 
-❌ **office_suite_spec.spl** (827ms)
-  - Source: `test/unit/app/office/office_suite_spec.spl`
-  - Generated doc: `spec/office_suite_spec.md`
+❌ **node_api_conformance_spec.spl** (1173ms)
+  - Source: `test/feature/js/node_api_conformance_spec.spl`
+  - Generated doc: `spec/node_api_conformance_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 0 ✅
-- **Failed:** 1 ❌
-- **Duration:** 832ms
+- **Passed:** 150 ✅
+- **Failed:** 3 ❌
+- **Duration:** 1184ms

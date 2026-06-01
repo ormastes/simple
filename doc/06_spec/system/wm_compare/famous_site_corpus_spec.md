@@ -709,7 +709,7 @@ expect(result.0).to_contain("\"expansionCandidates\"")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -724,6 +724,9 @@ expect(report).to_contain("layout_width: 122")
 expect(report).to_contain("first_mismatch: \"site_0_google\"")
 expect(report).to_contain("missing_simple_line: \"compatibility fixture\"")
 expect(report).to_contain("first_mismatch_widths:")
+expect(report).to_contain("structural_layout_report")
+expect(report).to_contain("source_a: \"chrome_metrics\"")
+expect(report).to_contain("source_b: \"simple_layout\"")
 ```
 
 </details>

@@ -189,16 +189,26 @@ impl Lowerer {
         match &target.kind {
             HirExprKind::FieldAccess { field_index, .. } => {
                 let field_name = format!("field_{}", field_index);
+                let context = self
+                    .current_function_name
+                    .as_ref()
+                    .map(|name| format!("mutation requires `mut` capability on the receiver while lowering {name}"))
+                    .unwrap_or_else(|| "mutation requires `mut` capability on the receiver".to_string());
                 self.memory_warnings.warn(
                     MemoryWarning::new(MemoryWarningCode::W1006, span)
                         .with_name(&field_name)
-                        .with_context("mutation requires `mut` capability on the receiver"),
+                        .with_context(&context),
                 );
             }
             HirExprKind::Index { .. } => {
+                let context = self
+                    .current_function_name
+                    .as_ref()
+                    .map(|name| format!("mutation requires `mut` capability while lowering {name}"))
+                    .unwrap_or_else(|| "mutation requires `mut` capability".to_string());
                 self.memory_warnings.warn(
                     MemoryWarning::new(MemoryWarningCode::W1006, span)
-                        .with_context("mutation requires `mut` capability"),
+                        .with_context(&context),
                 );
             }
             // MethodCall as lvalue is a property setter (field access fallback) - skip warning

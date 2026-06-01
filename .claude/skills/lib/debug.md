@@ -5,6 +5,10 @@
 ```bash
 SIMPLE_LOG=debug bin/simple file.spl                # Debug logging
 SIMPLE_LOG=interpreter=trace bin/simple file.spl    # Module-specific
+SIMPLE_AOP_LOG_CALLS=1 bin/simple compile file.spl   # AOP function-call traces
+SIMPLE_AOP_LOG_ASSIGNMENTS=1 bin/simple compile file.spl  # AOP assignment traces
+SIMPLE_AOP_COMPILE_LOG_LEVEL=trace \
+SIMPLE_AOP_RUNTIME_LOG_LEVEL=warn bin/simple compile file.spl
 bin/simple --gc-log file.spl                        # GC output
 bin/simple --emit-ast=ast.json file.spl             # AST dump
 bin/simple --emit-hir=hir.json file.spl             # HIR (type-checked)
@@ -17,6 +21,11 @@ Use compiler AOP logging for temporary function-call and variable-assignment
 debug traces instead of editing source with ad hoc debug log calls. Enable only
 the join points needed for the investigation, and set compile-time and runtime
 log levels separately when the scenario needs different filtering.
+
+Compile-time logging defaults to `debug`. Set `SIMPLE_AOP_COMPILE_LOG_LEVEL=off`
+to keep compiler AOP debug instrumentation disabled even when a join-point flag
+is set. Runtime log level is independent and controls the generated log call's
+intended runtime filtering.
 
 Manual `log()` calls are still appropriate for state that AOP cannot observe
 cleanly, such as cross-process context, external protocol frames, hardware

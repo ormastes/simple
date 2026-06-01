@@ -559,6 +559,28 @@ riscv64-unknown-elf-ld prog.o -o prog.elf -Ttext=0x80000000
 
 ---
 
+## Log Policy
+
+Bare-metal logging policy is explicit and does not depend on hosted runtime
+services. Use `src/os/baremetal/profile/log_policy.spl` for board or generated
+code that needs separate compile-time and runtime log levels.
+
+Defaults:
+
+- Compile-time log level: `debug`
+- Runtime log level: `info`
+- AOP function-call logging: off
+- AOP variable-assignment logging: off
+
+`BaremetalLogPolicy.with_aop(function_calls, variable_assignments)` enables
+function-call and variable-assignment AOP logging independently. Setting the
+compile-time level to `off` suppresses AOP debug instrumentation even when those
+switches are enabled.
+
+See also: `doc/07_guide/tooling/logging.md`.
+
+---
+
 ## Troubleshooting
 
 | Issue | Cause | Fix |

@@ -105,3 +105,9 @@ Add measurement records with:
 - artifact size deltas.
 
 Measurement records must be backend-qualified. A software fallback measurement can be useful baseline evidence, but it must not satisfy a Metal, Vulkan, CUDA, or CPU SIMD lane.
+
+`BackendMeasurementRecord` implements this selected contract for `wm_compare`. Initialized accelerated records require command, host, warmup/sample counts, p50/p95, max RSS, binary-size fields, render/readback scope, and scalar baseline comparison. Unavailable or failed backend records are valid host evidence only when they carry an explicit reason and do not masquerade as fallback success.
+
+`HostCommandMeasurement` parses repeated `/usr/bin/time` evidence into the measurement record fields. The first host evidence artifact records the focused backend measurement spec on Linux with p50/p95 timing, max RSS, and active Simple binary size.
+
+`current_host_backend_measurement_matrix` combines strict backend probes with host measurement samples. It emits explicit unavailable GPU records for this Linux host and initialized CPU SIMD timing evidence without using CPU fallback to satisfy Metal, Vulkan, or CUDA lanes.

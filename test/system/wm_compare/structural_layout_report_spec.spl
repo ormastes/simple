@@ -1,0 +1,71 @@
+# @tag: sys, wm_compare, layout, comparison
+
+use std.spec.{describe, it, expect}
+use app.wm_compare.structural_layout_report.{
+    structural_layout_compare,
+    structural_layout_report_sdn,
+    tui_cell_grid_sdn}
+use app.wm_compare.site_corpus_layout_report.{
+    build_site_corpus_structural_layout_report}
+use app.wm_compare.site_corpus.{
+    build_famous_site_sample_corpus,
+    famous_site_sample_chrome_metrics_path}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "wm_compare structural layout reports":
+
+    it "reports matching TUI and GUI line structure before pixel comparison":
+        val tui_lines = ["File Edit", "Status OK"]
+        val gui_lines = ["File Edit", "Status OK"]
+        val report = structural_layout_compare(
+            "tui", "gui", 80, 24,
+            tui_lines, gui_lines,
+            "runtime_evidence selected=cpu_simd_x86;status=Initialized",
+            "test/baselines/wm_compare/probe/diff.ppm"
+        )
+        expect(report.status).to_equal("layout_match")
+        expect(report.mismatch_count).to_equal(0)
+        val sdn = structural_layout_report_sdn(report, tui_lines, gui_lines)
+        expect(sdn).to_contain("structural_layout_report")
+        expect(sdn).to_contain("backend_evidence")
+        expect(sdn).to_contain("pixel_link")
+
+    it "separates geometry mismatch from capture or pixel failure":
+        val report = structural_layout_compare(
+            "tui", "gui", 80, 24,
+            ["Toolbar", "Body"],
+            ["Toolbar", "Body shifted"],
+            "runtime_evidence selected=vulkan;status=Unavailable",
+            ""
+        )
+        expect(report.status).to_equal("layout_mismatch")
+        expect(report.mismatch_count).to_equal(1)
+        val sdn = structural_layout_report_sdn(report, ["Toolbar", "Body"], ["Toolbar", "Body shifted"])
+        expect(sdn).to_contain("layout_mismatch")
+        expect(sdn).to_contain("Body shifted")
+        expect(sdn).to_contain("status=Unavailable")
+
+    it "fails closed for invalid structural viewport dimensions":
+        val report = structural_layout_compare(
+            "tui", "gui", 0, 24,
+            [], [], "", ""
+        )
+        expect(report.status).to_equal("invalid_viewport")
+        expect(report.mismatch_count).to_equal(1)
+
+    it "exports TUI rows as stable cell geometry":
+        val rows = ["AB", "C"]
+        val cells_sdn = tui_cell_grid_sdn("tui", rows, 8, 16)
+        expect(cells_sdn).to_contain("tui_cell_grid")
+        expect(cells_sdn).to_contain("count: 3")
+        expect(cells_sdn).to_contain("row: 0 col: 1 x: 8 y: 0")
+        expect(cells_sdn).to_contain("row: 1 col: 0 x: 0 y: 16")
+
+    it "attaches structural evidence to famous-site layout mismatches":
+        val sample = build_famous_site_sample_corpus()[0]
+        val metrics = rt_file_read_text(famous_site_sample_chrome_metrics_path(sample.id))
+        val report = build_site_corpus_structural_layout_report(sample, metrics, 132)
+        expect(report).to_contain("structural_layout_report")
+        expect(report).to_contain("source_a: \"chrome_metrics\"")
+        expect(report).to_contain("source_b: \"simple_layout\"")

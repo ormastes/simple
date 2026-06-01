@@ -32,18 +32,18 @@ use compiler.mir_opt.mir_opt.auto_vectorize.*
 #   auto_vectorize_cost.spl     - Phase 3: cost model + decision
 #   auto_vectorize_codegen.spl  - Phase 4: vector code generation
 
-use compiler.mir.mir_data.{MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId}
-use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
-use compiler.backend.feature_caps.{x86_caps_from_target, preferred_lane_count_x86}
-use compiler.frontend.parser_types.{Attribute}
+use compiler.mir.mir_data (MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId)
+use compiler.mir.mir_instructions (MirModule, MirFunction, MirBlock)
+use compiler.backend.feature_caps (x86_caps_from_target, preferred_lane_count_x86)
+use compiler.frontend.parser_types (Attribute)
 
 # Shared types (cycle-free base module)
-use compiler.mir_opt.auto_vectorize_types.{LoopInfo, ArrayAccess}
+use compiler.mir_opt.auto_vectorize_types (LoopInfo, ArrayAccess)
 # Re-import from sub-modules for coordinator use and re-export
-use compiler.mir_opt.auto_vectorize_analysis.{DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses, get_operand_local, detect_loop_bounds_only}
-use compiler.mir_opt.auto_vectorize_validate.{VectorizabilityResult, check_vectorizability, get_vectorizable_type}
-use compiler.mir_opt.auto_vectorize_cost.{CostEstimate, estimate_vectorization_cost, should_vectorize_loop}
-use compiler.mir_opt.auto_vectorize_codegen.{VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block}
+use compiler.mir_opt.auto_vectorize_analysis (DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses, get_operand_local, detect_loop_bounds_only)
+use compiler.mir_opt.auto_vectorize_validate (VectorizabilityResult, check_vectorizability, get_vectorizable_type)
+use compiler.mir_opt.auto_vectorize_cost (CostEstimate, estimate_vectorization_cost, should_vectorize_loop)
+use compiler.mir_opt.auto_vectorize_codegen (VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block)
 
 # ============================================================================
 # Main Auto-Vectorization Pass
@@ -84,35 +84,35 @@ fn try_vectorize_function(func: MirFunction) -> MirFunction:
     var modified = false
     var new_blocks = func.blocks
 
-    for loop in loops:
+    for loop_info in loops:
         # Get loop body blocks
-        val body_blocks = get_loop_body_blocks(func, loop)
+        val body_blocks = get_loop_body_blocks(func, loop_info)
 
         # Phase 1: Dependency analysis
-        val dep_result = analyze_loop_dependencies(loop, body_blocks)
+        val dep_result = analyze_loop_dependencies(loop_info, body_blocks)
 
         if not dep_result.vectorizable:
-            pass_do_nothing
+            val dependency_blocks_vectorization = true
         else:
             # Phase 2: Vectorizability validation
-            val vec_result = check_vectorizability(loop, body_blocks, dep_result)
+            val vec_result = check_vectorizability(loop_info, body_blocks, dep_result)
 
             if not vec_result.can_vectorize:
-                pass_do_nothing
+                val validation_blocks_vectorization = true
             else:
                 # Determine element type
                 val elem_type = get_vectorizable_type(body_blocks)
                 if not elem_type.?:
-                    pass_do_nothing
+                    val missing_element_type_blocks_vectorization = true
                 else:
                     val etype = elem_type.unwrap()
 
                     # Phase 3: Cost model
                     val vector_width = get_simd_width(etype)
-                    val cost = estimate_vectorization_cost(loop, body_blocks, vector_width, etype)
+                    val cost = estimate_vectorization_cost(loop_info, body_blocks, vector_width, etype)
 
                     if not cost.profitable:
-                        pass_do_nothing
+                        val cost_blocks_vectorization = true
                     else:
                         # Phase 4: Code generation
                         val ctx = VectorizeContext(
@@ -121,10 +121,10 @@ fn try_vectorize_function(func: MirFunction) -> MirFunction:
                             next_local: func.locals.len()
                         )
 
-                        val vectorized = create_vector_loop(ctx, loop, body_blocks)
+                        val vectorized = create_vector_loop(ctx, loop_info, body_blocks)
 
                         # Replace loop blocks with vectorized version
-                        new_blocks = replace_loop_blocks(new_blocks, loop, vectorized)
+                        new_blocks = replace_loop_blocks(new_blocks, loop_info, vectorized)
                         modified = true
 
     if modified:
@@ -151,7 +151,7 @@ fn identify_loops(func: MirFunction) -> [LoopInfo]:
 
     loops
 
-fn get_loop_body_blocks(func: MirFunction, loop: LoopInfo) -> [MirBlock]:
+fn get_loop_body_blocks(func: MirFunction, loop_info: LoopInfo) -> [MirBlock]:
     """
     Get all blocks that are part of the loop body.
     """
@@ -159,18 +159,18 @@ fn get_loop_body_blocks(func: MirFunction, loop: LoopInfo) -> [MirBlock]:
 
     # Include header block
     for block in func.blocks:
-        if block.id.id == loop.header_block.id:
+        if block.id.id == loop_info.header_block.id:
             body.push(block)
 
     # Include body blocks
-    for body_id in loop.body_blocks:
+    for body_id in loop_info.body_blocks:
         for block in func.blocks:
             if block.id.id == body_id.id:
                 body.push(block)
 
     body
 
-fn replace_loop_blocks(blocks: [MirBlock], loop: LoopInfo, vectorized: VectorizedLoop) -> [MirBlock]:
+fn replace_loop_blocks(blocks: [MirBlock], loop_info: LoopInfo, vectorized: VectorizedLoop) -> [MirBlock]:
     """
     Replace original loop blocks with vectorized version.
     """
@@ -178,7 +178,7 @@ fn replace_loop_blocks(blocks: [MirBlock], loop: LoopInfo, vectorized: Vectorize
 
     # Keep blocks before the loop
     for block in blocks:
-        if block.id.id < loop.header_block.id:
+        if block.id.id < loop_info.header_block.id:
             new_blocks.push(block)
 
     # Add vectorized blocks
@@ -187,8 +187,8 @@ fn replace_loop_blocks(blocks: [MirBlock], loop: LoopInfo, vectorized: Vectorize
     new_blocks = new_blocks + vectorized.epilogue_blocks
 
     # Keep blocks after the loop
-    var max_loop_id = loop.header_block.id
-    for body_id in loop.body_blocks:
+    var max_loop_id = loop_info.header_block.id
+    for body_id in loop_info.body_blocks:
         if body_id.id > max_loop_id:
             max_loop_id = body_id.id
 
