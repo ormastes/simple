@@ -123,3 +123,10 @@ dev-incomplete
   only when the populator succeeds. The FAT32 path lookup now resolves its own
   8.3 aliases for long directory names such as `node-compatible` after image
   reloads. This is still host-side image evidence, not QEMU guest validation.
+- dev: Added VFS-manager AI CLI file grant enforcement. `VfsManager` can now
+  carry an `AiCliManifest` policy and denies ungranted absolute paths,
+  sibling-prefix escapes, and relative paths before routing open/stat/readdir,
+  directory mutation, rename/symlink, preload, and path-based read/write
+  operations. `vfs_spec.spl` covers allowed workspace paths, denied
+  `/home/user/workspace` sibling escape, invalid relative paths, rename target
+  denial, and clearing the manifest back to unrestricted routing.

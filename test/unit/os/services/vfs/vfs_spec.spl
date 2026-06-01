@@ -15,6 +15,7 @@ longest-prefix mount resolution, prefix stripping, and operation routing.
 use std.spec
 use os.services.vfs.vfs.{VfsManager, Filesystem, MountEntry, SeekWhence}
 use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
+use os.ai_cli_js_node_contract.{codex_cli_smoke_manifest}
 
 
 # ============================================================================
@@ -272,3 +273,40 @@ describe "VfsManager":
             val result = vfs.preload_file_pages("/etc/config", 0)
 
             expect(result.is_err()).to_equal(true)
+
+    describe "AI CLI file grants":
+        it "enforces manifest file grants before routing VFS path operations":
+            var vfs = VfsManager.with_ai_cli_manifest(codex_cli_smoke_manifest())
+            val root_fs = MockFs.new("rootfs")
+            vfs.mount("/", "ext4", "/dev/sda1", false, root_fs)
+
+            val flags_read = FileFlags(read: true, write: false, append: false, create: false, truncate: false, directory: false)
+            val flags_write = FileFlags(read: false, write: true, append: false, create: true, truncate: false, directory: false)
+
+            expect(vfs.open("/home/user/work/main.spl", flags_read).is_ok()).to_equal(true)
+            expect(vfs.open("/home/user/work/out.txt", flags_write).is_ok()).to_equal(true)
+            expect(vfs.stat("/home/user/work/main.spl").is_ok()).to_equal(true)
+            expect(vfs.readdir("/home/user/work").is_ok()).to_equal(true)
+            expect(vfs.mkdir("/home/user/work/tmp").is_ok()).to_equal(true)
+            expect(vfs.write_text("/home/user/work/out.txt", "ok").is_ok()).to_equal(true)
+
+            val escaped = vfs.open("/home/user/workspace/secret.txt", flags_read)
+            val relative = vfs.open("relative.txt", flags_read)
+            val renamed = vfs.rename("/home/user/work/main.spl", "/home/user/workspace/main.spl")
+
+            expect(escaped.is_err()).to_equal(true)
+            expect(escaped.unwrap_err()).to_equal("file-grant-denied")
+            expect(relative.is_err()).to_equal(true)
+            expect(relative.unwrap_err()).to_equal("invalid-path")
+            expect(renamed.is_err()).to_equal(true)
+            expect(renamed.unwrap_err()).to_equal("file-grant-denied")
+
+        it "returns to unrestricted VFS routing after clearing an AI CLI manifest":
+            var vfs = VfsManager.with_ai_cli_manifest(codex_cli_smoke_manifest())
+            val root_fs = MockFs.new("rootfs")
+            vfs.mount("/", "ext4", "/dev/sda1", false, root_fs)
+            val flags_read = FileFlags(read: true, write: false, append: false, create: false, truncate: false, directory: false)
+
+            expect(vfs.open("/home/user/workspace/secret.txt", flags_read).is_err()).to_equal(true)
+            vfs.clear_ai_cli_manifest()
+            expect(vfs.open("/home/user/workspace/secret.txt", flags_read).is_ok()).to_equal(true)

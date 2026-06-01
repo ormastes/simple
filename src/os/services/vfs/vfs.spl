@@ -8,6 +8,7 @@
 # from applications and routes to the appropriate filesystem driver.
 
 use os.kernel.types.fs_types.{FileDescriptor, FileFlags, MountPoint, FsNode, FsNodeKind, DirEntry}
+use os.ai_cli_js_node_contract.{AiCliManifest, ai_cli_vfs_file_decision}
 use std.nogc_sync_mut.binary_io.{string_to_bytes, bytes_to_string}
 
 # ============================================================================
@@ -69,10 +70,29 @@ class VfsManager:
     """
     mounts: [VfsMountEntry]
     next_fd: i32
+    ai_cli_manifest: AiCliManifest?
 
 impl VfsManager:
     static fn new() -> VfsManager:
-        VfsManager(mounts: [], next_fd: 3)  # 0=stdin, 1=stdout, 2=stderr
+        VfsManager(mounts: [], next_fd: 3, ai_cli_manifest: nil)  # 0=stdin, 1=stdout, 2=stderr
+
+    static fn with_ai_cli_manifest(manifest: AiCliManifest) -> VfsManager:
+        VfsManager(mounts: [], next_fd: 3, ai_cli_manifest: manifest)
+
+    me set_ai_cli_manifest(manifest: AiCliManifest):
+        self.ai_cli_manifest = manifest
+
+    me clear_ai_cli_manifest():
+        self.ai_cli_manifest = nil
+
+    fn enforce_ai_cli_file_grant(operation: text, path: text) -> Result<bool, text>:
+        if not self.ai_cli_manifest.?:
+            return Result.Ok(true)
+        val manifest = self.ai_cli_manifest
+        val decision = ai_cli_vfs_file_decision(manifest, operation, path)
+        if decision.allowed:
+            return Result.Ok(true)
+        Result.Err(decision.reason)
 
     me mount(path: text, fs_type: text, device: text, read_only: bool, fs: Filesystem) -> Result<bool, text>:
         """Mount a filesystem at the given path."""
@@ -133,6 +153,10 @@ impl VfsManager:
 
     me open(path: text, flags: FileFlags) -> Result<FileDescriptor, text>:
         """Open a file, returning a file descriptor."""
+        val operation = if flags.write or flags.create or flags.append or flags.truncate: "write" else: "read"
+        val grant_result = self.enforce_ai_cli_file_grant(operation, path)
+        if grant_result.is_err():
+            return Result.Err(grant_result.unwrap_err())
         val mount = self.resolve_mount(path)
         if mount.?:
             val entry = mount
@@ -154,6 +178,9 @@ impl VfsManager:
 
     fn stat(path: text) -> Result<FsNode, text>:
         """Get file/directory metadata."""
+        val grant_result = self.enforce_ai_cli_file_grant("stat", path)
+        if grant_result.is_err():
+            return Result.Err(grant_result.unwrap_err())
         val mount = self.resolve_mount(path)
         if mount.?:
             val entry = mount
@@ -163,6 +190,9 @@ impl VfsManager:
 
     fn readdir(path: text) -> Result<[DirEntry], text>:
         """List directory contents."""
+        val grant_result = self.enforce_ai_cli_file_grant("readdir", path)
+        if grant_result.is_err():
+            return Result.Err(grant_result.unwrap_err())
         val mount = self.resolve_mount(path)
         if mount.?:
             val entry = mount
@@ -172,6 +202,9 @@ impl VfsManager:
 
     fn mkdir(path: text) -> Result<bool, text>:
         """Create directory."""
+        val grant_result = self.enforce_ai_cli_file_grant("mkdir", path)
+        if grant_result.is_err():
+            return Result.Err(grant_result.unwrap_err())
         val mount = self.resolve_mount(path)
         if mount.?:
             val entry = mount
@@ -183,6 +216,9 @@ impl VfsManager:
 
     fn rmdir(path: text) -> Result<bool, text>:
         """Remove an empty directory."""
+        val grant_result = self.enforce_ai_cli_file_grant("rmdir", path)
+        if grant_result.is_err():
+            return Result.Err(grant_result.unwrap_err())
         val mount = self.resolve_mount(path)
         if mount.?:
             val entry = mount
@@ -212,6 +248,9 @@ impl VfsManager:
 
     me unlink(path: text) -> Result<bool, text>:
         """Delete a file."""
+        val grant_result = self.enforce_ai_cli_file_grant("unlink", path)
+        if grant_result.is_err():
+            return Result.Err(grant_result.unwrap_err())
         val mount = self.resolve_mount(path)
         if mount.?:
             val entry = mount
@@ -223,6 +262,12 @@ impl VfsManager:
 
     me rename(old_path: text, new_path: text) -> Result<bool, text>:
         """Rename a file or directory."""
+        val old_grant = self.enforce_ai_cli_file_grant("rename", old_path)
+        if old_grant.is_err():
+            return Result.Err(old_grant.unwrap_err())
+        val new_grant = self.enforce_ai_cli_file_grant("rename", new_path)
+        if new_grant.is_err():
+            return Result.Err(new_grant.unwrap_err())
         val mount = self.resolve_mount(old_path)
         if mount.?:
             val entry = mount
@@ -235,6 +280,12 @@ impl VfsManager:
 
     me symlink(target: text, link_path: text) -> Result<bool, text>:
         """Create a symbolic link at link_path pointing to target."""
+        val target_grant = self.enforce_ai_cli_file_grant("symlink", target)
+        if target_grant.is_err():
+            return Result.Err(target_grant.unwrap_err())
+        val link_grant = self.enforce_ai_cli_file_grant("symlink", link_path)
+        if link_grant.is_err():
+            return Result.Err(link_grant.unwrap_err())
         val mount = self.resolve_mount(link_path)
         if mount.?:
             val entry = mount
@@ -269,6 +320,9 @@ impl VfsManager:
 
     me read_text(path: text) -> Result<text, text>:
         """Read entire file contents as text (open → read → close)."""
+        val grant_result = self.enforce_ai_cli_file_grant("read", path)
+        if grant_result.is_err():
+            return Result.Err(grant_result.unwrap_err())
         val maybe_entry = self.resolve_mount(path)
         if not maybe_entry.?:
             return Result.Err("no filesystem mounted for path: {path}")
@@ -300,6 +354,9 @@ impl VfsManager:
         """
         if page_size == 0:
             return Result.Err("page_size must be greater than zero")
+        val grant_result = self.enforce_ai_cli_file_grant("preload", path)
+        if grant_result.is_err():
+            return Result.Err(grant_result.unwrap_err())
         val maybe_entry = self.resolve_mount(path)
         if not maybe_entry.?:
             return Result.Err("no filesystem mounted for path: {path}")
@@ -345,6 +402,9 @@ impl VfsManager:
 
     me write_text(path: text, content: text) -> Result<bool, text>:
         """Write text to a file (open → write → close)."""
+        val grant_result = self.enforce_ai_cli_file_grant("write", path)
+        if grant_result.is_err():
+            return Result.Err(grant_result.unwrap_err())
         val maybe_entry = self.resolve_mount(path)
         if not maybe_entry.?:
             return Result.Err("no filesystem mounted for path: {path}")

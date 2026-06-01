@@ -108,5 +108,8 @@ Mirrored manual: `doc/06_spec/system/os/simpleos_ai_cli_js_node_port_spec.md`
 - Harness image population: `--populate-fat32-image <img>` connects the staged
   AI CLI tree to the host FAT32 populator and fails the harness if the image
   mirror fails.
-- Still pending: guest QEMU runtime smoke and kernel/OS-layer VFS, socket, and
-  process boundary evidence.
+- VFS-manager file grants: `test/unit/os/services/vfs/vfs_spec.spl` now proves
+  `VfsManager` can carry an `AiCliManifest` and deny ungranted paths before
+  VFS path routing.
+- Still pending: guest QEMU runtime smoke plus socket-layer and process syscall
+  boundary evidence.

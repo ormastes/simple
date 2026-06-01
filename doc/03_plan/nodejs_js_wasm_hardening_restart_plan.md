@@ -20,11 +20,11 @@ follow-up goals.
 
 GitHub `origin/main` observed during this checkpoint:
 
-- `4fac6ea1dd feat: add rv32i rvfi trace foundation`
+- `e90554060d test: populate ai cli fat32 image host-side`
 
-Latest pushed JS/WASM hardening commit:
+Latest pushed JS/WASM hardening commit at turn start:
 
-- `68e80d281b test: prove ai cli fat32 staging ingestion`
+- `e90554060d test: populate ai cli fat32 image host-side`
 
 Use clean worktrees from `origin/main` for pushable JS/WASM slices. The main
 workspace may contain unrelated GUI/perf/local changes. Do not revert unrelated
@@ -34,7 +34,7 @@ Current in-flight worktree:
 
 - Path: `/tmp/simple-js-wasm-qemu-audit`
 - Base: clean worktree from `origin/main`; rebase before pushing if remote moved.
-- Slice: host-side AI CLI smoke package FAT32 image population.
+- Slice: Phase 5 VFS-manager file-grant enforcement.
 - Status: implementation and focused verification in progress.
 - Evidence from pushed runtime grant slices: `node_api_conformance_spec.spl`
   passed 149 scenarios, `simpleos_ai_cli_js_node_port_spec.spl` passed 25
@@ -107,12 +107,18 @@ Completed evidence:
 - Phase 6 now has a contract-first QEMU lane harness, host-side smoke package
   staging, a disk-import manifest, and a host FAT32 tree-populator test proving
   staged AI CLI payload bytes can be mirrored into a formatted image.
+- VFS-manager file-grant enforcement now carries an optional `AiCliManifest`
+  policy and denies ungranted paths before VFS path routing. Unit coverage
+  proves allowed workspace access, sibling-prefix denial, invalid relative path
+  denial, denied rename targets, and clearing the manifest.
 
 ## Remaining Goal Plan
 
 1. Phase 5 OS-boundary hardening.
    - Keep the Node-compatible runtime grant work marked complete.
-   - Implement or explicitly split OS VFS-layer `file_grants` enforcement.
+   - VFS-manager `file_grants` enforcement is implemented and covered by
+     `test/unit/os/services/vfs/vfs_spec.spl`; do not broaden this claim to
+     socket/process boundaries.
    - Implement or explicitly split socket-layer `network_grants` enforcement.
    - Implement or explicitly split spawn/exec-layer `process_grants`
      enforcement.
@@ -161,8 +167,13 @@ Completed evidence:
      `webgpu.requestAdapter` host import are covered.
    - Decide whether full WASM-originated WebGPU ABI and hardware/driver-backed
      WebGPU execution belong in this goal or become a named follow-up.
-   - Update `doc/03_plan/sys_test/webgpu_js_wasm_simple.md` with the final
-     decision and evidence.
+   - Clean up `doc/03_plan/sys_test/webgpu_js_wasm_simple.md`: REQ-WGPU-001
+     through REQ-WGPU-005 still list stale "add system spec example" gaps even
+     though the traceability table and system spec show current coverage.
+   - Capture release-grade evidence for
+     `test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl`; the
+     focused fetch/WASM and browser host specs pass, but the full system spec
+     may need a longer runner window or split evidence.
 
 4. Focused verification before any final completion claim.
    - Run the Node conformance spec.
@@ -177,17 +188,23 @@ Completed evidence:
 
 ## Current Next Slice
 
-Start with the Phase 6 provisioning audit. The concrete output should be a small
-docs/test-plan slice that records:
+This turn's active slice is Phase 5 VFS-manager `file_grants` enforcement. The
+slice is complete only after these checks pass and the commit is pushed:
 
-- the exact runtime artifact or bundle path that `ai_cli_qemu_lane` expects;
-- the current source of the `blocked-runtime-artifact` marker;
-- the commands required to build or stage the QuickJS/Node-compatible runtime;
-- the serial markers required to promote a lane to `ready`;
-- the x86_64, RISC-V, and AArch64 QEMU commands or wrappers to run next.
+- `SIMPLE_LIB=<worktree>/src /home/ormastes/dev/pub/simple/bin/simple check src/os/services/vfs/vfs.spl test/unit/os/services/vfs/vfs_spec.spl`
+- `SIMPLE_LIB=<worktree>/src /home/ormastes/dev/pub/simple/bin/simple test test/unit/os/services/vfs/vfs_spec.spl --mode=interpreter --clean`
+- `SIMPLE_LIB=<worktree>/src /home/ormastes/dev/pub/simple/bin/simple test test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter --clean`
+- `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`
+- `git diff --check`
 
-Do not mark Phase 6 complete from host-side package generation alone. It needs
-guest serial evidence.
+Recommended next implementation slice after this commit: process-grant syscall
+enforcement in `src/os/kernel/ipc/syscall_process.spl`, specifically `_handle_exec`,
+`_handle_spawn_binary`, and `dispatch_spawn_binary_direct`, reusing
+`ai_cli_process_spawn_decision`.
+
+Phase 6 provisioning commands remain useful for the separate QEMU runtime slice.
+Do not mark Phase 6 complete from host-side package generation or image
+population alone. It needs guest serial evidence.
 
 Initial harness command:
 

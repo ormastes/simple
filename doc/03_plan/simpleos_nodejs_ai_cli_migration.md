@@ -205,7 +205,7 @@ Build minimal Node.js API compatibility on QuickJS + libuv:
 ### Phase 5: Security Hardening (2 weeks)
 
 Leverage existing `AiCliManifest` capability system:
-- [ ] File access: enforce `file_grants` at VFS layer, deny undeclared paths
+- [x] File access: enforce `file_grants` at VFS manager path-routing layer, deny undeclared paths
 - [ ] Network: enforce `network_grants` at socket layer, allowlist endpoints only
 - [ ] Process: enforce `process_grants`, deny undeclared spawns
 - [x] Credentials: enforce `credential_grants`, block ambient env var reads
@@ -214,6 +214,15 @@ Leverage existing `AiCliManifest` capability system:
 - [x] Add Node.js `--experimental-permission`-style flags to QuickJS launcher contract
 - [x] Test: all denial paths from existing `simpleos_ai_cli_js_node_port_spec.spl` and executable Node API conformance coverage
 - [x] Serial marker: `[ai-cli] hardening:ok app=<tool>`
+
+2026-06-01 VFS file-grant checkpoint: `VfsManager.with_ai_cli_manifest(...)`
+and `set_ai_cli_manifest(...)` enforce `ai_cli_vfs_file_decision` before VFS
+path routing for open/stat/readdir, directory mutation, rename/symlink, preload,
+and path-based read/write helpers. `test/unit/os/services/vfs/vfs_spec.spl`
+proves allowed workspace access, denied sibling-prefix escape, invalid relative
+paths, denied rename targets, and clearing the manifest back to unrestricted
+routing. This is VFS-manager enforcement; socket and process syscall boundary
+items remain open.
 
 ### Phase 6: Full QEMU Validation (1 week)
 
