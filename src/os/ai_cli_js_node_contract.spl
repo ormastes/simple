@@ -53,6 +53,7 @@ struct AiCliRuntimeSmokePackage:
     package_root: text
     manifest_sdn: text
     launcher_source: text
+    entry_source: text
     runtime_stub_source: text
     package_index_sdn: text
     marker_payload: text
@@ -585,9 +586,10 @@ pub fn ai_cli_runtime_smoke_package(manifest: AiCliManifest, lane: AiCliQemuLane
     val marker_payload = ai_cli_marker_payload(manifest, lane)
     val manifest_sdn = _ai_cli_manifest_sdn(manifest, plan)
     val launcher_source = _ai_cli_launcher_source(manifest, lane, plan)
+    val entry_source = _ai_cli_entry_source(manifest, lane)
     val runtime_stub_source = _ai_cli_runtime_stub_source(manifest, lane)
     val package_index_sdn = _ai_cli_package_index_sdn(manifest, lane, plan)
-    val hardening_error = ai_cli_runtime_smoke_package_hardening_error(launcher_source + "\n" + runtime_stub_source)
+    val hardening_error = ai_cli_runtime_smoke_package_hardening_error(launcher_source + "\n" + entry_source + "\n" + runtime_stub_source)
     val ready = hardening_error == "" and ai_cli_manifest_is_valid(manifest)
     val blocker = if ready: "" else: hardening_error
     AiCliRuntimeSmokePackage(
@@ -596,6 +598,7 @@ pub fn ai_cli_runtime_smoke_package(manifest: AiCliManifest, lane: AiCliQemuLane
         package_root: root,
         manifest_sdn: manifest_sdn,
         launcher_source: launcher_source,
+        entry_source: entry_source,
         runtime_stub_source: runtime_stub_source,
         package_index_sdn: package_index_sdn,
         marker_payload: marker_payload,
@@ -604,7 +607,7 @@ pub fn ai_cli_runtime_smoke_package(manifest: AiCliManifest, lane: AiCliQemuLane
     )
 
 pub fn ai_cli_runtime_smoke_package_summary(package: AiCliRuntimeSmokePackage) -> text:
-    "app={package.app_id};target={package.target};root={package.package_root};ready={package.ready};blocker={package.blocker};manifest-bytes={package.manifest_sdn.len()};launcher-bytes={package.launcher_source.len()};runtime-bytes={package.runtime_stub_source.len()};index-bytes={package.package_index_sdn.len()}"
+    "app={package.app_id};target={package.target};root={package.package_root};ready={package.ready};blocker={package.blocker};manifest-bytes={package.manifest_sdn.len()};launcher-bytes={package.launcher_source.len()};entry-bytes={package.entry_source.len()};runtime-bytes={package.runtime_stub_source.len()};index-bytes={package.package_index_sdn.len()}"
 
 pub fn ai_cli_runtime_smoke_packages() -> [AiCliRuntimeSmokePackage]:
     var packages: [AiCliRuntimeSmokePackage] = []
@@ -766,13 +769,24 @@ fn _ai_cli_launcher_source(manifest: AiCliManifest, lane: AiCliQemuLane, plan: A
     "    print \"[ai-cli] hardening:deny app=" + manifest.app_id + " reason=undeclared-capability\"\n" +
     "    print \"[ai-cli] hardening:ok app=" + manifest.app_id + "\"\n"
 
+fn _ai_cli_entry_source(manifest: AiCliManifest, lane: AiCliQemuLane) -> text:
+    "// SimpleOS AI CLI JS smoke entry generated from AiCliManifest.\n" +
+    "globalThis.__simple_ai_cli_smoke = {\n" +
+    "  app: \"" + manifest.app_id + "\",\n" +
+    "  target: \"" + lane.target + "\",\n" +
+    "  runtime: \"" + manifest.runtime_kind + "\",\n" +
+    "  command: \"" + manifest.entry_path + " " + manifest.args.join(" ") + "\",\n" +
+    "  markers: [\"[ai-cli] runtime:start app=" + manifest.app_id + "\", \"[ai-cli] cli-smoke:start app=" + manifest.app_id + "\", \"[ai-cli] hardening:ok app=" + manifest.app_id + "\"]\n" +
+    "};\n" +
+    "console.log(\"[ai-cli-js] smoke app=" + manifest.app_id + " target=" + lane.target + "\");\n"
+
 fn _ai_cli_runtime_stub_source(manifest: AiCliManifest, lane: AiCliQemuLane) -> text:
     "fn main():\n" +
     "    print \"[ai-cli-runtime] simple-js-agent target=" + lane.target + "\"\n" +
     "    print \"[ai-cli-runtime] app=" + manifest.app_id + " runtime=" + manifest.runtime_kind + "\"\n" +
     "    print \"[ai-cli-runtime] node-compat-surface=fs,process,stdio-tty,timers,net,tls,module-resolution,webassembly\"\n" +
     "    print \"[ai-cli-runtime] runtime-artifact=" + manifest.runtime_artifact + "\"\n" +
-    "    print \"[ai-cli-runtime] blocker-report app=" + manifest.app_id + " id=" + AI_CLI_RUNTIME_ARTIFACT_BLOCKER_ID + "\"\n"
+    "    print \"[ai-cli-runtime] blocker-report app=" + manifest.app_id + " id=blocked:no-full-node-v8-libuv-artifact-20260530\"\n"
 
 fn _ai_cli_package_index_sdn(manifest: AiCliManifest, lane: AiCliQemuLane, plan: AiCliProvisioningPlan) -> text:
     "ai_cli_package = {\n" +

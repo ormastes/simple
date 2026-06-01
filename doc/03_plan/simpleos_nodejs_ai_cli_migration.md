@@ -225,6 +225,14 @@ All three architectures, all three tools:
 - [ ] Automated serial capture and marker verification
 - [ ] Update `ai_cli_qemu_lane` runtime_status from "blocked-runtime-artifact" to "ready"
 
+2026-06-01 checkpoint: `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package`
+materializes a host-side FAT32-like staging tree for selected AI CLI smoke
+packages, including `AI_MANIFEST.SDN`, `launch.spl`, `qemu_markers.txt`,
+`<app>.js`, the short package manifest, and
+`sys/runtime/node-compatible/<target>/runtime.smf`. This is not checked off as
+FAT32 disk image provisioning because it has not yet been injected into a booted
+guest image or validated through guest serial markers.
+
 ## Minimum Syscall Surface Required
 
 ```

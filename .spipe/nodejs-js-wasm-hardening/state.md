@@ -85,3 +85,10 @@ dev-incomplete
   mode, and fails default validation until staged runtime artifacts and real
   guest serial logs exist. Fixed the AI CLI QEMU marker contract so manifest,
   blocker, and blocker-report markers are non-empty in generated lane evidence.
+- dev: Added host-side AI CLI smoke package materialization with
+  `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package`. The mode writes
+  `AI_MANIFEST.SDN`, `launch.spl`, `qemu_markers.txt`, a short package
+  manifest, generated `<app>.js` smoke entry, and `runtime.smf` under the
+  FAT32-like staging tree while reporting
+  `host-package-materialized-no-guest-validation`; default lane validation
+  still requires real guest serial logs.

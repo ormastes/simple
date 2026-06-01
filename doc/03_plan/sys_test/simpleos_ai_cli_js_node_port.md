@@ -11,6 +11,11 @@ Current QEMU harness:
 - `scripts/check-ai-cli-qemu-lanes.shs --contract-only` materializes the
   selected Codex/Claude/Gemini by x86/RISC-V/ARM lane marker contract and exits
   successfully without claiming guest evidence.
+- `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package` materializes the
+  selected host-side smoke package tree and reports
+  `ai_cli_qemu_lanes_status=stage-smoke-package` with reason
+  `host-package-materialized-no-guest-validation`; it does not read serial logs
+  or claim QEMU validation.
 - Default mode checks staged runtime artifacts under
   `build/os/ai-cli-runtime-staging/sys/runtime/node-compatible/<target>/runtime.smf`,
   CLI bundles under `build/os/ai-cli-runtime-staging/sys/apps/<app>/<app>.js`,
@@ -80,5 +85,8 @@ Mirrored manual: `doc/06_spec/system/os/simpleos_ai_cli_js_node_port_spec.md`
 - QEMU lane harness: `scripts/check-ai-cli-qemu-lanes.shs` records expected
   runtime artifact paths, serial log paths, lane scenarios, and required marker
   files for the 3x3 app/target matrix.
+- Host provisioning: `--stage-smoke-package` writes `AI_MANIFEST.SDN`,
+  `launch.spl`, `qemu_markers.txt`, the short-name package manifest, generated
+  `<app>.js` smoke entry, and `runtime.smf` under the FAT32-like staging tree.
 - Still pending: guest QEMU runtime smoke and kernel/OS-layer VFS, socket, and
   process boundary evidence.

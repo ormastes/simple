@@ -5,11 +5,13 @@ set -eu
 #
 # This script intentionally does not mark Phase 6 complete by generating host
 # files alone. Default mode requires staged runtime artifacts and real serial
-# logs. Use --contract-only for a CI-safe contract/materialization check while
-# runtime provisioning is still blocked.
+# logs. Use --contract-only for a CI-safe contract check, or
+# --stage-smoke-package to materialize host-side package files without guest
+# validation.
 #
 # Usage:
 #   sh scripts/check-ai-cli-qemu-lanes.shs --contract-only
+#   sh scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package --target x86 --app codex
 #   sh scripts/check-ai-cli-qemu-lanes.shs --target x86 --app codex --validate-log-only
 #   sh scripts/check-ai-cli-qemu-lanes.shs --target all --app all
 #
@@ -30,6 +32,7 @@ TARGET_FILTER="all"
 APP_FILTER="all"
 CONTRACT_ONLY=0
 VALIDATE_LOG_ONLY=0
+STAGE_SMOKE_PACKAGE=0
 
 usage() {
     sed -n '3,18p' "$0"
@@ -58,6 +61,7 @@ while [ "$#" -gt 0 ]; do
             shift
             ;;
         --contract-only) CONTRACT_ONLY=1 ;;
+        --stage-smoke-package) STAGE_SMOKE_PACKAGE=1 ;;
         --validate-log-only) VALIDATE_LOG_ONLY=1 ;;
         --help|-h) usage; exit 0 ;;
         *) echo "[ai-cli-qemu] unknown argument: $arg" >&2; usage >&2; exit 2 ;;
@@ -135,6 +139,15 @@ marker_file_for() {
     printf '%s\n' "$BUILD_DIR/expected-markers/$1-$2.markers"
 }
 
+disk_manifest_for_app() {
+    case "$1" in
+        codex) printf '%s\n' "CODEX.APP" ;;
+        claude) printf '%s\n' "CLAUDE.APP" ;;
+        gemini) printf '%s\n' "GEMINI.APP" ;;
+        *) printf '%s\n' "AICLI.APP" ;;
+    esac
+}
+
 write_expected_markers() {
     app="$1"
     target="$2"
@@ -201,12 +214,84 @@ validate_runtime_artifacts() {
     return "$missing"
 }
 
+stage_smoke_package() {
+    app="$1"
+    target="$2"
+    stage_src="$BUILD_DIR/stage-$app-$target.spl"
+    stage_out="$BUILD_DIR/stage-$app-$target.out"
+    disk_manifest="$(disk_manifest_for_app "$app")"
+
+    mkdir -p "$BUILD_DIR" "$STAGING_ROOT/sys/apps/$app" "$STAGING_ROOT/sys/runtime/node-compatible/$target"
+
+    case "$app" in
+        claude) manifest_fn="claude_cli_smoke_manifest" ;;
+        gemini) manifest_fn="gemini_cli_smoke_manifest" ;;
+        *) manifest_fn="codex_cli_smoke_manifest" ;;
+    esac
+
+    cat >"$stage_src" <<SIMPLE
+use os.ai_cli_js_node_contract.{ai_cli_qemu_lane, ai_cli_runtime_smoke_package, codex_cli_smoke_manifest, claude_cli_smoke_manifest, gemini_cli_smoke_manifest}
+
+fn _emit_file(path: text, content: text):
+    print "@@AI_CLI_FILE " + path
+    print content
+    print "@@AI_CLI_END"
+
+fn main() -> i64:
+    val manifest = ${manifest_fn}()
+    val lane = ai_cli_qemu_lane(manifest, "$target")
+    val package = ai_cli_runtime_smoke_package(manifest, lane)
+    _emit_file("sys/apps/$app/AI_MANIFEST.SDN", package.manifest_sdn)
+    _emit_file("sys/apps/$app/launch.spl", package.launcher_source)
+    _emit_file("sys/apps/$app/qemu_markers.txt", package.marker_payload)
+    _emit_file("sys/apps/$app/$disk_manifest", package.package_index_sdn)
+    _emit_file("sys/apps/$app/$app.js", package.entry_source)
+    _emit_file("sys/runtime/node-compatible/$target/runtime.smf", package.runtime_stub_source)
+    return 0
+SIMPLE
+
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$stage_src" --mode=interpreter --clean >"$stage_out"
+
+    awk -v root="$STAGING_ROOT" '
+        function close_current() {
+            if (out != "") {
+                close(out)
+                out = ""
+            }
+        }
+        /^@@AI_CLI_FILE / {
+            close_current()
+            rel = substr($0, 15)
+            if (rel ~ /^\// || rel ~ /\.\./) {
+                print "[ai-cli-qemu] unsafe staged path: " rel > "/dev/stderr"
+                exit 2
+            }
+            out = root "/" rel
+            dir = out
+            sub(/\/[^\/]*$/, "", dir)
+            system("mkdir -p \"" dir "\"")
+            next
+        }
+        /^@@AI_CLI_END$/ {
+            close_current()
+            next
+        }
+        {
+            if (out != "") {
+                print $0 > out
+            }
+        }
+        END { close_current() }
+    ' "$stage_out"
+}
+
 report_path="$BUILD_DIR/reports/ai-cli-qemu-lanes.env"
 rm -f "$report_path"
 
 echo "check=ai_cli_qemu_lanes" | tee -a "$report_path"
 echo "contract_only=$CONTRACT_ONLY" | tee -a "$report_path"
 echo "validate_log_only=$VALIDATE_LOG_ONLY" | tee -a "$report_path"
+echo "stage_smoke_package=$STAGE_SMOKE_PACKAGE" | tee -a "$report_path"
 echo "staging_root=$STAGING_ROOT" | tee -a "$report_path"
 echo "serial_root=$SERIAL_ROOT" | tee -a "$report_path"
 
@@ -214,6 +299,7 @@ total=0
 contract_count=0
 runtime_failures=0
 serial_failures=0
+stage_count=0
 
 for app in codex claude gemini; do
     app_selected "$app" || continue
@@ -223,6 +309,13 @@ for app in codex claude gemini; do
         marker_file="$(write_expected_markers "$app" "$target")"
         contract_count=$((contract_count + 1))
         echo "lane=$app/$target qemu=$(qemu_for_target "$target") machine=$(machine_for_target "$target") scenario=$(scenario_for_target "$target") serial=$(serial_for_target "$target") markers=$marker_file runtime=$(runtime_path_for_target "$target")"
+
+        if [ "$STAGE_SMOKE_PACKAGE" -eq 1 ]; then
+            stage_smoke_package "$app" "$target"
+            stage_count=$((stage_count + 1))
+            echo "staged_smoke_package=$app/$target root=$STAGING_ROOT"
+            continue
+        fi
 
         if [ "$CONTRACT_ONLY" -eq 1 ]; then
             continue
@@ -248,7 +341,14 @@ fi
     echo "contract_count=$contract_count"
     echo "runtime_failures=$runtime_failures"
     echo "serial_failures=$serial_failures"
+    echo "stage_count=$stage_count"
 } | tee -a "$report_path"
+
+if [ "$STAGE_SMOKE_PACKAGE" -eq 1 ]; then
+    echo "ai_cli_qemu_lanes_status=stage-smoke-package" | tee -a "$report_path"
+    echo "ai_cli_qemu_lanes_reason=host-package-materialized-no-guest-validation" | tee -a "$report_path"
+    exit 0
+fi
 
 if [ "$CONTRACT_ONLY" -eq 1 ]; then
     echo "ai_cli_qemu_lanes_status=contract-only" | tee -a "$report_path"

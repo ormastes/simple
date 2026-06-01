@@ -118,6 +118,10 @@ Completed evidence:
    - `scripts/check-ai-cli-qemu-lanes.shs --contract-only` now derives required
      marker files from `src/os/ai_cli_js_node_contract.spl` and records the
      selected app/target lane contract without claiming guest evidence.
+   - `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package` now writes the
+     selected host-side smoke package files into the FAT32-like staging tree and
+     exits with `stage-smoke-package`, not `pass`, because no guest serial
+     evidence has been observed.
    - Audit `ai_cli_qemu_lane`, staged package generation, launcher marker
      output, and runtime artifact assumptions.
    - Provision a Node-compatible runtime artifact and CLI bundles into the
@@ -167,6 +171,13 @@ Initial harness command:
 ```sh
 SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=<worktree>/src \
   sh scripts/check-ai-cli-qemu-lanes.shs --contract-only
+```
+
+Host-side staging command:
+
+```sh
+SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=<worktree>/src \
+  sh scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package --target x86 --app codex
 ```
 
 Promotion commands after runtime provisioning exists:

@@ -467,7 +467,7 @@ expect(ai_cli_provisioning_plan_summary(plan)).to_contain("disk-manifest=CLAUDE.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -484,6 +484,9 @@ expect(package.manifest_sdn).to_contain("runtime_kind = \"node-compatible\"")
 expect(package.manifest_sdn).to_contain("package_version = \"0.1.0-smoke.20260530\"")
 expect(package.manifest_sdn).to_contain("runtime_artifact = \"simple-js-agent-smoke-stub@20260530\"")
 expect(package.manifest_sdn).to_contain("permission_flags = \"--experimental-permission --allow-fs-read=/home/user/work,/home/user/.codex,/var/cache/codex,/tmp")
+expect(package.entry_source).to_contain("__simple_ai_cli_smoke")
+expect(package.entry_source).to_contain("app: \"codex\"")
+expect(package.entry_source).to_contain("[ai-cli-js] smoke app=codex target=x86")
 expect(package.launcher_source).to_contain("[ai-cli] runtime:start app=codex")
 expect(package.launcher_source).to_contain("[ai-cli] permission-flags --experimental-permission")
 expect(package.launcher_source).to_contain("[ai-cli] cli-smoke:start app=codex")
