@@ -20,7 +20,9 @@ use app.gui_perf.macos_smf_dynlib_evidence_core.{
     gui_mac_smf_dynlib_row_i64,
     gui_mac_smf_dynlib_accepts_probe_row,
     gui_mac_smf_dynlib_skip_row,
-    gui_mac_smf_dynlib_pass_row
+    gui_mac_smf_dynlib_pass_row,
+    gui_mac_smf_dynlib_accepts_pass_row,
+    gui_mac_smf_dynlib_accepts_transcript
 }
 
 describe "macOS SMF dynlib evidence helpers":
@@ -150,3 +152,18 @@ describe "macOS SMF dynlib evidence helpers":
         expect(row).to_contain("host_profile=macos-arm64")
         expect(row).to_contain("host_cpu=Apple_M3")
         expect(row).to_contain("artifact=build/gui/pure_gui_hot.smf")
+        expect(gui_mac_smf_dynlib_accepts_pass_row(row)).to_equal(true)
+        expect(gui_mac_smf_dynlib_accepts_pass_row(row.replace("host_cpu=Apple_M3", "host_cpu=unknown"))).to_equal(false)
+        expect(gui_mac_smf_dynlib_accepts_pass_row(row.replace("status=pass", "status=skip"))).to_equal(false)
+
+    it "accepts only full ordered mac SMF dynlib evidence transcripts":
+        val contract = "GUI_SMF_ARTIFACT_CONTRACT status=pass artifact=build/gui/pure_gui_hot.smf sha256=abc size=4096 smf_role=2 arch=3 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64"
+        val qemu = "GUI_QEMU_ARM64_SMF_PARITY status=contract-pass artifact=build/gui/pure_gui_hot.smf smf_role=2 arch=3 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick adapter=simpleos-framebuffer-virtio command_count=4 dirty_regions=4 same_artifact_contract=true live_qemu=false reason=same-smf-artifact-reaches-pure-gui-adapter"
+        val loader = "GUI_QEMU_ARM64_SMF_LOADER_PARITY status=loader-contract-pass artifact=build/gui/pure_gui_hot.smf smf_role=2 arch=3 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick loader=simpleos_smf_dynload adapter=simpleos-framebuffer-virtio command_count=4 dirty_regions=4 dynload_pass=true live_qemu=false reason=simpleos-dynload-artifact-reaches-pure-gui-adapter"
+        val probe = "GUI_DYNLIB_PERF artifact=build/gui/pure_gui_hot.smf dynlib_path=build/gui/pure_gui_hot.smf.extracted.dylib host_os=macos host_arch=arm64 host_profile=macos-arm64 host_cpu=Apple_M3 loader=smf_dynlib symbol=gui_dynlib_hot_probe_tick call_source=dynlib_symbol_call samples=128 expected_samples=128 warmup=16 p50_us=1 p95_us=1 p99_us=1 max_us=1 threshold_us=1000 pass=true error="
+        val pass_row = gui_mac_smf_dynlib_pass_row("macos", "arm64", "macos-arm64", "Apple_M3", "build/gui/pure_gui_hot.smf")
+        val full = contract + "\n" + qemu + "\n" + loader + "\n" + probe + "\n" + pass_row
+        expect(gui_mac_smf_dynlib_accepts_transcript(full)).to_equal(true)
+        expect(gui_mac_smf_dynlib_accepts_transcript(contract + "\n" + qemu + "\n" + probe + "\n" + pass_row)).to_equal(false)
+        expect(gui_mac_smf_dynlib_accepts_transcript(contract + "\n" + loader + "\n" + qemu + "\n" + probe + "\n" + pass_row)).to_equal(false)
+        expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("call_source=dynlib_symbol_call", "call_source=direct_simple"))).to_equal(false)
