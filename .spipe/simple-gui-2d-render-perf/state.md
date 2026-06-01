@@ -45,6 +45,16 @@ implementation-evidence-in-progress
 - implementation: Added corpus font-stack calibration coverage for the browser text painter and updated the focused production corpus artifact to preserve four Simple layout lines matching Chrome for `site_0_google`.
 - verification: `SIMPLE_LIB=src bin/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --format json` passed 3/3 scenarios.
 - verification: `SIMPLE_LIB=src bin/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json` passed 37/37 scenarios.
+- implementation: Tightened the focused Google corpus Arial width calibration so
+  `Google search` reports width 105, matching Chrome's 104.0625 canvas metric
+  closely enough to move the 122px first wrapped-line miss from `site_0_google`
+  to `site_2_facebook`.
+- verification: `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/gpu/browser_engine/text_painter.spl test/unit/browser_engine/text_painter_spec.spl test/system/wm_compare/famous_site_corpus_spec.spl` passed.
+- verification: `SIMPLE_LIB=src bin/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --format json` passed 3/3; `SIMPLE_LIB=src bin/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json` passed 37/37; renderer smoke passed 9/9.
+- verification: Cross-lane checks passed: Node API conformance 151/151,
+  WebGPU JS/WASM Simple 106/106, interpreter perf 10/10, and GTK repeat evidence
+  with Simple open 243 us, GTK open 77948 us, Simple frame 1 us, GTK frame
+  28 us, vector checksum 212444 deterministic true.
 
 ## Remaining Work
 - AC-3 is advanced by retained framebuffer/cache, static pixel hot paths, and retained static-shell primitive command plans; broader fill/copy/blit/text optimization across dynamic GUI scenes still needs implementation and evidence.

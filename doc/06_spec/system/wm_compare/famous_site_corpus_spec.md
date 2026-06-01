@@ -861,7 +861,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val samples = build_famous_site_sample_corpus()
-expect(_first_simple_layout_line_missing_from_chrome_metrics(samples, 122)).to_equal("site_0_google: missing line compatibility fixture")
+expect(_first_simple_layout_line_missing_from_chrome_metrics(samples, 122)).to_equal("site_2_facebook: missing line compatibility fixture")
 ```
 
 </details>

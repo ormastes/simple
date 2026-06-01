@@ -25,7 +25,7 @@ expect(browser_chrome_text_scanline_write_y_probe(49)).to_equal(49)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -33,6 +33,8 @@ val html = "<html><body><div style='width: 120px; height: 40px; background-color
 val lines = br_famous_site_corpus_layout_lines(html, 16, 120)
 expect(lines.len()).to_equal(4)
 expect(lines.join("|")).to_equal("Google search|deterministic|compatibility|fixture")
+val widths = br_famous_site_corpus_layout_line_widths_sdn(html, 16, 120)
+expect(widths).to_contain("(line text: \"Google search\" width: 105)")
 ```
 
 </details>

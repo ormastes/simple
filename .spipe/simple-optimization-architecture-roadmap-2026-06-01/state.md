@@ -102,3 +102,13 @@ dev-done
   210 us, GTK open 77889 us, Simple frame 1 us, GTK frame 27 us, vector
   checksum 212444 deterministic true. ES5 conformance remains a pre-existing
   harness failure at 54/54 scenarios returning `nil`.
+- implementation: GUI/text lane tightened the focused Google corpus Arial width
+  calibration so the first `Google search` line reports width 105 against
+  Chrome's 104.0625 metric, and moved the 122px first missing wrapped-line
+  boundary from `site_0_google` to `site_2_facebook`.
+- verification: PASS text painter check; PASS text painter spec (3); PASS
+  famous-site corpus spec (37); PASS renderer smoke (9); PASS regenerated
+  text-painter and famous-site manuals; PASS Node API conformance (151); PASS
+  WebGPU JS/WASM Simple (106); PASS interpreter perf (10); PASS GTK GUI repeat
+  evidence with Simple open 243 us, GTK open 77948 us, Simple frame 1 us, GTK
+  frame 28 us, vector checksum 212444 deterministic true.
