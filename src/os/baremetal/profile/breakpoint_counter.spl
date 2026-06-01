@@ -361,3 +361,105 @@ pub fn breakpoint_cleanup_ledger_summary(
         cleanup_complete: complete,
         summary: "patched={patched_entries} restored={restored_entries} pending={pending_entries} failed={failed_restore_entries} status={status}"
     )
+
+pub fn breakpoint_supported_trap_opcodes() -> [text]:
+    [
+        "x86_64:int3",
+        "aarch64:brk-imm0",
+        "riscv32:ebreak",
+        "riscv64:ebreak",
+        "riscv32:c.ebreak",
+        "riscv64:c.ebreak"
+    ]
+
+pub fn breakpoint_trap_patch_bytes(architecture: text, trap_opcode: text) -> text:
+    if architecture == "x86_64" and trap_opcode == "int3":
+        return "cc"
+    if architecture == "aarch64" and trap_opcode == "brk-imm0":
+        return "00 00 20 d4"
+    if (architecture == "riscv32" or architecture == "riscv64") and trap_opcode == "ebreak":
+        return "73 00 10 00"
+    if (architecture == "riscv32" or architecture == "riscv64") and trap_opcode == "c.ebreak":
+        return "02 90"
+    ""
+
+pub fn breakpoint_trap_patch_encoding(architecture: text, trap_opcode: text) -> text:
+    val bytes = breakpoint_trap_patch_bytes(architecture, trap_opcode)
+    if bytes == "":
+        return ""
+    "patch-bytes:arch={architecture};trap={trap_opcode};bytes={bytes}"
+
+fn breakpoint_patch_bytes_arch_supported(architecture: text) -> bool:
+    architecture == "x86_64" or
+        architecture == "aarch64" or
+        architecture == "riscv32" or
+        architecture == "riscv64"
+
+fn breakpoint_opcode_hex_payload(opcode_hex: text) -> text:
+    val normalized = opcode_hex.lower()
+    if normalized.starts_with("0x"):
+        return normalized.substring(2, normalized.len())
+    normalized
+
+pub fn breakpoint_original_opcode_restore_bytes(original_opcode_hex: text) -> text:
+    val payload = breakpoint_opcode_hex_payload(original_opcode_hex)
+    if payload.len() == 2:
+        return payload
+    if payload.len() == 4:
+        return payload.substring(2, 4) + " " + payload.substring(0, 2)
+    if payload.len() == 8:
+        return payload.substring(6, 8) + " " + payload.substring(4, 6) + " " + payload.substring(2, 4) + " " + payload.substring(0, 2)
+    ""
+
+pub fn breakpoint_restore_original_bytes(architecture: text, original_opcode_bytes: text) -> text:
+    if not breakpoint_patch_bytes_arch_supported(architecture) or original_opcode_bytes == "":
+        return ""
+    "restore-bytes:arch={architecture};bytes={original_opcode_bytes}"
+
+pub fn breakpoint_restore_original_opcode_encoding(architecture: text, original_opcode_hex: text) -> text:
+    val bytes = breakpoint_original_opcode_restore_bytes(original_opcode_hex)
+    if bytes == "":
+        return ""
+    breakpoint_restore_original_bytes(architecture, bytes)
+
+pub fn breakpoint_patch_encoding_valid(architecture: text, trap_opcode: text, encoded_bytes: text) -> bool:
+    val expected = breakpoint_trap_patch_bytes(architecture, trap_opcode)
+    expected != "" and encoded_bytes == expected
+
+pub fn breakpoint_restore_encoding_valid(
+    architecture: text,
+    original_opcode_bytes: text,
+    restore_encoding: text
+) -> bool:
+    original_opcode_bytes != "" and
+        restore_encoding == breakpoint_restore_original_bytes(architecture, original_opcode_bytes)
+
+pub fn breakpoint_patch_action_sequence(rearm: bool, sampled_only: bool) -> [text]:
+    if sampled_only:
+        return [
+            "read_original",
+            "write_trap",
+            "flush_icache",
+            "restore_original",
+            "single_step",
+            "sampled_only"
+        ]
+    if rearm:
+        return [
+            "read_original",
+            "write_trap",
+            "flush_icache",
+            "restore_original",
+            "single_step",
+            "rearm"
+        ]
+    [
+        "read_original",
+        "write_trap",
+        "flush_icache",
+        "restore_original",
+        "single_step"
+    ]
+
+pub fn breakpoint_patch_action_sequence_valid(actions: [text], rearm: bool, sampled_only: bool) -> bool:
+    actions == breakpoint_patch_action_sequence(rearm, sampled_only)

@@ -1,7 +1,7 @@
 # codex-system-test
 # Contract tests for persistent .sprof loader planning.
 
-use std.spec.SPipe
+use std.spec.{describe, it, expect}
 use app.optimize.sprof_loader.{
     sprof_profile_record_status,
     sprof_hot_path_policy,
@@ -13,6 +13,8 @@ use app.optimize.sprof_loader.{
     sprof_bounded_diagnostics,
     sprof_counter_record,
     sprof_counter_record_valid,
+    sprof_counter_record_from_native_counter_line,
+    sprof_counter_records_from_native_section_lines,
     sprof_serialize_record,
     sprof_serialize_profile,
     sprof_profile_write_diagnostics,
@@ -134,6 +136,37 @@ describe "Persistent .sprof Loader Contract":
             expect(profile.status).to_equal("loaded")
             expect(profile.function_merged_count).to_equal(11)
             expect(profile.edge_merged_count).to_equal(5)
+
+        it "should convert native counter metadata lines into persistent profile records":
+            val function_record = sprof_counter_record_from_native_counter_line(
+                "counter|section=simple_profile_counter_section__simple_profile_counters|slot=0|kind=function_entry|key=mir:main:entry|initial=9|symbol=__simple_profile_counter_0_function_entry"
+            )
+            val block_record = sprof_counter_record_from_native_counter_line(
+                "counter|section=simple_profile_counter_section__simple_profile_counters|slot=1|kind=basic_block|key=mir:main:bb0|initial=4|symbol=__simple_profile_counter_1_basic_block"
+            )
+            val edge_record = sprof_counter_record_from_native_counter_line(
+                "counter|section=simple_profile_counter_section__simple_profile_counters|slot=2|kind=edge|key=main:entry->main:exit|initial=3|symbol=__simple_profile_counter_2_edge"
+            )
+            expect(function_record.record_kind).to_equal("function")
+            expect(function_record.count).to_equal(9)
+            expect(block_record.record_kind).to_equal("block")
+            expect(block_record.secondary_key).to_equal("main")
+            expect(edge_record.record_kind).to_equal("edge")
+            expect(edge_record.key).to_equal("main:entry")
+            expect(edge_record.secondary_key).to_equal("main:exit")
+
+        it "should build reloadable sprof text from native counter section lines":
+            val records = sprof_counter_records_from_native_section_lines([
+                "section|label=simple_profile_counter_section__simple_profile_counters|name=.simple.profile.counters|records=2",
+                "counter|section=simple_profile_counter_section__simple_profile_counters|slot=0|kind=function_entry|key=mir:main:entry|initial=9|symbol=__simple_profile_counter_0_function_entry",
+                "counter|section=simple_profile_counter_section__simple_profile_counters|slot=1|kind=basic_block|key=mir:main:bb0|initial=4|symbol=__simple_profile_counter_1_basic_block"
+            ])
+            val body = sprof_serialize_profile("native-mod", "smoke", records)
+            val profile = sprof_load_profile_text(body, "native-mod", "smoke")
+            expect(records.len()).to_equal(2)
+            expect(profile.status).to_equal("loaded")
+            expect(profile.function_merged_count).to_equal(9)
+            expect(profile.block_merged_count).to_equal(4)
 
     describe "hot path policy":
         it "should forbid profile file operations in hot paths":

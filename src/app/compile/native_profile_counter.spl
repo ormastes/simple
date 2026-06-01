@@ -31,6 +31,23 @@ struct NativeProfileCounterIncrementOperation:
     operation: text
     reason: text
 
+struct NativeProfileCounterCPrelude:
+    counter_symbol: text
+    metadata_symbol: text
+    slot_count: i64
+    c_source: text
+
+struct NativeProfileCounterIncrementRecord:
+    slot_index: i64
+    counter_kind: text
+    stable_key: text
+    function_label: text
+    block_label: text
+    edge_label: text
+    call_path_label: text
+    placement_label: text
+    c_statement: text
+
 fn native_profile_counter_kinds() -> [text]:
     ["function_entry", "basic_block", "edge", "call_path"]
 
@@ -211,3 +228,87 @@ fn native_profile_call_path_counter_allowed(profile_build: bool, call_depth: i64
     native_profile_counter_enabled(profile_build, "call_path") and
         call_depth >= 0 and
         call_depth <= native_profile_call_path_counter_max_depth()
+
+fn native_profile_counter_array_symbol() -> text:
+    "__simple_profile_counters"
+
+fn native_profile_counter_metadata_symbol() -> text:
+    "__simple_profile_counter_metadata"
+
+fn native_profile_counter_c_comment_value(value: text) -> text:
+    var escaped = value.replace("*/", "* /")
+    escaped = escaped.replace("\n", " ")
+    escaped = escaped.replace("\r", " ")
+    escaped
+
+fn native_profile_counter_c_initializer(slots: [NativeProfileCounterSlot]) -> text:
+    var values = []
+    for slot in slots:
+        values.push(slot.initial_value.to_string())
+    values.join(", ")
+
+fn native_profile_counter_metadata_line(slot: NativeProfileCounterSlot) -> text:
+    "/* simple-profile-counter slot=" + slot.slot_index.to_string() +
+        " kind=" + native_profile_counter_c_comment_value(slot.counter_kind) +
+        " key=" + native_profile_counter_c_comment_value(slot.stable_key) +
+        " initial=" + slot.initial_value.to_string() + " */"
+
+fn native_profile_counter_c_prelude(slots: [NativeProfileCounterSlot]) -> NativeProfileCounterCPrelude:
+    val counter_symbol = native_profile_counter_array_symbol()
+    val metadata_symbol = native_profile_counter_metadata_symbol()
+    val initializer = native_profile_counter_c_initializer(slots)
+    var lines = [
+        "/* simple-profile-counter-prelude-v1 */",
+        "#include <stdint.h>",
+        "#include <stddef.h>",
+        "static uint64_t " + counter_symbol + "[" + slots.len().to_string() + "] = {" + initializer + "};",
+        "static const size_t " + counter_symbol + "_count = " + slots.len().to_string() + "u;",
+        "static const char * const " + metadata_symbol + "[" + slots.len().to_string() + "] = {0};"
+    ]
+    for slot in slots:
+        lines.push(native_profile_counter_metadata_line(slot))
+
+    NativeProfileCounterCPrelude(
+        counter_symbol: counter_symbol,
+        metadata_symbol: metadata_symbol,
+        slot_count: slots.len(),
+        c_source: lines.join("\n") + "\n"
+    )
+
+fn native_profile_counter_increment_placement_label(function_label: text, block_label: text, edge_label: text, call_path_label: text) -> text:
+    "function=" + function_label +
+        "|block=" + block_label +
+        "|edge=" + edge_label +
+        "|call_path=" + call_path_label
+
+fn native_profile_counter_increment_record(
+    slot: NativeProfileCounterSlot,
+    function_label: text,
+    block_label: text,
+    edge_label: text,
+    call_path_label: text
+) -> NativeProfileCounterIncrementRecord:
+    val placement_label = native_profile_counter_increment_placement_label(function_label, block_label, edge_label, call_path_label)
+    NativeProfileCounterIncrementRecord(
+        slot_index: slot.slot_index,
+        counter_kind: slot.counter_kind,
+        stable_key: slot.stable_key,
+        function_label: function_label,
+        block_label: block_label,
+        edge_label: edge_label,
+        call_path_label: call_path_label,
+        placement_label: placement_label,
+        c_statement: native_profile_counter_array_symbol() + "[" + slot.slot_index.to_string() + "] += 1u;"
+    )
+
+fn native_profile_counter_increment_records(
+    slots: [NativeProfileCounterSlot],
+    function_label: text,
+    block_label: text,
+    edge_label: text,
+    call_path_label: text
+) -> [NativeProfileCounterIncrementRecord]:
+    var records = []
+    for slot in slots:
+        records.push(native_profile_counter_increment_record(slot, function_label, block_label, edge_label, call_path_label))
+    records

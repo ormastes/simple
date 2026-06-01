@@ -1,7 +1,7 @@
 # codex-system-test
 # Contract tests for native profile counter ABI planning.
 
-use std.spec.SPipe
+use std.spec.{describe, it, expect}
 use app.compile.native_profile_counter.{
     native_profile_counter_kinds,
     native_profile_counters_enabled,
@@ -27,7 +27,12 @@ use app.compile.native_profile_counter.{
     native_profile_disabled_counter_cold_path_policy,
     native_profile_counter_cold_path_policy,
     native_profile_call_path_counter_max_depth,
-    native_profile_call_path_counter_allowed
+    native_profile_call_path_counter_allowed,
+    native_profile_counter_c_prelude,
+    native_profile_counter_increment_record,
+    native_profile_counter_increment_records,
+    native_profile_counter_array_symbol,
+    native_profile_counter_metadata_symbol
 }
 
 describe "Native Profile Counter Contract":
@@ -214,3 +219,58 @@ describe "Native Profile Counter Contract":
         it "should reject call path counters outside profile builds and negative depths":
             expect(native_profile_call_path_counter_allowed(false, 1)).to_equal(false)
             expect(native_profile_call_path_counter_allowed(true, -1)).to_equal(false)
+
+    describe "native C counter artifact":
+        it "should generate deterministic prelude declarations and metadata comments from slots":
+            val slots = [
+                native_profile_counter_slot(0, "function_entry", "mir:main:entry", 0),
+                native_profile_counter_slot(1, "basic_block", "mir:main:bb0", 7),
+                native_profile_counter_slot(2, "edge", "mir:main:bb0->bb1", 2)
+            ]
+            val prelude = native_profile_counter_c_prelude(slots)
+            expect(prelude.counter_symbol).to_equal(native_profile_counter_array_symbol())
+            expect(prelude.metadata_symbol).to_equal(native_profile_counter_metadata_symbol())
+            expect(prelude.slot_count).to_equal(3)
+            expect(prelude.c_source).to_contain("/* simple-profile-counter-prelude-v1 */")
+            expect(prelude.c_source).to_contain("#include <stdint.h>")
+            expect(prelude.c_source).to_contain("static uint64_t __simple_profile_counters[3] = {0, 7, 2};")
+            expect(prelude.c_source).to_contain("static const size_t __simple_profile_counters_count = 3u;")
+            expect(prelude.c_source).to_contain("static const char * const __simple_profile_counter_metadata[3] = {0};")
+            expect(prelude.c_source).to_contain("/* simple-profile-counter slot=0 kind=function_entry key=mir:main:entry initial=0 */")
+            expect(prelude.c_source).to_contain("/* simple-profile-counter slot=1 kind=basic_block key=mir:main:bb0 initial=7 */")
+            expect(prelude.c_source).to_contain("/* simple-profile-counter slot=2 kind=edge key=mir:main:bb0->bb1 initial=2 */")
+
+        it "should sanitize metadata comment values without changing stable slot order":
+            val slots = [
+                native_profile_counter_slot(0, "function_entry", "mir:main:*/entry", 0),
+                native_profile_counter_slot(1, "call_path", "mir:main\ncallee", 0)
+            ]
+            val prelude = native_profile_counter_c_prelude(slots)
+            expect(prelude.c_source).to_contain("key=mir:main:* /entry")
+            expect(prelude.c_source).to_contain("key=mir:main callee")
+
+    describe "increment insertion records":
+        it "should generate per-slot increment records with placement labels":
+            val slot = native_profile_counter_slot(4, "call_path", "mir:main:call:callee", 0)
+            val record = native_profile_counter_increment_record(slot, "main", "bb2", "bb2->bb3", "main/callee")
+            expect(record.slot_index).to_equal(4)
+            expect(record.counter_kind).to_equal("call_path")
+            expect(record.stable_key).to_equal("mir:main:call:callee")
+            expect(record.function_label).to_equal("main")
+            expect(record.block_label).to_equal("bb2")
+            expect(record.edge_label).to_equal("bb2->bb3")
+            expect(record.call_path_label).to_equal("main/callee")
+            expect(record.placement_label).to_equal("function=main|block=bb2|edge=bb2->bb3|call_path=main/callee")
+            expect(record.c_statement).to_equal("__simple_profile_counters[4] += 1u;")
+
+        it "should generate one deterministic increment record per slot":
+            val slots = [
+                native_profile_counter_slot(0, "function_entry", "mir:main:entry", 0),
+                native_profile_counter_slot(1, "basic_block", "mir:main:bb0", 0)
+            ]
+            val records = native_profile_counter_increment_records(slots, "main", "bb0", "", "")
+            expect(records.len()).to_equal(2)
+            expect(records[0].slot_index).to_equal(0)
+            expect(records[0].c_statement).to_equal("__simple_profile_counters[0] += 1u;")
+            expect(records[1].slot_index).to_equal(1)
+            expect(records[1].placement_label).to_equal("function=main|block=bb0|edge=|call_path=")

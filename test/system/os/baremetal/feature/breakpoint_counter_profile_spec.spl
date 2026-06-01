@@ -9,15 +9,25 @@ use os.baremetal.profile.breakpoint_counter.{
     breakpoint_cleanup_events_cover,
     breakpoint_hit_accounting_update,
     breakpoint_next_state,
+    breakpoint_patch_action_sequence,
+    breakpoint_patch_action_sequence_valid,
+    breakpoint_patch_encoding_valid,
     breakpoint_patch_record_construct,
     breakpoint_patch_ledger_cleanup_complete,
     breakpoint_patch_ledger_valid,
     breakpoint_profile_session_record_valid,
+    breakpoint_original_opcode_restore_bytes,
+    breakpoint_restore_encoding_valid,
+    breakpoint_restore_original_bytes,
+    breakpoint_restore_original_opcode_encoding,
     breakpoint_restore_rearm_transition,
     breakpoint_sampled_fallback_reason,
     breakpoint_sampled_only_fallback_state,
     breakpoint_should_disarm,
+    breakpoint_supported_trap_opcodes,
     breakpoint_trap_opcode_for_arch,
+    breakpoint_trap_patch_bytes,
+    breakpoint_trap_patch_encoding,
     breakpoint_trap_budget_total_over_budget,
     breakpoint_trap_budget_total_us
 }
@@ -149,6 +159,58 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(breakpoint_patch_ledger_cleanup_complete(3, 3, 0, 1)).to_equal(false)
             expect(breakpoint_patch_ledger_cleanup_complete(3, 4, 0, 0)).to_equal(false)
             expect(breakpoint_patch_ledger_cleanup_complete(-1, -1, 0, 0)).to_equal(false)
+
+    describe "patch byte encoding":
+        it "should encode every supported trap opcode deterministically":
+            val supported = breakpoint_supported_trap_opcodes()
+            expect(supported).to_contain("x86_64:int3")
+            expect(supported).to_contain("aarch64:brk-imm0")
+            expect(supported).to_contain("riscv32:ebreak")
+            expect(supported).to_contain("riscv64:ebreak")
+            expect(supported).to_contain("riscv32:c.ebreak")
+            expect(supported).to_contain("riscv64:c.ebreak")
+
+            expect(breakpoint_trap_patch_bytes("x86_64", "int3")).to_equal("cc")
+            expect(breakpoint_trap_patch_bytes("aarch64", "brk-imm0")).to_equal("00 00 20 d4")
+            expect(breakpoint_trap_patch_bytes("riscv32", "ebreak")).to_equal("73 00 10 00")
+            expect(breakpoint_trap_patch_bytes("riscv64", "ebreak")).to_equal("73 00 10 00")
+            expect(breakpoint_trap_patch_bytes("riscv32", "c.ebreak")).to_equal("02 90")
+            expect(breakpoint_trap_patch_bytes("riscv64", "c.ebreak")).to_equal("02 90")
+            expect(breakpoint_trap_patch_bytes("aarch64", "int3")).to_equal("")
+
+        it "should encode patch and restore bytes as ledger-ready production data":
+            expect(breakpoint_trap_patch_encoding("riscv64", "ebreak")).to_equal("patch-bytes:arch=riscv64;trap=ebreak;bytes=73 00 10 00")
+            expect(breakpoint_original_opcode_restore_bytes("0x00000013")).to_equal("13 00 00 00")
+            expect(breakpoint_original_opcode_restore_bytes("0x9002")).to_equal("02 90")
+            expect(breakpoint_original_opcode_restore_bytes("0x90")).to_equal("90")
+            expect(breakpoint_restore_original_bytes("riscv64", "13 00 00 00")).to_equal("restore-bytes:arch=riscv64;bytes=13 00 00 00")
+            expect(breakpoint_restore_original_opcode_encoding("aarch64", "0xd503201f")).to_equal("restore-bytes:arch=aarch64;bytes=1f 20 03 d5")
+            expect(breakpoint_patch_encoding_valid("riscv64", "ebreak", "73 00 10 00")).to_equal(true)
+            expect(breakpoint_patch_encoding_valid("riscv64", "ebreak", "00 00 00 00")).to_equal(false)
+            expect(breakpoint_restore_encoding_valid("riscv64", "13 00 00 00", "restore-bytes:arch=riscv64;bytes=13 00 00 00")).to_equal(true)
+            expect(breakpoint_restore_encoding_valid("riscv64", "13 00 00 00", "restore-bytes:arch=riscv64;bytes=73 00 10 00")).to_equal(false)
+            expect(breakpoint_restore_original_opcode_encoding("mips64", "0x0000000d")).to_equal("")
+
+    describe "patch action sequence":
+        it "should sequence read patch flush restore single-step and rearm actions":
+            val actions = breakpoint_patch_action_sequence(true, false)
+            expect(actions[0]).to_equal("read_original")
+            expect(actions[1]).to_equal("write_trap")
+            expect(actions[2]).to_equal("flush_icache")
+            expect(actions[3]).to_equal("restore_original")
+            expect(actions[4]).to_equal("single_step")
+            expect(actions[5]).to_equal("rearm")
+            expect(breakpoint_patch_action_sequence_valid(actions, true, false)).to_equal(true)
+
+        it "should terminate as sampled-only when rearming is disallowed":
+            val actions = breakpoint_patch_action_sequence(true, true)
+            expect(actions[0]).to_equal("read_original")
+            expect(actions[1]).to_equal("write_trap")
+            expect(actions[2]).to_equal("flush_icache")
+            expect(actions[3]).to_equal("restore_original")
+            expect(actions[4]).to_equal("single_step")
+            expect(actions[5]).to_equal("sampled_only")
+            expect(breakpoint_patch_action_sequence_valid(actions, true, true)).to_equal(true)
 
     describe "trap hit accounting":
         it "should update hit totals and keep rearming below budget":

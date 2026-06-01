@@ -134,11 +134,33 @@ fn _sprof_line_value(line: text, key: text) -> text:
         i = i + 1
     ""
 
+fn _sprof_pipe_value(line: text, key: text) -> text:
+    val prefix = "{key}="
+    val parts = line.split("|")
+    var i = 0
+    while i < parts.len():
+        val part = parts[i].trim()
+        if part.starts_with(prefix):
+            return part[prefix.len():]
+        i = i + 1
+    ""
+
 fn _sprof_parse_count(value: text) -> i64:
     value.trim().to_i64() ?? -1
 
 fn _sprof_token_safe(value: text) -> bool:
     value != "" and not value.contains(";") and not value.contains("\n")
+
+fn _sprof_unescape_native_key(value: text) -> text:
+    var unescaped = value.replace("\\p", "|")
+    unescaped = unescaped.replace("\\n", "_")
+    unescaped.replace("\\\\", "\\")
+
+fn _sprof_function_from_stable_key(stable_key: text) -> text:
+    val parts = stable_key.split(":")
+    if parts.len() >= 2 and parts[1] != "":
+        return parts[1]
+    "unknown"
 
 fn _sprof_schema_is_compatible(schema_version: text) -> bool:
     schema_version == "" or schema_version == "1" or schema_version == SPROF_SCHEMA_VERSION
@@ -161,6 +183,36 @@ fn sprof_counter_record_valid(record: SprofCounterRecord) -> bool:
     if record.record_kind == "edge":
         return _sprof_token_safe(record.key) and _sprof_token_safe(record.secondary_key)
     false
+
+fn sprof_counter_record_from_native_counter_line(line: text) -> SprofCounterRecord:
+    if not line.starts_with("counter|"):
+        return sprof_counter_record("invalid", "", "", -1)
+    val counter_kind = _sprof_pipe_value(line, "kind")
+    val stable_key = _sprof_unescape_native_key(_sprof_pipe_value(line, "key"))
+    val count = _sprof_parse_count(_sprof_pipe_value(line, "initial"))
+    if counter_kind == "function_entry":
+        return sprof_counter_record("function", stable_key, "", count)
+    if counter_kind == "basic_block":
+        return sprof_counter_record("block", stable_key, _sprof_function_from_stable_key(stable_key), count)
+    if counter_kind == "edge":
+        val edge_parts = stable_key.split("->")
+        if edge_parts.len() >= 2:
+            return sprof_counter_record("edge", edge_parts[0], edge_parts[1], count)
+        return sprof_counter_record("edge", stable_key, "{stable_key}:target", count)
+    if counter_kind == "call_path":
+        return sprof_counter_record("edge", stable_key, "call_path", count)
+    sprof_counter_record("invalid", stable_key, "", -1)
+
+fn sprof_counter_records_from_native_section_lines(lines: [text]) -> [SprofCounterRecord]:
+    var records: [SprofCounterRecord] = []
+    var i = 0
+    while i < lines.len():
+        if lines[i].starts_with("counter|"):
+            val record = sprof_counter_record_from_native_counter_line(lines[i])
+            if sprof_counter_record_valid(record):
+                records.push(record)
+        i = i + 1
+    records
 
 fn sprof_serialize_record(record: SprofCounterRecord) -> text:
     if record.record_kind == "function":

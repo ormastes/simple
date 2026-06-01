@@ -1,8 +1,8 @@
 # Pure-Simple executable layout optimizer contract helpers.
 #
 # This module owns the production-side contract slice for BOLT-like executable
-# layout planning. It only models deterministic eligibility and manifest rules;
-# it does not invoke external binary rewriters.
+# layout planning. It models deterministic eligibility, profile-guided hot/cold
+# placement, overlap validation, and manifest text for a future native rewriter.
 
 struct ExecutableLayoutManifestEntry:
     symbol_name: text
@@ -406,3 +406,119 @@ pub fn layout_profile_guided_plan(
         validation_status: status,
         skip_reason: reason
     )
+
+fn _plan_entry_precedes(left: ExecutableLayoutPlanEntry, right: ExecutableLayoutPlanEntry) -> bool:
+    if left.new_offset < right.new_offset:
+        return true
+    if left.new_offset > right.new_offset:
+        return false
+    if left.section_name < right.section_name:
+        return true
+    if left.section_name > right.section_name:
+        return false
+    if left.symbol_name < right.symbol_name:
+        return true
+    if left.symbol_name > right.symbol_name:
+        return false
+    left.original_offset < right.original_offset
+
+fn _sorted_plan_entries(entries: [ExecutableLayoutPlanEntry]) -> [ExecutableLayoutPlanEntry]:
+    var sorted = entries
+    var i = 1
+    while i < sorted.len():
+        var j = i
+        while j > 0 and _plan_entry_precedes(sorted[j], sorted[j - 1]):
+            val tmp = sorted[j]
+            sorted[j] = sorted[j - 1]
+            sorted[j - 1] = tmp
+            j = j - 1
+        i = i + 1
+    sorted
+
+fn _valid_entries_for_placement(plan: ExecutableLayoutPlan, placement: text) -> [ExecutableLayoutPlanEntry]:
+    var entries: [ExecutableLayoutPlanEntry] = []
+    var i = 0
+    while i < plan.entries.len():
+        val entry = plan.entries[i]
+        if entry.placement == placement and entry.validation_status == "valid":
+            entries.push(entry)
+        i = i + 1
+    entries
+
+fn _plan_entries_non_overlapping(entries: [ExecutableLayoutPlanEntry]) -> bool:
+    val sorted = _sorted_plan_entries(entries)
+    var i = 0
+    var previous_end: i64 = 0
+    while i < sorted.len():
+        val entry = sorted[i]
+        if entry.new_offset < 0 or entry.size_bytes <= 0:
+            return false
+        if i > 0 and entry.new_offset < previous_end:
+            return false
+        previous_end = entry.new_offset + entry.size_bytes
+        i = i + 1
+    true
+
+fn _plan_summary(entries: [ExecutableLayoutPlanEntry]) -> ExecutableLayoutManifestSummary:
+    var total_size: i64 = 0
+    var first_offset: i64 = 0
+    var last_end: i64 = 0
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        val end_offset = entry.new_offset + entry.size_bytes
+        total_size = total_size + entry.size_bytes
+        if i == 0 or entry.new_offset < first_offset:
+            first_offset = entry.new_offset
+        if end_offset > last_end:
+            last_end = end_offset
+        i = i + 1
+    ExecutableLayoutManifestSummary(
+        entry_count: entries.len() as i64,
+        total_size_bytes: total_size,
+        first_optimized_offset: first_offset,
+        last_optimized_end: last_end
+    )
+
+fn _escape_manifest_text(value: text) -> text:
+    val backslashes = value.replace("\\", "\\\\")
+    val tabs = backslashes.replace("\t", "\\t")
+    tabs.replace("\n", "\\n")
+
+fn _plan_entry_manifest_line(entry: ExecutableLayoutPlanEntry) -> text:
+    "{entry.placement}\t{_escape_manifest_text(entry.section_name)}\t{_escape_manifest_text(entry.symbol_name)}\t{entry.original_offset}\t{entry.new_offset}\t{entry.size_bytes}"
+
+fn _append_manifest_lines(lines: [text], entries: [ExecutableLayoutPlanEntry]) -> [text]:
+    val sorted = _sorted_plan_entries(entries)
+    var output = lines
+    var i = 0
+    while i < sorted.len():
+        output.push(_plan_entry_manifest_line(sorted[i]))
+        i = i + 1
+    output
+
+pub fn layout_plan_entries_non_overlapping(plan: ExecutableLayoutPlan) -> bool:
+    val hot_entries = _valid_entries_for_placement(plan, "hot")
+    val cold_entries = _valid_entries_for_placement(plan, "cold")
+    _plan_entries_non_overlapping(hot_entries) and _plan_entries_non_overlapping(cold_entries)
+
+pub fn layout_plan_valid(plan: ExecutableLayoutPlan) -> bool:
+    plan.validation_status == "valid" and plan.skip_reason == "ok" and layout_plan_entries_non_overlapping(plan)
+
+pub fn layout_plan_manifest_text(plan: ExecutableLayoutPlan) -> text:
+    if not layout_plan_valid(plan):
+        return ""
+
+    val hot_entries = _valid_entries_for_placement(plan, "hot")
+    val cold_entries = _valid_entries_for_placement(plan, "cold")
+    val hot_summary = _plan_summary(hot_entries)
+    val cold_summary = _plan_summary(cold_entries)
+    var lines = [
+        "simple-executable-layout-manifest-v1",
+        "columns\tplacement\tsection\tsymbol\toriginal_offset\toptimized_offset\tsize_bytes",
+        "summary\thot\t{hot_summary.entry_count}\t{hot_summary.total_size_bytes}\t{hot_summary.first_optimized_offset}\t{hot_summary.last_optimized_end}",
+        "summary\tcold\t{cold_summary.entry_count}\t{cold_summary.total_size_bytes}\t{cold_summary.first_optimized_offset}\t{cold_summary.last_optimized_end}"
+    ]
+    lines = _append_manifest_lines(lines, hot_entries)
+    lines = _append_manifest_lines(lines, cold_entries)
+    lines.join("\n") + "\n"
