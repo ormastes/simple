@@ -195,6 +195,22 @@ _expect_release_clean("src/app/gui_perf/pure_gui_hot_dynlib_export.spl")
 
 </details>
 
+#### keeps exported dynlib hot symbol delegated to the pure command boundary
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = _existing_source("src/app/gui_perf/pure_gui_hot_dynlib_export.spl")
+expect(source).to_contain("gui_representative_hot_probe_command_count(iteration)")
+expect(_text_has(source, "_pure_gui_hot_command_count")).to_equal(false)
+```
+
+</details>
+
 #### documents legacy Rust SMF helpers as outside GUI release evidence
 
 <details>
@@ -301,8 +317,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
