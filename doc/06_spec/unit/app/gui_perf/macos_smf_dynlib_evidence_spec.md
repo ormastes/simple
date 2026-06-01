@@ -238,11 +238,12 @@ expect(row).to_contain("requires-macos-arm64")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val row = gui_mac_smf_dynlib_pass_row("macos", "arm64", "macos-arm64", "Apple_M3", "build/gui/pure_gui_hot.smf")
+expect(gui_mac_smf_dynlib_evidence_token("Apple M3 Pro")).to_equal("Apple_M3_Pro")
+val row = gui_mac_smf_dynlib_pass_row("macos", "arm64", "macos-arm64", "Apple M3", "build/gui/pure_gui_hot.smf")
 expect(row).to_contain("status=pass")
 expect(row).to_contain("host_os=macos")
 expect(row).to_contain("arch=arm64")
