@@ -51,6 +51,36 @@ expect(report.call_source).to_equal("direct_simple")
 
 </details>
 
+#### fails closed for SMF registry symbols that are not process-callable
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val config = GuiDynlibProbeConfig(
+    artifact_path: "build/gui/pure_gui.smf",
+    symbol_name: "gui_dynlib_hot_probe_tick",
+    iterations: 4,
+    warmup_count: 1,
+    threshold_us: 1000
+)
+val evidence = GuiDynlibProbeLoadEvidence(
+    loader_mode: "smf_dynlib",
+    call_source: "registry_symbol_only",
+    symbol_resolved: true,
+    fallback_used: true
+)
+val report = gui_dynlib_probe_report(config, evidence, [10, 11, 12, 13])
+expect(report.pass).to_equal(false)
+expect(report.error).to_equal("not-dynlib-hot-call")
+expect(report.call_source).to_equal("registry_symbol_only")
+```
+
+</details>
+
 #### reports missing artifact as direct Simple fallback
 
 <details>
@@ -128,8 +158,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

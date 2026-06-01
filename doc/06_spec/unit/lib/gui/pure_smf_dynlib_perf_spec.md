@@ -182,6 +182,32 @@ expect(report.error).to_equal("not-dynlib-hot-call")
 
 </details>
 
+#### rejects SMF registry-only symbol resolution until executable mapping exists
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val report = gui_dynlib_perf_report(
+    "build/gui/pure_gui.smf",
+    "smf_dynlib",
+    "gui_dynlib_hot_probe_tick",
+    "registry_symbol_only",
+    true,
+    true,
+    100,
+    [100],
+    1000
+)
+expect(report.pass).to_equal(false)
+expect(report.error).to_equal("not-dynlib-hot-call")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -201,8 +227,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

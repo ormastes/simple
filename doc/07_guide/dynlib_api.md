@@ -4,7 +4,8 @@
 
 SimpleOS provides a unified dynamic library loading API through the `DynLibKind`
 enum, which dispatches to ELF, SMF, and PE backends. The SFFI bridge
-(`dynlib_sffi`) enables calling functions in loaded libraries by name.
+(`dynlib_sffi`) resolves function symbols and can call process-callable native
+ABI function pointers through `rt_dyncall_0..6`.
 
 ## Architecture
 
@@ -21,10 +22,10 @@ dylib_registry.spl  -- kernel handle table (ELF/SMF)
 use os.posix.dynlib.{dynlib_open, dynlib_symbol, dynlib_close, dynlib_is_valid}
 use os.posix.dynlib_sffi.{dynlib_call_1}
 
-# Open a shared library
+# Open a pre-registered library
 val lib = dynlib_open("/lib/libmath.so", 0)
 if dynlib_is_valid(lib):
-    # Call a function by name
+    # Only call when the loader evidence proves the symbol is process-callable.
     val result = dynlib_call_1(lib, "compute", 42)
     dynlib_close(lib)
 ```
@@ -58,8 +59,18 @@ if dynlib_is_valid(lib):
 - **Libraries must be pre-registered**: `dylib_async_open` calls
   `dylib_registry_open(path)`, which only finds libraries previously registered
   via `dylib_registry_register(path, bytes)`. Unregistered paths return ENOENT.
-- **rt_dyncall_N not in runtime**: the extern declarations are forward contracts;
-  calling them before runtime support will trap.
+- **SMF registry symbols are not executable mapping evidence**: the registry can
+  resolve ELF/SMF symbol values from registered bytes, but that does not prove
+  the address is mapped into the host process with executable permissions. Hot
+  perf probes must report this as `call_source=registry_symbol_only` and fail
+  closed until true SMF executable mapping exists.
+- **Runtime dyncall bridge exists**: `rt_dyncall_0..6` are implemented in the
+  Rust runtime for `i64` arguments and `i64` return values. They are valid only
+  for process-callable function pointers.
+- **Host shared libraries use a separate WFFI path**:
+  `src/lib/nogc_sync_mut/sffi/dynamic.spl` wraps `spl_dlopen`, `spl_dlsym`, and
+  `spl_wffi_call_i64` for `.so`/`.dylib` host libraries. That proves host dynlib
+  calls, not SMF dynlib acceptance.
 
 ## Testing
 
