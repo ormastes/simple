@@ -30,17 +30,70 @@ expect ports[2].name == "rvfi_insn"
 
 2. check
 
+3. check
+
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val text = rvfi_formal_wrapper_ports("rv32i_core")
 check(text.contains("rvfi_valid"))
 check(text.contains("rvfi_mem_wdata"))
+check(text.contains("std_logic_vector(31 downto 0)"))
+```
+
+</details>
+
+#### renders VHDL scalar and vector port types
+
+1. expect rvfi vhdl type
+
+2. expect rvfi vhdl type
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect rvfi_vhdl_type(1) == "std_logic"
+expect rvfi_vhdl_type(32) == "std_logic_vector(31 downto 0)"
+```
+
+</details>
+
+#### renders an RVFI formal VHDL wrapper
+
+1. check
+
+2. check
+
+3. check
+
+4. check
+
+5. check
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val text = rvfi_formal_wrapper_vhdl("rv32i_core_rvfi", "rv32i_core")
+check(text.contains("entity rv32i_core_rvfi is"))
+check(text.contains("dut: entity work.rv32i_core"))
+check(text.contains("rvfi_valid : out std_logic"))
+check(text.contains("rvfi_order : out std_logic_vector(63 downto 0)"))
+check(text.contains("rvfi_mem_wdata => rvfi_mem_wdata"))
 ```
 
 </details>
@@ -193,8 +246,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

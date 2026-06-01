@@ -110,8 +110,62 @@ fn rvfi_trace_from_snapshot(config: RvfiConfig, order: i64, snapshot: RvfiCoreSn
         rvfi_mem_wdata: snapshot.dmem_wdata
     )
 
+fn rvfi_vhdl_type(width: i32) -> text:
+    if width == 1:
+        return "std_logic"
+    "std_logic_vector(" + (width - 1).to_text() + " downto 0)"
+
 fn rvfi_formal_wrapper_ports(entity_name: text) -> text:
     var out = "-- RVFI wrapper ports for " + entity_name + "\n"
     for port in rvfi_port_manifest():
-        out = out + "-- " + port.name + " : " + port.direction + " " + port.width.to_text() + "\n"
+        out = out + "    " + port.name + " : " + port.direction + " " + rvfi_vhdl_type(port.width) + "\n"
+    out
+
+fn rvfi_formal_wrapper_vhdl(wrapper_entity: text, core_entity: text) -> text:
+    """Render a VHDL-2008 riscv-formal wrapper for an RVFI-enabled RV32I core."""
+    val ports = rvfi_port_manifest()
+    var out = "library ieee;\n"
+    out = out + "use ieee.std_logic_1164.all;\n\n"
+    out = out + "entity " + wrapper_entity + " is\n"
+    out = out + "    port (\n"
+    out = out + "        clk : in std_logic;\n"
+    out = out + "        reset_n : in std_logic;\n"
+    out = out + "        imem_data : in std_logic_vector(31 downto 0);\n"
+    out = out + "        dmem_rdata : in std_logic_vector(31 downto 0);\n"
+    out = out + "        imem_addr : out std_logic_vector(31 downto 0);\n"
+    out = out + "        dmem_addr : out std_logic_vector(31 downto 0);\n"
+    out = out + "        dmem_wdata : out std_logic_vector(31 downto 0);\n"
+    out = out + "        dmem_we : out std_logic;\n"
+    out = out + "        dmem_re : out std_logic;\n"
+    out = out + "        dmem_width : out std_logic_vector(1 downto 0);\n"
+    for i in 0..ports.len():
+        val port = ports[i]
+        var sep = ";"
+        if i == ports.len() - 1:
+            sep = ""
+        out = out + "        " + port.name + " : " + port.direction + " " + rvfi_vhdl_type(port.width) + sep + "\n"
+    out = out + "    );\n"
+    out = out + "end entity " + wrapper_entity + ";\n\n"
+    out = out + "architecture formal of " + wrapper_entity + " is\n"
+    out = out + "begin\n"
+    out = out + "    dut: entity work." + core_entity + "\n"
+    out = out + "        port map (\n"
+    out = out + "            clk => clk,\n"
+    out = out + "            reset_n => reset_n,\n"
+    out = out + "            imem_addr => imem_addr,\n"
+    out = out + "            imem_data => imem_data,\n"
+    out = out + "            dmem_addr => dmem_addr,\n"
+    out = out + "            dmem_wdata => dmem_wdata,\n"
+    out = out + "            dmem_rdata => dmem_rdata,\n"
+    out = out + "            dmem_we => dmem_we,\n"
+    out = out + "            dmem_re => dmem_re,\n"
+    out = out + "            dmem_width => dmem_width,\n"
+    for i in 0..ports.len():
+        val port = ports[i]
+        var sep = ","
+        if i == ports.len() - 1:
+            sep = ""
+        out = out + "            " + port.name + " => " + port.name + sep + "\n"
+    out = out + "        );\n"
+    out = out + "end architecture formal;\n"
     out
