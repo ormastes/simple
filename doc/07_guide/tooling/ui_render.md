@@ -31,6 +31,10 @@ simple ui render --adapter dashboard --format html
 
 # Render office sheets as text
 simple ui render --adapter sheets --format text
+
+# Check IDE Office plugin readiness without a desktop shell
+bin/simple-interp src/app/ide/main.spl --feature-check --tui
+bin/simple-interp src/app/ide/main.spl --feature-check --gui
 ```
 
 ---
@@ -77,6 +81,21 @@ Adapters bridge app-specific data into the shared render pipeline.
 
 When `--adapter` is omitted, the command renders the `.ui.sdn` file directly
 through the shared UI runtime.
+
+### IDE Office feature checks
+
+The IDE Office plugin suite has a separate pure readiness path, because it
+checks IDE capability wiring in addition to raw renderer output:
+
+```bash
+bin/simple-interp src/app/ide/main.spl --feature-check --tui
+bin/simple-interp src/app/ide/main.spl --feature-check --gui
+```
+
+Use this path for markdown preview/decorations, slide outlines, spreadsheet
+formulas, dashboard availability, DB admin availability, and plugin manifest
+coverage. The system spec is
+`test/system/app/ide/feature/ide_office_plugin_suite_spec.spl`.
 
 ---
 

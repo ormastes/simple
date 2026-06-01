@@ -16,6 +16,10 @@ struct EvalResult:
     value: CellValue
     next_pos: i32
 
+struct DisplayEvalResult:
+    ok: bool
+    value: i64
+
 # =========================================================================
 # Main Entry Point
 # =========================================================================
@@ -36,6 +40,26 @@ fn evaluate_formula(expr: text, sheet: Sheet) -> CellValue:
     val result = _eval_comparison(tokens, 0, sheet)
     result.value
 
+fn evaluate_formula_display_text(expr: text, sheet: Sheet) -> text:
+    """Evaluate a simple arithmetic formula for display using integer-safe paths.
+
+    This complements `evaluate_formula` for UI/report surfaces that only need a
+    stable display value while the native f64-return path is not reliable from
+    every entrypoint.
+    """
+    var formula = expr.trim()
+    if formula.len() == 0:
+        return ""
+    if formula.starts_with("="):
+        formula = formula.substring(1)
+    val tokens = tokenize_formula(formula)
+    if tokens.len() == 0:
+        return ""
+    val result = _eval_display_sum(tokens, sheet)
+    if not result.ok:
+        return ""
+    "{result.value}"
+
 # =========================================================================
 # Tokenizer
 # =========================================================================
@@ -54,34 +78,34 @@ fn tokenize_formula(expr: text) -> [text]:
             continue
         # Operators and punctuation
         if c == "+" or c == "-" or c == "*" or c == "/" or c == "^" or c == "(" or c == ")" or c == "," or c == ":":
-            tokens = tokens.push(c)
+            tokens.push(c)
             i = i + 1
             continue
         # Comparison operators
         if c == "=":
-            tokens = tokens.push("=")
+            tokens.push("=")
             i = i + 1
             continue
         if c == "<":
             if i + 1 < len:
                 val next = expr.char_at(i + 1)
                 if next == "=":
-                    tokens = tokens.push("<=")
+                    tokens.push("<=")
                     i = i + 2
                     continue
                 if next == ">":
-                    tokens = tokens.push("<>")
+                    tokens.push("<>")
                     i = i + 2
                     continue
-            tokens = tokens.push("<")
+            tokens.push("<")
             i = i + 1
             continue
         if c == ">":
             if i + 1 < len and expr.char_at(i + 1) == "=":
-                tokens = tokens.push(">=")
+                tokens.push(">=")
                 i = i + 2
                 continue
-            tokens = tokens.push(">")
+            tokens.push(">")
             i = i + 1
             continue
         # Numbers
@@ -94,7 +118,7 @@ fn tokenize_formula(expr: text) -> [text]:
                     i = i + 1
                 else:
                     break
-            tokens = tokens.push(num_str)
+            tokens.push(num_str)
             continue
         # Letters: could be cell ref (A1) or function name (SUM)
         if _is_alpha(c):
@@ -106,7 +130,7 @@ fn tokenize_formula(expr: text) -> [text]:
                     i = i + 1
                 else:
                     break
-            tokens = tokens.push(word)
+            tokens.push(word)
             continue
         # String literals in double quotes
         if c == "\"":
@@ -119,7 +143,7 @@ fn tokenize_formula(expr: text) -> [text]:
                     break
                 str_val = "{str_val}{ch}"
                 i = i + 1
-            tokens = tokens.push("\"{str_val}\"")
+            tokens.push("\"{str_val}\"")
             continue
         # Unknown character, skip
         i = i + 1
@@ -329,13 +353,13 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet) -> Ev
             _is_cell_ref_token(tokens.get(cur_pos + 2))):
             val range_str = "{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}"
             val values = resolve_cell_range(range_str, sheet)
-            args = args.push(values)
+            args.push(values)
             cur_pos = cur_pos + 3
         else:
             # Expression argument
             val result = _eval_comparison(tokens, cur_pos, sheet)
             val num_val = _to_number(result.value)
-            args = args.push([num_val])
+            args.push([num_val])
             cur_pos = result.next_pos
 
         # Skip comma
@@ -420,8 +444,28 @@ fn resolve_cell_range(range_str: text, sheet: Sheet) -> [f64]:
     val refs = expand_range_refs(range)
     for ref_str in refs:
         val v = resolve_cell_value(ref_str, sheet)
-        values = values.push(v)
+        values.push(v)
     values
+
+fn resolve_cell_display_i64(ref_str: text, sheet: Sheet) -> DisplayEvalResult:
+    """Resolve a cell to an integer value for display-oriented formula checks."""
+    val cell = sheet.get_cell(ref_str)
+    match cell.value:
+        CellValue.NumberVal(value):
+            return DisplayEvalResult(ok: true, value: value.to_i64())
+        CellValue.TextVal(value):
+            return _parse_i64_text(value)
+        CellValue.BoolVal(value):
+            if value:
+                return DisplayEvalResult(ok: true, value: 1)
+            return DisplayEvalResult(ok: true, value: 0)
+        CellValue.FormulaVal(expr, cached_display):
+            if cached_display != "":
+                return _parse_i64_text(cached_display)
+            val text_value = evaluate_formula_display_text(expr, sheet)
+            return _parse_i64_text(text_value)
+        _:
+            return DisplayEvalResult(ok: false, value: 0)
 
 # =========================================================================
 # Aggregation Functions
@@ -565,7 +609,7 @@ fn _flatten_args(args: [[f64]]) -> [f64]:
     var result: [f64] = []
     for group in args:
         for v in group:
-            result = result.push(v)
+            result.push(v)
     result
 
 fn _first_val(vals: [f64]) -> f64:
@@ -573,3 +617,56 @@ fn _first_val(vals: [f64]) -> f64:
     if vals.len() > 0:
         return vals[0]
     0.0
+
+fn _eval_display_sum(tokens: [text], sheet: Sheet) -> DisplayEvalResult:
+    var total: i64 = 0
+    var op = "+"
+    var expecting_value = true
+    for token in tokens:
+        if token == "+" or token == "-":
+            if expecting_value:
+                return DisplayEvalResult(ok: false, value: 0)
+            op = token
+            expecting_value = true
+            continue
+        val value = _display_token_i64(token, sheet)
+        if not value.ok:
+            return DisplayEvalResult(ok: false, value: 0)
+        if op == "-":
+            total = total - value.value
+        else:
+            total = total + value.value
+        expecting_value = false
+    if expecting_value:
+        return DisplayEvalResult(ok: false, value: 0)
+    DisplayEvalResult(ok: true, value: total)
+
+fn _display_token_i64(token: text, sheet: Sheet) -> DisplayEvalResult:
+    if token.len() == 0:
+        return DisplayEvalResult(ok: false, value: 0)
+    val upper_token = token.upper()
+    if parse_cell_ref(upper_token) != nil:
+        return resolve_cell_display_i64(upper_token, sheet)
+    _parse_i64_text(token)
+
+fn _parse_i64_text(s: text) -> DisplayEvalResult:
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return DisplayEvalResult(ok: false, value: 0)
+    var negative = false
+    var i = 0
+    if trimmed.char_at(0) == "-":
+        negative = true
+        i = 1
+        if trimmed.len() == 1:
+            return DisplayEvalResult(ok: false, value: 0)
+    var value: i64 = 0
+    while i < trimmed.len():
+        val c = trimmed.char_at(i)
+        if not _is_digit(c):
+            return DisplayEvalResult(ok: false, value: 0)
+        value = value * 10 + (c.char_code_at(0) - 48).to_i64()
+        i = i + 1
+    if negative:
+        return DisplayEvalResult(ok: true, value: 0 - value)
+    DisplayEvalResult(ok: true, value: value)
