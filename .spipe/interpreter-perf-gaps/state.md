@@ -174,3 +174,19 @@ Verification:
 - PASS `cargo test -p simple-runtime diagram_sffi --manifest-path src/compiler_rust/Cargo.toml` (3 tests)
 - PASS `SIMPLE_LIB=src bin/simple test test/unit/app/interpreter/perf_spec.spl --mode=interpreter --clean` (10 scenarios)
 - PASS `SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean` (51 scenarios)
+
+## Wave 12 Progress — watchdog timeout flag ordering (2026-06-01)
+
+`TIMEOUT_EXCEEDED` now uses `Release` stores and an `Acquire` load instead of
+`SeqCst` in the shared fault-detection path and compiler watchdog writers. The
+flag is a single timeout signal and does not protect any separate payload; crash
+log context and watchdog state remain handled by their existing synchronization.
+This keeps inter-thread visibility while removing total-order fences from the
+interpreter timeout polling path.
+
+Verification:
+- PASS `cargo check -p simple-compiler -p simple-common --manifest-path src/compiler_rust/Cargo.toml`
+- PASS `cargo test -p simple-common timeout --manifest-path src/compiler_rust/Cargo.toml`
+- PASS `cargo test -p simple-compiler watchdog --manifest-path src/compiler_rust/Cargo.toml -- --test-threads=1`
+- PASS `SIMPLE_LIB=src bin/simple test test/unit/app/interpreter/perf_spec.spl --mode=interpreter --clean` (10 scenarios)
+- PASS `SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean` (51 scenarios)

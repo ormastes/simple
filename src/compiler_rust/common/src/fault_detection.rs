@@ -57,13 +57,13 @@ pub static TIMEOUT_EXCEEDED: AtomicBool = AtomicBool::new(false);
 /// Check if timeout has been exceeded.
 #[inline]
 pub fn is_timeout_exceeded() -> bool {
-    TIMEOUT_EXCEEDED.load(Ordering::Relaxed)
+    TIMEOUT_EXCEEDED.load(Ordering::Acquire)
 }
 
 /// Reset the timeout flag.
 #[inline]
 pub fn reset_timeout() {
-    TIMEOUT_EXCEEDED.store(false, Ordering::SeqCst);
+    TIMEOUT_EXCEEDED.store(false, Ordering::Release);
 }
 
 #[cfg(test)]
@@ -114,7 +114,7 @@ mod tests {
     fn test_timeout_flag() {
         setup();
         assert!(!is_timeout_exceeded());
-        TIMEOUT_EXCEEDED.store(true, Ordering::SeqCst);
+        TIMEOUT_EXCEEDED.store(true, Ordering::Release);
         assert!(is_timeout_exceeded());
         reset_timeout();
         assert!(!is_timeout_exceeded());

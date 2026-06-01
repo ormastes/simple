@@ -77,3 +77,6 @@ dev-done
 - verification: PASS fallback probe mode (`GTK_EVIDENCE_FALLBACK_PROBE_ONLY=1 GTK_EVIDENCE_FORCE_VECTOR_FONT_UNAVAILABLE=1`) reported `gtk_benchmark_fallback_probe_status=pass`, reason `forced-vector-font-unavailable`, zero vector-font ink pixels, deterministic true.
 - verification: PASS `scripts/check-gtk-gui-repeat-evidence.shs` with fallback probe `forced-vector-font-unavailable`, Simple open 203 us, GTK open 68904 us, Simple frame 1 us, GTK frame 25 us, vector checksum 212444.
 - docs: Added `doc/09_report/gtk_gui_repeat_fallback_evidence_2026-06-01.md` and updated GUI/roadmap state for AC-6 fallback evidence.
+- implementation: Interpreter lane changed the shared timeout flag from `SeqCst` to `Release` stores plus `Acquire` reads in `fault_detection`, `watchdog`, and the compiler interpreter timeout test path.
+- verification: PASS `cargo check -p simple-compiler -p simple-common --manifest-path src/compiler_rust/Cargo.toml`; PASS `cargo test -p simple-common timeout --manifest-path src/compiler_rust/Cargo.toml`; PASS `cargo test -p simple-compiler watchdog --manifest-path src/compiler_rust/Cargo.toml -- --test-threads=1`.
+- verification: PASS interpreter perf and tiered JIT smoke specs after the timeout ordering change.

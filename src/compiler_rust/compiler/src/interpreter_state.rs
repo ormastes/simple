@@ -735,7 +735,7 @@ mod tests {
     fn test_timeout_flag() {
         setup();
         assert!(!is_timeout_exceeded());
-        TIMEOUT_EXCEEDED.store(true, Ordering::SeqCst);
+        TIMEOUT_EXCEEDED.store(true, Ordering::Release);
         assert!(is_timeout_exceeded());
         reset_timeout();
         assert!(!is_timeout_exceeded());

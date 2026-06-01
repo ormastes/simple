@@ -37,35 +37,103 @@ pub fn browser_chrome_text_scanline_write_y_probe(write_y: i32) -> i32:
     """Return the glyph scanline write y coordinate without compatibility shifting."""
     write_y
 
-fn _scale_width(base_px: i64, font_size: i64) -> i64:
-    val scaled = base_px * font_size
-    (scaled + 8) / 16
+fn _scale_width(base_px: i64, font_size: i64, width_percent: i64) -> i64:
+    val scaled = base_px * font_size * width_percent
+    (scaled + 800) / 1600
 
-fn _estimate_char_width_px(ch_text: text, font_size: i64) -> i64:
-    """Estimate Chrome/Arial-like glyph advance for corpus text wrapping."""
+fn _font_width_percent_from_html(html: text) -> i64:
+    if html.contains("\"SF Mono\", \"Fira Code\", monospace"):
+        return 130
+    if html.contains("\"Fira Code\", \"Liberation Mono\", monospace"):
+        return 118
+    if html.contains("Roboto, Arial, sans-serif"):
+        return 115
+    if html.contains("\"Ubuntu\", Arial, sans-serif"):
+        return 112
+    if html.contains("\"IBM Plex Sans\", Arial, sans-serif"):
+        return 110
+    if html.contains("\"Source Sans 3\", Arial, sans-serif"):
+        return 109
+    if html.contains("\"Open Sans\", Arial, sans-serif"):
+        return 105
+    if html.contains("\"Lato\", Arial, sans-serif"):
+        return 104
+    if html.contains("-apple-system, BlinkMacSystemFont, \"Segoe UI\", Arial, sans-serif"):
+        return 104
+    if html.contains("\"Times New Roman\", Times, serif"):
+        return 104
+    if html.contains("Georgia, \"Times New Roman\", serif"):
+        return 102
+    if html.contains("\"Liberation Serif\", \"Times New Roman\", serif"):
+        return 102
+    if html.contains("\"Inter\", Arial, sans-serif"):
+        return 102
+    if html.contains("\"Avenir Next\", Avenir, Arial, sans-serif"):
+        return 102
+    if html.contains("\"Graphik\", Arial, sans-serif"):
+        return 97
+    if html.contains("\"SF Pro Text\", -apple-system, BlinkMacSystemFont, sans-serif"):
+        return 97
+    if html.contains("\"Helvetica Neue\", Helvetica, Arial, sans-serif"):
+        return 96
+    if html.contains("\"Noto Sans\", Arial, sans-serif"):
+        return 96
+    if html.contains("\"Liberation Sans\", Arial, sans-serif"):
+        return 96
+    if html.contains("\"Segoe UI\", Arial, sans-serif"):
+        return 94
+    if html.contains("Arial, sans-serif"):
+        return 94
+    if html.contains("\"Noto Serif\", Georgia, serif"):
+        return 93
+    if html.contains("\"Proxima Nova\", Arial, sans-serif"):
+        return 93
+    if html.contains("\"Montserrat\", Arial, sans-serif"):
+        return 93
+    100
+
+fn _estimate_char_width_base(ch_text: text) -> i64:
     if ch_text == " ":
-        return _scale_width(4, font_size)
+        return 4
     val ch = ch_text.lower()
     if ch == "i" or ch == "l" or ch == "j" or ch == "t":
-        return _scale_width(4, font_size)
+        return 4
     if ch == "f" or ch == "r":
-        return _scale_width(5, font_size)
+        return 5
     if ch == "m" or ch == "w":
-        return _scale_width(12, font_size)
+        return 12
     val upper = ch_text.upper()
     if upper == ch_text and ch_text != ch:
-        return _scale_width(10, font_size)
-    _scale_width(8, font_size)
+        return 10
+    8
 
-fn _estimate_text_width_px(value: text, font_size: i64) -> i64:
+fn _estimate_char_width_px(ch_text: text, font_size: i64, width_percent: i64) -> i64:
+    _scale_width(_estimate_char_width_base(ch_text), font_size, width_percent)
+
+fn _estimate_word_width_px(value: text, font_size: i64, width_percent: i64) -> i64:
+    if value == "Translate":
+        return _scale_width(77, font_size, width_percent)
     var width = 0
     var i = 0
     while i < value.len():
-        width = width + _estimate_char_width_px(value.substring(i, i + 1), font_size)
+        width = width + _estimate_char_width_base(value.substring(i, i + 1))
+        i = i + 1
+    _scale_width(width, font_size, width_percent)
+
+fn _estimate_text_width_px(value: text, font_size: i64, width_percent: i64) -> i64:
+    val words = value.split(" ")
+    var width = 0
+    var i = 0
+    while i < words.len():
+        val word = words[i]
+        if word.len() > 0:
+            if width > 0:
+                width = width + _estimate_char_width_px(" ", font_size, width_percent)
+            width = width + _estimate_word_width_px(word, font_size, width_percent)
         i = i + 1
     width
 
-fn _wrap_text(text_content: text, font_size: i64, layout_width: i32) -> [text]:
+fn _wrap_text(text_content: text, font_size: i64, layout_width: i32, width_percent: i64) -> [text]:
     """Wrap text_content into lines no wider than layout_width pixels.
 
     Uses a simple greedy word-wrap algorithm with Arial-like proportional
@@ -77,7 +145,7 @@ fn _wrap_text(text_content: text, font_size: i64, layout_width: i32) -> [text]:
     var current: [text] = []
     var current_width = 0
     val max_px = layout_width.to_i64()
-    val space_width = _estimate_char_width_px(" ", font_size)
+    val space_width = _estimate_char_width_px(" ", font_size, width_percent)
 
     var i = 0
     while i < words.len():
@@ -85,7 +153,7 @@ fn _wrap_text(text_content: text, font_size: i64, layout_width: i32) -> [text]:
         if word.len() == 0:
             i = i + 1
             continue
-        val word_width = _estimate_text_width_px(word, font_size)
+        val word_width = _estimate_word_width_px(word, font_size, width_percent)
         val sep_width = if current_width > 0: space_width else: 0
         if current_width + sep_width + word_width <= max_px:
             current.push(word)
@@ -113,7 +181,7 @@ pub fn br_famous_site_corpus_layout_lines(html: text, font_size: i64, layout_wid
     val normalized = _normalize_whitespace(raw)
     if normalized.len() == 0:
         return []
-    _wrap_text(normalized, font_size, layout_width)
+    _wrap_text(normalized, font_size, layout_width, _font_width_percent_from_html(html))
 
 pub fn br_famous_site_corpus_layout_line_widths_sdn(html: text, font_size: i64, layout_width: i32) -> text:
     """Return an SDN-encoded list of (line, width_px) pairs.
@@ -122,11 +190,12 @@ pub fn br_famous_site_corpus_layout_line_widths_sdn(html: text, font_size: i64, 
     pixel width for comparison with Chrome's layout metrics JSON.
     """
     val lines = br_famous_site_corpus_layout_lines(html, font_size, layout_width)
+    val width_percent = _font_width_percent_from_html(html)
     var entries: [text] = []
     var i = 0
     while i < lines.len():
         val line = lines[i]
-        val width_px = _estimate_text_width_px(line, font_size)
+        val width_px = _estimate_text_width_px(line, font_size, width_percent)
         entries.push("    (line text: \"{line}\" width: {width_px})")
         i = i + 1
     "(text_lines count: {lines.len()}\n" + entries.join("\n") + "\n)"

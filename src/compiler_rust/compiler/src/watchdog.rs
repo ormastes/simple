@@ -85,7 +85,7 @@ pub fn read_rss_bytes() -> u64 {
 pub fn start_watchdog(timeout_secs: u64) {
     stop_watchdog();
 
-    TIMEOUT_EXCEEDED.store(false, Ordering::SeqCst);
+    TIMEOUT_EXCEEDED.store(false, Ordering::Release);
 
     let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop_flag);
@@ -100,7 +100,7 @@ pub fn start_watchdog(timeout_secs: u64) {
                     let msg = format!("[watchdog] wall-clock timeout ({}s) exceeded", timeout_secs);
                     eprintln!("{}", msg);
                     write_watchdog_crash_log(&msg);
-                    TIMEOUT_EXCEEDED.store(true, Ordering::SeqCst);
+                    TIMEOUT_EXCEEDED.store(true, Ordering::Release);
                     return;
                 }
                 // Check memory every iteration (100ms).
@@ -113,7 +113,7 @@ pub fn start_watchdog(timeout_secs: u64) {
                     );
                     eprintln!("{}", msg);
                     write_watchdog_crash_log(&msg);
-                    TIMEOUT_EXCEEDED.store(true, Ordering::SeqCst);
+                    TIMEOUT_EXCEEDED.store(true, Ordering::Release);
                     return;
                 }
                 thread::sleep(Duration::from_millis(100));
