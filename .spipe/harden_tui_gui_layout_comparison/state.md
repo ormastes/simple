@@ -46,3 +46,28 @@ dev-done
 - verify: `backend_probe_strict_spec` passes 8 scenarios uncached; backend-session, CPU SIMD session, and wm_compare HTML compatibility specs pass; doc layout and placeholder gates remain clean.
 - spec: Reviewed and improved `doc/06_spec/unit/lib/gpu/engine2d/backend_probe_strict_spec.md` with a manual-purpose section explaining the strict backend evidence contract for Metal, Vulkan, CUDA, WebGPU, OpenCL, ROCm, OptiX, and CPU SIMD lanes.
 - verify: Re-ran `backend_probe_strict_spec` uncached after manual review; 8 scenarios pass, `doc/06_spec` executable count is zero, and backend probe source/spec/manual placeholder scan is clean.
+- implement: Hardened shared wm_compare `compare_exact` so equal-length but truncated buffers cannot be reported as exact; the comparator now requires both buffers to match the expected viewport pixel count.
+- verify: `html_compat_spec` now passes 15 scenarios uncached; wm_compare emulated, backend screenshot comparison, and backend probe strict specs pass uncached; doc layout and placeholder gates remain clean.
+- implement: Hardened compositor `compare_pixel_buffers` so zero or negative viewport dimensions are failed comparisons instead of exact empty-buffer matches.
+- spec: Added backend screenshot comparison coverage and manual text for invalid-dimension failures.
+- verify: Backend screenshot comparison now passes 7 scenarios uncached; wm_compare HTML compatibility, wm_compare emulated capture, and backend probe strict specs pass uncached; doc layout and placeholder gates remain clean.
+- implement: Hardened compositor `generate_diff_image` so truncated buffers still produce viewport-sized diagnostics and mark missing pixels as red differences.
+- spec: Added backend screenshot comparison coverage and manual text for truncated-buffer diff diagnostics.
+- verify: Backend screenshot comparison now passes 8 scenarios uncached; wm_compare HTML compatibility, wm_compare emulated capture, and backend probe strict specs pass uncached; doc layout and placeholder gates remain clean.
+- spec: Added backend screenshot comparison coverage proving invalid dimensions remain failed through `compare_with_profile`, which is the path used by WM consistency callers.
+- verify: Backend screenshot comparison now passes 9 scenarios uncached; wm_compare HTML compatibility, wm_compare emulated capture, and backend probe strict specs pass uncached; doc layout and placeholder gates remain clean.
+- implement: Hardened wm_compare `compare_perceptual` so invalid dimensions or incomplete/truncated buffers report `0` perceptual match instead of scoring only the available prefix.
+- verify: `html_compat_spec` now passes 16 scenarios uncached; backend screenshot comparison, wm_compare emulated capture, and backend probe strict specs pass uncached; doc layout and placeholder gates remain clean.
+- spec: Synced ignored SPipe matcher mirror `test/sys/wm_compare/.spipe_matchers_html_compat_spec.spl` with the invalid-dimension, truncated exact, and truncated perceptual wm_compare comparison cases.
+- verify: The executable HTML compatibility spec still passes 16 scenarios uncached; the ignored matcher mirror passes direct `simple check`; backend screenshot comparison and backend probe strict specs pass uncached; doc layout and placeholder gates remain clean.
+- implement: Hardened wm_compare `compare_pair` so capture viewport metadata mismatches are treated as capture failures before exact pixel acceptance.
+- spec: Added HTML compatibility coverage and manual text for mismatched capture viewport metadata.
+- verify: `html_compat_spec` now passes 17 scenarios uncached; backend screenshot comparison, wm_compare emulated capture, and backend probe strict specs pass uncached; doc layout and placeholder gates remain clean.
+- spec: Synced ignored SPipe matcher mirror `test/sys/wm_compare/.spipe_matchers_html_compat_spec.spl` with the viewport metadata mismatch pair-level scenario.
+- verify: The matcher mirror passes direct `simple check`; HTML compatibility, backend screenshot comparison, and backend probe strict specs pass uncached; doc layout and placeholder gates remain clean.
+- implement: Hardened famous-site corpus `compare_site_sample` so Chrome/Simple capture viewport metadata mismatches are treated as capture failures before exact pixel acceptance.
+- spec: Added focused `site_corpus_pair_spec` and generated/improved its manual for the corpus pair metadata contract.
+- verify: `site_corpus_pair_spec`, `html_compat_spec`, `backend_screenshot_compare_spec`, and `backend_probe_strict_spec` pass uncached; doc layout and placeholder gates remain clean.
+- spec: Restored the manual-purpose section in `doc/06_spec/system/wm_compare/site_corpus_pair_spec.md` after doc generation and reverified the site corpus pair spec plus doc layout/placeholder gates.
+- design: Added preselection architecture, detail design, system-test plan, and agent-task docs for the option-independent comparison/backend evidence contract while leaving final requirements/design selection pending user choice.
+- verify: Re-ran focused site corpus pair, HTML compatibility, emulated capture, backend screenshot comparison, and backend probe strict specs; all pass, `doc/06_spec` executable spec count is zero, and changed executable artifacts have no placeholder/TODO blockers.

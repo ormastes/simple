@@ -10,7 +10,8 @@
 
 use std.spec.{describe, context, it, expect}
 use os.compositor.screenshot_compare.{
-    compare_pixel_buffers, compare_exact, generate_diff_image}
+    compare_pixel_buffers, compare_exact, compare_with_profile, generate_diff_image}
+use os.compositor.tolerance_profile.{profile_strict}
 
 val W: i32 = 40
 val H: i32 = 30
@@ -106,6 +107,18 @@ describe "Backend Screenshot Comparison":
             expect(result.passed).to_equal(false)
             expect(result.match_percentage).to_equal(0)
 
+        it "reports invalid dimensions as failed comparisons":
+            val result = compare_pixel_buffers([], [], 0, H, THRESHOLD_GPU)
+            expect(result.exact_match).to_equal(false)
+            expect(result.passed).to_equal(false)
+            expect(result.match_percentage).to_equal(0)
+
+        it "keeps invalid dimensions failed through profile comparison":
+            val result = compare_with_profile([], [], 0, H, profile_strict())
+            expect(result.exact_match).to_equal(false)
+            expect(result.passed).to_equal(false)
+            expect(result.match_percentage).to_equal(0)
+
     context "Diff image generation":
 
         it "produces all-green for identical buffers":
@@ -126,3 +139,13 @@ describe "Backend Screenshot Comparison":
             val first = diff[0]
             val red = ((first >> 16) & 0xFF).to_i32()
             expect(red).to_be_greater_than(100)
+
+        it "keeps viewport-sized diagnostics for truncated buffers":
+            val buf_a = _solid_buffer(0xFF000000u32, 100)
+            val buf_b = _solid_buffer(0xFF000000u32, 99)
+            val diff = generate_diff_image(buf_a, buf_b, 10, 10)
+            expect(diff.len()).to_equal(100)
+            val last = diff[99]
+            val red = ((last >> 16) & 0xFF).to_i32()
+            val green = ((last >> 8) & 0xFF).to_i32()
+            expect(red).to_be_greater_than(green)

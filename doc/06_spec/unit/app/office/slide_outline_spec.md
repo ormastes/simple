@@ -1,4 +1,19 @@
-# Slide Outline Specification
+# slide_outline_spec
+
+Slide outline unit specification.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/unit/app/office/slide_outline_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Slide outline unit specification.
+Validates CSS-like outline styling and per-slide design metadata for presentation views.
 
 ## Scenarios
 
@@ -44,21 +59,6 @@ expect(css).to_contain("text-transform: uppercase")
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/unit/app/office/slide_outline_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Slide outline styling
 
 ## Scenario Summary
 

@@ -95,6 +95,40 @@ expect(result.match_percentage).to_equal(0)
 
 </details>
 
+#### reports invalid dimensions as failed comparisons
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = compare_pixel_buffers([], [], 0, H, THRESHOLD_GPU)
+expect(result.exact_match).to_equal(false)
+expect(result.passed).to_equal(false)
+expect(result.match_percentage).to_equal(0)
+```
+
+</details>
+
+#### keeps invalid dimensions failed through profile comparison
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = compare_with_profile([], [], 0, H, profile_strict())
+expect(result.exact_match).to_equal(false)
+expect(result.passed).to_equal(false)
+expect(result.match_percentage).to_equal(0)
+```
+
+</details>
+
 #### Diff image generation
 
 #### produces all-green for identical buffers
@@ -138,6 +172,27 @@ expect(red).to_be_greater_than(100)
 
 </details>
 
+#### keeps viewport-sized diagnostics for truncated buffers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val buf_a = _solid_buffer(0xFF000000u32, 100)
+val buf_b = _solid_buffer(0xFF000000u32, 99)
+val diff = generate_diff_image(buf_a, buf_b, 10, 10)
+expect(diff.len()).to_equal(100)
+val last = diff[99]
+val red = ((last >> 16) & 0xFF).to_i32()
+val green = ((last >> 8) & 0xFF).to_i32()
+expect(red).to_be_greater_than(green)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -157,8 +212,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

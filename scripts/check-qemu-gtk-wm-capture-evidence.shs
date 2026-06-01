@@ -79,6 +79,49 @@ gtk_scene_rgba_mismatch_count=
 gtk_scene_expected_rgba_path=
 gtk_scene_captured_rgba_path=
 gtk_scene_blur_or_tolerance_used=
+host_perf_status=not-run
+host_perf_reason=not-run
+host_perf_simple_frame_us=0
+host_perf_gtk_frame_us=0
+host_perf_iterations=0
+host_perf_comparison_available=false
+
+run_gtk_scene_evidence() {
+    set +e
+    REPORT_PATH="$GTK_SCENE_REPORT_PATH" \
+    BUILD_DIR="$BUILD_DIR/gtk-gl" \
+        sh scripts/check-gtk-gl-wm-scene-bitmap-evidence.shs >"$BUILD_DIR/gtk-gl.out" 2>&1
+    gtk_scene_exit_code=$?
+    set -e
+    gtk_scene_status="$(sed -n 's/^gtk_gl_wm_scene_status=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    gtk_scene_reason="$(sed -n 's/^gtk_gl_wm_scene_reason=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    gtk_scene_simple_frame_us="$(sed -n 's/^gtk_gl_wm_scene_simple_frame_us=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    gtk_scene_gtk_frame_us="$(sed -n 's/^gtk_gl_wm_scene_gtk_frame_us=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    gtk_scene_rgba_mismatch_count="$(sed -n 's/^gtk_gl_wm_scene_rgba_mismatch_count=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    gtk_scene_expected_rgba_path="$(sed -n 's/^gtk_gl_wm_scene_expected_rgba_path=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    gtk_scene_captured_rgba_path="$(sed -n 's/^gtk_gl_wm_scene_captured_rgba_path=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    gtk_scene_blur_or_tolerance_used="$(sed -n 's/^gtk_gl_wm_scene_blur_or_tolerance_used=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
+    if [ -z "$gtk_scene_status" ]; then
+        gtk_scene_status=unavailable
+    fi
+    if [ -z "$gtk_scene_reason" ]; then
+        gtk_scene_reason=gtk-gl-wm-scene-evidence-unavailable
+    fi
+    if [ -z "$gtk_scene_simple_frame_us" ]; then
+        gtk_scene_simple_frame_us=0
+    fi
+    if [ -z "$gtk_scene_gtk_frame_us" ]; then
+        gtk_scene_gtk_frame_us=0
+    fi
+    host_perf_status="$gtk_scene_status"
+    host_perf_reason="$gtk_scene_reason"
+    host_perf_simple_frame_us="$gtk_scene_simple_frame_us"
+    host_perf_gtk_frame_us="$gtk_scene_gtk_frame_us"
+    host_perf_iterations="${GTK_GL_WM_SCENE_ITERATIONS:-200}"
+    if [ "$gtk_scene_status" = "pass" ] && [ "$gtk_scene_rgba_mismatch_count" = "0" ] && [ "$gtk_scene_blur_or_tolerance_used" = "false" ]; then
+        host_perf_comparison_available=true
+    fi
+}
 
 if [ -z "${QEMU_QMP_SOCKET:-}" ] && [ "$AUTO_QMP_LAUNCH" = "1" ]; then
     set +e
@@ -143,32 +186,7 @@ if [ -z "${QEMU_QMP_SOCKET:-}" ]; then
     if [ -z "$host_wm_reason" ]; then
         host_wm_reason=host-wm-smoke-failed
     fi
-    set +e
-    REPORT_PATH="$GTK_SCENE_REPORT_PATH" \
-    BUILD_DIR="$BUILD_DIR/gtk-gl" \
-        sh scripts/check-gtk-gl-wm-scene-bitmap-evidence.shs >"$BUILD_DIR/gtk-gl.out" 2>&1
-    gtk_scene_exit_code=$?
-    set -e
-    gtk_scene_status="$(sed -n 's/^gtk_gl_wm_scene_status=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
-    gtk_scene_reason="$(sed -n 's/^gtk_gl_wm_scene_reason=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
-    gtk_scene_simple_frame_us="$(sed -n 's/^gtk_gl_wm_scene_simple_frame_us=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
-    gtk_scene_gtk_frame_us="$(sed -n 's/^gtk_gl_wm_scene_gtk_frame_us=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
-    gtk_scene_rgba_mismatch_count="$(sed -n 's/^gtk_gl_wm_scene_rgba_mismatch_count=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
-    gtk_scene_expected_rgba_path="$(sed -n 's/^gtk_gl_wm_scene_expected_rgba_path=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
-    gtk_scene_captured_rgba_path="$(sed -n 's/^gtk_gl_wm_scene_captured_rgba_path=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
-    gtk_scene_blur_or_tolerance_used="$(sed -n 's/^gtk_gl_wm_scene_blur_or_tolerance_used=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
-    if [ -z "$gtk_scene_status" ]; then
-        gtk_scene_status=unavailable
-    fi
-    if [ -z "$gtk_scene_reason" ]; then
-        gtk_scene_reason=gtk-gl-wm-scene-evidence-unavailable
-    fi
-    if [ -z "$gtk_scene_simple_frame_us" ]; then
-        gtk_scene_simple_frame_us=0
-    fi
-    if [ -z "$gtk_scene_gtk_frame_us" ]; then
-        gtk_scene_gtk_frame_us=0
-    fi
+    run_gtk_scene_evidence
 elif [ -n "${QEMU_QMP_SOCKET:-}" ]; then
     set +e
     RUN_ELECTRON_LIVE_SMOKE=0 \
@@ -193,6 +211,10 @@ elif [ -n "${QEMU_QMP_SOCKET:-}" ]; then
         perf_status=fail
         perf_reason="$reason"
     fi
+fi
+
+if [ "$gtk_scene_status" = "not-run" ] && [ "${QEMU_HOST_GTK_SCENE_EVIDENCE:-1}" = "1" ]; then
+    run_gtk_scene_evidence
 fi
 
 {
@@ -229,6 +251,12 @@ fi
     echo "qemu_gtk_wm_capture_perf_gtk_frame_us=$perf_gtk_frame_us"
     echo "qemu_gtk_wm_capture_perf_iterations=$perf_iterations"
     echo "qemu_gtk_wm_capture_perf_comparison_available=false"
+    echo "qemu_gtk_wm_capture_host_perf_status=$host_perf_status"
+    echo "qemu_gtk_wm_capture_host_perf_reason=$host_perf_reason"
+    echo "qemu_gtk_wm_capture_host_perf_simple_frame_us=$host_perf_simple_frame_us"
+    echo "qemu_gtk_wm_capture_host_perf_gtk_frame_us=$host_perf_gtk_frame_us"
+    echo "qemu_gtk_wm_capture_host_perf_iterations=$host_perf_iterations"
+    echo "qemu_gtk_wm_capture_host_perf_comparison_available=$host_perf_comparison_available"
     echo "qemu_gtk_wm_capture_fake_qmp_status=$fake_qmp_status"
     echo "qemu_gtk_wm_capture_fake_qmp_reason=$fake_qmp_reason"
     echo "qemu_gtk_wm_capture_fake_qmp_report_path=$fake_qmp_report_path"
@@ -294,6 +322,12 @@ fi
     echo "- qemu-side perf status: $perf_status"
     echo "- qemu-side perf reason: $perf_reason"
     echo "- qemu-side perf comparison available: false"
+    echo "- host perf baseline status: $host_perf_status"
+    echo "- host perf baseline reason: $host_perf_reason"
+    echo "- host perf baseline simple frame us: $host_perf_simple_frame_us"
+    echo "- host perf baseline GTK frame us: $host_perf_gtk_frame_us"
+    echo "- host perf baseline iterations: $host_perf_iterations"
+    echo "- host perf baseline comparison available: $host_perf_comparison_available"
     echo "- fake QMP screendump status: $fake_qmp_status"
     echo "- fake QMP screendump reason: $fake_qmp_reason"
     echo "- fake QMP screendump report: $fake_qmp_report_path"

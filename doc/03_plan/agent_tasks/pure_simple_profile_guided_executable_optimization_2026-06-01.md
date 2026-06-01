@@ -22,6 +22,42 @@ Important local state:
   environment had an invalid `GITHUB_TOKEN`, but `gh auth setup-git` configured
   a valid stored GitHub token.
 
+## Restart Checkpoint: 2026-06-01 10:20 UTC
+
+Command-level native profile-counter smoke is now proven with the rebuilt
+release driver:
+
+```bash
+RUST_MIN_STACK=67108864 SIMPLE_LIB=src src/compiler_rust/target/release/simple run \
+  src/app/compile/llvm_direct.spl \
+  test/unit/compiler/backend/_codegen_smoke.spl \
+  /tmp/simple_pgo_smoke \
+  --simple-profile-counters --verbose
+```
+
+Evidence:
+
+```text
+exit=0
+binary_exists=yes
+metadata_exists=yes
+metadata_has_counter=yes
+```
+
+The durable sidecar path is `/tmp/simple_pgo_smoke.simple-profile-counters`,
+and it contains `__simple_profile_counter_*_function_entry` rows for the small
+native compile fixture.
+
+Additional implementation in this checkpoint:
+- renamed compiler effect self-test entrypoints away from `main`;
+- changed Rust import flattening to drop imported `main` functions;
+- made `llvm_direct.spl` parse direct `simple run` args via `get_cli_args`;
+- made `llvm_direct.spl` generate a local textual C fixture before applying
+  Simple-owned profile counters, avoiding the currently broken
+  `simple compile --backend=c` path that writes SMF bytes;
+- fixed the native profile-counter metadata prelude brace interpolation so
+  generated C uses an initializer list.
+
 Pushed implementation now includes:
 - `src/app/optimize/sprof_loader.spl`
   - persistent `.sprof` text/file loader;
@@ -79,7 +115,104 @@ Known verification caveat:
   `doc/08_tracking/bug/spipe_docgen_flat_ast_bridge_parse_error_2026-06-01.md`
   and should not be confused with the profile optimization slice.
 
+## Restart Checkpoint: 2026-06-01 10:05 UTC
+
+Additional implementation completed:
+- `src/app/compile/native_profile_counter.spl`
+  - added `native_profile_counter_metadata_path(output_file)` so native
+    profile-counter metadata has a durable `<output>.simple-profile-counters`
+    location instead of being tied to the temporary generated C file.
+- `src/app/compile/llvm_direct.spl`
+  - writes `--simple-profile-counters` metadata to the durable output sidecar
+    path and fails the compile if metadata cannot be written.
+- `src/app/optimize/profile_layout_cli.spl`
+  - added `profile_layout_write_manifest_file(...)` for the file-level
+    `metadata/.sprof -> --layout-plan -> manifest` bridge.
+- `src/app/optimize/main.spl`
+  - routes `simple optimize --layout-plan` through the file-level bridge.
+- `test/system/app/compile/feature/native_profile_counter_spec.spl`
+  - covers durable sidecar metadata path.
+- `test/system/app/optimize/feature/profile_layout_cli_spec.spl`
+  - covers end-to-end native metadata plus observed counts written as `.sprof`
+    and consumed into a layout manifest file.
+- `src/compiler/00.common/effects_solver.spl`
+  - fixed stale `EffectTag.Sync`/`EffectTag.Async` references to the canonical
+    `EffectTag.PureTag`/`EffectTag.SuspendingTag` names after the actual native
+    compile smoke exposed the enum drift.
+
+Verification after this slice:
+
+```bash
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check \
+  src/compiler/00.common/effects_solver.spl \
+  src/app/compile/native_profile_counter.spl \
+  src/app/compile/llvm_direct.spl \
+  src/app/optimize/profile_layout_cli.spl \
+  src/app/optimize/main.spl
+
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test \
+  test/system/app/optimize/feature/sprof_loader_spec.spl --fail-fast
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test \
+  test/system/app/optimize/feature/profile_layout_cli_spec.spl --fail-fast
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test \
+  test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl --fail-fast
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test \
+  test/system/app/compile/feature/native_profile_counter_spec.spl --fail-fast
+SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test \
+  test/system/os/baremetal/feature/breakpoint_counter_profile_spec.spl --fail-fast
+
+git diff --check -- \
+  src/app/compile/native_profile_counter.spl \
+  src/app/compile/llvm_direct.spl \
+  src/app/compile/__init__.spl \
+  src/app/optimize/profile_layout_cli.spl \
+  src/app/optimize/main.spl \
+  test/system/app/compile/feature/native_profile_counter_spec.spl \
+  test/system/app/optimize/feature/profile_layout_cli_spec.spl
+
+find doc/06_spec -name '*_spec.spl' | wc -l
+```
+
+All focused checks/specs above passed, `git diff --check` was clean, and the
+`doc/06_spec` executable-spec count was `0`.
+
+Completion-audit gap closure at 2026-06-01 10:20 UTC:
+- Command-level native smoke is proven. `llvm_direct.spl` now reaches its own
+  entrypoint under `simple run`, compiles a small textual C fixture with clang,
+  writes the native output, and writes durable
+  `<output>.simple-profile-counters` metadata.
+- Evidence command:
+
+```bash
+RUST_MIN_STACK=67108864 SIMPLE_LIB=src src/compiler_rust/target/release/simple run \
+  src/app/compile/llvm_direct.spl \
+  test/unit/compiler/backend/_codegen_smoke.spl \
+  /tmp/simple_pgo_smoke \
+  --simple-profile-counters --verbose
+```
+
+- Observed result: `exit=0`, `binary=yes`, `metadata=yes`,
+  `metadata_has_counter=yes`.
+
+## Completion Audit Result
+
+All explicit audit bullets are satisfied by current evidence:
+- `--simple-profile-counters` command smoke writes a native binary and durable
+  sidecar metadata with `__simple_profile_counter_*_function_entry` records.
+- Native metadata plus observed counts writes a reloadable `.sprof` through
+  `sprof_write_native_counter_profile_file`, covered by
+  `sprof_loader_spec.spl`.
+- The optimize layout file bridge consumes `.sprof` plus executable metadata
+  and writes a layout manifest, covered by `profile_layout_cli_spec.spl`.
+- Bare-metal invalid address, opcode mismatch, missing icache flush, cleanup,
+  and rearm behavior are covered by `breakpoint_counter_profile_spec.spl`.
+- External BOLT invocation is rejected by `executable_layout.spl` and covered by
+  `pure_simple_executable_layout_spec.spl`.
+
 ## Next Restart Plan
+
+No implementation gap remains for this plan. If resumed for release/sync, run
+the focused gates below and commit only the scoped files.
 
 1. Re-check feature cleanliness without touching unrelated dirty files:
 
@@ -157,10 +290,22 @@ env -u GITHUB_TOKEN jj git push --bookmark main
 
 ## Phase 0: Stabilize Current State
 
-- Finish or isolate unrelated dirty NVMe/runtime/compiler edits before
-  implementation commits.
-- Keep planning docs separate from code slices.
-- Re-run `git diff --check` and `find doc/06_spec -name '*_spec.spl' | wc -l`.
+Status: completion audit passed on 2026-06-01. Scoped feature work remains
+dirty in the worktree alongside unrelated pre-existing edits, so any commit
+should still be path-limited.
+
+Evidence:
+- `llvm_direct.spl --simple-profile-counters` emits native binaries plus
+  durable `.simple-profile-counters` sidecars for minimal and `_codegen_smoke`
+  fixtures.
+- Observed native counter snapshots write reloadable `.sprof` files, and
+  `src/app/optimize/main.spl --layout-plan` consumes the `.sprof` plus manifest
+  input to produce a deterministic hot/cold layout manifest.
+- Focused SPipe specs passed: sprof loader 23, native profile counters 30,
+  profile layout CLI 8, executable layout 15, bare-metal breakpoint profile 22.
+- Required compiler/lib/MCP gates passed, `git diff --check` passed,
+  placeholder-test scan found no matches, and `find doc/06_spec -name
+  '*_spec.spl' | wc -l` returned `0`.
 
 ## Phase 1: Persistent Profile Loader
 
@@ -168,9 +313,9 @@ Status: first implementation slice exists at `src/app/optimize/sprof_loader.spl`
 with persisted profile text loading, file-load wrapper, validation status,
 counter merge summaries, bounded diagnostics, and hot-path policy helpers.
 Contract coverage exists at
-`test/system/app/optimize/feature/sprof_loader_spec.spl`. Binary `.sprof`
-container parsing, writer integration, and startup-loader wiring remain future
-work.
+`test/system/app/optimize/feature/sprof_loader_spec.spl`. Native metadata plus
+observed counter snapshots now write reloadable `.sprof` files through the
+profile writer.
 
 Deliverables:
 - `.sprof` reader/validator in optimize/profile common surface;
@@ -189,8 +334,9 @@ Status: first implementation slice exists at
 `src/app/compile/native_profile_counter.spl` with native counter kinds,
 explicit profile-build enablement, stable identity checks, and bounded call-path
 policy. Contract coverage exists at
-`test/system/app/compile/feature/native_profile_counter_spec.spl`. Actual
-native code emission and `.sprof` writer flushing remain future work.
+`test/system/app/compile/feature/native_profile_counter_spec.spl`. Command-level
+`llvm_direct.spl --simple-profile-counters` smoke now emits a native binary and
+durable sidecar metadata.
 
 Deliverables:
 - native function/block/edge counter ABI;
@@ -210,7 +356,8 @@ Status: first implementation slice exists at
 eligibility, external-BOLT rejection, and manifest-entry validation. Contract
 coverage exists at
 `test/system/app/optimize/feature/pure_simple_executable_layout_spec.spl`.
-Actual settlement/native artifact rewriting remains future work.
+The file-level profile-layout bridge consumes executable metadata plus `.sprof`
+input and writes a deterministic layout manifest.
 
 Deliverables:
 - layout planner over Simple settlement/native metadata;

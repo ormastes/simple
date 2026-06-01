@@ -446,7 +446,7 @@ expect(result.0).to_contain("missing production report")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -472,6 +472,8 @@ expect(result.0).to_contain("\"chromeCanvasMetricCount\": 4")
 expect(result.0).to_contain("\"simpleGeometryLineCount\": 4")
 expect(result.0).to_contain("\"textLineCountDelta\": 0")
 expect(result.0).to_contain("\"layoutTextMatch\": true")
+expect(result.0).to_contain("\"hasTextLineInkDelta\": true")
+expect(result.0).to_contain("\"textLineInkDeltaCount\": 4")
 expect(result.0).to_contain("\"textRegionDelta\"")
 expect(result.0).to_contain("\"divBox\"")
 expect(result.0).to_contain("\"differentPixels\": 1612")

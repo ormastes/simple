@@ -48,7 +48,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   not claim a GPU framebuffer download.
 - Generated GUI WASM widget-matrix evidence covers source-level and retained
   browser state transitions for dropdowns, dialogs, tables, lists, progress,
-  image load/error state, menus, and statusbar state.
+  image load/error state, menus, and statusbar state. The widget matrix now
+  routes checkbox, dialog, table/list, image/tooltip, scroll, menu, and
+  statusbar event responses through shared `common.ui.builder`
+  `wasm_widget_state_event_response` helpers instead of local one-off branches.
 - Engine2D exact-bitmap coverage now includes split-pane, two-block, wide-card,
   toolbar/modal/grid, dashboard/command/list, form/sidebar/validation,
   settings/inspector/tree, media/gallery/command, report/table/command, and
@@ -58,10 +61,21 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - Generic Simple Web layout evidence covers colored CSS surfaces, selector and
   inline precedence, descendant scope, and child-scope behavior, but not full
   Chromium DOM/CSS/text parity.
+- HTML compatibility reports now expose exact-pixel policy as structured SDN:
+  `exact_required: true`, `perceptual_diagnostic_only: true`, and
+  `tolerance_acceptance_allowed: false`. Perceptual percentages remain
+  diagnostics only.
 - QEMU/GTK evidence has host-side exact GTK scene checks and QMP wiring. The
   live desktop auto-QMP launch reaches `pass`, yields a real QMP socket, and
   strict live QMP screendump capture now passes with zero sample/scene
-  mismatches. QEMU-side Simple-vs-GTK performance remains unwired.
+  mismatches. The same authoritative report now also runs the host GTK GL WM
+  exact-scene perf baseline during live-QMP evidence collection, recording
+  Simple `1us`, GTK `301us`, `200` iterations, zero RGBA mismatches, and no
+  tolerance path. QEMU-side Simple-vs-GTK performance remains unwired.
+- Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
+  boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
+  Linux-host evidence intentionally reports `pass=false` without a real
+  SMF/dynlib artifact, so it does not claim the final native hot-call target.
 
 ## Current Evidence
 
@@ -78,6 +92,16 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `layout_text_match: true`; the first-line width now records `105`px versus
   Chrome `104.0625`px, while pixel output remains divergent for paint/composite
   work.
+- `src/app/wm_compare/site_corpus_compat.spl`: production child capture honors
+  `SIMPLE_BIN`/`SIMPLE_BINARY` before falling back to `bin/simple`, keeping
+  focused probes on the same verified runtime as the parent command instead of
+  failing before pixel comparison when the cached wrapper lacks `run` support.
+- `test/baselines/famous_site_corpus/site_0_google/report.production.sdn`:
+  production text ink evidence now includes per-line regions derived from the
+  calibrated Simple paint runs. The four current line deltas are `Google search`
+  `808`, `deterministic` `761`, `compatibility` `779`, and `fixture` `368`
+  differing pixels, preserving the real `2717` total divergence while making the
+  glyph/compositing blocker gateable line by line.
 - `doc/09_report/chrome_production_glyph_paint_probe_2026-06-01.md`:
   fail-closed production glyph paint probe showing generic layout and Engine2D
   bitmap glyph routes regress the strict `site_0_google` different-pixel bound.
@@ -106,7 +130,28 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - `doc/09_report/qemu_gtk_wm_capture_evidence_2026-06-01.md`: live QEMU/GTK
   evidence showing auto-QMP launch reaches `pass` with a socket and strict
   live QMP screendump capture passes with `786432` pixels, `10` sample matches,
-  and `0` scene mismatches.
+  and `0` scene mismatches. The report also records host-side Simple-vs-GTK
+  perf baseline fields with Simple `1us`, GTK `301us`, `200` iterations,
+  comparison available, `0` RGBA mismatches, and
+  `blur_or_tolerance_used=false`.
+- `src/lib/common/ui/builder.spl` and
+  `examples/ui/widget_matrix_wasm_gui.spl`: shared retained-WASM widget event
+  helper and widget-matrix refactor. Current CLI/browser evidence keeps
+  widget-matrix import count at `0`, event markers at `23/23`, retained
+  selectors at `23/23`, nonzero boxes at `23/23`, and retained event mutations
+  at `22/22`.
+- `src/app/wm_compare/html_compat_part3.spl`,
+  `test/system/wm_compare/html_compat_spec.spl`, and
+  `doc/06_spec/system/wm_compare/html_compat_spec.md`: exact-pixel acceptance
+  policy is now machine-readable in generated reports with
+  `tolerance_acceptance_allowed: false`.
+- `src/lib/gui/pure_core.spl`, `src/lib/gui/pure_smf_dynlib_perf.spl`,
+  `src/app/gui_perf/smf_dynlib_probe_core.spl`, and
+  `src/app/gui_perf/smf_dynlib_probe.spl`: pure GUI command-boundary and
+  SMF/dynlib hot-response evidence. The focused CLI row is
+  `GUI_DYNLIB_PERF ... call_source=direct_simple ... pass=false
+  error=missing-artifact-path`, proving fallback measurements cannot satisfy the
+  release gate.
 - `doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md`:
   current Engine2D Node/Bun/Electron budgeted exact-bitmap matrix including
   settings-inspector-tree.
@@ -187,7 +232,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   divergence is solved.
 - QEMU/GTK: add a guest-side GTK/Simple performance harness and broaden strict
   live QEMU WM capture to representative app windows, text glyph content, and
-  event-driven retained rendering.
+  event-driven retained rendering. Host-side exact GTK scene perf is now wired
+  into the live-QMP report, but it is not a substitute for the guest-side
+  harness.
 - Tolerance audit: continue removing or quarantining legacy perceptual/tolerance
   claims outside the audited GUI hardening paths. Exact pixels remain the
   acceptance rule; perceptual values are diagnostic only.
@@ -220,3 +267,70 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - `SIMPLE_LIB=src bin/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
 
 All commands above passed in the current worktree.
+
+Additional continuation check:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/site_corpus_compat.spl test/system/wm_compare/famous_site_corpus_spec.spl test/unit/browser_engine/text_painter_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple run src/app/wm_compare/site_corpus_compat.spl --only=site_0_google --production-renderer --continue-on-fail --simple-timeout-ms=60000`
+
+The continuation check passed compilation and restored the focused production
+probe to the real `site_0_google` text/compositing blocker: child capture
+succeeds, `different_pixels` is `2717`, `layout_text_match` is `true`, and the
+report retains the exact-pixel acceptance policy with perceptual values as
+diagnostics only.
+
+Per-line text ink continuation check:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/site_corpus_compat.spl test/system/wm_compare/famous_site_corpus_spec.spl test/unit/browser_engine/text_painter_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple run src/app/wm_compare/site_corpus_compat.spl --only=site_0_google --production-renderer --continue-on-fail --simple-timeout-ms=60000`
+- `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/system/wm_compare/famous_site_corpus_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The per-line gate passed with `hasTextLineInkDelta: true`,
+`textLineInkDeltaCount: 4`, `differentPixels: 2717`, no verifier failures, and
+the system spec passing `37/37`. The doc layout guard returned `0`.
+
+Generated GUI WASM shared-helper continuation check:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/common/ui/builder.spl examples/ui/widget_matrix_wasm_gui.spl test/unit/app/ui/builder_spec.spl`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple examples/ui/widget_matrix_wasm_gui.spl`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-gui-wasm-cli-artifact.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-gui-wasm-browser-execution-evidence.shs`
+
+The compile and generated-WASM gates passed. The source run returned
+`wasm_gui:event:matrix_checkbox:changed`; CLI artifact evidence passed with
+widget-matrix byte size `15028` and import count `0`; browser evidence passed
+with widget-matrix `simple_app_event_probe=23`, event markers `23/23`, retained
+selectors `23/23`, nonzero boxes `23/23`, and retained event mutations `22/22`.
+`test/unit/app/ui/builder_spec.spl` still has an unrelated focused unit gap at
+`43 passed / 2 failed`, so it is not used as release evidence for this slice.
+
+Tolerance-audit continuation check:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/html_compat_part1.spl src/app/wm_compare/html_compat_part3.spl test/system/wm_compare/html_compat_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/html_compat_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/system/wm_compare/html_compat_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The focused html-compat check passed, the system spec passed `17/17`, the
+generated manual includes the structured exact-pixel policy assertion, and the
+doc layout guard returned `0`.
+
+Pure GUI release/perf continuation check:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/gui/pure_core.spl src/lib/gui/pure_smf_dynlib_perf.spl src/app/gui_perf/smf_dynlib_probe_core.spl src/app/gui_perf/smf_dynlib_probe.spl test/unit/lib/gui/pure_core_spec.spl test/unit/lib/gui/pure_smf_dynlib_perf_spec.spl test/unit/lib/gui/pure_gui_release_lane_spec.spl test/unit/app/gui_perf/smf_dynlib_probe_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/gui/pure_core_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/gui/pure_smf_dynlib_perf_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/gui/pure_gui_release_lane_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/gui_perf/smf_dynlib_probe_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple run src/app/gui_perf/smf_dynlib_probe.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/gui/pure_core_spec.spl test/unit/lib/gui/pure_smf_dynlib_perf_spec.spl test/unit/lib/gui/pure_gui_release_lane_spec.spl test/unit/app/gui_perf/smf_dynlib_probe_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The focused check passed; specs passed `6/6`, `7/7`, `7/7`, and `4/4`.
+The probe emitted a machine-readable fail-closed row with `pass=false` and
+`error=missing-artifact-path` because no real SMF/dynlib artifact was provided.
+The generated manuals exist under `doc/06_spec/unit/...`, and the doc layout
+guard returned `0`.

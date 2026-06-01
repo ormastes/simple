@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-01 09:46:27*
+*Generated: 2026-06-01 10:12:42*
 
-## test/unit/compiler/loader
+## test/unit/app/office
 
-❌ **module_loader_relocation_spec.spl** (15390ms)
-  - Source: `test/unit/compiler/loader/module_loader_relocation_spec.spl`
-  - Generated doc: `spec/module_loader_relocation_spec.md`
+❌ **office_suite_spec.spl** (827ms)
+  - Source: `test/unit/app/office/office_suite_spec.spl`
+  - Generated doc: `spec/office_suite_spec.md`
 
 
 ---
@@ -16,4 +16,4 @@
 - **Total:** 1 tests
 - **Passed:** 0 ✅
 - **Failed:** 1 ❌
-- **Duration:** 15401ms
+- **Duration:** 832ms

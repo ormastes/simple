@@ -381,6 +381,9 @@ fn strip_flattened_import_nodes(module: Module) -> Module {
         .items
         .into_iter()
         .filter(|item| {
+            if let Node::Function(function) = item {
+                return function.name != "main";
+            }
             !matches!(
                 item,
                 Node::UseStmt(_)

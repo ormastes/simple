@@ -158,6 +158,8 @@ let result = {
   textLineCountDelta: 0,
   layoutTextMatch: false,
   hasTextInkDelta: false,
+  hasTextLineInkDelta: false,
+  textLineInkDeltaCount: 0,
   textInkDelta: {
     divBoxDifferentPixels: 0,
     divBoxChromeExactBlackPixels: 0,
@@ -196,6 +198,8 @@ if (!fs.existsSync(reportPath)) {
   result.textLineCountDelta = Number.parseInt(matchText(text, /text_line_count_delta:\s*(-?[0-9]+)/, "0"), 10);
   result.layoutTextMatch = parseBool(text, /layout_text_match:\s*(true|false)/);
   result.hasTextInkDelta = text.includes("text_ink_delta:");
+  result.hasTextLineInkDelta = text.includes("text_line_ink_delta:");
+  result.textLineInkDeltaCount = parseIntField(text, /text_line_ink_delta:\s*\(text_line_ink_delta count:\s*([0-9]+)/);
   result.textInkDelta.divBoxDifferentPixels = parseIntField(text, /div_box:\s*\(region[^\)]*different_pixels:\s*([0-9]+)/);
   result.textInkDelta.divBoxChromeExactBlackPixels = parseIntField(text, /div_box:\s*\(region[^\)]*chrome_exact_black_pixels:\s*([0-9]+)/);
   result.textInkDelta.divBoxSimpleBackgroundMismatchPixels = parseIntField(text, /div_box:\s*\(region[^\)]*simple_background_mismatch_pixels:\s*([0-9]+)/);
@@ -219,6 +223,8 @@ if (!fs.existsSync(reportPath)) {
   if (result.textRegionDelta && result.textRegionDelta.divBox.differentPixels <= 0) failures.push("production div-box text delta did not report differences");
   if (result.textRegionDelta && (!result.textRegionDelta.overflowText || result.textRegionDelta.overflowText.differentPixels <= 0)) failures.push("production overflow text delta did not report differences");
   if (!result.hasTextInkDelta) failures.push("missing production text ink delta diagnostics");
+  if (!result.hasTextLineInkDelta) failures.push("missing production per-line text ink delta diagnostics");
+  if (result.hasTextLineInkDelta && result.textLineInkDeltaCount !== result.simpleLayoutLineCount) failures.push("per-line text ink delta count does not match Simple layout line count");
   if (result.hasTextInkDelta && result.textInkDelta.divBoxChromeExactBlackPixels <= 0) failures.push("text ink delta did not report div-box exact black glyph pixels");
   if (result.hasTextInkDelta && result.textInkDelta.overflowChromeExactBlackPixels <= 0) failures.push("text ink delta did not report overflow exact black glyph pixels");
   if (result.hasTextInkDelta && result.textInkDelta.divBoxSimpleBackgroundMismatchPixels <= 0) failures.push("text ink delta did not report div-box background mismatches");

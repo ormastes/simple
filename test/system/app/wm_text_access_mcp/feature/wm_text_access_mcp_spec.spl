@@ -1,0 +1,98 @@
+"""
+WM Text Access MCP source contract spec.
+Verifies that the selected common window-to-text module and adapter entrypoints exist and are wired through the UI access hub.
+"""
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn _src() -> text:
+    rt_file_read_text("src/lib/common/ui/win_text_access.spl") ?? ""
+
+fn _hub() -> text:
+    rt_file_read_text("src/lib/common/ui/access.spl") ?? ""
+
+fn _mcp_tools() -> text:
+    rt_file_read_text("src/app/mcp/tool_table.spl") ?? ""
+
+fn _mcp_dispatch() -> text:
+    rt_file_read_text("src/app/mcp/main_dispatch.spl") ?? ""
+
+fn _mcp_play() -> text:
+    rt_file_read_text("src/app/mcp/main_lazy_play_tools.spl") ?? ""
+
+describe "WM text access MCP":
+    """
+    Covers selected requirements for the common model, TRACE32/Simple UI/host WM adapters, shared query/action helpers, and hot-path constraints.
+    """
+
+    it "REQ-WTA-001 defines the common window-to-text model":
+        val src = _src()
+        expect(src).to_contain("struct WinTextSource")
+        expect(src).to_contain("struct WinTextSnapshot")
+        expect(src).to_contain("struct WinTextActionRequest")
+        expect(src).to_contain("struct WinTextActionResult")
+
+    it "REQ-WTA-002 implements shared query logic over normalized snapshots":
+        val src = _src()
+        expect(src).to_contain("fn win_text_find_nodes")
+        expect(src).to_contain("ui_access_find_nodes(snapshot.access")
+
+    it "REQ-WTA-003 implements shared action routing and unsupported results":
+        val src = _src()
+        expect(src).to_contain("fn win_text_route_action")
+        expect(src).to_contain("WIN_TEXT_ACTION_UNSUPPORTED")
+        expect(src).to_contain("win_text_node_supports_action")
+
+    it "REQ-WTA-004 includes TRACE32 text window adapter support":
+        val src = _src()
+        expect(src).to_contain("fn win_text_trace32_snapshot")
+        expect(src).to_contain("WIN_TEXT_SOURCE_TRACE32")
+        expect(src).to_contain("open_command")
+        expect(src).to_contain("capture_command")
+        expect(src).to_contain("captured_text.split")
+
+    it "REQ-WTA-005 includes Simple UI adapter support":
+        val src = _src()
+        expect(src).to_contain("fn win_text_simple_ui_snapshot")
+        expect(src).to_contain("WIN_TEXT_SOURCE_SIMPLE_UI")
+        expect(src).to_contain("in_process_semantic")
+
+    it "REQ-WTA-006 includes host WM top-level adapter support":
+        val src = _src()
+        expect(src).to_contain("fn win_text_host_wm_snapshot")
+        expect(src).to_contain("WIN_TEXT_SOURCE_HOST_WM")
+        expect(src).to_contain("host_window")
+        expect(src).to_contain("click_xy")
+
+    it "REQ-WTA-007 exposes the common module through the UI access hub":
+        val hub = _hub()
+        expect(hub).to_contain("use common.ui.win_text_access")
+        expect(hub).to_contain("win_text_trace32_snapshot")
+        expect(hub).to_contain("win_text_host_wm_snapshot")
+        expect(hub).to_contain("win_text_route_action")
+
+    it "REQ-WTA-007 exposes an MCP status hook for the common access surface":
+        val tools = _mcp_tools()
+        val dispatch = _mcp_dispatch()
+        val play = _mcp_play()
+        expect(tools).to_contain("play_wm_text_status")
+        expect(dispatch).to_contain("handle_play_wm_text_status")
+        expect(play).to_contain("common.ui.win_text_access")
+        expect(play).to_contain("trace32")
+        expect(play).to_contain("simple_ui")
+        expect(play).to_contain("host_wm")
+
+    it "NFR-WTA-002 exposes staleness metadata and calculation":
+        val src = _src()
+        expect(src).to_contain("captured_at_ms")
+        expect(src).to_contain("max_age_ms")
+        expect(src).to_contain("stale: bool")
+        expect(src).to_contain("fn win_text_is_stale")
+
+    it "NFR-WTA-003 keeps query hot paths in memory":
+        val src = _src()
+        expect(src).to_contain("fn win_text_find_nodes")
+        expect(src.contains("rt_process_run")).to_equal(false)
+        expect(src.contains("wm_list_windows(")).to_equal(false)

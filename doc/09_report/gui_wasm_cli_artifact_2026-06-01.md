@@ -21,13 +21,13 @@
 - reason: pass
 - source: examples/ui/widget_matrix_wasm_gui.spl
 - output: build/gui_wasm_cli_artifact/widget_matrix_wasm_gui.wasm
-- size bytes: 7355
+- size bytes: 15028
 - magic hex: 0061736d
 - version hex: 01000000
 - import count: 0
 - imports: none
-- marker coverage: checkbox, dropdown/select, text input/textfield, textarea, tabs, dialog, table/list, progress, image, tooltip, tree/scroll, menu, statusbar, and supported menu-command/event response strings; this does not claim command-bar coverage for the widget matrix
-- event markers: matrix_checkbox:changed, matrix_dropdown:changed, matrix_textfield:accepted, matrix_textarea:accepted, matrix_tabs:selected, matrix_dialog:opened, matrix_scroll:accepted, matrix_menu:accepted, matrix_event:ignored
+- marker coverage: checkbox, dropdown/select transitions, text input/textfield, textarea, tabs, dialog open/close, table/list selection, progress validation, image load/error/tooltip, tree/scroll, menu hierarchy, statusbar update/queue, and supported menu-command/event response strings; this does not claim command-bar coverage for the widget matrix
+- event markers: matrix_checkbox:changed, matrix_dropdown:changed, matrix_dropdown:beta-selected, matrix_textfield:accepted, matrix_textarea:accepted, matrix_tabs:selected, matrix_dialog:opened, matrix_dialog:closed, matrix_table:selected, matrix_table:row-primary-selected, matrix_list:selected, matrix_progress:changed, matrix_progress:clamped, matrix_tooltip:shown, matrix_image:loaded, matrix_image:error, matrix_scroll:accepted, matrix_menu:accepted, matrix_menu:view-accepted, matrix_menu:zoom-accepted, matrix_statusbar:updated, matrix_statusbar:queued, matrix_event:ignored
 
 ### builder_matrix
 - status: pass

@@ -79,11 +79,15 @@ fn _looks_like_driver_failure(output: text) -> bool:
     val trimmed = output.trim()
     if trimmed == "":
         return false
-    trimmed.contains("error:") or
-    trimmed.contains("panic") or
-        trimmed.contains("ParseError") or
-        trimmed.contains("TypeError") or
-        trimmed.contains("RuntimeError")
+    if trimmed.contains("error:"):
+        return true
+    if trimmed.contains("panic"):
+        return true
+    if trimmed.contains("ParseError"):
+        return true
+    if trimmed.contains("TypeError"):
+        return true
+    trimmed.contains("RuntimeError")
 
 fn _escape_simple_text(value: text) -> text:
     val escaped_slashes = value.replace("\\", "\\\\")
@@ -246,12 +250,11 @@ fn _parse_export_class(lines: [text], start_index: i64) -> PublicFieldParse:
     PublicFieldParse(fields: fields, methods: methods, next_index: i, error: "")
 
 fn _parse_export_method(line: text) -> PublicMethodParse:
-    val normalized = if line.starts_with("static fn "):
-        line.substring(10).trim()
+    var normalized = line.substring(3).trim()
+    if line.starts_with("static fn "):
+        normalized = line.substring(10).trim()
     elif line.starts_with("fn "):
-        line.substring(3).trim()
-    else:
-        line.substring(3).trim()
+        normalized = line.substring(3).trim()
     val parsed = _parse_signature_parts(normalized)
     if parsed.error != "":
         return PublicMethodParse(exported_method: PublicExportMethod(name: "", params: [], return_type: "", is_static: false), error: parsed.error)
@@ -301,16 +304,13 @@ fn _parse_signature_parts(signature: text) -> PublicSignatureParse:
                 return PublicSignatureParse(name: "", params: [], return_type: "", error: "failed to parse parameter in exported function: {fn_name}")
             params = params.push(param_parts[1].trim())
             i = i + 1
-    val return_type = if tail_parts[1].contains("->"):
+    var return_type = "unit"
+    if tail_parts[1].contains("->"):
         val ret_parts = tail_parts[1].split("->")
-        if ret_parts.len() < 2:
-            "unit"
-        else:
+        if ret_parts.len() >= 2:
             val suffix = ret_parts[1].trim()
             val suffix_parts = suffix.split(":")
-            suffix_parts[0].trim()
-    else:
-        "unit"
+            return_type = suffix_parts[0].trim()
     PublicSignatureParse(name: fn_name, params: params, return_type: return_type, error: "")
 
 fn _emit_public_c_header(lib_name: text, functions: [PublicExportFunction], classes: [PublicExportClass]) -> text:
@@ -523,7 +523,9 @@ fn _public_c_fn_decl(func: PublicExportFunction) -> text:
     if _public_is_result_type(func.return_type):
         val ok_type = _public_result_ok_type(func.return_type)
         val base = _public_c_fn_param_list(func.params)
-        val params = if base == "void": "spl_error_t** err_out" else: base + ", spl_error_t** err_out"
+        var params = base + ", spl_error_t** err_out"
+        if base == "void":
+            params = "spl_error_t** err_out"
         return _public_c_type(ok_type) + " " + export_name + "(" + params + ");"
     val ret = _public_c_type(func.return_type)
     if func.params.len() == 0:
@@ -533,7 +535,9 @@ fn _public_c_fn_decl(func: PublicExportFunction) -> text:
 fn _public_c_method_decl(class_: PublicExportClass, method: PublicExportMethod) -> text:
     val prefix = "spl_" + class_.name
     val export_name = prefix + "_" + method.name
-    val ret = if method.return_type == class_.name: prefix + "_t*" else: _public_c_type(method.return_type)
+    var ret = _public_c_type(method.return_type)
+    if method.return_type == class_.name:
+        ret = prefix + "_t*"
     var params: [text] = []
     if not method.is_static:
         params = params.push(prefix + "_t* self")
@@ -541,7 +545,9 @@ fn _public_c_method_decl(class_: PublicExportClass, method: PublicExportMethod) 
     while i < method.params.len():
         params = params.push(_public_c_type(method.params[i]) + " arg" + "{i}")
         i = i + 1
-    val params_str = if params.len() == 0: "void" else: params.join(", ")
+    var params_str = params.join(", ")
+    if params.len() == 0:
+        params_str = "void"
     "{ret} {export_name}(" + params_str + ");"
 
 fn _public_cpp_fn_params(params: [text]) -> text:
@@ -567,10 +573,9 @@ fn _public_cpp_method_wrapper(class_: PublicExportClass, method: PublicExportMet
     val export_name = prefix + "_" + method.name
     val cpp_ret = _public_cpp_type(method.return_type)
     val cpp_params = _public_cpp_fn_params(method.params)
-    val call_args = if method.params.len() == 0:
-        "handle_"
-    else:
-        "handle_, " + _public_cpp_fn_args(method.params)
+    var call_args = "handle_, " + _public_cpp_fn_args(method.params)
+    if method.params.len() == 0:
+        call_args = "handle_"
     var lines: [text] = []
     lines.push("    " + cpp_ret + " " + method.name + "(" + cpp_params + ") {")
     if cpp_ret == "void":
@@ -603,11 +608,15 @@ fn _public_cpp_result_wrapper(func: PublicExportFunction) -> [text]:
     val cpp_params = _public_cpp_fn_params(func.params)
     val c_args = _public_cpp_fn_args(func.params)
     var lines: [text] = []
-    var params_with_outputs = if cpp_params == "": "" else: cpp_params + ", "
+    var params_with_outputs = cpp_params + ", "
+    if cpp_params == "":
+        params_with_outputs = ""
     params_with_outputs = params_with_outputs + ok_type + "* out_value, std::string* out_error = nullptr"
     lines.push("inline bool " + func.name + "(" + params_with_outputs + ") noexcept {")
     lines.push("    spl_error_t* err = nullptr;")
-    val c_call_args = if c_args == "": "&err" else: c_args + ", &err"
+    var c_call_args = c_args + ", &err"
+    if c_args == "":
+        c_call_args = "&err"
     lines.push("    " + ok_type + " result = ::" + func.name + "(" + c_call_args + ");")
     lines.push("    if (err) {")
     lines.push("        if (out_error) {")
@@ -629,7 +638,9 @@ fn _public_cpp_result_wrapper(func: PublicExportFunction) -> [text]:
     lines.push("inline " + ok_type + " " + func.name + "_or_throw(" + cpp_params + ") {")
     lines.push("    " + ok_type + " value{};")
     lines.push("    std::string error;")
-    val throw_args = if c_args == "": "&value, &error" else: c_args + ", &value, &error"
+    var throw_args = c_args + ", &value, &error"
+    if c_args == "":
+        throw_args = "&value, &error"
     lines.push("    if (!" + func.name + "(" + throw_args + ")) {")
     lines.push("        throw std::runtime_error(error);")
     lines.push("    }")
@@ -646,7 +657,7 @@ fn _public_find_class_create_method(class_: PublicExportClass) -> Option<PublicE
         if method.is_static and method.name == "create":
             return Some(method)
         i = i + 1
-    None
+    nil
 
 fn _public_c_fn_param_list(params: [text]) -> text:
     if params.len() == 0:
@@ -711,8 +722,12 @@ fn _public_c_type(type_name: text) -> text:
 
 fn _public_cpp_type(type_name: text) -> text:
     match type_name:
-        case "text" | "str": "const std::string&"
-        case _: _public_c_type(type_name)
+        case "text":
+            "const std::string&"
+        case "str":
+            "const std::string&"
+        case _:
+            _public_c_type(type_name)
 
 fn _public_field_storage_c_type(field: PublicExportField) -> text:
     val raw = field.raw_decl.trim()

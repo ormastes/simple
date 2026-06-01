@@ -76,10 +76,10 @@ impl BuildGraph:
         """Add a build unit, return its ID."""
         val id = self.next_id
         self.next_id = self.next_id + 1
-        val unit = BuildUnit(id: id, path: path, dependencies: dependencies,
+        val build_unit = BuildUnit(id: id, path: path, dependencies: dependencies,
                              dependents: [], status: BuildUnitStatus.Pending,
                              output: nil)
-        self.units[id] = unit
+        self.units[id] = build_unit
 
         # Update dependents
         for dep_id in dependencies:
@@ -102,10 +102,10 @@ impl BuildGraph:
         var ready: [BuildUnit] = []
         for id in self.ready_queue:
             if self.units.has(id):
-                val unit = self.units[id]
-                match unit.status:
+                val build_unit = self.units[id]
+                match build_unit.status:
                     case Pending:
-                        ready = ready.push(unit)
+                        ready = ready.push(build_unit)
                     case _: ()
         self.ready_queue = []
         ready
@@ -160,8 +160,8 @@ impl BuildGraph:
         """All units completed or failed."""
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for id in self.units.keys():
-            val unit = self.units[id]
-            match unit.status:
+            val build_unit = self.units[id]
+            match build_unit.status:
                 case Completed | Failed(_): ()
                 case _: return false
         true
@@ -169,8 +169,8 @@ impl BuildGraph:
     fn has_failures() -> bool:
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for id in self.units.keys():
-            val unit = self.units[id]
-            match unit.status:
+            val build_unit = self.units[id]
+            match build_unit.status:
                 case Failed(_): return true
                 case _: ()
         false
@@ -290,11 +290,11 @@ impl ParallelBuilder:
             for id in order:
                 if not self.graph.units.has(id):
                     continue
-                val unit = self.graph.units[id]
+                val build_unit = self.graph.units[id]
 
                 # Skip if any dependency failed
                 var dep_failed = false
-                for dep_id in unit.dependencies:
+                for dep_id in build_unit.dependencies:
                     if self.graph.units.has(dep_id):
                         match self.graph.units[dep_id].status:
                             case Failed(_): dep_failed = true
@@ -309,7 +309,7 @@ impl ParallelBuilder:
                     continue
 
                 self.graph.mark_in_progress(id)
-                val result = compile_fn(unit.path)
+                val result = compile_fn(build_unit.path)
                 match result:
                     case Ok(output):
                         self.graph.mark_completed(id, Some(output))
@@ -321,7 +321,7 @@ impl ParallelBuilder:
                             parallel_batches: self.stats.parallel_batches)
                     case Err(msg):
                         self.graph.mark_failed(id, msg)
-                        errors = errors.push((unit.path, msg))
+                        errors = errors.push((build_unit.path, msg))
                         self.stats = BuildStats(total_units: self.stats.total_units,
                             completed: self.stats.completed,
                             failed: self.stats.failed + 1,
@@ -356,14 +356,14 @@ impl ParallelBuilder:
                         self.graph.mark_in_progress(ready[chunk_idx].id)
                         chunk_idx = chunk_idx + 1
 
-                    # Execute chunk: compile each unit
+                    # Execute chunk: compile each build unit
                     chunk_idx = batch_idx
                     while chunk_idx < chunk_end:
-                        val unit = ready[chunk_idx]
-                        val result = compile_fn(unit.path)
+                        val build_unit = ready[chunk_idx]
+                        val result = compile_fn(build_unit.path)
                         match result:
                             case Ok(output):
-                                self.graph.mark_completed(unit.id, Some(output))
+                                self.graph.mark_completed(build_unit.id, Some(output))
                                 outputs = outputs.push(output)
                                 self.stats = BuildStats(total_units: self.stats.total_units,
                                     completed: self.stats.completed + 1,
@@ -371,8 +371,8 @@ impl ParallelBuilder:
                                     skipped: self.stats.skipped,
                                     parallel_batches: self.stats.parallel_batches)
                             case Err(msg):
-                                self.graph.mark_failed(unit.id, msg)
-                                errors = errors.push((unit.path, msg))
+                                self.graph.mark_failed(build_unit.id, msg)
+                                errors = errors.push((build_unit.path, msg))
                                 self.stats = BuildStats(total_units: self.stats.total_units,
                                     completed: self.stats.completed,
                                     failed: self.stats.failed + 1,
@@ -420,18 +420,18 @@ impl ParallelBuilder:
             val ready = self.graph.ready_units()
             var ready_idx = 0
             while in_flight_pid.len() < max_workers and ready_idx < ready.len():
-                val unit = ready[ready_idx]
+                val build_unit = ready[ready_idx]
                 ready_idx = ready_idx + 1
 
                 # Check dependency failures
                 var dep_failed = false
-                for dep_id in unit.dependencies:
+                for dep_id in build_unit.dependencies:
                     if self.graph.units.has(dep_id):
                         match self.graph.units[dep_id].status:
                             case Failed(_): dep_failed = true
                             case _: ()
                 if dep_failed:
-                    self.graph.mark_failed(unit.id, "Dependency failed")
+                    self.graph.mark_failed(build_unit.id, "Dependency failed")
                     self.stats = BuildStats(total_units: self.stats.total_units,
                         completed: self.stats.completed,
                         failed: self.stats.failed + 1,
@@ -439,11 +439,11 @@ impl ParallelBuilder:
                         parallel_batches: self.stats.parallel_batches)
                     continue
 
-                self.graph.mark_in_progress(unit.id)
-                val pid = spawn_fn(unit.path)
+                self.graph.mark_in_progress(build_unit.id)
+                val pid = spawn_fn(build_unit.path)
                 if pid < 0:
-                    self.graph.mark_failed(unit.id, "Failed to spawn compilation process")
-                    errors = errors.push((unit.path, "Failed to spawn compilation process"))
+                    self.graph.mark_failed(build_unit.id, "Failed to spawn compilation process")
+                    errors = errors.push((build_unit.path, "Failed to spawn compilation process"))
                     self.stats = BuildStats(total_units: self.stats.total_units,
                         completed: self.stats.completed,
                         failed: self.stats.failed + 1,
@@ -451,10 +451,10 @@ impl ParallelBuilder:
                         parallel_batches: self.stats.parallel_batches)
                     continue
 
-                in_flight_pid[pid] = unit.id
-                in_flight_path[pid] = unit.path
+                in_flight_pid[pid] = build_unit.id
+                in_flight_path[pid] = build_unit.path
                 if self.config.verbose:
-                    print "[PARALLEL] spawned pid={pid} for {unit.path}"
+                    print "[PARALLEL] spawned pid={pid} for {build_unit.path}"
 
             # If nothing in-flight and nothing ready, we're stuck
             if in_flight_pid.len() == 0:

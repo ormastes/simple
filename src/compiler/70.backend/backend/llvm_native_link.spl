@@ -57,29 +57,41 @@ fn compile_entry_point_c(pid: i64, verbose: bool, opt_level: i64) -> Result<text
     val ext = _obj_ext()
     val entry_c = "{tmp_dir}/simple_entry_{pid}.c"
     val entry_o = "{tmp_dir}/simple_entry_{pid}{ext}"
-    val c_source = "extern void spl_init_args(int argc, char** argv);\n" +
-        "extern void __simple_runtime_init(void);\n" +
-        "extern long long __simple_main(void);\n" +
-        "extern void __simple_runtime_shutdown(void);\n" +
-        "int main(int argc, char** argv) {\n" +
-        "    spl_init_args(argc, argv);\n" +
-        "    __simple_runtime_init();\n" +
-        "    long long result = __simple_main();\n" +
-        "    __simple_runtime_shutdown();\n" +
-        "    return (int)result;\n" +
-        "}\n"
+    var c_source = "extern void spl_init_args(int argc, char** argv);\n"
+    c_source = c_source + "extern void __simple_runtime_init(void);\n"
+    c_source = c_source + "extern long long __simple_main(void);\n"
+    c_source = c_source + "extern void __simple_runtime_shutdown(void);\n"
+    c_source = c_source + "int main(int argc, char** argv) {\n"
+    c_source = c_source + "    spl_init_args(argc, argv);\n"
+    c_source = c_source + "    __simple_runtime_init();\n"
+    c_source = c_source + "    long long result = __simple_main();\n"
+    c_source = c_source + "    __simple_runtime_shutdown();\n"
+    c_source = c_source + "    return (int)result;\n"
+    c_source = c_source + "}\n"
     rt_file_write_text(entry_c, c_source)
 
     val use_msvc = _is_msvc_cc(cc)
     var comp_args: [text] = []
     if use_msvc:
-        val msvc_opt = if opt_level <= 0: "/Od" elif opt_level == 1: "/O1" elif opt_level == 2: "/O2" else: "/Ox"
+        var msvc_opt = "/Ox"
+        if opt_level <= 0:
+            msvc_opt = "/Od"
+        elif opt_level == 1:
+            msvc_opt = "/O1"
+        elif opt_level == 2:
+            msvc_opt = "/O2"
         comp_args = ["/c", msvc_opt, "/Gy", "/Fo{entry_o}", entry_c]
     else:
         comp_args = ["-c"]
         if not _is_windows():
             comp_args.push("-fPIC")
-        val cc_opt = if opt_level <= 0: "-O0" elif opt_level == 1: "-Oz" elif opt_level == 2: "-O2" else: "-O3"
+        var cc_opt = "-O3"
+        if opt_level <= 0:
+            cc_opt = "-O0"
+        elif opt_level == 1:
+            cc_opt = "-Oz"
+        elif opt_level == 2:
+            cc_opt = "-O2"
         comp_args.push(cc_opt)
         comp_args.push("-ffunction-sections")
         comp_args.push("-fdata-sections")
@@ -137,19 +149,16 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
 
     # Step 3: Combine all objects and link
     print "[LLVM-LINK] step 3: combining objects..."
-    val all_objects = if user_objects.len() > 0:
-        [
-            user_objects[0],
-            runtime_objects[0], runtime_objects[1], runtime_objects[2],
-            runtime_objects[3], runtime_objects[4], runtime_objects[5],
-            entry_obj_path
-        ]
-    else:
-        [
-            runtime_objects[0], runtime_objects[1], runtime_objects[2],
-            runtime_objects[3], runtime_objects[4], runtime_objects[5],
-            entry_obj_path
-        ]
+    var all_objects: [text] = []
+    if user_objects.len() > 0:
+        all_objects = all_objects.push(user_objects[0])
+    all_objects = all_objects.push(runtime_objects[0])
+    all_objects = all_objects.push(runtime_objects[1])
+    all_objects = all_objects.push(runtime_objects[2])
+    all_objects = all_objects.push(runtime_objects[3])
+    all_objects = all_objects.push(runtime_objects[4])
+    all_objects = all_objects.push(runtime_objects[5])
+    all_objects = all_objects.push(entry_obj_path)
     print "[LLVM-LINK] total objects: {all_objects.len()}"
 
     print "[LLVM-LINK] creating NativeLinkConfig..."

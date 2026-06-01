@@ -11,8 +11,7 @@ use app.optimize.profile_layout_cli.{
 }
 use app.optimize.sprof_loader.{
     sprof_counter_record,
-    sprof_load_profile_text,
-    sprof_write_native_counter_profile_file
+    sprof_load_profile_text
 }
 
 extern fn rt_file_read_text(path: text) -> text
@@ -124,37 +123,33 @@ describe "Profile Layout CLI Bridge":
         expect(missing_profile.status).to_equal("invalid")
         expect(missing_profile.diagnostics[0]).to_equal("empty_function_profile")
 
-    it "should write an end-to-end layout manifest from native metadata and observed counts":
+    it "should write an end-to-end layout manifest from a reloadable sprof profile":
         val base = "/tmp/simple_profile_layout_e2e_{rt_getpid()}"
-        val metadata_path = base + ".metadata"
         val profile_path = base + ".sprof"
         val manifest_path = base + ".layout"
         val out_path = base + ".optimized-layout"
-        val metadata = [
-            "counter|section=simple_profile_counter_section__simple_profile_counters|slot=0|kind=function_entry|key=c:dispatch:entry|initial=0|symbol=__simple_profile_counter_0_function_entry",
-            "counter|section=simple_profile_counter_section__simple_profile_counters|slot=1|kind=function_entry|key=c:parse:entry|initial=0|symbol=__simple_profile_counter_1_function_entry",
-            "counter|section=simple_profile_counter_section__simple_profile_counters|slot=2|kind=function_entry|key=c:rare:entry|initial=0|symbol=__simple_profile_counter_2_function_entry"
-        ]
-        rt_file_write_text(metadata_path, metadata.join("\n") + "\n")
+        rt_file_write_text(profile_path, [
+            "header;schema=sprof-v1;module=native-demo;workload=smoke",
+            "function;key=c:dispatch:entry;count=1",
+            "function;key=c:parse:entry;count=9",
+            "function;key=c:rare:entry;count=0"
+        ].join("\n"))
         rt_file_write_text(manifest_path, [
             "symbol=rare;section=.text;offset=300;size=64",
             "symbol=dispatch;section=.text;offset=64;size=80",
             "symbol=parse;section=.text;offset=160;size=96"
         ].join("\n"))
 
-        val write = sprof_write_native_counter_profile_file(profile_path, "native-demo", "smoke", metadata, [1, 9, 0])
         val result = profile_layout_write_manifest_file(manifest_path, profile_path, out_path, 4096, 8192, 500, 2)
         val output = rt_file_read_text(out_path)
 
-        expect(write.wrote).to_equal(true)
-        expect(write.record_count).to_equal(3)
         expect(result.status).to_equal("ok")
         expect(rt_file_exists(out_path)).to_equal(true)
         expect(output).to_contain("simple-executable-layout-manifest-v1")
         expect(output).to_contain("hot\t.text\tparse\t160\t4096\t96")
-        expect(output).to_contain("cold\t.text\trare\t300\t8192\t64")
+        expect(output).to_contain("cold\t.text\tdispatch\t64\t8192\t80")
+        expect(output).to_contain("cold\t.text\trare\t300\t8272\t64")
 
-        rt_file_delete(metadata_path)
         rt_file_delete(profile_path)
         rt_file_delete(manifest_path)
         rt_file_delete(out_path)

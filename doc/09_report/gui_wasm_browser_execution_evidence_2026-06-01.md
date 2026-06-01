@@ -34,7 +34,7 @@
 - reason: pass
 - wasm path: build/gui_wasm_cli_artifact/widget_matrix_wasm_gui.wasm
 - proof path: build/gui_wasm_browser_execution_evidence/widget_matrix_browser_proof.json
-- byte size: 7355
+- byte size: 15028
 - WebAssembly.validate: true
 - WebAssembly.instantiate: true
 - import count: 0
@@ -44,14 +44,14 @@
 - simple_app_init ready code: 1
 - simple_app_render call: called
 - simple_app_event call: called
-- simple_app_render_probe: 19
-- simple_app_event_probe: 9
+- simple_app_render_probe: 25
+- simple_app_event_probe: 23
 - simple.gui custom sections: 1
-- render behavior markers: 13/13
-- event behavior markers: 9/9
-- retained selectors: 13/13
-- retained nonzero boxes: 13/13
-- retained event mutations: 6/6
+- render behavior markers: 19/19
+- event behavior markers: 23/23
+- retained selectors: 23/23
+- retained nonzero boxes: 23/23
+- retained event mutations: 22/22
 - Electron exit code: 0
 
 ## builder_matrix
@@ -110,7 +110,7 @@
 - gui_wasm_browser_execution_widget_matrix_reason=pass
 - gui_wasm_browser_execution_widget_matrix_wasm_path=build/gui_wasm_cli_artifact/widget_matrix_wasm_gui.wasm
 - gui_wasm_browser_execution_widget_matrix_proof_path=build/gui_wasm_browser_execution_evidence/widget_matrix_browser_proof.json
-- gui_wasm_browser_execution_widget_matrix_byte_size=7355
+- gui_wasm_browser_execution_widget_matrix_byte_size=15028
 - gui_wasm_browser_execution_widget_matrix_validate=true
 - gui_wasm_browser_execution_widget_matrix_instantiate=true
 - gui_wasm_browser_execution_widget_matrix_import_count=0
@@ -120,14 +120,14 @@
 - gui_wasm_browser_execution_widget_matrix_call_simple_app_init=1
 - gui_wasm_browser_execution_widget_matrix_call_simple_app_render=called
 - gui_wasm_browser_execution_widget_matrix_call_simple_app_event=called
-- gui_wasm_browser_execution_widget_matrix_simple_app_render_probe=19
-- gui_wasm_browser_execution_widget_matrix_simple_app_event_probe=9
+- gui_wasm_browser_execution_widget_matrix_simple_app_render_probe=25
+- gui_wasm_browser_execution_widget_matrix_simple_app_event_probe=23
 - gui_wasm_browser_execution_widget_matrix_simple_gui_custom_sections=1
-- gui_wasm_browser_execution_widget_matrix_render_behavior_markers=13/13
-- gui_wasm_browser_execution_widget_matrix_event_behavior_markers=9/9
-- gui_wasm_browser_execution_widget_matrix_retained_selectors=13/13
-- gui_wasm_browser_execution_widget_matrix_retained_nonzero_boxes=13/13
-- gui_wasm_browser_execution_widget_matrix_retained_event_mutations=6/6
+- gui_wasm_browser_execution_widget_matrix_render_behavior_markers=19/19
+- gui_wasm_browser_execution_widget_matrix_event_behavior_markers=23/23
+- gui_wasm_browser_execution_widget_matrix_retained_selectors=23/23
+- gui_wasm_browser_execution_widget_matrix_retained_nonzero_boxes=23/23
+- gui_wasm_browser_execution_widget_matrix_retained_event_mutations=22/22
 - gui_wasm_browser_execution_widget_matrix_electron_exit_code=0
 - gui_wasm_browser_execution_builder_matrix_status=pass
 - gui_wasm_browser_execution_builder_matrix_reason=pass
@@ -156,6 +156,12 @@
 ## Electron Output
 
 ### builder_matrix.electron.out
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
 - [electron:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
 - gui_wasm_browser_execution_proof=/home/ormastes/dev/pub/simple/build/gui_wasm_browser_execution_evidence/builder_matrix_browser_proof.json
 - gui_wasm_browser_execution_validate=true
@@ -163,31 +169,38 @@
 - gui_wasm_browser_execution_import_count=0
 - gui_wasm_browser_execution_imports=
 - gui_wasm_browser_execution_exports=simple_app_event,simple_app_event_probe,simple_app_init,simple_app_render,simple_app_render_probe,spl_main
-- [electron:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.
 
 ### hello.electron.out
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
 - [electron:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
-- [electron:ERROR:shared_image_interface_proxy.cc(134)] Buffer handle is null. Not creating a mailbox from it.
-- [electron:ERROR:one_copy_raster_buffer_provider.cc(348)] Creation of StagingBuffer's SharedImage failed.
+- [electron:ERROR:shared_image_manager.cc(255)] SharedImageManager::ProduceSkia: Trying to produce a Skia representation from an incompatible backing: GLTextureImageBacking
+- [electron:ERROR:raster_decoder.cc(1968)] [.RenderWorker-ADDR]GL ERROR :GL_INVALID_VALUE : glCopySubTexture: unknown mailbox
 - gui_wasm_browser_execution_proof=/home/ormastes/dev/pub/simple/build/gui_wasm_browser_execution_evidence/hello_browser_proof.json
 - gui_wasm_browser_execution_validate=true
 - gui_wasm_browser_execution_instantiate=true
 - gui_wasm_browser_execution_import_count=0
 - gui_wasm_browser_execution_imports=
 - gui_wasm_browser_execution_exports=simple_app_event,simple_app_event_probe,simple_app_init,simple_app_render,simple_app_render_probe,spl_main
-- [electron:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.
 
 ### widget_matrix.electron.out
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [electron:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
 - [electron:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
-- [electron:ERROR:shared_image_manager.cc(255)] SharedImageManager::ProduceSkia: Trying to produce a Skia representation from an incompatible backing: GLTextureImageBacking
-- [electron:ERROR:raster_decoder.cc(1968)] [.RenderWorker-ADDR]GL ERROR :GL_INVALID_VALUE : glCopySubTexture: unknown mailbox
 - gui_wasm_browser_execution_proof=/home/ormastes/dev/pub/simple/build/gui_wasm_browser_execution_evidence/widget_matrix_browser_proof.json
 - gui_wasm_browser_execution_validate=true
 - gui_wasm_browser_execution_instantiate=true
 - gui_wasm_browser_execution_import_count=0
 - gui_wasm_browser_execution_imports=
 - gui_wasm_browser_execution_exports=simple_app_event,simple_app_event_probe,simple_app_init,simple_app_render,simple_app_render_probe,spl_main
-- [electron:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.
 
 ## Electron Error
 

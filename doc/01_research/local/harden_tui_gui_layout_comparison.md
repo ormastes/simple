@@ -169,6 +169,143 @@ Research for hardening TUI and GUI layout comparison, fixing reachable compariso
   - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
   - Placeholder scan over `backend_probe.spl`, `backend_probe_strict_spec.spl`, and the backend probe manual found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
 
+## Truncated Buffer Comparison Update: 2026-06-01
+
+- `src/app/wm_compare/html_compat_part1.spl` shared `compare_exact` could still report an exact match for two equal-length buffers that were both shorter than `width * height`. That let truncated captures look exact when pixel values matched over the shortened prefix.
+- `compare_exact` now requires both buffers to have length exactly equal to the requested viewport area before pixel comparison. Any length mismatch against the expected area returns `different_pixels: total`, `match_percentage: 0`, and `max_channel_diff: 255`.
+- `test/system/wm_compare/html_compat_spec.spl` now covers truncated equal buffers in addition to invalid dimensions and changed pixels.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 15 tests, 0 failures; runner duration 8585ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/emulated_capture_spec.spl --mode=interpreter --clean`: 1 file, 5 tests, 0 failures; runner duration 7780ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter --clean`: 1 file, 6 tests, 0 failures; runner duration 2135ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl --mode=interpreter --clean`: 1 file, 8 tests, 0 failures; runner duration 1427ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over changed comparison/backend executable artifacts found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+
+## Compositor Invalid-Dimension Comparison Update: 2026-06-01
+
+- `src/os/compositor/screenshot_compare.spl` `compare_pixel_buffers` could report empty buffers with a zero or negative viewport as `exact_match: true`, `match_percentage: 10000`, and `passed: true` because the expected pixel count collapsed to zero.
+- `compare_pixel_buffers` now rejects `width <= 0` or `height <= 0` before buffer equality checks and returns a failed comparison with `different_pixels: 1`, `match_percentage: 0`, and `max_channel_diff: 255`.
+- `test/integration/rendering/backend_screenshot_compare_spec.spl` now covers invalid-dimension failures, and `doc/06_spec/integration/rendering/backend_screenshot_compare_spec.md` mirrors the scenario.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter --clean`: 1 file, 7 tests, 0 failures; runner duration 2151ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 15 tests, 0 failures; runner duration 8503ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/emulated_capture_spec.spl --mode=interpreter --clean`: 1 file, 5 tests, 0 failures; runner duration 7781ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl --mode=interpreter --clean`: 1 file, 8 tests, 0 failures; runner duration 1461ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over changed comparison/backend executable artifacts found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+
+## Compositor Diff Diagnostic Update: 2026-06-01
+
+- `src/os/compositor/screenshot_compare.spl` `generate_diff_image` previously stopped at the shorter input buffer. For truncated captures, the diagnostic diff image could be shorter than the viewport and omit the missing tail entirely.
+- `generate_diff_image` now returns exactly `width * height` pixels for valid dimensions and marks missing or unequal pixels as red differences. Invalid dimensions return an empty diagnostic image.
+- `test/integration/rendering/backend_screenshot_compare_spec.spl` now covers truncated-buffer diff diagnostics, and `doc/06_spec/integration/rendering/backend_screenshot_compare_spec.md` mirrors the scenario with 8 active scenarios.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter --clean`: 1 file, 8 tests, 0 failures; runner duration 2107ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 15 tests, 0 failures; runner duration 8494ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/emulated_capture_spec.spl --mode=interpreter --clean`: 1 file, 5 tests, 0 failures; runner duration 7794ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl --mode=interpreter --clean`: 1 file, 8 tests, 0 failures; runner duration 1404ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over changed comparison/backend executable artifacts found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+
+## Profile Comparison Invalid-Dimension Coverage: 2026-06-01
+
+- WM consistency callers use `compare_with_profile`, not only raw `compare_pixel_buffers`. The current implementation inherits the invalid-dimension failure from `compare_pixel_buffers`, but this behavior was not explicitly covered.
+- `test/integration/rendering/backend_screenshot_compare_spec.spl` now proves invalid dimensions remain failed through `compare_with_profile([], [], 0, H, profile_strict())`.
+- `doc/06_spec/integration/rendering/backend_screenshot_compare_spec.md` mirrors the profile-path scenario and now lists 9 active scenarios.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter --clean`: 1 file, 9 tests, 0 failures; runner duration 2292ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 15 tests, 0 failures; runner duration 8597ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/emulated_capture_spec.spl --mode=interpreter --clean`: 1 file, 5 tests, 0 failures; runner duration 7603ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl --mode=interpreter --clean`: 1 file, 8 tests, 0 failures; runner duration 1404ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over changed comparison/backend executable artifacts found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+
+## Perceptual Metric Completeness Update: 2026-06-01
+
+- `src/app/wm_compare/html_compat_part1.spl` `compare_perceptual` previously scored only the overlapping prefix. Equal truncated buffers could therefore produce a nonzero or high perceptual percentage even though the requested viewport was incomplete.
+- `compare_perceptual` now returns `0` for invalid dimensions or when either buffer length differs from `width * height`. This keeps perceptual metrics diagnostic and prevents incomplete captures from looking visually complete.
+- `test/system/wm_compare/html_compat_spec.spl` now covers truncated equal buffers in perceptual comparison.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 16 tests, 0 failures; runner duration 8045ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter --clean`: 1 file, 9 tests, 0 failures; runner duration 2177ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/emulated_capture_spec.spl --mode=interpreter --clean`: 1 file, 5 tests, 0 failures; runner duration 7617ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl --mode=interpreter --clean`: 1 file, 8 tests, 0 failures; runner duration 1386ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over changed comparison/backend executable artifacts found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+
+## HTML Compatibility Matcher Mirror Update: 2026-06-01
+
+- `doc/06_spec/system/wm_compare/html_compat_spec.md` already mirrored the current 16 executable scenarios, including invalid dimensions, truncated exact buffers, and truncated perceptual buffers.
+- The ignored SPipe matcher mirror `test/sys/wm_compare/.spipe_matchers_html_compat_spec.spl` was stale and only covered the earlier exact-match/change cases. It now imports `compare_perceptual` and mirrors the invalid-dimension, truncated exact, and truncated perceptual comparison cases.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 16 tests, 0 failures; runner duration 8162ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check test/sys/wm_compare/.spipe_matchers_html_compat_spec.spl`: passed.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter --clean`: 1 file, 9 tests, 0 failures; runner duration 2180ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl --mode=interpreter --clean`: 1 file, 8 tests, 0 failures; runner duration 1414ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over changed comparison/backend executable artifacts and the matcher mirror found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+
+## Pair-Level Viewport Metadata Update: 2026-06-01
+
+- `src/app/wm_compare/html_compat_part3.spl` `compare_pair` previously accepted exact pixel matches based on the requested viewport dimensions and pixel buffer lengths, without checking each successful capture's own `width` and `height` metadata. A capture with mismatched viewport metadata could therefore be accepted as exact if the raw pixel array matched.
+- `compare_pair` now treats Chrome or Simple capture viewport metadata mismatches as failed captures before exact comparison. The returned pair result records `exact: false`, `accepted: false`, zero match/perceptual percentages, and a `viewport metadata mismatch` diagnostic.
+- `test/system/wm_compare/html_compat_spec.spl` now covers mismatched Chrome capture metadata, and `doc/06_spec/system/wm_compare/html_compat_spec.md` mirrors the scenario with 17 active scenarios.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 17 tests, 0 failures; runner duration 8406ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter --clean`: 1 file, 9 tests, 0 failures; runner duration 2184ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/emulated_capture_spec.spl --mode=interpreter --clean`: 1 file, 5 tests, 0 failures; runner duration 7560ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl --mode=interpreter --clean`: 1 file, 8 tests, 0 failures; runner duration 1390ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over changed comparison/backend executable artifacts found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+
+## Viewport Metadata Matcher Mirror Update: 2026-06-01
+
+- The ignored SPipe matcher mirror `test/sys/wm_compare/.spipe_matchers_html_compat_spec.spl` now mirrors the pair-level viewport metadata mismatch scenario and imports `compare_pair` plus `CaptureResult`.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check test/sys/wm_compare/.spipe_matchers_html_compat_spec.spl`: passed.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 17 tests, 0 failures; runner duration 7966ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter --clean`: 1 file, 9 tests, 0 failures; runner duration 2147ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl --mode=interpreter --clean`: 1 file, 8 tests, 0 failures; runner duration 1357ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over changed comparison/backend executable artifacts and the matcher mirror found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+
+## Famous-Site Corpus Pair Metadata Update: 2026-06-01
+
+- `src/app/wm_compare/site_corpus_compat.spl` `compare_site_sample` had the same viewport metadata acceptance gap as the HTML compatibility pair path: matching raw pixels could be accepted even when the capture's own `width` and `height` metadata disagreed with the requested corpus viewport.
+- `compare_site_sample` now treats Chrome or Simple capture viewport metadata mismatches as failed captures before exact comparison. The returned pair records `exact: false`, `accepted: false`, zero match/perceptual percentages, and a `viewport metadata mismatch` diagnostic.
+- Added `test/system/wm_compare/site_corpus_pair_spec.spl` to cover the corpus pair metadata contract, and added a manual-purpose section to `doc/06_spec/system/wm_compare/site_corpus_pair_spec.md`.
+- Focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/site_corpus_pair_spec.spl --mode=interpreter --clean`: 1 file, 1 test, 0 failures; runner duration 3769ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 17 tests, 0 failures; runner duration 8448ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter --clean`: 1 file, 9 tests, 0 failures; runner duration 2070ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl --mode=interpreter --clean`: 1 file, 8 tests, 0 failures; runner duration 1370ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over changed comparison/backend executable artifacts found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+- Final manual-doc restoration and focused verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check test/system/wm_compare/site_corpus_pair_spec.spl`: passed.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/site_corpus_pair_spec.spl --mode=interpreter --clean`: 1 file, 1 test, 0 failures; runner duration 3856ms.
+  - Restored `doc/06_spec/system/wm_compare/site_corpus_pair_spec.md` manual-purpose text after doc generation rewrote the file.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over `src/app/wm_compare/site_corpus_compat.spl`, `test/system/wm_compare/site_corpus_pair_spec.spl`, and `doc/06_spec/system/wm_compare/site_corpus_pair_spec.md` found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+
 ## Research Conclusion
 
 The repo already has enough capture, comparison, backend, and system-test scaffolding to harden incrementally. The next design should make comparison status explicit, preserve capture failures as first-class diagnostics, separate structural/layout comparison from pixel/perceptual comparison, and require backend performance evidence to be hardware-qualified rather than inferred from source presence.
+
+## Preselection Design Artifacts: 2026-06-01
+
+- Added option-independent preselection artifacts because final requirements remain blocked on user selection:
+  - `doc/04_architecture/harden_tui_gui_layout_comparison.md`
+  - `doc/05_design/harden_tui_gui_layout_comparison.md`
+  - `doc/03_plan/sys_test/harden_tui_gui_layout_comparison.md`
+  - `doc/03_plan/agent_tasks/harden_tui_gui_layout_comparison.md`
+- These artifacts record the current fail-closed comparison contract, capture failure model, exact-only acceptance policy, planned structural layout layer, and backend-qualified evidence model for Metal, Vulkan, CUDA, and CPU SIMD.
+- Focused verification after adding the artifacts:
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/site_corpus_pair_spec.spl --mode=interpreter --clean`: 1 file, 1 test, 0 failures; runner duration 4070ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 17 tests, 0 failures; runner duration 8645ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/wm_compare/emulated_capture_spec.spl --mode=interpreter --clean`: 1 file, 5 tests, 0 failures; runner duration 7308ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter --clean`: 1 file, 9 tests, 0 failures; runner duration 2168ms.
+  - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gpu/engine2d/backend_probe_strict_spec.spl --mode=interpreter --clean`: 1 file, 8 tests, 0 failures; runner duration 1420ms.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
+  - Placeholder scan over changed executable comparison/backend source and specs found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.

@@ -21,9 +21,9 @@ use compiler.mir_opt.mir_opt.collection_opt_core.{CollectionOptimization, PURE_M
 fn colopt_optimize_concat_all_blocks(self: CollectionOptimization, blocks: [MirBlock], func: MirFunction) -> [MirBlock]:
     # Build set of blocks already in loops (skip them)
     var loop_block_set = {}
-    for loop in self.detector.loops:
-        loop_block_set[loop.header.id] = true
-        for bid in loop.body:
+    for loop_info in self.detector.loops:
+        loop_block_set[loop_info.header.id] = true
+        for bid in loop_info.body:
             loop_block_set[bid.id] = true
 
     var new_blocks: [MirBlock] = []
@@ -39,11 +39,11 @@ fn colopt_optimize_concat_all_blocks(self: CollectionOptimization, blocks: [MirB
 # Pattern 1: Array concat -> push
 # ============================================================================
 
-fn colopt_optimize_concat_in_loop(self: CollectionOptimization, blocks: [MirBlock], loop: LoopInfo, func: MirFunction) -> [MirBlock]:
+fn colopt_optimize_concat_in_loop(self: CollectionOptimization, blocks: [MirBlock], loop_info: LoopInfo, func: MirFunction) -> [MirBlock]:
     # Build loop membership set
     var loop_set = {}
-    loop_set[loop.header.id] = true
-    for bid in loop.body:
+    loop_set[loop_info.header.id] = true
+    for bid in loop_info.body:
         loop_set[bid.id] = true
 
     var new_blocks: [MirBlock] = []
@@ -245,11 +245,11 @@ fn colopt_local_is_text(local_id: LocalId, func: MirFunction) -> bool:
 # Pattern 4: Loop-invariant pure call hoisting
 # ============================================================================
 
-fn colopt_hoist_pure_calls(self: CollectionOptimization, blocks: [MirBlock], loop: LoopInfo) -> [MirBlock]:
+fn colopt_hoist_pure_calls(self: CollectionOptimization, blocks: [MirBlock], loop_info: LoopInfo) -> [MirBlock]:
     # Build loop membership set
     var loop_set = {}
-    loop_set[loop.header.id] = true
-    for bid in loop.body:
+    loop_set[loop_info.header.id] = true
+    for bid in loop_info.body:
         loop_set[bid.id] = true
 
     # Build set of locals defined inside the loop
@@ -285,7 +285,7 @@ fn colopt_hoist_pure_calls(self: CollectionOptimization, blocks: [MirBlock], loo
     var inserted = false
 
     for block in blocks:
-        if block.id.id == loop.header.id and not inserted:
+        if block.id.id == loop_info.header.id and not inserted:
             # Insert hoisted instructions at start of header
             var new_insts: [MirInst] = []
             for h in to_hoist:
@@ -375,10 +375,14 @@ fn colopt_is_safe_loop_invariant_binop(op: MirBinOp) -> bool:
         case _: false
 
 fn colopt_is_hoistable_runtime_metadata_read(name: text) -> bool:
-    name == "rt_array_len" or
-    name == "rt_string_len" or
-    name == "rt_dict_len" or
-    name == "rt_array_data_ptr" or
+    if name == "rt_array_len":
+        return true
+    if name == "rt_string_len":
+        return true
+    if name == "rt_dict_len":
+        return true
+    if name == "rt_array_data_ptr":
+        return true
     name == "rt_array_header_ptr"
 
 fn colopt_operand_invariant(op: MirOperand, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>) -> bool:
@@ -419,15 +423,15 @@ class LinearScanMatch:
     field_name: text
     has_early_return: bool
 
-fn colopt_match_linear_scan_early_return(self: CollectionOptimization, loop: LoopInfo, blocks: [MirBlock]) -> LinearScanMatch?:
+fn colopt_match_linear_scan_early_return(self: CollectionOptimization, loop_info: LoopInfo, blocks: [MirBlock]) -> LinearScanMatch?:
     # Build loop membership set
     var loop_set: Dict<i64, bool> = {}
-    loop_set[loop.header.id] = true
-    for bid in loop.body:
+    loop_set[loop_info.header.id] = true
+    for bid in loop_info.body:
         loop_set[bid.id] = true
 
     # Step 1: Detect i < arr.len() loop guard in header
-    val guard = colopt_detect_linear_scan_guard(loop.header)
+    val guard = colopt_detect_linear_scan_guard(loop_info.header)
     if not guard.?:
         return nil
     val g = guard.unwrap()
@@ -446,7 +450,7 @@ fn colopt_match_linear_scan_early_return(self: CollectionOptimization, loop: Loo
     var found_return = false
     var field_name = ""
     for block in blocks:
-        if loop_set.has(block.id.id) and block.id.id != loop.header.id:
+        if loop_set.has(block.id.id) and block.id.id != loop_info.header.id:
             val ret = colopt_block_has_conditional_return(block)
             if ret.?:
                 found_return = true

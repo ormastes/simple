@@ -254,6 +254,46 @@ expect(result.max_channel_diff).to_equal(255)
 
 </details>
 
+#### does not report truncated equal buffers as exact
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = compare_exact(
+    [0xFF000000u32],
+    [0xFF000000u32],
+    2, 1
+)
+expect(result.different_pixels).to_equal(2)
+expect(result.match_percentage).to_equal(0)
+expect(result.max_channel_diff).to_equal(255)
+```
+
+</details>
+
+#### does not report truncated equal buffers as perceptually complete
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = compare_perceptual(
+    [0xFF000000u32],
+    [0xFF000000u32],
+    2, 1, 16, true
+)
+expect(result.match_percentage).to_equal(0)
+```
+
+</details>
+
 #### does not accept perceptual-only pixel matches
 
 <details>
@@ -287,12 +327,46 @@ expect(pair.perceptual_pct_10000).to_be_greater_than(0)
 
 </details>
 
+#### does not accept captures with mismatched viewport metadata
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val fixture = Fixture(
+    id: "99_policy_probe",
+    html_path: "test/fixtures/html_compat/04_button.html",
+    css_path: "",
+    strict: false
+)
+val chrome = CaptureResult(
+    pixels: [0xFF000000u32, 0xFFFFFFFFu32],
+    width: 1, height: 2,
+    backend_name: "chrome", success: true, error: ""
+)
+val simple = CaptureResult(
+    pixels: [0xFF000000u32, 0xFFFFFFFFu32],
+    width: 2, height: 1,
+    backend_name: "simple", success: true, error: ""
+)
+val pair = compare_pair(fixture, chrome, simple, 2, 1)
+expect(pair.exact).to_equal(false)
+expect(pair.accepted).to_equal(false)
+expect(pair.chrome_ok).to_equal(false)
+expect(pair.chrome_error).to_contain("viewport metadata mismatch")
+```
+
+</details>
+
 #### writes exact-only diagnostic policy into reports
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -320,6 +394,7 @@ val pair = compare_pair(fixture, capture, capture, 1, 1)
 expect(write_report(fixture, capture, capture, pair, opts)).to_equal(true)
 val report = rt_file_read_text(report_sdn_path(fixture.id))
 expect(report).to_contain("acceptance_policy: \"exact_pixels_required_perceptual_diagnostic_only\"")
+expect(report).to_contain("acceptance_policy: (exact_required: true perceptual_diagnostic_only: true tolerance_acceptance_allowed: false)")
 ```
 
 </details>
@@ -343,8 +418,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
