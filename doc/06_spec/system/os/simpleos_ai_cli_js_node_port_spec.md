@@ -114,7 +114,7 @@ expect(ai_cli_allows_credential(manifest, "openai-api-key")).to_equal(false)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -123,6 +123,8 @@ expect(ai_cli_allows_file(manifest, "/home/user/work/main.spl")).to_equal(true)
 expect(ai_cli_allows_file(manifest, "/home/user/work")).to_equal(true)
 expect(ai_cli_allows_file(manifest, "/home/user/workspace/secret.txt")).to_equal(false)
 expect(ai_cli_allows_process(manifest, "git")).to_equal(true)
+expect(ai_cli_allows_process(manifest, "/usr/bin/git")).to_equal(true)
+expect(ai_cli_allows_process(manifest, "git --version")).to_equal(false)
 expect(ai_cli_allows_network(manifest, "api.openai.com:443")).to_equal(true)
 expect(ai_cli_allows_network(manifest, "API.OPENAI.COM:0443")).to_equal(true)
 expect(ai_cli_allows_credential(manifest, "openai-api-key")).to_equal(true)
@@ -181,6 +183,33 @@ expect(denied.reason).to_equal("network-grant-denied")
 expect(invalid.allowed).to_equal(false)
 expect(invalid.reason).to_equal("invalid-endpoint")
 expect(ai_cli_socket_network_denial_reason(deny_all_manifest(), "connect", "api.openai.com:443")).to_equal("network-grant-denied")
+```
+
+</details>
+
+#### returns process spawn boundary decisions with fail-closed denial reasons
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = codex_cli_smoke_manifest()
+val allowed = ai_cli_process_spawn_decision(manifest, "spawn", "/usr/bin/git")
+val denied = ai_cli_process_spawn_decision(manifest, "spawn", "node")
+val shell_escape = ai_cli_process_spawn_decision(manifest, "spawn", "git --version")
+
+expect(allowed.layer).to_equal("process")
+expect(allowed.subject).to_equal("git")
+expect(allowed.allowed).to_equal(true)
+expect(allowed.reason).to_equal("allowed")
+expect(denied.allowed).to_equal(false)
+expect(denied.reason).to_equal("process-grant-denied")
+expect(shell_escape.allowed).to_equal(false)
+expect(shell_escape.reason).to_equal("invalid-command")
+expect(ai_cli_process_spawn_denial_reason(deny_all_manifest(), "spawn", "/usr/bin/git")).to_equal("process-grant-denied")
 ```
 
 </details>
@@ -610,8 +639,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

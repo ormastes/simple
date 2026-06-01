@@ -311,7 +311,42 @@ pub fn ai_cli_vfs_file_denial_reason(manifest: AiCliManifest, operation: text, p
     decision.reason
 
 pub fn ai_cli_allows_process(manifest: AiCliManifest, command: text) -> bool:
-    _text_list_allows(manifest.process_grants, command)
+    val normalized_command = _normalize_process_command(command)
+    if normalized_command == "":
+        return false
+    _text_list_allows(manifest.process_grants, normalized_command)
+
+pub fn ai_cli_process_spawn_decision(manifest: AiCliManifest, operation: text, command: text) -> AiCliBoundaryDecision:
+    val normalized_command = _normalize_process_command(command)
+    if normalized_command == "":
+        return AiCliBoundaryDecision(
+            layer: "process",
+            operation: operation,
+            subject: command,
+            allowed: false,
+            reason: "invalid-command"
+        )
+    if ai_cli_allows_process(manifest, normalized_command):
+        return AiCliBoundaryDecision(
+            layer: "process",
+            operation: operation,
+            subject: normalized_command,
+            allowed: true,
+            reason: "allowed"
+        )
+    AiCliBoundaryDecision(
+        layer: "process",
+        operation: operation,
+        subject: normalized_command,
+        allowed: false,
+        reason: "process-grant-denied"
+    )
+
+pub fn ai_cli_process_spawn_denial_reason(manifest: AiCliManifest, operation: text, command: text) -> text:
+    val decision = ai_cli_process_spawn_decision(manifest, operation, command)
+    if decision.allowed:
+        return ""
+    decision.reason
 
 pub fn ai_cli_allows_network(manifest: AiCliManifest, endpoint: text) -> bool:
     val normalized_endpoint = _normalize_network_endpoint(endpoint)
@@ -742,6 +777,32 @@ fn _text_list_allows(grants: [text], requested: text) -> bool:
         if grant == "*" or grant == requested:
             return true
     false
+
+fn _normalize_process_command(command: text) -> text:
+    val raw = command.trim()
+    if raw == "" or raw == "*":
+        return raw
+    if _contains_shell_command_syntax(raw):
+        return ""
+    val parts = raw.split("/")
+    val leaf = parts[parts.len() - 1].trim()
+    if leaf == "" or leaf == "." or leaf == "..":
+        return ""
+    leaf
+
+fn _contains_shell_command_syntax(command: text) -> bool:
+    command.contains(" ") or
+    command.contains("\t") or
+    command.contains("\n") or
+    command.contains("\r") or
+    command.contains(";") or
+    command.contains("|") or
+    command.contains("&") or
+    command.contains(">") or
+    command.contains("<") or
+    command.contains("$") or
+    command.contains("`") or
+    command.contains("\\")
 
 fn _normalize_network_endpoint(endpoint: text) -> text:
     val raw = endpoint.trim().lower()
