@@ -78,13 +78,18 @@ path remained faster than the current native-build artifacts on macOS.
   - Push length increases correctly in interpreter and LLVM native-build.
   - LLVM native-build reports `p1=4278190081` and `p7=4278190087` correctly, but
     reports `p0=534773760` and explicit `rt_typed_words_u64_at(data, 0)` as
-    `534773760` for raw `0xFF000000`.
-  - This narrows the failure to native typed-u64 storage/readback of raw words
-    whose low tag bits are zero, or to the linked native runtime archive's typed
-    array kind handling.
+    `534773760` for raw `0xFF000000`. Arithmetic confirms the same failure:
+    `delta0=2305843005470277632`, `eq0=0`.
+  - The failure was isolated to LLVM inline typed-word loads decoding raw
+    low-tag-zero lane values as tagged RuntimeValue ints. Simple source and
+    simple-core storage were not the cause.
 - `--runtime-bundle rust-hosted` cannot currently be used as an alternate
   diagnostic lane for this repro on this macOS host because native-build links
   duplicate hosted runtime symbols such as `rt_stdout_write`.
+- A seed fix now keeps LLVM inline `rt_typed_words_u32/u64_at` loads raw in
+  `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs`. Local
+  validation is blocked until this host has an LLVM 18 toolchain available for
+  rebuilding the `simple` driver with `--features llvm`.
 
 ## Expected
 

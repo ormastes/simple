@@ -784,19 +784,9 @@ impl LlvmBackend {
             .build_load(i64_type, elem_ptr, "typed_words_value")
             .map_err(|e| crate::error::factory::llvm_build_failed("typed words value load", &e))?
             .into_int_value();
-        let raw_tag = builder
-            .build_and(loaded, i64_type.const_int(7, false), "typed_words_raw_tag")
-            .map_err(|e| crate::error::factory::llvm_build_failed("typed words raw tag", &e))?;
-        let raw_is_int = builder
-            .build_int_compare(IntPredicate::EQ, raw_tag, zero, "typed_words_raw_is_int")
-            .map_err(|e| crate::error::factory::llvm_build_failed("typed words raw int compare", &e))?;
-        let int_payload = builder
-            .build_right_shift(loaded, i64_type.const_int(3, false), true, "typed_words_int_payload")
-            .map_err(|e| crate::error::factory::llvm_build_failed("typed words int payload", &e))?;
-        let value = builder
-            .build_select(raw_is_int, int_payload, loaded, "typed_words_runtime_value")
-            .map_err(|e| crate::error::factory::llvm_build_failed("typed words raw select", &e))?
-            .into_int_value();
+        // Typed word arrays store raw lane values, not tagged RuntimeValue ints.
+        // Decoding low-tag-zero values corrupts pixels such as 0xFF000000.
+        let value = loaded;
         let value = if width == 32 {
             builder
                 .build_and(value, i64_type.const_int(0xffff_ffff, false), "typed_words_u32_mask")
