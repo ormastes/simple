@@ -1,0 +1,38 @@
+# Run and validate the complete macOS SMF/dynlib GUI release evidence chain.
+
+use app.gui_perf.macos_smf_dynlib_evidence_core.{gui_mac_smf_dynlib_shell_quote, gui_mac_smf_dynlib_transcript_check_row}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _env_or(key: text, fallback: text) -> text:
+    val value = rt_env_get(key) ?? ""
+    if value == "":
+        return fallback
+    value
+
+fn _shell(command: text, timeout_ms: i64) -> (text, text, i32):
+    rt_process_run_timeout("/bin/sh", ["-c", command], timeout_ms)
+
+fn main() -> i64:
+    val simple_bin = _env_or("SIMPLE_BIN", "src/compiler_rust/target/debug/simple")
+    val transcript_path = _env_or("SIMPLE_GUI_DYNLIB_TRANSCRIPT", "build/gui/macos_smf_dynlib_transcript.log")
+    val _mkdir = _shell("mkdir -p build/gui", 5000)
+    val command = "SIMPLE_LIB=src " + gui_mac_smf_dynlib_shell_quote(simple_bin) + " run src/app/gui_perf/macos_smf_dynlib_evidence.spl"
+    val (stdout, stderr, code) = _shell(command, 240000)
+    if stdout.trim() != "":
+        print stdout.trim()
+    if not rt_file_write_text(transcript_path, stdout):
+        print "GUI_MAC_SMF_DYNLIB_RELEASE_GATE status=fail reason=transcript-write-failed path=" + transcript_path
+        return 1
+    val check_row = gui_mac_smf_dynlib_transcript_check_row(stdout)
+    print check_row
+    if code != 0:
+        print "GUI_MAC_SMF_DYNLIB_RELEASE_GATE status=fail reason=evidence-run-failed exit_code=" + code.to_text() + " stderr=" + stderr.replace("\n", " ").trim()
+        return 1
+    if check_row.contains("status=pass"):
+        print "GUI_MAC_SMF_DYNLIB_RELEASE_GATE status=pass transcript=" + transcript_path
+        return 0
+    print "GUI_MAC_SMF_DYNLIB_RELEASE_GATE status=fail reason=transcript-check-failed transcript=" + transcript_path
+    1
