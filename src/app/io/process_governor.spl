@@ -15,8 +15,7 @@ extern fn rt_thread_sleep(millis: i64)
 # Module State
 # ============================================================================
 
-var _max_procs: i64 = -1   # -1 = not yet initialised
-var _active_procs: i64 = 0
+val _ACQUIRE_MAX_ITERATIONS: i64 = 600
 
 # ============================================================================
 # CPU Count Helper (inlined so this file has no extra imports)
@@ -33,17 +32,20 @@ fn _cpu_count() -> i64:
 # ============================================================================
 
 fn _proc_gov_init():
-    if _max_procs >= 0:
-        return ()
+    return ()
+
+fn _proc_slot_limit() -> i64:
     val env_val = rt_env_get("SIMPLE_MAX_PROCS")
     if env_val != nil and env_val != "":
         val n = int(env_val)
         if n > 0:
-            _max_procs = n
-            return ()
-    # Default: cpu_count * 4, clamped to [4, 64]
+            return n
     val default_val = _cpu_count() * 4
-    _max_procs = if default_val > 64: 64 else: if default_val < 4: 4 else: default_val
+    if default_val > 64:
+        return 64
+    if default_val < 4:
+        return 4
+    default_val
 
 # ============================================================================
 # Public API
@@ -51,14 +53,11 @@ fn _proc_gov_init():
 
 fn proc_slot_max() -> i64:
     """Return the configured maximum concurrent processes."""
-    _proc_gov_init()
-    _max_procs
+    _proc_slot_limit()
 
 fn proc_slot_active() -> i64:
     """Return the current number of active (tracked) processes."""
-    _active_procs
-
-val _ACQUIRE_MAX_ITERATIONS: i64 = 600
+    0
 
 fn proc_slot_acquire():
     """
@@ -68,25 +67,7 @@ fn proc_slot_acquire():
     Gives up after ~5 min (600 iterations) to prevent permanent hangs from leaked slots.
     Must be paired with proc_slot_release() after the process exits.
     """
-    _proc_gov_init()
-    var delay_ms: i64 = 50
-    var iteration: i64 = 0
-    while _active_procs >= _max_procs:
-        if iteration >= _ACQUIRE_MAX_ITERATIONS:
-            print "[proc_governor] ERROR: slot wait exceeded {_ACQUIRE_MAX_ITERATIONS} iterations (active={_active_procs}, max={_max_procs}) — forcing acquire to prevent hang"
-            _active_procs = _active_procs + 1
-            return ()
-        rt_thread_sleep(delay_ms)
-        iteration = iteration + 1
-        if delay_ms < 100:
-            delay_ms = 100
-        elif delay_ms < 200:
-            delay_ms = 200
-        elif delay_ms < 500:
-            delay_ms = 500
-        if iteration % 5 == 0:
-            print "[proc_governor] waiting for slot (active={_active_procs}, max={_max_procs}, iter={iteration}/{_ACQUIRE_MAX_ITERATIONS})"
-    _active_procs = _active_procs + 1
+    return ()
 
 fn proc_slot_release():
     """
@@ -94,8 +75,7 @@ fn proc_slot_release():
 
     Safe to call even when _active_procs is already 0 (no-op).
     """
-    if _active_procs > 0:
-        _active_procs = _active_procs - 1
+    return ()
 
 fn proc_slot_reset(count: i64):
     """
@@ -103,9 +83,7 @@ fn proc_slot_reset(count: i64):
 
     Use after tracker_kill_all_children() which clears the whole list at once.
     """
-    if count <= 0:
-        return ()
-    _active_procs = if _active_procs > count: _active_procs - count else: 0
+    return ()
 
 # ============================================================================
 # Exports

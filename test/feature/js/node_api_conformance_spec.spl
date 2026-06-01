@@ -75,6 +75,19 @@ fn _eval_str_with_process(command: text, source: text) -> text:
     match result:
         Ok(value): js_to_string(value)
         Err(err): "error"
+
+fn _eval_before_after_timer_drain(source: text, probe: text, current_time_ms: i64) -> text:
+    var runtime = JsRuntime.new(Logger.new(LogLevel.Error))
+    val before = runtime.eval(source)
+    val before_text = match before:
+        Ok(value): js_to_string(value)
+        Err(err): "error"
+    val drained = runtime.drain_due_timers(current_time_ms)
+    val after = runtime.eval(probe)
+    val after_text = match after:
+        Ok(value): js_to_string(value)
+        Err(err): "error"
+    "{before_text}:{drained}:{after_text}"
 describe "Node.js path module":
     describe "path.dirname":
         it "gets directory name":
@@ -569,6 +582,10 @@ describe "Node.js runtime shape":
             expect(_eval_str("process.exit(7)")).to_equal("7")
         it "exposes embedded require process exit intent":
             expect(_eval_str("require('process').exit(7)")).to_equal("7")
+        it "schedules process.nextTick callbacks through the runtime drain":
+            expect(_eval_before_after_timer_drain("var tickValue = 0; process.nextTick(() => { tickValue = 7; }); tickValue", "tickValue", 0)).to_equal("0:1:7")
+        it "schedules require process.nextTick callbacks through the runtime drain":
+            expect(_eval_before_after_timer_drain("var tickValue = 0; require('process').nextTick(() => { tickValue = 9; }); tickValue", "tickValue", 0)).to_equal("0:1:9")
 
     describe "TextEncoder and TextDecoder globals":
         it "encodes text to Uint8Array-compatible bytes":
