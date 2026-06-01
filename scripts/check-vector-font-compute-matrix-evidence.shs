@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 SUMMARY_PATH="${SUMMARY_PATH:-doc/09_report/vector_font_compute_matrix_evidence_$(date -u +%F).md}"
 ITERATIONS="${VECTOR_FONT_MATRIX_ITERATIONS:-1}"
+MATRIX_SCOPE="${VECTOR_FONT_MATRIX_SCOPE:-all}"
 
 mkdir -p "$(dirname -- "$SUMMARY_PATH")" build/vector_font_compute_matrix
 rm -f "$SUMMARY_PATH"
@@ -15,10 +16,11 @@ write_summary_header() {
         echo "# Vector Font Compute Matrix Evidence"
         echo
         echo "- status: in-progress"
+        echo "- scope: $MATRIX_SCOPE"
         echo "- iterations per scene: $ITERATIONS"
         echo
-        echo "| text run | font size | status | reason | CUDA glyphs | OpenCL glyphs | GPU returned glyphs | GPU returned pixels | CPU fallback hits | report |"
-        echo "|---|---:|---|---|---:|---:|---:|---:|---:|---|"
+        echo "| text run | font size | kernel params | status | reason | CUDA glyphs | OpenCL glyphs | GPU returned glyphs | GPU returned pixels | CPU fallback hits | report |"
+        echo "|---|---:|---|---|---|---:|---:|---:|---:|---:|---|"
     } >"$SUMMARY_PATH"
 }
 
@@ -41,6 +43,10 @@ run_scene() {
     text_run="$1"
     font_size="$2"
     slug="$3"
+    cuda_grid="$4"
+    cuda_block="$5"
+    opencl_global="$6"
+    opencl_local="$7"
     build_dir="build/vector_font_compute_matrix/$slug"
     report_path="doc/09_report/vector_font_compute_${slug}_evidence_$(date -u +%F).md"
 
@@ -48,6 +54,10 @@ run_scene() {
     VECTOR_FONT_TEXT_RUN="$text_run" \
     VECTOR_FONT_SIZE="$font_size" \
     VECTOR_FONT_ITERATIONS="$ITERATIONS" \
+    CUDA_VECTOR_FONT_GRID_SIZE="$cuda_grid" \
+    CUDA_VECTOR_FONT_BLOCK_SIZE="$cuda_block" \
+    OPENCL_VECTOR_FONT_GLOBAL_SIZE="$opencl_global" \
+    OPENCL_VECTOR_FONT_LOCAL_SIZE="$opencl_local" \
     BUILD_DIR="$build_dir" \
     REPORT_PATH="$report_path" \
         sh scripts/check-vector-font-compute-evidence.shs >/dev/null
@@ -63,8 +73,8 @@ run_scene() {
     attempts="$(env_value vector_font_compute_production_accelerator_attempts "$env_file")"
 
     {
-        printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
-            "$text_run" "$font_size" "$status" "$reason" "$cuda_glyphs" "$opencl_glyphs" "$gpu_returned" "$gpu_returned_pixels" "$cpu_fallback" "$report_path"
+        printf '| %s | %s | CUDA %sx%s / OpenCL %s:%s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+            "$text_run" "$font_size" "$cuda_grid" "$cuda_block" "$opencl_global" "$opencl_local" "$status" "$reason" "$cuda_glyphs" "$opencl_glyphs" "$gpu_returned" "$gpu_returned_pixels" "$cpu_fallback" "$report_path"
     } >>"$SUMMARY_PATH"
 
     if [ "$status" != "pass" ]; then
@@ -78,23 +88,42 @@ run_scene() {
 }
 
 write_summary_header
-run_scene "HARDENED" 24 "hardened_24"
-run_scene "HARDENED" 16 "hardened_16"
-run_scene "GUIWM" 24 "guiwm_24"
-run_scene "GUIWM" 32 "guiwm_32"
-run_scene "CUDAOPENCL" 16 "cudaopencl_16"
-run_scene "FontRender" 32 "fontrender_32"
-run_scene "TASKBAR" 20 "taskbar_20"
-run_scene "COMMAND" 28 "command_28"
-run_scene "STATUSOK" 18 "statusok_18"
+case "$MATRIX_SCOPE" in
+    all|baseline)
+        run_scene "HARDENED" 24 "hardened_24" 2 32 2 1
+        run_scene "HARDENED" 16 "hardened_16" 1 64 1 1
+        run_scene "GUIWM" 24 "guiwm_24" 2 16 2 1
+        run_scene "GUIWM" 32 "guiwm_32" 3 32 3 1
+        run_scene "CUDAOPENCL" 16 "cudaopencl_16" 2 64 4 1
+        run_scene "FontRender" 32 "fontrender_32" 4 32 4 1
+        run_scene "TASKBAR" 20 "taskbar_20" 2 32 2 1
+        run_scene "COMMAND" 28 "command_28" 3 64 3 1
+        run_scene "STATUSOK" 18 "statusok_18" 2 16 2 1
+        ;;
+esac
+
+case "$MATRIX_SCOPE" in
+    all|expanded)
+        run_scene "PIPELINESTATUSOK" 24 "pipeline_status_ok_24" 4 64 4 1
+        run_scene "VECTORFONTGPU" 36 "vectorfontgpu_36" 5 32 5 1
+        run_scene "GPUREADBACKWM" 12 "gpureadbackwm_12" 3 16 3 1
+        ;;
+    baseline)
+        ;;
+    *)
+        echo "unknown VECTOR_FONT_MATRIX_SCOPE=$MATRIX_SCOPE" >&2
+        exit 2
+        ;;
+esac
 
 tmp="$SUMMARY_PATH.tmp"
 {
     echo "# Vector Font Compute Matrix Evidence"
     echo
     echo "- status: pass"
+    echo "- scope: $MATRIX_SCOPE"
     echo "- iterations per scene: $ITERATIONS"
-    tail -n +5 "$SUMMARY_PATH"
+    tail -n +6 "$SUMMARY_PATH"
 } >"$tmp"
 mv "$tmp" "$SUMMARY_PATH"
 

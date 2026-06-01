@@ -230,6 +230,34 @@ expect(pixel(surface, 1, 0)).to_equal([40, 50, 60, 255])
 
 </details>
 
+#### renders big-endian 16-bit PackBits decoded TIFF pixels exactly
+
+1. var rasterizer = Rasterizer new
+
+2. var surface = GpuSurface create
+
+3. rasterizer raster draw image
+   - Expected: pixel(surface, 0, 0) equals `[2, 65, 127, 255]`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var rasterizer = Rasterizer.new(Logger.new("tiff-raster-be-rgb16-packbits-spec"))
+var surface = GpuSurface.create(1, 1, 1, SurfaceFormat.RGBA8)
+val image = decode_tiff(_tiff_be_1x1_rgb16_packbits())
+
+rasterizer.raster_draw_image(surface, image, 0, 0, 1, 1)
+
+expect(pixel(surface, 0, 0)).to_equal([2, 65, 127, 255])
+```
+
+</details>
+
 #### renders palette ColorMap decoded TIFF pixels through the raster image path exactly
 
 1. var rasterizer = Rasterizer new
@@ -533,7 +561,7 @@ expect(pixel(surface, 1, 1)).to_equal([128, 128, 128, 255])
 | Category | GPU & SIMD |
 | Status | Active |
 | Source | `examples/browser/test/gpu/tiff_image_raster_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -545,8 +573,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

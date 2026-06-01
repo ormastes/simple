@@ -12,6 +12,10 @@ SIMPLE_OUT="$BUILD_DIR/simple.out"
 TEXT_RUN="${VECTOR_FONT_TEXT_RUN:-HARDENED}"
 FONT_SIZE="${VECTOR_FONT_SIZE:-24}"
 ITERATIONS="${VECTOR_FONT_ITERATIONS:-4}"
+CUDA_GRID_SIZE="${CUDA_VECTOR_FONT_GRID_SIZE:-2}"
+CUDA_BLOCK_SIZE="${CUDA_VECTOR_FONT_BLOCK_SIZE:-32}"
+OPENCL_GLOBAL_SIZE="${OPENCL_VECTOR_FONT_GLOBAL_SIZE:-2}"
+OPENCL_LOCAL_SIZE="${OPENCL_VECTOR_FONT_LOCAL_SIZE:-1}"
 
 CUDA_STATUS="${CUDA_VECTOR_FONT_STATUS:-unavailable}"
 CUDA_REASON="${CUDA_VECTOR_FONT_REASON:-missing-vector-font-cuda-kernel}"
@@ -562,10 +566,24 @@ write_vector_font_arrays_h() {
     {
         echo "#ifndef VECTOR_FONT_EVIDENCE_ARRAYS_H"
         echo "#define VECTOR_FONT_EVIDENCE_ARRAYS_H"
+        max_pixels=1
+        i=0
+        while [ "$i" -lt "${#TEXT_RUN}" ]; do
+            width="$(value_of "vector_font_compute_glyph_${i}_width")"
+            pixels=$((width * FONT_SIZE))
+            if [ "$pixels" -gt "$max_pixels" ]; then
+                max_pixels="$pixels"
+            fi
+            i=$((i + 1))
+        done
         echo "#define VECTOR_FONT_GLYPH_COUNT ${#TEXT_RUN}"
         echo "#define VECTOR_FONT_FONT_SIZE $FONT_SIZE"
-        echo "#define VECTOR_FONT_RETURNED_GLYPH_STRIDE 4096"
-        echo "#define VECTOR_FONT_MAX_RETURNED_GLYPHS 8"
+        echo "#define VECTOR_FONT_RETURNED_GLYPH_STRIDE $max_pixels"
+        echo "#define VECTOR_FONT_MAX_RETURNED_GLYPHS ${#TEXT_RUN}"
+        echo "#define VECTOR_FONT_CUDA_GRID_SIZE $CUDA_GRID_SIZE"
+        echo "#define VECTOR_FONT_CUDA_BLOCK_SIZE $CUDA_BLOCK_SIZE"
+        echo "#define VECTOR_FONT_OPENCL_GLOBAL_SIZE $OPENCL_GLOBAL_SIZE"
+        echo "#define VECTOR_FONT_OPENCL_LOCAL_SIZE $OPENCL_LOCAL_SIZE"
         echo "#ifdef __CUDACC__"
         echo "#define VECTOR_FONT_TABLE __constant__"
         echo "#else"
@@ -694,6 +712,7 @@ __device__ int vf_point_inside(const int *commands, int count, int px, int py, i
 }
 
 __global__ void vector_font_rasterize(unsigned long long *out, unsigned int *glyph_pixels) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
     unsigned long long text_checksum = 0;
     unsigned long long text_ink = 0;
     for (int glyph = 0; glyph < VECTOR_FONT_GLYPH_COUNT; ++glyph) {
@@ -759,7 +778,7 @@ int main() {
     rc = cudaMalloc(&d_glyph_pixels, sizeof(host_glyph_pixels));
     if (rc != cudaSuccess) { std::printf("status=fail\nreason=cuda-malloc-glyph0:%s\n", cudaGetErrorString(rc)); return 2; }
     cudaMemset(d_glyph_pixels, 0, sizeof(host_glyph_pixels));
-    vector_font_rasterize<<<1, 1>>>(d_out, d_glyph_pixels);
+    vector_font_rasterize<<<VECTOR_FONT_CUDA_GRID_SIZE, VECTOR_FONT_CUDA_BLOCK_SIZE>>>(d_out, d_glyph_pixels);
     rc = cudaDeviceSynchronize();
     if (rc != cudaSuccess) { std::printf("status=fail\nreason=cuda-kernel:%s\n", cudaGetErrorString(rc)); return 2; }
     cudaMemcpy(host_out, d_out, sizeof(host_out), cudaMemcpyDeviceToHost);
@@ -885,6 +904,7 @@ static const char *kernel_source =
 "  return crossings % 2 == 1;"
 "}"
 "__kernel void vector_font_rasterize(__constant const int *widths, __constant const int *offsets, __constant const int *counts, __constant const int *commands, __global ulong *out, __global uint *glyph_pixels) {"
+"  if (get_global_id(0) != 0) return;"
 "  ulong text_checksum = 0; ulong text_ink = 0;"
 "  for (int glyph = 0; glyph < VECTOR_FONT_GLYPH_COUNT; ++glyph) {"
 "    int width = widths[glyph]; int height = VECTOR_FONT_FONT_SIZE; int advance = width + 1;"
@@ -950,8 +970,10 @@ int main() {
     clSetKernelArg(kernel, 3, sizeof(cl_mem), &d_commands);
     clSetKernelArg(kernel, 4, sizeof(cl_mem), &d_out);
     clSetKernelArg(kernel, 5, sizeof(cl_mem), &d_glyph0_pixels);
-    size_t global = 1;
-    err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &global, NULL, 0, NULL, NULL);
+    size_t global = VECTOR_FONT_OPENCL_GLOBAL_SIZE;
+    size_t local = VECTOR_FONT_OPENCL_LOCAL_SIZE;
+    const size_t *local_ptr = local > 0 ? &local : NULL;
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &global, local_ptr, 0, NULL, NULL);
     if (err != CL_SUCCESS) { printf("status=unavailable\nreason=opencl-enqueue-kernel\n"); return 2; }
     clFinish(queue);
     err = clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0, sizeof(out), out, 0, NULL, NULL);
@@ -1279,6 +1301,10 @@ fi
         echo "vector_font_compute_opencl_glyph_${slot}_actual_pixels_path=$(get_var "OPENCL_GLYPH_${slot}_ACTUAL_PIXELS_PATH")"
         slot=$((slot + 1))
     done
+    echo "vector_font_compute_cuda_grid_size=$CUDA_GRID_SIZE"
+    echo "vector_font_compute_cuda_block_size=$CUDA_BLOCK_SIZE"
+    echo "vector_font_compute_opencl_global_size=$OPENCL_GLOBAL_SIZE"
+    echo "vector_font_compute_opencl_local_size=$OPENCL_LOCAL_SIZE"
     echo "vector_font_compute_status=$status"
     echo "vector_font_compute_reason=$reason"
 } >"$BUILD_DIR/evidence.env"
@@ -1294,6 +1320,8 @@ fi
     echo "- CPU checksum: $cpu_checksum"
     echo "- CPU ink pixels: $cpu_ink_pixels"
     echo "- CPU frame us: $cpu_frame_us"
+    echo "- CUDA launch grid/block: ${CUDA_GRID_SIZE}x${CUDA_BLOCK_SIZE}"
+    echo "- OpenCL launch global/local: ${OPENCL_GLOBAL_SIZE}:${OPENCL_LOCAL_SIZE}"
     echo "- production render checksum: $production_render_checksum"
     echo "- production render ink pixels: $production_render_ink_pixels"
     echo "- production vector raster hits: $production_vector_raster_hits"

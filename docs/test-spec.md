@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-31 21:07:25*
+*Generated: 2026-06-01 02:15:45*
 
-## test/system/app/browser/feature
+## examples/browser/test/gpu
 
-❌ **webgpu_js_wasm_simple_spec.spl** (11880ms)
-  - Source: `test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl`
-  - Generated doc: `spec/webgpu_js_wasm_simple_spec.md`
+❌ **tiff_image_raster_spec.spl** (516ms)
+  - Source: `examples/browser/test/gpu/tiff_image_raster_spec.spl`
+  - Generated doc: `spec/tiff_image_raster_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 102 ✅
+- **Passed:** 16 ✅
 - **Failed:** 1 ❌
-- **Duration:** 11887ms
+- **Duration:** 522ms

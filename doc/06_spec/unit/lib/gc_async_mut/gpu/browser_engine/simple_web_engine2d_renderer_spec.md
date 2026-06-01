@@ -88,6 +88,94 @@ expect(pixels[6 + 58 * 96]).to_equal(0xFF8B5CF6u32)
 
 </details>
 
+#### renders dashboard command list fixture with exact chart and list colors
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body class='simple-web-engine2d-dashboard-command-list' style='margin:0; background-color: #0b1220'><main>dashboard command list</main></body></html>"
+val pixels = simple_web_engine2d_render_html_pixels(html, 96, 64, "software")
+expect(pixels.len()).to_equal(96 * 64)
+expect(pixels[0]).to_equal(0xFF111827u32)
+expect(pixels[4 + 2 * 96]).to_equal(0xFF22C55Eu32)
+expect(pixels[24 + 18 * 96]).to_equal(0xFF22C55Eu32)
+expect(pixels[58 + 18 * 96]).to_equal(0xFFCBD5E1u32)
+expect(pixels[68 + 58 * 96]).to_equal(0xFF10B981u32)
+```
+
+</details>
+
+#### renders form sidebar validation fixture with exact navigation and validation colors
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body class='simple-web-engine2d-form-sidebar-validation' style='margin:0; background-color: #0a0f1a'><main>form sidebar validation</main></body></html>"
+val pixels = simple_web_engine2d_render_html_pixels(html, 96, 64, "software")
+expect(pixels.len()).to_equal(96 * 64)
+expect(pixels[0]).to_equal(0xFF111827u32)
+expect(pixels[4 + 6 * 96]).to_equal(0xFF2563EBu32)
+expect(pixels[26 + 30 * 96]).to_equal(0xFFEF4444u32)
+expect(pixels[26 + 42 * 96]).to_equal(0xFF22C55Eu32)
+expect(pixels[74 + 18 * 96]).to_equal(0xFFF59E0Bu32)
+expect(pixels[54 + 58 * 96]).to_equal(0xFF8B5CF6u32)
+```
+
+</details>
+
+#### renders settings inspector tree fixture with exact tree and inspector colors
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body class='simple-web-engine2d-settings-inspector-tree' style='margin:0; background-color: #0b1020'><main>settings inspector tree</main></body></html>"
+val pixels = simple_web_engine2d_render_html_pixels(html, 96, 64, "software")
+expect(pixels.len()).to_equal(96 * 64)
+expect(pixels[0]).to_equal(0xFF111827u32)
+expect(pixels[4 + 2 * 96]).to_equal(0xFF38BDF8u32)
+expect(pixels[4 + 15 * 96]).to_equal(0xFFE2E8F0u32)
+expect(pixels[30 + 28 * 96]).to_equal(0xFFBFDBFEu32)
+expect(pixels[68 + 18 * 96]).to_equal(0xFFF59E0Bu32)
+expect(pixels[76 + 58 * 96]).to_equal(0xFFEF4444u32)
+```
+
+</details>
+
+#### renders media gallery command fixture with exact image grid and taskbar colors
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body class='simple-web-engine2d-media-gallery-command' style='margin:0; background-color: #0f172a'><main>media gallery command</main></body></html>"
+val pixels = simple_web_engine2d_render_html_pixels(html, 96, 64, "software")
+expect(pixels.len()).to_equal(96 * 64)
+expect(pixels[0]).to_equal(0xFF1F2937u32)
+expect(pixels[4 + 2 * 96]).to_equal(0xFF14B8A6u32)
+expect(pixels[7 + 17 * 96]).to_equal(0xFF38BDF8u32)
+expect(pixels[37 + 17 * 96]).to_equal(0xFFFACC15u32)
+expect(pixels[67 + 17 * 96]).to_equal(0xFF22C55Eu32)
+expect(pixels[54 + 40 * 96]).to_equal(0xFFA78BFAu32)
+expect(pixels[70 + 58 * 96]).to_equal(0xFFEF4444u32)
+```
+
+</details>
+
 #### matches direct child :has selector for first block
 
 <details>
@@ -111,7 +199,7 @@ expect(_render_selector_color(style, "<div><section><span class='badge'></span><
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -123,8 +211,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

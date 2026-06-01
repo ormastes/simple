@@ -69,7 +69,7 @@ run_probe() {
     electron_err="$BUILD_DIR/${name}.electron.err"
 
     if [ ! -s "$wasm_path" ]; then
-        echo "${name}|fail|missing-wasm-artifact|$wasm_path|$proof_path|0|false|false|missing||missing|missing|missing|missing|missing|1"
+        echo "${name}|fail|missing-wasm-artifact|$wasm_path|$proof_path|0|false|false|missing||missing|missing|missing|missing|missing|missing|missing|0|0/0|0/0|0/0|0/0|0/0|1"
         return
     fi
 
@@ -96,11 +96,11 @@ run_probe() {
     set -e
 
     if [ ! -s "$proof_path" ]; then
-        echo "${name}|fail|missing-electron-proof|$wasm_path|$proof_path|0|false|false|missing||missing|missing|missing|missing|missing|$electron_code"
+        echo "${name}|fail|missing-electron-proof|$wasm_path|$proof_path|0|false|false|missing||missing|missing|missing|missing|missing|missing|missing|0|0/0|0/0|0/0|0/0|0/0|$electron_code"
         return
     fi
 
-    item_status="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const req=['spl_main','simple_app_init','simple_app_render','simple_app_event','simple_app_render_probe','simple_app_event_probe']; const calls=p.call_results||{}; const ok=p.browser_ready===true&&p.validate_result===true&&p.instantiate_result===true&&p.import_count===0&&req.every(n=>(p.export_names||[]).includes(n))&&calls.spl_main==='called'&&calls.simple_app_init==='1'&&calls.simple_app_render==='called'&&calls.simple_app_event==='called'&&calls.simple_app_render_probe===p.expected_render_probe&&calls.simple_app_event_probe===p.expected_event_probe; console.log(ok?'pass':'fail')" "$proof_path")"
+    item_status="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const req=['spl_main','simple_app_init','simple_app_render','simple_app_event','simple_app_render_probe','simple_app_event_probe']; const calls=p.call_results||{}; const renderOk=Array.isArray(p.render_behavior)&&p.render_behavior.length===p.expected_render_behavior_count&&p.render_behavior.every(x=>x.present===true); const eventOk=Array.isArray(p.event_behavior)&&p.event_behavior.length===p.expected_event_behavior_count&&p.event_behavior.every(x=>x.present===true); const rr=p.retained_render||{}; const retainedOk=rr.mounted===true&&rr.selector_count===rr.present_count&&rr.selector_count===rr.nonzero_box_count&&rr.text_length>0; const em=p.retained_event_mutation||{}; const mutationOk=em.mutation_count>0&&em.mutation_count===em.matched_count&&em.mutation_count===em.app_event_call_count; const ok=p.browser_ready===true&&p.validate_result===true&&p.instantiate_result===true&&p.import_count===0&&p.simple_gui_custom_section_count===1&&req.every(n=>(p.export_names||[]).includes(n))&&calls.spl_main==='called'&&calls.simple_app_init==='1'&&calls.simple_app_render==='called'&&calls.simple_app_event==='called'&&calls.simple_app_render_probe===p.expected_render_probe&&calls.simple_app_event_probe===p.expected_event_probe&&renderOk&&eventOk&&retainedOk&&mutationOk; console.log(ok?'pass':'fail')" "$proof_path")"
     item_reason=pass
     if [ "$item_status" != "pass" ]; then
         item_reason=browser-wasm-execution-failed
@@ -121,8 +121,14 @@ run_probe() {
     call_event="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.call_results&&p.call_results.simple_app_event||'')" "$proof_path")"
     render_probe="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.call_results&&p.call_results.simple_app_render_probe||'')" "$proof_path")"
     event_probe="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.call_results&&p.call_results.simple_app_event_probe||'')" "$proof_path")"
+    custom_sections="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.simple_gui_custom_section_count||0))" "$proof_path")"
+    render_behavior="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const rows=p.render_behavior||[]; console.log(rows.filter(x=>x.present).length + '/' + rows.length)" "$proof_path")"
+    event_behavior="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const rows=p.event_behavior||[]; console.log(rows.filter(x=>x.present).length + '/' + rows.length)" "$proof_path")"
+    retained_selectors="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const rr=p.retained_render||{}; console.log(String(rr.present_count||0) + '/' + String(rr.selector_count||0))" "$proof_path")"
+    retained_boxes="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const rr=p.retained_render||{}; console.log(String(rr.nonzero_box_count||0) + '/' + String(rr.selector_count||0))" "$proof_path")"
+    retained_mutations="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const em=p.retained_event_mutation||{}; console.log(String(em.matched_count||0) + '/' + String(em.mutation_count||0))" "$proof_path")"
 
-    echo "${name}|${item_status}|${item_reason}|${wasm_path}|${proof_path}|${byte_size}|${validate_result}|${instantiate_result}|${import_count}|${import_names}|${export_names}|${call_spl_main}|${call_init}|${call_render}|${call_event}|${render_probe}|${event_probe}|${electron_code}"
+    echo "${name}|${item_status}|${item_reason}|${wasm_path}|${proof_path}|${byte_size}|${validate_result}|${instantiate_result}|${import_count}|${import_names}|${export_names}|${call_spl_main}|${call_init}|${call_render}|${call_event}|${render_probe}|${event_probe}|${custom_sections}|${render_behavior}|${event_behavior}|${retained_selectors}|${retained_boxes}|${retained_mutations}|${electron_code}"
 }
 
 results=""
@@ -143,7 +149,7 @@ fi
     echo "gui_wasm_browser_execution_status=$overall_status"
     echo "gui_wasm_browser_execution_reason=$overall_reason"
     echo "gui_wasm_browser_execution_targets=hello,widget_matrix,builder_matrix"
-    printf '%s' "$results" | while IFS='|' read -r name item_status item_reason wasm_path proof_path byte_size validate_result instantiate_result import_count import_names export_names call_spl_main call_init call_render call_event render_probe event_probe electron_code; do
+    printf '%s' "$results" | while IFS='|' read -r name item_status item_reason wasm_path proof_path byte_size validate_result instantiate_result import_count import_names export_names call_spl_main call_init call_render call_event render_probe event_probe custom_sections render_behavior event_behavior retained_selectors retained_boxes retained_mutations electron_code; do
         [ -n "$name" ] || continue
         echo "gui_wasm_browser_execution_${name}_status=$item_status"
         echo "gui_wasm_browser_execution_${name}_reason=$item_reason"
@@ -161,6 +167,12 @@ fi
         echo "gui_wasm_browser_execution_${name}_call_simple_app_event=$call_event"
         echo "gui_wasm_browser_execution_${name}_simple_app_render_probe=$render_probe"
         echo "gui_wasm_browser_execution_${name}_simple_app_event_probe=$event_probe"
+        echo "gui_wasm_browser_execution_${name}_simple_gui_custom_sections=$custom_sections"
+        echo "gui_wasm_browser_execution_${name}_render_behavior_markers=$render_behavior"
+        echo "gui_wasm_browser_execution_${name}_event_behavior_markers=$event_behavior"
+        echo "gui_wasm_browser_execution_${name}_retained_selectors=$retained_selectors"
+        echo "gui_wasm_browser_execution_${name}_retained_nonzero_boxes=$retained_boxes"
+        echo "gui_wasm_browser_execution_${name}_retained_event_mutations=$retained_mutations"
         echo "gui_wasm_browser_execution_${name}_electron_exit_code=$electron_code"
     done
 } >"$BUILD_DIR/evidence.env"
@@ -171,7 +183,7 @@ fi
     echo "- status: $overall_status"
     echo "- reason: $overall_reason"
     echo "- targets: hello, widget_matrix, builder_matrix"
-    printf '%s' "$results" | while IFS='|' read -r name item_status item_reason wasm_path proof_path byte_size validate_result instantiate_result import_count import_names export_names call_spl_main call_init call_render call_event render_probe event_probe electron_code; do
+    printf '%s' "$results" | while IFS='|' read -r name item_status item_reason wasm_path proof_path byte_size validate_result instantiate_result import_count import_names export_names call_spl_main call_init call_render call_event render_probe event_probe custom_sections render_behavior event_behavior retained_selectors retained_boxes retained_mutations electron_code; do
         [ -n "$name" ] || continue
         echo
         echo "## $name"
@@ -191,6 +203,12 @@ fi
         echo "- simple_app_event call: $call_event"
         echo "- simple_app_render_probe: $render_probe"
         echo "- simple_app_event_probe: $event_probe"
+        echo "- simple.gui custom sections: $custom_sections"
+        echo "- render behavior markers: $render_behavior"
+        echo "- event behavior markers: $event_behavior"
+        echo "- retained selectors: $retained_selectors"
+        echo "- retained nonzero boxes: $retained_boxes"
+        echo "- retained event mutations: $retained_mutations"
         echo "- Electron exit code: $electron_code"
     done
     echo

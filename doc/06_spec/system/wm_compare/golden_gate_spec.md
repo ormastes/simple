@@ -177,7 +177,7 @@ expect(bytes[2] == 10u8).to_equal(true)
 | Category | Other |
 | Status | Active |
 | Source | `test/system/wm_compare/golden_gate_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

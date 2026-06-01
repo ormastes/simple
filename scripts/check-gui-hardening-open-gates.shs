@@ -1,0 +1,168 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/gui_hardening_open_gates}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_hardening_open_gates_$(date -u +%F).md}"
+REQUIRE_BROWSER_CORPUS="${REQUIRE_BROWSER_CORPUS:-0}"
+SPEC_TIMEOUT_SECONDS="${SPEC_TIMEOUT_SECONDS:-180}"
+BROWSER_CORPUS_SPECS="${BROWSER_CORPUS_SPECS:-test/system/wm_compare/backend_parity_spec.spl test/system/wm_compare/browser_shell_parity_spec.spl test/system/wm_compare/electron_reference_parity_spec.spl test/system/wm_compare/html_compat_spec.spl test/system/wm_compare/golden_gate_spec.spl test/system/wm_compare/famous_site_corpus_spec.spl}"
+ARTIFACT_ROOTS="${ARTIFACT_ROOTS:-doc/06_spec/system/wm_compare test/baselines/html_compat test/baselines/famous_site_corpus test/system/wm_compare/goldens}"
+
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+
+artifact_snapshot_dir="$BUILD_DIR/artifact-snapshot"
+artifact_file_manifest="$BUILD_DIR/artifact-files.txt"
+artifact_dir_manifest="$BUILD_DIR/artifact-dirs.txt"
+artifact_restore_log="$BUILD_DIR/artifact-restore.log"
+artifacts_snapshotted=0
+
+snapshot_artifacts() {
+    rm -rf "$artifact_snapshot_dir"
+    mkdir -p "$artifact_snapshot_dir"
+    : >"$artifact_file_manifest"
+    : >"$artifact_dir_manifest"
+    : >"$artifact_restore_log"
+
+    for root in $ARTIFACT_ROOTS; do
+        if [ -d "$root" ]; then
+            find "$root" -type d | sort >>"$artifact_dir_manifest"
+            find "$root" -type f | sort >>"$artifact_file_manifest"
+        fi
+    done
+
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        mkdir -p "$artifact_snapshot_dir/$(dirname "$path")"
+        cp -p "$path" "$artifact_snapshot_dir/$path"
+    done <"$artifact_file_manifest"
+
+    artifacts_snapshotted=1
+}
+
+manifest_has() {
+    manifest="$1"
+    path="$2"
+    grep -Fx -- "$path" "$manifest" >/dev/null 2>&1
+}
+
+restore_artifacts() {
+    [ "$artifacts_snapshotted" = "1" ] || return 0
+
+    for root in $ARTIFACT_ROOTS; do
+        if [ -d "$root" ]; then
+            find "$root" -type f | while IFS= read -r path; do
+                if ! manifest_has "$artifact_file_manifest" "$path"; then
+                    rm -f "$path"
+                    echo "removed new artifact: $path" >>"$artifact_restore_log"
+                fi
+            done
+        fi
+    done
+
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        if [ -f "$artifact_snapshot_dir/$path" ]; then
+            mkdir -p "$(dirname "$path")"
+            cp -p "$artifact_snapshot_dir/$path" "$path"
+        fi
+    done <"$artifact_file_manifest"
+
+    for root in $ARTIFACT_ROOTS; do
+        if [ -d "$root" ]; then
+            find "$root" -depth -type d | while IFS= read -r path; do
+                if ! manifest_has "$artifact_dir_manifest" "$path"; then
+                    rmdir "$path" 2>/dev/null && echo "removed empty artifact dir: $path" >>"$artifact_restore_log" || true
+                fi
+            done
+        fi
+    done
+}
+
+trap restore_artifacts EXIT HUP INT TERM
+snapshot_artifacts
+
+run_capture() {
+    label="$1"
+    shift
+    out="$BUILD_DIR/$label.out"
+    timeout_seconds="$1"
+    shift
+    if ! command -v timeout >/dev/null 2>&1; then
+        echo "timeout command unavailable; refusing unbounded evidence command" >"$out"
+        echo "fail"
+        return 0
+    fi
+    if timeout "$timeout_seconds" "$@" >"$out" 2>&1; then
+        echo "pass"
+    else
+        echo "fail"
+    fi
+}
+
+run_spec_capture() {
+    spec="$1"
+    label="$(printf '%s' "$spec" | tr '/.' '__')"
+    out="$BUILD_DIR/$label.out"
+    start="$(date -u +%s)"
+    status="$(run_capture "$label" "$SPEC_TIMEOUT_SECONDS" env SIMPLE_LIB=src REGEN_GOLDENS= bin/simple test "$spec" --mode=interpreter --clean --format json)"
+    end="$(date -u +%s)"
+    duration="$((end - start))"
+    echo "- $spec: status=$status duration_seconds=$duration timeout_seconds=$SPEC_TIMEOUT_SECONDS log=$out" >>"$spec_summary"
+    if [ "$status" != "pass" ]; then
+        browser_specs_status="fail"
+    fi
+}
+
+browser_specs_status="pass"
+spec_summary="$BUILD_DIR/spec-summary.txt"
+: >"$spec_summary"
+if [ -z "$(printf '%s' "$BROWSER_CORPUS_SPECS" | tr -d '[:space:]')" ]; then
+    echo "- no browser/corpus specs configured" >>"$spec_summary"
+    browser_specs_status="fail"
+fi
+for spec in $BROWSER_CORPUS_SPECS; do
+    run_spec_capture "$spec"
+done
+
+overall="pass"
+if [ "$REQUIRE_BROWSER_CORPUS" = "1" ] && [ "$browser_specs_status" != "pass" ]; then
+    overall="fail"
+fi
+
+{
+    echo "# GUI Hardening Chrome/Corpus Evidence"
+    echo
+    echo "Date: $(date -u +%F)"
+    echo
+    echo "## Status"
+    echo
+    echo "- overall=$overall"
+    echo "- browser_corpus_specs=$browser_specs_status"
+    echo "- require_browser_corpus=$REQUIRE_BROWSER_CORPUS"
+    echo "- spec_timeout_seconds=$SPEC_TIMEOUT_SECONDS"
+    echo "- artifact_roots=$ARTIFACT_ROOTS"
+    echo "- artifact_restore_log=$artifact_restore_log"
+    echo
+    echo "## Browser/Corpus Specs"
+    echo
+    cat "$spec_summary"
+    echo
+    echo "## Evidence Files"
+    echo
+    echo "- Raw command output: $BUILD_DIR"
+    echo "- Artifact restore log: $artifact_restore_log"
+    echo
+    echo "## Policy"
+    echo
+    echo "- Browser/corpus parity remains incomplete unless every listed SPipe spec passes."
+    echo "- This wrapper intentionally evaluates only Chrome/corpus evidence."
+} >"$REPORT_PATH"
+
+echo "gui_hardening_open_gates_status=$overall"
+echo "gui_hardening_open_gates_report=$REPORT_PATH"
+echo "gui_hardening_browser_corpus_specs=$browser_specs_status"
+
+[ "$overall" = "pass" ]

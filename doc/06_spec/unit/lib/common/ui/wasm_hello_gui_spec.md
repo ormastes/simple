@@ -567,7 +567,7 @@ expect(missing_entry.diagnostic).to_contain("spl_main")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/unit/lib/common/ui/wasm_hello_gui_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

@@ -201,6 +201,26 @@ fn _icc_rgb_xyz_profile() -> [i64]:
         0, 0, 0, 0
     ]
 
+fn _icc_rgb_lab_profile() -> [i64]:
+    [
+        0, 0, 0, 64,
+        0, 0, 0, 0,
+        4, 48, 0, 0,
+        109, 110, 116, 114,
+        82, 71, 66, 32,
+        76, 97, 98, 32,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        97, 99, 115, 112,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0
+    ]
+
 fn _bmp_2x2_32() -> text:
     _bytes([
         66, 77, 70, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0,
@@ -254,6 +274,14 @@ fn _jpeg_with_icc_profile() -> text:
         73, 67, 67, 95, 80, 82, 79, 70, 73, 76, 69, 0,
         1, 1
     ] + _icc_rgb_xyz_profile() + [255, 217])
+
+fn _jpeg_with_rgb_lab_icc_profile() -> text:
+    _bytes([
+        255, 216,
+        255, 226, 0, 80,
+        73, 67, 67, 95, 80, 82, 79, 70, 73, 76, 69, 0,
+        1, 1
+    ] + _icc_rgb_lab_profile() + [255, 217])
 
 fn _png_with_iccp() -> text:
     _bytes([
@@ -987,6 +1015,13 @@ fn _jpegxl_container_with_small_codestream_16x24() -> text:
         255, 10, 5, 2
     ])
 
+fn _jpegxl_container_with_codestream_without_ftyp() -> text:
+    _bytes([
+        0, 0, 0, 12, 74, 88, 76, 32, 13, 10, 135, 10,
+        0, 0, 0, 12, 106, 120, 108, 99,
+        255, 10, 5, 2
+    ])
+
 fn _jpegxl_container_with_large_size_codestream_16x24() -> text:
     _bytes([
         0, 0, 0, 12, 74, 88, 76, 32, 13, 10, 135, 10,
@@ -1185,6 +1220,14 @@ describe "Image decode":
             expect(result.supported).to_equal(true)
             expect(result.applied).to_equal(true)
             expect(result.reason).to_equal("icc-srgb-identity-applied")
+            expect(result.pixels).to_equal(pixels)
+
+        it "fails closed for non-identity RGB ICC profiles with Lab PCS":
+            val pixels = [10, 20, 30, 255, 40, 50, 60, 128]
+            val result = apply_detected_image_color_profile_to_rgba(_jpeg_with_rgb_lab_icc_profile(), pixels)
+            expect(result.supported).to_equal(false)
+            expect(result.applied).to_equal(false)
+            expect(result.reason).to_equal("icc-rgb-lab-transform-pending")
             expect(result.pixels).to_equal(pixels)
 
     describe "WebP":
@@ -1682,6 +1725,14 @@ describe "Image decode":
             expect(profile.requires_color_transform).to_equal(false)
             expect(profile.initializes_transform_now).to_equal(false)
             expect(profile.reason).to_equal("jpegxl-structured-default-srgb-lazy")
+
+        it "fails closed for JPEG XL color metadata when the container omits ftyp":
+            val profile = detect_image_color_profile_info(_jpegxl_container_with_codestream_without_ftyp())
+
+            expect(profile.format).to_equal("jpegxl")
+            expect(profile.has_profile).to_equal(false)
+            expect(profile.profile_kind).to_equal("container-color-metadata-pending")
+            expect(profile.reason).to_equal("jpegxl-container-codestream-without-ftyp")
 
         it "parses JPEG XL extended-size codestream boxes lazily":
             val info = detect_image_info(_jpegxl_container_with_large_size_codestream_16x24())

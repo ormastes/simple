@@ -314,7 +314,7 @@ expect(report).to_contain("acceptance_policy: \"exact_pixels_required_perceptual
 | Category | Other |
 | Status | Active |
 | Source | `test/system/wm_compare/html_compat_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

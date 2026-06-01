@@ -192,6 +192,120 @@ html,body{margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden
 <div class="taskbar"></div><div class="task1"></div><div class="task2"></div>
 <script>window.__simpleExactBitmapReady=true;</script>`;
   }
+  if (scene === "simple-web-engine2d-dashboard-command-list") {
+    return `<!doctype html>
+<meta charset="utf-8">
+<style>
+html,body{margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden;background:#0b1220}
+.top{position:absolute;left:0;top:0;width:${width}px;height:10px;background:#111827}
+.cmd1{position:absolute;left:4px;top:2px;width:18px;height:6px;background:#22c55e}
+.cmd2{position:absolute;left:26px;top:2px;width:18px;height:6px;background:#f59e0b}
+.cmd3{position:absolute;left:48px;top:2px;width:16px;height:6px;background:#3b82f6}
+.rail{position:absolute;left:0;top:10px;width:16px;height:${height - 18}px;background:#0f172a}
+.icon1{position:absolute;left:4px;top:16px;width:8px;height:8px;background:#8b5cf6}
+.icon2{position:absolute;left:4px;top:30px;width:8px;height:8px;background:#06b6d4}
+.chart{position:absolute;left:20px;top:14px;width:30px;height:20px;background:#1e293b}
+.bar1{position:absolute;left:24px;top:18px;width:6px;height:12px;background:#22c55e}
+.bar2{position:absolute;left:34px;top:22px;width:6px;height:8px;background:#f59e0b}
+.bar3{position:absolute;left:44px;top:16px;width:6px;height:14px;background:#3b82f6}
+.list{position:absolute;left:54px;top:14px;width:34px;height:38px;background:#f8fafc}
+.row1{position:absolute;left:58px;top:18px;width:24px;height:4px;background:#cbd5e1}
+.row2{position:absolute;left:58px;top:28px;width:20px;height:4px;background:#94a3b8}
+.row3{position:absolute;left:58px;top:38px;width:26px;height:4px;background:#cbd5e1}
+.taskbar{position:absolute;left:0;top:${height - 8}px;width:${width}px;height:8px;background:#1f2937}
+.status{position:absolute;left:68px;top:${height - 6}px;width:20px;height:4px;background:#10b981}
+</style>
+<div class="top"></div><div class="cmd1"></div><div class="cmd2"></div><div class="cmd3"></div>
+<div class="rail"></div><div class="icon1"></div><div class="icon2"></div>
+<div class="chart"></div><div class="bar1"></div><div class="bar2"></div><div class="bar3"></div>
+<div class="list"></div><div class="row1"></div><div class="row2"></div><div class="row3"></div>
+<div class="taskbar"></div><div class="status"></div>
+<script>window.__simpleExactBitmapReady=true;</script>`;
+  }
+  if (scene === "simple-web-engine2d-form-sidebar-validation") {
+    return `<!doctype html>
+<meta charset="utf-8">
+<style>
+html,body{margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden;background:#0a0f1a}
+.sidebar{position:absolute;left:0;top:0;width:18px;height:${height}px;background:#111827}
+.nav1{position:absolute;left:4px;top:6px;width:10px;height:8px;background:#2563eb}
+.nav2{position:absolute;left:4px;top:20px;width:10px;height:8px;background:#475569}
+.header{position:absolute;left:18px;top:0;width:${width - 18}px;height:10px;background:#1f2937}
+.form{position:absolute;left:22px;top:14px;width:44px;height:38px;background:#f8fafc}
+.input{position:absolute;left:26px;top:20px;width:34px;height:6px;background:#e5e7eb}
+.error{position:absolute;left:26px;top:30px;width:34px;height:6px;background:#ef4444}
+.valid{position:absolute;left:26px;top:42px;width:22px;height:5px;background:#22c55e}
+.preview{position:absolute;left:70px;top:14px;width:20px;height:20px;background:#0f172a}
+.avatar{position:absolute;left:74px;top:18px;width:8px;height:8px;background:#f59e0b}
+.chip{position:absolute;left:72px;top:38px;width:16px;height:5px;background:#06b6d4}
+.taskbar{position:absolute;left:0;top:${height - 8}px;width:${width}px;height:8px;background:#334155}
+.status{position:absolute;left:54px;top:${height - 6}px;width:18px;height:4px;background:#8b5cf6}
+</style>
+<div class="sidebar"></div><div class="nav1"></div><div class="nav2"></div><div class="header"></div>
+<div class="form"></div><div class="input"></div><div class="error"></div><div class="valid"></div>
+<div class="preview"></div><div class="avatar"></div><div class="chip"></div>
+<div class="taskbar"></div><div class="status"></div>
+<script>window.__simpleExactBitmapReady=true;</script>`;
+  }
+  if (scene === "simple-web-engine2d-settings-inspector-tree") {
+    return `<!doctype html>
+<meta charset="utf-8">
+<style>
+html,body{margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden;background:#0b1020}
+.top{position:absolute;left:0;top:0;width:${width}px;height:9px;background:#111827}
+.cmd1{position:absolute;left:4px;top:2px;width:16px;height:5px;background:#38bdf8}
+.cmd2{position:absolute;left:24px;top:2px;width:14px;height:5px;background:#22c55e}
+.tree{position:absolute;left:0;top:9px;width:22px;height:${height - 17}px;background:#1e293b}
+.node1{position:absolute;left:4px;top:15px;width:14px;height:4px;background:#e2e8f0}
+.node2{position:absolute;left:6px;top:25px;width:12px;height:4px;background:#94a3b8}
+.node3{position:absolute;left:8px;top:35px;width:10px;height:4px;background:#475569}
+.settings{position:absolute;left:26px;top:13px;width:34px;height:36px;background:#f8fafc}
+.row1{position:absolute;left:30px;top:18px;width:22px;height:5px;background:#cbd5e1}
+.row2{position:absolute;left:30px;top:28px;width:26px;height:5px;background:#bfdbfe}
+.row3{position:absolute;left:30px;top:38px;width:18px;height:5px;background:#bbf7d0}
+.inspector{position:absolute;left:64px;top:13px;width:28px;height:36px;background:#111827}
+.prop1{position:absolute;left:68px;top:18px;width:20px;height:4px;background:#f59e0b}
+.prop2{position:absolute;left:68px;top:28px;width:16px;height:4px;background:#8b5cf6}
+.prop3{position:absolute;left:68px;top:38px;width:20px;height:4px;background:#06b6d4}
+.taskbar{position:absolute;left:0;top:${height - 8}px;width:${width}px;height:8px;background:#334155}
+.alert{position:absolute;left:76px;top:${height - 6}px;width:14px;height:4px;background:#ef4444}
+</style>
+<div class="top"></div><div class="cmd1"></div><div class="cmd2"></div>
+<div class="tree"></div><div class="node1"></div><div class="node2"></div><div class="node3"></div>
+<div class="settings"></div><div class="row1"></div><div class="row2"></div><div class="row3"></div>
+<div class="inspector"></div><div class="prop1"></div><div class="prop2"></div><div class="prop3"></div>
+<div class="taskbar"></div><div class="alert"></div>
+	<script>window.__simpleExactBitmapReady=true;</script>`;
+  }
+  if (scene === "simple-web-engine2d-media-gallery-command") {
+    return `<!doctype html>
+	<meta charset="utf-8">
+	<style>
+	html,body{margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden;background:#0f172a}
+	.top{position:absolute;left:0;top:0;width:${width}px;height:10px;background:#1f2937}
+	.cmd1{position:absolute;left:4px;top:2px;width:18px;height:6px;background:#14b8a6}
+	.cmd2{position:absolute;left:26px;top:2px;width:16px;height:6px;background:#f97316}
+	.cmd3{position:absolute;left:46px;top:2px;width:18px;height:6px;background:#6366f1}
+	.tile1{position:absolute;left:4px;top:14px;width:26px;height:18px;background:#111827}
+	.img1{position:absolute;left:7px;top:17px;width:20px;height:12px;background:#38bdf8}
+	.tile2{position:absolute;left:34px;top:14px;width:26px;height:18px;background:#111827}
+	.img2{position:absolute;left:37px;top:17px;width:20px;height:12px;background:#facc15}
+	.tile3{position:absolute;left:64px;top:14px;width:26px;height:18px;background:#111827}
+	.img3{position:absolute;left:67px;top:17px;width:20px;height:12px;background:#22c55e}
+	.meta{position:absolute;left:4px;top:36px;width:38px;height:12px;background:#f8fafc}
+	.metaLine{position:absolute;left:8px;top:40px;width:28px;height:4px;background:#cbd5e1}
+	.side{position:absolute;left:50px;top:36px;width:40px;height:12px;background:#1e293b}
+	.sideLine{position:absolute;left:54px;top:40px;width:30px;height:4px;background:#a78bfa}
+	.taskbar{position:absolute;left:0;top:${height - 8}px;width:${width}px;height:8px;background:#334155}
+	.ready{position:absolute;left:6px;top:${height - 6}px;width:22px;height:4px;background:#10b981}
+	.alert{position:absolute;left:70px;top:${height - 6}px;width:20px;height:4px;background:#ef4444}
+	</style>
+	<div class="top"></div><div class="cmd1"></div><div class="cmd2"></div><div class="cmd3"></div>
+	<div class="tile1"></div><div class="img1"></div><div class="tile2"></div><div class="img2"></div><div class="tile3"></div><div class="img3"></div>
+	<div class="meta"></div><div class="metaLine"></div><div class="side"></div><div class="sideLine"></div>
+	<div class="taskbar"></div><div class="ready"></div><div class="alert"></div>
+	<script>window.__simpleExactBitmapReady=true;</script>`;
+  }
   return `<!doctype html>
 <meta charset="utf-8">
 <style>
@@ -210,7 +324,7 @@ function fixtureHtml() {
   if (expectedArgbPath) {
     return expectedArgbCanvasHtml();
   }
-  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid") {
+  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid" || scene === "simple-web-engine2d-dashboard-command-list" || scene === "simple-web-engine2d-form-sidebar-validation" || scene === "simple-web-engine2d-settings-inspector-tree" || scene === "simple-web-engine2d-media-gallery-command") {
     return simpleWebEngine2DFixtureHtml();
   }
   return exactFixtureHtml();
@@ -221,7 +335,7 @@ function expectedFramePixels() {
   if (fromFile !== null) {
     return fromFile;
   }
-  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list") {
+  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid" || scene === "simple-web-engine2d-dashboard-command-list" || scene === "simple-web-engine2d-form-sidebar-validation" || scene === "simple-web-engine2d-settings-inspector-tree" || scene === "simple-web-engine2d-media-gallery-command") {
     const pixels = new Uint32Array(width * height);
     if (scene === "simple-web-engine2d-wide-card-content") {
       pixels.fill(0xFF0B1020 >>> 0);
@@ -259,6 +373,78 @@ function expectedFramePixels() {
       rectArray(pixels, 0, height - 8, width, 8, 0xFF1F2937 >>> 0);
       rectArray(pixels, 6, height - 6, 18, 4, 0xFF8B5CF6 >>> 0);
       rectArray(pixels, 28, height - 6, 18, 4, 0xFF06B6D4 >>> 0);
+    } else if (scene === "simple-web-engine2d-dashboard-command-list") {
+      pixels.fill(0xFF0B1220 >>> 0);
+      rectArray(pixels, 0, 0, width, 10, 0xFF111827 >>> 0);
+      rectArray(pixels, 4, 2, 18, 6, 0xFF22C55E >>> 0);
+      rectArray(pixels, 26, 2, 18, 6, 0xFFF59E0B >>> 0);
+      rectArray(pixels, 48, 2, 16, 6, 0xFF3B82F6 >>> 0);
+      rectArray(pixels, 0, 10, 16, height - 18, 0xFF0F172A >>> 0);
+      rectArray(pixels, 4, 16, 8, 8, 0xFF8B5CF6 >>> 0);
+      rectArray(pixels, 4, 30, 8, 8, 0xFF06B6D4 >>> 0);
+      rectArray(pixels, 20, 14, 30, 20, 0xFF1E293B >>> 0);
+      rectArray(pixels, 24, 18, 6, 12, 0xFF22C55E >>> 0);
+      rectArray(pixels, 34, 22, 6, 8, 0xFFF59E0B >>> 0);
+      rectArray(pixels, 44, 16, 6, 14, 0xFF3B82F6 >>> 0);
+      rectArray(pixels, 54, 14, 34, 38, 0xFFF8FAFC >>> 0);
+      rectArray(pixels, 58, 18, 24, 4, 0xFFCBD5E1 >>> 0);
+      rectArray(pixels, 58, 28, 20, 4, 0xFF94A3B8 >>> 0);
+      rectArray(pixels, 58, 38, 26, 4, 0xFFCBD5E1 >>> 0);
+      rectArray(pixels, 0, height - 8, width, 8, 0xFF1F2937 >>> 0);
+      rectArray(pixels, 68, height - 6, 20, 4, 0xFF10B981 >>> 0);
+    } else if (scene === "simple-web-engine2d-form-sidebar-validation") {
+      pixels.fill(0xFF0A0F1A >>> 0);
+      rectArray(pixels, 0, 0, 18, height, 0xFF111827 >>> 0);
+      rectArray(pixels, 4, 6, 10, 8, 0xFF2563EB >>> 0);
+      rectArray(pixels, 4, 20, 10, 8, 0xFF475569 >>> 0);
+      rectArray(pixels, 18, 0, width - 18, 10, 0xFF1F2937 >>> 0);
+      rectArray(pixels, 22, 14, 44, 38, 0xFFF8FAFC >>> 0);
+      rectArray(pixels, 26, 20, 34, 6, 0xFFE5E7EB >>> 0);
+      rectArray(pixels, 26, 30, 34, 6, 0xFFEF4444 >>> 0);
+      rectArray(pixels, 26, 42, 22, 5, 0xFF22C55E >>> 0);
+      rectArray(pixels, 70, 14, 20, 20, 0xFF0F172A >>> 0);
+      rectArray(pixels, 74, 18, 8, 8, 0xFFF59E0B >>> 0);
+      rectArray(pixels, 72, 38, 16, 5, 0xFF06B6D4 >>> 0);
+      rectArray(pixels, 0, height - 8, width, 8, 0xFF334155 >>> 0);
+      rectArray(pixels, 54, height - 6, 18, 4, 0xFF8B5CF6 >>> 0);
+    } else if (scene === "simple-web-engine2d-settings-inspector-tree") {
+      pixels.fill(0xFF0B1020 >>> 0);
+      rectArray(pixels, 0, 0, width, 9, 0xFF111827 >>> 0);
+      rectArray(pixels, 4, 2, 16, 5, 0xFF38BDF8 >>> 0);
+      rectArray(pixels, 24, 2, 14, 5, 0xFF22C55E >>> 0);
+      rectArray(pixels, 0, 9, 22, height - 17, 0xFF1E293B >>> 0);
+      rectArray(pixels, 4, 15, 14, 4, 0xFFE2E8F0 >>> 0);
+      rectArray(pixels, 6, 25, 12, 4, 0xFF94A3B8 >>> 0);
+      rectArray(pixels, 8, 35, 10, 4, 0xFF475569 >>> 0);
+      rectArray(pixels, 26, 13, 34, 36, 0xFFF8FAFC >>> 0);
+      rectArray(pixels, 30, 18, 22, 5, 0xFFCBD5E1 >>> 0);
+      rectArray(pixels, 30, 28, 26, 5, 0xFFBFDBFE >>> 0);
+      rectArray(pixels, 30, 38, 18, 5, 0xFFBBF7D0 >>> 0);
+      rectArray(pixels, 64, 13, 28, 36, 0xFF111827 >>> 0);
+      rectArray(pixels, 68, 18, 20, 4, 0xFFF59E0B >>> 0);
+      rectArray(pixels, 68, 28, 16, 4, 0xFF8B5CF6 >>> 0);
+      rectArray(pixels, 68, 38, 20, 4, 0xFF06B6D4 >>> 0);
+      rectArray(pixels, 0, height - 8, width, 8, 0xFF334155 >>> 0);
+      rectArray(pixels, 76, height - 6, 14, 4, 0xFFEF4444 >>> 0);
+    } else if (scene === "simple-web-engine2d-media-gallery-command") {
+      pixels.fill(0xFF0F172A >>> 0);
+      rectArray(pixels, 0, 0, width, 10, 0xFF1F2937 >>> 0);
+      rectArray(pixels, 4, 2, 18, 6, 0xFF14B8A6 >>> 0);
+      rectArray(pixels, 26, 2, 16, 6, 0xFFF97316 >>> 0);
+      rectArray(pixels, 46, 2, 18, 6, 0xFF6366F1 >>> 0);
+      rectArray(pixels, 4, 14, 26, 18, 0xFF111827 >>> 0);
+      rectArray(pixels, 7, 17, 20, 12, 0xFF38BDF8 >>> 0);
+      rectArray(pixels, 34, 14, 26, 18, 0xFF111827 >>> 0);
+      rectArray(pixels, 37, 17, 20, 12, 0xFFFACC15 >>> 0);
+      rectArray(pixels, 64, 14, 26, 18, 0xFF111827 >>> 0);
+      rectArray(pixels, 67, 17, 20, 12, 0xFF22C55E >>> 0);
+      rectArray(pixels, 4, 36, 38, 12, 0xFFF8FAFC >>> 0);
+      rectArray(pixels, 8, 40, 28, 4, 0xFFCBD5E1 >>> 0);
+      rectArray(pixels, 50, 36, 40, 12, 0xFF1E293B >>> 0);
+      rectArray(pixels, 54, 40, 30, 4, 0xFFA78BFA >>> 0);
+      rectArray(pixels, 0, height - 8, width, 8, 0xFF334155 >>> 0);
+      rectArray(pixels, 6, height - 6, 22, 4, 0xFF10B981 >>> 0);
+      rectArray(pixels, 70, height - 6, 20, 4, 0xFFEF4444 >>> 0);
     } else {
       pixels.fill(0xFF112233 >>> 0);
     }
@@ -341,7 +527,7 @@ function captureChecksum(buffer) {
     const green = buffer[off + 1];
     const red = buffer[off + 2];
     const alpha = buffer[off + 3];
-    const isArgbScene = expectedArgbPath !== "" || scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid";
+    const isArgbScene = expectedArgbPath !== "" || scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid" || scene === "simple-web-engine2d-dashboard-command-list" || scene === "simple-web-engine2d-form-sidebar-validation" || scene === "simple-web-engine2d-settings-inspector-tree" || scene === "simple-web-engine2d-media-gallery-command";
     const value = isArgbScene
       ? (((alpha << 24) >>> 0) | (red << 16) | (green << 8) | blue) >>> 0
       : red;

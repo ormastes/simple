@@ -9,7 +9,7 @@ These checks cover numeric color conversion and the 8K packed-surface planning
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/unit/lib/common/color/color_lab_xyz_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 These checks cover numeric color conversion and the 8K packed-surface planning

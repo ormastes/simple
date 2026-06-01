@@ -147,7 +147,7 @@ expect(r.max_channel_delta == 0u32).to_equal(true)
 | Category | Other |
 | Status | Active |
 | Source | `test/system/wm_compare/backend_parity_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

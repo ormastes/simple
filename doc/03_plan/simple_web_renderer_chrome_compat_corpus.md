@@ -2,6 +2,10 @@
 
 Feature: `simple_web_renderer_chrome_compat_corpus`
 
+Current consolidated GUI hardening status, related evidence, and remaining work
+now live in `doc/03_plan/gui_hardening_current_plan_2026-06-01.md`. This file
+is retained as the Chrome/corpus lane detail.
+
 Scope:
 
 - Add a deterministic offline corpus with more than 100 famous-site-inspired sample pages.
@@ -303,7 +307,11 @@ Measured blocker:
   delta diagnostics in the production report so production misses can be
   classified against Chrome text metrics without changing the pixel artifact;
   the system spec covers its missing-report failure path and the checked-in
-  focused `site_0_google` production-artifact success path.
+  focused `site_0_google` production-artifact success path. The same spec now
+  asserts the fixture report remains exact/accepted with `simple.ppm` while the
+  production report remains non-accepted/divergent with `simple.production.ppm`,
+  preserving the evidence boundary between fixture completion and production
+  Chrome compatibility.
 - `tools/electron-shell/summarize_famous_site_corpus_coverage.js --limit=5`
   now reads the checked-in PPMs and Chrome metrics instead of returning canned
   target rows. It reports `reportCount: 132`, `analyzedCount: 132`, and

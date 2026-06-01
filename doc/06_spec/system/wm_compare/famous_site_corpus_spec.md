@@ -406,6 +406,21 @@ expect(result.0).to_contain("\"failures\": []")
 
 </details>
 
+#### keeps fixture completion artifacts separate from production probe artifacts
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_report_contains_exact_fixture_acceptance("site_0_google")).to_equal(true)
+expect(_report_contains_bounded_production_miss("site_0_google")).to_equal(true)
+```
+
+</details>
+
 #### fails the production probe gate when no generated production report exists
 
 <details>
@@ -953,7 +968,7 @@ expect(opts.continue_on_fail).to_equal(true)
 | Category | Other |
 | Status | Active |
 | Source | `test/system/wm_compare/famous_site_corpus_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -965,8 +980,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 36 |
-| Active scenarios | 36 |
+| Total scenarios | 37 |
+| Active scenarios | 37 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

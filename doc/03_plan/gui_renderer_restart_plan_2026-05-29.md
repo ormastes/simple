@@ -1,5 +1,9 @@
 # GUI Renderer Restart Plan - 2026-05-29
 
+Current consolidated GUI hardening status, related evidence, and remaining work
+now live in `doc/03_plan/gui_hardening_current_plan_2026-06-01.md`. This file
+is retained as restart-era platform and renderer lane evidence.
+
 ## Goal
 
 Complete the Simple GUI renderer restart across shared WM, Engine2D, web
@@ -746,9 +750,12 @@ Result: passed with `rendererMode: "production"`, `divergent: true`,
 `reportFresh: true`. The verifier also confirms Simple layout-line diagnostics
 and text-region deltas are present: div-box text delta `1612` pixels and
 overflow-text delta `1104` pixels. This keeps the production Chrome gap
-bounded and diagnosed without claiming Chrome parity. The full
-`test/system/wm_compare/famous_site_corpus_spec.spl` also passed `36/36` in
-101954 ms under a 180s guard.
+bounded and diagnosed without claiming Chrome parity. The corpus BDD now also
+locks the artifact split: the fixture report uses `simple.ppm` and remains
+exact/accepted, while the production report uses `simple.production.ppm` and
+remains divergent/non-accepted. The full
+`test/system/wm_compare/famous_site_corpus_spec.spl` also passed `37/37` under
+a 180s guard after adding the fixture-vs-production artifact separation check.
 
 Shared WM adapter lifecycle increment:
 ```bash

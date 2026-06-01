@@ -21,7 +21,7 @@ Prompt-to-artifact checklist:
 | --- | --- | --- |
 | Research rendering tools/data | `doc/01_research/domain/simple_web_renderer_chrome_compat_corpus.md` identifies WPT visual tests, current Playwright visual comparison behavior, `pixelmatch` as the external comparator model, and CDP `Page.captureScreenshot`. `doc/01_research/local/simple_web_renderer_chrome_compat_corpus.md` maps the local renderer, harness, corpus, and test files. | Present. |
 | Plan doc | `doc/03_plan/simple_web_renderer_chrome_compat_corpus.md` tracks acceptance, measured blockers, and current fixture status. | Present. |
-| BDD tests | `test/system/wm_compare/html_compat_spec.spl` covers catalog shape, golden loading, timeouts, and bitwise compare core. `test/system/wm_compare/famous_site_corpus_spec.spl` covers corpus shape, every exported HTML fixture, exact manifest content, smoke rendering, visible overflow text, the `--production-renderer` option, a production-vs-fixture distinction check for `site_0_google`, and one Engine2D backend determinism smoke. `test/system/wm_compare/famous_site_engine2d_backend_spec.spl` covers all 132 corpus pages at the watchdog-safe viewport and representative full-size corpus pages against the explicit Engine2D software backend through the canonical `compare_exact` bitwise comparator. `test/system/wm_compare/emulated_capture_spec.spl` covers the current in-process emulated screenshot capture adapter and exact Simple-vs-Engine2D comparison. | Present. |
+| BDD tests | `test/system/wm_compare/html_compat_spec.spl` covers catalog shape, golden loading, timeouts, and bitwise compare core. `test/system/wm_compare/famous_site_corpus_spec.spl` covers corpus shape, every exported HTML fixture, exact manifest content, smoke rendering, visible overflow text, the `--production-renderer` option, a production-vs-fixture distinction check for `site_0_google`, explicit fixture-vs-production artifact separation (`report.sdn`/`simple.ppm` exact versus `report.production.sdn`/`simple.production.ppm` divergent), and one Engine2D backend determinism smoke. `test/system/wm_compare/famous_site_engine2d_backend_spec.spl` covers all 132 corpus pages at the watchdog-safe viewport and representative full-size corpus pages against the explicit Engine2D software backend through the canonical `compare_exact` bitwise comparator. `test/system/wm_compare/emulated_capture_spec.spl` covers the current in-process emulated screenshot capture adapter and exact Simple-vs-Engine2D comparison. | Present. |
 | Bitwise screenshot compare | `src/app/wm_compare/html_compat.spl` compares checked-in Chromium PPMs against Simple captures, writes `report.sdn`, and supports exact/perceptual results. `bin/simple run src/app/wm_compare/html_compat.spl` completed all 16 fixtures and reported all accepted. `src/app/wm_compare/site_corpus_compat.spl` compares generated corpus Chrome PPMs against Simple captures. `src/app/wm_compare/emulated_capture.spl` compares current Simple Web Renderer and Engine2D software emulated screenshots through the same `compare_exact` core. `src/os/compositor/screenshot_compare.spl` restores the older OS/compositor bitwise compare surface for deterministic in-process captures, and small WM scene/electron captures now route through Simple Web Renderer pixels. `test/system/gui_entry_engine2d_wm_simple_web_spec.spl` now captures a booted QEMU PPM and verifies QMP-visible browser-region pixels. | Present for the 16-fixture gate, 132-sample corpus fixture gate, in-process Simple-vs-Engine2D emulated path, deterministic OS/compositor shim path, and one live QEMU framebuffer oracle. |
 | Corpus Simple timeout | `src/app/wm_compare/site_corpus_compat.spl` parses `--simple-timeout-ms` and now runs `simple_html_capture_worker.spl` as a bounded child-render watchdog before the fast in-process capture used for comparison artifacts. The corpus spec covers the worker path, option parsing asserts the 60s corpus default, and a focused `site_44_the_new_york_times` run with `--simple-timeout-ms=60000` returned under an outer 130s guard while preserving the documented `3334` differing pixels. The final artifact pixels still come from the in-process renderer path to avoid the slower parent-side P3 decode path. | Present as a bounded child-render watchdog; not a child-PPM artifact source. |
 | 100+ famous-site sample pages | `src/app/wm_compare/site_corpus.spl`; `src/app/wm_compare/export_site_corpus.spl`; `tools/electron-shell/capture_famous_site_corpus_chrome.js`; system spec asserts `samples.len() > 100`, complete HTML, stable ids, id uniqueness, expected category coverage, stable SDN manifest export with HTML, baseline, Chrome PPM, Simple PPM, and report paths, every on-disk exported fixture, exact manifest content, every baseline/report artifact, and every corpus page rendering non-empty through Simple Web Renderer at a watchdog-safe viewport. | Present. |
@@ -167,13 +167,16 @@ Current verification evidence:
   after a production run it recomputes the Chrome/production PPM delta, requires
   `renderer_mode: "production"`, requires `simple.production.ppm`, and currently
   reports `differentPixels: 2717`, `computedDifferentPixels: 2717`, and
-  `maxDifferentPixels: 2717` with `status: "PASS"`. A 2026-05-29 rerun also
+  `maxDifferentPixels: 2717` with `status: "PASS"`. The corpus BDD now also
+  asserts the checked-in fixture report for `site_0_google` remains exact and
+  accepted while the production report remains non-accepted/divergent, so the
+  fixture completion gate cannot be mistaken for production Chrome parity. A 2026-05-29 rerun also
   confirms the text-region guardrail: div-box text delta `1612` pixels,
   overflow-text delta `1104` pixels, Simple layout-line diagnostics present,
   Chrome text-line count `4`, Simple geometry line count `1`, and
   `layoutTextMatch: false`. A full 2026-05-29 rerun of
-  `test/system/wm_compare/famous_site_corpus_spec.spl` passed `36/36` in
-  101954 ms. The corpus system spec
+  `test/system/wm_compare/famous_site_corpus_spec.spl` passed `37/37` under
+  a 180s guard. The corpus system spec
   covers both the missing-report failure path and the checked-in
   `site_0_google` production-artifact success path. `site_corpus_compat.spl` also prints
   selected-run counts, so focused production probes expose `divergent=1` while
@@ -570,6 +573,11 @@ Uncovered or weak areas:
   This routing change does not by itself advance Chrome corpus parity — the
   corpus fixtures still use the heuristic and the open parity work below is
   unchanged.
+
+Current consolidated GUI hardening status, related evidence, and remaining work
+now live in `doc/03_plan/gui_hardening_current_plan_2026-06-01.md`. This file
+is retained as the Simple Web renderer completion audit and Chrome parity
+blocker detail.
 
 Conclusion:
 

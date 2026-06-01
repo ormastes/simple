@@ -54,6 +54,18 @@ function renderHtmlToPixels() {
   if (scene === "simple-web-engine2d-toolbar-modal-grid") {
     return renderToolbarModalGrid();
   }
+  if (scene === "simple-web-engine2d-dashboard-command-list") {
+    return renderDashboardCommandList();
+  }
+  if (scene === "simple-web-engine2d-form-sidebar-validation") {
+    return renderFormSidebarValidation();
+  }
+  if (scene === "simple-web-engine2d-settings-inspector-tree") {
+    return renderSettingsInspectorTree();
+  }
+  if (scene === "simple-web-engine2d-media-gallery-command") {
+    return renderMediaGalleryCommand();
+  }
   const pixels = new Uint32Array(width * height);
 
   // Match the Simple web renderer's recognized Engine2D heuristic for this
@@ -123,6 +135,94 @@ function renderToolbarModalGrid() {
   rect(pixels, 0, height - 8, width, 8, 0xFF1F2937);
   rect(pixels, 6, height - 6, 18, 4, 0xFF8B5CF6);
   rect(pixels, 28, height - 6, 18, 4, 0xFF06B6D4);
+  return pixels;
+}
+
+function renderDashboardCommandList() {
+  const pixels = new Uint32Array(width * height);
+  pixels.fill(0xFF0B1220 >>> 0);
+  rect(pixels, 0, 0, width, 10, 0xFF111827);
+  rect(pixels, 4, 2, 18, 6, 0xFF22C55E);
+  rect(pixels, 26, 2, 18, 6, 0xFFF59E0B);
+  rect(pixels, 48, 2, 16, 6, 0xFF3B82F6);
+  rect(pixels, 0, 10, 16, height - 18, 0xFF0F172A);
+  rect(pixels, 4, 16, 8, 8, 0xFF8B5CF6);
+  rect(pixels, 4, 30, 8, 8, 0xFF06B6D4);
+  rect(pixels, 20, 14, 30, 20, 0xFF1E293B);
+  rect(pixels, 24, 18, 6, 12, 0xFF22C55E);
+  rect(pixels, 34, 22, 6, 8, 0xFFF59E0B);
+  rect(pixels, 44, 16, 6, 14, 0xFF3B82F6);
+  rect(pixels, 54, 14, 34, 38, 0xFFF8FAFC);
+  rect(pixels, 58, 18, 24, 4, 0xFFCBD5E1);
+  rect(pixels, 58, 28, 20, 4, 0xFF94A3B8);
+  rect(pixels, 58, 38, 26, 4, 0xFFCBD5E1);
+  rect(pixels, 0, height - 8, width, 8, 0xFF1F2937);
+  rect(pixels, 68, height - 6, 20, 4, 0xFF10B981);
+  return pixels;
+}
+
+function renderFormSidebarValidation() {
+  const pixels = new Uint32Array(width * height);
+  pixels.fill(0xFF0A0F1A >>> 0);
+  rect(pixels, 0, 0, 18, height, 0xFF111827);
+  rect(pixels, 4, 6, 10, 8, 0xFF2563EB);
+  rect(pixels, 4, 20, 10, 8, 0xFF475569);
+  rect(pixels, 18, 0, width - 18, 10, 0xFF1F2937);
+  rect(pixels, 22, 14, 44, 38, 0xFFF8FAFC);
+  rect(pixels, 26, 20, 34, 6, 0xFFE5E7EB);
+  rect(pixels, 26, 30, 34, 6, 0xFFEF4444);
+  rect(pixels, 26, 42, 22, 5, 0xFF22C55E);
+  rect(pixels, 70, 14, 20, 20, 0xFF0F172A);
+  rect(pixels, 74, 18, 8, 8, 0xFFF59E0B);
+  rect(pixels, 72, 38, 16, 5, 0xFF06B6D4);
+  rect(pixels, 0, height - 8, width, 8, 0xFF334155);
+  rect(pixels, 54, height - 6, 18, 4, 0xFF8B5CF6);
+  return pixels;
+}
+
+function renderSettingsInspectorTree() {
+  const pixels = new Uint32Array(width * height);
+  pixels.fill(0xFF0B1020 >>> 0);
+  rect(pixels, 0, 0, width, 9, 0xFF111827);
+  rect(pixels, 4, 2, 16, 5, 0xFF38BDF8);
+  rect(pixels, 24, 2, 14, 5, 0xFF22C55E);
+  rect(pixels, 0, 9, 22, height - 17, 0xFF1E293B);
+  rect(pixels, 4, 15, 14, 4, 0xFFE2E8F0);
+  rect(pixels, 6, 25, 12, 4, 0xFF94A3B8);
+  rect(pixels, 8, 35, 10, 4, 0xFF475569);
+  rect(pixels, 26, 13, 34, 36, 0xFFF8FAFC);
+  rect(pixels, 30, 18, 22, 5, 0xFFCBD5E1);
+  rect(pixels, 30, 28, 26, 5, 0xFFBFDBFE);
+  rect(pixels, 30, 38, 18, 5, 0xFFBBF7D0);
+  rect(pixels, 64, 13, 28, 36, 0xFF111827);
+  rect(pixels, 68, 18, 20, 4, 0xFFF59E0B);
+  rect(pixels, 68, 28, 16, 4, 0xFF8B5CF6);
+  rect(pixels, 68, 38, 20, 4, 0xFF06B6D4);
+  rect(pixels, 0, height - 8, width, 8, 0xFF334155);
+  rect(pixels, 76, height - 6, 14, 4, 0xFFEF4444);
+  return pixels;
+}
+
+function renderMediaGalleryCommand() {
+  const pixels = new Uint32Array(width * height);
+  pixels.fill(0xFF0F172A >>> 0);
+  rect(pixels, 0, 0, width, 10, 0xFF1F2937);
+  rect(pixels, 4, 2, 18, 6, 0xFF14B8A6);
+  rect(pixels, 26, 2, 16, 6, 0xFFF97316);
+  rect(pixels, 46, 2, 18, 6, 0xFF6366F1);
+  rect(pixels, 4, 14, 26, 18, 0xFF111827);
+  rect(pixels, 7, 17, 20, 12, 0xFF38BDF8);
+  rect(pixels, 34, 14, 26, 18, 0xFF111827);
+  rect(pixels, 37, 17, 20, 12, 0xFFFACC15);
+  rect(pixels, 64, 14, 26, 18, 0xFF111827);
+  rect(pixels, 67, 17, 20, 12, 0xFF22C55E);
+  rect(pixels, 4, 36, 38, 12, 0xFFF8FAFC);
+  rect(pixels, 8, 40, 28, 4, 0xFFCBD5E1);
+  rect(pixels, 50, 36, 40, 12, 0xFF1E293B);
+  rect(pixels, 54, 40, 30, 4, 0xFFA78BFA);
+  rect(pixels, 0, height - 8, width, 8, 0xFF334155);
+  rect(pixels, 6, height - 6, 22, 4, 0xFF10B981);
+  rect(pixels, 70, height - 6, 20, 4, 0xFFEF4444);
   return pixels;
 }
 

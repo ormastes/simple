@@ -360,6 +360,25 @@ expect(result.pixels).to_equal(pixels)
 
 </details>
 
+#### fails closed for non-identity RGB ICC profiles with Lab PCS
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val pixels = [10, 20, 30, 255, 40, 50, 60, 128]
+val result = apply_detected_image_color_profile_to_rgba(_jpeg_with_rgb_lab_icc_profile(), pixels)
+expect(result.supported).to_equal(false)
+expect(result.applied).to_equal(false)
+expect(result.reason).to_equal("icc-rgb-lab-transform-pending")
+expect(result.pixels).to_equal(pixels)
+```
+
+</details>
+
 ### WebP
 
 #### preserves VP8X intrinsic dimensions for layout placeholder rendering
@@ -1356,6 +1375,25 @@ expect(profile.reason).to_equal("jpegxl-structured-default-srgb-lazy")
 
 </details>
 
+#### fails closed for JPEG XL color metadata when the container omits ftyp
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val profile = detect_image_color_profile_info(_jpegxl_container_with_codestream_without_ftyp())
+
+expect(profile.format).to_equal("jpegxl")
+expect(profile.has_profile).to_equal(false)
+expect(profile.profile_kind).to_equal("container-color-metadata-pending")
+expect(profile.reason).to_equal("jpegxl-container-codestream-without-ftyp")
+```
+
+</details>
+
 #### parses JPEG XL extended-size codestream boxes lazily
 
 <details>
@@ -1510,7 +1548,7 @@ expect(image.format).to_equal(ImageFormat.Svg)
 | Category | Other |
 | Status | Active |
 | Source | `examples/browser/test/paint/image_decode_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -1533,8 +1571,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 72 |
-| Active scenarios | 72 |
+| Total scenarios | 74 |
+| Active scenarios | 74 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

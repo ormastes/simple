@@ -130,7 +130,7 @@ expect(r.pass_exact).to_equal(true)
 | Category | Other |
 | Status | Active |
 | Source | `test/system/wm_compare/browser_shell_parity_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
