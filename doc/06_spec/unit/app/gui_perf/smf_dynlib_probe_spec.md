@@ -267,9 +267,9 @@ else:
 </details>
 
 <details>
-<summary>Advanced: reuses the dynlib call argument buffer in the measured hot loop</summary>
+<summary>Advanced: reuses a stable dynlib call argument buffer in the measured hot loop</summary>
 
-#### reuses the dynlib call argument buffer in the measured hot loop
+#### reuses a stable dynlib call argument buffer in the measured hot loop
 
 <details>
 <summary>Executable SPipe</summary>
@@ -280,7 +280,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val source = rt_file_read_text("src/app/gui_perf/smf_dynlib_probe_core.spl")
 expect(source.contains("var args: [i64] = [0]")).to_equal(true)
-expect(source.contains("args[0] = i.to_i64()")).to_equal(true)
+expect(source.contains("args[0] = i.to_i64()")).to_equal(false)
 expect(source.contains("var args: [i64] = []")).to_equal(false)
 expect(source.contains("args.push(i.to_i64())")).to_equal(false)
 ```
