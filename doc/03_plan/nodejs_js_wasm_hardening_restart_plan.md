@@ -88,7 +88,7 @@ Phase 6 remains unchecked:
 
 WebGPU/WASM remaining gap:
 
-- Nested returned-Promise assimilation for WebGPU callbacks is not proven.
+- Nested returned-Promise assimilation for WebGPU callbacks is now covered by `webgpu_js_wasm_simple_spec.spl`.
 - Complete WASM-originated WebGPU ABI and real hardware/driver WebGPU execution are not implemented.
 
 ## Recommended Next Slice

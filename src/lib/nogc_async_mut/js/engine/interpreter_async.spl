@@ -255,7 +255,17 @@ impl JsInterpreter:
 
     me _run_promise_task(promise_id: i64, handler_id: i64):
                         val state = _simple_fetch_state(promise_id, self.object_store)
-                        val settled_value = _simple_fetch_value(promise_id, self.object_store)
+                        var settled_value = _simple_fetch_value(promise_id, self.object_store)
+                        match settled_value:
+                            JsValue.Object(id: settled_obj_id):
+                                match self.get_object_property(settled_obj_id, "__simple_promise_host"):
+                                    JsValue.Boolean(is_host):
+                                        if is_host and _simple_fetch_state(settled_obj_id, self.object_store) == "fulfilled":
+                                            settled_value = _simple_fetch_value(settled_obj_id, self.object_store)
+                                    _:
+                                        pass_dn
+                            _:
+                                pass_dn
                         var handler_kind = "then"
                         var on_fulfilled = -1
                         var on_rejected = -1
@@ -324,8 +334,17 @@ impl JsInterpreter:
                                             self._append_handler(inner_promise_id, adopt_handler_id)
                                             adopted_pending = true
                                         else:
-                                            next_value = _simple_fetch_value(inner_promise_id, self.object_store)
                                             propagate_rejection = inner_state == "rejected"
+                                            next_value = _simple_fetch_value(inner_promise_id, self.object_store)
+                                            match next_value:
+                                                JsValue.Object(nested_promise_id):
+                                                    if val JsValue.Boolean(true) = self.get_object_property(nested_promise_id, "__simple_promise_host"):
+                                                        val nested_state = _simple_fetch_state(nested_promise_id, self.object_store)
+                                                        if nested_state != "pending":
+                                                            next_value = _simple_fetch_value(nested_promise_id, self.object_store)
+                                                            propagate_rejection = nested_state == "rejected"
+                                                _:
+                                                    pass_dn
                                 _:
                                     pass_dn
                             if not adopted_pending:

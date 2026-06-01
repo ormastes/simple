@@ -920,6 +920,90 @@ match session.take_pending_request():
 
 </details>
 
+#### should assimilate nested WebGPU promises returned from fetched WASM instantiation callbacks
+
+1. var session = BrowserSession new
+
+2. session open html
+
+3. Ok
+   - Expected: _display_js(value) equals `queued`
+
+4. Err
+   - Expected: "unexpected queue error: {err}" equals ``
+
+5. Ok
+   - Expected: _display_js(value) equals ``
+
+6. Err
+   - Expected: "unexpected pre-commit js error: {err}" equals ``
+
+7. Some
+   - Expected: request.kind equals `fetch`
+   - Expected: request.url equals `https://example.com/mod.wasm`
+
+8. Ok
+
+9. Ok
+   - Expected: _display_js(value) equals `Simple WebGPU Software Adapter:true:available`
+
+10. Err
+   - Expected: "unexpected adapter js error: {err}" equals ``
+
+11. Err
+   - Expected: "unexpected commit error: {err}" equals ``
+   - Expected: "missing fetch request" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 38 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+val queued = session.eval_script("var out = ''; window.fetch('/mod.wasm').then(function(r) { return r.arrayBuffer(); }).then(function(bytes) { return WebAssembly.instantiate(bytes); }).then(function(wasm) { return Promise.resolve(navigator.gpu.requestAdapter()); }).then(function(adapter) { out = adapter.name + ':' + adapter.isFallbackAdapter + ':' + adapter.requestAdapterStatus; }); 'queued'")
+match queued:
+    Ok(value):
+        expect(_display_js(value)).to_equal("queued")
+    Err(err):
+        expect("unexpected queue error: {err}").to_equal("")
+match session.eval_script("out"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("")
+    Err(err):
+        expect("unexpected pre-commit js error: {err}").to_equal("")
+
+match session.take_pending_request():
+    Some(request):
+        expect(request.kind).to_equal("fetch")
+        expect(request.url).to_equal("https://example.com/mod.wasm")
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 200,
+            headers: "Content-Type: application/wasm\n",
+            body: "0061736d01000000010100",
+            error: ""
+        ))
+        match committed:
+            Ok(_):
+                match session.eval_script("out"):
+                    Ok(value):
+                        expect(_display_js(value)).to_equal("Simple WebGPU Software Adapter:true:available")
+                    Err(err):
+                        expect("unexpected adapter js error: {err}").to_equal("")
+            Err(err):
+                expect("unexpected commit error: {err}").to_equal("")
+    nil:
+        expect("missing fetch request").to_equal("")
+```
+
+</details>
+
 #### should expose thenable WebAssembly.compile result shape through BrowserSession
 
 1. var session = BrowserSession new
@@ -3511,8 +3595,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 105 |
-| Active scenarios | 105 |
+| Total scenarios | 106 |
+| Active scenarios | 106 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

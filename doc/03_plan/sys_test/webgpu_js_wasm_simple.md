@@ -20,7 +20,7 @@ Out of scope until implementation exists: real browser GPU driver execution, pix
 | REQ-WGPU-004 | Software executor deterministically replays writes, render/compute passes, copies, and rejects invalid sequencing. | `test/feature/web_platform/webgpu/webgpu_software_executor_spec.spl`, `test/unit/browser/script/canvas_api_spec.spl` | Add end-to-end Simple script example that verifies checksums/counters after queue execution. |
 | REQ-WGPU-005 | Browser JS session exposes WebGPU globals without regressing regular JS execution. | `test/unit/browser_engine/js_integration_spec.spl`, `test/unit/lib/common/web/browser_session_spec.spl` | Add JS expression examples for `requestAdapter` shape and secure metadata. |
 | REQ-WGPU-006 | WASM backend emits browser-compatible WAT/JS glue. | `test/integration/compiler/wasm_e2e_spec.spl`, `test/unit/compiler/wasm_codegen_spec.spl`, `test/feature/usage/wasm_compile_spec.spl`, and `webgpu_js_wasm_simple_spec.spl` cover bounded exports plus a declared `webgpu.requestAdapter` host import call. | Complete WebGPU host ABI and driver-backed execution are not implemented. |
-| REQ-WGPU-007 | A browser page can load WASM glue and then use JS WebGPU APIs in the same session. | `webgpu_js_wasm_simple_spec.spl` and `browser_session_fetch_wasm_chain_spec.spl` cover `fetch` -> `arrayBuffer` -> `WebAssembly.instantiate`, deterministic module/instance metadata, WebGPU global metadata reached from that chain, `requestAdapter()` metadata in the same session, fail-closed unsupported imports, and a direct declared WASM-to-JS host import callback. | Remaining bridge work is nested returned-Promise assimilation for WebGPU callbacks and a full WebGPU binding surface, not browser-side asset loading/instantiation or minimal host import invocation. |
+| REQ-WGPU-007 | A browser page can load WASM glue and then use JS WebGPU APIs in the same session. | `webgpu_js_wasm_simple_spec.spl` and `browser_session_fetch_wasm_chain_spec.spl` cover `fetch` -> `arrayBuffer` -> `WebAssembly.instantiate`, deterministic module/instance metadata, WebGPU global metadata reached from that chain, `requestAdapter()` metadata in the same session, nested returned-Promise assimilation for WebGPU callbacks, fail-closed unsupported imports, and a direct declared WASM-to-JS host import callback. | Remaining bridge work is a full WebGPU binding surface, not browser-side asset loading/instantiation, nested promise assimilation, or minimal host import invocation. |
 
 ## Execution Order
 
@@ -45,7 +45,7 @@ Out of scope until implementation exists: real browser GPU driver execution, pix
 
 ## Pass/Fail Criteria
 
-PASS for the current slice requires REQ-WGPU-001 through REQ-WGPU-007 to pass with real assertions and no `pass_todo`/placeholder assertions. The browser promise chain must reach WASM instantiation metadata and WebGPU global metadata, `requestAdapter()` must resolve deterministic software-adapter metadata in the same session, and the minimal declared WASM-to-WebGPU host import call must be covered. Nested returned-Promise assimilation for WebGPU callbacks and a complete WebGPU host binding surface remain documented later bridge work.
+PASS for the current slice requires REQ-WGPU-001 through REQ-WGPU-007 to pass with real assertions and no `pass_todo`/placeholder assertions. The browser promise chain must reach WASM instantiation metadata and WebGPU global metadata, `requestAdapter()` must resolve deterministic software-adapter metadata in the same session, nested returned-Promise assimilation for WebGPU callbacks must be covered, and the minimal declared WASM-to-WebGPU host import call must be covered. A complete WebGPU host binding surface remains documented later bridge work.
 
 ## Traceability
 
@@ -57,11 +57,11 @@ PASS for the current slice requires REQ-WGPU-001 through REQ-WGPU-007 to pass wi
 | REQ-WGPU-004 | `webgpu_software_executor_spec.spl`, `canvas_api_spec.spl`, `webgpu_js_wasm_simple_spec.spl` | 3+ | Full for deterministic executor |
 | REQ-WGPU-005 | `browser_session_spec.spl`, `js_integration_spec.spl`, `webgpu_js_wasm_simple_spec.spl` | 3+ | Full for current JS globals |
 | REQ-WGPU-006 | `wasm_e2e_spec.spl`, `wasm_codegen_spec.spl`, `wasm_compile_spec.spl`, `webgpu_js_wasm_simple_spec.spl` | 4+ | Full for current backend/glue helper coverage and bounded host import invocation |
-| REQ-WGPU-007 | `webgpu_js_wasm_simple_spec.spl`, `browser_session_fetch_wasm_chain_spec.spl` | 4 | Full for JS-mediated BrowserSession WASM asset loading, instantiation, WebGPU global metadata, same-session adapter resolution, and minimal declared host import callback |
+| REQ-WGPU-007 | `webgpu_js_wasm_simple_spec.spl`, `browser_session_fetch_wasm_chain_spec.spl` | 5 | Full for JS-mediated BrowserSession WASM asset loading, instantiation, WebGPU global metadata, same-session adapter resolution, nested returned-Promise assimilation, and minimal declared host import callback |
 
 ## Risk Areas
 
 - Interpreter mode may load specs without exercising every `it` body in some runner paths; use native/full execution where available before release.
-- BrowserSession now proves JS-mediated WASM fetch, `arrayBuffer`, Promise chaining, instantiation, same-session WebGPU global/adapter metadata, and a minimal declared `webgpu.requestAdapter` host import callback, but not nested returned-Promise assimilation for WebGPU callbacks or a complete WebGPU host binding ABI.
+- BrowserSession now proves JS-mediated WASM fetch, `arrayBuffer`, Promise chaining, instantiation, same-session WebGPU global/adapter metadata, nested returned-Promise assimilation for WebGPU callbacks, and a minimal declared `webgpu.requestAdapter` host import callback, but not a complete WebGPU host binding ABI.
 - WASM tests prove backend/glue generation, browser-side instantiation, and bounded import invocation, not real hardware WebGPU execution.
 - Current WebGPU executor is deterministic software simulation, not a hardware GPU backend or CTS-compliant renderer.
