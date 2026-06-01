@@ -79,7 +79,7 @@ expect(gui_mac_smf_dynlib_probe_command_with_host(paths, "macos-arm64", "Apple M
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -89,12 +89,14 @@ val wrong_role = good.replace("smf_role=2", "smf_role=1")
 val wrong_arch = good.replace("arch=3", "arch=1")
 val no_dynlib = good.replace("embedded_dynlib=true", "embedded_dynlib=false")
 val wrong_symbol = good.replace("symbol=gui_dynlib_hot_probe_tick", "symbol=other")
+val duplicate_status = good + " status=missing"
 expect(gui_mac_smf_dynlib_accepts_contract_row(good)).to_equal(true)
 expect(gui_mac_smf_dynlib_accepts_contract_row(missing)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_role)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_arch)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_contract_row(no_dynlib)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_symbol)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_contract_row(duplicate_status)).to_equal(false)
 ```
 
 </details>
@@ -104,7 +106,7 @@ expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_symbol)).to_equal(false)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -114,12 +116,14 @@ val wrong_arch = good.replace("arch=3", "arch=1")
 val wrong_symbol = good.replace("symbol=gui_dynlib_hot_probe_tick", "symbol=other_symbol")
 val live = good.replace("live_qemu=false", "live_qemu=true")
 val wrong_adapter = good.replace("adapter=simpleos-framebuffer-virtio", "adapter=web-renderer")
+val duplicate_live = good + " live_qemu=true"
 expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(good)).to_equal(true)
 expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(fail)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(wrong_arch)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(wrong_symbol)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(live)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(wrong_adapter)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(duplicate_live)).to_equal(false)
 ```
 
 </details>
@@ -129,7 +133,7 @@ expect(gui_mac_smf_dynlib_accepts_qemu_parity_row(wrong_adapter)).to_equal(false
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -142,6 +146,7 @@ val no_dynload = good.replace("dynload_pass=true", "dynload_pass=false")
 val no_callable = good.replace("process_callable=true", "process_callable=false")
 val live = good.replace("live_qemu=false", "live_qemu=true")
 val wrong_adapter = good.replace("adapter=simpleos-framebuffer-virtio", "adapter=web-renderer")
+val duplicate_callable = good + " process_callable=false"
 expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(good)).to_equal(true)
 expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(fail)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(wrong_arch)).to_equal(false)
@@ -151,6 +156,7 @@ expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(no_dynload)).to_equal(f
 expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(no_callable)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(live)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(wrong_adapter)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(duplicate_callable)).to_equal(false)
 ```
 
 </details>
@@ -160,7 +166,7 @@ expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(wrong_adapter)).to_equa
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -181,7 +187,11 @@ val loose_threshold = good.replace("threshold_us=1000", "threshold_us=5000")
 val over_threshold = good.replace("p99_us=1", "p99_us=1000")
 val inconsistent_pass = good.replace("p99_us=1", "p99_us=2500")
 val non_empty_error = good.replace("error=", "error=p99-over-threshold")
+val duplicate_loader = good + " loader=host_dynlib"
+val duplicate_call_source = good + " call_source=direct_simple"
+val duplicate_error = good + " error=not-smf-dynlib"
 expect(gui_mac_smf_dynlib_row_value(good, "loader")).to_equal("smf_dynlib")
+expect(gui_mac_smf_dynlib_row_key_count(duplicate_loader, "loader")).to_equal(2)
 expect(gui_mac_smf_dynlib_row_i64(good, "p99_us")).to_equal(1i64)
 expect(gui_mac_smf_dynlib_accepts_probe_row(good)).to_equal(true)
 expect(gui_mac_smf_dynlib_accepts_probe_row(host)).to_equal(false)
@@ -200,6 +210,9 @@ expect(gui_mac_smf_dynlib_accepts_probe_row(loose_threshold)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(over_threshold)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(inconsistent_pass)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(non_empty_error)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(duplicate_loader)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(duplicate_call_source)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(duplicate_error)).to_equal(false)
 ```
 
 </details>
@@ -225,7 +238,7 @@ expect(row).to_contain("requires-macos-arm64")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -239,6 +252,7 @@ expect(row).to_contain("artifact=build/gui/pure_gui_hot.smf")
 expect(gui_mac_smf_dynlib_accepts_pass_row(row)).to_equal(true)
 expect(gui_mac_smf_dynlib_accepts_pass_row(row.replace("host_cpu=Apple_M3", "host_cpu=unknown"))).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_pass_row(row.replace("status=pass", "status=skip"))).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_pass_row(row + " status=skip")).to_equal(false)
 ```
 
 </details>
