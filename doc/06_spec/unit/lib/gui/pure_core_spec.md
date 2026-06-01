@@ -116,7 +116,38 @@ expect(batch.counters.elapsed_us).to_equal(0)
 
 </details>
 
-#### exposes an i64-only dynlib hot probe symbol
+#### keeps scalar hot probe count equivalent to representative dispatch
+
+1. gui pointer event
+
+2. gui pointer event
+
+3. gui pointer event
+
+4. gui key event
+   - Expected: gui_representative_hot_probe_command_count(7) equals `batch.commands.len().to_i64()`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val events = [
+    gui_pointer_event("pointer_move", "button.save", 19, 24),
+    gui_pointer_event("pointer_down", "button.save", 12, 24),
+    gui_pointer_event("pointer_up", "button.save", 12, 24),
+    gui_key_event("input.name", "A", "a")
+]
+val batch = gui_dispatch_events(events, 0)
+expect(gui_representative_hot_probe_command_count(7)).to_equal(batch.commands.len().to_i64())
+```
+
+</details>
+
+#### exposes an allocation-light i64-only dynlib hot probe symbol
 
 <details>
 <summary>Executable SPipe</summary>
@@ -149,8 +180,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
