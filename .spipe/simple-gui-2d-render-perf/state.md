@@ -42,6 +42,9 @@ implementation-evidence-in-progress
 - report: Added `doc/09_report/gtk_gui_repeat_fallback_evidence_2026-06-01.md` with tracked fail-closed fallback evidence.
 - implementation: Static-shell plan cache memory hits now reuse retained decoded metadata and prepared primitive commands instead of decoding the SWBC payload and regenerating the fill-rect command list.
 - verification: `SIMPLE_LIB=src bin/simple check src/app/ui.web/render_cache.spl test/system/app/ui/feature/html_css_binary_caching_spec.spl` passed; `SIMPLE_LIB=src bin/simple test test/system/app/ui/feature/html_css_binary_caching_spec.spl --mode=interpreter --clean` passed 10/10; `scripts/check-gtk-gui-repeat-evidence.shs` passed with Simple open 222 us, GTK open 70284 us, Simple frame 1 us, GTK frame 27 us, vector checksum 212444.
+- implementation: Added corpus font-stack calibration coverage for the browser text painter and updated the focused production corpus artifact to preserve four Simple layout lines matching Chrome for `site_0_google`.
+- verification: `SIMPLE_LIB=src bin/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --format json` passed 3/3 scenarios.
+- verification: `SIMPLE_LIB=src bin/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json` passed 37/37 scenarios.
 
 ## Remaining Work
 - AC-3 is advanced by retained framebuffer/cache, static pixel hot paths, and retained static-shell primitive command plans; broader fill/copy/blit/text optimization across dynamic GUI scenes still needs implementation and evidence.

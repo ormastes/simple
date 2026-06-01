@@ -78,7 +78,11 @@ Acceptance:
   rejects stale reports, and currently reports `differentPixels: 2717`,
   `computedDifferentPixels: 2717`, metrics-derived text region deltas
   (`divBox.differentPixels: 1612`, `overflowText.differentPixels: 1104`),
-  and `status: "PASS"` after the focused production run.
+  `simpleLayoutLineCount: 4`, `chromeTextLineCount: 4`,
+  `textLineCountDelta: 0`, `layoutTextMatch: true`, and `status: "PASS"` after
+  the focused production run. Production pixels are still divergent; this gate
+  now isolates the remaining issue to glyph paint/compositing rather than
+  wrapped-line geometry.
   The CLI summary now prints exact/accepted/divergent/failed-capture counts for
   selected runs; the focused fixture probe reports `exact=1 accepted=1
   divergent=0 failed_capture=0`, and the production probe reports `exact=0

@@ -465,13 +465,13 @@ expect(result.0).to_contain("\"computedDifferentPixels\": 2717")
 expect(result.0).to_contain("\"reportFresh\": true")
 expect(result.0).to_contain("\"hasSimpleLayoutLines\": true")
 expect(result.0).to_contain("\"hasSimpleLayoutLineWidths\": true")
-expect(result.0).to_contain("\"simpleLayoutLineCount\": 1")
+expect(result.0).to_contain("\"simpleLayoutLineCount\": 4")
 expect(result.0).to_contain("\"hasTextGeometryDelta\": true")
 expect(result.0).to_contain("\"chromeTextLineCount\": 4")
 expect(result.0).to_contain("\"chromeCanvasMetricCount\": 4")
-expect(result.0).to_contain("\"simpleGeometryLineCount\": 1")
-expect(result.0).to_contain("\"textLineCountDelta\": -3")
-expect(result.0).to_contain("\"layoutTextMatch\": false")
+expect(result.0).to_contain("\"simpleGeometryLineCount\": 4")
+expect(result.0).to_contain("\"textLineCountDelta\": 0")
+expect(result.0).to_contain("\"layoutTextMatch\": true")
 expect(result.0).to_contain("\"textRegionDelta\"")
 expect(result.0).to_contain("\"divBox\"")
 expect(result.0).to_contain("\"differentPixels\": 1612")
@@ -707,7 +707,7 @@ expect(result.0).to_contain("\"expansionCandidates\"")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -716,35 +716,17 @@ expect(rt_file_exists(report_app)).to_equal(true)
 val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts([]))
 expect(report).to_contain("(famous_site_corpus_layout_report")
 expect(report).to_contain("selected: 132")
-expect(report).to_contain("matched: 132")
-expect(report).to_contain("mismatched: 0")
+expect(report).to_contain("matched: 94")
+expect(report).to_contain("mismatched: 38")
 expect(report).to_contain("layout_width: 122")
-expect(report).to_contain("first_mismatch: \"\"")
+expect(report).to_contain("first_mismatch: \"site_0_google\"")
+expect(report).to_contain("missing_simple_line: \"compatibility fixture\"")
+expect(report).to_contain("first_mismatch_widths:")
 ```
 
 </details>
 
 #### documents the 120px mixed-font corpus wrapped-line boundary
-
-<details>
-<summary>Executable SPipe</summary>
-
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val report_app = "src/app/wm_compare/site_corpus_layout_report.spl"
-expect(rt_file_exists(report_app)).to_equal(true)
-val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts(["--layout-width=120"]))
-expect(report).to_contain("selected: 132")
-expect(report).to_contain("matched: 132")
-expect(report).to_contain("mismatched: 0")
-expect(report).to_contain("first_mismatch: \"\"")
-```
-
-</details>
-
-#### documents the 132px mixed-font corpus wrapped-line over-merge boundary
 
 <details>
 <summary>Executable SPipe</summary>
@@ -755,12 +737,34 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val report_app = "src/app/wm_compare/site_corpus_layout_report.spl"
 expect(rt_file_exists(report_app)).to_equal(true)
-val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts(["--layout-width=132"]))
+val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts(["--layout-width=120"]))
 expect(report).to_contain("selected: 132")
 expect(report).to_contain("matched: 132")
 expect(report).to_contain("mismatched: 0")
-expect(report).to_contain("layout_width: 132")
+expect(report).to_contain("layout_width: 120")
 expect(report).to_contain("first_mismatch: \"\"")
+```
+
+</details>
+
+#### documents the 132px mixed-font corpus wrapped-line over-merge boundary
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val report_app = "src/app/wm_compare/site_corpus_layout_report.spl"
+expect(rt_file_exists(report_app)).to_equal(true)
+val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts(["--layout-width=132"]))
+expect(report).to_contain("selected: 132")
+expect(report).to_contain("matched: 51")
+expect(report).to_contain("mismatched: 81")
+expect(report).to_contain("layout_width: 132")
+expect(report).to_contain("first_mismatch: \"site_0_google\"")
+expect(report).to_contain("missing_simple_line: \"compatibility fixture\"")
 ```
 
 </details>
@@ -832,19 +836,22 @@ expect(perceptual.match_percentage).to_be_less_than(9900)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val sample = build_famous_site_sample_corpus()[0]
 val lines = br_famous_site_corpus_layout_lines_sdn(sample.html, 16, 120)
-expect(lines).to_contain("count: 1")
-expect(lines).to_contain("text: \"Google search deterministic compatibility fixture\"")
+expect(lines).to_contain("count: 4")
+expect(lines).to_contain("text: \"Google search\"")
+expect(lines).to_contain("text: \"deterministic\"")
+expect(lines).to_contain("text: \"compatibility\"")
+expect(lines).to_contain("text: \"fixture\"")
 ```
 
 </details>
 
-#### documents the first mixed-font wrapped-line boundary
+#### documents the first over-wide mixed-font wrapped-line boundary
 
 <details>
 <summary>Executable SPipe</summary>
@@ -854,26 +861,28 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val samples = build_famous_site_sample_corpus()
-expect(_first_simple_layout_line_missing_from_chrome_metrics(samples, 122)).to_equal("")
+expect(_first_simple_layout_line_missing_from_chrome_metrics(samples, 122)).to_equal("site_0_google: missing line compatibility fixture")
 ```
 
 </details>
 
-#### exposes Simple wrapped line widths for the old boundary mismatch
+#### exposes Simple wrapped line widths for the calibrated mixed-font boundary
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val sample = build_famous_site_sample_corpus()[28]
 expect(sample.id).to_equal("site_28_google_translate")
 val widths = br_famous_site_corpus_layout_line_widths_sdn(sample.html, 16, 120)
-expect(widths).to_contain("text: \"Google Translate news deterministic compatibility fixture\"")
+expect(widths).to_contain("text: \"Google\"")
+expect(widths).to_contain("text: \"Translate news\"")
+expect(widths).to_contain("text: \"deterministic\"")
 expect(widths).to_contain("width:")
-expect(widths).to_contain("count: 1")
+expect(widths).to_contain("count: 5")
 ```
 
 </details>

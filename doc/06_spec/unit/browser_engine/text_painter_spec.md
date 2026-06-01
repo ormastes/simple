@@ -37,6 +37,23 @@ expect(lines.join("|")).to_equal("Google search|deterministic|compatibility|fixt
 
 </details>
 
+#### uses corpus font stack metrics for wider Chrome line breaks
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><div data-font-corpus=\"known-site-fonts\" style='width: 120px; height: 40px; background-color: #0f766e; font-family: \"Times New Roman\", Times, serif'>TikTok productivity deterministic compatibility fixture</div></body></html>"
+val lines = br_famous_site_corpus_layout_lines(html, 16, 120)
+expect(lines.len()).to_equal(5)
+expect(lines.join("|")).to_equal("TikTok|productivity|deterministic|compatibility|fixture")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -56,8 +73,9 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+

@@ -12,9 +12,9 @@
 
 ---
 
-## Application (1 features)
+## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Webgpu Js Wasm Simple Specification](system/app/browser/feature/webgpu_js_wasm_simple_spec.md) | Auto-generated | N/A | 106 | 0% | 0 lines |
+| [Text Painter Specification](unit/browser_engine/text_painter_spec.md) | Auto-generated | N/A | 3 | 0% | 0 lines |
 

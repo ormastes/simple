@@ -18,8 +18,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   exact/no-tolerance harness. The broader production renderer still is not full
   Chrome parity; the known blocker is Chrome-compatible text/font/compositing,
   not corpus generation. The focused `site_0_google` text-line diagnostic now
-  uses pixel-width font metrics and matches Chrome's four-line split, but the
-  broader famous-site corpus system spec still reports remaining failures.
+  uses calibrated pixel-width font metrics and matches Chrome's four-line split.
+  The famous-site corpus system spec passes 37/37; production pixels remain
+  divergent (`differentPixels: 2717`) and are tracked as the next glyph paint
+  and compositing blocker.
 - 8K color/image Option A is selected and documented: lazy packed 8K surfaces,
   CIELAB as the semantic color space, XYZ as the connection space, and fail-
   closed unsupported codec/profile paths.
@@ -49,6 +51,13 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - `test/unit/browser_engine/text_painter_spec.spl`: focused
   `site_0_google` text wrapping proof for `Google search`, `deterministic`,
   `compatibility`, and `fixture` line grouping.
+- `test/system/wm_compare/famous_site_corpus_spec.spl`: 37/37 passing
+  Chrome/corpus system scenarios, including 120px full text-line coverage and
+  explicit over-wide 122px/132px mismatch diagnostics.
+- `test/baselines/famous_site_corpus/site_0_google/report.production.sdn`:
+  focused production artifact with four Simple layout lines and
+  `layout_text_match: true`; pixel output remains divergent for paint/composite
+  work.
 - `doc/09_report/gui_color_image_pipeline_8k_current_2026-06-01.md`: current
   packed 8K surface and lazy codec/profile evidence.
 - `doc/09_report/gui_color_image_pipeline_8k_evidence_2026-06-01.md`: 8K lane
@@ -138,5 +147,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - `sh scripts/check-electron-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
 - `BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_settings_inspector REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
 - `BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_media_gallery REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_media_gallery_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
+- `SIMPLE_LIB=src bin/simple check src/app/wm_compare/site_corpus_layout_report.spl test/system/wm_compare/famous_site_corpus_spec.spl test/unit/browser_engine/text_painter_spec.spl`
+- `SIMPLE_LIB=src bin/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --format json`
+- `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`
+- `SIMPLE_LIB=src bin/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
 
 All commands above passed in the current worktree.
