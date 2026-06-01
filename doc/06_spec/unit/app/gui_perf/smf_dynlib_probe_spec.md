@@ -161,6 +161,25 @@ expect(gui_dynlib_probe_smf_cache_path("build/gui/pure_gui.smf", "linux")).to_eq
 
 </details>
 
+#### extracts SMF dynlib bytes only for the matching host architecture
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val stub = [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8, 1u8, 0u8]
+val arm64_smf = gui_smf_wrap_native_library(stub, 3u8)
+expect(gui_dynlib_probe_extract_smf_library_bytes_for_host_arch(arm64_smf, "arm64").len()).to_equal(stub.len())
+expect(gui_dynlib_probe_extract_smf_library_bytes_for_host_arch(arm64_smf, "aarch64").len()).to_equal(stub.len())
+expect(gui_dynlib_probe_extract_smf_library_bytes_for_host_arch(arm64_smf, "x86_64").len()).to_equal(0)
+expect(gui_dynlib_probe_extract_smf_library_bytes_for_host_arch(arm64_smf, "unknown").len()).to_equal(0)
+```
+
+</details>
+
 #### rejects callable host dynlib samples as not SMF dynlib acceptance
 
 <details>
@@ -290,8 +309,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

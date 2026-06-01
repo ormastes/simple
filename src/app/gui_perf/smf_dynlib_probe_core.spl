@@ -9,7 +9,8 @@
 use std.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}
 use std.gui.pure_core.{GuiInputEvent, gui_pointer_event, gui_key_event, gui_dispatch_events}
 use std.gui.pure_smf_dynlib_perf.{GuiDynlibPerfReport, gui_dynlib_perf_report}
-use os.kernel.loader.smf.{smf_extract_library_stub}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.smf.{smf_extract_library_stub_for_arch}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_time_now_unix_micros() -> i64
@@ -78,6 +79,28 @@ fn gui_dynlib_probe_host_dynlib_extension(host_os: text) -> text:
 fn gui_dynlib_probe_smf_cache_path(path: text, host_os: text) -> text:
     path + ".extracted" + gui_dynlib_probe_host_dynlib_extension(host_os)
 
+fn _gui_dynlib_probe_extract_for_arch(bytes: [u8], arch: Architecture) -> [u8]:
+    val stub = smf_extract_library_stub_for_arch(bytes, arch)
+    if stub.is_ok():
+        return stub.unwrap()
+    []
+
+fn gui_dynlib_probe_extract_smf_library_bytes_for_host_arch(bytes: [u8], host_arch: text) -> [u8]:
+    val normalized = host_arch.trim().lower()
+    if normalized == "x86_64" or normalized == "amd64":
+        return _gui_dynlib_probe_extract_for_arch(bytes, Architecture.X86_64)
+    if normalized == "x86":
+        return _gui_dynlib_probe_extract_for_arch(bytes, Architecture.X86)
+    if normalized == "arm64" or normalized == "aarch64":
+        return _gui_dynlib_probe_extract_for_arch(bytes, Architecture.Arm64)
+    if normalized == "arm32" or normalized == "arm":
+        return _gui_dynlib_probe_extract_for_arch(bytes, Architecture.Arm32)
+    if normalized == "riscv64" or normalized == "rv64":
+        return _gui_dynlib_probe_extract_for_arch(bytes, Architecture.Riscv64)
+    if normalized == "riscv32" or normalized == "rv32":
+        return _gui_dynlib_probe_extract_for_arch(bytes, Architecture.Riscv32)
+    []
+
 fn gui_dynlib_probe_load_host_evidence(config: GuiDynlibProbeConfig) -> GuiDynlibProbeLoadEvidence:
     val handle = spl_dlopen(config.artifact_path)
     if handle == 0:
@@ -89,14 +112,15 @@ fn gui_dynlib_probe_load_host_evidence(config: GuiDynlibProbeConfig) -> GuiDynli
     GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "dynlib_symbol_call", symbol_resolved: true, fallback_used: false, dynlib_path: config.artifact_path)
 
 fn gui_dynlib_probe_extract_smf_library_to_cache(artifact_path: text) -> text:
-    val cache_path = gui_dynlib_probe_smf_cache_path(artifact_path, rt_platform_name())
+    val host_os = rt_platform_name()
+    val cache_path = gui_dynlib_probe_smf_cache_path(artifact_path, host_os)
     val smf_bytes = rt_file_read_bytes(artifact_path) ?? []
     if smf_bytes.len() == 0:
         return ""
-    val stub = smf_extract_library_stub(smf_bytes)
-    if not stub.is_ok():
+    val stub = gui_dynlib_probe_extract_smf_library_bytes_for_host_arch(smf_bytes, gui_dynlib_probe_host_arch_from_env(host_os))
+    if stub.len() == 0:
         return ""
-    if not rt_file_write_bytes(cache_path, stub.unwrap()):
+    if not rt_file_write_bytes(cache_path, stub):
         return ""
     cache_path
 
