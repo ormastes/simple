@@ -314,7 +314,47 @@ pub fn ai_cli_allows_process(manifest: AiCliManifest, command: text) -> bool:
     _text_list_allows(manifest.process_grants, command)
 
 pub fn ai_cli_allows_network(manifest: AiCliManifest, endpoint: text) -> bool:
-    _text_list_allows(manifest.network_grants, endpoint)
+    val normalized_endpoint = _normalize_network_endpoint(endpoint)
+    if normalized_endpoint == "":
+        return false
+    for grant in manifest.network_grants:
+        if grant == "*":
+            return true
+        if _normalize_network_endpoint(grant) == normalized_endpoint:
+            return true
+    false
+
+pub fn ai_cli_socket_network_decision(manifest: AiCliManifest, operation: text, endpoint: text) -> AiCliBoundaryDecision:
+    val normalized_endpoint = _normalize_network_endpoint(endpoint)
+    if normalized_endpoint == "":
+        return AiCliBoundaryDecision(
+            layer: "socket",
+            operation: operation,
+            subject: endpoint,
+            allowed: false,
+            reason: "invalid-endpoint"
+        )
+    if ai_cli_allows_network(manifest, normalized_endpoint):
+        return AiCliBoundaryDecision(
+            layer: "socket",
+            operation: operation,
+            subject: normalized_endpoint,
+            allowed: true,
+            reason: "allowed"
+        )
+    AiCliBoundaryDecision(
+        layer: "socket",
+        operation: operation,
+        subject: normalized_endpoint,
+        allowed: false,
+        reason: "network-grant-denied"
+    )
+
+pub fn ai_cli_socket_network_denial_reason(manifest: AiCliManifest, operation: text, endpoint: text) -> text:
+    val decision = ai_cli_socket_network_decision(manifest, operation, endpoint)
+    if decision.allowed:
+        return ""
+    decision.reason
 
 pub fn ai_cli_allows_credential(manifest: AiCliManifest, handle: text) -> bool:
     _text_list_allows(manifest.credential_grants, handle)
@@ -702,6 +742,33 @@ fn _text_list_allows(grants: [text], requested: text) -> bool:
         if grant == "*" or grant == requested:
             return true
     false
+
+fn _normalize_network_endpoint(endpoint: text) -> text:
+    val raw = endpoint.trim().lower()
+    if raw == "*":
+        return "*"
+    val parts = raw.split(":")
+    if parts.len() != 2:
+        return ""
+    val host = parts[0].trim()
+    val port_text = parts[1].trim()
+    if host == "" or port_text == "":
+        return ""
+    if not _is_valid_port_text(port_text):
+        return ""
+    "{host}:{port_text.to_i64()}"
+
+fn _is_valid_port_text(port_text: text) -> bool:
+    if port_text == "":
+        return false
+    var i = 0
+    while i < port_text.len():
+        val ch = port_text.slice(i, i + 1)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    val port = port_text.to_i64()
+    port > 0 and port <= 65535
 
 fn _path_prefix_allows(prefix: text, path: text) -> bool:
     if prefix == "*":

@@ -114,7 +114,7 @@ expect(ai_cli_allows_credential(manifest, "openai-api-key")).to_equal(false)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -124,8 +124,10 @@ expect(ai_cli_allows_file(manifest, "/home/user/work")).to_equal(true)
 expect(ai_cli_allows_file(manifest, "/home/user/workspace/secret.txt")).to_equal(false)
 expect(ai_cli_allows_process(manifest, "git")).to_equal(true)
 expect(ai_cli_allows_network(manifest, "api.openai.com:443")).to_equal(true)
+expect(ai_cli_allows_network(manifest, "API.OPENAI.COM:0443")).to_equal(true)
 expect(ai_cli_allows_credential(manifest, "openai-api-key")).to_equal(true)
 expect(ai_cli_allows_network(manifest, "example.com:443")).to_equal(false)
+expect(ai_cli_allows_network(manifest, "api.openai.com")).to_equal(false)
 ```
 
 </details>
@@ -152,6 +154,33 @@ expect(escaped.reason).to_equal("file-grant-denied")
 expect(relative.allowed).to_equal(false)
 expect(relative.reason).to_equal("invalid-path")
 expect(ai_cli_vfs_file_denial_reason(deny_all_manifest(), "write", "/home/user/work/main.spl")).to_equal("file-grant-denied")
+```
+
+</details>
+
+#### returns socket network boundary decisions with fail-closed denial reasons
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = codex_cli_smoke_manifest()
+val allowed = ai_cli_socket_network_decision(manifest, "connect", "API.OPENAI.COM:0443")
+val denied = ai_cli_socket_network_decision(manifest, "connect", "example.com:443")
+val invalid = ai_cli_socket_network_decision(manifest, "connect", "api.openai.com")
+
+expect(allowed.layer).to_equal("socket")
+expect(allowed.subject).to_equal("api.openai.com:443")
+expect(allowed.allowed).to_equal(true)
+expect(allowed.reason).to_equal("allowed")
+expect(denied.allowed).to_equal(false)
+expect(denied.reason).to_equal("network-grant-denied")
+expect(invalid.allowed).to_equal(false)
+expect(invalid.reason).to_equal("invalid-endpoint")
+expect(ai_cli_socket_network_denial_reason(deny_all_manifest(), "connect", "api.openai.com:443")).to_equal("network-grant-denied")
 ```
 
 </details>
@@ -581,8 +610,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
