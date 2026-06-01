@@ -198,17 +198,17 @@ impl JsInterpreter:
         if native_id == NATIVE_NODE_CHILD_PROCESS_SPAWN:
             return self._native_node_child_process_spawn(arg_vals)
         if native_id == NATIVE_NODE_FS_READ_FILE_SYNC:
-            return self._native_node_fs_denied("readFileSync", arg_vals)
+            return self._native_node_fs_result("readFileSync", arg_vals)
         if native_id == NATIVE_NODE_FS_WRITE_FILE_SYNC:
-            return self._native_node_fs_denied("writeFileSync", arg_vals)
+            return self._native_node_fs_result("writeFileSync", arg_vals)
         if native_id == NATIVE_NODE_FS_EXISTS_SYNC:
-            return self._native_node_fs_denied("existsSync", arg_vals)
+            return self._native_node_fs_result("existsSync", arg_vals)
         if native_id == NATIVE_NODE_FS_STAT_SYNC:
-            return self._native_node_fs_denied("statSync", arg_vals)
+            return self._native_node_fs_result("statSync", arg_vals)
         if native_id == NATIVE_NODE_FS_PROMISES_READ_FILE:
-            return self._native_node_fs_denied("promises.readFile", arg_vals)
+            return self._native_node_fs_result("promises.readFile", arg_vals)
         if native_id == NATIVE_NODE_FS_PROMISES_WRITE_FILE:
-            return self._native_node_fs_denied("promises.writeFile", arg_vals)
+            return self._native_node_fs_result("promises.writeFile", arg_vals)
         if native_id == NATIVE_NODE_NET_SOCKET:
             return self._native_node_network_denied("net.Socket", "tcp", arg_vals)
         if native_id == NATIVE_NODE_NET_CREATE_CONNECTION:
@@ -413,16 +413,96 @@ impl JsInterpreter:
         self.set_object_property(module_id, "promises", JsValue.Object(id: promises_id))
         JsValue.Object(id: module_id)
 
-    me _native_node_fs_denied(operation: text, arg_vals: [JsValue]) -> JsValue:
+    me _native_node_fs_result(operation: text, arg_vals: [JsValue]) -> JsValue:
         val result_id = self.create_object()
         var path = ""
         if arg_vals.len() > 0:
             path = js_to_string(arg_vals[0])
-        self.set_object_property(result_id, "status", JsValue.String(v: "denied"))
-        self.set_object_property(result_id, "error", JsValue.String(v: "file-denied"))
+        val reason = self._native_node_file_denial_reason(path)
+        if reason == "":
+            self.set_object_property(result_id, "status", JsValue.String(v: "allowed"))
+            self.set_object_property(result_id, "error", JsValue.String(v: ""))
+            self.set_object_property(result_id, "data", JsValue.String(v: self._native_node_file_data(path)))
+            if operation == "writeFileSync" or operation == "promises.writeFile":
+                var content = ""
+                if arg_vals.len() > 1:
+                    content = js_to_string(arg_vals[1])
+                self._native_node_set_file_data(path, content)
+                self.set_object_property(result_id, "bytesWritten", JsValue.Number(v: content.len().to_f64()))
+        else:
+            self.set_object_property(result_id, "status", JsValue.String(v: "denied"))
+            self.set_object_property(result_id, "error", JsValue.String(v: "file-denied"))
+            self.set_object_property(result_id, "reason", JsValue.String(v: reason))
         self.set_object_property(result_id, "operation", JsValue.String(v: operation))
         self.set_object_property(result_id, "path", JsValue.String(v: path))
         JsValue.Object(id: result_id)
+
+    me _native_node_file_denial_reason(path: text) -> text:
+        if path == "" or not path.starts_with("/"):
+            return "invalid-path"
+        if val Some(files_value) = self.lookup_global_value("__simple_node_files"):
+            match files_value:
+                JsValue.Object(files_id):
+                    match self.get_object_property_exact_key(files_id, path):
+                        JsValue.String(_):
+                            return ""
+                        _:
+                            pass_dn
+                _:
+                    pass_dn
+        if val Some(grant_value) = self.lookup_global_value("__simple_node_file_grant_prefix"):
+            match grant_value:
+                JsValue.String(prefix):
+                    if prefix != "":
+                        if path == prefix:
+                            return ""
+                        if path.len() > prefix.len() and path.substring(0, prefix.len()) == prefix:
+                            if prefix.ends_with("/"):
+                                return ""
+                            if path.substring(prefix.len(), prefix.len() + 1) == "/":
+                                return ""
+                _:
+                    pass_dn
+        "file-grant-denied"
+
+    me _native_node_file_allowed(path: text) -> bool:
+        if val Some(grant_value) = self.lookup_global_value("__simple_node_file_grant_prefix"):
+            match grant_value:
+                JsValue.String(prefix):
+                    if prefix != "":
+                        if path == prefix:
+                            return true
+                        if path.len() > prefix.len() and path.substring(0, prefix.len()) == prefix:
+                            if prefix.ends_with("/"):
+                                return true
+                            return path.substring(prefix.len(), prefix.len() + 1) == "/"
+                _:
+                    pass_dn
+        false
+
+    me _native_node_file_data(path: text) -> text:
+        if val Some(files_value) = self.lookup_global_value("__simple_node_files"):
+            match files_value:
+                JsValue.Object(files_id):
+                    match self.get_object_property_exact_key(files_id, path):
+                        JsValue.String(data):
+                            return data
+                        _:
+                            pass_dn
+                _:
+                    pass_dn
+        ""
+
+    me _native_node_set_file_data(path: text, content: text):
+        var files_id = self.create_object()
+        if val Some(files_value) = self.lookup_global_value("__simple_node_files"):
+            match files_value:
+                JsValue.Object(id):
+                    files_id = id
+                _:
+                    pass_dn
+        self.set_object_property(files_id, path, JsValue.String(v: content))
+        self.define_global_value("__simple_node_files", JsValue.Object(id: files_id))
 
     me _native_node_net_module() -> JsValue:
         val module_id = self.create_object()

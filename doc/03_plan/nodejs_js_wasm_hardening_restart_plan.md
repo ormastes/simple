@@ -20,7 +20,7 @@ goals.
 
 GitHub `origin/main` is currently:
 
-- `64ababc735f5 docs: mark credential env slice pushed`
+- `bad347a47892 docs: record JS/WASM restart state after credential slice`
 
 Use clean worktrees from `origin/main` for pushable JS/WASM slices. The main
 workspace may contain unrelated GUI/perf/local changes. Do not revert unrelated
@@ -29,15 +29,13 @@ dirty files and do not commit them into this goal.
 Current in-flight worktree:
 
 - Path: `/tmp/simple-js-wasm-file-grants`
-- Base: `origin/main` at `64ababc735f5`
+- Base: rebased onto `origin/main` at `bad347a47892`
 - Slice: Node-compatible runtime file grants for `fs` APIs.
-- Status: not pushed; focused conformance currently fails one scenario.
-- Dirty files: `src/lib/nogc_sync_mut/js/engine/runtime.spl`,
-  `src/lib/nogc_sync_mut/js/engine/interpreter_native.spl`,
-  `test/feature/js/node_api_conformance_spec.spl`,
-  generated `docs/test-spec.*`, and temp `tmp_node_file_debug.spl`.
-- Before commit: delete `tmp_node_file_debug.spl` and drop generated doc noise
-  unless intentionally regenerated.
+- Status: focused conformance passes locally; push the current
+  `feat: enforce node file grants` commit if it is not already on GitHub.
+- Evidence: `node_api_conformance_spec.spl` passes 145 scenarios,
+  `simpleos_ai_cli_js_node_port_spec.spl` passes 25 scenarios, and
+  `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`.
 
 ## Authoritative Files
 
@@ -68,6 +66,7 @@ Pushed JS/WASM hardening commits include:
 - `2a400b9eb510 test: harden webgpu wasm promise assimilation`
 - `24182092ea11 feat: enforce node credential env grants`
 - `64ababc735f5 docs: mark credential env slice pushed`
+- `feat: enforce node file grants` is the current file-grant slice being synced
 
 Completed evidence:
 
@@ -83,15 +82,14 @@ Completed evidence:
 - Deno comparison flags and hardening serial marker fragments are documented.
 - Credential env grants are wired into actual JS runtime `process.env` and
   `require("process").env`; ambient env reads remain undefined.
+- Node-compatible `fs` grant conformance now covers allowed read/write status,
+  read data for a granted file, sibling-prefix denial, and relative-path denial.
 
 ## Remaining Goal Plan
 
-1. Finish runtime file grants.
-   - Make `require("fs")` and `require("node:fs")` read/write APIs return
-     `allowed` only for explicitly granted absolute paths.
-   - Preserve denial for sibling-prefix escapes and relative paths.
-   - Pass `test/feature/js/node_api_conformance_spec.spl`.
-   - Sync to GitHub immediately after the focused slice passes.
+1. Push runtime file grants if needed.
+   - The current `feat: enforce node file grants` commit is locally verified.
+   - If GitHub already contains it, start the network-grant slice next.
 
 2. Enforce network grants at the socket/runtime boundary.
    - Wire allowlisted endpoint grants into `net`, `http`, and `https` runtime
@@ -142,13 +140,11 @@ SIMPLE_LIB=/tmp/simple-js-wasm-file-grants/src /home/ormastes/dev/pub/simple/bin
 SIMPLE_LIB=/tmp/simple-js-wasm-file-grants/src /home/ormastes/dev/pub/simple/bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean
 ```
 
-Known current failure:
+Known current caveat:
 
-- `runtime.grant_node_file(...)` creates visible JS globals, but native `fs`
-  grant checks still return `file-grant-denied` for the granted path.
-- Likely fix: store file grant prefix/path/content directly on `JsInterpreter`
-  fields and have native `fs` helpers read those fields instead of looking up
-  JS globals.
+- The focused Node-compatible `fs` runtime conformance passes, but this does
+  not prove OS VFS-layer enforcement. Keep the Phase 5 VFS checklist item open
+  unless a later slice verifies the actual VFS boundary.
 
 ## Verification Checklist Per Slice
 

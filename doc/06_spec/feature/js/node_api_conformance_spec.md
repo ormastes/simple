@@ -1093,6 +1093,39 @@ expect(_eval_str("require('node:fs').promises.writeFile('/tmp/simple.txt', 'data
 
 </details>
 
+#### allows fs sync APIs only for explicitly granted file paths
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_file("/home/user/work/main.spl", "print('ok')", "require('fs').readFileSync('/home/user/work/main.spl', 'utf8').status")).to_equal("allowed")
+expect(_eval_str_with_file("/home/user/work/main.spl", "print('ok')", "require('fs').readFileSync('/home/user/work/main.spl', 'utf8').data")).to_equal("print('ok')")
+expect(_eval_str_with_file("/home/user/work/main.spl", "print('ok')", "require('fs').readFileSync('/home/user/workspace/main.spl', 'utf8').reason")).to_equal("file-grant-denied")
+expect(_eval_str_with_file("/home/user/work/main.spl", "print('ok')", "require('fs').readFileSync('relative.txt', 'utf8').reason")).to_equal("invalid-path")
+```
+
+</details>
+
+#### allows fs write APIs only for explicitly granted file paths
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_file("/home/user/work/main.spl", "", "require('node:fs').writeFileSync('/home/user/work/main.spl', 'new-data').status")).to_equal("allowed")
+expect(_eval_str_with_file("/home/user/work/main.spl", "", "require('node:fs').writeFileSync('/home/user/workspace/main.spl', 'new-data').reason")).to_equal("file-grant-denied")
+expect(_eval_str_with_file("/home/user/work/main.spl", "", "require('fs').promises.writeFile('/home/user/work/main.spl', 'new-data').status")).to_equal("allowed")
+```
+
+</details>
+
 #### resolves os and node:os through deterministic require
 
 <details>
@@ -2169,8 +2202,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 143 |
-| Active scenarios | 143 |
+| Total scenarios | 145 |
+| Active scenarios | 145 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

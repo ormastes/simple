@@ -52,6 +52,14 @@ fn _eval_str_with_credential(handle: text, value: text, source: text) -> text:
         Ok(value): js_to_string(value)
         Err(err): "error"
 
+fn _eval_str_with_file(path: text, content: text, source: text) -> text:
+    var runtime = JsRuntime.new(Logger.new(LogLevel.Error))
+    runtime.grant_node_file(path, content)
+    val result = runtime.eval(source)
+    match result:
+        Ok(value): js_to_string(value)
+        Err(err): "error"
+
 describe "Node.js path module":
     describe "path.dirname":
         it "gets directory name":
@@ -282,6 +290,17 @@ describe "Node.js runtime shape":
         it "denies fs promises APIs without file grants":
             expect(_eval_str("require('fs').promises.readFile('/tmp/simple.txt', 'utf8').status")).to_equal("denied")
             expect(_eval_str("require('node:fs').promises.writeFile('/tmp/simple.txt', 'data').error")).to_equal("file-denied")
+
+        it "allows fs sync APIs only for explicitly granted file paths":
+            expect(_eval_str_with_file("/home/user/work/main.spl", "print('ok')", "require('fs').readFileSync('/home/user/work/main.spl', 'utf8').status")).to_equal("allowed")
+            expect(_eval_str_with_file("/home/user/work/main.spl", "print('ok')", "require('fs').readFileSync('/home/user/work/main.spl', 'utf8').data")).to_equal("print('ok')")
+            expect(_eval_str_with_file("/home/user/work/main.spl", "print('ok')", "require('fs').readFileSync('/home/user/workspace/main.spl', 'utf8').reason")).to_equal("file-grant-denied")
+            expect(_eval_str_with_file("/home/user/work/main.spl", "print('ok')", "require('fs').readFileSync('relative.txt', 'utf8').reason")).to_equal("invalid-path")
+
+        it "allows fs write APIs only for explicitly granted file paths":
+            expect(_eval_str_with_file("/home/user/work/main.spl", "", "require('node:fs').writeFileSync('/home/user/work/main.spl', 'new-data').status")).to_equal("allowed")
+            expect(_eval_str_with_file("/home/user/work/main.spl", "", "require('node:fs').writeFileSync('/home/user/workspace/main.spl', 'new-data').reason")).to_equal("file-grant-denied")
+            expect(_eval_str_with_file("/home/user/work/main.spl", "", "require('fs').promises.writeFile('/home/user/work/main.spl', 'new-data').status")).to_equal("allowed")
 
         it "resolves os and node:os through deterministic require":
             expect(_eval_str("require('os').platform()")).to_equal("linux")

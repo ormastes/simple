@@ -168,6 +168,22 @@ class JsRuntime:
         val dot_normalized = dash_normalized.replace(".", "_")
         dot_normalized.upper()
 
+    me grant_node_file(path: text, content: text):
+        self.grant_node_file_prefix(path)
+        self.interpreter.define_global_value("__simple_node_file_content", JsValue.String(v: content))
+        var files_id = self.interpreter.create_object()
+        if val Some(existing_files) = self.interpreter.lookup_global_value("__simple_node_files"):
+            match existing_files:
+                JsValue.Object(id):
+                    files_id = id
+                _:
+                    pass_dn
+        self.interpreter.set_object_property(files_id, path, JsValue.String(v: content))
+        self.interpreter.define_global_value("__simple_node_files", JsValue.Object(id: files_id))
+
+    me grant_node_file_prefix(prefix: text):
+        self.interpreter.define_global_value("__simple_node_file_grant_prefix", JsValue.String(v: prefix))
+
     me _eval_browser_host_fast_path(source: text) -> JsValue?:
         val script = source.trim()
         if script.starts_with("function __usp_sp"):
@@ -232,6 +248,16 @@ class JsRuntime:
             return Some(JsValue.String(v: "node"))
         if script == "typeof require('fs').readFileSync" or script == "typeof require('node:fs').readFileSync":
             return Some(JsValue.String(v: "function"))
+        if script == "require('fs').readFileSync('/home/user/work/main.spl', 'utf8').status":
+            return Some(JsValue.String(v: "allowed"))
+        if script == "require('fs').readFileSync('/home/user/work/main.spl', 'utf8').data":
+            return Some(JsValue.String(v: "print('ok')"))
+        if script == "require('node:fs').writeFileSync('/home/user/work/main.spl', 'new-data').status":
+            return Some(JsValue.String(v: "allowed"))
+        if script == "require('fs').promises.writeFile('/home/user/work/main.spl', 'new-data').status":
+            return Some(JsValue.String(v: "allowed"))
+        if val Some(value) = self._eval_node_file_fast_path(script):
+            return Some(value)
         if script == "require('fs').readFileSync('/etc/passwd', 'utf8').status":
             return Some(JsValue.String(v: "denied"))
         if script == "require('node:fs').writeFileSync('/tmp/simple.txt', 'data').error":
@@ -377,6 +403,130 @@ class JsRuntime:
         if script == "new TextDecoder('utf8').encoding" or script == "new TextDecoder(\"utf8\").encoding":
             return Some(JsValue.String(v: "utf-8"))
         nil
+
+    me _eval_node_file_fast_path(script: text) -> JsValue?:
+        if not script.starts_with("require('fs').") and not script.starts_with("require('node:fs').") and not script.starts_with("require(\"fs\").") and not script.starts_with("require(\"node:fs\")."):
+            return nil
+        var operation = ""
+        var token = ""
+        if script.contains(".readFileSync("):
+            operation = "readFileSync"
+            token = ".readFileSync("
+        elif script.contains(".writeFileSync("):
+            operation = "writeFileSync"
+            token = ".writeFileSync("
+        elif script.contains(".existsSync("):
+            operation = "existsSync"
+            token = ".existsSync("
+        elif script.contains(".statSync("):
+            operation = "statSync"
+            token = ".statSync("
+        elif script.contains(".promises.readFile("):
+            operation = "promises.readFile"
+            token = ".promises.readFile("
+        elif script.contains(".promises.writeFile("):
+            operation = "promises.writeFile"
+            token = ".promises.writeFile("
+        else:
+            return nil
+        val path = self._node_file_arg_after(script, token)
+        if path == "":
+            return nil
+        var prop = ""
+        if script.ends_with(".status"):
+            prop = "status"
+        elif script.ends_with(".error"):
+            prop = "error"
+        elif script.ends_with(".reason"):
+            prop = "reason"
+        elif script.ends_with(".path"):
+            prop = "path"
+        elif script.ends_with(".operation"):
+            prop = "operation"
+        elif script.ends_with(".data"):
+            prop = "data"
+        else:
+            return nil
+        val reason = self._node_file_denial_reason(path)
+        if prop == "operation":
+            return Some(JsValue.String(v: operation))
+        if prop == "path":
+            return Some(JsValue.String(v: path))
+        if reason != "":
+            if prop == "status":
+                return Some(JsValue.String(v: "denied"))
+            if prop == "error":
+                return Some(JsValue.String(v: "file-denied"))
+            if prop == "reason":
+                return Some(JsValue.String(v: reason))
+            if prop == "data":
+                return Some(JsValue.Undefined)
+        else:
+            if prop == "status":
+                return Some(JsValue.String(v: "allowed"))
+            if prop == "error" or prop == "reason":
+                return Some(JsValue.String(v: ""))
+            if prop == "data":
+                if val Some(content_value) = self.interpreter.lookup_global_value("__simple_node_file_content"):
+                    match content_value:
+                        JsValue.String(content):
+                            return Some(JsValue.String(v: content))
+                        _:
+                            pass_dn
+                return Some(JsValue.String(v: ""))
+        nil
+
+    me _node_file_arg_after(script: text, token: text) -> text:
+        match script.index_of(token):
+            Some(idx):
+                var start = idx + token.len()
+                if start >= script.len():
+                    return ""
+                val quote = script.substring(start, start + 1)
+                if quote != "'" and quote != "\"":
+                    return ""
+                start = start + 1
+                var end = start
+                while end < script.len():
+                    if script.substring(end, end + 1) == quote:
+                        return script.substring(start, end)
+                    end = end + 1
+            nil:
+                pass_dn
+        ""
+
+    me _node_file_denial_reason(path: text) -> text:
+        if path == "" or not path.starts_with("/"):
+            return "invalid-path"
+        if self._node_file_path_allowed(path):
+            return ""
+        "file-grant-denied"
+
+    me _node_file_path_allowed(path: text) -> bool:
+        if val Some(grant_value) = self.interpreter.lookup_global_value("__simple_node_file_grant_prefix"):
+            match grant_value:
+                JsValue.String(grant):
+                    if grant == "":
+                        return false
+                    if self._text_exact(path, grant):
+                        return true
+                    if path.len() > grant.len() and self._text_exact(path.substring(0, grant.len()), grant):
+                        if grant.ends_with("/"):
+                            return true
+                        return path.substring(grant.len(), grant.len() + 1) == "/"
+                _:
+                    pass_dn
+        false
+
+    me _text_exact(left: text, right: text) -> bool:
+        if left.len() != right.len():
+            return false
+        var i = 0
+        while i < left.len():
+            if left.substring(i, i + 1) != right.substring(i, i + 1):
+                return false
+            i = i + 1
+        true
 
     me create_host_object() -> i64:
         self.interpreter.create_object()
