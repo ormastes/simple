@@ -11,10 +11,12 @@ JavaScript, fetch-driven WebAssembly loading, and WebGPU-adjacent WASM behavior
 so capability boundaries are explicit, denial paths are verified, and positive
 runtime paths are covered by executable tests.
 
-This goal is not complete. Do not mark the active goal complete until the
-remaining OS-boundary hardening, Phase 6 QEMU validation, and documented
-WebGPU/WASM scope decisions are all either implemented or explicitly split into
-follow-up goals.
+The OS-boundary hardening and WebGPU/WASM scope closure are implemented for the
+current goal. Real Phase 6 guest QEMU validation is split into
+`doc/03_plan/agent_tasks/ai_cli_qemu_guest_validation_followup.md` because it
+requires a guest-executable Node-compatible runtime artifact and launcher handoff;
+host-side package staging and FAT32 population remain evidence only for
+provisioning readiness.
 
 ## Crash Restart Summary
 
@@ -162,15 +164,11 @@ Completed evidence:
    - The FAT32 driver must resolve its own 8.3 aliases for long names such as
      `node-compatible`; otherwise the host populator can create the directory,
      reload the image, and fail to traverse the original long path.
-   - Audit `ai_cli_qemu_lane`, staged package generation, launcher marker
-     output, and runtime artifact assumptions.
-   - Provision a Node-compatible runtime artifact and CLI bundles into the
-     guest-visible FAT32 image path.
-   - Boot x86_64, RISC-V, and AArch64 lanes.
-   - Capture real guest serial markers for runtime start, CLI smoke, hardening
-     denials, and `[ai-cli] hardening:ok app=<tool>`.
-   - Update `ai_cli_qemu_lane` from `blocked-runtime-artifact` to `ready` only
-     after real guest evidence exists.
+   - Real guest runtime execution and serial validation are split into
+     `doc/03_plan/agent_tasks/ai_cli_qemu_guest_validation_followup.md`.
+   - Keep `ai_cli_qemu_lane` at `blocked-runtime-artifact` until that follow-up
+     produces real guest serial logs. Do not use staged marker payloads or
+     synthetic logs as completion evidence.
 
 3. WebGPU/WASM scope closure.
    - Current browser-side asset loading, `WebAssembly.instantiate`, nested
@@ -210,9 +208,9 @@ slice is complete only after these checks pass and the commit is pushed:
 - `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`
 - `git diff --check`
 
-Recommended next implementation slice after this commit: Phase 6 guest-visible
-runtime provisioning and real QEMU serial evidence. Keep host-side FAT32
-package/image readiness separate from guest validation.
+Recommended next implementation slice after this commit: run `$verify` for the
+current hardening goal. Phase 6 guest-visible runtime execution and real QEMU
+serial evidence are now a named follow-up.
 
 Phase 6 provisioning commands remain useful for the separate QEMU runtime slice.
 Do not mark Phase 6 complete from host-side package generation or image

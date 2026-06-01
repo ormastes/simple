@@ -141,3 +141,7 @@ dev-incomplete
   coverage. Full WASM-originated WebGPU ABI, hardware/driver WebGPU execution,
   CTS conformance, and pixel-stable hardware rendering are explicitly follow-up
   scope outside this hardening goal.
+- dev: Split real Phase 6 QEMU guest validation into
+  `doc/03_plan/agent_tasks/ai_cli_qemu_guest_validation_followup.md` after
+  fresh harness evidence showed contract and host staging pass but default
+  validation still lacks real guest serial logs.

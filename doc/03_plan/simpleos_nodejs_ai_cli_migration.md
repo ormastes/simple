@@ -256,6 +256,11 @@ image reloads. The Phase 6 FAT32 provisioning checkbox remains open because
 this still has not been integrated into the boot image flow or proven by guest
 serial markers.
 
+2026-06-01 split: real guest runtime execution and serial-marker validation are
+tracked as `doc/03_plan/agent_tasks/ai_cli_qemu_guest_validation_followup.md`.
+The current JS/WASM hardening goal keeps host-side provisioning readiness and
+does not mark QEMU guest validation complete.
+
 ## Minimum Syscall Surface Required
 
 ```
