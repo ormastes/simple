@@ -94,6 +94,14 @@
   - Verification: `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/compositor/engine2d_glass_spec.spl --mode=interpreter --no-cache` passed, 8 tests in 10,998 ms.
   - Verification: `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/compositor/host_compositor_entry_spec.spl --mode=interpreter --no-cache` passed, 29 tests in 36,939 ms.
   - Rust SFFI validation note: `cargo test -j1 -p simple-compiler blit_pixels_extern_copies_and_clips_pixels --lib` was attempted twice after adding direct unit coverage. Both attempts were terminated during dependency compilation without a Rust diagnostic, so this host did not produce Rust unit-test evidence for the new SFFI path.
+- Shared MDI and backend-evidence follow-up:
+  - Added a lightweight pure Simple GUI renderer for the hosted WM lane so the macOS inspection path can render real app content without pulling the full Simple Web renderer into every first-frame check.
+  - Added backend-evidence records so GUI/QEMU reports must name the requested backend, selected backend, fallback reason, frame timing, and readback status.
+  - Added QEMU shared-MDI contract markers for ARM64 and x86_64 framebuffer lanes.
+  - Verification: `backend_evidence_spec.spl` passed, 10 tests in 3,812 ms.
+  - Verification: `shared_mdi_framebuffer_scene_spec.spl` passed, 2 tests in 18,045 ms.
+  - Verification: `arm64_wm_shared_mdi_contract_spec.spl` passed, 1 test in 3,852 ms.
+  - Capture blocker: `scripts/check-hosted-wm-capture-evidence.shs` now exits bounded and records `hosted-wm-capture-timeout`; latest report is `doc/09_report/hosted_wm_capture_evidence_2026-06-01.md`. The hosted capture artifact is still not accepted evidence until the timeout is fixed.
 
 ## Open Evidence Gaps
 
@@ -101,4 +109,5 @@
 - Metal Simple benchmark has timing rows but no per-scene GPU readback hash and a JIT mutability fallback, so it cannot close the benchmark hash gate.
 - Pure-Simple full-frame rendering improved materially for blit and scroll, but still misses the C parity NFR by a wide margin.
 - `examples/simple_os/hosted/hosted_main.spl` still fails to reach `First frame presented` within 30s on the direct host path. The square-only `gui_test.spl` smoke is excluded from release evidence; the required path is the shared hosted WM entry in `src/os/hosted/hosted_entry.spl`.
+- Hosted first-frame capture is bounded but currently unavailable due `hosted-wm-capture-timeout`; the script records this as a blocker instead of hanging.
 - User still needs to select feature and NFR options before final requirements are written.

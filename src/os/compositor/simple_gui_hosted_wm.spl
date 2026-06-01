@@ -1,0 +1,199 @@
+# Lightweight hosted WM for the visible macOS Simple GUI lib inspection path.
+
+use common.window_protocol.geometry.{Size}
+use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.shared_mdi_setup.{shared_mdi_surfaces}
+use os.compositor.simple_gui_window_renderer.{render_simple_gui_app_content}
+
+class SimpleGuiHostedWindow:
+    id: i64
+    title: text
+    app_id: text
+    content: text
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    minimized: bool
+    focused: bool
+
+class SimpleGuiHostedWm:
+    backend: CompositorBackend
+    width: i32
+    height: i32
+    windows: [SimpleGuiHostedWindow]
+    pointer_x: i32
+    pointer_y: i32
+    dragging: bool
+    drag_window_id: i64
+    drag_offset_x: i32
+    drag_offset_y: i32
+
+    static fn create(backend: CompositorBackend, size: Size) -> SimpleGuiHostedWm:
+        var windows: [SimpleGuiHostedWindow] = []
+        var id: i64 = 1
+        val surfaces = shared_mdi_surfaces()
+        var i = 0
+        while i < surfaces.len():
+            val surface = surfaces[i]
+            windows.push(SimpleGuiHostedWindow(
+                id: id,
+                title: surface.title,
+                app_id: surface.app_id,
+                content: surface.content,
+                x: surface.x,
+                y: surface.y,
+                w: surface.w,
+                h: surface.h,
+                minimized: false,
+                focused: i == surfaces.len() - 1
+            ))
+            id = id + 1
+            i = i + 1
+        SimpleGuiHostedWm(
+            backend: backend,
+            width: size.width.to_i32(),
+            height: size.height.to_i32(),
+            windows: windows,
+            pointer_x: 0,
+            pointer_y: 0,
+            dragging: false,
+            drag_window_id: 0,
+            drag_offset_x: 0,
+            drag_offset_y: 0
+        )
+
+    me render_frame():
+        self.backend.clear(0xFF0F172Au32)
+        var i = 0
+        while i < self.windows.len():
+            val win = self.windows[i]
+            if not win.minimized:
+                val title_color = if win.focused: 0xFF2563EBu32 else: 0xFF334155u32
+                self.backend.fill_rect(win.x + 5, win.y + 6, win.w, win.h, 0x66000000u32)
+                self.backend.fill_rect(win.x, win.y, win.w, win.h, 0xFF1E293Bu32)
+                self.backend.fill_rect(win.x, win.y, win.w, 24, title_color)
+                self.backend.draw_text(win.x + 8, win.y + 4, win.title, 0xFFFFFFFFu32, title_color)
+                self.backend.fill_rect(win.x + win.w - 24, win.y, 24, 24, 0xFFCC3333u32)
+                self.backend.draw_text(win.x + win.w - 17, win.y + 4, "X", 0xFFFFFFFFu32, 0xFFCC3333u32)
+                render_simple_gui_app_content(self.backend, win.title, win.x + 4, win.y + 28, win.w - 8, win.h - 32, win.content)
+            i = i + 1
+        self.backend.present()
+
+    fn focused_window_id() -> i64:
+        var i = 0
+        while i < self.windows.len():
+            if self.windows[i].focused and not self.windows[i].minimized:
+                return self.windows[i].id
+            i = i + 1
+        0
+
+    fn hit_window(x: i32, y: i32) -> i64:
+        var i = self.windows.len() - 1
+        while i >= 0:
+            val win = self.windows[i]
+            if not win.minimized and x >= win.x and y >= win.y and x < win.x + win.w and y < win.y + win.h:
+                return win.id
+            i = i - 1
+        0
+
+    me focus_window(window_id: i64):
+        var focused: [SimpleGuiHostedWindow] = []
+        var selected: SimpleGuiHostedWindow? = nil
+        var i = 0
+        while i < self.windows.len():
+            var win = self.windows[i]
+            win.focused = false
+            if win.id == window_id:
+                selected = win
+            else:
+                focused.push(win)
+            i = i + 1
+        if selected != nil:
+            selected.focused = true
+            focused.push(selected)
+        self.windows = focused
+
+    me pointer_move(x: i32, y: i32):
+        self.pointer_x = x
+        self.pointer_y = y
+        if self.dragging:
+            var i = 0
+            while i < self.windows.len():
+                var win = self.windows[i]
+                if win.id == self.drag_window_id:
+                    win.x = x - self.drag_offset_x
+                    win.y = y - self.drag_offset_y
+                    self.windows[i] = win
+                i = i + 1
+
+    me handle_left_button(down: bool):
+        if not down:
+            self.dragging = false
+            self.drag_window_id = 0
+            return
+        val hit = self.hit_window(self.pointer_x, self.pointer_y)
+        if hit == 0:
+            return
+        self.focus_window(hit)
+        var i = 0
+        while i < self.windows.len():
+            val win = self.windows[i]
+            if win.id == hit:
+                if self.pointer_y < win.y + 24:
+                    if self.pointer_x >= win.x + win.w - 24:
+                        self.close_focused()
+                        return
+                    self.dragging = true
+                    self.drag_window_id = hit
+                    self.drag_offset_x = self.pointer_x - win.x
+                    self.drag_offset_y = self.pointer_y - win.y
+                return
+            i = i + 1
+
+    me cycle_focus():
+        if self.windows.len() == 0:
+            return
+        var current = -1
+        var i = 0
+        while i < self.windows.len():
+            if self.windows[i].focused:
+                current = i
+            self.windows[i].focused = false
+            i = i + 1
+        var next = current + 1
+        if next >= self.windows.len():
+            next = 0
+        self.windows[next].focused = true
+
+    me close_focused():
+        val focused = self.focused_window_id()
+        if focused == 0:
+            return
+        var next_windows: [SimpleGuiHostedWindow] = []
+        var i = 0
+        while i < self.windows.len():
+            if self.windows[i].id != focused:
+                next_windows.push(self.windows[i])
+            i = i + 1
+        self.windows = next_windows
+        if self.windows.len() > 0:
+            self.windows[self.windows.len() - 1].focused = true
+
+    me minimize_focused():
+        val focused = self.focused_window_id()
+        var i = 0
+        while i < self.windows.len():
+            if self.windows[i].id == focused:
+                self.windows[i].minimized = true
+                self.windows[i].focused = false
+            i = i + 1
+        if self.windows.len() > 0:
+            self.windows[self.windows.len() - 1].focused = true
+
+    me restore_all():
+        var i = 0
+        while i < self.windows.len():
+            self.windows[i].minimized = false
+            self.windows[i].focused = i == self.windows.len() - 1
+            i = i + 1
