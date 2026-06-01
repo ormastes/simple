@@ -6,6 +6,7 @@ use os.kernel.loader.dylib_registry.{
     dylib_registry_open,
     dylib_registry_close,
     dylib_registry_symbol,
+    dylib_registry_mark_mapped,
     dylib_registry_symbol_is_process_callable
 }
 
@@ -111,8 +112,8 @@ fn _pad_to(buf: [u8], target: i64) -> [u8]:
         buf.push(0.to_u8())
     buf
 
-fn make_elf64_with_dynsym() -> [u8]:
-    """Build minimal ELF64 with .dynsym containing symbol 'hello' at 0xBEEF."""
+fn make_elf64_with_dynsym_value(symbol_value: i64) -> [u8]:
+    """Build minimal ELF64 with .dynsym containing symbol 'hello'."""
     var b: [u8] = []
     # ELF ident
     b.push(0x7F.to_u8())
@@ -171,8 +172,8 @@ fn make_elf64_with_dynsym() -> [u8]:
     b.push(0x12.to_u8())
     b.push(0.to_u8())
     b = push_u16_le(b, 1)
-    # st_value=0xBEEF, st_size=8
-    b = push_u64_le(b, 0xBEEF)
+    # st_value=symbol_value, st_size=8
+    b = push_u64_le(b, symbol_value)
     b = push_u64_le(b, 8)
     # Section headers at 192: null(64) + .dynsym(64) + .strtab(64)
     b = _pad_to(b, 192)
@@ -207,6 +208,9 @@ fn make_elf64_with_dynsym() -> [u8]:
     b = push_u64_le(b, 0)
     b = push_u64_le(b, 0)
     b
+
+fn make_elf64_with_dynsym() -> [u8]:
+    make_elf64_with_dynsym_value(0xBEEF)
 
 describe "dylib_registry":
     it "registers an ELF64 library and resolves entry symbols":
@@ -284,10 +288,20 @@ describe "dylib_registry":
         # Slow path — missing symbol
         expect(dylib_registry_symbol(handle, "missing")).to_equal(0 - ENOENT as i64)
 
-    it "does not claim registry symbols are process-callable":
+    it "does not claim unmapped registry symbols are process-callable":
         dylib_registry_reset_for_test()
         val handle = dylib_registry_register("/lib/dynsym.smf", make_elf64_with_dynsym())
         expect(handle).to_be_greater_than(0)
         expect(dylib_registry_symbol(handle, "hello")).to_equal(0xBEEF)
         expect(dylib_registry_symbol_is_process_callable(handle, "hello")).to_equal(false)
+        expect(dylib_registry_symbol_is_process_callable(handle, "missing")).to_equal(false)
+
+    it "marks mapped executable-range symbols as process-callable":
+        dylib_registry_reset_for_test()
+        val handle = dylib_registry_register("/lib/callable.so", make_elf64_with_dynsym_value(0x400010))
+        expect(handle).to_be_greater_than(0)
+        expect(dylib_registry_symbol(handle, "hello")).to_equal(0x400010)
+        expect(dylib_registry_symbol_is_process_callable(handle, "hello")).to_equal(false)
+        expect(dylib_registry_mark_mapped(handle)).to_equal(0)
+        expect(dylib_registry_symbol_is_process_callable(handle, "hello")).to_equal(true)
         expect(dylib_registry_symbol_is_process_callable(handle, "missing")).to_equal(false)

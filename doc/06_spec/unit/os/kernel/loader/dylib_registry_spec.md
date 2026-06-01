@@ -211,7 +211,7 @@ expect(dylib_registry_symbol(handle, "missing")).to_equal(0 - ENOENT as i64)
 
 </details>
 
-#### does not claim registry symbols are process-callable
+#### does not claim unmapped registry symbols are process-callable
 
 1. dylib registry reset for test
    - Expected: dylib_registry_symbol(handle, "hello") equals `0xBEEF`
@@ -236,6 +236,35 @@ expect(dylib_registry_symbol_is_process_callable(handle, "missing")).to_equal(fa
 
 </details>
 
+#### marks mapped executable-range symbols as process-callable
+
+1. dylib registry reset for test
+   - Expected: dylib_registry_symbol(handle, "hello") equals `0x400010`
+   - Expected: dylib_registry_symbol_is_process_callable(handle, "hello") is false
+   - Expected: dylib_registry_mark_mapped(handle) equals `0`
+   - Expected: dylib_registry_symbol_is_process_callable(handle, "hello") is true
+   - Expected: dylib_registry_symbol_is_process_callable(handle, "missing") is false
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+dylib_registry_reset_for_test()
+val handle = dylib_registry_register("/lib/callable.so", make_elf64_with_dynsym_value(0x400010))
+expect(handle).to_be_greater_than(0)
+expect(dylib_registry_symbol(handle, "hello")).to_equal(0x400010)
+expect(dylib_registry_symbol_is_process_callable(handle, "hello")).to_equal(false)
+expect(dylib_registry_mark_mapped(handle)).to_equal(0)
+expect(dylib_registry_symbol_is_process_callable(handle, "hello")).to_equal(true)
+expect(dylib_registry_symbol_is_process_callable(handle, "missing")).to_equal(false)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -255,8 +284,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
