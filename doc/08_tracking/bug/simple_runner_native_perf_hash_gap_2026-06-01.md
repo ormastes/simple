@@ -62,6 +62,29 @@ path remained faster than the current native-build artifacts on macOS.
     `p192=4278190335`, `p240=536862720`.
   - This rules out `[i64]` alone as the cause and keeps the suspicion on native
     array mutation/lowering/runtime ABI behavior in loop-heavy writes.
+- `test/perf/graphics_2d/blit_tile_u64_manual_runtime_repro.spl`
+  - Allocates `[u64]` through `rt_array_new_with_cap_u64` directly, avoiding
+    empty-array literal lowering in the Simple source.
+  - Interpreter remains correct, but LLVM native-build still corrupts the same
+    samples. The bug is therefore not limited to `var data: [u64] = []`
+    lowering.
+- `test/perf/graphics_2d/typed_u64_set_direct_native_repro.spl`
+  - Calls `rt_array_new_with_cap_u64`, `rt_typed_words_u64_push`, and
+    `rt_typed_words_u64_set` directly.
+  - Interpreter reports the expected raw packed colors.
+  - LLVM native-build at `--opt-level none` reports `p0=4278190335` but later
+    samples as `534773760`, which is `0xFF000000 >> 3`.
+- `test/perf/graphics_2d/typed_u64_push_len_native_repro.spl`
+  - Push length increases correctly in interpreter and LLVM native-build.
+  - LLVM native-build reports `p1=4278190081` and `p7=4278190087` correctly, but
+    reports `p0=534773760` and explicit `rt_typed_words_u64_at(data, 0)` as
+    `534773760` for raw `0xFF000000`.
+  - This narrows the failure to native typed-u64 storage/readback of raw words
+    whose low tag bits are zero, or to the linked native runtime archive's typed
+    array kind handling.
+- `--runtime-bundle rust-hosted` cannot currently be used as an alternate
+  diagnostic lane for this repro on this macOS host because native-build links
+  duplicate hosted runtime symbols such as `rt_stdout_write`.
 
 ## Expected
 
