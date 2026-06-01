@@ -648,3 +648,9 @@ From `doc/08_tracking/bug/`:
 - `doc/03_plan/simple_db_jit_optimization_plan_2026-05-27.md`
 - `doc/03_plan/render_2d_optimization_plan_2026-05-30.md`
 - `doc/03_plan/simd_utf8_text_api_optimization.md`
+
+## 14. Progress Log
+
+| Date | Lane | Progress | Evidence |
+|------|------|----------|----------|
+| 2026-06-01 | D/F | Optimized Rust interpreter `text[index]` so ASCII remains O(1), positive in-bounds Unicode indexing avoids the up-front char-count walk, and error previews allocate only on diagnostics. | PASS string spec check; PASS string spec 47; PASS cargo check simple-compiler; PASS string system 33; PASS interpreter perf 10; PASS Node API 151; PASS WebGPU JS/WASM 106; PASS GTK evidence Simple open 227 us / GTK open 69171 us / checksum 212444. |

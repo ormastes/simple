@@ -80,6 +80,52 @@ fn require_integer_index_value(value: &Value, context: &str) -> Result<i64, Comp
     Err(CompileError::semantic_with_context(message, ctx))
 }
 
+fn string_index_out_of_bounds(s: &str, raw_idx: i64, len: i64) -> CompileError {
+    let preview: String = s.chars().take(60).collect::<String>().replace('\n', "\\n");
+    let ctx = ErrorContext::new()
+        .with_code(codes::INDEX_OUT_OF_BOUNDS)
+        .with_help(format!("string has {} character(s); preview={:?}", len, preview))
+        .with_note("ensure the index is within bounds");
+    CompileError::semantic_with_context(
+        format!(
+            "string index out of bounds: index is {} but length is {} (preview={:?})",
+            raw_idx, len, preview
+        ),
+        ctx,
+    )
+}
+
+fn indexed_string_char(s: &str, raw_idx: i64) -> Result<Value, CompileError> {
+    if s.is_ascii() {
+        let len = s.len() as i64;
+        let idx = if raw_idx < 0 { len + raw_idx } else { raw_idx };
+        if (0..len).contains(&idx) {
+            return Ok(Value::Str(String::from(s.as_bytes()[idx as usize] as char)));
+        }
+        return Err(string_index_out_of_bounds(s, raw_idx, len));
+    }
+
+    if raw_idx >= 0 {
+        if let Some(c) = s.chars().nth(raw_idx as usize) {
+            return Ok(Value::Str(c.to_string()));
+        }
+        let len = s.chars().count() as i64;
+        return Err(string_index_out_of_bounds(s, raw_idx, len));
+    }
+
+    let len = s.chars().count() as i64;
+    let idx = len + raw_idx;
+    if (0..len).contains(&idx) {
+        return Ok(Value::Str(
+            s.chars()
+                .nth(idx as usize)
+                .expect("bounds checked string character index")
+                .to_string(),
+        ));
+    }
+    Err(string_index_out_of_bounds(s, raw_idx, len))
+}
+
 pub(super) fn eval_collection_expr(
     expr: &Expr,
     env: &mut Env,
@@ -533,54 +579,7 @@ pub(super) fn eval_collection_expr(
                 }
                 Value::Str(s) => {
                     let raw_idx = require_integer_index_value(&idx_val, "string")?;
-                    let preview: String = s.chars().take(60).collect::<String>().replace('\n', "\\n");
-                    // Fast path: if string is ASCII-only, use byte indexing O(1)
-                    // instead of chars().nth() which is O(n)
-                    if s.is_ascii() {
-                        let len = s.len() as i64;
-                        let idx = if raw_idx < 0 {
-                            (len + raw_idx) as usize
-                        } else {
-                            raw_idx as usize
-                        };
-                        if idx < s.len() {
-                            Ok(Value::Str(String::from(s.as_bytes()[idx] as char)))
-                        } else {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                                .with_help(format!("string has {} character(s); preview={:?}", len, preview))
-                                .with_note("ensure the index is within bounds");
-                            Err(CompileError::semantic_with_context(
-                                format!(
-                                    "string index out of bounds: index is {} but length is {} (preview={:?})",
-                                    raw_idx, len, preview
-                                ),
-                                ctx,
-                            ))
-                        }
-                    } else {
-                        let len = s.chars().count() as i64;
-                        // Support negative indexing
-                        let idx = if raw_idx < 0 {
-                            (len + raw_idx) as usize
-                        } else {
-                            raw_idx as usize
-                        };
-                        s.chars().nth(idx).map(|c| Value::Str(c.to_string())).ok_or_else(|| {
-                            // E3002 - Index Out Of Bounds
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                                .with_help(format!("string has {} character(s); preview={:?}", len, preview))
-                                .with_note("ensure the index is within bounds");
-                            CompileError::semantic_with_context(
-                                format!(
-                                    "string index out of bounds: index is {} but length is {} (preview={:?})",
-                                    raw_idx, len, preview
-                                ),
-                                ctx,
-                            )
-                        })
-                    }
+                    indexed_string_char(&s, raw_idx)
                 }
                 Value::Object {
                     ref class, ref fields, ..

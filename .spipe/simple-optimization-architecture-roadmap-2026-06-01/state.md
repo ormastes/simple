@@ -112,3 +112,12 @@ dev-done
   WebGPU JS/WASM Simple (106); PASS interpreter perf (10); PASS GTK GUI repeat
   evidence with Simple open 243 us, GTK open 77948 us, Simple frame 1 us, GTK
   frame 28 us, vector checksum 212444 deterministic true.
+- implementation: Interpreter lane optimized Rust `text[index]` by preserving
+  the ASCII byte-index fast path, skipping the up-front Unicode character count
+  for positive in-bounds indexes, and deferring diagnostic preview allocation
+  until out-of-bounds errors.
+- verification: PASS string spec check; PASS string spec (47); PASS
+  `cargo check -p simple-compiler`; PASS string system (33); PASS interpreter
+  perf (10); PASS Node API conformance (151); PASS WebGPU JS/WASM Simple (106);
+  PASS GTK GUI repeat evidence with Simple open 227 us, GTK open 69171 us,
+  Simple frame 1 us, GTK frame 26 us, vector checksum 212444 deterministic true.

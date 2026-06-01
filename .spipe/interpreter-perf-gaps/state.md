@@ -220,3 +220,20 @@ Verification:
 - PASS `SIMPLE_LIB=src bin/simple test test/system/features/string_system_spec.spl --mode=interpreter --clean` (33 scenarios)
 - PASS JS/WASM smoke: Node API conformance (145 scenarios) and WebGPU JS/WASM Simple (106 scenarios)
 - PASS GUI repeat evidence: Simple open 244 us, GTK open 68925 us, vector checksum 212444 deterministic true
+
+## Wave 15 Progress — Unicode string indexing fast path (2026-06-01)
+
+The Rust interpreter string indexing path now keeps the ASCII O(1) byte-index
+case and avoids a full character count for positive in-bounds non-ASCII indexes.
+Error preview construction is deferred until an actual out-of-bounds diagnostic,
+so common successful `text[index]` operations avoid both the up-front `count()`
+walk and preview allocation.
+
+Verification:
+- PASS `SIMPLE_LIB=src bin/simple check test/unit/lib/common/string_spec.spl`
+- PASS `SIMPLE_LIB=src bin/simple test test/unit/lib/common/string_spec.spl --mode=interpreter --clean` (47 scenarios)
+- PASS `cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml` (existing `last_value` warnings)
+- PASS `SIMPLE_LIB=src bin/simple test test/system/features/string_system_spec.spl --mode=interpreter --clean` (33 scenarios)
+- PASS `SIMPLE_LIB=src bin/simple test test/unit/app/interpreter/perf_spec.spl --mode=interpreter --clean` (10 scenarios)
+- PASS JS/WASM smoke: Node API conformance (151 scenarios) and WebGPU JS/WASM Simple (106 scenarios)
+- PASS GUI repeat evidence: Simple open 227 us, GTK open 69171 us, vector checksum 212444 deterministic true
