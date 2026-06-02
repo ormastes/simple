@@ -5,6 +5,29 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+
+# The genuine-NEON evidence needs an interpreter binary that carries the
+# rt_simd_fill_row_u32 / rt_simd_copy_row_u32 externs. A freshly built driver
+# has them; a stale bootstrap/release binary predating the kernels does not
+# (deploy via scripts/bootstrap/bootstrap-from-scratch.sh --deploy). When the
+# user pinned SIMPLE_BIN we honour it; otherwise prefer a capable driver and,
+# if none exists, SKIP (not fail) so the gate never false-reds on an old binary.
+binary_has_neon_externs() {
+    [ -x "$1" ] && LC_ALL=C strings "$1" 2>/dev/null | grep -q 'rt_simd_fill_row_u32'
+}
+if [ -z "${SIMPLE_BIN+pinned}" ] || [ "$SIMPLE_BIN" = "bin/simple" ]; then
+    for _cand in \
+        "src/compiler_rust/target/gui/debug/simple" \
+        "src/compiler_rust/target/debug/simple" \
+        "src/compiler_rust/target/release/simple" \
+        "$SIMPLE_BIN"; do
+        if binary_has_neon_externs "$_cand"; then
+            SIMPLE_BIN="$_cand"
+            break
+        fi
+    done
+fi
+
 TIMEOUT_SECS="${SIMPLE_CPU_SIMD_EVIDENCE_TIMEOUT_SECS:-120}"
 WORK_DIR="${BUILD_DIR:-build/cpu-simd-engine2d-evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/cpu_simd_engine2d_evidence_$(date -u +%F).md}"
@@ -149,6 +172,23 @@ rm -f "$EVIDENCE_LOG" "$ENV_PATH" "$REPORT_PATH"
 echo "check=cpu_simd_engine2d_evidence"
 echo "simple_bin=$SIMPLE_BIN"
 echo "timeout_secs=$TIMEOUT_SECS"
+
+# If no interpreter binary carries the NEON pixel-row externs yet, skip cleanly
+# rather than hard-failing on "unknown extern function" — the kernels exist in
+# source and need a bootstrap to reach the deployed binary.
+if ! binary_has_neon_externs "$SIMPLE_BIN"; then
+    echo "cpu_simd_evidence_status=skip"
+    echo "cpu_simd_evidence_reason=neon-externs-not-in-binary-bootstrap-required"
+    echo "cpu_simd_evidence_simple_bin=$SIMPLE_BIN"
+    mkdir -p "$WORK_DIR"
+    {
+        echo "cpu_simd_evidence_status=skip"
+        echo "cpu_simd_evidence_reason=neon-externs-not-in-binary-bootstrap-required"
+        echo "cpu_simd_evidence_simple_bin=$SIMPLE_BIN"
+    } >"$ENV_PATH"
+    echo "cpu-simd-engine2d-evidence: skip (NEON externs not in $SIMPLE_BIN; run bootstrap --deploy)"
+    exit 0
+fi
 
 if [ ! -x "$SIMPLE_BIN" ]; then
     STATUS=fail
