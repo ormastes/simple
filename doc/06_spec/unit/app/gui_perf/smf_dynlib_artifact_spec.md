@@ -69,14 +69,15 @@ expect(stub.unwrap()[0]).to_equal(0xCFu8)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val smf = gui_smf_wrap_native_library([0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8], 1u8)
+val smf = gui_smf_wrap_native_library([0xCFu8, 0xFAu8, 0xEDu8, 0xFEu8, 0u8], 3u8)
 val contract = gui_smf_artifact_contract("build/gui/pure_gui_hot.smf", smf, "gui_dynlib_hot_probe_tick")
 expect(contract.status).to_equal("pass")
 expect(contract.smf_role).to_equal(2i64)
+expect(contract.arch_code).to_equal(3i64)
 expect(contract.embedded_dynlib).to_equal(true)
 expect(contract.qemu_status).to_equal("not-run")
 expect(contract.macos_status).to_equal("not-run")
@@ -86,6 +87,52 @@ expect(row).to_contain(" qemu_status=not-run ")
 expect(row).to_contain(" qemu_reason=live-qemu-not-executed ")
 expect(row).to_contain(" macos_status=not-run ")
 expect(row).to_contain(" macos_reason=requires-macos-arm64")
+```
+
+</details>
+
+#### fails closed for an embedded dynlib with a non-arm64 release arch
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val smf = gui_smf_wrap_native_library([0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8], 1u8)
+val contract = gui_smf_artifact_contract("build/gui/pure_gui_hot.smf", smf, "gui_dynlib_hot_probe_tick")
+expect(contract.status).to_equal("fail")
+expect(contract.smf_role).to_equal(2i64)
+expect(contract.arch_code).to_equal(1i64)
+expect(contract.embedded_dynlib).to_equal(true)
+val row = gui_smf_artifact_contract_row(contract)
+expect(row).to_start_with("GUI_SMF_ARTIFACT_CONTRACT status=fail")
+expect(row).to_contain(" arch=1 ")
+expect(row).to_contain(" symbol=gui_dynlib_hot_probe_tick ")
+```
+
+</details>
+
+#### fails closed for an embedded arm64 dynlib with the wrong release symbol
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val smf = gui_smf_wrap_native_library([0xCFu8, 0xFAu8, 0xEDu8, 0xFEu8, 0u8], 3u8)
+val contract = gui_smf_artifact_contract("build/gui/pure_gui_hot.smf", smf, "unexpected_probe")
+expect(contract.status).to_equal("fail")
+expect(contract.smf_role).to_equal(2i64)
+expect(contract.arch_code).to_equal(3i64)
+expect(contract.embedded_dynlib).to_equal(true)
+val row = gui_smf_artifact_contract_row(contract)
+expect(row).to_start_with("GUI_SMF_ARTIFACT_CONTRACT status=fail")
+expect(row).to_contain(" arch=3 ")
+expect(row).to_contain(" symbol=unexpected_probe ")
 ```
 
 </details>
@@ -197,8 +244,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
