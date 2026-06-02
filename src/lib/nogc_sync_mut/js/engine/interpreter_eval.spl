@@ -731,34 +731,26 @@ impl JsInterpreter:
                     return Ok(self._native_uint8_array_sort(typed_val))
                 return Ok(self._native_uint8_array_index_of(typed_val, typed_arg_vals))
 
-        if is_member and member_method == "call" and self._is_uint8_array_set_reference(member_obj_expr):
-            if args.len() > 0:
-                val dst_val = self.eval_expression(args.get(0), env)?
-                var set_call_args: [JsValue] = []
-                var call_ai = 1
-                while call_ai < args.len():
-                    set_call_args.push(self.eval_expression(args.get(call_ai), env)?)
-                    call_ai = call_ai + 1
-                return Ok(self._native_uint8_array_set(dst_val, set_call_args))
+        if is_member and member_method == "call":
+            val uint8_method = self._uint8_array_prototype_method_name(member_obj_expr)
+            if uint8_method != "":
+                if args.len() > 0:
+                    val dst_val = self.eval_expression(args.get(0), env)?
+                    var call_args: [JsValue] = []
+                    var call_ai = 1
+                    while call_ai < args.len():
+                        call_args.push(self.eval_expression(args.get(call_ai), env)?)
+                        call_ai = call_ai + 1
+                    return Ok(self._dispatch_uint8_array_prototype_method(uint8_method, dst_val, call_args))
 
-        if is_member and member_method == "apply" and self._is_uint8_array_set_reference(member_obj_expr):
-            if args.len() > 1:
-                val dst_val = self.eval_expression(args.get(0), env)?
-                val args_val = self.eval_expression(args.get(1), env)?
-                val args_id = _get_obj_id(args_val)
-                var set_apply_args: [JsValue] = []
-                if args_id >= 0:
-                    var arg_len = self.object_store.array_length(args_id)
-                    match self.get_object_property(args_id, "length"):
-                        JsValue.Number(v):
-                            arg_len = f64_to_i64(v)
-                        _:
-                            pass_dn
-                    var apply_ai = 0
-                    while apply_ai < arg_len:
-                        set_apply_args.push(self.get_object_property(args_id, apply_ai.to_text()))
-                        apply_ai = apply_ai + 1
-                return Ok(self._native_uint8_array_set(dst_val, set_apply_args))
+        if is_member and member_method == "apply":
+            val uint8_method_apply = self._uint8_array_prototype_method_name(member_obj_expr)
+            if uint8_method_apply != "":
+                if args.len() > 1:
+                    val dst_val = self.eval_expression(args.get(0), env)?
+                    val args_val = self.eval_expression(args.get(1), env)?
+                    val apply_args = self._indexed_arg_values(args_val)
+                    return Ok(self._dispatch_uint8_array_prototype_method(uint8_method_apply, dst_val, apply_args))
 
         # Object.keys / Object.values / Object.entries
         if is_member and member_method == "keys":
@@ -1186,24 +1178,21 @@ impl JsInterpreter:
                 self.logger.warn("TypeError: {js_to_string(callee_val)} is not a function")
                 return Ok(JsValue.Undefined)
 
-    me _is_uint8_array_set_reference(expr: JsExpression) -> bool:
-        var is_uint8_prototype_set = false
+    me _uint8_array_prototype_method_name(expr: JsExpression) -> text:
+        var resolved_method = ""
         match expr:
             JsExpression.Member(obj_expr, method_name):
-                if method_name != "set":
-                    return false
                 match obj_expr:
                     JsExpression.Member(root_expr, proto_name):
                         if proto_name == "prototype":
                             match root_expr:
                                 JsExpression.Identifier(root_name):
                                     if root_name == "Uint8Array":
-                                        is_uint8_prototype_set = true
+                                        resolved_method = method_name
                                 _:
                                     pass_dn
                     _:
                         pass_dn
-                return is_uint8_prototype_set
             JsExpression.ComputedMember(obj_expr, prop_expr):
                 var prop_name = ""
                 match prop_expr:
@@ -1215,19 +1204,65 @@ impl JsInterpreter:
                                 prop_name = js_to_string(value)
                     _:
                         pass_dn
-                if prop_name != "set":
-                    return false
-                match obj_expr:
-                    JsExpression.Member(root_expr, proto_name):
-                        if proto_name == "prototype":
-                            match root_expr:
-                                JsExpression.Identifier(root_name):
-                                    if root_name == "Uint8Array":
-                                        is_uint8_prototype_set = true
-                                _:
-                                    pass_dn
-                    _:
-                        pass_dn
-                return is_uint8_prototype_set
+                if prop_name != "":
+                    match obj_expr:
+                        JsExpression.Member(root_expr, proto_name):
+                            if proto_name == "prototype":
+                                match root_expr:
+                                    JsExpression.Identifier(root_name):
+                                        if root_name == "Uint8Array":
+                                            resolved_method = prop_name
+                                    _:
+                                        pass_dn
+                        _:
+                            pass_dn
             _:
-                false
+                pass_dn
+        resolved_method
+
+    me _indexed_arg_values(args_val: JsValue) -> [JsValue]:
+        val args_id = _get_obj_id(args_val)
+        var result: [JsValue] = []
+        if args_id >= 0:
+            var arg_len = self.object_store.array_length(args_id)
+            match self.get_object_property(args_id, "length"):
+                JsValue.Number(v):
+                    arg_len = f64_to_i64(v)
+                _:
+                    pass_dn
+            var ai = 0
+            while ai < arg_len:
+                result.push(self.get_object_property(args_id, ai.to_text()))
+                ai = ai + 1
+        result
+
+    me _dispatch_uint8_array_prototype_method(method_name: text, this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        if method_name == "set":
+            return self._native_uint8_array_set(this_val, arg_vals)
+        if method_name == "subarray" or method_name == "slice":
+            return self._native_uint8_array_subarray(this_val, arg_vals)
+        if method_name == "fill":
+            return self._native_uint8_array_fill(this_val, arg_vals)
+        if method_name == "includes":
+            return self._native_uint8_array_includes(this_val, arg_vals)
+        if method_name == "indexOf":
+            return self._native_uint8_array_index_of(this_val, arg_vals)
+        if method_name == "join":
+            return self._native_uint8_array_join(this_val, arg_vals)
+        if method_name == "reverse":
+            return self._native_uint8_array_reverse(this_val)
+        if method_name == "lastIndexOf":
+            return self._native_uint8_array_last_index_of(this_val, arg_vals)
+        if method_name == "toString":
+            return self._native_uint8_array_to_string(this_val)
+        if method_name == "at":
+            return self._native_uint8_array_at(this_val, arg_vals)
+        if method_name == "copyWithin":
+            return self._native_uint8_array_copy_within(this_val, arg_vals)
+        if method_name == "keys":
+            return self._native_uint8_array_iterator(this_val, "keys")
+        if method_name == "values" or method_name == "Symbol.iterator":
+            return self._native_uint8_array_iterator(this_val, "values")
+        if method_name == "entries":
+            return self._native_uint8_array_iterator(this_val, "entries")
+        JsValue.Undefined
