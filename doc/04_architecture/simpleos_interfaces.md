@@ -334,12 +334,15 @@ handlers; dynamic-library syscalls are backed by the kernel dylib registry.
 
 Dynamic library loading follows the same async-first rule as file I/O:
 native SimpleOS code uses `os.posix.dylib_async`, while libc `dlopen`,
-`dlsym`, and `dlclose` are synchronous compatibility wrappers. The libc
-self-handle (`dlopen(NULL, ...)`) resolves core libc symbols immediately;
-path-backed SMF/ELF library loads use syscalls `65`-`67` to validate bytes,
-create kernel handles, resolve `_start`/`main`, and refcount close. Full PIC
-relocation, import binding, and unload-safe link namespaces remain future
-shared-object mapper work.
+`dlsym`, and `dlclose` are synchronous compatibility wrappers. For the pure GUI
+release lane, the default artifact is not a raw host `.so`/`.dylib`; it is an
+SMF dynlib package carrying the pure GUI library payload. SimpleOS validates the
+SMF bytes, creates loader handles, resolves the hot GUI symbol, and presents the
+resulting command batches through the framebuffer/virtio adapter. The libc
+self-handle (`dlopen(NULL, ...)`) still resolves core libc symbols immediately;
+path-backed raw SMF/ELF shared-object loads use syscalls `65`-`67` for
+compatibility and diagnostics. Full PIC relocation, import binding, and
+unload-safe link namespaces remain future shared-object mapper work.
 
 **Consumers:** `src/compiler_rust/`, LLVM cross-toolchain, any userspace ELF
 compiled for `x86_64-unknown-simpleos`.

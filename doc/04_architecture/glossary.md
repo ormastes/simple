@@ -412,7 +412,7 @@ A set of standalone `emu_*` functions that implement every RenderBackendAdv oper
 
 ## GpuFfiMode (Engine2D)
 
-Enum with two variants: `Static` (extern fn resolved at link time against Rust runtime) and `Dynamic` (DynLib.load via dlopen at runtime). SimpleOS defaults to Static (no dynamic loader); hosted OSes default to Dynamic with graceful fallback. Defined in `src/lib/gc_async_mut/gpu/engine2d/ffi_dispatch.spl`.
+Enum with two variants: `Static` (extern fn resolved at link time against the runtime) and `Dynamic` (DynLib.load via host `dlopen` at runtime). For the pure GUI SMF dynlib release path, raw host `Dynamic` loading is diagnostic/compatibility only: the default GUI artifact is an SMF dynlib package (`loader=smf_dynlib`, `dynload=smf_dynlib`) and hosted macOS/Linux adapters use SFFI only to call the extracted SMF payload (`host_dynload=sffi`). SimpleOS uses the SMF loader path for the same artifact contract; full raw shared-object mapping remains separate from GUI release acceptance. Defined in `src/lib/gc_async_mut/gpu/engine2d/ffi_dispatch.spl`.
 
 ## SReplay
 

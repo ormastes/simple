@@ -119,6 +119,13 @@ extern fn rt_wffi_call(fn_ptr: i64, arg_types: [i64], args: [i64]) -> i64
 
 Simple API: `wffi_load`, `wffi_get`, `wffi_call_i64`, `wffi_call_text`, `wffi_free`
 
+For the pure GUI performance release path, raw WFFI `dlopen` of a `.so` or
+`.dylib` is not the accepted default. The accepted artifact is an SMF dynlib
+package; host adapters may use SFFI/WFFI only to call the extracted SMF payload,
+and evidence must report `loader=smf_dynlib`, `dynload=smf_dynlib`,
+`host_dynload=sffi`, and `call_source=dynlib_symbol_call`. Raw host dynlib rows
+remain diagnostic and must not satisfy the GUI SMF dynlib acceptance gate.
+
 ### Full WFFI Extensions
 - `header_parser`: Parse C `.h` files, extract fn signatures + structs
 - `binding_gen`: Auto-generate typed Simple wrappers from headers

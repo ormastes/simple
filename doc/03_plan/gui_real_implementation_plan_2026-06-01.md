@@ -88,6 +88,15 @@ the evidence.
   ordered SMF artifact, QEMU parity, SimpleOS dynload parity, mac dynlib perf,
   and mac pass rows, and fails closed unless the transcript proves the real SMF
   dynlib hot-call path.
+- `src/app/gui_perf/linux_smf_dynlib_e2e_gate.spl` and
+  `test/system/gui/linux_smf_dynlib_e2e_gate_system_spec.spl` provide the
+  repeatable Linux evidence lane. The gate builds the pure GUI hot dynlib,
+  wraps it into `build/gui/pure_gui_hot.smf`, probes the extracted payload
+  through SFFI, and requires `loader=smf_dynlib`, `dynload=smf_dynlib`,
+  `host_dynload=sffi`, `call_source=dynlib_symbol_call`, and `pass=true`.
+  This does not replace the macOS arm64 evidence requirement, but it prevents
+  regressions back to raw host dynlib or direct Simple fallback while mac
+  hardware evidence is pending.
 - `src/app/gui_perf/pure_gui_hot_dynlib_export.spl` provides a pure Simple,
   i64-only exported hot symbol that can be built as a host `.so`/`.dylib` for
   callable ABI diagnostics. This proves dynlib call overhead separately, but
@@ -197,6 +206,7 @@ the evidence.
 - `SIMPLE_LIB=src bin/simple check src/lib/gui`
 - `SIMPLE_LIB=src bin/simple test test/unit/lib/gui/pure_smf_dynlib_perf_spec.spl --mode=interpreter`
 - `SIMPLE_LIB=src bin/simple run src/app/gui_perf/smf_dynlib_probe.spl`
+- `SIMPLE_LIB=src bin/simple test test/system/gui/linux_smf_dynlib_e2e_gate_system_spec.spl --mode=interpreter`
 - `SIMPLE_LIB=src SIMPLE_BIN=bin/simple bin/simple run src/app/gui_perf/macos_smf_dynlib_release_gate.spl`
 - `SIMPLE_LIB=src bin/simple check src/os/smf`
 - `SIMPLE_LIB=src bin/simple check src/os/posix`
@@ -211,6 +221,10 @@ the evidence.
   `SIMPLE_LIB=src bin/simple compile src/app/gui_perf/pure_gui_hot_dynlib_export.spl --native --shared --strip -o build/gui/libpure_gui_hot.dylib`
   on macOS or `... -o build/gui/libpure_gui_hot.so` on Linux, followed by
   `SIMPLE_GUI_DYNLIB_ARTIFACT=<artifact> SIMPLE_LIB=src bin/simple run src/app/gui_perf/smf_dynlib_probe.spl`.
+- Linux repeatable SMF dynlib evidence:
+  `SIMPLE_LIB=src bin/simple run src/app/gui_perf/linux_smf_dynlib_e2e_gate.spl`
+  must emit `GUI_LINUX_SMF_DYNLIB_E2E_GATE status=pass` on Linux after a
+  `GUI_DYNLIB_PERF` row proving the SMF/SFFI hot-call path.
 - Pure GUI release-lane dependency guard: no WM, Simple Web, or `rt_gui`/hosted
   runtime imports.
 - macOS arm64 dynlib/SMF hot response probe: p99 < 1000 us after warmup.
