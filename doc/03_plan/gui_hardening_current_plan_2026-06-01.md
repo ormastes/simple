@@ -1619,3 +1619,22 @@ combined readiness report now requires both Web quality evidence and OS-shell
 affordance metadata before reporting `os_affordances=true` and
 `control_center=true`. Focused Web WM, modern shell contract, and readiness
 specs pass `5/5`, `7/7`, and `2/2`.
+
+BrowserSession Uint8Array search continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl test/unit/lib/common/web/browser_session_wasm_host_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+The BrowserSession script-level typed-array search gap is resolved for bounded
+`Uint8Array.fill`, `indexOf`, and `includes` coverage. The permanent browser
+script scenario now proves filled byte reads, positive search, positive search
+with a start offset, negative-start search semantics, and negative includes
+checks with `0:4:4:0:1:2:3:true:false`. Focused checks passed, the fetch/WASM
+chain spec passed `8/8`, the native WASM host spec passed `107/107`, and Node
+API conformance remained `213/213`. The generated scenario manual was refreshed
+with the existing docgen stub warning. This closes
+`doc/08_tracking/bug/browser_session_uint8array_search_dispatch.md` while
+leaving broader typed-array prototype parity in the JS/WebEngine/WASM lane open.

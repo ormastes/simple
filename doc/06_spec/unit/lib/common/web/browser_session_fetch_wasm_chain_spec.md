@@ -495,12 +495,12 @@ match result:
 
 </details>
 
-#### fills Uint8Array values in browser scripts
+#### fills and searches Uint8Array values in browser scripts
 
 1. var session = BrowserSession new
 
 2. Ok
-   - Expected: _display_js(value) equals `0:4:4:0`
+   - Expected: _display_js(value) equals `0:4:4:0:1:2:3:true:false`
 
 3. Err
    - Expected: "unexpected uint8 js error: {err}" equals ``
@@ -518,10 +518,10 @@ session.open_html(
     "https://example.com/webgpu-wasm.html",
     "<html><body>WASM GPU</body></html>"
 )
-val result = session.eval_script("var b = new Uint8Array(5); b.fill(260, 1, 4); b[0] + ':' + b[1] + ':' + b[3] + ':' + b[4]")
+val result = session.eval_script("var b = new Uint8Array(5); b.fill(260, 1, 4); b[0] + ':' + b[1] + ':' + b[3] + ':' + b[4] + ':' + b.indexOf(4) + ':' + b.indexOf(4, 2) + ':' + b.indexOf(4, -2) + ':' + b.includes(4) + ':' + b.includes(5)")
 match result:
     Ok(value):
-        expect(_display_js(value)).to_equal("0:4:4:0")
+        expect(_display_js(value)).to_equal("0:4:4:0:1:2:3:true:false")
     Err(err):
         expect("unexpected uint8 js error: {err}").to_equal("")
 ```
