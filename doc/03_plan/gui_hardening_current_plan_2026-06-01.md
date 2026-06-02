@@ -318,7 +318,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   thenables, bounded WASM exports, traps, table/global metadata, imported
   function binding, and `Uint8Array`/`DataView` access to WebAssembly.Memory.
   Browser scripts now also cover bounded `Uint8Array[Symbol.iterator]()` value
-  iteration through the same deterministic values iterator as `values()`.
+  iteration through the same deterministic values iterator as `values()`, and
+  the returned typed-array iterator object exposes `Symbol.iterator` with shared
+  cursor state.
 
 ## Related Docs
 

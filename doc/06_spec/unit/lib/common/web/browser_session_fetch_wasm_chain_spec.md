@@ -1259,7 +1259,7 @@ match result:
 1. var session = BrowserSession new
 
 2. Ok
-   - Expected: _display_js(value) equals `function:4:255:true`
+   - Expected: _display_js(value) equals `function:function:4:255`
 
 3. Err
    - Expected: "unexpected uint8 symbol iterator js error: {err}" equals ``
@@ -1277,10 +1277,10 @@ session.open_html(
     "https://example.com/webgpu-wasm.html",
     "<html><body>WASM GPU</body></html>"
 )
-val result = session.eval_script("var b = new Uint8Array(2); b[0] = 260; b[1] = -1; var iterator = b[Symbol.iterator](); var i0 = iterator.next(); var i1 = iterator.next(); var i2 = iterator.next(); typeof b[Symbol.iterator] + ':' + i0.value + ':' + i1.value + ':' + i2.done")
+val result = session.eval_script("var b = new Uint8Array(2); b[0] = 260; b[1] = -1; var iterator = b[Symbol.iterator](); var iter2 = iterator[Symbol.iterator](); var i0 = iter2.next(); var i1 = iterator.next(); typeof b[Symbol.iterator] + ':' + typeof iterator[Symbol.iterator] + ':' + i0.value + ':' + i1.value")
 match result:
     Ok(value):
-        expect(_display_js(value)).to_equal("function:4:255:true")
+        expect(_display_js(value)).to_equal("function:function:4:255")
     Err(err):
         expect("unexpected uint8 symbol iterator js error: {err}").to_equal("")
 ```
