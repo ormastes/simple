@@ -2040,13 +2040,15 @@ expect(_eval_str("typeof require('node:stream').Writable")).to_equal("function")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("var r = require('stream').Readable.from(['a','b']); r.readableLength")).to_equal("2")
 expect(_eval_str("var r = require('stream').Readable.from(['a','b']); r.read()")).to_equal("a")
 expect(_eval_str("var r = require('stream').Readable.from(['a','b']); r.read(); r.read()")).to_equal("b")
+expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a']); r.on('end', () => { seen = seen + 1; }); r.read(); r.read(); seen + ':' + r.readableEnded + ':' + r.readable")).to_equal("1:true:false")
+expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a','b']); r.on('end', () => { seen = seen + 1; }); r.read(); seen + ':' + r.readableLength + ':' + r.endEmitted")).to_equal("0:1:false")
 ```
 
 </details>
