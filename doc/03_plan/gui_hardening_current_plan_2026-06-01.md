@@ -1942,3 +1942,23 @@ passed `25/25`, the native WASM host spec passed `107/107`, and Node API
 conformance remained `213/213`. The generated scenario manual was refreshed
 with the existing docgen warnings. Comparator sorting, broader typed-array
 prototype parity, and production GUI pixel parity remain open.
+
+BrowserSession Uint8Array keys/values iterator continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession typed-array prototype coverage now includes bounded
+`Uint8Array.keys()` and `Uint8Array.values()` iterator objects with `next()`
+results shaped as `{ value, done }`. The browser script scenario proves key
+ordering, normalized byte values, and terminal `done` behavior with
+`0:1:true:4:255:true`. Focused checks passed, the fetch/WASM chain spec passed
+`26/26`, the native WASM host spec passed `107/107`, and Node API conformance
+remained `213/213`. The generated scenario manual was refreshed with the
+existing docgen warnings. `Uint8Array.entries()` remains open; a temporary probe
+hit `semantic: variable self not found` when advancing an entries iterator, so
+this slice does not claim entries parity. Broader typed-array prototype parity
+and production GUI pixel parity remain open.
