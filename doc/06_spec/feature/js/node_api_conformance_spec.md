@@ -3179,6 +3179,20 @@ expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close(); 
 
 </details>
 
+#### refreshes completed bounded timeout handles
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_before_after_timer_drain("var h = require('timers').setTimeout(() => {}, 0); h.completed", "h.refresh(); h.active + ':' + h.completed + ':' + h.refreshed + ':' + h.dueAt", 0)).to_equal("false:1:true:false:true:0")
+```
+
+</details>
+
 #### reschedules timers module setInterval callbacks across drains
 
 <details>
@@ -4145,8 +4159,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 266 |
-| Active scenarios | 266 |
+| Total scenarios | 267 |
+| Active scenarios | 267 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
