@@ -179,7 +179,7 @@ fn print_summary_doc(result: &TestRunResult) {
     if let Err(e) = generate_documentation(result) {
         eprintln!("Warning: Failed to generate documentation: {}", e);
     } else {
-        println!("✓ Documentation generated in docs/");
+        println!("✓ Documentation generated in doc/08_tracking/test/");
     }
 }
 
@@ -188,8 +188,8 @@ pub fn generate_documentation(result: &TestRunResult) -> Result<(), Box<dyn std:
     use std::fs;
     use std::path::PathBuf;
 
-    // Create docs directory
-    let docs_dir = PathBuf::from("docs");
+    // Keep generated test summaries out of the workspace root.
+    let docs_dir = PathBuf::from("doc/08_tracking/test");
     fs::create_dir_all(&docs_dir)?;
 
     // Build spec results structure for formatters
@@ -356,7 +356,7 @@ fn generate_markdown_doc(docs_dir: &Path, result: &TestRunResult) -> Result<(), 
         };
         let file_name = parts.last().unwrap_or(&"");
         let spec_doc = if file_name.ends_with("_spec.spl") {
-            format!("spec/{}.md", file_name.trim_end_matches(".spl"))
+            format!("doc/06_spec/{}.md", file_name.trim_end_matches(".spl"))
         } else {
             String::new()
         };

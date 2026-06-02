@@ -26,6 +26,12 @@
 | **tmp/** | Local transient cache | Runtime scratch (gitignored) |
 | **target/** | Cargo/Rust build output | Rust compilation (gitignored) |
 | **bootstrap/** | Bootstrap artifacts | Bootstrap stages (gitignored) |
+| **.agents/** | Agent skills and workflow helpers | LLM development pipeline |
+| **.claude/** | Claude Code integration | Agent definitions, skills, templates |
+| **.codex/** | Codex integration | Skills and local Codex configuration |
+| **.gemini/** | Gemini integration | Gemini workflow configuration |
+| **.github/** | GitHub automation | CI and repository workflows |
+| **.spipe/** | SPipe pipeline state | Local/test pipeline coordination |
 
 ---
 
@@ -51,6 +57,12 @@
 | `.mcp.json` | MCP server definitions |
 | `.jscpd.json` | Copy-paste detector config |
 | `.dockerignore` | Docker build excludes |
+| `.agents/` | Agent skills and workflow helpers |
+| `.claude/` | Claude Code integration |
+| `.codex/` | Codex integration |
+| `.gemini/` | Gemini workflow configuration |
+| `.github/` | GitHub automation |
+| `.spipe/` | SPipe pipeline state |
 
 **No other files at root.** Temp files, build artifacts, compiler intermediates,
 and test outputs must go to `build/`, `tmp/`, or `target/`.
