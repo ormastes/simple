@@ -11,15 +11,32 @@ evidence.
 """
 
 use std.spec.*
+use app.gui_perf.macos_smf_dynlib_evidence_core.{
+    gui_mac_smf_dynlib_select_stdout_row,
+    gui_mac_smf_dynlib_row_has,
+    gui_mac_smf_dynlib_row_unsigned_i64,
+    gui_mac_smf_dynlib_accepts_transcript
+}
 
 extern fn rt_platform_name() -> text
+extern fn rt_file_read_text(path: text) -> text
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _transcript_path() -> text:
+    "build/gui/macos_smf_dynlib_release_gate_system_spec_transcript.log"
 
 fn _run_gate() -> (text, text, i32):
     rt_process_run_timeout(
         "/bin/sh",
-        ["-c", "SIMPLE_LIB=src src/compiler_rust/target/debug/simple run src/app/gui_perf/macos_smf_dynlib_release_gate.spl"],
+        ["-c", "SIMPLE_GUI_DYNLIB_TRANSCRIPT=" + _transcript_path() + " SIMPLE_LIB=src src/compiler_rust/target/debug/simple run src/app/gui_perf/macos_smf_dynlib_release_gate.spl"],
         300000
+    )
+
+fn _run_transcript_check() -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        ["-c", "SIMPLE_GUI_DYNLIB_TRANSCRIPT=" + _transcript_path() + " SIMPLE_LIB=src src/compiler_rust/target/debug/simple run src/app/gui_perf/macos_smf_dynlib_transcript_check.spl"],
+        30000
     )
 
 describe "macOS GUI SMF dynlib release gate":
@@ -40,6 +57,23 @@ describe "macOS GUI SMF dynlib release gate":
             expect(stdout.contains("dynload=smf_dynlib")).to_equal(true)
             expect(stdout.contains("host_dynload=sffi")).to_equal(true)
             expect(stdout.contains("call_source=dynlib_symbol_call")).to_equal(true)
+            expect(stdout.contains("transcript=" + _transcript_path())).to_equal(true)
+            val transcript = rt_file_read_text(_transcript_path())
+            expect(gui_mac_smf_dynlib_accepts_transcript(transcript)).to_equal(true)
+            val transcript_check = _run_transcript_check()
+            expect(transcript_check[2]).to_equal(0)
+            expect(transcript_check[0].contains("GUI_MAC_SMF_DYNLIB_TRANSCRIPT status=pass")).to_equal(true)
+            val probe = gui_mac_smf_dynlib_select_stdout_row(transcript, "GUI_DYNLIB_PERF")
+            expect(gui_mac_smf_dynlib_row_has(probe, "artifact", "build/gui/pure_gui_hot.smf")).to_equal(true)
+            expect(gui_mac_smf_dynlib_row_has(probe, "dynlib_path", "build/gui/pure_gui_hot.smf.extracted.dylib")).to_equal(true)
+            expect(gui_mac_smf_dynlib_row_has(probe, "loader", "smf_dynlib")).to_equal(true)
+            expect(gui_mac_smf_dynlib_row_has(probe, "dynload", "smf_dynlib")).to_equal(true)
+            expect(gui_mac_smf_dynlib_row_has(probe, "host_dynload", "sffi")).to_equal(true)
+            expect(gui_mac_smf_dynlib_row_has(probe, "call_source", "dynlib_symbol_call")).to_equal(true)
+            expect(gui_mac_smf_dynlib_row_has(probe, "samples", "128")).to_equal(true)
+            expect(gui_mac_smf_dynlib_row_has(probe, "expected_samples", "128")).to_equal(true)
+            expect(gui_mac_smf_dynlib_row_has(probe, "threshold_us", "1000")).to_equal(true)
+            expect(gui_mac_smf_dynlib_row_unsigned_i64(probe, "p99_us")).to_be_less_than(1000)
         else:
             expect(code).to_equal(1)
             expect(stdout.contains("GUI_MAC_SMF_DYNLIB_EVIDENCE status=skip")).to_equal(true)
