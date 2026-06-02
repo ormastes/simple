@@ -2938,6 +2938,22 @@ expect(_eval_str("var w = require('stream').Writable(); w.cork(); w.destroy(); w
 
 </details>
 
+#### reports bounded writable option metadata
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var w = require('stream').Writable(); w.writableObjectMode + ':' + w.writableDefaultEncoding + ':' + w.writableDecodeStrings")).to_equal("false:utf8:true")
+expect(_eval_str("var opts = {}; opts.objectMode = true; opts.defaultEncoding = 'latin1'; opts.decodeStrings = false; var w = require('stream').Writable(opts); w.writableObjectMode + ':' + w.writableDefaultEncoding + ':' + w.writableDecodeStrings")).to_equal("true:latin1:false")
+expect(_eval_str("var opts = {}; opts.defaultEncoding = ''; var w = require('stream').Writable(opts); w.writableDefaultEncoding")).to_equal("utf8")
+```
+
+</details>
+
 #### caches stream module state across repeated require calls
 
 <details>
@@ -4272,8 +4288,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 273 |
-| Active scenarios | 273 |
+| Total scenarios | 274 |
+| Active scenarios | 274 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
