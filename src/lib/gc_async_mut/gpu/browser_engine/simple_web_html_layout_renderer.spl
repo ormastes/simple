@@ -32,10 +32,11 @@ class HNode:
     style_attr: text   # raw style="" value
     class_attr: text
     id_attr: text
+    src_attr: text
     parent: i64        # index of parent in the arena (-1 for root)
 
 fn mk_node(tag: text, parent: i64) -> HNode:
-    HNode(tag: tag, text_data: "", style_attr: "", class_attr: "", id_attr: "", parent: parent)
+    HNode(tag: tag, text_data: "", style_attr: "", class_attr: "", id_attr: "", src_attr: "", parent: parent)
 
 # ---------------------------------------------------------------------------
 # Position-aware string find (works around index_of(needle,pos) ignoring pos)
@@ -158,6 +159,7 @@ fn parse_html(html: text) -> [HNode]:
         node.class_attr = attr_value(inner, "class")
         node.id_attr = attr_value(inner, "id")
         node.style_attr = attr_value(inner, "style")
+        node.src_attr = attr_value(inner, "src")
         nodes.push(node)
         val self_close = inner.substring(inner.len() - 1, inner.len()) == "/"
         if name == "style":
@@ -270,27 +272,69 @@ class Style:
     bg: u32
     fg: u32
     font_size: i32
+    width: i32
+    height: i32
+    min_height: i32
+    min_height_vh: i32
+    flex_grow: i32
     pad_l: i32
     pad_t: i32
     pad_r: i32
     pad_b: i32
     margin_t: i32
     margin_b: i32
+    gap: i32
+    border_w: i32
+    border_color: u32
     display: text       # block / inline / none
     text_align: text
     bold: bool
 
 fn default_style() -> Style:
-    Style(bg: 0u32, fg: argb(20, 20, 24), font_size: 16, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, display: "block", text_align: "left", bold: false)
+    Style(bg: 0u32, fg: argb(20, 20, 24), font_size: 16, width: -1, height: -1, min_height: -1, min_height_vh: -1, flex_grow: 0, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, gap: 0, border_w: 0, border_color: 0u32, display: "block", text_align: "left", bold: false)
 
 fn inherit_style(p: Style) -> Style:
-    Style(bg: 0u32, fg: p.fg, font_size: p.font_size, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, display: p.display, text_align: p.text_align, bold: p.bold)
+    Style(bg: 0u32, fg: p.fg, font_size: p.font_size, width: -1, height: -1, min_height: -1, min_height_vh: -1, flex_grow: 0, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, gap: 0, border_w: 0, border_color: 0u32, display: p.display, text_align: p.text_align, bold: p.bold)
 
 fn is_inline_tag(tag: text) -> bool:
     tag == "a" or tag == "span" or tag == "b" or tag == "strong" or tag == "em" or tag == "i" or tag == "small" or tag == "code" or tag == "#text"
 
 fn is_heading(tag: text) -> bool:
     tag == "h1" or tag == "h2" or tag == "h3" or tag == "h4" or tag == "h5" or tag == "h6"
+
+fn apply_padding_shorthand(st: Style, raw: text) -> Style:
+    val trimmed = raw.trim()
+    val parts = trimmed.split(" ")
+    if parts.len() >= 4:
+        st.pad_t = parse_int(parts[0])
+        st.pad_r = parse_int(parts[1])
+        st.pad_b = parse_int(parts[2])
+        st.pad_l = parse_int(parts[3])
+    elif parts.len() >= 2:
+        val v = parse_int(parts[0])
+        val h = parse_int(parts[1])
+        st.pad_t = v
+        st.pad_b = v
+        st.pad_l = h
+        st.pad_r = h
+    elif parts.len() >= 1:
+        val p = parse_int(parts[0])
+        st.pad_l = p
+        st.pad_t = p
+        st.pad_r = p
+        st.pad_b = p
+    st
+
+fn parse_border_color(raw: text) -> u32:
+    val trimmed = raw.trim()
+    val parts = trimmed.split(" ")
+    var i = parts.len() - 1
+    while i >= 0:
+        val c = parse_color(parts[i])
+        if c != 0u32:
+            return c
+        i = i - 1
+    0u32
 
 # apply a declaration block onto a style
 fn apply_decls(st: Style, decls: text) -> Style:
@@ -312,6 +356,32 @@ fn apply_decls(st: Style, decls: text) -> Style:
         val v = parse_int(fs)
         if v > 0:
             st.font_size = v
+    val width = decl_get(decls, "width")
+    if width.len() > 0:
+        val w = parse_int(width)
+        if w > 0:
+            st.width = w
+    val height = decl_get(decls, "height")
+    if height.len() > 0:
+        val h = parse_int(height)
+        if h > 0:
+            st.height = h
+    val min_height = decl_get(decls, "min-height")
+    if min_height.len() > 0:
+        val mh = parse_int(min_height)
+        if mh > 0:
+            if min_height.index_of("vh") >= 0:
+                st.min_height_vh = mh
+            else:
+                st.min_height = mh
+    val flex = decl_get(decls, "flex")
+    if flex.len() > 0:
+        val fg = parse_int(flex)
+        if fg > 0:
+            st.flex_grow = fg
+    val display = decl_get(decls, "display")
+    if display.len() > 0:
+        st.display = display
     val ta = decl_get(decls, "text-align")
     if ta.len() > 0:
         st.text_align = ta
@@ -321,11 +391,23 @@ fn apply_decls(st: Style, decls: text) -> Style:
             st.bold = true
     val pad = decl_get(decls, "padding")
     if pad.len() > 0:
-        val p = parse_int(pad)
-        st.pad_l = p
-        st.pad_t = p
-        st.pad_r = p
-        st.pad_b = p
+        st = apply_padding_shorthand(st, pad)
+    val gap = decl_get(decls, "gap")
+    if gap.len() > 0:
+        st.gap = parse_int(gap)
+    val border = decl_get(decls, "border")
+    if border.len() > 0:
+        val bw = parse_int(border)
+        if bw > 0:
+            st.border_w = bw
+        val bc = parse_border_color(border)
+        if bc != 0u32:
+            st.border_color = bc
+    val border_color = decl_get(decls, "border-color")
+    if border_color.len() > 0:
+        val bc2 = parse_color(border_color)
+        if bc2 != 0u32:
+            st.border_color = bc2
     val mb = decl_get(decls, "margin-bottom")
     if mb.len() > 0:
         st.margin_b = parse_int(mb)
@@ -429,15 +511,29 @@ fn simple_match(sel: text, tag: text, cls: text, id: text) -> bool:
     if colon >= 0:
         base = base.substring(0, colon)
     if base.substring(0, 1) == ".":
-        val want = base.substring(1, base.len())
-        return class_has(cls, want)
+        val class_tail = base.substring(1, base.len())
+        val wants = class_tail.split(".")
+        var wi = 0
+        while wi < wants.len():
+            if wants[wi].len() > 0 and not class_has(cls, wants[wi]):
+                return false
+            wi = wi + 1
+        return true
     if base.substring(0, 1) == "#":
         return id == base.substring(1, base.len())
     val dot = base.index_of(".")
     if dot >= 0:
         val t = base.substring(0, dot)
-        val want = base.substring(dot + 1, base.len())
-        return t == tag and class_has(cls, want)
+        if t != tag:
+            return false
+        val class_tail = base.substring(dot + 1, base.len())
+        val wants = class_tail.split(".")
+        var wi = 0
+        while wi < wants.len():
+            if wants[wi].len() > 0 and not class_has(cls, wants[wi]):
+                return false
+            wi = wi + 1
+        return true
     base == tag
 
 fn class_has(cls: text, want: text) -> bool:
@@ -711,6 +807,96 @@ fn fb_rect(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color:
         py = py + 1
     out
 
+fn hex_pair_to_int(a: text, b: text) -> i32:
+    hex_val(a) * 16 + hex_val(b)
+
+fn percent_decode(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch == "%" and i + 2 < s.len():
+            val v = hex_pair_to_int(s.substring(i + 1, i + 2), s.substring(i + 2, i + 3))
+            if v == 35:
+                out = out + "#"
+            elif v == 60:
+                out = out + "<"
+            elif v == 62:
+                out = out + ">"
+            elif v == 32:
+                out = out + " "
+            elif v == 34:
+                out = out + "\""
+            elif v == 39:
+                out = out + "'"
+            elif v == 47:
+                out = out + "/"
+            elif v == 61:
+                out = out + "="
+            elif v == 58:
+                out = out + ":"
+            elif v == 59:
+                out = out + ";"
+            else:
+                out = out + ch + s.substring(i + 1, i + 3)
+            i = i + 3
+        elif ch == "+":
+            out = out + " "
+            i = i + 1
+        else:
+            out = out + ch
+            i = i + 1
+    out
+
+fn scale_coord(v: i32, from_size: i32, to_size: i32) -> i32:
+    if from_size <= 0:
+        return v
+    (v * to_size) / from_size
+
+fn paint_svg_rects(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, src: text, fallback: u32) -> [u32]:
+    var out = fb
+    if src.index_of("data:image/svg+xml") != 0:
+        return fb_rect(out, fbw, fbh, x, y, w, h, fallback)
+    val comma = src.index_of(",")
+    if comma < 0:
+        return fb_rect(out, fbw, fbh, x, y, w, h, fallback)
+    val encoded = src.substring(comma + 1, src.len())
+    val svg = percent_decode(encoded)
+    val svg_w_raw = attr_value(svg, "width")
+    val svg_h_raw = attr_value(svg, "height")
+    var svg_w = parse_int(svg_w_raw)
+    var svg_h = parse_int(svg_h_raw)
+    if svg_w <= 0:
+        svg_w = w
+    if svg_h <= 0:
+        svg_h = h
+    var pos = 0
+    var painted = false
+    while pos < svg.len():
+        val rp = find_from(svg, "<rect", pos)
+        if rp < 0:
+            break
+        val gt = find_from(svg, ">", rp)
+        if gt < 0:
+            break
+        val inner = svg.substring(rp + 5, gt)
+        val fill = parse_color(attr_value(inner, "fill"))
+        if fill != 0u32:
+            var rx = parse_int(attr_value(inner, "x"))
+            var ry = parse_int(attr_value(inner, "y"))
+            var rw = parse_int(attr_value(inner, "width"))
+            var rh = parse_int(attr_value(inner, "height"))
+            if rw <= 0:
+                rw = svg_w
+            if rh <= 0:
+                rh = svg_h
+            out = fb_rect(out, fbw, fbh, x + scale_coord(rx, svg_w, w), y + scale_coord(ry, svg_h, h), scale_coord(rw, svg_w, w), scale_coord(rh, svg_h, h), fill)
+            painted = true
+        pos = gt + 1
+    if not painted:
+        out = fb_rect(out, fbw, fbh, x, y, w, h, fallback)
+    out
+
 # draw one glyph at (x,y) scaled by `scale`
 fn fb_glyph(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, scale: i32) -> [u32]:
     var out = fb
@@ -825,7 +1011,103 @@ fn descendant_text(nodes: [HNode], i: i32) -> text:
         c = c + 1
     out
 
-fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32]) -> LayoutResult:
+fn has_children(nodes: [HNode], i: i32) -> bool:
+    var c = i + 1
+    while c < nodes.len():
+        if nodes[c].parent == i:
+            return true
+        c = c + 1
+    false
+
+fn layout_inline_children(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32]) -> LayoutResult:
+    var obx = bx
+    var oby = by
+    var obw = bw
+    var obh = bh
+    val st = styles[i]
+    var cx = x + st.border_w + st.pad_l
+    val content_y = y + st.border_w + st.pad_t
+    var c = i + 1
+    var laid = 0
+    while c < nodes.len():
+        if nodes[c].parent == i:
+            if laid > 0:
+                cx = cx + st.gap
+            val cst = styles[c]
+            var cw = cst.width
+            var ch = cst.height
+            if nodes[c].tag == "#text":
+                val txt = nodes[c].text_data.trim()
+                cw = txt.len() * char_w(cst.font_size)
+                ch = line_h(cst.font_size)
+            if cw < 0:
+                cw = char_w(cst.font_size)
+            if ch < 0:
+                ch = line_h(cst.font_size)
+            var cy = content_y + ((h - st.border_w - st.pad_t - st.pad_b - ch) / 2)
+            if cy < content_y:
+                cy = content_y
+            obx[c] = cx
+            oby[c] = cy
+            obw[c] = cw
+            obh[c] = ch
+            cx = cx + cw
+            laid = laid + 1
+        c = c + 1
+    LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: h)
+
+fn flex_target_height(st: Style, natural_h: i32, viewport_h: i32) -> i32:
+    var target = natural_h
+    if st.height > target:
+        target = st.height
+    if st.min_height > target:
+        target = st.min_height
+    if st.min_height_vh > 0:
+        val vh = (viewport_h * st.min_height_vh) / 100
+        if vh > target:
+            target = vh
+    target
+
+fn shift_direct_child(nodes: [HNode], child_idx: i32, shift_y: i32, by: [i32]) -> [i32]:
+    var oby = by
+    if shift_y == 0:
+        return oby
+    var c = child_idx
+    while c < nodes.len():
+        if c == child_idx or has_ancestor_index(nodes, c, child_idx.to_i64()):
+            oby[c] = oby[c] + shift_y
+        c = c + 1
+    oby
+
+fn grow_flex_children(nodes: [HNode], styles: [Style], parent_idx: i32, extra_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32]) -> LayoutResult:
+    var obx = bx
+    var oby = by
+    var obw = bw
+    var obh = bh
+    if extra_h <= 0:
+        return LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: bh[parent_idx])
+    var flex_total = 0
+    var c = parent_idx + 1
+    while c < nodes.len():
+        if nodes[c].parent == parent_idx and styles[c].flex_grow > 0:
+            flex_total = flex_total + styles[c].flex_grow
+        c = c + 1
+    if flex_total <= 0:
+        return LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: bh[parent_idx])
+    var shifted = 0
+    c = parent_idx + 1
+    while c < nodes.len():
+        if nodes[c].parent == parent_idx:
+            if shifted > 0:
+                oby = shift_direct_child(nodes, c, shifted, oby)
+            if styles[c].flex_grow > 0:
+                val add_h = (extra_h * styles[c].flex_grow) / flex_total
+                obh[c] = obh[c] + add_h
+                shifted = shifted + add_h
+        c = c + 1
+    LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: bh[parent_idx])
+
+fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32]) -> LayoutResult:
     var obx = bx
     var oby = by
     var obw = bw
@@ -857,34 +1139,59 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, bx: [
         obh[i] = h
         return LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: h)
     if nodes[i].tag == "img":
-        var img_w = 24
-        var img_h = 16
+        var img_w = if st.width > 0: st.width else: 24
+        var img_h = if st.height > 0: st.height else: 16
         if img_w > w:
             img_w = w
         obw[i] = img_w
         obh[i] = img_h
         return LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: img_h)
-    val ix = x + st.pad_l
-    var iw = w - st.pad_l - st.pad_r
+    if nodes[i].tag == "button" or st.display == "inline-flex":
+        var button_h = st.font_size + st.pad_t + st.pad_b + (st.border_w * 2)
+        if button_h < 14:
+            button_h = 14
+        obh[i] = button_h
+        return layout_inline_children(nodes, styles, i, x, y, w, button_h, obx, oby, obw, obh)
+    if st.width > 0 and st.height > 0 and not has_children(nodes, i):
+        obw[i] = st.width
+        obh[i] = st.height
+        return LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: st.height)
+    val ix = x + st.border_w + st.pad_l
+    var iw = w - (st.border_w * 2) - st.pad_l - st.pad_r
     if iw < 1:
         iw = 1
-    var cy = y + st.pad_t
+    var cy = y + st.border_w + st.pad_t
     var c = i + 1
+    var laid_children = 0
     while c < nodes.len():
         if nodes[c].parent == i:
             val cst = styles[c]
+            if laid_children > 0:
+                cy = cy + st.gap
             cy = cy + cst.margin_t
-            val child = layout(nodes, styles, c, ix, cy, iw, obx, oby, obw, obh)
+            val child = layout(nodes, styles, c, ix, cy, iw, viewport_h, obx, oby, obw, obh)
             obx = child.bx
             oby = child.by
             obw = child.bw
             obh = child.bh
             val ch = child.height
             cy = cy + ch + cst.margin_b
+            if ch > 0:
+                laid_children = laid_children + 1
         c = c + 1
     var h = (cy - y) + st.pad_b
+    h = h + st.border_w
     if h < 1:
         h = 1
+    val target_h = flex_target_height(st, h, viewport_h)
+    if target_h > h and st.display.index_of("flex") >= 0:
+        val grown = grow_flex_children(nodes, styles, i, target_h - h, obx, oby, obw, obh)
+        obx = grown.bx
+        oby = grown.by
+        obw = grown.bw
+        obh = grown.bh
+    if target_h > h:
+        h = target_h
     obh[i] = h
     LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: h)
 
@@ -900,6 +1207,14 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         val st = styles[i]
         if not is_hidden_html_node(nodes, i) and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
             out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg)
+            if st.border_w > 0 and st.border_color != 0u32:
+                var bi = 0
+                while bi < st.border_w:
+                    out = fb_rect(out, fbw, fbh, bx[i] + bi, by[i] + bi, bw[i] - (bi * 2), 1, st.border_color)
+                    out = fb_rect(out, fbw, fbh, bx[i] + bi, by[i] + bh[i] - 1 - bi, bw[i] - (bi * 2), 1, st.border_color)
+                    out = fb_rect(out, fbw, fbh, bx[i] + bi, by[i] + bi, 1, bh[i] - (bi * 2), st.border_color)
+                    out = fb_rect(out, fbw, fbh, bx[i] + bw[i] - 1 - bi, by[i] + bi, 1, bh[i] - (bi * 2), st.border_color)
+                    bi = bi + 1
         i = i + 1
     # text on top
     i = 0
@@ -907,37 +1222,11 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         if is_hidden_html_node(nodes, i):
             pass
         elif nodes[i].tag == "img":
-            out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(37, 99, 235))
-            out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], 2, argb(15, 23, 42))
-            out = fb_rect(out, fbw, fbh, bx[i], by[i] + bh[i] - 2, bw[i], 2, argb(15, 23, 42))
-            out = fb_rect(out, fbw, fbh, bx[i] + 5, by[i] + 5, 7, 7, argb(245, 158, 11))
-            out = fb_rect(out, fbw, fbh, bx[i] + 14, by[i] + 7, 7, 6, argb(34, 197, 94))
+            val fallback = if styles[i].bg != 0u32: styles[i].bg else: argb(37, 99, 235)
+            out = paint_svg_rects(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], nodes[i].src_attr, fallback)
         elif nodes[i].tag == "button":
-            val st = styles[i]
-            val scale = glyph_scale(st.font_size)
-            val label = descendant_text(nodes, i)
-            var button_w = bw[i]
-            var button_h = bh[i]
-            val min_w = label.len() * char_w(st.font_size) + 20
-            if button_w < min_w:
-                button_w = min_w
-            if button_h < 14:
-                button_h = 14
-            if bx[i] + button_w > fbw:
-                button_w = fbw - bx[i]
-            out = fb_rect(out, fbw, fbh, bx[i], by[i], button_w, button_h, argb(203, 213, 225))
-            out = fb_rect(out, fbw, fbh, bx[i], by[i], button_w, 1, argb(100, 116, 139))
-            out = fb_rect(out, fbw, fbh, bx[i], by[i] + button_h - 1, button_w, 1, argb(100, 116, 139))
-            out = fb_rect(out, fbw, fbh, bx[i], by[i], 1, button_h, argb(100, 116, 139))
-            out = fb_rect(out, fbw, fbh, bx[i] + button_w - 1, by[i], 1, button_h, argb(100, 116, 139))
-            var text_x = bx[i] + st.pad_l
-            if class_has(nodes[i].class_attr, "with-icon"):
-                out = fb_rect(out, fbw, fbh, bx[i] + st.pad_l, by[i] + st.pad_t + 1, 6, 6, argb(37, 99, 235))
-                out = fb_rect(out, fbw, fbh, bx[i] + st.pad_l + 2, by[i] + st.pad_t + 3, 2, 2, argb(245, 158, 11))
-                text_x = text_x + 10
-            if label.len() > 0:
-                out = fb_text(out, fbw, fbh, text_x, by[i] + st.pad_t, label, st.fg, scale)
-        elif nodes[i].tag == "#text" and not has_ancestor_tag(nodes, i, "button"):
+            pass
+        elif nodes[i].tag == "#text":
             val st = styles[i]
             val txt = nodes[i].text_data.trim()
             if txt.len() > 0 and by[i] < fbh:
@@ -976,7 +1265,7 @@ pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32,
         bw: [0; nodes.len()],
         bh: [0; nodes.len()]
     )
-    val laid_out = layout(nodes, styles, 0, 0, 0, width, boxes.bx, boxes.by, boxes.bw, boxes.bh)
+    val laid_out = layout(nodes, styles, 0, 0, 0, width, height, boxes.bx, boxes.by, boxes.bw, boxes.bh)
     val white = argb(255, 255, 255)
     var fb: [u32] = [white; width * height]
     paint(nodes, styles, laid_out.bx, laid_out.by, laid_out.bw, laid_out.bh, fb, width, height)
