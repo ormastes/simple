@@ -1,25 +1,27 @@
 # Simple Web Renderer TTF Glyph Metrics Gap
 
 Date: 2026-05-06
-Status: Resolved 2026-05-27
+Status: Resolved for checked-in offline corpus; production parity open
 
 ## Summary
 
-The famous-site corpus comparison now wraps the `site_0_google` text with
-browser-like word boundaries, but bitwise parity remains divergent because the
-Simple Web Renderer does not place and blend TTF glyphs with Chrome-compatible
-metrics.
+The checked-in famous-site corpus comparison now wraps the `site_0_google` text
+with browser-like word boundaries. Production rendering parity remains divergent
+because the Simple Web Renderer does not yet place and blend TTF glyphs with
+Chrome-compatible metrics and compositing.
 
 ## Current Status
 
-Resolved 2026-05-27. The checked-in 132-sample famous-site corpus is exact
-against the checked-in Chrome oracles, and the focused corpus spec passes 33/33
-in interpreter mode.
+Resolved 2026-05-27 for the checked-in offline corpus. The checked-in
+132-sample famous-site corpus is exact against the checked-in Chrome oracles,
+and the focused corpus spec passes 45/45 in interpreter mode. This does not
+claim open production Chrome glyph/compositing parity; the production renderer
+still tracks Chrome-compatible text/font/compositing as a separate blocker.
 
 Current verification:
 
 - `bin/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --no-cache --timeout 80`
-  passes 33/33.
+  passes 45/45.
 - `node tools/electron-shell/verify_famous_site_corpus_completion.js`
   reports `status: PASS`, `reportCount: 132`, `accepted: 132`, and
   `divergent: 0`.
@@ -73,7 +75,7 @@ Current focused text/compositing evidence:
 
 - Chrome oracle for `site_0_google` at 160x120:
   - dark text bbox: `x=8..98 y=10..75`
-- Current refreshed overflow-alpha corpus output:
+- Historical refreshed overflow-alpha corpus output from rejected overlay work:
   - `site_0_google`: `different_pixels: 2532`,
     `match_pct_10000: 8681`, `perceptual_pct_10000: 8912`
   - `site_0_google` overflow coverage: `963` expected non-white pixels,
@@ -83,7 +85,7 @@ Current focused text/compositing evidence:
   - `site_44_the_new_york_times`: `different_pixels: 3435`
   - `site_44_the_new_york_times` overflow coverage: `1608` expected,
     `1258` actual, `350` missing, `actualPct10000: 7823`
-  - Full corpus summary: `132` reports, `0` exact, `0` accepted,
+  - Historical full corpus summary: `132` reports, `0` exact, `0` accepted,
     `132` divergent; worst exact target remains
     `site_44_the_new_york_times`, while the worst overflow coverage target is
     `site_102_docker_hub` with the same `1608/1258/350/7823` coverage tuple.
@@ -496,7 +498,8 @@ oracles:
   `divergent: 0`, `staleSuspectCount: 0`, `staleReportCount: 0`, and no
   missing metric fonts.
 - `bin/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --no-cache`
-  passes all 33 corpus checks, including the exact completion gate.
+  passes all 45 corpus checks, including the exact completion gate and focused
+  production glyph-compositing diagnostics.
 - `bin/simple test test/unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl --mode=interpreter --no-cache`
   passes all 56 BrowserRenderer checks.
 - `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/browser_renderer.spl`

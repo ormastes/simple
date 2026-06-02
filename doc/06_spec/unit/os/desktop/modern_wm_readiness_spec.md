@@ -24,7 +24,7 @@ Verifies one combined readiness report for the modern Web WM, SimpleOS
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 74 lines folded for reproduction.
+Runnable source: 88 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -54,6 +54,10 @@ expect(report.os_render_taskbar_interaction_ready)
 expect(report.os_render_dock_magnification_ready)
 expect(report.os_render_notification_feedback_ready)
 expect(report.os_render_notification_max_width_px).to_equal(360)
+expect(report.os_render_notification_center_ready)
+expect(report.os_render_notification_center_max_width_px).to_equal(340)
+expect(report.os_render_live_activity_ready)
+expect(report.os_render_live_activity_max_width_px).to_equal(420)
 expect(report.os_render_workspace_switcher_ready)
 expect(report.os_render_workspace_switcher_max_width_px).to_equal(360)
 expect(report.os_render_keyboard_shortcut_overlay_ready)
@@ -62,6 +66,12 @@ expect(report.os_render_app_launcher_ready)
 expect(report.os_render_app_launcher_max_width_px).to_equal(520)
 expect(report.os_render_context_menu_ready)
 expect(report.os_render_context_menu_max_width_px).to_equal(280)
+expect(report.os_render_snap_layouts_ready)
+expect(report.os_render_snap_layouts_max_width_px).to_equal(360)
+expect(report.os_render_window_switcher_ready)
+expect(report.os_render_window_switcher_max_width_px).to_equal(460)
+expect(report.os_render_quick_settings_ready)
+expect(report.os_render_quick_settings_max_width_px).to_equal(300)
 expect(report.os_render_hot_corners_ready)
 expect(report.os_render_hot_corner_max_size_px).to_equal(44)
 expect(report.os_render_resize_hud_ready)
@@ -72,6 +82,10 @@ expect(report.os_render_taskbar_preview_ready)
 expect(report.os_render_taskbar_preview_max_width_px).to_equal(320)
 expect(report.os_render_stage_rail_ready)
 expect(report.os_render_stage_rail_max_width_px).to_equal(88)
+expect(report.os_render_screen_capture_ready)
+expect(report.os_render_screen_capture_max_width_px).to_equal(560)
+expect(report.os_render_clipboard_history_ready)
+expect(report.os_render_clipboard_history_max_width_px).to_equal(360)
 expect(report.os_render_contrast_ratio_x100).to_be_greater_than(449)
 expect(report.os_render_bounded_layout)
 expect(report.os_render_touch_target_min_height_px).to_equal(44)
@@ -111,7 +125,7 @@ expect(report.notes[0]).to_equal("modern WM readiness passed")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 73 lines folded for reproduction.
+Runnable source: 87 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -142,6 +156,10 @@ expect(summary).to_contain("os_render_taskbar_interaction=true")
 expect(summary).to_contain("os_render_dock_magnification=true")
 expect(summary).to_contain("os_render_notification_feedback=true")
 expect(summary).to_contain("os_render_notification_max=360px")
+expect(summary).to_contain("os_render_notification_center=true")
+expect(summary).to_contain("os_render_notification_center_max=340px")
+expect(summary).to_contain("os_render_live_activity=true")
+expect(summary).to_contain("os_render_live_activity_max=420px")
 expect(summary).to_contain("os_render_workspace_switcher=true")
 expect(summary).to_contain("os_render_workspace_switcher_max=360px")
 expect(summary).to_contain("os_render_keyboard_shortcuts=true")
@@ -150,6 +168,12 @@ expect(summary).to_contain("os_render_app_launcher=true")
 expect(summary).to_contain("os_render_app_launcher_max=520px")
 expect(summary).to_contain("os_render_context_menu=true")
 expect(summary).to_contain("os_render_context_menu_max=280px")
+expect(summary).to_contain("os_render_snap_layouts=true")
+expect(summary).to_contain("os_render_snap_layouts_max=360px")
+expect(summary).to_contain("os_render_window_switcher=true")
+expect(summary).to_contain("os_render_window_switcher_max=460px")
+expect(summary).to_contain("os_render_quick_settings=true")
+expect(summary).to_contain("os_render_quick_settings_max=300px")
 expect(summary).to_contain("os_render_hot_corners=true")
 expect(summary).to_contain("os_render_hot_corner_max=44px")
 expect(summary).to_contain("os_render_resize_hud=true")
@@ -160,6 +184,10 @@ expect(summary).to_contain("os_render_taskbar_preview=true")
 expect(summary).to_contain("os_render_taskbar_preview_max=320px")
 expect(summary).to_contain("os_render_stage_rail=true")
 expect(summary).to_contain("os_render_stage_rail_max=88px")
+expect(summary).to_contain("os_render_screen_capture=true")
+expect(summary).to_contain("os_render_screen_capture_max=560px")
+expect(summary).to_contain("os_render_clipboard_history=true")
+expect(summary).to_contain("os_render_clipboard_history_max=360px")
 expect(summary).to_contain("os_render_contrast_ratio_x100=")
 expect(summary).to_contain("os_render_bounded_layout=true")
 expect(summary).to_contain("os_render_touch_target_min=44px")

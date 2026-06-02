@@ -54,6 +54,13 @@ struct SiteCorpusPair:
     max_channel_diff: i32
     accepted: bool
 
+struct RegionTextInkDelta:
+    label: text
+    different_pixels: i32
+    chrome_exact_black_pixels: i32
+    simple_background_mismatch_pixels: i32
+    status: text
+
 fn default_site_corpus_compat_opts() -> SiteCorpusCompatOpts:
     SiteCorpusCompatOpts(
         only: "",
@@ -255,9 +262,16 @@ fn _repeat_text_site(s: text, count: i32) -> text:
 fn _rgb_text(color: u32) -> text:
     ((color >> 16) & 0xFF).to_string() + " " + ((color >> 8) & 0xFF).to_string() + " " + (color & 0xFF).to_string() + "\n"
 
-fn _region_text_ink_delta_sdn(label: text, chrome_pixels: [u32], simple_pixels: [u32], width: i32, height: i32, left: i32, top: i32, right: i32, bottom: i32) -> text:
+fn _format_region_text_ink_delta_sdn(delta: RegionTextInkDelta) -> text:
+    if delta.status != "":
+        return "(region name: \"" + delta.label + "\" status: \"" + delta.status + "\")"
+    "(region name: \"" + delta.label + "\" different_pixels: " + delta.different_pixels.to_string() +
+        " chrome_exact_black_pixels: " + delta.chrome_exact_black_pixels.to_string() +
+        " simple_background_mismatch_pixels: " + delta.simple_background_mismatch_pixels.to_string() + ")"
+
+fn _region_text_ink_delta(label: text, chrome_pixels: [u32], simple_pixels: [u32], width: i32, height: i32, left: i32, top: i32, right: i32, bottom: i32) -> RegionTextInkDelta:
     if width <= 0 or height <= 0 or chrome_pixels.len() != simple_pixels.len():
-        return "(region name: \"" + label + "\" status: \"invalid_pixels\")"
+        return RegionTextInkDelta(label: label, different_pixels: 0, chrome_exact_black_pixels: 0, simple_background_mismatch_pixels: 0, status: "invalid_pixels")
     var x0 = left
     var y0 = top
     var x1 = right
@@ -271,7 +285,7 @@ fn _region_text_ink_delta_sdn(label: text, chrome_pixels: [u32], simple_pixels: 
     if y1 > height:
         y1 = height
     if x0 >= x1 or y0 >= y1:
-        return "(region name: \"" + label + "\" status: \"empty\")"
+        return RegionTextInkDelta(label: label, different_pixels: 0, chrome_exact_black_pixels: 0, simple_background_mismatch_pixels: 0, status: "empty")
     val background_rgb = simple_pixels[y0 * width + x0] & 0x00FFFFFFu32
     var different_pixels = 0
     var chrome_exact_black_pixels = 0
@@ -291,9 +305,10 @@ fn _region_text_ink_delta_sdn(label: text, chrome_pixels: [u32], simple_pixels: 
                     simple_background_mismatch_pixels = simple_background_mismatch_pixels + 1
             px = px + 1
         py = py + 1
-    "(region name: \"" + label + "\" different_pixels: " + different_pixels.to_string() +
-        " chrome_exact_black_pixels: " + chrome_exact_black_pixels.to_string() +
-        " simple_background_mismatch_pixels: " + simple_background_mismatch_pixels.to_string() + ")"
+    RegionTextInkDelta(label: label, different_pixels: different_pixels, chrome_exact_black_pixels: chrome_exact_black_pixels, simple_background_mismatch_pixels: simple_background_mismatch_pixels, status: "")
+
+fn _region_text_ink_delta_sdn(label: text, chrome_pixels: [u32], simple_pixels: [u32], width: i32, height: i32, left: i32, top: i32, right: i32, bottom: i32) -> text:
+    _format_region_text_ink_delta_sdn(_region_text_ink_delta(label, chrome_pixels, simple_pixels, width, height, left, top, right, bottom))
 
 fn _production_text_ink_delta_sdn(chrome: CaptureResult, simple: CaptureResult, opts: SiteCorpusCompatOpts) -> text:
     if not chrome.success or not simple.success:
@@ -323,6 +338,33 @@ fn _production_text_line_ink_delta_sdn(sample: SiteSample, chrome: CaptureResult
         entries.push("    (line index: " + i.to_string() + " text: \"" + _sdn_text_escape(run.line) + "\" x: " + run.x.to_string() + " y: " + run.y.to_string() + " width: " + run.width.to_string() + " region: " + region + ")")
         i = i + 1
     "(text_line_ink_delta count: " + runs.len().to_string() + "\n" + entries.join("\n") + "\n)"
+
+fn _production_glyph_compositing_signature_sdn(sample: SiteSample, chrome: CaptureResult, simple: CaptureResult, pair: SiteCorpusPair, opts: SiteCorpusCompatOpts) -> text:
+    if not chrome.success or not simple.success:
+        return "(glyph_compositing_signature status: \"capture_failed\")"
+    if chrome.pixels.len() != opts.width * opts.height or simple.pixels.len() != opts.width * opts.height:
+        return "(glyph_compositing_signature status: \"pixel_size_mismatch\")"
+    val runs = br_famous_site_corpus_layout_paint_runs(sample.html, 16, 120, 8, 8, 18)
+    var different_pixels_total = 0
+    var chrome_exact_black_pixels_total = 0
+    var simple_background_mismatch_pixels_total = 0
+    var detail_entries: [text] = []
+    var i = 0
+    while i < runs.len():
+        val run = runs[i]
+        val delta = _region_text_ink_delta("line_" + i.to_string(), chrome.pixels, simple.pixels, opts.width, opts.height, run.x, run.y, run.x + run.width, run.y + 18)
+        different_pixels_total = different_pixels_total + delta.different_pixels
+        chrome_exact_black_pixels_total = chrome_exact_black_pixels_total + delta.chrome_exact_black_pixels
+        simple_background_mismatch_pixels_total = simple_background_mismatch_pixels_total + delta.simple_background_mismatch_pixels
+        detail_entries.push("    (line index: " + i.to_string() + " text: \"" + _sdn_text_escape(run.line) + "\" x: " + run.x.to_string() + " y: " + run.y.to_string() + " width: " + run.width.to_string() + " different_pixels: " + delta.different_pixels.to_string() + " chrome_exact_black_pixels: " + delta.chrome_exact_black_pixels.to_string() + " simple_background_mismatch_pixels: " + delta.simple_background_mismatch_pixels.to_string() + ")")
+        i = i + 1
+    val unexplained = pair.different_pixels.to_i32() - different_pixels_total
+    "(glyph_compositing_signature kind: \"per_line_missing_ink_v1\" line_count: " + runs.len().to_string() +
+        " different_pixels_total: " + different_pixels_total.to_string() +
+        " unexplained_different_pixels: " + unexplained.to_string() +
+        " chrome_exact_black_pixels_total: " + chrome_exact_black_pixels_total.to_string() +
+        " simple_background_mismatch_pixels_total: " + simple_background_mismatch_pixels_total.to_string() +
+        " line_details: (glyph_compositing_line_details count: " + detail_entries.len().to_string() + "\n" + detail_entries.join("\n") + "\n  ))"
 
 fn _count_text_occurrences(haystack: text, needle: text) -> i32:
     if needle == "":
@@ -493,6 +535,7 @@ fn write_site_corpus_report(sample: SiteSample, chrome: CaptureResult, simple: C
         body = body + "  text_geometry_delta: " + _production_text_geometry_delta_sdn(sample) + "\n"
         body = body + "  text_ink_delta: " + _production_text_ink_delta_sdn(chrome, simple, opts) + "\n"
         body = body + "  text_line_ink_delta: " + _production_text_line_ink_delta_sdn(sample, chrome, simple, opts) + "\n"
+        body = body + "  glyph_compositing_signature: " + _production_glyph_compositing_signature_sdn(sample, chrome, simple, pair, opts) + "\n"
     body = body + ")\n"
     dir_create_all(famous_site_sample_baseline_dir(sample.id))
     file_write_text(report_path, body)

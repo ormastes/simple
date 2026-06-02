@@ -1,15 +1,28 @@
 # SimpleOS Hardening Evidence Matrix
 
-- status: pass
-- reason: pass
-- passed: 8/8
+- status: fail
+- reason: matrix-incomplete
+- passed: 7/9
 - executable_launch_from_fs: pass
 - ssh_shell_smf_and_exec: pass
 - shared_wm_logic: pass
 - cpu_simd_engine2d_diagram: pass
 - web_renderer_engine2d_bitmap: pass
 - simple_gui_webrenderer_bitmap: pass
-- qemu_host_counterpart_bitmap: pass
+- qemu_host_counterpart_bitmap: fail
+- qemu_gui_smf_artifact_contract: fail
+- qemu_gui_smf_artifact_contract_status: missing
+- qemu_gui_smf_artifact_contract_row: GUI_SMF_ARTIFACT_CONTRACT status=missing artifact= sha256= size=0 smf_role=-1 arch=0 embedded_dynlib=false symbol=gui_dynlib_hot_probe_tick qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64
+- qemu_guest_perf_release_gate: guest-side-simple-vs-gtk-performance
+- qemu_guest_perf_release_gate_status: blocked-unwired
+- qemu_guest_perf_release_blocker: missing-qmp-socket
+- qemu_guest_perf_harness_status: unwired
+- qemu_guest_perf_harness_reason: qemu-side-gtk-simple-perf-harness-not-wired
+- qemu_guest_perf_harness_sample_origin: none
+- qemu_guest_perf_harness_required_sample_origin: qemu-guest
+- qemu_guest_perf_harness_pending_marker: [desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_us=<positive> gtk_frame_us=<positive> iterations=<positive>
+- qemu_guest_perf_harness_marker_line: 
+- qemu_host_perf_promotes_qemu_perf: false
 - qemu_wm_simple_gui_mdi: pass
 - qemu_wm_simple_gui_mdi_ppm_anchors: pass
 - qemu_wm_simple_gui_mdi_ppm_nonblack: 779590

@@ -20,12 +20,14 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 ## Current Status
 
 - Chrome/corpus open gates are green for the bounded offline corpus and current
-  exact/no-tolerance harness. The broader production renderer still is not full
-  Chrome parity; the known blocker is Chrome-compatible text/font/compositing,
-  not corpus generation. The focused `site_0_google` text-line diagnostic now
+  exact/no-tolerance harness only. That offline-oracle success is distinct from
+  open production Chrome glyph/compositing parity: the broader production
+  renderer still is not full Chrome parity, and the known blocker is
+  Chrome-compatible text/font/compositing, not corpus generation. The focused
+  `site_0_google` text-line diagnostic now
   uses calibrated pixel-width font metrics, matches Chrome's four-line split,
   and records a first-line width of `105`px versus Chrome canvas `104.0625`px.
-  The famous-site corpus system spec passes 37/37; production pixels remain
+  The famous-site corpus system spec passes 45/45; production pixels remain
   divergent (`differentPixels: 2717`) and are tracked as the next glyph paint
   and compositing blocker. Direct bitmap glyph paint routes were probed and
   fail closed because they regress the strict different-pixel bound. A follow-up
@@ -39,9 +41,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   without duplicating font metrics.
   The focused production verifier now reads its strict current-difference bound
   from the checked-in sample baseline, requires the production report to declare
-  `production_render_strategy:
-  "famous_site_block_only_pending_glyph_compositing"`, and independently
-  recomputes PPM pixels, while still reporting
+  `production_render_strategy: "famous_site_block_only_pending_glyph_compositing"`,
+  and independently recomputes PPM pixels, while still reporting
   `chromeGlyphCompositingParity=false` until exact pixels reach zero.
 - 8K color/image Option A is selected and documented: lazy packed 8K surfaces,
   CIELAB as the semantic color space, XYZ as the connection space, and fail-
@@ -92,21 +93,16 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   structured `acceptance_policy_flags` inside the comparison record, so the
   focused Chrome-parity verifier can fail closed if a production report omits
   the no-tolerance policy.
-- QEMU/GTK evidence has host-side exact GTK scene checks and QMP wiring. The
-  live desktop auto-QMP launch reaches `pass`, yields a real QMP socket, and
-  strict live QMP screendump capture now passes with zero sample/scene
-  mismatches. The same authoritative report now also runs the host GTK GL WM
-  exact-scene perf baseline during live-QMP evidence collection, recording
-  Simple `1us`, GTK `301us`, `200` iterations, zero RGBA mismatches, and no
-  tolerance path. QEMU-side Simple-vs-GTK performance remains unwired; the
-  QEMU/GTK evidence wrapper now records that as structured guest-side release
-  blocker metadata and marks the host perf baseline as non-promoting.
-- macOS live-window release evidence now has a fail-closed wrapper and system
-  spec. Linux hosts must report an explicit `requires-macos` skip with zero
-  capture bytes/checksum/non-background pixels; a Darwin run must launch through
-  `scripts/macos-gui-run.shs`, find a real `SimpleGui` window, report a positive
-  window rectangle, capture that rectangle, and prove non-background pixels
-  before satisfying the `live-macos-window-visual-proof` gate.
+- QEMU/GTK evidence has host-side exact GTK scene checks and QMP wiring, but
+  the current Linux-host report is fail-closed: no live QMP socket is present,
+  the host GTK GL WM scene now passes with zero bitmap mismatches and no
+  tolerance path, and QEMU-side Simple-vs-GTK performance remains
+  `blocked-unwired`. Host GTK timing is non-promoting evidence only and cannot
+  substitute for guest-side QEMU/GTK performance parity.
+- macOS live-window evidence now emits a release gate explicitly. On this Linux
+  host the report is `status=skip`, `reason=requires-macos`, with
+  `macos_gui_live_window_evidence_release_gate=live-macos-window-visual-proof`
+  and `macos_gui_live_window_evidence_release_gate_status=not-satisfied`.
 - Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
   boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
   Linux-host evidence intentionally reports `pass=false` without a real
@@ -133,7 +129,7 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 - `test/unit/browser_engine/text_painter_spec.spl`: focused
   `site_0_google` text wrapping proof for `Google search`, `deterministic`,
   `compatibility`, and `fixture` line grouping.
-- `test/system/wm_compare/famous_site_corpus_spec.spl`: 37/37 passing
+- `test/system/wm_compare/famous_site_corpus_spec.spl`: 45/45 passing
   Chrome/corpus system scenarios, including 120px full text-line coverage and
   explicit over-wide 122px/132px mismatch diagnostics.
 - `test/baselines/famous_site_corpus/site_0_google/report.production.sdn`:
@@ -193,18 +189,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `exact_gpu_claimed=false`.
 - `doc/09_report/gtk_gui_repeat_fallback_evidence_2026-06-01.md`: repeat
   open/render evidence with an explicit vector-font unavailable fallback probe.
-- `doc/09_report/qemu_gtk_wm_capture_evidence_2026-06-01.md`: live QEMU/GTK
-  evidence showing auto-QMP launch reaches `pass` with a socket and strict
-  live QMP screendump capture passes with `786432` pixels, `10` sample matches,
-  and `0` scene mismatches. The report also records host-side Simple-vs-GTK
-  perf baseline fields with Simple `1us`, GTK `301us`, `200` iterations,
-  comparison available, `0` RGBA mismatches, and
-  `blur_or_tolerance_used=false`.
-- `scripts/check-macos-gui-live-window-evidence.shs` and
-  `test/system/gui/macos_gui_live_window_evidence_spec.spl`: macOS live-window
-  evidence gate. Current Linux verification proves the explicit
-  `requires-macos` skip path; the macOS branch requires a real `SimpleGui`
-  window rectangle, screenshot bytes/checksum, and non-background pixels.
+- `doc/09_report/qemu_gtk_wm_capture_evidence_2026-06-02.md`: current
+  QEMU/GTK evidence is fail-closed on this Linux refresh: no live QMP socket is
+  present, the host GTK GL scene passes with zero bitmap mismatches, and the
+  guest-side Simple-vs-GTK perf release gate remains blocked.
 - `src/lib/common/ui/builder.spl` and
   `examples/ui/widget_matrix_wasm_gui.spl`: shared retained-WASM widget event
   helper and widget-matrix refactor. Current CLI/browser evidence keeps
@@ -412,32 +400,33 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 
 ## Latest Local Verification
 
-- `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl`
-- `SIMPLE_LIB=src bin/simple test test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl --mode=interpreter --clean --format json`
-- `sh scripts/check-node-simple-web-engine2d-settings-inspector-tree-bitmap-evidence.shs`
-- `sh scripts/check-bun-simple-web-engine2d-settings-inspector-tree-bitmap-evidence.shs`
-- `sh scripts/check-electron-simple-web-engine2d-settings-inspector-tree-bitmap-evidence.shs`
-- `sh scripts/check-node-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
-- `sh scripts/check-bun-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
-- `sh scripts/check-electron-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
-- `NODE_BITMAP_ITERATIONS=20 sh scripts/check-node-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
-- `NODE_BITMAP_ITERATIONS=20 sh scripts/check-bun-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
-- `ELECTRON_BITMAP_ITERATIONS=1 sh scripts/check-electron-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
-- `BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_settings_inspector REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
-- `BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_media_gallery REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_media_gallery_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
-- `BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_report_table REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_report_table_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-node-simple-web-engine2d-settings-inspector-tree-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-bun-simple-web-engine2d-settings-inspector-tree-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-electron-simple-web-engine2d-settings-inspector-tree-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-node-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-bun-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-electron-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple NODE_BITMAP_ITERATIONS=20 sh scripts/check-node-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple NODE_BITMAP_ITERATIONS=20 sh scripts/check-bun-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple ELECTRON_BITMAP_ITERATIONS=1 sh scripts/check-electron-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_settings_inspector REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_media_gallery REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_media_gallery_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_report_table REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_report_table_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-node-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs`
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-bun-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs`
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-electron-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs`
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_full REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_full_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/gc_async_mut/gpu/browser_engine/text_painter.spl test/unit/browser_engine/text_painter_spec.spl`
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --format json`
-- `SIMPLE_LIB=src bin/simple check src/app/wm_compare/site_corpus_layout_report.spl test/system/wm_compare/famous_site_corpus_spec.spl test/unit/browser_engine/text_painter_spec.spl`
-- `SIMPLE_LIB=src bin/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/site_corpus_layout_report.spl test/system/wm_compare/famous_site_corpus_spec.spl test/unit/browser_engine/text_painter_spec.spl`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --format json`
 - `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`
-- `SIMPLE_LIB=src bin/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
 
-All commands above passed in the current worktree.
+All commands above passed in the current worktree through the release CLI path;
+wrappers set `SIMPLE_BIN` to the same release binary.
 
 Additional continuation check:
 
@@ -461,7 +450,8 @@ Per-line text ink continuation check:
 
 The per-line gate passed with `hasTextLineInkDelta: true`,
 `textLineInkDeltaCount: 4`, `differentPixels: 2717`, no verifier failures, and
-the system spec passing `37/37`. The doc layout guard returned `0`.
+the then-current system spec passing its full scenario set. The doc layout guard
+returned `0`.
 
 Generated GUI WASM shared-helper continuation check:
 
@@ -515,7 +505,8 @@ Structural layout diagnostics continuation check:
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
 
 The structural diagnostics check passed compilation, the focused structural spec
-passed `5/5`, and the famous-site corpus spec passed `37/37` with the new
+passed `5/5`, and the famous-site corpus spec passed its then-current full set
+with the new
 structural report assertions. `doc/06_spec/system/wm_compare/structural_layout_report_spec.md`
 is maintained manually for this slice because `spipe-docgen` is currently
 blocked by the unrelated `unknown extern function: shell` semantic error. The
@@ -614,7 +605,7 @@ The GitHub fetch checkpoint reported `Nothing changed`. The focused production
 report was regenerated and the verifier passed with `differentPixels=2717`,
 `computedDifferentPixels=2717`, `reportFresh=true`, `layoutTextMatch=true`,
 `hasTextLineInkDelta=true`, and `textLineInkDeltaCount=4`. The famous-site
-system spec passed `37/37`, and the doc layout guard returned `0`. This is
+system spec passed its then-current full set, and the doc layout guard returned `0`. This is
 current evidence for the Chrome text/font/compositing blocker; the blocker
 remains open because the production renderer is still divergent rather than
 Chrome-exact.
@@ -642,7 +633,7 @@ The structural layout helper now emits `structural_box_layout_report` SDN for
 GUI box comparisons, including source counts, backend evidence, pixel link, and
 both labeled box lists. The focused structural spec passed `7/7`, the generated
 manual has 7 active scenarios and includes the GUI box report flow, the broader
-famous-site corpus spec still passed `37/37`, and the doc layout guard returned
+famous-site corpus spec still passed its then-current full set, and the doc layout guard returned
 `0`. This advances pre-pixel geometry evidence for Chrome/layout hardening; it
 does not close the remaining production glyph/compositing divergence.
 
@@ -1461,7 +1452,7 @@ per-line reported/actual counts. The normal focused probe passes with exact
 counts `808/761/779/368`; the shifted-position mutation fails closed with
 `allRegionCountsMatch=false`, first actual count `745`, and
 `per-line text ink region geometry does not match production pixels`. The
-focused system spec now passes `42/42`.
+focused system spec now passes `45/45`.
 
 Modern WM readiness surface-field continuation:
 
@@ -1551,7 +1542,7 @@ QEMU/GTK guest perf blocker metadata continuation:
 The QEMU/GTK evidence wrapper now emits structured release-blocker metadata for
 guest-side Simple-vs-GTK performance: `perf_scope=qemu-guest-simple-vs-gtk`,
 `perf_release_gate=guest-side-simple-vs-gtk-performance`,
-`perf_release_blocker=missing-qmp-socket`, and
+`perf_release_blocker=qemu-side-gtk-simple-perf-harness-not-wired`, and
 `perf_required_for_release=true` in the bounded non-live path. The same report
 marks the host GTK GL exact-scene baseline as
 `host-gtk-gl-exact-scene-baseline` with `host_perf_promotes_qemu_perf=false`.
@@ -1607,7 +1598,7 @@ The production Chrome verifier now distinguishes bounded divergence evidence
 from actual Chrome glyph/compositing parity. The focused `site_0_google` probe
 passes with `parityStatus=divergent`, `boundedDivergenceOnly=true`,
 `chromeGlyphCompositingParity=false`, `promotionRequiredDifferentPixels=2717`,
-and `differentPixels=2717`. The famous-site corpus spec passes `42/42` in about
+and `differentPixels=2717`. The famous-site corpus spec passes `45/45` in about
 86s, so this strengthens the release gate wording while keeping the production
 Chrome pixel-parity blocker explicitly open.
 

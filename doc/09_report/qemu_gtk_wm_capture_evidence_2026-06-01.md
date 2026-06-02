@@ -54,6 +54,14 @@
 - host GTK GL WM scene captured RGBA path: build/qemu_gtk_wm_capture_evidence/gtk-gl/gtk-captured-rgba.json
 - host GTK GL WM scene blur/tolerance used: false
 
+## Interpretation
+
+The live QEMU/GTK capture and host GTK GL exact-scene checks passed with no
+blur or tolerance path. QEMU-side Simple-vs-GTK performance remains unavailable
+because the guest-side perf harness is not wired, so that gap is still a release
+blocker. The host perf baseline is recorded only as a non-promoting baseline and
+does not replace guest-side QEMU performance evidence.
+
 ## Raw Evidence
 - qemu_gtk_wm_capture_status=pass
 - qemu_gtk_wm_capture_reason=pass

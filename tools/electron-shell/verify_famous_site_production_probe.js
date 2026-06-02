@@ -7,6 +7,9 @@ const root = process.cwd();
 const sampleArg = process.argv.find((arg) => arg.startsWith("--sample="));
 const sample = sampleArg ? sampleArg.slice("--sample=".length) : "site_0_google";
 const dropAcceptancePolicyFlagsForTest = process.argv.includes("--drop-acceptance-policy-flags-for-test");
+const dropExactAcceptedFieldsForTest = process.argv.includes("--drop-exact-accepted-fields-for-test");
+const dropGlyphCompositingSignatureForTest = process.argv.includes("--drop-glyph-compositing-signature-for-test");
+const corruptGlyphCompositingSignatureForTest = process.argv.includes("--corrupt-glyph-compositing-signature-for-test");
 const corruptTextLineInkForTest = process.argv.includes("--corrupt-text-line-ink-for-test");
 const corruptTextLineInkPositionForTest = process.argv.includes("--corrupt-text-line-ink-position-for-test");
 const dropTextLineInkDifferenceForTest = process.argv.includes("--drop-text-line-ink-difference-for-test");
@@ -34,6 +37,10 @@ function matchText(text, regex, fallback = "") {
 
 function parseBool(text, regex) {
   return matchText(text, regex, "false") === "true";
+}
+
+function hasField(text, regex) {
+  return regex.test(text);
 }
 
 function parseIntField(text, regex) {
@@ -72,9 +79,13 @@ function parseTextLineInkEntries(text) {
 
 function compareTextLineInk(layoutLines, inkLines) {
   const differentPixelsTotal = inkLines.reduce((sum, line) => sum + line.differentPixels, 0);
+  const chromeExactBlackPixelsTotal = inkLines.reduce((sum, line) => sum + line.chromeExactBlackPixels, 0);
+  const simpleBackgroundMismatchPixelsTotal = inkLines.reduce((sum, line) => sum + line.simpleBackgroundMismatchPixels, 0);
   const detail = {
     detailCount: inkLines.length,
     differentPixelsTotal,
+    chromeExactBlackPixelsTotal,
+    simpleBackgroundMismatchPixelsTotal,
     textMatchesLayout: layoutLines.length > 0 && layoutLines.length === inkLines.length,
     widthMatchesLayout: layoutLines.length > 0 && layoutLines.length === inkLines.length,
     regionNamesSequential: inkLines.length > 0,
@@ -91,6 +102,60 @@ function compareTextLineInk(layoutLines, inkLines) {
     if (ink.chromeExactBlackPixels <= 0) detail.allLinesHaveChromeBlackPixels = false;
   }
   return detail;
+}
+
+function parseGlyphCompositingSignature(text) {
+  const match = text.match(/glyph_compositing_signature:\s*\(glyph_compositing_signature\s+kind:\s*"([^"]+)"\s+line_count:\s*([0-9]+)\s+different_pixels_total:\s*([0-9]+)\s+unexplained_different_pixels:\s*(-?[0-9]+)\s+chrome_exact_black_pixels_total:\s*([0-9]+)\s+simple_background_mismatch_pixels_total:\s*([0-9]+)/);
+  if (!match) return null;
+  return {
+    kind: match[1],
+    lineCount: Number.parseInt(match[2], 10),
+    differentPixelsTotal: Number.parseInt(match[3], 10),
+    unexplainedDifferentPixels: Number.parseInt(match[4], 10),
+    chromeExactBlackPixelsTotal: Number.parseInt(match[5], 10),
+    simpleBackgroundMismatchPixelsTotal: Number.parseInt(match[6], 10),
+    lineDetails: parseGlyphCompositingLineDetails(text)
+  };
+}
+
+function parseGlyphCompositingLineDetails(text) {
+  const details = [];
+  const regex = /\(line index:\s*([0-9]+)\s+text:\s*"([^"]+)"\s+x:\s*(-?[0-9]+)\s+y:\s*(-?[0-9]+)\s+width:\s*([0-9]+)\s+different_pixels:\s*([0-9]+)\s+chrome_exact_black_pixels:\s*([0-9]+)\s+simple_background_mismatch_pixels:\s*([0-9]+)\)/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    details.push({
+      index: Number.parseInt(match[1], 10),
+      text: match[2],
+      x: Number.parseInt(match[3], 10),
+      y: Number.parseInt(match[4], 10),
+      width: Number.parseInt(match[5], 10),
+      differentPixels: Number.parseInt(match[6], 10),
+      chromeExactBlackPixels: Number.parseInt(match[7], 10),
+      simpleBackgroundMismatchPixels: Number.parseInt(match[8], 10)
+    });
+  }
+  return details;
+}
+
+function dropGlyphCompositingSignatureBlock(text) {
+  const start = text.indexOf("\n  glyph_compositing_signature:");
+  if (start < 0) return text;
+  const end = text.indexOf("\n  ))", start);
+  if (end < 0) return text.slice(0, start);
+  return text.slice(0, start) + text.slice(end + "\n  ))".length);
+}
+
+function expectedGlyphCompositingLineDetails(inkLines) {
+  return inkLines.map((line) => ({
+    index: line.index,
+    text: line.text,
+    x: line.x,
+    y: line.y,
+    width: line.width,
+    differentPixels: line.differentPixels,
+    chromeExactBlackPixels: line.chromeExactBlackPixels,
+    simpleBackgroundMismatchPixels: line.simpleBackgroundMismatchPixels
+  }));
 }
 
 function pixelInLineInkRegion(x, y, inkLines) {
@@ -305,6 +370,10 @@ let result = {
   layoutTextMatch: false,
   hasTextInkDelta: false,
   hasTextLineInkDelta: false,
+  hasGlyphCompositingSignature: false,
+  glyphCompositingSignatureMatches: false,
+  glyphCompositingSignature: null,
+  expectedGlyphCompositingSignature: null,
   textLineInkDeltaCount: 0,
   textLineInkDetails: {
     detailCount: 0,
@@ -343,6 +412,16 @@ if (!fs.existsSync(reportPath)) {
   if (dropAcceptancePolicyFlagsForTest) {
     text = text.replace(" acceptance_policy_flags: (exact_required: true perceptual_diagnostic_only: true tolerance_acceptance_allowed: false)", "");
   }
+  if (dropExactAcceptedFieldsForTest) {
+    text = text.replace(/([\s(])exact:\s*(true|false)\s*/, "$1");
+    text = text.replace(/([\s(])accepted:\s*(true|false)\s*/, "$1");
+  }
+  if (dropGlyphCompositingSignatureForTest) {
+    text = dropGlyphCompositingSignatureBlock(text);
+  }
+  if (corruptGlyphCompositingSignatureForTest) {
+    text = text.replace("glyph_compositing_signature kind: \"per_line_missing_ink_v1\" line_count: 4", "glyph_compositing_signature kind: \"per_line_missing_ink_v1\" line_count: 3");
+  }
   if (corruptTextLineInkForTest) {
     const marker = text.indexOf("text_line_ink_delta:");
     if (marker >= 0) {
@@ -361,6 +440,8 @@ if (!fs.existsSync(reportPath)) {
   const simplePath = path.join(root, simpleRel);
   result.rendererMode = matchText(text, /renderer_mode:\s*"([^"]+)"/);
   result.productionRenderStrategy = matchText(text, /production_render_strategy:\s*"([^"]+)"/);
+  result.hasExactField = hasField(text, /\bexact:\s*(true|false)/);
+  result.hasAcceptedField = hasField(text, /\baccepted:\s*(true|false)/);
   result.exact = parseBool(text, /exact:\s*(true|false)/);
   result.accepted = parseBool(text, /accepted:\s*(true|false)/);
   result.differentPixels = parseIntField(text, /different_pixels:\s*([0-9]+)/);
@@ -380,6 +461,8 @@ if (!fs.existsSync(reportPath)) {
   result.layoutTextMatch = parseBool(text, /layout_text_match:\s*(true|false)/);
   result.hasTextInkDelta = text.includes("text_ink_delta:");
   result.hasTextLineInkDelta = text.includes("text_line_ink_delta:");
+  result.hasGlyphCompositingSignature = text.includes("glyph_compositing_signature:");
+  result.glyphCompositingSignature = parseGlyphCompositingSignature(text);
   result.hasExactAcceptancePolicyFlags = text.includes("acceptance_policy_flags: (exact_required: true perceptual_diagnostic_only: true tolerance_acceptance_allowed: false)");
   result.textLineInkDeltaCount = parseIntField(text, /text_line_ink_delta:\s*\(text_line_ink_delta count:\s*([0-9]+)/);
   const textLineInkEntries = parseTextLineInkEntries(text);
@@ -392,6 +475,16 @@ if (!fs.existsSync(reportPath)) {
   result.textLineInkDetails.regionPixelCounts = regionPixelCounts.counts;
   result.textLineInkDetails.unexplainedDifferentPixels = result.differentPixels - result.textLineInkDetails.differentPixelsTotal;
   result.residualDifference = hideResidualDifferenceForTest ? { count: 0, first: null } : residualDifferenceDetails(chromePath, simplePath, textLineInkEntries);
+  result.expectedGlyphCompositingSignature = {
+    kind: "per_line_missing_ink_v1",
+    lineCount: result.textLineInkDeltaCount,
+    differentPixelsTotal: result.textLineInkDetails.differentPixelsTotal,
+    unexplainedDifferentPixels: result.textLineInkDetails.unexplainedDifferentPixels,
+    chromeExactBlackPixelsTotal: result.textLineInkDetails.chromeExactBlackPixelsTotal,
+    simpleBackgroundMismatchPixelsTotal: result.textLineInkDetails.simpleBackgroundMismatchPixelsTotal,
+    lineDetails: expectedGlyphCompositingLineDetails(textLineInkEntries)
+  };
+  result.glyphCompositingSignatureMatches = JSON.stringify(result.glyphCompositingSignature) === JSON.stringify(result.expectedGlyphCompositingSignature);
   result.textInkDelta.divBoxDifferentPixels = parseIntField(text, /div_box:\s*\(region[^\)]*different_pixels:\s*([0-9]+)/);
   result.textInkDelta.divBoxChromeExactBlackPixels = parseIntField(text, /div_box:\s*\(region[^\)]*chrome_exact_black_pixels:\s*([0-9]+)/);
   result.textInkDelta.divBoxSimpleBackgroundMismatchPixels = parseIntField(text, /div_box:\s*\(region[^\)]*simple_background_mismatch_pixels:\s*([0-9]+)/);
@@ -404,6 +497,8 @@ if (!fs.existsSync(reportPath)) {
   result.promotionRequiredDifferentPixels = result.parityStatus === "exact" ? 0 : result.differentPixels;
   if (result.rendererMode !== "production") failures.push("report is not renderer_mode production");
   if (result.productionRenderStrategy !== "famous_site_block_only_pending_glyph_compositing") failures.push("missing or unexpected production render strategy");
+  if (!result.hasExactField) failures.push("missing exact acceptance result field");
+  if (!result.hasAcceptedField) failures.push("missing accepted acceptance result field");
   if (!simpleRel.endsWith("/simple.production.ppm")) failures.push("simple_ppm does not use production artifact path");
   if (!result.divergent) failures.push("production probe is not divergent");
   if (!result.reportFresh) failures.push("production report is stale or PPM parse failed");
@@ -422,6 +517,8 @@ if (!fs.existsSync(reportPath)) {
   if (result.textRegionDelta && (!result.textRegionDelta.overflowText || result.textRegionDelta.overflowText.differentPixels <= 0)) failures.push("production overflow text delta did not report differences");
   if (!result.hasTextInkDelta) failures.push("missing production text ink delta diagnostics");
   if (!result.hasTextLineInkDelta) failures.push("missing production per-line text ink delta diagnostics");
+  if (!result.hasGlyphCompositingSignature) failures.push("missing glyph compositing diagnostic signature");
+  if (result.hasGlyphCompositingSignature && !result.glyphCompositingSignatureMatches) failures.push("glyph compositing diagnostic signature is stale or inconsistent");
   if (result.hasTextLineInkDelta && result.textLineInkDeltaCount !== result.simpleLayoutLineCount) failures.push("per-line text ink delta count does not match Simple layout line count");
   if (result.hasTextLineInkDelta && result.textLineInkDetails.detailCount !== result.textLineInkDeltaCount) failures.push("per-line text ink detail count does not match declared count");
   if (result.hasTextLineInkDelta && !result.textLineInkDetails.textMatchesLayout) failures.push("per-line text ink entries do not match Simple layout line text");

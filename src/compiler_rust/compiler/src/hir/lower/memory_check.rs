@@ -211,10 +211,8 @@ impl Lowerer {
                     .as_ref()
                     .map(|name| format!("mutation requires `mut` capability while lowering {name}"))
                     .unwrap_or_else(|| "mutation requires `mut` capability".to_string());
-                self.memory_warnings.warn(
-                    MemoryWarning::new(MemoryWarningCode::W1006, span)
-                        .with_context(&context),
-                );
+                self.memory_warnings
+                    .warn(MemoryWarning::new(MemoryWarningCode::W1006, span).with_context(&context));
             }
             // MethodCall as lvalue is a property setter (field access fallback) - skip warning
             // This happens when type information is incomplete (TypeId(0))

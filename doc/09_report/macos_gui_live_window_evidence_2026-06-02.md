@@ -1,0 +1,20 @@
+# macOS GUI Live Window Evidence
+
+- macos_gui_live_window_evidence_status=skip
+- macos_gui_live_window_evidence_reason=requires-macos
+- macos_gui_live_window_evidence_host_os=linux
+- macos_gui_live_window_evidence_launcher=macos-gui-run
+- macos_gui_live_window_evidence_window_found=false
+- macos_gui_live_window_evidence_window_title=
+- macos_gui_live_window_evidence_window_rect=
+- macos_gui_live_window_evidence_capture_path=
+- macos_gui_live_window_evidence_capture_bytes=0
+- macos_gui_live_window_evidence_capture_cksum=0
+- macos_gui_live_window_evidence_capture_width=0
+- macos_gui_live_window_evidence_capture_height=0
+- macos_gui_live_window_evidence_capture_total_pixels=0
+- macos_gui_live_window_evidence_non_background_pixels=0
+- macos_gui_live_window_evidence_non_background_ratio=0.000000
+- macos_gui_live_window_evidence_release_gate=live-macos-window-visual-proof
+- macos_gui_live_window_evidence_release_gate_status=not-satisfied
+- macos_gui_live_window_evidence_report_path=doc/09_report/macos_gui_live_window_evidence_2026-06-02.md

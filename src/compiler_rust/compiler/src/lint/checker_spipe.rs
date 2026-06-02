@@ -542,6 +542,16 @@ impl LintChecker {
         )
     }
 
+    fn is_true_boolean_wrapper_assertion(normalized: &str) -> bool {
+        Self::is_boolean_wrapper_assertion(normalized)
+            && (normalized.contains(").to_equal(true)") || normalized.contains(").to_be(true)"))
+    }
+
+    fn is_false_boolean_wrapper_assertion(normalized: &str) -> bool {
+        Self::is_boolean_wrapper_assertion(normalized)
+            && (normalized.contains(").to_equal(false)") || normalized.contains(").to_be(false)"))
+    }
+
     fn boolean_wrapper_easy_fix(
         &self,
         original_line: &str,
@@ -803,13 +813,23 @@ impl LintChecker {
                 );
             }
 
-            if Self::is_boolean_wrapper_assertion(&normalized) {
+            if Self::is_false_boolean_wrapper_assertion(&normalized) {
+                let easy_fix = self.boolean_wrapper_easy_fix(line, &normalized, byte_offset, line_num);
+                self.emit_with_fix(
+                    LintName::SPipeFalseBooleanWrapperAssertions,
+                    Span::new(0, 0, line_num, 1),
+                    "false boolean matcher wrapper in spec/example; use expect_not(condition) instead of .to_equal(false)".to_string(),
+                    Some("use expect_not(condition) instead of .to_equal(false) or .to_be(false)".to_string()),
+                    easy_fix,
+                );
+            } else if Self::is_true_boolean_wrapper_assertion(&normalized) {
                 let easy_fix = self.boolean_wrapper_easy_fix(line, &normalized, byte_offset, line_num);
                 self.emit_with_fix(
                     LintName::SPipeBooleanWrapperAssertions,
                     Span::new(0, 0, line_num, 1),
-                    "boolean matcher wrapper in spec/example; use expect(condition), and use expect_not(condition) instead of .to_equal(false)".to_string(),
-                    Some("use expect(condition) for true checks; use expect_not(condition) instead of .to_equal(false) or .to_be(false)".to_string()),
+                    "verbose true boolean assertion in spec/example; use expect(condition) instead of .to_equal(true)"
+                        .to_string(),
+                    Some("use expect(condition) for true checks".to_string()),
                     easy_fix,
                 );
             }

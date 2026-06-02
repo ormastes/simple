@@ -14,6 +14,7 @@ use std.io_runtime.{getpid, time_now_unix_micros}
 use std.spec.*
 
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
 fn _run_id() -> text:
@@ -28,12 +29,57 @@ fn _report_path(run_id: text) -> text:
 fn _evidence_env_path(run_id: text) -> text:
     _build_dir(run_id) + "/evidence.env"
 
+fn _guest_serial_path(run_id: text) -> text:
+    "build/tmp/qemu_gtk_wm_capture_evidence_spec_" + run_id + "_guest_serial.log"
+
 fn _run_evidence(run_id: text) -> (text, text, i32):
     rt_process_run_timeout(
         "/bin/sh",
         [
             "-c",
             "SIMPLE_BIN=src/compiler_rust/target/release/simple SIMPLE_LIB=src GTK_GL_WM_SCENE_ITERATIONS=1 QEMU_HOST_GTK_SCENE_EVIDENCE=0 QEMU_GTK_WM_HOST_SMOKE=0 BUILD_DIR=" + _build_dir(run_id) +
+                " REPORT_PATH=" + _report_path(run_id) +
+                " sh scripts/check-qemu-gtk-wm-capture-evidence.shs"
+        ],
+        120000
+    )
+
+fn _run_forced_live_host_perf_evidence(run_id: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "SIMPLE_BIN=src/compiler_rust/target/release/simple SIMPLE_LIB=src GTK_GL_WM_SCENE_ITERATIONS=1 QEMU_HOST_GTK_SCENE_EVIDENCE=0 QEMU_GTK_WM_HOST_SMOKE=0 QEMU_GTK_WM_CAPTURE_FORCE_LIVE_HOST_PERF_FOR_TEST=1 BUILD_DIR=" + _build_dir(run_id) +
+                " REPORT_PATH=" + _report_path(run_id) +
+                " sh scripts/check-qemu-gtk-wm-capture-evidence.shs"
+        ],
+        120000
+    )
+
+fn _run_forced_live_guest_perf_evidence(run_id: text) -> (text, text, i32):
+    rt_process_run_timeout("/bin/sh", ["-c", "mkdir -p build/tmp"], 5000)
+    expect(rt_file_write_text(_guest_serial_path(run_id), "[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_us=2 gtk_frame_us=5 iterations=7\n")).to_equal(true)
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "SIMPLE_BIN=src/compiler_rust/target/release/simple SIMPLE_LIB=src GTK_GL_WM_SCENE_ITERATIONS=1 QEMU_HOST_GTK_SCENE_EVIDENCE=0 QEMU_GTK_WM_HOST_SMOKE=0 QEMU_GTK_WM_CAPTURE_FORCE_LIVE_HOST_PERF_FOR_TEST=1 QEMU_GUEST_SERIAL_LOG=" + _guest_serial_path(run_id) +
+                " BUILD_DIR=" + _build_dir(run_id) +
+                " REPORT_PATH=" + _report_path(run_id) +
+                " sh scripts/check-qemu-gtk-wm-capture-evidence.shs"
+        ],
+        120000
+    )
+
+fn _run_forced_live_guest_perf_without_acceptance_evidence(run_id: text) -> (text, text, i32):
+    rt_process_run_timeout("/bin/sh", ["-c", "mkdir -p build/tmp"], 5000)
+    expect(rt_file_write_text(_guest_serial_path(run_id), "[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_us=2 gtk_frame_us=5 iterations=7\n")).to_equal(true)
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "SIMPLE_BIN=src/compiler_rust/target/release/simple SIMPLE_LIB=src GTK_GL_WM_SCENE_ITERATIONS=1 QEMU_HOST_GTK_SCENE_EVIDENCE=0 QEMU_GTK_WM_HOST_SMOKE=0 QEMU_GTK_WM_CAPTURE_FORCE_LIVE_HOST_PERF_FOR_TEST=1 QEMU_GUEST_SERIAL_LOG=" + _guest_serial_path(run_id) +
+                " BUILD_DIR=" + _build_dir(run_id) +
                 " REPORT_PATH=" + _report_path(run_id) +
                 " sh scripts/check-qemu-gtk-wm-capture-evidence.shs"
         ],
@@ -72,6 +118,11 @@ describe "QEMU GTK WM capture evidence":
         expect(evidence).to_contain("qemu_gtk_wm_capture_perf_release_gate=guest-side-simple-vs-gtk-performance")
         expect(evidence).to_contain("qemu_gtk_wm_capture_perf_release_blocker=missing-qmp-socket")
         expect(evidence).to_contain("qemu_gtk_wm_capture_perf_required_for_release=true")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_status=unwired")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_reason=qemu-side-gtk-simple-perf-harness-not-wired")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_sample_origin=none")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_required_sample_origin=qemu-guest")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_pending_marker=[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_us=<positive> gtk_frame_us=<positive> iterations=<positive>")
         expect(evidence).to_contain("qemu_gtk_wm_capture_host_wm_smoke=0")
         expect(evidence).to_contain("qemu_gtk_wm_capture_host_wm_status=skipped")
         expect(evidence).to_contain("qemu_gtk_wm_capture_host_wm_reason=QEMU_GTK_WM_HOST_SMOKE=0")
@@ -119,6 +170,11 @@ describe "QEMU GTK WM capture evidence":
         expect(report).to_contain("qemu-side perf release gate: guest-side-simple-vs-gtk-performance")
         expect(report).to_contain("qemu-side perf release blocker: missing-qmp-socket")
         expect(report).to_contain("qemu-side perf required for release: true")
+        expect(report).to_contain("qemu-side perf harness status: unwired")
+        expect(report).to_contain("qemu-side perf harness reason: qemu-side-gtk-simple-perf-harness-not-wired")
+        expect(report).to_contain("qemu-side perf harness sample origin: none")
+        expect(report).to_contain("qemu-side perf harness required sample origin: qemu-guest")
+        expect(report).to_contain("qemu-side perf harness pending marker: [desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_us=<positive> gtk_frame_us=<positive> iterations=<positive>")
         expect(report).to_contain("host WM smoke enabled: 0")
         expect(report).to_contain("host WM smoke status: skipped")
         expect(report).to_contain("host WM smoke reason: QEMU_GTK_WM_HOST_SMOKE=0")
@@ -146,4 +202,91 @@ describe "QEMU GTK WM capture evidence":
         expect(report).to_contain("host GTK GL WM scene output bytes:")
         expect(report).to_contain("host GTK GL WM scene output cksum:")
         expect(report).to_contain("host perf baseline scope: host-gtk-gl-exact-scene-baseline")
+        expect(report).to_contain("host perf baseline promotes QEMU perf: false")
+
+    slow_it "does not promote host GTK timing when live QEMU bitmap evidence passes":
+        val run_id = _run_id()
+        val result = _run_forced_live_host_perf_evidence(run_id)
+        val stdout = result[0]
+        val stderr = result[1]
+        val code = result[2]
+        if code != 1:
+            print "qemu forced live host perf stdout: " + stdout
+            print "qemu forced live host perf stderr: " + stderr
+        expect(code).to_equal(1)
+        val evidence = rt_file_read_text(_evidence_env_path(run_id))
+        expect(evidence).to_contain("qemu_gtk_wm_capture_status=pass")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_live_status=pass")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_host_perf_status=pass")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_host_perf_comparison_available=true")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_host_perf_promotes_qemu_perf=false")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_status=unavailable")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_reason=forced-live-host-perf-for-test-not-release-evidence")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_comparison_available=false")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_release_blocker=forced-live-host-perf-for-test-not-release-evidence")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_status=unwired")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_required_sample_origin=qemu-guest")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_pending_marker=[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_us=<positive> gtk_frame_us=<positive> iterations=<positive>")
+
+        val report = rt_file_read_text(_report_path(run_id))
+        expect(report).to_contain("qemu-side perf status: unavailable")
+        expect(report).to_contain("qemu-side perf reason: forced-live-host-perf-for-test-not-release-evidence")
+        expect(report).to_contain("qemu-side perf comparison available: false")
+        expect(report).to_contain("qemu-side perf release blocker: forced-live-host-perf-for-test-not-release-evidence")
+        expect(report).to_contain("host perf baseline status: pass")
+        expect(report).to_contain("host perf baseline promotes QEMU perf: false")
+
+    slow_it "does not accept forced live guest perf markers by default":
+        val run_id = _run_id()
+        val result = _run_forced_live_guest_perf_without_acceptance_evidence(run_id)
+        val stdout = result[0]
+        val stderr = result[1]
+        val code = result[2]
+        if code != 1:
+            print "qemu forced live guest perf without acceptance stdout: " + stdout
+            print "qemu forced live guest perf without acceptance stderr: " + stderr
+        expect(code).to_equal(1)
+        val evidence = rt_file_read_text(_evidence_env_path(run_id))
+        expect(evidence).to_contain("qemu_gtk_wm_capture_status=pass")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_live_status=pass")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_status=unavailable")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_release_blocker=forced-live-host-perf-for-test-not-release-evidence")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_status=unwired")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_sample_origin=none")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_simple_frame_us=0")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_gtk_frame_us=0")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_iterations=0")
+
+    slow_it "does not accept forced live guest perf markers as release evidence":
+        val run_id = _run_id()
+        val result = _run_forced_live_guest_perf_evidence(run_id)
+        val stdout = result[0]
+        val stderr = result[1]
+        val code = result[2]
+        if code != 1:
+            print "qemu forced live guest perf stdout: " + stdout
+            print "qemu forced live guest perf stderr: " + stderr
+        expect(code).to_equal(1)
+        val evidence = rt_file_read_text(_evidence_env_path(run_id))
+        expect(evidence).to_contain("qemu_gtk_wm_capture_status=pass")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_live_status=pass")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_host_perf_status=pass")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_host_perf_comparison_available=true")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_host_perf_promotes_qemu_perf=false")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_status=unavailable")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_reason=forced-live-host-perf-for-test-not-release-evidence")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_simple_frame_us=0")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_gtk_frame_us=0")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_iterations=0")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_comparison_available=false")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_release_blocker=forced-live-host-perf-for-test-not-release-evidence")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_status=unwired")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_reason=qemu-side-gtk-simple-perf-harness-not-wired")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_sample_origin=none")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_required_sample_origin=qemu-guest")
+
+        val report = rt_file_read_text(_report_path(run_id))
+        expect(report).to_contain("qemu-side perf status: unavailable")
+        expect(report).to_contain("qemu-side perf reason: forced-live-host-perf-for-test-not-release-evidence")
+        expect(report).to_contain("qemu-side perf release blocker: forced-live-host-perf-for-test-not-release-evidence")
         expect(report).to_contain("host perf baseline promotes QEMU perf: false")

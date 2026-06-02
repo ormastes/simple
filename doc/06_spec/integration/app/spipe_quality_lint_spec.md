@@ -6,7 +6,7 @@
 
 #### flags tautological literal assertions
 
-1. "        expect
+1. count_lint(source, "SPIPE001") equals `1`
    - Expected: count_lint(source, "SPIPE001") equals `1`
 
 
@@ -161,7 +161,7 @@ expect(count_lint(source, "SPIPE005")).to_equal(1)
 
 #### flags boolean-wrapper assertions
 
-1. "        expect
+1. count_lint(source, "SPIPE006") equals `1`
    - Expected: count_lint(source, "SPIPE006") equals `1`
 
 
@@ -184,7 +184,7 @@ expect(count_lint(source, "SPIPE006")).to_equal(1)
 
 #### flags false boolean-wrapper assertions
 
-1. "        expect
+1. count_lint(source, "SPIPE006") equals `1`
    - Expected: count_lint(source, "SPIPE006") equals `1`
 
 
@@ -206,11 +206,40 @@ expect(count_lint(source, "SPIPE006")).to_equal(1)
 
 </details>
 
+#### flags to_be boolean wrappers
+
+1. count_lint(true_source, "SPIPE006") equals `1`
+2. count_lint(false_source, "SPIPE006") equals `1`
+   - Expected: count_lint(true_source, "SPIPE006") equals `1`
+   - Expected: count_lint(false_source, "SPIPE006") equals `1`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val true_source =
+    "describe \"demo\":\n" +
+    "    it \"wraps true with to_be\":\n" +
+    "        expect(code != 0).to_be(true)\n"
+val false_source =
+    "describe \"demo\":\n" +
+    "    it \"wraps false with to_be\":\n" +
+    "        expect(ok).to_be(false)\n"
+
+expect(count_lint(true_source, "SPIPE006")).to_equal(1)
+expect(count_lint(false_source, "SPIPE006")).to_equal(1)
+```
+
+</details>
+
 #### allows concise boolean assertions
 
-1. "        expect
-
-2. "        expect not
+1. source includes concise `expect(ok)`
+2. source includes concise `expect_not(failed)`
    - Expected: total_spipe_quality_lints(source) equals `0`
 
 
@@ -301,9 +330,8 @@ expect(total_spipe_quality_lints(source)).to_equal(0)
 
 #### respects allow on spipe_placeholder_tests
 
-1. "@" + "allow
-
-2. "        expect
+1. source includes `@allow(spipe_placeholder_tests)`
+2. source includes placeholder assertion under the allow annotation
    - Expected: total_spipe_quality_lints(source) equals `0`
 
 
@@ -344,9 +372,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-

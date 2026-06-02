@@ -487,6 +487,10 @@ expect_not(html.contains("Hidden"))
    - Expected: elem.text equals `right`
    - Expected: elem.w equals `360`
    - Expected: elem.text equals `Window snapped|Right half|Undo`
+   - Expected: elem.w equals `340`
+   - Expected: elem.text equals `Window snapped|Build finished|Calendar`
+   - Expected: elem.w equals `420`
+   - Expected: elem.text equals `Build indexing|72|Pause|Cancel`
    - Expected: elem.w equals `360`
    - Expected: elem.text equals `1|2|3`
    - Expected: elem.w equals `420`
@@ -495,6 +499,12 @@ expect_not(html.contains("Hidden"))
    - Expected: elem.text equals `Terminal|Browser|Simple IDE|Settings`
    - Expected: elem.w equals `280`
    - Expected: elem.text equals `Open|Pin to taskbar|Move to workspace|Close`
+   - Expected: elem.w equals `360`
+   - Expected: elem.text equals `Left half|Right half|Fullscreen|Quarter grid`
+   - Expected: elem.w equals `460`
+   - Expected: elem.text equals `Terminal|Browser|Settings`
+   - Expected: elem.w equals `300`
+   - Expected: elem.text equals `Wi-Fi|Audio|Battery|Brightness`
    - Expected: elem.w equals `44`
    - Expected: elem.h equals `44`
    - Expected: elem.w equals `240`
@@ -506,6 +516,10 @@ expect_not(html.contains("Hidden"))
    - Expected: elem.text equals `Terminal|simple.terminal|win1`
    - Expected: elem.w equals `88`
    - Expected: elem.text equals `Terminal|Browser|Settings`
+   - Expected: elem.w equals `560`
+   - Expected: elem.text equals `Selection|Window|Screen|Capture`
+   - Expected: elem.w equals `360`
+   - Expected: elem.text equals `Command|Code|Link|Paste|Pin|Clear`
    - Expected: right_icons equals `2`
    - Expected: launchers equals `2`
    - Expected: running equals `1`
@@ -515,7 +529,7 @@ expect_not(html.contains("Hidden"))
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 353 lines folded for reproduction.
+Runnable source: 510 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -540,15 +554,22 @@ var has_control_center = false
 var has_overview = false
 var has_snap_preview = false
 var has_notification = false
+var has_notification_center = false
+var has_live_activity = false
 var has_workspace_switcher = false
 var has_shortcut_overlay = false
 var has_app_launcher = false
 var has_context_menu = false
+var has_snap_layouts = false
+var has_window_switcher = false
+var has_quick_settings = false
 var hot_corner_count = 0
 var has_resize_hud = false
 var has_gesture_hints = false
 var has_taskbar_preview = false
 var has_stage_rail = false
+var has_screen_capture = false
+var has_clipboard_history = false
 for elem in scene.elements:
     if elem.kind == "command_lane":
         has_command = true
@@ -584,6 +605,14 @@ for elem in scene.elements:
         has_notification = true
         expect(elem.w).to_equal(360)
         expect(elem.text).to_equal("Window snapped|Right half|Undo")
+    elif elem.kind == "notification_center":
+        has_notification_center = true
+        expect(elem.w).to_equal(340)
+        expect(elem.text).to_equal("Window snapped|Build finished|Calendar")
+    elif elem.kind == "live_activity":
+        has_live_activity = true
+        expect(elem.w).to_equal(420)
+        expect(elem.text).to_equal("Build indexing|72|Pause|Cancel")
     elif elem.kind == "workspace_switcher":
         has_workspace_switcher = true
         expect(elem.w).to_equal(360)
@@ -600,6 +629,18 @@ for elem in scene.elements:
         has_context_menu = true
         expect(elem.w).to_equal(280)
         expect(elem.text).to_equal("Open|Pin to taskbar|Move to workspace|Close")
+    elif elem.kind == "snap_layouts":
+        has_snap_layouts = true
+        expect(elem.w).to_equal(360)
+        expect(elem.text).to_equal("Left half|Right half|Fullscreen|Quarter grid")
+    elif elem.kind == "window_switcher":
+        has_window_switcher = true
+        expect(elem.w).to_equal(460)
+        expect(elem.text).to_equal("Terminal|Browser|Settings")
+    elif elem.kind == "quick_settings":
+        has_quick_settings = true
+        expect(elem.w).to_equal(300)
+        expect(elem.text).to_equal("Wi-Fi|Audio|Battery|Brightness")
     elif elem.kind == "hot_corner_zone":
         hot_corner_count = hot_corner_count + 1
         expect(elem.w).to_equal(44)
@@ -621,6 +662,14 @@ for elem in scene.elements:
         has_stage_rail = true
         expect(elem.w).to_equal(88)
         expect(elem.text).to_equal("Terminal|Browser|Settings")
+    elif elem.kind == "screen_capture_overlay":
+        has_screen_capture = true
+        expect(elem.w).to_equal(560)
+        expect(elem.text).to_equal("Selection|Window|Screen|Capture")
+    elif elem.kind == "clipboard_history":
+        has_clipboard_history = true
+        expect(elem.w).to_equal(360)
+        expect(elem.text).to_equal("Command|Code|Link|Paste|Pin|Clear")
 
 expect(has_command)
 expect(has_clock)
@@ -634,15 +683,22 @@ expect(has_control_center)
 expect(has_overview)
 expect(has_snap_preview)
 expect(has_notification)
+expect(has_notification_center)
+expect(has_live_activity)
 expect(has_workspace_switcher)
 expect(has_shortcut_overlay)
 expect(has_app_launcher)
 expect(has_context_menu)
+expect(has_snap_layouts)
+expect(has_window_switcher)
+expect(has_quick_settings)
 expect(hot_corner_count).to_equal(4)
 expect(has_resize_hud)
 expect(has_gesture_hints)
 expect(has_taskbar_preview)
 expect(has_stage_rail)
+expect(has_screen_capture)
+expect(has_clipboard_history)
 expect(html).to_contain("class='command-lane'")
 expect(html).to_contain("data-app='terminal'")
 expect(html).to_contain("data-window='win1'")
@@ -716,6 +772,13 @@ expect(html).to_contain("data-motion-scope='control-center'")
 expect(html).to_contain("data-motion-choice='standard'")
 expect(html).to_contain("data-motion-choice='reduced'")
 expect(html).to_contain("data-motion-choice='off'")
+expect(html).to_contain("class='accent-controls' role='group' aria-label='Theme accent color'")
+expect(html).to_contain("class='accent-swatch active' data-accent-choice='blue'")
+expect(html).to_contain("data-accent-choice='teal'")
+expect(html).to_contain("data-accent-choice='rose'")
+expect(html).to_contain("aria-label='Use blue accent'")
+expect(html).to_contain(".accent-swatch[data-accent-choice='blue']")
+expect(html).to_contain(".accent-swatch:focus-visible")
 expect(html).to_contain("Standard motion")
 expect(html).to_contain("Motion off")
 expect(html).to_contain("aria-label='Window overview'")
@@ -731,6 +794,34 @@ expect(html).to_contain("Right half")
 expect(html).to_contain("class='toast-action' aria-label='Undo notification action'")
 expect(html).to_contain("class='toast-progress'")
 expect(html).to_contain("max-width:360px")
+expect(html).to_contain("class='notification-center'")
+expect(html).to_contain("role='dialog' aria-label='Notification center'")
+expect(html).to_contain("data-motion-scope='notification-center'")
+expect(html).to_contain("data-notification-source='history'")
+expect(html).to_contain("class='notification-clear' aria-label='Clear notifications'")
+expect(html).to_contain("class='notification-list' role='list'")
+expect(html).to_contain("class='notification-card unread' role='listitem' data-notification-kind='window'")
+expect(html).to_contain("data-notification-kind='build'")
+expect(html).to_contain("data-notification-kind='calendar'")
+expect(html).to_contain("Build finished")
+expect(html).to_contain("Focus block starts soon")
+expect(html).to_contain("@keyframes wm-notification-center-in")
+expect(html).to_contain("body[data-motion-mode='reduced'] .notification-center")
+expect(html).to_contain("body[data-motion-mode='off'] .notification-center")
+expect(html).to_contain("class='live-activity'")
+expect(html).to_contain("role='status' aria-live='polite' aria-label='Live activity'")
+expect(html).to_contain("data-motion-scope='live-activity'")
+expect(html).to_contain("data-live-activity='build-indexing'")
+expect(html).to_contain("class='live-activity-copy'")
+expect(html).to_contain("72% complete")
+expect(html).to_contain("class='live-activity-progress' role='progressbar'")
+expect(html).to_contain("aria-valuenow='72'")
+expect(html).to_contain("data-live-action='pause'")
+expect(html).to_contain("data-live-action='cancel'")
+expect(html).to_contain("@keyframes wm-live-activity-in")
+expect(html).to_contain("@keyframes wm-live-activity-progress")
+expect(html).to_contain("body[data-motion-mode='reduced'] .live-activity")
+expect(html).to_contain("body[data-motion-mode='off'] .live-activity")
 expect(html).to_contain("class='workspace-switcher'")
 expect(html).to_contain("role='tablist' aria-label='Workspaces'")
 expect(html).to_contain("data-motion-scope='workspace-switcher'")
@@ -809,6 +900,53 @@ expect(html).to_contain("class='context-menu-item danger' role='menuitem' data-c
 expect(html).to_contain("@keyframes wm-menu-in")
 expect(html).to_contain("body[data-motion-mode='reduced'] .context-menu")
 expect(html).to_contain("body[data-motion-mode='off'] .context-menu")
+expect(html).to_contain("class='snap-layouts'")
+expect(html).to_contain("role='dialog' aria-label='Snap layouts'")
+expect(html).to_contain("data-motion-scope='snap-layouts'")
+expect(html).to_contain("data-snap-layout-target='win1'")
+expect(html).to_contain("class='snap-layout-option active' role='option' aria-selected='true' data-snap-layout='left-half'")
+expect(html).to_contain("data-snap-layout='right-half'")
+expect(html).to_contain("data-snap-layout='fullscreen'")
+expect(html).to_contain("data-snap-layout='quarter-grid'")
+expect(html).to_contain("class='snap-layout-diagram split-left'")
+expect(html).to_contain("class='snap-layout-diagram split-right'")
+expect(html).to_contain("class='snap-layout-diagram fullscreen'")
+expect(html).to_contain("class='snap-layout-diagram quarter-grid'")
+expect(html).to_contain("Meta Arrow")
+expect(html).to_contain("@keyframes wm-snap-layouts-in")
+expect(html).to_contain("body[data-motion-mode='reduced'] .snap-layouts")
+expect(html).to_contain("body[data-motion-mode='off'] .snap-layouts")
+expect(html).to_contain("class='window-switcher'")
+expect(html).to_contain("role='dialog' aria-label='Window switcher'")
+expect(html).to_contain("data-motion-scope='window-switcher'")
+expect(html).to_contain("data-switcher-shortcut='Meta Tab'")
+expect(html).to_contain("class='window-switcher-list' role='listbox'")
+expect(html).to_contain("class='window-switcher-item active' role='option' aria-selected='true' data-switch-window='win1'")
+expect(html).to_contain("data-switch-window='win2'")
+expect(html).to_contain("data-switch-window='win3'")
+expect(html).to_contain("window-switcher-icon")
+expect(html).to_contain("Switch windows")
+expect(html).to_contain("Meta Tab")
+expect(html).to_contain("@keyframes wm-switcher-in")
+expect(html).to_contain("body[data-motion-mode='reduced'] .window-switcher")
+expect(html).to_contain("body[data-motion-mode='off'] .window-switcher")
+expect(html).to_contain("class='quick-settings'")
+expect(html).to_contain("role='dialog' aria-label='Quick settings'")
+expect(html).to_contain("data-motion-scope='quick-settings'")
+expect(html).to_contain("data-command-lane-source='right-icons'")
+expect(html).to_contain("class='quick-settings-grid'")
+expect(html).to_contain("data-setting='wifi' aria-pressed='true'")
+expect(html).to_contain("data-setting='audio' aria-pressed='true'")
+expect(html).to_contain("data-setting='battery' aria-pressed='false'")
+expect(html).to_contain("data-setting='brightness' aria-pressed='false'")
+expect(html).to_contain("Office")
+expect(html).to_contain("42%")
+expect(html).to_contain("86%")
+expect(html).to_contain("68%")
+expect(html).to_contain("quick-setting-icon")
+expect(html).to_contain("@keyframes wm-quick-settings-in")
+expect(html).to_contain("body[data-motion-mode='reduced'] .quick-settings")
+expect(html).to_contain("body[data-motion-mode='off'] .quick-settings")
 expect(html).to_contain("class='hot-corner-zone hot-corner-overview'")
 expect(html).to_contain("class='hot-corner-zone hot-corner-launcher'")
 expect(html).to_contain("class='hot-corner-zone hot-corner-desktop'")
@@ -872,6 +1010,39 @@ expect(html).to_contain("Activate Terminal stage")
 expect(html).to_contain("@keyframes wm-stage-rail-in")
 expect(html).to_contain("body[data-motion-mode='reduced'] .stage-rail")
 expect(html).to_contain("body[data-motion-mode='off'] .stage-rail")
+expect(html).to_contain("class='screen-capture-overlay'")
+expect(html).to_contain("role='dialog' aria-label='Screen capture'")
+expect(html).to_contain("data-motion-scope='screen-capture'")
+expect(html).to_contain("data-capture-mode='selection'")
+expect(html).to_contain("class='capture-selection' role='img' aria-label='Selected capture region 420 by 160'")
+expect(html).to_contain("class='capture-handle nw' data-capture-handle='nw'")
+expect(html).to_contain("class='capture-handle ne' data-capture-handle='ne'")
+expect(html).to_contain("class='capture-handle sw' data-capture-handle='sw'")
+expect(html).to_contain("class='capture-handle se' data-capture-handle='se'")
+expect(html).to_contain("class='capture-dimensions'")
+expect(html).to_contain("420 x 160")
+expect(html).to_contain("class='capture-toolbar' role='toolbar' aria-label='Capture controls'")
+expect(html).to_contain("class='capture-mode active' data-capture-mode='selection' aria-pressed='true'")
+expect(html).to_contain("data-capture-mode='window'")
+expect(html).to_contain("data-capture-mode='screen'")
+expect(html).to_contain("data-capture-action='capture'")
+expect(html).to_contain("@keyframes wm-capture-in")
+expect(html).to_contain("body[data-motion-mode='reduced'] .screen-capture-overlay")
+expect(html).to_contain("body[data-motion-mode='off'] .screen-capture-overlay")
+expect(html).to_contain("class='clipboard-history' role='dialog' aria-label='Clipboard history'")
+expect(html).to_contain("data-motion-scope='clipboard-history'")
+expect(html).to_contain("data-clipboard-source='system'")
+expect(html).to_contain("class='clipboard-clear' data-clipboard-action='clear'")
+expect(html).to_contain("class='clipboard-list' role='listbox'")
+expect(html).to_contain("class='clipboard-item active' role='option' aria-selected='true' data-clipboard-kind='command'")
+expect(html).to_contain("data-clipboard-kind='code'")
+expect(html).to_contain("class='clipboard-item pinned'")
+expect(html).to_contain("data-clipboard-kind='link'")
+expect(html).to_contain("data-clipboard-action='paste'")
+expect(html).to_contain("class='clipboard-pin' data-clipboard-action='pin'")
+expect(html).to_contain("@keyframes wm-clipboard-in")
+expect(html).to_contain("body[data-motion-mode='reduced'] .clipboard-history")
+expect(html).to_contain("body[data-motion-mode='off'] .clipboard-history")
 ```
 
 </details>
@@ -881,7 +1052,7 @@ expect(html).to_contain("body[data-motion-mode='off'] .stage-rail")
 1. var manager = WindowManager new
 
 2. var registry = UiWindowSurfaceRegistry new
-   - Expected: bounded_affordances equals `18`
+   - Expected: bounded_affordances equals `25`
 
 
 <details>
@@ -898,7 +1069,7 @@ val scene = shared_wm_scene_to_chromed_wm_scene(shared, _shared_taskbar(), 1000,
 
 var bounded_affordances = 0
 for elem in scene.elements:
-    if elem.kind == "command_palette" or elem.kind == "desktop_widgets" or elem.kind == "control_center" or elem.kind == "window_overview" or elem.kind == "snap_preview" or elem.kind == "notification_toast" or elem.kind == "workspace_switcher" or elem.kind == "shortcut_overlay" or elem.kind == "app_launcher" or elem.kind == "context_menu" or elem.kind == "hot_corner_zone" or elem.kind == "resize_hud" or elem.kind == "gesture_hints" or elem.kind == "taskbar_preview" or elem.kind == "stage_rail":
+    if elem.kind == "command_palette" or elem.kind == "desktop_widgets" or elem.kind == "control_center" or elem.kind == "window_overview" or elem.kind == "snap_preview" or elem.kind == "notification_toast" or elem.kind == "notification_center" or elem.kind == "live_activity" or elem.kind == "workspace_switcher" or elem.kind == "shortcut_overlay" or elem.kind == "app_launcher" or elem.kind == "context_menu" or elem.kind == "snap_layouts" or elem.kind == "window_switcher" or elem.kind == "quick_settings" or elem.kind == "hot_corner_zone" or elem.kind == "resize_hud" or elem.kind == "gesture_hints" or elem.kind == "taskbar_preview" or elem.kind == "stage_rail" or elem.kind == "screen_capture_overlay" or elem.kind == "clipboard_history":
         bounded_affordances = bounded_affordances + 1
         expect(elem.x).to_be_greater_than(-1)
         expect(elem.y).to_be_greater_than(-1)
@@ -907,7 +1078,7 @@ for elem in scene.elements:
         expect(elem.x + elem.w).to_be_less_than(scene.width + 1)
         expect(elem.y + elem.h).to_be_less_than(scene.height + 1)
 
-expect(bounded_affordances).to_equal(18)
+expect(bounded_affordances).to_equal(25)
 ```
 
 </details>
@@ -923,15 +1094,22 @@ expect(bounded_affordances).to_equal(18)
    - Expected: report.max_control_center_width_px equals `320`
    - Expected: report.max_desktop_widget_width_px equals `260`
    - Expected: report.max_notification_width_px equals `360`
+   - Expected: report.max_notification_center_width_px equals `340`
+   - Expected: report.max_live_activity_width_px equals `420`
    - Expected: report.max_workspace_switcher_width_px equals `360`
    - Expected: report.max_shortcut_overlay_width_px equals `420`
    - Expected: report.max_app_launcher_width_px equals `520`
    - Expected: report.max_context_menu_width_px equals `280`
+   - Expected: report.max_snap_layouts_width_px equals `360`
+   - Expected: report.max_window_switcher_width_px equals `460`
+   - Expected: report.max_quick_settings_width_px equals `300`
    - Expected: report.max_hot_corner_size_px equals `44`
    - Expected: report.max_resize_hud_width_px equals `240`
    - Expected: report.max_gesture_hint_width_px equals `360`
    - Expected: report.max_taskbar_preview_width_px equals `320`
    - Expected: report.max_stage_rail_width_px equals `88`
+   - Expected: report.max_screen_capture_width_px equals `560`
+   - Expected: report.max_clipboard_history_width_px equals `360`
    - Expected: report.min_overview_card_width_px equals `180`
    - Expected: report.min_touch_target_height_px equals `44`
    - Expected: report.reduced_motion_duration_ms equals `80`
@@ -940,7 +1118,7 @@ expect(bounded_affordances).to_equal(18)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 68 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -961,20 +1139,28 @@ expect(report.traffic_controls_ready)
 expect(report.animated_background_ready)
 expect(report.window_interaction_ready)
 expect(report.command_palette_ready)
+expect(report.theme_accent_controls_ready)
 expect(report.focus_depth_ready)
 expect(report.lifecycle_animation_ready)
 expect(report.taskbar_interaction_ready)
 expect(report.dock_magnification_ready)
 expect(report.notification_feedback_ready)
+expect(report.notification_center_ready)
+expect(report.live_activity_ready)
 expect(report.workspace_switcher_ready)
 expect(report.keyboard_shortcut_overlay_ready)
 expect(report.app_launcher_ready)
 expect(report.context_menu_ready)
+expect(report.snap_layouts_ready)
+expect(report.window_switcher_ready)
+expect(report.quick_settings_ready)
 expect(report.hot_corners_ready)
 expect(report.resize_hud_ready)
 expect(report.gesture_hints_ready)
 expect(report.taskbar_preview_ready)
 expect(report.stage_rail_ready)
+expect(report.screen_capture_ready)
+expect(report.clipboard_history_ready)
 expect(report.color_checked)
 expect(report.contrast_ratio_x100).to_be_greater_than(449)
 expect(report.bounded_layout)
@@ -984,15 +1170,22 @@ expect(report.max_command_palette_width_px).to_equal(680)
 expect(report.max_control_center_width_px).to_equal(320)
 expect(report.max_desktop_widget_width_px).to_equal(260)
 expect(report.max_notification_width_px).to_equal(360)
+expect(report.max_notification_center_width_px).to_equal(340)
+expect(report.max_live_activity_width_px).to_equal(420)
 expect(report.max_workspace_switcher_width_px).to_equal(360)
 expect(report.max_shortcut_overlay_width_px).to_equal(420)
 expect(report.max_app_launcher_width_px).to_equal(520)
 expect(report.max_context_menu_width_px).to_equal(280)
+expect(report.max_snap_layouts_width_px).to_equal(360)
+expect(report.max_window_switcher_width_px).to_equal(460)
+expect(report.max_quick_settings_width_px).to_equal(300)
 expect(report.max_hot_corner_size_px).to_equal(44)
 expect(report.max_resize_hud_width_px).to_equal(240)
 expect(report.max_gesture_hint_width_px).to_equal(360)
 expect(report.max_taskbar_preview_width_px).to_equal(320)
 expect(report.max_stage_rail_width_px).to_equal(88)
+expect(report.max_screen_capture_width_px).to_equal(560)
+expect(report.max_clipboard_history_width_px).to_equal(360)
 expect(report.min_overview_card_width_px).to_equal(180)
 expect(report.min_touch_target_height_px).to_equal(44)
 expect(report.motion_can_disable)

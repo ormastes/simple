@@ -30,8 +30,12 @@ bitmap evidence, and the latest live QEMU Simple GUI/MDI framebuffer artifact.
   counterparts, including the explicit `simple-web-engine2d-image-taskbar-command`
   sample page.
 - Simple GUI backed by Simple WebRenderer passes exact Electron bitmap checks.
-- QEMU WM capture and host GTK counterpart capture both pass with zero
-  mismatches and no blur/tolerance.
+- QEMU WM capture and the host GTK GL scene counterpart both pass with zero
+  mismatches and no blur/tolerance. Host GTK timing baselines are
+  non-promoting, and guest-side Simple-vs-GTK performance is satisfied only by
+  QEMU guest serial timing markers. If the guest-side performance gate is still
+  blocked, the aggregate matrix is blocked and exits nonzero even when all
+  artifact rows preserve their evidence fields.
 - The live QEMU Simple GUI/MDI artifact has the expected 1024x768 PPM and raw
   pmemsave byte sizes, while the executable spec/manual require the canonical
   MDI serial markers and framebuffer anchor checks.
@@ -78,9 +82,11 @@ The wrapper emits these rows:
 - `simpleos_hardening_web_renderer_engine2d_status`
 - `simpleos_hardening_simple_gui_webrenderer_status`
 - `simpleos_hardening_qemu_host_counterpart_status`
+- `simpleos_hardening_qemu_gui_smf_artifact_status`
 - `simpleos_hardening_qemu_mdi_status`
 
-The matrix passes only when all eight rows are `pass`.
+The matrix passes only when all nine rows are `pass` and the required
+guest-side QEMU performance release gate is `pass`.
 
 ## Evidence Sources
 
@@ -114,10 +120,18 @@ The matrix passes only when all eight rows are `pass`.
   sizes, because those prove a real 1024x768 framebuffer artifact exists.
 - It samples the latest MDI PPM directly so a size-only artifact cannot satisfy
   the live QEMU row.
+- The GUI SMF artifact contract is a counted matrix row. It cannot promote live
+  QEMU capture or guest-side performance evidence, but a missing or failing
+  SMF artifact contract keeps the matrix incomplete.
+- QEMU guest perf can report `pass` only when the QEMU evidence report contains
+  a harness pass, `sample_origin=qemu-guest`, and a serial marker line with
+  `simple_frame_us`, `gtk_frame_us`, and `iterations` fields.
 - If a report is stale or missing, the right fix is to rerun the source gate and
   refresh the report.
 - If the matrix passes after a source gate was weakened, the source gate should
   be tightened; the matrix is only as strong as the row evidence it checks.
+- Host GTK timing baselines are diagnostic only and must never promote the
+  `guest-side-simple-vs-gtk-performance` release gate.
 - Before release, run this matrix together with the individual source gates that
   changed in the current branch.
 
@@ -131,6 +145,7 @@ use std.io_runtime.{getpid, time_now_unix_micros}
 use std.spec.*
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_write_text(path: text, content: text) -> bool
 
 fn _run_id() -> text:
     getpid().to_text() + "_" + time_now_unix_micros().to_text()
@@ -140,6 +155,9 @@ fn _build_dir(run_id: text) -> text:
 
 fn _report_path(run_id: text) -> text:
     "build/tmp/simpleos_hardening_evidence_matrix_spec_" + run_id + ".md"
+
+fn _qemu_report_path(run_id: text) -> text:
+    _build_dir(run_id) + "/qemu-report.md"
 
 fn _run_matrix(run_id: text) -> (text, text, i32):
     rt_process_run_timeout(
@@ -152,29 +170,91 @@ fn _run_matrix(run_id: text) -> (text, text, i32):
         120000
     )
 
+fn _run_matrix_with_qemu_report(run_id: text, qemu_report_path: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "BUILD_DIR=" + _build_dir(run_id) + " REPORT_PATH=" + _report_path(run_id) +
+                " QEMU_GTK_REPORT=" + qemu_report_path +
+                " sh scripts/check-simpleos-hardening-evidence-matrix.shs"
+        ],
+        120000
+    )
+
 describe "SimpleOS hardening evidence matrix":
-    it "has current evidence for every requested hardening requirement":
+    it "fails closed when live QMP evidence is missing and guest performance is blocked":
         val run_id = _run_id()
         val result = _run_matrix(run_id)
         val stdout = result[0]
         val stderr = result[1]
         val code = result[2]
-        if code != 0:
-            print "simpleos hardening matrix stdout: " + stdout
-            print "simpleos hardening matrix stderr: " + stderr
-        expect(code).to_equal(0)
-        expect(stdout).to_contain("simpleos_hardening_matrix_status=pass")
-        expect(stdout).to_contain("simpleos_hardening_matrix_reason=pass")
-        expect(stdout).to_contain("simpleos_hardening_matrix_passed=8/8")
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("simpleos_hardening_matrix_status=fail")
+        expect(stdout).to_contain("simpleos_hardening_matrix_reason=matrix-incomplete")
+        expect(stdout).to_contain("simpleos_hardening_matrix_passed=7/9")
         expect(stdout).to_contain("simpleos_hardening_exec_launch_fs_status=pass")
         expect(stdout).to_contain("simpleos_hardening_ssh_smf_exec_status=pass")
         expect(stdout).to_contain("simpleos_hardening_shared_wm_status=pass")
         expect(stdout).to_contain("simpleos_hardening_cpu_simd_status=pass")
         expect(stdout).to_contain("simpleos_hardening_web_renderer_engine2d_status=pass")
         expect(stdout).to_contain("simpleos_hardening_simple_gui_webrenderer_status=pass")
-        expect(stdout).to_contain("simpleos_hardening_qemu_host_counterpart_status=pass")
+        expect(stdout).to_contain("simpleos_hardening_qemu_host_counterpart_status=fail")
+        expect(stdout).to_contain("simpleos_hardening_qemu_gui_smf_artifact_status=fail")
+        expect(stdout).to_contain("simpleos_hardening_qemu_gui_smf_artifact_contract_status=missing")
+        expect(stdout).to_contain("simpleos_hardening_qemu_gui_smf_artifact_contract_row=GUI_SMF_ARTIFACT_CONTRACT status=missing")
+        expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_release_gate=guest-side-simple-vs-gtk-performance")
+        expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_release_gate_status=blocked-unwired")
+        expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_release_blocker=missing-qmp-socket")
+        expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_harness_status=unwired")
+        expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_harness_reason=qemu-side-gtk-simple-perf-harness-not-wired")
+        expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_harness_sample_origin=none")
+        expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_harness_required_sample_origin=qemu-guest")
+        expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_harness_pending_marker=")
+        expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_harness_marker_line=")
+        expect(stdout).to_contain("simpleos_hardening_qemu_host_perf_promotes_qemu_perf=false")
         expect(stdout).to_contain("simpleos_hardening_qemu_mdi_status=pass")
         expect(stdout).to_contain("simpleos_hardening_qemu_mdi_ppm_anchor_status=pass")
         expect(stdout).to_contain("simpleos_hardening_qemu_mdi_ppm_nonblack=")
         expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_ppm_bytes=2359312")
         expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_raw_bytes=3145728")
+
+    it "fails closed when live QMP passes but GUI SMF artifact contract is not executed":
+        val run_id = _run_id()
+        val qemu_report = _qemu_report_path(run_id)
+        rt_process_run_timeout("/bin/sh", ["-c", "mkdir -p " + _build_dir(run_id)], 5000)
+        expect(rt_file_write_text(qemu_report,
+            "# QEMU GTK WM Capture Evidence\n\n" +
+            "- status: pass\n" +
+            "- auto QMP status: pass\n" +
+            "- qemu live bitmap status: pass\n" +
+            "- live capture sample mismatches: 0\n" +
+            "- live capture full-scene mismatches: 0\n" +
+            "- qemu-side perf status: unavailable\n" +
+            "- qemu-side perf release gate: guest-side-simple-vs-gtk-performance\n" +
+            "- qemu-side perf required for release: true\n" +
+            "- qemu-side perf release blocker: qemu-side-gtk-simple-perf-harness-not-wired\n" +
+            "- qemu-side perf harness status: unwired\n" +
+            "- qemu-side perf harness reason: qemu-side-gtk-simple-perf-harness-not-wired\n" +
+            "- qemu-side perf harness sample origin: none\n" +
+            "- qemu-side perf harness required sample origin: qemu-guest\n" +
+            "- qemu-side perf harness marker line:\n" +
+            "- host GTK GL WM scene mismatch count: 0\n" +
+            "- host GTK GL WM scene blur/tolerance used: false\n" +
+            "- host perf baseline promotes QEMU perf: false\n" +
+            "- GUI SMF artifact contract status: fail\n" +
+            "- GUI SMF artifact contract row: GUI_SMF_ARTIFACT_CONTRACT status=fail artifact=build/gui/pure_gui_hot.smf sha256=abc size=1 smf_role=2 arch=1 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64\n"
+        )).to_equal(true)
+        val result = _run_matrix_with_qemu_report(run_id, qemu_report)
+        val stdout = result[0]
+        val code = result[2]
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("simpleos_hardening_matrix_status=fail")
+        expect(stdout).to_contain("simpleos_hardening_matrix_reason=matrix-incomplete")
+        expect(stdout).to_contain("simpleos_hardening_matrix_passed=8/9")
+        expect(stdout).to_contain("simpleos_hardening_qemu_host_counterpart_status=pass")
+        expect(stdout).to_contain("simpleos_hardening_qemu_gui_smf_artifact_status=fail")
+        expect(stdout).to_contain("simpleos_hardening_qemu_gui_smf_artifact_contract_status=fail")
+        expect(stdout).to_contain("qemu_status=not-run")
+        expect(stdout).to_contain("macos_status=not-run")
+        expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_release_gate_status=blocked-unwired")

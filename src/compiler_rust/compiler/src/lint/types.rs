@@ -57,8 +57,10 @@ pub enum LintName {
     SPipePlaceholderTests,
     /// `it` / `slow_it` body has no real assertion or sanctioned skip
     SPipeEmptyExamples,
-    /// `expect(<comparison>).to_equal(true/false)` style wrappers
+    /// `expect(<condition>).to_equal(true)` style wrappers
     SPipeBooleanWrapperAssertions,
+    /// `expect(<condition>).to_equal(false)` style wrappers
+    SPipeFalseBooleanWrapperAssertions,
     /// Explicit placeholder implementation body in production code
     StubImpl,
     /// pass_* used without a useful rationale
@@ -110,6 +112,7 @@ impl LintName {
             LintName::SPipePlaceholderTests => "spipe_placeholder_tests",
             LintName::SPipeEmptyExamples => "spipe_empty_examples",
             LintName::SPipeBooleanWrapperAssertions => "spipe_boolean_wrapper_assertions",
+            LintName::SPipeFalseBooleanWrapperAssertions => "spipe_false_boolean_wrapper_assertions",
             LintName::StubImpl => "stub_impl",
             LintName::RequiredCommentPass => "REQC001",
             LintName::RequiredCommentDangerous => "REQC002",
@@ -144,6 +147,7 @@ impl LintName {
             "spipe_placeholder_tests" => Some(LintName::SPipePlaceholderTests),
             "spipe_empty_examples" => Some(LintName::SPipeEmptyExamples),
             "spipe_boolean_wrapper_assertions" => Some(LintName::SPipeBooleanWrapperAssertions),
+            "spipe_false_boolean_wrapper_assertions" => Some(LintName::SPipeFalseBooleanWrapperAssertions),
             "stub_impl" => Some(LintName::StubImpl),
             "required_comment" | "REQC001" => Some(LintName::RequiredCommentPass),
             "REQC002" => Some(LintName::RequiredCommentDangerous),
@@ -184,7 +188,8 @@ impl LintName {
             LintName::SPipeManualAssertions => LintLevel::Warn,
             LintName::SPipePlaceholderTests => LintLevel::Deny,
             LintName::SPipeEmptyExamples => LintLevel::Deny,
-            LintName::SPipeBooleanWrapperAssertions => LintLevel::Deny,
+            LintName::SPipeBooleanWrapperAssertions => LintLevel::Warn,
+            LintName::SPipeFalseBooleanWrapperAssertions => LintLevel::Deny,
             LintName::StubImpl => LintLevel::Deny,
             LintName::RequiredCommentPass
             | LintName::RequiredCommentDangerous
@@ -437,7 +442,8 @@ See also: .claude/skills/todo.md for full format specification
             LintName::SPipeManualAssertions => "Lint: spipe_manual_assertions\nLevel: warn\n\nDetects manual pass/fail tracking instead of expect() assertions.".to_string(),
             LintName::SPipePlaceholderTests => "Lint: spipe_placeholder_tests\nLevel: deny\n\nDetects tautological assertions, placeholder pass helpers, and fake match-arm success in SPipe files.".to_string(),
             LintName::SPipeEmptyExamples => "Lint: spipe_empty_examples\nLevel: deny\n\nDetects SPipe examples that have no real assertion or sanctioned skip.".to_string(),
-            LintName::SPipeBooleanWrapperAssertions => "Lint: spipe_boolean_wrapper_assertions\nLevel: deny\n\nDetects verbose boolean assertions like expect(condition).to_equal(true) and expect(condition).to_equal(false). Use expect(condition) or expect_not(condition).".to_string(),
+            LintName::SPipeBooleanWrapperAssertions => "Lint: spipe_boolean_wrapper_assertions\nLevel: warn\n\nDetects verbose true boolean assertions like expect(condition).to_equal(true). Use expect(condition).".to_string(),
+            LintName::SPipeFalseBooleanWrapperAssertions => "Lint: spipe_false_boolean_wrapper_assertions\nLevel: deny\n\nDetects false boolean matcher wrappers like expect(condition).to_equal(false). Use expect_not(condition).".to_string(),
             LintName::StubImpl => "Lint: stub_impl\nLevel: deny\n\nDetects explicit placeholder implementation bodies in production code.".to_string(),
             LintName::RequiredCommentPass => "Lint: REQC001\nLevel: warn\n\nWarns when pass_* is used without a useful rationale.".to_string(),
             LintName::RequiredCommentDangerous => "Lint: REQC002\nLevel: warn\n\nWarns when a dangerous keyword is used without a useful rationale.".to_string(),
@@ -847,6 +853,7 @@ scoped suppression with a concrete reason.
             LintName::SPipePlaceholderTests,
             LintName::SPipeEmptyExamples,
             LintName::SPipeBooleanWrapperAssertions,
+            LintName::SPipeFalseBooleanWrapperAssertions,
             LintName::StubImpl,
             LintName::RequiredCommentPass,
             LintName::RequiredCommentDangerous,

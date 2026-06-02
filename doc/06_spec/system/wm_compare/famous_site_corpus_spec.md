@@ -571,6 +571,35 @@ expect(result.0).to_contain("missing structured exact-pixel acceptance policy fl
 </details>
 
 <details>
+<summary>Advanced: fails the production probe gate without exact and accepted result fields</summary>
+
+#### fails the production probe gate without exact and accepted result fields _(slow)_
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
+expect(rt_file_exists(tool_path)).to_equal(true)
+expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--drop-exact-accepted-fields-for-test"], 10000)
+expect(result.2).to_equal(1)
+expect(result.0).to_contain("\"status\": \"FAIL\"")
+expect(result.0).to_contain("\"hasExactField\": false")
+expect(result.0).to_contain("\"hasAcceptedField\": false")
+expect(result.0).to_contain("missing exact acceptance result field")
+expect(result.0).to_contain("missing accepted acceptance result field")
+```
+
+</details>
+
+
+</details>
+
+<details>
 <summary>Advanced: fails the production probe gate when per-line ink text drifts from layout</summary>
 
 #### fails the production probe gate when per-line ink text drifts from layout _(slow)_
@@ -655,6 +684,60 @@ expect(result.0).to_contain("per-line text ink diagnostics do not account for pr
 </details>
 
 <details>
+<summary>Advanced: fails the production probe gate without the glyph compositing signature</summary>
+
+#### fails the production probe gate without the glyph compositing signature _(slow)_
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
+expect(rt_file_exists(tool_path)).to_equal(true)
+expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--drop-glyph-compositing-signature-for-test"], 10000)
+expect(result.2).to_equal(1)
+expect(result.0).to_contain("\"status\": \"FAIL\"")
+expect(result.0).to_contain("\"hasGlyphCompositingSignature\": false")
+expect(result.0).to_contain("missing glyph compositing diagnostic signature")
+```
+
+</details>
+
+
+</details>
+
+<details>
+<summary>Advanced: fails the production probe gate when the glyph compositing signature is stale</summary>
+
+#### fails the production probe gate when the glyph compositing signature is stale _(slow)_
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
+expect(rt_file_exists(tool_path)).to_equal(true)
+expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--corrupt-glyph-compositing-signature-for-test"], 10000)
+expect(result.2).to_equal(1)
+expect(result.0).to_contain("\"status\": \"FAIL\"")
+expect(result.0).to_contain("\"glyphCompositingSignatureMatches\": false")
+expect(result.0).to_contain("glyph compositing diagnostic signature is stale or inconsistent")
+```
+
+</details>
+
+
+</details>
+
+<details>
 <summary>Advanced: fails the production probe gate when residual pixel diagnostics are hidden</summary>
 
 #### fails the production probe gate when residual pixel diagnostics are hidden _(slow)_
@@ -690,7 +773,7 @@ expect(result.0).to_contain("residual pixel diagnostics do not match unexplained
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -702,6 +785,8 @@ val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google"
 expect(result.2).to_equal(0)
 expect(result.0).to_contain("\"status\": \"PASS\"")
 expect(result.0).to_contain("\"rendererMode\": \"production\"")
+expect(result.0).to_contain("\"hasExactField\": true")
+expect(result.0).to_contain("\"hasAcceptedField\": true")
 expect(result.0).to_contain("\"divergent\": true")
 expect(result.0).to_contain("\"parityStatus\": \"divergent\"")
 expect(result.0).to_contain("\"boundedDivergenceOnly\": true")
@@ -721,10 +806,14 @@ expect(result.0).to_contain("\"simpleGeometryLineCount\": 4")
 expect(result.0).to_contain("\"textLineCountDelta\": 0")
 expect(result.0).to_contain("\"layoutTextMatch\": true")
 expect(result.0).to_contain("\"hasTextLineInkDelta\": true")
+expect(result.0).to_contain("\"hasGlyphCompositingSignature\": true")
+expect(result.0).to_contain("\"glyphCompositingSignatureMatches\": true")
 expect(result.0).to_contain("\"textLineInkDeltaCount\": 4")
 expect(result.0).to_contain("\"detailCount\": 4")
 expect(result.0).to_contain("\"differentPixelsTotal\": 2716")
 expect(result.0).to_contain("\"unexplainedDifferentPixels\": 1")
+expect(result.0).to_contain("\"chromeExactBlackPixelsTotal\": 67")
+expect(result.0).to_contain("\"simpleBackgroundMismatchPixelsTotal\": 1980")
 expect(result.0).to_contain("\"allRegionCountsMatch\": true")
 expect(result.0).to_contain("\"reportedDifferentPixels\": 808")
 expect(result.0).to_contain("\"actualDifferentPixels\": 808")
@@ -1364,9 +1453,9 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 42 |
-| Active scenarios | 42 |
-| Slow scenarios | 42 |
+| Total scenarios | 45 |
+| Active scenarios | 45 |
+| Slow scenarios | 45 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 

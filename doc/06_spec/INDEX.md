@@ -12,8 +12,9 @@
 
 ---
 
-## Other (1 features)
+## Standard Library (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Engine2d Backend Specification](integration/rendering/engine2d_backend_spec.md) | Auto-generated | N/A | 11 | 0% | 0 lines |
+| [Browser Session Wasm Host Specification](unit/lib/common/web/browser_session_wasm_host_spec.md) | Auto-generated | N/A | 107 | 0% | 0 lines |
+

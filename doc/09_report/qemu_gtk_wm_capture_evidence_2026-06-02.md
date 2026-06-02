@@ -1,220 +1,266 @@
 # QEMU GTK WM Capture Evidence
 
-- status: pass
-- reason: pass
+- status: unavailable
+- reason: missing-qmp-socket
 - qemu bin: qemu-system-x86_64
 - qemu arch: x86_64
 - qemu display gtk supported: true
 - qemu display reason: pass
-- auto QMP launch: 1
-- auto QMP status: pass
-- auto QMP reason: pass
+- auto QMP launch: 0
+- host WM smoke enabled: 1
+- auto QMP status: not-run
+- auto QMP reason: not-run
 - auto QMP exit code: 0
-- auto QMP pid: 3078216
-- auto QMP socket: /tmp/simpleos_desktop_qmp_3074101_1780372039384478.sock
-- auto QMP serial log: build/os/simpleos_desktop_qmp_3074101_1780372039384478.log
-- auto QMP stderr log: build/os/simpleos_desktop_qmp_3074101_1780372039384478.log.stderr
+- auto QMP pid:
+- auto QMP socket:
+- auto QMP serial log:
+- auto QMP serial log bytes: 0
+- auto QMP serial log cksum: 0
+- auto QMP stderr log:
+- auto QMP stderr log bytes: 0
+- auto QMP stderr log cksum: 0
 - auto QMP missing marker:
 - auto QMP marker timeout ms:
 - auto QMP qemu running at failure:
 - auto QMP serial bytes:
 - auto QMP stderr bytes:
-- qmp socket: /tmp/simpleos_desktop_qmp_3074101_1780372039384478.sock
-- host WM smoke status: unavailable
-- host WM smoke reason: not-run
-- host WM smoke report: build/qemu_gtk_wm_capture_evidence_2026-06-02-live/wm-host-launch-capture.md
-- live capture status: pass
-- live capture reason: pass
-- qemu live bitmap status: pass
-- qemu live bitmap reason: live-qmp-screendump-pass
-- live capture pixels: 786432
-- live capture non-black pixels: 786432
-- live capture sample matches: 10
+- auto QMP guest perf marker present:
+- auto QMP guest perf sample origin:
+- auto QMP guest perf simple frame us:
+- auto QMP guest perf GTK frame us:
+- auto QMP guest perf iterations:
+- auto QMP guest perf pending marker:
+- qmp socket:
+- host WM smoke status: pass
+- host WM smoke reason: wm-launch-capture-contract-verified
+- host WM smoke report: build/tmp/qemu_gtk_wm_capture_evidence_current/wm-host-launch-capture.md
+- live capture status: unavailable
+- live capture reason: missing-qmp-socket
+- qemu live bitmap status: unavailable
+- qemu live bitmap reason: missing-qmp-socket
+- live capture pixels: 0
+- live capture non-black pixels: 0
+- live capture sample matches: 0
 - live capture sample mismatches: 0
 - live capture full-scene mismatches: 0
-- qemu-side perf status: pass
-- qemu-side perf reason: qemu-live-bitmap-and-host-gtk-baseline-pass
-- qemu-side perf comparison available: true
+- qemu-side perf status: unavailable
+- qemu-side perf reason: missing-qmp-socket
+- qemu-side perf comparison available: false
 - qemu-side perf scope: qemu-live-bitmap-plus-host-gtk-baseline
 - qemu-side perf release gate: guest-side-simple-vs-gtk-performance
-- qemu-side perf release blocker: none
+- qemu-side perf release blocker: missing-qmp-socket
 - qemu-side perf required for release: true
+- qemu-side perf harness status: unwired
+- qemu-side perf harness reason: qemu-side-gtk-simple-perf-harness-not-wired
+- qemu-side perf harness sample origin: none
+- qemu-side perf harness required sample origin: qemu-guest
+- qemu-side perf harness pending marker: [desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_us=<positive> gtk_frame_us=<positive> iterations=<positive>
+- qemu-side perf harness marker line:
 - host perf baseline status: pass
 - host perf baseline reason: pass
 - host perf baseline simple frame us: 1
-- host perf baseline GTK frame us: 290
+- host perf baseline GTK frame us: 279
 - host perf baseline iterations: 200
 - host perf baseline comparison available: true
 - host perf baseline scope: host-gtk-gl-exact-scene-baseline
 - host perf baseline promotes QEMU perf: false
-- fake QMP screendump status: not-run
-- fake QMP screendump reason: not-run
-- fake QMP screendump report: build/qemu_gtk_wm_capture_evidence_2026-06-02-live/fake-qmp-capture.md
-- fake QMP expected ARGB path:
-- fake QMP captured ARGB path:
+- fake QMP screendump status: pass
+- fake QMP screendump reason: fake-qmp-screendump-pass
+- fake QMP screendump report: build/tmp/qemu_gtk_wm_capture_evidence_current/fake-qmp-capture.md
+- fake QMP expected ARGB path: build/tmp/qemu_gtk_wm_capture_evidence_current/fake-qmp/expected-argb.json
+- fake QMP expected ARGB bytes: 33910
+- fake QMP expected ARGB cksum: 123401992
+- fake QMP captured ARGB path: build/tmp/qemu_gtk_wm_capture_evidence_current/fake-qmp/captured-argb.json
+- fake QMP captured ARGB bytes: 33915
+- fake QMP captured ARGB cksum: 1773745064
+- fake QMP output bytes: 2046
+- fake QMP output cksum: 2449873325
 - host GTK GL WM scene status: pass
 - host GTK GL WM scene reason: pass
-- host GTK GL WM scene report: build/qemu_gtk_wm_capture_evidence_2026-06-02-live/gtk-gl-wm-scene.md
+- host GTK GL WM scene report: build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl-wm-scene.md
 - host GTK GL WM scene simple frame us: 1
-- host GTK GL WM scene GTK frame us: 290
+- host GTK GL WM scene GTK frame us: 279
 - host GTK GL WM scene mismatch count: 0
-- host GTK GL WM scene expected RGBA path: build/qemu_gtk_wm_capture_evidence_2026-06-02-live/gtk-gl/simple-expected-rgba.json
-- host GTK GL WM scene captured RGBA path: build/qemu_gtk_wm_capture_evidence_2026-06-02-live/gtk-gl/gtk-captured-rgba.json
+- host GTK GL WM scene expected RGBA path: build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl/simple-expected-rgba.json
+- host GTK GL WM scene expected RGBA bytes: 663300
+- host GTK GL WM scene expected RGBA cksum: 2632171176
+- host GTK GL WM scene captured RGBA path: build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl/gtk-captured-rgba.json
+- host GTK GL WM scene captured RGBA bytes: 663272
+- host GTK GL WM scene captured RGBA cksum: 70624314
 - host GTK GL WM scene blur/tolerance used: false
+- host GTK GL WM scene output bytes: 1254
+- host GTK GL WM scene output cksum: 3193501046
 - GUI SMF artifact contract status: missing
 - GUI SMF artifact contract row: GUI_SMF_ARTIFACT_CONTRACT status=missing artifact= sha256= size=0 smf_role=-1 arch=0 embedded_dynlib=false symbol=gui_dynlib_hot_probe_tick qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64
 - GUI SMF artifact contract scope: contract-only; does not promote live QEMU capture
 
 ## Raw Evidence
-- qemu_gtk_wm_capture_status=pass
-- qemu_gtk_wm_capture_reason=pass
+- qemu_gtk_wm_capture_status=unavailable
+- qemu_gtk_wm_capture_reason=missing-qmp-socket
 - qemu_gtk_wm_capture_qemu_bin=qemu-system-x86_64
 - qemu_gtk_wm_capture_qemu_arch=x86_64
 - qemu_gtk_wm_capture_display_gtk_supported=true
 - qemu_gtk_wm_capture_display_reason=pass
-- qemu_gtk_wm_capture_auto_qmp_launch=1
-- qemu_gtk_wm_capture_auto_qmp_status=pass
-- qemu_gtk_wm_capture_auto_qmp_reason=pass
+- qemu_gtk_wm_capture_auto_qmp_launch=0
+- qemu_gtk_wm_capture_host_wm_smoke=1
+- qemu_gtk_wm_capture_auto_qmp_status=not-run
+- qemu_gtk_wm_capture_auto_qmp_reason=not-run
 - qemu_gtk_wm_capture_auto_qmp_exit_code=0
-- qemu_gtk_wm_capture_auto_qmp_pid=3078216
-- qemu_gtk_wm_capture_auto_qmp_socket=/tmp/simpleos_desktop_qmp_3074101_1780372039384478.sock
-- qemu_gtk_wm_capture_auto_qmp_serial_log=build/os/simpleos_desktop_qmp_3074101_1780372039384478.log
-- qemu_gtk_wm_capture_auto_qmp_stderr_log=build/os/simpleos_desktop_qmp_3074101_1780372039384478.log.stderr
+- qemu_gtk_wm_capture_auto_qmp_pid=
+- qemu_gtk_wm_capture_auto_qmp_socket=
+- qemu_gtk_wm_capture_auto_qmp_serial_log=
+- qemu_gtk_wm_capture_auto_qmp_serial_log_bytes=0
+- qemu_gtk_wm_capture_auto_qmp_serial_log_cksum=0
+- qemu_gtk_wm_capture_auto_qmp_stderr_log=
+- qemu_gtk_wm_capture_auto_qmp_stderr_log_bytes=0
+- qemu_gtk_wm_capture_auto_qmp_stderr_log_cksum=0
 - qemu_gtk_wm_capture_auto_qmp_missing_marker=
 - qemu_gtk_wm_capture_auto_qmp_marker_timeout_ms=
 - qemu_gtk_wm_capture_auto_qmp_qemu_running=
 - qemu_gtk_wm_capture_auto_qmp_serial_bytes=
 - qemu_gtk_wm_capture_auto_qmp_stderr_bytes=
-- qemu_gtk_wm_capture_qmp_socket=/tmp/simpleos_desktop_qmp_3074101_1780372039384478.sock
+- qemu_gtk_wm_capture_auto_qmp_guest_perf_marker_present=
+- qemu_gtk_wm_capture_auto_qmp_guest_perf_sample_origin=
+- qemu_gtk_wm_capture_auto_qmp_guest_perf_simple_frame_us=
+- qemu_gtk_wm_capture_auto_qmp_guest_perf_gtk_frame_us=
+- qemu_gtk_wm_capture_auto_qmp_guest_perf_iterations=
+- qemu_gtk_wm_capture_auto_qmp_guest_perf_pending_marker=
+- qemu_gtk_wm_capture_qmp_socket=
 - qemu_gtk_wm_capture_wm_exit_code=0
-- qemu_gtk_wm_capture_host_wm_status=unavailable
-- qemu_gtk_wm_capture_host_wm_reason=not-run
+- qemu_gtk_wm_capture_host_wm_status=pass
+- qemu_gtk_wm_capture_host_wm_reason=wm-launch-capture-contract-verified
 - qemu_gtk_wm_capture_host_wm_exit_code=0
-- qemu_gtk_wm_capture_host_wm_report_path=build/qemu_gtk_wm_capture_evidence_2026-06-02-live/wm-host-launch-capture.md
-- qemu_gtk_wm_capture_live_capture_status=pass
-- qemu_gtk_wm_capture_live_capture_reason=pass
-- qemu_gtk_wm_capture_qemu_live_status=pass
-- qemu_gtk_wm_capture_qemu_live_reason=live-qmp-screendump-pass
-- qemu_gtk_wm_capture_qemu_live_pixels=786432
-- qemu_gtk_wm_capture_qemu_live_non_black_pixels=786432
-- qemu_gtk_wm_capture_qemu_live_sample_matches=10
+- qemu_gtk_wm_capture_host_wm_report_path=build/tmp/qemu_gtk_wm_capture_evidence_current/wm-host-launch-capture.md
+- qemu_gtk_wm_capture_live_capture_status=unavailable
+- qemu_gtk_wm_capture_live_capture_reason=missing-qmp-socket
+- qemu_gtk_wm_capture_qemu_live_status=unavailable
+- qemu_gtk_wm_capture_qemu_live_reason=missing-qmp-socket
+- qemu_gtk_wm_capture_qemu_live_pixels=0
+- qemu_gtk_wm_capture_qemu_live_non_black_pixels=0
+- qemu_gtk_wm_capture_qemu_live_sample_matches=0
 - qemu_gtk_wm_capture_qemu_live_sample_mismatches=0
 - qemu_gtk_wm_capture_qemu_live_scene_mismatches=0
-- qemu_gtk_wm_capture_perf_status=pass
-- qemu_gtk_wm_capture_perf_reason=qemu-live-bitmap-and-host-gtk-baseline-pass
-- qemu_gtk_wm_capture_perf_simple_frame_us=1
-- qemu_gtk_wm_capture_perf_gtk_frame_us=290
-- qemu_gtk_wm_capture_perf_iterations=200
-- qemu_gtk_wm_capture_perf_comparison_available=true
+- qemu_gtk_wm_capture_perf_status=unavailable
+- qemu_gtk_wm_capture_perf_reason=missing-qmp-socket
+- qemu_gtk_wm_capture_perf_simple_frame_us=0
+- qemu_gtk_wm_capture_perf_gtk_frame_us=0
+- qemu_gtk_wm_capture_perf_iterations=0
+- qemu_gtk_wm_capture_perf_comparison_available=false
 - qemu_gtk_wm_capture_perf_scope=qemu-live-bitmap-plus-host-gtk-baseline
 - qemu_gtk_wm_capture_perf_release_gate=guest-side-simple-vs-gtk-performance
-- qemu_gtk_wm_capture_perf_release_blocker=none
+- qemu_gtk_wm_capture_perf_release_blocker=missing-qmp-socket
 - qemu_gtk_wm_capture_perf_required_for_release=true
+- qemu_gtk_wm_capture_qemu_perf_harness_status=unwired
+- qemu_gtk_wm_capture_qemu_perf_harness_reason=qemu-side-gtk-simple-perf-harness-not-wired
+- qemu_gtk_wm_capture_qemu_perf_harness_sample_origin=none
+- qemu_gtk_wm_capture_qemu_perf_harness_required_sample_origin=qemu-guest
+- qemu_gtk_wm_capture_qemu_perf_harness_pending_marker=[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_us=<positive> gtk_frame_us=<positive> iterations=<positive>
+- qemu_gtk_wm_capture_qemu_perf_harness_marker_line=
 - qemu_gtk_wm_capture_host_perf_status=pass
 - qemu_gtk_wm_capture_host_perf_reason=pass
 - qemu_gtk_wm_capture_host_perf_simple_frame_us=1
-- qemu_gtk_wm_capture_host_perf_gtk_frame_us=290
+- qemu_gtk_wm_capture_host_perf_gtk_frame_us=279
 - qemu_gtk_wm_capture_host_perf_iterations=200
 - qemu_gtk_wm_capture_host_perf_comparison_available=true
 - qemu_gtk_wm_capture_host_perf_scope=host-gtk-gl-exact-scene-baseline
 - qemu_gtk_wm_capture_host_perf_promotes_qemu_perf=false
-- qemu_gtk_wm_capture_fake_qmp_status=not-run
-- qemu_gtk_wm_capture_fake_qmp_reason=not-run
-- qemu_gtk_wm_capture_fake_qmp_report_path=build/qemu_gtk_wm_capture_evidence_2026-06-02-live/fake-qmp-capture.md
-- qemu_gtk_wm_capture_fake_qmp_expected_argb_path=
-- qemu_gtk_wm_capture_fake_qmp_captured_argb_path=
+- qemu_gtk_wm_capture_fake_qmp_status=pass
+- qemu_gtk_wm_capture_fake_qmp_reason=fake-qmp-screendump-pass
+- qemu_gtk_wm_capture_fake_qmp_report_path=build/tmp/qemu_gtk_wm_capture_evidence_current/fake-qmp-capture.md
+- qemu_gtk_wm_capture_fake_qmp_expected_argb_path=build/tmp/qemu_gtk_wm_capture_evidence_current/fake-qmp/expected-argb.json
+- qemu_gtk_wm_capture_fake_qmp_expected_argb_bytes=33910
+- qemu_gtk_wm_capture_fake_qmp_expected_argb_cksum=123401992
+- qemu_gtk_wm_capture_fake_qmp_captured_argb_path=build/tmp/qemu_gtk_wm_capture_evidence_current/fake-qmp/captured-argb.json
+- qemu_gtk_wm_capture_fake_qmp_captured_argb_bytes=33915
+- qemu_gtk_wm_capture_fake_qmp_captured_argb_cksum=1773745064
+- qemu_gtk_wm_capture_fake_qmp_output_bytes=2046
+- qemu_gtk_wm_capture_fake_qmp_output_cksum=2449873325
 - qemu_gtk_wm_capture_gtk_scene_status=pass
 - qemu_gtk_wm_capture_gtk_scene_reason=pass
-- qemu_gtk_wm_capture_gtk_scene_report_path=build/qemu_gtk_wm_capture_evidence_2026-06-02-live/gtk-gl-wm-scene.md
+- qemu_gtk_wm_capture_gtk_scene_report_path=build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl-wm-scene.md
 - qemu_gtk_wm_capture_gtk_scene_simple_frame_us=1
-- qemu_gtk_wm_capture_gtk_scene_gtk_frame_us=290
+- qemu_gtk_wm_capture_gtk_scene_gtk_frame_us=279
 - qemu_gtk_wm_capture_gtk_scene_rgba_mismatch_count=0
-- qemu_gtk_wm_capture_gtk_scene_expected_rgba_path=build/qemu_gtk_wm_capture_evidence_2026-06-02-live/gtk-gl/simple-expected-rgba.json
-- qemu_gtk_wm_capture_gtk_scene_captured_rgba_path=build/qemu_gtk_wm_capture_evidence_2026-06-02-live/gtk-gl/gtk-captured-rgba.json
+- qemu_gtk_wm_capture_gtk_scene_expected_rgba_path=build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl/simple-expected-rgba.json
+- qemu_gtk_wm_capture_gtk_scene_expected_rgba_bytes=663300
+- qemu_gtk_wm_capture_gtk_scene_expected_rgba_cksum=2632171176
+- qemu_gtk_wm_capture_gtk_scene_captured_rgba_path=build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl/gtk-captured-rgba.json
+- qemu_gtk_wm_capture_gtk_scene_captured_rgba_bytes=663272
+- qemu_gtk_wm_capture_gtk_scene_captured_rgba_cksum=70624314
 - qemu_gtk_wm_capture_gtk_scene_blur_or_tolerance_used=false
+- qemu_gtk_wm_capture_gtk_scene_output_bytes=1254
+- qemu_gtk_wm_capture_gtk_scene_output_cksum=3193501046
 - qemu_gtk_wm_capture_gui_smf_artifact_contract_status=missing
 - qemu_gtk_wm_capture_gui_smf_artifact_contract_row=GUI_SMF_ARTIFACT_CONTRACT status=missing artifact= sha256= size=0 smf_role=-1 arch=0 embedded_dynlib=false symbol=gui_dynlib_hot_probe_tick qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64
-- qemu_gtk_wm_capture_wm_evidence_status=pass
-- qemu_gtk_wm_capture_wm_evidence_reason=wm-launch-capture-contract-verified
-- qemu_gtk_wm_capture_wm_contract_status=pass
-- qemu_gtk_wm_capture_wm_spec_status=pass
-- qemu_gtk_wm_capture_wm_electron_live_status=skipped
-- qemu_gtk_wm_capture_wm_electron_live_reason=RUN_ELECTRON_LIVE_SMOKE=0
-- qemu_gtk_wm_capture_wm_qemu_live_status=pass
-- qemu_gtk_wm_capture_wm_qemu_live_reason=live-qmp-screendump-pass
-- qemu_gtk_wm_capture_wm_qemu_live_pixels=786432
-- qemu_gtk_wm_capture_wm_qemu_live_non_black_pixels=786432
-- qemu_gtk_wm_capture_wm_qemu_live_sample_matches=10
-- qemu_gtk_wm_capture_wm_qemu_live_sample_mismatches=0
-- qemu_gtk_wm_capture_wm_qemu_live_sample_checksum=2806560364359906732
-- qemu_gtk_wm_capture_wm_qemu_live_scene_mismatches=0
-- qemu_gtk_wm_capture_wm_qemu_live_first_mismatch_x=-1
-- qemu_gtk_wm_capture_wm_qemu_live_first_mismatch_y=-1
-- qemu_gtk_wm_capture_wm_report_path=build/qemu_gtk_wm_capture_evidence_2026-06-02-live/wm-launch-capture.md
+- qemu_gtk_wm_capture_host_evidence_status=pass
+- qemu_gtk_wm_capture_host_evidence_reason=wm-launch-capture-contract-verified
+- qemu_gtk_wm_capture_host_contract_status=pass
+- qemu_gtk_wm_capture_host_spec_status=pass
+- qemu_gtk_wm_capture_host_electron_live_status=skipped
+- qemu_gtk_wm_capture_host_electron_live_reason=RUN_ELECTRON_LIVE_SMOKE=0
+- qemu_gtk_wm_capture_host_qemu_live_status=skipped
+- qemu_gtk_wm_capture_host_qemu_live_reason=RUN_QEMU_LIVE_CAPTURE=0
+- qemu_gtk_wm_capture_host_qemu_live_pixels=0
+- qemu_gtk_wm_capture_host_qemu_live_non_black_pixels=0
+- qemu_gtk_wm_capture_host_qemu_live_sample_matches=0
+- qemu_gtk_wm_capture_host_qemu_live_sample_mismatches=0
+- qemu_gtk_wm_capture_host_qemu_live_sample_checksum=0
+- qemu_gtk_wm_capture_host_qemu_live_scene_mismatches=0
+- qemu_gtk_wm_capture_host_qemu_live_first_mismatch_x=-1
+- qemu_gtk_wm_capture_host_qemu_live_first_mismatch_y=-1
+- qemu_gtk_wm_capture_host_report_path=build/tmp/qemu_gtk_wm_capture_evidence_current/wm-host-launch-capture.md
 
-## Auto QMP Launch Output
-- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unsupported feature: unknown static member 'Result.Err'; wrapper-type static-member sugar only resolves to existing static methods (tried: Result.err)
+## Fake QMP Capture Output
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/common/image/ppm_decode.spl:33:33
+-    |
+-  33 |             while p < n and data[p] != 10:
+-    |                                 ^
+-
+- Use angle brackets: data<...> instead of data[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: T
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/common/image/ppm_decode.spl:33:33
+-    |
+-  33 |             while p < n and data[p] != 10:
+-    |                                 ^
+-
+- Use angle brackets: data<...> instead of data[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
 - [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.test_runner.resource_governor' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.test_runner.system_monitor' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.process_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.sysinfo_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [build][x86_64] phase=plan entry=examples/simple_os/arch/x86_64/desktop_e2e_entry.spl target=x86_64-unknown-none backend=cranelift log=on
-- [build][x86_64] phase=spawn timeout_ms=900000
-- [build][x86_64] env: SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$(pwd)/src" SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_OS_LOG_MODE=on PATH="/usr/bin:$PATH"
-- [build][x86_64] cmd: src/compiler_rust/target/debug/simple native-build --source build/os/generated --source src/os --source src/lib --source examples/simple_os --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log on --entry-closure --entry examples/simple_os/arch/x86_64/desktop_e2e_entry.spl --target x86_64-unknown-none -o build/os/simpleos_desktop_e2e_32.elf --linker-script examples/simple_os/arch/x86_64/linker.ld
-- [build][x86_64] phase=native-build OK elapsed_ms=129835
-- simpleos_desktop_qmp_status=pass
-- simpleos_desktop_qmp_reason=pass
-- simpleos_desktop_qmp_pid=3078216
-- simpleos_desktop_qmp_socket=/tmp/simpleos_desktop_qmp_3074101_1780372039384478.sock
-- simpleos_desktop_qmp_serial_log=build/os/simpleos_desktop_qmp_3074101_1780372039384478.log
-- simpleos_desktop_qmp_stderr_log=build/os/simpleos_desktop_qmp_3074101_1780372039384478.log.stderr
+- qemu_capture_fake_qmp_success=true
+- qemu_capture_fake_qmp_backend=qemu_vm
+- qemu_capture_fake_qmp_width=64
+- qemu_capture_fake_qmp_height=48
+- qemu_capture_fake_qmp_pixels=3072
+- qemu_capture_fake_qmp_capture_checksum=20215336677919650
+- qemu_capture_fake_qmp_reference_checksum=20215336677919650
+- qemu_capture_fake_qmp_mismatch_count=0
+- qemu_capture_fake_qmp_first_mismatch=-1
+- qemu_capture_fake_qmp_blur_or_tolerance_used=false
+- qemu_capture_fake_qmp_capture_us=262410
+- qemu_capture_fake_qmp_pixel0=4280307872
+- qemu_capture_fake_qmp_pixel384=4279310375
+- qemu_capture_fake_qmp_pixel1000=4293257195
+- qemu_capture_fake_qmp_error=
+- fake_qmp_socket=build/tmp/qemu_gtk_wm_capture_evidence_current/fake-qmp/fake-qmp.sock
+- __CM_FS__:2497
+- __CM_FS__:9229
+- qemu_capture_fake_qmp_status=pass
+- qemu_capture_fake_qmp_reason=fake-qmp-screendump-pass
+- qemu_capture_fake_qmp_report=build/tmp/qemu_gtk_wm_capture_evidence_current/fake-qmp-capture.md
+- qemu_capture_fake_qmp_expected_argb_path=build/tmp/qemu_gtk_wm_capture_evidence_current/fake-qmp/expected-argb.json
+- qemu_capture_fake_qmp_captured_argb_path=build/tmp/qemu_gtk_wm_capture_evidence_current/fake-qmp/captured-argb.json
 
-## WM Capture Output
+## Host WM Smoke Output
 - check=wm_launch_capture_evidence
 - strict_live_capture=0
-- strict_qemu_capture=1
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl:282:45
--    |
-- 282 |                 if idx < data.len() and data[idx] != 0:
--    |                                             ^
--
-- Use angle brackets: data<...> instead of data[...]
--
-- Run `simple migrate --fix-generics` to automatically update your code
--
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
--    |
-- 138 |         if c < bp.len() and pp[c] == bp[c]:
--    |                               ^
--
-- Use angle brackets: pp<...> instead of pp[...]
--
-- Run `simple migrate --fix-generics` to automatically update your code
--
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
--    |
--   3 | export use std.gc_async_mut.io.oneapi_sffi.*
--    | ^
--
-- Use explicit exports instead
--
-- Example: export use module.{A, B, C} or export A, B from module
--
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
--    |
--   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
--    | ^
--
-- Use explicit exports instead
--
-- Example: export use module.{A, B, C} or export A, B from module
--
+- strict_qemu_capture=0
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /home/ormastes/dev/pub/simple/src/lib/common/image/ppm_decode.spl:33:33
 -    |
@@ -225,47 +271,7 @@
 -
 - Run `simple migrate --fix-generics` to automatically update your code
 -
-- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl:282:45
--    |
-- 282 |                 if idx < data.len() and data[idx] != 0:
--    |                                             ^
--
-- Use angle brackets: data<...> instead of data[...]
--
-- Run `simple migrate --fix-generics` to automatically update your code
--
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
--    |
-- 138 |         if c < bp.len() and pp[c] == bp[c]:
--    |                               ^
--
-- Use angle brackets: pp<...> instead of pp[...]
--
-- Run `simple migrate --fix-generics` to automatically update your code
--
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
--    |
--   3 | export use std.gc_async_mut.io.oneapi_sffi.*
--    | ^
--
-- Use explicit exports instead
--
-- Example: export use module.{A, B, C} or export A, B from module
--
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
--    |
--   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
--    | ^
--
-- Use explicit exports instead
--
-- Example: export use module.{A, B, C} or export A, B from module
--
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: T
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /home/ormastes/dev/pub/simple/src/lib/common/image/ppm_decode.spl:33:33
 -    |
@@ -277,14 +283,6 @@
 - Run `simple migrate --fix-generics` to automatically update your code
 -
 - [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.oneapi_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - host_wm_package_ready=true
 - simpleos_wm_package_ready=true
 - host_wm_focused_window=win1
@@ -310,7 +308,7 @@
 -
 - Running: test/unit/app/ui/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/app/ui/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (214ms)
+-   [32mPASSED[0m (224ms)
 -
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -318,12 +316,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 219ms
+- Duration: 229ms
 -
 - [32m✓ All tests passed![0m
 -
 - Slowest tests:
--        214ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
+-        224ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -337,7 +335,7 @@
 -
 - Running: test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - [1/1] test/unit/app/ui/host_wm_runtime_loop_spec.spl
--   [32mPASSED[0m (1029ms)
+-   [32mPASSED[0m (1072ms)
 -
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -345,12 +343,12 @@
 - Files: 1
 - [32mPassed: 2[0m
 - Failed: 0
-- Duration: 1033ms
+- Duration: 1077ms
 -
 - [32m✓ All tests passed![0m
 -
 - Slowest tests:
--       1029ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
+-       1072ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -364,7 +362,7 @@
 -
 - Running: test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/os/desktop/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (214ms)
+-   [32mPASSED[0m (194ms)
 -
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -372,12 +370,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 219ms
+- Duration: 199ms
 -
 - [32m✓ All tests passed![0m
 -
 - Slowest tests:
--        214ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
+-        194ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/qemu_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -391,7 +389,7 @@
 -
 - Running: test/unit/os/compositor/qemu_capture_spec.spl
 - [1/1] test/unit/os/compositor/qemu_capture_spec.spl
--   [32mPASSED[0m (1056ms)
+-   [32mPASSED[0m (573ms)
 -
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -399,12 +397,12 @@
 - Files: 1
 - [32mPassed: 11[0m
 - Failed: 0
-- Duration: 1061ms
+- Duration: 578ms
 -
 - [32m✓ All tests passed![0m
 -
 - Slowest tests:
--       1056ms  test/unit/os/compositor/qemu_capture_spec.spl
+-        573ms  test/unit/os/compositor/qemu_capture_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/electron_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -418,7 +416,7 @@
 -
 - Running: test/unit/os/compositor/electron_capture_spec.spl
 - [1/1] test/unit/os/compositor/electron_capture_spec.spl
--   [32mPASSED[0m (882ms)
+-   [32mPASSED[0m (462ms)
 -
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -426,153 +424,30 @@
 - Files: 1
 - [32mPassed: 7[0m
 - Failed: 0
-- Duration: 887ms
+- Duration: 467ms
 -
 - [32m✓ All tests passed![0m
 -
 - Slowest tests:
--        882ms  test/unit/os/compositor/electron_capture_spec.spl
+-        462ms  test/unit/os/compositor/electron_capture_spec.spl
 - spec_exit_code=0
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl:282:45
--    |
-- 282 |                 if idx < data.len() and data[idx] != 0:
--    |                                             ^
--
-- Use angle brackets: data<...> instead of data[...]
--
-- Run `simple migrate --fix-generics` to automatically update your code
--
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
--    |
-- 138 |         if c < bp.len() and pp[c] == bp[c]:
--    |                               ^
--
-- Use angle brackets: pp<...> instead of pp[...]
--
-- Run `simple migrate --fix-generics` to automatically update your code
--
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
--    |
--   3 | export use std.gc_async_mut.io.oneapi_sffi.*
--    | ^
--
-- Use explicit exports instead
--
-- Example: export use module.{A, B, C} or export A, B from module
--
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
--    |
--   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
--    | ^
--
-- Use explicit exports instead
--
-- Example: export use module.{A, B, C} or export A, B from module
--
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/lib/common/image/ppm_decode.spl:33:33
--    |
--  33 |             while p < n and data[p] != 10:
--    |                                 ^
--
-- Use angle brackets: data<...> instead of data[...]
--
-- Run `simple migrate --fix-generics` to automatically update your code
--
-- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl:282:45
--    |
-- 282 |                 if idx < data.len() and data[idx] != 0:
--    |                                             ^
--
-- Use angle brackets: data<...> instead of data[...]
--
-- Run `simple migrate --fix-generics` to automatically update your code
--
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
--    |
-- 138 |         if c < bp.len() and pp[c] == bp[c]:
--    |                               ^
--
-- Use angle brackets: pp<...> instead of pp[...]
--
-- Run `simple migrate --fix-generics` to automatically update your code
--
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
--    |
--   3 | export use std.gc_async_mut.io.oneapi_sffi.*
--    | ^
--
-- Use explicit exports instead
--
-- Example: export use module.{A, B, C} or export A, B from module
--
-- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
--    |
--   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
--    | ^
--
-- Use explicit exports instead
--
-- Example: export use module.{A, B, C} or export A, B from module
--
-- [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/lib/common/image/ppm_decode.spl:33:33
--    |
--  33 |             while p < n and data[p] != 10:
--    |                                 ^
--
-- Use angle brackets: data<...> instead of data[...]
--
-- Run `simple migrate --fix-generics` to automatically update your code
--
-- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.oneapi_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- qemu_live_success=true
-- qemu_live_backend=qemu_vm
-- qemu_live_width=1024
-- qemu_live_height=768
-- qemu_live_pixels=786432
-- qemu_live_non_black_pixels=786432
-- qemu_live_sample_matches=10
-- qemu_live_sample_mismatches=0
-- qemu_live_sample_checksum=2806560364359906732
-- qemu_live_scene_mismatches=0
-- qemu_live_first_mismatch_x=-1
-- qemu_live_first_mismatch_y=-1
-- qemu_live_error=
 - wm_launch_capture_evidence_status=pass
 - wm_launch_capture_evidence_reason=wm-launch-capture-contract-verified
 - wm_launch_capture_contract_status=pass
 - wm_launch_capture_spec_status=pass
 - wm_launch_capture_electron_live_status=skipped
 - wm_launch_capture_electron_live_reason=RUN_ELECTRON_LIVE_SMOKE=0
-- wm_launch_capture_qemu_live_status=pass
-- wm_launch_capture_qemu_live_reason=live-qmp-screendump-pass
-- wm_launch_capture_qemu_live_pixels=786432
-- wm_launch_capture_qemu_live_non_black_pixels=786432
-- wm_launch_capture_qemu_live_sample_matches=10
+- wm_launch_capture_qemu_live_status=skipped
+- wm_launch_capture_qemu_live_reason=RUN_QEMU_LIVE_CAPTURE=0
+- wm_launch_capture_qemu_live_pixels=0
+- wm_launch_capture_qemu_live_non_black_pixels=0
+- wm_launch_capture_qemu_live_sample_matches=0
 - wm_launch_capture_qemu_live_sample_mismatches=0
-- wm_launch_capture_qemu_live_sample_checksum=2806560364359906732
+- wm_launch_capture_qemu_live_sample_checksum=0
 - wm_launch_capture_qemu_live_scene_mismatches=0
 - wm_launch_capture_qemu_live_first_mismatch_x=-1
 - wm_launch_capture_qemu_live_first_mismatch_y=-1
-- wm_launch_capture_report_path=build/qemu_gtk_wm_capture_evidence_2026-06-02-live/wm-launch-capture.md
+- wm_launch_capture_report_path=build/tmp/qemu_gtk_wm_capture_evidence_current/wm-host-launch-capture.md
 
 ## Host GTK GL WM Scene Output
 - gtk_gl_wm_scene_status=pass
@@ -585,7 +460,7 @@
 - gtk_gl_wm_scene_simple_checksum=1193966625284
 - gtk_gl_wm_scene_simple_frame_us=1
 - gtk_gl_wm_scene_simple_blur_or_tolerance_used=false
-- gtk_gl_wm_scene_gtk_captured_rgba_path=build/qemu_gtk_wm_capture_evidence_2026-06-02-live/gtk-gl/gtk-captured-rgba.json
+- gtk_gl_wm_scene_gtk_captured_rgba_path=build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl/gtk-captured-rgba.json
 - gtk_gl_wm_scene_gtk_captured_rgba_written=true
 - gtk_gl_wm_scene_gtk_status=pass
 - gtk_gl_wm_scene_gtk_reason=pass
@@ -593,11 +468,11 @@
 - gtk_gl_wm_scene_gtk_gl_context=true
 - gtk_gl_wm_scene_gtk_iterations=200
 - gtk_gl_wm_scene_gtk_checksum=1193966625284
-- gtk_gl_wm_scene_gtk_total_us=58178
-- gtk_gl_wm_scene_gtk_frame_us=290
+- gtk_gl_wm_scene_gtk_total_us=55890
+- gtk_gl_wm_scene_gtk_frame_us=279
 - gtk_gl_wm_scene_gtk_blur_or_tolerance_used=false
 - gtk_gl_wm_scene_reference_checksum=1193966625284
 - gtk_gl_wm_scene_rgba_mismatch_count=0
-- gtk_gl_wm_scene_expected_rgba_path=build/qemu_gtk_wm_capture_evidence_2026-06-02-live/gtk-gl/simple-expected-rgba.json
-- gtk_gl_wm_scene_captured_rgba_path=build/qemu_gtk_wm_capture_evidence_2026-06-02-live/gtk-gl/gtk-captured-rgba.json
+- gtk_gl_wm_scene_expected_rgba_path=build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl/simple-expected-rgba.json
+- gtk_gl_wm_scene_captured_rgba_path=build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl/gtk-captured-rgba.json
 - gtk_gl_wm_scene_blur_or_tolerance_used=false

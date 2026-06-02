@@ -12,9 +12,9 @@ fn project_root() -> PathBuf {
 }
 
 #[test]
-fn lint_flags_boolean_wrapper_assertion() {
+fn lint_warns_for_true_boolean_wrapper_assertion() {
     let dir = tempdir().expect("tempdir");
-    let spec = dir.path().join("bad_quality_spec.spl");
+    let spec = dir.path().join("verbose_quality_spec.spl");
     fs::write(
         &spec,
         "describe \"x\":\n    it \"y\":\n        expect(code != 0).to_equal(true)\n",
@@ -24,7 +24,23 @@ fn lint_flags_boolean_wrapper_assertion() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("simple"));
     cmd.current_dir(project_root()).arg("lint").arg(&spec);
 
-    cmd.assert().failure().stdout(contains("SPIPE006"));
+    cmd.assert().success().stdout(contains("SPIPE006"));
+}
+
+#[test]
+fn lint_flags_false_boolean_wrapper_assertion() {
+    let dir = tempdir().expect("tempdir");
+    let spec = dir.path().join("bad_quality_spec.spl");
+    fs::write(
+        &spec,
+        "describe \"x\":\n    it \"y\":\n        expect(ok).to_equal(false)\n",
+    )
+    .expect("write fixture");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("simple"));
+    cmd.current_dir(project_root()).arg("lint").arg(&spec);
+
+    cmd.assert().failure().stdout(contains("SPIPE007"));
 }
 
 #[test]

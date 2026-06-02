@@ -32,6 +32,44 @@ fn _timeout_ms() -> i64:
 fn _bool_text(value: bool) -> text:
     if value: "true" else: "false"
 
+fn _field_from_marker_line(line: text, key: text) -> text:
+    val prefix = key + "="
+    val parts = line.split(" ")
+    var i = 0
+    while i < parts.len():
+        if parts[i].starts_with(prefix):
+            return parts[i].substring(prefix.len())
+        i = i + 1
+    return ""
+
+fn _guest_perf_marker_line(serial_text: text) -> text:
+    val lines = serial_text.split("\n")
+    var found = ""
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if line.contains("sample_origin=qemu-guest") and line.contains("simple_frame_us=") and line.contains("gtk_frame_us=") and line.contains("iterations="):
+            found = line
+        i = i + 1
+    return found
+
+fn _print_guest_perf_marker(serial_text: text):
+    val line = _guest_perf_marker_line(serial_text)
+    if line == "":
+        print "simpleos_desktop_qmp_guest_perf_marker_present=false"
+        print "simpleos_desktop_qmp_guest_perf_pending_marker=[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_us=<positive> gtk_frame_us=<positive> iterations=<positive>"
+        return
+    val sample_origin = _field_from_marker_line(line, "sample_origin")
+    val simple_frame_us = _field_from_marker_line(line, "simple_frame_us")
+    val gtk_frame_us = _field_from_marker_line(line, "gtk_frame_us")
+    val iterations = _field_from_marker_line(line, "iterations")
+    print "simpleos_desktop_qmp_guest_perf_marker_present=true"
+    print "simpleos_desktop_qmp_guest_perf_sample_origin={sample_origin}"
+    print "simpleos_desktop_qmp_guest_perf_simple_frame_us={simple_frame_us}"
+    print "simpleos_desktop_qmp_guest_perf_gtk_frame_us={gtk_frame_us}"
+    print "simpleos_desktop_qmp_guest_perf_iterations={iterations}"
+    print "simpleos_desktop_qmp_guest_perf_marker_line={line}"
+
 fn _print_launch_failure_context(handle_pid: i64, qmp_socket: text, serial_log: text, stderr_log: text, marker: text, timeout_ms: i64):
     val handle = QemuGuestHandle.create(handle_pid, qmp_socket, serial_log, stderr_log, "")
     val serial_text = if serial_log == "": "" else: read_serial_log(handle)
@@ -89,6 +127,7 @@ fn main() -> i64:
             print "simpleos_desktop_qmp_socket={handle.qmp_socket}"
             print "simpleos_desktop_qmp_serial_log={handle.serial_log}"
             print "simpleos_desktop_qmp_stderr_log={handle.stderr_log}"
+            _print_guest_perf_marker(read_serial_log(handle))
             return 0
         Err(err):
             print "simpleos_desktop_qmp_status=unavailable"

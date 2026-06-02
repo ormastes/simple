@@ -62,11 +62,17 @@ emit_skip() {
     append_env "macos_gui_live_window_evidence_launcher" "macos-gui-run"
     append_env "macos_gui_live_window_evidence_window_found" "false"
     append_env "macos_gui_live_window_evidence_window_title" ""
+    append_env "macos_gui_live_window_evidence_window_rect" ""
     append_env "macos_gui_live_window_evidence_capture_path" ""
     append_env "macos_gui_live_window_evidence_capture_bytes" "0"
     append_env "macos_gui_live_window_evidence_capture_cksum" "0"
+    append_env "macos_gui_live_window_evidence_capture_width" "0"
+    append_env "macos_gui_live_window_evidence_capture_height" "0"
+    append_env "macos_gui_live_window_evidence_capture_total_pixels" "0"
     append_env "macos_gui_live_window_evidence_non_background_pixels" "0"
+    append_env "macos_gui_live_window_evidence_non_background_ratio" "0.000000"
     append_env "macos_gui_live_window_evidence_release_gate" "live-macos-window-visual-proof"
+    append_env "macos_gui_live_window_evidence_release_gate_status" "not-satisfied"
     append_env "macos_gui_live_window_evidence_report_path" "$REPORT_PATH"
     write_report
     cat "$EVIDENCE_ENV"
@@ -79,11 +85,18 @@ emit_fail() {
     append_env "macos_gui_live_window_evidence_host_os" "$(host_os_name)"
     append_env "macos_gui_live_window_evidence_launcher" "macos-gui-run"
     append_env "macos_gui_live_window_evidence_window_found" "false"
+    append_env "macos_gui_live_window_evidence_window_title" ""
+    append_env "macos_gui_live_window_evidence_window_rect" ""
     append_env "macos_gui_live_window_evidence_capture_path" "$CAPTURE_PNG"
     append_env "macos_gui_live_window_evidence_capture_bytes" "$(file_byte_count "$CAPTURE_PNG")"
     append_env "macos_gui_live_window_evidence_capture_cksum" "$(file_cksum_value "$CAPTURE_PNG")"
+    append_env "macos_gui_live_window_evidence_capture_width" "0"
+    append_env "macos_gui_live_window_evidence_capture_height" "0"
+    append_env "macos_gui_live_window_evidence_capture_total_pixels" "0"
     append_env "macos_gui_live_window_evidence_non_background_pixels" "0"
+    append_env "macos_gui_live_window_evidence_non_background_ratio" "0.000000"
     append_env "macos_gui_live_window_evidence_release_gate" "live-macos-window-visual-proof"
+    append_env "macos_gui_live_window_evidence_release_gate_status" "not-satisfied"
     append_env "macos_gui_live_window_evidence_report_path" "$REPORT_PATH"
     write_report
     cat "$EVIDENCE_ENV"
@@ -160,14 +173,14 @@ if ! sips -s format bmp "$CAPTURE_PNG" --out "$CAPTURE_BMP" >/dev/null 2>&1; the
     emit_fail "capture-convert-failed"
 fi
 
-non_background_pixels="$(python3 - "$CAPTURE_BMP" <<'PY'
+capture_metrics="$(python3 - "$CAPTURE_BMP" <<'PY'
 import sys
 from pathlib import Path
 import struct
 
 data = Path(sys.argv[1]).read_bytes()
 if len(data) < 54 or data[:2] != b"BM":
-    print(0)
+    print("0 0 0 0 0.000000")
     raise SystemExit
 
 offset = struct.unpack_from("<I", data, 10)[0]
@@ -176,7 +189,7 @@ height_raw = struct.unpack_from("<i", data, 22)[0]
 bits = struct.unpack_from("<H", data, 28)[0]
 compression = struct.unpack_from("<I", data, 30)[0]
 if width <= 0 or height_raw == 0 or bits not in (24, 32) or compression != 0:
-    print(0)
+    print("0 0 0 0 0.000000")
     raise SystemExit
 
 height = abs(height_raw)
@@ -192,9 +205,17 @@ for y in range(height):
         b, g, r = data[pos], data[pos + 1], data[pos + 2]
         if max(r, g, b) - min(r, g, b) > 12 or max(r, g, b) > 32:
             count += 1
-print(count)
+total = width * height
+ratio = count / total if total > 0 else 0
+print(f"{width} {height} {total} {count} {ratio:.6f}")
 PY
 )"
+set -- $capture_metrics
+capture_width="${1:-0}"
+capture_height="${2:-0}"
+capture_total_pixels="${3:-0}"
+non_background_pixels="${4:-0}"
+non_background_ratio="${5:-0.000000}"
 
 if [ "${non_background_pixels:-0}" -le 0 ]; then
     emit_fail "capture-has-no-visible-content"
@@ -210,8 +231,13 @@ append_env "macos_gui_live_window_evidence_window_rect" "$window_rect"
 append_env "macos_gui_live_window_evidence_capture_path" "$CAPTURE_PNG"
 append_env "macos_gui_live_window_evidence_capture_bytes" "$(file_byte_count "$CAPTURE_PNG")"
 append_env "macos_gui_live_window_evidence_capture_cksum" "$(file_cksum_value "$CAPTURE_PNG")"
+append_env "macos_gui_live_window_evidence_capture_width" "$capture_width"
+append_env "macos_gui_live_window_evidence_capture_height" "$capture_height"
+append_env "macos_gui_live_window_evidence_capture_total_pixels" "$capture_total_pixels"
 append_env "macos_gui_live_window_evidence_non_background_pixels" "$non_background_pixels"
+append_env "macos_gui_live_window_evidence_non_background_ratio" "$non_background_ratio"
 append_env "macos_gui_live_window_evidence_release_gate" "live-macos-window-visual-proof"
+append_env "macos_gui_live_window_evidence_release_gate_status" "satisfied"
 append_env "macos_gui_live_window_evidence_report_path" "$REPORT_PATH"
 
 write_report

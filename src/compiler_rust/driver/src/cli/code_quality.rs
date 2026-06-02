@@ -13,8 +13,8 @@ use super::commands::arg_parsing::FixFlags;
 use crate::cli::interactive_fix;
 
 const QUALITY_CODES: &[&str] = &[
-    "STUB001", "STUB003", "SPIPE001", "SPIPE002", "SPIPE003", "SPIPE004", "SPIPE005", "SPIPE006", "UI001", "UI002",
-    "UI003",
+    "STUB001", "STUB003", "SPIPE001", "SPIPE002", "SPIPE003", "SPIPE004", "SPIPE005", "SPIPE006", "SPIPE007", "UI001",
+    "UI002", "UI003",
 ];
 
 fn is_test_like_path(path: &Path) -> bool {
@@ -38,6 +38,39 @@ fn is_theme_package_lint_path(path: &Path) -> bool {
 
 fn compact(source: &str) -> String {
     source.replace([' ', '\t', '\n', '\r'], "")
+}
+
+fn extract_expect_subject(normalized: &str) -> Option<&str> {
+    let start = normalized.find("expect(")?;
+    let tail = &normalized[start + 7..];
+    if let Some(end) = tail.find(").to_equal(") {
+        return Some(&tail[..end]);
+    }
+    if let Some(end) = tail.find(").to_be(") {
+        return Some(&tail[..end]);
+    }
+    None
+}
+
+fn is_boolean_wrapper_assertion(normalized: &str) -> bool {
+    let compares_to_bool = normalized.contains(").to_equal(true)")
+        || normalized.contains(").to_equal(false)")
+        || normalized.contains(").to_be(true)")
+        || normalized.contains(").to_be(false)");
+    if !compares_to_bool {
+        return false;
+    }
+    matches!(extract_expect_subject(normalized), Some(subject) if !subject.is_empty() && subject != "true" && subject != "false")
+}
+
+fn is_true_boolean_wrapper_assertion(normalized: &str) -> bool {
+    is_boolean_wrapper_assertion(normalized)
+        && (normalized.contains(").to_equal(true)") || normalized.contains(").to_be(true)"))
+}
+
+fn is_false_boolean_wrapper_assertion(normalized: &str) -> bool {
+    is_boolean_wrapper_assertion(normalized)
+        && (normalized.contains(").to_equal(false)") || normalized.contains(").to_be(false)"))
 }
 
 fn file_allows_lint(source: &str, lint_name: &str) -> bool {
@@ -89,6 +122,7 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
     let allow_print_skip = file_allows_lint(source, "spipe_no_print_based_tests");
     let allow_empty = file_allows_lint(source, "spipe_empty_examples");
     let allow_boolean_wrapper = file_allows_lint(source, "spipe_boolean_wrapper_assertions");
+    let allow_false_boolean_wrapper = file_allows_lint(source, "spipe_false_boolean_wrapper_assertions");
 
     let lines: Vec<&str> = source.lines().collect();
     let mut diagnostics = Vec::new();
@@ -162,24 +196,21 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
             );
         }
 
-        let boolean_wrapper = (normalized.contains(").to_equal(true)")
-            || normalized.contains(").to_equal(false)")
-            || normalized.contains(").to_be(true)")
-            || normalized.contains(").to_be(false)"))
-            && normalized.contains("expect(")
-            && (normalized.contains("==")
-                || normalized.contains("!=")
-                || normalized.contains(">=")
-                || normalized.contains("<=")
-                || normalized.contains('>')
-                || normalized.contains('<'));
-        if boolean_wrapper && !allow_boolean_wrapper {
+        if is_false_boolean_wrapper_assertion(&normalized) && !allow_false_boolean_wrapper {
             diagnostics.push(
-                Diagnostic::error("Boolean-wrapper assertion in spec/example")
+                Diagnostic::error("False boolean matcher wrapper in spec/example")
+                    .with_code("SPIPE007")
+                    .with_file(path.display().to_string())
+                    .with_label(line_span(source, idx), "")
+                    .with_help("Use expect_not(condition) instead of expect(condition).to_equal(false)"),
+            );
+        } else if is_true_boolean_wrapper_assertion(&normalized) && !allow_boolean_wrapper {
+            diagnostics.push(
+                Diagnostic::warning("Verbose true boolean assertion in spec/example")
                     .with_code("SPIPE006")
                     .with_file(path.display().to_string())
                     .with_label(line_span(source, idx), "")
-                    .with_help("Assert the underlying value or capability result instead of expect(<comparison>).to_equal(true/false)"),
+                    .with_help("Use expect(condition) instead of expect(condition).to_equal(true)"),
             );
         }
     }

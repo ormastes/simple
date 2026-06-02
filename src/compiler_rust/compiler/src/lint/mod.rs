@@ -254,6 +254,7 @@ describe "demo":
             .iter()
             .find(|d| d.lint == LintName::SPipeBooleanWrapperAssertions)
             .expect("missing boolean wrapper lint");
+        assert_eq!(lint.level, LintLevel::Warn);
         assert!(lint
             .suggestion
             .as_deref()
@@ -276,8 +277,9 @@ describe "demo":
         let diagnostics = check_code_in_file("demo_spec.spl", code);
         let lint = diagnostics
             .iter()
-            .find(|d| d.lint == LintName::SPipeBooleanWrapperAssertions)
+            .find(|d| d.lint == LintName::SPipeFalseBooleanWrapperAssertions)
             .expect("missing false boolean wrapper lint");
+        assert_eq!(lint.level, LintLevel::Deny);
         assert!(lint
             .suggestion
             .as_deref()
@@ -303,6 +305,9 @@ describe "demo":
         assert!(diagnostics
             .iter()
             .all(|d| d.lint != LintName::SPipeBooleanWrapperAssertions));
+        assert!(diagnostics
+            .iter()
+            .all(|d| d.lint != LintName::SPipeFalseBooleanWrapperAssertions));
         assert!(diagnostics.iter().all(|d| d.lint != LintName::SPipeEmptyExamples));
     }
 
