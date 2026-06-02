@@ -14,6 +14,7 @@ QEMU_ARCH="${QEMU_ARCH:-x86_64}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-$QEMU_ARCH}"
 SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 AUTO_QMP_LAUNCH="${QEMU_AUTO_LAUNCH_SIMPLEOS_DESKTOP:-0}"
+HOST_WM_SMOKE="${QEMU_GTK_WM_HOST_SMOKE:-1}"
 AUTO_QMP_OUT="$BUILD_DIR/auto-qmp.out"
 AUTO_QMP_PID=""
 AUTO_QMP_STATUS=not-run
@@ -30,6 +31,22 @@ AUTO_QMP_EXIT_CODE=0
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$REPORT_PATH" "$BUILD_DIR/evidence.env" "$BUILD_DIR/qemu-display-help.txt" "$BUILD_DIR/wm.out" "$BUILD_DIR/wm-host.out" "$BUILD_DIR/fake-qmp.out" "$BUILD_DIR/gtk-gl.out" "$AUTO_QMP_OUT"
+
+file_byte_count() {
+    if [ -f "$1" ]; then
+        wc -c <"$1" | tr -d ' '
+    else
+        echo 0
+    fi
+}
+
+file_cksum_value() {
+    if [ -f "$1" ]; then
+        cksum "$1" | sed 's/ .*//'
+    else
+        echo 0
+    fi
+}
 
 cleanup_auto_qmp() {
     if [ -n "$AUTO_QMP_PID" ]; then
@@ -187,22 +204,27 @@ if [ -z "${QEMU_QMP_SOCKET:-}" ]; then
     if [ -z "$fake_qmp_reason" ]; then
         fake_qmp_reason=fake-qmp-evidence-failed
     fi
-    set +e
-    RUN_ELECTRON_LIVE_SMOKE=0 \
-    RUN_QEMU_LIVE_CAPTURE=0 \
-    STRICT_QEMU_CAPTURE=0 \
-    REPORT_PATH="$WM_HOST_REPORT_PATH" \
-    BUILD_DIR="$BUILD_DIR/wm-host" \
-        sh scripts/check-wm-launch-capture-evidence.shs >"$BUILD_DIR/wm-host.out" 2>&1
-    host_wm_exit_code=$?
-    set -e
-    host_wm_status="$(sed -n 's/^wm_launch_capture_evidence_status=//p' "$BUILD_DIR/wm-host.out" | tail -n 1)"
-    host_wm_reason="$(sed -n 's/^wm_launch_capture_evidence_reason=//p' "$BUILD_DIR/wm-host.out" | tail -n 1)"
-    if [ -z "$host_wm_status" ]; then
-        host_wm_status=fail
-    fi
-    if [ -z "$host_wm_reason" ]; then
-        host_wm_reason=host-wm-smoke-failed
+    if [ "$HOST_WM_SMOKE" = "1" ]; then
+        set +e
+        RUN_ELECTRON_LIVE_SMOKE=0 \
+        RUN_QEMU_LIVE_CAPTURE=0 \
+        STRICT_QEMU_CAPTURE=0 \
+        REPORT_PATH="$WM_HOST_REPORT_PATH" \
+        BUILD_DIR="$BUILD_DIR/wm-host" \
+            sh scripts/check-wm-launch-capture-evidence.shs >"$BUILD_DIR/wm-host.out" 2>&1
+        host_wm_exit_code=$?
+        set -e
+        host_wm_status="$(sed -n 's/^wm_launch_capture_evidence_status=//p' "$BUILD_DIR/wm-host.out" | tail -n 1)"
+        host_wm_reason="$(sed -n 's/^wm_launch_capture_evidence_reason=//p' "$BUILD_DIR/wm-host.out" | tail -n 1)"
+        if [ -z "$host_wm_status" ]; then
+            host_wm_status=fail
+        fi
+        if [ -z "$host_wm_reason" ]; then
+            host_wm_reason=host-wm-smoke-failed
+        fi
+    else
+        host_wm_status=skipped
+        host_wm_reason=QEMU_GTK_WM_HOST_SMOKE=0
     fi
     run_gtk_scene_evidence
 elif [ -n "${QEMU_QMP_SOCKET:-}" ]; then
@@ -294,13 +316,18 @@ fi
     echo "qemu_gtk_wm_capture_display_gtk_supported=$qemu_display_gtk_supported"
     echo "qemu_gtk_wm_capture_display_reason=$qemu_display_reason"
     echo "qemu_gtk_wm_capture_auto_qmp_launch=$AUTO_QMP_LAUNCH"
+    echo "qemu_gtk_wm_capture_host_wm_smoke=$HOST_WM_SMOKE"
     echo "qemu_gtk_wm_capture_auto_qmp_status=$AUTO_QMP_STATUS"
     echo "qemu_gtk_wm_capture_auto_qmp_reason=$AUTO_QMP_REASON"
     echo "qemu_gtk_wm_capture_auto_qmp_exit_code=$AUTO_QMP_EXIT_CODE"
     echo "qemu_gtk_wm_capture_auto_qmp_pid=$AUTO_QMP_PID"
     echo "qemu_gtk_wm_capture_auto_qmp_socket=$AUTO_QMP_SOCKET"
     echo "qemu_gtk_wm_capture_auto_qmp_serial_log=$AUTO_QMP_SERIAL_LOG"
+    echo "qemu_gtk_wm_capture_auto_qmp_serial_log_bytes=$(file_byte_count "$AUTO_QMP_SERIAL_LOG")"
+    echo "qemu_gtk_wm_capture_auto_qmp_serial_log_cksum=$(file_cksum_value "$AUTO_QMP_SERIAL_LOG")"
     echo "qemu_gtk_wm_capture_auto_qmp_stderr_log=$AUTO_QMP_STDERR_LOG"
+    echo "qemu_gtk_wm_capture_auto_qmp_stderr_log_bytes=$(file_byte_count "$AUTO_QMP_STDERR_LOG")"
+    echo "qemu_gtk_wm_capture_auto_qmp_stderr_log_cksum=$(file_cksum_value "$AUTO_QMP_STDERR_LOG")"
     echo "qemu_gtk_wm_capture_auto_qmp_missing_marker=$AUTO_QMP_MISSING_MARKER"
     echo "qemu_gtk_wm_capture_auto_qmp_marker_timeout_ms=$AUTO_QMP_MARKER_TIMEOUT_MS"
     echo "qemu_gtk_wm_capture_auto_qmp_qemu_running=$AUTO_QMP_QEMU_RUNNING"
@@ -343,7 +370,13 @@ fi
     echo "qemu_gtk_wm_capture_fake_qmp_reason=$fake_qmp_reason"
     echo "qemu_gtk_wm_capture_fake_qmp_report_path=$fake_qmp_report_path"
     echo "qemu_gtk_wm_capture_fake_qmp_expected_argb_path=$fake_qmp_expected_argb_path"
+    echo "qemu_gtk_wm_capture_fake_qmp_expected_argb_bytes=$(file_byte_count "$fake_qmp_expected_argb_path")"
+    echo "qemu_gtk_wm_capture_fake_qmp_expected_argb_cksum=$(file_cksum_value "$fake_qmp_expected_argb_path")"
     echo "qemu_gtk_wm_capture_fake_qmp_captured_argb_path=$fake_qmp_captured_argb_path"
+    echo "qemu_gtk_wm_capture_fake_qmp_captured_argb_bytes=$(file_byte_count "$fake_qmp_captured_argb_path")"
+    echo "qemu_gtk_wm_capture_fake_qmp_captured_argb_cksum=$(file_cksum_value "$fake_qmp_captured_argb_path")"
+    echo "qemu_gtk_wm_capture_fake_qmp_output_bytes=$(file_byte_count "$BUILD_DIR/fake-qmp.out")"
+    echo "qemu_gtk_wm_capture_fake_qmp_output_cksum=$(file_cksum_value "$BUILD_DIR/fake-qmp.out")"
     echo "qemu_gtk_wm_capture_gtk_scene_status=$gtk_scene_status"
     echo "qemu_gtk_wm_capture_gtk_scene_reason=$gtk_scene_reason"
     echo "qemu_gtk_wm_capture_gtk_scene_report_path=$gtk_scene_report_path"
@@ -351,8 +384,14 @@ fi
     echo "qemu_gtk_wm_capture_gtk_scene_gtk_frame_us=$gtk_scene_gtk_frame_us"
     echo "qemu_gtk_wm_capture_gtk_scene_rgba_mismatch_count=$gtk_scene_rgba_mismatch_count"
     echo "qemu_gtk_wm_capture_gtk_scene_expected_rgba_path=$gtk_scene_expected_rgba_path"
+    echo "qemu_gtk_wm_capture_gtk_scene_expected_rgba_bytes=$(file_byte_count "$gtk_scene_expected_rgba_path")"
+    echo "qemu_gtk_wm_capture_gtk_scene_expected_rgba_cksum=$(file_cksum_value "$gtk_scene_expected_rgba_path")"
     echo "qemu_gtk_wm_capture_gtk_scene_captured_rgba_path=$gtk_scene_captured_rgba_path"
+    echo "qemu_gtk_wm_capture_gtk_scene_captured_rgba_bytes=$(file_byte_count "$gtk_scene_captured_rgba_path")"
+    echo "qemu_gtk_wm_capture_gtk_scene_captured_rgba_cksum=$(file_cksum_value "$gtk_scene_captured_rgba_path")"
     echo "qemu_gtk_wm_capture_gtk_scene_blur_or_tolerance_used=$gtk_scene_blur_or_tolerance_used"
+    echo "qemu_gtk_wm_capture_gtk_scene_output_bytes=$(file_byte_count "$BUILD_DIR/gtk-gl.out")"
+    echo "qemu_gtk_wm_capture_gtk_scene_output_cksum=$(file_cksum_value "$BUILD_DIR/gtk-gl.out")"
     echo "qemu_gtk_wm_capture_gui_smf_artifact_contract_status=$gui_smf_artifact_contract_status"
     echo "qemu_gtk_wm_capture_gui_smf_artifact_contract_row=$gui_smf_artifact_contract_row"
     if [ -f "$BUILD_DIR/wm.out" ]; then
@@ -373,13 +412,18 @@ fi
     echo "- qemu display gtk supported: $qemu_display_gtk_supported"
     echo "- qemu display reason: $qemu_display_reason"
     echo "- auto QMP launch: $AUTO_QMP_LAUNCH"
+    echo "- host WM smoke enabled: $HOST_WM_SMOKE"
     echo "- auto QMP status: $AUTO_QMP_STATUS"
     echo "- auto QMP reason: $AUTO_QMP_REASON"
     echo "- auto QMP exit code: $AUTO_QMP_EXIT_CODE"
     echo "- auto QMP pid: $AUTO_QMP_PID"
     echo "- auto QMP socket: $AUTO_QMP_SOCKET"
     echo "- auto QMP serial log: $AUTO_QMP_SERIAL_LOG"
+    echo "- auto QMP serial log bytes: $(file_byte_count "$AUTO_QMP_SERIAL_LOG")"
+    echo "- auto QMP serial log cksum: $(file_cksum_value "$AUTO_QMP_SERIAL_LOG")"
     echo "- auto QMP stderr log: $AUTO_QMP_STDERR_LOG"
+    echo "- auto QMP stderr log bytes: $(file_byte_count "$AUTO_QMP_STDERR_LOG")"
+    echo "- auto QMP stderr log cksum: $(file_cksum_value "$AUTO_QMP_STDERR_LOG")"
     echo "- auto QMP missing marker: $AUTO_QMP_MISSING_MARKER"
     echo "- auto QMP marker timeout ms: $AUTO_QMP_MARKER_TIMEOUT_MS"
     echo "- auto QMP qemu running at failure: $AUTO_QMP_QEMU_RUNNING"
@@ -419,7 +463,13 @@ fi
     echo "- fake QMP screendump reason: $fake_qmp_reason"
     echo "- fake QMP screendump report: $fake_qmp_report_path"
     echo "- fake QMP expected ARGB path: $fake_qmp_expected_argb_path"
+    echo "- fake QMP expected ARGB bytes: $(file_byte_count "$fake_qmp_expected_argb_path")"
+    echo "- fake QMP expected ARGB cksum: $(file_cksum_value "$fake_qmp_expected_argb_path")"
     echo "- fake QMP captured ARGB path: $fake_qmp_captured_argb_path"
+    echo "- fake QMP captured ARGB bytes: $(file_byte_count "$fake_qmp_captured_argb_path")"
+    echo "- fake QMP captured ARGB cksum: $(file_cksum_value "$fake_qmp_captured_argb_path")"
+    echo "- fake QMP output bytes: $(file_byte_count "$BUILD_DIR/fake-qmp.out")"
+    echo "- fake QMP output cksum: $(file_cksum_value "$BUILD_DIR/fake-qmp.out")"
     echo "- host GTK GL WM scene status: $gtk_scene_status"
     echo "- host GTK GL WM scene reason: $gtk_scene_reason"
     echo "- host GTK GL WM scene report: $gtk_scene_report_path"
@@ -427,8 +477,14 @@ fi
     echo "- host GTK GL WM scene GTK frame us: $gtk_scene_gtk_frame_us"
     echo "- host GTK GL WM scene mismatch count: $gtk_scene_rgba_mismatch_count"
     echo "- host GTK GL WM scene expected RGBA path: $gtk_scene_expected_rgba_path"
+    echo "- host GTK GL WM scene expected RGBA bytes: $(file_byte_count "$gtk_scene_expected_rgba_path")"
+    echo "- host GTK GL WM scene expected RGBA cksum: $(file_cksum_value "$gtk_scene_expected_rgba_path")"
     echo "- host GTK GL WM scene captured RGBA path: $gtk_scene_captured_rgba_path"
+    echo "- host GTK GL WM scene captured RGBA bytes: $(file_byte_count "$gtk_scene_captured_rgba_path")"
+    echo "- host GTK GL WM scene captured RGBA cksum: $(file_cksum_value "$gtk_scene_captured_rgba_path")"
     echo "- host GTK GL WM scene blur/tolerance used: $gtk_scene_blur_or_tolerance_used"
+    echo "- host GTK GL WM scene output bytes: $(file_byte_count "$BUILD_DIR/gtk-gl.out")"
+    echo "- host GTK GL WM scene output cksum: $(file_cksum_value "$BUILD_DIR/gtk-gl.out")"
     echo "- GUI SMF artifact contract status: $gui_smf_artifact_contract_status"
     echo "- GUI SMF artifact contract row: $gui_smf_artifact_contract_row"
     echo "- GUI SMF artifact contract scope: contract-only; does not promote live QEMU capture"
