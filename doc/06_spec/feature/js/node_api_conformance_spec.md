@@ -2909,6 +2909,22 @@ expect(_eval_before_after_timer_drain("var timerValue = 0; require('timers').set
 
 </details>
 
+#### passes bounded timer callback arguments
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_before_after_timer_drain("var timerValue = ''; require('timers').setTimeout((a, b) => { timerValue = a + ':' + b; }, 0, 'left', 'right'); timerValue", "timerValue", 0)).to_equal(":1:left:right")
+expect(_eval_before_after_two_timer_drains("var timerValue = ''; require('timers').setInterval((a) => { timerValue = timerValue + a; }, 1, 'i'); timerValue", "timerValue", 1, 2)).to_equal(":1:i:1:ii")
+expect(_eval_before_after_timer_drain("var timerValue = ''; require('timers').setImmediate((a, b) => { timerValue = a + ':' + b; }, 'now', 'later'); timerValue", "timerValue", 0)).to_equal(":1:now:later")
+```
+
+</details>
+
 #### cancels timers module callbacks through clearTimeout
 
 <details>
@@ -3184,12 +3200,13 @@ expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close(); 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_before_after_timer_drain("var h = require('timers').setTimeout(() => {}, 0); h.completed", "h.refresh(); h.active + ':' + h.completed + ':' + h.refreshed + ':' + h.dueAt", 0)).to_equal("false:1:true:false:true:0")
 expect(_eval_timer_drain_action_then_timer_drain("var timerValue = 0; var h = require('timers').setTimeout(() => { timerValue = timerValue + 1; }, 0); timerValue", "h.refresh(); h.active + ':' + h.completed + ':' + h.fireCount", "timerValue + ':' + h.fireCount + ':' + h.active + ':' + h.completed", 0, 0)).to_equal("0:1:true:false:1:1:2:2:false:true")
+expect(_eval_timer_drain_action_then_timer_drain("var timerValue = ''; var h = require('timers').setTimeout((a) => { timerValue = timerValue + a; }, 0, 'r'); timerValue", "h.refresh(); h.callbackArgCount", "timerValue + ':' + h.fireCount", 0, 0)).to_equal(":1:1:1:rr:2")
 ```
 
 </details>
@@ -4160,8 +4177,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 267 |
-| Active scenarios | 267 |
+| Total scenarios | 268 |
+| Active scenarios | 268 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
