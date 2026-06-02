@@ -201,7 +201,7 @@ val policy = load_capability_config("window_main.capability.sdn", "main")
 ### Session Integration
 
 ```simple
-use common.ui.session.{UISession}
+use nogc_sync_mut.ui.session.{UISession}
 use common.ui.capability_policy.{CapabilityPolicy, grant}
 
 # Create session with policy

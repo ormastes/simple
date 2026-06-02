@@ -4,17 +4,18 @@
 
 ## Quick Stats
 
-- **Total Features:** 1
-- **Complete Documentation:** 0 (0%)
+- **Total Features:** 2
+- **Complete Documentation:** 1 (50%)
 - **Stubs Remaining:** 1
-- **Total Lines:** 0
-- **Warnings:** 1
+- **Total Lines:** 2
+- **Warnings:** 8
 
 ---
 
-## Standard Library (1 features)
+## Hardware & OS (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Browser Session Fetch Wasm Chain Specification](unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md) | Auto-generated | N/A | 8 | 0% | 0 lines |
+| [Wm Scene Specification](unit/os/compositor/wm_scene_spec.md) | Auto-generated | N/A | 30 | 0% | 0 lines |
+| [Modern Wm Readiness Specification](unit/os/desktop/modern_wm_readiness_spec.md) | Minimal | N/A | 2 | 20% | 2 lines |
 

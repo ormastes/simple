@@ -74,7 +74,7 @@ Every SimpleOS app follows the same two-method pattern:
 
 ```simple
 use common.ui.widget.{WidgetNode, UITree}
-use common.ui.session.{UISession}
+use nogc_sync_mut.ui.session.{UISession}
 use common.ui.builder.{column, row, panel, text_widget, button, label, statusbar, build_tree_with_title}
 
 class MyApp:
@@ -127,7 +127,7 @@ Apps construct their UI using composable builder functions from `common.ui.build
 
 ```simple
 use common.ui.widget.{WidgetNode, UITree}
-use common.ui.session.{UISession}
+use nogc_sync_mut.ui.session.{UISession}
 use common.ui.builder.{column, row, panel, text_widget, button, label, statusbar, build_tree_with_title}
 
 class Calculator:

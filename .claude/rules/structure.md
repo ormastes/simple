@@ -7,8 +7,8 @@ alwaysApply: false
 src/
   app/              # Applications (cli, build, mcp, mcp_jj, io, test_runner_new, desugar)
   lib/              # Standard library — `use std.X` resolves here
-    common/         # Pure functions (text, math, json, crypto, encoding)
-    nogc_sync_mut/  # Sync mutable (ffi, fs, net, http, database, mcp, spec)
+    common/         # Pure functions (text, math, json, crypto, encoding, ui model/layout/style)
+    nogc_sync_mut/  # Sync mutable (ffi, fs, net, http, database, mcp, spec, ui session/theme I/O)
     nogc_async_mut/ # Async mutable (actors, async, threads, generators)
     gc_async_mut/   # GC + async (gpu, cuda, torch, ML)
     nogc_async_mut_noalloc/  # Baremetal, execution, memory, qemu

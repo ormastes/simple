@@ -8,7 +8,7 @@ Old `.simple-theme` files are compatibility/import inputs only. Runtime GUI, Web
 
 ## Ownership
 
-`common.ui.theme_package` owns:
+`nogc_sync_mut.ui.theme_package` owns:
 
 - Registry parsing and alias resolution.
 - Family/theme package resolution.

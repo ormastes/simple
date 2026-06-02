@@ -54,7 +54,7 @@ The desktop shell (`src/os/desktop/shell.spl`) provides the taskbar, app launche
 **Imports:**
 
 ```
-use common.ui.session.{UISession, new_session}
+use nogc_sync_mut.ui.session.{UISession, new_session}
 use common.ui.builder.{column, row, panel, text_widget, button, label, statusbar, build_tree, build_tree_with_title, ...}
 use os.compositor.compositor.{Compositor, WindowSurface}
 use os.desktop.app_manifest.{AppManifest, load_app_manifests, search_apps, manifest_categories}
@@ -198,4 +198,4 @@ All apps in `src/os/apps/`:
 | `tetris` | Tetris game |
 | `todo` | Todo list manager |
 
-Each app follows the same pattern: imports `common.ui.session.{UISession}` and `common.ui.builder.{...}`, defines a class with a `build_ui() -> UISession` method that constructs the widget tree using the builder DSL.
+Each app follows the same pattern: imports `nogc_sync_mut.ui.session.{UISession}` and `common.ui.builder.{...}`, defines a class with a `build_ui() -> UISession` method that constructs the widget tree using the builder DSL.

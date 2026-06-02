@@ -24,7 +24,7 @@ Verifies one combined readiness report for the modern Web WM, SimpleOS
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 88 lines folded for reproduction.
+Runnable source: 92 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -86,6 +86,10 @@ expect(report.os_render_screen_capture_ready)
 expect(report.os_render_screen_capture_max_width_px).to_equal(560)
 expect(report.os_render_clipboard_history_ready)
 expect(report.os_render_clipboard_history_max_width_px).to_equal(360)
+expect(report.os_render_privacy_indicator_ready)
+expect(report.os_render_privacy_indicator_max_width_px).to_equal(300)
+expect(report.os_render_system_hud_ready)
+expect(report.os_render_system_hud_max_width_px).to_equal(280)
 expect(report.os_render_contrast_ratio_x100).to_be_greater_than(449)
 expect(report.os_render_bounded_layout)
 expect(report.os_render_touch_target_min_height_px).to_equal(44)
@@ -125,7 +129,7 @@ expect(report.notes[0]).to_equal("modern WM readiness passed")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 87 lines folded for reproduction.
+Runnable source: 91 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -188,6 +192,10 @@ expect(summary).to_contain("os_render_screen_capture=true")
 expect(summary).to_contain("os_render_screen_capture_max=560px")
 expect(summary).to_contain("os_render_clipboard_history=true")
 expect(summary).to_contain("os_render_clipboard_history_max=360px")
+expect(summary).to_contain("os_render_privacy_indicator=true")
+expect(summary).to_contain("os_render_privacy_indicator_max=300px")
+expect(summary).to_contain("os_render_system_hud=true")
+expect(summary).to_contain("os_render_system_hud_max=280px")
 expect(summary).to_contain("os_render_contrast_ratio_x100=")
 expect(summary).to_contain("os_render_bounded_layout=true")
 expect(summary).to_contain("os_render_touch_target_min=44px")
