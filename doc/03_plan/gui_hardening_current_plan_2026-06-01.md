@@ -445,7 +445,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   response header metadata including raw header order and HTTP version parts.
   Bounded synthetic responses now expose `pause()`, `resume()`, and
   `isPaused()` and defer pending `data`/`end` delivery while paused before
-  draining in order on `resume()`.
+  draining in order on `resume()`. Bounded synthetic responses now also expose
+  `destroy()`, clear pending paused delivery, mark destroyed/closed, and emit
+  `close` once.
   Real response streaming and event-loop ordering remain open.
 - Generated GUI WASM: move widget-matrix-specific state patterns into shared
   per-widget state helpers and cover additional generated apps.
