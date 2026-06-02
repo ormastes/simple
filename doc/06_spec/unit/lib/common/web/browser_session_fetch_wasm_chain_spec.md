@@ -1386,6 +1386,39 @@ match result:
 
 </details>
 
+#### detects ArrayBuffer view objects in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `true:true:false:false:false`
+
+3. Err
+   - Expected: "unexpected arraybuffer isView js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var buffer = new ArrayBuffer(8); var bytes = new Uint8Array(buffer); var data = new DataView(buffer); ArrayBuffer.isView(bytes) + ':' + ArrayBuffer.isView(data) + ':' + ArrayBuffer.isView(buffer) + ':' + ArrayBuffer.isView({}) + ':' + ArrayBuffer.isView(null)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:true:false:false:false")
+    Err(err):
+        expect("unexpected arraybuffer isView js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reads and writes ArrayBuffer bytes through DataView in browser scripts
 
 1. var session = BrowserSession new
@@ -1570,8 +1603,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 39 |
-| Active scenarios | 39 |
+| Total scenarios | 40 |
+| Active scenarios | 40 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
