@@ -3015,6 +3015,23 @@ expect(_eval_str("var h = require('timers').setInterval(() => {}, 5); h.repeat")
 
 </details>
 
+#### labels bounded Node timer handle types
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("require('timers').setTimeout(() => {}, 5).timerType")).to_equal("timeout")
+expect(_eval_str("require('timers').setInterval(() => {}, 5).timerType")).to_equal("interval")
+expect(_eval_str("require('timers').setImmediate(() => {}).timerType")).to_equal("immediate")
+expect(_eval_str("setImmediate(() => {}).timerType")).to_equal("immediate")
+```
+
+</details>
+
 #### tracks bounded Node timer handle ref state
 
 <details>
@@ -4060,8 +4077,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 261 |
-| Active scenarios | 261 |
+| Total scenarios | 262 |
+| Active scenarios | 262 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
