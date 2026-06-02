@@ -2145,6 +2145,39 @@ match result:
 
 </details>
 
+#### binds arguments object through function call apply and bind
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `call:2:1:2:1|apply:2:3:4:3|bound:2:5:6:5|bound:2:5:7:5`
+
+3. Err
+   - Expected: "unexpected function arguments binding js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script('var inspect = function(a) { return this.base + ":" + arguments.length + ":" + arguments[0] + ":" + arguments[1] + ":" + a; }; var viaCall = inspect.call({ base: "call" }, 1, 2); var viaApply = inspect.apply({ base: "apply" }, [3, 4]); var bound = inspect.bind({ base: "bound" }, 5); var viaBound = bound(6); var viaBoundApply = bound.apply({ base: "ignored" }, [7]); viaCall + "|" + viaApply + "|" + viaBound + "|" + viaBoundApply')
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("call:2:1:2:1|apply:2:3:4:3|bound:2:5:6:5|bound:2:5:7:5")
+    Err(err):
+        expect("unexpected function arguments binding js error: {err}").to_equal("")
+```
+
+</details>
+
 #### dispatches Uint8Array prototype helpers with call and apply in browser scripts
 
 1. var session = BrowserSession new
@@ -2428,8 +2461,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 65 |
-| Active scenarios | 65 |
+| Total scenarios | 66 |
+| Active scenarios | 66 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
