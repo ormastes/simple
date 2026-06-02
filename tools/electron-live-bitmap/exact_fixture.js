@@ -23,8 +23,38 @@ function emit(key, value) {
 
 function htmlFileFixtureHtml() {
   const body = fs.readFileSync(htmlPath, "utf8");
-  const readyScript = "<script>window.__simpleExactBitmapReady=true;</script>";
+  const readyScript = `<script>
+(function(){
+  async function waitForExactBitmapReady(){
+    if (document.fonts && document.fonts.ready) {
+      try { await document.fonts.ready; } catch (_) {}
+    }
+    const images = Array.from(document.images || []);
+    await Promise.all(images.map(async (img) => {
+      if (img.complete) return;
+      if (img.decode) {
+        try { await img.decode(); return; } catch (_) {}
+      }
+      await new Promise((resolve) => {
+        img.addEventListener("load", resolve, { once: true });
+        img.addEventListener("error", resolve, { once: true });
+      });
+    }));
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    window.__simpleExactBitmapReady=true;
+  }
+  if (document.readyState === "complete") {
+    waitForExactBitmapReady();
+  } else {
+    window.addEventListener("load", waitForExactBitmapReady, { once: true });
+  }
+})();
+</script>`;
   if (body.includes("__simpleExactBitmapReady")) return body;
+  const closeBody = body.lastIndexOf("</body>");
+  if (closeBody >= 0) {
+    return `${body.substring(0, closeBody)}${readyScript}\n${body.substring(closeBody)}`;
+  }
   return `${body}\n${readyScript}`;
 }
 
@@ -636,6 +666,59 @@ function writeCapturedArgb(pixels) {
   return true;
 }
 
+// Resolution-convert layer for Electron capture.
+//
+// On HiDPI/Retina displays, BrowserWindow.capturePage({width,height}) returns a
+// NativeImage whose backing store is the physical resolution: image.getSize()
+// reports scaleFactor*{width,height} and image.toBitmap() is a BGRA buffer at
+// that native size. Reading it at the logical `width` stride mislabels a
+// top-left slice as the whole frame (scanline garbage) and forces ~100% pixel
+// mismatch independent of rendering fidelity. This layer normalizes ANY capture
+// resolution down to the logical comparison resolution by box-averaging each
+// native block into one logical pixel, so the comparison is resolution-agnostic.
+function bitmapToLogicalBgra(image) {
+  const size = image.getSize();
+  const native = image.toBitmap({ scaleFactor: 1 }); // BGRA at size.width x size.height
+  const nw = size.width;
+  const nh = size.height;
+  if (nw === width && nh === height) {
+    return { buffer: native, nativeWidth: nw, nativeHeight: nh, downsampled: false };
+  }
+  const out = Buffer.alloc(width * height * 4);
+  const kx = nw / width;
+  const ky = nh / height;
+  for (let y = 0; y < height; y += 1) {
+    const sy0 = Math.floor(y * ky);
+    const sy1 = Math.min(nh, Math.max(sy0 + 1, Math.floor((y + 1) * ky)));
+    for (let x = 0; x < width; x += 1) {
+      const sx0 = Math.floor(x * kx);
+      const sx1 = Math.min(nw, Math.max(sx0 + 1, Math.floor((x + 1) * kx)));
+      let b = 0;
+      let g = 0;
+      let r = 0;
+      let a = 0;
+      let n = 0;
+      for (let sy = sy0; sy < sy1; sy += 1) {
+        for (let sx = sx0; sx < sx1; sx += 1) {
+          const o = (sy * nw + sx) * 4;
+          b += native[o];
+          g += native[o + 1];
+          r += native[o + 2];
+          a += native[o + 3];
+          n += 1;
+        }
+      }
+      if (n === 0) n = 1;
+      const o = (y * width + x) * 4;
+      out[o] = Math.round(b / n);
+      out[o + 1] = Math.round(g / n);
+      out[o + 2] = Math.round(r / n);
+      out[o + 3] = Math.round(a / n);
+    }
+  }
+  return { buffer: out, nativeWidth: nw, nativeHeight: nh, downsampled: true };
+}
+
 async function main() {
   await app.whenReady();
   const win = new BrowserWindow({
@@ -654,15 +737,36 @@ async function main() {
   win.setContentSize(width, height);
   win.webContents.setZoomFactor(1);
   await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(fixtureHtml())}`);
-  await win.webContents.executeJavaScript("window.__simpleExactBitmapReady === true");
+  const ready = await win.webContents.executeJavaScript(`
+    new Promise((resolve) => {
+      if (window.__simpleExactBitmapReady === true) {
+        resolve(true);
+        return;
+      }
+      const start = performance.now();
+      const tick = () => {
+        if (window.__simpleExactBitmapReady === true || performance.now() - start > 10000) {
+          resolve(window.__simpleExactBitmapReady === true);
+          return;
+        }
+        setTimeout(tick, 10);
+      };
+      tick();
+    })
+  `);
+  if (ready !== true) {
+    throw new Error("generated HTML did not reach exact bitmap readiness");
+  }
 
   const expected = expectedChecksum > 0n ? expectedChecksum : expectedFrameChecksum();
   const expectedWeighted = expectedWeightedChecksum > 0n ? expectedWeightedChecksum : weightedChecksum(expectedFramePixels());
   let last = { sum: 0n, weighted: 0n, mismatches: width * height };
+  let capture = { nativeWidth: width, nativeHeight: height, downsampled: false };
   const start = process.hrtime.bigint();
   for (let i = 0; i < iterations; i += 1) {
     const image = await win.capturePage({ x: 0, y: 0, width, height }, { stayHidden: true });
-    last = captureChecksum(image.toBitmap({ scaleFactor: 1 }));
+    capture = bitmapToLogicalBgra(image);
+    last = captureChecksum(capture.buffer);
   }
   const elapsed = process.hrtime.bigint() - start;
   const frameUs = elapsed > 0n ? Number(elapsed / BigInt(iterations) / 1000n) : 1;
@@ -679,6 +783,9 @@ async function main() {
   emit("expected_weighted_checksum", expectedWeighted.toString());
   emit("mismatch_count", last.mismatches);
   emit("frame_us", frameUs > 0 ? frameUs : 1);
+  emit("capture_native_width", capture.nativeWidth);
+  emit("capture_native_height", capture.nativeHeight);
+  emit("capture_downsampled", String(capture.downsampled));
   emit("captured_argb_path", capturedArgbPath);
   emit("captured_argb_written", String(wroteCapturedArgb));
   emit("blur_or_tolerance_used", "false");
@@ -695,6 +802,9 @@ async function main() {
       expected_weighted_checksum: expectedWeighted.toString(),
       mismatch_count: last.mismatches,
       frame_us: frameUs > 0 ? frameUs : 1,
+      capture_native_width: capture.nativeWidth,
+      capture_native_height: capture.nativeHeight,
+      capture_downsampled: capture.downsampled,
       html_path: htmlPath,
       captured_argb_path: capturedArgbPath,
       captured_argb_written: wroteCapturedArgb,
