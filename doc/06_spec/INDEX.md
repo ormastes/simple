@@ -5,10 +5,10 @@
 ## Quick Stats
 
 - **Total Features:** 1
-- **Complete Documentation:** 1 (100%)
-- **Stubs Remaining:** 0
-- **Total Lines:** 2
-- **Warnings:** 7
+- **Complete Documentation:** 0 (0%)
+- **Stubs Remaining:** 1
+- **Total Lines:** 0
+- **Warnings:** 1
 
 ---
 
@@ -16,4 +16,4 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Modern Wm Readiness Specification](unit/os/desktop/modern_wm_readiness_spec.md) | Minimal | N/A | 2 | 20% | 2 lines |
+| [Ssh Session Shell Specification](unit/os/apps/sshd/ssh_session_shell_spec.md) | Auto-generated | N/A | 6 | 0% | 0 lines |

@@ -25,7 +25,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -54,6 +54,12 @@ expect(html).to_contain(".wm-command-bar")
 expect(html).to_contain(".wm-command-palette")
 expect(html).to_contain(".wm-command-palette-input")
 expect(html).to_contain(".wm-command-item")
+expect(html).to_contain(":focus-visible")
+expect(html).to_contain("outline-offset: 3px")
+expect(html).to_contain(".wm-traffic-lights button::before")
+expect(html).to_contain("inset: -8px")
+expect(html).to_contain(".wm-command-palette-input { width: 100%; height: 44px")
+expect(html).to_contain("min-height: 44px")
 expect(html).to_contain(".wm-taskbar-icon")
 expect(html).to_contain("translateY(-3px) scale(1.04)")
 expect(html).to_contain("border-radius: 999px")
@@ -66,7 +72,7 @@ expect(html).to_contain("border-radius: 999px")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -83,9 +89,21 @@ expect(js).to_contain("_commandPaletteCommands")
 expect(js).to_contain("_toggleCommandPalette")
 expect(js).to_contain("_moveCommandPaletteSelection")
 expect(js).to_contain("_executeCommandPaletteAction")
+expect(js).to_contain("_activateTaskbarItem")
 expect(js).to_contain("Open Simple IDE")
 expect(js).to_contain("Set motion: off")
 expect(js).to_contain("e.key.toLowerCase() === 'k'")
+expect(js).to_contain("role', 'listbox'")
+expect(js).to_contain("role', 'option'")
+expect(js).to_contain("aria-selected")
+expect(js).to_contain("Window taskbar")
+expect(js).to_contain("a.display_name || a.app_id")
+expect(js).to_contain("w.minimized ? 'Restore' : 'Focus'")
+expect(js).to_contain("w.title || w.window_id")
+expect(js).to_contain("ev.key !== 'Enter' && ev.key !== ' '")
+expect(js).to_contain("Close window")
+expect(js).to_contain("Minimize window")
+expect(js).to_contain("Maximize window")
 expect(js).to_contain("_makeRoundIcon")
 expect(js).to_contain("_isImageIcon")
 expect(js).to_contain("square-to-round")
@@ -94,7 +112,7 @@ expect(js).to_contain("_makeTitleInput")
 expect(js).to_contain("_markWindowLifecycle")
 expect(js).to_contain("wm-titlebar-icon")
 expect(js).to_contain("wm-command-bar")
-expect(js).to_contain("wm-btn-close")
+expect(js).to_contain("wm-btn-")
 expect(retained).to_contain("_makeSurfaceIcon")
 expect(retained).to_contain("_makeRoundIcon")
 expect(retained).to_contain("_isImageIcon")
@@ -104,6 +122,9 @@ expect(retained).to_contain("_markLifecycle")
 expect(retained).to_contain("wm-command-bar")
 expect(retained).to_contain("closing")
 expect(retained).to_contain("minimizing")
+expect(retained).to_contain("Close window")
+expect(retained).to_contain("Minimize window")
+expect(retained).to_contain("Maximize window")
 ```
 
 </details>
@@ -113,7 +134,7 @@ expect(retained).to_contain("minimizing")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -127,6 +148,14 @@ expect(preview).to_contain("wm-title-input wm-command-bar")
 expect(preview).to_contain("wm-command-palette")
 expect(preview).to_contain("wm-command-palette-input")
 expect(preview).to_contain("wm-command-item active")
+expect(preview).to_contain("role=\"listbox\"")
+expect(preview).to_contain("role=\"option\"")
+expect(preview).to_contain("aria-selected=\"true\"")
+expect(preview).to_contain("aria-label=\"Close window\"")
+expect(preview).to_contain("aria-label=\"Minimize window\"")
+expect(preview).to_contain("aria-label=\"Maximize window\"")
+expect(preview).to_contain("role=\"navigation\" aria-label=\"Window taskbar\"")
+expect(preview).to_contain("aria-label=\"Focus Simple IDE\"")
 expect(preview).to_contain("Set motion: reduced")
 expect(preview).to_contain("widget-menubar")
 expect(preview).to_contain("widget-panel focused")
@@ -169,7 +198,7 @@ expect(report).to_contain("normalized_icons=true")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -202,10 +231,12 @@ expect(report.command_context_ready)
 expect(report.command_palette_ready)
 expect(report.title_input_ready)
 expect(report.visual_layering_ready)
+expect(report.accessible_controls_ready)
 expect(wm_theme_quality_summary("glass_dark")).to_contain("status=pass")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("contrast_ratio_x100=")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("titlebar_height_px=38")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("visual_layering_ready=true")
+expect(wm_theme_quality_summary("glass_dark")).to_contain("accessible_controls_ready=true")
 ```
 
 </details>
@@ -219,4 +250,3 @@ expect(wm_theme_quality_summary("glass_dark")).to_contain("visual_layering_ready
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-

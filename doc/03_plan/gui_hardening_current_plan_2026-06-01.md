@@ -1472,3 +1472,20 @@ registry spec passes `25/25`, the VFS exec bytes spec passes `4/4`, and the
 mirrored manuals were refreshed. This advances the live SimpleOS execution lane
 without claiming the remaining guest-side QEMU/GTK performance harness is
 complete.
+
+Web WM accessibility contract continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/ui.web/html.spl src/app/ui.web/wm_quality_contract.spl test/unit/app/ui/web_wm_modern_shell_spec.spl src/os/desktop/modern_wm_readiness.spl test/unit/os/desktop/modern_wm_readiness_spec.spl`
+- `node --check src/app/ui.web/wm.js && node --check src/app/ui.web/retained_renderer.js`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/ui/web_wm_modern_shell_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/os/desktop/modern_wm_readiness_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/unit/app/ui/web_wm_modern_shell_spec.spl test/unit/os/desktop/modern_wm_readiness_spec.spl --output doc/06_spec`
+
+The Web WM shell now exposes accessible control evidence: traffic-light buttons
+use explicit window action labels, command palette items expose listbox/option
+semantics, taskbar launch/focus items are keyboard activatable, focus-visible
+rings are present, traffic-light hit targets are expanded, and command palette
+targets are 44px high. The Web WM quality and modern readiness reports now carry
+`accessible_controls_ready`. Focused checks pass, the Web WM spec passes `5/5`,
+and the modern readiness spec passes `2/2`. This advances Web WM usability and
+release evidence without claiming production Chrome pixel parity is fixed.

@@ -409,12 +409,12 @@ export class RetainedRenderer {
     titlebar.className = 'wm-titlebar';
     const lights = document.createElement('div');
     lights.className = 'wm-traffic-lights';
-    for (const [action, label] of [['close', 'x'], ['minimize', '-'], ['maximize', '+']]) {
+    for (const [action, label, aria] of [['close', 'x', 'Close window'], ['minimize', '-', 'Minimize window'], ['maximize', '+', 'Maximize window']]) {
       const btn = document.createElement('button');
       btn.dataset.action = action;
       btn.textContent = label;
       btn.className = `wm-btn-${action}`;
-      btn.setAttribute('aria-label', action);
+      btn.setAttribute('aria-label', aria);
       lights.appendChild(btn);
     }
     const icon = this._makeSurfaceIcon(surface);

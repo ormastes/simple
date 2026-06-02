@@ -408,6 +408,8 @@ class SimpleWindowManager {
 
     const list = document.createElement('div');
     list.className = 'wm-command-palette-list';
+    list.setAttribute('role', 'listbox');
+    list.setAttribute('aria-label', 'Available commands');
     palette.appendChild(list);
     document.body.appendChild(palette);
 
@@ -448,6 +450,9 @@ class SimpleWindowManager {
       item.type = 'button';
       item.className = 'wm-command-item' + (index === this._commandPaletteActiveIndex ? ' active' : '');
       item.dataset.commandIndex = String(index);
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', index === this._commandPaletteActiveIndex ? 'true' : 'false');
+      item.setAttribute('aria-label', command.label);
       item.appendChild(this._makeRoundIcon('wm-taskbar-icon', command.icon));
       const label = document.createElement('span');
       label.textContent = command.label;
@@ -497,17 +502,27 @@ class SimpleWindowManager {
     this.taskbar.addEventListener('click', (ev) => {
       const el = ev.target.closest('[data-action]');
       if (!el || !this.taskbar.contains(el)) return;
-      const action = el.dataset.action;
-      if (action === 'launch' && el.dataset.appId) {
-        this._sendHostWmPointer(ev, 'down');
-      } else if (action === 'focus' && el.dataset.windowIdHint) {
-        const isElectronWindow = this.transport === 'electron-ipc' && this._electronWindows.has(el.dataset.windowIdHint);
-        if (this.transport === 'electron-ipc' && this._electronWindows.has(el.dataset.windowIdHint)) {
-          this._electronFocusWindow(el.dataset.windowIdHint);
-        }
-        this._sendHostWmPointer(ev, 'down');
-      }
+      this._activateTaskbarItem(el, ev);
     });
+    this.taskbar.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter' && ev.key !== ' ') return;
+      const el = ev.target.closest('[data-action]');
+      if (!el || !this.taskbar.contains(el)) return;
+      ev.preventDefault();
+      this._activateTaskbarItem(el, ev);
+    });
+  }
+
+  _activateTaskbarItem(el, ev) {
+    const action = el.dataset.action;
+    if (action === 'launch' && el.dataset.appId) {
+      this._sendHostWmPointer(ev, 'down');
+    } else if (action === 'focus' && el.dataset.windowIdHint) {
+      if (this.transport === 'electron-ipc' && this._electronWindows.has(el.dataset.windowIdHint)) {
+        this._electronFocusWindow(el.dataset.windowIdHint);
+      }
+      this._sendHostWmPointer(ev, 'down');
+    }
   }
 
   // Render a TaskbarModel { pinned, running, tray } into the taskbar
@@ -517,12 +532,17 @@ class SimpleWindowManager {
     if (!this.taskbar) return;
     this._installTaskbarDelegation();
     this.taskbar.innerHTML = '';
+    this.taskbar.setAttribute('role', 'navigation');
+    this.taskbar.setAttribute('aria-label', 'Window taskbar');
 
     const pinned = document.createElement('div');
     pinned.className = 'wm-taskbar-section pinned';
     for (const a of (model.pinned || [])) {
       const item = document.createElement('div');
       item.className = 'wm-taskbar-item pinned';
+      item.setAttribute('role', 'button');
+      item.setAttribute('tabindex', '0');
+      item.setAttribute('aria-label', `Launch ${a.display_name || a.app_id}`);
       item.appendChild(this._makeTaskbarIcon(a.icon || a.display_name || a.app_id));
       item.appendChild(this._makeTaskbarLabel(a.display_name || a.app_id));
       item.dataset.action = 'launch';
@@ -538,6 +558,9 @@ class SimpleWindowManager {
       item.className = 'wm-taskbar-item running'
         + (w.active ? ' active' : '')
         + (w.minimized ? ' minimized' : '');
+      item.setAttribute('role', 'button');
+      item.setAttribute('tabindex', '0');
+      item.setAttribute('aria-label', `${w.minimized ? 'Restore' : 'Focus'} ${w.title || w.window_id}`);
       item.appendChild(this._makeTaskbarIcon(w.icon || w.title || w.app_id || w.window_id));
       item.appendChild(this._makeTaskbarLabel((w.minimized ? '[-] ' : '') + (w.title || w.window_id)));
       item.dataset.action = 'focus';
@@ -847,12 +870,12 @@ class SimpleWindowManager {
     titlebar.className = 'wm-titlebar';
     const lights = document.createElement('div');
     lights.className = 'wm-traffic-lights';
-    for (const [action, label] of [['close', 'x'], ['minimize', '-'], ['maximize', '+']]) {
+    for (const [action, label, aria] of [['close', 'x', 'Close window'], ['minimize', '-', 'Minimize window'], ['maximize', '+', 'Maximize window']]) {
       const btn = document.createElement('button');
       btn.dataset.action = action;
       btn.textContent = label;
       btn.className = `wm-btn-${action}`;
-      btn.setAttribute('aria-label', action);
+      btn.setAttribute('aria-label', aria);
       lights.appendChild(btn);
     }
     const icon = this._makeRoundIcon('wm-titlebar-icon', msg.icon || msg.title || windowId || 'S');
