@@ -381,8 +381,11 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   paused-pipe clearing, and idempotent `close` listener emission/once-listener
   cleanup. Bounded readable `data` listener delivery is covered for immediate
   flowing delivery, once-listener cleanup, paused deferral, resume delivery, and
-  destroyed-stream suppression. Full flow control, `for await` syntax support,
-  broader stream scheduling, and broader event-loop phases remain open.
+  destroyed-stream suppression. Bounded readable `end` listener delivery is
+  covered after data-flow exhaustion, including once-listener cleanup,
+  non-exhausted once-data buffering, and paused resume delivery. Full flow
+  control, `for await` syntax support, broader stream scheduling, and broader
+  event-loop phases remain open.
   Bounded `setInterval` rescheduling across explicit timer drains,
   `clearInterval` from inside an interval callback, and nextTick-before-timer
   phase priority are covered. Broader event-loop phases, host I/O integration,
@@ -2339,6 +2342,25 @@ BrowserSession fetch/WASM and native WASM host regressions remain `36/36` and
 `107/107`, and the broad `src/lib` check passed with the existing `447`
 warning profile. Full stream flow control, async scheduling, and host I/O
 integration remain open.
+
+CommonJS/Node bounded readable end-listener continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+
+Bounded readable streams now emit `end` once after buffered data drains through
+`data` listeners. The bounded path tracks `endEmitted`, preserves paused
+deferral until `resume()`, clears once-registered `end` listeners through the
+existing EventEmitter path, and leaves `end` un-emitted when `once("data")`
+consumes only one chunk and leaves buffered data behind. Focused checks passed,
+the Node API conformance suite passes `230/230`, BrowserSession fetch/WASM and
+native WASM host regressions remain `36/36` and `107/107`, and the broad
+`src/lib` check passed with the existing `447` warning profile. Full stream
+flow control, async scheduling, and host I/O integration remain open.
 
 CommonJS/Node bounded readable pause/resume continuation:
 
