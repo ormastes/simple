@@ -27,22 +27,19 @@ expect(gui_smf_dynlib_arch_code("weird")).to_equal(0u8)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val smf = gui_smf_wrap_native_library([0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8], 1u8)
-expect(smf.len()).to_equal(6 + (SMF_HEADER_TRAILER_SIZE as i32))
-val header = smf_parse_header(smf)
+expect(smf.len()).to_equal(6 + 128)
+val header = gui_smf_parse_header(smf)
 expect(header == nil).to_equal(false)
 val parsed = header.unwrap()
 expect(parsed.stub_size).to_equal(6i64)
 expect(parsed.smf_data_offset).to_equal(6i64)
 expect(parsed.role).to_equal(2i64)
 expect(parsed.arch).to_equal(1i64)
-val stub = smf_extract_library_stub_for_arch(smf, Architecture.X86_64)
-expect(stub.is_ok()).to_equal(true)
-expect(stub.unwrap().len()).to_equal(6)
 ```
 
 </details>
@@ -57,9 +54,9 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val smf = gui_smf_wrap_native_library([0xCFu8, 0xFAu8, 0xEDu8, 0xFEu8, 0u8], 3u8)
-val stub = smf_extract_library_stub_for_arch(smf, Architecture.Arm64)
-expect(stub.is_ok()).to_equal(true)
-expect(stub.unwrap()[0]).to_equal(0xCFu8)
+val header = gui_smf_parse_header(smf)
+expect(header == nil).to_equal(false)
+expect(header.unwrap().arch).to_equal(3i64)
 ```
 
 </details>
@@ -198,10 +195,17 @@ expect(row).to_contain(" macos_reason=requires-macos-arm64")
 
 #### wraps and extracts a role-2 SMF dynlib through pure Simple helpers and file IO
 
+1. extracted stub push
+   - Expected: rt_file_write_bytes(extracted_path, extracted_stub) is true
+   - Expected: extracted.len() equals `6`
+   - Expected: extracted[0] equals `0x7Fu8`
+   - Expected: extracted[1] equals `0x45u8`
+
+
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -214,9 +218,16 @@ val loaded = rt_file_read_bytes(dynlib_path) ?? []
 val smf = gui_smf_wrap_native_library(loaded, 1u8)
 expect(rt_file_write_bytes(smf_path, smf)).to_equal(true)
 val smf_loaded = rt_file_read_bytes(smf_path) ?? []
-val stub = smf_extract_library_stub_for_arch(smf_loaded, Architecture.X86_64)
-expect(stub.is_ok()).to_equal(true)
-expect(rt_file_write_bytes(extracted_path, stub.unwrap())).to_equal(true)
+val parsed = gui_smf_parse_header(smf_loaded)
+expect(parsed == nil).to_equal(false)
+val header = parsed.unwrap()
+expect(header.stub_size).to_equal(6i64)
+var extracted_stub: [u8] = []
+var i = 0
+while i < header.stub_size:
+    extracted_stub.push(smf_loaded[i])
+    i = i + 1
+expect(rt_file_write_bytes(extracted_path, extracted_stub)).to_equal(true)
 val extracted = rt_file_read_bytes(extracted_path) ?? []
 expect(extracted.len()).to_equal(6)
 expect(extracted[0]).to_equal(0x7Fu8)

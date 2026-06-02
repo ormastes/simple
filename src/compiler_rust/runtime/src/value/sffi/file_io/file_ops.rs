@@ -952,11 +952,9 @@ pub unsafe extern "C" fn rt_file_write_bytes(
         Err(_) => return false,
     };
 
-    // If data_ptr is null but len is 0, write empty file
     if data_ptr.is_null() {
-        return std::fs::write(path_str, []).is_ok();
+        return data_len == 0 && std::fs::write(path_str, []).is_ok();
     }
-
     let data = std::slice::from_raw_parts(data_ptr, data_len as usize);
     std::fs::write(path_str, data).is_ok()
 }

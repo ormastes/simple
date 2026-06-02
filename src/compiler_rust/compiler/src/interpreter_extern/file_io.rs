@@ -770,6 +770,20 @@ pub fn rt_file_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
     let bytes_arr = match args.get(1) {
         Some(Value::Array(arr)) => arr,
         Some(Value::FrozenArray(arr)) => arr,
+        Some(Value::FixedSizeArray { data, .. }) => {
+            let bytes: Vec<u8> = data
+                .iter()
+                .map(|v| match v {
+                    Value::Int(i) => *i as u8,
+                    Value::UInt { value, .. } => *value as u8,
+                    _ => 0u8,
+                })
+                .collect();
+            return match fs::write(&path, &bytes) {
+                Ok(_) => Ok(Value::Bool(true)),
+                Err(_) => Ok(Value::Bool(false)),
+            };
+        }
         _ => return Ok(Value::Bool(false)),
     };
 
