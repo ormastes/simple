@@ -3,8 +3,11 @@
 ## Current Goal
 
 Replan the macOS host GUI and SimpleOS QEMU ARM64 work around a real pure
-Simple GUI path loaded from SMF/dynlib artifacts, with a measured sub-1 ms hot
-response target. This restart explicitly removes WM and web-renderer runtime
+Simple GUI path loaded from pure SMF dynlib artifacts by default, with a
+measured sub-1 ms hot response target. On macOS, the host adapter uses SFFI
+dynload to open and call the dynlib extracted from the SMF artifact; SimpleOS
+uses the same pure SMF dynlib artifact for adapter parity. This restart
+explicitly removes WM and web-renderer runtime
 extern dependencies from the production path and does not change rendering pixel
 logic.
 
@@ -35,12 +38,13 @@ The production lane is:
 ```text
 macOS arm64 host
   -> SMF artifact for pure Simple GUI library
-  -> native dynlib loader bridge
+  -> pure SMF dynlib default
+  -> SFFI dynload host-call bridge
   -> pure Simple GUI event/update/render command API
   -> adapter presentation only
 
 SimpleOS QEMU ARM64
-  -> same SMF GUI artifact
+  -> same pure SMF dynlib GUI artifact
   -> framebuffer/virtio adapter presentation only
 ```
 
@@ -74,8 +78,10 @@ SimpleOS QEMU ARM64
   report contract: real `smf_dynlib` mode, resolved hot symbol, no fallback, and
   p99 below 1000 us.
 - `src/app/gui_perf/smf_dynlib_probe.spl` now emits the machine-readable
-  `GUI_DYNLIB_PERF` row. It deliberately fails closed for direct Simple fallback
-  samples until real dynlib symbol invocation is wired.
+  `GUI_DYNLIB_PERF` row. Acceptance rows must report `loader=smf_dynlib`,
+  `dynload=smf_dynlib`, `host_dynload=sffi`, and
+  `call_source=dynlib_symbol_call`; host `.so`/`.dylib` rows remain diagnostic
+  only.
 - `src/app/gui_perf/macos_smf_dynlib_release_gate.spl` is the current macOS
   acceptance entrypoint. It runs the SMF evidence chain, writes the transcript,
   validates the ordered artifact/QEMU/SimpleOS/macOS rows, and emits
@@ -137,6 +143,7 @@ rg -n "rt_file_wrap_smf_dynlib|rt_file_extract_smf_dynlib|rt_dyncall|src/compile
 - No live macOS arm64 release-gate transcript is checked in yet. The required
   final evidence is `GUI_MAC_SMF_DYNLIB_RELEASE_GATE status=pass` with the
   transcript containing `GUI_DYNLIB_PERF ... loader=smf_dynlib ...
+  dynload=smf_dynlib ... host_dynload=sffi ...
   call_source=dynlib_symbol_call ... pass=true ... p99_us=<1000`.
 - Current hosted and QEMU WM paths still contain direct runtime GUI externs and
   therefore cannot close this goal.

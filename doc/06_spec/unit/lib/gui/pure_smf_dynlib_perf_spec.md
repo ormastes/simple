@@ -27,7 +27,7 @@ expect(stats.max_us).to_equal(900)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -51,6 +51,8 @@ val report = gui_dynlib_perf_report(
 expect(report.pass).to_equal(true)
 expect(report.error).to_equal("")
 expect(report.stats.p99_us).to_equal(990)
+expect(gui_dynlib_perf_dynload_kind(report)).to_equal("smf_dynlib")
+expect(gui_dynlib_perf_host_dynload_kind(report)).to_equal("sffi")
 ```
 
 </details>
@@ -156,7 +158,7 @@ expect(report.error).to_equal("p99-over-threshold")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -185,6 +187,8 @@ expect(row.contains("host_arch=x86_64")).to_equal(true)
 expect(row.contains("host_profile=linux-x86_64")).to_equal(true)
 expect(row.contains("host_cpu=CI_CPU")).to_equal(true)
 expect(row.contains("loader=smf_dynlib")).to_equal(true)
+expect(row.contains("dynload=smf_dynlib")).to_equal(true)
+expect(row.contains("host_dynload=sffi")).to_equal(true)
 expect(row.contains("call_source=dynlib_symbol_call")).to_equal(true)
 expect(row.contains("expected_samples=1")).to_equal(true)
 expect(row.contains("p99_us=100")).to_equal(true)
@@ -288,6 +292,43 @@ expect(report.error).to_equal("not-dynlib-hot-call")
 
 </details>
 
+#### labels host dynlib calls as SFFI diagnostics outside SMF dynlib acceptance
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val report = gui_dynlib_perf_report(
+    "build/gui/libpure_gui_hot.so",
+    "build/gui/libpure_gui_hot.so",
+    "linux",
+    "x86_64",
+    "linux-x86_64",
+    "CI_CPU",
+    "host_dynlib",
+    "gui_dynlib_hot_probe_tick",
+    "dynlib_symbol_call",
+    true,
+    false,
+    1,
+    100,
+    [100],
+    1000
+)
+val row = gui_dynlib_perf_report_row(report)
+expect(report.pass).to_equal(false)
+expect(report.error).to_equal("not-smf-dynlib")
+expect(gui_dynlib_perf_dynload_kind(report)).to_equal("host_dynlib_diagnostic")
+expect(gui_dynlib_perf_host_dynload_kind(report)).to_equal("sffi")
+expect(row.contains("dynload=host_dynlib_diagnostic")).to_equal(true)
+expect(row.contains("host_dynload=sffi")).to_equal(true)
+```
+
+</details>
+
 #### rejects SMF registry-only symbol resolution until executable mapping exists
 
 <details>
@@ -339,8 +380,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

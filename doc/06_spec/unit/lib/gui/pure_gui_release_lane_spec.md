@@ -108,13 +108,17 @@ _expect_release_clean("src/app/gui_perf/smf_dynlib_probe.spl")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_has_forbidden_release_dependency("extern fn rt_file_wrap_smf_dynlib(input: text, output: text, arch: text) -> bool")).to_equal(true)
 expect(_has_forbidden_release_dependency("extern fn rt_file_extract_smf_dynlib(input: text, output: text) -> bool")).to_equal(true)
+expect(_has_forbidden_release_dependency("extern fn rt_dyncall_0(ptr: i64) -> i64")).to_equal(true)
 expect(_has_forbidden_release_dependency("extern fn rt_dyncall_1(ptr: i64, arg0: i64) -> i64")).to_equal(true)
+expect(_has_forbidden_release_dependency("extern fn rt_dyncall_6(ptr: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64")).to_equal(true)
+expect(_has_forbidden_release_dependency("extern fn rt_webgpu_present(surface: i64) -> i64")).to_equal(true)
+expect(_has_forbidden_release_dependency("use std.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}")).to_equal(false)
 ```
 
 </details>

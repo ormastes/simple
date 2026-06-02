@@ -251,7 +251,7 @@ expect(report.call_source).to_equal("dynlib_symbol_call")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -272,6 +272,7 @@ val evidence = GuiDynlibProbeLoadEvidence(
 val report = gui_dynlib_probe_report(config, evidence, [10, 11, 12, 13])
 expect(report.pass).to_equal(true)
 expect(report.call_source).to_equal("dynlib_symbol_call")
+expect(report.loader_mode).to_equal("smf_dynlib")
 ```
 
 </details>
@@ -309,11 +310,13 @@ else:
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("src/app/gui_perf/smf_dynlib_probe_core.spl")
+expect(source).to_contain("use std.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}")
+expect(source).to_contain("val handle = spl_dlopen(cache_path)")
 expect(source.contains("var args: [i64] = [0, 12, 24, 65]")).to_equal(true)
 expect(source.contains("args[0] = i.to_i64()")).to_equal(true)
 expect(source.contains("args[1] = 12 + i.to_i64()")).to_equal(true)

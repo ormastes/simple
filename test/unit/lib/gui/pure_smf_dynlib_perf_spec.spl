@@ -1,7 +1,7 @@
 # Pure GUI SMF/dynlib perf contract tests
 
 use std.spipe.*
-use std.gui.pure_smf_dynlib_perf.{gui_dynlib_perf_stats, gui_dynlib_perf_report, gui_dynlib_perf_report_row}
+use std.gui.pure_smf_dynlib_perf.{gui_dynlib_perf_stats, gui_dynlib_perf_report, gui_dynlib_perf_dynload_kind, gui_dynlib_perf_host_dynload_kind, gui_dynlib_perf_report_row}
 
 describe "pure GUI SMF dynlib perf contract":
     it "computes p50 p95 p99 and max from measured samples":
@@ -32,6 +32,8 @@ describe "pure GUI SMF dynlib perf contract":
         expect(report.pass).to_equal(true)
         expect(report.error).to_equal("")
         expect(report.stats.p99_us).to_equal(990)
+        expect(gui_dynlib_perf_dynload_kind(report)).to_equal("smf_dynlib")
+        expect(gui_dynlib_perf_host_dynload_kind(report)).to_equal("sffi")
 
     it "rejects interpreter or fallback measurements":
         val report = gui_dynlib_perf_report(
@@ -122,6 +124,8 @@ describe "pure GUI SMF dynlib perf contract":
         expect(row.contains("host_profile=linux-x86_64")).to_equal(true)
         expect(row.contains("host_cpu=CI_CPU")).to_equal(true)
         expect(row.contains("loader=smf_dynlib")).to_equal(true)
+        expect(row.contains("dynload=smf_dynlib")).to_equal(true)
+        expect(row.contains("host_dynload=sffi")).to_equal(true)
         expect(row.contains("call_source=dynlib_symbol_call")).to_equal(true)
         expect(row.contains("expected_samples=1")).to_equal(true)
         expect(row.contains("p99_us=100")).to_equal(true)
@@ -188,6 +192,32 @@ describe "pure GUI SMF dynlib perf contract":
         )
         expect(report.pass).to_equal(false)
         expect(report.error).to_equal("not-dynlib-hot-call")
+
+    it "labels host dynlib calls as SFFI diagnostics outside SMF dynlib acceptance":
+        val report = gui_dynlib_perf_report(
+            "build/gui/libpure_gui_hot.so",
+            "build/gui/libpure_gui_hot.so",
+            "linux",
+            "x86_64",
+            "linux-x86_64",
+            "CI_CPU",
+            "host_dynlib",
+            "gui_dynlib_hot_probe_tick",
+            "dynlib_symbol_call",
+            true,
+            false,
+            1,
+            100,
+            [100],
+            1000
+        )
+        val row = gui_dynlib_perf_report_row(report)
+        expect(report.pass).to_equal(false)
+        expect(report.error).to_equal("not-smf-dynlib")
+        expect(gui_dynlib_perf_dynload_kind(report)).to_equal("host_dynlib_diagnostic")
+        expect(gui_dynlib_perf_host_dynload_kind(report)).to_equal("sffi")
+        expect(row.contains("dynload=host_dynlib_diagnostic")).to_equal(true)
+        expect(row.contains("host_dynload=sffi")).to_equal(true)
 
     it "rejects SMF registry-only symbol resolution until executable mapping exists":
         val report = gui_dynlib_perf_report(

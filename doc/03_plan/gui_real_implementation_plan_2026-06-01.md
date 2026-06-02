@@ -5,9 +5,11 @@
 ## Objective
 
 Implement the real macOS host GUI path as a pure Simple GUI library loaded from
-SMF through a native dynlib bridge, with hot event response below 1 ms on the
-macOS arm64 host profile. The SimpleOS QEMU ARM64 lane must use the same SMF GUI
-artifact through a framebuffer/virtio presentation adapter.
+the pure SMF dynlib artifact by default, with hot event response below 1 ms on
+the macOS arm64 host profile. On macOS, the host adapter uses SFFI dynload to
+open and call the dynlib extracted from that SMF artifact. The SimpleOS QEMU
+ARM64 lane must use the same pure SMF dynlib artifact through a
+framebuffer/virtio presentation adapter.
 
 This plan replaces the earlier hosted WM and Simple Web Renderer direction.
 Those paths remain smoke/regression coverage only and are not release evidence
@@ -32,7 +34,8 @@ thresholds.
 ```text
 pure Simple GUI library
   -> SMF artifact
-  -> macOS arm64 dynlib loader / SimpleOS SMF loader
+  -> pure SMF dynlib default
+  -> macOS arm64 SFFI dynload adapter / SimpleOS SMF loader
   -> stable GUI command ABI
   -> platform adapter presentation
 ```
@@ -131,7 +134,8 @@ the evidence.
 ### Phase 2 - SMF/Dynlib Loader Path
 
 - Add a macOS arm64 loader wrapper that opens the compiled GUI dynlib/SMF
-  artifact, resolves the hot entry symbol once, and reuses it.
+  artifact through the pure SMF dynlib default, resolves the hot entry symbol
+  once with SFFI dynload, and reuses it.
 - Use the host `.so`/`.dylib` diagnostic lane only to prove callable symbol ABI
   and timing. Do not treat it as acceptance unless the loader is `smf_dynlib`.
 - Implement wrapper, envelope, extraction, and probe orchestration in pure
@@ -210,8 +214,9 @@ the evidence.
 - Pure GUI release-lane dependency guard: no WM, Simple Web, or `rt_gui`/hosted
   runtime imports.
 - macOS arm64 dynlib/SMF hot response probe: p99 < 1000 us after warmup.
-- `GUI_DYNLIB_PERF` must report `call_source=dynlib_symbol_call`,
-  `loader=smf_dynlib`, `pass=true`, and `error=`.
+- `GUI_DYNLIB_PERF` must report `loader=smf_dynlib`,
+  `dynload=smf_dynlib`, `host_dynload=sffi`,
+  `call_source=dynlib_symbol_call`, `pass=true`, and `error=`.
 - The macOS release gate must emit `GUI_MAC_SMF_DYNLIB_RELEASE_GATE
   status=pass`, and the saved transcript must validate through
   `src/app/gui_perf/macos_smf_dynlib_transcript_check.spl`.
