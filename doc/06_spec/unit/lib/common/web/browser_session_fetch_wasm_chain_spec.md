@@ -1452,6 +1452,39 @@ match result:
 
 </details>
 
+#### reports ArrayBuffer and typed-array constructor metadata in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `Uint8Array:3:ArrayBuffer:1:DataView:1:true`
+
+3. Err
+   - Expected: "unexpected constructor metadata js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("Uint8Array.name + ':' + Uint8Array.length + ':' + ArrayBuffer.name + ':' + ArrayBuffer.length + ':' + DataView.name + ':' + DataView.length + ':' + (Uint8Array.prototype.constructor === Uint8Array)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("Uint8Array:3:ArrayBuffer:1:DataView:1:true")
+    Err(err):
+        expect("unexpected constructor metadata js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reads and writes ArrayBuffer bytes through DataView in browser scripts
 
 1. var session = BrowserSession new
@@ -1636,8 +1669,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 41 |
-| Active scenarios | 41 |
+| Total scenarios | 42 |
+| Active scenarios | 42 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
