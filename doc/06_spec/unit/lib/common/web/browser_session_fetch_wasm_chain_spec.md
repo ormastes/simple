@@ -561,6 +561,39 @@ match result:
 
 </details>
 
+#### searches Uint8Array values backward in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `3:2:3:0:-1`
+
+3. Err
+   - Expected: "unexpected uint8 lastIndexOf js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(5); b[0] = 4; b[1] = 7; b[2] = 260; b[3] = 4; b[4] = 0; b.lastIndexOf(4) + ':' + b.lastIndexOf(4, 2) + ':' + b.lastIndexOf(4, -2) + ':' + b.lastIndexOf(4, -4) + ':' + b.lastIndexOf(5)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("3:2:3:0:-1")
+    Err(err):
+        expect("unexpected uint8 lastIndexOf js error: {err}").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -580,8 +613,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
