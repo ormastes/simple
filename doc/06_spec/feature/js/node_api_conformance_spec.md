@@ -2500,6 +2500,22 @@ expect(_eval_before_after_timer_drain("var timerValue = 0; var id = require('tim
 
 </details>
 
+#### marks bounded timer object handles closed through clear calls
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); require('node:timers').clearTimeout(h); h.closed")).to_equal("true")
+expect(_eval_str("var h = require('timers').setInterval(() => {}, 5); require('node:timers').clearInterval(h); h.closed")).to_equal("true")
+expect(_eval_str("var h = require('timers').setImmediate(() => {}); require('node:timers').clearImmediate(h); h.closed")).to_equal("true")
+```
+
+</details>
+
 #### schedules bounded setImmediate callbacks through runtime drain
 
 <details>
@@ -3601,8 +3617,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 234 |
-| Active scenarios | 234 |
+| Total scenarios | 235 |
+| Active scenarios | 235 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

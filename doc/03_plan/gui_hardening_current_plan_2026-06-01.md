@@ -401,9 +401,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   phase priority are covered. Broader event-loop phases, host I/O integration,
   and full Node timer object behavior remain open.
   Bounded timer handle objects with `ref`, `unref`, `hasRef`, repeat metadata,
-  object-handle clearing, `close()` cancellation, and bounded `refresh()`
-  lifecycle state are covered. Full Node handle lifecycle behavior remains
-  open.
+  object-handle clearing/cancel state, `close()` cancellation, and bounded
+  `refresh()` lifecycle state are covered. Full Node handle lifecycle behavior
+  remains open.
   Bounded `readline.createInterface` terminal grants are covered for allowed
   interface state, deterministic `question` callback answers, prompt/answer
   metadata, and close state. Real terminal I/O remains open.
@@ -2580,3 +2580,22 @@ native WASM host regressions remain `36/36` and `107/107`, and the broad
 `src/lib` check passed with the existing `447` warning profile. Broader
 event-loop phase behavior, host I/O integration, and full Node timer-object
 lifecycle behavior remain open.
+
+CommonJS/Node bounded timer clear-state continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+
+Bounded timer module clear calls now update object handle lifecycle state.
+`clearTimeout(handle)`, `clearInterval(handle)`, and `clearImmediate(handle)`
+still cancel the pending timer task and now also mark the passed handle
+`closed=true`, matching the handle-level cancellation state exposed by
+`close()`. Focused checks passed, the Node API conformance suite passes
+`235/235`, BrowserSession fetch/WASM and native WASM host regressions remain
+`36/36` and `107/107`, and the broad `src/lib` check passed with the existing
+`447` warning profile. Broader event-loop phase behavior, host I/O integration,
+and full Node timer-object lifecycle behavior remain open.
