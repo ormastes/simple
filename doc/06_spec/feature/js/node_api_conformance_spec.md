@@ -2216,7 +2216,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.readableLength + ':' + saved.read() + ':' + saved.readableLength + ':' + saved.read()")).to_equal("16:bounded-response:0:undefined")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.readable + ':' + saved.readableLength + ':' + saved.read() + ':' + saved.readable + ':' + saved.readableLength + ':' + saved.read()")).to_equal("true:16:bounded-response:false:0:undefined")
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', () => {}); }); req.end(); saved.pendingData + ':' + saved.read() + ':' + saved.pendingData + ':' + saved.readableLength")).to_equal("true:bounded-response:false:0")
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.destroy(); saved.read()")).to_equal("undefined")
 ```
@@ -2247,7 +2247,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var returned = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; returned = res.pipe(w); }); req.end(); (returned === w) + ':' + w.lastChunk + ':' + w.bytesWritten + ':' + saved.readableLength + ':' + saved.responseRead")).to_equal("true:bounded-response:16:0:true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var returned = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; returned = res.pipe(w); }); req.end(); returned.lastChunk + ':' + returned.bytesWritten + ':' + w.lastChunk + ':' + w.bytesWritten + ':' + saved.readableLength + ':' + saved.responseRead")).to_equal("bounded-response:16:bounded-response:16:0:true")
 expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.pipe(w); }); req.end(); w.bytesWritten + ':' + saved.pipePaused + ':' + saved.responseRead + ':' + saved.readableLength")).to_equal("0:true:false:16")
 expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.pipe(w); }); req.end(); saved.resume(); w.lastChunk + ':' + w.bytesWritten + ':' + saved.pipePaused + ':' + saved.pipeResumed")).to_equal("bounded-response:16:false:true")
 expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var returned = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.pipe(w); returned = res.unpipe(); }); req.end(); saved.resume(); (returned === saved) + ':' + w.bytesWritten + ':' + saved.pipePaused + ':' + saved.pipeResumed + ':' + saved.pipeUnpiped + ':' + saved.responseRead")).to_equal("true:0:false:false:true:false")
@@ -2262,13 +2262,16 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var stream = requi
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.complete + ':' + saved.readableEnded + ':' + saved.endDelivered")).to_equal("true:true:false")
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.on('data', () => {}); res.on('end', () => {}); }); req.end(); saved.dataListenerCount + ':' + saved.endListenerCount + ':' + saved.dataDelivered + ':' + saved.endDelivered")).to_equal("1:1:true:true")
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080'); req.on('response', (res) => { saved = res; res.on('end', () => {}); }); req.end(); saved.complete + ':' + saved.readableEnded + ':' + saved.endListenerCount")).to_equal("true:true:1")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.on('data', () => {}); }); req.end(); saved.readable + ':' + saved.responseRead + ':' + saved.readableLength")).to_equal("false:true:0")
+expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pipe(w); }); req.end(); saved.readable + ':' + saved.responseRead + ':' + saved.readableLength")).to_equal("false:true:0")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.destroy(); saved.readable + ':' + saved.destroyed + ':' + saved.readableLength")).to_equal("false:true:0")
 ```
 
 </details>
