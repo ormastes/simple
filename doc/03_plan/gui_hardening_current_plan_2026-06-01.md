@@ -423,13 +423,14 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   Bounded `net.connect`, `http.get`, and `https.get` aliases are covered under
   the same explicit network-grant model.
   Bounded request lifecycle methods now cover deterministic `write`, `end`, and
-  `abort` state, plus bounded request-side `finish` listener delivery on
-  `end()`, `abort` listener delivery on `abort()`, and `close` listener
-  delivery on terminal request actions. Bounded request state now distinguishes
-  initial, normally ended, and aborted/destroyed lifecycle flags, and terminal
-  requests reject later writes deterministically. Bounded request headers reject
-  mutation after flushed, ended, or aborted state, and terminal requests reject
-  later header flushes, `end()` calls, and `abort()` calls deterministically.
+  `abort`, and `destroy` state, plus bounded request-side `finish` listener
+  delivery on `end()`, `abort` listener delivery on `abort()`, and `close`
+  listener delivery on terminal request actions. Bounded request state now
+  distinguishes initial, normally ended, aborted, and destroyed lifecycle flags,
+  and terminal requests reject later writes deterministically. Bounded request
+  headers reject mutation after flushed, ended, aborted, or destroyed state, and
+  terminal requests reject later header flushes, `end()` calls, `abort()` calls,
+  and `destroy()` calls deterministically.
   Real request streams, responses,
   broader callbacks, and host network I/O remain open.
   Bounded request callback delivery now invokes the supplied callback on

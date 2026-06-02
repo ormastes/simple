@@ -1811,13 +1811,14 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var headers = {Acc
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').write")).to_equal("function")
 expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').end")).to_equal("function")
 expect(_eval_str_with_network("https://api.example.com:443", "typeof require('node:https').request('https://api.example.com').abort")).to_equal("function")
+expect(_eval_str_with_network("https://api.example.com:443", "typeof require('node:https').request('https://api.example.com').destroy")).to_equal("function")
 expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').on")).to_equal("function")
 expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').once")).to_equal("function")
 expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').listenerCount")).to_equal("function")
@@ -1851,13 +1852,14 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var req = require(
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.writeRejected + ':' + req.writeRejectReason")).to_equal("false:")
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.end(); var r = req.write('late'); r.status + ':' + r.error + ':' + req.writeRejected + ':' + req.writeRejectReason")).to_equal("denied:request-ended:true:request-ended")
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.abort(); var r = req.write('late'); r.status + ':' + r.error + ':' + req.writeRejected + ':' + req.writeRejectReason")).to_equal("denied:request-aborted:true:request-aborted")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.destroy(); var r = req.write('late'); r.status + ':' + r.error + ':' + req.writeRejected + ':' + req.writeRejectReason")).to_equal("denied:request-destroyed:true:request-destroyed")
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.write('ok'); req.end(); req.write('late'); req.bodyBytes + ':' + req.bodyChunks")).to_equal("2:1")
 ```
 
@@ -1984,12 +1986,13 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var req = require(
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.end(); req.requestEnded")).to_equal("true")
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.abort(); req.aborted")).to_equal("true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.destroy(); req.destroyed")).to_equal("true")
 ```
 
 </details>
@@ -2026,18 +2029,36 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 0; var 
 
 </details>
 
+#### destroys bounded http requests deterministically
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.destroyRejected + ':' + req.destroyRejectReason")).to_equal("false:")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.destroy(); req.requestEnded + ':' + req.aborted + ':' + req.destroyed + ':' + req.closed + ':' + req.responseDelivered")).to_equal("false:false:true:true:false")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 0; var req = require('http').request('http://api.example.com:8080'); req.once('close', () => { seen = seen + 1; }); req.destroy(); req.destroy(); seen + ':' + req.destroyRejected + ':' + req.destroyRejectReason + ':' + req.listenerCount('close')")).to_equal("1:true:request-destroyed:0")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.destroy(); req.end(); req.abort(); req.endRejectReason + ':' + req.abortRejectReason")).to_equal("request-destroyed:request-destroyed")
+```
+
+</details>
+
 #### tracks bounded http request lifecycle flags
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.writableEnded + ':' + req.writableFinished + ':' + req.destroyed + ':' + req.closed")).to_equal("false:false:false:false")
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.end(); req.writableEnded + ':' + req.writableFinished + ':' + req.destroyed + ':' + req.closed")).to_equal("true:true:false:true")
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.abort(); req.writableEnded + ':' + req.writableFinished + ':' + req.destroyed + ':' + req.closed")).to_equal("false:false:true:true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.destroy(); req.writableEnded + ':' + req.writableFinished + ':' + req.destroyed + ':' + req.closed")).to_equal("false:false:true:true")
 ```
 
 </details>
@@ -3852,8 +3873,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 249 |
-| Active scenarios | 249 |
+| Total scenarios | 250 |
+| Active scenarios | 250 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
