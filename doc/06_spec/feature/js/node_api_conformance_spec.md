@@ -2055,6 +2055,22 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; v
 
 </details>
 
+#### reports bounded http response raw header ordering
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.httpVersionMajor + ':' + saved.httpVersionMinor + ':' + saved.rawHeaders")).to_equal("1:1:Content-Type,text/plain,Content-Length,16,X-Simple-Runtime,bounded")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080'); req.on('response', (res) => { seen = res.httpVersionMajor + '.' + res.httpVersionMinor + ':' + res.rawHeaders; }); req.end(); seen")).to_equal("1.1:Content-Type,text/plain,Content-Length,16,X-Simple-Runtime,bounded")
+expect(_eval_str_with_network("https://api.example.com:443", "var saved = null; var req = require('node:https').request('https://api.example.com', (res) => { saved = res; }); req.end(); saved.statusMessage + ':' + saved.rawHeaders")).to_equal("OK:Content-Type,text/plain,Content-Length,16,X-Simple-Runtime,bounded")
+```
+
+</details>
+
 #### resolves Express-like http server creation as fail-closed network API
 
 <details>
@@ -3720,8 +3736,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 241 |
-| Active scenarios | 241 |
+| Total scenarios | 242 |
+| Active scenarios | 242 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
