@@ -1457,7 +1457,7 @@ match result:
 1. var session = BrowserSession new
 
 2. Ok
-   - Expected: _display_js(value) equals `Uint8Array:3:ArrayBuffer:1:DataView:1:true`
+   - Expected: _display_js(value) equals `Uint8Array:3:ArrayBuffer:1:DataView:1:true:true:true:true:true:function`
 
 3. Err
    - Expected: "unexpected constructor metadata js error: {err}" equals ``
@@ -1475,10 +1475,10 @@ session.open_html(
     "https://example.com/webgpu-wasm.html",
     "<html><body>WASM GPU</body></html>"
 )
-val result = session.eval_script("Uint8Array.name + ':' + Uint8Array.length + ':' + ArrayBuffer.name + ':' + ArrayBuffer.length + ':' + DataView.name + ':' + DataView.length + ':' + (Uint8Array.prototype.constructor === Uint8Array)")
+val result = session.eval_script("Uint8Array.name + ':' + Uint8Array.length + ':' + ArrayBuffer.name + ':' + ArrayBuffer.length + ':' + DataView.name + ':' + DataView.length + ':' + (Uint8Array.prototype.constructor === Uint8Array) + ':' + (ArrayBuffer.prototype === ArrayBuffer.prototype) + ':' + (ArrayBuffer.prototype.constructor === ArrayBuffer) + ':' + (DataView.prototype === DataView.prototype) + ':' + (DataView.prototype.constructor === DataView) + ':' + typeof DataView.prototype.getUint8")
 match result:
     Ok(value):
-        expect(_display_js(value)).to_equal("Uint8Array:3:ArrayBuffer:1:DataView:1:true")
+        expect(_display_js(value)).to_equal("Uint8Array:3:ArrayBuffer:1:DataView:1:true:true:true:true:true:function")
     Err(err):
         expect("unexpected constructor metadata js error: {err}").to_equal("")
 ```

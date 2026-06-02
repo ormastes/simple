@@ -333,6 +333,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   Bounded constructor metadata now reports `name`/`length` for `ArrayBuffer`,
   `Uint8Array`, and `DataView`, and `Uint8Array.prototype.constructor`
   compares identical to the browser-script `Uint8Array` constructor.
+  `ArrayBuffer.prototype` and `DataView.prototype` now also expose stable
+  bounded prototype objects with constructor links, and `DataView.prototype`
+  carries the deterministic byte accessor method surface.
 
 ## Related Docs
 
@@ -3285,3 +3288,17 @@ BrowserSession scripts now expose bounded constructor metadata for
 spec now passes `42/42`; broader typed-array prototype parity, general
 `Function.prototype.call/apply` dispatch, and full browser/WASM semantics
 remain open.
+
+BrowserSession ArrayBuffer/DataView prototype metadata continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval_member.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now expose stable bounded `ArrayBuffer.prototype` and
+`DataView.prototype` objects. The scenario proves repeated strict identity,
+constructor links back to `ArrayBuffer` and `DataView`, and a function-valued
+`DataView.prototype.getUint8` accessor surface while preserving the focused
+fetch/WASM chain spec at `42/42`. Broader typed-array prototype parity, general
+`Function.prototype.call/apply` dispatch, and full browser/WASM semantics remain
+open.
