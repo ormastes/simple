@@ -2023,6 +2023,22 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; 
 
 </details>
 
+#### tracks bounded http response lifecycle state
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.complete + ':' + saved.readableEnded + ':' + saved.endDelivered")).to_equal("true:true:false")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.on('data', () => {}); res.on('end', () => {}); }); req.end(); saved.dataListenerCount + ':' + saved.endListenerCount + ':' + saved.dataDelivered + ':' + saved.endDelivered")).to_equal("1:1:true:true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080'); req.on('response', (res) => { saved = res; res.on('end', () => {}); }); req.end(); saved.complete + ':' + saved.readableEnded + ':' + saved.endListenerCount")).to_equal("true:true:1")
+```
+
+</details>
+
 #### resolves Express-like http server creation as fail-closed network API
 
 <details>
@@ -3688,8 +3704,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 239 |
-| Active scenarios | 239 |
+| Total scenarios | 240 |
+| Active scenarios | 240 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
