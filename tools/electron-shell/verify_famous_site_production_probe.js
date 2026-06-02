@@ -272,6 +272,10 @@ let result = {
   exact: false,
   accepted: false,
   divergent: false,
+  parityStatus: "unknown",
+  boundedDivergenceOnly: false,
+  chromeGlyphCompositingParity: false,
+  promotionRequiredDifferentPixels: 0,
   differentPixels: 0,
   maxDifferentPixels,
   computedDifferentPixels: null,
@@ -376,6 +380,10 @@ if (!fs.existsSync(reportPath)) {
   result.textInkDelta.overflowDifferentPixels = parseIntField(text, /overflow_text:\s*\(region[^\)]*different_pixels:\s*([0-9]+)/);
   result.textInkDelta.overflowChromeExactBlackPixels = parseIntField(text, /overflow_text:\s*\(region[^\)]*chrome_exact_black_pixels:\s*([0-9]+)/);
   result.textInkDelta.overflowSimpleBackgroundMismatchPixels = parseIntField(text, /overflow_text:\s*\(region[^\)]*simple_background_mismatch_pixels:\s*([0-9]+)/);
+  result.parityStatus = result.exact && result.accepted && result.differentPixels === 0 ? "exact" : "divergent";
+  result.boundedDivergenceOnly = result.parityStatus === "divergent" && result.differentPixels > 0 && result.differentPixels <= maxDifferentPixels;
+  result.chromeGlyphCompositingParity = result.parityStatus === "exact";
+  result.promotionRequiredDifferentPixels = result.parityStatus === "exact" ? 0 : result.differentPixels;
   if (result.rendererMode !== "production") failures.push("report is not renderer_mode production");
   if (!simpleRel.endsWith("/simple.production.ppm")) failures.push("simple_ppm does not use production artifact path");
   if (!result.divergent) failures.push("production probe is not divergent");

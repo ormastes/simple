@@ -1563,3 +1563,19 @@ preview, CSS, reduced/off-motion, Web quality, and modern-readiness evidence via
 the readiness spec passes `2/2`. This advances the repeated-use desktop shell
 lane without claiming production Chrome pixel parity or guest QEMU/GTK perf is
 complete.
+
+Production Chrome parity metadata continuation:
+
+- `node --check tools/electron-shell/verify_famous_site_production_probe.js`
+- `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check test/system/wm_compare/famous_site_corpus_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/system/wm_compare/famous_site_corpus_spec.spl --output doc/06_spec --no-index`
+
+The production Chrome verifier now distinguishes bounded divergence evidence
+from actual Chrome glyph/compositing parity. The focused `site_0_google` probe
+passes with `parityStatus=divergent`, `boundedDivergenceOnly=true`,
+`chromeGlyphCompositingParity=false`, `promotionRequiredDifferentPixels=2717`,
+and `differentPixels=2717`. The famous-site corpus spec passes `42/42` in about
+86s, so this strengthens the release gate wording while keeping the production
+Chrome pixel-parity blocker explicitly open.

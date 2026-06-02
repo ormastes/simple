@@ -6,7 +6,10 @@
 
 #### offline sample manifest
 
-#### contains more than 100 deterministic site-inspired pages
+<details>
+<summary>Advanced: contains more than 100 deterministic site-inspired pages</summary>
+
+#### contains more than 100 deterministic site-inspired pages _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -21,7 +24,13 @@ expect(samples.len()).to_be_greater_than(100)
 
 </details>
 
-#### uses complete HTML documents with stable ids
+
+</details>
+
+<details>
+<summary>Advanced: uses complete HTML documents with stable ids</summary>
+
+#### uses complete HTML documents with stable ids _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -41,10 +50,13 @@ expect(samples[0].html).to_contain("font-family: " + samples[0].font_family)
 
 </details>
 
+
+</details>
+
 <details>
 <summary>Advanced: covers a deterministic common-site font stack matrix</summary>
 
-#### covers a deterministic common-site font stack matrix
+#### covers a deterministic common-site font stack matrix _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -66,7 +78,10 @@ expect(samples[fonts.len() - 1].html).to_contain("font-family: " + fonts[fonts.l
 
 </details>
 
-#### uses unique ids for every sample
+<details>
+<summary>Advanced: uses unique ids for every sample</summary>
+
+#### uses unique ids for every sample _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -81,7 +96,13 @@ expect(_has_duplicate_ids(samples)).to_equal(false)
 
 </details>
 
-#### covers the expected page categories
+
+</details>
+
+<details>
+<summary>Advanced: covers the expected page categories</summary>
+
+#### covers the expected page categories _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -107,7 +128,13 @@ expect(_has_category(samples, "media")).to_equal(true)
 
 </details>
 
-#### exports a stable SDN manifest for future Chrome oracle jobs
+
+</details>
+
+<details>
+<summary>Advanced: exports a stable SDN manifest for future Chrome oracle jobs</summary>
+
+#### exports a stable SDN manifest for future Chrome oracle jobs _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -133,7 +160,13 @@ expect(manifest).to_contain("report_sdn: \"" + famous_site_sample_report_sdn_pat
 
 </details>
 
-#### uses deterministic future artifact paths
+
+</details>
+
+<details>
+<summary>Advanced: uses deterministic future artifact paths</summary>
+
+#### uses deterministic future artifact paths _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -156,7 +189,13 @@ expect(famous_site_sample_production_report_sdn_path(samples[0].id)).to_end_with
 
 </details>
 
-#### has every exported HTML fixture and manifest on disk
+
+</details>
+
+<details>
+<summary>Advanced: has every exported HTML fixture and manifest on disk</summary>
+
+#### has every exported HTML fixture and manifest on disk _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -174,7 +213,13 @@ expect(rt_file_read_text("test/fixtures/famous_site_corpus/manifest.sdn")).to_eq
 
 </details>
 
-#### has every Chrome baseline, Simple capture, and comparison report on disk
+
+</details>
+
+<details>
+<summary>Advanced: has every Chrome baseline, Simple capture, and comparison report on disk</summary>
+
+#### has every Chrome baseline, Simple capture, and comparison report on disk _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -189,7 +234,13 @@ expect(_all_baseline_artifacts_exist(samples)).to_equal(true)
 
 </details>
 
-#### has valid Chrome DOM metrics for every oracle sample
+
+</details>
+
+<details>
+<summary>Advanced: has valid Chrome DOM metrics for every oracle sample</summary>
+
+#### has valid Chrome DOM metrics for every oracle sample _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -204,7 +255,13 @@ expect(_all_chrome_metrics_valid(samples)).to_equal(true)
 
 </details>
 
-#### has focused Chrome DOM metrics for the first failing oracle sample
+
+</details>
+
+<details>
+<summary>Advanced: has focused Chrome DOM metrics for the first failing oracle sample</summary>
+
+#### has focused Chrome DOM metrics for the first failing oracle sample _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -232,7 +289,13 @@ expect(metrics).to_contain("\"fontBoundingBoxAscent\": 14")
 
 </details>
 
-#### renders the first corpus page through the bounded child worker
+
+</details>
+
+<details>
+<summary>Advanced: renders the first corpus page through the bounded child worker</summary>
+
+#### renders the first corpus page through the bounded child worker _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -256,7 +319,13 @@ expect(rt_file_exists("/tmp/famous_site_worker_google.ppm")).to_equal(true)
 
 </details>
 
-#### has a PPM delta diagnostic tool for the first failing oracle sample
+
+</details>
+
+<details>
+<summary>Advanced: has a PPM delta diagnostic tool for the first failing oracle sample</summary>
+
+#### has a PPM delta diagnostic tool for the first failing oracle sample _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -301,7 +370,13 @@ expect(result.0).to_contain("\"sumAbsoluteChannelDiff\": 0")
 
 </details>
 
-#### has PPM delta diagnostics for the focused production renderer miss
+
+</details>
+
+<details>
+<summary>Advanced: has PPM delta diagnostics for the focused production renderer miss</summary>
+
+#### has PPM delta diagnostics for the focused production renderer miss _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -342,7 +417,13 @@ expect(result.0).to_contain("\"line3Overflow\"")
 
 </details>
 
-#### summarizes all corpus comparison reports for target selection
+
+</details>
+
+<details>
+<summary>Advanced: summarizes all corpus comparison reports for target selection</summary>
+
+#### summarizes all corpus comparison reports for target selection _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -380,7 +461,13 @@ expect(result.0).to_contain("\"categorySummary\"")
 
 </details>
 
-#### passes the corpus completion gate when every report is exact
+
+</details>
+
+<details>
+<summary>Advanced: passes the corpus completion gate when every report is exact</summary>
+
+#### passes the corpus completion gate when every report is exact _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -406,7 +493,13 @@ expect(result.0).to_contain("\"failures\": []")
 
 </details>
 
-#### keeps fixture completion artifacts separate from production probe artifacts
+
+</details>
+
+<details>
+<summary>Advanced: keeps fixture completion artifacts separate from production probe artifacts</summary>
+
+#### keeps fixture completion artifacts separate from production probe artifacts _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -421,7 +514,13 @@ expect(_report_contains_bounded_production_miss("site_0_google")).to_equal(true)
 
 </details>
 
-#### fails the production probe gate when no generated production report exists
+
+</details>
+
+<details>
+<summary>Advanced: fails the production probe gate when no generated production report exists</summary>
+
+#### fails the production probe gate when no generated production report exists _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -441,7 +540,13 @@ expect(result.0).to_contain("missing production report")
 
 </details>
 
-#### fails the production probe gate without exact-pixel acceptance flags
+
+</details>
+
+<details>
+<summary>Advanced: fails the production probe gate without exact-pixel acceptance flags</summary>
+
+#### fails the production probe gate without exact-pixel acceptance flags _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -462,7 +567,13 @@ expect(result.0).to_contain("missing structured exact-pixel acceptance policy fl
 
 </details>
 
-#### fails the production probe gate when per-line ink text drifts from layout
+
+</details>
+
+<details>
+<summary>Advanced: fails the production probe gate when per-line ink text drifts from layout</summary>
+
+#### fails the production probe gate when per-line ink text drifts from layout _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -483,7 +594,13 @@ expect(result.0).to_contain("per-line text ink entries do not match Simple layou
 
 </details>
 
-#### fails the production probe gate when per-line ink position drifts from pixels
+
+</details>
+
+<details>
+<summary>Advanced: fails the production probe gate when per-line ink position drifts from pixels</summary>
+
+#### fails the production probe gate when per-line ink position drifts from pixels _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -506,7 +623,13 @@ expect(result.0).to_contain("per-line text ink region geometry does not match pr
 
 </details>
 
-#### fails the production probe gate when per-line ink no longer covers divergence
+
+</details>
+
+<details>
+<summary>Advanced: fails the production probe gate when per-line ink no longer covers divergence</summary>
+
+#### fails the production probe gate when per-line ink no longer covers divergence _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -528,7 +651,13 @@ expect(result.0).to_contain("per-line text ink diagnostics do not account for pr
 
 </details>
 
-#### fails the production probe gate when residual pixel diagnostics are hidden
+
+</details>
+
+<details>
+<summary>Advanced: fails the production probe gate when residual pixel diagnostics are hidden</summary>
+
+#### fails the production probe gate when residual pixel diagnostics are hidden _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -550,12 +679,18 @@ expect(result.0).to_contain("residual pixel diagnostics do not match unexplained
 
 </details>
 
-#### passes the production probe gate for the focused production artifact
+
+</details>
+
+<details>
+<summary>Advanced: passes the production probe gate for the focused production artifact</summary>
+
+#### passes the production probe gate for the focused production artifact _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -568,6 +703,10 @@ expect(result.2).to_equal(0)
 expect(result.0).to_contain("\"status\": \"PASS\"")
 expect(result.0).to_contain("\"rendererMode\": \"production\"")
 expect(result.0).to_contain("\"divergent\": true")
+expect(result.0).to_contain("\"parityStatus\": \"divergent\"")
+expect(result.0).to_contain("\"boundedDivergenceOnly\": true")
+expect(result.0).to_contain("\"chromeGlyphCompositingParity\": false")
+expect(result.0).to_contain("\"promotionRequiredDifferentPixels\": 2717")
 expect(result.0).to_contain("\"maxDifferentPixels\": 2717")
 expect(result.0).to_contain("\"differentPixels\": 2717")
 expect(result.0).to_contain("\"computedDifferentPixels\": 2717")
@@ -609,7 +748,13 @@ expect(result.0).to_contain("\"b\": 169893")
 
 </details>
 
-#### summarizes corpus text coverage deficits for compositing targets
+
+</details>
+
+<details>
+<summary>Advanced: summarizes corpus text coverage deficits for compositing targets</summary>
+
+#### summarizes corpus text coverage deficits for compositing targets _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -642,7 +787,13 @@ expect(result.0).to_contain("\"differentPixels\": 1612")
 
 </details>
 
-#### summarizes colored-background text compositing deficits
+
+</details>
+
+<details>
+<summary>Advanced: summarizes colored-background text compositing deficits</summary>
+
+#### summarizes colored-background text compositing deficits _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -678,7 +829,13 @@ expect(result.0).to_contain("\"sad\": 269117")
 
 </details>
 
-#### summarizes colored-background text mask overlap deficits
+
+</details>
+
+<details>
+<summary>Advanced: summarizes colored-background text mask overlap deficits</summary>
+
+#### summarizes colored-background text mask overlap deficits _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -710,7 +867,13 @@ expect(result.0).to_contain("\"falsePositiveInk\": 0")
 
 </details>
 
-#### summarizes colored-background text ink color histograms
+
+</details>
+
+<details>
+<summary>Advanced: summarizes colored-background text ink color histograms</summary>
+
+#### summarizes colored-background text ink color histograms _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -744,7 +907,13 @@ expect(result.0).to_contain("\"sample\": \"site_44_the_new_york_times\"")
 
 </details>
 
-#### calibrates corpus ink candidates for renderer tuning
+
+</details>
+
+<details>
+<summary>Advanced: calibrates corpus ink candidates for renderer tuning</summary>
+
+#### calibrates corpus ink candidates for renderer tuning _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -780,7 +949,13 @@ expect(result.0).to_contain("\"candidates\"")
 
 </details>
 
-#### sweeps renderer-positioned text postprocess candidates
+
+</details>
+
+<details>
+<summary>Advanced: sweeps renderer-positioned text postprocess candidates</summary>
+
+#### sweeps renderer-positioned text postprocess candidates _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -829,7 +1004,13 @@ expect(result.0).to_contain("\"expansionCandidates\"")
 
 </details>
 
-#### reports mixed-font corpus wrapped-line mismatches with Simple line widths
+
+</details>
+
+<details>
+<summary>Advanced: reports mixed-font corpus wrapped-line mismatches with Simple line widths</summary>
+
+#### reports mixed-font corpus wrapped-line mismatches with Simple line widths _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -854,7 +1035,13 @@ expect(report).to_contain("source_b: \"simple_layout\"")
 
 </details>
 
-#### documents the 120px mixed-font corpus wrapped-line boundary
+
+</details>
+
+<details>
+<summary>Advanced: documents the 120px mixed-font corpus wrapped-line boundary</summary>
+
+#### documents the 120px mixed-font corpus wrapped-line boundary _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -874,7 +1061,13 @@ expect(report).to_contain("first_mismatch: \"\"")
 
 </details>
 
-#### documents the 132px mixed-font corpus wrapped-line over-merge boundary
+
+</details>
+
+<details>
+<summary>Advanced: documents the 132px mixed-font corpus wrapped-line over-merge boundary</summary>
+
+#### documents the 132px mixed-font corpus wrapped-line over-merge boundary _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -894,9 +1087,15 @@ expect(report).to_contain("missing_simple_line: \"compatibility fixture\"")
 
 </details>
 
+
+</details>
+
 #### Simple Web Renderer smoke coverage
 
-#### renders every corpus page to non-empty pixels
+<details>
+<summary>Advanced: renders every corpus page to non-empty pixels</summary>
+
+#### renders every corpus page to non-empty pixels _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -911,7 +1110,13 @@ expect(_all_samples_render_non_empty(samples)).to_equal(true)
 
 </details>
 
-#### keeps the normal system font corpus capture pixel-aligned with Chrome
+
+</details>
+
+<details>
+<summary>Advanced: keeps the normal system font corpus capture pixel-aligned with Chrome</summary>
+
+#### keeps the normal system font corpus capture pixel-aligned with Chrome _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -929,7 +1134,13 @@ expect(_pixels_equal(pixels, chrome)).to_equal(true)
 
 </details>
 
-#### keeps production renderer corpus compatibility distinct from fixture-oracle compatibility
+
+</details>
+
+<details>
+<summary>Advanced: keeps production renderer corpus compatibility distinct from fixture-oracle compatibility</summary>
+
+#### keeps production renderer corpus compatibility distinct from fixture-oracle compatibility _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -956,7 +1167,13 @@ expect(perceptual.match_percentage).to_be_less_than(9900)
 
 </details>
 
-#### exposes Simple wrapped text lines for Chrome TextMetrics comparison
+
+</details>
+
+<details>
+<summary>Advanced: exposes Simple wrapped text lines for Chrome TextMetrics comparison</summary>
+
+#### exposes Simple wrapped text lines for Chrome TextMetrics comparison _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -976,7 +1193,13 @@ expect(lines).to_contain("text: \"fixture\"")
 
 </details>
 
-#### documents the first over-wide mixed-font wrapped-line boundary
+
+</details>
+
+<details>
+<summary>Advanced: documents the first over-wide mixed-font wrapped-line boundary</summary>
+
+#### documents the first over-wide mixed-font wrapped-line boundary _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -991,7 +1214,13 @@ expect(_first_simple_layout_line_missing_from_chrome_metrics(samples, 122)).to_e
 
 </details>
 
-#### exposes Simple wrapped line widths for the calibrated mixed-font boundary
+
+</details>
+
+<details>
+<summary>Advanced: exposes Simple wrapped line widths for the calibrated mixed-font boundary</summary>
+
+#### exposes Simple wrapped line widths for the calibrated mixed-font boundary _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -1012,7 +1241,13 @@ expect(widths).to_contain("count: 5")
 
 </details>
 
-#### keeps Engine2D software backend deterministic for corpus pages
+
+</details>
+
+<details>
+<summary>Advanced: keeps Engine2D software backend deterministic for corpus pages</summary>
+
+#### keeps Engine2D software backend deterministic for corpus pages _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -1032,9 +1267,15 @@ expect(_pixels_equal(default_pixels, engine_pixels)).to_equal(true)
 
 </details>
 
+
+</details>
+
 #### Chrome oracle runner options
 
-#### defaults to the corpus screenshot viewport
+<details>
+<summary>Advanced: defaults to the corpus screenshot viewport</summary>
+
+#### defaults to the corpus screenshot viewport _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -1056,7 +1297,13 @@ expect(opts.production_renderer).to_equal(false)
 
 </details>
 
-#### parses bounded corpus comparison options
+
+</details>
+
+<details>
+<summary>Advanced: parses bounded corpus comparison options</summary>
+
+#### parses bounded corpus comparison options _(slow)_
 
 <details>
 <summary>Executable SPipe</summary>
@@ -1095,6 +1342,9 @@ expect(opts.continue_on_fail).to_equal(true)
 
 </details>
 
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -1116,6 +1366,7 @@ Tests covering:
 |--------|------:|
 | Total scenarios | 42 |
 | Active scenarios | 42 |
-| Slow scenarios | 0 |
+| Slow scenarios | 42 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
