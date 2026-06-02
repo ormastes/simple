@@ -1320,6 +1320,39 @@ match result:
 
 </details>
 
+#### reports Uint8Array prototype metadata in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `object:1:function:function:function`
+
+3. Err
+   - Expected: "unexpected uint8 prototype metadata js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("typeof Uint8Array.prototype + ':' + Uint8Array.prototype.BYTES_PER_ELEMENT + ':' + typeof Uint8Array.prototype.subarray + ':' + typeof Uint8Array.prototype.values + ':' + typeof Uint8Array.prototype[Symbol.iterator]")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("object:1:function:function:function")
+    Err(err):
+        expect("unexpected uint8 prototype metadata js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reads and writes ArrayBuffer bytes through DataView in browser scripts
 
 1. var session = BrowserSession new
@@ -1504,8 +1537,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 37 |
-| Active scenarios | 37 |
+| Total scenarios | 38 |
+| Active scenarios | 38 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
