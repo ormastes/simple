@@ -2940,6 +2940,23 @@ expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); require('no
 
 </details>
 
+#### tracks bounded timer clear provenance
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.cleared + ':' + h.clearedBy")).to_equal("false:")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); require('node:timers').clearTimeout(h); h.cleared + ':' + h.clearedBy")).to_equal("true:clearTimeout")
+expect(_eval_str("var h = require('timers').setInterval(() => {}, 5); require('node:timers').clearInterval(h); h.cleared + ':' + h.clearedBy")).to_equal("true:clearInterval")
+expect(_eval_str("var h = require('timers').setImmediate(() => {}); clearImmediate(h); h.cleared + ':' + h.clearedBy")).to_equal("true:clearImmediate")
+```
+
+</details>
+
 #### schedules bounded setImmediate callbacks through runtime drain
 
 <details>
@@ -3069,7 +3086,7 @@ expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.unref(); 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -3077,6 +3094,7 @@ expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h.cl
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close() === h")).to_equal("true")
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close(); h.closed")).to_equal("true")
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close(); h.active")).to_equal("false")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close(); h.cleared + ':' + h.clearedBy")).to_equal("true:close")
 ```
 
 </details>
@@ -4094,8 +4112,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 263 |
-| Active scenarios | 263 |
+| Total scenarios | 264 |
+| Active scenarios | 264 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

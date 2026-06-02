@@ -3031,3 +3031,20 @@ the next bounded repeat; and refresh restores the visible schedule window.
 Focused checks and regression evidence are captured in this continuation;
 broader event-loop ordering, host I/O integration, and full Node timer-object
 lifecycle behavior remain open.
+
+CommonJS/Node bounded timer clear-provenance continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+
+Bounded timer handles now expose deterministic cancellation provenance. New
+handles start with `cleared=false` and empty `clearedBy`; `clearTimeout`,
+`clearInterval`, `clearImmediate`, and handle `close()` mark the handle closed,
+inactive, cleared, and record the API that cleared it. Focused checks and
+regression evidence are captured in this continuation; broader event-loop
+ordering, host I/O integration, and full Node timer-object lifecycle behavior
+remain open.
