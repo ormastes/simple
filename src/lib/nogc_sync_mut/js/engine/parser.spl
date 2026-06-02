@@ -5,6 +5,7 @@ use std.js.types.ast_types.{DestructProp, JsStatement, JsExpression}
 use std.js.engine.js_error.{JsError, Logger}
 use std.js.engine.lexer.{JsLexer}
 use std.js.types.js_types.{JsValue}
+use std.js.types.pair.{Pair}
 
 fn js_parse_program_subset(source: text) -> [JsStatement]:
     var statements: [JsStatement] = []
@@ -45,12 +46,54 @@ fn _js_parser_expression(raw: text) -> JsExpression:
         return JsExpression.Unary(op: "-", operand: _js_parser_expression(expr.slice(1, expr.len())))
     if expr.starts_with("!") and expr.len() > 1:
         return JsExpression.Unary(op: "!", operand: _js_parser_expression(expr.slice(1, expr.len())))
-    val plus = _js_parser_find_top_level_right(expr, "+")
-    if plus >= 0:
+    val logical_or = _js_parser_find_binary_operator(expr, ["||", "??"])
+    if logical_or.first >= 0:
         return JsExpression.Binary(
-            op: "+",
-            left: _js_parser_expression(expr.slice(0, plus)),
-            right: _js_parser_expression(expr.slice(plus + 1, expr.len()))
+            op: logical_or.second,
+            left: _js_parser_expression(expr.slice(0, logical_or.first)),
+            right: _js_parser_expression(expr.slice(logical_or.first + logical_or.second.len(), expr.len()))
+        )
+    val logical_and = _js_parser_find_binary_operator(expr, ["&&"])
+    if logical_and.first >= 0:
+        return JsExpression.Binary(
+            op: logical_and.second,
+            left: _js_parser_expression(expr.slice(0, logical_and.first)),
+            right: _js_parser_expression(expr.slice(logical_and.first + logical_and.second.len(), expr.len()))
+        )
+    val equality = _js_parser_find_binary_operator(expr, ["===", "!==", "==", "!="])
+    if equality.first >= 0:
+        return JsExpression.Binary(
+            op: equality.second,
+            left: _js_parser_expression(expr.slice(0, equality.first)),
+            right: _js_parser_expression(expr.slice(equality.first + equality.second.len(), expr.len()))
+        )
+    val comparison = _js_parser_find_binary_operator(expr, ["<=", ">=", "<", ">"])
+    if comparison.first >= 0:
+        return JsExpression.Binary(
+            op: comparison.second,
+            left: _js_parser_expression(expr.slice(0, comparison.first)),
+            right: _js_parser_expression(expr.slice(comparison.first + comparison.second.len(), expr.len()))
+        )
+    val additive = _js_parser_find_binary_operator(expr, ["+", "-"])
+    if additive.first >= 0:
+        return JsExpression.Binary(
+            op: additive.second,
+            left: _js_parser_expression(expr.slice(0, additive.first)),
+            right: _js_parser_expression(expr.slice(additive.first + additive.second.len(), expr.len()))
+        )
+    val multiplicative = _js_parser_find_binary_operator(expr, ["*", "/", "%"])
+    if multiplicative.first >= 0:
+        return JsExpression.Binary(
+            op: multiplicative.second,
+            left: _js_parser_expression(expr.slice(0, multiplicative.first)),
+            right: _js_parser_expression(expr.slice(multiplicative.first + multiplicative.second.len(), expr.len()))
+        )
+    val exponent = _js_parser_find_binary_operator(expr, ["**"])
+    if exponent.first >= 0:
+        return JsExpression.Binary(
+            op: exponent.second,
+            left: _js_parser_expression(expr.slice(0, exponent.first)),
+            right: _js_parser_expression(expr.slice(exponent.first + exponent.second.len(), expr.len()))
         )
     if expr.starts_with("new "):
         val new_expr = _js_parser_postfix(expr.slice(4, expr.len()).trim())
@@ -309,6 +352,35 @@ fn _js_parser_find_top_level_right(expr: text, needle: text) -> i64:
                 found = i
         i = i + 1
     found
+
+fn _js_parser_find_binary_operator(expr: text, operators: [text]) -> Pair<i64, text>:
+    var best_pos = -1
+    var best_op = ""
+    var oi = 0
+    while oi < operators.len():
+        val op = operators.get(oi)
+        val pos = _js_parser_find_top_level_right(expr, op)
+        if pos > best_pos and not _js_parser_binary_operator_is_unary(expr, pos, op):
+            best_pos = pos
+            best_op = op
+        oi = oi + 1
+    Pair(first: best_pos, second: best_op)
+
+fn _js_parser_binary_operator_is_unary(expr: text, pos: i64, op: text) -> bool:
+    if op == "*" and ((pos > 0 and expr.slice(pos - 1, pos) == "*") or (pos + 1 < expr.len() and expr.slice(pos + 1, pos + 2) == "*")):
+        return true
+    if op != "-":
+        return false
+    if pos <= 0:
+        return true
+    var i = pos - 1
+    while i >= 0:
+        val ch = expr.slice(i, i + 1)
+        if ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
+            i = i - 1
+            continue
+        return ch == "(" or ch == "[" or ch == "{" or ch == "," or ch == ":" or ch == "=" or ch == "+" or ch == "-" or ch == "*" or ch == "/" or ch == "%"
+    true
 
 fn _js_parser_find_top_level_assignment(expr: text) -> i64:
     var depth = 0
