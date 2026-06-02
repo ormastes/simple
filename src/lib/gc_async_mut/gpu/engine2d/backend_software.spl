@@ -13,7 +13,7 @@
 #   use std.gpu.engine2d.backend_software.{SoftwareBackend}
 
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
-use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend, lerp_color}
+use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend}
 use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance}
 use std.gpu.engine2d.simd_provider.{record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit}
 use std.gpu.engine2d.backend_emu.{
@@ -326,10 +326,29 @@ impl RenderBackend for SoftwareBackend:
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
         if h <= 0:
             return
+        # Integer lerp identical to the Metal MSL kernel_draw_gradient_rect
+        # (lerp_channel: a + (b-a)*t/max_t, truncate toward zero) so the CPU
+        # and GPU backends produce bit-identical gradient pixels. A float lerp
+        # diverges by +/-1 per channel due to rounding and is not reproducible
+        # on the GPU.
+        var max_t = h - 1
+        if max_t < 1:
+            max_t = 1
+        val tr = color_r(top_color)
+        val tg = color_g(top_color)
+        val tb = color_b(top_color)
+        val ta = color_a(top_color)
+        val br = color_r(bottom_color)
+        val bg = color_g(bottom_color)
+        val bb = color_b(bottom_color)
+        val ba = color_a(bottom_color)
         var row = 0
         while row < h:
-            val t = _i32_to_f32(row) / _i32_to_f32(h - 1)
-            val c = lerp_color(top_color, bottom_color, t)
+            val rr = tr + (br - tr) * row / max_t
+            val gg = tg + (bg - tg) * row / max_t
+            val bv = tb + (bb - tb) * row / max_t
+            val av = ta + (ba - ta) * row / max_t
+            val c = rgba(rr, gg, bv, av)
             self.sw_hline(x, y + row, w, c)
             row = row + 1
 
@@ -718,10 +737,3 @@ fn _sw_edge_x(x1: i32, y1: i32, x2: i32, y2: i32, y: i32) -> i32:
     if dy == 0:
         return x1
     x1 + (x2 - x1) * (y - y1) / dy
-
-# ============================================================================
-# Conversion Helpers
-# ============================================================================
-
-fn _i32_to_f32(v: i32) -> f32:
-    v as f32
