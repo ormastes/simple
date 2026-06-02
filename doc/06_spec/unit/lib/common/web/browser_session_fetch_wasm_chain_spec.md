@@ -825,6 +825,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array prototype every with call in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `true:false`
+
+3. Err
+   - Expected: "unexpected uint8 prototype every dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; Uint8Array.prototype.every.call(b, function(v, i, arr) { return arr.at(i) == v && v >= 0; }) + ':' + Uint8Array.prototype.every.call(b, function(v, i, arr) { return i < 2 || arr.at(i) < 10; })")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:false")
+    Err(err):
+        expect("unexpected uint8 prototype every dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### iterates Uint8Array values with side-effect callbacks in browser scripts
 
 1. var session = BrowserSession new
@@ -1999,8 +2032,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 52 |
-| Active scenarios | 52 |
+| Total scenarios | 53 |
+| Active scenarios | 53 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
