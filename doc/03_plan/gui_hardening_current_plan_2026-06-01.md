@@ -447,7 +447,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `isPaused()` and defer pending `data`/`end` delivery while paused before
   draining in order on `resume()`. Bounded synthetic responses now also expose
   `destroy()`, clear pending paused delivery, mark destroyed/closed, and emit
-  `close` once.
+  `close` once. Bounded synthetic responses now expose one-shot `read()` body
+  pulls with deterministic `readableLength`, pending-data clearing, and
+  destroyed-response suppression.
   Real response streaming and event-loop ordering remain open.
 - Generated GUI WASM: move widget-matrix-specific state patterns into shared
   per-widget state helpers and cover additional generated apps.

@@ -2185,7 +2185,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); typeof saved.pause + ':' + typeof saved.resume + ':' + typeof saved.isPaused + ':' + typeof saved.destroy")).to_equal("function:function:function:function")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); typeof saved.pause + ':' + typeof saved.resume + ':' + typeof saved.isPaused + ':' + typeof saved.destroy + ':' + typeof saved.read")).to_equal("function:function:function:function:function")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var ended = 'no'; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', (chunk) => { seen = seen + chunk; }); res.on('end', () => { ended = 'yes'; }); }); req.end(); seen + ':' + ended + ':' + saved.pendingData + ':' + saved.pendingEnd + ':' + saved.complete + ':' + saved.isPaused()")).to_equal(":no:true:true:false:true")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var ended = 'no'; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', (chunk) => { seen = seen + chunk; }); res.on('end', () => { ended = 'yes'; }); }); req.end(); saved.resume(); seen + ':' + ended + ':' + saved.pendingData + ':' + saved.pendingEnd + ':' + saved.complete + ':' + saved.isPaused()")).to_equal("bounded-response:yes:false:false:true:false")
 ```
@@ -2203,6 +2203,22 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var closed = 0; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', (chunk) => { seen = seen + chunk; }); res.on('end', () => { seen = seen + ':end'; }); res.once('close', () => { closed = closed + 1; }); }); req.end(); saved.destroy(); saved.resume(); seen + ':' + closed + ':' + saved.destroyed + ':' + saved.closed + ':' + saved.pendingData + ':' + saved.pendingEnd + ':' + saved.listenerCount('close')")).to_equal(":1:true:true:false:false:0")
 expect(_eval_str_with_network("http://api.example.com:8080", "var closed = 0; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.on('close', () => { closed = closed + 1; }); }); req.end(); saved.destroy(); saved.destroy(); closed + ':' + saved.closeEmitted + ':' + saved.closeListenerCount")).to_equal("1:true:1")
+```
+
+</details>
+
+#### reads bounded http response bodies
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.readableLength + ':' + saved.read() + ':' + saved.readableLength + ':' + saved.read()")).to_equal("16:bounded-response:0:undefined")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', () => {}); }); req.end(); saved.pendingData + ':' + saved.read() + ':' + saved.pendingData + ':' + saved.readableLength")).to_equal("true:bounded-response:false:0")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.destroy(); saved.read()")).to_equal("undefined")
 ```
 
 </details>
@@ -3920,8 +3936,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 253 |
-| Active scenarios | 253 |
+| Total scenarios | 254 |
+| Active scenarios | 254 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -10,7 +10,7 @@ use std.js.engine.runtime.{NATIVE_DATA_VIEW_GET_INT8, NATIVE_DATA_VIEW_SET_INT8,
 use std.js.engine.runtime.{NATIVE_NODE_STREAM_READABLE_DESTROY, NATIVE_NODE_STREAM_READABLE_UNPIPE}
 use std.js.engine.runtime.{NATIVE_NODE_HTTP_REQUEST_DESTROY}
 use std.js.engine.runtime.{NATIVE_NODE_HTTP_GET, NATIVE_NODE_HTTPS_GET}
-use std.js.engine.runtime.{NATIVE_NODE_HTTP_RESPONSE_PAUSE, NATIVE_NODE_HTTP_RESPONSE_RESUME, NATIVE_NODE_HTTP_RESPONSE_IS_PAUSED, NATIVE_NODE_HTTP_RESPONSE_DESTROY}
+use std.js.engine.runtime.{NATIVE_NODE_HTTP_RESPONSE_PAUSE, NATIVE_NODE_HTTP_RESPONSE_RESUME, NATIVE_NODE_HTTP_RESPONSE_IS_PAUSED, NATIVE_NODE_HTTP_RESPONSE_DESTROY, NATIVE_NODE_HTTP_RESPONSE_READ}
 use std.js.engine.runtime.{NATIVE_UINT8_ARRAY_FILL, NATIVE_UINT8_ARRAY_INCLUDES, NATIVE_UINT8_ARRAY_INDEX_OF, NATIVE_UINT8_ARRAY_JOIN, NATIVE_UINT8_ARRAY_REVERSE, NATIVE_UINT8_ARRAY_LAST_INDEX_OF, NATIVE_UINT8_ARRAY_TO_STRING, NATIVE_UINT8_ARRAY_AT, NATIVE_UINT8_ARRAY_COPY_WITHIN, NATIVE_UINT8_ARRAY_KEYS, NATIVE_UINT8_ARRAY_VALUES, NATIVE_UINT8_ARRAY_ENTRIES, NATIVE_UINT8_ARRAY_ITERATOR_NEXT}
 use std.js.engine.runtime.{NATIVE_NODE_CHILD_PROCESS_SPAWN, NATIVE_NODE_EVENT_EMITTER_CONSTRUCTOR, NATIVE_NODE_EVENT_EMITTER_EMIT, NATIVE_NODE_EVENT_EMITTER_LISTENER_COUNT, NATIVE_NODE_EVENT_EMITTER_ON, NATIVE_NODE_EVENT_EMITTER_ONCE, NATIVE_NODE_EVENT_EMITTER_REMOVE_ALL_LISTENERS, NATIVE_NODE_EVENT_EMITTER_REMOVE_LISTENER, NATIVE_NODE_FS_EXISTS_SYNC, NATIVE_NODE_FS_MKDIR_SYNC, NATIVE_NODE_FS_PROMISES_READ_FILE, NATIVE_NODE_FS_PROMISES_WRITE_FILE, NATIVE_NODE_FS_READ_FILE_SYNC, NATIVE_NODE_FS_READDIR_SYNC, NATIVE_NODE_FS_STAT_SYNC, NATIVE_NODE_FS_WRITE_FILE_SYNC, NATIVE_NODE_HTTP_CREATE_SERVER, NATIVE_NODE_HTTP_REQUEST, NATIVE_NODE_HTTP_SERVER_CLOSE, NATIVE_NODE_HTTP_SERVER_LISTEN, NATIVE_NODE_HTTPS_REQUEST, NATIVE_NODE_NET_CREATE_CONNECTION, NATIVE_NODE_NET_SOCKET, NATIVE_NODE_READLINE_CLOSE, NATIVE_NODE_READLINE_CREATE_INTERFACE, NATIVE_NODE_READLINE_QUESTION}
 use std.js.engine.parser.{JsParser, js_parse_program_subset}
@@ -63,6 +63,8 @@ impl JsInterpreter:
             return self._native_node_http_response_is_paused(this_val)
         if native_id == NATIVE_NODE_HTTP_RESPONSE_DESTROY:
             return self._native_node_http_response_destroy(this_val)
+        if native_id == NATIVE_NODE_HTTP_RESPONSE_READ:
+            return self._native_node_http_response_read(this_val)
         if native_id == NATIVE_NODE_HTTP_REQUEST_SET_HEADER:
             return self._native_node_http_request_set_header(this_val, arg_vals)
         if native_id == NATIVE_NODE_HTTP_REQUEST_GET_HEADER:
@@ -1532,6 +1534,8 @@ impl JsInterpreter:
             self.set_object_property(response_id, "method", response_method)
             self.set_object_property(response_id, "path", response_path)
             self.set_object_property(response_id, "body", JsValue.String(v: "bounded-response"))
+            self.set_object_property(response_id, "responseRead", JsValue.Boolean(v: false))
+            self.set_object_property(response_id, "readableLength", JsValue.Number(v: 16.0))
             val response_headers_id = self.create_object()
             self.set_object_property(response_headers_id, "content-type", JsValue.String(v: "text/plain"))
             self.set_object_property(response_headers_id, "content-length", JsValue.String(v: "16"))
@@ -1561,6 +1565,7 @@ impl JsInterpreter:
             self._define_method_on(response_id, "resume", NATIVE_NODE_HTTP_RESPONSE_RESUME)
             self._define_method_on(response_id, "isPaused", NATIVE_NODE_HTTP_RESPONSE_IS_PAUSED)
             self._define_method_on(response_id, "destroy", NATIVE_NODE_HTTP_RESPONSE_DESTROY)
+            self._define_method_on(response_id, "read", NATIVE_NODE_HTTP_RESPONSE_READ)
             if callback_id >= 0:
                 val ignored_callback_result = self._invoke_promise_callback(callback_id, [JsValue.Object(id: response_id)])
             if response_count > 0:
@@ -1614,6 +1619,8 @@ impl JsInterpreter:
             val ignored_callback_result = self._invoke_promise_callback(callback_id, arg_vals)
         if event_name == "data":
             self.set_object_property(response_id, "dataDelivered", JsValue.Boolean(v: true))
+            self.set_object_property(response_id, "responseRead", JsValue.Boolean(v: true))
+            self.set_object_property(response_id, "readableLength", JsValue.Number(v: 0.0))
         if event_name == "end":
             self.set_object_property(response_id, "endDelivered", JsValue.Boolean(v: true))
         match self.get_object_property(response_id, "__simple_node_event_once_" + event_name):
@@ -1671,6 +1678,7 @@ impl JsInterpreter:
         self.set_object_property(response_id, "readableFlowing", JsValue.Boolean(v: false))
         self.set_object_property(response_id, "pendingData", JsValue.Boolean(v: false))
         self.set_object_property(response_id, "pendingEnd", JsValue.Boolean(v: false))
+        self.set_object_property(response_id, "readableLength", JsValue.Number(v: 0.0))
         var close_count = 0
         match self.get_object_property(response_id, "__simple_node_event_count_close"):
             JsValue.Number(v): close_count = f64_to_i64(v)
@@ -1684,6 +1692,19 @@ impl JsInterpreter:
                 _:
                     self.set_object_property(response_id, "closeEmitted", JsValue.Boolean(v: false))
         this_val
+
+    me _native_node_http_response_read(this_val: JsValue) -> JsValue:
+        val response_id = _get_obj_id(this_val)
+        if response_id < 0:
+            return JsValue.Undefined
+        if to_boolean(self.get_object_property(response_id, "destroyed")):
+            return JsValue.Undefined
+        if to_boolean(self.get_object_property(response_id, "responseRead")):
+            return JsValue.Undefined
+        self.set_object_property(response_id, "responseRead", JsValue.Boolean(v: true))
+        self.set_object_property(response_id, "readableLength", JsValue.Number(v: 0.0))
+        self.set_object_property(response_id, "pendingData", JsValue.Boolean(v: false))
+        self.get_object_property(response_id, "body")
 
     me _native_node_http_request_abort(this_val: JsValue) -> JsValue:
         val request_id = _get_obj_id(this_val)
