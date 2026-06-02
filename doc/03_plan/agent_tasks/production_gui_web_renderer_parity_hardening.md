@@ -87,15 +87,34 @@ format, and both artifact PNGs as documented divergence; do not assert `==0`.
 Closing the fidelity gap (AA/gamma/LCD text) is the long-tail "production level"
 work tracked in `doc/03_plan/gui_hardening_current_plan_2026-06-01.md`.
 
-### Hand-off
+### Convert layer — LANDED (commit 9a1b094a)
 
-The 2× fix belongs in `tools/electron-live-bitmap/exact_fixture.js` (pixel
-extraction after `capturePage`/`toBitmap`), which the concurrent agent has
-uncommitted edits in (readiness detection) — committing it here would bundle
-their in-flight work, so it is handed off via this doc rather than edited.
-Saved to project memory as `bug-electron-capture-2x-retina`. Verification
-probes: `build/cap_probe/getsize_probe.js`, `downscale_probe.js`,
-`electron_fixed_6x.png` (corrected reference). A non-colliding fidelity probe
-(`build/cap_probe/render_probe.spl`) hit a probe-specific import-scope build
-error (`variable color not found` via a broader module graph than the harness
-entry pulls) — not a production bug; the harness entry renders fine.
+A native→logical resolution convert layer was added to
+`tools/electron-live-bitmap/exact_fixture.js` (`bitmapToLogicalBgra`): it reads
+`image.getSize()`, box-averages each native block into one logical pixel, and
+feeds the logical buffer to the existing checksum/compare/write path. The proof
+JSON + stdout now record `capture_native_width/height` and `capture_downsampled`
+provenance. Comparison is now **resolution-agnostic** — any capture scaleFactor
+is normalized to the logical comparison resolution.
+
+Verified on macOS arm64 (scaleFactor=2) across three logical resolutions; each
+detects native = 2× and downsamples to a correct 384-color AA render (was
+scanline garbage):
+
+| logical | native  | captured px | distinct colors |
+|---------|---------|-------------|-----------------|
+| 96×72   | 192×144 | 6912        | 384             |
+| 128×96  | 256×192 | 12288       | 384             |
+| 160×100 | 320×200 | 16000       | 384             |
+
+Note: the commit also carries the concurrent agent's in-flight readiness-
+detection hunks (font/image load wait) in disjoint regions of the same file —
+`jj commit <path>` cannot split a single file. Saved to project memory as
+`bug-electron-capture-2x-retina`. Probes: `build/cap_probe/{getsize,downscale}_probe.js`,
+`patched_6x.png` (corrected reference from the production tool).
+
+**Still open (concurrent agent):** transparent-black for *unstyled* generated
+HTML is a separate bug — the document-wrapper fix (`generated_gui_web_page_html`
+with background + `generate_css`) lives in `production_gui_web_renderer_parity.spl`
+and is in-flight. After both land, Simple (6–8 flat colors) still won't
+pixel-match Chromium (384 AA colors); record the divergence per NFR-006.
