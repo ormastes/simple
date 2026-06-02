@@ -37,7 +37,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   CIELAB as the semantic color space, XYZ as the connection space, and fail-
   closed unsupported codec/profile paths. The JPEG XL stage now distinguishes
   default structured sRGB metadata from non-default structured color headers,
-  which fail closed as transform-pending instead of being treated as sRGB.
+  which fail closed as transform-pending instead of being treated as sRGB. The
+  current refreshed report records the 8K BGRA8 framebuffer at `132710400`
+  bytes, avoids eager Lab/XYZ, TIFF, and JPEG XL initialization, and keeps full
+  JPEG XL pixel decode open as follow-up work.
 - Vector-font GPU evidence is expanded beyond the original nine-scene matrix.
   Current evidence proves GPU-returned glyphs with zero CPU fallback for the
   expanded `PIPELINESTATUSOK/24`, `VECTORFONTGPU/36`, and `GPUREADBACKWM/12`
@@ -52,6 +55,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   routes checkbox, dialog, table/list, image/tooltip, scroll, menu, and
   statusbar event responses through shared `common.ui.builder`
   `wasm_widget_state_event_response` helpers instead of local one-off branches.
+  Broader browser execution evidence now covers three generated apps:
+  `hello`, `widget_matrix`, and `builder_matrix`, including validation,
+  instantiation, exported app entrypoints, zero imports, retained selectors,
+  nonzero boxes, and retained event mutations.
 - Engine2D exact-bitmap coverage now includes split-pane, two-block, wide-card,
   toolbar/modal/grid, dashboard/command/list, form/sidebar/validation,
   settings/inspector/tree, media/gallery/command, report/table/command, and
@@ -62,13 +69,19 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   inline precedence, descendant scope, and child-scope behavior, but not full
   Chromium DOM/CSS/text parity.
 - CommonJS/Node runtime evidence now covers `process.nextTick` scheduling
-  through the runtime drain path. The callback path uses the same JS callback
-  invoker as promise microtasks, so queued callbacks can mutate runtime globals
-  instead of being counted without observable execution.
+  through the runtime drain path and explicit child-process command grants
+  through `JsRuntime.grant_node_process`. The callback path uses the same JS
+  callback invoker as promise microtasks, so queued callbacks can mutate runtime
+  globals instead of being counted without observable execution. The broader
+  Node API conformance spec now passes its focused builtin/process sandbox
+  scenarios, including rejecting missing and invalid process grants.
 - HTML compatibility reports now expose exact-pixel policy as structured SDN:
   `exact_required: true`, `perceptual_diagnostic_only: true`, and
   `tolerance_acceptance_allowed: false`. Perceptual percentages remain
-  diagnostics only.
+  diagnostics only. Famous-site production corpus reports now expose the same
+  structured `acceptance_policy_flags` inside the comparison record, so the
+  focused Chrome-parity verifier can fail closed if a production report omits
+  the no-tolerance policy.
 - QEMU/GTK evidence has host-side exact GTK scene checks and QMP wiring. The
   live desktop auto-QMP launch reaches `pass`, yields a real QMP socket, and
   strict live QMP screendump capture now passes with zero sample/scene
@@ -80,6 +93,20 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
   Linux-host evidence intentionally reports `pass=false` without a real
   SMF/dynlib artifact, so it does not claim the final native hot-call target.
+  The SMF artifact contract now also emits a release-reportable
+  `GUI_SMF_ARTIFACT_CONTRACT` row and fails closed for missing, non-SMF, and
+  empty-library-envelope inputs while keeping QEMU and macOS execution marked
+  `not-run`. QEMU ARM64 SMF parity evidence is contract-only and now requires
+  the same role-2 ARM64 SMF artifact, the expected `gui_dynlib_hot_probe_tick`
+  symbol, and a non-empty pure GUI command batch before emitting
+  `GUI_QEMU_ARM64_SMF_PARITY status=contract-pass`; it keeps
+  `live_qemu=false`, so it does not replace the remaining guest-side QEMU/GTK
+  harness. The dynlib hot-response gate now also fails closed for incomplete
+  sample sets and wrong-symbol measurements, so fast calls to any symbol other
+  than `gui_dynlib_hot_probe_tick` cannot satisfy release evidence. SimpleOS
+  dynload evidence now proves the same ARM64 SMF envelope can be opened through
+  the kernel loader registry and resolve the GUI hot-call symbol, while wrong
+  symbol, wrong architecture, and missing artifact bytes fail closed.
 
 ## Current Evidence
 
@@ -105,7 +132,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   calibrated Simple paint runs. The four current line deltas are `Google search`
   `808`, `deterministic` `761`, `compatibility` `779`, and `fixture` `368`
   differing pixels, preserving the real `2717` total divergence while making the
-  glyph/compositing blocker gateable line by line.
+  glyph/compositing blocker gateable line by line. The production `compare`
+  record also contains `acceptance_policy_flags: (exact_required: true
+  perceptual_diagnostic_only: true tolerance_acceptance_allowed: false)`.
 - `doc/09_report/chrome_production_glyph_paint_probe_2026-06-01.md`:
   fail-closed production glyph paint probe showing generic layout and Engine2D
   bitmap glyph routes regress the strict `site_0_google` different-pixel bound.
@@ -118,7 +147,12 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   packed 8K surface and lazy codec/profile evidence.
 - `doc/09_report/gui_color_image_pipeline_8k_evidence_2026-06-01.md`: 8K lane
   canonical evidence with non-identity ICC and JPEG XL non-default structured
-  color fail-closed behavior.
+  color fail-closed behavior. The refreshed release-binary run reports
+  `gui_color_image_pipeline_8k_status=pass`, `framebuffer_bytes=132710400`,
+  `lab_xyz_full_frame_bytes=796262400`, `initializes_color_transforms=false`,
+  `initializes_tiff_decoder=false`, `initializes_jpegxl_decoder=false`, and a
+  D65 Lab/XYZ red round trip. Focused image specs pass `77/77` and TIFF raster
+  specs pass `17/17`.
 - `doc/09_report/vector_font_compute_current_2026-06-01.md`: focused
   vector-font GPU glyph readback evidence.
 - `doc/09_report/vector_font_compute_matrix_current_2026-06-01.md`: full
@@ -155,15 +189,49 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   SMF/dynlib hot-response evidence. The focused CLI row is
   `GUI_DYNLIB_PERF ... call_source=direct_simple ... pass=false
   error=missing-artifact-path`, proving fallback measurements cannot satisfy the
-  release gate.
-- `src/lib/nogc_sync_mut/js/engine/interpreter_async.spl`,
+  release gate. Current focused checks also pass
+  `pure_smf_dynlib_perf_spec.spl` `10/10`; the perf contract rejects
+  incomplete sample sets with `error=incomplete-samples` and wrong release
+  symbols with `error=wrong-symbol`.
+- `src/app/gui_perf/smf_artifact_contract.spl`,
+  `src/app/gui_perf/smf_dynlib_artifact.spl`,
+  `test/unit/app/gui_perf/smf_dynlib_artifact_spec.spl`, and
+  `doc/06_spec/unit/app/gui_perf/smf_dynlib_artifact_spec.md`: SMF artifact
+  contract evidence. Current focused checks pass 8/8 for valid role-2 envelopes,
+  missing artifact rows, non-SMF rejection, empty-envelope rejection, and
+  explicit `qemu_status=not-run` / `macos_status=not-run` reasons. The missing
+  artifact CLI exits `1` with a `status=missing` contract row.
+- `src/app/gui_perf/qemu_arm64_smf_parity.spl`,
+  `src/app/gui_perf/qemu_arm64_smf_parity_evidence.spl`,
+  `src/app/gui_perf/simpleos_smf_dynload.spl`,
+  `src/app/gui_perf/simpleos_smf_dynload_evidence.spl`,
+  `src/app/gui_perf/macos_smf_dynlib_evidence_core.spl`,
+  `test/unit/app/gui_perf/qemu_arm64_smf_parity_spec.spl`,
+  `test/unit/app/gui_perf/simpleos_smf_dynload_spec.spl`,
+  `test/unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl`, and
+  `doc/06_spec/unit/app/gui_perf/qemu_arm64_smf_parity_spec.md`: contract-only
+  QEMU ARM64 SMF parity and SimpleOS dynload evidence. Current focused checks pass
+  `qemu_arm64_smf_parity_spec.spl` `3/3`, `macos_smf_dynlib_evidence_spec.spl`
+  `7/7`, `simpleos_smf_dynload_spec.spl` `4/4`, and
+  `pure_gui_release_lane_spec.spl` `13/13`. The rows include
+  `symbol=gui_dynlib_hot_probe_tick`, reject wrong-symbol parity/dynload
+  claims, reject non-ARM64 and missing-artifact dynload attempts, and keep
+  `live_qemu=false`.
+- `src/lib/nogc_sync_mut/js/engine/runtime.spl`,
+  `src/lib/nogc_sync_mut/js/engine/interpreter_native.spl`,
+  `src/lib/nogc_sync_mut/js/engine/interpreter_async.spl`,
+  `test/feature/js/node_api_conformance_spec.spl`,
   `test/feature/js/node_process_next_tick_spec.spl`, and
   `doc/06_spec/feature/js/node_process_next_tick_spec.md`: focused Node
-  event-loop evidence proving `process.nextTick` and
-  `require('process').nextTick` callbacks run on `drain_due_timers(0)` and
-  mutate runtime globals. The focused spec passes `2/2`; the broader
-  `node_api_conformance_spec.spl` still has an unrelated residual
-  `152 passed / 1 failed` gap.
+  evidence proving `process.nextTick` and `require('process').nextTick`
+  callbacks run on `drain_due_timers(0)` and mutate runtime globals, plus
+  explicit process capability grants for `child_process.spawn`. Current focused
+  checks pass `node_api_conformance_spec.spl` `177/177` and
+  `node_process_next_tick_spec.spl` `2/2`; missing and invalid process grants
+  remain rejected, and explicit in-memory CommonJS source grants now execute
+  `exports.*` assignments plus `module.exports = ...` replacements with cache
+  identity, slash-bearing specifier coverage, and bounded `/node_modules`
+  index/package-main resolution over granted in-memory files.
 - `doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md`:
   current Engine2D Node/Bun/Electron budgeted exact-bitmap matrix including
   settings-inspector-tree.
@@ -184,10 +252,25 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   live Electron, all with zero mismatches and no blur/tolerance path.
 - `doc/09_report/gui_wasm_browser_execution_widget_state_machine_debug_2026-06-01.md`:
   generated GUI WASM retained-browser state-machine evidence.
+- `doc/09_report/gui_wasm_browser_execution_widget_behavior_2026-06-01.md`:
+  generated GUI WASM browser execution evidence for `hello`, `widget_matrix`,
+  and `builder_matrix`. Current refreshed evidence has all three targets
+  passing with import count `0`; retained event mutations are `4/4`, `22/22`,
+  and `5/5` respectively.
 - `doc/09_report/gui_wasm_cli_artifact_widget_state_machine_debug_2026-06-01.md`,
   `doc/09_report/gui_wasm_target_package_widget_state_machine_debug_2026-06-01.md`,
   and `doc/09_report/gui_wasm_host_wm_launch_widget_state_machine_debug_2026-06-01.md`:
   generated GUI WASM artifact, package, and host-WM launch evidence.
+- `test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl`,
+  `test/unit/lib/common/web/browser_session_wasm_host_spec.spl`,
+  `test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`, and
+  `doc/06_spec/system/app/browser/feature/webgpu_js_wasm_simple_spec.md`:
+  JS/WebEngine/WASM BrowserSession evidence. Current focused checks pass the
+  WebGPU/JS/WASM system spec `106/106`, the native WASM host spec `101/101`,
+  and the fetch-to-WASM chain spec `1/1`. The coverage includes secure WebGPU
+  globals, fetched `arrayBuffer()` to `WebAssembly.instantiate`, compile
+  thenables, bounded WASM exports, traps, table/global metadata, imported
+  function binding, and `Uint8Array`/`DataView` access to WebAssembly.Memory.
 
 ## Related Docs
 
@@ -216,9 +299,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   bitmap glyph text; the fail-closed probe shows that regresses the strict
   different-pixel bound.
 - 8K color/image: broaden high-bit-depth compressed raster coverage, JPEG XL
-  codestream pixel decoding, real non-identity ICC/profile transforms, broader
-  JPEG XL structured/ICC color parser coverage, and web/browser/WM image
-  integration.
+  codestream pixel decoding, real non-identity ICC/profile transforms,
+  remaining ICC/profile parser coverage, and web/browser/WM image integration.
 - Vector-font GPU: turn current evidence-kernel glyph return into reusable
   production buffer ownership/readback across arbitrary text runs, more font
   sizes, and broader kernel parameter combinations. Add the Apple-host native
@@ -233,9 +315,46 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   exports, import binding, async instantiate semantics, and fuller typed-array
   prototype behavior.
 - CommonJS/Node APIs: extend beyond builtin module cache, deterministic
-  `process.exit`, `path`, `Buffer`, and bounded process metadata to real module
-  execution/cache semantics, package resolution, timers/event loop, streams,
-  networking, and sandboxed `fs` capability design.
+  `process.exit`, `path`, `Buffer`, and bounded process metadata to
+  full host filesystem-backed package resolution, timers/event loop, streams,
+  networking, and sandboxed `fs` capability design. Bounded in-memory CommonJS
+  text/source grants, `exports.*`, `module.exports = ...`, slash-bearing source
+  specifiers, repeated-require cache identity, and granted `/node_modules`
+  index/package-main resolution are covered. Bounded `stream` module shape,
+  `Readable.from`, `Writable.write/end`, `Readable.pipe(Writable)`, and stream
+  module cache behavior are covered. The `timers`/`node:timers` module now
+  routes `setTimeout` and clear operations through the runtime timer drain.
+  Bounded multi-chunk `Readable.from(...).read()` and `Readable.pipe(Writable)`
+  draining are covered, and bounded writable `finish` listener state is tracked
+  through `end()` with callback invocation. Bounded write-after-end pressure
+  signaling is covered. A deterministic `streamAsyncIterator().next()` subset
+  now consumes bounded readable chunks and reports exhaustion. Full pressure
+  propagation/flow control, real `Symbol.asyncIterator`/`for await` semantics,
+  broader stream scheduling, and broader event-loop phases remain open.
+  Bounded `setInterval` rescheduling across explicit timer drains and
+  `clearInterval` from inside an interval callback are covered. Broader
+  event-loop phase ordering, host I/O integration, and full Node timer object
+  behavior remain open.
+  Bounded timer handle objects with `ref`, `unref`, `hasRef`, repeat metadata,
+  object-handle clearing, and `close()` cancellation are covered. Full Node
+  handle lifecycle behavior remains open.
+  Bounded `http.request`/`https.request` endpoint extraction now covers URL
+  strings with explicit ports and option objects with default ports under the
+  existing explicit network-grant model. Real host network I/O remains open.
+  Bounded request metadata now reports deterministic `method` and `path` for
+  URL strings and option objects. Full request streams, callbacks, headers, and
+  host network I/O remain open.
+  Bounded `net.connect`, `http.get`, and `https.get` aliases are covered under
+  the same explicit network-grant model.
+  Bounded request lifecycle methods now cover deterministic `write`, `end`, and
+  `abort` state. Real request streams, responses, callbacks, and host network
+  I/O remain open.
+  Bounded request callback delivery now invokes the supplied callback on
+  `end()` with deterministic response metadata. Real host response delivery and
+  streaming remain open.
+  Bounded synthetic response `data` and `end` events are delivered after the
+  response callback registers listeners. Real response streaming and event-loop
+  ordering remain open.
 - Generated GUI WASM: move widget-matrix-specific state patterns into shared
   per-widget state helpers and cover additional generated apps.
 - Live Electron: maintain the passing ten-scene Node/Bun/Electron exact-bitmap
@@ -575,3 +694,480 @@ dependencies on WebContents or Skia as release-lane failures. The corrected
 release-lane spec passed `12/12`, the adjacent SMF dynlib probe spec passed
 `9/9`, the generated manual has 12 active scenarios, and the doc layout guard
 returned `0`.
+
+SMF/dynlib mapped-loader rollback continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/kernel/loader/loader_api.spl test/unit/os/kernel/loader/loader_api_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/os/kernel/loader/loader_api_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/os/kernel/loader/smf_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/gui_perf/smf_dynlib_probe_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/unit/os/kernel/loader/loader_api_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The mapped dynopen path now has explicit fail-closed evidence: failed ELF
+segment mapping and non-native SMF bytes roll back their registry handles, so a
+failed mapping cannot leave a stale dynlib entry for later symbol lookup. The
+loader API spec passed `8/8`, the SMF loader spec passed `18/18`, the adjacent
+GUI SMF dynlib probe spec passed `9/9`, `spipe-docgen` produced a complete
+8-scenario loader manual, and the doc layout guard returned `0`.
+
+QEMU ARM64 SMF parity continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/gui_perf/qemu_arm64_smf_parity.spl src/app/gui_perf/qemu_arm64_smf_parity_evidence.spl src/app/gui_perf/macos_smf_dynlib_evidence_core.spl src/app/gui_perf/macos_smf_dynlib_evidence.spl test/unit/app/gui_perf/qemu_arm64_smf_parity_spec.spl test/unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl test/unit/lib/gui/pure_gui_release_lane_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/gui_perf/qemu_arm64_smf_parity_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/gui/pure_gui_release_lane_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/unit/app/gui_perf/qemu_arm64_smf_parity_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple run src/app/gui_perf/qemu_arm64_smf_parity_evidence.spl`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The contract-only QEMU ARM64 SMF parity row now carries and enforces the
+release hot-call symbol. A role-2 ARM64 SMF envelope with a non-empty pure GUI
+command batch passes only when `symbol=gui_dynlib_hot_probe_tick`; wrong-symbol
+artifacts fail closed even if the artifact shape and command batch otherwise
+match. The focused QEMU parity spec passed `3/3`, the macOS orchestration
+acceptance spec passed `7/7`, the pure release-lane dependency guard passed
+`13/13`, the generated QEMU parity manual has 3 active scenarios, the missing
+artifact CLI emits `GUI_QEMU_ARM64_SMF_PARITY status=contract-fail ... symbol=gui_dynlib_hot_probe_tick ... live_qemu=false`, and the doc layout guard returned
+`0`. This strengthens SMF/QEMU release evidence without claiming the remaining
+live guest-side QEMU/GTK harness.
+
+SMF dynlib hot-response sample contract continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/gui/pure_smf_dynlib_perf.spl src/app/gui_perf/smf_dynlib_probe_core.spl src/app/gui_perf/macos_smf_dynlib_evidence_core.spl test/unit/lib/gui/pure_smf_dynlib_perf_spec.spl test/unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl test/unit/lib/gui/pure_gui_release_lane_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/gui/pure_smf_dynlib_perf_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/gui/pure_gui_release_lane_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/gui/pure_smf_dynlib_perf_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The SMF/dynlib hot-response row now includes `expected_samples` and the core
+perf contract rejects partial hot-call sample sets with
+`error=incomplete-samples`. The same release gate now requires
+`symbol=gui_dynlib_hot_probe_tick` both in the low-level perf contract and in
+the macOS evidence row validator, so a fast dynlib call to a different symbol
+cannot satisfy the release evidence. Focused specs passed:
+`pure_smf_dynlib_perf_spec.spl` `10/10`,
+`macos_smf_dynlib_evidence_spec.spl` `7/7`, and
+`pure_gui_release_lane_spec.spl` `13/13`. Regenerated the pure perf and macOS
+SMF evidence manuals; the doc layout guard returned `0`.
+
+SimpleOS SMF dynload evidence continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/gui_perf/simpleos_smf_dynload.spl src/app/gui_perf/simpleos_smf_dynload_evidence.spl test/unit/app/gui_perf/simpleos_smf_dynload_spec.spl test/unit/lib/gui/pure_gui_release_lane_spec.spl src/os/kernel/loader/loader_api.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/gui_perf/simpleos_smf_dynload_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/gui/pure_gui_release_lane_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple run src/app/gui_perf/simpleos_smf_dynload_evidence.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/unit/app/gui_perf/simpleos_smf_dynload_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+SimpleOS dynload evidence now validates the pure GUI role-2 ARM64 SMF envelope
+through `loader_dynopen_smf_library_bytes_for_arch`, resolves
+`gui_dynlib_hot_probe_tick` through `loader_dynsym`, and emits
+`GUI_SIMPLEOS_SMF_DYNLOAD status=simpleos-dynload-pass ... pass=true` for the
+positive path. The focused spec passed `4/4`, covering successful ARM64 dynload,
+wrong-symbol failure, non-ARM64 failure, and missing artifact failure. The CLI
+without an artifact exits fail-closed with
+`GUI_SIMPLEOS_SMF_DYNLOAD status=simpleos-dynload-fail ... error=bad-smf-contract`.
+The pure release-lane dependency guard passed `13/13`, the generated manual is
+complete with 4 active scenarios, and the doc layout guard returned `0`. This
+proves SimpleOS registry/symbol dynload for the hot-call artifact contract, but
+does not claim live QEMU execution or rendered app-window parity.
+
+JS/WebEngine/WASM BrowserSession evidence refresh:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl test/unit/lib/common/web/browser_session_wasm_host_spec.spl test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The BrowserSession JS/WebEngine/WASM evidence now has a complete generated
+system manual and a fresh focused pass. The system spec passed `106/106`, the
+native WASM host spec passed `101/101`, and the fetch-to-WASM chain spec passed
+`1/1`. This evidence covers secure WebGPU globals, WebAssembly validation,
+compile thenables, instantiate success/fail-closed paths, fetched `arrayBuffer`
+bytes flowing into instantiation, bounded exports, traps, table/global metadata,
+import binding, memory growth, and `Uint8Array`/`DataView` behavior over
+WebAssembly.Memory. Broader WASM semantics beyond the bounded host subset remain
+open.
+
+Production Chrome exact-policy fail-closed continuation:
+
+- `jj git fetch`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/site_corpus_compat.spl test/system/wm_compare/famous_site_corpus_spec.spl`
+- `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`
+- `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google --drop-acceptance-policy-flags-for-test`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/system/wm_compare/famous_site_corpus_spec.spl --output doc/06_spec --no-index`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The production verifier now has explicit fail-closed coverage for missing
+structured exact-pixel policy flags. The normal `site_0_google` production probe
+passes at the current divergent baseline with `differentPixels=2717`,
+`computedDifferentPixels=2717`, `reportFresh=true`, and
+`hasExactAcceptancePolicyFlags=true`; the mutated verifier path exits `1` with
+`hasExactAcceptancePolicyFlags=false` and
+`missing structured exact-pixel acceptance policy flags`. The famous-site corpus
+system spec passed `38/38`, the generated manual includes the new scenario, and
+the doc layout guard returned `0`. This advances the tolerance-audit evidence
+without claiming the still-open production Chrome glyph/compositing fix.
+
+CommonJS/Node fail-closed package resolution continuation:
+
+- `jj git fetch`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec --no-index`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Native `require()` now fails closed for unrecognized package specifiers without
+routing them through the builtin module cache path. The conformance suite covers
+`require('missing-package').error == "module-denied"` and preserves the denied
+`specifier` for diagnostics. Focused checks passed, the Node API conformance
+spec now passes `154/154`, the generated manual includes the missing-package
+denial scenario, and the doc layout guard returned `0`. Later continuations
+closed explicit granted source execution/cache coverage; remaining CommonJS
+follow-up is recorded in
+`doc/08_tracking/bug/commonjs_granted_module_execution_limitations_2026-06-01.md`.
+Filesystem-style resolution and fuller Node APIs remain open.
+
+CommonJS/Node explicit text-export module continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+`JsRuntime.grant_node_module_text_export()` now creates explicit in-memory
+CommonJS text-export grants, and native `require()` resolves those grants
+through a separate `module:<specifier>` cache key before falling back to
+`module-denied`. The Node API conformance spec now covers granted text exports,
+same-object repeated `require()` cache mutation, and preserved ungranted
+denial, passing `156/156`. Later continuations closed explicit CommonJS source
+execution and slash-bearing specifier coverage; `module.exports` replacement
+semantics, filesystem-style resolution, streams, and fuller Node APIs remain
+open.
+
+CommonJS/Node bounded stream continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Native `require('stream')` and `require('node:stream')` now expose bounded
+deterministic stream objects: `Readable.from(...)` reports readable length and
+returns the first chunk through `read()`, `Writable()` tracks `write(...)`
+status/byte counts and `end()` state, and `stream`/`node:stream` share the
+require cache. The Node API conformance spec passes `160/160`, and the
+generated manual includes the four stream scenarios. Full stream backpressure,
+pipe composition, async iteration, event ordering, and host I/O integration
+remain open.
+
+CommonJS/Node bounded stream pipe continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Bounded stream pipe composition now transfers readable chunks into a writable
+destination, records `lastChunk` and total `bytesWritten`, decrements
+`readableLength`, and returns the writable destination object. Follow-up
+coverage advanced the bounded stream cursor so sequential `read()` returns the
+next chunk and multi-chunk `pipe()` drains all currently buffered chunks. The
+Node API conformance suite passes `179/179`. Full stream backpressure, async
+iteration, event scheduling, and host I/O integration remain open.
+
+CommonJS/Node bounded stream async-iterator subset continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Bounded readable streams now expose `streamAsyncIterator()`, returning an
+iterator object with `next()` results shaped as `{ value, done }`. Calls consume
+the same readable cursor used by `read()`, return chunks in order, and report
+`done=true` after exhaustion. The Node API conformance suite passes `200/200`.
+Real `Symbol.asyncIterator`/`for await` syntax support, async scheduling, and
+host I/O integration remain open.
+
+CommonJS/Node bounded stream finish-event continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Writable streams now expose bounded `on`, `once`, and `listenerCount` event
+methods for stream-local listener state. `end()` records `finishEmitted` and
+`finishListenerCount`, and clears one-shot `finish` listeners. The Node API
+conformance suite passes `181/181`. Full callback invocation scheduling,
+backpressure, async iteration, and host I/O integration remain open.
+
+CommonJS/Node bounded stream finish-callback continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Writable `finish` listeners now retain a bounded callback id and `end()` invokes
+that callback through the same global-aware callback path used by timers and
+promises. The Node API conformance suite proves both `on('finish', ...)` and
+`once('finish', ...)` callbacks can mutate observable JS state, passing
+`182/182`. Full stream backpressure, async iteration, broader stream
+scheduling, and host I/O integration remain open.
+
+CommonJS/Node bounded stream write-after-end continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Writable streams now expose bounded post-end pressure state. `write(...)` after
+`end()` returns a structured `backpressure` result with a `write-after-end`
+error, sets observable `backpressure`/`writeAfterEnd` flags, and leaves
+`chunksWritten` unchanged. The Node API conformance suite passes `183/183`.
+Full pressure propagation/flow control, async iteration, broader stream
+scheduling, and host I/O integration remain open.
+
+CommonJS/Node timers module continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Native `require('timers')` and `require('node:timers')` now expose
+`setTimeout`, `setInterval`, `clearTimeout`, and `clearInterval` through the
+same runtime scheduler used by browser globals. The conformance suite proves
+timer callback mutation after `drain_due_timers(0)`, cancellation via
+`clearTimeout`, and shared `timers`/`node:timers` cache state, passing
+`164/164`. Broader event-loop phase ordering, interval rescheduling semantics,
+host I/O integration, and full Node timer object behavior remain open.
+
+CommonJS/Node timers interval continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_async.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl src/lib/nogc_sync_mut/js/engine/interpreter.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Timer draining now tracks canceled timer ids during an active drain so
+`clearInterval(id)` inside the interval callback prevents rescheduling. The
+Node API conformance suite proves bounded interval rescheduling across two
+explicit drains and callback self-cancel behavior, passing `185/185`. Broader
+event-loop phase ordering, host I/O integration, and full Node timer object
+behavior remain open.
+
+CommonJS/Node bounded timer handle continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_async.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl src/lib/nogc_sync_mut/js/engine/interpreter.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+`setTimeout` and `setInterval` now return bounded timer handle objects instead
+of raw numeric ids. Handles expose `id`, `delay`, `repeat`, `ref`, `unref`, and
+`hasRef`; clear operations accept either legacy numeric ids or handle objects.
+The Node API conformance suite passes `187/187`. Full Node handle lifecycle
+behavior and host event-loop integration remain open.
+
+CommonJS/Node bounded timer handle close continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_async.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl src/lib/nogc_sync_mut/js/engine/interpreter.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Bounded timer handles now expose `close()`, which cancels the underlying timer,
+marks the handle `closed`, and returns the handle for chaining. The Node API
+conformance suite proves handle close shape and drain cancellation, passing
+`189/189`. Full Node handle lifecycle behavior and host event-loop integration
+remain open.
+
+CommonJS/Node bounded HTTP request endpoint continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_async.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl src/lib/nogc_sync_mut/js/engine/interpreter.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+`http.request` and `https.request` now derive bounded endpoint targets from URL
+strings with explicit ports and from option objects using `hostname` or `host`
+plus optional `port` defaults. The same sanitized grant marker convention used
+by `grant_node_network(...)` gates those endpoints, and the Node API
+conformance suite passes `191/191`. Real host network I/O and broader request
+object behavior remain open.
+
+CommonJS/Node bounded HTTP request metadata continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_async.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl src/lib/nogc_sync_mut/js/engine/interpreter.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+`http.request` and `https.request` deterministic result objects now expose
+bounded `method` and `path` metadata. URL strings report default `GET` and the
+parsed path/query, while option objects report explicit `method` and `path`
+values. The Node API conformance suite passes `193/193`. Full request streams,
+callbacks, headers, and host network I/O remain open.
+
+CommonJS/Node bounded network alias continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_async.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl src/lib/nogc_sync_mut/js/engine/interpreter.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The Node API conformance suite now explicitly covers bounded network aliases:
+`net.connect(...)`, `http.get(...)`, and `https.get(...)` route through the same
+deterministic grant-gated behavior as `createConnection`/`request`, passing
+`194/194`. Real host network I/O and broader request/response object behavior
+remain open.
+
+CommonJS/Node bounded HTTP request lifecycle continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_async.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl src/lib/nogc_sync_mut/js/engine/interpreter.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Deterministic `http.request` and `https.request` results now expose bounded
+request lifecycle methods: `write` records body byte/chunk counts and last
+chunk, `end` marks `requestEnded`, and `abort` marks `aborted`. The Node API
+conformance suite passes `197/197`. Real host network I/O, response delivery,
+callbacks, and full stream behavior remain open.
+
+CommonJS/Node bounded HTTP response callback continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_async.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl src/lib/nogc_sync_mut/js/engine/interpreter.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+`http.request` and `https.request` now retain an optional response callback and
+invoke it from `end()` with a bounded synthetic response object containing
+`statusCode`, `statusMessage`, `url`, `method`, and `path`. The Node API
+conformance suite proves callback-observable response metadata and
+`responseDelivered`, passing `198/198`. Real host response delivery, streaming,
+and event ordering remain open.
+
+CommonJS/Node bounded HTTP response event continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_async.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl src/lib/nogc_sync_mut/js/engine/interpreter.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Bounded synthetic HTTP responses now expose `on`, `once`, and `listenerCount`
+through the existing EventEmitter helpers. After the request callback returns,
+`end()` delivers deterministic `data` and `end` events, including clearing
+one-shot end listeners. The Node API conformance suite passes `199/199`. Real
+host response streaming and event-loop ordering remain open.
+
+CommonJS/Node bounded fs directory continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Native `require('fs')` and `require('node:fs')` now expose bounded
+`readdirSync` and `mkdirSync` methods, and the existing Node fs compatibility
+fast path covers deterministic sandbox directory metadata for explicitly
+granted examples. The conformance suite proves method shape, denied ungranted
+directory access, allowed synthetic `mkdirSync`, and `readdirSync` first-entry
+and entry-count metadata, passing `165/165`. Full host filesystem access,
+directory arrays, recursive mkdir options, native-grant unification, and real
+package/filesystem resolution remain open.
+
+CommonJS/Node fs grant-prefix compatibility continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+`JsRuntime` now writes runtime grant state back through its interpreter field for
+`eval` and Node grant helpers, and file grants also create explicit sanitized
+file-grant markers. The Node fs compatibility path now proves a non-exact
+granted prefix allows a child path while rejecting a sibling prefix. Parsed
+native `var fs = require('fs')` and `require('node:fs')` method dispatch now
+shares captured file grants for read, write/read, and sibling-denial checks, and
+the conformance suite passes `167/167`. Real directory arrays, recursive mkdir
+semantics, full host filesystem access, and filesystem-backed package
+resolution remain open.
+
+CommonJS/Node granted readdir result continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Native directory-state key lookups are now flattened before object/global
+lookup and set calls, avoiding interpreter-mode instability around nested key
+expressions. Granted synthetic `readdirSync` results expose `firstEntry`,
+`entryCount`, `length`, and string-index `"0"` properties after `mkdirSync`,
+and the conformance suite passes `168/168`. A follow-up converts those results
+to real `JsValue.Array` values while preserving the metadata properties:
+numeric index access, `join`, and `length` now exercise array behavior, and
+`Array.isArray` static dispatch returns a `JsValue.Boolean`. Recursive mkdir
+options are now bounded for granted synthetic directories:
+`mkdirSync(path, { recursive: true })` walks only granted ancestors, records
+parent-child directory entries for nested paths, preserves sibling denial, and
+exposes a `recursive` result flag. The Node API conformance suite passes
+`169/169`. Full host filesystem access and filesystem-backed package
+resolution remain open.
+
+CommonJS/Node granted source module continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+`JsRuntime.grant_node_module_source()` now stores explicit in-memory CommonJS
+source grants visible to native `require()`. Granted source executes with
+isolated `module`, `exports`, `require`, `__filename`, and `__dirname` bindings,
+uses a `module:<specifier>` cache key shared by repeated requires, and supports
+slash-bearing specifiers such as `./widget.js` without host filesystem access.
+The Node API conformance suite passes `172/172`. A follow-up now also covers
+`module.exports = ...` replacement objects and repeated-require mutation
+identity. Full host filesystem access and filesystem-backed package resolution
+remain open.
+
+CommonJS/Node module.exports replacement continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Source-executed CommonJS modules now honor `module.exports = { ... }`
+replacement objects, preserve their properties through `require('widget')`, and
+reuse the replacement object across repeated requires. The Node API conformance
+suite passes `174/174`. Full host filesystem access and filesystem-backed
+package resolution remain open.
+
+CommonJS/Node granted package file continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Explicit `grant_node_file()` calls for `/node_modules/<pkg>/index.js` now derive
+package source grants consumed by native `require('<pkg>')`, preserve the
+resolved file path in `__filename`, and reuse the same exports object across
+repeated requires. Granted `/node_modules/<pkg>/package.json` files with a
+`main` entry can resolve the matching granted package file without touching
+ambient host filesystem state. The Node API conformance suite passes `177/177`.
+Full host filesystem package policy remains open beyond this bounded in-memory
+grant model.

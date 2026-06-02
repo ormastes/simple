@@ -1,4 +1,42 @@
-# Webgpu Js Wasm Simple Specification
+# WebGPU JS WASM Simple System Evidence
+
+This executable system manual covers the active GUI hardening JS/WebEngine/WASM lane. It verifies secure WebGPU exposure, canvas WebGPU context behavior, software WebGPU command replay, BrowserSession JavaScript integration, WebAssembly validation/compile/instantiate behavior, fetched WASM byte chains, bounded WASM exports, traps, memory/table/global export metadata, imported function binding, and typed-array/DataView access to WebAssembly.Memory.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/gui_hardening_current_plan_2026-06-01.md |
+| Design | doc/05_design/gui_color_image_pipeline_8k.md |
+| Research | doc/01_research/local/gui_color_image_pipeline_8k.md |
+| Source | `test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+This executable system manual covers the active GUI hardening JS/WebEngine/WASM
+lane. It verifies secure WebGPU exposure, canvas WebGPU context behavior,
+software WebGPU command replay, BrowserSession JavaScript integration,
+WebAssembly validation/compile/instantiate behavior, fetched WASM byte chains,
+bounded WASM exports, traps, memory/table/global export metadata, imported
+function binding, and typed-array/DataView access to WebAssembly.Memory.
+
+## Examples
+
+Representative browser evidence includes `WebAssembly.instantiate` returning
+`status=instantiated`, exported WASM functions returning bounded numeric values
+or fail-closed `wasm-trap:*` strings, fetched `/mod.wasm` bytes flowing through
+`arrayBuffer()` into instantiation, and WebAssembly.Memory bytes being shared
+with `Uint8Array` and `DataView` views.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/gui_hardening_current_plan_2026-06-01.md
+**Design:** doc/05_design/gui_color_image_pipeline_8k.md
+**Research:** doc/01_research/local/gui_color_image_pipeline_8k.md
 
 ## Scenarios
 
@@ -3570,27 +3608,6 @@ match result:
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- WebGPU JS WASM Simple system examples
-- REQ-WGPU-001: secure context exposure
-- REQ-WGPU-002: canvas WebGPU context
-- REQ-WGPU-003 and REQ-WGPU-004: Simple script resource and executor path
-- REQ-WGPU-005: JavaScript integration remains available
-- REQ-WGPU-006: WASM backend smoke
-- REQ-WGPU-007: browser WASM to WebGPU bridge
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -3600,4 +3617,11 @@ Tests covering:
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/gui_hardening_current_plan_2026-06-01.md](doc/03_plan/gui_hardening_current_plan_2026-06-01.md)
+- **Design:** [doc/05_design/gui_color_image_pipeline_8k.md](doc/05_design/gui_color_image_pipeline_8k.md)
+- **Research:** [doc/01_research/local/gui_color_image_pipeline_8k.md](doc/01_research/local/gui_color_image_pipeline_8k.md)
 

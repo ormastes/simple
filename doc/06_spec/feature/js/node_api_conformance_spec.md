@@ -1079,7 +1079,7 @@ expect(_eval_str("var p = require('path'); p.hot = 0; var q = require('node:path
 
 </details>
 
-#### resolves fs sync APIs as fail-closed file API
+#### denies ungranted CommonJS modules without host filesystem access
 
 <details>
 <summary>Executable SPipe</summary>
@@ -1088,8 +1088,170 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+expect(_eval_str("require('missing-package').error")).to_equal("module-denied")
+expect(_eval_str("require('missing-package').specifier")).to_equal("missing-package")
+```
+
+</details>
+
+#### resolves explicitly granted CommonJS text exports without host filesystem access
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_module_text_export("widget", "name", "panel", "require('widget').name")).to_equal("panel")
+expect(_eval_str_with_module_text_export("widget", "name", "panel", "require('missing-package').error")).to_equal("module-denied")
+```
+
+</details>
+
+#### caches explicitly granted CommonJS module exports across repeated require calls
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_module_text_export("widget", "name", "panel", "var m = require('widget'); m.cached = 'yes'; require('widget').cached")).to_equal("yes")
+```
+
+</details>
+
+#### executes explicitly granted CommonJS source exports without host filesystem access
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_module_source("widget", "exports.name = 'panel'; exports.kind = 'source'", "require('widget').name")).to_equal("panel")
+expect(_eval_str_with_module_source("widget", "exports.name = 'panel'; exports.kind = 'source'", "require('widget').kind")).to_equal("source")
+```
+
+</details>
+
+#### caches source-executed CommonJS exports across repeated require calls
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_module_source("widget", "exports.name = 'panel'", "var m = require('widget'); m.cached = 'yes'; require('widget').cached")).to_equal("yes")
+```
+
+</details>
+
+#### honors source-executed CommonJS module.exports replacement
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_module_source("widget", "module.exports = { name: 'panel', kind: 'replacement' }", "require('widget').name")).to_equal("panel")
+expect(_eval_str_with_module_source("widget", "module.exports = { name: 'panel', kind: 'replacement' }", "require('widget').kind")).to_equal("replacement")
+```
+
+</details>
+
+#### caches source-executed CommonJS module.exports replacement objects
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_module_source("widget", "module.exports = { name: 'panel' }", "var m = require('widget'); m.cached = 'yes'; require('widget').cached")).to_equal("yes")
+```
+
+</details>
+
+#### executes explicitly granted slash-bearing CommonJS source specifiers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_module_source("./widget.js", "exports.name = 'panel'", "require('./widget.js').name")).to_equal("panel")
+expect(_eval_str_with_module_source("./widget.js", "exports.dir = __dirname", "require('./widget.js').dir")).to_equal(".")
+```
+
+</details>
+
+#### resolves granted CommonJS packages from in-memory node_modules index files
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_file("/node_modules/widget/index.js", "exports.name = 'panel'", "require('widget').name")).to_equal("panel")
+expect(_eval_str_with_file("/node_modules/widget/index.js", "exports.filename = __filename", "require('widget').filename")).to_equal("/node_modules/widget/index.js")
+```
+
+</details>
+
+#### resolves granted CommonJS packages through package main fields
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_two_files("/node_modules/widget/package.json", "{\"main\":\"main.js\"}", "/node_modules/widget/main.js", "module.exports = { name: 'panel' }", "require('widget').name")).to_equal("panel")
+```
+
+</details>
+
+#### caches granted filesystem-backed CommonJS package exports
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_file("/node_modules/widget/index.js", "exports.name = 'panel'", "var m = require('widget'); m.cached = 'yes'; require('widget').cached")).to_equal("yes")
+```
+
+</details>
+
+#### resolves fs sync APIs as fail-closed file API
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
 expect(_eval_str("typeof require('fs').readFileSync")).to_equal("function")
 expect(_eval_str("typeof require('node:fs').readFileSync")).to_equal("function")
+expect(_eval_str("typeof require('fs').readdirSync")).to_equal("function")
+expect(_eval_str("typeof require('node:fs').mkdirSync")).to_equal("function")
 ```
 
 </details>
@@ -1099,7 +1261,7 @@ expect(_eval_str("typeof require('node:fs').readFileSync")).to_equal("function")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1107,6 +1269,8 @@ expect(_eval_str("require('fs').readFileSync('/etc/passwd', 'utf8').status")).to
 expect(_eval_str("require('node:fs').writeFileSync('/tmp/simple.txt', 'data').error")).to_equal("file-denied")
 expect(_eval_str("require('fs').existsSync('/tmp/simple.txt').operation")).to_equal("existsSync")
 expect(_eval_str("require('fs').statSync('/tmp/simple.txt').path")).to_equal("/tmp/simple.txt")
+expect(_eval_str("require('fs').readdirSync('/tmp').status")).to_equal("denied")
+expect(_eval_str("require('node:fs').mkdirSync('/tmp/simple').reason")).to_equal("file-grant-denied")
 ```
 
 </details>
@@ -1155,6 +1319,86 @@ Reproduction: this block contains the complete executable scenario source.
 expect(_eval_str_with_file("/home/user/work/main.spl", "", "require('node:fs').writeFileSync('/home/user/work/main.spl', 'new-data').status")).to_equal("allowed")
 expect(_eval_str_with_file("/home/user/work/main.spl", "", "require('node:fs').writeFileSync('/home/user/workspace/main.spl', 'new-data').reason")).to_equal("file-grant-denied")
 expect(_eval_str_with_file("/home/user/work/main.spl", "", "require('fs').promises.writeFile('/home/user/work/main.spl', 'new-data').status")).to_equal("allowed")
+```
+
+</details>
+
+#### applies explicit file grant prefixes in fs compatibility dispatch
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_file("/home/user/native", "", "require('fs').readFileSync('/home/user/native/main.spl', 'utf8').status")).to_equal("allowed")
+expect(_eval_str_with_file("/home/user/native", "", "require('fs').readFileSync('/home/user/native2/main.spl', 'utf8').reason")).to_equal("file-grant-denied")
+```
+
+</details>
+
+#### shares explicit file grants with parsed native fs module dispatch
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_file("/home/user/native/main.spl", "native-data", "var fs = require('fs'); fs.readFileSync('/home/user/native/main.spl', 'utf8').data")).to_equal("native-data")
+expect(_eval_str_with_file("/home/user/native/main.spl", "", "var fs = require('node:fs'); fs.writeFileSync('/home/user/native/main.spl', 'changed'); fs.readFileSync('/home/user/native/main.spl', 'utf8').data")).to_equal("changed")
+expect(_eval_str_with_file("/home/user/native/main.spl", "", "var fs = require('fs'); fs.readFileSync('/home/user/native2/main.spl', 'utf8').reason")).to_equal("file-grant-denied")
+```
+
+</details>
+
+#### allows fs directory metadata only under explicit file grants
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_file("/home/user/work", "", "var fs = require('fs'); fs.mkdirSync('/home/user/work/logs').status")).to_equal("allowed")
+expect(_eval_str_with_file("/home/user/work", "", "var fs = require('fs'); fs.mkdirSync('/home/user/work/logs'); var entries = fs.readdirSync('/home/user/work'); entries.firstEntry")).to_equal("logs")
+expect(_eval_str_with_file("/home/user/work", "", "var fs = require('node:fs'); fs.mkdirSync('/home/user/work/logs'); var entries = fs.readdirSync('/home/user/work'); entries.entryCount")).to_equal("1")
+```
+
+</details>
+
+#### returns directory entries as real readdirSync arrays
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_file("/home/user/work", "", "var fs = require('fs'); fs.mkdirSync('/home/user/work/logs'); var entries = fs.readdirSync('/home/user/work'); entries[0]")).to_equal("logs")
+expect(_eval_str_with_file("/home/user/work", "", "var fs = require('fs'); fs.mkdirSync('/home/user/work/logs'); var entries = fs.readdirSync('/home/user/work'); entries.join(',')")).to_equal("logs")
+expect(_eval_str_with_file("/home/user/work", "", "var fs = require('node:fs'); fs.mkdirSync('/home/user/work/logs'); var entries = fs.readdirSync('/home/user/work'); entries.length")).to_equal("1")
+```
+
+</details>
+
+#### creates nested granted directories with recursive mkdirSync
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_file("/home/user/work", "", "var fs = require('fs'); fs.mkdirSync('/home/user/work/logs/archive', { recursive: true }).recursive")).to_equal("true")
+expect(_eval_str_with_file("/home/user/work", "", "var fs = require('fs'); fs.mkdirSync('/home/user/work/logs/archive', { recursive: true }); fs.readdirSync('/home/user/work').join(',')")).to_equal("logs")
+expect(_eval_str_with_file("/home/user/work", "", "var fs = require('node:fs'); fs.mkdirSync('/home/user/work/logs/archive', { recursive: true }); fs.readdirSync('/home/user/work/logs')[0]")).to_equal("archive")
+expect(_eval_str_with_file("/home/user/work", "", "var fs = require('fs'); fs.mkdirSync('/home/user/workspace/logs', { recursive: true }).reason")).to_equal("file-grant-denied")
 ```
 
 </details>
@@ -1404,6 +1648,163 @@ expect(_eval_str_with_network("https://example.com:443", "require('http').reques
 
 </details>
 
+#### covers bounded network request aliases
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("tcp://example.com:80", "require('net').connect(80, 'example.com').status")).to_equal("allowed")
+expect(_eval_str_with_network("http://example.com:80", "require('http').get('http://example.com').operation")).to_equal("http.request")
+expect(_eval_str_with_network("https://example.com:443", "require('node:https').get('https://example.com').status")).to_equal("allowed")
+```
+
+</details>
+
+#### parses bounded http request endpoints from URL strings
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "require('http').request('http://api.example.com:8080/v1').status")).to_equal("allowed")
+expect(_eval_str_with_network("https://api.example.com:444", "require('node:https').request('https://api.example.com:444/v1').target")).to_equal("https://api.example.com:444")
+expect(_eval_str_with_network("http://api.example.com:8081", "require('http').request('http://api.example.com:8080/v1').reason")).to_equal("network-grant-denied")
+```
+
+</details>
+
+#### parses bounded http request endpoints from option objects
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "require('http').request({hostname:'api.example.com', port:8080}).status")).to_equal("allowed")
+expect(_eval_str_with_network("https://secure.example.com:443", "require('node:https').request({host:'secure.example.com'}).target")).to_equal("https://secure.example.com:443")
+expect(_eval_str_with_network("https://secure.example.com:444", "require('node:https').request({host:'secure.example.com'}).reason")).to_equal("network-grant-denied")
+```
+
+</details>
+
+#### reports bounded http request metadata from URL strings
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "require('http').request('http://api.example.com:8080/v1/items?limit=2').method")).to_equal("GET")
+expect(_eval_str_with_network("http://api.example.com:8080", "require('http').request('http://api.example.com:8080/v1/items?limit=2').path")).to_equal("/v1/items?limit=2")
+```
+
+</details>
+
+#### reports bounded http request metadata from option objects
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "require('http').request({hostname:'api.example.com', port:8080, method:'POST', path:'/submit'}).method")).to_equal("POST")
+expect(_eval_str_with_network("http://api.example.com:8080", "require('http').request({hostname:'api.example.com', port:8080, method:'POST', path:'/submit'}).path")).to_equal("/submit")
+```
+
+</details>
+
+#### exposes bounded http request lifecycle methods
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').write")).to_equal("function")
+expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').end")).to_equal("function")
+expect(_eval_str_with_network("https://api.example.com:443", "typeof require('node:https').request('https://api.example.com').abort")).to_equal("function")
+```
+
+</details>
+
+#### tracks bounded http request body writes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.write('abc').bytes")).to_equal("3")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.write('ab'); req.write('cde'); req.bodyBytes")).to_equal("5")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.write('ab'); req.write('cde'); req.bodyChunks")).to_equal("2")
+```
+
+</details>
+
+#### tracks bounded http request end and abort state
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.end(); req.requestEnded")).to_equal("true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.abort(); req.aborted")).to_equal("true")
+```
+
+</details>
+
+#### delivers bounded http response callbacks on request end
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080', (res) => { seen = res.statusCode; }); req.end(); seen")).to_equal("200")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080/v1', (res) => { seen = res.path; }); req.end(); seen")).to_equal("/v1")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080', (res) => {}); req.end(); req.responseDelivered")).to_equal("true")
+```
+
+</details>
+
+#### delivers bounded http response data and end events
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080', (res) => { res.on('data', (chunk) => { seen = chunk; }); }); req.end(); seen")).to_equal("bounded-response")
+expect(_eval_str_with_network("http://api.example.com:8080", "var ended = 'no'; var req = require('http').request('http://api.example.com:8080', (res) => { res.on('end', () => { ended = 'yes'; }); }); req.end(); ended")).to_equal("yes")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.once('end', () => {}); }); req.end(); saved.listenerCount('end')")).to_equal("0")
+```
+
+</details>
+
 #### resolves Express-like http server creation as fail-closed network API
 
 <details>
@@ -1448,6 +1849,326 @@ Reproduction: this block contains the complete executable scenario source.
 expect(_eval_str_with_network("listen://0.0.0.0:3000", "require('http').createServer((req,res)=>{}).listen(3000).status")).to_equal("allowed")
 expect(_eval_str_with_network("listen://0.0.0.0:3000", "require('node:http').createServer((req,res)=>{}).listen(3000).port")).to_equal("3000")
 expect(_eval_str_with_network("listen://0.0.0.0:3000", "require('http').createServer((req,res)=>{}).listen(0).reason")).to_equal("network-grant-denied")
+```
+
+</details>
+
+#### resolves stream APIs as bounded deterministic objects
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("typeof require('stream').Readable.from")).to_equal("function")
+expect(_eval_str("typeof require('node:stream').Writable")).to_equal("function")
+```
+
+</details>
+
+#### reads from bounded stream Readable.from inputs
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var r = require('stream').Readable.from(['a','b']); r.readableLength")).to_equal("2")
+expect(_eval_str("var r = require('stream').Readable.from(['a','b']); r.read()")).to_equal("a")
+expect(_eval_str("var r = require('stream').Readable.from(['a','b']); r.read(); r.read()")).to_equal("b")
+```
+
+</details>
+
+#### tracks bounded stream Writable writes and end state
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var w = require('stream').Writable(); w.write('abc').status")).to_equal("ok")
+expect(_eval_str("var w = require('stream').Writable(); w.write('abc').bytes")).to_equal("3")
+expect(_eval_str("var w = require('stream').Writable(); w.end(); w.writableEnded")).to_equal("true")
+```
+
+</details>
+
+#### reports bounded writable backpressure after end
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var w = require('stream').Writable(); w.end(); w.write('late').status")).to_equal("backpressure")
+expect(_eval_str("var w = require('stream').Writable(); w.end(); w.write('late').error")).to_equal("write-after-end")
+expect(_eval_str("var w = require('stream').Writable(); w.end(); w.write('late'); w.backpressure")).to_equal("true")
+expect(_eval_str("var w = require('stream').Writable(); w.write('ok'); w.end(); w.write('late'); w.chunksWritten")).to_equal("1")
+```
+
+</details>
+
+#### pipes bounded readable chunks into writable destinations
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pipe(w); w.lastChunk")).to_equal("abc")
+expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pipe(w); w.bytesWritten")).to_equal("3")
+expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['ab','cde']); var w = s.Writable(); r.pipe(w); w.bytesWritten")).to_equal("5")
+expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['ab','cde']); var w = s.Writable(); r.pipe(w); w.lastChunk")).to_equal("cde")
+```
+
+</details>
+
+#### returns the writable destination from bounded stream pipe
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pipe(w).lastChunk")).to_equal("abc")
+expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pipe(w); r.readableLength")).to_equal("0")
+```
+
+</details>
+
+#### iterates bounded readable chunks through explicit async iterator subset
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("typeof require('stream').Readable.from(['a']).streamAsyncIterator")).to_equal("function")
+expect(_eval_str("var r = require('stream').Readable.from(['a','b']); var it = r.streamAsyncIterator(); it.next().value")).to_equal("a")
+expect(_eval_str("var r = require('stream').Readable.from(['a','b']); var it = r.streamAsyncIterator(); it.next(); it.next().value")).to_equal("b")
+expect(_eval_str("var r = require('stream').Readable.from(['a']); var it = r.streamAsyncIterator(); it.next(); it.next().done")).to_equal("true")
+expect(_eval_str("var r = require('stream').Readable.from(['a','b']); var it = r.streamAsyncIterator(); it.next(); r.readableLength")).to_equal("1")
+```
+
+</details>
+
+#### tracks bounded writable finish event listeners
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var w = require('stream').Writable(); w.on('finish', () => 1); w.listenerCount('finish')")).to_equal("1")
+expect(_eval_str("var w = require('stream').Writable(); w.on('finish', () => 1); w.end(); w.finishEmitted")).to_equal("true")
+expect(_eval_str("var w = require('stream').Writable(); w.on('finish', () => 1); w.end(); w.finishListenerCount")).to_equal("1")
+```
+
+</details>
+
+#### clears bounded once finish listeners after end
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var w = require('stream').Writable(); w.once('finish', () => 1); w.end(); w.listenerCount('finish')")).to_equal("0")
+```
+
+</details>
+
+#### invokes bounded writable finish callbacks on end
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var finished = 'no'; var w = require('stream').Writable(); w.on('finish', () => { finished = 'yes'; }); w.end(); finished")).to_equal("yes")
+expect(_eval_str("var finished = 'no'; var w = require('stream').Writable(); w.once('finish', () => { finished = 'once'; }); w.end(); finished")).to_equal("once")
+```
+
+</details>
+
+#### caches stream module state across repeated require calls
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var s = require('stream'); s.cached = 'yes'; require('node:stream').cached")).to_equal("yes")
+```
+
+</details>
+
+#### resolves timers APIs through the runtime scheduler
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("typeof require('timers').setTimeout")).to_equal("function")
+expect(_eval_str("typeof require('node:timers').clearTimeout")).to_equal("function")
+```
+
+</details>
+
+#### schedules timers module setTimeout callbacks through runtime drain
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_before_after_timer_drain("var timerValue = 0; require('timers').setTimeout(() => { timerValue = 11; }, 0); timerValue", "timerValue", 0)).to_equal("0:1:11")
+```
+
+</details>
+
+#### cancels timers module callbacks through clearTimeout
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_before_after_timer_drain("var timerValue = 0; var id = require('timers').setTimeout(() => { timerValue = 11; }, 0); require('node:timers').clearTimeout(id); timerValue", "timerValue", 0)).to_equal("0:0:0")
+```
+
+</details>
+
+#### returns bounded Node timer handle objects
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h")).to_equal("object")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h.ref")).to_equal("function")
+expect(_eval_str("var h = require('timers').setInterval(() => {}, 5); h.repeat")).to_equal("true")
+```
+
+</details>
+
+#### tracks bounded Node timer handle ref state
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.hasRef()")).to_equal("true")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.unref(); h.hasRef()")).to_equal("false")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.unref(); h.ref(); h.hasRef()")).to_equal("true")
+```
+
+</details>
+
+#### closes bounded Node timer handles
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h.close")).to_equal("function")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close() === h")).to_equal("true")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close(); h.closed")).to_equal("true")
+```
+
+</details>
+
+#### cancels timers through bounded handle close
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_before_after_timer_drain("var timerValue = 0; var h = require('timers').setTimeout(() => { timerValue = 11; }, 0); h.close(); timerValue", "timerValue", 0)).to_equal("0:0:0")
+```
+
+</details>
+
+#### reschedules timers module setInterval callbacks across drains
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_before_after_two_timer_drains("var timerValue = 0; require('timers').setInterval(() => { timerValue = timerValue + 1; }, 1); timerValue", "timerValue", 1, 2)).to_equal("0:1:1:1:2")
+```
+
+</details>
+
+#### cancels timers module intervals from their callback
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_before_after_two_timer_drains("var timerValue = 0; var id = require('timers').setInterval(() => { timerValue = timerValue + 1; require('node:timers').clearInterval(id); }, 1); timerValue", "timerValue", 1, 2)).to_equal("0:1:1:0:1")
+```
+
+</details>
+
+#### caches timers module state across repeated require calls
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var t = require('timers'); t.cached = 'yes'; require('node:timers').cached")).to_equal("yes")
 ```
 
 </details>
@@ -2121,6 +2842,34 @@ expect(_eval_str("require('process').exit(7)")).to_equal("7")
 
 </details>
 
+#### schedules process.nextTick callbacks through the runtime drain
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_before_after_timer_drain("var tickValue = 0; process.nextTick(() => { tickValue = 7; }); tickValue", "tickValue", 0)).to_equal("0:1:7")
+```
+
+</details>
+
+#### schedules require process.nextTick callbacks through the runtime drain
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_before_after_timer_drain("var tickValue = 0; require('process').nextTick(() => { tickValue = 9; }); tickValue", "tickValue", 0)).to_equal("0:1:9")
+```
+
+</details>
+
 ### TextEncoder and TextDecoder globals
 
 #### encodes text to Uint8Array-compatible bytes
@@ -2303,8 +3052,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 151 |
-| Active scenarios | 151 |
+| Total scenarios | 200 |
+| Active scenarios | 200 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

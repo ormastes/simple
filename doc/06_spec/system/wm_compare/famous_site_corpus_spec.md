@@ -441,6 +441,27 @@ expect(result.0).to_contain("missing production report")
 
 </details>
 
+#### fails the production probe gate without exact-pixel acceptance flags
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
+expect(rt_file_exists(tool_path)).to_equal(true)
+expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--drop-acceptance-policy-flags-for-test"], 10000)
+expect(result.2).to_equal(1)
+expect(result.0).to_contain("\"status\": \"FAIL\"")
+expect(result.0).to_contain("\"hasExactAcceptancePolicyFlags\": false")
+expect(result.0).to_contain("missing structured exact-pixel acceptance policy flags")
+```
+
+</details>
+
 #### passes the production probe gate for the focused production artifact
 
 <details>
@@ -989,8 +1010,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 37 |
-| Active scenarios | 37 |
+| Total scenarios | 38 |
+| Active scenarios | 38 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

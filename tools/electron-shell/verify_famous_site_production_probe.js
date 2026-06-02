@@ -6,6 +6,7 @@ const path = require("path");
 const root = process.cwd();
 const sampleArg = process.argv.find((arg) => arg.startsWith("--sample="));
 const sample = sampleArg ? sampleArg.slice("--sample=".length) : "site_0_google";
+const dropAcceptancePolicyFlagsForTest = process.argv.includes("--drop-acceptance-policy-flags-for-test");
 const maxDifferentPixels = sample === "site_0_google" ? 2717 : 6000;
 const dir = path.join(root, "test", "baselines", "famous_site_corpus", sample);
 const reportPath = path.join(dir, "report.production.sdn");
@@ -175,7 +176,10 @@ let result = {
 if (!fs.existsSync(reportPath)) {
   failures.push("missing production report; run site_corpus_compat.spl with --production-renderer first");
 } else {
-  const text = fs.readFileSync(reportPath, "utf8");
+  let text = fs.readFileSync(reportPath, "utf8");
+  if (dropAcceptancePolicyFlagsForTest) {
+    text = text.replace(" acceptance_policy_flags: (exact_required: true perceptual_diagnostic_only: true tolerance_acceptance_allowed: false)", "");
+  }
   const chromeRel = matchText(text, /chrome_ppm:\s*"([^"]+)"/);
   const simpleRel = matchText(text, /simple_ppm:\s*"([^"]+)"/);
   const chromePath = path.join(root, chromeRel);
@@ -199,6 +203,7 @@ if (!fs.existsSync(reportPath)) {
   result.layoutTextMatch = parseBool(text, /layout_text_match:\s*(true|false)/);
   result.hasTextInkDelta = text.includes("text_ink_delta:");
   result.hasTextLineInkDelta = text.includes("text_line_ink_delta:");
+  result.hasExactAcceptancePolicyFlags = text.includes("acceptance_policy_flags: (exact_required: true perceptual_diagnostic_only: true tolerance_acceptance_allowed: false)");
   result.textLineInkDeltaCount = parseIntField(text, /text_line_ink_delta:\s*\(text_line_ink_delta count:\s*([0-9]+)/);
   result.textInkDelta.divBoxDifferentPixels = parseIntField(text, /div_box:\s*\(region[^\)]*different_pixels:\s*([0-9]+)/);
   result.textInkDelta.divBoxChromeExactBlackPixels = parseIntField(text, /div_box:\s*\(region[^\)]*chrome_exact_black_pixels:\s*([0-9]+)/);
@@ -212,6 +217,7 @@ if (!fs.existsSync(reportPath)) {
   if (!result.reportFresh) failures.push("production report is stale or PPM parse failed");
   if (!result.hasSimpleLayoutLines) failures.push("missing Simple layout line diagnostics");
   if (!result.hasSimpleLayoutLineWidths) failures.push("missing Simple layout line width diagnostics");
+  if (!result.hasExactAcceptancePolicyFlags) failures.push("missing structured exact-pixel acceptance policy flags");
   if (result.simpleLayoutLineCount <= 0) failures.push("Simple layout diagnostics did not report any text lines");
   if (!result.hasTextGeometryDelta) failures.push("missing Chrome-vs-Simple text geometry delta diagnostics");
   if (result.chromeTextLineCount <= 0) failures.push("text geometry delta did not report Chrome text lines");

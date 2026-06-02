@@ -2174,11 +2174,11 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_copy"
         | "rt_file_rename"
         | "rt_file_append_text"
-        | "rt_file_write_bytes"
         | "rt_file_move"
         | "rt_file_wrap_smf_dynlib"
         | "rt_file_extract_smf_dynlib"
         | "rt_file_create_excl" => Some(&[0, 1]),
+        "rt_file_write_bytes" => Some(&[0]),
 
         // Directory operations
         "rt_dir_create" | "rt_dir_create_all" | "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all"
@@ -2328,6 +2328,32 @@ fn expand_text_cstr_args<M: Module>(
         }
     }
     expanded
+}
+
+fn expand_file_write_bytes_args<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    arg_vals: &[cranelift_codegen::ir::Value],
+) -> Option<Vec<cranelift_codegen::ir::Value>> {
+    if arg_vals.len() != 2 {
+        return None;
+    }
+
+    let string_data_id = ctx.runtime_funcs["rt_string_data"];
+    let string_len_id = ctx.runtime_funcs["rt_string_len"];
+    let string_data_ref = ctx.module.declare_func_in_func(string_data_id, builder.func);
+    let string_len_ref = ctx.module.declare_func_in_func(string_len_id, builder.func);
+
+    let path_ptr_call = adapted_call(builder, string_data_ref, &[arg_vals[0]]);
+    let path_ptr = builder.inst_results(path_ptr_call)[0];
+    let path_len_call = adapted_call(builder, string_len_ref, &[arg_vals[0]]);
+    let path_len = builder.inst_results(path_len_call)[0];
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let array_header = builder.ins().band(arg_vals[1], ptr_mask);
+    let data_len = builder.ins().load(types::I64, MemFlags::new(), array_header, 8);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), array_header, 24);
+
+    Some(vec![path_ptr, path_len, data_ptr, data_len])
 }
 
 /// Adapt argument values to match a function's expected signature.
@@ -2749,7 +2775,9 @@ pub fn compile_call<M: Module>(
 
         // Expand text RuntimeValue arguments for C-ABI SFFI calls.
         // Two modes: (ptr, len) for Rust-style APIs, or ptr-only for C-string APIs.
-        let arg_vals = if let Some(text_indices) = text_arg_indices(sffi_name) {
+        let arg_vals = if sffi_name == "rt_file_write_bytes" {
+            expand_file_write_bytes_args(ctx, builder, &arg_vals).unwrap_or(arg_vals)
+        } else if let Some(text_indices) = text_arg_indices(sffi_name) {
             expand_text_args(ctx, builder, &arg_vals, text_indices)
         } else if let Some(cstr_indices) = text_cstr_arg_indices(sffi_name) {
             expand_text_cstr_args(ctx, builder, &arg_vals, cstr_indices)

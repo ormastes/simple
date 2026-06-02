@@ -4934,7 +4934,7 @@ match memory:
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/unit/lib/common/web/browser_session_wasm_host_spec.spl` |
-| Updated | 2026-05-31 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

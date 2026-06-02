@@ -60,6 +60,15 @@ fn _eval_str_with_file(path: text, content: text, source: text) -> text:
         Ok(value): js_to_string(value)
         Err(err): "error"
 
+fn _eval_str_with_two_files(path_a: text, content_a: text, path_b: text, content_b: text, source: text) -> text:
+    var runtime = JsRuntime.new(Logger.new(LogLevel.Error))
+    runtime.grant_node_file(path_a, content_a)
+    runtime.grant_node_file(path_b, content_b)
+    val result = runtime.eval(source)
+    match result:
+        Ok(value): js_to_string(value)
+        Err(err): "error"
+
 fn _eval_str_with_network(endpoint: text, source: text) -> text:
     var runtime = JsRuntime.new(Logger.new(LogLevel.Error))
     runtime.grant_node_network(endpoint)
@@ -71,6 +80,22 @@ fn _eval_str_with_network(endpoint: text, source: text) -> text:
 fn _eval_str_with_process(command: text, source: text) -> text:
     var runtime = JsRuntime.new(Logger.new(LogLevel.Error))
     runtime.grant_node_process(command)
+    val result = runtime.eval(source)
+    match result:
+        Ok(value): js_to_string(value)
+        Err(err): "error"
+
+fn _eval_str_with_module_text_export(specifier: text, export_name: text, value: text, source: text) -> text:
+    var runtime = JsRuntime.new(Logger.new(LogLevel.Error))
+    runtime.grant_node_module_text_export(specifier, export_name, value)
+    val result = runtime.eval(source)
+    match result:
+        Ok(value): js_to_string(value)
+        Err(err): "error"
+
+fn _eval_str_with_module_source(specifier: text, module_source: text, source: text) -> text:
+    var runtime = JsRuntime.new(Logger.new(LogLevel.Error))
+    runtime.grant_node_module_source(specifier, module_source)
     val result = runtime.eval(source)
     match result:
         Ok(value): js_to_string(value)
@@ -88,6 +113,24 @@ fn _eval_before_after_timer_drain(source: text, probe: text, current_time_ms: i6
         Ok(value): js_to_string(value)
         Err(err): "error"
     "{before_text}:{drained}:{after_text}"
+
+fn _eval_before_after_two_timer_drains(source: text, probe: text, first_time_ms: i64, second_time_ms: i64) -> text:
+    var runtime = JsRuntime.new(Logger.new(LogLevel.Error))
+    val before = runtime.eval(source)
+    val before_text = match before:
+        Ok(value): js_to_string(value)
+        Err(err): "error"
+    val first_drained = runtime.drain_due_timers(first_time_ms)
+    val mid = runtime.eval(probe)
+    val mid_text = match mid:
+        Ok(value): js_to_string(value)
+        Err(err): "error"
+    val second_drained = runtime.drain_due_timers(second_time_ms)
+    val after = runtime.eval(probe)
+    val after_text = match after:
+        Ok(value): js_to_string(value)
+        Err(err): "error"
+    "{before_text}:{first_drained}:{mid_text}:{second_drained}:{after_text}"
 describe "Node.js path module":
     describe "path.dirname":
         it "gets directory name":
@@ -315,15 +358,58 @@ describe "Node.js runtime shape":
         it "keeps builtin require cache stable on a hot repeated module":
             expect(_eval_str("var p = require('path'); p.hot = 0; var q = require('node:path'); q.hot = p.hot + 1; var r = require('path'); r.hot = q.hot + 1; var s = require('node:path'); s.hot = r.hot + 1; require('path').hot")).to_equal("3")
 
+        it "denies ungranted CommonJS modules without host filesystem access":
+            expect(_eval_str("require('missing-package').error")).to_equal("module-denied")
+            expect(_eval_str("require('missing-package').specifier")).to_equal("missing-package")
+
+        it "resolves explicitly granted CommonJS text exports without host filesystem access":
+            expect(_eval_str_with_module_text_export("widget", "name", "panel", "require('widget').name")).to_equal("panel")
+            expect(_eval_str_with_module_text_export("widget", "name", "panel", "require('missing-package').error")).to_equal("module-denied")
+
+        it "caches explicitly granted CommonJS module exports across repeated require calls":
+            expect(_eval_str_with_module_text_export("widget", "name", "panel", "var m = require('widget'); m.cached = 'yes'; require('widget').cached")).to_equal("yes")
+
+        it "executes explicitly granted CommonJS source exports without host filesystem access":
+            expect(_eval_str_with_module_source("widget", "exports.name = 'panel'; exports.kind = 'source'", "require('widget').name")).to_equal("panel")
+            expect(_eval_str_with_module_source("widget", "exports.name = 'panel'; exports.kind = 'source'", "require('widget').kind")).to_equal("source")
+
+        it "caches source-executed CommonJS exports across repeated require calls":
+            expect(_eval_str_with_module_source("widget", "exports.name = 'panel'", "var m = require('widget'); m.cached = 'yes'; require('widget').cached")).to_equal("yes")
+
+        it "honors source-executed CommonJS module.exports replacement":
+            expect(_eval_str_with_module_source("widget", "module.exports = { name: 'panel', kind: 'replacement' }", "require('widget').name")).to_equal("panel")
+            expect(_eval_str_with_module_source("widget", "module.exports = { name: 'panel', kind: 'replacement' }", "require('widget').kind")).to_equal("replacement")
+
+        it "caches source-executed CommonJS module.exports replacement objects":
+            expect(_eval_str_with_module_source("widget", "module.exports = { name: 'panel' }", "var m = require('widget'); m.cached = 'yes'; require('widget').cached")).to_equal("yes")
+
+        it "executes explicitly granted slash-bearing CommonJS source specifiers":
+            expect(_eval_str_with_module_source("./widget.js", "exports.name = 'panel'", "require('./widget.js').name")).to_equal("panel")
+            expect(_eval_str_with_module_source("./widget.js", "exports.dir = __dirname", "require('./widget.js').dir")).to_equal(".")
+
+        it "resolves granted CommonJS packages from in-memory node_modules index files":
+            expect(_eval_str_with_file("/node_modules/widget/index.js", "exports.name = 'panel'", "require('widget').name")).to_equal("panel")
+            expect(_eval_str_with_file("/node_modules/widget/index.js", "exports.filename = __filename", "require('widget').filename")).to_equal("/node_modules/widget/index.js")
+
+        it "resolves granted CommonJS packages through package main fields":
+            expect(_eval_str_with_two_files("/node_modules/widget/package.json", "{\"main\":\"main.js\"}", "/node_modules/widget/main.js", "module.exports = { name: 'panel' }", "require('widget').name")).to_equal("panel")
+
+        it "caches granted filesystem-backed CommonJS package exports":
+            expect(_eval_str_with_file("/node_modules/widget/index.js", "exports.name = 'panel'", "var m = require('widget'); m.cached = 'yes'; require('widget').cached")).to_equal("yes")
+
         it "resolves fs sync APIs as fail-closed file API":
             expect(_eval_str("typeof require('fs').readFileSync")).to_equal("function")
             expect(_eval_str("typeof require('node:fs').readFileSync")).to_equal("function")
+            expect(_eval_str("typeof require('fs').readdirSync")).to_equal("function")
+            expect(_eval_str("typeof require('node:fs').mkdirSync")).to_equal("function")
 
         it "denies fs sync APIs without file grants":
             expect(_eval_str("require('fs').readFileSync('/etc/passwd', 'utf8').status")).to_equal("denied")
             expect(_eval_str("require('node:fs').writeFileSync('/tmp/simple.txt', 'data').error")).to_equal("file-denied")
             expect(_eval_str("require('fs').existsSync('/tmp/simple.txt').operation")).to_equal("existsSync")
             expect(_eval_str("require('fs').statSync('/tmp/simple.txt').path")).to_equal("/tmp/simple.txt")
+            expect(_eval_str("require('fs').readdirSync('/tmp').status")).to_equal("denied")
+            expect(_eval_str("require('node:fs').mkdirSync('/tmp/simple').reason")).to_equal("file-grant-denied")
 
         it "denies fs promises APIs without file grants":
             expect(_eval_str("require('fs').promises.readFile('/tmp/simple.txt', 'utf8').status")).to_equal("denied")
@@ -339,6 +425,31 @@ describe "Node.js runtime shape":
             expect(_eval_str_with_file("/home/user/work/main.spl", "", "require('node:fs').writeFileSync('/home/user/work/main.spl', 'new-data').status")).to_equal("allowed")
             expect(_eval_str_with_file("/home/user/work/main.spl", "", "require('node:fs').writeFileSync('/home/user/workspace/main.spl', 'new-data').reason")).to_equal("file-grant-denied")
             expect(_eval_str_with_file("/home/user/work/main.spl", "", "require('fs').promises.writeFile('/home/user/work/main.spl', 'new-data').status")).to_equal("allowed")
+
+        it "applies explicit file grant prefixes in fs compatibility dispatch":
+            expect(_eval_str_with_file("/home/user/native", "", "require('fs').readFileSync('/home/user/native/main.spl', 'utf8').status")).to_equal("allowed")
+            expect(_eval_str_with_file("/home/user/native", "", "require('fs').readFileSync('/home/user/native2/main.spl', 'utf8').reason")).to_equal("file-grant-denied")
+
+        it "shares explicit file grants with parsed native fs module dispatch":
+            expect(_eval_str_with_file("/home/user/native/main.spl", "native-data", "var fs = require('fs'); fs.readFileSync('/home/user/native/main.spl', 'utf8').data")).to_equal("native-data")
+            expect(_eval_str_with_file("/home/user/native/main.spl", "", "var fs = require('node:fs'); fs.writeFileSync('/home/user/native/main.spl', 'changed'); fs.readFileSync('/home/user/native/main.spl', 'utf8').data")).to_equal("changed")
+            expect(_eval_str_with_file("/home/user/native/main.spl", "", "var fs = require('fs'); fs.readFileSync('/home/user/native2/main.spl', 'utf8').reason")).to_equal("file-grant-denied")
+
+        it "allows fs directory metadata only under explicit file grants":
+            expect(_eval_str_with_file("/home/user/work", "", "var fs = require('fs'); fs.mkdirSync('/home/user/work/logs').status")).to_equal("allowed")
+            expect(_eval_str_with_file("/home/user/work", "", "var fs = require('fs'); fs.mkdirSync('/home/user/work/logs'); var entries = fs.readdirSync('/home/user/work'); entries.firstEntry")).to_equal("logs")
+            expect(_eval_str_with_file("/home/user/work", "", "var fs = require('node:fs'); fs.mkdirSync('/home/user/work/logs'); var entries = fs.readdirSync('/home/user/work'); entries.entryCount")).to_equal("1")
+
+        it "returns directory entries as real readdirSync arrays":
+            expect(_eval_str_with_file("/home/user/work", "", "var fs = require('fs'); fs.mkdirSync('/home/user/work/logs'); var entries = fs.readdirSync('/home/user/work'); entries[0]")).to_equal("logs")
+            expect(_eval_str_with_file("/home/user/work", "", "var fs = require('fs'); fs.mkdirSync('/home/user/work/logs'); var entries = fs.readdirSync('/home/user/work'); entries.join(',')")).to_equal("logs")
+            expect(_eval_str_with_file("/home/user/work", "", "var fs = require('node:fs'); fs.mkdirSync('/home/user/work/logs'); var entries = fs.readdirSync('/home/user/work'); entries.length")).to_equal("1")
+
+        it "creates nested granted directories with recursive mkdirSync":
+            expect(_eval_str_with_file("/home/user/work", "", "var fs = require('fs'); fs.mkdirSync('/home/user/work/logs/archive', { recursive: true }).recursive")).to_equal("true")
+            expect(_eval_str_with_file("/home/user/work", "", "var fs = require('fs'); fs.mkdirSync('/home/user/work/logs/archive', { recursive: true }); fs.readdirSync('/home/user/work').join(',')")).to_equal("logs")
+            expect(_eval_str_with_file("/home/user/work", "", "var fs = require('node:fs'); fs.mkdirSync('/home/user/work/logs/archive', { recursive: true }); fs.readdirSync('/home/user/work/logs')[0]")).to_equal("archive")
+            expect(_eval_str_with_file("/home/user/work", "", "var fs = require('fs'); fs.mkdirSync('/home/user/workspace/logs', { recursive: true }).reason")).to_equal("file-grant-denied")
 
         it "resolves os and node:os through deterministic require":
             expect(_eval_str("require('os').platform()")).to_equal("linux")
@@ -420,6 +531,53 @@ describe "Node.js runtime shape":
             expect(_eval_str_with_network("https://example.com:443", "require('node:https').request('https://example.com').status")).to_equal("allowed")
             expect(_eval_str_with_network("https://example.com:443", "require('http').request('http://example.com').reason")).to_equal("network-grant-denied")
 
+        it "covers bounded network request aliases":
+            expect(_eval_str_with_network("tcp://example.com:80", "require('net').connect(80, 'example.com').status")).to_equal("allowed")
+            expect(_eval_str_with_network("http://example.com:80", "require('http').get('http://example.com').operation")).to_equal("http.request")
+            expect(_eval_str_with_network("https://example.com:443", "require('node:https').get('https://example.com').status")).to_equal("allowed")
+
+        it "parses bounded http request endpoints from URL strings":
+            expect(_eval_str_with_network("http://api.example.com:8080", "require('http').request('http://api.example.com:8080/v1').status")).to_equal("allowed")
+            expect(_eval_str_with_network("https://api.example.com:444", "require('node:https').request('https://api.example.com:444/v1').target")).to_equal("https://api.example.com:444")
+            expect(_eval_str_with_network("http://api.example.com:8081", "require('http').request('http://api.example.com:8080/v1').reason")).to_equal("network-grant-denied")
+
+        it "parses bounded http request endpoints from option objects":
+            expect(_eval_str_with_network("http://api.example.com:8080", "require('http').request({hostname:'api.example.com', port:8080}).status")).to_equal("allowed")
+            expect(_eval_str_with_network("https://secure.example.com:443", "require('node:https').request({host:'secure.example.com'}).target")).to_equal("https://secure.example.com:443")
+            expect(_eval_str_with_network("https://secure.example.com:444", "require('node:https').request({host:'secure.example.com'}).reason")).to_equal("network-grant-denied")
+
+        it "reports bounded http request metadata from URL strings":
+            expect(_eval_str_with_network("http://api.example.com:8080", "require('http').request('http://api.example.com:8080/v1/items?limit=2').method")).to_equal("GET")
+            expect(_eval_str_with_network("http://api.example.com:8080", "require('http').request('http://api.example.com:8080/v1/items?limit=2').path")).to_equal("/v1/items?limit=2")
+
+        it "reports bounded http request metadata from option objects":
+            expect(_eval_str_with_network("http://api.example.com:8080", "require('http').request({hostname:'api.example.com', port:8080, method:'POST', path:'/submit'}).method")).to_equal("POST")
+            expect(_eval_str_with_network("http://api.example.com:8080", "require('http').request({hostname:'api.example.com', port:8080, method:'POST', path:'/submit'}).path")).to_equal("/submit")
+
+        it "exposes bounded http request lifecycle methods":
+            expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').write")).to_equal("function")
+            expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').end")).to_equal("function")
+            expect(_eval_str_with_network("https://api.example.com:443", "typeof require('node:https').request('https://api.example.com').abort")).to_equal("function")
+
+        it "tracks bounded http request body writes":
+            expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.write('abc').bytes")).to_equal("3")
+            expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.write('ab'); req.write('cde'); req.bodyBytes")).to_equal("5")
+            expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.write('ab'); req.write('cde'); req.bodyChunks")).to_equal("2")
+
+        it "tracks bounded http request end and abort state":
+            expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.end(); req.requestEnded")).to_equal("true")
+            expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.abort(); req.aborted")).to_equal("true")
+
+        it "delivers bounded http response callbacks on request end":
+            expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080', (res) => { seen = res.statusCode; }); req.end(); seen")).to_equal("200")
+            expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080/v1', (res) => { seen = res.path; }); req.end(); seen")).to_equal("/v1")
+            expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080', (res) => {}); req.end(); req.responseDelivered")).to_equal("true")
+
+        it "delivers bounded http response data and end events":
+            expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080', (res) => { res.on('data', (chunk) => { seen = chunk; }); }); req.end(); seen")).to_equal("bounded-response")
+            expect(_eval_str_with_network("http://api.example.com:8080", "var ended = 'no'; var req = require('http').request('http://api.example.com:8080', (res) => { res.on('end', () => { ended = 'yes'; }); }); req.end(); ended")).to_equal("yes")
+            expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.once('end', () => {}); }); req.end(); saved.listenerCount('end')")).to_equal("0")
+
         it "resolves Express-like http server creation as fail-closed network API":
             expect(_eval_str("typeof require('http').createServer")).to_equal("function")
             expect(_eval_str("typeof require('node:http').createServer")).to_equal("function")
@@ -434,6 +592,95 @@ describe "Node.js runtime shape":
             expect(_eval_str_with_network("listen://0.0.0.0:3000", "require('http').createServer((req,res)=>{}).listen(3000).status")).to_equal("allowed")
             expect(_eval_str_with_network("listen://0.0.0.0:3000", "require('node:http').createServer((req,res)=>{}).listen(3000).port")).to_equal("3000")
             expect(_eval_str_with_network("listen://0.0.0.0:3000", "require('http').createServer((req,res)=>{}).listen(0).reason")).to_equal("network-grant-denied")
+
+        it "resolves stream APIs as bounded deterministic objects":
+            expect(_eval_str("typeof require('stream').Readable.from")).to_equal("function")
+            expect(_eval_str("typeof require('node:stream').Writable")).to_equal("function")
+
+        it "reads from bounded stream Readable.from inputs":
+            expect(_eval_str("var r = require('stream').Readable.from(['a','b']); r.readableLength")).to_equal("2")
+            expect(_eval_str("var r = require('stream').Readable.from(['a','b']); r.read()")).to_equal("a")
+            expect(_eval_str("var r = require('stream').Readable.from(['a','b']); r.read(); r.read()")).to_equal("b")
+
+        it "tracks bounded stream Writable writes and end state":
+            expect(_eval_str("var w = require('stream').Writable(); w.write('abc').status")).to_equal("ok")
+            expect(_eval_str("var w = require('stream').Writable(); w.write('abc').bytes")).to_equal("3")
+            expect(_eval_str("var w = require('stream').Writable(); w.end(); w.writableEnded")).to_equal("true")
+
+        it "reports bounded writable backpressure after end":
+            expect(_eval_str("var w = require('stream').Writable(); w.end(); w.write('late').status")).to_equal("backpressure")
+            expect(_eval_str("var w = require('stream').Writable(); w.end(); w.write('late').error")).to_equal("write-after-end")
+            expect(_eval_str("var w = require('stream').Writable(); w.end(); w.write('late'); w.backpressure")).to_equal("true")
+            expect(_eval_str("var w = require('stream').Writable(); w.write('ok'); w.end(); w.write('late'); w.chunksWritten")).to_equal("1")
+
+        it "pipes bounded readable chunks into writable destinations":
+            expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pipe(w); w.lastChunk")).to_equal("abc")
+            expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pipe(w); w.bytesWritten")).to_equal("3")
+            expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['ab','cde']); var w = s.Writable(); r.pipe(w); w.bytesWritten")).to_equal("5")
+            expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['ab','cde']); var w = s.Writable(); r.pipe(w); w.lastChunk")).to_equal("cde")
+
+        it "returns the writable destination from bounded stream pipe":
+            expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pipe(w).lastChunk")).to_equal("abc")
+            expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pipe(w); r.readableLength")).to_equal("0")
+
+        it "iterates bounded readable chunks through explicit async iterator subset":
+            expect(_eval_str("typeof require('stream').Readable.from(['a']).streamAsyncIterator")).to_equal("function")
+            expect(_eval_str("var r = require('stream').Readable.from(['a','b']); var it = r.streamAsyncIterator(); it.next().value")).to_equal("a")
+            expect(_eval_str("var r = require('stream').Readable.from(['a','b']); var it = r.streamAsyncIterator(); it.next(); it.next().value")).to_equal("b")
+            expect(_eval_str("var r = require('stream').Readable.from(['a']); var it = r.streamAsyncIterator(); it.next(); it.next().done")).to_equal("true")
+            expect(_eval_str("var r = require('stream').Readable.from(['a','b']); var it = r.streamAsyncIterator(); it.next(); r.readableLength")).to_equal("1")
+
+        it "tracks bounded writable finish event listeners":
+            expect(_eval_str("var w = require('stream').Writable(); w.on('finish', () => 1); w.listenerCount('finish')")).to_equal("1")
+            expect(_eval_str("var w = require('stream').Writable(); w.on('finish', () => 1); w.end(); w.finishEmitted")).to_equal("true")
+            expect(_eval_str("var w = require('stream').Writable(); w.on('finish', () => 1); w.end(); w.finishListenerCount")).to_equal("1")
+
+        it "clears bounded once finish listeners after end":
+            expect(_eval_str("var w = require('stream').Writable(); w.once('finish', () => 1); w.end(); w.listenerCount('finish')")).to_equal("0")
+
+        it "invokes bounded writable finish callbacks on end":
+            expect(_eval_str("var finished = 'no'; var w = require('stream').Writable(); w.on('finish', () => { finished = 'yes'; }); w.end(); finished")).to_equal("yes")
+            expect(_eval_str("var finished = 'no'; var w = require('stream').Writable(); w.once('finish', () => { finished = 'once'; }); w.end(); finished")).to_equal("once")
+
+        it "caches stream module state across repeated require calls":
+            expect(_eval_str("var s = require('stream'); s.cached = 'yes'; require('node:stream').cached")).to_equal("yes")
+
+        it "resolves timers APIs through the runtime scheduler":
+            expect(_eval_str("typeof require('timers').setTimeout")).to_equal("function")
+            expect(_eval_str("typeof require('node:timers').clearTimeout")).to_equal("function")
+
+        it "schedules timers module setTimeout callbacks through runtime drain":
+            expect(_eval_before_after_timer_drain("var timerValue = 0; require('timers').setTimeout(() => { timerValue = 11; }, 0); timerValue", "timerValue", 0)).to_equal("0:1:11")
+
+        it "cancels timers module callbacks through clearTimeout":
+            expect(_eval_before_after_timer_drain("var timerValue = 0; var id = require('timers').setTimeout(() => { timerValue = 11; }, 0); require('node:timers').clearTimeout(id); timerValue", "timerValue", 0)).to_equal("0:0:0")
+
+        it "returns bounded Node timer handle objects":
+            expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h")).to_equal("object")
+            expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h.ref")).to_equal("function")
+            expect(_eval_str("var h = require('timers').setInterval(() => {}, 5); h.repeat")).to_equal("true")
+
+        it "tracks bounded Node timer handle ref state":
+            expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.hasRef()")).to_equal("true")
+            expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.unref(); h.hasRef()")).to_equal("false")
+            expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.unref(); h.ref(); h.hasRef()")).to_equal("true")
+
+        it "closes bounded Node timer handles":
+            expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h.close")).to_equal("function")
+            expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close() === h")).to_equal("true")
+            expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close(); h.closed")).to_equal("true")
+
+        it "cancels timers through bounded handle close":
+            expect(_eval_before_after_timer_drain("var timerValue = 0; var h = require('timers').setTimeout(() => { timerValue = 11; }, 0); h.close(); timerValue", "timerValue", 0)).to_equal("0:0:0")
+
+        it "reschedules timers module setInterval callbacks across drains":
+            expect(_eval_before_after_two_timer_drains("var timerValue = 0; require('timers').setInterval(() => { timerValue = timerValue + 1; }, 1); timerValue", "timerValue", 1, 2)).to_equal("0:1:1:1:2")
+
+        it "cancels timers module intervals from their callback":
+            expect(_eval_before_after_two_timer_drains("var timerValue = 0; var id = require('timers').setInterval(() => { timerValue = timerValue + 1; require('node:timers').clearInterval(id); }, 1); timerValue", "timerValue", 1, 2)).to_equal("0:1:1:0:1")
+
+        it "caches timers module state across repeated require calls":
+            expect(_eval_str("var t = require('timers'); t.cached = 'yes'; require('node:timers').cached")).to_equal("yes")
 
         it "resolves readline createInterface as fail-closed terminal API":
             expect(_eval_str("typeof require('readline').createInterface")).to_equal("function")

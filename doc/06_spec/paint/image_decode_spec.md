@@ -1401,6 +1401,27 @@ expect(profile.reason).to_equal("jpegxl-structured-default-srgb-lazy")
 
 </details>
 
+#### fails closed for JPEG XL full-container non-default structured color metadata
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val profile = detect_image_color_profile_info(_jpegxl_container_with_small_codestream_16x24_nondefault_color())
+
+expect(profile.format).to_equal("jpegxl")
+expect(profile.has_profile).to_equal(true)
+expect(profile.profile_kind).to_equal("structured-color-nondefault-pending")
+expect(profile.requires_color_transform).to_equal(true)
+expect(profile.initializes_transform_now).to_equal(false)
+expect(profile.reason).to_equal("jpegxl-structured-nondefault-color-pending")
+```
+
+</details>
+
 #### fails closed for JPEG XL color metadata when the container omits ftyp
 
 <details>
@@ -1506,6 +1527,27 @@ expect(profile.reason).to_equal("jpegxl-structured-default-srgb-lazy")
 
 </details>
 
+#### fails closed for JPEG XL split partial non-default structured color metadata
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val profile = detect_image_color_profile_info(_jpegxl_container_with_split_partial_small_codestream_16x24_nondefault_color())
+
+expect(profile.format).to_equal("jpegxl")
+expect(profile.has_profile).to_equal(true)
+expect(profile.profile_kind).to_equal("structured-color-nondefault-pending")
+expect(profile.requires_color_transform).to_equal(true)
+expect(profile.initializes_transform_now).to_equal(false)
+expect(profile.reason).to_equal("jpegxl-structured-nondefault-color-pending")
+```
+
+</details>
+
 #### fails closed on truncated JPEG XL container boxes
 
 <details>
@@ -1597,8 +1639,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 75 |
-| Active scenarios | 75 |
+| Total scenarios | 77 |
+| Active scenarios | 77 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -86,11 +86,11 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_copy"
         | "rt_file_rename"
         | "rt_file_append_text"
-        | "rt_file_write_bytes"
         | "rt_file_move"
         | "rt_file_wrap_smf_dynlib"
         | "rt_file_extract_smf_dynlib"
         | "rt_file_create_excl" => Some(&[0, 1]),
+        "rt_file_write_bytes" => Some(&[0]),
 
         // Directory operations
         "rt_dir_create" | "rt_dir_create_all" | "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all"
@@ -2267,7 +2267,53 @@ impl LlvmBackend {
         // This handles the ABI mismatch between Simple (text = RuntimeValue i64)
         // and Rust SFFI (text = *const u8 + u64 len).
         let arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> =
-            if let Some(text_indices) = crate::codegen::instr::calls::text_arg_indices(sffi_name) {
+            if sffi_name == "rt_file_write_bytes" && raw_arg_vals.len() == 2 {
+                let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
+                    let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                    module.add_function("rt_string_data", fn_type, None)
+                });
+                let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| {
+                    let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                    module.add_function("rt_string_len", fn_type, None)
+                });
+                let rt_array_data_ptr_u8 = module.get_function("rt_array_data_ptr_u8").unwrap_or_else(|| {
+                    let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                    module.add_function("rt_array_data_ptr_u8", fn_type, None)
+                });
+                let rt_array_len = module.get_function("rt_array_len").unwrap_or_else(|| {
+                    let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                    module.add_function("rt_array_len", fn_type, None)
+                });
+                let path_ptr_call = builder
+                    .build_call(rt_string_data, &[raw_arg_vals[0].into()], "write_path_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?;
+                let path_ptr = path_ptr_call
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                let path_len_call = builder
+                    .build_call(rt_string_len, &[raw_arg_vals[0].into()], "write_path_len")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?;
+                let path_len = path_len_call
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                let data_ptr_call = builder
+                    .build_call(rt_array_data_ptr_u8, &[raw_arg_vals[1].into()], "write_data_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_array_data_ptr_u8", &e))?;
+                let data_ptr = data_ptr_call
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                let data_len_call = builder
+                    .build_call(rt_array_len, &[raw_arg_vals[1].into()], "write_data_len")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_array_len", &e))?;
+                let data_len = data_len_call
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                vec![path_ptr.into(), path_len.into(), data_ptr.into(), data_len.into()]
+            } else if let Some(text_indices) = crate::codegen::instr::calls::text_arg_indices(sffi_name) {
                 let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
                     let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                     module.add_function("rt_string_data", fn_type, None)

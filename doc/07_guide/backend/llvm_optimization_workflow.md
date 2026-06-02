@@ -97,6 +97,36 @@ The 2026-05-12 accepted local sample:
 | XXHash64 | 8415 | 8415 | 8256 | 8282 |
 | ChaCha20 | 182 | 195 | 203 | 206 |
 
+## Simple-Owned Native Profile Optimization
+
+LLVM owns the target backend, but Simple owns native profile collection,
+profile import, and executable layout planning. Do not replace this path with
+an external BOLT dependency unless a design explicitly changes that contract.
+
+Current profile-guided executable optimization evidence lives in:
+
+- `doc/09_report/pure_simple_profile_guided_executable_optimization_2026-06-01.md`
+- `doc/05_design/pure_simple_profile_guided_executable_optimization_2026-06-01.md`
+- `doc/03_plan/agent_tasks/pure_simple_profile_guided_executable_optimization_2026-06-01.md`
+
+The implemented path is:
+
+1. `src/app/compile/native_profile_counter.spl` derives generated-C counter
+   slots and keeps non-profile native builds clean.
+2. `src/app/compile/native_profile_counter_runtime.spl` parses native runtime
+   counter snapshots and plans `.sprof` import.
+3. `src/app/optimize/sprof_loader.spl` reloads persisted profile summaries.
+4. `src/app/optimize/profile_layout_cli.spl` and
+   `src/app/optimize/executable_layout.spl` produce Simple-owned layout
+   manifests, native symbol-order files, and generated-C section maps.
+5. `src/os/baremetal/profile/breakpoint_counter.spl` provides software
+   breakpoint counter evidence for x86/i386, x86-family x86_64, ARM32, Thumb,
+   AArch64, RV32/RVC32, and RV64/RVC64 probes.
+
+Before claiming a profile optimization result, include both no-counter native
+build audit evidence and a representative before/after native runtime or size
+measurement.
+
 ## Hot-Path Optimization Pattern
 
 Use this order when a Simple algorithm is slower than the C/Rust reference:

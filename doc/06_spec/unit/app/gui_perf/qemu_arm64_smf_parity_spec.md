@@ -6,13 +6,21 @@
 
 #### accepts the same role-2 arm64 SMF artifact reaching the pure GUI adapter
 
-1. gui pointer event
+1. Build a role-2 ARM64 SMF envelope for the GUI hot-call symbol
 
-2. gui pointer event
+2. Convert the SMF bytes into the release artifact contract
 
-3. gui pointer event
+3. Dispatch a representative pure GUI command batch
 
-4. gui key event
+4. gui pointer event
+
+5. gui pointer event
+
+6. gui pointer event
+
+7. gui key event
+
+8. Verify the same artifact contract reaches the QEMU framebuffer adapter path
    - Expected: parity.status equals `contract-pass`
    - Expected: parity.adapter equals `simpleos-framebuffer-virtio`
    - Expected: parity.same_artifact_contract is true
@@ -22,7 +30,7 @@
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -43,6 +51,7 @@ val row = gui_qemu_arm64_smf_parity_row(parity)
 expect(row).to_contain("GUI_QEMU_ARM64_SMF_PARITY")
 expect(row).to_contain("status=contract-pass")
 expect(row).to_contain("arch=3")
+expect(row).to_contain("symbol=gui_dynlib_hot_probe_tick")
 expect(row).to_contain("adapter=simpleos-framebuffer-virtio")
 expect(row).to_contain("live_qemu=false")
 ```
@@ -50,6 +59,13 @@ expect(row).to_contain("live_qemu=false")
 </details>
 
 #### fails closed for non-arm64 or empty command-batch parity claims
+
+1. Build a non-ARM64 SMF envelope
+
+2. Pair the wrong-architecture artifact with an empty GUI batch
+   - Expected: parity.status equals `contract-fail`
+   - Expected: parity.same_artifact_contract is false
+
 
 <details>
 <summary>Executable SPipe</summary>
@@ -64,6 +80,41 @@ val parity = gui_qemu_arm64_smf_parity(contract, gui_empty_batch())
 expect(parity.status).to_equal("contract-fail")
 expect(parity.same_artifact_contract).to_equal(false)
 expect(gui_qemu_arm64_smf_parity_row(parity)).to_contain("reason=missing-arm64-smf-or-command-batch")
+```
+
+</details>
+
+#### fails closed when the SMF artifact targets the wrong hot-call symbol
+
+1. Build an ARM64 SMF envelope for a non-release symbol
+
+2. Dispatch a non-empty GUI command batch that would otherwise satisfy adapter parity
+
+3. gui pointer event
+
+4. Reject the parity row because the artifact targets the wrong hot-call symbol
+   - Expected: parity.status equals `contract-fail`
+   - Expected: parity.same_artifact_contract is false
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val smf = gui_smf_wrap_native_library([0xCFu8, 0xFAu8, 0xEDu8, 0xFEu8, 1u8], 3u8)
+val contract = gui_smf_artifact_contract("build/gui/pure_gui_hot.smf", smf, "other_symbol")
+val batch = gui_dispatch_events([
+    gui_pointer_event("pointer_move", "button.save", 12, 24)
+], 0)
+val parity = gui_qemu_arm64_smf_parity(contract, batch)
+expect(parity.status).to_equal("contract-fail")
+expect(parity.same_artifact_contract).to_equal(false)
+val row = gui_qemu_arm64_smf_parity_row(parity)
+expect(row).to_contain("symbol=other_symbol")
+expect(row).to_contain("reason=missing-arm64-smf-or-command-batch")
 ```
 
 </details>
@@ -87,8 +138,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -952,6 +952,12 @@ pub unsafe extern "C" fn rt_file_write_bytes(
         Err(_) => return false,
     };
 
+    if std::env::var("SIMPLE_DEBUG_WRITE_BYTES").is_ok() {
+        eprintln!(
+            "DEBUG_WRITE_BYTES path_len={} data_ptr={:p} data_len={}",
+            path_len, data_ptr, data_len
+        );
+    }
     if data_ptr.is_null() {
         return data_len == 0 && std::fs::write(path_str, []).is_ok();
     }

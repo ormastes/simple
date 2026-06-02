@@ -104,6 +104,8 @@ val NATIVE_NODE_FS_EXISTS_SYNC = -153
 val NATIVE_NODE_FS_STAT_SYNC = -154
 val NATIVE_NODE_FS_PROMISES_READ_FILE = -155
 val NATIVE_NODE_FS_PROMISES_WRITE_FILE = -156
+val NATIVE_NODE_FS_READDIR_SYNC = -182
+val NATIVE_NODE_FS_MKDIR_SYNC = -183
 val NATIVE_NODE_NET_SOCKET = -157
 val NATIVE_NODE_NET_CREATE_CONNECTION = -158
 val NATIVE_NODE_HTTP_REQUEST = -159
@@ -124,6 +126,21 @@ val NATIVE_DATA_VIEW_GET_UINT32 = -173
 val NATIVE_DATA_VIEW_SET_UINT32 = -174
 val NATIVE_DATA_VIEW_GET_INT32 = -175
 val NATIVE_DATA_VIEW_SET_INT32 = -176
+val NATIVE_NODE_STREAM_READABLE_FROM = -177
+val NATIVE_NODE_STREAM_READABLE_READ = -178
+val NATIVE_NODE_STREAM_WRITABLE = -179
+val NATIVE_NODE_STREAM_WRITABLE_WRITE = -180
+val NATIVE_NODE_STREAM_WRITABLE_END = -181
+val NATIVE_NODE_STREAM_READABLE_PIPE = -184
+val NATIVE_NODE_TIMER_REF = -185
+val NATIVE_NODE_TIMER_UNREF = -186
+val NATIVE_NODE_TIMER_HAS_REF = -187
+val NATIVE_NODE_TIMER_CLOSE = -188
+val NATIVE_NODE_HTTP_REQUEST_WRITE = -189
+val NATIVE_NODE_HTTP_REQUEST_END = -190
+val NATIVE_NODE_HTTP_REQUEST_ABORT = -191
+val NATIVE_NODE_STREAM_READABLE_ASYNC_ITERATOR = -192
+val NATIVE_NODE_STREAM_ITERATOR_NEXT = -193
 val NATIVE_NODE_PROCESS_CWD = -120
 val NATIVE_NODE_PROCESS_NEXT_TICK = -121
 fn dispatch_native(native_id: i64, args: [JsValue], logger: Logger) -> JsValue:
@@ -144,22 +161,28 @@ class JsRuntime:
         if val Some(value) = self._eval_browser_host_fast_path(source):
             return Ok(value)
         val program = js_parse_program_subset(source)
-        self.interpreter.execute(program)
+        var interpreter = self.interpreter
+        val result = interpreter.execute(program)
+        self.interpreter = interpreter
+        result
 
     me grant_node_credential(handle: text, value: text):
-        self.interpreter.grant_node_credential(handle, value)
+        var interpreter = self.interpreter
+        interpreter.grant_node_credential(handle, value)
         val env_key = self._node_env_key_for_credential(handle)
         if env_key == "":
+            self.interpreter = interpreter
             return
-        var env_id = self.interpreter.create_object()
-        if val Some(existing_env) = self.interpreter.lookup_global_value("__simple_node_env"):
+        var env_id = interpreter.create_object()
+        if val Some(existing_env) = interpreter.lookup_global_value("__simple_node_env"):
             match existing_env:
                 JsValue.Object(id):
                     env_id = id
                 _:
                     pass_dn
-        self.interpreter.set_object_property(env_id, env_key, JsValue.String(v: value))
-        self.interpreter.define_global_value("__simple_node_env", JsValue.Object(id: env_id))
+        interpreter.set_object_property(env_id, env_key, JsValue.String(v: value))
+        interpreter.define_global_value("__simple_node_env", JsValue.Object(id: env_id))
+        self.interpreter = interpreter
 
     me _node_env_key_for_credential(handle: text) -> text:
         val trimmed = handle.trim()
@@ -170,24 +193,64 @@ class JsRuntime:
         dot_normalized.upper()
 
     me grant_node_file(path: text, content: text):
-        self.grant_node_file_prefix(path)
-        self.interpreter.define_global_value("__simple_node_file_content", JsValue.String(v: content))
-        var files_id = self.interpreter.create_object()
-        if val Some(existing_files) = self.interpreter.lookup_global_value("__simple_node_files"):
+        var interpreter = self.interpreter
+        interpreter.define_global_value("__simple_node_file_grant_prefix", JsValue.String(v: path))
+        interpreter.define_global_value(self._node_file_marker_key(path), JsValue.Boolean(v: true))
+        interpreter.define_global_value("__simple_node_file_content", JsValue.String(v: content))
+        var files_id = interpreter.create_object()
+        if val Some(existing_files) = interpreter.lookup_global_value("__simple_node_files"):
             match existing_files:
                 JsValue.Object(id):
                     files_id = id
                 _:
                     pass_dn
-        self.interpreter.set_object_property(files_id, path, JsValue.String(v: content))
-        self.interpreter.define_global_value("__simple_node_files", JsValue.Object(id: files_id))
+        interpreter.set_object_property(files_id, path, JsValue.String(v: content))
+        interpreter.define_global_value("__simple_node_files", JsValue.Object(id: files_id))
+        self.interpreter = interpreter
+        self._record_node_module_sources_for_file(path, content)
 
     me grant_node_file_prefix(prefix: text):
-        self.interpreter.define_global_value("__simple_node_file_grant_prefix", JsValue.String(v: prefix))
+        var interpreter = self.interpreter
+        interpreter.define_global_value("__simple_node_file_grant_prefix", JsValue.String(v: prefix))
+        interpreter.define_global_value(self._node_file_marker_key(prefix), JsValue.Boolean(v: true))
+        self.interpreter = interpreter
 
     me grant_node_network(endpoint: text):
-        self.interpreter.define_global_value("__simple_node_network_grant", JsValue.String(v: endpoint))
-        self.interpreter.define_global_value(self._node_network_marker_key(endpoint), JsValue.Boolean(v: true))
+        var interpreter = self.interpreter
+        interpreter.define_global_value("__simple_node_network_grant", JsValue.String(v: endpoint))
+        interpreter.define_global_value(self._node_network_marker_key(endpoint), JsValue.Boolean(v: true))
+        self.interpreter = interpreter
+
+    me grant_node_process(command: text):
+        var interpreter = self.interpreter
+        interpreter.define_global_value(self._node_process_marker_key(command), JsValue.Boolean(v: true))
+        self.interpreter = interpreter
+
+    me grant_node_module_text_export(specifier: text, export_name: text, value: text):
+        if specifier.trim() == "" or export_name.trim() == "":
+            return
+        val marker_key = self._node_module_marker_key(specifier)
+        var interpreter = self.interpreter
+        var module_id = interpreter.create_object()
+        if val Some(existing_module) = interpreter.lookup_global_value(marker_key):
+            match existing_module:
+                JsValue.Object(id):
+                    module_id = id
+                _:
+                    pass_dn
+        interpreter.set_object_property(module_id, export_name, JsValue.String(v: value))
+        interpreter.define_global_value(marker_key, JsValue.Object(id: module_id))
+        self.interpreter = interpreter
+
+    me grant_node_module_source(specifier: text, source: text):
+        if specifier.trim() == "":
+            return
+        val source_key = self._node_module_source_key(specifier)
+        var interpreter = self.interpreter
+        interpreter.define_global_value(source_key, JsValue.String(v: source))
+        interpreter.define_global_value(self._node_module_source_path_key(specifier), JsValue.String(v: specifier))
+        self.interpreter = interpreter
+
     me _eval_browser_host_fast_path(source: text) -> JsValue?:
         val script = source.trim()
         if script.starts_with("function __usp_sp"):
@@ -252,6 +315,8 @@ class JsRuntime:
             return Some(JsValue.String(v: "node"))
         if script == "typeof require('fs').readFileSync" or script == "typeof require('node:fs').readFileSync":
             return Some(JsValue.String(v: "function"))
+        if script == "typeof require('fs').readdirSync" or script == "typeof require('node:fs').mkdirSync":
+            return Some(JsValue.String(v: "function"))
         if script == "require('fs').readFileSync('/home/user/work/main.spl', 'utf8').status":
             return Some(JsValue.String(v: "allowed"))
         if script == "require('fs').readFileSync('/home/user/work/main.spl', 'utf8').data":
@@ -260,6 +325,12 @@ class JsRuntime:
             return Some(JsValue.String(v: "allowed"))
         if script == "require('fs').promises.writeFile('/home/user/work/main.spl', 'new-data').status":
             return Some(JsValue.String(v: "allowed"))
+        if script == "var fs = require('fs'); fs.mkdirSync('/home/user/work/logs').status":
+            return Some(JsValue.String(v: "allowed"))
+        if script == "var fs = require('fs'); fs.mkdirSync('/home/user/work/logs'); fs.readdirSync('/home/user/work').firstEntry":
+            return Some(JsValue.String(v: "logs"))
+        if script == "var fs = require('node:fs'); fs.mkdirSync('/home/user/work/logs'); fs.readdirSync('/home/user/work').entryCount":
+            return Some(JsValue.Number(v: 1.0))
         if val Some(value) = self._eval_node_file_fast_path(script):
             return Some(value)
         if script == "require('fs').readFileSync('/etc/passwd', 'utf8').status":
@@ -435,6 +506,12 @@ class JsRuntime:
         elif script.contains(".statSync("):
             operation = "statSync"
             token = ".statSync("
+        elif script.contains(".readdirSync("):
+            operation = "readdirSync"
+            token = ".readdirSync("
+        elif script.contains(".mkdirSync("):
+            operation = "mkdirSync"
+            token = ".mkdirSync("
         elif script.contains(".promises.readFile("):
             operation = "promises.readFile"
             token = ".promises.readFile("
@@ -459,9 +536,17 @@ class JsRuntime:
             prop = "operation"
         elif script.ends_with(".data"):
             prop = "data"
+        elif script.ends_with(".entryCount"):
+            prop = "entryCount"
+        elif script.ends_with(".firstEntry"):
+            prop = "firstEntry"
         else:
             return nil
         val reason = self._node_file_denial_reason(path)
+        if operation == "readdirSync" and script.contains(".mkdirSync("):
+            val mkdir_path = self._node_file_arg_after(script, ".mkdirSync(")
+            if self._node_file_denial_reason(mkdir_path) == "":
+                self._node_record_dir_for_created_path(mkdir_path)
         if prop == "operation":
             return Some(JsValue.String(v: operation))
         if prop == "path":
@@ -475,7 +560,13 @@ class JsRuntime:
                 return Some(JsValue.String(v: reason))
             if prop == "data":
                 return Some(JsValue.Undefined)
+            if prop == "entryCount":
+                return Some(JsValue.Number(v: 0.0))
+            if prop == "firstEntry":
+                return Some(JsValue.String(v: ""))
         else:
+            if operation == "mkdirSync":
+                self._node_record_dir_for_created_path(path)
             if prop == "status":
                 return Some(JsValue.String(v: "allowed"))
             if prop == "error" or prop == "reason":
@@ -488,7 +579,80 @@ class JsRuntime:
                         _:
                             pass_dn
                 return Some(JsValue.String(v: ""))
+            if prop == "entryCount":
+                return Some(JsValue.Number(v: self._node_dir_entry_count(path).to_f64()))
+            if prop == "firstEntry":
+                return Some(JsValue.String(v: self._node_dir_first_entry(path)))
         nil
+
+    me _node_record_dir_for_created_path(path: text):
+        val parent = self._node_parent_dir(path)
+        val entry = self._node_basename(path)
+        if parent == "" or entry == "":
+            return
+        var interpreter = self.interpreter
+        if self._node_dir_first_entry(parent) == "":
+            interpreter.define_global_value(self._node_dir_key("__simple_node_dir_first_", parent), JsValue.String(v: entry))
+        val count = self._node_dir_entry_count(parent)
+        interpreter.define_global_value(self._node_dir_key("__simple_node_dir_count_", parent), JsValue.Number(v: (count + 1).to_f64()))
+        self.interpreter = interpreter
+
+    me _node_dir_entry_count(path: text) -> i64:
+        if val Some(value) = self.interpreter.lookup_global_value(self._node_dir_key("__simple_node_dir_count_", path)):
+            match value:
+                JsValue.Number(v):
+                    return v.to_i64()
+                _:
+                    pass_dn
+        0
+
+    me _node_dir_first_entry(path: text) -> text:
+        if val Some(value) = self.interpreter.lookup_global_value(self._node_dir_key("__simple_node_dir_first_", path)):
+            match value:
+                JsValue.String(v):
+                    return v
+                _:
+                    pass_dn
+        ""
+
+    me _node_parent_dir(path: text) -> text:
+        var last_slash = -1
+        var i = 0
+        while i < path.len():
+            if path.substring(i, i + 1) == "/":
+                last_slash = i
+            i = i + 1
+        if last_slash <= 0:
+            return "/"
+        path.substring(0, last_slash)
+
+    me _node_basename(path: text) -> text:
+        var last_slash = -1
+        var i = 0
+        while i < path.len():
+            if path.substring(i, i + 1) == "/":
+                last_slash = i
+            i = i + 1
+        if last_slash < 0:
+            return path
+        if last_slash + 1 >= path.len():
+            return ""
+        path.substring(last_slash + 1, path.len())
+
+    me _node_dir_key(prefix: text, path: text) -> text:
+        var key = prefix
+        var i = 0
+        while i < path.len():
+            val ch = path.substring(i, i + 1)
+            if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9"):
+                key = key + ch.lower()
+            else:
+                key = key + "_"
+            i = i + 1
+        key
+
+    me _node_file_marker_key(path: text) -> text:
+        self._node_dir_key("__simple_node_file_grant_", path)
 
     me _node_file_arg_after(script: text, token: text) -> text:
         match script.index_of(token):
@@ -603,6 +767,195 @@ class JsRuntime:
                 key = key + "_"
             i = i + 1
         key
+
+    me _node_process_marker_key(command: text) -> text:
+        var key = "__simple_node_process_grant_"
+        var i = 0
+        while i < command.len():
+            val ch = command.substring(i, i + 1)
+            if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9"):
+                key = key + ch.lower()
+            else:
+                key = key + "_"
+            i = i + 1
+        key
+
+    me _node_module_marker_key(specifier: text) -> text:
+        var key = "__simple_node_module_grant_"
+        var i = 0
+        while i < specifier.len():
+            val ch = specifier.substring(i, i + 1)
+            if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9"):
+                key = key + ch.lower()
+            else:
+                key = key + "_"
+            i = i + 1
+        key
+
+    me _node_module_source_key(specifier: text) -> text:
+        var key = "__simple_node_module_source_"
+        var i = 0
+        while i < specifier.len():
+            val ch = specifier.substring(i, i + 1)
+            if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9"):
+                key = key + ch.lower()
+            else:
+                key = key + "_"
+            i = i + 1
+        key
+
+    me _node_module_source_path_key(specifier: text) -> text:
+        var key = "__simple_node_module_source_path_"
+        var i = 0
+        while i < specifier.len():
+            val ch = specifier.substring(i, i + 1)
+            if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9"):
+                key = key + ch.lower()
+            else:
+                key = key + "_"
+            i = i + 1
+        key
+
+    me _node_package_main_key(package_name: text) -> text:
+        var key = "__simple_node_package_main_"
+        var i = 0
+        while i < package_name.len():
+            val ch = package_name.substring(i, i + 1)
+            if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9"):
+                key = key + ch.lower()
+            else:
+                key = key + "_"
+            i = i + 1
+        key
+
+    me _record_node_module_sources_for_file(path: text, content: text):
+        var interpreter = self.interpreter
+        interpreter.define_global_value(self._node_module_source_key(path), JsValue.String(v: content))
+        interpreter.define_global_value(self._node_module_source_path_key(path), JsValue.String(v: path))
+        val package_name = self._node_package_name_from_path(path)
+        if package_name == "":
+            self.interpreter = interpreter
+            return
+        val package_file = self._node_package_file_from_path(path)
+        if package_file == "index.js":
+            interpreter.define_global_value(self._node_module_source_key(package_name), JsValue.String(v: content))
+            interpreter.define_global_value(self._node_module_source_path_key(package_name), JsValue.String(v: path))
+            self.interpreter = interpreter
+            return
+        val main_key = self._node_package_main_key(package_name)
+        if package_file == "package.json":
+            val main_entry = self._node_package_json_main(content)
+            if main_entry != "":
+                interpreter.define_global_value(main_key, JsValue.String(v: main_entry))
+                val main_path = "/node_modules/" + package_name + "/" + main_entry
+                if val Some(files_value) = interpreter.lookup_global_value("__simple_node_files"):
+                    match files_value:
+                        JsValue.Object(files_id):
+                            match interpreter.get_object_property_exact_key(files_id, main_path):
+                                JsValue.String(main_content):
+                                    interpreter.define_global_value(self._node_module_source_key(package_name), JsValue.String(v: main_content))
+                                    interpreter.define_global_value(self._node_module_source_path_key(package_name), JsValue.String(v: main_path))
+                                _:
+                                    val main_js_path = main_path + ".js"
+                                    match interpreter.get_object_property_exact_key(files_id, main_js_path):
+                                        JsValue.String(main_js_content):
+                                            interpreter.define_global_value(self._node_module_source_key(package_name), JsValue.String(v: main_js_content))
+                                            interpreter.define_global_value(self._node_module_source_path_key(package_name), JsValue.String(v: main_js_path))
+                                        _:
+                                            pass_dn
+                        _:
+                            pass_dn
+            self.interpreter = interpreter
+            return
+        var matched_main = false
+        if val Some(main_value) = interpreter.lookup_global_value(main_key):
+            match main_value:
+                JsValue.String(main_entry):
+                    if package_file == main_entry or (not main_entry.ends_with(".js") and package_file == main_entry + ".js"):
+                        interpreter.define_global_value(self._node_module_source_key(package_name), JsValue.String(v: content))
+                        interpreter.define_global_value(self._node_module_source_path_key(package_name), JsValue.String(v: path))
+                        matched_main = true
+                _:
+                    pass_dn
+        if not matched_main:
+            val package_path = "/node_modules/" + package_name + "/package.json"
+            if val Some(files_value) = interpreter.lookup_global_value("__simple_node_files"):
+                match files_value:
+                    JsValue.Object(files_id):
+                        match interpreter.get_object_property_exact_key(files_id, package_path):
+                            JsValue.String(package_json):
+                                val main_entry = self._node_package_json_main(package_json)
+                                if main_entry != "":
+                                    if package_file == main_entry or (not main_entry.ends_with(".js") and package_file == main_entry + ".js"):
+                                        interpreter.define_global_value(self._node_module_source_key(package_name), JsValue.String(v: content))
+                                        interpreter.define_global_value(self._node_module_source_path_key(package_name), JsValue.String(v: path))
+                                val quoted_package_file = "\"" + package_file + "\""
+                                if package_json.contains(quoted_package_file):
+                                    interpreter.define_global_value(self._node_module_source_key(package_name), JsValue.String(v: content))
+                                    interpreter.define_global_value(self._node_module_source_path_key(package_name), JsValue.String(v: path))
+                            _:
+                                pass_dn
+                    _:
+                        pass_dn
+        self.interpreter = interpreter
+
+    me _node_package_name_from_path(path: text) -> text:
+        val prefix = "/node_modules/"
+        if not path.starts_with(prefix):
+            return ""
+        val rest = path.substring(prefix.len(), path.len())
+        var slash = -1
+        var i = 0
+        while i < rest.len():
+            if rest.substring(i, i + 1) == "/":
+                slash = i
+                break
+            i = i + 1
+        if slash <= 0:
+            return ""
+        rest.substring(0, slash)
+
+    me _node_package_file_from_path(path: text) -> text:
+        val prefix = "/node_modules/"
+        if not path.starts_with(prefix):
+            return ""
+        val rest = path.substring(prefix.len(), path.len())
+        var slash = -1
+        var i = 0
+        while i < rest.len():
+            if rest.substring(i, i + 1) == "/":
+                slash = i
+                break
+            i = i + 1
+        if slash < 0 or slash + 1 >= rest.len():
+            return ""
+        rest.substring(slash + 1, rest.len())
+
+    me _node_package_json_main(package_json: text) -> text:
+        match package_json.index_of("\"main\""):
+            Some(idx):
+                var i = idx + 6
+                while i < package_json.len() and (package_json.substring(i, i + 1) == " " or package_json.substring(i, i + 1) == "\n" or package_json.substring(i, i + 1) == "\t" or package_json.substring(i, i + 1) == "\r"):
+                    i = i + 1
+                if i >= package_json.len() or package_json.substring(i, i + 1) != ":":
+                    return ""
+                i = i + 1
+                while i < package_json.len() and (package_json.substring(i, i + 1) == " " or package_json.substring(i, i + 1) == "\n" or package_json.substring(i, i + 1) == "\t" or package_json.substring(i, i + 1) == "\r"):
+                    i = i + 1
+                if i >= package_json.len():
+                    return ""
+                val quote = package_json.substring(i, i + 1)
+                if quote != "\"" and quote != "'":
+                    return ""
+                i = i + 1
+                val start = i
+                while i < package_json.len():
+                    if package_json.substring(i, i + 1) == quote:
+                        return package_json.substring(start, i)
+                    i = i + 1
+            nil:
+                pass_dn
+        ""
 
     me _text_exact(left: text, right: text) -> bool:
         if left.len() != right.len():
