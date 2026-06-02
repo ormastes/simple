@@ -1353,6 +1353,39 @@ match result:
 
 </details>
 
+#### preserves WebAssembly Memory state when grow exceeds maximum in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `65536:65536:1:-1:65536`
+
+3. Err
+   - Expected: "unexpected wasm memory grow limit js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var memory = new WebAssembly.Memory({ initial: 1, maximum: 1 }); var before = memory.buffer.byteLength; var first = memory.grow(0); var fail = memory.grow(1); var after = memory.buffer.byteLength; var bytes = new Uint8Array(memory.buffer); bytes.length + ':' + before + ':' + first + ':' + fail + ':' + after")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("65536:65536:1:-1:65536")
+    Err(err):
+        expect("unexpected wasm memory grow limit js error: {err}").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -1372,8 +1405,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 33 |
-| Active scenarios | 33 |
+| Total scenarios | 34 |
+| Active scenarios | 34 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
