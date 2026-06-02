@@ -353,6 +353,16 @@ fn tag_defaults(st: Style, tag: text):
     elif tag == "p":
         st.margin_t = 6
         st.margin_b = 6
+    elif tag == "button":
+        st.display = "block"
+        st.font_size = 8
+        st.bg = argb(203, 213, 225)
+        st.fg = argb(15, 23, 42)
+        st.pad_l = 4
+        st.pad_t = 3
+        st.pad_r = 4
+        st.pad_b = 3
+        st.margin_b = 2
     elif tag == "header" or tag == "footer" or tag == "nav" or tag == "section" or tag == "table" or tag == "tr" or tag == "div" or tag == "ul" or tag == "li":
         st.display = "block"
 
@@ -728,7 +738,8 @@ fn fb_text(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color: u32, s
     var cx = x
     val adv = 6 * scale
     while i < n:
-        val ch = s.substring(i, i + 1).upper()
+        val code = s.char_code_at(i)
+        val ch = "{code as char}".upper()
         if cx < fbw:
             val gi = FONT_CHARSET.index_of(ch)
             if gi >= 0 and gi != 36:
@@ -754,6 +765,27 @@ fn char_w(fs: i32) -> i32:
 fn line_h(fs: i32) -> i32:
     9 * glyph_scale(fs)
 
+fn has_ancestor_tag(nodes: [HNode], i: i32, tag: text) -> bool:
+    var p = nodes[i].parent
+    while p >= 0:
+        if nodes[p].tag == tag:
+            return true
+        p = nodes[p].parent
+    false
+
+fn descendant_text(nodes: [HNode], i: i32) -> text:
+    var out = ""
+    var c = i + 1
+    while c < nodes.len():
+        if nodes[c].tag == "#text" and has_ancestor_tag(nodes, c, nodes[i].tag):
+            val txt = nodes[c].text_data.trim()
+            if txt.len() > 0:
+                if out.len() > 0:
+                    out = out + " "
+                out = out + txt
+        c = c + 1
+    out
+
 fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, boxes: LayoutBoxes) -> i32:
     boxes.bx[i] = x
     boxes.by[i] = y
@@ -765,6 +797,8 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, boxes
         var cpl = w / cw
         if cpl < 1:
             cpl = 1
+        if has_ancestor_tag(nodes, i, "button") and txt.len() > cpl:
+            cpl = txt.len()
         var lines = (txt.len() + cpl - 1) / cpl
         if lines < 1:
             lines = 1
@@ -806,7 +840,32 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     # text on top
     i = 0
     while i < nodes.len():
-        if nodes[i].tag == "#text":
+        if nodes[i].tag == "button":
+            val st = styles[i]
+            val scale = glyph_scale(st.font_size)
+            val label = descendant_text(nodes, i)
+            var button_w = bw[i]
+            var button_h = bh[i]
+            val min_w = label.len() * char_w(st.font_size) + 20
+            if button_w < min_w:
+                button_w = min_w
+            if button_h < 14:
+                button_h = 14
+            if bx[i] + button_w > fbw:
+                button_w = fbw - bx[i]
+            out = fb_rect(out, fbw, fbh, bx[i], by[i], button_w, button_h, argb(203, 213, 225))
+            out = fb_rect(out, fbw, fbh, bx[i], by[i], button_w, 1, argb(100, 116, 139))
+            out = fb_rect(out, fbw, fbh, bx[i], by[i] + button_h - 1, button_w, 1, argb(100, 116, 139))
+            out = fb_rect(out, fbw, fbh, bx[i], by[i], 1, button_h, argb(100, 116, 139))
+            out = fb_rect(out, fbw, fbh, bx[i] + button_w - 1, by[i], 1, button_h, argb(100, 116, 139))
+            var text_x = bx[i] + st.pad_l
+            if class_has(nodes[i].class_attr, "with-icon"):
+                out = fb_rect(out, fbw, fbh, bx[i] + st.pad_l, by[i] + st.pad_t + 1, 6, 6, argb(37, 99, 235))
+                out = fb_rect(out, fbw, fbh, bx[i] + st.pad_l + 2, by[i] + st.pad_t + 3, 2, 2, argb(245, 158, 11))
+                text_x = text_x + 10
+            if label.len() > 0:
+                out = fb_text(out, fbw, fbh, text_x, by[i] + st.pad_t, label, st.fg, scale)
+        elif nodes[i].tag == "#text" and not has_ancestor_tag(nodes, i, "button"):
             val st = styles[i]
             val txt = nodes[i].text_data.trim()
             if txt.len() > 0 and by[i] < fbh:
