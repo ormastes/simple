@@ -1566,6 +1566,22 @@ expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new
 
 </details>
 
+#### lists bounded EventEmitter callbacks
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new EventEmitter(); var cb = () => 1; e.on('ready', cb); typeof e.listeners + ':' + e.listeners('ready').length")).to_equal("function:1")
+expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new EventEmitter(); var a = () => 1; var b = () => 2; e.on('ready', a); e.on('ready', b); e.removeListener('ready', a); e.listeners('ready').length + ':' + (e.listeners('ready')[0] === b)")).to_equal("1:true")
+expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new EventEmitter(); e.listeners('missing').length")).to_equal("0")
+```
+
+</details>
+
 #### removes EventEmitter listeners by event name
 
 <details>
@@ -2118,13 +2134,15 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var req = require(
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); typeof req.addListener + ':' + typeof req.removeListener + ':' + typeof req.off + ':' + typeof req.removeAllListeners")).to_equal("function:function:function:function")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); typeof req.addListener + ':' + typeof req.removeListener + ':' + typeof req.off + ':' + typeof req.removeAllListeners + ':' + typeof req.listeners")).to_equal("function:function:function:function:function")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080'); var cb = () => { seen = 'close'; }; req.on('close', cb); req.removeListener('close', cb); req.end(); seen + ':' + req.listenerCount('close') + ':' + req.closeEmitted")).to_equal("no:0:false")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080'); var cb = () => { seen = 'abort'; }; req.on('abort', cb); req.off('abort', cb); req.abort(); seen + ':' + req.listenerCount('abort') + ':' + req.abortEmitted")).to_equal("no:0:false")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); var cb = () => 1; req.on('close', cb); req.listeners('close').length")).to_equal("1")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); var cb = () => 1; req.on('close', cb); req.removeListener('close', cb); req.listeners('close').length")).to_equal("0")
 ```
 
 </details>
@@ -2215,13 +2233,15 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); typeof saved.addListener + ':' + typeof saved.removeListener + ':' + typeof saved.off + ':' + typeof saved.removeAllListeners")).to_equal("function:function:function:function")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); typeof saved.addListener + ':' + typeof saved.removeListener + ':' + typeof saved.off + ':' + typeof saved.removeAllListeners + ':' + typeof saved.listeners")).to_equal("function:function:function:function:function")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); var cb = (chunk) => { seen = seen + chunk; }; res.on('data', cb); res.removeListener('data', cb); }); req.end(); saved.resume(); seen + ':' + saved.listenerCount('data') + ':' + saved.dataDelivered + ':' + saved.pendingData")).to_equal(":0:false:false")
 expect(_eval_str_with_network("http://api.example.com:8080", "var ended = 'no'; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('end', () => { ended = 'yes'; }); res.removeAllListeners('end'); }); req.end(); saved.resume(); ended + ':' + saved.listenerCount('end') + ':' + saved.endDelivered + ':' + saved.complete")).to_equal("no:0:false:true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; var cb = () => 1; res.on('end', cb); }); req.end(); saved.listeners('end').length")).to_equal("1")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; var cb = () => 1; res.on('end', cb); res.removeListener('end', cb); }); req.end(); saved.listeners('end').length")).to_equal("0")
 ```
 
 </details>
@@ -4040,8 +4060,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 260 |
-| Active scenarios | 260 |
+| Total scenarios | 261 |
+| Active scenarios | 261 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
