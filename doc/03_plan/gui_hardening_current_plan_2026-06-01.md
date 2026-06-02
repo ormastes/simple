@@ -429,7 +429,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   initial, normally ended, and aborted/destroyed lifecycle flags, and terminal
   requests reject later writes deterministically. Bounded request headers reject
   mutation after flushed, ended, or aborted state, and terminal requests reject
-  later header flushes and `end()` calls deterministically. Real request streams, responses,
+  later header flushes, `end()` calls, and `abort()` calls deterministically.
+  Real request streams, responses,
   broader callbacks, and host network I/O remain open.
   Bounded request callback delivery now invokes the supplied callback on
   `end()` with deterministic response metadata, and request-side `response`

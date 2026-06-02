@@ -2010,6 +2010,22 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 0; var 
 
 </details>
 
+#### rejects bounded http request abort after terminal state
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.abortRejected + ':' + req.abortRejectReason")).to_equal("false:")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.end(); req.abort(); req.requestEnded + ':' + req.aborted + ':' + req.abortRejected + ':' + req.abortRejectReason")).to_equal("true:false:true:request-ended")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 0; var req = require('http').request('http://api.example.com:8080'); req.once('abort', () => { seen = seen + 1; }); req.abort(); req.abort(); seen + ':' + req.abortRejected + ':' + req.abortRejectReason + ':' + req.listenerCount('abort')")).to_equal("1:true:request-aborted:0")
+```
+
+</details>
+
 #### tracks bounded http request lifecycle flags
 
 <details>
@@ -3836,8 +3852,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 248 |
-| Active scenarios | 248 |
+| Total scenarios | 249 |
+| Active scenarios | 249 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
