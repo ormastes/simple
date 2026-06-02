@@ -1287,6 +1287,39 @@ match result:
 
 </details>
 
+#### windows DataView bytes over ArrayBuffer offsets in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `2:4:3:258:-1:1,2,3,2,1,255,0,0`
+
+3. Err
+   - Expected: "unexpected dataview window js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var buffer = new ArrayBuffer(8); var bytes = new Uint8Array(buffer); bytes[0] = 1; bytes[1] = 2; bytes[2] = 3; bytes[3] = 4; bytes[4] = 5; var view = new DataView(buffer, 2, 4); view.setUint16(1, 258, true); view.setInt8(3, -1); view.byteOffset + ':' + view.byteLength + ':' + view.getUint8(0) + ':' + view.getUint16(1, true) + ':' + view.getInt8(3) + ':' + bytes.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("2:4:3:258:-1:1,2,3,2,1,255,0,0")
+    Err(err):
+        expect("unexpected dataview window js error: {err}").to_equal("")
+```
+
+</details>
+
 #### shares WebAssembly Memory buffer bytes with typed array views in browser scripts
 
 1. var session = BrowserSession new
@@ -1339,8 +1372,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 32 |
-| Active scenarios | 32 |
+| Total scenarios | 33 |
+| Active scenarios | 33 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
