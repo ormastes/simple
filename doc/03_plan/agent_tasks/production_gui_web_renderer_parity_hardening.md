@@ -30,3 +30,59 @@
 - Add Metal GPU-readback provenance to reject CPU mirror fallback.
 - Expand CSS/layout matrix for width, height, margin, padding, border, flex,
   gap, and nested selectors.
+
+## Verified Diagnostics — Claude (2026-06-02)
+
+Independent verification of the Electron capture path on macOS arm64 (Retina).
+Read-only probes; no hot-path files touched (concurrent agent owns
+`exact_fixture.js`, the `.shs`, `production_gui_web_renderer_parity.spl`,
+`generated_gui_web_parity_expected.spl`, and the renderer modules).
+
+### CRITICAL: Electron capture is 2× on Retina — all parity numbers are invalid
+
+`BrowserWindow.capturePage({width:96,height:72})` returns an image whose
+`image.getSize()` is **192×144**, and `image.toBitmap()` is
+`110592 bytes = 192×144×4`. The screen `scaleFactor` is 2, and
+`--force-device-scale-factor=1` does **not** change the capture backing size.
+
+`tools/electron-live-bitmap/exact_fixture.js` reads that 192-wide BGRA buffer as
+if it were 96 wide, so the "captured" 96×72 ARGB JSON is actually the **top-left
+192×36 slice mislabeled 96×72** — the horizontal-scanline garbage visible when
+the buffer is rendered to PNG. Consequence: **every Electron parity
+`mismatch_count` / `checksum` on a Retina Mac is a stride-misalignment artifact,
+not a rendering-fidelity measurement.** This is separate from, and not fixed by,
+the transparent-black document-wrapper change in progress.
+
+Verified via `build/cap_probe/getsize_probe.js`:
+`getSize={192,144}, bitmapBytes=110592, scaleFactor_screen=2`.
+
+### Verified fix recipe (box-downsample native → logical)
+
+Capture, then box-average the native `image.getSize()` buffer down to the
+requested logical W×H before comparison:
+
+```
+const sz = img.getSize();              // 192×144 on 2× displays
+const bm = img.toBitmap({scaleFactor:1}); // BGRA at sz.width×sz.height
+const kx = sz.width / W, ky = sz.height / H;
+// average each kx×ky native block into one logical pixel (ARGB-u32)
+```
+
+Verified via `build/cap_probe/downscale_probe.js`: the downsampled 96×72 frame
+has **386 distinct colors** (proper Chromium AA) and renders as a correct widget
+layout — crisp "AB CD"/"EF" text, green image placeholder, blue RUN button with
+orange icon, dark border, white AA text (see `build/cap_probe/electron_fixed_6x.png`).
+
+Equivalent alternatives: capture at native size and compare against a Simple
+render upscaled to native (worse — Simple has no AA), or run Electron under an
+`scaleFactor=1` display. Box-downsample is the least invasive and is what the
+node reference path already assumes.
+
+### Implication for the parity gate
+
+After both fixes (document wrapper + 2× downsample), Simple (6–8 flat colors,
+5×7 bitmap font) still will not pixel-match Chromium (386 AA colors). That is
+expected and acceptable per NFR-006: **record** mismatch %, viewport, color
+format, and both artifact PNGs as documented divergence; do not assert `==0`.
+Closing the fidelity gap (AA/gamma/LCD text) is the long-tail "production level"
+work tracked in `doc/03_plan/gui_hardening_current_plan_2026-06-01.md`.
