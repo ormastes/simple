@@ -1056,6 +1056,39 @@ match result:
 
 </details>
 
+#### iterates Uint8Array entries in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `0=4:1=255:true`
+
+3. Err
+   - Expected: "unexpected uint8 entries iterator js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(2); b[0] = 260; b[1] = -1; var entries = b.entries(); var e0 = entries.next(); var e1 = entries.next(); var e2 = entries.next(); e0.value[0] + '=' + e0.value[1] + ':' + e1.value[0] + '=' + e1.value[1] + ':' + e2.done")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("0=4:1=255:true")
+    Err(err):
+        expect("unexpected uint8 entries iterator js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reports Uint8Array view buffer metadata in browser scripts
 
 1. var session = BrowserSession new
@@ -1174,8 +1207,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 27 |
-| Active scenarios | 27 |
+| Total scenarios | 28 |
+| Active scenarios | 28 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
