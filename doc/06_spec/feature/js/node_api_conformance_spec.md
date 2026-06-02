@@ -2185,7 +2185,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); typeof saved.pause + ':' + typeof saved.resume + ':' + typeof saved.isPaused + ':' + typeof saved.destroy + ':' + typeof saved.read + ':' + typeof saved.setEncoding")).to_equal("function:function:function:function:function:function")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); typeof saved.pause + ':' + typeof saved.resume + ':' + typeof saved.isPaused + ':' + typeof saved.destroy + ':' + typeof saved.read + ':' + typeof saved.setEncoding + ':' + typeof saved.pipe")).to_equal("function:function:function:function:function:function:function")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var ended = 'no'; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', (chunk) => { seen = seen + chunk; }); res.on('end', () => { ended = 'yes'; }); }); req.end(); seen + ':' + ended + ':' + saved.pendingData + ':' + saved.pendingEnd + ':' + saved.complete + ':' + saved.isPaused()")).to_equal(":no:true:true:false:true")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var ended = 'no'; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', (chunk) => { seen = seen + chunk; }); res.on('end', () => { ended = 'yes'; }); }); req.end(); saved.resume(); seen + ':' + ended + ':' + saved.pendingData + ':' + saved.pendingEnd + ':' + saved.complete + ':' + saved.isPaused()")).to_equal("bounded-response:yes:false:false:true:false")
 ```
@@ -2234,6 +2234,24 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var returned = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; returned = res.setEncoding('utf-8'); }); req.end(); (returned === saved) + ':' + saved.encoding + ':' + saved.readableEncoding")).to_equal("true:utf8:utf8")
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.setEncoding('base64'); res.on('data', () => {}); }); req.end(); saved.read() + ':' + saved.encoding + ':' + saved.pendingData")).to_equal("bounded-response:base64:false")
+```
+
+</details>
+
+#### pipes bounded http responses to writable streams
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var returned = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; returned = res.pipe(w); }); req.end(); (returned === w) + ':' + w.lastChunk + ':' + w.bytesWritten + ':' + saved.readableLength + ':' + saved.responseRead")).to_equal("true:bounded-response:16:0:true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.pipe(w); }); req.end(); w.bytesWritten + ':' + saved.pipePaused + ':' + saved.responseRead + ':' + saved.readableLength")).to_equal("0:true:false:16")
+expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.pipe(w); }); req.end(); saved.resume(); w.lastChunk + ':' + w.bytesWritten + ':' + saved.pipePaused + ':' + saved.pipeResumed")).to_equal("bounded-response:16:false:true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.read(); saved.pipe(w); w.bytesWritten + ':' + saved.responseRead")).to_equal("0:true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.destroy(); saved.pipe(w); w.bytesWritten + ':' + saved.destroyed")).to_equal("0:true")
 ```
 
 </details>
@@ -3951,8 +3969,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 255 |
-| Active scenarios | 255 |
+| Total scenarios | 256 |
+| Active scenarios | 256 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

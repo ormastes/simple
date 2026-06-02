@@ -451,7 +451,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   pulls with deterministic `readableLength`, pending-data clearing, and
   destroyed-response suppression. Bounded synthetic responses now expose
   chainable `setEncoding()` with normalized `encoding`/`readableEncoding`
-  tracking.
+  tracking. Bounded synthetic responses now pipe their synthetic body into
+  bounded `Writable` destinations, defer pipe while paused, drain on `resume()`,
+  and suppress pipe after read or destroy.
   Real response streaming and event-loop ordering remain open.
 - Generated GUI WASM: move widget-matrix-specific state patterns into shared
   per-widget state helpers and cover additional generated apps.

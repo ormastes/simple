@@ -10,7 +10,7 @@ use std.js.engine.runtime.{NATIVE_DATA_VIEW_GET_INT8, NATIVE_DATA_VIEW_SET_INT8,
 use std.js.engine.runtime.{NATIVE_NODE_STREAM_READABLE_DESTROY, NATIVE_NODE_STREAM_READABLE_UNPIPE}
 use std.js.engine.runtime.{NATIVE_NODE_HTTP_REQUEST_DESTROY}
 use std.js.engine.runtime.{NATIVE_NODE_HTTP_GET, NATIVE_NODE_HTTPS_GET}
-use std.js.engine.runtime.{NATIVE_NODE_HTTP_RESPONSE_PAUSE, NATIVE_NODE_HTTP_RESPONSE_RESUME, NATIVE_NODE_HTTP_RESPONSE_IS_PAUSED, NATIVE_NODE_HTTP_RESPONSE_DESTROY, NATIVE_NODE_HTTP_RESPONSE_READ, NATIVE_NODE_HTTP_RESPONSE_SET_ENCODING}
+use std.js.engine.runtime.{NATIVE_NODE_HTTP_RESPONSE_PAUSE, NATIVE_NODE_HTTP_RESPONSE_RESUME, NATIVE_NODE_HTTP_RESPONSE_IS_PAUSED, NATIVE_NODE_HTTP_RESPONSE_DESTROY, NATIVE_NODE_HTTP_RESPONSE_READ, NATIVE_NODE_HTTP_RESPONSE_SET_ENCODING, NATIVE_NODE_HTTP_RESPONSE_PIPE}
 use std.js.engine.runtime.{NATIVE_UINT8_ARRAY_FILL, NATIVE_UINT8_ARRAY_INCLUDES, NATIVE_UINT8_ARRAY_INDEX_OF, NATIVE_UINT8_ARRAY_JOIN, NATIVE_UINT8_ARRAY_REVERSE, NATIVE_UINT8_ARRAY_LAST_INDEX_OF, NATIVE_UINT8_ARRAY_TO_STRING, NATIVE_UINT8_ARRAY_AT, NATIVE_UINT8_ARRAY_COPY_WITHIN, NATIVE_UINT8_ARRAY_KEYS, NATIVE_UINT8_ARRAY_VALUES, NATIVE_UINT8_ARRAY_ENTRIES, NATIVE_UINT8_ARRAY_ITERATOR_NEXT}
 use std.js.engine.runtime.{NATIVE_NODE_CHILD_PROCESS_SPAWN, NATIVE_NODE_EVENT_EMITTER_CONSTRUCTOR, NATIVE_NODE_EVENT_EMITTER_EMIT, NATIVE_NODE_EVENT_EMITTER_LISTENER_COUNT, NATIVE_NODE_EVENT_EMITTER_ON, NATIVE_NODE_EVENT_EMITTER_ONCE, NATIVE_NODE_EVENT_EMITTER_REMOVE_ALL_LISTENERS, NATIVE_NODE_EVENT_EMITTER_REMOVE_LISTENER, NATIVE_NODE_FS_EXISTS_SYNC, NATIVE_NODE_FS_MKDIR_SYNC, NATIVE_NODE_FS_PROMISES_READ_FILE, NATIVE_NODE_FS_PROMISES_WRITE_FILE, NATIVE_NODE_FS_READ_FILE_SYNC, NATIVE_NODE_FS_READDIR_SYNC, NATIVE_NODE_FS_STAT_SYNC, NATIVE_NODE_FS_WRITE_FILE_SYNC, NATIVE_NODE_HTTP_CREATE_SERVER, NATIVE_NODE_HTTP_REQUEST, NATIVE_NODE_HTTP_SERVER_CLOSE, NATIVE_NODE_HTTP_SERVER_LISTEN, NATIVE_NODE_HTTPS_REQUEST, NATIVE_NODE_NET_CREATE_CONNECTION, NATIVE_NODE_NET_SOCKET, NATIVE_NODE_READLINE_CLOSE, NATIVE_NODE_READLINE_CREATE_INTERFACE, NATIVE_NODE_READLINE_QUESTION}
 use std.js.engine.parser.{JsParser, js_parse_program_subset}
@@ -67,6 +67,8 @@ impl JsInterpreter:
             return self._native_node_http_response_read(this_val)
         if native_id == NATIVE_NODE_HTTP_RESPONSE_SET_ENCODING:
             return self._native_node_http_response_set_encoding(this_val, arg_vals)
+        if native_id == NATIVE_NODE_HTTP_RESPONSE_PIPE:
+            return self._native_node_http_response_pipe(this_val, arg_vals)
         if native_id == NATIVE_NODE_HTTP_REQUEST_SET_HEADER:
             return self._native_node_http_request_set_header(this_val, arg_vals)
         if native_id == NATIVE_NODE_HTTP_REQUEST_GET_HEADER:
@@ -1557,6 +1559,10 @@ impl JsInterpreter:
             self.set_object_property(response_id, "closed", JsValue.Boolean(v: false))
             self.set_object_property(response_id, "closeEmitted", JsValue.Boolean(v: false))
             self.set_object_property(response_id, "closeListenerCount", JsValue.Number(v: 0.0))
+            self.set_object_property(response_id, "pipePaused", JsValue.Boolean(v: false))
+            self.set_object_property(response_id, "pipeBackpressured", JsValue.Boolean(v: false))
+            self.set_object_property(response_id, "pipeResumed", JsValue.Boolean(v: false))
+            self.set_object_property(response_id, "__simple_http_response_pending_pipe_dest", JsValue.Number(v: -1.0))
             self.set_object_property(response_id, "pendingData", JsValue.Boolean(v: false))
             self.set_object_property(response_id, "pendingEnd", JsValue.Boolean(v: false))
             self.set_object_property(response_id, "dataListenerCount", JsValue.Number(v: 0.0))
@@ -1570,6 +1576,7 @@ impl JsInterpreter:
             self._define_method_on(response_id, "destroy", NATIVE_NODE_HTTP_RESPONSE_DESTROY)
             self._define_method_on(response_id, "read", NATIVE_NODE_HTTP_RESPONSE_READ)
             self._define_method_on(response_id, "setEncoding", NATIVE_NODE_HTTP_RESPONSE_SET_ENCODING)
+            self._define_method_on(response_id, "pipe", NATIVE_NODE_HTTP_RESPONSE_PIPE)
             if callback_id >= 0:
                 val ignored_callback_result = self._invoke_promise_callback(callback_id, [JsValue.Object(id: response_id)])
             if response_count > 0:
@@ -1658,6 +1665,15 @@ impl JsInterpreter:
         if to_boolean(self.get_object_property(response_id, "pendingEnd")):
             self.set_object_property(response_id, "pendingEnd", JsValue.Boolean(v: false))
             self._native_node_http_response_emit(response_id, "end", [])
+        var pending_pipe_dest = -1
+        match self.get_object_property(response_id, "__simple_http_response_pending_pipe_dest"):
+            JsValue.Number(v): pending_pipe_dest = f64_to_i64(v)
+            _:
+                pass_dn
+        if pending_pipe_dest >= 0:
+            self.set_object_property(response_id, "__simple_http_response_pending_pipe_dest", JsValue.Number(v: -1.0))
+            val ignored_pipe_result = self._native_node_http_response_pipe(this_val, [JsValue.Object(id: pending_pipe_dest)])
+            self.set_object_property(response_id, "pipeResumed", JsValue.Boolean(v: true))
         this_val
 
     me _native_node_http_response_is_paused(this_val: JsValue) -> JsValue:
@@ -1683,6 +1699,8 @@ impl JsInterpreter:
         self.set_object_property(response_id, "pendingData", JsValue.Boolean(v: false))
         self.set_object_property(response_id, "pendingEnd", JsValue.Boolean(v: false))
         self.set_object_property(response_id, "readableLength", JsValue.Number(v: 0.0))
+        self.set_object_property(response_id, "__simple_http_response_pending_pipe_dest", JsValue.Number(v: -1.0))
+        self.set_object_property(response_id, "pipePaused", JsValue.Boolean(v: false))
         var close_count = 0
         match self.get_object_property(response_id, "__simple_node_event_count_close"):
             JsValue.Number(v): close_count = f64_to_i64(v)
@@ -1724,6 +1742,60 @@ impl JsInterpreter:
         self.set_object_property(response_id, "encoding", JsValue.String(v: encoding))
         self.set_object_property(response_id, "readableEncoding", JsValue.String(v: encoding))
         this_val
+
+    me _native_node_http_response_pipe(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val response_id = _get_obj_id(this_val)
+        if response_id < 0 or arg_vals.len() == 0:
+            return JsValue.Undefined
+        val dest = arg_vals.get(0)
+        val writable_id = _get_obj_id(dest)
+        if writable_id < 0:
+            return dest
+        if to_boolean(self.get_object_property(response_id, "destroyed")):
+            return dest
+        if to_boolean(self.get_object_property(response_id, "responsePaused")):
+            self.set_object_property(response_id, "pipePaused", JsValue.Boolean(v: true))
+            self.set_object_property(response_id, "__simple_http_response_pending_pipe_dest", JsValue.Number(v: writable_id.to_f64()))
+            return dest
+        if to_boolean(self.get_object_property(response_id, "responseRead")):
+            return dest
+        val body = js_to_string(self.get_object_property(response_id, "body"))
+        var chunks = 0
+        match self.get_object_property(writable_id, "__simple_stream_chunks"):
+            JsValue.Number(v): chunks = f64_to_i64(v)
+            _:
+                pass_dn
+        var bytes_written = 0
+        match self.get_object_property(writable_id, "bytesWritten"):
+            JsValue.Number(v): bytes_written = f64_to_i64(v)
+            _:
+                pass_dn
+        var writable_length = 0
+        match self.get_object_property(writable_id, "writableLength"):
+            JsValue.Number(v): writable_length = f64_to_i64(v)
+            _:
+                pass_dn
+        var high_water_mark = 16384
+        match self.get_object_property(writable_id, "writableHighWaterMark"):
+            JsValue.Number(v): high_water_mark = f64_to_i64(v)
+            _:
+                pass_dn
+        chunks = chunks + 1
+        bytes_written = bytes_written + body.len()
+        writable_length = writable_length + body.len()
+        val pressure = writable_length >= high_water_mark
+        self.set_object_property(writable_id, "__simple_stream_chunks", JsValue.Number(v: chunks.to_f64()))
+        self.set_object_property(writable_id, "chunksWritten", JsValue.Number(v: chunks.to_f64()))
+        self.set_object_property(writable_id, "bytesWritten", JsValue.Number(v: bytes_written.to_f64()))
+        self.set_object_property(writable_id, "writableLength", JsValue.Number(v: writable_length.to_f64()))
+        self.set_object_property(writable_id, "backpressure", JsValue.Boolean(v: pressure))
+        self.set_object_property(writable_id, "lastChunk", JsValue.String(v: body))
+        self.set_object_property(response_id, "responseRead", JsValue.Boolean(v: true))
+        self.set_object_property(response_id, "readableLength", JsValue.Number(v: 0.0))
+        self.set_object_property(response_id, "pipePaused", JsValue.Boolean(v: pressure))
+        self.set_object_property(response_id, "pipeBackpressured", JsValue.Boolean(v: pressure))
+        self.set_object_property(response_id, "readableFlowing", JsValue.Boolean(v: not pressure))
+        dest
 
     me _native_node_http_request_abort(this_val: JsValue) -> JsValue:
         val request_id = _get_obj_id(this_val)
