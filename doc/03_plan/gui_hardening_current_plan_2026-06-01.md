@@ -261,8 +261,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `writableHighWaterMark`, cumulative `writableLength`/`bytesWritten`, and set
   write/pipe backpressure state when the high-water mark is reached. Bounded
   `Writable.end()` now clears pressure, zeroes `writableLength`, and emits
-  registered `drain` callbacks before finish. Current focused checks pass
-  `node_api_conformance_spec.spl` `223/223` and
+  registered `drain` callbacks before finish. Bounded readable streams now
+  expose `pause`, `resume`, and `isPaused`, track `readableFlowing`, and defer
+  `pipe()` drains while paused. Current focused checks pass
+  `node_api_conformance_spec.spl` `225/225` and
   `node_process_next_tick_spec.spl` `2/2`; missing and invalid process grants
   remain rejected, and explicit in-memory CommonJS source grants now execute
   `exports.*` assignments plus `module.exports = ...` replacements with cache
@@ -368,8 +370,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   now expose the same iterator through the `Symbol.asyncIterator` key. Bounded
   writable high-water pressure and pipe-to-writable pressure propagation are
   covered. Bounded `Writable.end()` drain clearing and `drain` callback
-  emission are covered. Full flow control, `for await` syntax support, broader
-  stream scheduling, and broader event-loop phases remain open.
+  emission are covered. Bounded readable `pause`/`resume` flow state and
+  paused-pipe deferral are covered. Full flow control, `for await` syntax
+  support, broader stream scheduling, and broader event-loop phases remain
+  open.
   Bounded `setInterval` rescheduling across explicit timer drains,
   `clearInterval` from inside an interval callback, and nextTick-before-timer
   phase priority are covered. Broader event-loop phases, host I/O integration,
@@ -2306,3 +2310,22 @@ passed, the Node API conformance suite passes `223/223`, BrowserSession
 fetch/WASM and native WASM host regressions remain `36/36` and `107/107`, and
 the broad `src/lib` check passed with the existing `447` warning profile. Full
 stream flow control, async scheduling, and host I/O integration remain open.
+
+CommonJS/Node bounded readable pause/resume continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+
+Bounded readable streams now expose deterministic `pause()`, `resume()`, and
+`isPaused()` methods. `pause()` marks `readableFlowing=false`, `resume()` marks
+`readableFlowing=true`, and `pipe()` returns the destination without draining
+while a readable is paused; after `resume()`, the same bounded pipe path drains
+remaining chunks. Focused checks passed, the Node API conformance suite passes
+`225/225`, BrowserSession fetch/WASM and native WASM host regressions remain
+`36/36` and `107/107`, and the broad `src/lib` check passed with the existing
+`447` warning profile. Full stream flow control, async scheduling, and host I/O
+integration remain open.

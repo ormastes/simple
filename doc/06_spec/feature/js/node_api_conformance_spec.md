@@ -2051,6 +2051,22 @@ expect(_eval_str("var r = require('stream').Readable.from(['a','b']); r.read(); 
 
 </details>
 
+#### tracks bounded readable pause and resume flow state
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var r = require('stream').Readable.from(['a']); typeof r.pause + ':' + typeof r.resume + ':' + typeof r.isPaused")).to_equal("function:function:function")
+expect(_eval_str("var r = require('stream').Readable.from(['a']); r.pause(); r.isPaused() + ':' + r.readableFlowing")).to_equal("true:false")
+expect(_eval_str("var r = require('stream').Readable.from(['a']); r.pause(); r.resume(); r.isPaused() + ':' + r.readableFlowing")).to_equal("false:true")
+```
+
+</details>
+
 #### tracks bounded stream Writable writes and end state
 
 <details>
@@ -2129,6 +2145,21 @@ expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); v
 expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pipe(w); w.bytesWritten")).to_equal("3")
 expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['ab','cde']); var w = s.Writable(); r.pipe(w); w.bytesWritten")).to_equal("5")
 expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['ab','cde']); var w = s.Writable(); r.pipe(w); w.lastChunk")).to_equal("cde")
+```
+
+</details>
+
+#### defers bounded pipe drains while readable is paused
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pause(); r.pipe(w); r.readableLength + ':' + w.bytesWritten + ':' + r.pipePaused")).to_equal("1:0:true")
+expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pause(); r.resume(); r.pipe(w); r.readableLength + ':' + w.bytesWritten + ':' + r.pipePaused")).to_equal("0:3:false")
 ```
 
 </details>
@@ -3412,8 +3443,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 223 |
-| Active scenarios | 223 |
+| Total scenarios | 225 |
+| Active scenarios | 225 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
