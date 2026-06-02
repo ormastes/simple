@@ -1980,6 +1980,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array prototype iterators with complementary call and apply
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `0:1:4:255:0=4:4`
+
+3. Err
+   - Expected: "unexpected uint8 iterator complementary dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(3); b[0] = 260; b[1] = -1; b[2] = 7; var keys = Uint8Array.prototype.keys.apply(b, []); var k0 = keys.next(); var k1 = keys.next(); var values = Uint8Array.prototype.values.apply(b, []); var v0 = values.next(); var v1 = values.next(); var entries = Uint8Array.prototype.entries.call(b); var e0 = entries.next(); var sym = Uint8Array.prototype[Symbol.iterator].apply(b, []); var s0 = sym.next(); k0.value + ':' + k1.value + ':' + v0.value + ':' + v1.value + ':' + e0.value[0] + '=' + e0.value[1] + ':' + s0.value")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("0:1:4:255:0=4:4")
+    Err(err):
+        expect("unexpected uint8 iterator complementary dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### dispatches Uint8Array prototype Symbol iterator with call in browser scripts
 
 1. var session = BrowserSession new
@@ -2758,8 +2791,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 75 |
-| Active scenarios | 75 |
+| Total scenarios | 76 |
+| Active scenarios | 76 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
