@@ -990,6 +990,39 @@ match result:
 
 </details>
 
+#### reads and writes ArrayBuffer bytes through DataView in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `16909060:-2:4,3,2,1,254,255,255,255:0:8`
+
+3. Err
+   - Expected: "unexpected dataview js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var buffer = new ArrayBuffer(8); var view = new DataView(buffer); view.setUint32(0, 16909060, true); view.setInt32(4, -2, true); var bytes = new Uint8Array(buffer); view.getUint32(0, true) + ':' + view.getInt32(4, true) + ':' + bytes.toString() + ':' + view.byteOffset + ':' + view.byteLength")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("16909060:-2:4,3,2,1,254,255,255,255:0:8")
+    Err(err):
+        expect("unexpected dataview js error: {err}").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -1009,8 +1042,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
