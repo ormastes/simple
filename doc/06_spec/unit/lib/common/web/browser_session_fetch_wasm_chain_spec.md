@@ -858,6 +858,39 @@ match result:
 
 </details>
 
+#### filters Uint8Array values into a new coerced array in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `255,7,8:4,255,7,8:3:7`
+
+3. Err
+   - Expected: "unexpected uint8 filter js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 260; b[1] = -1; b[2] = 7; b[3] = 8; var filtered = b.filter(function(v, i) { return i; }); filtered.toString() + ':' + b.toString() + ':' + filtered.length + ':' + filtered.at(1)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("255,7,8:4,255,7,8:3:7")
+    Err(err):
+        expect("unexpected uint8 filter js error: {err}").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -877,8 +910,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
