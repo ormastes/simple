@@ -72,3 +72,6 @@ dev-done
 - impl: Added `write_wm_modern_preview_html(path, theme)` and `wm_modern_preview_evidence_report(path, theme)` so the modern WM preview can be emitted as a browser-loadable HTML artifact for screenshot/manual GUI review.
 - verify: WM spec now writes `build/simple_wm_modern_preview.html`, verifies it exists through `rt_file_read_text`, checks preview markers, and checks the evidence report fields. Focused WM spec passed 5/5; focused Simple checks and `node --check` passed.
 - docs: Regenerated `doc/06_spec/unit/app/ui/web_wm_modern_shell_spec.md` after the preview artifact update; `find doc/06_spec -name '*_spec.spl' | wc -l` printed `0`.
+- impl: Fixed WM preview visual layering by keeping the animated desktop background at z-index 0 and explicit windows at z-index 20; added `visual_layering_ready` to the WM quality contract.
+- verify: Focused WM spec passed 5/5 after the layering regression assertion; Simple checks passed for `html.spl`, `wm_quality_contract.spl`, and `web_wm_modern_shell_spec.spl`; `node --check` passed for `wm.js` and `retained_renderer.js`.
+- evidence: Captured `build/simple_wm_modern_preview.png` from `build/simple_wm_modern_preview.html` at 1440x900 with a 1000ms animation settle wait; visual evidence report written to `doc/09_report/simple_wm_modern_preview_2026-06-02.md`.
