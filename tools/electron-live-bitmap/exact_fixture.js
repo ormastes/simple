@@ -12,12 +12,20 @@ const expectedWeightedChecksum = BigInt(process.env.ELECTRON_BITMAP_EXPECTED_WEI
 const expectedArgbPath = process.env.ELECTRON_BITMAP_EXPECTED_ARGB_PATH || "";
 const capturedArgbPath = process.env.ELECTRON_BITMAP_CAPTURED_ARGB_PATH || "";
 const proofPath = process.env.ELECTRON_BITMAP_PROOF_PATH || "";
+const htmlPath = process.env.ELECTRON_BITMAP_HTML_PATH || "";
 const scene = process.env.ELECTRON_BITMAP_SCENE || "wm-image-taskbar-command";
 let expectedArgb = null;
 
 
 function emit(key, value) {
   console.log(`${key}=${value}`);
+}
+
+function htmlFileFixtureHtml() {
+  const body = fs.readFileSync(htmlPath, "utf8");
+  const readyScript = "<script>window.__simpleExactBitmapReady=true;</script>";
+  if (body.includes("__simpleExactBitmapReady")) return body;
+  return `${body}\n${readyScript}`;
 }
 
 function exactFixtureHtml() {
@@ -361,6 +369,9 @@ html,body{margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden
 }
 
 function fixtureHtml() {
+  if (htmlPath) {
+    return htmlFileFixtureHtml();
+  }
   if (expectedArgbPath) {
     return expectedArgbCanvasHtml();
   }
@@ -684,19 +695,20 @@ async function main() {
       expected_weighted_checksum: expectedWeighted.toString(),
       mismatch_count: last.mismatches,
       frame_us: frameUs > 0 ? frameUs : 1,
+      html_path: htmlPath,
       captured_argb_path: capturedArgbPath,
       captured_argb_written: wroteCapturedArgb,
       blur_or_tolerance_used: false
     }));
   }
 
-  await win.close();
-  await app.quit();
-  process.exit(last.sum === expected && last.weighted === expectedWeighted && last.mismatches === 0 ? 0 : 2);
+  const exitCode = last.sum === expected && last.weighted === expectedWeighted && last.mismatches === 0 ? 0 : 2;
+  app.exit(exitCode);
+  process.exit(exitCode);
 }
 
 main().catch(async (err) => {
   console.error(err && err.stack ? err.stack : String(err));
-  try { await app.quit(); } catch (_) {}
+  try { app.exit(1); } catch (_) {}
   process.exit(1);
 });

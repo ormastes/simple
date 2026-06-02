@@ -1,0 +1,92 @@
+# Generate marker-free common.ui widget HTML and CPU SIMD Simple Web pixels for
+# the Electron generated-GUI parity evidence script.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+use common.ui.builder.{button, column, image, label, build_tree_with_title, with_icon}
+use common.ui.state.{init_state}
+use app.ui.render.widgets.{render_html_tree}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+
+fn env_or(key: text, fallback: text) -> text:
+    val value = rt_env_get(key)
+    if value == "":
+        return fallback
+    value
+
+fn checksum(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        sum = sum + pixels[i].to_i64()
+        i = i + 1
+    sum
+
+fn weighted_checksum(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        sum = sum + (pixels[i].to_i64() * (i.to_i64() + 1))
+        i = i + 1
+    sum
+
+fn distinct_colors(pixels: [u32]) -> i32:
+    var seen: [u32] = []
+    var i = 0
+    while i < pixels.len():
+        val c = pixels[i]
+        var found = false
+        var j = 0
+        while j < seen.len():
+            if seen[j] == c:
+                found = true
+            j = j + 1
+        if not found:
+            seen.push(c)
+        i = i + 1
+    seen.len()
+
+fn write_argb(path: text, width: i32, height: i32, pixels: [u32]) -> bool:
+    var json = "{\"width\":" + width.to_text() + ",\"height\":" + height.to_text() + ",\"format\":\"argb-u32\",\"producer\":\"simple-web-cpu-simd-generated-gui\",\"pixels\":["
+    var i = 0
+    while i < pixels.len():
+        if i > 0:
+            json = json + ","
+        json = json + pixels[i].to_i64().to_text()
+        i = i + 1
+    json = json + "]}"
+    rt_file_write_text(path, json)
+
+fn generated_gui_widget_html() -> text:
+    val hero = label("prod_gui_text", "AB CD")
+    val detail = label("prod_gui_detail", "EF")
+    val preview = image("prod_gui_image", "production-preview.png", "Production preview")
+    val action = with_icon(button("prod_gui_button", "RUN", "run_production_gui"), "image")
+    val root = column("prod_gui_root", [hero, detail, preview, action])
+    val tree = build_tree_with_title(root, "Production GUI Web Parity", "light")
+    val state = init_state(tree)
+    render_html_tree(state.tree.root_node(), state)
+
+fn main():
+    val width = env_or("ELECTRON_GENERATED_GUI_WIDTH", "96").to_int()
+    val height = env_or("ELECTRON_GENERATED_GUI_HEIGHT", "72").to_int()
+    val html_path = env_or("ELECTRON_GENERATED_GUI_HTML_PATH", "build/electron_generated_gui_web_parity_evidence/generated-gui.html")
+    val expected_argb_path = env_or("ELECTRON_GENERATED_GUI_EXPECTED_ARGB_PATH", "build/electron_generated_gui_web_parity_evidence/simple-cpu-simd-expected-argb.json")
+    val html = generated_gui_widget_html()
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, width, height, "cpu_simd")
+    val wrote_html = rt_file_write_text(html_path, html)
+    val wrote_argb = write_argb(expected_argb_path, width, height, pixels)
+    print "simple_status={if wrote_html and wrote_argb: \"pass\" else: \"fail\"}"
+    print "scene=generated-gui-widget-html"
+    print "width={width}"
+    print "height={height}"
+    print "html_path={html_path}"
+    print "expected_argb_path={expected_argb_path}"
+    print "pixel_count={pixels.len()}"
+    print "distinct_colors={distinct_colors(pixels)}"
+    print "checksum={checksum(pixels)}"
+    print "weighted_checksum={weighted_checksum(pixels)}"
+    print "blur_or_tolerance_used=false"
+
+main()

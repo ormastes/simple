@@ -25,9 +25,15 @@ first production slice.
   requires `tolerance_used=false`.
 - REQ-007: The system spec must fail on fixture marker use, empty framebuffer,
   low color diversity, CPU SIMD mismatch, Metal mismatch, or tolerance use.
+- REQ-008: The Electron/Web reference evidence path must load generated GUI
+  HTML directly into Electron, capture ARGB pixels, and compare against Simple
+  CPU SIMD expected ARGB without using the exact expected-bitmap canvas mode.
+- REQ-009: Electron/Web reference evidence must record pass/divergent/fail
+  status, mismatch count, checksums, weighted checksums, blur/tolerance policy,
+  generated HTML path, expected ARGB path, and captured ARGB path.
 
 ## Remaining Scope
 
-Electron/WebKit live reference capture, broader CSS fixture matrices, actual
-vectorized CPU SIMD proof, and Metal GPU-readback proof remain open for later
-acceptance slices.
+Electron/WebKit parity is now measured for generated GUI HTML and currently
+divergent. Broader CSS fixture matrices, actual vectorized CPU SIMD proof, and
+Metal GPU-readback proof remain open for later acceptance slices.

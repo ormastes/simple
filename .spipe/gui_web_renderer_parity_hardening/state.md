@@ -41,3 +41,4 @@ dev-done
 ## Log
 - dev: Created state file with 10 acceptance criteria (type: feature).
 - impl: Added first production backend-parity slice for marker-free generated GUI widget HTML.
+- impl: Added live Electron generated-GUI HTML capture evidence. Current result is divergent with exact mismatch accounting, not a fake pass.

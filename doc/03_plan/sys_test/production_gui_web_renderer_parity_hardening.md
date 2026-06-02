@@ -25,3 +25,25 @@ evidence for this slice.
 - Metal pixels match software exactly; on macOS the backend must resolve to
   `metal`, otherwise it may resolve to `software`.
 - `tolerance_used` is false.
+
+## Electron Generated-GUI Evidence
+
+Run the live Electron generated-GUI comparison:
+
+```bash
+sh scripts/check-electron-generated-gui-web-parity-evidence.shs
+```
+
+Recorded result on 2026-06-02:
+
+- status: `divergent`
+- reason: `pixel-mismatch`
+- mismatch count: `6912`
+- blur/tolerance used: `false`
+- generated HTML: `build/electron_generated_gui_web_parity_evidence/generated-gui.html`
+- Simple expected ARGB: `build/electron_generated_gui_web_parity_evidence/simple-cpu-simd-expected-argb.json`
+- Electron captured ARGB: `build/electron_generated_gui_web_parity_evidence/electron-captured-argb.json`
+- report: `doc/09_report/electron_generated_gui_web_parity_evidence_2026-06-02.md`
+
+This proves the live Electron comparison path exists and records exact pixel
+evidence. It also proves Electron parity is not complete for this fixture.

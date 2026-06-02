@@ -14,3 +14,6 @@
   processes for this first backend-parity slice.
 - NFR-006: Follow-on Electron/WebKit slices must record capture provenance,
   viewport, color format, tolerance policy, mismatch count, and artifact paths.
+- NFR-007: Electron generated-GUI evidence must distinguish `pass`,
+  `divergent`, `fail`, and `unavailable`; a divergent measured result is valid
+  diagnostic evidence but not completion of Electron parity.

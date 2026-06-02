@@ -27,6 +27,16 @@ bin/simple test/system/wm_compare/production_gui_web_renderer_parity_hardening_s
 
 Expected focused result: `4 examples, 0 failures`.
 
+## Electron Evidence Command
+
+```bash
+sh scripts/check-electron-generated-gui-web-parity-evidence.shs
+```
+
+Current focused result on 2026-06-02 is `divergent` with `6912` mismatching
+pixels and `blur_or_tolerance_used=false`. This is a measured live Electron
+reference gap, not an accepted parity pass.
+
 ## Notes
 
 The CLI documented `spipe-docgen` command is not present in this checkout, and

@@ -23,6 +23,9 @@ available only for existing fixture/corpus gates.
 
 ## Open Architecture Work
 
-Later slices must add a canonical manifest and live Electron/WebKit capture
-runner, then extend parity reports with CPU SIMD counter proof and Metal
-GPU-readback provenance.
+`scripts/check-electron-generated-gui-web-parity-evidence.shs` now provides the
+first live Electron generated-GUI capture lane. It writes generated GUI HTML and
+Simple CPU SIMD expected ARGB, asks Electron to render the HTML directly, then
+captures Electron ARGB and records exact mismatch evidence. Later slices must
+promote this into a canonical manifest covering more fixtures, then extend
+parity reports with CPU SIMD counter proof and Metal GPU-readback provenance.

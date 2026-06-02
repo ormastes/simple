@@ -16,10 +16,16 @@
 - Add generic image fallback rendering in the layout renderer.
 - Add executable SPipe system spec for software, CPU SIMD, and Metal exact
   backend parity.
+- Add live Electron generated-GUI HTML evidence that compares Electron capture
+  pixels against Simple CPU SIMD expected pixels and records the current
+  divergence.
 
 ## Next Agent Tasks
 
-- Add live Electron/WebKit capture manifest and exact pixel runner.
+- Convert the live Electron generated-GUI divergence into passing parity by
+  aligning viewport/base offset, CSS defaults, image replacement behavior, and
+  text rasterization policy.
+- Add a canonical Electron/WebKit capture manifest and exact pixel runner.
 - Add CPU SIMD counter evidence to the parity report.
 - Add Metal GPU-readback provenance to reject CPU mirror fallback.
 - Expand CSS/layout matrix for width, height, margin, padding, border, flex,
