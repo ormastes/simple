@@ -3113,6 +3113,25 @@ expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.unref(); 
 
 </details>
 
+#### exposes bounded Node timer primitive conversion
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Symbol.toPrimitive")).to_equal("Symbol.toPrimitive")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h.valueOf + ':' + typeof h.toString + ':' + typeof h[Symbol.toPrimitive]")).to_equal("function:function:function")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.valueOf() === h.id")).to_equal("true")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.toString()")).to_equal("1")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h[Symbol.toPrimitive]('number') === h.id")).to_equal("true")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); require('node:timers').clearTimeout(h.valueOf()); h.closed + ':' + h.clearedBy")).to_equal("true:clearTimeout")
+```
+
+</details>
+
 #### closes bounded Node timer handles
 
 <details>
@@ -4177,8 +4196,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 268 |
-| Active scenarios | 268 |
+| Total scenarios | 269 |
+| Active scenarios | 269 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
