@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Browser Session Fetch Wasm Chain Specification](unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md) | Auto-generated | N/A | 26 | 0% | 0 lines |
+| [Browser Session Fetch Wasm Chain Specification](unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md) | Auto-generated | N/A | 27 | 0% | 0 lines |
 

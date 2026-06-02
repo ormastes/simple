@@ -990,6 +990,39 @@ match result:
 
 </details>
 
+#### sorts Uint8Array values with comparator callbacks in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `1,4,255,7:1,4,255,7:1:7`
+
+3. Err
+   - Expected: "unexpected uint8 comparator sort js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; var returned = b.sort(function(x, y) { return false; }); returned.toString() + ':' + b.toString() + ':' + returned.at(0) + ':' + returned.at(3)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("1,4,255,7:1,4,255,7:1:7")
+    Err(err):
+        expect("unexpected uint8 comparator sort js error: {err}").to_equal("")
+```
+
+</details>
+
 #### iterates Uint8Array keys and values in browser scripts
 
 1. var session = BrowserSession new
@@ -1141,8 +1174,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 26 |
-| Active scenarios | 26 |
+| Total scenarios | 27 |
+| Active scenarios | 27 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
