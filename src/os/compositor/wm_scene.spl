@@ -26,6 +26,9 @@ struct WmSceneVisualQualityReport:
     theme_configured: bool
     round_scrollbars: bool
     round_icon_converter: bool
+    titlebar_input_ready: bool
+    traffic_controls_ready: bool
+    animated_background_ready: bool
     contrast_ratio_x100: i64
     color_checked: bool
     bounded_layout: bool
@@ -275,6 +278,9 @@ fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityRep
     val theme_configured = _scene_theme_configured(html, config)
     val round_scrollbars = _scene_round_scrollbars_configured(html, config)
     val round_icon_converter = _scene_round_icon_converter_configured(html)
+    val titlebar_input_ready = _scene_titlebar_input_configured(html)
+    val traffic_controls_ready = _scene_traffic_controls_configured(html)
+    val animated_background_ready = _scene_animated_background_configured(html)
     val contrast_ratio_x100 = _scene_contrast_ratio_x100(_scene_background_color(scene), 0xFFFFFFFFu32)
     val color_checked = contrast_ratio_x100 >= 450 and html.contains("color:white")
     var bounded_layout = scene.width > 0 and scene.height > 0
@@ -324,12 +330,15 @@ fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityRep
     val has_all_motion_affordances = has_control_center and has_desktop_widgets and has_window_overview and has_snap_preview
     val motion_can_disable = has_all_motion_affordances and html.contains("data-motion-can-disable='true'") and html.contains("body[data-motion-mode='off']") and html.contains("animation:none!important")
     val reduced_motion_duration_ms = if has_all_motion_affordances and html.contains("data-reduced-motion-duration-ms='80'") and html.contains("animation-duration:80ms"): 80 else: 0
-    val passed = theme_configured and round_scrollbars and round_icon_converter and color_checked and bounded_layout and translucent_surfaces and rounded_surface_count >= 4 and max_control_center_width_px <= 320 and max_desktop_widget_width_px <= 260 and min_overview_card_width_px >= 180 and min_touch_target_height_px >= 44 and motion_can_disable and reduced_motion_duration_ms == 80
+    val passed = theme_configured and round_scrollbars and round_icon_converter and titlebar_input_ready and traffic_controls_ready and animated_background_ready and color_checked and bounded_layout and translucent_surfaces and rounded_surface_count >= 4 and max_control_center_width_px <= 320 and max_desktop_widget_width_px <= 260 and min_overview_card_width_px >= 180 and min_touch_target_height_px >= 44 and motion_can_disable and reduced_motion_duration_ms == 80
     WmSceneVisualQualityReport(
         passed: passed,
         theme_configured: theme_configured,
         round_scrollbars: round_scrollbars,
         round_icon_converter: round_icon_converter,
+        titlebar_input_ready: titlebar_input_ready,
+        traffic_controls_ready: traffic_controls_ready,
+        animated_background_ready: animated_background_ready,
         contrast_ratio_x100: contrast_ratio_x100,
         color_checked: color_checked,
         bounded_layout: bounded_layout,
@@ -350,9 +359,9 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
     var body = ""
     for elem in scene.elements:
         if elem.kind == "desktop_chrome":
-            body = body + "<div class='desktop' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
+            body = body + "<div class='desktop' data-motion-scope='desktop-background' data-motion-mode='standard' data-reduced-motion-duration-ms='80' data-motion-can-disable='true' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
         elif elem.kind == "decoration":
-            body = body + "<div class='bar' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'><span class='traffic traffic-close'></span><span class='traffic traffic-min'></span><span class='traffic traffic-max'></span>" + _scene_round_icon_html("bar-icon", elem.text) + "<span class='bar-title'>{elem.text}</span><span class='bar-command'>{elem.text}</span><span class='bar-context'>workspace</span></div>"
+            body = body + "<div class='bar' role='toolbar' aria-label='Window titlebar' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'><button class='traffic traffic-close' data-window-control='close' aria-label='Close window'></button><button class='traffic traffic-min' data-window-control='minimize' aria-label='Minimize window'></button><button class='traffic traffic-max' data-window-control='maximize' aria-label='Maximize window'></button>" + _scene_round_icon_html("bar-icon", elem.text) + "<span class='bar-title'>{elem.text}</span><input class='bar-command-input' aria-label='Window command or location' value='{elem.text}'><span class='bar-context'>workspace</span></div>"
         elif elem.kind == "glass_panel":
             body = body + "<div class='glass' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
         elif elem.kind == "motion_window":
@@ -384,11 +393,11 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
             body = body + "<div class='snap-preview active' data-snap-zone='{elem.text}' data-motion-scope='snap-preview' data-motion-mode='standard' data-reduced-motion-duration-ms='80' data-motion-can-disable='true' aria-hidden='true' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
     "<!DOCTYPE html><html><head><style>" +
     "body{{margin:0;width:" + w + "px;height:" + h + "px;background:#0f172a}}" +
-    ".desktop{{position:absolute;background:radial-gradient(circle at 18% 22%,rgba(37,99,235,.28),transparent 28%),radial-gradient(circle at 78% 72%,rgba(20,184,166,.18),transparent 26%),#0f172a}}" +
+    ".desktop{{position:absolute;overflow:hidden;background:#0f172a}}.desktop::before{{content:'';position:absolute;inset:-12%;background:radial-gradient(circle at 18% 22%,rgba(37,99,235,.28),transparent 28%),radial-gradient(circle at 78% 72%,rgba(20,184,166,.18),transparent 26%),radial-gradient(circle at 46% 48%,rgba(255,255,255,.08),transparent 34%);animation:wm-bg-drift 24000ms ease-in-out infinite alternate}}" +
     ".glass{{position:absolute;background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.16);border-top:0;border-radius:0 0 18px 18px;backdrop-filter:blur(18px) saturate(170%);box-shadow:0 22px 60px rgba(0,0,0,.34)}}" +
     ".bar{{position:absolute;display:grid;grid-template-columns:12px 12px 12px 18px minmax(64px,.8fr) minmax(96px,1fr) auto;gap:7px;align-items:center;background:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,.07));color:white;font:600 12px system-ui;padding:0 12px;box-sizing:border-box;overflow:hidden;border:1px solid rgba(255,255,255,.18);border-bottom:0;border-radius:18px 18px 0 0;backdrop-filter:blur(20px) saturate(170%)}}" +
-    ".traffic{{width:12px;height:12px;border-radius:999px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.18),0 1px 4px rgba(0,0,0,.24)}}.traffic-close{{background:#ff5f57}}.traffic-min{{background:#ffbd2e}}.traffic-max{{background:#28c840}}" +
-    ".bar-icon{{width:18px;height:18px;font-size:10px}}.bar-title{{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}.bar-command{{height:22px;border-radius:999px;padding:0 10px;display:flex;align-items:center;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#dbeafe;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}.bar-context{{height:22px;border-radius:999px;padding:0 10px;display:flex;align-items:center;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.10);color:#cbd5e1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
+    ".traffic{{position:relative;width:12px;height:12px;border:0;padding:0;border-radius:999px;color:transparent;cursor:pointer;box-shadow:inset 0 0 0 1px rgba(0,0,0,.18),0 1px 4px rgba(0,0,0,.24);transition:transform 120ms ease,filter 120ms ease}}.traffic::before{{content:'';position:absolute;inset:-8px;border-radius:999px}}.traffic:focus-visible{{outline:2px solid rgba(96,165,250,.82);outline-offset:3px}}.traffic:hover{{transform:scale(1.08);filter:brightness(1.06)}}.traffic-close{{background:#ff5f57}}.traffic-min{{background:#ffbd2e}}.traffic-max{{background:#28c840}}" +
+    ".bar-icon{{width:18px;height:18px;font-size:10px}}.bar-title{{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}.bar-command-input{{min-width:140px;width:100%;height:22px;border-radius:999px;padding:0 10px;box-sizing:border-box;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#dbeafe;font:600 11px system-ui;outline:none;overflow:hidden;text-overflow:ellipsis}}.bar-command-input:focus{{border-color:rgba(96,165,250,.72);box-shadow:0 0 0 3px rgba(96,165,250,.18)}}.bar-context{{height:22px;border-radius:999px;padding:0 10px;display:flex;align-items:center;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.10);color:#cbd5e1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
     ".round-icon{{border-radius:999px;display:inline-grid;place-items:center;overflow:hidden;background:linear-gradient(135deg,#2563eb,rgba(255,255,255,.22));color:white;font-weight:800;box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 2px 8px rgba(0,0,0,.22);clip-path:circle(50% at 50% 50%)}}.round-icon.icon-normalized-square .icon-image-placeholder{{width:100%;height:100%;border-radius:inherit;background:linear-gradient(135deg,rgba(255,255,255,.28),rgba(37,99,235,.72));object-fit:cover}}.round-icon .icon-glyph{{line-height:1}}" +
     ".wm-scrollable,.glass,.window-overview,.control-center{{scrollbar-width:thin;scrollbar-color:rgba(96,165,250,.58) transparent}}.wm-scrollable::-webkit-scrollbar,.glass::-webkit-scrollbar,.window-overview::-webkit-scrollbar,.control-center::-webkit-scrollbar{{width:10px;height:10px}}.wm-scrollable::-webkit-scrollbar-track,.glass::-webkit-scrollbar-track,.window-overview::-webkit-scrollbar-track,.control-center::-webkit-scrollbar-track{{background:transparent}}.wm-scrollable::-webkit-scrollbar-thumb,.glass::-webkit-scrollbar-thumb,.window-overview::-webkit-scrollbar-thumb,.control-center::-webkit-scrollbar-thumb{{background:linear-gradient(180deg,rgba(96,165,250,.62),rgba(255,255,255,.18));border:3px solid transparent;background-clip:padding-box;border-radius:999px}}.wm-scrollable::-webkit-scrollbar-thumb:hover{{background:#2563eb}}" +
     ".motion-window{{position:absolute;border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.16);backdrop-filter:blur(18px) saturate(170%);box-shadow:0 22px 60px rgba(0,0,0,.34);overflow:hidden}}.motion-title{{position:absolute;left:14px;top:10px;color:white;font:600 12px system-ui}}.wm-window-opening,.wm-window-restoring{{opacity:1}}.wm-window-closing,.wm-window-minimizing{{opacity:.72}}.wm-window-focused{{box-shadow:0 24px 70px rgba(37,99,235,.32)}}" +
@@ -404,9 +413,9 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
     ".control-center{{position:absolute;display:grid;grid-template-columns:1fr 1fr;gap:8px;max-width:320px;border-radius:18px;background:linear-gradient(180deg,rgba(15,23,42,.88),rgba(15,23,42,.68));border:1px solid rgba(255,255,255,.16);box-shadow:0 22px 70px rgba(0,0,0,.36);backdrop-filter:blur(24px) saturate(170%);padding:12px;box-sizing:border-box;animation:wm-control-in 180ms cubic-bezier(.2,.8,.2,1) both}}.control-center button{{min-height:44px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:rgba(255,255,255,.08);color:white;font:600 11px system-ui}}" +
     ".window-overview{{position:absolute;border-radius:22px;background:rgba(2,6,23,.66);border:1px solid rgba(255,255,255,.14);box-shadow:0 30px 90px rgba(0,0,0,.42);backdrop-filter:blur(28px) saturate(160%);padding:18px;box-sizing:border-box;animation:wm-overview-in 200ms cubic-bezier(.2,.8,.2,1) both}}.overview-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}}.overview-card{{min-height:112px;border:1px solid rgba(255,255,255,.16);border-radius:16px;background:linear-gradient(180deg,rgba(255,255,255,.14),rgba(255,255,255,.06));color:white;text-align:left;padding:12px;display:grid;gap:8px}}.overview-card.active{{box-shadow:0 0 0 2px rgba(37,99,235,.55)}}.overview-icon{{width:28px;height:28px;border-radius:999px;display:grid;place-items:center;background:#2563eb}}.overview-title,.overview-meta{{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
     ".snap-preview{{position:absolute;border-radius:20px;border:1px solid rgba(96,165,250,.72);background:rgba(37,99,235,.18);box-shadow:0 0 0 1px rgba(255,255,255,.10) inset,0 18px 48px rgba(37,99,235,.22);pointer-events:none;animation:wm-snap-pulse 900ms ease-in-out infinite}}" +
-    "@keyframes wm-widget-float{{from{{opacity:0;transform:translateY(10px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-control-in{{from{{opacity:0;transform:translateY(-8px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-overview-in{{from{{opacity:0;transform:scale(.98)}}to{{opacity:1;transform:scale(1)}}}}@keyframes wm-snap-pulse{{0%,100%{{opacity:.76}}50%{{opacity:1}}}}" +
-    "@media (prefers-reduced-motion: reduce){{.desktop-widgets,.control-center,.window-overview,.snap-preview{{animation-duration:80ms;animation-iteration-count:1}}}}" +
-    "body[data-motion-mode='reduced'] .desktop-widgets,body[data-motion-mode='reduced'] .control-center,body[data-motion-mode='reduced'] .window-overview,body[data-motion-mode='reduced'] .snap-preview{{animation-duration:80ms;animation-iteration-count:1}}body[data-motion-mode='off'] .desktop-widgets,body[data-motion-mode='off'] .control-center,body[data-motion-mode='off'] .window-overview,body[data-motion-mode='off'] .snap-preview{{animation:none!important;transition:none!important}}" +
+    "@keyframes wm-bg-drift{{from{{transform:translate3d(-1.5%,-1%,0) scale(1)}}to{{transform:translate3d(1.5%,1%,0) scale(1.03)}}}}@keyframes wm-widget-float{{from{{opacity:0;transform:translateY(10px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-control-in{{from{{opacity:0;transform:translateY(-8px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-overview-in{{from{{opacity:0;transform:scale(.98)}}to{{opacity:1;transform:scale(1)}}}}@keyframes wm-snap-pulse{{0%,100%{{opacity:.76}}50%{{opacity:1}}}}" +
+    "@media (prefers-reduced-motion: reduce){{.desktop::before,.desktop-widgets,.control-center,.window-overview,.snap-preview{{animation-duration:80ms;animation-iteration-count:1}}}}" +
+    "body[data-motion-mode='reduced'] .desktop::before,body[data-motion-mode='reduced'] .desktop-widgets,body[data-motion-mode='reduced'] .control-center,body[data-motion-mode='reduced'] .window-overview,body[data-motion-mode='reduced'] .snap-preview{{animation-duration:80ms;animation-iteration-count:1}}body[data-motion-mode='off'] .desktop::before,body[data-motion-mode='off'] .desktop-widgets,body[data-motion-mode='off'] .control-center,body[data-motion-mode='off'] .window-overview,body[data-motion-mode='off'] .snap-preview{{animation:none!important;transition:none!important}}" +
     "</style></head><body data-modern-wm='true' data-theme-configured='true' data-window-radius-px='{config.window_radius_px}' data-widget-radius-px='{config.widget_radius_px}' data-taskbar-radius-px='{config.taskbar_radius_px}' data-control-radius-px='{config.control_radius_px}' data-icon-radius-px='{config.icon_radius_px}' data-scrollbar-width-px='{config.scrollbar_width_px}' data-scrollbar-thumb-radius-px='{config.scrollbar_thumb_radius_px}' data-scrollbar-thumb-border-px='{config.scrollbar_thumb_border_px}' data-blur-px='{config.blur_px}' data-titlebar-height-px='{config.titlebar_height_px}' data-command-lane-height-px='{config.command_lane_height_px}' data-taskbar-height-px='{config.taskbar_height_px}' data-desktop-layer-z='{config.desktop_layer_z}' data-snap-layer-z='{config.snap_layer_z}' data-window-layer-z='{config.window_layer_z}' data-overlay-layer-z='{config.overlay_layer_z}' data-standard-motion-ms='{config.standard_motion_ms}' data-reduced-motion-ms='{config.reduced_motion_ms}' data-motion-mode='standard' data-motion-can-disable='{config.can_disable_motion}' data-width='" + w + "' data-height='" + h + "'>" +
     body + "</body></html>"
 
@@ -516,6 +525,38 @@ fn _scene_round_icon_converter_configured(html: text) -> bool:
     html.contains("icon-image-placeholder") and
     html.contains("icon-glyph") and
     html.contains("clip-path:circle(50% at 50% 50%)")
+
+fn _scene_titlebar_input_configured(html: text) -> bool:
+    html.contains("role='toolbar' aria-label='Window titlebar'") and
+    html.contains("<input class='bar-command-input'") and
+    html.contains("aria-label='Window command or location'") and
+    html.contains(".bar-command-input{{min-width:140px") and
+    html.contains("height:22px") and
+    html.contains(".bar-command-input:focus") and
+    html.contains("box-shadow:0 0 0 3px")
+
+fn _scene_traffic_controls_configured(html: text) -> bool:
+    html.contains("<button class='traffic traffic-close'") and
+    html.contains("data-window-control='close'") and
+    html.contains("aria-label='Close window'") and
+    html.contains("<button class='traffic traffic-min'") and
+    html.contains("data-window-control='minimize'") and
+    html.contains("aria-label='Minimize window'") and
+    html.contains("<button class='traffic traffic-max'") and
+    html.contains("data-window-control='maximize'") and
+    html.contains("aria-label='Maximize window'") and
+    html.contains(".traffic::before{{content:'';position:absolute;inset:-8px") and
+    html.contains(".traffic:focus-visible") and
+    html.contains(".traffic:hover{{transform:scale(1.08)")
+
+fn _scene_animated_background_configured(html: text) -> bool:
+    html.contains("data-motion-scope='desktop-background'") and
+    html.contains(".desktop::before") and
+    html.contains("@keyframes wm-bg-drift") and
+    html.contains("animation:wm-bg-drift") and
+    html.contains("body[data-motion-mode='reduced'] .desktop::before") and
+    html.contains("body[data-motion-mode='off'] .desktop::before") and
+    html.contains("animation:none!important")
 
 fn _scene_contrast_ratio_x100(a: u32, b: u32) -> i64:
     val la = _scene_relative_luminance_x1000(a)

@@ -324,7 +324,7 @@ expect(has_width)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -347,10 +347,22 @@ expect(html).to_contain("data-window-layer-z='20'")
 expect(html).to_contain("data-overlay-layer-z='11000'")
 expect(html).to_contain("data-standard-motion-ms='240'")
 expect(html).to_contain("data-reduced-motion-ms='80'")
-expect(html).to_contain("traffic-close")
-expect(html).to_contain("traffic-min")
-expect(html).to_contain("traffic-max")
-expect(html).to_contain("bar-command")
+expect(html).to_contain("<button class='traffic traffic-close'")
+expect(html).to_contain("data-window-control='close'")
+expect(html).to_contain("aria-label='Close window'")
+expect(html).to_contain("<button class='traffic traffic-min'")
+expect(html).to_contain("data-window-control='minimize'")
+expect(html).to_contain("aria-label='Minimize window'")
+expect(html).to_contain("<button class='traffic traffic-max'")
+expect(html).to_contain("data-window-control='maximize'")
+expect(html).to_contain("aria-label='Maximize window'")
+expect(html).to_contain(".traffic::before")
+expect(html).to_contain("inset:-8px")
+expect(html).to_contain(".traffic:focus-visible")
+expect(html).to_contain("<input class='bar-command-input'")
+expect(html).to_contain("aria-label='Window command or location'")
+expect(html).to_contain(".bar-command-input{{min-width:140px")
+expect(html).to_contain(".bar-command-input:focus")
 expect(html).to_contain("bar-context")
 expect(html).to_contain("border-radius:18px 18px 0 0")
 expect(html).to_contain("border-radius:999px")
@@ -480,7 +492,7 @@ expect_not(html.contains("Hidden"))
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 94 lines folded for reproduction.
+Runnable source: 104 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -551,11 +563,19 @@ expect(html).to_contain("icon-normalized-square")
 expect(html).to_contain("icon-glyph-to-round")
 expect(html).to_contain("icon-image-placeholder")
 expect(html).to_contain("clip-path:circle(50% at 50% 50%)")
-expect(html).to_contain("traffic-close")
-expect(html).to_contain("bar-command")
+expect(html).to_contain("<button class='traffic traffic-close'")
+expect(html).to_contain("data-window-control='close'")
+expect(html).to_contain("data-window-control='minimize'")
+expect(html).to_contain("data-window-control='maximize'")
+expect(html).to_contain("<input class='bar-command-input'")
+expect(html).to_contain("aria-label='Window command or location'")
 expect(html).to_contain("aria-label='Desktop widgets'")
 expect(html).to_contain("class='desktop-widget'")
 expect(html).to_contain("aria-label='WM control center'")
+expect(html).to_contain("data-motion-scope='desktop-background'")
+expect(html).to_contain(".desktop::before")
+expect(html).to_contain("@keyframes wm-bg-drift")
+expect(html).to_contain("animation:wm-bg-drift")
 expect(html).to_contain("data-motion-scope='control-center'")
 expect(html).to_contain("data-motion-choice='standard'")
 expect(html).to_contain("data-motion-choice='reduced'")
@@ -575,7 +595,9 @@ expect(html).to_contain("@keyframes wm-overview-in")
 expect(html).to_contain("@keyframes wm-snap-pulse")
 expect(html).to_contain("@media (prefers-reduced-motion: reduce)")
 expect(html).to_contain("body[data-motion-mode='reduced']")
+expect(html).to_contain("body[data-motion-mode='reduced'] .desktop::before")
 expect(html).to_contain("body[data-motion-mode='off']")
+expect(html).to_contain("body[data-motion-mode='off'] .desktop::before")
 expect(html).to_contain("animation:none!important")
 expect(html).to_contain("repeat(auto-fit,minmax(180px,1fr))")
 ```
@@ -635,7 +657,7 @@ expect(bounded_affordances).to_equal(4)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -651,6 +673,9 @@ expect(report.passed)
 expect(report.theme_configured)
 expect(report.round_scrollbars)
 expect(report.round_icon_converter)
+expect(report.titlebar_input_ready)
+expect(report.traffic_controls_ready)
+expect(report.animated_background_ready)
 expect(report.color_checked)
 expect(report.contrast_ratio_x100).to_be_greater_than(449)
 expect(report.bounded_layout)
@@ -843,6 +868,53 @@ expect(report.min_overview_card_width_px).to_equal(120)
 
 </details>
 
+#### fails visual quality when titlebar command chrome is missing
+
+1. SceneElement
+
+2. SceneElement
+
+3. SceneElement
+
+4. SceneElement
+
+5. SceneElement
+
+6. expect not
+
+7. expect not
+
+8. expect not
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val scene = WmSceneSpec(
+    name: "missing_titlebar_chrome_scene",
+    width: 900,
+    height: 640,
+    elements: [
+        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: 900, h: 640, color: 0xFF101418u32, text: ""),
+        SceneElement(kind: "control_center", x: 520, y: 60, w: 280, h: 180, color: 0xDD111827u32, text: "controls"),
+        SceneElement(kind: "desktop_widgets", x: 40, y: 70, w: 220, h: 140, color: 0xCC111827u32, text: "widgets"),
+        SceneElement(kind: "window_overview", x: 340, y: 120, w: 220, h: 120, color: 0xDD020617u32, text: "overview"),
+        SceneElement(kind: "snap_preview", x: 620, y: 60, w: 160, h: 180, color: 0x552563EBu32, text: "right")
+    ]
+)
+val report = wm_scene_visual_quality_report(scene)
+
+expect_not(report.passed)
+expect_not(report.titlebar_input_ready)
+expect_not(report.traffic_controls_ready)
+```
+
+</details>
+
 ### WmScene — lifecycle motion projection
 
 #### projects host-neutral lifecycle motion classes into inspectable HTML
@@ -913,8 +985,9 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 29 |
-| Active scenarios | 29 |
+| Total scenarios | 30 |
+| Active scenarios | 30 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+

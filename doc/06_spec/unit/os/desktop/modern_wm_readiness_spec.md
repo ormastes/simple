@@ -24,7 +24,7 @@ Verifies one combined readiness report for the modern Web WM, SimpleOS
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -41,6 +41,9 @@ expect(report.os_render_quality_ready)
 expect(report.os_render_theme_configured)
 expect(report.os_render_round_scrollbars)
 expect(report.os_render_round_icon_converter)
+expect(report.os_render_titlebar_input_ready)
+expect(report.os_render_traffic_controls_ready)
+expect(report.os_render_animated_background_ready)
 expect(report.os_render_contrast_ratio_x100).to_be_greater_than(449)
 expect(report.os_render_bounded_layout)
 expect(report.os_render_touch_target_min_height_px).to_equal(44)
@@ -80,7 +83,7 @@ expect(report.notes[0]).to_equal("modern WM readiness passed")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -98,6 +101,9 @@ expect(summary).to_contain("os_render_quality=true")
 expect(summary).to_contain("os_render_theme_configured=true")
 expect(summary).to_contain("os_render_round_scrollbars=true")
 expect(summary).to_contain("os_render_round_icon_converter=true")
+expect(summary).to_contain("os_render_titlebar_input=true")
+expect(summary).to_contain("os_render_traffic_controls=true")
+expect(summary).to_contain("os_render_animated_background=true")
 expect(summary).to_contain("os_render_contrast_ratio_x100=")
 expect(summary).to_contain("os_render_bounded_layout=true")
 expect(summary).to_contain("os_render_touch_target_min=44px")
@@ -139,3 +145,4 @@ expect(summary).to_contain("control_center=true")
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
