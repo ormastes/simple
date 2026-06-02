@@ -32,7 +32,7 @@ expect(gui_linux_smf_dynlib_e2e_probe_command(paths)).to_contain("SIMPLE_GUI_DYN
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -53,6 +53,8 @@ expect(gui_linux_smf_dynlib_e2e_accepts_probe_row(good.replace("samples=128", "s
 expect(gui_linux_smf_dynlib_e2e_accepts_probe_row(good.replace("expected_samples=128", "expected_samples=64"))).to_equal(false)
 expect(gui_linux_smf_dynlib_e2e_accepts_probe_row(good.replace("threshold_us=1000", "threshold_us=5000"))).to_equal(false)
 expect(gui_linux_smf_dynlib_e2e_accepts_probe_row(good.replace("p99_us=1", "p99_us=1000"))).to_equal(false)
+expect(gui_linux_smf_dynlib_e2e_accepts_probe_row(good.replace("p99_us=1", "p99_us=abc"))).to_equal(false)
+expect(gui_linux_smf_dynlib_e2e_probe_reject_reason(good.replace("p99_us=1", "p99_us=abc"))).to_equal("bad-p99-token")
 expect(gui_linux_smf_dynlib_e2e_accepts_probe_row(good + " p99_us=1")).to_equal(false)
 ```
 
