@@ -792,6 +792,39 @@ match result:
 
 </details>
 
+#### dispatches remaining Uint8Array prototype helpers with call and apply in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `1,4,255,7,9:undefined:2:7:0,1:0=1,1=4`
+
+3. Err
+   - Expected: "unexpected uint8 remaining prototype helper dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var dst = new Uint8Array(5); dst[0] = 1; dst[4] = 9; var src = new Uint8Array(3); src[0] = 260; src[1] = -1; src[2] = 7; var setRet = Uint8Array.prototype.set.call(dst, src, 1); var last = Uint8Array.prototype.lastIndexOf.call(dst, 255); var str = Uint8Array.prototype.toString.call(dst); var at = Uint8Array.prototype.at.apply(dst, [-2]); var keys = Uint8Array.prototype.keys.call(dst); var k0 = keys.next(); var k1 = keys.next(); var entries = Uint8Array.prototype.entries.apply(dst, []); var e0 = entries.next(); var e1 = entries.next(); str + ':' + setRet + ':' + last + ':' + at + ':' + k0.value + ',' + k1.value + ':' + e0.value[0] + '=' + e0.value[1] + ',' + e1.value[0] + '=' + e1.value[1]")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("1,4,255,7,9:undefined:2:7:0,1:0=1,1=4")
+    Err(err):
+        expect("unexpected uint8 remaining prototype helper dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### checks Uint8Array values with callback predicates in browser scripts
 
 1. var session = BrowserSession new
@@ -2164,8 +2197,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 57 |
-| Active scenarios | 57 |
+| Total scenarios | 58 |
+| Active scenarios | 58 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
