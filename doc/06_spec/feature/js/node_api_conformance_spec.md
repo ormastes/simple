@@ -2578,7 +2578,7 @@ expect(_eval_before_after_timer_drain("var timerValue = 0; var id = setImmediate
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2586,6 +2586,7 @@ expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h"))
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h.ref")).to_equal("function")
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h.refresh")).to_equal("function")
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.active + ':' + h.closed")).to_equal("true:false")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.fired + ':' + h.fireCount")).to_equal("false:0")
 expect(_eval_str("var h = require('timers').setInterval(() => {}, 5); h.repeat")).to_equal("true")
 ```
 
@@ -2634,6 +2635,21 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_before_after_timer_drain("var timerValue = 0; var h = require('timers').setTimeout(() => { timerValue = 11; }, 0); h.close(); timerValue", "timerValue", 0)).to_equal("0:0:0")
+```
+
+</details>
+
+#### tracks bounded timer handle fire state during drains
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_before_after_timer_drain("var h = require('timers').setTimeout(() => {}, 0); h.active + ':' + h.fired + ':' + h.fireCount", "h.active + ':' + h.fired + ':' + h.fireCount", 0)).to_equal("true:false:0:1:false:true:1")
+expect(_eval_before_after_two_timer_drains("var h = require('timers').setInterval(() => {}, 1); h.fireCount", "h.active + ':' + h.fired + ':' + h.fireCount", 1, 2)).to_equal("0:1:true:true:1:1:true:true:2")
 ```
 
 </details>
@@ -3621,8 +3637,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 235 |
-| Active scenarios | 235 |
+| Total scenarios | 236 |
+| Active scenarios | 236 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
