@@ -428,8 +428,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   delivery on terminal request actions. Bounded request state now distinguishes
   initial, normally ended, and aborted/destroyed lifecycle flags, and terminal
   requests reject later writes deterministically. Bounded request headers reject
-  mutation after flushed, ended, or aborted state. Real request streams,
-  responses, broader callbacks, and host network I/O remain open.
+  mutation after flushed, ended, or aborted state, and terminal requests reject
+  later header flushes deterministically. Real request streams, responses,
+  broader callbacks, and host network I/O remain open.
   Bounded request callback delivery now invokes the supplied callback on
   `end()` with deterministic response metadata, and request-side `response`
   listener delivery now emits the same bounded response metadata on `end()`.
@@ -2841,3 +2842,23 @@ passes `246/246`, BrowserSession fetch/WASM and native WASM host regressions
 remain `36/36` and `107/107`, and the broad `src/lib` check passed with the
 existing `447` warning profile. Real request streams, response streaming,
 broader event-loop ordering, and host network I/O remain open.
+
+CommonJS/Node bounded HTTP terminal-flush continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+
+Bounded `http.request`/`https.request` header flushing now rejects
+deterministically after terminal request states. `flushHeaders()` after `end()`
+records `headerFlushRejected=true` with `headerFlushRejectReason=request-ended`;
+`flushHeaders()` after `abort()` records `request-aborted`; and a late rejected
+flush does not rewrite the earlier `headersFlushed` or `flushedHeaderCount`
+state. Focused checks passed, the Node API conformance suite passes `247/247`,
+BrowserSession fetch/WASM and native WASM host regressions remain `36/36` and
+`107/107`, and the broad `src/lib` check passed with the existing `447` warning
+profile. Real request streams, response streaming, broader event-loop ordering,
+and host network I/O remain open.

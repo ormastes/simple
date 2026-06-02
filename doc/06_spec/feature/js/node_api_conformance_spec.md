@@ -1945,6 +1945,23 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var req = require(
 
 </details>
 
+#### rejects bounded http header flush after terminal state
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.headerFlushRejected + ':' + req.headerFlushRejectReason")).to_equal("false:")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.end(); req.flushHeaders(); req.headersFlushed + ':' + req.headerFlushRejected + ':' + req.headerFlushRejectReason")).to_equal("false:true:request-ended")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.abort(); req.flushHeaders(); req.headersFlushed + ':' + req.headerFlushRejected + ':' + req.headerFlushRejectReason")).to_equal("false:true:request-aborted")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.flushHeaders(); req.end(); req.flushHeaders(); req.flushedHeaderCount + ':' + req.headerFlushRejectReason")).to_equal("1:request-ended")
+```
+
+</details>
+
 #### rejects bounded http header mutation after sealed request state
 
 <details>
@@ -3803,8 +3820,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 246 |
-| Active scenarios | 246 |
+| Total scenarios | 247 |
+| Active scenarios | 247 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
