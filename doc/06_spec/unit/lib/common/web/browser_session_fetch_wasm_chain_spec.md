@@ -924,6 +924,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array prototype forEach with call and apply in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `532:0=4;1=255;2=7;:undefined:undefined`
+
+3. Err
+   - Expected: "unexpected uint8 prototype forEach dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(3); b[0] = 260; b[1] = -1; b[2] = 7; var total = 0; var seen = ''; var ret1 = Uint8Array.prototype.forEach.call(b, function(v, i, arr) { total = total + v; seen = seen + i + '=' + arr.at(i) + ';'; }); var ret2 = Uint8Array.prototype.forEach.apply(b, [function(v, i, arr) { total = total + arr.at(i); }]); total + ':' + seen + ':' + ret1 + ':' + ret2")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("532:0=4;1=255;2=7;:undefined:undefined")
+    Err(err):
+        expect("unexpected uint8 prototype forEach dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### finds Uint8Array values with callback predicates in browser scripts
 
 1. var session = BrowserSession new
@@ -2098,8 +2131,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 55 |
-| Active scenarios | 55 |
+| Total scenarios | 56 |
+| Active scenarios | 56 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
