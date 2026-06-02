@@ -481,18 +481,41 @@ expect_not(html.contains("Hidden"))
    - Expected: elem.h equals `32`
    - Expected: elem.text equals `09:41`
    - Expected: elem.w equals `260`
+   - Expected: elem.w equals `680`
    - Expected: elem.w equals `320`
    - Expected: elem.w equals `720`
    - Expected: elem.text equals `right`
+   - Expected: elem.w equals `360`
+   - Expected: elem.text equals `Window snapped|Right half|Undo`
+   - Expected: elem.w equals `360`
+   - Expected: elem.text equals `1|2|3`
+   - Expected: elem.w equals `420`
+   - Expected: elem.text equals `Keyboard shortcuts`
+   - Expected: elem.w equals `520`
+   - Expected: elem.text equals `Terminal|Browser|Simple IDE|Settings`
+   - Expected: elem.w equals `280`
+   - Expected: elem.text equals `Open|Pin to taskbar|Move to workspace|Close`
+   - Expected: elem.w equals `44`
+   - Expected: elem.h equals `44`
+   - Expected: elem.w equals `240`
+   - Expected: elem.h equals `64`
+   - Expected: elem.text equals `300 x 200|20,40|Snap ready`
+   - Expected: elem.w equals `360`
+   - Expected: elem.text equals `Swipe up|Pinch out|Swipe left`
+   - Expected: elem.w equals `320`
+   - Expected: elem.text equals `Terminal|simple.terminal|win1`
+   - Expected: elem.w equals `88`
+   - Expected: elem.text equals `Terminal|Browser|Settings`
    - Expected: right_icons equals `2`
    - Expected: launchers equals `2`
    - Expected: running equals `1`
+   - Expected: hot_corner_count equals `4`
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 104 lines folded for reproduction.
+Runnable source: 353 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -512,9 +535,20 @@ var launchers = 0
 var running = 0
 var has_window_bar = false
 var has_widgets = false
+var has_command_palette = false
 var has_control_center = false
 var has_overview = false
 var has_snap_preview = false
+var has_notification = false
+var has_workspace_switcher = false
+var has_shortcut_overlay = false
+var has_app_launcher = false
+var has_context_menu = false
+var hot_corner_count = 0
+var has_resize_hud = false
+var has_gesture_hints = false
+var has_taskbar_preview = false
+var has_stage_rail = false
 for elem in scene.elements:
     if elem.kind == "command_lane":
         has_command = true
@@ -534,6 +568,9 @@ for elem in scene.elements:
     elif elem.kind == "desktop_widgets":
         has_widgets = true
         expect(elem.w).to_equal(260)
+    elif elem.kind == "command_palette":
+        has_command_palette = true
+        expect(elem.w).to_equal(680)
     elif elem.kind == "control_center":
         has_control_center = true
         expect(elem.w).to_equal(320)
@@ -543,6 +580,47 @@ for elem in scene.elements:
     elif elem.kind == "snap_preview":
         has_snap_preview = true
         expect(elem.text).to_equal("right")
+    elif elem.kind == "notification_toast":
+        has_notification = true
+        expect(elem.w).to_equal(360)
+        expect(elem.text).to_equal("Window snapped|Right half|Undo")
+    elif elem.kind == "workspace_switcher":
+        has_workspace_switcher = true
+        expect(elem.w).to_equal(360)
+        expect(elem.text).to_equal("1|2|3")
+    elif elem.kind == "shortcut_overlay":
+        has_shortcut_overlay = true
+        expect(elem.w).to_equal(420)
+        expect(elem.text).to_equal("Keyboard shortcuts")
+    elif elem.kind == "app_launcher":
+        has_app_launcher = true
+        expect(elem.w).to_equal(520)
+        expect(elem.text).to_equal("Terminal|Browser|Simple IDE|Settings")
+    elif elem.kind == "context_menu":
+        has_context_menu = true
+        expect(elem.w).to_equal(280)
+        expect(elem.text).to_equal("Open|Pin to taskbar|Move to workspace|Close")
+    elif elem.kind == "hot_corner_zone":
+        hot_corner_count = hot_corner_count + 1
+        expect(elem.w).to_equal(44)
+        expect(elem.h).to_equal(44)
+    elif elem.kind == "resize_hud":
+        has_resize_hud = true
+        expect(elem.w).to_equal(240)
+        expect(elem.h).to_equal(64)
+        expect(elem.text).to_equal("300 x 200|20,40|Snap ready")
+    elif elem.kind == "gesture_hints":
+        has_gesture_hints = true
+        expect(elem.w).to_equal(360)
+        expect(elem.text).to_equal("Swipe up|Pinch out|Swipe left")
+    elif elem.kind == "taskbar_preview":
+        has_taskbar_preview = true
+        expect(elem.w).to_equal(320)
+        expect(elem.text).to_equal("Terminal|simple.terminal|win1")
+    elif elem.kind == "stage_rail":
+        has_stage_rail = true
+        expect(elem.w).to_equal(88)
+        expect(elem.text).to_equal("Terminal|Browser|Settings")
 
 expect(has_command)
 expect(has_clock)
@@ -551,12 +629,48 @@ expect(launchers).to_equal(2)
 expect(running).to_equal(1)
 expect(has_window_bar)
 expect(has_widgets)
+expect(has_command_palette)
 expect(has_control_center)
 expect(has_overview)
 expect(has_snap_preview)
+expect(has_notification)
+expect(has_workspace_switcher)
+expect(has_shortcut_overlay)
+expect(has_app_launcher)
+expect(has_context_menu)
+expect(hot_corner_count).to_equal(4)
+expect(has_resize_hud)
+expect(has_gesture_hints)
+expect(has_taskbar_preview)
+expect(has_stage_rail)
 expect(html).to_contain("class='command-lane'")
 expect(html).to_contain("data-app='terminal'")
 expect(html).to_contain("data-window='win1'")
+expect(html).to_contain("data-taskbar-motion='dock-hover'")
+expect(html).to_contain("data-taskbar-state='running'")
+expect(html).to_contain("aria-label='Launch terminal'")
+expect(html).to_contain("aria-label='Focus window win1'")
+expect(html).to_contain("class='taskbar-running-indicator'")
+expect(html).to_contain("data-dock-magnification='1.18'")
+expect(html).to_contain("data-dock-neighbor-magnification='1.07'")
+expect(html).to_contain(".taskbar-launcher:hover,.taskbar-running:hover")
+expect(html).to_contain("transform:translateY(-6px) scale(1.18)")
+expect(html).to_contain(".taskbar-launcher:hover + .taskbar-launcher")
+expect(html).to_contain(".taskbar-running:hover + .taskbar-running")
+expect(html).to_contain("scale(1.07)")
+expect(html).to_contain("filter:brightness(1.12)")
+expect(html).to_contain("outline-offset:3px;transform:translateY(-6px) scale(1.18)")
+expect(html).to_contain(".taskbar-launcher:focus-visible,.taskbar-running:focus-visible")
+expect(html).to_contain("@keyframes wm-taskbar-indicator")
+expect(html).to_contain("body[data-motion-mode='reduced'] .taskbar-running-indicator")
+expect(html).to_contain("body[data-motion-mode='off'] .taskbar-running-indicator")
+expect(html).to_contain("data-window-focus='focused'")
+expect(html).to_contain("data-elevation-layer='active-window'")
+expect(html).to_contain("class='bar focused'")
+expect(html).to_contain("class='glass focused'")
+expect(html).to_contain(".bar.focused")
+expect(html).to_contain(".glass.focused")
+expect(html).to_contain("transform:translateY(-1px)")
 expect(html).to_contain("data-icon-normalized='square-to-round'")
 expect(html).to_contain("data-icon-normalized='glyph-to-round'")
 expect(html).to_contain("icon-normalized-square")
@@ -569,8 +683,30 @@ expect(html).to_contain("data-window-control='minimize'")
 expect(html).to_contain("data-window-control='maximize'")
 expect(html).to_contain("<input class='bar-command-input'")
 expect(html).to_contain("aria-label='Window command or location'")
+expect(html).to_contain("data-drag-region='titlebar'")
+expect(html).to_contain("data-drag-hit-size-px='44'")
+expect(html).to_contain("data-resize-surface='window'")
+expect(html).to_contain("class='resize-handle resize-east'")
+expect(html).to_contain("class='resize-handle resize-south'")
+expect(html).to_contain("class='resize-handle resize-west'")
+expect(html).to_contain("class='resize-handle resize-south-east'")
+expect(html).to_contain("data-resize-edge='south-east'")
+expect(html).to_contain("data-hit-size-px='44'")
+expect(html).to_contain(".resize-handle::before")
+expect(html).to_contain(".resize-handle:focus-visible")
 expect(html).to_contain("aria-label='Desktop widgets'")
 expect(html).to_contain("class='desktop-widget'")
+expect(html).to_contain("role='dialog' aria-label='Simple command palette'")
+expect(html).to_contain("data-motion-scope='command-palette'")
+expect(html).to_contain("class='command-palette-input'")
+expect(html).to_contain("aria-label='Global command'")
+expect(html).to_contain("class='command-palette-list' role='listbox'")
+expect(html).to_contain("class='command-palette-item active' role='option' aria-selected='true'")
+expect(html).to_contain("Open Simple IDE")
+expect(html).to_contain("Show window overview")
+expect(html).to_contain("@keyframes wm-command-in")
+expect(html).to_contain("body[data-motion-mode='reduced'] .command-palette")
+expect(html).to_contain("body[data-motion-mode='off'] .command-palette")
 expect(html).to_contain("aria-label='WM control center'")
 expect(html).to_contain("data-motion-scope='desktop-background'")
 expect(html).to_contain(".desktop::before")
@@ -586,6 +722,42 @@ expect(html).to_contain("aria-label='Window overview'")
 expect(html).to_contain("class='overview-card active'")
 expect(html).to_contain("class='snap-preview active'")
 expect(html).to_contain("data-snap-zone='right'")
+expect(html).to_contain("class='notification-toast toast-enter'")
+expect(html).to_contain("role='status' aria-live='polite'")
+expect(html).to_contain("data-motion-scope='notification-toast'")
+expect(html).to_contain("data-toast-state='entering'")
+expect(html).to_contain("Window snapped")
+expect(html).to_contain("Right half")
+expect(html).to_contain("class='toast-action' aria-label='Undo notification action'")
+expect(html).to_contain("class='toast-progress'")
+expect(html).to_contain("max-width:360px")
+expect(html).to_contain("class='workspace-switcher'")
+expect(html).to_contain("role='tablist' aria-label='Workspaces'")
+expect(html).to_contain("data-motion-scope='workspace-switcher'")
+expect(html).to_contain("class='workspace-active-pill'")
+expect(html).to_contain("class='workspace-tab active' role='tab' aria-selected='true' data-workspace-id='1'")
+expect(html).to_contain("aria-label='Switch to workspace 1'")
+expect(html).to_contain("data-workspace-id='2'")
+expect(html).to_contain("data-workspace-id='3'")
+expect(html).to_contain("Meta 1")
+expect(html).to_contain("class='shortcut-overlay'")
+expect(html).to_contain("role='dialog' aria-label='Keyboard shortcuts'")
+expect(html).to_contain("data-motion-scope='shortcut-overlay'")
+expect(html).to_contain("class='shortcut-header'")
+expect(html).to_contain("class='shortcut-close' aria-label='Close keyboard shortcuts'")
+expect(html).to_contain("class='shortcut-grid'")
+expect(html).to_contain("class='shortcut-row'")
+expect(html).to_contain("Command palette")
+expect(html).to_contain("Meta K")
+expect(html).to_contain("Window overview")
+expect(html).to_contain("Meta O")
+expect(html).to_contain("Control center")
+expect(html).to_contain("Meta ,")
+expect(html).to_contain("Switch workspace")
+expect(html).to_contain("Meta 1-3")
+expect(html).to_contain("Snap window")
+expect(html).to_contain("Meta Arrow")
+expect(html).to_contain("max-width:420px")
 expect(html).to_contain("data-motion-mode='standard'")
 expect(html).to_contain("data-motion-can-disable='true'")
 expect(html).to_contain("data-reduced-motion-duration-ms='80'")
@@ -593,13 +765,113 @@ expect(html).to_contain("@keyframes wm-widget-float")
 expect(html).to_contain("@keyframes wm-control-in")
 expect(html).to_contain("@keyframes wm-overview-in")
 expect(html).to_contain("@keyframes wm-snap-pulse")
+expect(html).to_contain("@keyframes wm-toast-in")
+expect(html).to_contain("@keyframes wm-toast-out")
+expect(html).to_contain("@keyframes wm-toast-progress")
+expect(html).to_contain("@keyframes wm-workspace-in")
+expect(html).to_contain("@keyframes wm-workspace-slide")
+expect(html).to_contain("@keyframes wm-shortcut-in")
 expect(html).to_contain("@media (prefers-reduced-motion: reduce)")
 expect(html).to_contain("body[data-motion-mode='reduced']")
 expect(html).to_contain("body[data-motion-mode='reduced'] .desktop::before")
 expect(html).to_contain("body[data-motion-mode='off']")
 expect(html).to_contain("body[data-motion-mode='off'] .desktop::before")
+expect(html).to_contain("body[data-motion-mode='reduced'] .notification-toast")
+expect(html).to_contain("body[data-motion-mode='off'] .notification-toast")
+expect(html).to_contain("body[data-motion-mode='off'] .toast-progress")
+expect(html).to_contain("body[data-motion-mode='reduced'] .workspace-switcher")
+expect(html).to_contain("body[data-motion-mode='off'] .workspace-switcher")
+expect(html).to_contain("body[data-motion-mode='off'] .workspace-active-pill")
+expect(html).to_contain("body[data-motion-mode='reduced'] .shortcut-overlay")
+expect(html).to_contain("body[data-motion-mode='off'] .shortcut-overlay")
 expect(html).to_contain("animation:none!important")
 expect(html).to_contain("repeat(auto-fit,minmax(180px,1fr))")
+expect(html).to_contain("class='app-launcher'")
+expect(html).to_contain("role='dialog' aria-label='App launcher'")
+expect(html).to_contain("class='app-launcher-search'")
+expect(html).to_contain("class='app-launcher-grid' role='listbox'")
+expect(html).to_contain("data-app-id='terminal'")
+expect(html).to_contain("data-app-id='browser'")
+expect(html).to_contain("data-app-id='simple-ide'")
+expect(html).to_contain("data-app-id='settings'")
+expect(html).to_contain("@keyframes wm-launcher-in")
+expect(html).to_contain("body[data-motion-mode='reduced'] .app-launcher")
+expect(html).to_contain("body[data-motion-mode='off'] .app-launcher")
+expect(html).to_contain("repeat(auto-fit,minmax(96px,1fr))")
+expect(html).to_contain("class='context-menu'")
+expect(html).to_contain("role='menu' aria-label='Window context menu'")
+expect(html).to_contain("data-context-target='win1'")
+expect(html).to_contain("class='context-menu-item active' role='menuitem' data-command='open'")
+expect(html).to_contain("role='menuitemcheckbox' aria-checked='false' data-command='pin-to-taskbar'")
+expect(html).to_contain("class='context-menu-separator' role='separator'")
+expect(html).to_contain("data-command='move-to-workspace'")
+expect(html).to_contain("class='context-menu-item danger' role='menuitem' data-command='close'")
+expect(html).to_contain("@keyframes wm-menu-in")
+expect(html).to_contain("body[data-motion-mode='reduced'] .context-menu")
+expect(html).to_contain("body[data-motion-mode='off'] .context-menu")
+expect(html).to_contain("class='hot-corner-zone hot-corner-overview'")
+expect(html).to_contain("class='hot-corner-zone hot-corner-launcher'")
+expect(html).to_contain("class='hot-corner-zone hot-corner-desktop'")
+expect(html).to_contain("class='hot-corner-zone hot-corner-control-center'")
+expect(html).to_contain("data-hot-corner-action='overview'")
+expect(html).to_contain("data-hot-corner-action='launcher'")
+expect(html).to_contain("data-hot-corner-action='desktop'")
+expect(html).to_contain("data-hot-corner-action='control-center'")
+expect(html).to_contain("class='hot-corner-ring'")
+expect(html).to_contain("@keyframes wm-hot-corner-pulse")
+expect(html).to_contain("body[data-motion-mode='reduced'] .hot-corner-ring")
+expect(html).to_contain("body[data-motion-mode='off'] .hot-corner-ring")
+expect(html).to_contain("class='resize-hud'")
+expect(html).to_contain("role='status' aria-live='polite'")
+expect(html).to_contain("aria-label='Window resize feedback'")
+expect(html).to_contain("data-resize-state='active'")
+expect(html).to_contain("class='resize-hud-size'")
+expect(html).to_contain("300 x 200")
+expect(html).to_contain("class='resize-hud-position'")
+expect(html).to_contain("20,40")
+expect(html).to_contain("class='resize-hud-snap'")
+expect(html).to_contain("Snap ready")
+expect(html).to_contain("@keyframes wm-resize-hud-in")
+expect(html).to_contain("body[data-motion-mode='reduced'] .resize-hud")
+expect(html).to_contain("body[data-motion-mode='off'] .resize-hud")
+expect(html).to_contain("class='gesture-hints'")
+expect(html).to_contain("aria-label='Trackpad gesture hints'")
+expect(html).to_contain("data-motion-scope='gesture-hints'")
+expect(html).to_contain("class='gesture-hint-list'")
+expect(html).to_contain("data-gesture='swipe-up'")
+expect(html).to_contain("Swipe up")
+expect(html).to_contain("data-gesture='pinch-out'")
+expect(html).to_contain("Pinch out")
+expect(html).to_contain("data-gesture='swipe-left'")
+expect(html).to_contain("Swipe left")
+expect(html).to_contain("@keyframes wm-gesture-hints-in")
+expect(html).to_contain("body[data-motion-mode='reduced'] .gesture-hints")
+expect(html).to_contain("body[data-motion-mode='off'] .gesture-hints")
+expect(html).to_contain("class='taskbar-preview'")
+expect(html).to_contain("role='tooltip' aria-label='Taskbar window preview'")
+expect(html).to_contain("data-motion-scope='taskbar-preview'")
+expect(html).to_contain("data-preview-window='win1'")
+expect(html).to_contain("class='taskbar-preview-thumb'")
+expect(html).to_contain("class='taskbar-preview-titlebar'")
+expect(html).to_contain("class='taskbar-preview-body'")
+expect(html).to_contain("class='taskbar-preview-meta'")
+expect(html).to_contain("simple.terminal")
+expect(html).to_contain("class='taskbar-preview-focus' aria-label='Focus preview window win1'")
+expect(html).to_contain("@keyframes wm-taskbar-preview-in")
+expect(html).to_contain("body[data-motion-mode='reduced'] .taskbar-preview")
+expect(html).to_contain("body[data-motion-mode='off'] .taskbar-preview")
+expect(html).to_contain("class='stage-rail'")
+expect(html).to_contain("aria-label='Window stage rail'")
+expect(html).to_contain("data-motion-scope='stage-rail'")
+expect(html).to_contain("class='stage-rail-item active'")
+expect(html).to_contain("data-stage-window='win1'")
+expect(html).to_contain("data-stage-window='win2'")
+expect(html).to_contain("data-stage-window='win3'")
+expect(html).to_contain("class='stage-rail-thumb'")
+expect(html).to_contain("Activate Terminal stage")
+expect(html).to_contain("@keyframes wm-stage-rail-in")
+expect(html).to_contain("body[data-motion-mode='reduced'] .stage-rail")
+expect(html).to_contain("body[data-motion-mode='off'] .stage-rail")
 ```
 
 </details>
@@ -609,7 +881,7 @@ expect(html).to_contain("repeat(auto-fit,minmax(180px,1fr))")
 1. var manager = WindowManager new
 
 2. var registry = UiWindowSurfaceRegistry new
-   - Expected: bounded_affordances equals `4`
+   - Expected: bounded_affordances equals `18`
 
 
 <details>
@@ -626,7 +898,7 @@ val scene = shared_wm_scene_to_chromed_wm_scene(shared, _shared_taskbar(), 1000,
 
 var bounded_affordances = 0
 for elem in scene.elements:
-    if elem.kind == "desktop_widgets" or elem.kind == "control_center" or elem.kind == "window_overview" or elem.kind == "snap_preview":
+    if elem.kind == "command_palette" or elem.kind == "desktop_widgets" or elem.kind == "control_center" or elem.kind == "window_overview" or elem.kind == "snap_preview" or elem.kind == "notification_toast" or elem.kind == "workspace_switcher" or elem.kind == "shortcut_overlay" or elem.kind == "app_launcher" or elem.kind == "context_menu" or elem.kind == "hot_corner_zone" or elem.kind == "resize_hud" or elem.kind == "gesture_hints" or elem.kind == "taskbar_preview" or elem.kind == "stage_rail":
         bounded_affordances = bounded_affordances + 1
         expect(elem.x).to_be_greater_than(-1)
         expect(elem.y).to_be_greater_than(-1)
@@ -635,7 +907,7 @@ for elem in scene.elements:
         expect(elem.x + elem.w).to_be_less_than(scene.width + 1)
         expect(elem.y + elem.h).to_be_less_than(scene.height + 1)
 
-expect(bounded_affordances).to_equal(4)
+expect(bounded_affordances).to_equal(18)
 ```
 
 </details>
@@ -647,8 +919,19 @@ expect(bounded_affordances).to_equal(4)
 2. var registry = UiWindowSurfaceRegistry new
 
 3. registry bind with kind
+   - Expected: report.max_command_palette_width_px equals `680`
    - Expected: report.max_control_center_width_px equals `320`
    - Expected: report.max_desktop_widget_width_px equals `260`
+   - Expected: report.max_notification_width_px equals `360`
+   - Expected: report.max_workspace_switcher_width_px equals `360`
+   - Expected: report.max_shortcut_overlay_width_px equals `420`
+   - Expected: report.max_app_launcher_width_px equals `520`
+   - Expected: report.max_context_menu_width_px equals `280`
+   - Expected: report.max_hot_corner_size_px equals `44`
+   - Expected: report.max_resize_hud_width_px equals `240`
+   - Expected: report.max_gesture_hint_width_px equals `360`
+   - Expected: report.max_taskbar_preview_width_px equals `320`
+   - Expected: report.max_stage_rail_width_px equals `88`
    - Expected: report.min_overview_card_width_px equals `180`
    - Expected: report.min_touch_target_height_px equals `44`
    - Expected: report.reduced_motion_duration_ms equals `80`
@@ -657,7 +940,7 @@ expect(bounded_affordances).to_equal(4)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -676,13 +959,40 @@ expect(report.round_icon_converter)
 expect(report.titlebar_input_ready)
 expect(report.traffic_controls_ready)
 expect(report.animated_background_ready)
+expect(report.window_interaction_ready)
+expect(report.command_palette_ready)
+expect(report.focus_depth_ready)
+expect(report.lifecycle_animation_ready)
+expect(report.taskbar_interaction_ready)
+expect(report.dock_magnification_ready)
+expect(report.notification_feedback_ready)
+expect(report.workspace_switcher_ready)
+expect(report.keyboard_shortcut_overlay_ready)
+expect(report.app_launcher_ready)
+expect(report.context_menu_ready)
+expect(report.hot_corners_ready)
+expect(report.resize_hud_ready)
+expect(report.gesture_hints_ready)
+expect(report.taskbar_preview_ready)
+expect(report.stage_rail_ready)
 expect(report.color_checked)
 expect(report.contrast_ratio_x100).to_be_greater_than(449)
 expect(report.bounded_layout)
 expect(report.translucent_surfaces)
 expect(report.rounded_surface_count).to_be_greater_than(3)
+expect(report.max_command_palette_width_px).to_equal(680)
 expect(report.max_control_center_width_px).to_equal(320)
 expect(report.max_desktop_widget_width_px).to_equal(260)
+expect(report.max_notification_width_px).to_equal(360)
+expect(report.max_workspace_switcher_width_px).to_equal(360)
+expect(report.max_shortcut_overlay_width_px).to_equal(420)
+expect(report.max_app_launcher_width_px).to_equal(520)
+expect(report.max_context_menu_width_px).to_equal(280)
+expect(report.max_hot_corner_size_px).to_equal(44)
+expect(report.max_resize_hud_width_px).to_equal(240)
+expect(report.max_gesture_hint_width_px).to_equal(360)
+expect(report.max_taskbar_preview_width_px).to_equal(320)
+expect(report.max_stage_rail_width_px).to_equal(88)
 expect(report.min_overview_card_width_px).to_equal(180)
 expect(report.min_touch_target_height_px).to_equal(44)
 expect(report.motion_can_disable)
@@ -930,7 +1240,7 @@ expect_not(report.traffic_controls_ready)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -946,17 +1256,26 @@ expect(opening_html).to_contain("data-motion-phase='opening'")
 expect(opening_html).to_contain("data-motion-duration-ms='240'")
 expect(opening_html).to_contain("data-reduced-motion-duration-ms='80'")
 expect(opening_html).to_contain("data-motion-can-disable='true'")
+expect(opening_html).to_contain("@keyframes wm-window-open")
+expect(opening_html).to_contain("@keyframes wm-window-close")
+expect(opening_html).to_contain("@keyframes wm-window-minimize")
+expect(opening_html).to_contain("@keyframes wm-window-restore")
+expect(opening_html).to_contain(".wm-window-opening{{animation:wm-window-open 240ms")
+expect(opening_html).to_contain("body[data-motion-mode='reduced'] .motion-window")
+expect(opening_html).to_contain("body[data-motion-mode='off'] .motion-window")
 expect_not(opening_html.contains("Hidden"))
 
 val minimizing_scene = lifecycle_windows_to_motion_wm_scene(windows, "minimize", 640, 480)
 val minimizing_html = scene_to_html(minimizing_scene)
 expect(minimizing_html).to_contain("wm-window-minimizing")
+expect(minimizing_html).to_contain(".wm-window-minimizing{{animation:wm-window-minimize 180ms")
 expect(minimizing_html).to_contain("data-title='Hidden'")
 expect(minimizing_html).to_contain("data-motion-duration-ms='180'")
 
 val restoring_scene = lifecycle_windows_to_motion_wm_scene(windows, "restore", 640, 480)
 val restoring_html = scene_to_html(restoring_scene)
 expect(restoring_html).to_contain("wm-window-restoring")
+expect(restoring_html).to_contain(".wm-window-restoring{{animation:wm-window-restore 240ms")
 expect(restoring_html).to_contain("data-motion-phase='restoring'")
 ```
 
