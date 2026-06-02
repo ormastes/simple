@@ -97,10 +97,12 @@ impl Linter:
 
         val lines = content.split("\n")
         var line_num = 1
+        var byte_offset = 0
         for line in lines:
             val trimmed = line.trim()
             if trimmed == "" or trimmed.starts_with("#"):
                 line_num = line_num + 1
+                byte_offset = byte_offset + line.len() + 1
                 continue
 
             val normalized = normalize_lint_line(trimmed)
@@ -172,9 +174,11 @@ impl Linter:
                 self.results.push(LintResult.new(path, line_num, 0, lint))
 
             if is_boolean_wrapper_assertion(normalized):
+                val fix = boolean_wrapper_easy_fix(path, line, normalized, byte_offset, line_num)
                 val lint = Lint.new("SPIPE006", LintLevel.Deny, LintCategory.Correctness,
-                    "Verbose boolean equality assertion in spec/example")
-                    .with_fix("Use expect(condition) for true checks and expect_not(condition) for false checks")
+                    "Boolean matcher wrapper in spec/example; use expect(condition), and use expect_not(condition) instead of .to_equal(false)")
+                    .with_fix("Use expect(condition) for true checks; use expect_not(condition) for false checks")
+                    .with_easy_fix(fix)
                 self.results.push(LintResult.new(path, line_num, 0, lint))
 
             var has_print_skip = normalized.contains("print(\"[skip]")
@@ -196,6 +200,7 @@ impl Linter:
                 self.results.push(LintResult.new(path, line_num, 0, lint))
 
             line_num = line_num + 1
+            byte_offset = byte_offset + line.len() + 1
 
         self.check_spipe_example_bodies(path, lines)
 
@@ -462,6 +467,30 @@ fn is_boolean_wrapper_assertion(normalized: String) -> Bool:
         return false
 
     true
+
+fn boolean_wrapper_easy_fix(path: String, line: String, normalized: String, byte_offset: Int, line_num: Int) -> EasyFix:
+    val subject = extract_expect_subject(normalized)
+    var replacement_call = "expect({subject})"
+    if normalized.contains(").to_equal(false)") or normalized.contains(").to_be(false)"):
+        replacement_call = "expect_not({subject})"
+
+    val trimmed = line.trim()
+    val indent = line.len() - trimmed.len()
+    val new_text = line.slice(0, indent) + replacement_call
+    var fix = EasyFix.create(
+        id: "L:spipe_boolean_wrapper_assertions:{line_num}",
+        description: "replace verbose boolean matcher chain with concise assertion",
+        confidence: FixConfidence.Safe
+    )
+    fix.add_replacement(Replacement.create(
+        file: path,
+        start: byte_offset,
+        end: byte_offset + line.len(),
+        line: line_num,
+        column: 1,
+        new_text: new_text
+    ))
+    fix
 
 fn indent_width(line: String) -> Int:
     var width = 0
