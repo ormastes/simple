@@ -168,11 +168,12 @@ expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(duplicate_callable)).to
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 64 lines folded for reproduction.
+Runnable source: 70 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val good = "GUI_DYNLIB_PERF artifact=build/gui/pure_gui_hot.smf dynlib_path=build/gui/pure_gui_hot.smf.extracted.dylib host_os=macos host_arch=arm64 host_profile=macos-arm64 host_cpu=Apple_M3 loader=smf_dynlib dynload=smf_dynlib host_dynload=sffi symbol=gui_dynlib_hot_probe_tick call_source=dynlib_symbol_call samples=128 expected_samples=128 warmup=16 p50_us=1 p95_us=1 p99_us=1 max_us=1 threshold_us=1000 pass=true error="
+val measured = "GUI_DYNLIB_PERF artifact=build/gui/pure_gui_hot.smf dynlib_path=build/gui/pure_gui_hot.smf.extracted.dylib host_os=macos host_arch=arm64 host_profile=macos-arm64 host_cpu=Apple_M3 loader=smf_dynlib dynload=smf_dynlib host_dynload=sffi symbol=gui_dynlib_hot_probe_tick call_source=dynlib_symbol_call samples=128 expected_samples=128 warmup=16 p50_us=23 p95_us=30 p99_us=212 max_us=404 threshold_us=1000 pass=true error="
 val wrong_artifact = good.replace("artifact=build/gui/pure_gui_hot.smf", "artifact=build/gui/other.smf")
 val host = good.replace("loader=smf_dynlib", "loader=host_dynlib")
 val host_sffi_diagnostic = good.replace("loader=smf_dynlib dynload=smf_dynlib", "loader=host_dynlib dynload=host_dynlib_diagnostic")
@@ -192,6 +193,7 @@ val missing_p99 = good.replace("p99_us=1 ", "")
 val loose_threshold = good.replace("threshold_us=1000", "threshold_us=5000")
 val over_threshold = good.replace("p99_us=1", "p99_us=1000")
 val inconsistent_pass = good.replace("p99_us=1", "p99_us=2500")
+val nonnumeric_p99 = good.replace("p99_us=1", "p99_us=abc")
 val non_empty_error = good.replace("error=", "error=p99-over-threshold")
 val duplicate_loader = good + " loader=host_dynlib"
 val duplicate_dynload = good + " dynload=native"
@@ -205,8 +207,11 @@ val duplicate_expected_samples = good + " expected_samples=64"
 expect(gui_mac_smf_dynlib_row_value(good, "loader")).to_equal("smf_dynlib")
 expect(gui_mac_smf_dynlib_row_key_count(duplicate_loader, "loader")).to_equal(2)
 expect(gui_mac_smf_dynlib_row_i64(good, "p99_us")).to_equal(1i64)
+expect(gui_mac_smf_dynlib_unsigned_decimal_token("212")).to_equal(true)
+expect(gui_mac_smf_dynlib_unsigned_decimal_token("abc")).to_equal(false)
 expect(gui_mac_smf_dynlib_row_has_one_i64(duplicate_p99, "p99_us")).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(good)).to_equal(true)
+expect(gui_mac_smf_dynlib_accepts_probe_row(measured)).to_equal(true)
 expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_artifact)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(host)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(host_sffi_diagnostic)).to_equal(false)
@@ -226,6 +231,7 @@ expect(gui_mac_smf_dynlib_accepts_probe_row(missing_p99)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(loose_threshold)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(over_threshold)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(inconsistent_pass)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(nonnumeric_p99)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(non_empty_error)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(duplicate_loader)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(duplicate_dynload)).to_equal(false)
