@@ -521,6 +521,17 @@ impl JsInterpreter:
                     ai_bl = ai_bl + 1
                 return Ok(buffer_byteLength(arg_vals))
 
+        if is_member and member_method == "slice":
+            val buffer_val = self.eval_expression(member_obj_expr, env)?
+            val buffer_id = _get_obj_id(buffer_val)
+            if buffer_id >= 0 and to_boolean(self.get_object_property(buffer_id, "__simple_array_buffer")):
+                var slice_args: [JsValue] = []
+                var slice_ai = 0
+                while slice_ai < args.len():
+                    slice_args.push(self.eval_expression(args.get(slice_ai), env)?)
+                    slice_ai = slice_ai + 1
+                return Ok(self._native_array_buffer_slice(buffer_val, slice_args))
+
         if is_member and _is_array_method(member_method):
             val obj_val = self.eval_expression(member_obj_expr, env)?
             var is_array = false
@@ -772,6 +783,16 @@ impl JsInterpreter:
                         call_args.push(self.eval_expression(args.get(call_ai), env)?)
                         call_ai = call_ai + 1
                     return Ok(self._dispatch_data_view_prototype_method(data_view_method, dst_val, call_args))
+            val array_buffer_method = self._array_buffer_prototype_method_name(member_obj_expr)
+            if array_buffer_method != "":
+                if args.len() > 0:
+                    val dst_val = self.eval_expression(args.get(0), env)?
+                    var call_args: [JsValue] = []
+                    var call_ai = 1
+                    while call_ai < args.len():
+                        call_args.push(self.eval_expression(args.get(call_ai), env)?)
+                        call_ai = call_ai + 1
+                    return Ok(self._dispatch_array_buffer_prototype_method(array_buffer_method, dst_val, call_args))
 
         if is_member and member_method == "apply":
             val uint8_method_apply = self._uint8_array_prototype_method_name(member_obj_expr)
@@ -808,6 +829,13 @@ impl JsInterpreter:
                     val args_val = self.eval_expression(args.get(1), env)?
                     val apply_args = self._indexed_arg_values(args_val)
                     return Ok(self._dispatch_data_view_prototype_method(data_view_method_apply, dst_val, apply_args))
+            val array_buffer_method_apply = self._array_buffer_prototype_method_name(member_obj_expr)
+            if array_buffer_method_apply != "":
+                if args.len() > 1:
+                    val dst_val = self.eval_expression(args.get(0), env)?
+                    val args_val = self.eval_expression(args.get(1), env)?
+                    val apply_args = self._indexed_arg_values(args_val)
+                    return Ok(self._dispatch_array_buffer_prototype_method(array_buffer_method_apply, dst_val, apply_args))
 
         # Object.keys / Object.values / Object.entries
         if is_member and member_method == "keys":
@@ -1319,6 +1347,25 @@ impl JsInterpreter:
                 pass_dn
         resolved_method
 
+    me _array_buffer_prototype_method_name(expr: JsExpression) -> text:
+        var resolved_method = ""
+        match expr:
+            JsExpression.Member(obj_expr, method_name):
+                match obj_expr:
+                    JsExpression.Member(root_expr, proto_name):
+                        if proto_name == "prototype":
+                            match root_expr:
+                                JsExpression.Identifier(root_name):
+                                    if root_name == "ArrayBuffer":
+                                        resolved_method = method_name
+                                _:
+                                    pass_dn
+                    _:
+                        pass_dn
+            _:
+                pass_dn
+        resolved_method
+
     me _dispatch_uint8_array_prototype_method(method_name: text, this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         if method_name == "set":
             return self._native_uint8_array_set(this_val, arg_vals)
@@ -1577,4 +1624,9 @@ impl JsInterpreter:
             return self._native_data_view_set(this_val, arg_vals, 4)
         if method_name == "setUint32":
             return self._native_data_view_set(this_val, arg_vals, 4)
+        JsValue.Undefined
+
+    me _dispatch_array_buffer_prototype_method(method_name: text, this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        if method_name == "slice":
+            return self._native_array_buffer_slice(this_val, arg_vals)
         JsValue.Undefined
