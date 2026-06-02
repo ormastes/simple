@@ -87,7 +87,26 @@ Backends still own live refresh and privileged input; the common module keeps
 the query/action contract consistent across CLI, service, and MCP callers.
 
 The Simple MCP probe `play_wm_text_status` reports whether the common adapter
-contract is available.
+contract is available. It is intentionally a status/contract probe, not a live
+refresh command; TRACE32, Simple UI, and host WM adapters still own their
+backend-specific refresh and privileged input steps.
+
+MCP clients that already have scalar adapter data can call the common facade
+directly:
+
+| Tool | Purpose |
+|------|---------|
+| `play_wm_text_snapshot` | Normalize one TRACE32, Simple UI, or host WM payload into a canonical snapshot |
+| `play_wm_text_find` | Query normalized window text nodes through the shared selector logic |
+| `play_wm_text_act` | Validate and route an action against a normalized canonical target |
+
+These tools do not refresh live backends. For live Simple UI sessions, use
+`ui_access_*`; for live TRACE32 open/capture, use TRACE32 MCP tools first and
+then pass captured text to the common facade.
+
+The startup-light play CLI recognizes matching planner subcommands:
+`simple play wm-text-snapshot`, `simple play wm-text-find`, and
+`simple play wm-text-act`.
 
 ---
 
@@ -320,6 +339,7 @@ The protocol is covered in:
 - [test/unit/os/services/llm/ui_access_dispatch_spec.spl](../../../test/unit/os/services/llm/ui_access_dispatch_spec.spl)
 - [test/system/ui/ui_access_contract_spec.spl](../../../test/system/ui/ui_access_contract_spec.spl)
 - [test/system/app/os/feature/ui_access_protocol_spec.spl](../../../test/system/app/os/feature/ui_access_protocol_spec.spl)
+- [test/system/app/wm_text_access_mcp/feature/wm_text_access_mcp_spec.spl](../../../test/system/app/wm_text_access_mcp/feature/wm_text_access_mcp_spec.spl)
 
 Current limitation:
 
@@ -334,3 +354,5 @@ Current limitation:
 - [ui_stack_guide.md](../ui_stack_guide.md)
 - [requirements](../../02_requirements/feature/ui_access_protocol.md)
 - [architecture](../../04_architecture/ui_access_protocol.md)
+- [WM text-access requirements](../../02_requirements/feature/wm_text_access_mcp.md)
+- [WM text-access architecture](../../04_architecture/wm_text_access_mcp.md)

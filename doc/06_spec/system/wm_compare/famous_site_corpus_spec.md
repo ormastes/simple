@@ -462,12 +462,33 @@ expect(result.0).to_contain("missing structured exact-pixel acceptance policy fl
 
 </details>
 
+#### fails the production probe gate when per-line ink text drifts from layout
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
+expect(rt_file_exists(tool_path)).to_equal(true)
+expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--corrupt-text-line-ink-for-test"], 10000)
+expect(result.2).to_equal(1)
+expect(result.0).to_contain("\"status\": \"FAIL\"")
+expect(result.0).to_contain("\"textMatchesLayout\": false")
+expect(result.0).to_contain("per-line text ink entries do not match Simple layout line text")
+```
+
+</details>
+
 #### passes the production probe gate for the focused production artifact
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -495,6 +516,10 @@ expect(result.0).to_contain("\"textLineCountDelta\": 0")
 expect(result.0).to_contain("\"layoutTextMatch\": true")
 expect(result.0).to_contain("\"hasTextLineInkDelta\": true")
 expect(result.0).to_contain("\"textLineInkDeltaCount\": 4")
+expect(result.0).to_contain("\"detailCount\": 4")
+expect(result.0).to_contain("\"textMatchesLayout\": true")
+expect(result.0).to_contain("\"widthMatchesLayout\": true")
+expect(result.0).to_contain("\"regionNamesSequential\": true")
 expect(result.0).to_contain("\"textRegionDelta\"")
 expect(result.0).to_contain("\"divBox\"")
 expect(result.0).to_contain("\"differentPixels\": 1612")
@@ -1010,8 +1035,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 38 |
-| Active scenarios | 38 |
+| Total scenarios | 39 |
+| Active scenarios | 39 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

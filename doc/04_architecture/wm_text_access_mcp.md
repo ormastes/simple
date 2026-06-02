@@ -1,9 +1,12 @@
 <!-- codex-design -->
 # WM Text Access MCP — Architecture
 
-Status: Draft pending final requirement selection.
+Status: Implemented first slice.
 
-This architecture is based on the research recommendation: Feature Option B and NFR Option 2. It must be reconciled with final selected requirements before implementation.
+This architecture is based on the selected Feature Option B and NFR Option 2.
+The first implementation slice is `std.common.ui.win_text_access`, re-exported
+through `std.common.ui.access`, with MCP status exposed by
+`play_wm_text_status`.
 
 ## Problem
 
@@ -141,10 +144,18 @@ These targets follow the recommended NFR Option 2:
 
 ## Implementation Placement
 
-Preferred placement after final selection:
+- shared core: `src/lib/common/ui/win_text_access.spl`
+- hub export: `src/lib/common/ui/access.spl`
+- MCP status integration: `src/app/mcp/main_lazy_play_tools.spl`,
+  `src/app/mcp/main_dispatch.spl`, and `src/app/mcp/tool_table.spl`
+- live MCP scalar facade: `play_wm_text_snapshot`, `play_wm_text_find`, and
+  `play_wm_text_act`
+- CLI planner discovery: `simple play wm-text-snapshot`,
+  `simple play wm-text-find`, and `simple play wm-text-act`
+- system spec: `test/system/app/wm_text_access_mcp/feature/wm_text_access_mcp_spec.spl`
+- generated/manual spec: `doc/06_spec/system/app/wm_text_access_mcp/feature/wm_text_access_mcp_spec.md`
 
-- shared core: `src/lib/common/ui/wm_text_access*.spl` or additive extensions under `src/lib/common/ui/access*.spl`
-- app facade/CLI: `src/app/wm_text_access_mcp/`
-- MCP tool integration: extend existing `src/app/mcp/main_lazy_play_tools.spl`, `main_dispatch.spl`, and `tool_table.spl`
-- TRACE32 adapter: owned source should not remain only under `examples/`
-
+The first slice supplies reusable TRACE32 captured-text, Simple UI snapshot, and
+host WM top-level adapters. Live TRACE32 refresh/open/capture execution remains
+owned by the existing TRACE32 MCP/window tooling; the common layer owns the
+normalized text/query/action contract.

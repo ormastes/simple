@@ -328,9 +328,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   draining are covered, and bounded writable `finish` listener state is tracked
   through `end()` with callback invocation. Bounded write-after-end pressure
   signaling is covered. A deterministic `streamAsyncIterator().next()` subset
-  now consumes bounded readable chunks and reports exhaustion. Full pressure
-  propagation/flow control, real `Symbol.asyncIterator`/`for await` semantics,
-  broader stream scheduling, and broader event-loop phases remain open.
+  consumes bounded readable chunks and reports exhaustion, and readable streams
+  now expose the same iterator through the `Symbol.asyncIterator` key. Full
+  pressure propagation/flow control, `for await` syntax support, broader stream
+  scheduling, and broader event-loop phases remain open.
   Bounded `setInterval` rescheduling across explicit timer drains and
   `clearInterval` from inside an interval callback are covered. Broader
   event-loop phase ordering, host I/O integration, and full Node timer object
@@ -342,8 +343,14 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   strings with explicit ports and option objects with default ports under the
   existing explicit network-grant model. Real host network I/O remains open.
   Bounded request metadata now reports deterministic `method` and `path` for
-  URL strings and option objects. Full request streams, callbacks, headers, and
-  host network I/O remain open.
+  URL strings and option objects. Bounded request-local `setHeader`, `getHeader`,
+  `hasHeader`, `removeHeader`, `getHeaderNames`, `getHeaders`, and
+  `flushHeaders` support
+  tracks case-insensitive headers, removal, lowercase header-name snapshots,
+  object snapshots, overwrite-stable `headerCount`, and deterministic
+  `headersFlushed`/`flushedHeaderCount` state snapshots. Construction-time
+  option-object `headers` now load into the same bounded request-local header
+  state. Full request streams, callbacks, and host network I/O remain open.
   Bounded `net.connect`, `http.get`, and `https.get` aliases are covered under
   the same explicit network-grant model.
   Bounded request lifecycle methods now cover deterministic `write`, `end`, and
@@ -605,6 +612,23 @@ manual has 7 active scenarios and includes the GUI box report flow, the broader
 famous-site corpus spec still passed `37/37`, and the doc layout guard returned
 `0`. This advances pre-pixel geometry evidence for Chrome/layout hardening; it
 does not close the remaining production glyph/compositing divergence.
+
+Production Chrome per-line ink verifier continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/site_corpus_compat.spl test/system/wm_compare/famous_site_corpus_spec.spl`
+- `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`
+- `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google --corrupt-text-line-ink-for-test`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The production probe verifier now parses every `text_line_ink_delta` row and
+requires the row count, line text, widths, sequential region names, nonzero
+differences, and Chrome black glyph pixels to match the Simple layout-line
+diagnostics. The normal `site_0_google` production verifier still passes at
+`differentPixels=2717`; the test-only corrupted line-text report fails closed
+with `textMatchesLayout=false`. The famous-site corpus spec passes `39/39`.
+This tightens the per-line glyph/compositing evidence gate without claiming the
+remaining production pixel divergence is fixed.
 
 Comparison failure and no-tolerance policy continuation:
 
@@ -892,9 +916,11 @@ CommonJS/Node bounded stream async-iterator subset continuation:
 Bounded readable streams now expose `streamAsyncIterator()`, returning an
 iterator object with `next()` results shaped as `{ value, done }`. Calls consume
 the same readable cursor used by `read()`, return chunks in order, and report
-`done=true` after exhaustion. The Node API conformance suite passes `200/200`.
-Real `Symbol.asyncIterator`/`for await` syntax support, async scheduling, and
-host I/O integration remain open.
+`done=true` after exhaustion. A follow-up exposes the same iterator through the
+well-known `Symbol.asyncIterator` key so `r[Symbol.asyncIterator]().next()`
+uses the bounded stream iterator. The Node API conformance suite passes
+`203/203`. Real `for await` syntax support, async scheduling, and host I/O
+integration remain open.
 
 CommonJS/Node bounded stream finish-event continuation:
 
@@ -1018,6 +1044,27 @@ bounded `method` and `path` metadata. URL strings report default `GET` and the
 parsed path/query, while option objects report explicit `method` and `path`
 values. The Node API conformance suite passes `193/193`. Full request streams,
 callbacks, headers, and host network I/O remain open.
+
+CommonJS/Node bounded HTTP request header continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Bounded deterministic request objects now expose `setHeader`, `getHeader`,
+`hasHeader`, `removeHeader`, `getHeaderNames`, `getHeaders`, and
+`flushHeaders`. Headers are
+stored request-locally with case-insensitive lookup, repeated `setHeader` calls
+overwrite without incrementing `headerCount`, `removeHeader` clears presence and
+decrements the count, `getHeaderNames` returns a lowercase comma-separated
+snapshot, and `getHeaders` returns an object snapshot with current lowercase
+header properties. `flushHeaders` marks `headersFlushed`, snapshots the current
+`headerCount` into `flushedHeaderCount`, and leaves `requestEnded` unchanged.
+Construction-time option-object `headers` now load into the same bounded
+request-local header state, including `getHeader`, `getHeaderNames`, and
+`flushHeaders` snapshots. The Node API conformance suite passes `209/209`.
+Real request streams, callbacks, and host network I/O remain open.
 
 CommonJS/Node bounded network alias continuation:
 

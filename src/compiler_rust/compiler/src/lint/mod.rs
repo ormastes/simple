@@ -256,6 +256,39 @@ describe "demo":
     }
 
     #[test]
+    fn test_spipe_false_boolean_wrapper_detected() {
+        let code = r#"
+describe "demo":
+    it "wraps negative boolean":
+        val ok = false
+        expect(ok).to_equal(false)
+"#;
+        let diagnostics = check_code_in_file("demo_spec.spl", code);
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.lint == LintName::SPipeBooleanWrapperAssertions));
+    }
+
+    #[test]
+    fn test_spipe_concise_boolean_assertions_are_real_assertions() {
+        let code = r#"
+describe "demo":
+    it "uses concise boolean expectations":
+        val ok = true
+        val failed = false
+        expect(ok)
+        expect_not(failed)
+"#;
+        let diagnostics = check_code_in_file("demo_spec.spl", code);
+        assert!(diagnostics
+            .iter()
+            .all(|d| d.lint != LintName::SPipeBooleanWrapperAssertions));
+        assert!(diagnostics
+            .iter()
+            .all(|d| d.lint != LintName::SPipeEmptyExamples));
+    }
+
+    #[test]
     fn test_stub_placeholder_body_detected() {
         let code = r#"
 fn not_done(port: i64) -> i64:

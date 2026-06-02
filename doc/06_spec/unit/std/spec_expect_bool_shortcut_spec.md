@@ -1,0 +1,85 @@
+# spec_expect_bool_shortcut_spec
+
+Verifies concise boolean assertions:
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/unit/std/spec_expect_bool_shortcut_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Verifies concise boolean assertions:
+    `expect(condition)` asserts true and `expect_not(condition)` asserts false.
+    Matcher chains such as `expect(value).to_equal(value)` remain supported for
+    non-boolean equality.
+
+## Scenarios
+
+### std.spec boolean expectation shortcuts
+
+#### accepts bare expect for true boolean expressions
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(true)
+val condition = 2 + 2 == 4
+expect(condition)
+```
+
+</details>
+
+#### accepts expect_not for false boolean expressions
+
+1. expect not
+
+2. expect not
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect_not(false)
+val condition = "abc".contains("z")
+expect_not(condition)
+```
+
+</details>
+
+#### keeps matcher equality for non-boolean values
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(42).to_equal(42)
+expect("simple").to_equal("simple")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 3 |
+| Active scenarios | 3 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+

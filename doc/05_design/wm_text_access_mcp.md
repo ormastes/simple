@@ -1,7 +1,12 @@
 <!-- codex-design -->
 # WM Text Access MCP — Detail Design
 
-Status: Draft pending final requirement selection.
+Status: Implemented first slice.
+
+The current implementation lives in `src/lib/common/ui/win_text_access.spl` and
+is re-exported by `src/lib/common/ui/access.spl`. MCP exposes
+`play_wm_text_status` as the read-only contract/status hook while live adapter
+refresh remains backend-owned.
 
 ## Data Model
 
@@ -186,15 +191,18 @@ Unsupported:
 
 ## CLI/Service/MCP Surface
 
-Proposed operations:
+Canonical operations:
 
-- `wm_access_snapshot`
-- `wm_access_surface`
-- `wm_access_find`
-- `wm_access_act`
-- `wm_access_value`
-- `wm_access_history`
-- `wm_access_adapter_status`
+- snapshot construction through `win_text_trace32_snapshot`,
+  `win_text_simple_ui_snapshot`, and `win_text_host_wm_snapshot`
+- shared query through `win_text_find_nodes`
+- shared action validation/routing through `win_text_route_action`
+- snapshot composition through `win_text_merge_snapshots`
+- MCP contract/status through `play_wm_text_status`
+- MCP scalar-payload facade through `play_wm_text_snapshot`,
+  `play_wm_text_find`, and `play_wm_text_act`
+- CLI planner discovery through `simple play wm-text-snapshot`,
+  `simple play wm-text-find`, and `simple play wm-text-act`
 
 Existing `play_ui_*` and `play_wm_*` tools can remain, but new unified tools should call the shared facade. Existing tools can later become compatibility wrappers.
 
@@ -238,5 +246,6 @@ MCP debug output should include whether a response came from cache.
 - Keep OS accessibility adapters out of first implementation unless selected.
 - Do not run subprocesses in selector matching.
 - Do not add screenshot/OCR as a semantic source; expose it only as low-confidence evidence.
-- Promote reusable TRACE32 catalog/capture logic from `examples/` into owned source before relying on it from production MCP.
-
+- TRACE32 live catalog/open/capture behavior remains in the TRACE32 MCP/window
+  tooling; use `win_text_trace32_snapshot` to normalize captured text into the
+  shared access model before query/action routing.

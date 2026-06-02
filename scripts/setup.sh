@@ -54,7 +54,68 @@ if [ ! -x "${native}" ]; then
   exit 127
 fi
 
-exec "${native}" "$@"
+tmp_input="${TMPDIR:-/tmp}/simple_mcp_server_input.$$"
+cat > "${tmp_input}"
+
+tmp_delegate="${TMPDIR:-/tmp}/simple_mcp_server_delegate.$$"
+grep -v '"method":"initialized"' "${tmp_input}" > "${tmp_delegate}" || true
+tmp_source_err="${TMPDIR:-/tmp}/simple_mcp_server_source_err.$$"
+
+fallback_runtime=""
+for candidate in \
+  "${script_dir}/../src/compiler_rust/target/debug/simple" \
+  "${script_dir}/../bin/release/simple" \
+  "${script_dir}/simple"
+do
+  if [ -x "${candidate}" ]; then
+    fallback_runtime="${candidate}"
+    break
+  fi
+done
+
+run_source_mcp() {
+  if [ -z "${fallback_runtime}" ]; then
+    return 127
+  fi
+  SIMPLE_LIB="${SIMPLE_LIB:-src}" "${fallback_runtime}" "${script_dir}/../src/app/mcp/main.spl" "$@" < "${tmp_delegate}" 2> "${tmp_source_err}"
+}
+
+needs_wm_text_mcp=false
+if grep -q '"play_wm_text_' "${tmp_delegate}"; then
+  needs_wm_text_mcp=true
+fi
+
+if [ "${needs_wm_text_mcp}" = "true" ]; then
+  run_source_mcp "$@"
+  status="$?"
+  rm -f "${tmp_input}" "${tmp_delegate}" "${tmp_source_err}"
+  exit "${status}"
+fi
+
+tmp_output="${TMPDIR:-/tmp}/simple_mcp_server_output.$$"
+tmp_native_err="${TMPDIR:-/tmp}/simple_mcp_server_native_err.$$"
+set +e
+if command -v timeout >/dev/null 2>&1; then
+  timeout 5 "${native}" "$@" < "${tmp_delegate}" > "${tmp_output}" 2> "${tmp_native_err}"
+  status="$?"
+  if [ "${status}" = "124" ]; then
+    status=0
+  fi
+else
+  "${native}" "$@" < "${tmp_delegate}" > "${tmp_output}" 2> "${tmp_native_err}"
+  status="$?"
+fi
+set -e
+
+if [ "${status}" != "0" ] || { grep -q '"method":"tools/list"' "${tmp_delegate}" && ! grep -q 'play_wm_text_status' "${tmp_output}"; }; then
+  run_source_mcp "$@"
+  status="$?"
+else
+  cat "${tmp_output}"
+fi
+
+rm -f "${tmp_input}" "${tmp_delegate}" "${tmp_output}" "${tmp_native_err}" "${tmp_source_err}"
+exit "${status}"
 EOF
   chmod +x simple_mcp_server
 fi

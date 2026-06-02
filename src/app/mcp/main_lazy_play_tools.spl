@@ -1,6 +1,6 @@
 # MCP Play Tool Handlers — Playwright-compatible UI automation
 #
-# Provides 15 MCP tools for driving Electron / VS Code / SDL2 / native WM
+# Provides MCP tools for driving Electron / VS Code / SDL2 / native WM
 # targets from Claude. Each handler shells out to `bin/simple play <sub>`
 # so the MCP layer reuses the CLI's session store, artifact paths, and
 # backend dispatch logic without duplicating state.
@@ -23,6 +23,30 @@
 #   play_wm_click     — Native WM: click at (x, y)
 #   play_wm_type      — Native WM: type text via keyboard
 #   play_wm_text_status — Common window-to-text adapter contract status
+#   play_wm_text_snapshot — Common window-to-text scalar adapter snapshot
+#   play_wm_text_find — Common window-to-text scalar adapter query
+#   play_wm_text_act  — Common window-to-text scalar adapter action routing
+
+use .main_lazy_json
+use common.ui.access.{
+    UiAccessProp,
+    UiAccessNode,
+    UiAccessSurface,
+    UiAccessSnapshot,
+    ui_access_canonical_id,
+    ui_access_snapshot_to_json,
+    ui_access_query_result,
+    ui_access_query_to_json,
+    win_text_trace32_snapshot,
+    win_text_simple_ui_snapshot,
+    win_text_host_wm_single_window_snapshot,
+    win_text_make_node,
+    win_text_find_nodes,
+    win_text_route_action,
+    WinTextActionRequest,
+    WinTextActionResult,
+    WinTextSnapshot
+}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
@@ -233,8 +257,121 @@ fn handle_play_wm_type(id: text, body: text) -> text:
 # ----------------------------------------------------------------------------
 
 fn handle_play_wm_text_status(id: text, body: text) -> text:
-    val payload = "{\"module\":\"common.ui.win_text_access\",\"status\":\"available\",\"sources\":[\"trace32\",\"simple_ui\",\"host_wm\"],\"operations\":[\"snapshot\",\"find\",\"act\",\"merge\",\"staleness\"],\"note\":\"live backend refresh remains adapter-owned; shared query/action logic is in-memory\"}"
+    val payload = "{\"module\":\"common.ui.win_text_access\",\"status\":\"available\",\"sources\":[\"trace32\",\"simple_ui\",\"host_wm\"],\"operations\":[\"snapshot\",\"find\",\"act\",\"merge\",\"staleness\"],\"mcp_tools\":[\"play_wm_text_snapshot\",\"play_wm_text_find\",\"play_wm_text_act\"],\"note\":\"live backend refresh remains adapter-owned; shared query/action logic is in-memory\"}"
     make_tool_result(id, payload)
+
+fn _wm_text_limit(body: text) -> i32:
+    val raw = extract_field(body, "limit")
+    if raw == "":
+        return 20
+    val parsed = raw.to_i64() ?? 20
+    parsed.to_i32()
+
+fn _wm_text_i64(body: text, key: text, fallback: i64) -> i64:
+    val raw = extract_field(body, key)
+    if raw == "":
+        return fallback
+    raw.to_i64() ?? fallback
+
+fn _wm_text_bool(body: text, key: text, fallback: bool) -> bool:
+    val raw = extract_field(body, key)
+    if raw == "":
+        return fallback
+    raw == "true" or raw == "1" or raw == "yes"
+
+fn _wm_text_action_names(action: text) -> [text]:
+    if action == "":
+        return []
+    [action]
+
+fn _wm_text_snapshot_from_body(body: text) -> WinTextSnapshot:
+    val source = extract_field(body, "source")
+    val now_ms = _wm_text_i64(body, "now_ms", 1000)
+    val captured_at_ms = _wm_text_i64(body, "captured_at_ms", now_ms)
+    val max_age_ms = _wm_text_i64(body, "max_age_ms", 5000)
+    if source == "trace32":
+        val window_key = extract_field(body, "window_key")
+        val title = extract_field(body, "title")
+        val open_command = extract_field(body, "open_command")
+        val capture_command = extract_field(body, "capture_command")
+        val capture_mode = extract_field(body, "capture_mode")
+        val captured_text = extract_field(body, "captured_text")
+        return win_text_trace32_snapshot(
+            window_key: if window_key != "": window_key else: "window",
+            title: if title != "": title else: "TRACE32 Window",
+            open_command: open_command,
+            capture_command: capture_command,
+            capture_mode: if capture_mode != "": capture_mode else: "text",
+            captured_text: captured_text,
+            captured_at_ms: captured_at_ms,
+            max_age_ms: max_age_ms,
+            now_ms: now_ms
+        )
+    if source == "simple_ui":
+        val surface_id = if extract_field(body, "surface_id") != "": extract_field(body, "surface_id") else: "simple:main"
+        val widget_id = if extract_field(body, "widget_id") != "": extract_field(body, "widget_id") else: "root"
+        val kind = if extract_field(body, "kind") != "": extract_field(body, "kind") else: "label"
+        val text_value = extract_field(body, "text")
+        val action = extract_field(body, "action")
+        val surface = UiAccessSurface(
+            surface_id: surface_id,
+            title: if extract_field(body, "title") != "": extract_field(body, "title") else: "Simple UI",
+            active: true,
+            window_id: surface_id,
+            app_id: "simple_ui",
+            root_canonical_id: ui_access_canonical_id(surface_id, "root")
+        )
+        val node = win_text_make_mcp_node(surface_id, widget_id, kind, text_value, _wm_text_action_names(action), "simple_ui")
+        val snapshot = UiAccessSnapshot(protocol_version: 1, snapshot_revision: 0, mode: "simple_ui", active_surface: surface_id, surfaces: [surface], nodes: [node], recent_events: [])
+        return win_text_simple_ui_snapshot(snapshot, captured_at_ms, max_age_ms, now_ms)
+    win_text_host_wm_single_window_snapshot(
+        window_id: if extract_field(body, "window_id") != "": extract_field(body, "window_id") else: "0",
+        target_id: extract_field(body, "target_id"),
+        title: if extract_field(body, "title") != "": extract_field(body, "title") else: "Host Window",
+        url: extract_field(body, "url"),
+        width: _wm_text_i64(body, "width", 0),
+        height: _wm_text_i64(body, "height", 0),
+        focused: _wm_text_bool(body, "focused", false),
+        captured_at_ms: captured_at_ms,
+        max_age_ms: max_age_ms,
+        now_ms: now_ms
+    )
+
+fn win_text_make_mcp_node(surface_id: text, widget_id: text, kind: text, text_value: text, action_names: [text], source: text) -> UiAccessNode:
+    win_text_make_node(surface_id: surface_id, widget_id: widget_id, kind: kind, text_value: text_value, action_names: action_names, props: [UiAccessProp(key: "source", value: source)])
+
+fn _wm_text_snapshot_response(snapshot: WinTextSnapshot) -> text:
+    "{" + jp("source_count", str(snapshot.sources.len())) + "," + jp("snapshot", ui_access_snapshot_to_json(snapshot.access)) + "}"
+
+fn _wm_text_action_response(result: WinTextActionResult) -> text:
+    "{" + jp("ok", if result.ok: "true" else: "false") + "," + jp("code", js(result.code)) + "," + jp("message", js(result.message)) + "," + jp("source_id", js(result.source_id)) + "," + jp("target_id", js(result.target_id)) + "," + jp("action", js(result.action)) + "}"
+
+fn handle_play_wm_text_snapshot(id: text, body: text) -> text:
+    val snapshot = _wm_text_snapshot_from_body(body)
+    make_tool_result(id, _wm_text_snapshot_response(snapshot))
+
+fn handle_play_wm_text_find(id: text, body: text) -> text:
+    val snapshot = _wm_text_snapshot_from_body(body)
+    val surface_id = extract_field(body, "surface_id")
+    val kind = extract_field(body, "kind")
+    val text_query = extract_field(body, "text")
+    val nodes = win_text_find_nodes(snapshot, surface_id, kind, text_query, _wm_text_limit(body))
+    make_tool_result(id, ui_access_query_to_json(ui_access_query_result(nodes)))
+
+fn handle_play_wm_text_act(id: text, body: text) -> text:
+    val target_id = extract_field(body, "target_id")
+    if target_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: target_id")
+    val snapshot = _wm_text_snapshot_from_body(body)
+    val action = extract_field(body, "action")
+    val result = win_text_route_action(snapshot, WinTextActionRequest(
+        target_id: target_id,
+        action: action,
+        text_value: extract_field(body, "text_value"),
+        x: _wm_text_i64(body, "x", 0),
+        y: _wm_text_i64(body, "y", 0)
+    ))
+    make_tool_result(id, _wm_text_action_response(result))
 
 # ============================================================================
 # SDL2 backend tools

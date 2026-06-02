@@ -142,6 +142,7 @@ If schema validation fails:
    bin/simple check src/app/mcp
    bin/simple check src/app/simple_lsp_mcp
    SIMPLE_LIB=src bin/simple test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
+   scripts/check-mcp-native-smoke.shs
    ```
 
 5. If the npm package or registry wrapper changed, also run the core-lane
@@ -150,14 +151,13 @@ If schema validation fails:
    ```bash
    bin/simple native-build --runtime-bundle core-c --source src/app --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server
    bin/simple native-build --runtime-bundle core-c --source src/app --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server
-   scripts/check-mcp-native-smoke.shs
    ```
 
    The package binaries must stay on a core lane. Do not use
    `--runtime-bundle rust-hosted` for MCP/LSP package validation.
 
 Do not publish npm, registry metadata, or plugin bundles while either
-`*_json_valid` or `*_schema_valid` is false.
+`*_json_valid`, `*_schema_valid`, or `mcp_wm_text_tools_present` is false.
 
 ---
 
@@ -176,7 +176,10 @@ bin/simple_mcp_server
 - **Protocol**: JSON-RPC 2.0 over stdio
 - **MCP Version**: 2025-06-18
 - **Startup**: < 1s (optimized single-process)
-- **Tool count**: 108 tools
+- **Tool count**: 151 tools in the current source fallback path
+- **Wrapper fallback**: `bin/simple_mcp_server` delegates to the native binary
+  first, then falls back to the source MCP entrypoint when native `tools/list`
+  is stale or a `play_wm_text_*` request needs the current source handlers.
 
 ---
 
@@ -376,6 +379,8 @@ bin/simple query sem-query 'FIND fn WHERE name starts_with "parse_" AND param_co
 **Tools not working:**
 - Check `SIMPLE_PROJECT_ROOT` env var is set correctly
 - Check logs: `~/Library/Logs/Claude/` (macOS) or `~/.config/Claude/logs/` (Linux)
+- Run `scripts/check-mcp-native-smoke.shs`; it must report
+  `mcp_wm_text_tools_present=true` for the common WM text tools.
 
 ---
 

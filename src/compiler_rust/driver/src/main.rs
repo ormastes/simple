@@ -772,6 +772,17 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "",
         needs_rust_flags: &[],
     },
+    // Playwright-compatible UI automation (app-only)
+    CommandEntry {
+        name: "play",
+        app_path: "src/app/play/main.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: play app not found (install Simple or run from project root)");
+            1
+        }),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
     // Native build (compile .spl project to native binary via Cranelift)
     CommandEntry {
         name: "native-build",
@@ -1012,6 +1023,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/app/cli/bootstrap_main.spl"
         && app_relative_path != "src/app/cli/main.spl"
         && app_relative_path != "src/app/os/main.spl"
+        && app_relative_path != "src/app/play/main.spl"
         && app_relative_path != "src/app/dashboard/main.spl"
         && app_relative_path != "src/app/lsp/main.spl"
         && app_relative_path != "src/compiler/90.tools/sffi_gen/main.spl"
@@ -1044,6 +1056,21 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         let mut full_args = vec![path.to_string_lossy().to_string()];
         full_args.extend(args.iter().skip(1).cloned());
         return Some(run_file_with_args(&path, gc_log, gc_off, full_args));
+    }
+
+    if app_relative_path == "src/app/play/main.spl" {
+        let previous_force_args = std::env::var("SIMPLE_FORCE_ARGS").ok();
+        let forced_args = args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
+        std::env::set_var("SIMPLE_FORCE_ARGS", forced_args);
+
+        let exit_code = run_file_with_args(&path, gc_log, gc_off, vec![path.to_string_lossy().to_string()]);
+
+        match previous_force_args {
+            Some(value) => std::env::set_var("SIMPLE_FORCE_ARGS", value),
+            None => std::env::remove_var("SIMPLE_FORCE_ARGS"),
+        }
+
+        return Some(exit_code);
     }
 
     // Preserve the original command token in argv so src/app/ui/main.spl can

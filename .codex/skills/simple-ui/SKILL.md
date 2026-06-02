@@ -26,7 +26,13 @@ It normalizes those sources into the canonical UI access node model, then uses
 `win_text_find_nodes`, `win_text_route_action`, and `win_text_merge_snapshots`.
 
 The Simple MCP status probe is `play_wm_text_status`; it reports whether the
-common adapter contract is available. Live refresh remains adapter-owned.
+common adapter contract is available for CLI/service/MCP callers. Live refresh,
+TRACE32 open/capture, and host WM privileged input remain adapter-owned; use the
+common helpers only for normalized snapshot/query/action logic.
+For MCP scalar adapter payloads, use `play_wm_text_snapshot`,
+`play_wm_text_find`, and `play_wm_text_act`.
+For CLI planning/discovery, use `simple play wm-text-snapshot`,
+`simple play wm-text-find`, and `simple play wm-text-act`.
 
 ## Procedure
 

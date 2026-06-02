@@ -1726,7 +1726,7 @@ expect(_eval_str_with_network("http://api.example.com:8080", "require('http').re
 
 </details>
 
-#### exposes bounded http request lifecycle methods
+#### loads bounded http request headers from option objects
 
 <details>
 <summary>Executable SPipe</summary>
@@ -1735,9 +1735,30 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var headers = {Accept:'json', Authorization:'token'}; var opts = {hostname:'api.example.com', port:8080}; opts.headers = headers; require('http').request(opts).getHeader('accept')")).to_equal("json")
+expect(_eval_str_with_network("http://api.example.com:8080", "var headers = {Accept:'json', Authorization:'token'}; var opts = {hostname:'api.example.com', port:8080}; opts.headers = headers; require('http').request(opts).getHeaderNames()")).to_equal("accept,authorization")
+expect(_eval_str_with_network("http://api.example.com:8080", "var headers = {Accept:'json', Authorization:'token'}; var opts = {hostname:'api.example.com', port:8080}; opts.headers = headers; var req = require('http').request(opts); req.flushHeaders(); req.flushedHeaderCount")).to_equal("2")
+```
+
+</details>
+
+#### exposes bounded http request lifecycle methods
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
 expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').write")).to_equal("function")
 expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').end")).to_equal("function")
 expect(_eval_str_with_network("https://api.example.com:443", "typeof require('node:https').request('https://api.example.com').abort")).to_equal("function")
+expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').setHeader")).to_equal("function")
+expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').removeHeader")).to_equal("function")
+expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').getHeaderNames")).to_equal("function")
+expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').getHeaders")).to_equal("function")
+expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').flushHeaders")).to_equal("function")
 ```
 
 </details>
@@ -1754,6 +1775,88 @@ Reproduction: this block contains the complete executable scenario source.
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.write('abc').bytes")).to_equal("3")
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.write('ab'); req.write('cde'); req.bodyBytes")).to_equal("5")
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.write('ab'); req.write('cde'); req.bodyChunks")).to_equal("2")
+```
+
+</details>
+
+#### tracks bounded http request headers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Authorization', 'Bearer token'); req.getHeader('authorization')")).to_equal("Bearer token")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.headerCount")).to_equal("1")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.setHeader('accept', 'text'); req.getHeader('ACCEPT')")).to_equal("text")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.setHeader('accept', 'text'); req.headerCount")).to_equal("1")
+```
+
+</details>
+
+#### removes bounded http request headers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.hasHeader('ACCEPT')")).to_equal("true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.hasHeader('missing')")).to_equal("false")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.removeHeader('accept'); req.hasHeader('Accept')")).to_equal("false")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.removeHeader('accept'); req.headerCount")).to_equal("0")
+```
+
+</details>
+
+#### reports bounded http request header names
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.setHeader('Authorization', 'token'); req.getHeaderNames()")).to_equal("accept,authorization")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.setHeader('accept', 'text'); req.getHeaderNames()")).to_equal("accept")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.removeHeader('accept'); req.getHeaderNames()")).to_equal("")
+```
+
+</details>
+
+#### reports bounded http request header objects
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.getHeaders().accept")).to_equal("json")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.setHeader('accept', 'text'); req.getHeaders().accept")).to_equal("text")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.removeHeader('accept'); req.getHeaders().accept")).to_equal("undefined")
+```
+
+</details>
+
+#### flushes bounded http request headers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.flushHeaders(); req.headersFlushed")).to_equal("true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.setHeader('Authorization', 'token'); req.flushHeaders(); req.flushedHeaderCount")).to_equal("2")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.flushHeaders(); req.requestEnded")).to_equal("false")
 ```
 
 </details>
@@ -1963,6 +2066,48 @@ expect(_eval_str("var r = require('stream').Readable.from(['a','b']); var it = r
 expect(_eval_str("var r = require('stream').Readable.from(['a','b']); var it = r.streamAsyncIterator(); it.next(); it.next().value")).to_equal("b")
 expect(_eval_str("var r = require('stream').Readable.from(['a']); var it = r.streamAsyncIterator(); it.next(); it.next().done")).to_equal("true")
 expect(_eval_str("var r = require('stream').Readable.from(['a','b']); var it = r.streamAsyncIterator(); it.next(); r.readableLength")).to_equal("1")
+```
+
+</details>
+
+#### exposes bounded Symbol asyncIterator key
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("Symbol.asyncIterator")).to_equal("Symbol.asyncIterator")
+```
+
+</details>
+
+#### exposes bounded readable Symbol asyncIterator method
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("typeof require('stream').Readable.from(['a'])[Symbol.asyncIterator]")).to_equal("function")
+```
+
+</details>
+
+#### iterates bounded readable chunks through Symbol asyncIterator
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var r = require('stream').Readable.from(['a','b']); var it = r[Symbol.asyncIterator](); it.next().value")).to_equal("a")
 ```
 
 </details>
@@ -3052,8 +3197,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 200 |
-| Active scenarios | 200 |
+| Total scenarios | 209 |
+| Active scenarios | 209 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

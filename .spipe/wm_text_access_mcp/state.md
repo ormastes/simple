@@ -43,3 +43,51 @@ dev-done
 - impl: Made the window-to-text core public/importable, added a host-WM primitive-field snapshot helper for CLI/service/MCP callers, fixed parser-sensitive shared UI query serialization, and made the process shell result path public for MCP stdio tests.
 - test: Upgraded the WM text-access SPipe spec from source-contract-only to 15 examples, including behavioral TRACE32, Simple UI, host WM, merged-query, supported-action, and unsupported-operation assertions.
 - verify: `SIMPLE_LIB=src bin/release/simple test test/system/app/wm_text_access_mcp/feature/wm_text_access_mcp_spec.spl --mode=interpreter --fail-fast` passes 15/15; MCP stdio integration passes 5/5; `bin/release/simple check src/compiler`, `src/lib`, `src/app/mcp`, and `src/app/simple_lsp_mcp` all report no errors; `sh scripts/check-mcp-native-smoke.shs` passes; `doc/06_spec` executable spec count remains 0.
+- audit: Rechecked the current request against existing artifacts. Research,
+  requirements, architecture, detail design, system plan, agent plan, SPipe
+  spec, mirrored manual, implementation, MCP status hook, UI access guide, and
+  `simple-ui` skill are present for `wm_text_access_mcp`.
+- docs: Refreshed architecture/detail design status and guide/skill wording so
+  the placed first slice is documented as implemented rather than pending final
+  selection.
+- verify: Re-ran focused current-state gates. `wm_text_access_mcp_spec.spl`
+  passes 15/15; touched common UI/MCP files check clean; `check src/compiler`,
+  `check src/lib`, `check src/app/mcp`, and `check src/app/simple_lsp_mcp` pass;
+  MCP stdio integration passes 5/5; `check-mcp-native-smoke.shs` reports valid
+  MCP/LSP tool JSON/schema; `doc/06_spec` executable spec count is 0.
+- impl: Added live scalar-payload MCP facade tools:
+  `play_wm_text_snapshot`, `play_wm_text_find`, and `play_wm_text_act`. They
+  normalize TRACE32, Simple UI, or host WM payloads and call the shared
+  `win_text_*` snapshot/query/action core.
+- test: Extended the system spec to 17 examples covering static MCP discovery,
+  tool-table registration, dispatch wiring, and shared-core use for the live
+  facade tools. Directly importing the MCP play handler module from the spec
+  caused an interpreter hang after loading `main_lazy_json`; keep that as a
+  concrete follow-up for direct handler unit coverage instead of hiding it.
+- impl: Added CLI planner/discovery names `simple play wm-text-snapshot`,
+  `simple play wm-text-find`, and `simple play wm-text-act`; normalized the
+  parser-sensitive play CLI predicate helpers to explicit returns.
+- verify: Focused check for touched MCP/play/spec files passed; WM text-access
+  system spec passes 18/18; `check src/compiler`, `check src/lib`,
+  `check src/app/mcp`, and `check src/app/simple_lsp_mcp` pass; MCP stdio
+  integration passes 5/5; native MCP smoke reports valid MCP/LSP schema JSON;
+  `doc/06_spec` executable spec count is 0.
+- impl: Registered `play` in the native Rust driver, allowed
+  `src/app/play/main.spl` dispatch, normalized leading `play` in the Play CLI,
+  and kept the Simple/Rust CLI source contracts covered by the system spec.
+- verify: Rebuilt the debug native driver and proved
+  `simple play wm-text-find trace32 PC --json` reaches the Play planner and
+  returns `{"command":"play","status":"planned","subcommand":"wm-text-find","args":2}`.
+- verify: Final gates pass: WM text-access system spec 19/19; `check
+  src/compiler`, `check src/lib`, `check src/app/mcp`, and `check
+  src/app/simple_lsp_mcp`; MCP stdio integration 5/5; native MCP smoke
+  JSON/schema checks; Rust `cargo build -p simple-driver`; and `doc/06_spec`
+  executable spec count is 0.
+- fix: `bin/simple_mcp_server` native `tools/list` was stale and the rebuilt
+  native binary segfaulted, so the wrapper now falls back to the source MCP
+  entrypoint for stale `tools/list` output and `play_wm_text_*` calls.
+  `scripts/setup.sh` generates the same fallback wrapper.
+- verify: `scripts/check-mcp-native-smoke.shs` now asserts
+  `mcp_wm_text_tools_present=true`; wrapper probes show 151 tools and
+  `play_wm_text_status`, `play_wm_text_snapshot`, `play_wm_text_find`, and
+  `play_wm_text_act` present with clean stderr.

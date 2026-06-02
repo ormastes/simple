@@ -536,17 +536,10 @@ impl LintChecker {
             return false;
         }
 
-        let subject = match Self::extract_expect_subject(normalized) {
-            Some(subject) if !subject.is_empty() && subject != "true" && subject != "false" => subject,
-            _ => return false,
-        };
-
-        subject.contains("==")
-            || subject.contains("!=")
-            || subject.contains(">=")
-            || subject.contains("<=")
-            || subject.contains('>')
-            || subject.contains('<')
+        matches!(
+            Self::extract_expect_subject(normalized),
+            Some(subject) if !subject.is_empty() && subject != "true" && subject != "false"
+        )
     }
 
     fn indent_width(line: &str) -> usize {
@@ -567,6 +560,7 @@ impl LintChecker {
 
     pub(super) fn is_assertion_like(normalized: &str) -> bool {
         normalized.contains("expect(")
+            || normalized.contains("expect_not(")
             || normalized.contains("to_equal(")
             || normalized.contains("to_be(")
             || normalized.contains("to_contain(")
@@ -782,8 +776,8 @@ impl LintChecker {
                 self.emit(
                     LintName::SPipeBooleanWrapperAssertions,
                     Span::new(0, 0, line_num, 1),
-                    "boolean-wrapper assertion in spec/example".to_string(),
-                    Some("assert the underlying value or capability result directly".to_string()),
+                    "verbose boolean equality assertion in spec/example".to_string(),
+                    Some("use expect(condition) for true checks and expect_not(condition) for false checks".to_string()),
                 );
             }
         }

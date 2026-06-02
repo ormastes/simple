@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Node Api Conformance Specification](feature/js/node_api_conformance_spec.md) | Auto-generated | N/A | 200 | 0% | 0 lines |
+| [Famous Site Corpus Specification](system/wm_compare/famous_site_corpus_spec.md) | Auto-generated | N/A | 39 | 0% | 0 lines |
 

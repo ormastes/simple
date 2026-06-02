@@ -437,7 +437,7 @@ See also: .claude/skills/todo.md for full format specification
             LintName::SPipeManualAssertions => "Lint: spipe_manual_assertions\nLevel: warn\n\nDetects manual pass/fail tracking instead of expect() assertions.".to_string(),
             LintName::SPipePlaceholderTests => "Lint: spipe_placeholder_tests\nLevel: deny\n\nDetects tautological assertions, placeholder pass helpers, and fake match-arm success in SPipe files.".to_string(),
             LintName::SPipeEmptyExamples => "Lint: spipe_empty_examples\nLevel: deny\n\nDetects SPipe examples that have no real assertion or sanctioned skip.".to_string(),
-            LintName::SPipeBooleanWrapperAssertions => "Lint: spipe_boolean_wrapper_assertions\nLevel: deny\n\nDetects boolean-wrapper assertions like expect(a != b).to_equal(true).".to_string(),
+            LintName::SPipeBooleanWrapperAssertions => "Lint: spipe_boolean_wrapper_assertions\nLevel: deny\n\nDetects verbose boolean assertions like expect(condition).to_equal(true) and expect(condition).to_equal(false). Use expect(condition) or expect_not(condition).".to_string(),
             LintName::StubImpl => "Lint: stub_impl\nLevel: deny\n\nDetects explicit placeholder implementation bodies in production code.".to_string(),
             LintName::RequiredCommentPass => "Lint: REQC001\nLevel: warn\n\nWarns when pass_* is used without a useful rationale.".to_string(),
             LintName::RequiredCommentDangerous => "Lint: REQC002\nLevel: warn\n\nWarns when a dangerous keyword is used without a useful rationale.".to_string(),

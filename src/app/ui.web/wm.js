@@ -23,6 +23,8 @@ const ACK_INTERVAL_MS   = 500;
 const HOST_NATIVE_EVENT_SOURCE = 'native_event';
 const NATIVE_SUPPRESSION_TTL_MS = 500;
 const NATIVE_BURST_DEBOUNCE_MS = 80;
+const WM_EXIT_ANIMATION_MS = 210;
+const WM_MOTION_STORAGE_KEY = 'simple.wm.motion';
 
 class SimpleWindowManager {
   constructor(options = {}) {
@@ -55,6 +57,14 @@ class SimpleWindowManager {
     this._electronWindows = new Map();
     this._electronActiveWindowId = '';
     this._electronZCounter = 20;
+    this._commandPalette = null;
+    this._commandPaletteInput = null;
+    this._commandPaletteList = null;
+    this._commandPaletteItems = [];
+    this._commandPaletteActiveIndex = 0;
+
+    this._applyMotionPreference(options.motion || '');
+    window.simpleWmSetMotion = (preference) => this.setMotionPreference(preference);
 
     // Load renderer then begin auth.
     this._init();
@@ -97,6 +107,36 @@ class SimpleWindowManager {
       this.renderer = null;
       return false;
     }
+  }
+
+  setMotionPreference(preference) {
+    const motion = this._normalizeMotionPreference(preference);
+    try {
+      window.localStorage.setItem(WM_MOTION_STORAGE_KEY, motion);
+    } catch (_) {
+      // Storage can be unavailable in restricted webviews; the DOM attribute is enough.
+    }
+    return this._applyMotionPreference(motion);
+  }
+
+  _applyMotionPreference(preference) {
+    const motion = this._normalizeMotionPreference(preference || this._readMotionPreference());
+    document.documentElement.dataset.wmMotion = motion;
+    return motion;
+  }
+
+  _readMotionPreference() {
+    try {
+      return window.localStorage.getItem(WM_MOTION_STORAGE_KEY) || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  _normalizeMotionPreference(preference) {
+    const value = String(preference || '').trim().toLowerCase();
+    if (value === 'off' || value === 'reduced' || value === 'standard') return value;
+    return 'standard';
   }
 
   async _authenticate() {
@@ -351,6 +391,103 @@ class SimpleWindowManager {
     this._sendWindowCmd('launch', { app_id: appId });
   }
 
+  _ensureCommandPalette() {
+    if (this._commandPalette) return this._commandPalette;
+    const palette = document.createElement('aside');
+    palette.className = 'wm-command-palette';
+    palette.hidden = true;
+    palette.setAttribute('role', 'dialog');
+    palette.setAttribute('aria-label', 'Simple command palette');
+
+    const input = document.createElement('input');
+    input.className = 'wm-command-palette-input';
+    input.type = 'text';
+    input.placeholder = 'Run a command';
+    input.setAttribute('aria-label', 'Global command');
+    palette.appendChild(input);
+
+    const list = document.createElement('div');
+    list.className = 'wm-command-palette-list';
+    palette.appendChild(list);
+    document.body.appendChild(palette);
+
+    this._commandPalette = palette;
+    this._commandPaletteInput = input;
+    this._commandPaletteList = list;
+    input.addEventListener('input', () => this._renderCommandPaletteItems());
+    list.addEventListener('click', (event) => {
+      const item = event.target.closest('.wm-command-item');
+      if (!item || !list.contains(item)) return;
+      const index = Number(item.dataset.commandIndex || 0);
+      this._commandPaletteActiveIndex = index;
+      this._executeCommandPaletteAction();
+    });
+    this._renderCommandPaletteItems();
+    return palette;
+  }
+
+  _commandPaletteCommands() {
+    return [
+      { label: 'Open Simple IDE', shortcut: 'Enter', icon: 'I', action: () => this._sendLaunch('simple.ide') },
+      { label: 'Set motion: standard', shortcut: 'Cmd 1', icon: 'S', action: () => this.setMotionPreference('standard') },
+      { label: 'Set motion: reduced', shortcut: 'Cmd 2', icon: 'M', action: () => this.setMotionPreference('reduced') },
+      { label: 'Set motion: off', shortcut: 'Cmd 3', icon: 'O', action: () => this.setMotionPreference('off') }
+    ];
+  }
+
+  _renderCommandPaletteItems() {
+    if (!this._commandPaletteList) return;
+    const query = String(this._commandPaletteInput?.value || '').trim().toLowerCase();
+    const commands = this._commandPaletteCommands()
+      .filter((command) => !query || command.label.toLowerCase().includes(query));
+    this._commandPaletteItems = commands;
+    this._commandPaletteActiveIndex = Math.min(this._commandPaletteActiveIndex, Math.max(commands.length - 1, 0));
+    this._commandPaletteList.innerHTML = '';
+    commands.forEach((command, index) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'wm-command-item' + (index === this._commandPaletteActiveIndex ? ' active' : '');
+      item.dataset.commandIndex = String(index);
+      item.appendChild(this._makeRoundIcon('wm-taskbar-icon', command.icon));
+      const label = document.createElement('span');
+      label.textContent = command.label;
+      item.appendChild(label);
+      const shortcut = document.createElement('span');
+      shortcut.className = 'wm-command-shortcut';
+      shortcut.textContent = command.shortcut;
+      item.appendChild(shortcut);
+      this._commandPaletteList.appendChild(item);
+    });
+  }
+
+  _toggleCommandPalette(open = null) {
+    const palette = this._ensureCommandPalette();
+    const shouldOpen = open == null ? palette.hidden : open;
+    palette.hidden = !shouldOpen;
+    if (shouldOpen) {
+      this._commandPaletteInput.value = '';
+      this._commandPaletteActiveIndex = 0;
+      this._renderCommandPaletteItems();
+      this._commandPaletteInput.focus();
+    }
+  }
+
+  _moveCommandPaletteSelection(delta) {
+    if (!this._commandPalette || this._commandPalette.hidden) return;
+    const count = this._commandPaletteItems.length;
+    if (!count) return;
+    this._commandPaletteActiveIndex = (this._commandPaletteActiveIndex + delta + count) % count;
+    this._renderCommandPaletteItems();
+  }
+
+  _executeCommandPaletteAction() {
+    if (!this._commandPalette || this._commandPalette.hidden) return;
+    const command = this._commandPaletteItems[this._commandPaletteActiveIndex];
+    if (!command) return;
+    command.action();
+    this._toggleCommandPalette(false);
+  }
+
   // Install one persistent click listener on the taskbar that dispatches
   // by data-action. Idempotent — rendering can clear innerHTML without
   // losing the handler. Call once after this.taskbar is bound.
@@ -386,7 +523,8 @@ class SimpleWindowManager {
     for (const a of (model.pinned || [])) {
       const item = document.createElement('div');
       item.className = 'wm-taskbar-item pinned';
-      item.textContent = a.display_name || a.app_id;
+      item.appendChild(this._makeTaskbarIcon(a.icon || a.display_name || a.app_id));
+      item.appendChild(this._makeTaskbarLabel(a.display_name || a.app_id));
       item.dataset.action = 'launch';
       item.dataset.appId = a.app_id;
       pinned.appendChild(item);
@@ -400,7 +538,8 @@ class SimpleWindowManager {
       item.className = 'wm-taskbar-item running'
         + (w.active ? ' active' : '')
         + (w.minimized ? ' minimized' : '');
-      item.textContent = (w.minimized ? '[-] ' : '') + (w.title || w.window_id);
+      item.appendChild(this._makeTaskbarIcon(w.icon || w.title || w.app_id || w.window_id));
+      item.appendChild(this._makeTaskbarLabel((w.minimized ? '[-] ' : '') + (w.title || w.window_id)));
       item.dataset.action = 'focus';
       item.dataset.windowIdHint = w.window_id;
       running.appendChild(item);
@@ -416,6 +555,44 @@ class SimpleWindowManager {
       tray.appendChild(item);
     }
     this.taskbar.appendChild(tray);
+  }
+
+  _makeTaskbarIcon(raw) {
+    return this._makeRoundIcon('wm-taskbar-icon', raw);
+  }
+
+  _makeRoundIcon(baseClass, raw) {
+    const icon = document.createElement('span');
+    icon.className = `${baseClass} wm-round-icon`;
+    const value = String(raw || 'S');
+    icon.dataset.iconSource = value;
+    if (this._isImageIcon(value)) {
+      icon.classList.add('wm-icon-normalized-square');
+      icon.dataset.iconNormalized = 'square-to-round';
+      const img = document.createElement('img');
+      img.className = 'wm-icon-image';
+      img.src = value;
+      img.alt = '';
+      icon.appendChild(img);
+    } else {
+      icon.dataset.iconNormalized = 'glyph-to-round';
+      const glyph = document.createElement('span');
+      glyph.className = 'wm-icon-glyph';
+      glyph.textContent = value.trim().slice(0, 1).toUpperCase() || 'S';
+      icon.appendChild(glyph);
+    }
+    return icon;
+  }
+
+  _isImageIcon(value) {
+    return value.startsWith('/') || value.startsWith('data:') || value.startsWith('http://') || value.startsWith('https://');
+  }
+
+  _makeTaskbarLabel(text) {
+    const label = document.createElement('span');
+    label.className = 'wm-taskbar-label';
+    label.textContent = text || '';
+    return label;
   }
 
   async _handleHostWindowCommand(payload) {
@@ -674,13 +851,23 @@ class SimpleWindowManager {
       const btn = document.createElement('button');
       btn.dataset.action = action;
       btn.textContent = label;
+      btn.className = `wm-btn-${action}`;
+      btn.setAttribute('aria-label', action);
       lights.appendChild(btn);
     }
+    const icon = this._makeRoundIcon('wm-titlebar-icon', msg.icon || msg.title || windowId || 'S');
     const title = document.createElement('div');
     title.className = 'wm-title';
     title.textContent = msg.title || windowId;
+    const command = this._makeTitleInput(msg);
+    const context = document.createElement('div');
+    context.className = 'wm-title-context';
+    context.textContent = msg.context || msg.appId || msg.app_id || windowId;
     titlebar.appendChild(lights);
+    titlebar.appendChild(icon);
     titlebar.appendChild(title);
+    titlebar.appendChild(command);
+    titlebar.appendChild(context);
     winEl.appendChild(titlebar);
 
     const body = document.createElement('div');
@@ -689,6 +876,7 @@ class SimpleWindowManager {
     body.innerHTML = msg.html || '';
     winEl.appendChild(body);
     this.desktop.appendChild(winEl);
+    this._markWindowLifecycle(winEl, 'opening');
     this._electronWindows.set(windowId, {
       winEl,
       body,
@@ -705,11 +893,24 @@ class SimpleWindowManager {
     if (entry) entry.body.innerHTML = html;
   }
 
+  _makeTitleInput(payload) {
+    const input = document.createElement('input');
+    input.className = 'wm-title-input wm-command-bar';
+    input.type = 'text';
+    input.value = payload.command || payload.command_text || payload.url || payload.path || payload.workspace || '';
+    input.placeholder = payload.placeholder || payload.context || payload.appId || payload.app_id || 'Command';
+    input.setAttribute('aria-label', 'Window command');
+    input.addEventListener('pointerdown', (event) => event.stopPropagation());
+    input.addEventListener('mousedown', (event) => event.stopPropagation());
+    input.addEventListener('dblclick', (event) => event.stopPropagation());
+    return input;
+  }
+
   _electronCloseWindow(windowId) {
     const key = String(windowId || '');
     const entry = this._electronWindows.get(key);
     if (!entry) return;
-    entry.winEl.remove();
+    this._animateRemoveWindow(entry.winEl);
     this._electronWindows.delete(key);
     if (this._electronActiveWindowId === key) {
       this._electronActiveWindowId = '';
@@ -736,7 +937,9 @@ class SimpleWindowManager {
     if (!entry) return;
     for (const item of this._electronWindows.values()) item.winEl.classList.remove('focused');
     entry.winEl.classList.add('focused');
+    entry.winEl.classList.remove('minimized', 'minimizing');
     entry.winEl.style.display = '';
+    if (entry.minimized) this._markWindowLifecycle(entry.winEl, 'restoring');
     entry.winEl.style.zIndex = String(++this._electronZCounter);
     entry.minimized = false;
     this._electronActiveWindowId = String(windowId || '');
@@ -746,8 +949,15 @@ class SimpleWindowManager {
   _electronMinimizeWindow(windowId) {
     const entry = this._electronWindows.get(String(windowId || ''));
     if (!entry) return;
-    entry.winEl.style.display = 'none';
     entry.minimized = true;
+    this._markWindowLifecycle(entry.winEl, 'minimizing');
+    setTimeout(() => {
+      if (entry.minimized) {
+        entry.winEl.classList.remove('minimizing');
+        entry.winEl.classList.add('minimized');
+        entry.winEl.style.display = 'none';
+      }
+    }, WM_EXIT_ANIMATION_MS);
     if (this._electronActiveWindowId === String(windowId || '')) {
       this._electronActiveWindowId = '';
     }
@@ -789,6 +999,20 @@ class SimpleWindowManager {
     entry.titleText = title || String(windowId || '');
     entry.title.textContent = entry.titleText;
     this._renderElectronTaskbar();
+  }
+
+  _animateRemoveWindow(winEl) {
+    if (!winEl) return;
+    winEl.classList.remove('opening', 'restoring', 'minimizing');
+    winEl.classList.add('closing');
+    setTimeout(() => winEl.remove(), WM_EXIT_ANIMATION_MS);
+  }
+
+  _markWindowLifecycle(winEl, className) {
+    if (!winEl) return;
+    winEl.classList.remove('opening', 'restoring', 'closing', 'minimizing', 'minimized');
+    winEl.classList.add(className);
+    setTimeout(() => winEl.classList.remove(className), WM_EXIT_ANIMATION_MS + 80);
   }
 
   _renderElectronTaskbar() {
@@ -1002,6 +1226,7 @@ class SimpleWindowManager {
   // -------------------------------------------------------------------------
 
   _bindGlobalEvents() {
+    this._ensureCommandPalette();
     document.addEventListener('mousemove', (e) => this._onMousemove(e));
     document.addEventListener('mouseup',   (e) => this._onMouseup(e));
 
@@ -1119,6 +1344,35 @@ class SimpleWindowManager {
     });
 
     document.addEventListener('keydown', (e) => {
+      const wantsPalette = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k';
+      if (wantsPalette) {
+        e.preventDefault();
+        this._toggleCommandPalette();
+        return;
+      }
+      if (this._commandPalette && !this._commandPalette.hidden) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          this._toggleCommandPalette(false);
+          return;
+        }
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          this._moveCommandPaletteSelection(1);
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          this._moveCommandPaletteSelection(-1);
+          return;
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          this._executeCommandPaletteAction();
+          return;
+        }
+        return;
+      }
       if (!this.renderer || !this.renderer.activeSurface) return;
       const surfId = this.renderer.activeSurface;
       this._sendInputEvent(surfId, '', {

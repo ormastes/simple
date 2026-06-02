@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-01 22:31:18*
+*Generated: 2026-06-02 01:30:14*
 
-## test/unit/lib/gui
+## test/feature/js
 
-❌ **pure_gui_release_lane_spec.spl** (3367ms)
-  - Source: `test/unit/lib/gui/pure_gui_release_lane_spec.spl`
-  - Generated doc: `spec/pure_gui_release_lane_spec.md`
+❌ **node_api_conformance_spec.spl** (2108ms)
+  - Source: `test/feature/js/node_api_conformance_spec.spl`
+  - Generated doc: `spec/node_api_conformance_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 15 ✅
+- **Passed:** 208 ✅
 - **Failed:** 1 ❌
-- **Duration:** 3377ms
+- **Duration:** 2118ms

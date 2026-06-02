@@ -7,6 +7,7 @@
 
 // Known prop keys applied as direct element properties (not data-* attributes).
 const DIRECT_PROPS = new Set(['text', 'value', 'disabled', 'placeholder', 'title']);
+const WM_EXIT_ANIMATION_MS = 210;
 
 // Map widget kind to element tag + class.
 const KIND_MAP = {
@@ -113,12 +114,13 @@ export class RetainedRenderer {
       const el = this._materializeNode(nodeSpec);
       this.surfaces.set(surfaceId, el);
       this.root.appendChild(el);
+      this._markLifecycle(el, 'opening');
     }
 
     // Remove surfaces not present in this snapshot.
     for (const [surfId, el] of this.surfaces) {
       if (!incomingSurfaces.has(surfId)) {
-        el.remove();
+        this._animateRemoveElement(el);
         for (const [cid] of this.nodes) {
           if (cid.startsWith(surfId + '#')) this.nodes.delete(cid);
         }
@@ -141,11 +143,12 @@ export class RetainedRenderer {
       this.surfaces.set(surfaceId, winEl);
       this.surfaceRoots.set(surfaceId, surface.root_canonical_id);
       this.root.appendChild(winEl);
+      this._markLifecycle(winEl, 'opening');
     }
 
     for (const surfId of Array.from(this.surfaces.keys())) {
       if (!incomingSurfaces.has(surfId)) {
-        this._removeSurface(surfId);
+        this._removeSurface(surfId, true);
       }
     }
     if (payload.active_surface) {
@@ -206,7 +209,7 @@ export class RetainedRenderer {
     if (idx >= 0 && idx < children.length) {
       const removed = children[idx];
       const cid = removed.dataset.canonicalId;
-      removed.remove();
+      this._animateRemoveElement(removed);
       if (cid) this.nodes.delete(cid);
     }
   }
@@ -265,15 +268,36 @@ export class RetainedRenderer {
     const el = this.nodes.get(p.id);
     if (!el) return;
     const vis = p.visible === true || p.visible === 'true';
-    el.style.display = vis ? '' : 'none';
     if (vis) {
-      el.classList.remove('minimized');
+      el.classList.remove('minimized', 'minimizing');
+      el.style.display = '';
+      this._markLifecycle(el, 'restoring');
     } else {
-      el.classList.add('minimized');
+      this._markLifecycle(el, 'minimizing');
+      setTimeout(() => {
+        if (el.classList.contains('minimizing')) {
+          el.classList.remove('minimizing');
+          el.classList.add('minimized');
+          el.style.display = 'none';
+        }
+      }, WM_EXIT_ANIMATION_MS);
     }
     const surfaceWindow = this._surfaceWindowForCanonical(p.id);
     if (surfaceWindow && this._isRootCanonical(p.id)) {
-      surfaceWindow.style.display = vis ? '' : 'none';
+      if (vis) {
+        surfaceWindow.classList.remove('minimized', 'minimizing');
+        surfaceWindow.style.display = '';
+        this._markLifecycle(surfaceWindow, 'restoring');
+      } else {
+        this._markLifecycle(surfaceWindow, 'minimizing');
+        setTimeout(() => {
+          if (surfaceWindow.classList.contains('minimizing')) {
+            surfaceWindow.classList.remove('minimizing');
+            surfaceWindow.classList.add('minimized');
+            surfaceWindow.style.display = 'none';
+          }
+        }, WM_EXIT_ANIMATION_MS);
+      }
     }
   }
 
@@ -389,13 +413,23 @@ export class RetainedRenderer {
       const btn = document.createElement('button');
       btn.dataset.action = action;
       btn.textContent = label;
+      btn.className = `wm-btn-${action}`;
+      btn.setAttribute('aria-label', action);
       lights.appendChild(btn);
     }
+    const icon = this._makeSurfaceIcon(surface);
     const title = document.createElement('div');
     title.className = 'wm-title';
     title.textContent = surface.title || surface.surface_id;
+    const command = this._makeTitleInput(surface);
+    const context = document.createElement('div');
+    context.className = 'wm-title-context';
+    context.textContent = surface.context || surface.app_id || surface.surface_id;
     titlebar.appendChild(lights);
+    titlebar.appendChild(icon);
     titlebar.appendChild(title);
+    titlebar.appendChild(command);
+    titlebar.appendChild(context);
     winEl.appendChild(titlebar);
 
     const body = document.createElement('div');
@@ -457,15 +491,77 @@ export class RetainedRenderer {
     return el;
   }
 
-  _removeSurface(surfaceId) {
+  _removeSurface(surfaceId, animate = false) {
     const existing = this.surfaces.get(surfaceId);
-    if (existing) existing.remove();
+    if (existing) {
+      if (animate) this._animateRemoveElement(existing);
+      else existing.remove();
+    }
     for (const [cid] of this.nodes) {
       if (cid.startsWith(surfaceId + '#')) this.nodes.delete(cid);
     }
     this.surfaces.delete(surfaceId);
     this.surfaceRoots.delete(surfaceId);
     this.surfaceBodies.delete(surfaceId);
+  }
+
+  _animateRemoveElement(el) {
+    if (!el) return;
+    el.classList.remove('opening', 'restoring', 'minimizing');
+    el.classList.add('closing');
+    setTimeout(() => el.remove(), WM_EXIT_ANIMATION_MS);
+  }
+
+  _markLifecycle(el, className) {
+    if (!el) return;
+    el.classList.remove('opening', 'restoring', 'closing', 'minimizing', 'minimized');
+    el.classList.add(className);
+    setTimeout(() => el.classList.remove(className), WM_EXIT_ANIMATION_MS + 80);
+  }
+
+  _makeSurfaceIcon(surface) {
+    const raw = surface.icon || surface.app_icon || surface.title || surface.app_id || surface.surface_id || 'S';
+    return this._makeRoundIcon('wm-titlebar-icon', raw);
+  }
+
+  _makeRoundIcon(baseClass, raw) {
+    const icon = document.createElement('span');
+    icon.className = `${baseClass} wm-round-icon`;
+    const value = String(raw || 'S');
+    icon.dataset.iconSource = value;
+    if (this._isImageIcon(value)) {
+      icon.classList.add('wm-icon-normalized-square');
+      icon.dataset.iconNormalized = 'square-to-round';
+      const img = document.createElement('img');
+      img.className = 'wm-icon-image';
+      img.src = value;
+      img.alt = '';
+      icon.appendChild(img);
+    } else {
+      icon.dataset.iconNormalized = 'glyph-to-round';
+      const glyph = document.createElement('span');
+      glyph.className = 'wm-icon-glyph';
+      glyph.textContent = value.trim().slice(0, 1).toUpperCase() || 'S';
+      icon.appendChild(glyph);
+    }
+    return icon;
+  }
+
+  _isImageIcon(value) {
+    return value.startsWith('/') || value.startsWith('data:') || value.startsWith('http://') || value.startsWith('https://');
+  }
+
+  _makeTitleInput(surface) {
+    const input = document.createElement('input');
+    input.className = 'wm-title-input wm-command-bar';
+    input.type = 'text';
+    input.value = surface.command || surface.command_text || surface.url || surface.path || surface.workspace || '';
+    input.placeholder = surface.placeholder || surface.context || surface.app_id || 'Command';
+    input.setAttribute('aria-label', 'Window command');
+    input.addEventListener('pointerdown', (event) => event.stopPropagation());
+    input.addEventListener('mousedown', (event) => event.stopPropagation());
+    input.addEventListener('dblclick', (event) => event.stopPropagation());
+    return input;
   }
 
   _surfaceWindowForCanonical(canonicalId) {
