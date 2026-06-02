@@ -153,6 +153,62 @@ expect(report.error).to_equal("p99-over-threshold")
 
 </details>
 
+#### requires the hot call dynlib to be extracted from the SMF artifact
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 43 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(gui_dynlib_perf_uses_smf_extracted_dynlib("build/gui/pure_gui.smf", "build/gui/pure_gui.smf.extracted.so")).to_equal(true)
+expect(gui_dynlib_perf_uses_smf_extracted_dynlib("build/gui/pure_gui.smf", "build/gui/pure_gui.smf.extracted.dylib")).to_equal(true)
+expect(gui_dynlib_perf_uses_smf_extracted_dynlib("build/gui/pure_gui.smf", "build/gui/libpure_gui_hot.so")).to_equal(false)
+
+val raw_host = gui_dynlib_perf_report(
+    "build/gui/pure_gui.smf",
+    "build/gui/libpure_gui_hot.so",
+    "linux",
+    "x86_64",
+    "linux-x86_64",
+    "CI_CPU",
+    "smf_dynlib",
+    "gui_dynlib_hot_probe_tick",
+    "dynlib_symbol_call",
+    true,
+    false,
+    1,
+    100,
+    [100],
+    1000
+)
+expect(raw_host.pass).to_equal(false)
+expect(raw_host.error).to_equal("not-smf-extracted-dynlib")
+
+val missing_path = gui_dynlib_perf_report(
+    "build/gui/pure_gui.smf",
+    "",
+    "linux",
+    "x86_64",
+    "linux-x86_64",
+    "CI_CPU",
+    "smf_dynlib",
+    "gui_dynlib_hot_probe_tick",
+    "dynlib_symbol_call",
+    true,
+    false,
+    1,
+    100,
+    [100],
+    1000
+)
+expect(missing_path.pass).to_equal(false)
+expect(missing_path.error).to_equal("missing-dynlib-path")
+```
+
+</details>
+
 #### emits a machine-readable evidence row
 
 <details>
@@ -380,8 +436,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
