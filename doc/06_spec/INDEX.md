@@ -17,4 +17,3 @@
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [Engine2d Backend Specification](integration/rendering/engine2d_backend_spec.md) | Auto-generated | N/A | 11 | 0% | 0 lines |
-
