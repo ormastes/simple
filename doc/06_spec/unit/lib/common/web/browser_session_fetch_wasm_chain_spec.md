@@ -693,6 +693,39 @@ match result:
 
 </details>
 
+#### checks Uint8Array values with callback predicates in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `true:true:false`
+
+3. Err
+   - Expected: "unexpected uint8 callback js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; b.some(function(v, i, arr) { return v == 255 && i == 2 && arr.at(3) == 7; }) + ':' + b.every(function(v) { return v >= 0; }) + ':' + b.every(function(v) { return false; })")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:true:false")
+    Err(err):
+        expect("unexpected uint8 callback js error: {err}").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -712,8 +745,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

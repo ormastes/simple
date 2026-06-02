@@ -556,10 +556,37 @@ impl JsInterpreter:
                     set_ai = set_ai + 1
                 return Ok(self._native_uint8_array_set(dst_val, set_arg_vals))
 
-        if is_member and (member_method == "fill" or member_method == "includes" or member_method == "indexOf" or member_method == "join" or member_method == "reverse" or member_method == "lastIndexOf" or member_method == "toString" or member_method == "at" or member_method == "copyWithin"):
+        if is_member and (member_method == "fill" or member_method == "includes" or member_method == "indexOf" or member_method == "join" or member_method == "reverse" or member_method == "lastIndexOf" or member_method == "toString" or member_method == "at" or member_method == "copyWithin" or member_method == "some" or member_method == "every"):
             val typed_val = self.eval_expression(member_obj_expr, env)?
             val typed_id = _get_obj_id(typed_val)
             if typed_id >= 0 and to_boolean(self.get_object_property(typed_id, "__simple_typed_array")):
+                if member_method == "some" or member_method == "every":
+                    if args.len() == 0:
+                        return Ok(JsValue.Boolean(v: member_method == "every"))
+                    val cb_val = self.eval_expression(args.get(0), env)?
+                    match cb_val:
+                        JsValue.Function(fn_id):
+                            val typed_len = self._native_uint8_array_length(typed_id)
+                            var typed_i = 0
+                            var matched = false
+                            var all_match = true
+                            while typed_i < typed_len:
+                                val elem = self._native_uint8_array_byte_at(typed_id, typed_i)
+                                val result = self._invoke_function(fn_id, [elem, JsValue.Number(v: typed_i.to_f64()), typed_val], env)?
+                                if member_method == "some":
+                                    if is_truthy(result):
+                                        matched = true
+                                        break
+                                else:
+                                    if not is_truthy(result):
+                                        all_match = false
+                                        break
+                                typed_i = typed_i + 1
+                            if member_method == "some":
+                                return Ok(JsValue.Boolean(v: matched))
+                            return Ok(JsValue.Boolean(v: all_match))
+                        _:
+                            return Ok(JsValue.Boolean(v: member_method == "every"))
                 var typed_arg_vals: [JsValue] = []
                 var typed_ai = 0
                 while typed_ai < args.len():
