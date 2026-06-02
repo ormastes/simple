@@ -4,6 +4,7 @@
 # and executes it via shell_cmd(). Works for any tool with handler_kind="cli".
 
 use .tool_registry
+use .main_lazy_json.{extract_field, make_tool_result, shell_cmd}
 use .main_lazy_diag_tools.{handle_simple_diagnostics, handle_simple_symbols}
 
 fn handle_cli_passthrough(id: text, body: text, entry: McpToolEntry) -> text:
@@ -17,8 +18,10 @@ fn handle_cli_passthrough_direct(id: text, body: text, name: text, cli_command: 
 
     val _bin = _mcp_find_simple_binary()
 
+    val effective_timeout_s = _effective_cli_timeout_s(name, body, timeout_s)
+
     # Build command: timeout <N> bin/simple <cli_command> <args...>
-    var cmd = "timeout " + str(timeout_s) + " " + _bin + " " + cli_command
+    var cmd = "timeout " + str(effective_timeout_s) + " " + _bin + " " + cli_command
 
     # Extract known parameters from body and append as CLI args
     cmd = _append_cli_args_for_name(cmd, body, name)
@@ -33,12 +36,10 @@ fn handle_cli_passthrough_direct(id: text, body: text, name: text, cli_command: 
     # file so workers hold a file fd (not the popen pipe), then read the file
     # back with `cat` after the command finishes.
     if name == "simple_test":
-        # Wrap in a subshell so that shell_cmd's appended "< /dev/null" binds to
-        # the subshell entry point (harmless), not to individual internal commands.
         # < /dev/null is explicitly placed on the test command itself so it doesn't
         # read from the MCP stdin pipe.
         # mktemp uses trailing X's only (no suffix) for BSD/macOS compatibility.
-        val wrapped = "(tmp=$(mktemp /tmp/simple_mcp_test_XXXXXX); { " + cmd + " < /dev/null; } > \"$tmp\" 2>&1; EC=$?; cat \"$tmp\"; rm -f \"$tmp\"; exit $EC)"
+        val wrapped = "tmp=$(mktemp /tmp/simple_mcp_test_XXXXXX); " + cmd + " < /dev/null > \"$tmp\" 2>&1; EC=$?; cat \"$tmp\"; rm -f \"$tmp\"; exit $EC"
         (out, exit_code) = shell_cmd(wrapped)
     else:
         cmd = cmd + " 2>&1"
@@ -46,8 +47,27 @@ fn handle_cli_passthrough_direct(id: text, body: text, name: text, cli_command: 
 
     var output = "-- " + name + " (exit: " + str(exit_code) + ") --\n" + out
     if exit_code == 124:
-        output = "TIMEOUT: " + name + " timed out after " + str(timeout_s) + "s\n" + out
+        output = "TIMEOUT: " + name + " timed out after " + str(effective_timeout_s) + "s\n" + out
     make_tool_result(id, output)
+
+fn _effective_cli_timeout_s(name: text, body: text, default_timeout_s: i64) -> i64:
+    if name != "simple_test":
+        return default_timeout_s
+    val requested_timeout_s = _parse_positive_int_or_zero(extract_field(body, "timeout"))
+    if requested_timeout_s <= default_timeout_s:
+        return default_timeout_s
+    requested_timeout_s + 30
+
+fn _parse_positive_int_or_zero(value: text) -> i64:
+    if value == "":
+        return 0
+    for ch in value:
+        if ch < "0" or ch > "9":
+            return 0
+    val parsed = value.to_int()
+    if parsed > 0:
+        return parsed
+    0
 
 fn _append_cli_args(cmd: text, body: text, entry: McpToolEntry) -> text:
     _append_cli_args_for_name(cmd, body, entry.tool_name)
@@ -92,8 +112,9 @@ fn _append_cli_args_for_name(cmd: text, body: text, name: text) -> text:
             result = result + " --filter " + filter_str
         if only_slow == "true":
             result = result + " --only-slow"
-        if timeout != "":
-            result = result + " --timeout " + timeout
+        val timeout_s = _parse_positive_int_or_zero(timeout)
+        if timeout_s > 0:
+            result = result + " --timeout " + str(timeout_s)
         else:
             result = result + " --timeout 60"
         return result
