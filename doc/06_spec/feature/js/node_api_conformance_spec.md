@@ -2149,6 +2149,22 @@ expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['ab','cde'
 
 </details>
 
+#### emits bounded readable end after pipe drains
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var seen = 0; var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.on('end', () => { seen = seen + 1; }); r.pipe(w); seen + ':' + r.endEmitted + ':' + r.readableLength")).to_equal("1:true:0")
+expect(_eval_str("var seen = 0; var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.once('end', () => { seen = seen + 1; }); r.pipe(w); r.pipe(w); seen + ':' + r.listenerCount('end') + ':' + r.endEmitted")).to_equal("1:0:true")
+expect(_eval_str("var seen = 0; var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pause(); r.on('end', () => { seen = seen + 1; }); r.pipe(w); r.resume(); seen + ':' + r.endEmitted + ':' + w.bytesWritten")).to_equal("1:true:3")
+```
+
+</details>
+
 #### defers bounded pipe drains while readable is paused
 
 <details>
@@ -3543,8 +3559,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 231 |
-| Active scenarios | 231 |
+| Total scenarios | 232 |
+| Active scenarios | 232 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
