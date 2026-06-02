@@ -1550,6 +1550,22 @@ expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new
 
 </details>
 
+#### emits multiple bounded EventEmitter callbacks in registration order
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new EventEmitter(); var seen = ''; e.on('ready', (v) => { seen = seen + 'a' + v; }); e.on('ready', (v) => { seen = seen + 'b' + v; }); e.emit('ready', 7); seen + ':' + e.listenerCount('ready')")).to_equal("a7b7:2")
+expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new EventEmitter(); var seen = ''; e.once('ready', () => { seen = seen + 'once'; }); e.on('ready', () => { seen = seen + ':on'; }); e.emit('ready'); e.emit('ready'); seen + ':' + e.listenerCount('ready')")).to_equal("once:on:on:1")
+expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new EventEmitter(); var seen = ''; var a = () => { seen = seen + 'a'; }; var b = () => { seen = seen + 'b'; }; e.on('ready', a); e.on('ready', b); e.removeListener('ready', a); e.emit('ready'); seen + ':' + e.listenerCount('ready')")).to_equal("b:1")
+```
+
+</details>
+
 #### removes EventEmitter listeners by event name
 
 <details>
@@ -3289,8 +3305,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 215 |
-| Active scenarios | 215 |
+| Total scenarios | 216 |
+| Active scenarios | 216 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

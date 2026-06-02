@@ -1986,6 +1986,14 @@ impl JsInterpreter:
         if arg_vals.len() > 1:
             val callback_id = _get_fn_id(arg_vals.get(1))
             if callback_id >= 0:
+                var next_slot = 0
+                match self.get_object_property(emitter_id, "__simple_node_event_next_" + event_name):
+                    JsValue.Number(v): next_slot = f64_to_i64(v)
+                    _:
+                        pass_dn
+                self.set_object_property(emitter_id, "__simple_node_event_callback_" + event_name + "_" + next_slot.to_text(), JsValue.Function(id: callback_id))
+                self.set_object_property(emitter_id, "__simple_node_event_once_" + event_name + "_" + next_slot.to_text(), JsValue.Number(v: if once: 1.0 else: 0.0))
+                self.set_object_property(emitter_id, "__simple_node_event_next_" + event_name, JsValue.Number(v: (next_slot + 1).to_f64()))
                 self.set_object_property(emitter_id, "__simple_node_event_callback_" + event_name, JsValue.Function(id: callback_id))
         if once:
             self.set_object_property(emitter_id, "__simple_node_event_once_" + event_name, JsValue.Number(v: 1.0))
@@ -2003,20 +2011,49 @@ impl JsInterpreter:
             _: pass_dn
         if count <= 0:
             return JsValue.Boolean(v: false)
-        val callback_id = _get_fn_id(self.get_object_property(emitter_id, "__simple_node_event_callback_" + event_name))
-        if callback_id >= 0:
-            var callback_args: [JsValue] = []
-            var arg_i = 1
-            while arg_i < arg_vals.len():
-                callback_args.push(arg_vals.get(arg_i))
-                arg_i = arg_i + 1
-            val ignored_callback_result = self._invoke_promise_callback(callback_id, callback_args)
-        match self.get_object_property(emitter_id, "__simple_node_event_once_" + event_name):
-            JsValue.Number(v):
-                if f64_to_i64(v) > 0:
-                    self.set_object_property(emitter_id, key, JsValue.Number(v: 0.0))
+        var next_slot = 0
+        match self.get_object_property(emitter_id, "__simple_node_event_next_" + event_name):
+            JsValue.Number(v): next_slot = f64_to_i64(v)
+            _:
+                pass_dn
+        var callback_args: [JsValue] = []
+        var arg_i = 1
+        while arg_i < arg_vals.len():
+            callback_args.push(arg_vals.get(arg_i))
+            arg_i = arg_i + 1
+        if next_slot > 0:
+            var slot = 0
+            var removed_once = 0
+            while slot < next_slot:
+                val slot_key = "__simple_node_event_callback_" + event_name + "_" + slot.to_text()
+                val callback_id = _get_fn_id(self.get_object_property(emitter_id, slot_key))
+                if callback_id >= 0:
+                    val ignored_callback_result = self._invoke_promise_callback(callback_id, callback_args)
+                    match self.get_object_property(emitter_id, "__simple_node_event_once_" + event_name + "_" + slot.to_text()):
+                        JsValue.Number(v):
+                            if f64_to_i64(v) > 0:
+                                self.set_object_property(emitter_id, slot_key, JsValue.Undefined)
+                                self.set_object_property(emitter_id, "__simple_node_event_once_" + event_name + "_" + slot.to_text(), JsValue.Number(v: 0.0))
+                                removed_once = removed_once + 1
+                        _:
+                            pass_dn
+                slot = slot + 1
+            if removed_once > 0:
+                val remaining = if count > removed_once: count - removed_once else: 0
+                self.set_object_property(emitter_id, key, JsValue.Number(v: remaining.to_f64()))
+                if remaining == 0:
                     self.set_object_property(emitter_id, "__simple_node_event_once_" + event_name, JsValue.Number(v: 0.0))
-            _: pass_dn
+            return JsValue.Boolean(v: true)
+        else:
+            val callback_id = _get_fn_id(self.get_object_property(emitter_id, "__simple_node_event_callback_" + event_name))
+            if callback_id >= 0:
+                val ignored_callback_result = self._invoke_promise_callback(callback_id, callback_args)
+            match self.get_object_property(emitter_id, "__simple_node_event_once_" + event_name):
+                JsValue.Number(v):
+                    if f64_to_i64(v) > 0:
+                        self.set_object_property(emitter_id, key, JsValue.Number(v: 0.0))
+                        self.set_object_property(emitter_id, "__simple_node_event_once_" + event_name, JsValue.Number(v: 0.0))
+                _: pass_dn
         JsValue.Boolean(v: true)
 
     me _native_node_event_emitter_listener_count(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
@@ -2037,6 +2074,8 @@ impl JsInterpreter:
             val event_name = js_to_string(arg_vals[0])
             self.set_object_property(emitter_id, "__simple_node_event_count_" + event_name, JsValue.Number(v: 0.0))
             self.set_object_property(emitter_id, "__simple_node_event_once_" + event_name, JsValue.Number(v: 0.0))
+            self.set_object_property(emitter_id, "__simple_node_event_next_" + event_name, JsValue.Number(v: 0.0))
+            self.set_object_property(emitter_id, "__simple_node_event_callback_" + event_name, JsValue.Undefined)
         this_val
 
     me _native_node_event_emitter_remove_listener(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
@@ -2048,6 +2087,30 @@ impl JsInterpreter:
         val event_name = js_to_string(arg_vals[0])
         val requested_callback_id = _get_fn_id(arg_vals[1])
         if requested_callback_id < 0:
+            return this_val
+        val key = "__simple_node_event_count_" + event_name
+        var count = 0
+        match self.get_object_property(emitter_id, key):
+            JsValue.Number(v): count = f64_to_i64(v)
+            _:
+                pass_dn
+        var next_slot = 0
+        match self.get_object_property(emitter_id, "__simple_node_event_next_" + event_name):
+            JsValue.Number(v): next_slot = f64_to_i64(v)
+            _:
+                pass_dn
+        var slot = 0
+        while slot < next_slot:
+            val slot_key = "__simple_node_event_callback_" + event_name + "_" + slot.to_text()
+            val slot_callback_id = _get_fn_id(self.get_object_property(emitter_id, slot_key))
+            if slot_callback_id == requested_callback_id:
+                self.set_object_property(emitter_id, slot_key, JsValue.Undefined)
+                self.set_object_property(emitter_id, "__simple_node_event_once_" + event_name + "_" + slot.to_text(), JsValue.Number(v: 0.0))
+                if count > 0:
+                    self.set_object_property(emitter_id, key, JsValue.Number(v: (count - 1).to_f64()))
+                return this_val
+            slot = slot + 1
+        if next_slot > 0:
             return this_val
         val stored_callback_id = _get_fn_id(self.get_object_property(emitter_id, "__simple_node_event_callback_" + event_name))
         if stored_callback_id == requested_callback_id:
