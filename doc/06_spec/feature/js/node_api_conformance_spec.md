@@ -2822,13 +2822,17 @@ expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a']); 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("var w = require('stream').Writable(); w.on('finish', () => 1); w.listenerCount('finish')")).to_equal("1")
+expect(_eval_str("var w = require('stream').Writable(); w.writableEnded + ':' + w.writableFinished + ':' + w.closed")).to_equal("false:false:false")
 expect(_eval_str("var w = require('stream').Writable(); w.on('finish', () => 1); w.end(); w.finishEmitted")).to_equal("true")
 expect(_eval_str("var w = require('stream').Writable(); w.on('finish', () => 1); w.end(); w.finishListenerCount")).to_equal("1")
+expect(_eval_str("var w = require('stream').Writable(); w.end(); w.writableEnded + ':' + w.writableFinished + ':' + w.closed + ':' + w.destroyed")).to_equal("true:true:true:false")
+expect(_eval_str("var w = require('stream').Writable(); w.end(); var r = w.write('late'); r.status + ':' + r.error + ':' + w.bytesWritten")).to_equal("backpressure:write-after-end:0")
+expect(_eval_str("var seen = 0; var w = require('stream').Writable(); w.on('close', () => { seen = seen + 1; }); w.end(); w.destroy(); seen + ':' + w.closed + ':' + w.destroyed + ':' + w.closeEmitted")).to_equal("0:true:false:false")
 ```
 
 </details>
