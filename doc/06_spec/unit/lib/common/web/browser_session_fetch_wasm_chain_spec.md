@@ -858,6 +858,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array prototype search edge ranges with complementary call and apply
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `true:false:false:4:3`
+
+3. Err
+   - Expected: "unexpected uint8 search edge complementary dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(6); b[0] = 4; b[1] = 7; b[2] = 4; b[3] = -1; b[4] = 4; b[5] = 0; Uint8Array.prototype.includes.apply(b, [4, -2]) + ':' + Uint8Array.prototype.includes.apply(b, [-1, -2]) + ':' + Uint8Array.prototype.includes.apply(b, [7, -2]) + ':' + Uint8Array.prototype.indexOf.call(b, 4, -3) + ':' + Uint8Array.prototype.indexOf.call(b, -1, -4)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:false:false:4:3")
+    Err(err):
+        expect("unexpected uint8 search edge complementary dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### dispatches Uint8Array prototype fill edge ranges with apply
 
 1. var session = BrowserSession new
@@ -2791,8 +2824,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 76 |
-| Active scenarios | 76 |
+| Total scenarios | 77 |
+| Active scenarios | 77 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
