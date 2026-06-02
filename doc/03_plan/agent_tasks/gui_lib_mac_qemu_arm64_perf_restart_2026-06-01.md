@@ -88,6 +88,19 @@ SimpleOS QEMU ARM64
   `GUI_MAC_SMF_DYNLIB_RELEASE_GATE status=pass` only when the full transcript
   proves `loader=smf_dynlib`, `call_source=dynlib_symbol_call`, and p99 below
   1000 us.
+- `src/app/gui_perf/linux_smf_dynlib_e2e_gate.spl` and
+  `test/system/gui/linux_smf_dynlib_e2e_gate_system_spec.spl` now provide a
+  repeatable Linux regression lane for the same pure SMF/SFFI hot-call contract.
+  This lane builds the pure GUI hot dynlib, wraps it into
+  `build/gui/pure_gui_hot.smf`, probes the extracted payload through SFFI, and
+  requires `loader=smf_dynlib`, `dynload=smf_dynlib`, `host_dynload=sffi`,
+  `call_source=dynlib_symbol_call`, and `pass=true`. It prevents fallback to raw
+  host dynlib evidence but does not replace the required macOS arm64 transcript.
+- `test/system/gui/macos_smf_dynlib_release_gate_system_spec.spl` runs the
+  macOS release gate as system evidence. On macOS it requires the full pass
+  transcript; on non-mac hosts it accepts only the explicit
+  `requires-macos-arm64` skip/fail output so Linux CI cannot claim mac release
+  evidence.
 - `src/app/gui_perf/pure_gui_hot_dynlib_export.spl` now provides a pure Simple
   exported hot symbol for host `.so`/`.dylib` diagnostics. This lane has proven
   callable dynlib overhead, but it is still rejected as `not-smf-dynlib`.
@@ -125,6 +138,8 @@ mkdir -p build/gui
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple compile src/app/gui_perf/pure_gui_hot_dynlib_export.spl --native --shared --strip -o build/gui/libpure_gui_hot.so
 SIMPLE_LIB=src SIMPLE_GUI_DYNLIB_ARTIFACT=build/gui/libpure_gui_hot.so src/compiler_rust/target/debug/simple run src/app/gui_perf/smf_dynlib_probe.spl
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple run src/app/gui_perf/smf_dynlib_probe.spl
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/gui/linux_smf_dynlib_e2e_gate_system_spec.spl --mode=interpreter --no-cache --fail-fast
+SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/system/gui/macos_smf_dynlib_release_gate_system_spec.spl --mode=interpreter --no-cache --fail-fast
 SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/debug/simple src/compiler_rust/target/debug/simple run src/app/gui_perf/macos_smf_dynlib_release_gate.spl
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/posix/dynlib_spec.spl --mode=interpreter --no-cache
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/os/smf_runtime_spec.spl --mode=interpreter --no-cache
@@ -134,8 +149,9 @@ rg -n "rt_file_wrap_smf_dynlib|rt_file_extract_smf_dynlib|rt_dyncall|src/compile
 
 ## Open Evidence Gaps
 
-- No current evidence proves a pure Simple GUI SMF/dynlib hot event response
-  below 1 ms.
+- Linux now has repeatable evidence for the pure Simple GUI SMF/dynlib hot-call
+  contract below 1 ms through the e2e gate. This is regression evidence for the
+  artifact/wrap/extract/SFFI path, not final macOS host acceptance.
 - The remaining implementation must not depend on newly added Rust runtime
   `rt_*` helpers. If current experimental work introduced such helpers, replace
   that direction with pure Simple or a minimal C adapter before treating the
