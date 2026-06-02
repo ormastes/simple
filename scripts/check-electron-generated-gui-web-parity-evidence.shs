@@ -62,7 +62,16 @@ if [ ! -x "$SIMPLE_BIN" ]; then
     exit 1
 fi
 
-if [ ! -x "tools/electron-shell/node_modules/.bin/electron" ] && [ ! -x "tools/electron-shell/node_modules/electron/dist/electron" ]; then
+ELECTRON_BIN=""
+if [ -x "tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" ]; then
+    ELECTRON_BIN="tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+elif [ -x "tools/electron-shell/node_modules/.bin/electron" ]; then
+    ELECTRON_BIN="tools/electron-shell/node_modules/.bin/electron"
+elif [ -x "tools/electron-shell/node_modules/electron/dist/electron" ]; then
+    ELECTRON_BIN="tools/electron-shell/node_modules/electron/dist/electron"
+fi
+
+if [ "$ELECTRON_BIN" = "" ]; then
     emit_unavailable "missing-electron-dependency"
     exit 1
 fi
@@ -83,6 +92,8 @@ simple_checksum="$(field_of checksum "$SIMPLE_OUT")"
 simple_weighted="$(field_of weighted_checksum "$SIMPLE_OUT")"
 simple_blur="$(field_of blur_or_tolerance_used "$SIMPLE_OUT")"
 distinct_colors="$(field_of distinct_colors "$SIMPLE_OUT")"
+html_has_style="$(field_of html_has_style "$SIMPLE_OUT")"
+html_has_app_shell="$(field_of html_has_app_shell "$SIMPLE_OUT")"
 
 if [ "$simple_status" != "pass" ] || [ ! -s "$HTML_PATH" ] || [ ! -s "$EXPECTED_ARGB" ]; then
     emit_unavailable "missing-simple-generated-artifacts"
@@ -95,10 +106,10 @@ fi
 
 set +e
 if have timeout; then
-    timeout "$TIMEOUT_SECS" sh -c 'env ELECTRON_BITMAP_SCENE="$1" ELECTRON_BITMAP_WIDTH="$2" ELECTRON_BITMAP_HEIGHT="$3" ELECTRON_BITMAP_ITERATIONS="$4" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$5" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$6" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$7" ELECTRON_BITMAP_HTML_PATH="$8" ELECTRON_BITMAP_PROOF_PATH="$9" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="${10}" SIMPLE_ELECTRON_LIVE_BITMAP=1 '"$XVFB_PREFIX"' npm --prefix tools/electron-shell exec -- electron --no-sandbox tools/electron-shell' sh "$SCENE" "$WIDTH" "$HEIGHT" "$ITERATIONS" "$simple_checksum" "$simple_weighted" "$EXPECTED_ARGB" "$HTML_PATH" "$ELECTRON_PROOF" "$CAPTURED_ARGB" >"$ELECTRON_OUT" 2>&1
+    timeout "$TIMEOUT_SECS" sh -c 'env ELECTRON_BITMAP_SCENE="$1" ELECTRON_BITMAP_WIDTH="$2" ELECTRON_BITMAP_HEIGHT="$3" ELECTRON_BITMAP_ITERATIONS="$4" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$5" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$6" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$7" ELECTRON_BITMAP_HTML_PATH="$8" ELECTRON_BITMAP_PROOF_PATH="$9" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="${10}" SIMPLE_ELECTRON_LIVE_BITMAP=1 '"$XVFB_PREFIX"' "${11}" --force-device-scale-factor=1 --high-dpi-support=1 --no-sandbox tools/electron-shell' sh "$SCENE" "$WIDTH" "$HEIGHT" "$ITERATIONS" "$simple_checksum" "$simple_weighted" "$EXPECTED_ARGB" "$HTML_PATH" "$ELECTRON_PROOF" "$CAPTURED_ARGB" "$ELECTRON_BIN" >"$ELECTRON_OUT" 2>&1
 else
     ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_HTML_PATH="$HTML_PATH" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
-        npm --prefix tools/electron-shell exec -- electron --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1
+        "$ELECTRON_BIN" --force-device-scale-factor=1 --high-dpi-support=1 --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1
 fi
 electron_code=$?
 set -e
@@ -150,6 +161,8 @@ fi
     echo "electron_generated_gui_web_width=$WIDTH"
     echo "electron_generated_gui_web_height=$HEIGHT"
     echo "electron_generated_gui_web_iterations=$ITERATIONS"
+    echo "electron_generated_gui_web_html_has_style=${html_has_style:-}"
+    echo "electron_generated_gui_web_html_has_app_shell=${html_has_app_shell:-}"
     echo "electron_generated_gui_web_distinct_simple_colors=${distinct_colors:-}"
     echo "electron_generated_gui_web_simple_checksum=$simple_checksum"
     echo "electron_generated_gui_web_electron_checksum=${electron_checksum:-0}"
@@ -172,6 +185,8 @@ fi
     echo "- reason: $reason"
     echo "- scene: $SCENE"
     echo "- dimensions: ${WIDTH}x${HEIGHT}"
+    echo "- generated HTML has style: ${html_has_style:-}"
+    echo "- generated HTML has app shell: ${html_has_app_shell:-}"
     echo "- Simple distinct colors: ${distinct_colors:-}"
     echo "- mismatch count: ${mismatch_count:-}"
     echo "- blur/tolerance used: ${blur_used:-}"

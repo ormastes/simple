@@ -284,7 +284,7 @@ fn default_style() -> Style:
     Style(bg: 0u32, fg: argb(20, 20, 24), font_size: 16, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, display: "block", text_align: "left", bold: false)
 
 fn inherit_style(p: Style) -> Style:
-    Style(bg: 0u32, fg: p.fg, font_size: p.font_size, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, display: "block", text_align: p.text_align, bold: p.bold)
+    Style(bg: 0u32, fg: p.fg, font_size: p.font_size, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, display: p.display, text_align: p.text_align, bold: p.bold)
 
 fn is_inline_tag(tag: text) -> bool:
     tag == "a" or tag == "span" or tag == "b" or tag == "strong" or tag == "em" or tag == "i" or tag == "small" or tag == "code" or tag == "#text"
@@ -333,6 +333,9 @@ fn apply_decls(st: Style, decls: text) -> Style:
 
 # default per-tag tweaks (block/inline, heading sizes, spacing)
 fn tag_defaults(st: Style, tag: text):
+    if tag == "head" or tag == "title" or tag == "meta" or tag == "style" or tag == "script" or tag == "link":
+        st.display = "none"
+        return
     if is_inline_tag(tag):
         st.display = "inline"
     if tag == "h1":
@@ -569,6 +572,10 @@ fn compute_styles(nodes: [HNode], rules: Rules, html: text) -> [Style]:
     while i < nodes.len():
         val nd = nodes[i]
         var st = if nd.parent >= 0: inherit_style(styles[nd.parent]) else: default_style()
+        if st.display == "none":
+            styles.push(st)
+            i = i + 1
+            continue
         tag_defaults(st, nd.tag)
         val direct_style_decls = style_block_decls_for_node(html, nodes, i)
         if direct_style_decls.len() > 0:
@@ -763,6 +770,13 @@ class LayoutBoxes:
     bw: [i32]
     bh: [i32]
 
+class LayoutResult:
+    bx: [i32]
+    by: [i32]
+    bw: [i32]
+    bh: [i32]
+    height: i32
+
 fn char_w(fs: i32) -> i32:
     6 * glyph_scale(fs)
 
@@ -777,11 +791,32 @@ fn has_ancestor_tag(nodes: [HNode], i: i32, tag: text) -> bool:
         p = nodes[p].parent
     false
 
+fn has_ancestor_index(nodes: [HNode], i: i32, want: i64) -> bool:
+    var p = nodes[i].parent
+    while p >= 0:
+        if p == want:
+            return true
+        p = nodes[p].parent
+    false
+
+fn is_hidden_html_tag(tag: text) -> bool:
+    tag == "head" or tag == "title" or tag == "meta" or tag == "style" or tag == "script" or tag == "link"
+
+fn is_hidden_html_node(nodes: [HNode], i: i32) -> bool:
+    if is_hidden_html_tag(nodes[i].tag):
+        return true
+    var p = nodes[i].parent
+    while p >= 0:
+        if is_hidden_html_tag(nodes[p].tag):
+            return true
+        p = nodes[p].parent
+    false
+
 fn descendant_text(nodes: [HNode], i: i32) -> text:
     var out = ""
     var c = i + 1
     while c < nodes.len():
-        if nodes[c].tag == "#text" and has_ancestor_tag(nodes, c, nodes[i].tag):
+        if nodes[c].tag == "#text" and has_ancestor_index(nodes, c, i.to_i64()):
             val txt = nodes[c].text_data.trim()
             if txt.len() > 0:
                 if out.len() > 0:
@@ -790,11 +825,23 @@ fn descendant_text(nodes: [HNode], i: i32) -> text:
         c = c + 1
     out
 
-fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, boxes: LayoutBoxes) -> i32:
-    boxes.bx[i] = x
-    boxes.by[i] = y
-    boxes.bw[i] = w
+fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32]) -> LayoutResult:
+    var obx = bx
+    var oby = by
+    var obw = bw
+    var obh = bh
+    obx[i] = x
+    oby[i] = y
+    obw[i] = w
     val st = styles[i]
+    if is_hidden_html_node(nodes, i):
+        obw[i] = 0
+        obh[i] = 0
+        return LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: 0)
+    if st.display == "none":
+        obw[i] = 0
+        obh[i] = 0
+        return LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: 0)
     if nodes[i].tag == "#text":
         val txt = nodes[i].text_data.trim()
         val cw = char_w(st.font_size)
@@ -807,16 +854,16 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, boxes
         if lines < 1:
             lines = 1
         val h = lines * line_h(st.font_size)
-        boxes.bh[i] = h
-        return h
+        obh[i] = h
+        return LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: h)
     if nodes[i].tag == "img":
         var img_w = 24
         var img_h = 16
         if img_w > w:
             img_w = w
-        boxes.bw[i] = img_w
-        boxes.bh[i] = img_h
-        return img_h
+        obw[i] = img_w
+        obh[i] = img_h
+        return LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: img_h)
     val ix = x + st.pad_l
     var iw = w - st.pad_l - st.pad_r
     if iw < 1:
@@ -827,14 +874,19 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, boxes
         if nodes[c].parent == i:
             val cst = styles[c]
             cy = cy + cst.margin_t
-            val ch = layout(nodes, styles, c, ix, cy, iw, boxes)
+            val child = layout(nodes, styles, c, ix, cy, iw, obx, oby, obw, obh)
+            obx = child.bx
+            oby = child.by
+            obw = child.bw
+            obh = child.bh
+            val ch = child.height
             cy = cy + ch + cst.margin_b
         c = c + 1
     var h = (cy - y) + st.pad_b
     if h < 1:
         h = 1
-    boxes.bh[i] = h
-    h
+    obh[i] = h
+    LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: h)
 
 # ---------------------------------------------------------------------------
 # Paint directly into a [u32] framebuffer (no Engine2D)
@@ -846,13 +898,15 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     var i = 0
     while i < nodes.len():
         val st = styles[i]
-        if nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
+        if not is_hidden_html_node(nodes, i) and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
             out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg)
         i = i + 1
     # text on top
     i = 0
     while i < nodes.len():
-        if nodes[i].tag == "img":
+        if is_hidden_html_node(nodes, i):
+            pass
+        elif nodes[i].tag == "img":
             out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(37, 99, 235))
             out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], 2, argb(15, 23, 42))
             out = fb_rect(out, fbw, fbh, bx[i], by[i] + bh[i] - 2, bw[i], 2, argb(15, 23, 42))
@@ -922,7 +976,7 @@ pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32,
         bw: [0; nodes.len()],
         bh: [0; nodes.len()]
     )
-    layout(nodes, styles, 0, 0, 0, width, boxes)
+    val laid_out = layout(nodes, styles, 0, 0, 0, width, boxes.bx, boxes.by, boxes.bw, boxes.bh)
     val white = argb(255, 255, 255)
     var fb: [u32] = [white; width * height]
-    paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, fb, width, height)
+    paint(nodes, styles, laid_out.bx, laid_out.by, laid_out.bw, laid_out.bh, fb, width, height)
