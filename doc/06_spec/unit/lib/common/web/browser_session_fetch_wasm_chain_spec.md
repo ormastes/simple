@@ -1683,6 +1683,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array prototype range helpers with complementary call and apply
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `4,255,7:3:4:255,7,8:3:1,4,255,7,8,9`
+
+3. Err
+   - Expected: "unexpected uint8 range complementary dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(6); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; b[4] = 8; b[5] = 9; var sub = Uint8Array.prototype.subarray.apply(b, [-5, -2]); var sl = Uint8Array.prototype.slice.call(b, -4, -1); sub.toString() + ':' + sub.length + ':' + sub.at(0) + ':' + sl.toString() + ':' + sl.length + ':' + b.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("4,255,7:3:4:255,7,8:3:1,4,255,7,8,9")
+    Err(err):
+        expect("unexpected uint8 range complementary dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### sets Uint8Array ranges from another typed array in browser scripts
 
 1. var session = BrowserSession new
@@ -2857,8 +2890,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 78 |
-| Active scenarios | 78 |
+| Total scenarios | 79 |
+| Active scenarios | 79 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
