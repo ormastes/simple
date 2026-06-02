@@ -16,15 +16,15 @@
 - optimized path: static-pixel-cache
 - simple cache hits: 10
 - simple cache stores: 1
-- best simple frame us: 9
-- best baseline frame us: 462
-- baseline/simple speedup x1000: 51333
+- best simple frame us: 30
+- best baseline frame us: 1391
+- baseline/simple speedup x1000: 46366
 - simple ARGB path: build/node_simple_web_engine2d_two_block_bitmap_evidence/simple-argb.json
 - baseline ARGB path: build/node_simple_web_engine2d_two_block_bitmap_evidence/node-argb.json
 
 ## Simple Output
 - ## trial 1
-- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Memory safety error [W1006]: mutation without mut capability (field_10): mutation requires `mut` capability on the receiver while lowering apply_padding_shorthand at 310:18
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Memory safety error [W1006]: mutation without mut capability (field_0): mutation requires `mut` capability on the receiver while lowering apply_decls at 356:15
 - [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
 - renderer=pure-simple-web-engine2d-cache
 - scene=simple-web-engine2d-two-block-content
@@ -49,7 +49,7 @@
 - checksum=26305055459328
 - weighted_checksum=80814070787097600
 - total_checksum=263050554593280
-- frame_us=9
+- frame_us=30
 - backend_name=software
 - optimized_path=static-pixel-cache
 - cache_hits=10
@@ -67,5 +67,5 @@
 - checksum=26305055459328
 - weighted_checksum=80814070787097600
 - total_checksum=263050554593280
-- frame_us=462
+- frame_us=1391
 - blur_or_tolerance_used=false
