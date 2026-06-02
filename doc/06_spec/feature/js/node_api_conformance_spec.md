@@ -2920,6 +2920,24 @@ expect(_eval_str("var opts = {}; opts.highWaterMark = 2; var w = require('stream
 
 </details>
 
+#### tracks bounded writable cork state
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var w = require('stream').Writable(); typeof w.cork + ':' + typeof w.uncork + ':' + w.writableCorked")).to_equal("function:function:0")
+expect(_eval_str("var w = require('stream').Writable(); w.cork(); w.cork(); w.writableCorked")).to_equal("2")
+expect(_eval_str("var w = require('stream').Writable(); w.cork(); w.cork(); w.uncork(); w.writableCorked")).to_equal("1")
+expect(_eval_str("var w = require('stream').Writable(); w.uncork(); w.writableCorked")).to_equal("0")
+expect(_eval_str("var w = require('stream').Writable(); w.cork(); w.destroy(); w.cork(); w.uncork(); w.writableCorked + ':' + w.destroyed")).to_equal("1:true")
+```
+
+</details>
+
 #### caches stream module state across repeated require calls
 
 <details>
@@ -4254,8 +4272,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 272 |
-| Active scenarios | 272 |
+| Total scenarios | 273 |
+| Active scenarios | 273 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
