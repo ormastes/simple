@@ -16,8 +16,8 @@ Requirements:
   retry decision.
 - The process supports app/server development by linking each app build to the
   model attempt used for implementation assistance or runtime inference.
-- Verification can mark an attempt as accepted, retry-implementation, retry-
-  tuning, or try-other-way.
+- Verification can mark an attempt as accepted, retry-implementation,
+  retry-tuning-method, retry-data-research, retry-base-model, or try-other-way.
 
 Pros:
 - Smallest useful step; gives every future tuning run an auditable record.
@@ -51,6 +51,20 @@ Cons:
 - Higher verification cost and more environmental failure modes.
 
 Effort: High.
+
+## Selection Needed
+
+Choose exactly one feature option before final requirements are generated:
+
+- A: Fine-Tune Process Scaffold
+- B: Local QLoRA-First Tuning Pipeline
+- C: Provider Fine-Tune Adapter Pipeline
+- D: Hybrid Tuning and Retrieval Loop
+
+After selection, SPipe writes
+`doc/02_requirements/feature/spipe_llm_finetune_process.md`, records the choice
+in `.spipe/llm-finetune-process/requirements_selection.sdn`, and deletes this
+options file as required by the pipeline.
 
 ## Option C: Provider Fine-Tune Adapter Pipeline
 

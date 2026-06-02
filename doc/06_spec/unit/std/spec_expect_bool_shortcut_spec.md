@@ -23,16 +23,23 @@ Verifies concise boolean assertions:
 
 #### accepts bare expect for true boolean expressions
 
+1. check
+
+2. check msg
+
+
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(true)
 val condition = 2 + 2 == 4
 expect(condition)
+check(condition)
+check_msg(condition, "condition should be true")
 ```
 
 </details>
@@ -43,17 +50,20 @@ expect(condition)
 
 2. expect not
 
+3. expect not
+
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect_not(false)
 val condition = "abc".contains("z")
 expect_not(condition)
+expect_not(2 + 2 == 5)
 ```
 
 </details>
