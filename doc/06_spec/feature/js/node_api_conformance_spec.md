@@ -3032,6 +3032,22 @@ expect(_eval_str("setImmediate(() => {}).timerType")).to_equal("immediate")
 
 </details>
 
+#### tracks bounded Node timer schedule state
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.scheduledAt + ':' + h.dueAt + ':' + h.lastFiredAt")).to_equal("0:5:-1")
+expect(_eval_before_after_timer_drain("var h = require('timers').setTimeout(() => {}, 5); h.lastFiredAt", "h.active + ':' + h.lastFiredAt", 5)).to_equal("-1:1:false:5")
+expect(_eval_before_after_two_timer_drains("var h = require('timers').setInterval(() => {}, 5); h.dueAt", "h.scheduledAt + ':' + h.dueAt + ':' + h.lastFiredAt", 5, 10)).to_equal("5:1:5:10:5:1:10:15:10")
+```
+
+</details>
+
 #### tracks bounded Node timer handle ref state
 
 <details>
@@ -3099,13 +3115,14 @@ expect(_eval_before_after_two_timer_drains("var h = require('timers').setInterva
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.refresh(); h.refreshed")).to_equal("true")
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.refresh(); h.refreshedAt")).to_equal("0")
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.refresh(); h.active + ':' + h.closed")).to_equal("true:false")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.refresh(); h.scheduledAt + ':' + h.dueAt")).to_equal("0:5")
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close(); h.refresh(); h.refreshed")).to_equal("false")
 ```
 
@@ -4077,8 +4094,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 262 |
-| Active scenarios | 262 |
+| Total scenarios | 263 |
+| Active scenarios | 263 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
