@@ -2310,6 +2310,22 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; 
 
 </details>
 
+#### signals bounded http response readable availability
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 0; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.on('readable', () => { seen = res.readableLength; }); }); req.end(); seen + ':' + saved.readableNotified + ':' + saved.readableAvailableEmitted + ':' + saved.listenerCount('readable')")).to_equal("16:true:true:1")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 0; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.once('readable', () => { seen = seen + 1; }); }); req.end(); seen + ':' + saved.listenerCount('readable') + ':' + saved.readableNotified")).to_equal("1:0:true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 0; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.read(); res.on('readable', () => { seen = seen + 1; }); }); req.end(); seen + ':' + saved.readable + ':' + saved.readableLength + ':' + saved.readableNotified")).to_equal("0:false:0:false")
+```
+
+</details>
+
 #### iterates bounded http response bodies
 
 <details>
@@ -4024,8 +4040,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 259 |
-| Active scenarios | 259 |
+| Total scenarios | 260 |
+| Active scenarios | 260 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
