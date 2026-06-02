@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Node Api Conformance Specification](feature/js/node_api_conformance_spec.md) | Auto-generated | N/A | 247 | 0% | 0 lines |
+| [Node Api Conformance Specification](feature/js/node_api_conformance_spec.md) | Auto-generated | N/A | 248 | 0% | 0 lines |
 
