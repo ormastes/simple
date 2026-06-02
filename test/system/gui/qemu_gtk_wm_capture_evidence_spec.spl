@@ -1,0 +1,61 @@
+# @tag:system, slow
+# @tag:gui
+# @tag:qemu
+
+"""
+# QEMU GTK WM Capture Evidence Spec
+
+Runs the QEMU/GTK evidence wrapper in a bounded non-live mode and verifies that
+guest-side Simple-vs-GTK performance remains a structured release blocker
+instead of being satisfied by host GTK baseline evidence.
+"""
+
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _build_dir() -> text:
+    "build/tmp/qemu_gtk_wm_capture_evidence_spec"
+
+fn _report_path() -> text:
+    "build/tmp/qemu_gtk_wm_capture_evidence_spec.md"
+
+fn _run_evidence() -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "QEMU_HOST_GTK_SCENE_EVIDENCE=0 BUILD_DIR=" + _build_dir() +
+                " REPORT_PATH=" + _report_path() +
+                " sh scripts/check-qemu-gtk-wm-capture-evidence.shs"
+        ],
+        120000
+    )
+
+describe "QEMU GTK WM capture evidence":
+    slow_it "keeps QEMU-side perf as a structured guest release blocker":
+        val result = _run_evidence()
+        val stdout = result[0]
+        val stderr = result[1]
+        val code = result[2]
+        if code != 1:
+            print "qemu gtk evidence stdout: " + stdout
+            print "qemu gtk evidence stderr: " + stderr
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("qemu_gtk_wm_capture_perf_comparison_available=false")
+        expect(stdout).to_contain("qemu_gtk_wm_capture_perf_scope=qemu-guest-simple-vs-gtk")
+        expect(stdout).to_contain("qemu_gtk_wm_capture_perf_release_gate=guest-side-simple-vs-gtk-performance")
+        expect(stdout).to_contain("qemu_gtk_wm_capture_perf_release_blocker=missing-qmp-socket")
+        expect(stdout).to_contain("qemu_gtk_wm_capture_perf_required_for_release=true")
+        expect(stdout).to_contain("qemu_gtk_wm_capture_host_perf_scope=host-gtk-gl-exact-scene-baseline")
+        expect(stdout).to_contain("qemu_gtk_wm_capture_host_perf_promotes_qemu_perf=false")
+
+        val report = rt_file_read_text(_report_path())
+        expect(report).to_contain("qemu-side perf comparison available: false")
+        expect(report).to_contain("qemu-side perf scope: qemu-guest-simple-vs-gtk")
+        expect(report).to_contain("qemu-side perf release gate: guest-side-simple-vs-gtk-performance")
+        expect(report).to_contain("qemu-side perf release blocker: missing-qmp-socket")
+        expect(report).to_contain("qemu-side perf required for release: true")
+        expect(report).to_contain("host perf baseline scope: host-gtk-gl-exact-scene-baseline")
+        expect(report).to_contain("host perf baseline promotes QEMU perf: false")

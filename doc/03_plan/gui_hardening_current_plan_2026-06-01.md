@@ -88,7 +88,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   mismatches. The same authoritative report now also runs the host GTK GL WM
   exact-scene perf baseline during live-QMP evidence collection, recording
   Simple `1us`, GTK `301us`, `200` iterations, zero RGBA mismatches, and no
-  tolerance path. QEMU-side Simple-vs-GTK performance remains unwired.
+  tolerance path. QEMU-side Simple-vs-GTK performance remains unwired; the
+  QEMU/GTK evidence wrapper now records that as structured guest-side release
+  blocker metadata and marks the host perf baseline as non-promoting.
 - Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
   boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
   Linux-host evidence intentionally reports `pass=false` without a real
@@ -1507,3 +1509,21 @@ pass with the existing generated-marker warning on the live entrypoint, and
 `ssh_session_shell_spec.spl` passes `6/6`. This advances SimpleOS live
 execution evidence without claiming the remaining guest-side QEMU/GTK
 performance harness is complete.
+
+QEMU/GTK guest perf blocker metadata continuation:
+
+- `QEMU_HOST_GTK_SCENE_EVIDENCE=0 BUILD_DIR=build/tmp/qemu_gtk_wm_capture_evidence_spec REPORT_PATH=build/tmp/qemu_gtk_wm_capture_evidence_spec.md sh scripts/check-qemu-gtk-wm-capture-evidence.shs`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check test/system/gui/qemu_gtk_wm_capture_evidence_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/gui/qemu_gtk_wm_capture_evidence_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/system/gui/qemu_gtk_wm_capture_evidence_spec.spl --output doc/06_spec`
+
+The QEMU/GTK evidence wrapper now emits structured release-blocker metadata for
+guest-side Simple-vs-GTK performance: `perf_scope=qemu-guest-simple-vs-gtk`,
+`perf_release_gate=guest-side-simple-vs-gtk-performance`,
+`perf_release_blocker=missing-qmp-socket`, and
+`perf_required_for_release=true` in the bounded non-live path. The same report
+marks the host GTK GL exact-scene baseline as
+`host-gtk-gl-exact-scene-baseline` with `host_perf_promotes_qemu_perf=false`.
+The focused system spec passes `1/1` and the mirrored manual was generated. This
+improves release evidence clarity without claiming the guest-side QEMU/GTK perf
+harness is wired.
