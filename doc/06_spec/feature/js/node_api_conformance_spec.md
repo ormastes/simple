@@ -2100,11 +2100,12 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var req = require(
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080'); req.on('close', () => { seen = 'end'; }); req.end(); seen + ':' + req.closeEmitted + ':' + req.closeListenerCount")).to_equal("end:true:1")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080'); req.addListener('close', () => { seen = 'add'; }); req.end(); seen + ':' + req.listenerCount('close')")).to_equal("add:1")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080'); req.on('close', () => { seen = 'abort'; }); req.abort(); seen + ':' + req.closeEmitted + ':' + req.closeListenerCount")).to_equal("abort:true:1")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 0; var req = require('http').request('http://api.example.com:8080'); req.once('close', () => { seen = seen + 1; }); req.end(); req.end(); seen + ':' + req.listenerCount('close')")).to_equal("1:0")
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.end(); req.closeEmitted + ':' + req.closeListenerCount")).to_equal("false:0")
@@ -2121,7 +2122,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); typeof req.removeListener + ':' + typeof req.off + ':' + typeof req.removeAllListeners")).to_equal("function:function:function")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); typeof req.addListener + ':' + typeof req.removeListener + ':' + typeof req.off + ':' + typeof req.removeAllListeners")).to_equal("function:function:function:function")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080'); var cb = () => { seen = 'close'; }; req.on('close', cb); req.removeListener('close', cb); req.end(); seen + ':' + req.listenerCount('close') + ':' + req.closeEmitted")).to_equal("no:0:false")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080'); var cb = () => { seen = 'abort'; }; req.on('abort', cb); req.off('abort', cb); req.abort(); seen + ':' + req.listenerCount('abort') + ':' + req.abortEmitted")).to_equal("no:0:false")
 ```
@@ -2197,12 +2198,13 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); typeof saved.pause + ':' + typeof saved.resume + ':' + typeof saved.isPaused + ':' + typeof saved.destroy + ':' + typeof saved.read + ':' + typeof saved.setEncoding + ':' + typeof saved.pipe + ':' + typeof saved.unpipe")).to_equal("function:function:function:function:function:function:function:function")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var ended = 'no'; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', (chunk) => { seen = seen + chunk; }); res.on('end', () => { ended = 'yes'; }); }); req.end(); seen + ':' + ended + ':' + saved.pendingData + ':' + saved.pendingEnd + ':' + saved.complete + ':' + saved.isPaused()")).to_equal(":no:true:true:false:true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.addListener('data', (chunk) => { seen = seen + chunk; }); }); req.end(); saved.resume(); seen + ':' + saved.listenerCount('data') + ':' + saved.dataDelivered")).to_equal("bounded-response:1:true")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var ended = 'no'; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', (chunk) => { seen = seen + chunk; }); res.on('end', () => { ended = 'yes'; }); }); req.end(); saved.resume(); seen + ':' + ended + ':' + saved.pendingData + ':' + saved.pendingEnd + ':' + saved.complete + ':' + saved.isPaused()")).to_equal("bounded-response:yes:false:false:true:false")
 ```
 
@@ -2217,7 +2219,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); typeof saved.removeListener + ':' + typeof saved.off + ':' + typeof saved.removeAllListeners")).to_equal("function:function:function")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); typeof saved.addListener + ':' + typeof saved.removeListener + ':' + typeof saved.off + ':' + typeof saved.removeAllListeners")).to_equal("function:function:function:function")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); var cb = (chunk) => { seen = seen + chunk; }; res.on('data', cb); res.removeListener('data', cb); }); req.end(); saved.resume(); seen + ':' + saved.listenerCount('data') + ':' + saved.dataDelivered + ':' + saved.pendingData")).to_equal(":0:false:false")
 expect(_eval_str_with_network("http://api.example.com:8080", "var ended = 'no'; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('end', () => { ended = 'yes'; }); res.removeAllListeners('end'); }); req.end(); saved.resume(); ended + ':' + saved.listenerCount('end') + ':' + saved.endDelivered + ':' + saved.complete")).to_equal("no:0:false:true")
 ```
