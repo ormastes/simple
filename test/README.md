@@ -110,6 +110,8 @@ captures, visibility, or helper/checker names before calling the spec done.
 
 ### Available Matchers
 
+- `expect(condition)` - Boolean true assertion
+- `expect_not(condition)` - Boolean false assertion
 - `expect(x).to_equal(y)` - Exact equality
 - `expect(x).to_be_nil()` - Nil check
 - `expect(x).to_contain("str")` - String/array contains
@@ -117,6 +119,11 @@ captures, visibility, or helper/checker names before calling the spec done.
 - `expect(x).to_end_with("str")` - String suffix
 - `expect(x).to_be_greater_than(y)` - Numeric comparison
 - `expect(x).to_be_less_than(y)` - Numeric comparison
+
+Use bare `expect(condition)` for true boolean checks and `expect_not(condition)`
+for false boolean checks. SPipe quality lint warns on verbose
+`expect(condition).to_equal(true)` and denies false boolean wrappers such as
+`expect(condition).to_equal(false)`.
 
 ### Imports via Symlinks
 

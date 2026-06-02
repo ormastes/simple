@@ -34,7 +34,7 @@
 - x86_status: Initialized
 - arm_status: Unavailable
 - riscv_status: Unavailable
-- evidence_log: build/cpu-simd-engine2d-evidence-dev/evidence.log
+- evidence_log: build/cpu-simd-engine2d-evidence/evidence.log
 - evidence_log_bytes: 3471
 - evidence_log_cksum: 44221271
 
@@ -73,7 +73,7 @@
 - cpu_simd_evidence_x86_status=Initialized
 - cpu_simd_evidence_arm_status=Unavailable
 - cpu_simd_evidence_riscv_status=Unavailable
-- cpu_simd_evidence_log=build/cpu-simd-engine2d-evidence-dev/evidence.log
+- cpu_simd_evidence_log=build/cpu-simd-engine2d-evidence/evidence.log
 - cpu_simd_evidence_log_bytes=3471
 - cpu_simd_evidence_log_cksum=44221271
 
