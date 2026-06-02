@@ -424,8 +424,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   the same explicit network-grant model.
   Bounded request lifecycle methods now cover deterministic `write`, `end`, and
   `abort` state, plus bounded request-side `finish` listener delivery on
-  `end()` and `abort` listener delivery on `abort()`. Real request streams,
-  responses, broader callbacks, and host network I/O remain open.
+  `end()`, `abort` listener delivery on `abort()`, and `close` listener
+  delivery on terminal request actions. Real request streams, responses,
+  broader callbacks, and host network I/O remain open.
   Bounded request callback delivery now invokes the supplied callback on
   `end()` with deterministic response metadata, and request-side `response`
   listener delivery now emits the same bounded response metadata on `end()`.
@@ -2758,3 +2759,22 @@ fetch/WASM and native WASM host regressions remain `36/36` and `107/107`, and
 the broad `src/lib` check passed with the existing `447` warning profile. Real
 response streaming, broader event-loop ordering, and host network I/O remain
 open.
+
+CommonJS/Node bounded HTTP request close-event continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+
+Bounded `http.request`/`https.request` objects now emit request-side `close`
+events through the shared EventEmitter path when `end()` or `abort()` reaches
+a terminal request action. The bounded path records `closeEmitted` and
+`closeListenerCount`, clears one-shot close listeners, and keeps no-listener
+state deterministic. Focused checks passed, the Node API conformance suite
+passes `243/243`, BrowserSession fetch/WASM and native WASM host regressions
+remain `36/36` and `107/107`, and the broad `src/lib` check passed with the
+existing `447` warning profile. Real request streams, response streaming,
+broader event-loop ordering, and host network I/O remain open.

@@ -1975,6 +1975,23 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var req = require(
 
 </details>
 
+#### emits bounded http request close events
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080'); req.on('close', () => { seen = 'end'; }); req.end(); seen + ':' + req.closeEmitted + ':' + req.closeListenerCount")).to_equal("end:true:1")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080'); req.on('close', () => { seen = 'abort'; }); req.abort(); seen + ':' + req.closeEmitted + ':' + req.closeListenerCount")).to_equal("abort:true:1")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 0; var req = require('http').request('http://api.example.com:8080'); req.once('close', () => { seen = seen + 1; }); req.end(); req.end(); seen + ':' + req.listenerCount('close')")).to_equal("1:0")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.end(); req.closeEmitted + ':' + req.closeListenerCount")).to_equal("false:0")
+```
+
+</details>
+
 #### delivers bounded http response callbacks on request end
 
 <details>
@@ -3736,8 +3753,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 242 |
-| Active scenarios | 242 |
+| Total scenarios | 243 |
+| Active scenarios | 243 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
