@@ -2176,12 +2176,14 @@ expect(_eval_str("var s = require('stream'); s.cached = 'yes'; require('node:str
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("typeof require('timers').setTimeout")).to_equal("function")
 expect(_eval_str("typeof require('node:timers').clearTimeout")).to_equal("function")
+expect(_eval_str("typeof require('timers').setImmediate")).to_equal("function")
+expect(_eval_str("typeof require('node:timers').clearImmediate")).to_equal("function")
 ```
 
 </details>
@@ -2210,6 +2212,34 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_before_after_timer_drain("var timerValue = 0; var id = require('timers').setTimeout(() => { timerValue = 11; }, 0); require('node:timers').clearTimeout(id); timerValue", "timerValue", 0)).to_equal("0:0:0")
+```
+
+</details>
+
+#### schedules bounded setImmediate callbacks through runtime drain
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_before_after_timer_drain("var timerValue = 0; require('timers').setImmediate(() => { timerValue = 13; }); timerValue", "timerValue", 0)).to_equal("0:1:13")
+```
+
+</details>
+
+#### cancels bounded setImmediate callbacks through clearImmediate
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_before_after_timer_drain("var timerValue = 0; var id = require('timers').setImmediate(() => { timerValue = 13; }); require('node:timers').clearImmediate(id); timerValue", "timerValue", 0)).to_equal("0:0:0")
 ```
 
 </details>
@@ -3197,8 +3227,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 209 |
-| Active scenarios | 209 |
+| Total scenarios | 211 |
+| Active scenarios | 211 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
