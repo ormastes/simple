@@ -51,7 +51,14 @@ emit_unavailable() {
     cat "$BUILD_DIR/evidence.env"
 }
 
-for required in node npm xvfb-run; do
+UNAME_S="$(uname -s)"
+# Electron offscreen rendering needs no X server on macOS; only Linux requires
+# xvfb-run to back the offscreen/GPU pipeline.
+REQUIRED_CMDS="node npm"
+if [ "$UNAME_S" = "Linux" ]; then
+    REQUIRED_CMDS="node npm xvfb-run"
+fi
+for required in $REQUIRED_CMDS; do
     if ! have "$required"; then
         emit_unavailable "missing-command:$required"
         exit 1
@@ -170,13 +177,20 @@ if [ "$simple_blur" != "false" ]; then
     exit 1
 fi
 
+# Shared Electron command; xvfb-run prefix only on Linux (macOS offscreen
+# rendering needs no X server). Positionals: 1=scene 2=w 3=h 4=iters
+# 5=expected_checksum 6=expected_weighted 7=proof 8=expected_argb 9=captured_argb.
+ELECTRON_RUN_CMD='ELECTRON_BITMAP_SCENE="$1" ELECTRON_BITMAP_WIDTH="$2" ELECTRON_BITMAP_HEIGHT="$3" ELECTRON_BITMAP_ITERATIONS="$4" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$5" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$6" ELECTRON_BITMAP_PROOF_PATH="$7" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$8" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$9" SIMPLE_ELECTRON_LIVE_BITMAP=1 '
+if [ "$UNAME_S" = "Linux" ]; then
+    ELECTRON_RUN_CMD="$ELECTRON_RUN_CMD"'xvfb-run -a --server-args="-screen 0 1280x720x24" '
+fi
+ELECTRON_RUN_CMD="$ELECTRON_RUN_CMD"'npm --prefix tools/electron-shell exec -- electron --no-sandbox tools/electron-shell'
+
 set +e
 if have timeout; then
-    timeout "$TIMEOUT_SECS" sh -c 'ELECTRON_BITMAP_SCENE="$1" ELECTRON_BITMAP_WIDTH="$2" ELECTRON_BITMAP_HEIGHT="$3" ELECTRON_BITMAP_ITERATIONS="$4" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$5" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$6" ELECTRON_BITMAP_PROOF_PATH="$7" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$8" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$9" SIMPLE_ELECTRON_LIVE_BITMAP=1 xvfb-run -a --server-args="-screen 0 1280x720x24" npm --prefix tools/electron-shell exec -- electron --no-sandbox tools/electron-shell' sh "$SCENE" "$WIDTH" "$HEIGHT" "$ITERATIONS" "$simple_checksum" "$simple_weighted" "$ELECTRON_PROOF" "$EXPECTED_ARGB" "$CAPTURED_ARGB" >"$ELECTRON_OUT" 2>&1
+    timeout "$TIMEOUT_SECS" sh -c "$ELECTRON_RUN_CMD" sh "$SCENE" "$WIDTH" "$HEIGHT" "$ITERATIONS" "$simple_checksum" "$simple_weighted" "$ELECTRON_PROOF" "$EXPECTED_ARGB" "$CAPTURED_ARGB" >"$ELECTRON_OUT" 2>&1
 else
-    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
-        xvfb-run -a --server-args="-screen 0 1280x720x24" \
-        npm --prefix tools/electron-shell exec -- electron --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1
+    sh -c "$ELECTRON_RUN_CMD" sh "$SCENE" "$WIDTH" "$HEIGHT" "$ITERATIONS" "$simple_checksum" "$simple_weighted" "$ELECTRON_PROOF" "$EXPECTED_ARGB" "$CAPTURED_ARGB" >"$ELECTRON_OUT" 2>&1
 fi
 electron_code=$?
 set -e
